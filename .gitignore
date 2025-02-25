@@ -1,0 +1,11 @@
+*.ipynb_checkpoints
+annotations
+dual_box_frames
+fish_crops_mt
+fish_frames
+fish_yolo_dataset
+output_frames
+raw_frames
+zoomed_box_frames
+*.csv
+*.mp4
