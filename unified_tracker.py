@@ -83,11 +83,12 @@ def run_import_stage(video_path, zarr_path):
     raw_video_group.attrs['import_timestamp_utc'] = datetime.utcnow().isoformat()
     raw_video_group.attrs['gpu_info'] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'
     
+    # Using larger chunks for the frame axis to improve read performance later
     images_full = raw_video_group.create_dataset('images_full', shape=(n_frames, full_height, full_width), chunks=(32, None, None), dtype=np.uint8)
-    images_ds = raw_video_group.create_dataset('images_ds', shape=(n_frames, ds_size[0], ds_size[1]), chunks=(128, None, None), dtype=np.uint8)
+    images_ds = raw_video_group.create_dataset('images_ds', shape=(n_frames, ds_size[0], ds_size[1]), chunks=(32, None, None), dtype=np.uint8)
     
     print(f"Importing {n_frames} frames and downsampling...")
-    batch_size = 32
+    batch_size = 32 
     for i in tqdm(range(0, n_frames, batch_size), desc="Importing Video"):
         batch_gpu = vr.get_batch(range(i, min(i + batch_size, n_frames)))
         gray_batch_float_gpu = (batch_gpu.float() @ gray_weights).unsqueeze(1)
@@ -122,38 +123,57 @@ def run_background_stage(zarr_path):
     bg_group.attrs['duration_seconds'] = end_time - start_time
     print(f"Background stage completed in {end_time - start_time:.2f} seconds.")
 
-def crop_frame_worker(frame_index, roi_sz, ds_thresh, se1, se4):
-    """Worker to find and crop a single ROI. Now also returns bbox coordinates."""
-    try:
-        img_ds = worker_root['raw_video/images_ds'][frame_index]
-        background_ds = worker_root['background_models/background_ds'][:]
-        diff_ds = np.clip(background_ds.astype(np.int16) - img_ds.astype(np.int16), 0, 255).astype(np.uint8)
-        
-        im_ds = erosion(diff_ds >= ds_thresh, se1)
-        im_ds = dilation(im_ds, se4)
-        ds_stat = regionprops(label(im_ds))
-        if not ds_stat: return None
+def crop_chunk_worker(chunk_slice, roi_sz, ds_thresh, se1, se4):
+    """Worker to find and crop ROIs for an entire chunk of frames."""
+    # Read all necessary data for the chunk in one go
+    images_ds_chunk = worker_root['raw_video/images_ds'][chunk_slice]
+    images_full_chunk = worker_root['raw_video/images_full'][chunk_slice]
+    background_ds = worker_root['background_models/background_ds'][:]
+    
+    chunk_len = images_ds_chunk.shape[0]
+    # Prepare result arrays for this chunk
+    chunk_rois = np.zeros((chunk_len, roi_sz[0], roi_sz[1]), dtype='uint8')
+    chunk_coords = np.full((chunk_len, 2), -1, dtype='i4')
+    chunk_bbox_norms = np.full((chunk_len, 2), np.nan, dtype='f8')
 
-        ds_centroid_norm = np.array(ds_stat[0].centroid)[::-1] / np.array(worker_root['raw_video/images_ds'].shape[1:])
-        full_centroid_px = np.round(ds_centroid_norm * np.array(worker_root['raw_video/images_full'].shape[1:])).astype(int)
-        
-        x1 = full_centroid_px[0] - roi_sz[1] // 2
-        y1 = full_centroid_px[1] - roi_sz[0] // 2
-        roi = worker_root['raw_video/images_full'][frame_index, y1:y1+roi_sz[0], x1:x1+roi_sz[1]]
-        if roi.shape != roi_sz: return None
+    # Loop internally over frames in the chunk
+    for i in range(chunk_len):
+        try:
+            img_ds = images_ds_chunk[i]
+            diff_ds = np.clip(background_ds.astype(np.int16) - img_ds.astype(np.int16), 0, 255).astype(np.uint8)
+            
+            im_ds = erosion(diff_ds >= ds_thresh, se1)
+            im_ds = dilation(im_ds, se4)
+            ds_stat = regionprops(label(im_ds))
+            if not ds_stat: continue
 
-        return frame_index, roi, (x1, y1), ds_centroid_norm
-    except Exception:
-        return None
+            ds_centroid_norm = np.array(ds_stat[0].centroid)[::-1] / np.array(images_ds_chunk.shape[1:])
+            full_centroid_px = np.round(ds_centroid_norm * np.array(images_full_chunk.shape[1:])).astype(int)
+            
+            x1 = full_centroid_px[0] - roi_sz[1] // 2
+            y1 = full_centroid_px[1] - roi_sz[0] // 2
+            
+            roi = images_full_chunk[i, y1:y1+roi_sz[0], x1:x1+roi_sz[1]]
+            if roi.shape != roi_sz: continue
+            
+            chunk_rois[i] = roi
+            chunk_coords[i] = (x1, y1)
+            chunk_bbox_norms[i] = ds_centroid_norm
+        except Exception:
+            continue  # Skip frame on error
+            
+    return chunk_slice, chunk_rois, chunk_coords, chunk_bbox_norms
 
 def run_crop_stage(zarr_path):
-    """Finds and saves ROIs and their normalized bbox coordinates for each frame."""
-    print("--- Stage 3: Cropping ROIs ---")
+    """Finds and saves ROIs using chunk-aware parallel processing."""
+    print("--- Stage 3: Cropping ROIs (Chunk-Aware) ---")
     start_time = time.perf_counter()
     root = zarr.open_group(zarr_path, mode='a')
     if 'background_models' not in root: raise ValueError("Background stage not run.")
 
-    num_images = root['raw_video/images_full'].shape[0]
+    images_ds = root['raw_video/images_ds']
+    num_images, chunk_size = images_ds.shape[0], images_ds.chunks[0]
+    
     crop_group = root.require_group('crop_data')
     crop_group.attrs['crop_timestamp_utc'] = datetime.utcnow().isoformat()
     
@@ -162,89 +182,105 @@ def run_crop_stage(zarr_path):
     serializable_params['morphology_disk_radii'] = {'se1': 1, 'se4': 4}
     crop_group.attrs['crop_parameters'] = serializable_params
 
-    roi_images = crop_group.create_dataset('roi_images', shape=(num_images, *params['roi_sz']), chunks=(128, None, None), dtype='uint8', overwrite=True)
-    roi_coords = crop_group.create_dataset('roi_coordinates', shape=(num_images, 2), chunks=(4096, None), dtype='i4', overwrite=True)
-    roi_coords[:] = -1 # Use -1 to indicate not found
+    roi_images = crop_group.create_dataset('roi_images', shape=(num_images, *params['roi_sz']), chunks=(chunk_size, None, None), dtype='uint8', overwrite=True)
+    roi_coords = crop_group.create_dataset('roi_coordinates', shape=(num_images, 2), chunks=(chunk_size * 4, None), dtype='i4', overwrite=True)
+    roi_coords[:] = -1  # Use -1 to indicate not found
     
     # NEW: Dataset for normalized bounding box coordinates from the downsampled image
-    bbox_norm_coords = crop_group.create_dataset('bbox_norm_coords', shape=(num_images, 2), chunks=(4096, None), dtype='f8', overwrite=True)
+    bbox_norm_coords = crop_group.create_dataset('bbox_norm_coords', shape=(num_images, 2), chunks=(chunk_size * 4, None), dtype='f8', overwrite=True)
     bbox_norm_coords[:] = np.nan
 
-    worker_func = partial(crop_frame_worker, **params)
-    print(f"Cropping {num_images} frames using {os.cpu_count()} CPU cores...")
+    # Create a list of chunk slices to distribute to workers
+    chunk_slices = [slice(i, min(i + chunk_size, num_images)) for i in range(0, num_images, chunk_size)]
+    
+    worker_func = partial(crop_chunk_worker, **params)
+    print(f"Cropping {num_images} frames in {len(chunk_slices)} chunks using {os.cpu_count()} CPU cores...")
     with multiprocessing.Pool(initializer=init_worker, initargs=(zarr_path,)) as pool:
-        pbar = tqdm(pool.imap_unordered(worker_func, range(num_images)), total=num_images, desc="Cropping Frames")
-        for result in pbar:
-            if result:
-                frame_idx, roi, coords, bbox_norm = result
-                roi_images[frame_idx] = roi
-                roi_coords[frame_idx] = coords
-                bbox_norm_coords[frame_idx] = bbox_norm
+        pbar = tqdm(pool.imap_unordered(worker_func, chunk_slices), total=len(chunk_slices), desc="Cropping Chunks")
+        for slc, rois, coords, bboxes in pbar:
+            # Write the entire chunk of results at once
+            roi_images[slc] = rois
+            roi_coords[slc] = coords
+            bbox_norm_coords[slc] = bboxes
     
     end_time = time.perf_counter()
     crop_group.attrs['duration_seconds'] = end_time - start_time
     print(f"Crop stage completed in {end_time - start_time:.2f} seconds.")
 
-def track_roi_worker(frame_index, roi_sz, roi_thresh, se1, se2):
-    """Worker to find keypoints within a pre-cropped ROI. Now returns all keypoint data."""
-    try:
-        roi = worker_root['crop_data/roi_images'][frame_index]
-        if np.all(roi == 0): return None # Skip if ROI is empty from crop stage
+def track_chunk_worker(chunk_slice, roi_sz, roi_thresh, se1, se2):
+    """Worker to find keypoints for an entire chunk of ROIs."""
+    # Read all necessary data for the chunk in one go
+    rois_chunk = worker_root['crop_data/roi_images'][chunk_slice]
+    coords_chunk = worker_root['crop_data/roi_coordinates'][chunk_slice]
+    background_full = worker_root['background_models/background_full'][:]
+    
+    chunk_len = rois_chunk.shape[0]
+    # Prepare result array for keypoint data for this chunk
+    chunk_keypoints = np.full((chunk_len, 7), np.nan, dtype='f8')
 
-        x1, y1 = worker_root['crop_data/roi_coordinates'][frame_index]
-        if x1 == -1: return None # Skip if ROI was not found
+    # Loop internally over frames in the chunk
+    for i in range(chunk_len):
+        try:
+            roi = rois_chunk[i]
+            if np.all(roi == 0): continue  # Skip if ROI is empty from crop stage
 
-        background_roi = worker_root['background_models/background_full'][y1:y1+roi.shape[0], x1:x1+roi.shape[1]]
-        diff_roi = np.clip(background_roi.astype(np.int16) - roi.astype(np.int16), 0, 255).astype(np.uint8)
-        
-        im_roi = erosion(diff_roi >= roi_thresh, se1)
-        im_roi = dilation(im_roi, se2)
-        im_roi = erosion(im_roi, se1)
-        
-        L = label(im_roi)
-        roi_stat = [r for r in regionprops(L) if r.area > 5]
-        if len(roi_stat) < 3: return None
+            x1, y1 = coords_chunk[i]
+            if x1 == -1: continue  # Skip if ROI was not found
 
-        # Sort by area and take top 3
-        keypoint_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
-        pts = np.array([s.centroid[::-1] for s in keypoint_stats])
-        angles, _ = triangle_calculations(pts[0], pts[1], pts[2])
-        kp_idx = np.argsort(angles)
+            background_roi = background_full[y1:y1+roi.shape[0], x1:x1+roi.shape[1]]
+            diff_roi = np.clip(background_roi.astype(np.int16) - roi.astype(np.int16), 0, 255).astype(np.uint8)
+            
+            im_roi = erosion(diff_roi >= roi_thresh, se1)
+            im_roi = dilation(im_roi, se2)
+            im_roi = erosion(im_roi, se1)
+            
+            L = label(im_roi)
+            roi_stat = [r for r in regionprops(L) if r.area > 5]
+            if len(roi_stat) < 3: continue
 
-        eye_mean = np.mean(pts[kp_idx[1:3]], axis=0)
-        head_vec = eye_mean - pts[kp_idx[0]]
-        heading = np.rad2deg(np.arctan2(-head_vec[1], head_vec[0]))
-        
-        # This logic is restored from the original combined script
-        R = np.array([[np.cos(np.deg2rad(heading)), -np.sin(np.deg2rad(heading))], [np.sin(np.deg2rad(heading)), np.cos(np.deg2rad(heading))]])
-        rotpts = (pts - eye_mean) @ R.T
-        
-        bladder_orig_idx, eye1_orig_idx, eye2_orig_idx = kp_idx[0], kp_idx[1], kp_idx[2]
-        eye_r_orig_idx, eye_l_orig_idx = (eye1_orig_idx, eye2_orig_idx) if rotpts[eye1_orig_idx, 1] > rotpts[eye2_orig_idx, 1] else (eye2_orig_idx, eye1_orig_idx)
+            # Sort by area and take top 3
+            keypoint_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
+            pts = np.array([s.centroid[::-1] for s in keypoint_stats])
+            angles, _ = triangle_calculations(pts[0], pts[1], pts[2])
+            kp_idx = np.argsort(angles)
 
-        bladder_pt_norm = keypoint_stats[bladder_orig_idx].centroid[::-1] / np.array(roi_sz)
-        eye_l_pt_norm = keypoint_stats[eye_l_orig_idx].centroid[::-1] / np.array(roi_sz)
-        eye_r_pt_norm = keypoint_stats[eye_r_orig_idx].centroid[::-1] / np.array(roi_sz)
-        
-        # Return all the data needed by the visualizer
-        result_data = [
-            heading,
-            bladder_pt_norm[0], bladder_pt_norm[1],
-            eye_l_pt_norm[0], eye_l_pt_norm[1],
-            eye_r_pt_norm[0], eye_r_pt_norm[1],
-        ]
-        return frame_index, result_data
-    except Exception:
-        return None
+            eye_mean = np.mean(pts[kp_idx[1:3]], axis=0)
+            head_vec = eye_mean - pts[kp_idx[0]]
+            heading = np.rad2deg(np.arctan2(-head_vec[1], head_vec[0]))
+            
+            # This logic is restored from the original combined script
+            R = np.array([[np.cos(np.deg2rad(heading)), -np.sin(np.deg2rad(heading))], [np.sin(np.deg2rad(heading)), np.cos(np.deg2rad(heading))]])
+            rotpts = (pts - eye_mean) @ R.T
+            
+            bladder_orig_idx, eye1_orig_idx, eye2_orig_idx = kp_idx[0], kp_idx[1], kp_idx[2]
+            eye_r_orig_idx, eye_l_orig_idx = (eye1_orig_idx, eye2_orig_idx) if rotpts[eye1_orig_idx, 1] > rotpts[eye2_orig_idx, 1] else (eye2_orig_idx, eye1_orig_idx)
+
+            bladder_pt_norm = keypoint_stats[bladder_orig_idx].centroid[::-1] / np.array(roi_sz)
+            eye_l_pt_norm = keypoint_stats[eye_l_orig_idx].centroid[::-1] / np.array(roi_sz)
+            eye_r_pt_norm = keypoint_stats[eye_r_orig_idx].centroid[::-1] / np.array(roi_sz)
+            
+            # Store all the keypoint data for this frame
+            chunk_keypoints[i, :] = [
+                heading,
+                bladder_pt_norm[0], bladder_pt_norm[1],
+                eye_l_pt_norm[0], eye_l_pt_norm[1],
+                eye_r_pt_norm[0], eye_r_pt_norm[1],
+            ]
+        except Exception:
+            continue
+            
+    return chunk_slice, chunk_keypoints
 
 def run_tracking_stage(zarr_path):
-    """Runs keypoint tracking on pre-cropped ROIs and saves combined results."""
-    print("--- Stage 4: Tracking Keypoints ---")
+    """Runs keypoint tracking using chunk-aware parallel processing."""
+    print("--- Stage 4: Tracking Keypoints (Chunk-Aware) ---")
     start_time = time.perf_counter()
     root = zarr.open_group(zarr_path, mode='a')
     if 'crop_data' not in root: raise ValueError("Crop stage not run.")
     
-    num_images = root['crop_data/roi_images'].shape[0]
+    roi_images = root['crop_data/roi_images']
+    num_images, chunk_size = roi_images.shape[0], roi_images.chunks[0]
+    
     track_group = root.require_group('tracking')
     track_group.attrs['tracking_timestamp_utc'] = datetime.utcnow().isoformat()
     
@@ -254,25 +290,27 @@ def run_tracking_stage(zarr_path):
     track_group.attrs['tracking_parameters'] = serializable_params
 
     results_cols = 9
-    tracking_results = track_group.create_dataset('tracking_results', shape=(num_images, results_cols), chunks=(4096, None), dtype='f8', overwrite=True)
+    tracking_results = track_group.create_dataset('tracking_results', shape=(num_images, results_cols), chunks=(chunk_size * 4, None), dtype='f8', overwrite=True)
     tracking_results[:] = np.nan
     tracking_results.attrs['column_names'] = [
         'heading_degrees', 'bbox_x_norm', 'bbox_y_norm', 'bladder_x_roi_norm', 'bladder_y_roi_norm',
         'eye_l_x_roi_norm', 'eye_l_y_roi_norm', 'eye_r_x_roi_norm', 'eye_r_y_roi_norm'
     ]
     
+    # Pre-load all bbox coordinates since it's a small array
     bbox_coords = root['crop_data/bbox_norm_coords'][:]
 
-    worker_func = partial(track_roi_worker, **params)
-    print(f"Tracking {num_images} ROIs using {os.cpu_count()} CPU cores...")
+    # Create a list of chunk slices to distribute to workers
+    chunk_slices = [slice(i, min(i + chunk_size, num_images)) for i in range(0, num_images, chunk_size)]
+
+    worker_func = partial(track_chunk_worker, **params)
+    print(f"Tracking {num_images} ROIs in {len(chunk_slices)} chunks using {os.cpu_count()} CPU cores...")
     with multiprocessing.Pool(initializer=init_worker, initargs=(zarr_path,)) as pool:
-        pbar = tqdm(pool.imap_unordered(worker_func, range(num_images)), total=num_images, desc="Tracking Keypoints")
-        for result in pbar:
-            if result:
-                frame_idx, keypoint_data = result
-                bbox_data = bbox_coords[frame_idx]
-                full_row = [keypoint_data[0]] + [bbox_data[0], bbox_data[1]] + keypoint_data[1:]
-                tracking_results[frame_idx] = full_row
+        pbar = tqdm(pool.imap_unordered(worker_func, chunk_slices), total=len(chunk_slices), desc="Tracking Chunks")
+        for slc, keypoint_data in pbar:
+            # Combine the bbox data with the keypoint data from the worker
+            combined_data = np.hstack([keypoint_data[:, 0:1], bbox_coords[slc], keypoint_data[:, 1:]])
+            tracking_results[slc] = combined_data
 
     successful_tracks = np.count_nonzero(~np.isnan(tracking_results[:, 0]))
     percent_tracked = (successful_tracks / num_images) * 100
