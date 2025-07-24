@@ -14,7 +14,7 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
     background_array = zarr_group['background_models/background_ds']
     
     # --- UNCHANGED: These paths are still correct ---
-    roi_images_array = zarr_group['tracking/roi_images']
+    roi_images_array = zarr_group['crop_data/roi_images']
     results_array = zarr_group['tracking/tracking_results']
     
     num_frames = images_array.shape[0]
