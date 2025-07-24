@@ -60,25 +60,25 @@ def create_zarr_from_video(video_path, zarr_path, target_size=None):
     Converts a video to a Zarr array using a fully GPU-accelerated pipeline.
     """
     print("Initializing fully GPU-accelerated video pipeline...")
-    decord.bridge.set_bridge('torch') # Set decord to output PyTorch tensors
+    decord.bridge.set_bridge('torch')
     
     try:
         vr = decord.VideoReader(video_path, ctx=decord.gpu(0))
         n_frames = len(vr)
         
-        # Define grayscale conversion weights as a tensor on the GPU
         gray_weights = torch.tensor([0.2989, 0.5870, 0.1140]).to('cuda:0')
 
         # Process the first frame to determine final dimensions
-        test_frame_gpu = vr[0] # This is now a torch.Tensor on the GPU
-        gray_test_gpu = (test_frame_gpu.float() @ gray_weights).byte().unsqueeze(0)
+        test_frame_gpu = vr[0]
+        
+        # Convert to float and keep it as a float for processing
+        gray_test_float_gpu = (test_frame_gpu.float() @ gray_weights).unsqueeze(0).unsqueeze(0)
         
         if target_size:
-            # PyTorch expects (Batch, Channels, Height, Width)
-            resized_test_gpu = F.interpolate(gray_test_gpu.unsqueeze(0), size=target_size, mode='bilinear', align_corners=False)
+            resized_test_gpu = F.interpolate(gray_test_float_gpu, size=target_size, mode='bilinear', align_corners=False)
             height, width = resized_test_gpu.shape[2], resized_test_gpu.shape[3]
         else:
-            height, width = gray_test_gpu.shape[1], gray_test_gpu.shape[2]
+            height, width = gray_test_float_gpu.shape[2], gray_test_float_gpu.shape[3]
 
         dtype = np.uint8
 
@@ -95,18 +95,17 @@ def create_zarr_from_video(video_path, zarr_path, target_size=None):
     for i in tqdm(range(0, n_frames, batch_size), desc="Converting Video"):
         batch_gpu = vr.get_batch(range(i, min(i + batch_size, n_frames)))
         
-        # 1. Convert to grayscale on GPU
-        gray_batch_gpu = (batch_gpu.float() @ gray_weights).byte().unsqueeze(1)
+        # 1. Convert to float and then to grayscale on GPU
+        gray_batch_float_gpu = (batch_gpu.float() @ gray_weights).unsqueeze(1)
 
-        # 2. Resize on GPU (if needed)
+        # 2. Resize on GPU (if needed) while still a float
         if target_size:
-            processed_batch_gpu = F.interpolate(gray_batch_gpu, size=target_size, mode='bilinear', align_corners=False)
+            processed_batch_float_gpu = F.interpolate(gray_batch_float_gpu, size=target_size, mode='bilinear', align_corners=False)
         else:
-            processed_batch_gpu = gray_batch_gpu
+            processed_batch_float_gpu = gray_batch_float_gpu
         
-        # 3. Move final data to CPU and save
-        # Squeeze removes the channel dimension (e.g., [64, 1, 640, 640] -> [64, 640, 640])
-        final_batch_cpu = processed_batch_gpu.squeeze(1).cpu().numpy()
+        # 3. Convert back to byte, move to CPU, and save
+        final_batch_cpu = processed_batch_float_gpu.squeeze(1).byte().cpu().numpy()
         image_array[i:i + len(final_batch_cpu)] = final_batch_cpu
 
     print(f"Zarr array creation complete! Total frames: {n_frames}")
