@@ -14,8 +14,7 @@ import subprocess
 import decord
 import torch
 import torch.nn.functional as F
-
-# --- New imports for rich metadata ---
+import time
 import sys
 from datetime import datetime
 import platform
@@ -59,30 +58,27 @@ def triangle_calculations(p1, p2, p3):
 
 def run_import_stage(video_path, zarr_path):
     """Imports video, saving both full-res and downsampled versions with rich metadata."""
-    print("--- Stage 1: Importing Video ---")
+    print("--- Stage: Importing Video ---")
+    start_time = time.perf_counter()
     
-    # GPU-accelerated video to Zarr conversion
     print("Initializing GPU-accelerated video pipeline...")
     decord.bridge.set_bridge('torch')
     vr = decord.VideoReader(video_path, ctx=decord.gpu(0))
-    n_frames = len(vr)
-    gray_weights = torch.tensor([0.2989, 0.5870, 0.1140]).to('cuda:0')
 
-    test_frame_gpu = vr[0]
-    full_height, full_width = test_frame_gpu.shape[0], test_frame_gpu.shape[1]
+    # Correctly get video dimensions by reading the shape of the first frame
+    n_frames = len(vr)
+    first_frame_shape = vr[0].shape
+    full_height, full_width = first_frame_shape[0], first_frame_shape[1]
+    
     ds_size = (640, 640)
+    gray_weights = torch.tensor([0.2989, 0.5870, 0.1140], device='cuda:0')
 
     root = zarr.open_group(zarr_path, mode='w')
-    
-    # --- Add rich metadata to the root group ---
     root.attrs['import_command'] = " ".join(sys.argv)
     root.attrs['git_info'] = get_git_info()
     root.attrs['source_video_metadata'] = iio.immeta(video_path)
     root.attrs['platform_info'] = {'system': platform.system(), 'release': platform.release(), 'machine': platform.machine(), 'hostname': socket.gethostname()}
-    root.attrs['software_versions'] = {
-        'python': platform.python_version(), 'numpy': np.__version__, 'zarr': zarr.__version__,
-        'scikit-image': skimage.__version__, 'opencv-python': cv2.__version__, 'torch': torch.__version__, 'decord': decord.__version__
-    }
+    root.attrs['software_versions'] = {'python': platform.python_version(), 'numpy': np.__version__, 'zarr': zarr.__version__, 'scikit-image': skimage.__version__, 'opencv-python': cv2.__version__, 'torch': torch.__version__, 'decord': decord.__version__}
 
     raw_video_group = root.create_group('raw_video')
     raw_video_group.attrs['import_timestamp_utc'] = datetime.utcnow().isoformat()
@@ -96,19 +92,22 @@ def run_import_stage(video_path, zarr_path):
     for i in tqdm(range(0, n_frames, batch_size), desc="Importing Video"):
         batch_gpu = vr.get_batch(range(i, min(i + batch_size, n_frames)))
         gray_batch_float_gpu = (batch_gpu.float() @ gray_weights).unsqueeze(1)
-        
         full_res_batch_cpu = gray_batch_float_gpu.squeeze(1).byte().cpu().numpy()
         images_full[i:i + len(full_res_batch_cpu)] = full_res_batch_cpu
-        
         ds_batch_gpu = F.interpolate(gray_batch_float_gpu, size=ds_size, mode='bilinear', align_corners=False)
         ds_batch_cpu = ds_batch_gpu.squeeze(1).byte().cpu().numpy()
         images_ds[i:i + len(ds_batch_cpu)] = ds_batch_cpu
 
-    print("Import stage complete.")
+    end_time = time.perf_counter()
+    elapsed_time = end_time - start_time
+    raw_video_group.attrs['duration_seconds'] = elapsed_time
+    print(f"Import stage completed in {elapsed_time:.2f} seconds.")
 
 def run_background_stage(zarr_path):
     """Calculates and saves background models with metadata."""
     print("--- Stage 2: Calculating Background ---")
+    start_time = time.perf_counter()
+    
     root = zarr.open_group(zarr_path, mode='a')
     if 'raw_video/images_full' not in root:
         raise ValueError("Cannot find image datasets. Please run the 'import' stage first.")
@@ -134,7 +133,11 @@ def run_background_stage(zarr_path):
     bg_group.create_dataset('background_full', data=background_full, overwrite=True)
     bg_group.create_dataset('background_ds', data=background_ds, overwrite=True)
     bg_group.attrs['source_frame_indices'] = random_indices
-    print("Background models saved.")
+    
+    end_time = time.perf_counter()
+    elapsed_time = end_time - start_time
+    bg_group.attrs['duration_seconds'] = elapsed_time
+    print(f"Background models saved. Stage completed in {elapsed_time:.2f} seconds.")
 
 def init_track_worker(zarr_path):
     """Initializes the multiprocessing worker for the tracking stage."""
@@ -211,6 +214,8 @@ def track_frame_worker(frame_index, roi_sz, ds_thresh, roi_thresh, se1, se2, se4
 def run_tracking_stage(zarr_path):
     """Runs parallel tracking and saves results with rich metadata and parameters."""
     print("--- Stage 3: Tracking Objects ---")
+    start_time = time.perf_counter()
+    
     root = zarr.open_group(zarr_path, mode='a')
     if 'background_models' not in root:
         raise ValueError("Missing '/background_models'. Please run 'background' stage.")
@@ -253,9 +258,12 @@ def run_tracking_stage(zarr_path):
     successful_tracks = np.count_nonzero(~np.isnan(tracking_results[:, 0]))
     percent_tracked = (successful_tracks / num_images) * 100
     track_group.attrs['summary_statistics'] = {'total_frames': num_images, 'frames_tracked': successful_tracks, 'percent_tracked': round(percent_tracked, 2)}
+    
+    end_time = time.perf_counter()
+    elapsed_time = end_time - start_time
+    track_group.attrs['duration_seconds'] = elapsed_time
     print(f"Summary: {successful_tracks}/{num_images} frames tracked ({percent_tracked:.2f}%).")
-
-    print("Tracking stage complete.")
+    print(f"Tracking stage complete. Total time: {elapsed_time:.2f} seconds.")
 
 def main():
     parser = argparse.ArgumentParser(description="Unified, multi-stage fish tracking pipeline with rich metadata.", formatter_class=argparse.RawTextHelpFormatter)
@@ -263,6 +271,8 @@ def main():
     parser.add_argument("zarr_path", type=str, help="Path to the output Zarr file.")
     parser.add_argument("--stage", required=True, choices=['import', 'background', 'track', 'all'], help="Processing stage to run.")
     args = parser.parse_args()
+
+    overall_start_time = time.perf_counter()
 
     if args.stage == 'import':
         run_import_stage(args.video_path, args.zarr_path)
@@ -274,7 +284,14 @@ def main():
         run_import_stage(args.video_path, args.zarr_path)
         run_background_stage(args.zarr_path)
         run_tracking_stage(args.zarr_path)
-    
+        
+        # Save total pipeline time for 'all' stage
+        overall_end_time = time.perf_counter()
+        total_elapsed = overall_end_time - overall_start_time
+        root = zarr.open_group(args.zarr_path, mode='a')
+        root.attrs['total_pipeline_duration_seconds'] = total_elapsed
+        print(f"\nAll stages completed. Total pipeline time: {total_elapsed:.2f} seconds.")
+
     print("\nDone.")
 
 if __name__ == "__main__":
