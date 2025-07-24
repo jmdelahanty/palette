@@ -9,3 +9,6 @@ raw_frames
 zoomed_box_frames
 *.csv
 *.mp4
+__pycache__
+debug_background_subtraction
+debug_contour_tracking
