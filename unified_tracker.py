@@ -6,28 +6,28 @@ import cv2
 from skimage.morphology import disk, erosion, dilation
 from skimage.measure import label, regionprops
 import random
-import multiprocessing
-from functools import partial
-from tqdm import tqdm
-import argparse
-import subprocess
-import decord
-import torch
-import torch.nn.functional as F
 import time
 import sys
 from datetime import datetime
 import platform
 import socket
 import skimage
+import argparse
+import subprocess
+import decord
+import torch
+import torch.nn.functional as F
+from tqdm import tqdm
 
-# Prevent deadlocks from nested parallelism
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
-os.environ['NUMEXPR_NUM_THREADS'] = '1'
-cv2.setNumThreads(0)
+# Dask imports
+import dask
+import dask.array as da
+from dask import delayed
+from dask.diagnostics import ProgressBar
+
+# Prevent conflicts between threading libraries
+os.environ['OMP_NUM_THREADS'] = '1'  # Prevent OpenMP conflicts
+cv2.setNumThreads(0)  # Let scheduler handle OpenCV threading
 
 # --- Utility Functions (unchanged) ---
 def get_git_info():
@@ -53,12 +53,6 @@ def triangle_calculations(p1, p2, p3):
     if (2 * a * c) > 0: angles[1] = np.arccos(np.clip((a**2 + c**2 - b**2) / (2 * a * c), -1.0, 1.0)) * 180 / np.pi
     if (2 * a * b) > 0: angles[2] = np.arccos(np.clip((a**2 + b**2 - c**2) / (2 * a * b), -1.0, 1.0)) * 180 / np.pi
     return angles, np.array([a, b, c])
-
-# --- Worker Initializer ---
-def init_worker(zarr_path):
-    """Initializes the multiprocessing worker with a read-only Zarr group."""
-    global worker_root
-    worker_root = zarr.open_group(zarr_path, mode='r')
 
 # --- Stage-Specific Functions ---
 
@@ -88,7 +82,7 @@ def run_import_stage(video_path, zarr_path):
     images_ds = raw_video_group.create_dataset('images_ds', shape=(n_frames, ds_size[0], ds_size[1]), chunks=(32, None, None), dtype=np.uint8)
     
     print(f"Importing {n_frames} frames and downsampling...")
-    batch_size = 32 
+    batch_size = 32  # Keep original batch size to avoid GPU memory issues
     for i in tqdm(range(0, n_frames, batch_size), desc="Importing Video"):
         batch_gpu = vr.get_batch(range(i, min(i + batch_size, n_frames)))
         gray_batch_float_gpu = (batch_gpu.float() @ gray_weights).unsqueeze(1)
@@ -123,12 +117,16 @@ def run_background_stage(zarr_path):
     bg_group.attrs['duration_seconds'] = end_time - start_time
     print(f"Background stage completed in {end_time - start_time:.2f} seconds.")
 
-def crop_chunk_worker(chunk_slice, roi_sz, ds_thresh, se1, se4):
-    """Worker to find and crop ROIs for an entire chunk of frames."""
+@delayed
+def crop_chunk_delayed(zarr_path, chunk_slice, roi_sz, ds_thresh, se1, se4):
+    """Dask delayed function to process a chunk of frames for cropping."""
+    # Open zarr group within the delayed function
+    root = zarr.open_group(zarr_path, mode='r')
+    
     # Read all necessary data for the chunk in one go
-    images_ds_chunk = worker_root['raw_video/images_ds'][chunk_slice]
-    images_full_chunk = worker_root['raw_video/images_full'][chunk_slice]
-    background_ds = worker_root['background_models/background_ds'][:]
+    images_ds_chunk = root['raw_video/images_ds'][chunk_slice]
+    images_full_chunk = root['raw_video/images_full'][chunk_slice]
+    background_ds = root['background_models/background_ds'][:]
     
     chunk_len = images_ds_chunk.shape[0]
     # Prepare result arrays for this chunk
@@ -164,9 +162,9 @@ def crop_chunk_worker(chunk_slice, roi_sz, ds_thresh, se1, se4):
             
     return chunk_slice, chunk_rois, chunk_coords, chunk_bbox_norms
 
-def run_crop_stage(zarr_path):
-    """Finds and saves ROIs using chunk-aware parallel processing."""
-    print("--- Stage 3: Cropping ROIs (Chunk-Aware) ---")
+def run_crop_stage(zarr_path, scheduler_name):
+    """Finds and saves ROIs using Dask with configurable scheduler."""
+    print(f"--- Stage 3: Cropping ROIs (Dask {scheduler_name.title()} Scheduler) ---")
     start_time = time.perf_counter()
     root = zarr.open_group(zarr_path, mode='a')
     if 'background_models' not in root: raise ValueError("Background stage not run.")
@@ -176,43 +174,54 @@ def run_crop_stage(zarr_path):
     
     crop_group = root.require_group('crop_data')
     crop_group.attrs['crop_timestamp_utc'] = datetime.utcnow().isoformat()
+    crop_group.attrs['dask_scheduler'] = scheduler_name
     
     params = {'roi_sz': (320, 320), 'ds_thresh': 55, 'se1': disk(1), 'se4': disk(4)}
     serializable_params = {k: v for k, v in params.items() if not isinstance(v, np.ndarray)}
     serializable_params['morphology_disk_radii'] = {'se1': 1, 'se4': 4}
     crop_group.attrs['crop_parameters'] = serializable_params
 
+    # Create output datasets
     roi_images = crop_group.create_dataset('roi_images', shape=(num_images, *params['roi_sz']), chunks=(chunk_size, None, None), dtype='uint8', overwrite=True)
     roi_coords = crop_group.create_dataset('roi_coordinates', shape=(num_images, 2), chunks=(chunk_size * 4, None), dtype='i4', overwrite=True)
     roi_coords[:] = -1  # Use -1 to indicate not found
-    
-    # NEW: Dataset for normalized bounding box coordinates from the downsampled image
     bbox_norm_coords = crop_group.create_dataset('bbox_norm_coords', shape=(num_images, 2), chunks=(chunk_size * 4, None), dtype='f8', overwrite=True)
     bbox_norm_coords[:] = np.nan
 
-    # Create a list of chunk slices to distribute to workers
+    # Create chunk slices and delayed tasks
     chunk_slices = [slice(i, min(i + chunk_size, num_images)) for i in range(0, num_images, chunk_size)]
     
-    worker_func = partial(crop_chunk_worker, **params)
-    print(f"Cropping {num_images} frames in {len(chunk_slices)} chunks using {os.cpu_count()} CPU cores...")
-    with multiprocessing.Pool(initializer=init_worker, initargs=(zarr_path,)) as pool:
-        pbar = tqdm(pool.imap_unordered(worker_func, chunk_slices), total=len(chunk_slices), desc="Cropping Chunks")
-        for slc, rois, coords, bboxes in pbar:
-            # Write the entire chunk of results at once
-            roi_images[slc] = rois
-            roi_coords[slc] = coords
-            bbox_norm_coords[slc] = bboxes
+    print(f"Creating {len(chunk_slices)} Dask tasks for cropping {num_images} frames...")
+    
+    # Create delayed tasks
+    delayed_tasks = [crop_chunk_delayed(zarr_path, chunk_slice, **params) for chunk_slice in chunk_slices]
+    
+    # Compute with progress bar
+    print(f"Executing Dask computation graph using '{scheduler_name}' scheduler...")
+    with ProgressBar():
+        results = dask.compute(*delayed_tasks)
+    
+    # Write results back to zarr
+    print("Writing results to Zarr...")
+    for slc, rois, coords, bboxes in tqdm(results, desc="Writing Chunks"):
+        roi_images[slc] = rois
+        roi_coords[slc] = coords
+        bbox_norm_coords[slc] = bboxes
     
     end_time = time.perf_counter()
     crop_group.attrs['duration_seconds'] = end_time - start_time
     print(f"Crop stage completed in {end_time - start_time:.2f} seconds.")
 
-def track_chunk_worker(chunk_slice, roi_sz, roi_thresh, se1, se2):
-    """Worker to find keypoints for an entire chunk of ROIs."""
+@delayed
+def track_chunk_delayed(zarr_path, chunk_slice, roi_sz, roi_thresh, se1, se2):
+    """Dask delayed function to process a chunk of ROIs for tracking."""
+    # Open zarr group within the delayed function
+    root = zarr.open_group(zarr_path, mode='r')
+    
     # Read all necessary data for the chunk in one go
-    rois_chunk = worker_root['crop_data/roi_images'][chunk_slice]
-    coords_chunk = worker_root['crop_data/roi_coordinates'][chunk_slice]
-    background_full = worker_root['background_models/background_full'][:]
+    rois_chunk = root['crop_data/roi_images'][chunk_slice]
+    coords_chunk = root['crop_data/roi_coordinates'][chunk_slice]
+    background_full = root['background_models/background_full'][:]
     
     chunk_len = rois_chunk.shape[0]
     # Prepare result array for keypoint data for this chunk
@@ -271,9 +280,9 @@ def track_chunk_worker(chunk_slice, roi_sz, roi_thresh, se1, se2):
             
     return chunk_slice, chunk_keypoints
 
-def run_tracking_stage(zarr_path):
-    """Runs keypoint tracking using chunk-aware parallel processing."""
-    print("--- Stage 4: Tracking Keypoints (Chunk-Aware) ---")
+def run_tracking_stage(zarr_path, scheduler_name):
+    """Runs keypoint tracking using Dask with configurable scheduler."""
+    print(f"--- Stage 4: Tracking Keypoints (Dask {scheduler_name.title()} Scheduler) ---")
     start_time = time.perf_counter()
     root = zarr.open_group(zarr_path, mode='a')
     if 'crop_data' not in root: raise ValueError("Crop stage not run.")
@@ -283,6 +292,7 @@ def run_tracking_stage(zarr_path):
     
     track_group = root.require_group('tracking')
     track_group.attrs['tracking_timestamp_utc'] = datetime.utcnow().isoformat()
+    track_group.attrs['dask_scheduler'] = scheduler_name
     
     params = {'roi_sz': (320, 320), 'roi_thresh': 115, 'se1': disk(1), 'se2': disk(2)}
     serializable_params = {k: v for k, v in params.items() if not isinstance(v, np.ndarray)}
@@ -300,17 +310,25 @@ def run_tracking_stage(zarr_path):
     # Pre-load all bbox coordinates since it's a small array
     bbox_coords = root['crop_data/bbox_norm_coords'][:]
 
-    # Create a list of chunk slices to distribute to workers
+    # Create chunk slices and delayed tasks
     chunk_slices = [slice(i, min(i + chunk_size, num_images)) for i in range(0, num_images, chunk_size)]
+    
+    print(f"Creating {len(chunk_slices)} Dask tasks for tracking {num_images} ROIs...")
+    
+    # Create delayed tasks
+    delayed_tasks = [track_chunk_delayed(zarr_path, chunk_slice, **params) for chunk_slice in chunk_slices]
 
-    worker_func = partial(track_chunk_worker, **params)
-    print(f"Tracking {num_images} ROIs in {len(chunk_slices)} chunks using {os.cpu_count()} CPU cores...")
-    with multiprocessing.Pool(initializer=init_worker, initargs=(zarr_path,)) as pool:
-        pbar = tqdm(pool.imap_unordered(worker_func, chunk_slices), total=len(chunk_slices), desc="Tracking Chunks")
-        for slc, keypoint_data in pbar:
-            # Combine the bbox data with the keypoint data from the worker
-            combined_data = np.hstack([keypoint_data[:, 0:1], bbox_coords[slc], keypoint_data[:, 1:]])
-            tracking_results[slc] = combined_data
+    # Compute with progress bar
+    print(f"Executing Dask computation graph using '{scheduler_name}' scheduler...")
+    with ProgressBar():
+        results = dask.compute(*delayed_tasks)
+
+    # Write results back to zarr
+    print("Writing results to Zarr...")
+    for slc, keypoint_data in tqdm(results, desc="Writing Chunks"):
+        # Combine the bbox data with the keypoint data from the worker
+        combined_data = np.hstack([keypoint_data[:, 0:1], bbox_coords[slc], keypoint_data[:, 1:]])
+        tracking_results[slc] = combined_data
 
     successful_tracks = np.count_nonzero(~np.isnan(tracking_results[:, 0]))
     percent_tracked = (successful_tracks / num_images) * 100
@@ -322,11 +340,45 @@ def run_tracking_stage(zarr_path):
     print(f"Tracking stage completed in {end_time - start_time:.2f} seconds.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Modular, multi-stage fish tracking pipeline.", formatter_class=argparse.RawTextHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description="Modular, multi-stage fish tracking pipeline with Dask scheduler options.",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog="""
+Scheduler Options:
+  processes     - Use multiprocessing for maximum CPU utilization (best for CPU-bound tasks)
+  threads       - Use threading for better memory efficiency (best when I/O bound or limited RAM)
+  single-thread - No parallelism, useful for debugging
+  
+Performance Guide:
+  • Use 'processes' for best speed when you have plenty of RAM
+  • Use 'threads' for better memory management on large datasets
+  • Use 'single-thread' for debugging or profiling
+        """)
+    
     parser.add_argument("video_path", type=str, help="Path to the input video file.")
     parser.add_argument("zarr_path", type=str, help="Path to the output Zarr file.")
-    parser.add_argument("--stage", required=True, choices=['import', 'background', 'crop', 'track', 'all'], help="Processing stage to run.")
+    parser.add_argument("--stage", required=True, choices=['import', 'background', 'crop', 'track', 'all'], 
+                       help="Processing stage to run.")
+    parser.add_argument("--scheduler", default='processes', 
+                       choices=['processes', 'threads', 'single-thread'],
+                       help="Dask scheduler to use (default: processes)")
+    parser.add_argument("--num-workers", type=int, default=None,
+                       help="Number of workers (default: number of CPU cores)")
+    
     args = parser.parse_args()
+
+    # Configure Dask scheduler based on user choice
+    scheduler_config = {'scheduler': args.scheduler}
+    if args.num_workers is not None:
+        scheduler_config['num_workers'] = args.num_workers
+    
+    # Apply the scheduler configuration
+    dask.config.set(**scheduler_config)
+    
+    # Print scheduler info
+    active_scheduler = dask.config.get('scheduler', 'threads')
+    num_workers = dask.config.get('num_workers', os.cpu_count())
+    print(f"Using Dask '{active_scheduler}' scheduler with {num_workers} workers")
 
     overall_start_time = time.perf_counter()
 
@@ -335,14 +387,14 @@ def main():
     elif args.stage == 'background':
         run_background_stage(args.zarr_path)
     elif args.stage == 'crop':
-        run_crop_stage(args.zarr_path)
+        run_crop_stage(args.zarr_path, active_scheduler)
     elif args.stage == 'track':
-        run_tracking_stage(args.zarr_path)
+        run_tracking_stage(args.zarr_path, active_scheduler)
     elif args.stage == 'all':
         run_import_stage(args.video_path, args.zarr_path)
         run_background_stage(args.zarr_path)
-        run_crop_stage(args.zarr_path)
-        run_tracking_stage(args.zarr_path)
+        run_crop_stage(args.zarr_path, active_scheduler)
+        run_tracking_stage(args.zarr_path, active_scheduler)
         
         overall_end_time = time.perf_counter()
         total_elapsed = overall_end_time - overall_start_time
