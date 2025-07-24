@@ -2,90 +2,137 @@ import cv2
 import numpy as np
 import os
 import argparse
+import zarr
 
-def generate_annotated_image(frame_number, base_output_path):
+def create_dashboard_view(frame_number, zarr_group, column_map):
     """
-    Loads an ROI image and its label file, draws the keypoints,
-    and returns the annotated image as a NumPy array.
-    Returns None if the files for the frame do not exist.
+    Reads all image data for a frame from the Zarr group and assembles a 
+    2x2 dashboard for visualization.
     """
-    roi_image_path = os.path.join(base_output_path, 'roi/images', f"{frame_number}.png")
-    roi_label_path = os.path.join(base_output_path, 'roi/labels', f"{frame_number}.txt")
+    # Get handles to the Zarr arrays
+    images_array = zarr_group['images']
+    roi_images_array = zarr_group['roi_images']
+    background_array = zarr_group['background']
+    results_array = zarr_group['tracking_results']
+    
+    num_frames = images_array.shape[0]
+    frame_index = frame_number - 1
 
-    if not os.path.exists(roi_image_path):
+    if not (0 <= frame_index < num_frames):
         return None
 
-    image = cv2.imread(roi_image_path)
-    if image is None:
-        return None
-        
-    height, width, _ = image.shape
+    # 1. Read all necessary data for the frame
+    main_image = images_array[frame_index]
+    roi_image = roi_images_array[frame_index]
+    background_image = background_array[:] # Read the full background
+    results = results_array[frame_index]
 
-    # Class 0: Bladder (Red), Class 1: Left Eye (Green), Class 2: Right Eye (Blue)
-    colors = {0: (0, 0, 255), 1: (0, 255, 0), 2: (255, 100, 0)}
+    # --- Panel 1: Main View with ROI Box ---
+    main_view = cv2.cvtColor(main_image, cv2.COLOR_GRAY2BGR)
+    full_h, full_w = main_view.shape[:2]
+    roi_sz = roi_image.shape
+    
+    # Re-calculate the full-resolution ROI box from the normalized centroid
+    bbox_x_norm = results[column_map['bbox_x_norm']]
+    bbox_y_norm = results[column_map['bbox_y_norm']]
+    if not np.isnan(bbox_x_norm):
+        full_centroid_px = (int(bbox_x_norm * full_w), int(bbox_y_norm * full_h))
+        x1 = full_centroid_px[0] - (roi_sz[1] // 2)
+        y1 = full_centroid_px[1] - (roi_sz[0] // 2)
+        cv2.rectangle(main_view, (x1, y1), (x1 + roi_sz[1], y1 + roi_sz[0]), (0, 255, 255), 2) # Yellow box
+    
+    # --- Panel 2: Annotated ROI View ---
+    roi_view = cv2.cvtColor(roi_image, cv2.COLOR_GRAY2BGR)
+    colors = {'bladder': (0, 0, 255), 'eye_l': (0, 255, 0), 'eye_r': (255, 100, 0)}
+    keypoints = {
+        'bladder': (results[column_map['bladder_x_norm']], results[column_map['bladder_y_norm']]),
+        'eye_l': (results[column_map['eye_l_x_norm']], results[column_map['eye_l_y_norm']]),
+        'eye_r': (results[column_map['eye_r_x_norm']], results[column_map['eye_r_y_norm']])
+    }
+    for name, (x_norm, y_norm) in keypoints.items():
+        if not np.isnan(x_norm):
+            x_center = int(x_norm * roi_sz[1])
+            y_center = int(y_norm * roi_sz[0])
+            cv2.circle(roi_view, (x_center, y_center), 4, colors.get(name), -1)
+            cv2.circle(roi_view, (x_center, y_center), 5, (0,0,0), 1)
 
-    if os.path.exists(roi_label_path):
-        with open(roi_label_path, 'r') as f:
-            for line in f:
-                parts = line.strip().split()
-                class_id = int(parts[0])
-                x_center = int(float(parts[1]) * width)
-                y_center = int(float(parts[2]) * height)
-                color = colors.get(class_id, (255, 255, 255))
-                cv2.circle(image, (x_center, y_center), radius=4, color=color, thickness=-1)
-                cv2.circle(image, (x_center, y_center), radius=5, color=(0,0,0), thickness=1)
+    # --- Panel 3: Background Model ---
+    background_view = cv2.cvtColor(background_image, cv2.COLOR_GRAY2BGR)
 
-    # Add frame number text to the image
-    cv2.putText(image, f"Frame: {frame_number}", (10, 30), 
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+    # --- Panel 4: Difference Image ---
+    diff_image = cv2.absdiff(main_image, background_image)
+    diff_view = cv2.cvtColor(diff_image, cv2.COLOR_GRAY2BGR)
 
-    return image
+    # --- Assemble the Dashboard ---
+    display_size = (480, 480)
+    main_resized = cv2.resize(main_view, display_size, interpolation=cv2.INTER_AREA)
+    roi_resized = cv2.resize(roi_view, display_size, interpolation=cv2.INTER_NEAREST)
+    bg_resized = cv2.resize(background_view, display_size, interpolation=cv2.INTER_AREA)
+    diff_resized = cv2.resize(diff_view, display_size, interpolation=cv2.INTER_AREA)
 
+    # Add titles to each panel
+    cv2.putText(main_resized, "Full View (ROI in yellow)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    cv2.putText(roi_resized, "ROI Detail", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    cv2.putText(bg_resized, "Background Model", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    cv2.putText(diff_resized, "Difference Image", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    
+    # Combine panels into a grid
+    top_row = np.hstack((main_resized, roi_resized))
+    bottom_row = np.hstack((bg_resized, diff_resized))
+    dashboard = np.vstack((top_row, bottom_row))
+    
+    # Add main frame number title
+    cv2.putText(dashboard, f"Frame: {frame_number}", (10, dashboard.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
-def main(start_frame, base_output_path):
-    """Main display loop for interactive visualization."""
+    return dashboard
+
+def main(start_frame, zarr_path):
+    """Main display loop for interactive dashboard visualization."""
+    try:
+        zarr_group = zarr.open_group(zarr_path, mode='r')
+    except Exception as e:
+        print(f"Error opening Zarr store at '{zarr_path}': {e}")
+        return
+
+    num_frames = zarr_group['images'].shape[0]
+    
+    column_names = zarr_group['tracking_results'].attrs['column_names']
+    column_map = {name: i for i, name in enumerate(column_names)}
+    
     current_frame = start_frame
     
-    print("Starting interactive visualizer...")
+    print("Starting interactive dashboard...")
     print("Controls: → (Next Frame), ← (Previous Frame), 'q' or Esc (Quit)")
 
-    while True:
-        annotated_image = generate_annotated_image(current_frame, base_output_path)
+    # Pre-generate a "Not Found" message panel
+    not_found_panel = np.zeros((960, 960, 3), dtype=np.uint8)
+    cv2.putText(not_found_panel, "Frame Not Found", (300, 480), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 2)
 
-        if annotated_image is None:
-            # Create a black screen with "Frame Not Found" text
-            annotated_image = np.zeros((320, 320, 3), dtype=np.uint8)
-            text = f"Frame {current_frame} Not Found"
-            (text_width, text_height), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-            text_x = (annotated_image.shape[1] - text_width) // 2
-            text_y = (annotated_image.shape[0] + text_height) // 2
-            cv2.putText(annotated_image, text, (text_x, text_y), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+    while True:
+        dashboard = create_dashboard_view(current_frame, zarr_group, column_map)
+        display_image = dashboard if dashboard is not None else not_found_panel
             
-        cv2.imshow("Interactive Visualizer", annotated_image)
+        cv2.imshow("Interactive Dashboard", display_image)
         
-        # Wait for a key press
         key = cv2.waitKey(0)
 
-        # Handle different key presses
-        if key == ord('q') or key == 27:  # 'q' or Esc key to quit
+        if key == ord('q') or key == 27:
             break
-        elif key == 83 or key == 2555904:  # Right arrow key
-            current_frame += 1
-        elif key == 81 or key == 2424832:  # Left arrow key
-            current_frame = max(1, current_frame - 1) # Prevent going below frame 1
+        elif key == 83 or key == 2555904: # Right arrow
+            current_frame = min(num_frames, current_frame + 1)
+        elif key == 81 or key == 2424832: # Left arrow
+            current_frame = max(1, current_frame - 1)
 
     cv2.destroyAllWindows()
     print("Visualizer closed.")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Interactively visualize fish tracking keypoints.")
-    # The starting frame is now an optional argument
+    parser = argparse.ArgumentParser(description="Interactively visualize fish tracking results in a dashboard.")
     parser.add_argument("start_frame", type=int, nargs='?', default=1, 
                         help="The frame number to start visualizing from. Defaults to 1.")
     args = parser.parse_args()
 
-    output_path = r'/home/delahantyj@hhmi.org/Desktop/yolo_data_zarr'
+    zarr_file_path = r'/home/delahantyj@hhmi.org/Desktop/concentricOMR3/video.zarr'
     
-    main(args.start_frame, output_path)
+    main(args.start_frame, zarr_file_path)
