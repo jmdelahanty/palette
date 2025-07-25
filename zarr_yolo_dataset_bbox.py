@@ -246,11 +246,19 @@ class ZarrYOLODataset(Dataset):
             print(f"Warning: No valid fish data for frame {zarr_index}, using fallback")
             label = np.array([[0, 0.5, 0.5, 0.1, 0.1]], dtype=np.float32)
 
+        # CRITICAL FIX: Ensure cls and bboxes are always properly shaped arrays
+        cls_labels = label[:, 0].astype(np.float32)  # Shape: (1,) - always 1D
+        bbox_coords = label[:, 1:5].astype(np.float32)  # Shape: (1, 4) - always 2D
+        
+        # Validate dimensions
+        assert cls_labels.ndim == 1, f"cls_labels should be 1D, got {cls_labels.ndim}D with shape {cls_labels.shape}"
+        assert bbox_coords.ndim == 2 and bbox_coords.shape[1] == 4, f"bbox_coords should be (N, 4), got {bbox_coords.shape}"
+
         # Return complete dictionary for YOLO training
         return {
             "img": image_tensor,
-            "cls": label[:, 0],      # Class labels: [0]
-            "bboxes": label[:, 1:5], # Bounding boxes: [[x, y, w, h]]
+            "cls": cls_labels,        # Guaranteed 1D: [0] 
+            "bboxes": bbox_coords,    # Guaranteed 2D: [[x, y, w, h]]
             "im_file": f"zarr_frame_{zarr_index}",
             "ori_shape": (self.target_size, self.target_size),
             "ratio_pad": (1.0, (0.0, 0.0))
