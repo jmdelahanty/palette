@@ -4,6 +4,87 @@ import os
 import argparse
 import zarr
 
+def rotate_roi_to_heading(roi_image, heading_degrees):
+    """
+    Rotate the ROI image so the fish is oriented according to the heading angle.
+    """
+    if np.isnan(heading_degrees):
+        return roi_image
+    
+    # Get ROI center
+    h, w = roi_image.shape
+    center = (w // 2, h // 2)
+    
+    # Create rotation matrix (negative because CV2 rotates clockwise, but we want counterclockwise)
+    rotation_matrix = cv2.getRotationMatrix2D(center, -heading_degrees, 1.0)
+    
+    # Rotate the image
+    rotated_roi = cv2.warpAffine(roi_image, rotation_matrix, (w, h), 
+                                flags=cv2.INTER_LINEAR, 
+                                borderMode=cv2.BORDER_CONSTANT, 
+                                borderValue=0)
+    
+    return rotated_roi
+
+def create_fish_reference_frame_view(main_image, roi_image, background_image, bbox_x_norm, bbox_y_norm, heading_degrees):
+    """
+    Transform the current frame into the fish's reference frame - fish stays centered and 
+    oriented upward while everything else rotates and translates around it.
+    """
+    if np.isnan(bbox_x_norm) or np.isnan(heading_degrees):
+        # If no fish detected, just return the current frame
+        return cv2.cvtColor(main_image, cv2.COLOR_GRAY2BGR)
+    
+    # Get fish position in image coordinates
+    full_h, full_w = main_image.shape
+    fish_x = bbox_x_norm * full_w
+    fish_y = bbox_y_norm * full_h
+    
+    # Center of the output image
+    center_x = full_w / 2
+    center_y = full_h / 2
+    
+    # Translation to center the fish
+    translate_x = center_x - fish_x
+    translate_y = center_y - fish_y
+    
+    # Combined transformation matrix: translate then rotate around new center
+    # First, translate to put fish at center
+    T1 = np.array([[1, 0, translate_x],
+                   [0, 1, translate_y],
+                   [0, 0, 1]], dtype=np.float32)
+    
+    # Then rotate around the center to make fish point upward
+    # We want fish to point upward (90 degrees), so rotate by (90 - heading)
+    target_angle = 90 - heading_degrees
+    R = cv2.getRotationMatrix2D((center_x, center_y), target_angle, 1.0)
+    
+    # Convert to 3x3 matrix for multiplication
+    R_3x3 = np.vstack([R, [0, 0, 1]])
+    
+    # Combine transformations: final = R * T1
+    combined = R_3x3 @ T1
+    final_transform = combined[:2, :]  # Back to 2x3 for cv2.warpAffine
+    
+    # Apply transformation to the current frame (not just background!)
+    transformed_frame = cv2.warpAffine(main_image, final_transform, (full_w, full_h),
+                                      flags=cv2.INTER_LINEAR,
+                                      borderMode=cv2.BORDER_REFLECT_101)
+    
+    # Convert to color
+    fish_ref_view = cv2.cvtColor(transformed_frame, cv2.COLOR_GRAY2BGR)
+    
+    # Draw a small cross at the center to show where the fish is
+    cv2.drawMarker(fish_ref_view, (int(center_x), int(center_y)), (0, 255, 255), 
+                   cv2.MARKER_CROSS, 20, 2)
+    
+    # Draw an arrow pointing up to show fish orientation
+    arrow_start = (int(center_x), int(center_y + 15))
+    arrow_end = (int(center_x), int(center_y - 15))
+    cv2.arrowedLine(fish_ref_view, arrow_start, arrow_end, (255, 0, 255), 2, tipLength=0.3)
+    
+    return fish_ref_view
+
 def create_dashboard_view(frame_number, zarr_group, column_map):
     """
     Reads all image data for a frame from the Zarr group and assembles a 
@@ -36,6 +117,8 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
     
     bbox_x_norm = results[column_map['bbox_x_norm']]
     bbox_y_norm = results[column_map['bbox_y_norm']]
+    heading_degrees = results[column_map['heading_degrees']]
+    
     if not np.isnan(bbox_x_norm):
         # The normalized coordinates work perfectly regardless of image size
         full_centroid_px = (int(bbox_x_norm * full_w), int(bbox_y_norm * full_h))
@@ -45,8 +128,15 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
         x1 = full_centroid_px[0] - (roi_display_w // 2)
         y1 = full_centroid_px[1] - (roi_display_h // 2)
         cv2.rectangle(main_view, (x1, y1), (x1 + roi_display_w, y1 + roi_display_h), (0, 255, 255), 1)
+        
+        # Draw heading arrow
+        if not np.isnan(heading_degrees):
+            arrow_length = 30
+            arrow_end_x = int(full_centroid_px[0] + arrow_length * np.cos(np.deg2rad(heading_degrees)))
+            arrow_end_y = int(full_centroid_px[1] - arrow_length * np.sin(np.deg2rad(heading_degrees)))
+            cv2.arrowedLine(main_view, full_centroid_px, (arrow_end_x, arrow_end_y), (255, 0, 255), 2, tipLength=0.3)
     
-    # --- Panel 2: Annotated ROI View (Unchanged) ---
+    # --- Panel 2: Original ROI View ---
     roi_view = cv2.cvtColor(roi_image, cv2.COLOR_GRAY2BGR)
     colors = {'bladder': (0, 0, 255), 'eye_l': (0, 255, 0), 'eye_r': (255, 100, 0)}
     keypoints = {
@@ -61,8 +151,51 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
             cv2.circle(roi_view, (x_center, y_center), 4, colors.get(name), -1)
             cv2.circle(roi_view, (x_center, y_center), 5, (0,0,0), 1)
 
-    # --- Panel 3: Background Model ---
-    background_view = cv2.cvtColor(background_image, cv2.COLOR_GRAY2BGR)
+    # Add heading text to original ROI view
+    if not np.isnan(heading_degrees):
+        cv2.putText(roi_view, f"Heading: {heading_degrees:.1f}°", (10, roi_sz[0] - 10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    # --- Panel 3: Stabilized ROI View ---
+    if not np.isnan(heading_degrees):
+        # Rotate the ROI so fish always points upward (90 degrees)
+        # We need to rotate by (90 - heading_degrees) to make the fish point up
+        rotation_needed = 90 - heading_degrees
+        stabilized_roi = rotate_roi_to_heading(roi_image, rotation_needed)
+        stabilized_view = cv2.cvtColor(stabilized_roi, cv2.COLOR_GRAY2BGR)
+        
+        # For stabilized view, we need to rotate the keypoint coordinates too
+        roi_center = np.array([roi_sz[1]/2, roi_sz[0]/2])
+        rotation_angle_rad = np.deg2rad(rotation_needed)  # Same rotation as image
+        cos_angle, sin_angle = np.cos(rotation_angle_rad), np.sin(rotation_angle_rad)
+        
+        for name, (x_norm, y_norm) in keypoints.items():
+            if not np.isnan(x_norm):
+                # Convert normalized coords to pixel coords
+                x_pixel = x_norm * roi_sz[1]
+                y_pixel = y_norm * roi_sz[0]
+                
+                # Rotate around ROI center
+                rel_x = x_pixel - roi_center[0]
+                rel_y = y_pixel - roi_center[1]
+                rotated_x = rel_x * cos_angle - rel_y * sin_angle + roi_center[0]
+                rotated_y = rel_x * sin_angle + rel_y * cos_angle + roi_center[1]
+                
+                cv2.circle(stabilized_view, (int(rotated_x), int(rotated_y)), 4, colors.get(name), -1)
+                cv2.circle(stabilized_view, (int(rotated_x), int(rotated_y)), 5, (0,0,0), 1)
+        
+        # Add text showing this is stabilized
+        cv2.putText(stabilized_view, "Stabilized (Fish Up)", (10, roi_sz[0] - 10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    else:
+        # No heading data, show normal ROI
+        stabilized_view = cv2.cvtColor(roi_image, cv2.COLOR_GRAY2BGR)
+        for name, (x_norm, y_norm) in keypoints.items():
+            if not np.isnan(x_norm):
+                x_center = int(x_norm * roi_sz[1])
+                y_center = int(y_norm * roi_sz[0])
+                cv2.circle(stabilized_view, (x_center, y_center), 4, colors.get(name), -1)
+                cv2.circle(stabilized_view, (x_center, y_center), 5, (0,0,0), 1)
 
     # --- Panel 4: Difference Image ---
     diff_image = cv2.absdiff(main_image, background_image)
@@ -74,17 +207,17 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
     main_resized = cv2.resize(main_view, display_size, interpolation=cv2.INTER_AREA)
     # The roi_view is 320x320, so we resize it up
     roi_resized = cv2.resize(roi_view, display_size, interpolation=cv2.INTER_NEAREST)
-    bg_resized = cv2.resize(background_view, display_size, interpolation=cv2.INTER_AREA)
+    stabilized_resized = cv2.resize(stabilized_view, display_size, interpolation=cv2.INTER_NEAREST)
     diff_resized = cv2.resize(diff_view, display_size, interpolation=cv2.INTER_AREA)
 
     # Add titles to each panel
-    cv2.putText(main_resized, "Full View (Downsampled)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    cv2.putText(roi_resized, "ROI Detail", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    cv2.putText(bg_resized, "Background Model (DS)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    cv2.putText(diff_resized, "Difference Image (DS)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    cv2.putText(main_resized, "Full View + Heading", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    cv2.putText(roi_resized, "Original ROI", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    cv2.putText(stabilized_resized, "Stabilized ROI", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    cv2.putText(diff_resized, "Difference Image", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     
     top_row = np.hstack((main_resized, roi_resized))
-    bottom_row = np.hstack((bg_resized, diff_resized))
+    bottom_row = np.hstack((stabilized_resized, diff_resized))
     dashboard = np.vstack((top_row, bottom_row))
     
     cv2.putText(dashboard, f"Frame: {frame_number}", (10, dashboard.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)

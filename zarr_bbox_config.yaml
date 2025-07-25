@@ -1,0 +1,12 @@
+# zarr_bbox_config.yaml
+
+# These paths are ignored by our custom loader, but the file requires them.
+train: ./
+val: ./
+
+# Number of classes
+nc: 1
+
+# Class names
+names:
+  - fish
