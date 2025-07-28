@@ -1,50 +1,72 @@
 # ================================================================================
-# ZARR YOLO TRAINING CONFIGURATION
-# ================================================================================
-# This file serves as the complete recipe for a training run.
-# It defines the data, hyperparameters, and will be updated with
-# the results and metadata after the training is complete.
+# COMPREHENSIVE MULTI-ZARR YOLO TRAINING CONFIGURATION
 # ================================================================================
 
+# --- Dummy paths for YOLOv8 trainer compatibility ---
+# Our custom dataloader ignores these paths, but they are required to pass initial checks.
+train: ./
+val: ./
+nc: 1
+names: ['fish']
+
 # Part 1: DATA CONFIGURATION
-# Define the datasets and how they are sampled
 # --------------------------------------------------------------------------------
 data_config:
   zarr_paths:
-  - /home/delahantyj@hhmi.org/Desktop/concentricOMR3/video.zarr
-  - /home/delahantyj@hhmi.org/Desktop/concentricOMR3/longer_edge.zarr
+    - /home/delahantyj@hhmi.org/Desktop/concentricOMR3/video.zarr
+    - /home/delahantyj@hhmi.org/Desktop/concentricOMR3/longer_edge.zarr
   task: detect
   split_ratio: 0.8
   random_seed: 42
-  sampling_strategy: balanced # Options: balanced, proportional, weighted
+
+  # sampling_strategy: Defines how to sample from multiple zarr_paths.
+  #
+  # --- Available Strategies ---
+  # "balanced": (Default) Takes an equal number of samples from each dataset,
+  #             matching the size of the smallest one. Prevents larger
+  #             datasets from dominating the training.
+  #
+  # "proportional": Uses all available valid frames from all datasets. The number
+  #                 of samples from each dataset will be proportional to its size.
+  #
+  # "weighted":     Allows you to manually define the importance of each dataset.
+  #                 Requires the 'dataset_weights' dictionary below.
+  #
+  sampling_strategy: balanced
+
+  # --- Example for 'weighted' strategy ---
+  # To use this, set sampling_strategy to "weighted" and uncomment the following lines.
+  # The keys must match the names of your zarr files (without the .zarr extension).
+  # The weights are relative. For example, a weight of 2.0 for 'video' and 1.0 for
+  # 'longer_edge' means you want twice as many samples from 'video' relative to 'longer_edge',
+  # assuming enough valid frames are available.
+  #
+  # dataset_weights:
+  #   video: 2.0
+  #   longer_edge: 1.0
+
 
 # Part 2: MODEL & TRAINING HYPERPARAMETERS
-# Define the model and how it should be trained.
 # --------------------------------------------------------------------------------
 training_config:
   # Model setup
   model_name: yolov8n.pt
-  nc: 1
-  names: ['fish']
 
   # Core hyperparameters
-  epochs: 50
+  epochs: 100
   batch_size: 16
   imgsz: 640
   optimizer: AdamW
   lr0: 0.002
   momentum: 0.9
   weight_decay: 0.0005
-
-  # Other training settings
   patience: 50
   device: '0'
 
 # ================================================================================
 # Part 3: TRAINING HISTORY & METADATA
 # This section is automatically populated by the training script after a run.
-# It ensures that this file becomes a complete, reproducible record.
-# --------------------------------------------------------------------------------
+# ================================================================================
 training_history:
   # --- Run Details ---
   training_run_name: "multi_zarr_train_example"
@@ -54,14 +76,17 @@ training_history:
   training_duration_hours: 0.5
 
   # --- Code & Environment ---
-  git_commit_hash: "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0"
-  python_version: "3.10.18"
-  torch_version: "2.5.1+cu121"
-  ultralytics_version: "8.3.169"
+  git_commit_hash: ""
+  python_version: ""
+  torch_version: ""
+  ultralytics_version: ""
 
   # --- Final Validation Metrics ---
   final_metrics:
-    box_loss: 2.416
-    cls_loss: 14.39
-    dfl_loss: 0.8117
-    # mAP50-95, precision, recall would also be logged here
+    box_loss: 0.0000
+    cls_loss: 0.0000
+    dfl_loss: 0.0000
+    precision: 0.0000
+    recall: 0.0000
+    mAP50: 0.0000
+    mAP50_95: 0.0000

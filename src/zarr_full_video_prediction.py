@@ -16,23 +16,34 @@ from tqdm import tqdm
 import json
 import os
 
+def draw_yolo_bbox(image, detections, color=(0, 255, 0), thickness=2):
+    """Draw YOLO format bounding boxes on an image."""
+    for det in detections:
+        x1, y1, x2, y2 = int(det['x1']), int(det['y1']), int(det['x2']), int(det['y2'])
+        conf = det['confidence']
+        
+        # Draw bounding box
+        cv2.rectangle(image, (x1, y1), (x2, y2), color, thickness)
+        
+        # Add label with confidence score
+        label = f"Fish {conf:.2f}"
+        label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+        cv2.rectangle(image, (x1, y1 - label_size[1] - 10), (x1 + label_size[0], y1), color, -1)
+        cv2.putText(image, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+    return image
+
 def yolo_image_generator(images_array, batch_size):
-    """
-    A generator that yields batches of images preprocessed for YOLO.
-    This avoids loading the entire dataset into memory.
-    """
+    """A generator that yields batches of images preprocessed for YOLO."""
     total_frames = images_array.shape[0]
     for i in range(0, total_frames, batch_size):
         batch_images = images_array[i:i + batch_size]
         processed_batch = []
         for zarr_image in batch_images:
-            # Prepare for YOLO (convert grayscale to RGB)
             if zarr_image.ndim == 2:
                 yolo_image = np.stack([zarr_image] * 3, axis=-1)
             else:
                 yolo_image = zarr_image
             
-            # Ensure uint8 and correct size
             if yolo_image.dtype != np.uint8:
                 yolo_image = yolo_image.astype(np.uint8)
             if yolo_image.shape[:2] != (640, 640):
@@ -42,10 +53,9 @@ def yolo_image_generator(images_array, batch_size):
         yield processed_batch
 
 def run_full_video_predictions(model_path, zarr_path, data_source='images_ds', 
-                              confidence=0.25, batch_size=32, output_dir='predictions_output'):
-    """
-    Run YOLO predictions on ALL frames in the Zarr data. (Optimized)
-    """
+                              confidence=0.25, batch_size=32, output_dir='predictions_output',
+                              save_annotated=False):
+    """Run YOLO predictions on ALL frames in the Zarr data. (Optimized)"""
     print(f"🎬 FULL VIDEO PREDICTION (Optimized)")
     print(f"📁 Zarr: {zarr_path}")
     print(f"🤖 Model: {model_path}")
@@ -57,11 +67,7 @@ def run_full_video_predictions(model_path, zarr_path, data_source='images_ds',
         print(f"❌ Error loading Zarr: {e}")
         return None
     
-    data_source_mapping = {
-        'images_ds': 'raw_video/images_ds',
-        'images_full': 'raw_video/images_full', 
-        'roi_images': 'crop_data/roi_images'
-    }
+    data_source_mapping = {'images_ds': 'raw_video/images_ds', 'images_full': 'raw_video/images_full', 'roi_images': 'crop_data/roi_images'}
     zarr_data_path = data_source_mapping.get(data_source)
     if not zarr_data_path or zarr_data_path not in root:
         print(f"❌ Data source '{data_source}' not found")
@@ -80,36 +86,41 @@ def run_full_video_predictions(model_path, zarr_path, data_source='images_ds',
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    annotated_dir = output_dir / "annotated_frames" if save_annotated else None
+    if save_annotated:
+        annotated_dir.mkdir(exist_ok=True)
+        print(f"🖼️  Saving annotated images to: {annotated_dir}")
     
     all_results = []
-    detection_stats = {
-        'total_frames': total_frames, 'frames_with_detections': 0,
-        'total_detections': 0, 'confidence_scores': [],
-        'detection_by_frame': np.zeros(total_frames, dtype=bool)
-    }
+    detection_stats = {'total_frames': total_frames, 'frames_with_detections': 0, 'total_detections': 0, 'confidence_scores': [], 'detection_by_frame': np.zeros(total_frames, dtype=bool)}
     
-    # Create the generator for our images
     image_gen = yolo_image_generator(images_array, batch_size)
+    num_batches = (total_frames + batch_size - 1) // batch_size
     
     print(f"🔄 Processing {total_frames} frames...")
     
-    # Use model.predict on the generator for efficient batch processing
-    frame_idx = 0
-    for results_batch in tqdm(model.predict(image_gen, stream=True, verbose=False), total=len(range(0, total_frames, batch_size))):
+    current_frame_idx = 0
+    for image_batch in tqdm(image_gen, total=num_batches, desc="Predicting Batches"):
+        # Pass the list of images directly to the model
+        results_list = model.predict(image_batch, verbose=False, conf=confidence)
         
-        for result in results_batch: # This should be one frame's result
+        for i, result in enumerate(results_list):
+            frame_idx = current_frame_idx + i
             frame_detections = []
+            
             if result.boxes is not None:
                 for box in result.boxes:
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     conf = float(box.conf[0].cpu().numpy())
                     cls_id = int(box.cls[0].cpu().numpy())
-                    
-                    frame_detections.append({
-                        'frame_idx': frame_idx, 'x1': float(x1), 'y1': float(y1), 
-                        'x2': float(x2), 'y2': float(y2), 'confidence': conf, 'class_id': cls_id
-                    })
+                    frame_detections.append({'frame_idx': frame_idx, 'x1': float(x1), 'y1': float(y1), 'x2': float(x2), 'y2': float(y2), 'confidence': conf, 'class_id': cls_id})
             
+            if save_annotated and len(frame_detections) > 0:
+                annotated_image = draw_yolo_bbox(result.orig_img.copy(), frame_detections)
+                save_path = annotated_dir / f"frame_{frame_idx:06d}.jpg"
+                cv2.imwrite(str(save_path), cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR))
+
             all_results.append({'frame_idx': frame_idx, 'num_detections': len(frame_detections), 'detections': frame_detections})
             
             if len(frame_detections) > 0:
@@ -117,8 +128,8 @@ def run_full_video_predictions(model_path, zarr_path, data_source='images_ds',
                 detection_stats['total_detections'] += len(frame_detections)
                 detection_stats['detection_by_frame'][frame_idx] = True
                 detection_stats['confidence_scores'].extend([d['confidence'] for d in frame_detections])
-            
-            frame_idx += 1
+        
+        current_frame_idx += len(image_batch)
 
     print(f"\n📊 FINAL STATISTICS:")
     print(f"   Detection rate: {detection_stats['frames_with_detections']/total_frames*100:.2f}%")
@@ -303,6 +314,8 @@ Examples:
                        help="Output directory for results")
     parser.add_argument("--create-plots", action='store_true',
                        help="Create analysis plots")
+    parser.add_argument("--save-annotated", action='store_true',
+                        help="Save images with bounding boxes drawn on them.")
     
     args = parser.parse_args()
     
@@ -314,7 +327,8 @@ Examples:
     # Run predictions
     results, stats = run_full_video_predictions(
         args.model_path, args.zarr_path, args.data_source,
-        args.confidence, args.batch_size, args.output_dir
+        args.confidence, args.batch_size, args.output_dir,
+        args.save_annotated
     )
     
     if results is None:
