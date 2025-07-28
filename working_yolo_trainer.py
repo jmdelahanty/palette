@@ -29,7 +29,7 @@ def main(args):
                     if hasattr(cls, 'ndim') and cls.ndim == 0:
                         # Convert 0-d tensor to 1-d tensor
                         pbatch['cls'] = cls.unsqueeze(0)
-                        print(f"🔧 Fixed 0-d cls tensor: {cls} -> {pbatch['cls']}")
+                        # print(f"🔧 Fixed 0-d cls tensor: {cls} -> {pbatch['cls']}")
                 
                 return pbatch
                 
@@ -133,7 +133,7 @@ def main(args):
                 batch_size=batch_size, 
                 shuffle=(mode == 'train'), 
                 collate_fn=robust_collate_fn,
-                num_workers=8,  # Can use multiple workers now
+                num_workers=16,  # Can use multiple workers now
                 pin_memory=True,
                 persistent_workers=True if batch_size > 1 else False
             )
@@ -156,7 +156,7 @@ def main(args):
             val=True,  # Validation should work now!
             amp=True,
             cache=False,
-            workers=8,
+            workers=16,
             patience=100,
             verbose=True
         )
