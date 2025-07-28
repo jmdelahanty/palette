@@ -1,0 +1,44 @@
+# multi_zarr_config.yaml
+# Multi-Zarr YOLO Configuration for Runtime Data Combination
+# Generated for concentricOMR3 videos
+
+# Training and validation paths (handled by custom dataset)
+train: ./
+val: ./
+
+# Number of classes
+nc: 1
+
+# Class names
+names:
+  - fish
+
+# Multi-Zarr specific configuration
+zarr_paths:
+  - /home/delahantyj@hhmi.org/Desktop/concentricOMR3/longer_edge.zarr
+  - /home/delahantyj@hhmi.org/Desktop/concentricOMR3/video.zarr
+
+# Dataset parameters
+task: detect  # 'detect' for 640x640 full images, 'pose' for 320x320 ROI crops
+target_size: 640  # Image size for training
+split_ratio: 0.8  # 80% train, 20% validation
+random_seed: 42   # For reproducible train/val splits
+
+# Optional video weighting (adjust if you want to sample more from one video)
+# video_weights:
+#   longer_edge: 1.0  # Standard sampling
+#   video: 1.0        # Standard sampling
+#   # Example: longer_edge: 1.5, video: 0.8 to favor longer_edge
+
+# Training recommendations
+training:
+  epochs: 100
+  batch_size: 16
+  patience: 50
+  amp: true  # Automatic Mixed Precision
+  
+# Notes:
+# - This config uses runtime data combination (no file merging)
+# - Both videos will be loaded simultaneously during training
+# - Data from both videos will be mixed in each batch
+# - Train/val split ensures both videos are represented in each set
