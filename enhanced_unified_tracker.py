@@ -176,8 +176,6 @@ def transform_bbox_to_image_scales(bbox_data, roi_coords_full, roi_coords_ds, ro
         }
     }
 
-# YOLO dataset generation removed - use separate generate_yolo_dataset.py script for flexible dataset creation
-
 # --- Stage-Specific Functions (Import and Background unchanged) ---
 
 def run_import_stage(video_path, zarr_path):
@@ -574,33 +572,58 @@ def run_enhanced_tracking_stage(zarr_path, scheduler_name, use_gpu=False):
     for slc, chunk_results in tqdm(results, desc="Writing Enhanced Tracking"):
         tracking_results[slc] = chunk_results
 
-    # Calculate comprehensive statistics
+    # Calculate comprehensive statistics - FIXED VERSION
     valid_frames = ~np.isnan(tracking_results[:, 0])  # Non-NaN heading
     valid_indices = np.where(valid_frames)[0]
     
     successful_tracks = len(valid_indices)
     percent_tracked = (successful_tracks / num_images) * 100
     
-    # Enhanced statistics
+    # Enhanced statistics with safe handling of empty arrays
+    if successful_tracks > 0:
+        confidence_stats = {
+            'mean': float(np.nanmean(tracking_results[valid_indices, 19])),
+            'std': float(np.nanstd(tracking_results[valid_indices, 19])),
+            'min': float(np.nanmin(tracking_results[valid_indices, 19])),
+            'max': float(np.nanmax(tracking_results[valid_indices, 19]))
+        }
+    else:
+        # Handle case where no tracking was successful
+        confidence_stats = {
+            'mean': 0.0,
+            'std': 0.0,
+            'min': 0.0,
+            'max': 0.0
+        }
+        print("⚠️  WARNING: No successful tracking found in any frames!")
+        print("   This may indicate:")
+        print("   - No fish are present in the video")
+        print("   - Detection thresholds need adjustment")
+        print("   - Video quality issues")
+        print("   - Background subtraction problems")
+    
     track_group.attrs['summary_statistics'] = {
         'total_frames': num_images, 
         'frames_tracked': successful_tracks, 
         'percent_tracked': round(percent_tracked, 2),
         'coordinate_systems': 4,  # ROI, DS, Full, Pixel
         'keypoints_per_frame': 3,
-        'confidence_stats': {
-            'mean': float(np.nanmean(tracking_results[valid_indices, 19])),
-            'std': float(np.nanstd(tracking_results[valid_indices, 19])),
-            'min': float(np.nanmin(tracking_results[valid_indices, 19])),
-            'max': float(np.nanmax(tracking_results[valid_indices, 19]))
-        }
+        'confidence_stats': confidence_stats
     }
     
     end_time = time.perf_counter()
     track_group.attrs['duration_seconds'] = end_time - start_time
     print(f"Enhanced tracking: {successful_tracks}/{num_images} frames tracked ({percent_tracked:.2f}%).")
     print(f"Enhanced tracking stage completed in {end_time - start_time:.2f} seconds.")
-    print(f"💡 Use generate_yolo_dataset.py to create flexible training datasets from this tracking data")
+    
+    if successful_tracks > 0:
+        print(f"💡 Use generate_yolo_dataset.py to create flexible training datasets from this tracking data")
+    else:
+        print(f"⚠️  No tracking data available for YOLO training")
+        print(f"💡 Consider:")
+        print(f"   - Checking video content and quality")
+        print(f"   - Adjusting detection thresholds")
+        print(f"   - Verifying fish are visible in the video")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -613,6 +636,7 @@ Enhanced Features:
   • Complete provenance tracking for all coordinate transformations
   • Ready for flexible YOLO dataset generation (use separate script)
   • Enhanced metadata and audit trails
+  • Safe handling of videos with no fish detections
         """)
     
     parser.add_argument("video_path", type=str, help="Path to the input video file.")
@@ -671,10 +695,22 @@ Enhanced Features:
         root = zarr.open_group(args.zarr_path, mode='a')
         root.attrs['total_pipeline_duration_seconds'] = total_elapsed
         root.attrs['enhanced_pipeline_version'] = '2.1'  # Updated version
-        root.attrs['yolo_ready'] = True  # Data is ready for YOLO, but not pre-generated
-        print(f"\n🎉 Enhanced pipeline completed! Total time: {total_elapsed:.2f} seconds.")
-        print(f"✅ Data is ready for YOLO training (use separate generate_yolo_dataset.py script)")
-        print(f"💡 Next step: python generate_yolo_dataset.py {args.zarr_path} --split 0.8")
+        
+        # Check if we have any tracking data before claiming YOLO readiness
+        tracking_results = root['tracking/tracking_results']
+        valid_frames = ~np.isnan(tracking_results[:, 0])
+        successful_tracks = np.sum(valid_frames)
+        
+        if successful_tracks > 0:
+            root.attrs['yolo_ready'] = True
+            print(f"\n🎉 Enhanced pipeline completed! Total time: {total_elapsed:.2f} seconds.")
+            print(f"✅ Data is ready for YOLO training (use separate generate_yolo_dataset.py script)")
+            print(f"💡 Next step: python generate_yolo_dataset.py {args.zarr_path} --split 0.8")
+        else:
+            root.attrs['yolo_ready'] = False  
+            print(f"\n⚠️  Pipeline completed but no fish were tracked! Total time: {total_elapsed:.2f} seconds.")
+            print(f"❌ No data available for YOLO training")
+            print(f"💡 This may indicate the video doesn't contain visible fish")
 
     print("\n✨ Enhanced tracking complete!")
 
