@@ -1,14 +1,14 @@
 {
   "model_confidence": 0.25,
   "total_frames": 11024,
-  "frames_with_detections": 7446,
-  "detection_rate": 0.6754354136429608,
-  "total_detections": 7477,
-  "average_detections_per_frame": 0.6782474600870827,
+  "frames_with_detections": 7512,
+  "detection_rate": 0.681422351233672,
+  "total_detections": 7527,
+  "average_detections_per_frame": 0.6827830188679245,
   "confidence_stats": {
-    "mean": 0.8363266237497616,
-    "min": 0.25080886483192444,
-    "max": 0.964195191860199,
-    "std": 0.1350708449788364
+    "mean": 0.8466421878399627,
+    "min": 0.2509402334690094,
+    "max": 0.9565728306770325,
+    "std": 0.11592359141637355
   }
 }

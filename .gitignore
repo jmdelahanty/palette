@@ -1,7 +1,62 @@
-# Jupyter
+# ===================================================================
+# Python & IDE Files
+# ===================================================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===================================================================
+# OS-specific Files
+# ===================================================================
+.DS_Store
+Thumbs.db
+
+# ===================================================================
+# Jupyter Notebooks
+# ===================================================================
 *.ipynb_checkpoints
 
-# Data directories
+# ===================================================================
+# Large Data Files (Source Data)
+# It's good practice to keep these out of the git repo.
+# ===================================================================
+*.zarr/
+*.h5
+*.hdf5
+*.mp4
+*.csv
+*.npy
+*.npz
+
+# ===================================================================
+# Generated Output & Temporary Directories
+# This section covers all generated data, models, and analysis.
+# ===================================================================
+
+# --- Model Training Outputs ---
+runs/
+src/runs/
+
+# --- Prediction & Analysis Outputs ---
+full_video_predictions/
+src/full_video_predictions/
+topk1_predictions/
+decoder_comparison/
+debug_background_subtraction/
+debug_contour_tracking/
+
+# --- Temporary Frame & Data Directories ---
 annotations/
 dual_box_frames/
 fish_crops_mt/
@@ -19,56 +74,6 @@ test_frames/
 all_frames_exact/
 comprehensive_test/
 working_test/
-
-# Analysis and debugging directories
-debug_background_subtraction/
-debug_contour_tracking/
-decoder_comparison/
-topk1_predictions/
-
-# Test directories
-test/
-test2/
-
-# Model training outputs
-runs/detect/*
-runs/detect/train*
-
-# Data files
-*.csv
-*.mp4
-
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-*.so
-*.egg
-*.egg-info/
-dist/
-build/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Large data files
-*.zarr/
-*.h5
-*.hdf5
-*.npy
-*.npz
-
-# Temporary files
 tmp/
 temp/
 *.tmp
