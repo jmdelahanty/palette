@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 import warnings
+import yaml
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -40,8 +41,19 @@ class DatasetMetadata:
 
 @dataclass
 class MultiDatasetConfig:
-    """Configuration for multi-dataset training."""
+    """Comprehensive configuration for multi-dataset YOLO training."""
+    
+    # ===== REQUIRED FIELDS =====
     zarr_paths: List[str]
+    
+    # ===== YOLO TRAINING PARAMETERS =====
+    # Standard YOLO parameters (passed to ultralytics)
+    nc: int = 1  # Number of classes
+    names: List[str] = None  # Class names
+    train: str = "./"  # Placeholder - handled by custom dataset
+    val: str = "./"    # Placeholder - handled by custom dataset
+    
+    # ===== MULTI-ZARR DATASET PARAMETERS =====
     sampling_strategy: SamplingStrategy = SamplingStrategy.BALANCED
     dataset_weights: Optional[Dict[str, float]] = None
     split_ratio: float = 0.8
@@ -50,6 +62,183 @@ class MultiDatasetConfig:
     target_size: Optional[int] = None
     min_confidence: float = 0.0
     balance_across_videos: bool = True
+    
+    # ===== TRAINING CONFIGURATION =====
+    training: Optional[Dict] = None  # Training recommendations (epochs, batch_size, etc.)
+    
+    # ===== PERFORMANCE OPTIMIZATION =====
+    performance: Optional[Dict] = None  # Performance settings
+    
+    # ===== MONITORING AND DEBUGGING =====
+    monitoring: Optional[Dict] = None  # Monitoring settings
+    
+    # ===== DATA QUALITY CONTROLS =====
+    quality_controls: Optional[Dict] = None  # Quality control settings
+    
+    def __post_init__(self):
+        """Post-initialization processing."""
+        # Set default class names if not provided
+        if self.names is None:
+            self.names = ['fish']
+        
+        # Ensure we have the right number of class names
+        if len(self.names) != self.nc:
+            if self.nc == 1 and not self.names:
+                self.names = ['fish']
+            elif len(self.names) != self.nc:
+                raise ValueError(f"Number of class names ({len(self.names)}) doesn't match nc ({self.nc})")
+        
+        # Set default training parameters
+        if self.training is None:
+            self.training = {
+                'epochs': 100,
+                'batch_size': 16,
+                'patience': 50,
+                'amp': True
+            }
+        
+        # Set default performance parameters
+        if self.performance is None:
+            self.performance = {
+                'recommended_batch_sizes': {
+                    'gpu_8gb': 16,
+                    'gpu_12gb': 24,
+                    'gpu_16gb': 32,
+                    'gpu_24gb': 48
+                }
+            }
+        
+        # Set default monitoring parameters
+        if self.monitoring is None:
+            self.monitoring = {
+                'track_per_dataset_metrics': True,
+                'log_sampling_stats': True,
+                'create_plots': True
+            }
+        
+        # Set default quality controls
+        if self.quality_controls is None:
+            self.quality_controls = {
+                'require_valid_keypoints': False
+            }
+    
+    def get_yolo_params(self) -> Dict:
+        """Extract parameters for YOLO trainer."""
+        return {
+            'nc': self.nc,
+            'names': self.names,
+            'train': self.train,
+            'val': self.val
+        }
+    
+    def get_dataset_params(self) -> Dict:
+        """Extract parameters for dataset creation."""
+        return {
+            'zarr_paths': self.zarr_paths,
+            'sampling_strategy': self.sampling_strategy,
+            'dataset_weights': self.dataset_weights,
+            'split_ratio': self.split_ratio,
+            'random_seed': self.random_seed,
+            'task': self.task,
+            'target_size': self.target_size,
+            'min_confidence': self.min_confidence,
+            'balance_across_videos': self.balance_across_videos
+        }
+    
+    def get_training_params(self) -> Dict:
+        """Extract training parameters."""
+        return self.training or {}
+    
+    def save_full_config(self, path: str):
+        """Save complete configuration with documentation."""
+        config_dict = {
+            '# COMPREHENSIVE MULTI-ZARR YOLO CONFIGURATION': None,
+            '# This file contains all parameters for training': None,
+            '# Generated at': datetime.utcnow().isoformat(),
+            
+            '# ===== YOLO TRAINING PARAMETERS =====': None,
+            'nc': self.nc,
+            'names': self.names,
+            'train': self.train,
+            'val': self.val,
+            
+            '# ===== MULTI-ZARR DATASET PARAMETERS =====': None,
+            'zarr_paths': self.zarr_paths,
+            'task': self.task,
+            'target_size': self.target_size,
+            'split_ratio': self.split_ratio,
+            'random_seed': self.random_seed,
+            'sampling_strategy': self.sampling_strategy.value if hasattr(self.sampling_strategy, 'value') else self.sampling_strategy,
+            'min_confidence': self.min_confidence,
+            'balance_across_videos': self.balance_across_videos,
+            
+            '# ===== TRAINING CONFIGURATION =====': None,
+            'training': self.training,
+            
+            '# ===== PERFORMANCE OPTIMIZATION =====': None,
+            'performance': self.performance,
+            
+            '# ===== MONITORING AND DEBUGGING =====': None,
+            'monitoring': self.monitoring,
+            
+            '# ===== DATA QUALITY CONTROLS =====': None,
+            'quality_controls': self.quality_controls
+        }
+        
+        # Remove comment keys and save
+        clean_dict = {k: v for k, v in config_dict.items() if not k.startswith('#') and v is not None}
+        
+        with open(path, 'w') as f:
+            yaml.dump(clean_dict, f, default_flow_style=False, sort_keys=False)
+        
+        print(f"📝 Complete configuration saved to: {path}")
+
+def load_training_config(config_path: str) -> MultiDatasetConfig:
+    """Load multi-zarr training configuration."""
+    config_path = Path(config_path)
+    
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    
+    with open(config_path, 'r') as f:
+        config_dict = yaml.safe_load(f)
+    
+    # Validate required fields
+    required_fields = ['zarr_paths']
+    for field in required_fields:
+        if field not in config_dict:
+            raise ValueError(f"Missing required config field: {field}")
+    
+    # Define the parameters that MultiDatasetConfig actually accepts
+    known_params = {
+        'zarr_paths', 'sampling_strategy', 'dataset_weights', 'split_ratio', 
+        'random_seed', 'task', 'target_size', 'min_confidence', 'balance_across_videos'
+    }
+    
+    # Filter config dict to only include known parameters
+    filtered_config = {k: v for k, v in config_dict.items() if k in known_params}
+    
+    # Log what we're filtering out for transparency
+    filtered_out = {k: v for k, v in config_dict.items() if k not in known_params and k not in ['nc', 'names', 'train', 'val']}
+    if filtered_out:
+        logger.info(f"📝 Additional config sections (preserved in file): {list(filtered_out.keys())}")
+    
+    # Convert sampling strategy if provided
+    if 'sampling_strategy' in filtered_config:
+        if isinstance(filtered_config['sampling_strategy'], str):
+            try:
+                filtered_config['sampling_strategy'] = SamplingStrategy(filtered_config['sampling_strategy'])
+            except ValueError:
+                logger.warning(f"Unknown sampling strategy: {filtered_config['sampling_strategy']}, using balanced")
+                filtered_config['sampling_strategy'] = SamplingStrategy.BALANCED
+    
+    # Set defaults for MultiDatasetConfig
+    filtered_config.setdefault('sampling_strategy', SamplingStrategy.BALANCED)
+    filtered_config.setdefault('task', 'detect')
+    filtered_config.setdefault('split_ratio', 0.8)
+    filtered_config.setdefault('random_seed', 42)
+    
+    return MultiDatasetConfig(**filtered_config)
 
 class CompatibilityValidator:
     """Validates compatibility across multiple zarr files."""
