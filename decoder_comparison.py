@@ -151,7 +151,7 @@ def extract_frame_with_decord(video_path, frame_number, output_path, target_size
         try:
             # Set up decord exactly like your training pipeline
             decord.bridge.set_bridge('torch')
-            vr = decord.VideoReader(str(video_path), ctx=decord.gpu(0))
+            vr = decord.VideoReader(str(video_path), ctx=decord.cpu(0))
             device = 'cuda:0'
             print("   ✅ Using GPU for decord extraction")
         except Exception as gpu_error:
