@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Full Video YOLO Prediction from Zarr
+Full Video YOLO Prediction from Zarr (Optimized Version)
 Run YOLO predictions on ALL frames in the Zarr data and save comprehensive results.
 """
 
@@ -13,191 +13,117 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from ultralytics import YOLO
 from tqdm import tqdm
-import tempfile
-import os
 import json
+import os
+
+def yolo_image_generator(images_array, batch_size):
+    """
+    A generator that yields batches of images preprocessed for YOLO.
+    This avoids loading the entire dataset into memory.
+    """
+    total_frames = images_array.shape[0]
+    for i in range(0, total_frames, batch_size):
+        batch_images = images_array[i:i + batch_size]
+        processed_batch = []
+        for zarr_image in batch_images:
+            # Prepare for YOLO (convert grayscale to RGB)
+            if zarr_image.ndim == 2:
+                yolo_image = np.stack([zarr_image] * 3, axis=-1)
+            else:
+                yolo_image = zarr_image
+            
+            # Ensure uint8 and correct size
+            if yolo_image.dtype != np.uint8:
+                yolo_image = yolo_image.astype(np.uint8)
+            if yolo_image.shape[:2] != (640, 640):
+                yolo_image = cv2.resize(yolo_image, (640, 640))
+            
+            processed_batch.append(yolo_image)
+        yield processed_batch
 
 def run_full_video_predictions(model_path, zarr_path, data_source='images_ds', 
                               confidence=0.25, batch_size=32, output_dir='predictions_output'):
     """
-    Run YOLO predictions on ALL frames in the Zarr data.
+    Run YOLO predictions on ALL frames in the Zarr data. (Optimized)
     """
-    print(f"🎬 FULL VIDEO PREDICTION")
+    print(f"🎬 FULL VIDEO PREDICTION (Optimized)")
     print(f"📁 Zarr: {zarr_path}")
     print(f"🤖 Model: {model_path}")
-    print(f"🎯 Confidence: {confidence}")
-    print(f"📊 Data source: {data_source}")
     print("=" * 60)
     
-    # Load Zarr data
     try:
         root = zarr.open(zarr_path, mode='r')
-        print("✅ Zarr data loaded")
     except Exception as e:
         print(f"❌ Error loading Zarr: {e}")
         return None
     
-    # Map data source to actual path
     data_source_mapping = {
         'images_ds': 'raw_video/images_ds',
         'images_full': 'raw_video/images_full', 
         'roi_images': 'crop_data/roi_images'
     }
-    
     zarr_data_path = data_source_mapping.get(data_source)
-    if zarr_data_path is None or zarr_data_path not in root:
+    if not zarr_data_path or zarr_data_path not in root:
         print(f"❌ Data source '{data_source}' not found")
         return None
-    
+
     images_array = root[zarr_data_path]
     total_frames = images_array.shape[0]
     print(f"📊 Total frames to process: {total_frames}")
-    
-    # Get tracking data for context
-    tracking_results = None
-    if 'tracking/tracking_results' in root:
-        tracking_results = root['tracking/tracking_results']
-        valid_tracking_mask = ~np.isnan(tracking_results[:, 0])
-        valid_tracking_count = np.sum(valid_tracking_mask)
-        print(f"📈 Frames with valid tracking: {valid_tracking_count}/{total_frames} ({valid_tracking_count/total_frames*100:.1f}%)")
-    
-    # Load YOLO model
+
     try:
         model = YOLO(model_path)
         print("✅ YOLO model loaded")
     except Exception as e:
         print(f"❌ Error loading model: {e}")
         return None
-    
-    # Create output directory
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"📁 Output directory: {output_dir}")
     
-    # Initialize results storage
     all_results = []
     detection_stats = {
-        'total_frames': total_frames,
-        'frames_with_detections': 0,
-        'total_detections': 0,
-        'confidence_scores': [],
+        'total_frames': total_frames, 'frames_with_detections': 0,
+        'total_detections': 0, 'confidence_scores': [],
         'detection_by_frame': np.zeros(total_frames, dtype=bool)
     }
     
-    # Process in batches to manage memory
-    print(f"🔄 Processing {total_frames} frames in batches of {batch_size}...")
+    # Create the generator for our images
+    image_gen = yolo_image_generator(images_array, batch_size)
     
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
+    print(f"🔄 Processing {total_frames} frames...")
+    
+    # Use model.predict on the generator for efficient batch processing
+    frame_idx = 0
+    for results_batch in tqdm(model.predict(image_gen, stream=True, verbose=False), total=len(range(0, total_frames, batch_size))):
         
-        for batch_start in tqdm(range(0, total_frames, batch_size), desc="Processing batches"):
-            batch_end = min(batch_start + batch_size, total_frames)
-            batch_indices = range(batch_start, batch_end)
-            
-            # Process batch
-            batch_results = []
-            
-            for frame_idx in batch_indices:
-                try:
-                    # Load image from Zarr
-                    zarr_image = images_array[frame_idx]
+        for result in results_batch: # This should be one frame's result
+            frame_detections = []
+            if result.boxes is not None:
+                for box in result.boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    conf = float(box.conf[0].cpu().numpy())
+                    cls_id = int(box.cls[0].cpu().numpy())
                     
-                    # Prepare for YOLO (convert grayscale to RGB)
-                    if zarr_image.ndim == 2:  # Grayscale
-                        yolo_image = np.stack([zarr_image, zarr_image, zarr_image], axis=-1)
-                    else:
-                        yolo_image = zarr_image
-                    
-                    # Ensure uint8 and correct size
-                    if yolo_image.dtype != np.uint8:
-                        yolo_image = yolo_image.astype(np.uint8)
-                    
-                    if yolo_image.shape[:2] != (640, 640):
-                        yolo_image = cv2.resize(yolo_image, (640, 640))
-                    
-                    # Save temporary image
-                    temp_image_path = temp_path / f"temp_{frame_idx}.jpg"
-                    cv2.imwrite(str(temp_image_path), cv2.cvtColor(yolo_image, cv2.COLOR_RGB2BGR))
-                    
-                    # Run prediction
-                    pred_results = model.predict(str(temp_image_path), conf=confidence, verbose=False)
-                    
-                    # Process results
-                    frame_detections = []
-                    if len(pred_results) > 0 and pred_results[0].boxes is not None:
-                        for box in pred_results[0].boxes:
-                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                            conf = float(box.conf[0].cpu().numpy())
-                            cls_id = int(box.cls[0].cpu().numpy())
-                            
-                            frame_detections.append({
-                                'frame_idx': frame_idx,
-                                'x1': float(x1), 'y1': float(y1), 
-                                'x2': float(x2), 'y2': float(y2),
-                                'confidence': conf,
-                                'class_id': cls_id,
-                                'center_x': float((x1 + x2) / 2),
-                                'center_y': float((y1 + y2) / 2),
-                                'width': float(x2 - x1),
-                                'height': float(y2 - y1)
-                            })
-                    
-                    # Store frame result
-                    frame_result = {
-                        'frame_idx': frame_idx,
-                        'num_detections': len(frame_detections),
-                        'detections': frame_detections,
-                        'has_valid_tracking': False
-                    }
-                    
-                    # Add tracking context if available
-                    if tracking_results is not None:
-                        frame_result['has_valid_tracking'] = bool(valid_tracking_mask[frame_idx])
-                        if frame_result['has_valid_tracking']:
-                            tracking_data = tracking_results[frame_idx]
-                            frame_result['tracking_heading'] = float(tracking_data[0])
-                            # Add more tracking data as needed
-                    
-                    batch_results.append(frame_result)
-                    
-                    # Update statistics
-                    if len(frame_detections) > 0:
-                        detection_stats['frames_with_detections'] += 1
-                        detection_stats['total_detections'] += len(frame_detections)
-                        detection_stats['detection_by_frame'][frame_idx] = True
-                        detection_stats['confidence_scores'].extend([d['confidence'] for d in frame_detections])
-                    
-                    # Clean up temp file
-                    temp_image_path.unlink()
-                    
-                except Exception as e:
-                    print(f"   ❌ Error processing frame {frame_idx}: {e}")
-                    # Add empty result for failed frame
-                    batch_results.append({
-                        'frame_idx': frame_idx,
-                        'num_detections': 0,
-                        'detections': [],
-                        'has_valid_tracking': False,
-                        'error': str(e)
+                    frame_detections.append({
+                        'frame_idx': frame_idx, 'x1': float(x1), 'y1': float(y1), 
+                        'x2': float(x2), 'y2': float(y2), 'confidence': conf, 'class_id': cls_id
                     })
             
-            # Add batch results to main results
-            all_results.extend(batch_results)
-    
+            all_results.append({'frame_idx': frame_idx, 'num_detections': len(frame_detections), 'detections': frame_detections})
+            
+            if len(frame_detections) > 0:
+                detection_stats['frames_with_detections'] += 1
+                detection_stats['total_detections'] += len(frame_detections)
+                detection_stats['detection_by_frame'][frame_idx] = True
+                detection_stats['confidence_scores'].extend([d['confidence'] for d in frame_detections])
+            
+            frame_idx += 1
+
     print(f"\n📊 FINAL STATISTICS:")
-    print(f"   Total frames processed: {detection_stats['total_frames']}")
-    print(f"   Frames with detections: {detection_stats['frames_with_detections']}")
-    print(f"   Detection rate: {detection_stats['frames_with_detections']/detection_stats['total_frames']*100:.2f}%")
-    print(f"   Total detections: {detection_stats['total_detections']}")
-    print(f"   Average detections per frame: {detection_stats['total_detections']/detection_stats['total_frames']:.3f}")
+    print(f"   Detection rate: {detection_stats['frames_with_detections']/total_frames*100:.2f}%")
     
-    if detection_stats['confidence_scores']:
-        conf_scores = np.array(detection_stats['confidence_scores'])
-        print(f"   Confidence - Mean: {np.mean(conf_scores):.3f}, Min: {np.min(conf_scores):.3f}, Max: {np.max(conf_scores):.3f}")
-    
-    # Save detailed results
     save_results(all_results, detection_stats, output_dir, confidence)
-    
     return all_results, detection_stats
 
 def save_results(all_results, detection_stats, output_dir, confidence):
