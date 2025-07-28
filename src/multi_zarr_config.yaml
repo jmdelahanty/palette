@@ -1,44 +1,188 @@
-# multi_zarr_config.yaml
-# Multi-Zarr YOLO Configuration for Runtime Data Combination
-# Generated for concentricOMR3 videos
+# ================================================================================
+# COMPREHENSIVE MULTI-ZARR YOLO TRAINING CONFIGURATION
+# ================================================================================
+# This single file contains ALL parameters for training YOLO models on multi-zarr
+# datasets. It serves as both configuration and documentation for your training runs.
+# 
+# Generated for: concentricOMR3 videos
+# Created: $(date)
+# ================================================================================
 
-# Training and validation paths (handled by custom dataset)
-train: ./
-val: ./
+# ================================================================================
+# YOLO TRAINING PARAMETERS
+# ================================================================================
+# Standard YOLO parameters (passed directly to ultralytics trainer)
 
-# Number of classes
+# Number of classes in your dataset
 nc: 1
 
-# Class names
+# Class names (must match the number of classes)
 names:
   - fish
 
-# Multi-Zarr specific configuration
+# Training and validation paths (handled by our custom dataset loader)
+train: ./  # Placeholder - handled by custom dataset
+val: ./    # Placeholder - handled by custom dataset
+
+# ================================================================================
+# MULTI-ZARR DATASET PARAMETERS
+# ================================================================================
+# Configuration for combining multiple zarr files during training
+
+# List of zarr files to combine for training
 zarr_paths:
   - /home/delahantyj@hhmi.org/Desktop/concentricOMR3/longer_edge.zarr
   - /home/delahantyj@hhmi.org/Desktop/concentricOMR3/video.zarr
 
-# Dataset parameters
-task: detect  # 'detect' for 640x640 full images, 'pose' for 320x320 ROI crops
-target_size: 640  # Image size for training
-split_ratio: 0.8  # 80% train, 20% validation
-random_seed: 42   # For reproducible train/val splits
+# Task type: 'detect' for object detection, 'pose' for keypoint detection
+task: detect  # 'detect' uses 640x640 images, 'pose' uses 320x320 ROI crops
 
-# Optional video weighting (adjust if you want to sample more from one video)
-# video_weights:
-#   longer_edge: 1.0  # Standard sampling
-#   video: 1.0        # Standard sampling
-#   # Example: longer_edge: 1.5, video: 0.8 to favor longer_edge
+# Target image size for training (auto-set based on task if not specified)
+target_size: 640  # 640 for detect, 320 for pose
 
-# Training recommendations
+# Train/validation split ratio (0.8 = 80% train, 20% validation)
+split_ratio: 0.8
+
+# Random seed for reproducible train/val splits
+random_seed: 42
+
+# Sampling strategy for combining multiple datasets
+sampling_strategy: balanced  # Options: balanced, weighted, proportional, quality
+
+# Optional: Custom weights for each dataset (only used with 'weighted' strategy)
+# dataset_weights:
+#   longer_edge: 1.0
+#   video: 1.5
+
+# Minimum confidence threshold for detections (filters low-confidence samples)
+min_confidence: 0.0
+
+# Ensure both train and validation sets contain samples from all videos
+balance_across_videos: true
+
+# ================================================================================
+# TRAINING CONFIGURATION
+# ================================================================================
+# Training hyperparameters and settings
+
 training:
+  # Number of training epochs
   epochs: 100
-  batch_size: 16
-  patience: 50
-  amp: true  # Automatic Mixed Precision
   
-# Notes:
-# - This config uses runtime data combination (no file merging)
-# - Both videos will be loaded simultaneously during training
-# - Data from both videos will be mixed in each batch
-# - Train/val split ensures both videos are represented in each set
+  # Batch size (adjust based on your GPU memory)
+  batch_size: 16
+  
+  # Early stopping patience (stop if no improvement for N epochs)
+  patience: 50
+  
+  # Automatic Mixed Precision (saves memory, speeds up training)
+  amp: true
+
+# ================================================================================
+# PERFORMANCE OPTIMIZATION
+# ================================================================================
+# Settings to optimize training performance
+
+performance:
+  # Recommended batch sizes for different GPU memory configurations
+  recommended_batch_sizes:
+    gpu_8gb: 16      # RTX 3070, RTX 2080 Ti
+    gpu_12gb: 24     # RTX 3080 Ti, RTX 4070 Ti
+    gpu_16gb: 32     # RTX 4080, RTX 3090
+    gpu_24gb: 48     # RTX 3090 Ti, RTX 4090, A100
+  
+  # Number of data loading workers (auto-calculated based on dataset count if not set)
+  # workers: 8  # Uncomment to override auto-calculation
+
+# ================================================================================
+# MONITORING AND DEBUGGING
+# ================================================================================
+# Settings for tracking training progress and debugging
+
+monitoring:
+  # Save detailed per-dataset metrics during training
+  track_per_dataset_metrics: true
+  
+  # Log statistics about sampling from each dataset
+  log_sampling_stats: true
+  
+  # Create training visualization plots
+  create_plots: true
+  
+  # Save comprehensive training reports
+  save_training_reports: true
+
+# ================================================================================
+# DATA QUALITY CONTROLS
+# ================================================================================
+# Settings to filter and validate training data
+
+quality_controls:
+  # Skip frames that don't have valid keypoint data
+  require_valid_keypoints: false
+  
+  # Skip frames with bounding boxes that are too small or too large
+  # bbox_size_limits:
+  #   min_width: 0.01   # Minimum bbox width (normalized)
+  #   min_height: 0.01  # Minimum bbox height (normalized)
+  #   max_width: 0.95   # Maximum bbox width (normalized)
+  #   max_height: 0.95  # Maximum bbox height (normalized)
+  
+  # Skip frames where tracking confidence is below threshold
+  # min_tracking_confidence: 0.0
+
+# ================================================================================
+# TRAINING HISTORY AND METADATA
+# ================================================================================
+# This section is automatically populated during training
+
+# training_metadata:
+#   start_time: "2025-01-XX 10:00:00"
+#   end_time: "2025-01-XX 12:30:00"
+#   total_duration: "2.5 hours"
+#   model_used: "yolov8n.pt"
+#   device: "cuda:0"
+#   final_metrics:
+#     train_loss: 0.045
+#     val_loss: 0.052
+#     mAP50: 0.89
+#     mAP50-95: 0.67
+#   dataset_statistics:
+#     total_samples: 15420
+#     train_samples: 12336
+#     val_samples: 3084
+#     per_dataset_distribution:
+#       longer_edge: 7710 (50.0%)
+#       video: 7710 (50.0%)
+
+# ================================================================================
+# NOTES AND DOCUMENTATION
+# ================================================================================
+# 
+# USAGE:
+#   python enhanced_multi_zarr_trainer.py comprehensive_multi_zarr_config.yaml --epochs 50
+#
+# FEATURES:
+#   - Runtime combination of multiple zarr files (no file merging required)
+#   - Intelligent sampling ensures balanced representation from all videos
+#   - Comprehensive monitoring and reporting
+#   - Self-documenting configuration with full training history
+#   - Quality controls to filter problematic data
+#   - Performance optimizations for different hardware
+#
+# DATA FORMATS SUPPORTED:
+#   - Enhanced format: Full bbox coordinates, confidence scores, comprehensive metadata
+#   - Original format: Basic tracking data with normalized coordinates
+#
+# SAMPLING STRATEGIES:
+#   - balanced: Equal samples from each video (default)
+#   - weighted: Custom weights per video
+#   - proportional: Samples proportional to video length
+#   - quality: Weight by tracking success rate
+#
+# TROUBLESHOOTING:
+#   - If you get memory errors, reduce batch_size
+#   - If training is slow, increase workers (but not above CPU cores)
+#   - If validation loss doesn't improve, try early stopping with lower patience
+#   - Check logs for per-dataset metrics to identify problematic videos
+# ================================================================================

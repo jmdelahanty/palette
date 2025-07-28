@@ -117,100 +117,100 @@ quality_controls:
 # EXPERIMENTAL FEATURES
 # ================================================================================
 
-experimental:
-  # Enable experimental features (use with caution)
-  enable_experimental: false
+# experimental:
+#   # Enable experimental features (use with caution)
+#   enable_experimental: false
   
-  # Dynamic resampling during training
-  dynamic_resampling: false
+#   # Dynamic resampling during training
+#   dynamic_resampling: false
   
-  # Adaptive quality weighting
-  adaptive_quality_weighting: false
+#   # Adaptive quality weighting
+#   adaptive_quality_weighting: false
 
 # ================================================================================
 # TRAINING RECOMMENDATIONS
 # ================================================================================
 
-# Recommended training commands:
-training_examples: |
+# # Recommended training commands:
+# training_examples: |
   
-  # Basic training (50 epochs)
-  python enhanced_multi_zarr_trainer.py enhanced_multi_zarr_config.yaml --epochs 50
+#   # Basic training (50 epochs)
+#   python enhanced_multi_zarr_trainer.py enhanced_multi_zarr_config.yaml --epochs 50
   
-  # Extended training with larger model
-  python enhanced_multi_zarr_trainer.py enhanced_multi_zarr_config.yaml \
-    --model yolov8s.pt --epochs 100 --batch-size 24
+#   # Extended training with larger model
+#   python enhanced_multi_zarr_trainer.py enhanced_multi_zarr_config.yaml \
+#     --model yolov8s.pt --epochs 100 --batch-size 24
   
-  # Production training with full monitoring
-  python enhanced_multi_zarr_trainer.py enhanced_multi_zarr_config.yaml \
-    --model yolov8m.pt --epochs 200 --batch-size 16 \
-    --project ./fish_detection_experiments \
-    --name multi_video_balanced_v1
+#   # Production training with full monitoring
+#   python enhanced_multi_zarr_trainer.py enhanced_multi_zarr_config.yaml \
+#     --model yolov8m.pt --epochs 200 --batch-size 16 \
+#     --project ./fish_detection_experiments \
+#     --name multi_video_balanced_v1
   
-  # Quick test run
-  python enhanced_multi_zarr_trainer.py enhanced_multi_zarr_config.yaml \
-    --epochs 5 --batch-size 8
+#   # Quick test run
+#   python enhanced_multi_zarr_trainer.py enhanced_multi_zarr_config.yaml \
+#     --epochs 5 --batch-size 8
 
-# Expected results with your data:
-expected_performance: |
+# # Expected results with your data:
+# expected_performance: |
   
-  Based on your zarr files:
-  - longer_edge.zarr: ~8,283 training samples (84.6%)
-  - video.zarr: ~1,506 training samples (15.4%)
+#   Based on your zarr files:
+#   - longer_edge.zarr: ~8,283 training samples (84.6%)
+#   - video.zarr: ~1,506 training samples (15.4%)
   
-  With balanced sampling:
-  - Each dataset contributes equally (50%/50%)
-  - Total training samples: ~3,012 (1,506 from each)
+#   With balanced sampling:
+#   - Each dataset contributes equally (50%/50%)
+#   - Total training samples: ~3,012 (1,506 from each)
   
-  Recommended training progression:
-  1. Start with 50 epochs to validate setup
-  2. Scale to 100-200 epochs for production model
-  3. Experiment with different sampling strategies
-  4. Try larger models (yolov8s/m) for better accuracy
+#   Recommended training progression:
+#   1. Start with 50 epochs to validate setup
+#   2. Scale to 100-200 epochs for production model
+#   3. Experiment with different sampling strategies
+#   4. Try larger models (yolov8s/m) for better accuracy
 
 # ================================================================================
 # TROUBLESHOOTING
 # ================================================================================
 
-troubleshooting: |
+# troubleshooting: |
   
-  Common issues and solutions:
+#   Common issues and solutions:
   
-  1. "Zarr files not compatible":
-     - Ensure both zarr files have the same data format (enhanced/original)
-     - Check that column names match across files
-     - Verify image shapes are consistent
+#   1. "Zarr files not compatible":
+#      - Ensure both zarr files have the same data format (enhanced/original)
+#      - Check that column names match across files
+#      - Verify image shapes are consistent
   
-  2. "No valid frames found":
-     - Check min_confidence threshold (try 0.0)
-     - Verify tracking results contain valid data
-     - Review data quality in zarr files
+#   2. "No valid frames found":
+#      - Check min_confidence threshold (try 0.0)
+#      - Verify tracking results contain valid data
+#      - Review data quality in zarr files
   
-  3. "Out of memory during training":
-     - Reduce batch_size (try 8 or 4)
-     - Use smaller model (yolov8n.pt)
-     - Reduce number of workers
+#   3. "Out of memory during training":
+#      - Reduce batch_size (try 8 or 4)
+#      - Use smaller model (yolov8n.pt)
+#      - Reduce number of workers
   
-  4. "Training very slow":
-     - Increase batch_size if memory allows
-     - Ensure persistent_workers=True
-     - Check disk I/O performance
+#   4. "Training very slow":
+#      - Increase batch_size if memory allows
+#      - Ensure persistent_workers=True
+#      - Check disk I/O performance
   
-  5. "Unbalanced dataset warning":
-     - Consider using "balanced" sampling strategy
-     - Adjust dataset_weights if using "weighted" strategy
-     - Review per-dataset metrics in training logs
+#   5. "Unbalanced dataset warning":
+#      - Consider using "balanced" sampling strategy
+#      - Adjust dataset_weights if using "weighted" strategy
+#      - Review per-dataset metrics in training logs
 
 # ================================================================================
 # METADATA
 # ================================================================================
 
 # Configuration metadata
-metadata:
-  version: "2.0"
-  created_for: "concentricOMR3 fish tracking project"
-  last_updated: "2024-12-28"
-  compatible_with:
-    - "Enhanced Multi-Zarr YOLO Dataset v2.0+"
-    - "YOLOv8 (ultralytics)"
-    - "PyTorch 1.9+"
+# metadata:
+#   version: "2.0"
+#   created_for: "concentricOMR3 fish tracking project"
+#   last_updated: "2024-12-28"
+#   compatible_with:
+#     - "Enhanced Multi-Zarr YOLO Dataset v2.0+"
+#     - "YOLOv8 (ultralytics)"
+#     - "PyTorch 1.9+"
