@@ -288,53 +288,141 @@ class ZarrYOLODataset(Dataset):
         return info
 
 
-if __name__ == '__main__':
-    TEST_ZARR_PATH = '/home/delahantyj@hhmi.org/Desktop/concentricOMR3/video.zarr'
-    print(f"--- Testing Enhanced Index-Based Dataset on {TEST_ZARR_PATH} ---")
+def main():
+    """Main function for testing the dataset with command line arguments."""
+    import argparse
+    from pathlib import Path
+    
+    parser = argparse.ArgumentParser(
+        description="Test ZarrYOLODataset with enhanced pipeline data",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog="""
+Examples:
+  # Test detection task (640x640 full images)
+  python zarr_yolo_dataset_bbox.py /path/to/video.zarr --task detect
+  
+  # Test pose task (320x320 ROI crops)  
+  python zarr_yolo_dataset_bbox.py /path/to/video.zarr --task pose
+  
+  # Test both tasks with custom split
+  python zarr_yolo_dataset_bbox.py /path/to/video.zarr --task both --split-ratio 0.9
+        """
+    )
+    
+    parser.add_argument('zarr_path', type=str, help='Path to the Zarr file (e.g., video.zarr)')
+    parser.add_argument('--task', choices=['detect', 'pose', 'both'], default='both',
+                       help='Task to test: detect (640x640), pose (320x320), or both')
+    parser.add_argument('--split-ratio', type=float, default=0.8,
+                       help='Train/validation split ratio (default: 0.8)')
+    parser.add_argument('--random-seed', type=int, default=42,
+                       help='Random seed for reproducible splits (default: 42)')
+    parser.add_argument('--max-samples', type=int, default=3,
+                       help='Maximum samples to show in detail (default: 3)')
+    
+    args = parser.parse_args()
+    
+    # Validate input path
+    zarr_path = Path(args.zarr_path)
+    if not zarr_path.exists():
+        print(f"❌ Error: Zarr file not found: {zarr_path}")
+        return
+    
+    print(f"🔬 Testing Enhanced Index-Based Dataset")
+    print(f"📁 Zarr path: {zarr_path}")
+    print(f"🎯 Task(s): {args.task}")
+    print(f"📊 Split ratio: {args.split_ratio}")
+    print("=" * 60)
     
     try:
-        # Test with detection task (640x640 full images)
-        print("\n--- Creating Detection Training Set (640×640 Full Images) ---")
-        detect_train_set = ZarrYOLODataset(zarr_path=TEST_ZARR_PATH, mode='train', task='detect')
-        
-        print("\n--- Creating Detection Validation Set (640×640 Full Images) ---")
-        detect_val_set = ZarrYOLODataset(zarr_path=TEST_ZARR_PATH, mode='val', task='detect')
-
-        print(f"\nDetection - Training samples: {len(detect_train_set)}")
-        print(f"Detection - Validation samples: {len(detect_val_set)}")
-        
-        # Test first few samples
-        print("\n--- Sample Detection Bounding Boxes ---")
-        for i in range(min(3, len(detect_train_set))):
-            sample = detect_train_set[i]
-            sample_info = detect_train_set.get_sample_info(i)
-            bbox = sample['bboxes'][0]
-            cls = sample['cls'][0]
-            img_shape = sample['img'].shape
+        # Test detection task
+        if args.task in ['detect', 'both']:
+            print("\n🎯 DETECTION TASK (640×640 Full Images)")
+            print("-" * 45)
             
-            print(f"Detection Sample {i}:")
-            print(f"  Task: {sample_info['task']} | Source: {sample_info['image_source']}")
-            print(f"  Image shape: {img_shape} | Zarr index: {sample_info['zarr_index']}")
-            print(f"  Bbox: [{bbox[0]:.3f}, {bbox[1]:.3f}, {bbox[2]:.3f}, {bbox[3]:.3f}]")
-            if sample_info['valid_bbox']:
-                print(f"  Confidence: {sample_info['confidence']:.3f}")
-            print()
+            detect_train_set = ZarrYOLODataset(
+                zarr_path=str(zarr_path), 
+                mode='train', 
+                task='detect',
+                split_ratio=args.split_ratio,
+                random_seed=args.random_seed
+            )
+            
+            detect_val_set = ZarrYOLODataset(
+                zarr_path=str(zarr_path), 
+                mode='val', 
+                task='detect',
+                split_ratio=args.split_ratio,
+                random_seed=args.random_seed
+            )
 
-        # Test pose task (320x320 ROI images)
-        print("\n--- Creating Pose Training Set (320×320 ROI Crops) ---")
-        pose_train_set = ZarrYOLODataset(zarr_path=TEST_ZARR_PATH, mode='train', task='pose')
-        print(f"Pose - Training samples: {len(pose_train_set)}")
+            print(f"📊 Training samples: {len(detect_train_set)}")
+            print(f"📊 Validation samples: {len(detect_val_set)}")
+            
+            # Show sample details
+            print(f"\n📋 Sample Detection Data:")
+            for i in range(min(args.max_samples, len(detect_train_set))):
+                sample = detect_train_set[i]
+                sample_info = detect_train_set.get_sample_info(i)
+                bbox = sample['bboxes'][0]
+                cls = sample['cls'][0]
+                img_shape = sample['img'].shape
+                
+                print(f"  Sample {i+1}:")
+                print(f"    Zarr index: {sample_info['zarr_index']}")
+                print(f"    Image shape: {img_shape}")
+                print(f"    Bbox (YOLO): [{bbox[0]:.3f}, {bbox[1]:.3f}, {bbox[2]:.3f}, {bbox[3]:.3f}]")
+                print(f"    Class: {cls}")
+                if sample_info['valid_bbox']:
+                    print(f"    Confidence: {sample_info['confidence']:.3f}")
         
-        pose_sample = pose_train_set[0]
-        pose_info = pose_train_set.get_sample_info(0)
-        print(f"\nPose Sample:")
-        print(f"  Task: {pose_info['task']} | Source: {pose_info['image_source']}")
-        print(f"  Image shape: {pose_sample['img'].shape}")
+        # Test pose task  
+        if args.task in ['pose', 'both']:
+            print(f"\n🧘 POSE TASK (320×320 ROI Crops)")
+            print("-" * 40)
+            
+            pose_train_set = ZarrYOLODataset(
+                zarr_path=str(zarr_path), 
+                mode='train', 
+                task='pose',
+                split_ratio=args.split_ratio,
+                random_seed=args.random_seed
+            )
+            
+            pose_val_set = ZarrYOLODataset(
+                zarr_path=str(zarr_path), 
+                mode='val', 
+                task='pose',
+                split_ratio=args.split_ratio,
+                random_seed=args.random_seed
+            )
+            
+            print(f"📊 Training samples: {len(pose_train_set)}")
+            print(f"📊 Validation samples: {len(pose_val_set)}")
+            
+            # Show sample details
+            print(f"\n📋 Sample Pose Data:")
+            for i in range(min(args.max_samples, len(pose_train_set))):
+                sample = pose_train_set[i]
+                sample_info = pose_train_set.get_sample_info(i)
+                bbox = sample['bboxes'][0]
+                cls = sample['cls'][0]
+                img_shape = sample['img'].shape
+                
+                print(f"  Sample {i+1}:")
+                print(f"    Zarr index: {sample_info['zarr_index']}")
+                print(f"    Image shape: {img_shape}")
+                print(f"    Bbox (YOLO): [{bbox[0]:.3f}, {bbox[1]:.3f}, {bbox[2]:.3f}, {bbox[3]:.3f}]")
+                print(f"    Class: {cls}")
         
-        print(f"\n🎯 Detection task: Ready for YOLO object detection training")
+        print(f"\n✅ DATASET TESTING COMPLETE")
+        print(f"🎯 Detection task: Ready for YOLO object detection training")
         print(f"🧘 Pose task: Ready for YOLO pose estimation training")
+        print(f"💡 Use with your training scripts: python train_yolo.py --zarr-path {zarr_path}")
 
     except Exception as e:
-        print(f"\nAn error occurred: {e}")
+        print(f"\n❌ An error occurred: {e}")
         import traceback
         traceback.print_exc()
+
+if __name__ == '__main__':
+    main()
