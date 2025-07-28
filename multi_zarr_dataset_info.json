@@ -1,0 +1,110 @@
+{
+  "dataset_type": "MultiZarrDetectDataset",
+  "mode": "train",
+  "data_format": "enhanced",
+  "target_size": 640,
+  "zarr_paths": [
+    "/home/delahantyj@hhmi.org/Desktop/concentricOMR3/longer_edge.zarr",
+    "/home/delahantyj@hhmi.org/Desktop/concentricOMR3/video.zarr"
+  ],
+  "video_metadata": {
+    "/home/delahantyj@hhmi.org/Desktop/concentricOMR3/longer_edge.zarr": {
+      "name": "longer_edge",
+      "total_frames": 11024,
+      "zarr_path": "/home/delahantyj@hhmi.org/Desktop/concentricOMR3/longer_edge.zarr"
+    },
+    "/home/delahantyj@hhmi.org/Desktop/concentricOMR3/video.zarr": {
+      "name": "video",
+      "total_frames": 1944,
+      "zarr_path": "/home/delahantyj@hhmi.org/Desktop/concentricOMR3/video.zarr"
+    }
+  },
+  "compatibility_report": {
+    "compatible": true,
+    "issues": [],
+    "zarr_info": {
+      "/home/delahantyj@hhmi.org/Desktop/concentricOMR3/longer_edge.zarr": {
+        "total_frames": 11024,
+        "num_columns": 20,
+        "column_names": [
+          "heading_degrees",
+          "bladder_x_roi_norm",
+          "bladder_y_roi_norm",
+          "eye_l_x_roi_norm",
+          "eye_l_y_roi_norm",
+          "eye_r_x_roi_norm",
+          "eye_r_y_roi_norm",
+          "bbox_x_norm_ds",
+          "bbox_y_norm_ds",
+          "bbox_width_norm_ds",
+          "bbox_height_norm_ds",
+          "bbox_x_norm_full",
+          "bbox_y_norm_full",
+          "bbox_width_norm_full",
+          "bbox_height_norm_full",
+          "roi_x1_full",
+          "roi_y1_full",
+          "roi_x1_ds",
+          "roi_y1_ds",
+          "confidence_score"
+        ],
+        "image_shape": [
+          640,
+          640
+        ],
+        "data_format": "enhanced",
+        "enhanced_features": true
+      },
+      "/home/delahantyj@hhmi.org/Desktop/concentricOMR3/video.zarr": {
+        "total_frames": 1944,
+        "num_columns": 20,
+        "column_names": [
+          "heading_degrees",
+          "bladder_x_roi_norm",
+          "bladder_y_roi_norm",
+          "eye_l_x_roi_norm",
+          "eye_l_y_roi_norm",
+          "eye_r_x_roi_norm",
+          "eye_r_y_roi_norm",
+          "bbox_x_norm_ds",
+          "bbox_y_norm_ds",
+          "bbox_width_norm_ds",
+          "bbox_height_norm_ds",
+          "bbox_x_norm_full",
+          "bbox_y_norm_full",
+          "bbox_width_norm_full",
+          "bbox_height_norm_full",
+          "roi_x1_full",
+          "roi_y1_full",
+          "roi_x1_ds",
+          "roi_y1_ds",
+          "confidence_score"
+        ],
+        "image_shape": [
+          640,
+          640
+        ],
+        "data_format": "enhanced",
+        "enhanced_features": true
+      }
+    },
+    "total_frames": 12968,
+    "common_format": "enhanced",
+    "common_image_shape": [
+      640,
+      640
+    ]
+  },
+  "statistics": {
+    "total_samples": 9789,
+    "videos": 2,
+    "per_video_counts": {
+      "longer_edge": 8283,
+      "video": 1506
+    },
+    "per_video_percentages": {
+      "longer_edge": 84.61538461538461,
+      "video": 15.384615384615385
+    }
+  }
+}
