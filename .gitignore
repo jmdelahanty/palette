@@ -12,3 +12,14 @@ zoomed_box_frames
 __pycache__
 debug_background_subtraction
 debug_contour_tracking
+frames/
+edge/
+non_working_frames/
+test/
+test2/
+working_frames/
+fish_detections_full/
+decoder_comparison/
+runs/**/
+test_frames/
+topk1_predictions/

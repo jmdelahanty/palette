@@ -11,7 +11,7 @@ save: true
 save_period: -1
 cache: false
 device: '0'
-workers: 8
+workers: 16
 project: null
 name: train4
 exist_ok: false
@@ -33,7 +33,7 @@ multi_scale: false
 overlap_mask: true
 mask_ratio: 4
 dropout: 0.0
-val: false
+val: true
 split: val
 save_json: false
 conf: null
@@ -41,7 +41,7 @@ iou: 0.7
 max_det: 300
 half: false
 dnn: false
-plots: false
+plots: true
 source: null
 vid_stride: 1
 stream_buffer: false
