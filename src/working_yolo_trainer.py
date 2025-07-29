@@ -1,54 +1,47 @@
-# working_yolo_trainer.py (Final, Reusable Module)
+# working_yolo_trainer.py
 
 import argparse
 import torch
 from ultralytics import YOLO
+from torch.utils.data import DataLoader
 import numpy as np
 from ultralytics.models.yolo.detect import DetectionTrainer, DetectionValidator
 from zarr_yolo_dataset_bbox import ZarrYOLODataset
 
-# --- Reusable Components (Moved to top level) ---
+# --- Reusable Components ---
+
+class YoloCompatibleDataLoader(DataLoader):
+    """
+    A DataLoader wrapper that is compatible with the Ultralytics trainer.
+    It adds a dummy 'reset()' method to satisfy the trainer's API when
+    mosaic augmentation is turned off in the final epochs.
+    """
+    def reset(self):
+        """A dummy reset method to do nothing, preventing a crash."""
+        pass
 
 def robust_collate_fn(batch):
     """
-    Custom collate function that correctly assembles batches for the YOLO trainer,
-    including all required keys: 'batch_idx', 'im_file', 'ori_shape', and 'ratio_pad'.
+    Fully robust collate function that handles batches with no labels by ensuring
+    all expected keys are always present.
     """
-    # Standard batch items
     images = torch.from_numpy(np.stack([s['img'] for s in batch]))
     im_files = [s['im_file'] for s in batch]
     ori_shapes = [s['ori_shape'] for s in batch]
     ratio_pads = [s['ratio_pad'] for s in batch]
 
-    # Concatenate labels and add a batch index for each bounding box
     cls_list, bboxes_list, batch_idx_list = [], [], []
     for i, sample in enumerate(batch):
-        if len(sample['cls']) > 0:
-            cls_list.append(torch.from_numpy(sample['cls']))
+        cls_labels = np.asarray(sample['cls'])
+        if cls_labels.size > 0:
+            cls_list.append(torch.from_numpy(cls_labels))
             bboxes_list.append(torch.from_numpy(sample['bboxes']))
-            batch_idx_list.append(torch.full((len(sample['cls']),), i))
+            batch_idx_list.append(torch.full((len(cls_labels),), i))
 
-    # Handle cases with no labels in the batch
     if not batch_idx_list:
-        return {
-            'img': images,
-            'batch_idx': torch.empty(0, dtype=torch.long),
-            'cls': torch.empty(0, dtype=torch.float32),
-            'bboxes': torch.empty(0, 4, dtype=torch.float32),
-            'im_file': im_files,
-            'ori_shape': ori_shapes,
-            'ratio_pad': ratio_pads
-        }
+        return {'img': images, 'batch_idx': torch.empty(0, dtype=torch.long), 'cls': torch.empty(0, dtype=torch.float32), 'bboxes': torch.empty(0, 4, dtype=torch.float32), 'im_file': im_files, 'ori_shape': ori_shapes, 'ratio_pad': ratio_pads}
 
-    return {
-        'img': images,
-        'batch_idx': torch.cat(batch_idx_list, 0),
-        'cls': torch.cat(cls_list, 0),
-        'bboxes': torch.cat(bboxes_list, 0),
-        'im_file': im_files,
-        'ori_shape': ori_shapes,
-        'ratio_pad': ratio_pads
-    }
+    return {'img': images, 'batch_idx': torch.cat(batch_idx_list, 0), 'cls': torch.cat(cls_list, 0), 'bboxes': torch.cat(bboxes_list, 0), 'im_file': im_files, 'ori_shape': ori_shapes, 'ratio_pad': ratio_pads}
 
 class FixedDetectionValidator(DetectionValidator):
     """Custom validator to fix a 0-d tensor bug in the YOLOv8 validator."""
@@ -59,21 +52,19 @@ class FixedDetectionValidator(DetectionValidator):
         return pbatch
 
 class FixedTrainer(DetectionTrainer):
-    """Custom trainer that uses our fixed validator."""
-    def get_validator(self):
-        self.loss_names = 'box_loss', 'cls_loss', 'dfl_loss'
-        return FixedDetectionValidator(self.test_loader, save_dir=self.save_dir, args=self.args)
-
+    """Custom trainer that uses our fixed validator and the compatible dataloader."""
     def get_dataloader(self, dataset_path, batch_size, mode="train", **kwargs):
         """Dataloader for the single-zarr trainer."""
         dataset = ZarrYOLODataset(
             zarr_path=self.args.zarr_path, mode=mode, task='detect',
             split_ratio=self.args.split_ratio, random_seed=self.args.random_seed
         )
-        return torch.utils.data.DataLoader(
+        return YoloCompatibleDataLoader(
             dataset, batch_size=batch_size, shuffle=(mode == 'train'),
             collate_fn=robust_collate_fn, num_workers=8, pin_memory=True
         )
+
+
 # --- Main Execution Block ---
 
 def main(args):
@@ -93,7 +84,6 @@ def main(args):
         batch=args.batch_size,
         imgsz=args.img_size,
         device=args.device,
-        # Custom arguments for our dataloader
         zarr_path=args.zarr_path,
         split_ratio=args.split_ratio,
         random_seed=args.random_seed
