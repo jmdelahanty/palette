@@ -78,3 +78,5 @@ tmp/
 temp/
 *.tmp
 *.log
+
+notes.md
