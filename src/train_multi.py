@@ -11,15 +11,50 @@ import yaml
 from pathlib import Path
 import time
 import platform
+import traceback
+import pandas as pd
 from ultralytics import YOLO, __version__ as ultralytics_version
+from ultralytics.models.yolo.detect import DetectionTrainer, DetectionValidator
+from torch.utils.data import DataLoader
+import numpy as np
 
-# Import our custom classes and the git info utility
+# Import your custom dataset and git tracker
 from enhanced_multi_zarr_dataset import create_multi_zarr_dataset, MultiDatasetConfig
-from working_yolo_trainer import FixedTrainer, robust_collate_fn
 from tracker import get_git_info # For reproducibility
 
+class YoloCompatibleDataLoader(DataLoader):
+    def reset(self):
+        pass
+
+def robust_collate_fn(batch):
+    images = torch.from_numpy(np.stack([s['img'] for s in batch]))
+    im_files = [s['im_file'] for s in batch]
+    ori_shapes = [s['ori_shape'] for s in batch]
+    ratio_pads = [s['ratio_pad'] for s in batch]
+    cls_list, bboxes_list, batch_idx_list = [], [], []
+    for i, sample in enumerate(batch):
+        cls_labels = np.atleast_1d(sample['cls'])
+        if cls_labels.size > 0 and cls_labels[0] is not None:
+            cls_list.append(torch.from_numpy(cls_labels))
+            bboxes_list.append(torch.from_numpy(sample['bboxes']))
+            batch_idx_list.append(torch.full((len(cls_labels),), i))
+    if not batch_idx_list:
+        return {'img': images, 'batch_idx': torch.empty(0, dtype=torch.long), 'cls': torch.empty(0, dtype=torch.float32), 'bboxes': torch.empty(0, 4, dtype=torch.float32), 'im_file': im_files, 'ori_shape': ori_shapes, 'ratio_pad': ratio_pads}
+    return {'img': images, 'batch_idx': torch.cat(batch_idx_list, 0), 'cls': torch.cat(cls_list, 0), 'bboxes': torch.cat(bboxes_list, 0), 'im_file': im_files, 'ori_shape': ori_shapes, 'ratio_pad': ratio_pads}
+
+class FixedDetectionValidator(DetectionValidator):
+    def _prepare_batch(self, si, batch):
+        pbatch = super()._prepare_batch(si, batch)
+        if 'cls' in pbatch and hasattr(pbatch['cls'], 'ndim') and pbatch['cls'].ndim == 0:
+            pbatch['cls'] = pbatch['cls'].unsqueeze(0)
+        return pbatch
+
+class FixedTrainer(DetectionTrainer):
+    def get_validator(self):
+        self.loss_names = 'box_loss', 'cls_loss', 'dfl_loss'
+        return FixedDetectionValidator(self.test_loader, save_dir=self.save_dir, args=self.args, _callbacks=self.callbacks)
+
 def main(args):
-    """Main training function with post-training metadata logging."""
     print("🚀 Starting Enhanced Multi-Zarr YOLO Training...")
 
     # --- 1. Load Configuration ---
@@ -32,29 +67,32 @@ def main(args):
         print(f"❌ Error loading config: {e}")
         return
 
-    # --- 2. Set up Custom Dataloader ---
+    # --- 2. Define Custom Dataloader for the Trainer ---
     def get_multi_dataloader(self, dataset_path, batch_size=16, **kwargs):
         mode = kwargs.get('mode', 'train')
         dataset = create_multi_zarr_dataset(config=config, mode=mode)
-        return torch.utils.data.DataLoader(
-            dataset, batch_size=batch_size, shuffle=(mode == 'train'),
-            collate_fn=robust_collate_fn, num_workers=8,
-            pin_memory=True, persistent_workers=True
+        return YoloCompatibleDataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=(mode == 'train'),
+            collate_fn=robust_collate_fn,
+            num_workers=8,
+            pin_memory=True,
+            persistent_workers=False # TODO: See why we can't kill these when training stops properly, program hangs until timeout or something...
         )
 
     FixedTrainer.get_dataloader = get_multi_dataloader
-    
+
     # --- 3. Initialize and Train the Model ---
     training_params = full_config.get('training_config', {})
     model = YOLO(training_params.get('model_name', 'yolov8n.pt'))
     
     training_start_time = time.time()
     
-    # The 'train' method returns a results object with all the metrics
     results = model.train(
         trainer=FixedTrainer,
         data=args.config_path,
-        epochs=training_params.get('epochs', 50),
+        epochs=training_params.get('epochs', 10),
         batch=training_params.get('batch_size', 16),
         device=training_params.get('device', '0'),
         project="runs/detect",
@@ -66,10 +104,24 @@ def main(args):
     # --- 4. Log Metadata and Save Final Config ---
     print("\n📝 Logging training history and metadata...")
     try:
-        # Get git and environment info
         git_info = get_git_info()
+        results_df = pd.read_csv(results.save_dir / 'results.csv')
+        results_df.columns = results_df.columns.str.strip()
+        last_epoch_metrics = results_df.iloc[-1]
 
-        # Populate the training history section
+        # --- Descriptive Filename Implementation ---
+        # 1. Define the core components of your filename
+        project_type = "SingleFish"
+        model_name = "pancake0"
+        version = "v01"
+
+        # 2. Create the clean timestamp
+        timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(training_start_time))
+
+        # 3. Combine them into the final filename
+        final_config_filename = f"{timestamp}_{project_type}_{model_name}_{version}.yaml"
+        final_config_path = results.save_dir / final_config_filename
+        
         full_config['training_history'] = {
             'training_run_name': results.save_dir.name,
             'output_directory': str(results.save_dir),
@@ -78,21 +130,21 @@ def main(args):
             'training_duration_hours': round(training_duration_seconds / 3600, 2),
             'git_commit_hash': git_info.get('commit_hash', 'N/A'),
             'python_version': platform.python_version(),
-            'torch_version': torch.__version__,
-            'ultralytics_version': ultralytics_version,
-            'final_metrics': {
-                'box_loss': results.box_loss,
-                'cls_loss': results.cls_loss,
-                'dfl_loss': results.dfl_loss,
-                'precision': results.metrics.precision,
-                'recall': results.metrics.recall,
-                'mAP50': results.metrics.map50,
-                'mAP50_95': results.metrics.map
+            'torch_version': str(torch.__version__),
+            'ultralytics_version': str(ultralytics_version),
+            'final_training_losses': {
+                'box_loss': float(last_epoch_metrics.get('train/box_loss')),
+                'cls_loss': float(last_epoch_metrics.get('train/cls_loss')),
+                'dfl_loss': float(last_epoch_metrics.get('train/dfl_loss')),
+            },
+            'final_validation_metrics': {
+                'precision': float(last_epoch_metrics.get('metrics/precision(B)')),
+                'recall': float(last_epoch_metrics.get('metrics/recall(B)')),
+                'mAP50': float(last_epoch_metrics.get('metrics/mAP50(B)')),
+                'mAP50_95': float(last_epoch_metrics.get('metrics/mAP50-95(B)'))
             }
         }
         
-        # Save the updated, complete config file to the run directory
-        final_config_path = results.save_dir / "final_comprehensive_config.yaml"
         with open(final_config_path, 'w') as f:
             yaml.dump(full_config, f, default_flow_style=False, sort_keys=False)
         
@@ -100,6 +152,7 @@ def main(args):
 
     except Exception as e:
         print(f"❌ Could not save final training report: {e}")
+        traceback.print_exc()
 
 
 if __name__ == '__main__':
