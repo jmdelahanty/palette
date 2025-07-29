@@ -17,6 +17,7 @@ from ultralytics import YOLO, __version__ as ultralytics_version
 from ultralytics.models.yolo.detect import DetectionTrainer, DetectionValidator
 from torch.utils.data import DataLoader
 import numpy as np
+from rich.console import Console
 
 # Import your custom dataset and git tracker
 from enhanced_multi_zarr_dataset import create_multi_zarr_dataset, MultiDatasetConfig
@@ -55,16 +56,18 @@ class FixedTrainer(DetectionTrainer):
         return FixedDetectionValidator(self.test_loader, save_dir=self.save_dir, args=self.args, _callbacks=self.callbacks)
 
 def main(args):
-    print("🚀 Starting Enhanced Multi-Zarr YOLO Training...")
+    # Create a console object for rich printing
+    console = Console()
+    console.print("[bold cyan]Starting Enhanced Multi-Zarr YOLO Training...[/bold cyan]")
 
     # --- 1. Load Configuration ---
     try:
         with open(args.config_path, 'r') as f:
             full_config = yaml.safe_load(f)
         config = MultiDatasetConfig(**full_config['data_config'])
-        print(f"✅ Loaded data configuration from: {args.config_path}")
+        console.print(f"[bold green]Loaded data configuration from:[/bold green] {args.config_path}")
     except Exception as e:
-        print(f"❌ Error loading config: {e}")
+        console.print(f"[bold red]Error loading config:[/bold red] {e}")
         return
 
     # --- 2. Define Custom Dataloader for the Trainer ---
@@ -78,7 +81,7 @@ def main(args):
             collate_fn=robust_collate_fn,
             num_workers=8,
             pin_memory=True,
-            persistent_workers=False # TODO: See why we can't kill these when training stops properly, program hangs until timeout or something...
+            persistent_workers=False # TODO: Figure out why we can't kill these after training completes
         )
 
     FixedTrainer.get_dataloader = get_multi_dataloader
@@ -102,7 +105,7 @@ def main(args):
     training_duration_seconds = time.time() - training_start_time
 
     # --- 4. Log Metadata and Save Final Config ---
-    print("\n📝 Logging training history and metadata...")
+    console.print("\n[bold cyan]📝 Logging training history and metadata...[/bold cyan]")
     try:
         git_info = get_git_info()
         results_df = pd.read_csv(results.save_dir / 'results.csv')
@@ -110,18 +113,17 @@ def main(args):
         last_epoch_metrics = results_df.iloc[-1]
 
         # --- Descriptive Filename Implementation ---
-        # 1. Define the core components of your filename
         project_type = "SingleFish"
         model_name = "pancake0"
         version = "v01"
-
-        # 2. Create the clean timestamp
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(training_start_time))
-
-        # 3. Combine them into the final filename
         final_config_filename = f"{timestamp}_{project_type}_{model_name}_{version}.yaml"
         final_config_path = results.save_dir / final_config_filename
         
+        # Create config with metadata
+        # Convert any numpy objects to native Python types
+        # If we don't do this, the numpy objects are written as 
+        # a non-human friendly representation in YAML
         full_config['training_history'] = {
             'training_run_name': results.save_dir.name,
             'output_directory': str(results.save_dir),
@@ -148,10 +150,10 @@ def main(args):
         with open(final_config_path, 'w') as f:
             yaml.dump(full_config, f, default_flow_style=False, sort_keys=False)
         
-        print(f"✅ Successfully saved final config to: {final_config_path}")
+        console.print(f"[bold green]Successfully saved final config to:[/bold green] {final_config_path}")
 
     except Exception as e:
-        print(f"❌ Could not save final training report: {e}")
+        console.print(f"[bold red]Could not save final training report:[/bold red] {e}")
         traceback.print_exc()
 
 
