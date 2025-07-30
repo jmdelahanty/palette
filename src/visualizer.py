@@ -4,6 +4,13 @@ import os
 import argparse
 import zarr
 
+current_frame = 1
+
+def update_frame(val):
+    """Callback function to update the global frame index when the slider is moved."""
+    global current_frame
+    current_frame = val
+
 def rotate_roi_to_heading(roi_image, heading_degrees):
     """
     Rotate the ROI image so the fish is oriented according to the heading angle.
@@ -26,59 +33,23 @@ def rotate_roi_to_heading(roi_image, heading_degrees):
     
     return rotated_roi
 
-def detect_data_format(column_names):
+def create_dashboard_view(frame_number, zarr_group, column_map):
     """
-    Detect whether this is original or enhanced data format.
+    Creates a dashboard that visualizes the fish tracking data,
+    showing crop results even if tracking fails.
+    """
+    # --- Dynamically get the latest runs ---
+    latest_tracking_run = zarr_group['tracking_runs'].attrs['latest']
+    latest_background_run = zarr_group['background_runs'].attrs['latest']
+    latest_crop_run = zarr_group['crop_runs'].attrs['latest']
     
-    Returns:
-        dict: Column mappings for the detected format
-    """
-    if 'bbox_x_norm_ds' in column_names:
-        # Enhanced format (20 columns)
-        print("✅ Detected enhanced data format with multi-scale coordinates")
-        return {
-            'format': 'enhanced',
-            'heading_degrees': 'heading_degrees',
-            'bbox_x_norm': 'bbox_x_norm_ds',  # Use downsampled coords for visualization
-            'bbox_y_norm': 'bbox_y_norm_ds',
-            'bladder_x_roi_norm': 'bladder_x_roi_norm',
-            'bladder_y_roi_norm': 'bladder_y_roi_norm',
-            'eye_l_x_roi_norm': 'eye_l_x_roi_norm',
-            'eye_l_y_roi_norm': 'eye_l_y_roi_norm',
-            'eye_r_x_roi_norm': 'eye_r_x_roi_norm',
-            'eye_r_y_roi_norm': 'eye_r_y_roi_norm',
-            # Additional enhanced columns available
-            'bbox_width_norm_ds': 'bbox_width_norm_ds',
-            'bbox_height_norm_ds': 'bbox_height_norm_ds',
-            'bbox_x_norm_full': 'bbox_x_norm_full',
-            'bbox_y_norm_full': 'bbox_y_norm_full',
-            'confidence_score': 'confidence_score'
-        }
-    else:
-        # Original format (9 columns)
-        print("✅ Detected original data format")
-        return {
-            'format': 'original',
-            'heading_degrees': 'heading_degrees',
-            'bbox_x_norm': 'bbox_x_norm',
-            'bbox_y_norm': 'bbox_y_norm',
-            'bladder_x_roi_norm': 'bladder_x_roi_norm',
-            'bladder_y_roi_norm': 'bladder_y_roi_norm',
-            'eye_l_x_roi_norm': 'eye_l_x_roi_norm',
-            'eye_l_y_roi_norm': 'eye_l_y_roi_norm',
-            'eye_r_x_roi_norm': 'eye_r_x_roi_norm',
-            'eye_r_y_roi_norm': 'eye_r_y_roi_norm'
-        }
-
-def create_dashboard_view(frame_number, zarr_group, column_map, format_info):
-    """
-    Enhanced dashboard that works with both original and enhanced data formats.
-    """
-    # Use downsampled images for visualization
+    # --- Load all necessary arrays ---
     images_array = zarr_group['raw_video/images_ds'] 
-    background_array = zarr_group['background_models/background_ds']
-    roi_images_array = zarr_group['crop_data/roi_images']
-    results_array = zarr_group['tracking/tracking_results']
+    background_array = zarr_group[f'background_runs/{latest_background_run}/background_ds']
+    roi_images_array = zarr_group[f'crop_runs/{latest_crop_run}/roi_images']
+    results_array = zarr_group[f'tracking_runs/{latest_tracking_run}/tracking_results']
+    # Load the crop-stage bounding box coordinates for fallback
+    crop_bbox_array = zarr_group[f'crop_runs/{latest_crop_run}/bbox_norm_coords']
     
     num_frames = images_array.shape[0]
     frame_index = frame_number - 1
@@ -91,54 +62,53 @@ def create_dashboard_view(frame_number, zarr_group, column_map, format_info):
     roi_image = roi_images_array[frame_index]
     background_image = background_array[:] 
     results = results_array[frame_index]
+    crop_bbox = crop_bbox_array[frame_index]
 
-    # --- Panel 1: Main View with ROI Box ---
+    # --- Panel 1: Main View with Bounding Box ---
     main_view = cv2.cvtColor(main_image, cv2.COLOR_GRAY2BGR)
-    full_h, full_w = main_view.shape[:2] # This is 640x640
-    roi_sz = roi_image.shape
+    full_h, full_w = main_view.shape[:2]
     
-    bbox_x_norm = results[column_map[format_info['bbox_x_norm']]]
-    bbox_y_norm = results[column_map[format_info['bbox_y_norm']]]
-    heading_degrees = results[column_map[format_info['heading_degrees']]]
+    heading_degrees = results[column_map['heading_degrees']]
+    confidence = results[column_map['confidence_score']]
     
-    # Enhanced format has bounding box dimensions
-    if format_info['format'] == 'enhanced':
-        bbox_width_norm = results[column_map[format_info['bbox_width_norm_ds']]]
-        bbox_height_norm = results[column_map[format_info['bbox_height_norm_ds']]]
-        confidence = results[column_map[format_info['confidence_score']]]
+    # First, try to use the detailed data from the tracking stage
+    if not np.isnan(results[column_map['bbox_x_norm_ds']]):
+        bbox_x_norm = results[column_map['bbox_x_norm_ds']]
+        bbox_y_norm = results[column_map['bbox_y_norm_ds']]
+        bbox_width_norm = results[column_map['bbox_width_norm_ds']]
+        bbox_height_norm = results[column_map['bbox_height_norm_ds']]
+
+        center_x = int(bbox_x_norm * full_w)
+        center_y = int(bbox_y_norm * full_h)
+        box_w = int(bbox_width_norm * full_w)
+        box_h = int(bbox_height_norm * full_h)
         
-        # Draw actual bounding box with dimensions
-        if not any(np.isnan([bbox_x_norm, bbox_y_norm, bbox_width_norm, bbox_height_norm])):
-            center_x = int(bbox_x_norm * full_w)
-            center_y = int(bbox_y_norm * full_h)
-            box_w = int(bbox_width_norm * full_w)
-            box_h = int(bbox_height_norm * full_h)
-            
-            x1 = center_x - box_w // 2
-            y1 = center_y - box_h // 2
-            x2 = x1 + box_w
-            y2 = y1 + box_h
-            
-            # Draw YOLO-style bounding box
-            cv2.rectangle(main_view, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.circle(main_view, (center_x, center_y), 3, (0, 255, 0), -1)
-            
-            # Add confidence score
-            label = f"Fish {confidence:.3f}"
-            cv2.putText(main_view, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-    else:
-        # Original format - draw ROI box like before
-        if not np.isnan(bbox_x_norm):
-            full_centroid_px = (int(bbox_x_norm * full_w), int(bbox_y_norm * full_h))
-            roi_display_w = int((roi_sz[1] / 4512) * full_w)
-            roi_display_h = int((roi_sz[0] / 4512) * full_h) 
-            x1 = full_centroid_px[0] - (roi_display_w // 2)
-            y1 = full_centroid_px[1] - (roi_display_h // 2)
-            cv2.rectangle(main_view, (x1, y1), (x1 + roi_display_w, y1 + roi_display_h), (0, 255, 255), 1)
-    
-    # Draw heading arrow (same for both formats)
-    if not any(np.isnan([bbox_x_norm, bbox_y_norm, heading_degrees])):
-        center_px = (int(bbox_x_norm * full_w), int(bbox_y_norm * full_h))
+        x1, y1 = center_x - box_w // 2, center_y - box_h // 2
+        x2, y2 = x1 + box_w, y1 + box_h
+        
+        cv2.rectangle(main_view, (x1, y1), (x2, y2), (0, 255, 0), 2) # Green for tracked
+        cv2.circle(main_view, (center_x, center_y), 3, (0, 255, 0), -1)
+        label = f"Tracked {confidence:.3f}"
+        cv2.putText(main_view, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+    # ELSE, fall back to the initial crop detection data
+    elif not np.isnan(crop_bbox[0]):
+        bbox_x_norm, bbox_y_norm = crop_bbox
+        
+        box_w, box_h = int(0.05 * full_w), int(0.05 * full_h) # Default 5% size
+        center_x = int(bbox_x_norm * full_w)
+        center_y = int(bbox_y_norm * full_h)
+        
+        x1, y1 = center_x - box_w // 2, center_y - box_h // 2
+        x2, y2 = x1 + box_w, y1 + box_h
+
+        cv2.rectangle(main_view, (x1, y1), (x2, y2), (0, 255, 255), 2) # Yellow for cropped
+        label = "Cropped (not tracked)"
+        cv2.putText(main_view, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+
+    # Draw heading arrow (only if tracking was successful)
+    if not np.isnan(heading_degrees):
+        center_px = (int(results[column_map['bbox_x_norm_ds']] * full_w), int(results[column_map['bbox_y_norm_ds']] * full_h))
         arrow_length = 30
         arrow_end_x = int(center_px[0] + arrow_length * np.cos(np.deg2rad(heading_degrees)))
         arrow_end_y = int(center_px[1] - arrow_length * np.sin(np.deg2rad(heading_degrees)))
@@ -146,11 +116,12 @@ def create_dashboard_view(frame_number, zarr_group, column_map, format_info):
     
     # --- Panel 2: Original ROI View ---
     roi_view = cv2.cvtColor(roi_image, cv2.COLOR_GRAY2BGR)
+    roi_sz = roi_image.shape
     colors = {'bladder': (0, 0, 255), 'eye_l': (0, 255, 0), 'eye_r': (255, 100, 0)}
     keypoints = {
-        'bladder': (results[column_map[format_info['bladder_x_roi_norm']]], results[column_map[format_info['bladder_y_roi_norm']]]),
-        'eye_l': (results[column_map[format_info['eye_l_x_roi_norm']]], results[column_map[format_info['eye_l_y_roi_norm']]]),
-        'eye_r': (results[column_map[format_info['eye_r_x_roi_norm']]], results[column_map[format_info['eye_r_y_roi_norm']]])
+        'bladder': (results[column_map['bladder_x_roi_norm']], results[column_map['bladder_y_roi_norm']]),
+        'eye_l': (results[column_map['eye_l_x_roi_norm']], results[column_map['eye_l_y_roi_norm']]),
+        'eye_r': (results[column_map['eye_r_x_roi_norm']], results[column_map['eye_r_y_roi_norm']])
     }
     for name, (x_norm, y_norm) in keypoints.items():
         if not np.isnan(x_norm):
@@ -159,18 +130,16 @@ def create_dashboard_view(frame_number, zarr_group, column_map, format_info):
             cv2.circle(roi_view, (x_center, y_center), 4, colors.get(name), -1)
             cv2.circle(roi_view, (x_center, y_center), 5, (0,0,0), 1)
 
-    # Add heading text to original ROI view
     if not np.isnan(heading_degrees):
         cv2.putText(roi_view, f"Heading: {heading_degrees:.1f}°", (10, roi_sz[0] - 10), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
     # --- Panel 3: Stabilized ROI View ---
+    rotation_needed = 90 - heading_degrees if not np.isnan(heading_degrees) else 0
+    stabilized_roi = rotate_roi_to_heading(roi_image, rotation_needed)
+    stabilized_view = cv2.cvtColor(stabilized_roi, cv2.COLOR_GRAY2BGR)
+    
     if not np.isnan(heading_degrees):
-        rotation_needed = 90 - heading_degrees
-        stabilized_roi = rotate_roi_to_heading(roi_image, rotation_needed)
-        stabilized_view = cv2.cvtColor(stabilized_roi, cv2.COLOR_GRAY2BGR)
-        
-        # For stabilized view, we need to rotate the keypoint coordinates too
         roi_center = np.array([roi_sz[1]/2, roi_sz[0]/2])
         rotation_angle_rad = np.deg2rad(rotation_needed)
         cos_angle, sin_angle = np.cos(rotation_angle_rad), np.sin(rotation_angle_rad)
@@ -188,16 +157,8 @@ def create_dashboard_view(frame_number, zarr_group, column_map, format_info):
                 cv2.circle(stabilized_view, (int(rotated_x), int(rotated_y)), 4, colors.get(name), -1)
                 cv2.circle(stabilized_view, (int(rotated_x), int(rotated_y)), 5, (0,0,0), 1)
         
-        cv2.putText(stabilized_view, "Stabilized (Fish Up)", (10, roi_sz[0] - 10), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-    else:
-        stabilized_view = cv2.cvtColor(roi_image, cv2.COLOR_GRAY2BGR)
-        for name, (x_norm, y_norm) in keypoints.items():
-            if not np.isnan(x_norm):
-                x_center = int(x_norm * roi_sz[1])
-                y_center = int(y_norm * roi_sz[0])
-                cv2.circle(stabilized_view, (x_center, y_center), 4, colors.get(name), -1)
-                cv2.circle(stabilized_view, (x_center, y_center), 5, (0,0,0), 1)
+    cv2.putText(stabilized_view, "Stabilized (Fish Up)", (10, roi_sz[0] - 10), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
     # --- Panel 4: Difference Image ---
     diff_image = cv2.absdiff(main_image, background_image)
@@ -210,14 +171,7 @@ def create_dashboard_view(frame_number, zarr_group, column_map, format_info):
     stabilized_resized = cv2.resize(stabilized_view, display_size, interpolation=cv2.INTER_NEAREST)
     diff_resized = cv2.resize(diff_view, display_size, interpolation=cv2.INTER_AREA)
 
-    # Add titles to each panel
-    if format_info['format'] == 'enhanced':
-        title1 = "Full View + YOLO Bbox"
-        if not np.isnan(confidence):
-            title1 += f" (conf: {confidence:.3f})"
-    else:
-        title1 = "Full View + Heading"
-        
+    title1 = f"Full View + YOLO Bbox (conf: {confidence:.3f})" if not np.isnan(confidence) else "Full View"
     cv2.putText(main_resized, title1, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     cv2.putText(roi_resized, "Original ROI", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     cv2.putText(stabilized_resized, "Stabilized ROI", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
@@ -227,70 +181,78 @@ def create_dashboard_view(frame_number, zarr_group, column_map, format_info):
     bottom_row = np.hstack((stabilized_resized, diff_resized))
     dashboard = np.vstack((top_row, bottom_row))
     
-    # Enhanced status info
-    status_text = f"Frame: {frame_number}"
-    if format_info['format'] == 'enhanced':
-        status_text += f" | Format: Enhanced ({len(column_map)} cols)"
-        if not np.isnan(confidence):
-            status_text += f" | Confidence: {confidence:.3f}"
-    else:
-        status_text += f" | Format: Original ({len(column_map)} cols)"
+    status_text = f"Frame: {frame_number} | Columns: {len(column_map)}"
+    if not np.isnan(confidence):
+        status_text += f" | Confidence: {confidence:.3f}"
     
     cv2.putText(dashboard, status_text, (10, dashboard.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
     return dashboard
 
 def main(zarr_path, start_frame):
-    """Main display loop for interactive dashboard visualization."""
+    global current_frame
+    current_frame = start_frame
+    
     try:
         zarr_group = zarr.open_group(zarr_path, mode='r')
     except Exception as e:
         print(f"Error opening Zarr store at '{zarr_path}': {e}")
         return
 
-    num_frames = zarr_group['raw_video/images_ds'].shape[0]
-    results_array = zarr_group['tracking/tracking_results']
-    
+    try:
+        latest_tracking_run = zarr_group['tracking_runs'].attrs['latest']
+        results_array = zarr_group[f'tracking_runs/{latest_tracking_run}/tracking_results']
+        print(f"Using latest tracking run: {latest_tracking_run}")
+    except KeyError:
+        print("Error: Could not find 'tracking_runs' or the 'latest' attribute in the Zarr file.")
+        print("Please ensure the tracking stage has been run successfully.")
+        return
+
     column_names = results_array.attrs['column_names']
+    
+    if 'bbox_x_norm_ds' not in column_names:
+        print("Error: This visualizer now requires the new data format from tracker.py.")
+        return
+
     column_map = {name: i for i, name in enumerate(column_names)}
+    num_frames = zarr_group['raw_video/images_ds'].shape[0]
     
-    # Detect data format and create appropriate mappings
-    format_info = detect_data_format(column_names)
+    window_name = "Interactive Dashboard"
+    cv2.namedWindow(window_name)
+
+    # --- MODIFICATION: Create a trackbar for frame navigation ---
+    cv2.createTrackbar("Frame", window_name, current_frame, num_frames - 1, update_frame)
     
-    print(f"📊 Data info: {num_frames} frames, {len(column_names)} tracking columns")
-    if format_info['format'] == 'enhanced':
-        print("🎯 Enhanced features: Multi-scale coordinates, YOLO bounding boxes, confidence scores")
-    
-    current_frame = start_frame
-    
-    print("Starting enhanced interactive dashboard...")
-    print("Controls: → (Next Frame), ← (Previous Frame), 'q' or Esc (Quit)")
+    print("Starting interactive dashboard...")
+    print("Controls: Use slider or arrow keys for navigation. 'q' or Esc to quit.")
 
     while True:
-        dashboard = create_dashboard_view(current_frame, zarr_group, column_map, format_info)
+        # --- MODIFICATION: Main loop now uses the global 'current_frame' ---
+        dashboard = create_dashboard_view(current_frame, zarr_group, column_map)
         
+        display_image = dashboard if dashboard is not None else np.zeros((960, 960, 3), dtype=np.uint8)
         if dashboard is None:
-            display_image = np.zeros((960, 960, 3), dtype=np.uint8)
             cv2.putText(display_image, "Frame Not Found", (300, 480), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 2)
-        else:
-            display_image = dashboard
             
-        cv2.imshow("Enhanced Interactive Dashboard", display_image)
+        cv2.imshow(window_name, display_image)
         
-        key = cv2.waitKey(0)
+        # Update the slider's position to match the current frame (for arrow key presses)
+        cv2.setTrackbarPos("Frame", window_name, current_frame)
+        
+        key = cv2.waitKey(30) & 0xFF
 
         if key == ord('q') or key == 27:
             break
         elif key == 83: # Right arrow
-            current_frame = min(num_frames, current_frame + 1)
+            current_frame = min(num_frames - 1, current_frame + 1)
         elif key == 81: # Left arrow
-            current_frame = max(1, current_frame - 1)
+            current_frame = max(0, current_frame - 1)
 
     cv2.destroyAllWindows()
-    print("Enhanced visualizer closed.")
+    print("Visualizer closed.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Enhanced interactive visualizer for fish tracking results.")
+    parser = argparse.ArgumentParser(description="Interactive visualizer for fish tracking results.")
     parser.add_argument("zarr_path", type=str, help="Path to the unified Zarr file (e.g., video.zarr).")
     parser.add_argument("start_frame", type=int, nargs='?', default=1, 
                         help="The frame number to start visualizing from. Defaults to 1.")
