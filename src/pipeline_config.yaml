@@ -1,0 +1,34 @@
+# src/pipeline_config.yaml
+#
+# Centralized configuration for the Zarr data processing pipeline.
+# This file defines all parameters for each stage of the tracking workflow.
+
+import:
+  downsample_size: [640, 640]
+  chunk_size: 32
+  batch_size: 32
+
+background:
+  sample_size: 100
+  seed: 42
+
+crop:
+  roi_sz: [256, 256]
+  ds_thresh: 27
+  se1_radius: 1
+  se4_radius: 6
+  proximity_check:
+    # Max distance (as fraction of image width) fish can move between frames
+    max_distance_norm: 0.1
+  dish_mask:
+    shape: 'circle'
+    hough_param1: 10
+    hough_param2: 200
+    radius_adj: 5
+
+
+track:
+  roi_sz: [256, 256]
+  roi_thresh: 115
+  se1_radius: 1
+  se2_radius: 2

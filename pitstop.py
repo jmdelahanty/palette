@@ -1,6 +1,6 @@
 # pitstop.py
 
-# Using Wilson Chen's, HHMI Janelia Johnson Lab/Aso Lab, mechanic framework
+# Using Wilson Chen's, HHMI Janelia Johnson Lab/Aso Lab, mechanic pipeline
 
 import argparse
 from io import BytesIO

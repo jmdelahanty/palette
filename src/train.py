@@ -18,6 +18,7 @@ from ultralytics.models.yolo.detect import DetectionTrainer, DetectionValidator
 from torch.utils.data import DataLoader
 import numpy as np
 from rich.console import Console
+import zarr
 
 # Import your custom dataset and git tracker
 from enhanced_multi_zarr_dataset import create_multi_zarr_dataset, MultiDatasetConfig
@@ -55,6 +56,27 @@ class FixedTrainer(DetectionTrainer):
         self.loss_names = 'box_loss', 'cls_loss', 'dfl_loss'
         return FixedDetectionValidator(self.test_loader, save_dir=self.save_dir, args=self.args, _callbacks=self.callbacks)
 
+def get_zarr_metadata(zarr_paths):
+    """Extracts key metadata from a list of Zarr files."""
+    metadata = {}
+    for path in zarr_paths:
+        try:
+            root = zarr.open(path, mode='r')
+            path_name = Path(path).name
+            
+            crop_stats = root['crop_runs'].attrs.get('best', {})
+            track_stats = root['tracking_runs'].attrs.get('best', {})
+            
+            metadata[path_name] = {
+                'cropping_success_rate': crop_stats.get('percent_cropped', 'N/A'),
+                'tracking_success_rate': track_stats.get('percent_tracked', 'N/A'),
+                'best_crop_run': crop_stats.get('run_name', 'N/A'),
+                'best_track_run': track_stats.get('run_name', 'N/A')
+            }
+        except Exception as e:
+            metadata[path_name] = {'error': str(e)}
+    return metadata
+
 def main(args):
     # Create a console object for rich printing
     console = Console()
@@ -70,6 +92,14 @@ def main(args):
         console.print(f"[bold red]Error loading config:[/bold red] {e}")
         return
 
+    # --- Extract Zarr Metadata Before Training ---
+    zarr_metadata = get_zarr_metadata(config.zarr_paths)
+    console.print("\n[bold cyan]📊 Zarr Dataset Metadata[/bold cyan]")
+    for name, meta in zarr_metadata.items():
+        console.print(f"  [green]{name}[/green]:")
+        console.print(f"    - Cropping Success: {meta.get('cropping_success_rate', 'N/A')}%")
+        console.print(f"    - Tracking Success: {meta.get('tracking_success_rate', 'N/A')}%")
+
     # --- 2. Define Custom Dataloader for the Trainer ---
     def get_multi_dataloader(self, dataset_path, batch_size=16, **kwargs):
         mode = kwargs.get('mode', 'train')
@@ -81,7 +111,7 @@ def main(args):
             collate_fn=robust_collate_fn,
             num_workers=8,
             pin_memory=True,
-            persistent_workers=False # TODO: Figure out why we can't kill these after training completes
+            persistent_workers=False
         )
 
     FixedTrainer.get_dataloader = get_multi_dataloader
@@ -95,11 +125,7 @@ def main(args):
     results = model.train(
         trainer=FixedTrainer,
         data=args.config_path,
-        epochs=training_params.get('epochs', 10),
-        batch=training_params.get('batch_size', 16),
-        device=training_params.get('device', '0'),
-        project="runs/detect",
-        name=args.run_name or "multi_zarr_train"
+        **training_params
     )
     
     training_duration_seconds = time.time() - training_start_time
@@ -112,7 +138,6 @@ def main(args):
         results_df.columns = results_df.columns.str.strip()
         last_epoch_metrics = results_df.iloc[-1]
 
-        # --- Descriptive Filename Implementation ---
         project_type = "SingleFish"
         model_name = "pancake0"
         version = "v01"
@@ -120,11 +145,8 @@ def main(args):
         final_config_filename = f"{timestamp}_{project_type}_{model_name}_{version}.yaml"
         final_config_path = results.save_dir / final_config_filename
         
-        # Create config with metadata
-        # Convert any numpy objects to native Python types
-        # If we don't do this, the numpy objects are written as 
-        # a non-human friendly representation in YAML
         full_config['training_history'] = {
+            'source_zarr_metadata': zarr_metadata,
             'training_run_name': results.save_dir.name,
             'output_directory': str(results.save_dir),
             'final_model_path': str(results.save_dir / 'weights' / 'best.pt'),
