@@ -13,8 +13,7 @@ names: ['fish']
 # --------------------------------------------------------------------------------
 data_config:
   zarr_paths:
-    # - /home/delahantyj@hhmi.org/Desktop/concentricOMR3/video.zarr
-    - /home/delahantyj@hhmi.org/Desktop/training_data_1/ominifin0_20250730_arena04.zarr
+    - /home/delahantyj@hhmi.org/Desktop/training_data_2/20250731_omnifin0_arena4.zarr
   task: detect
   split_ratio: 0.8
   random_seed: 42
@@ -37,20 +36,20 @@ data_config:
   # --- Example for 'weighted' strategy ---
   # To use this, set sampling_strategy to "weighted" and uncomment the following lines.
   # The keys must match the names of your zarr files (without the .zarr extension).
-  # The weights are relative. For example, a weight of 2.0 for 'video' and 1.0 for
-  # 'longer_edge' means you want twice as many samples from 'video' relative to 'longer_edge',
+  # The weights are relative. For example, a weight of 1.0 for 'video1' and 2.0 for
+  # 'video2' means you want twice as many samples from 'video2' relative to 'video1',
   # assuming enough valid frames are available.
   #
   # dataset_weights:
-  #   video: 2.0
-  #   longer_edge: 1.0
+  #   video1: 1.0
+  #   video2: 2.0
 
 
 # Part 2: MODEL & TRAINING HYPERPARAMETERS
 # --------------------------------------------------------------------------------
-training_config:
+training_params:
   # Model setup
-  model_name: yolov8s.pt
+  model: yolov8s.pt
 
   # Core hyperparameters
   epochs: 100 # Number of training epochs
