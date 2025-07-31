@@ -521,7 +521,7 @@ def track_chunk_delayed(zarr_path, chunk_slice, roi_sz, roi_thresh, se1_radius, 
         background_full = root[f'background_runs/{latest_bg_run}/background_full'][:]
         
     chunk_len = rois_chunk.shape[0]
-    chunk_results = np.full((chunk_len, 20), np.nan, dtype='f8')
+    chunk_results = np.full((chunk_len, 21), np.nan, dtype='f8')
     
     for i in range(chunk_len):
         try:
@@ -546,9 +546,16 @@ def track_chunk_delayed(zarr_path, chunk_slice, roi_sz, roi_thresh, se1_radius, 
             if background_roi.shape != roi.shape: continue
             
             diff_roi = np.clip(background_roi.astype(np.int16) - roi.astype(np.int16), 0, 255).astype(np.uint8)
-            im_roi = erosion(dilation(erosion(diff_roi >= roi_thresh, se1), se2), se1)
-            roi_stat = [r for r in regionprops(label(im_roi)) if r.area > 5]
             
+            current_thresh = roi_thresh
+            roi_stat = []
+            for _ in range(5):
+                im_roi = erosion(dilation(erosion(diff_roi >= current_thresh, se1), se2), se1)
+                roi_stat = [r for r in regionprops(label(im_roi)) if r.area > 5]
+                if len(roi_stat) >= 3:
+                    break
+                current_thresh -= 5
+
             # --- If keypoints are found, overwrite the initial bbox with the more accurate data ---
             if len(roi_stat) >= 3:
                 keypoint_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
@@ -576,7 +583,7 @@ def track_chunk_delayed(zarr_path, chunk_slice, roi_sz, roi_thresh, se1_radius, 
                 chunk_results[i, :] = [heading, *bbox_data['bladder_roi_norm'], *bbox_data['eye_l_roi_norm'], *bbox_data['eye_r_roi_norm'], 
                                        *multi_scale_data['ds_scale']['center_norm'], *multi_scale_data['ds_scale']['extent_norm'], 
                                        *multi_scale_data['full_scale']['center_norm'], *multi_scale_data['full_scale']['extent_norm'], 
-                                       *coords_full, *coords_ds_chunk[i], confidence]
+                                       *coords_full, *coords_ds_chunk[i], confidence, current_thresh]
         except Exception:
             continue
             
@@ -612,9 +619,9 @@ def run_tracking_stage(zarr_path, scheduler_name, params, console):
     # Use the crop run for chunk size, as it holds the images
     track_chunk_size = root[f"crop_runs/{root['crop_runs'].attrs['latest']}/roi_images"].chunks[0]
     
-    tracking_results = track_group.create_dataset('tracking_results', shape=(num_images, 20), chunks=(track_chunk_size * 4, None), dtype='f8', overwrite=True)
+    tracking_results = track_group.create_dataset('tracking_results', shape=(num_images, 21), chunks=(track_chunk_size * 4, None), dtype='f8', overwrite=True)
     tracking_results[:] = np.nan
-    tracking_results.attrs['column_names'] = ['heading_degrees', 'bladder_x_roi_norm', 'bladder_y_roi_norm', 'eye_l_x_roi_norm', 'eye_l_y_roi_norm', 'eye_r_x_roi_norm', 'eye_r_y_roi_norm', 'bbox_x_norm_ds', 'bbox_y_norm_ds', 'bbox_width_norm_ds', 'bbox_height_norm_ds', 'bbox_x_norm_full', 'bbox_y_norm_full', 'bbox_width_norm_full', 'bbox_height_norm_full', 'roi_x1_full', 'roi_y1_full', 'roi_x1_ds', 'roi_y1_ds', 'confidence_score']
+    tracking_results.attrs['column_names'] = ['heading_degrees', 'bladder_x_roi_norm', 'bladder_y_roi_norm', 'eye_l_x_roi_norm', 'eye_l_y_roi_norm', 'eye_r_x_roi_norm', 'eye_r_y_roi_norm', 'bbox_x_norm_ds', 'bbox_y_norm_ds', 'bbox_width_norm_ds', 'bbox_height_norm_ds', 'bbox_x_norm_full', 'bbox_y_norm_full', 'bbox_width_norm_full', 'bbox_height_norm_full', 'roi_x1_full', 'roi_y1_full', 'roi_x1_ds', 'roi_y1_ds', 'confidence_score', 'effective_threshold']
     
     coord_systems = track_group.create_group('coordinate_systems')
     coord_systems.attrs.update({

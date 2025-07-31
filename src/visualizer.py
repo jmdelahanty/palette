@@ -11,21 +11,32 @@ def update_frame(val):
     global current_frame
     current_frame = val
 
+def apply_circular_mask(image):
+    """Applies a circular mask to the image to hide corners."""
+    h, w = image.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    center = (w // 2, h // 2)
+    radius = min(center[0], center[1])
+    cv2.circle(mask, center, radius, 255, -1)
+    
+    # Apply the mask
+    masked_image = cv2.bitwise_and(image, image, mask=mask)
+    return masked_image
+
 def rotate_roi_to_heading(roi_image, heading_degrees):
     """
     Rotate the ROI image so the fish is oriented according to the heading angle.
+    A positive heading should result in a counter-clockwise rotation to stabilize.
     """
     if np.isnan(heading_degrees):
         return roi_image
     
-    # Get ROI center
     h, w = roi_image.shape
     center = (w // 2, h // 2)
     
-    # Create rotation matrix (negative because CV2 rotates clockwise, but we want counterclockwise)
+    # Rotate by the negative of the heading to counteract the fish's orientation
     rotation_matrix = cv2.getRotationMatrix2D(center, -heading_degrees, 1.0)
     
-    # Rotate the image
     rotated_roi = cv2.warpAffine(roi_image, rotation_matrix, (w, h), 
                                 flags=cv2.INTER_LINEAR, 
                                 borderMode=cv2.BORDER_CONSTANT, 
@@ -49,7 +60,6 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
     roi_images_array = zarr_group[f'crop_runs/{latest_crop_run}/roi_images']
     results_array = zarr_group[f'tracking_runs/{latest_tracking_run}/tracking_results']
     
-    # --- MODIFICATION: Use refined data if it exists, otherwise fall back to crop data ---
     if 'refine_runs' in zarr_group and 'latest' in zarr_group['refine_runs'].attrs:
         latest_refine_run = zarr_group['refine_runs'].attrs['latest']
         crop_bbox_array = zarr_group[f'refine_runs/{latest_refine_run}/refined_bbox_norm_coords']
@@ -62,56 +72,44 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
     if not (0 <= frame_index < num_frames):
         return None
 
-    # Read all necessary data for the frame
     main_image = images_array[frame_index]
     roi_image = roi_images_array[frame_index]
     background_image = background_array[:] 
     results = results_array[frame_index]
     crop_bbox = crop_bbox_array[frame_index]
 
-    # --- Panel 1: Main View with Bounding Box ---
     main_view = cv2.cvtColor(main_image, cv2.COLOR_GRAY2BGR)
     full_h, full_w = main_view.shape[:2]
     
     heading_degrees = results[column_map['heading_degrees']]
     confidence = results[column_map['confidence_score']]
-    
-    # First, try to use the detailed data from the tracking stage
-    if not np.isnan(results[column_map['bbox_x_norm_ds']]):
-        bbox_x_norm = results[column_map['bbox_x_norm_ds']]
-        bbox_y_norm = results[column_map['bbox_y_norm_ds']]
-        bbox_width_norm = results[column_map['bbox_width_norm_ds']]
-        bbox_height_norm = results[column_map['bbox_height_norm_ds']]
+    effective_threshold = results[column_map.get('effective_threshold', -1)] 
 
-        center_x = int(bbox_x_norm * full_w)
-        center_y = int(bbox_y_norm * full_h)
-        box_w = int(bbox_width_norm * full_w)
-        box_h = int(bbox_height_norm * full_h)
+    if not np.isnan(results[column_map['bbox_x_norm_ds']]):
+        bbox_x_norm, bbox_y_norm = results[column_map['bbox_x_norm_ds']], results[column_map['bbox_y_norm_ds']]
+        bbox_width_norm, bbox_height_norm = results[column_map['bbox_width_norm_ds']], results[column_map['bbox_height_norm_ds']]
+
+        center_x, center_y = int(bbox_x_norm * full_w), int(bbox_y_norm * full_h)
+        box_w, box_h = int(bbox_width_norm * full_w), int(bbox_height_norm * full_h)
         
         x1, y1 = center_x - box_w // 2, center_y - box_h // 2
         x2, y2 = x1 + box_w, y1 + box_h
         
-        cv2.rectangle(main_view, (x1, y1), (x2, y2), (0, 255, 0), 2) # Green for tracked
+        cv2.rectangle(main_view, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.circle(main_view, (center_x, center_y), 3, (0, 255, 0), -1)
         label = f"Tracked {confidence:.3f}"
         cv2.putText(main_view, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-    # ELSE, fall back to the initial crop detection data
     elif not np.isnan(crop_bbox[0]):
         bbox_x_norm, bbox_y_norm = crop_bbox
-        
-        box_w, box_h = int(0.05 * full_w), int(0.05 * full_h) # Default 5% size
-        center_x = int(bbox_x_norm * full_w)
-        center_y = int(bbox_y_norm * full_h)
-        
+        box_w, box_h = int(0.08 * full_w), int(0.08 * full_h)
+        center_x, center_y = int(bbox_x_norm * full_w), int(bbox_y_norm * full_h)
         x1, y1 = center_x - box_w // 2, center_y - box_h // 2
         x2, y2 = x1 + box_w, y1 + box_h
-
-        cv2.rectangle(main_view, (x1, y1), (x2, y2), (0, 255, 255), 2) # Yellow for cropped
+        cv2.rectangle(main_view, (x1, y1), (x2, y2), (0, 255, 255), 2)
         label = "Cropped (not tracked)"
         cv2.putText(main_view, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
-    # Draw heading arrow (only if tracking was successful)
     if not np.isnan(heading_degrees):
         center_px = (int(results[column_map['bbox_x_norm_ds']] * full_w), int(results[column_map['bbox_y_norm_ds']] * full_h))
         arrow_length = 30
@@ -119,7 +117,6 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
         arrow_end_y = int(center_px[1] - arrow_length * np.sin(np.deg2rad(heading_degrees)))
         cv2.arrowedLine(main_view, center_px, (arrow_end_x, arrow_end_y), (255, 0, 255), 2, tipLength=0.3)
     
-    # --- Panel 2: Original ROI View ---
     roi_view = cv2.cvtColor(roi_image, cv2.COLOR_GRAY2BGR)
     roi_sz = roi_image.shape
     colors = {'bladder': (0, 0, 255), 'eye_l': (0, 255, 0), 'eye_r': (255, 100, 0)}
@@ -130,8 +127,7 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
     }
     for name, (x_norm, y_norm) in keypoints.items():
         if not np.isnan(x_norm):
-            x_center = int(x_norm * roi_sz[1])
-            y_center = int(y_norm * roi_sz[0])
+            x_center, y_center = int(x_norm * roi_sz[1]), int(y_norm * roi_sz[0])
             cv2.circle(roi_view, (x_center, y_center), 4, colors.get(name), -1)
             cv2.circle(roi_view, (x_center, y_center), 5, (0,0,0), 1)
 
@@ -139,44 +135,41 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
         cv2.putText(roi_view, f"Heading: {heading_degrees:.1f}°", (10, roi_sz[0] - 10), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
-    # --- Panel 3: Stabilized ROI View ---
-    rotation_needed = 90 - heading_degrees if not np.isnan(heading_degrees) else 0
-    stabilized_roi = rotate_roi_to_heading(roi_image, rotation_needed)
+    stabilized_roi = rotate_roi_to_heading(roi_image, heading_degrees)
     stabilized_view = cv2.cvtColor(stabilized_roi, cv2.COLOR_GRAY2BGR)
+    
+    # Apply the circular mask
+    stabilized_view = apply_circular_mask(stabilized_view)
     
     if not np.isnan(heading_degrees):
         roi_center = np.array([roi_sz[1]/2, roi_sz[0]/2])
-        rotation_angle_rad = np.deg2rad(rotation_needed)
+        rotation_angle_rad = np.deg2rad(-heading_degrees)
         cos_angle, sin_angle = np.cos(rotation_angle_rad), np.sin(rotation_angle_rad)
         
         for name, (x_norm, y_norm) in keypoints.items():
             if not np.isnan(x_norm):
-                x_pixel = x_norm * roi_sz[1]
-                y_pixel = y_norm * roi_sz[0]
+                x_pixel, y_pixel = x_norm * roi_sz[1], y_norm * roi_sz[0]
+                rel_x, rel_y = x_pixel - roi_center[0], y_pixel - roi_center[1]
                 
-                rel_x = x_pixel - roi_center[0]
-                rel_y = y_pixel - roi_center[1]
-                rotated_x = rel_x * cos_angle - rel_y * sin_angle + roi_center[0]
-                rotated_y = rel_x * sin_angle + rel_y * cos_angle + roi_center[1]
-                
+                rotated_x = rel_x * cos_angle + rel_y * sin_angle + roi_center[0]
+                rotated_y = -rel_x * sin_angle + rel_y * cos_angle + roi_center[1]
+
                 cv2.circle(stabilized_view, (int(rotated_x), int(rotated_y)), 4, colors.get(name), -1)
                 cv2.circle(stabilized_view, (int(rotated_x), int(rotated_y)), 5, (0,0,0), 1)
         
-    cv2.putText(stabilized_view, "Stabilized (Fish Up)", (10, roi_sz[0] - 10), 
+    cv2.putText(stabilized_view, "Stabilized (Facing Right)", (10, roi_sz[0] - 10), 
                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
-    # --- Panel 4: Difference Image ---
     diff_image = cv2.absdiff(main_image, background_image)
     diff_view = cv2.cvtColor(diff_image, cv2.COLOR_GRAY2BGR)
 
-    # --- Assemble the Dashboard ---
     display_size = (480, 480)
     main_resized = cv2.resize(main_view, display_size, interpolation=cv2.INTER_AREA)
     roi_resized = cv2.resize(roi_view, display_size, interpolation=cv2.INTER_NEAREST)
     stabilized_resized = cv2.resize(stabilized_view, display_size, interpolation=cv2.INTER_NEAREST)
     diff_resized = cv2.resize(diff_view, display_size, interpolation=cv2.INTER_AREA)
 
-    title1 = f"Full View + YOLO Bbox (conf: {confidence:.3f})" if not np.isnan(confidence) else "Full View"
+    title1 = f"Full View + Bbox (conf: {confidence:.3f})" if not np.isnan(confidence) else "Full View"
     cv2.putText(main_resized, title1, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     cv2.putText(roi_resized, "Original ROI", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     cv2.putText(stabilized_resized, "Stabilized ROI", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
@@ -186,9 +179,11 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
     bottom_row = np.hstack((stabilized_resized, diff_resized))
     dashboard = np.vstack((top_row, bottom_row))
     
-    status_text = f"Frame: {frame_number} | Columns: {len(column_map)}"
+    status_text = f"Frame: {frame_number}"
     if not np.isnan(confidence):
         status_text += f" | Confidence: {confidence:.3f}"
+    if not np.isnan(effective_threshold):
+        status_text += f" | ROI Thresh: {int(effective_threshold)}"
     
     cv2.putText(dashboard, status_text, (10, dashboard.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
@@ -216,7 +211,7 @@ def main(zarr_path, start_frame):
     column_names = results_array.attrs['column_names']
     
     if 'bbox_x_norm_ds' not in column_names:
-        print("Error: This visualizer now requires the new data format from tracker.py.")
+        print("Error: This visualizer requires the new multi-scale data format from tracker.py.")
         return
 
     column_map = {name: i for i, name in enumerate(column_names)}
@@ -225,7 +220,6 @@ def main(zarr_path, start_frame):
     window_name = "Interactive Dashboard"
     cv2.namedWindow(window_name)
 
-    # Create a trackbar for frame navigation
     cv2.createTrackbar("Frame", window_name, current_frame, num_frames - 1, update_frame)
     
     print("Starting interactive dashboard...")

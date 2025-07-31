@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
-Enhanced Multi-Zarr YOLO Trainer with Automated Metadata Logging
-This script trains a YOLO model on multiple Zarr datasets and saves a complete,
-reproducible configuration file with the training results.
+Detection YOLO Trainer with Automated Metadata Logging
 """
 
 import argparse
@@ -75,7 +73,7 @@ def get_zarr_metadata(zarr_paths):
 
 def main(args):
     console = Console()
-    console.print("[bold cyan]Starting Enhanced Multi-Zarr YOLO Training...[/bold cyan]")
+    console.print("[bold cyan]Starting YOLO Detection Training...[/bold cyan]")
 
     try:
         with open(args.config_path, 'r') as f:
@@ -100,11 +98,20 @@ def main(args):
 
     FixedTrainer.get_dataloader = get_multi_dataloader
     
-    # --- MODIFICATION: Initialize model and pass params correctly ---
+    # --- CORRECTED LOGIC ---
     training_params = full_config.get('training_params', {})
-    model_name = training_params.pop('model', 'yolov8n.pt')
+    # Use .get() to read the model name without removing it from the dictionary
+    model_name = training_params.get('model', 'yolov8n.pt')
     model = YOLO(model_name)
-    
+
+    # --- ADDED FOR DEBUGGING ---
+    # Use a Panel to neatly display the training parameters
+    from rich.panel import Panel
+    import json
+    params_str = json.dumps(training_params, indent=2)
+    console.print(Panel(params_str, title="[bold yellow]Training Hyperparameters[/bold yellow]", expand=False))
+    # --- END ADDITION ---
+
     training_start_time = time.time()
     
     results = model.train(
