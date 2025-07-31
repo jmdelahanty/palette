@@ -30,7 +30,6 @@ def parse_args():
         choices=['fp32', 'fp16', 'int8'],
         help='Precision for the TensorRT engine (default: fp16).'
     )
-    # New arguments for advanced features
     parser.add_argument(
         '--verbose',
         action='store_true',

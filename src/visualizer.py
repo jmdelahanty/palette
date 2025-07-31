@@ -48,9 +48,14 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
     background_array = zarr_group[f'background_runs/{latest_background_run}/background_ds']
     roi_images_array = zarr_group[f'crop_runs/{latest_crop_run}/roi_images']
     results_array = zarr_group[f'tracking_runs/{latest_tracking_run}/tracking_results']
-    # Load the crop-stage bounding box coordinates for fallback
-    crop_bbox_array = zarr_group[f'crop_runs/{latest_crop_run}/bbox_norm_coords']
     
+    # --- MODIFICATION: Use refined data if it exists, otherwise fall back to crop data ---
+    if 'refine_runs' in zarr_group and 'latest' in zarr_group['refine_runs'].attrs:
+        latest_refine_run = zarr_group['refine_runs'].attrs['latest']
+        crop_bbox_array = zarr_group[f'refine_runs/{latest_refine_run}/refined_bbox_norm_coords']
+    else:
+        crop_bbox_array = zarr_group[f'crop_runs/{latest_crop_run}/bbox_norm_coords']
+
     num_frames = images_array.shape[0]
     frame_index = frame_number - 1
 
@@ -220,14 +225,13 @@ def main(zarr_path, start_frame):
     window_name = "Interactive Dashboard"
     cv2.namedWindow(window_name)
 
-    # --- MODIFICATION: Create a trackbar for frame navigation ---
+    # Create a trackbar for frame navigation
     cv2.createTrackbar("Frame", window_name, current_frame, num_frames - 1, update_frame)
     
     print("Starting interactive dashboard...")
     print("Controls: Use slider or arrow keys for navigation. 'q' or Esc to quit.")
 
     while True:
-        # --- MODIFICATION: Main loop now uses the global 'current_frame' ---
         dashboard = create_dashboard_view(current_frame, zarr_group, column_map)
         
         display_image = dashboard if dashboard is not None else np.zeros((960, 960, 3), dtype=np.uint8)
@@ -236,7 +240,6 @@ def main(zarr_path, start_frame):
             
         cv2.imshow(window_name, display_image)
         
-        # Update the slider's position to match the current frame (for arrow key presses)
         cv2.setTrackbarPos("Frame", window_name, current_frame)
         
         key = cv2.waitKey(30) & 0xFF

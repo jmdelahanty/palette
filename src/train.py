@@ -20,9 +20,8 @@ import numpy as np
 from rich.console import Console
 import zarr
 
-# Import your custom dataset and git tracker
 from enhanced_multi_zarr_dataset import create_multi_zarr_dataset, MultiDatasetConfig
-from tracker import get_git_info # For reproducibility
+from tracker import get_git_info
 
 class YoloCompatibleDataLoader(DataLoader):
     def reset(self):
@@ -57,16 +56,13 @@ class FixedTrainer(DetectionTrainer):
         return FixedDetectionValidator(self.test_loader, save_dir=self.save_dir, args=self.args, _callbacks=self.callbacks)
 
 def get_zarr_metadata(zarr_paths):
-    """Extracts key metadata from a list of Zarr files."""
     metadata = {}
     for path in zarr_paths:
         try:
             root = zarr.open(path, mode='r')
             path_name = Path(path).name
-            
             crop_stats = root['crop_runs'].attrs.get('best', {})
             track_stats = root['tracking_runs'].attrs.get('best', {})
-            
             metadata[path_name] = {
                 'cropping_success_rate': crop_stats.get('percent_cropped', 'N/A'),
                 'tracking_success_rate': track_stats.get('percent_tracked', 'N/A'),
@@ -78,11 +74,9 @@ def get_zarr_metadata(zarr_paths):
     return metadata
 
 def main(args):
-    # Create a console object for rich printing
     console = Console()
     console.print("[bold cyan]Starting Enhanced Multi-Zarr YOLO Training...[/bold cyan]")
 
-    # --- 1. Load Configuration ---
     try:
         with open(args.config_path, 'r') as f:
             full_config = yaml.safe_load(f)
@@ -92,7 +86,6 @@ def main(args):
         console.print(f"[bold red]Error loading config:[/bold red] {e}")
         return
 
-    # --- Extract Zarr Metadata Before Training ---
     zarr_metadata = get_zarr_metadata(config.zarr_paths)
     console.print("\n[bold cyan]📊 Zarr Dataset Metadata[/bold cyan]")
     for name, meta in zarr_metadata.items():
@@ -100,37 +93,30 @@ def main(args):
         console.print(f"    - Cropping Success: {meta.get('cropping_success_rate', 'N/A')}%")
         console.print(f"    - Tracking Success: {meta.get('tracking_success_rate', 'N/A')}%")
 
-    # --- 2. Define Custom Dataloader for the Trainer ---
     def get_multi_dataloader(self, dataset_path, batch_size=16, **kwargs):
         mode = kwargs.get('mode', 'train')
         dataset = create_multi_zarr_dataset(config=config, mode=mode)
-        return YoloCompatibleDataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=(mode == 'train'),
-            collate_fn=robust_collate_fn,
-            num_workers=8,
-            pin_memory=True,
-            persistent_workers=False
-        )
+        return YoloCompatibleDataLoader(dataset, batch_size=batch_size, shuffle=(mode == 'train'), collate_fn=robust_collate_fn, num_workers=8, pin_memory=True, persistent_workers=False)
 
     FixedTrainer.get_dataloader = get_multi_dataloader
-
-    # --- 3. Initialize and Train the Model ---
-    training_params = full_config.get('training_config', {})
-    model = YOLO(training_params.get('model_name', 'yolov8n.pt'))
+    
+    # --- MODIFICATION: Initialize model and pass params correctly ---
+    training_params = full_config.get('training_params', {})
+    model_name = training_params.pop('model', 'yolov8n.pt')
+    model = YOLO(model_name)
     
     training_start_time = time.time()
     
     results = model.train(
         trainer=FixedTrainer,
         data=args.config_path,
+        name=args.run_name or "multi_zarr_train",
+        project="runs/detect",
         **training_params
     )
     
     training_duration_seconds = time.time() - training_start_time
 
-    # --- 4. Log Metadata and Save Final Config ---
     console.print("\n[bold cyan]📝 Logging training history and metadata...[/bold cyan]")
     try:
         git_info = get_git_info()
@@ -139,11 +125,14 @@ def main(args):
         last_epoch_metrics = results_df.iloc[-1]
 
         project_type = "SingleFish"
-        model_name = "pancake0"
+        run_name = "pancake0"
         version = "v01"
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(training_start_time))
-        final_config_filename = f"{timestamp}_{project_type}_{model_name}_{version}.yaml"
+        final_config_filename = f"{timestamp}_{project_type}_{run_name}_{version}.yaml"
         final_config_path = results.save_dir / final_config_filename
+        
+        # Add the model name back in for the final report
+        full_config['training_params']['model'] = model_name
         
         full_config['training_history'] = {
             'source_zarr_metadata': zarr_metadata,
@@ -177,7 +166,6 @@ def main(args):
     except Exception as e:
         console.print(f"[bold red]Could not save final training report:[/bold red] {e}")
         traceback.print_exc()
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Multi-Zarr YOLO Trainer")

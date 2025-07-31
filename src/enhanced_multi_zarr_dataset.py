@@ -1,4 +1,4 @@
-# enhanced_multi_zarr_dataset.py (Revised to handle timestamped run directories)
+# enhanced_multi_zarr_dataset.py (Final Version with all fixes)
 
 import zarr
 import torch
@@ -126,22 +126,21 @@ class GlobalIndexManager:
                 column_names = tracking_results.attrs['column_names']
                 data_format = detect_data_format(column_names)
                 
-                # --- MODIFICATION: Find all valid frames now includes successful crops ---
-                valid_tracking_mask = ~np.isnan(tracking_results[:, 0])
+                if 'refine_runs' in root and 'latest' in root['refine_runs'].attrs:
+                    latest_refine_run = root['refine_runs'].attrs['latest']
+                    source_coords = root[f'refine_runs/{latest_refine_run}/refined_bbox_norm_coords']
+                else:
+                    latest_crop_run = root['crop_runs'].attrs['latest']
+                    source_coords = root[f'crop_runs/{latest_crop_run}/bbox_norm_coords']
                 
-                latest_crop_run = root['crop_runs'].attrs['latest']
-                crop_coords = root[f'crop_runs/{latest_crop_run}/bbox_norm_coords']
-                valid_crop_mask = ~np.isnan(crop_coords[:, 0])
-
-                # A frame is valid if it was successfully cropped, even if tracking failed
-                valid_mask = valid_crop_mask
+                valid_mask = ~np.isnan(source_coords[:, 0])
                 valid_frames = np.sum(valid_mask)
                 total_frames = len(tracking_results)
 
                 metadata_list.append(DatasetMetadata(
                     path=path_str, name=Path(path_str).stem, total_frames=total_frames,
                     valid_frames=valid_frames, data_format=data_format, column_names=column_names,
-                    tracking_success_rate=(np.sum(valid_tracking_mask) / total_frames * 100) if total_frames > 0 else 0
+                    tracking_success_rate=(np.sum(~np.isnan(tracking_results[:, 0])) / total_frames * 100) if total_frames > 0 else 0
                 ))
             except Exception as e:
                 raise IOError(f"Failed to process Zarr file at '{path_str}': {e}")
@@ -155,12 +154,15 @@ class GlobalIndexManager:
     def _get_valid_indices(self, metadata: DatasetMetadata) -> np.ndarray:
         root = zarr.open(metadata.path, mode='r')
         
-        # --- MODIFICATION: Base validity on successful cropping ---
-        latest_crop_run = root['crop_runs'].attrs['latest']
-        crop_coords = root[f'crop_runs/{latest_crop_run}/bbox_norm_coords']
-        valid_mask = ~np.isnan(crop_coords[:, 0])
+        if 'refine_runs' in root and 'latest' in root['refine_runs'].attrs:
+            latest_refine_run = root['refine_runs'].attrs['latest']
+            source_coords = root[f'refine_runs/{latest_refine_run}/refined_bbox_norm_coords']
+        else:
+            latest_crop_run = root['crop_runs'].attrs['latest']
+            source_coords = root[f'crop_runs/{latest_crop_run}/bbox_norm_coords']
+            
+        valid_mask = ~np.isnan(source_coords[:, 0])
         
-        # We can still apply a confidence filter if desired, using the tracking data
         if self.config.min_confidence > 0 and metadata.data_format == 'enhanced':
             latest_track_run = root['tracking_runs'].attrs['latest']
             tracking_data = root[f'tracking_runs/{latest_track_run}/tracking_results']
@@ -168,7 +170,6 @@ class GlobalIndexManager:
             conf_idx = col_map.get('confidence_score')
             if conf_idx is not None:
                 confidence_data = tracking_data[:, conf_idx]
-                # Apply confidence where it's not NaN
                 valid_mask &= (np.isnan(confidence_data) | (confidence_data >= self.config.min_confidence))
         
         return np.where(valid_mask)[0]
@@ -179,7 +180,9 @@ class GlobalIndexManager:
             return all_indices
 
         if strategy == SamplingStrategy.BALANCED:
-            min_samples = min(len(indices) for indices in all_indices.values())
+            if not all_indices or not any(len(v) > 0 for v in all_indices.values()):
+                return {}
+            min_samples = min(len(indices) for indices in all_indices.values() if len(indices) > 0)
             logger.info(f"⚖️ Balancing datasets to {min_samples} samples each.")
             for path, indices in all_indices.items():
                 if len(indices) > min_samples:
@@ -208,7 +211,6 @@ class GlobalIndexManager:
         )
 
 class EnhancedMultiZarrYOLODataset(Dataset):
-    """A PyTorch Dataset for training YOLO models on multiple Zarr files."""
     def __init__(self, config: MultiDatasetConfig, mode: str = 'train'):
         super().__init__()
         self.config = config
@@ -219,12 +221,12 @@ class EnhancedMultiZarrYOLODataset(Dataset):
         self.indices = train_indices if mode == 'train' else val_indices
         
         self.metadata_map = {m.path: m for m in index_manager.metadata_list}
-        self.data_format = index_manager.metadata_list[0].data_format
+        # Access metadata_list from the manager ---
+        self.data_format = index_manager.metadata_list[0].data_format if index_manager.metadata_list else 'enhanced'
         self.column_mappings = get_column_mappings(index_manager.metadata_list[0].column_names, self.data_format)
         
         self.zarr_roots = {path: zarr.open(path, mode='r') for path in config.zarr_paths}
         
-        self.image_source = 'raw_video/images_ds' if self.config.task == 'detect' else 'crop_data/roi_images'
         self.target_size = self.config.target_size or (640 if self.config.task == 'detect' else 320)
         
         logger.info(f"Pre-caching labels for {self.mode} set...")
@@ -243,47 +245,52 @@ class EnhancedMultiZarrYOLODataset(Dataset):
 
     def _get_bbox_data(self, zarr_path: str, frame_idx: int) -> np.ndarray:
         """
-        Gets bounding box data. Prefers tracking data, but falls back to crop data.
+        Gets bounding box data. Prefers tight, keypoint-derived tracking data, 
+        and uses a tight fallback for crop-only data.
         """
         root = self.zarr_roots[zarr_path]
         latest_track_run = root['tracking_runs'].attrs['latest']
         tracking_data = root[f'tracking_runs/{latest_track_run}/tracking_results'][frame_idx]
         
-        # --- MODIFICATION: Fallback Logic ---
-        # 1. Try to use the high-quality tracking data first
+        # 1. Prioritize the tight bounding box from the tracking stage
         if not np.isnan(tracking_data[self.column_mappings['heading']]):
             bbox_x = tracking_data[self.column_mappings['bbox_x']]
             bbox_y = tracking_data[self.column_mappings['bbox_y']]
             bbox_w = tracking_data[self.column_mappings['bbox_width']]
             bbox_h = tracking_data[self.column_mappings['bbox_height']]
-            
-            # Check for any lingering NaNs in the detailed data
-            if any(np.isnan([bbox_x, bbox_y, bbox_w, bbox_h])):
-                 return np.array([[0, 0.5, 0.5, 0.1, 0.1]], dtype=np.float32) # Fallback
-            
-            return np.array([[0, bbox_x, bbox_y, bbox_w, bbox_h]], dtype=np.float32)
+            if not any(np.isnan([bbox_x, bbox_y, bbox_w, bbox_h])):
+                return np.array([[0, bbox_x, bbox_y, bbox_w, bbox_h]], dtype=np.float32)
 
-        # 2. If tracking failed, fall back to the initial crop data
+        # 2. If tracking failed, use the refined/cropped center point
+        if 'refine_runs' in root and 'latest' in root['refine_runs'].attrs:
+            latest_refine_run = root['refine_runs'].attrs['latest']
+            crop_coords = root[f'refine_runs/{latest_refine_run}/refined_bbox_norm_coords'][frame_idx]
         else:
             latest_crop_run = root['crop_runs'].attrs['latest']
             crop_coords = root[f'crop_runs/{latest_crop_run}/bbox_norm_coords'][frame_idx]
-            
-            bbox_x = crop_coords[0]
-            bbox_y = crop_coords[1]
-            
-            # Use a default size for crop-only detections
-            bbox_w, bbox_h = 0.05, 0.05
-            
-            if any(np.isnan([bbox_x, bbox_y])):
-                return np.array([[0, 0.5, 0.5, 0.1, 0.1]], dtype=np.float32) # Final fallback
-            
-            return np.array([[0, bbox_x, bbox_y, bbox_w, bbox_h]], dtype=np.float32)
+
+        bbox_x, bbox_y = crop_coords[0], crop_coords[1]
+        if not any(np.isnan([bbox_x, bbox_y])):
+            # Use a small, tight default size of bounding box
+            default_width = 0.08  # 10% of image width
+            default_height = 0.10  # 10% of image height (fish are often longer than they are wide)
+            return np.array([[0, bbox_x, bbox_y, default_width, default_height]], dtype=np.float32)
+
+        # 3. Final fallback for completely failed frames
+        return np.array([[0, 0.5, 0.5, 0.1, 0.1]], dtype=np.float32)
 
     def __getitem__(self, index: int) -> Dict:
         zarr_path, frame_idx = self.indices[index]
         root = self.zarr_roots[zarr_path]
         
-        image = root[self.image_source][frame_idx]
+        # Locate the ROI images
+        if self.config.task == 'detect':
+            image_source_path = 'raw_video/images_ds'
+        else: # pose
+            latest_crop_run = root['crop_runs'].attrs['latest']
+            image_source_path = f'crop_runs/{latest_crop_run}/roi_images'
+        
+        image = root[image_source_path][frame_idx]
         image_3ch = np.stack([image] * 3, axis=-1).astype(np.uint8)
         
         if image_3ch.shape[0] != self.target_size:

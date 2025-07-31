@@ -11,8 +11,8 @@ import cv2
 import argparse
 from pathlib import Path
 import os
-os.environ['OMP_NUM_THREADS'] = '1'  # Limit OpenMP threads for reproducibility
-cv2.setNumThreads(0)  # Limit OpenCV threads for reproducibility
+os.environ['OMP_NUM_THREADS'] = '1'
+cv2.setNumThreads(0)
 
 # Global variable to store the current frame index from the slider
 frame_idx = 0
@@ -41,14 +41,15 @@ def create_comparison_dashboard(zarr_root, annotated_frames_map, column_map):
     """Creates the visual dashboard for a given frame."""
     global frame_idx
     
-    # --- 1. Get Ground Truth Data ---
-    image_ds = zarr_root['raw_video/images_ds'][frame_idx]
-    tracking_data = zarr_root['tracking/tracking_results'][frame_idx]
+    # --- Dynamically get the latest runs ---
+    latest_tracking_run = zarr_root['tracking_runs'].attrs['latest']
     
-    # Prepare the base image (grayscale to BGR)
+    # --- Get Ground Truth Data ---
+    image_ds = zarr_root['raw_video/images_ds'][frame_idx]
+    tracking_data = zarr_root[f'tracking_runs/{latest_tracking_run}/tracking_results'][frame_idx]
+    
     base_image = np.stack([image_ds] * 3, axis=-1)
     
-    # Get ground truth bbox
     gt_bbox = [
         tracking_data[column_map['bbox_x_norm_ds']],
         tracking_data[column_map['bbox_y_norm_ds']],
@@ -56,7 +57,7 @@ def create_comparison_dashboard(zarr_root, annotated_frames_map, column_map):
         tracking_data[column_map['bbox_height_norm_ds']]
     ]
     
-    # --- 2. Create Visualization Panels ---
+    # --- Create Visualization Panels ---
     h, w = base_image.shape[:2]
     panel_size = (w, h)
     
@@ -70,12 +71,10 @@ def create_comparison_dashboard(zarr_root, annotated_frames_map, column_map):
     pred_panel = base_image.copy()
     annotated_path = annotated_frames_map.get(frame_idx)
     if annotated_path:
-        # Load the pre-annotated image if it exists
         pred_panel = cv2.imread(str(annotated_path))
         if pred_panel.shape[:2] != panel_size:
             pred_panel = cv2.resize(pred_panel, panel_size)
     else:
-        # Otherwise, indicate no detection was made
         cv2.putText(pred_panel, "No Detection", (w // 2 - 100, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
     cv2.putText(pred_panel, "Model Prediction", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 100, 0), 2)
     
@@ -84,21 +83,12 @@ def create_comparison_dashboard(zarr_root, annotated_frames_map, column_map):
     if not np.isnan(gt_bbox).any():
         overlay_panel = draw_yolo_bbox(overlay_panel, gt_bbox, "GT", (0, 255, 0))
     if annotated_path:
-        # We need to read the prediction boxes to draw them
-        # (For simplicity, we'll re-draw the GT box and assume the pred box is similar for vis)
-        # A more advanced version would parse the prediction log file.
         temp_pred_img = cv2.imread(str(annotated_path))
         overlay_panel = cv2.addWeighted(overlay_panel, 0.7, temp_pred_img, 0.3, 0)
         
     cv2.putText(overlay_panel, "Overlay", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
     
     # Assemble the dashboard
-    top_row = np.hstack((gt_panel, pred_panel))
-    # Create an info panel for the bottom
-    info_panel = np.zeros((100, top_row.shape[1], 3), dtype=np.uint8)
-    cv2.putText(info_panel, f"Frame: {frame_idx}", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-    
-    # Stack top row and a resized overlay panel
     final_view = np.hstack((gt_panel, pred_panel, overlay_panel))
     
     return final_view
@@ -111,7 +101,8 @@ def main(args):
     try:
         zarr_root = zarr.open(args.zarr_path, mode='r')
         total_frames = zarr_root['raw_video/images_ds'].shape[0]
-        column_names = zarr_root['tracking/tracking_results'].attrs['column_names']
+        latest_tracking_run = zarr_root['tracking_runs'].attrs['latest']
+        column_names = zarr_root[f'tracking_runs/{latest_tracking_run}/tracking_results'].attrs['column_names']
         column_map = {name: i for i, name in enumerate(column_names)}
     except Exception as e:
         print(f"❌ Error loading Zarr file: {e}")
@@ -124,7 +115,7 @@ def main(args):
         return
         
     print(f"🖼️  Mapping annotated frames from: {annotated_dir}")
-    annotated_frames_map = {int(p.stem.split('_')[-1]): p for p in annotated_dir.glob("frame_*.jpg")}
+    annotated_frames_map = {int(p.stem.split('_')[-1]): p for p in annotated_dir.glob("annotated_frame_*.jpg")}
     print(f"✅ Found {len(annotated_frames_map)} annotated frames.")
 
     # --- Create UI ---
@@ -137,15 +128,14 @@ def main(args):
         dashboard = create_comparison_dashboard(zarr_root, annotated_frames_map, column_map)
         cv2.imshow(window_name, dashboard)
         
-        # Update the slider position to match the current frame_idx
         cv2.setTrackbarPos("Frame", window_name, frame_idx)
 
         key = cv2.waitKey(20) & 0xFF
-        if key == ord('q') or key == 27: # Quit
+        if key == ord('q') or key == 27:
             break
-        elif key == 83: # Right arrow
+        elif key == 83:
             frame_idx = min(total_frames - 1, frame_idx + 1)
-        elif key == 81: # Left arrow
+        elif key == 81:
             frame_idx = max(0, frame_idx - 1)
             
     cv2.destroyAllWindows()

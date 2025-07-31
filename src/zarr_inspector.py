@@ -54,26 +54,12 @@ def inspect_yolo_readiness(root, data_format):
         panel_content.append("Multi-scale tracking data found.")
         border_style = "green"
         latest_run = root['tracking_runs'].attrs['latest']
-        tracking_results = root[f'tracking_runs/{latest_run}/tracking_results']
-        column_names = tracking_results.attrs.get('column_names', [])
-        
-        coord_systems = []
-        if 'bbox_x_norm_ds' in column_names:
-            coord_systems.append("640x640 (YOLO-ready)")
-        if 'bbox_x_norm_full' in column_names:
-            coord_systems.append("4512x4512 (full-res)")
-        if 'bladder_x_roi_norm' in column_names:
-            coord_systems.append("ROI normalized")
-        
-        panel_content.append(f"Coordinate systems: {len(coord_systems)}")
-        for system in coord_systems:
-            panel_content.append(f"   - {system}")
         
         if 'summary_statistics' in root[f'tracking_runs/{latest_run}'].attrs:
             stats = root[f'tracking_runs/{latest_run}'].attrs['summary_statistics']
             panel_content.append(f"Tracked frames: {stats.get('frames_tracked', 'N/A')}/{stats.get('total_frames', 'N/A')}")
         
-        panel_content.append("\nReady for flexible YOLO dataset generation.")
+        panel_content.append("\n[bold]Ready for flexible YOLO dataset generation.[/bold]")
         
     else:
         panel_content.append("Single-scale or unknown pipeline format detected.")
@@ -81,73 +67,43 @@ def inspect_yolo_readiness(root, data_format):
     yolo_panel = Panel("\n".join(panel_content), title="YOLO Training Readiness", border_style=border_style)
     console.print(yolo_panel)
 
-def analyze_pipeline_performance(root, column_names):
+def analyze_pipeline_performance(root):
     """Analyzes performance and data quality for all pipeline stages."""
     console = Console()
     
     # --- Cropping Performance ---
-    if 'crop_runs' in root and 'latest' in root['crop_runs'].attrs:
-        latest_run_name = root['crop_runs'].attrs['latest']
-        latest_run_group = root[f'crop_runs/{latest_run_name}']
-        
-        if 'summary_statistics' in latest_run_group.attrs:
-            stats = latest_run_group.attrs['summary_statistics']
-            crop_table = Table(title="Cropping Performance", box=box.ROUNDED)
-            crop_table.add_column("Metric", style="cyan")
-            crop_table.add_column("Value", style="green")
-            crop_table.add_row("Total Frames", str(stats.get('total_frames', 'N/A')))
-            crop_table.add_row("Successfully Cropped", str(stats.get('frames_cropped', 'N/A')))
-            crop_table.add_row("Success Rate", f"{stats.get('percent_cropped', 0):.2f}%")
-            console.print(crop_table)
+    if 'crop_runs' in root and 'best' in root['crop_runs'].attrs:
+        stats = root['crop_runs'].attrs['best']
+        crop_table = Table(title="Best Cropping Performance", box=box.ROUNDED)
+        crop_table.add_column("Metric", style="cyan")
+        crop_table.add_column("Value", style="green")
+        crop_table.add_row("Run Name", stats.get('run_name', 'N/A').split('/')[-1])
+        crop_table.add_row("Success Rate", f"{stats.get('percent_cropped', 0):.2f}%")
+        console.print(crop_table)
+
+    # --- Refinement Performance ---
+    if 'refine_runs' in root and 'latest' in root['refine_runs'].attrs:
+        latest_run_name = root['refine_runs'].attrs['latest']
+        stats = root[f'refine_runs/{latest_run_name}'].attrs.get('summary_statistics', {})
+        refine_table = Table(title="Refinement Performance (Latest Run)", box=box.ROUNDED)
+        refine_table.add_column("Metric", style="cyan")
+        refine_table.add_column("Value", style="green")
+        refine_table.add_row("Jumps Removed", str(stats.get('jumps_removed', 'N/A')))
+        refine_table.add_row("Valid Crops Remaining", str(stats.get('refined_valid_crops', 'N/A')))
+        refine_table.add_row("Percent Culled", f"{stats.get('percent_culled', 0):.2f}%")
+        console.print(refine_table)
 
     # --- Tracking Performance ---
-    if 'tracking_runs' in root and 'latest' in root['tracking_runs'].attrs:
-        latest_run_name = root['tracking_runs'].attrs['latest']
-        latest_run_group = root[f'tracking_runs/{latest_run_name}']
-        
-        if 'summary_statistics' in latest_run_group.attrs:
-            stats = latest_run_group.attrs['summary_statistics']
-            perf_table = Table(title="Tracking Performance", box=box.ROUNDED)
-            perf_table.add_column("Metric", style="cyan")
-            perf_table.add_column("Value", style="green")
-            
-            perf_table.add_row("Total Frames", str(stats.get('total_frames', 'N/A')))
-            perf_table.add_row("Successfully Tracked", str(stats.get('frames_tracked', 'N/A')))
-            perf_table.add_row("Success Rate", f"{stats.get('percent_tracked', 0):.2f}%")
-            
-            if 'confidence_stats' in stats:
-                conf = stats['confidence_stats']
-                perf_table.add_row("Avg Confidence", f"{conf.get('mean', 0):.3f}")
-
-            console.print(perf_table)
-
-def inspect_coordinate_systems(root):
-    """Inspects coordinate system documentation from the latest tracking run."""
-    console = Console()
-    if 'tracking_runs' not in root or 'latest' not in root['tracking_runs'].attrs:
-        return
-        
-    latest_run = root['tracking_runs'].attrs['latest']
-    coord_group_path = f'tracking_runs/{latest_run}/coordinate_systems'
-    
-    if coord_group_path not in root:
-        return
-        
-    coord_group = root[coord_group_path]
-    console.print("\n[bold]Coordinate Systems Documentation[/bold]")
-    
-    for coord_name, coord_info in coord_group.attrs.items():
-        table = Table(title=f"Coordinate System: {coord_name}", box=box.MINIMAL)
-        table.add_column("Property", style="cyan")
-        table.add_column("Value", style="white")
-        
-        for key, value in coord_info.items():
-            value_str = str(value)
-            if isinstance(value, list) and len(value) > 3:
-                value_str = f"{len(value)} columns"
-            table.add_row(key, value_str)
-        
-        console.print(table)
+    if 'tracking_runs' in root and 'best' in root['tracking_runs'].attrs:
+        stats = root['tracking_runs'].attrs['best']
+        perf_table = Table(title="Best Tracking Performance", box=box.ROUNDED)
+        perf_table.add_column("Metric", style="cyan")
+        perf_table.add_column("Value", style="green")
+        perf_table.add_row("Run Name", stats.get('run_name', 'N/A').split('/')[-1])
+        perf_table.add_row("Success Rate", f"{stats.get('percent_tracked', 0):.2f}%")
+        if 'confidence_stats' in stats:
+            perf_table.add_row("Avg Confidence", f"{stats['confidence_stats'].get('mean', 0):.3f}")
+        console.print(perf_table)
 
 # --- Core Inspection Functions ---
 def print_attributes_table(console: Console, title: str, attributes: zarr.attrs.Attributes, root_group: zarr.hierarchy.Group):
@@ -166,22 +122,17 @@ def print_attributes_table(console: Console, title: str, attributes: zarr.attrs.
                 frames_key = 'frames_cropped' if 'frames_cropped' in value else 'frames_tracked'
                 stats_str = f"Success: {value.get(frames_key, 'N/A')}/{value.get('total_frames', 'N/A')} ({value.get(rate_key, 0):.1f}%)"
                 table.add_row(key, f"[green]{stats_str}[/green]")
-            
-            # --- MODIFICATION: Display parameters for the 'best' run ---
             elif key == 'best':
                 run_name = value.get('run_name', 'N/A')
                 success_rate = value.get('percent_cropped', value.get('percent_tracked', 0))
-                
                 best_str = f"Run: '{run_name.split('/')[-1]}' | Success: {success_rate:.2f}%"
                 
-                # Now, try to get the parameters from that specific run
                 if run_name in root_group:
                     best_run_group = root_group[run_name]
                     if 'parameters' in best_run_group.attrs:
                         params = best_run_group.attrs['parameters']
                         params_str = json.dumps(params, indent=2)
                         best_str += f"\n[dim]Parameters:[/dim]\n{params_str}"
-                
                 table.add_row(key, f"[bold green]{best_str}[/bold green]")
             else:
                 table.add_row(key, json.dumps(value, indent=2))
@@ -190,13 +141,10 @@ def print_attributes_table(console: Console, title: str, attributes: zarr.attrs.
 
     console.print(table)
 
-
 def print_datasets_summary(console: Console, title: str, group: zarr.hierarchy.Group):
     """Creates a summary table for datasets in a group."""
     datasets = {name: obj for name, obj in group.items() if isinstance(obj, zarr.core.Array)}
-
-    if not datasets:
-        return
+    if not datasets: return
 
     table = Table(title=title, box=box.ROUNDED, show_header=True, header_style="bold magenta")
     table.add_column("Dataset Name", style="cyan", no_wrap=True)
@@ -208,18 +156,13 @@ def print_datasets_summary(console: Console, title: str, group: zarr.hierarchy.G
 
     for name, dset in datasets.items():
         extra_info = ""
-        if name == 'tracking_results':
-            if 'column_names' in dset.attrs:
-                col_count = len(dset.attrs['column_names'])
-                extra_info = f"Multi-scale ({col_count} cols)" if col_count >= 20 else f"Single-scale ({col_count} cols)"
-        elif name in ['images_full', 'images_ds']:
-            extra_info = "Video data"
-        elif name == 'roi_images':
-            extra_info = "Fish crops"
-        elif 'coordinates' in name:
-            extra_info = "ROI coordinates"
-        elif name == 'effective_thresholds':
-            extra_info = "Adaptive thresholds used"
+        if 'tracking_results' in name: extra_info = "Final fish keypoints"
+        elif 'images' in name: extra_info = "Video frames"
+        elif 'roi_images' in name: extra_info = "Cropped fish images"
+        elif 'coordinates' in name: extra_info = "ROI coordinates"
+        elif 'effective_thresholds' in name: extra_info = "Adaptive thresholds"
+        elif 'refined' in name: extra_info = "Smoothed coordinates"
+        elif 'distances' in name: extra_info = "Frame-to-frame jumps"
 
         table.add_row(
             name, str(dset.shape), str(dset.chunks), str(dset.dtype),
@@ -244,14 +187,10 @@ def inspect_zarr_archive(zarr_path: str):
     console = Console()
     console.rule(f"[bold]Zarr Inspector: {os.path.abspath(zarr_path)}[/bold]", style="bold white")
 
-    if not os.path.exists(zarr_path):
-        console.print(f"\n[bold red]Error:[/bold red] Path does not exist: '{zarr_path}'")
-        return
-        
     try:
         root = zarr.open(zarr_path, mode='r')
     except Exception as e:
-        console.print(f"\n[bold red]Error:[/bold red] Could not open Zarr archive at '{zarr_path}'. Details: {e}")
+        console.print(f"\n[bold red]Error:[/bold red] Could not open Zarr archive: {e}")
         return
 
     data_format, column_names = detect_data_format(root)
@@ -266,16 +205,20 @@ def inspect_zarr_archive(zarr_path: str):
     console.rule(style="white")
 
     inspect_yolo_readiness(root, data_format)
-    analyze_pipeline_performance(root, column_names)
-    inspect_coordinate_systems(root)
+    analyze_pipeline_performance(root)
 
     groups_to_inspect = [('/', root)] + sorted([(name, grp) for name, grp in root.groups()])
     for name, group in groups_to_inspect:
         title = f"Inspecting Group: '{name}'"
         console.print(f"\n\n[bold white on blue] {title.center(80)} [/bold white on blue]")
-        # --- MODIFICATION: Pass the root group to the function ---
         print_attributes_table(console, f"Attributes for Group '{name}'", group.attrs, root)
-        print_datasets_summary(console, f"Datasets in Group '{name}'", group)
+        
+        # If inspecting a run group, also show its datasets
+        if name.endswith('_runs'):
+            for run_name, run_group in group.items():
+                print_datasets_summary(console, f"Datasets in Run '{run_name}'", run_group)
+        else:
+             print_datasets_summary(console, f"Datasets in Group '{name}'", group)
 
 def main():
     parser = argparse.ArgumentParser(

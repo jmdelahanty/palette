@@ -17,14 +17,15 @@ crop:
   ds_thresh: 27
   se1_radius: 1
   se4_radius: 6
-  proximity_check:
-    # Max distance (as fraction of image width) fish can move between frames
-    max_distance_norm: 0.1
   dish_mask:
     shape: 'circle'
-    hough_param1: 10
-    hough_param2: 200
-    radius_adj: 5
+    hough_param1: 88 # Higher threshold to internal Canny edge detector through gradient detection
+    hough_param2: 188 # Accumulator threshold for circle detection; basically how "confident" you can be that the object detected is a circle
+    radius_adj: 4 # Radius adjustment for detected circles; positive values increase radius, negative decrease
+
+refine:
+  # Max distance (as fraction of image width) detections can move to be considered valid
+  max_jump_norm: 0.1
 
 
 track:
