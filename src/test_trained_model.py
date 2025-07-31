@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Test Trained Model on Extracted Frames
-Run your trained YOLO model on extracted frames and create annotated results.
+Test Trained Model on Zarr Dataset
+Run your trained YOLO model on frames from a Zarr dataset and create annotated results.
 """
 
 import cv2
@@ -12,21 +12,23 @@ from ultralytics import YOLO
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from tqdm import tqdm
+import zarr
 
-def test_model_on_frames(model_path, frames_dir, output_dir, confidence=0.25, save_annotated=True):
+def test_model_on_zarr(model_path, zarr_path, output_dir, confidence=0.25, save_annotated=True, max_frames=None):
     """
-    Test trained YOLO model on extracted frames.
+    Test trained YOLO model on frames from a Zarr dataset.
     
     Args:
         model_path: Path to trained model (best.pt or last.pt)
-        frames_dir: Directory containing extracted frames
+        zarr_path: Path to the Zarr file
         output_dir: Directory to save results
         confidence: Confidence threshold for detections
         save_annotated: Whether to save annotated images
+        max_frames: Optional limit on the number of frames to test
     """
     
     model_path = Path(model_path)
-    frames_dir = Path(frames_dir)
+    zarr_path = Path(zarr_path)
     output_dir = Path(output_dir)
     
     # Validate inputs
@@ -34,8 +36,11 @@ def test_model_on_frames(model_path, frames_dir, output_dir, confidence=0.25, sa
         print(f"❌ Model not found: {model_path}")
         return False
     
-    if not frames_dir.exists():
-        print(f"❌ Frames directory not found: {frames_dir}")
+    try:
+        zarr_root = zarr.open(str(zarr_path), mode='r')
+        images_array = zarr_root['raw_video/images_ds']
+    except Exception as e:
+        print(f"❌ Error opening Zarr file or finding images_ds: {e}")
         return False
     
     # Create output directory
@@ -50,36 +55,22 @@ def test_model_on_frames(model_path, frames_dir, output_dir, confidence=0.25, sa
         print(f"❌ Failed to load model: {e}")
         return False
     
-    # Find image files
-    image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
-    image_files = []
-    for ext in image_extensions:
-        image_files.extend(frames_dir.glob(f'*{ext}'))
-        image_files.extend(frames_dir.glob(f'*{ext.upper()}'))
-    
-    image_files = sorted(image_files)
-    
-    if not image_files:
-        print(f"❌ No image files found in {frames_dir}")
-        return False
-    
-    print(f"🖼️  Found {len(image_files)} images to process")
+    num_frames_to_process = min(max_frames, images_array.shape[0]) if max_frames else images_array.shape[0]
+    print(f"🖼️  Found {images_array.shape[0]} frames. Processing the first {num_frames_to_process}.")
     
     # Process each image
     results_summary = []
     
-    for image_path in tqdm(image_files, desc="Processing images"):
+    for frame_idx in tqdm(range(num_frames_to_process), desc="Processing frames"):
         try:
+            # Load image from Zarr and prepare for YOLO
+            image_gray = images_array[frame_idx]
+            image_bgr = cv2.cvtColor(image_gray, cv2.COLOR_GRAY2BGR)
+
             # Run inference
-            results = model.predict(str(image_path), conf=confidence, verbose=False)
-            
-            if len(results) == 0:
-                print(f"⚠️  No results for {image_path.name}")
-                continue
-            
+            results = model.predict(image_bgr, conf=confidence, verbose=False)
             result = results[0]
             
-            # Count detections
             num_detections = len(result.boxes) if result.boxes is not None else 0
             
             # Get detection info
@@ -97,132 +88,71 @@ def test_model_on_frames(model_path, frames_dir, output_dir, confidence=0.25, sa
                     })
             
             results_summary.append({
-                'image': image_path.name,
+                'frame_index': frame_idx,
                 'detections': num_detections,
                 'boxes': detections
             })
             
             # Save annotated image if requested
             if save_annotated and num_detections > 0:
-                # Read original image
-                image = cv2.imread(str(image_path))
-                annotated_image = image.copy()
-                
-                # Draw detections
-                for detection in detections:
-                    x1, y1, x2, y2 = detection['bbox']
-                    conf = detection['confidence']
-                    
-                    # Draw bounding box
-                    cv2.rectangle(annotated_image, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                    
-                    # Add confidence label
-                    label = f"Fish {conf:.3f}"
-                    label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-                    
-                    # Background for text
-                    cv2.rectangle(annotated_image, 
-                                (int(x1), int(y1) - label_size[1] - 10),
-                                (int(x1) + label_size[0], int(y1)), 
-                                (0, 255, 0), -1)
-                    
-                    # Text
-                    cv2.putText(annotated_image, label, 
-                              (int(x1), int(y1) - 5), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-                
-                # Save annotated image
-                annotated_path = output_dir / f"annotated_{image_path.name}"
+                annotated_image = result.plot() # Use ultralytics' plotting function
+                annotated_path = output_dir / f"annotated_frame_{frame_idx:06d}.jpg"
                 cv2.imwrite(str(annotated_path), annotated_image)
             
         except Exception as e:
-            print(f"❌ Error processing {image_path.name}: {e}")
+            print(f"❌ Error processing frame {frame_idx}: {e}")
     
     # Print summary
     print(f"\n📊 Detection Summary:")
-    print(f"📁 Processed: {len(image_files)} images")
+    print(f"📁 Processed: {num_frames_to_process} frames")
     
     total_detections = sum(r['detections'] for r in results_summary)
     images_with_detections = sum(1 for r in results_summary if r['detections'] > 0)
     
     print(f"🎯 Total detections: {total_detections}")
-    print(f"🖼️  Images with detections: {images_with_detections}/{len(image_files)} ({images_with_detections/len(image_files)*100:.1f}%)")
+    print(f"🖼️  Images with detections: {images_with_detections}/{num_frames_to_process} ({images_with_detections/num_frames_to_process*100:.1f}%)")
     
     if total_detections > 0:
-        confidences = []
-        for r in results_summary:
-            for box in r['boxes']:
-                confidences.append(box['confidence'])
-        
-        avg_conf = np.mean(confidences)
-        min_conf = np.min(confidences)
-        max_conf = np.max(confidences)
-        
-        print(f"📈 Confidence scores - Avg: {avg_conf:.3f}, Min: {min_conf:.3f}, Max: {max_conf:.3f}")
+        confidences = [box['confidence'] for r in results_summary for box in r['boxes']]
+        print(f"📈 Confidence scores - Avg: {np.mean(confidences):.3f}, Min: {np.min(confidences):.3f}, Max: {np.max(confidences):.3f}")
     
     # Save detailed results
     results_file = output_dir / 'detection_results.txt'
     with open(results_file, 'w') as f:
-        f.write("Detection Results Summary\n")
-        f.write("=" * 50 + "\n\n")
-        
+        f.write("Detection Results Summary\n" + "=" * 50 + "\n\n")
         for result in results_summary:
-            f.write(f"Image: {result['image']}\n")
-            f.write(f"Detections: {result['detections']}\n")
-            
+            f.write(f"Frame: {result['frame_index']}\n Detections: {result['detections']}\n")
             if result['boxes']:
                 for i, box in enumerate(result['boxes']):
                     x1, y1, x2, y2 = box['bbox']
-                    f.write(f"  Detection {i+1}: bbox=({x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}), conf={box['confidence']:.3f}\n")
-            
+                    f.write(f"  - Detection {i+1}: bbox=({x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}), conf={box['confidence']:.3f}\n")
             f.write("\n")
     
     print(f"💾 Detailed results saved to: {results_file}")
     
-    # Show some example results
-    print(f"\n🖼️  Example results:")
-    for result in results_summary[:5]:
-        if result['detections'] > 0:
-            print(f"   {result['image']}: {result['detections']} fish detected")
-    
     return True
 
-def create_detection_grid(frames_dir, output_dir, max_images=16):
+def create_detection_grid(output_dir, max_images=16):
     """
-    Create a grid showing original and annotated images side by side.
+    Create a grid showing annotated images.
     """
-    frames_dir = Path(frames_dir)
     output_dir = Path(output_dir)
-    
-    # Find original and annotated images
-    original_images = sorted(frames_dir.glob('frame_*.jpg'))
     annotated_images = sorted(output_dir.glob('annotated_*.jpg'))
     
     if not annotated_images:
         print("⚠️  No annotated images found for grid creation")
         return
     
-    # Select subset for grid
     selected_annotated = annotated_images[:max_images]
     
-    # Calculate grid dimensions
     n_images = len(selected_annotated)
     cols = int(np.ceil(np.sqrt(n_images)))
     rows = int(np.ceil(n_images / cols))
     
     fig, axes = plt.subplots(rows, cols, figsize=(20, 20))
-    if rows == 1 and cols == 1:
-        axes = [axes]
-    elif rows == 1 or cols == 1:
-        axes = axes.flatten()
-    else:
-        axes = axes.flatten()
+    axes = np.array(axes).flatten()
     
     for i, annotated_path in enumerate(selected_annotated):
-        if i >= len(axes):
-            break
-        
-        # Load annotated image
         img = cv2.imread(str(annotated_path))
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
@@ -230,7 +160,6 @@ def create_detection_grid(frames_dir, output_dir, max_images=16):
         axes[i].set_title(f'{annotated_path.name}', fontsize=10)
         axes[i].axis('off')
     
-    # Hide unused subplots
     for i in range(n_images, len(axes)):
         axes[i].axis('off')
     
@@ -244,43 +173,39 @@ def create_detection_grid(frames_dir, output_dir, max_images=16):
     print(f"📊 Detection grid saved to: {grid_path}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Test trained YOLO model on extracted frames")
+    parser = argparse.ArgumentParser(description="Test trained YOLO model on a Zarr dataset")
     
-    parser.add_argument("model_path", type=str, help="Path to trained model (e.g., runs/detect/train16/weights/best.pt)")
-    parser.add_argument("frames_dir", type=str, help="Directory containing extracted frames")
+    parser.add_argument("model_path", type=str, help="Path to trained model (e.g., runs/detect/train/weights/best.pt)")
+    parser.add_argument("zarr_path", type=str, help="Path to the Zarr dataset file")
     parser.add_argument("output_dir", type=str, help="Directory to save results")
     
-    parser.add_argument("--confidence", type=float, default=0.25, 
-                       help="Confidence threshold for detections")
-    parser.add_argument("--no-annotated", action='store_true',
-                       help="Don't save annotated images")
-    parser.add_argument("--create-grid", action='store_true',
-                       help="Create detection grid visualization")
+    parser.add_argument("--confidence", type=float, default=0.25, help="Confidence threshold for detections")
+    parser.add_argument("--no-annotated", action='store_true', help="Don't save annotated images")
+    parser.add_argument("--create-grid", action='store_true', help="Create detection grid visualization")
+    parser.add_argument("--max-frames", type=int, default=None, help="Maximum number of frames to test from the start of the video")
     
     args = parser.parse_args()
     
-    print(f"🚀 Testing Trained Fish Detection Model")
+    print(f"🚀 Testing Trained Fish Detection Model on Zarr")
     print(f"🤖 Model: {args.model_path}")
-    print(f"🖼️  Frames: {args.frames_dir}")
+    print(f"📦 Zarr Dataset: {args.zarr_path}")
     print(f"💾 Output: {args.output_dir}")
     print(f"🎯 Confidence: {args.confidence}")
     
-    # Test model
-    success = test_model_on_frames(
+    success = test_model_on_zarr(
         args.model_path,
-        args.frames_dir, 
+        args.zarr_path, 
         args.output_dir,
         args.confidence,
-        not args.no_annotated
+        not args.no_annotated,
+        args.max_frames
     )
     
     if success:
         print(f"\n✅ Model testing completed!")
-        
         if args.create_grid:
             print(f"📊 Creating detection grid...")
-            create_detection_grid(args.frames_dir, args.output_dir)
-        
+            create_detection_grid(args.output_dir)
         print(f"\n🎉 Results available in: {args.output_dir}")
     else:
         print(f"\n❌ Model testing failed")

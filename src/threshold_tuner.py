@@ -26,7 +26,7 @@ def update_frame(val):
     global current_frame
     current_frame = val
 
-# --- NEW: Callbacks for morphology sliders ---
+# --- Callbacks for morphology sliders ---
 def update_ds_se1(val):
     global ds_se1_radius
     ds_se1_radius = val

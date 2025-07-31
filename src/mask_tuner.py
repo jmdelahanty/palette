@@ -6,7 +6,7 @@ import argparse
 # Global variables to store trackbar values
 hough_param1 = 50
 hough_param2 = 30
-# --- NEW: Global for radius adjustment ---
+# Global for radius adjustment
 radius_adjustment = 0
 
 def update_param1(val):
@@ -17,7 +17,7 @@ def update_param2(val):
     global hough_param2
     hough_param2 = max(1, val) # Ensure value is at least 1
 
-# --- NEW: Callback for radius adjustment slider ---
+# --- Callback for radius adjustment slider ---
 def update_radius_adj(val):
     """Callback to handle the radius adjustment slider."""
     global radius_adjustment
@@ -41,8 +41,8 @@ def main(zarr_path):
     # Create trackbars
     cv2.createTrackbar("param1", window_name, hough_param1, 200, update_param1)
     cv2.createTrackbar("param2", window_name, hough_param2, 200, update_param2)
-    # --- NEW: Radius adjustment trackbar ---
-    # We create a trackbar from 0-40 and will offset it by -20 to get a range of [-20, 20]
+    # Radius adjustment trackbar
+    # Create a trackbar from 0-40 and offset it by -20 to get a range of [-20, 20]
     cv2.createTrackbar("Radius Adjust", window_name, radius_adjustment + 20, 40, update_radius_adj)
     
     print("🚀 Starting Dish Mask Tuner...")
@@ -60,7 +60,7 @@ def main(zarr_path):
         if circles is not None:
             circles = np.uint16(np.around(circles))
             for i in circles[0, :]:
-                # --- MODIFICATION: Apply radius adjustment ---
+                # Apply radius adjustment
                 adjusted_radius = int(i[2]) + radius_adjustment
                 
                 # Draw the outer circle with the adjusted radius
@@ -68,7 +68,7 @@ def main(zarr_path):
                 # Draw the center of the circle
                 cv2.circle(display_image, (i[0], i[1]), 2, (0, 0, 255), 3)
         
-        # --- MODIFICATION: Update status text ---
+        # Update status text
         status_text = f"param1={hough_param1}, param2={hough_param2}, radius_adj={radius_adjustment}"
         cv2.putText(display_image, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         

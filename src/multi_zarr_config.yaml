@@ -53,15 +53,14 @@ training_config:
   model_name: yolov8s.pt
 
   # Core hyperparameters
-  epochs: 1
-  batch_size: 16
-  imgsz: 640
-  optimizer: AdamW
-  lr0: 0.002
-  momentum: 0.9
-  weight_decay: 0.0005
-  patience: 50
-  device: '0'
+  epochs: 100 # Number of training epochs
+  batch: 48 # Batch size for training
+  imgsz: 640 # Input image size for training
+  lr0: 0.002 # Initial learning rate
+  momentum: 0.9 # Momentum factor
+  weight_decay: 0.0005 # Weight decay (L2 penalty)
+  patience: 50 # Early stopping patience
+  device: '0' # CUDA device
 
 # ================================================================================
 # Part 3: TRAINING HISTORY & METADATA

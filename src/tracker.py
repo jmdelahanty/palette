@@ -129,12 +129,32 @@ def calculate_multi_scale_bounding_boxes(keypoint_stats, roi_sz, margin_factor=1
     if len(keypoint_stats) < 3: return None
     all_positions = np.array([s.centroid[::-1] for s in keypoint_stats])
     min_pos, max_pos = np.min(all_positions, axis=0), np.max(all_positions, axis=0)
+
+    # Calculate the precise center based on keypoints
     center_roi_px = (min_pos + max_pos) / 2.0
-    extent_roi_px = np.maximum((max_pos - min_pos) * margin_factor, min_bbox_size * np.array(roi_sz[::-1]))
     center_roi_norm = center_roi_px / np.array(roi_sz[::-1])
-    extent_roi_norm = extent_roi_px / np.array(roi_sz[::-1])
+    
+    # Calculate tight bounding box based on actual keypoint positions
+    # Instead of using full ROI size, calculate based on keypoint spread
+    keypoint_extent_px = max_pos - min_pos
+    
+    # Add some margin around the keypoints (default 50% margin)
+    margin_px = keypoint_extent_px * (margin_factor - 1.0)
+    tight_extent_px = keypoint_extent_px + margin_px
+    
+    # Ensure minimum bounding box size (5% of ROI by default)
+    min_size_px = np.array(roi_sz[::-1]) * min_bbox_size
+    tight_extent_px = np.maximum(tight_extent_px, min_size_px)
+    
+    # Convert to normalized coordinates
+    extent_roi_norm = tight_extent_px / np.array(roi_sz[::-1])
+    
+    # Ensure the bounding box doesn't exceed ROI boundaries
+    extent_roi_norm = np.minimum(extent_roi_norm, [1.0, 1.0])
+
     return {
-        'center_roi_norm': center_roi_norm, 'extent_roi_norm': extent_roi_norm,
+        'center_roi_norm': center_roi_norm, 
+        'extent_roi_norm': extent_roi_norm,
         'bladder_roi_norm': all_positions[0] / np.array(roi_sz[::-1]),
         'eye_l_roi_norm': all_positions[1] / np.array(roi_sz[::-1]),
         'eye_r_roi_norm': all_positions[2] / np.array(roi_sz[::-1]),
@@ -316,7 +336,7 @@ def run_background_stage(zarr_path, params, console):
     console.print(f"Background stage completed in [green]{bg_group.attrs['duration_seconds']:.2f}[/green] seconds.")
 
 @delayed
-def crop_chunk_delayed(zarr_path, chunk_slice, roi_sz, ds_thresh, se1_radius, se4_radius, dish_mask, max_distance_norm):
+def crop_chunk_delayed(zarr_path, chunk_slice, roi_sz, ds_thresh, se1_radius, se4_radius, dish_mask):
     se1, se4 = disk(se1_radius), disk(se4_radius)
     with zarr.open(zarr_path, mode='r') as root:
         images_ds_chunk = root['raw_video/images_ds'][chunk_slice]
@@ -329,21 +349,16 @@ def crop_chunk_delayed(zarr_path, chunk_slice, roi_sz, ds_thresh, se1_radius, se
     chunk_rois = np.zeros((chunk_len, *roi_sz), dtype='uint8')
     chunk_coords_full = np.full((chunk_len, 2), -1, dtype='i4')
     chunk_coords_ds = np.full((chunk_len, 2), -1, dtype='i4')
-    chunk_bbox_norms = np.full((chunk_len, 2), np.nan, dtype='f8')
+    chunk_bbox_norms = np.full((chunk_len, 4), np.nan, dtype='f8')
     chunk_thresholds = np.full(chunk_len, -1, dtype='i2')
-
-    # Variable to track the last known position within this chunk
-    last_known_centroid_norm = None
 
     for i in range(chunk_len):
         try:
             diff_ds = np.clip(background_ds.astype(np.int16) - images_ds_chunk[i].astype(np.int16), 0, 255).astype(np.uint8)
             
-            # Apply the pre-calculated dish mask
             if dish_mask is not None:
                 diff_ds[dish_mask == 0] = 0
 
-            # Adaptive Thresholding Loop
             current_thresh = ds_thresh
             ds_stat = []
             for _ in range(5):
@@ -356,29 +371,35 @@ def crop_chunk_delayed(zarr_path, chunk_slice, roi_sz, ds_thresh, se1_radius, se
             
             if not ds_stat: continue
 
-            # Proximity Check Logic
-            chosen_blob = max(ds_stat, key=lambda r: r.area) # Default to largest
-            if last_known_centroid_norm is not None and len(ds_stat) > 1:
-                centroids_norm = [np.array(s.centroid)[::-1] / np.array(ds_img_shape) for s in ds_stat]
-                distances = [np.linalg.norm(c - last_known_centroid_norm) for c in centroids_norm]
-                closest_idx = np.argmin(distances)
-                
-                if distances[closest_idx] < max_distance_norm:
-                    chosen_blob = ds_stat[closest_idx]
+            # Logic is simplified to just get the largest blob ---
+            chosen_blob = max(ds_stat, key=lambda r: r.area)
 
-            ds_centroid_norm = np.array(chosen_blob.centroid)[::-1] / np.array(ds_img_shape)
-            last_known_centroid_norm = ds_centroid_norm # Update for next frame
+            # Calculate and store the full bounding box
+            min_r, min_c, max_r, max_c = chosen_blob.bbox
+            
+            center_y, center_x = (min_r + max_r) / 2, (min_c + max_c) / 2
+            height, width = max_r - min_r, max_c - min_c
+            
+            center_norm = np.array([center_x / ds_img_shape[1], center_y / ds_img_shape[0]])
+            size_norm = np.array([width / ds_img_shape[1], height / ds_img_shape[0]])
 
-            # ROI Calculation (uses the chosen blob's centroid)
-            full_centroid_px = np.round(ds_centroid_norm * np.array(full_img_shape)).astype(int)
+            chunk_bbox_norms[i] = [*center_norm, *size_norm]
+
+            # ROI Calculation 
+            full_centroid_px = np.round(center_norm * np.array(full_img_shape)[::-1]).astype(int)
             roi_x1_full, roi_y1_full = full_centroid_px[0] - roi_sz[1] // 2, full_centroid_px[1] - roi_sz[0] // 2
-            roi_size_ds = np.array(roi_sz) * (ds_img_shape[0] / full_img_shape[0])
-            roi_x1_ds, roi_y1_ds = int(full_centroid_px[0] * (ds_img_shape[1]/full_img_shape[1])) - int(roi_size_ds[1] // 2), int(full_centroid_px[1] * (ds_img_shape[0]/full_img_shape[0])) - int(roi_size_ds[0] // 2)
             roi = images_full_chunk[i][roi_y1_full:roi_y1_full+roi_sz[0], roi_x1_full:roi_x1_full+roi_sz[1]]
             
             if roi.shape != tuple(roi_sz): continue
             
-            chunk_rois[i], chunk_coords_full[i], chunk_coords_ds[i], chunk_bbox_norms[i] = roi, (roi_x1_full, roi_y1_full), (roi_x1_ds, roi_y1_ds), ds_centroid_norm
+            roi_size_ds = np.array(roi_sz) * (ds_img_shape[0] / full_img_shape[0])
+            roi_x1_ds = int(full_centroid_px[0] * (ds_img_shape[1]/full_img_shape[1])) - int(roi_size_ds[1] // 2)
+            roi_y1_ds = int(full_centroid_px[1] * (ds_img_shape[0]/full_img_shape[0])) - int(roi_size_ds[0] // 2)
+            
+            chunk_rois[i] = roi
+            chunk_coords_full[i] = (roi_x1_full, roi_y1_full)
+            chunk_coords_ds[i] = (roi_x1_ds, roi_y1_ds)
+
         except Exception: 
             continue
     
@@ -393,16 +414,16 @@ def run_crop_stage(zarr_path, scheduler_name, params, console):
     
     crop_params = params['crop']
     crop_group = get_run_group(root, 'crop', console)
-    # --- MODIFICATION: Save all parameters used for this run ---
+    latest_bg_run = root['background_runs'].attrs['latest']
+    
     crop_group.attrs.update({
         'crop_timestamp_utc': datetime.now(timezone.utc).isoformat(), 
         'dask_scheduler': scheduler_name, 
-        'parameters': crop_params
+        'parameters': crop_params,
+        'source_background_run': latest_bg_run
     })
     
-    # --- Automatically detect the dish mask ---
     console.print("Detecting dish from background model...")
-    latest_bg_run = root['background_runs'].attrs['latest']
     background_ds = root[f'background_runs/{latest_bg_run}/background_ds'][:]
     
     mask_params = crop_params.get('dish_mask', {})
@@ -417,7 +438,6 @@ def run_crop_stage(zarr_path, scheduler_name, params, console):
                                    minRadius=0, maxRadius=0)
         if circles is not None:
             circle = np.uint16(np.around(circles[0, 0, :]))
-            # Apply radius adjustment from config
             radius = circle[2] + mask_params.get('radius_adj', 0)
             mask = np.zeros(ds_img_shape, dtype=np.uint8)
             cv2.circle(mask, (circle[0], circle[1]), radius, 255, -1)
@@ -437,30 +457,26 @@ def run_crop_stage(zarr_path, scheduler_name, params, console):
         console.print(f"  [yellow]⚠️[/yellow]  Could not detect a {dish_shape} dish. Proceeding without a mask.")
         mask = np.ones(ds_img_shape, dtype=np.uint8) * 255
 
-    # --- Setup for Dask tasks ---
     num_images = root['raw_video/images_ds'].shape[0]
     crop_chunk_size = min(params['import']['chunk_size'], num_images)
     
-    # Create Zarr datasets for the output
     roi_images = crop_group.create_dataset('roi_images', shape=(num_images, *crop_params['roi_sz']), chunks=(crop_chunk_size, None, None), dtype='uint8', overwrite=True)
     roi_coordinates_full = crop_group.create_dataset('roi_coordinates_full', shape=(num_images, 2), chunks=(crop_chunk_size * 4, None), dtype='i4', overwrite=True)
     roi_coordinates_ds = crop_group.create_dataset('roi_coordinates_ds', shape=(num_images, 2), chunks=(crop_chunk_size * 4, None), dtype='i4', overwrite=True)
-    bbox_norm_coords = crop_group.create_dataset('bbox_norm_coords', shape=(num_images, 2), chunks=(crop_chunk_size * 4, None), dtype='f8', overwrite=True)
+    bbox_norm_coords = crop_group.create_dataset('bbox_norm_coords', shape=(num_images, 4), chunks=(crop_chunk_size * 4, None), dtype='f8', overwrite=True)
     effective_thresholds = crop_group.create_dataset('effective_thresholds', shape=(num_images,), chunks=(crop_chunk_size * 4,), dtype='i2', overwrite=True)
     
     roi_coordinates_full[:], roi_coordinates_ds[:], bbox_norm_coords[:] = -1, -1, np.nan
     chunk_slices = [slice(i, min(i + crop_chunk_size, num_images)) for i in range(0, num_images, crop_chunk_size)]
     
-    max_dist = crop_params.get('proximity_check', {}).get('max_distance_norm', 0.15)
-    console.print(f"Creating [yellow]{len(chunk_slices)}[/yellow] Dask tasks with proximity checks and dish masking...")
+    console.print(f"Creating [yellow]{len(chunk_slices)}[/yellow] Dask tasks with dish masking...")
 
     delayed_tasks = [crop_chunk_delayed(zarr_path, s, 
                                         roi_sz=tuple(crop_params['roi_sz']), 
                                         ds_thresh=crop_params['ds_thresh'], 
                                         se1_radius=crop_params['se1_radius'], 
                                         se4_radius=crop_params['se4_radius'],
-                                        dish_mask=mask,
-                                        max_distance_norm=max_dist) for s in chunk_slices]
+                                        dish_mask=mask) for s in chunk_slices]
     
     with ProgressBar(): results = dask.compute(*delayed_tasks)
     console.print("Writing results to Zarr...")
@@ -469,7 +485,6 @@ def run_crop_stage(zarr_path, scheduler_name, params, console):
         roi_images[slc], roi_coordinates_full[slc], roi_coordinates_ds[slc], bbox_norm_coords[slc] = rois, coords_full, coords_ds, bboxes
         effective_thresholds[slc] = thresholds
 
-    # --- Final Summary and "Best" Run Logic ---
     successful_crops = np.sum(effective_thresholds[:] > -1)
     percent_cropped = (successful_crops / num_images) * 100 if num_images > 0 else 0
     summary_stats = {'total_frames': num_images, 'frames_cropped': successful_crops, 'percent_cropped': round(percent_cropped, 2)}
@@ -489,44 +504,82 @@ def run_crop_stage(zarr_path, scheduler_name, params, console):
 def track_chunk_delayed(zarr_path, chunk_slice, roi_sz, roi_thresh, se1_radius, se2_radius):
     se1, se2 = disk(se1_radius), disk(se2_radius)
     with zarr.open(zarr_path, mode='r') as root:
+        # The tracking stage always uses the images and coordinates from the crop run
         latest_crop_run = root['crop_runs'].attrs['latest']
-        latest_bg_run = root['background_runs'].attrs['latest']
         rois_chunk = root[f'crop_runs/{latest_crop_run}/roi_images'][chunk_slice]
         coords_full_chunk = root[f'crop_runs/{latest_crop_run}/roi_coordinates_full'][chunk_slice]
         coords_ds_chunk = root[f'crop_runs/{latest_crop_run}/roi_coordinates_ds'][chunk_slice]
+
+        # Use the refined bounding box centers if available, otherwise fall back to crop
+        if 'refine_runs' in root and 'latest' in root['refine_runs'].attrs:
+            latest_refine_run = root['refine_runs'].attrs['latest']
+            bbox_coords_chunk = root[f'refine_runs/{latest_refine_run}/refined_bbox_norm_coords'][chunk_slice]
+        else:
+            bbox_coords_chunk = root[f'crop_runs/{latest_crop_run}/bbox_norm_coords'][chunk_slice]
+
+        latest_bg_run = root['background_runs'].attrs['latest']
         background_full = root[f'background_runs/{latest_bg_run}/background_full'][:]
+        
     chunk_len = rois_chunk.shape[0]
     chunk_results = np.full((chunk_len, 20), np.nan, dtype='f8')
+    
     for i in range(chunk_len):
         try:
+            # Start by assuming the crop/refined bbox is the result
+            # This ensures that even if keypoint tracking fails, we still have a valid bounding box.
+            initial_bbox = bbox_coords_chunk[i]
+            if not np.isnan(initial_bbox[0]):
+                # Columns 7, 8, 9, 10 are for the downsampled bbox (x, y, w, h)
+                chunk_results[i, 7:11] = initial_bbox
+            else:
+                # If the crop/refine stage failed for this frame, skip it entirely.
+                continue
+
+            # Now, attempt to find keypoints to get a more precise result
             roi = rois_chunk[i]
-            if np.all(roi == 0): continue
-            coords_full, coords_ds = coords_full_chunk[i], coords_ds_chunk[i]
-            if coords_full[0] == -1: continue
+            coords_full = coords_full_chunk[i]
+
+            if np.all(roi == 0) or coords_full[0] == -1:
+                continue
+            
             background_roi = background_full[coords_full[1]:coords_full[1]+roi.shape[0], coords_full[0]:coords_full[0]+roi.shape[1]]
             if background_roi.shape != roi.shape: continue
+            
             diff_roi = np.clip(background_roi.astype(np.int16) - roi.astype(np.int16), 0, 255).astype(np.uint8)
             im_roi = erosion(dilation(erosion(diff_roi >= roi_thresh, se1), se2), se1)
             roi_stat = [r for r in regionprops(label(im_roi)) if r.area > 5]
-            if len(roi_stat) < 3: continue
-            keypoint_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
-            pts = np.array([s.centroid[::-1] for s in keypoint_stats])
-            angles, _ = triangle_calculations(pts[0], pts[1], pts[2])
-            kp_idx = np.argsort(angles)
-            eye_mean = np.mean(pts[kp_idx[1:3]], axis=0)
-            head_vec = eye_mean - pts[kp_idx[0]]
-            heading = np.rad2deg(np.arctan2(-head_vec[1], head_vec[0]))
-            R = np.array([[np.cos(np.deg2rad(heading)), -np.sin(np.deg2rad(heading))], [np.sin(np.deg2rad(heading)), np.cos(np.deg2rad(heading))]])
-            rotpts = (pts - eye_mean) @ R.T
-            eye_r_idx, eye_l_idx = (kp_idx[1], kp_idx[2]) if rotpts[kp_idx[1], 1] > rotpts[kp_idx[2], 1] else (kp_idx[2], kp_idx[1])
-            ordered_stats = [keypoint_stats[kp_idx[0]], keypoint_stats[eye_l_idx], keypoint_stats[eye_r_idx]]
-            bbox_data = calculate_multi_scale_bounding_boxes(ordered_stats, roi_sz)
-            if bbox_data is None: continue
-            multi_scale_data = transform_bbox_to_image_scales(bbox_data, coords_full, coords_ds, tuple(roi_sz))
-            if multi_scale_data is None: continue
-            confidence = min(1.0, np.mean([s.area for s in ordered_stats]) / 100.0)
-            chunk_results[i, :] = [heading, *bbox_data['bladder_roi_norm'], *bbox_data['eye_l_roi_norm'], *bbox_data['eye_r_roi_norm'], *multi_scale_data['ds_scale']['center_norm'], *multi_scale_data['ds_scale']['extent_norm'], *multi_scale_data['full_scale']['center_norm'], *multi_scale_data['full_scale']['extent_norm'], *coords_full, *coords_ds, confidence]
-        except Exception: continue
+            
+            # --- If keypoints are found, overwrite the initial bbox with the more accurate data ---
+            if len(roi_stat) >= 3:
+                keypoint_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
+                pts = np.array([s.centroid[::-1] for s in keypoint_stats])
+                angles, _ = triangle_calculations(pts[0], pts[1], pts[2])
+                kp_idx = np.argsort(angles)
+                eye_mean = np.mean(pts[kp_idx[1:3]], axis=0)
+                head_vec = eye_mean - pts[kp_idx[0]]
+                heading = np.rad2deg(np.arctan2(-head_vec[1], head_vec[0]))
+                
+                R = np.array([[np.cos(np.deg2rad(heading)), -np.sin(np.deg2rad(heading))], [np.sin(np.deg2rad(heading)), np.cos(np.deg2rad(heading))]])
+                rotpts = (pts - eye_mean) @ R.T
+                eye_r_idx, eye_l_idx = (kp_idx[1], kp_idx[2]) if rotpts[kp_idx[1], 1] > rotpts[kp_idx[2], 1] else (kp_idx[2], kp_idx[1])
+                ordered_stats = [keypoint_stats[kp_idx[0]], keypoint_stats[eye_l_idx], keypoint_stats[eye_r_idx]]
+                
+                bbox_data = calculate_multi_scale_bounding_boxes(ordered_stats, roi_sz)
+                if bbox_data is None: continue
+                
+                multi_scale_data = transform_bbox_to_image_scales(bbox_data, coords_full, coords_ds_chunk[i], tuple(roi_sz))
+                if multi_scale_data is None: continue
+                
+                confidence = min(1.0, np.mean([s.area for s in ordered_stats]) / 100.0)
+                
+                # Overwrite the initial crop data with the full, precise tracking data
+                chunk_results[i, :] = [heading, *bbox_data['bladder_roi_norm'], *bbox_data['eye_l_roi_norm'], *bbox_data['eye_r_roi_norm'], 
+                                       *multi_scale_data['ds_scale']['center_norm'], *multi_scale_data['ds_scale']['extent_norm'], 
+                                       *multi_scale_data['full_scale']['center_norm'], *multi_scale_data['full_scale']['extent_norm'], 
+                                       *coords_full, *coords_ds_chunk[i], confidence]
+        except Exception:
+            continue
+            
     return chunk_slice, chunk_results
 
 def run_tracking_stage(zarr_path, scheduler_name, params, console):
@@ -534,14 +587,35 @@ def run_tracking_stage(zarr_path, scheduler_name, params, console):
     start_time = time.perf_counter()
     root = zarr.open_group(zarr_path, mode='a')
     if 'crop_runs' not in root: raise ValueError("Crop stage not run.")
+    
     track_params = params['track']
     track_group = get_run_group(root, 'tracking', console)
-    track_group.attrs.update({'tracking_timestamp_utc': datetime.now(timezone.utc).isoformat(), 'dask_scheduler': scheduler_name, 'parameters': track_params})
+    
+    # --- MODIFICATION: Determine and record the source of the data ---
+    if 'refine_runs' in root and 'latest' in root['refine_runs'].attrs:
+        source_run_name = root['refine_runs'].attrs['latest']
+        source_type = 'refine'
+        console.print(f"Using refined data from run: [cyan]{source_run_name}[/cyan]")
+    else:
+        source_run_name = root['crop_runs'].attrs['latest']
+        source_type = 'crop'
+        console.print(f"Using cropped data from run: [cyan]{source_run_name}[/cyan]")
+
+    track_group.attrs.update({
+        'tracking_timestamp_utc': datetime.now(timezone.utc).isoformat(), 
+        'dask_scheduler': scheduler_name, 
+        'parameters': track_params,
+        f'source_{source_type}_run': source_run_name
+    })
+
     num_images = root['raw_video/images_ds'].shape[0]
+    # Use the crop run for chunk size, as it holds the images
     track_chunk_size = root[f"crop_runs/{root['crop_runs'].attrs['latest']}/roi_images"].chunks[0]
+    
     tracking_results = track_group.create_dataset('tracking_results', shape=(num_images, 20), chunks=(track_chunk_size * 4, None), dtype='f8', overwrite=True)
     tracking_results[:] = np.nan
     tracking_results.attrs['column_names'] = ['heading_degrees', 'bladder_x_roi_norm', 'bladder_y_roi_norm', 'eye_l_x_roi_norm', 'eye_l_y_roi_norm', 'eye_r_x_roi_norm', 'eye_r_y_roi_norm', 'bbox_x_norm_ds', 'bbox_y_norm_ds', 'bbox_width_norm_ds', 'bbox_height_norm_ds', 'bbox_x_norm_full', 'bbox_y_norm_full', 'bbox_width_norm_full', 'bbox_height_norm_full', 'roi_x1_full', 'roi_y1_full', 'roi_x1_ds', 'roi_y1_ds', 'confidence_score']
+    
     coord_systems = track_group.create_group('coordinate_systems')
     coord_systems.attrs.update({
         'roi_normalized': {'description': 'Coordinates normalized to ROI size (e.g. 320x320)', 'range': [0.0, 1.0], 'columns': ['bladder_x_roi_norm', 'bladder_y_roi_norm', 'eye_l_x_roi_norm', 'eye_l_y_roi_norm', 'eye_r_x_roi_norm', 'eye_r_y_roi_norm']},
@@ -549,26 +623,109 @@ def run_tracking_stage(zarr_path, scheduler_name, params, console):
         'full_normalized': {'description': 'Coordinates normalized to full resolution image (4512x4512)', 'range': [0.0, 1.0], 'columns': ['bbox_x_norm_full', 'bbox_y_norm_full', 'bbox_width_norm_full', 'bbox_height_norm_full']},
         'pixel_coordinates': {'description': 'ROI positions in pixel coordinates', 'columns': ['roi_x1_full', 'roi_y1_full', 'roi_x1_ds', 'roi_y1_ds']}
     })
+    
     chunk_slices = [slice(i, min(i + track_chunk_size, num_images)) for i in range(0, num_images, track_chunk_size)]
     console.print(f"Creating [yellow]{len(chunk_slices)}[/yellow] tasks...")
     delayed_tasks = [track_chunk_delayed(zarr_path, s, roi_sz=tuple(track_params['roi_sz']), roi_thresh=track_params['roi_thresh'], se1_radius=track_params['se1_radius'], se2_radius=track_params['se2_radius']) for s in chunk_slices]
+    
     with ProgressBar(): results = dask.compute(*delayed_tasks)
+    
     console.print("Writing tracking results to Zarr...")
     for slc, chunk_res in tqdm(results, desc="Writing Tracking Chunks"):
         tracking_results[slc] = chunk_res
+        
     successful_tracks = np.sum(~np.isnan(tracking_results[:, 0]))
     percent_tracked = (successful_tracks / num_images) * 100 if num_images > 0 else 0
     summary_stats = {'total_frames': num_images, 'frames_tracked': successful_tracks, 'percent_tracked': round(percent_tracked, 2)}
+    
     if successful_tracks > 0:
         valid_indices = np.where(~np.isnan(tracking_results[:, 0]))[0]
         summary_stats['confidence_stats'] = {'mean': float(np.nanmean(tracking_results[valid_indices, 19])), 'std': float(np.nanstd(tracking_results[valid_indices, 19])), 'min': float(np.nanmin(tracking_results[valid_indices, 19])), 'max': float(np.nanmax(tracking_results[valid_indices, 19]))}
+        
     track_group.attrs['summary_statistics'] = summary_stats
     track_group.attrs['duration_seconds'] = time.perf_counter() - start_time
+    
     console.print(f"Tracking: [green]{successful_tracks}/{num_images}[/green] frames tracked ([cyan]{percent_tracked:.2f}%[/cyan]).")
+    
     parent_group = root['tracking_runs']
     if 'best' not in parent_group.attrs or percent_tracked > parent_group.attrs['best']['percent_tracked']:
         console.print(f"[bold green]New best tracking run found! Success rate: {percent_tracked:.2f}%[/bold green]")
         parent_group.attrs['best'] = {'run_name': track_group.name, **summary_stats}
+
+def run_refine_stage(zarr_path, params, console):
+    """
+    Refines the output of the crop stage by removing temporal jumps.
+    This is a sequential process that cannot be parallelized with Dask.
+    """
+    console.rule("[bold]Stage 3.5: Refining Crop Detections[/bold]")
+    start_time = time.perf_counter()
+    root = zarr.open_group(zarr_path, mode='a')
+    if 'crop_runs' not in root or 'latest' not in root['crop_runs'].attrs:
+        raise ValueError("Crop stage must be run before the refine stage.")
+
+    refine_params = params.get('refine', {})
+    max_jump = refine_params.get('max_jump_norm', 0.1)
+    
+    # --- Get source data from the latest crop run ---
+    latest_crop_run_name = root['crop_runs'].attrs['latest']
+    crop_group = root[f'crop_runs/{latest_crop_run_name}']
+    console.print(f"Refining data from crop run: [cyan]{latest_crop_run_name}[/cyan]")
+
+    # Load the raw crop results
+    bbox_coords = crop_group['bbox_norm_coords'][:]
+    
+    # --- Create new group and datasets for refined data ---
+    refine_group = get_run_group(root, 'refine', console)
+    refine_group.attrs['parameters'] = refine_params
+    refine_group.attrs['source_crop_run'] = latest_crop_run_name
+    
+    num_images = bbox_coords.shape[0]
+    refined_bbox_coords = refine_group.create_dataset('refined_bbox_norm_coords', shape=bbox_coords.shape, dtype=bbox_coords.dtype)
+    frame_distances = refine_group.create_dataset('frame_to_frame_distances', shape=(num_images,), dtype=np.float32)
+    
+    # --- Main refinement loop ---
+    last_valid_coord = None
+    jumps_removed = 0
+    
+    for i in tqdm(range(num_images), desc="Refining track"):
+        current_coord = bbox_coords[i]
+        distance = np.nan
+        
+        if not np.isnan(current_coord[0]):
+            if last_valid_coord is None:
+                # This is the first valid detection, accept it.
+                last_valid_coord = current_coord
+                refined_bbox_coords[i] = current_coord
+            else:
+                distance = np.linalg.norm(current_coord - last_valid_coord)
+                if distance < max_jump:
+                    # The jump is within the threshold, accept it.
+                    last_valid_coord = current_coord
+                    refined_bbox_coords[i] = current_coord
+                else:
+                    # Jump is too large, invalidate this detection.
+                    refined_bbox_coords[i] = [np.nan, np.nan]
+                    jumps_removed += 1
+        else:
+            # The original detection was already invalid.
+            refined_bbox_coords[i] = [np.nan, np.nan]
+            
+        frame_distances[i] = distance
+
+    # --- Save summary ---
+    total_valid = np.sum(~np.isnan(refined_bbox_coords[:, 0]))
+    summary_stats = {
+        'source_valid_crops': np.sum(~np.isnan(bbox_coords[:, 0])),
+        'refined_valid_crops': total_valid,
+        'jumps_removed': jumps_removed,
+        'percent_culled': (jumps_removed / num_images) * 100 if num_images > 0 else 0
+    }
+    refine_group.attrs['summary_statistics'] = summary_stats
+    refine_group.attrs['duration_seconds'] = time.perf_counter() - start_time
+    
+    console.print(f"Refinement complete in [green]{refine_group.attrs['duration_seconds']:.2f}[/green] seconds.")
+    console.print(f"Removed [yellow]{jumps_removed}[/yellow] jumps. [green]{total_valid}[/green] valid crops remain.")
+
 
 def main():
     # Instantiate Console
@@ -590,8 +747,8 @@ def main():
                         )
     parser.add_argument("--stage",
                         required=True,
-                        choices=['import', 'background', 'crop', 'track', 'all'],
-                        help="Processing stage to run. Choose from: 'import', 'background', 'crop', 'track', or 'all'."
+                        choices=['import', 'background', 'crop', 'refine', 'track', 'all'],
+                        help="Processing stage to run. Choose from: 'import', 'background', 'crop', 'refine', 'track', or 'all'."
                         )
     parser.add_argument("--scheduler",
                         default='processes',
@@ -638,6 +795,8 @@ def main():
         run_background_stage(args.zarr_path, pipeline_params, console)
     if args.stage in ['crop', 'all']:
         run_crop_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)
+    if args.stage in ['refine', 'all']:
+        run_refine_stage(args.zarr_path, pipeline_params, console)
     if args.stage in ['track', 'all']:
         run_tracking_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)
         
