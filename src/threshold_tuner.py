@@ -8,7 +8,7 @@ from skimage.morphology import disk, erosion, dilation
 ds_thresh = 55
 roi_thresh = 115
 current_frame = 1
-# --- NEW: Globals for morphology parameters ---
+# Globals for morphology parameters
 ds_se1_radius = 1
 ds_se4_radius = 4
 roi_se1_radius = 1
@@ -26,7 +26,7 @@ def update_frame(val):
     global current_frame
     current_frame = val
 
-# --- Callbacks for morphology sliders ---
+# Callbacks for morphology sliders
 def update_ds_se1(val):
     global ds_se1_radius
     ds_se1_radius = val
@@ -50,7 +50,7 @@ def create_tuner_dashboard(frame_idx, zarr_root):
     """
     global ds_thresh, roi_thresh, ds_se1_radius, ds_se4_radius, roi_se1_radius, roi_se2_radius
     
-    # --- Dynamically get the latest runs ---
+    # Dynamically get the latest runs
     try:
         latest_bg_run = zarr_root['background_runs'].attrs['latest']
         latest_crop_run = zarr_root['crop_runs'].attrs['latest']
@@ -70,17 +70,17 @@ def create_tuner_dashboard(frame_idx, zarr_root):
     background_ds = background_ds_array[:]
     roi_image = roi_images_array[frame_idx]
     
-    # --- Panel 1 & 2: Downsampled View and Mask ---
+    # Panel 1 & 2: Downsampled View and Mask
     diff_ds = np.clip(background_ds.astype(np.int16) - image_ds.astype(np.int16), 0, 255).astype(np.uint8)
     mask_ds = (diff_ds >= ds_thresh).astype(np.uint8) * 255
     
-    # --- MODIFICATION: Use slider values for morphology ---
+    # Use slider values for morphology
     # Ensure radii are at least 1 to avoid errors with disk(0)
     se1_ds = disk(max(1, ds_se1_radius))
     se4_ds = disk(max(1, ds_se4_radius))
     processed_mask_ds = erosion(dilation(erosion(mask_ds, se1_ds), se4_ds), se1_ds)
 
-    # --- Panel 3 & 4: ROI View and Mask ---
+    # Panel 3 & 4: ROI View and Mask
     roi_coords = roi_coords_full_array[frame_idx]
     
     if roi_coords[0] != -1: # Check if ROI is valid
@@ -92,7 +92,7 @@ def create_tuner_dashboard(frame_idx, zarr_root):
             diff_roi = np.clip(background_roi.astype(np.int16) - roi_image.astype(np.int16), 0, 255).astype(np.uint8)
             mask_roi = (diff_roi >= roi_thresh).astype(np.uint8) * 255
             
-            # --- MODIFICATION: Use slider values for morphology ---
+            # Apply morphology operations
             se1_roi = disk(max(1, roi_se1_radius))
             se2_roi = disk(max(1, roi_se2_radius))
             processed_mask_roi = erosion(dilation(erosion(mask_roi, se1_roi), se2_roi), se1_roi)
@@ -103,7 +103,7 @@ def create_tuner_dashboard(frame_idx, zarr_root):
         diff_roi = np.zeros_like(roi_image)
         processed_mask_roi = np.zeros_like(roi_image)
 
-    # --- Assemble Dashboard ---
+    # Assemble Dashboard
     display_size = (480, 480)
     
     diff_ds_bgr = cv2.cvtColor(diff_ds, cv2.COLOR_GRAY2BGR)
@@ -116,7 +116,7 @@ def create_tuner_dashboard(frame_idx, zarr_root):
     panel3 = cv2.resize(diff_roi_bgr, display_size)
     panel4 = cv2.resize(mask_roi_bgr, display_size)
 
-    # --- MODIFICATION: Update titles to show morphology values ---
+    # Show morphology parameters on the panels
     cv2.putText(panel1, f"Downsampled Diff", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     cv2.putText(panel2, f"Result (thresh={ds_thresh}, se1={ds_se1_radius}, se4={ds_se4_radius})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     cv2.putText(panel3, f"ROI Diff", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
@@ -139,20 +139,19 @@ def main(zarr_path, start_frame):
         print(f"Error opening Zarr file: {e}")
         return
 
-    window_name = "Threshold Tuner"
+    window_name = "Fish Tracker Threshold Tuner"
     cv2.namedWindow(window_name)
     
     # Create trackbars
     cv2.createTrackbar("Frame", window_name, current_frame, num_frames - 1, update_frame)
     cv2.createTrackbar("ds_thresh", window_name, ds_thresh, 255, update_ds_thresh)
     cv2.createTrackbar("roi_thresh", window_name, roi_thresh, 255, update_roi_thresh)
-    # --- NEW: Morphology trackbars ---
     cv2.createTrackbar("ds_erode(se1)", window_name, ds_se1_radius, 10, update_ds_se1)
     cv2.createTrackbar("ds_dilate(se4)", window_name, ds_se4_radius, 10, update_ds_se4)
     cv2.createTrackbar("roi_erode(se1)", window_name, roi_se1_radius, 10, update_roi_se1)
     cv2.createTrackbar("roi_dilate(se2)", window_name, roi_se2_radius, 10, update_roi_se2)
     
-    print("🚀 Starting Threshold Tuner...")
+    print("Starting Threshold Tuner...")
     print("Controls: Adjust sliders to see results. Press 'q' or Esc to quit.")
 
     while True:

@@ -49,7 +49,7 @@ data_config:
 # --------------------------------------------------------------------------------
 training_params:
   # Model setup
-  model: yolov8s.pt
+  model: yolov8n.pt
 
   # Core hyperparameters
   epochs: 100 # Number of training epochs
@@ -58,7 +58,7 @@ training_params:
   lr0: 0.002 # Initial learning rate
   momentum: 0.9 # Momentum factor
   weight_decay: 0.0005 # Weight decay (L2 penalty)
-  patience: 50 # Early stopping patience
+  patience: 10 # Early stopping patience
   device: '0' # CUDA device
 
 # ================================================================================

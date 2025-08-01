@@ -1,3 +1,8 @@
+# src/models/common.py
+
+# From https://github.com/triple-Mu/YOLOv8-TensorRT
+# Adapted for use here as asinspired by Wilson Chen (HHMI Janelia, Johnson and Aso Labs) in mechanic.py
+
 from typing import Tuple
 
 import torch

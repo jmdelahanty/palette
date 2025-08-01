@@ -125,7 +125,7 @@ def triangle_calculations(p1, p2, p3):
     if (2 * a * b) > 0: angles[2] = np.arccos(np.clip((a**2 + b**2 - c**2) / (2 * a * b), -1.0, 1.0)) * 180 / np.pi
     return angles, np.array([a, b, c])
 
-def calculate_multi_scale_bounding_boxes(keypoint_stats, roi_sz, margin_factor=1.5, min_bbox_size=0.05):
+def calculate_multi_scale_bounding_boxes(keypoint_stats, roi_sz, margin_factor=3, min_bbox_size=0.5):
     if len(keypoint_stats) < 3: return None
     all_positions = np.array([s.centroid[::-1] for s in keypoint_stats])
     min_pos, max_pos = np.min(all_positions, axis=0), np.max(all_positions, axis=0)
@@ -610,7 +610,7 @@ def run_tracking_stage(zarr_path, scheduler_name, params, console):
 
     track_group.attrs.update({
         'tracking_timestamp_utc': datetime.now(timezone.utc).isoformat(), 
-        'dask_scheduler': scheduler_name, 
+        'dask_scheduler': scheduler_name,
         'parameters': track_params,
         f'source_{source_type}_run': source_run_name
     })

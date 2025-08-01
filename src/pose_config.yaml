@@ -1,0 +1,85 @@
+# src/pose_config.yaml
+# ================================================================================
+# MULTI-ZARR YOLO POSE TRAINING CONFIGURATION
+# ================================================================================
+
+# --- Parameters for the Ultralytics trainer ---
+# These are required to pass initial checks.
+train: ./
+val: ./
+nc: 1
+names: ['fish']
+
+# Define the keypoint shape: [number_of_keypoints, dimensions_per_keypoint]
+# We have 3 keypoints (bladder, eye_l, eye_r), each with x and y coordinates.
+kpt_shape: [3, 2] 
+
+# Part 1: DATA CONFIGURATION
+# --------------------------------------------------------------------------------
+# This section is for our custom multi-Zarr dataset loader.
+data_config:
+  zarr_paths:
+    - /home/delahantyj@hhmi.org/Desktop/training_data_2/20250731_omnifin0_arena4.zarr
+    # Add more zarr file paths here if needed
+  
+  # This is the most important change: it tells our dataset to load ROI images
+  # and format the keypoint data for pose estimation.
+  task: pose 
+  
+  split_ratio: 0.8
+  random_seed: 42
+
+  # sampling_strategy: Defines how to sample from multiple zarr_paths.
+  # "balanced": (Default) Takes an equal number of samples from each dataset.
+  # "proportional": Uses all available valid frames from all datasets.
+  sampling_strategy: balanced
+
+# Part 2: MODEL & TRAINING HYPERPARAMETERS
+# --------------------------------------------------------------------------------
+# These parameters are passed directly to the Ultralytics trainer.
+training_params:
+  model: yolov8s-pose.pt 
+  
+  epochs: 1
+  batch: 32
+  
+  # Since we are training on the smaller ROIs (256x256), a smaller
+  # image size is more efficient.
+  imgsz: 256 
+  lr0: 0.001
+  
+  # Hyperparameters
+  momentum: 0.9 
+  weight_decay: 0.0005
+  patience: 10 # Early stopping patience
+  device: '0'
+  project: runs/pose # Save pose runs to a separate directory
+
+# ================================================================================
+# Part 3: TRAINING HISTORY & METADATA
+# Placeholder section for training results
+# This section is automatically populated by the training script after a run.
+# ================================================================================
+training_history:
+  # --- Run Details ---
+  training_run_name: ""
+  output_directory: ""
+  final_model_path: ""
+  training_start_time: ""
+  training_duration_hours: 0.0
+
+  # --- Code & Environment ---
+  git_commit_hash: ""
+  python_version: ""
+  torch_version: ""
+  ultralytics_version: ""
+
+  # --- Final Validation Metrics ---
+  final_metrics:
+    box_loss: 0.0
+    pose_loss: 0.0
+    dfl_loss: 0.0
+    precision: 0.0
+    recall: 0.0
+    mAP50: 0.0
+    mAP50_95: 0.0
