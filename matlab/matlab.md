@@ -1,0 +1,1 @@
+These two MATLAB scripts were written by Dr. Rob Johnson at HHMI Janelia for detecting fish through resizing and background subtraction. It is what started this repository. They function well and can be used with any MATLAB distribution!

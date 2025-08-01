@@ -67,11 +67,11 @@ def main():
 
         fake_input = torch.randn(args.input_shape).to(args.device)
         
-        console.print("🔥 Warming up the model...")
+        console.print("Warming up the model...")
         for _ in range(2):
             model(fake_input)
             
-        console.print(f"📤 Exporting to ONNX with NMS...")
+        console.print(f"Exporting to ONNX with NMS...")
         with BytesIO() as f:
             torch.onnx.export(
                 model,
@@ -79,16 +79,14 @@ def main():
                 f,
                 opset_version=args.opset,
                 input_names=['images'],
-                # --- MODIFICATION: Use the four NMS outputs ---
                 output_names=['num_dets', 'bboxes', 'scores', 'labels']
             )
             f.seek(0)
             onnx_model = onnx.load(f)
 
         onnx.checker.check_model(onnx_model)
-        console.print("✅ ONNX model validation passed.")
+        console.print("ONNX model validation passed.")
 
-        # --- MODIFICATION: Manually set dynamic output shapes ---
         b = args.input_shape[0]
         shapes = [b, 1, b, args.topk, 4, b, args.topk, b, args.topk]
         for i in onnx_model.graph.output:
@@ -97,25 +95,25 @@ def main():
                 j.dim_param = str(shapes.pop(0))
 
         if args.sim and onnxsim:
-            console.print("✨ Simplifying ONNX model...")
+            console.print("Simplifying ONNX model...")
             try:
                 onnx_model, check = onnxsim.simplify(onnx_model)
                 assert check, 'ONNX simplification check failed'
-                console.print("✅ Model simplified successfully.")
+                console.print("Model simplified successfully.")
             except Exception as e:
-                console.print(f"[bold yellow]⚠️  Simplifier failure:[/bold yellow] {e}")
+                console.print(f"[bold yellow]Simplifier failure:[/bold yellow] {e}")
 
         onnx.save(onnx_model, save_path)
         file_size = Path(save_path).stat().st_size / (1024 * 1024)
         
-        console.print(f"\n[bold green]✅ ONNX export successful![/bold green]")
+        console.print(f"\n[bold green]ONNX export successful![/bold green]")
         console.print(f"   Saved as: [cyan]{save_path}[/cyan]")
         console.print(f"   File size: {file_size:.2f} MB")
         
         console.print(f"\n💡 [bold]Next step:[/bold] Convert to TensorRT using your [cyan]onnx_to_tensorrt.py[/cyan] script.")
 
     except Exception as e:
-        console.print(f"[bold red]❌ Export failed:[/bold red]")
+        console.print(f"[bold red]Export failed:[/bold red]")
         console.print(traceback.format_exc())
 
 if __name__ == '__main__':

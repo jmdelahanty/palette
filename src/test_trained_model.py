@@ -33,30 +33,30 @@ def test_model_on_zarr(model_path, zarr_path, output_dir, confidence=0.25, save_
     
     # Validate inputs
     if not model_path.exists():
-        print(f"❌ Model not found: {model_path}")
+        print(f"Model not found: {model_path}")
         return False
     
     try:
         zarr_root = zarr.open(str(zarr_path), mode='r')
         images_array = zarr_root['raw_video/images_ds']
     except Exception as e:
-        print(f"❌ Error opening Zarr file or finding images_ds: {e}")
+        print(f"Error opening Zarr file or finding images_ds: {e}")
         return False
     
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Load model
-    print(f"🤖 Loading trained model: {model_path}")
+    print(f"Loading trained model: {model_path}")
     try:
         model = YOLO(str(model_path))
-        print(f"✅ Model loaded successfully")
+        print(f"Model loaded successfully")
     except Exception as e:
-        print(f"❌ Failed to load model: {e}")
+        print(f"Failed to load model: {e}")
         return False
     
     num_frames_to_process = min(max_frames, images_array.shape[0]) if max_frames else images_array.shape[0]
-    print(f"🖼️  Found {images_array.shape[0]} frames. Processing the first {num_frames_to_process}.")
+    print(f"Found {images_array.shape[0]} frames. Processing the first {num_frames_to_process}.")
     
     # Process each image
     results_summary = []
@@ -100,22 +100,22 @@ def test_model_on_zarr(model_path, zarr_path, output_dir, confidence=0.25, save_
                 cv2.imwrite(str(annotated_path), annotated_image)
             
         except Exception as e:
-            print(f"❌ Error processing frame {frame_idx}: {e}")
+            print(f"Error processing frame {frame_idx}: {e}")
     
     # Print summary
-    print(f"\n📊 Detection Summary:")
-    print(f"📁 Processed: {num_frames_to_process} frames")
-    
+    print(f"\nDetection Summary:")
+    print(f"Processed: {num_frames_to_process} frames")
+
     total_detections = sum(r['detections'] for r in results_summary)
     images_with_detections = sum(1 for r in results_summary if r['detections'] > 0)
-    
-    print(f"🎯 Total detections: {total_detections}")
-    print(f"🖼️  Images with detections: {images_with_detections}/{num_frames_to_process} ({images_with_detections/num_frames_to_process*100:.1f}%)")
+
+    print(f"Total detections: {total_detections}")
+    print(f"Images with detections: {images_with_detections}/{num_frames_to_process} ({images_with_detections/num_frames_to_process*100:.1f}%)")
     
     if total_detections > 0:
         confidences = [box['confidence'] for r in results_summary for box in r['boxes']]
-        print(f"📈 Confidence scores - Avg: {np.mean(confidences):.3f}, Min: {np.min(confidences):.3f}, Max: {np.max(confidences):.3f}")
-    
+        print(f"Confidence scores - Avg: {np.mean(confidences):.3f}, Min: {np.min(confidences):.3f}, Max: {np.max(confidences):.3f}")
+
     # Save detailed results
     results_file = output_dir / 'detection_results.txt'
     with open(results_file, 'w') as f:
@@ -127,9 +127,9 @@ def test_model_on_zarr(model_path, zarr_path, output_dir, confidence=0.25, save_
                     x1, y1, x2, y2 = box['bbox']
                     f.write(f"  - Detection {i+1}: bbox=({x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}), conf={box['confidence']:.3f}\n")
             f.write("\n")
-    
-    print(f"💾 Detailed results saved to: {results_file}")
-    
+
+    print(f"Detailed results saved to: {results_file}")
+
     return True
 
 def create_detection_grid(output_dir, max_images=16):
@@ -140,7 +140,7 @@ def create_detection_grid(output_dir, max_images=16):
     annotated_images = sorted(output_dir.glob('annotated_*.jpg'))
     
     if not annotated_images:
-        print("⚠️  No annotated images found for grid creation")
+        print("No annotated images found for grid creation")
         return
     
     selected_annotated = annotated_images[:max_images]
@@ -169,8 +169,8 @@ def create_detection_grid(output_dir, max_images=16):
     grid_path = output_dir / 'detection_grid.png'
     plt.savefig(grid_path, dpi=150, bbox_inches='tight')
     plt.show()
-    
-    print(f"📊 Detection grid saved to: {grid_path}")
+
+    print(f"Detection grid saved to: {grid_path}")
 
 def main():
     parser = argparse.ArgumentParser(description="Test trained YOLO model on a Zarr dataset")
@@ -185,13 +185,13 @@ def main():
     parser.add_argument("--max-frames", type=int, default=None, help="Maximum number of frames to test from the start of the video")
     
     args = parser.parse_args()
-    
-    print(f"🚀 Testing Trained Fish Detection Model on Zarr")
-    print(f"🤖 Model: {args.model_path}")
-    print(f"📦 Zarr Dataset: {args.zarr_path}")
-    print(f"💾 Output: {args.output_dir}")
-    print(f"🎯 Confidence: {args.confidence}")
-    
+
+    print(f"Testing Trained Fish Detection Model on Zarr")
+    print(f"Model: {args.model_path}")
+    print(f"Zarr Dataset: {args.zarr_path}")
+    print(f"Output: {args.output_dir}")
+    print(f"Confidence: {args.confidence}")
+
     success = test_model_on_zarr(
         args.model_path,
         args.zarr_path, 
@@ -202,13 +202,13 @@ def main():
     )
     
     if success:
-        print(f"\n✅ Model testing completed!")
+        print(f"\nModel testing completed!")
         if args.create_grid:
-            print(f"📊 Creating detection grid...")
+            print(f"Creating detection grid...")
             create_detection_grid(args.output_dir)
-        print(f"\n🎉 Results available in: {args.output_dir}")
+        print(f"\nResults available in: {args.output_dir}")
     else:
-        print(f"\n❌ Model testing failed")
+        print(f"\nModel testing failed")
 
 if __name__ == "__main__":
     main()

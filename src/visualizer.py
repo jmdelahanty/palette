@@ -3,6 +3,10 @@ import numpy as np
 import os
 import argparse
 import zarr
+import matplotlib
+matplotlib.use('Agg') # Use a non-interactive backend
+import matplotlib.pyplot as plt
+from pathlib import Path
 
 current_frame = 1
 
@@ -10,6 +14,69 @@ def update_frame(val):
     """Callback function to update the global frame index when the slider is moved."""
     global current_frame
     current_frame = val
+
+def create_summary_panel(crop_success_mask, track_success_mask, headings, positions, image_shape, output_path):
+    """Creates a single summary panel with all static plots using matplotlib subplots."""
+    num_frames = len(crop_success_mask)
+    valid_track_indices = np.where(track_success_mask)[0]
+    valid_headings = headings[track_success_mask].copy() # Use copy to avoid changing original data
+    
+    # Normalize headings to be in the [0, 360] range for consistent plotting
+    valid_headings[valid_headings < 0] += 360
+    
+    # Define the layout: 4 rows, with the heatmap being much larger
+    fig, axes = plt.subplots(4, 1, figsize=(8, 12), dpi=150, 
+                             gridspec_kw={'height_ratios': [0.5, 0.5, 2, 6]})
+    fig.patch.set_facecolor('#2c2c2c') # Dark background for the whole figure
+
+    # 1. Crop Success Timeline
+    ax1 = axes[0]
+    crop_timeline = np.zeros((1, num_frames))
+    crop_timeline[0, crop_success_mask] = 1
+    ax1.imshow(crop_timeline, cmap='Greens', vmin=0, vmax=1, aspect='auto', interpolation='none')
+    ax1.set_title('Crop Success', color='white', fontsize=10)
+    ax1.axis('off')
+
+    # 2. Track Success Timeline
+    ax2 = axes[1]
+    track_timeline_data = np.zeros((1, num_frames))
+    track_timeline_data[0, track_success_mask] = 1
+    ax2.imshow(track_timeline_data, cmap='Greens', vmin=0, vmax=1, aspect='auto', interpolation='none')
+    ax2.set_title('Track (Pose) Success', color='white', fontsize=10)
+    ax2.axis('off')
+    
+    # 3. Heading Plot
+    ax3 = axes[2]
+    ax3.plot(valid_track_indices, valid_headings, color='cyan', linewidth=0.8)
+    ax3.set_title('Fish Heading Over Time', color='white', fontsize=10)
+    ax3.set_xlim(0, num_frames)
+    ax3.set_ylim(-10, 370) # Y-axis is now padded
+    ax3.tick_params(axis='x', colors='white', labelsize=8)
+    ax3.tick_params(axis='y', colors='white', labelsize=8)
+    ax3.set_facecolor('#1e1e1e')
+    ax3.grid(True, alpha=0.2)
+
+    # 4. Position Heatmap
+    ax4 = axes[3]
+    valid_positions = positions[~np.isnan(positions).any(axis=1)]
+    if len(valid_positions) > 0:
+        heatmap, _, _ = np.histogram2d(
+            valid_positions[:, 1] * image_shape[0], # y
+            valid_positions[:, 0] * image_shape[1], # x
+            bins=100, range=[[0, image_shape[0]], [0, image_shape[1]]]
+        )
+        heatmap = np.log(heatmap + 1)
+        ax4.imshow(heatmap.T, cmap='jet', aspect='equal', origin='lower', extent=[0, image_shape[1], 0, image_shape[0]])
+    ax4.set_title('Position Heatmap', color='white', fontsize=10)
+    ax4.set_xlim(0, image_shape[1])
+    ax4.set_ylim(0, image_shape[0])
+    ax4.axis('off')
+
+    plt.tight_layout(pad=1.5)
+    fig.savefig(output_path, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return cv2.imread(str(output_path))
+
 
 def apply_circular_mask(image):
     """Applies a circular mask to the image to hide corners."""
@@ -51,12 +118,10 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
     """
     # --- Dynamically get the latest runs ---
     latest_tracking_run = zarr_group['tracking_runs'].attrs['latest']
-    latest_background_run = zarr_group['background_runs'].attrs['latest']
     latest_crop_run = zarr_group['crop_runs'].attrs['latest']
     
     # --- Load all necessary arrays ---
     images_array = zarr_group['raw_video/images_ds'] 
-    background_array = zarr_group[f'background_runs/{latest_background_run}/background_ds']
     roi_images_array = zarr_group[f'crop_runs/{latest_crop_run}/roi_images']
     results_array = zarr_group[f'tracking_runs/{latest_tracking_run}/tracking_results']
     
@@ -74,7 +139,6 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
 
     main_image = images_array[frame_index]
     roi_image = roi_images_array[frame_index]
-    background_image = background_array[:] 
     results = results_array[frame_index]
     crop_bbox = crop_bbox_array[frame_index]
 
@@ -83,7 +147,10 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
     
     heading_degrees = results[column_map['heading_degrees']]
     confidence = results[column_map['confidence_score']]
-    effective_threshold = results[column_map.get('effective_threshold', -1)] 
+
+    # Initialize a blank image for the crop view
+    bbox_crop_view = np.zeros_like(main_view)
+    crop_title = "BBox Crop (Not Tracked)"
 
     if not np.isnan(results[column_map['bbox_x_norm_ds']]):
         bbox_x_norm, bbox_y_norm = results[column_map['bbox_x_norm_ds']], results[column_map['bbox_y_norm_ds']]
@@ -100,6 +167,15 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
         label = f"Tracked {confidence:.3f}"
         cv2.putText(main_view, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
+        # Create the bounding box crop view
+        crop_x1, crop_y1 = max(0, x1), max(0, y1)
+        crop_x2, crop_y2 = min(full_w, x2), min(full_h, y2)
+        if crop_x1 < crop_x2 and crop_y1 < crop_y2:
+            bbox_crop = main_image[crop_y1:crop_y2, crop_x1:crop_x2]
+            bbox_crop_view = cv2.cvtColor(bbox_crop, cv2.COLOR_GRAY2BGR)
+            crop_title = f"BBox Crop ({box_w}x{box_h}px)"
+
+
     elif not np.isnan(crop_bbox[0]):
         bbox_x_norm, bbox_y_norm = crop_bbox
         box_w, box_h = int(0.08 * full_w), int(0.08 * full_h)
@@ -109,6 +185,9 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
         cv2.rectangle(main_view, (x1, y1), (x2, y2), (0, 255, 255), 2)
         label = "Cropped (not tracked)"
         cv2.putText(main_view, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+        bbox_crop_view = cv2.cvtColor(roi_image, cv2.COLOR_GRAY2BGR)
+        crop_title = "BBox Crop (ROI Fallback)"
+
 
     if not np.isnan(heading_degrees):
         center_px = (int(results[column_map['bbox_x_norm_ds']] * full_w), int(results[column_map['bbox_y_norm_ds']] * full_h))
@@ -132,13 +211,14 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
             cv2.circle(roi_view, (x_center, y_center), 5, (0,0,0), 1)
 
     if not np.isnan(heading_degrees):
-        cv2.putText(roi_view, f"Heading: {heading_degrees:.1f}°", (10, roi_sz[0] - 10), 
+        # Normalize heading for display
+        heading_display = heading_degrees if heading_degrees >= 0 else heading_degrees + 360
+        cv2.putText(roi_view, f"Heading: {heading_display:.1f}°", (10, roi_sz[0] - 10), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
     stabilized_roi = rotate_roi_to_heading(roi_image, heading_degrees)
     stabilized_view = cv2.cvtColor(stabilized_roi, cv2.COLOR_GRAY2BGR)
     
-    # Apply the circular mask
     stabilized_view = apply_circular_mask(stabilized_view)
     
     if not np.isnan(heading_degrees):
@@ -150,40 +230,33 @@ def create_dashboard_view(frame_number, zarr_group, column_map):
             if not np.isnan(x_norm):
                 x_pixel, y_pixel = x_norm * roi_sz[1], y_norm * roi_sz[0]
                 rel_x, rel_y = x_pixel - roi_center[0], y_pixel - roi_center[1]
-                
                 rotated_x = rel_x * cos_angle + rel_y * sin_angle + roi_center[0]
                 rotated_y = -rel_x * sin_angle + rel_y * cos_angle + roi_center[1]
-
                 cv2.circle(stabilized_view, (int(rotated_x), int(rotated_y)), 4, colors.get(name), -1)
                 cv2.circle(stabilized_view, (int(rotated_x), int(rotated_y)), 5, (0,0,0), 1)
         
     cv2.putText(stabilized_view, "Stabilized (Facing Right)", (10, roi_sz[0] - 10), 
                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
-    diff_image = cv2.absdiff(main_image, background_image)
-    diff_view = cv2.cvtColor(diff_image, cv2.COLOR_GRAY2BGR)
-
     display_size = (480, 480)
     main_resized = cv2.resize(main_view, display_size, interpolation=cv2.INTER_AREA)
     roi_resized = cv2.resize(roi_view, display_size, interpolation=cv2.INTER_NEAREST)
     stabilized_resized = cv2.resize(stabilized_view, display_size, interpolation=cv2.INTER_NEAREST)
-    diff_resized = cv2.resize(diff_view, display_size, interpolation=cv2.INTER_AREA)
+    crop_resized = cv2.resize(bbox_crop_view, display_size, interpolation=cv2.INTER_NEAREST)
 
     title1 = f"Full View + Bbox (conf: {confidence:.3f})" if not np.isnan(confidence) else "Full View"
     cv2.putText(main_resized, title1, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     cv2.putText(roi_resized, "Original ROI", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     cv2.putText(stabilized_resized, "Stabilized ROI", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    cv2.putText(diff_resized, "Difference Image", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    cv2.putText(crop_resized, crop_title, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     
     top_row = np.hstack((main_resized, roi_resized))
-    bottom_row = np.hstack((stabilized_resized, diff_resized))
+    bottom_row = np.hstack((stabilized_resized, crop_resized))
     dashboard = np.vstack((top_row, bottom_row))
     
     status_text = f"Frame: {frame_number}"
     if not np.isnan(confidence):
         status_text += f" | Confidence: {confidence:.3f}"
-    if not np.isnan(effective_threshold):
-        status_text += f" | ROI Thresh: {int(effective_threshold)}"
     
     cv2.putText(dashboard, status_text, (10, dashboard.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
@@ -205,7 +278,6 @@ def main(zarr_path, start_frame):
         print(f"Using latest tracking run: {latest_tracking_run}")
     except KeyError:
         print("Error: Could not find 'tracking_runs' or the 'latest' attribute in the Zarr file.")
-        print("Please ensure the tracking stage has been run successfully.")
         return
 
     column_names = results_array.attrs['column_names']
@@ -216,10 +288,26 @@ def main(zarr_path, start_frame):
 
     column_map = {name: i for i, name in enumerate(column_names)}
     num_frames = zarr_group['raw_video/images_ds'].shape[0]
+
+    print("Generating summary plots...")
+    temp_dir = Path("./temp_plots")
+    temp_dir.mkdir(exist_ok=True)
+    
+    tracking_data_full = results_array[:]
+    crop_bbox_array = zarr_group[f"crop_runs/{zarr_group['crop_runs'].attrs['latest']}/bbox_norm_coords"][:]
+
+    crop_success_mask = ~np.isnan(crop_bbox_array[:, 0])
+    track_success_mask = ~np.isnan(tracking_data_full[:, column_map['heading_degrees']])
+    headings = tracking_data_full[:, column_map['heading_degrees']]
+    positions = tracking_data_full[:, [column_map['bbox_x_norm_ds'], column_map['bbox_y_norm_ds']]]
+    
+    summary_panel = create_summary_panel(
+        crop_success_mask, track_success_mask, headings, positions,
+        zarr_group['raw_video/images_ds'].shape[1:], temp_dir / "summary_panel.png"
+    )
     
     window_name = "Interactive Dashboard"
-    cv2.namedWindow(window_name)
-
+    cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
     cv2.createTrackbar("Frame", window_name, current_frame, num_frames - 1, update_frame)
     
     print("Starting interactive dashboard...")
@@ -231,9 +319,15 @@ def main(zarr_path, start_frame):
         display_image = dashboard if dashboard is not None else np.zeros((960, 960, 3), dtype=np.uint8)
         if dashboard is None:
             cv2.putText(display_image, "Frame Not Found", (300, 480), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 2)
-            
-        cv2.imshow(window_name, display_image)
         
+        dash_h, dash_w = display_image.shape[:2]
+        summary_h, summary_w = summary_panel.shape[:2]
+        target_summary_w = int(summary_w * (dash_h / summary_h))
+        summary_resized = cv2.resize(summary_panel, (target_summary_w, dash_h))
+
+        final_view = np.hstack([display_image, summary_resized])
+
+        cv2.imshow(window_name, final_view)
         cv2.setTrackbarPos("Frame", window_name, current_frame)
         
         key = cv2.waitKey(30) & 0xFF
@@ -246,6 +340,8 @@ def main(zarr_path, start_frame):
             current_frame = max(0, current_frame - 1)
 
     cv2.destroyAllWindows()
+    for f in temp_dir.glob("*.png"): f.unlink()
+    temp_dir.rmdir()
     print("Visualizer closed.")
 
 if __name__ == "__main__":
@@ -254,5 +350,4 @@ if __name__ == "__main__":
     parser.add_argument("start_frame", type=int, nargs='?', default=1, 
                         help="The frame number to start visualizing from. Defaults to 1.")
     args = parser.parse_args()
-
     main(args.zarr_path, args.start_frame)
