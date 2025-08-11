@@ -50,7 +50,7 @@ def parse_args():
 
 def main(args):
     """Main function to run the ONNX to TensorRT conversion."""
-    print("Starting ONNX to TensorRT conversion with advanced options...")
+    print("Starting ONNX to TensorRT conversion...")
 
     onnx_path = Path(args.onnx)
     engine_path = Path(args.engine)
