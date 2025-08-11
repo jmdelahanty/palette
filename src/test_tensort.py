@@ -19,8 +19,6 @@ import os
 import re
 
 # Path to the exact trtexec executable
-# Must use specific version that matches the one used on system running real time inference
-# This is a hardcoded path and should be adjusted based on your TensorRT installation
 TRTEXEC_PATH = "/usr/local/TensorRT-10.0.1.6/bin/trtexec"
 
 def preprocess_array(original_image, target_size=(640, 640)):
@@ -40,28 +38,69 @@ def preprocess_array(original_image, target_size=(640, 640)):
     return preprocessed, original_image, scale
 
 def parse_trtexec_output(output_text):
-    """Parses the raw text output from trtexec --dumpOutput."""
+    """
+    Parses the raw text output from trtexec --dumpOutput with robust regex.
+    """
     try:
-        # Find the output tensors by name
-        num_dets_str = re.search(r"num_dets\]:\n([\s\S]*?)\n\n", output_text).group(1)
-        bboxes_str = re.search(r"bboxes\]:\n([\s\S]*?)\n\n", output_text).group(1)
-        scores_str = re.search(r"scores\]:\n([\s\S]*?)\n\n", output_text).group(1)
-        labels_str = re.search(r"labels\]:\n([\s\S]*?)$", output_text).group(1)
+        # This regex is designed to find a tensor's name and its values, ignoring timestamps
+        def find_tensor_values(tensor_name, text):
+            # Matches the tensor block and captures the numeric values
+            pattern = re.compile(rf"\[I\]\s+{tensor_name}:\s*\([^)]+\)\s*\n(?:\[.*?\]\s*\[I\])?\s*([\d\s\.\-e]+)")
+            match = pattern.search(text)
+            if match:
+                return match.group(1).strip()
+            return None
 
-        # Convert the text blocks to numpy arrays
-        num_dets = np.array([int(num_dets_str.strip())], dtype=np.int32)
-        bboxes = np.fromstring(bboxes_str.strip(), sep=' ').reshape(-1, 4).astype(np.float32)
-        scores = np.fromstring(scores_str.strip(), sep=' ').astype(np.float32)
-        labels = np.fromstring(labels_str.strip(), sep=' ').astype(np.int32)
+        # Find the section of text that contains the output tensors
+        output_section_start = output_text.rfind("Output Tensors:")
+        if output_section_start == -1:
+            print("❌ Could not find 'Output Tensors:' delimiter in the output.")
+            return None
+        output_section = output_text[output_section_start:]
+
+        # First, get the number of detections, which is a single integer
+        num_dets_str = find_tensor_values("num_dets", output_section)
+        if num_dets_str is None:
+            print("❌ Could not parse 'num_dets' from the output.")
+            return None
+        num_dets = int(num_dets_str)
+
+        if num_dets == 0:
+            return {
+                "num_dets": np.array([0], dtype=np.int32),
+                "bboxes": np.empty((0, 4), dtype=np.float32),
+                "scores": np.empty(0, dtype=np.float32),
+                "labels": np.empty(0, dtype=np.int32)
+            }
+
+        # Parse the other tensors which are arrays
+        bboxes_str = find_tensor_values("bboxes", output_section)
+        scores_str = find_tensor_values("scores", output_section)
+        labels_str = find_tensor_values("labels", output_section)
+
+        if any(s is None for s in [bboxes_str, scores_str, labels_str]):
+            print("❌ Failed to parse one or more output tensors (bboxes, scores, labels).")
+            return None
+
+        # Convert string values to numpy arrays and slice them based on num_dets
+        bboxes_flat = np.fromstring(bboxes_str, sep=' ')
+        scores_all = np.fromstring(scores_str, sep=' ')
+        labels_all = np.fromstring(labels_str, sep=' ')
+
+        # The output arrays are padded to the 'topk' value, so we slice them
+        bboxes = bboxes_flat[:num_dets * 4].reshape(num_dets, 4).astype(np.float32)
+        scores = scores_all[:num_dets].astype(np.float32)
+        labels = labels_all[:num_dets].astype(np.int32)
 
         return {
-            "num_dets": num_dets,
+            "num_dets": np.array([num_dets], dtype=np.int32),
             "bboxes": bboxes,
             "scores": scores,
             "labels": labels
         }
+
     except Exception as e:
-        print(f"Failed to parse trtexec output: {e}")
+        print(f"❌ An error occurred during output parsing: {e}")
         return None
 
 
@@ -97,8 +136,8 @@ def postprocess_output(outputs, scale):
     if num_dets == 0:
         return []
 
-    bboxes = outputs["bboxes"][:num_dets]
-    scores = outputs["scores"][:num_dets]
+    bboxes = outputs["bboxes"]
+    scores = outputs["scores"]
     
     final_boxes = []
     for i in range(num_dets):
