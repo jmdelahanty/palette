@@ -1,0 +1,19 @@
+{
+  "file": "/home/delahantyj@hhmi.org/Desktop/escape_1/2025-08-11T18-40-27Z_arena_4_chaser.h5",
+  "session_uuid": "2025-08-11T18-40-27Z_arena_4",
+  "timestamp": "2025-08-11T15:41:19.891969",
+  "frames": {
+    "total_bboxes": 14998,
+    "unique_frames": 14998,
+    "frame_range": "468-15469",
+    "measured_fps": 60.6
+  },
+  "latency": {
+    "mean_ms": NaN,
+    "median_ms": NaN,
+    "std_ms": NaN,
+    "min_ms": NaN,
+    "max_ms": NaN,
+    "samples": 0
+  }
+}
