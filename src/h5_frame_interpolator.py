@@ -293,6 +293,34 @@ class H5FrameMetadataInterpolator:
                                 self.log(f"    ✅ Copied {dataset_name} dataset")
                             except:
                                 self.log(f"    ⚠️  Could not copy {dataset_name}")
+                
+                # Copy calibration_snapshot group with homography
+                if '/calibration_snapshot' in src:
+                    self.log("  🔄 Copying calibration data...")
+                    calib_src = src['/calibration_snapshot']
+                    calib_dst = dst.create_group('calibration_snapshot')
+                    
+                    # Copy arena_config_json if it exists
+                    if 'arena_config_json' in calib_src:
+                        arena_config = calib_src['arena_config_json'][()]
+                        calib_dst.create_dataset('arena_config_json', data=arena_config)
+                        self.log("    ✅ Copied arena configuration")
+                    
+                    # Copy camera-specific calibration data
+                    for cam_id in calib_src.keys():
+                        if isinstance(calib_src[cam_id], h5py.Group):
+                            self.log(f"    📷 Copying calibration for camera: {cam_id}")
+                            cam_group = calib_dst.create_group(cam_id)
+                            
+                            # Copy homography matrix YAML
+                            if 'homography_matrix_yml' in calib_src[cam_id]:
+                                homography_yml = calib_src[cam_id]['homography_matrix_yml'][()]
+                                cam_group.create_dataset('homography_matrix_yml', data=homography_yml)
+                                self.log(f"      ✅ Copied homography matrix for {cam_id}")
+                            
+                            # Copy any attributes
+                            for attr_name, attr_value in calib_src[cam_id].attrs.items():
+                                cam_group.attrs[attr_name] = attr_value
             
             # Add analysis metadata group
             analysis_group = dst.create_group('analysis')
