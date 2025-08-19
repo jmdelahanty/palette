@@ -5,7 +5,7 @@ import:
   chunk_size: 32
   batch_size: 32
 background:
-  sample_size: -1
+  sample_size: 100
   seed: 42
 detect:
   ds_thresh: 25
@@ -43,73 +43,7 @@ assign_ids:
   sub_dish_rois:
   - id: 0
     roi_pixels:
-    - 61
-    - 76
-    - 73
-    - 181
-  - id: 1
-    roi_pixels:
-    - 144
-    - 75
-    - 69
-    - 177
-  - id: 2
-    roi_pixels:
-    - 246
-    - 76
-    - 69
-    - 180
-  - id: 3
-    roi_pixels:
-    - 325
-    - 77
-    - 69
-    - 178
-  - id: 4
-    roi_pixels:
-    - 430
-    - 76
-    - 71
-    - 177
-  - id: 5
-    roi_pixels:
-    - 511
-    - 75
-    - 68
-    - 180
-  - id: 6
-    roi_pixels:
-    - 64
-    - 275
-    - 67
-    - 179
-  - id: 7
-    roi_pixels:
-    - 143
-    - 278
-    - 68
-    - 178
-  - id: 8
-    roi_pixels:
-    - 243
-    - 277
-    - 69
-    - 180
-  - id: 9
-    roi_pixels:
-    - 323
-    - 277
-    - 69
-    - 178
-  - id: 10
-    roi_pixels:
-    - 429
-    - 278
-    - 70
-    - 180
-  - id: 11
-    roi_pixels:
-    - 508
-    - 276
-    - 70
-    - 182
+    - 92
+    - 123
+    - 482
+    - 382
