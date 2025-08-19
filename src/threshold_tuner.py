@@ -3,30 +3,26 @@ import numpy as np
 import zarr
 import argparse
 from skimage.morphology import disk, erosion, dilation
+from skimage.measure import label, regionprops
+from pathlib import Path
+import yaml
 
 # Global variables to store trackbar values
 ds_thresh = 55
-roi_thresh = 115
 current_frame = 1
-# Globals for morphology parameters
 ds_se1_radius = 1
 ds_se4_radius = 4
-roi_se1_radius = 1
-roi_se2_radius = 2
+min_area = 50
+max_area = 500
 
 def update_ds_thresh(val):
     global ds_thresh
     ds_thresh = val
 
-def update_roi_thresh(val):
-    global roi_thresh
-    roi_thresh = val
-
 def update_frame(val):
     global current_frame
     current_frame = val
 
-# Callbacks for morphology sliders
 def update_ds_se1(val):
     global ds_se1_radius
     ds_se1_radius = val
@@ -35,131 +31,117 @@ def update_ds_se4(val):
     global ds_se4_radius
     ds_se4_radius = val
 
-def update_roi_se1(val):
-    global roi_se1_radius
-    roi_se1_radius = val
+def update_min_area(val):
+    global min_area
+    min_area = val
 
-def update_roi_se2(val):
-    global roi_se2_radius
-    roi_se2_radius = val
+def update_max_area(val):
+    global max_area
+    max_area = val
 
-
-def create_tuner_dashboard(frame_idx, zarr_root):
+def create_tuner_dashboard(frame_idx, zarr_root, dish_mask):
     """
-    Creates the visual dashboard for a given frame, applying current threshold values.
+    Creates the visual dashboard for a given frame, applying current threshold values
+    and displaying all detected fish.
     """
-    global ds_thresh, roi_thresh, ds_se1_radius, ds_se4_radius, roi_se1_radius, roi_se2_radius
+    global ds_thresh, ds_se1_radius, ds_se4_radius, min_area, max_area
     
-    # Dynamically get the latest runs
     try:
         latest_bg_run = zarr_root['background_runs'].attrs['latest']
-        latest_crop_run = zarr_root['crop_runs'].attrs['latest']
-        
         images_ds_array = zarr_root['raw_video/images_ds']
         background_ds_array = zarr_root[f'background_runs/{latest_bg_run}/background_ds']
-        
-        roi_images_array = zarr_root[f'crop_runs/{latest_crop_run}/roi_images']
-        roi_coords_full_array = zarr_root[f'crop_runs/{latest_crop_run}/roi_coordinates_full']
-        background_full_array = zarr_root[f'background_runs/{latest_bg_run}/background_full']
     except KeyError as e:
         print(f"Error: Missing necessary data in Zarr file: {e}")
         return None
 
-    # Load data for the current frame
     image_ds = images_ds_array[frame_idx]
     background_ds = background_ds_array[:]
-    roi_image = roi_images_array[frame_idx]
     
-    # Panel 1 & 2: Downsampled View and Mask
+    panel1 = cv2.cvtColor(image_ds, cv2.COLOR_GRAY2BGR)
+    
     diff_ds = np.clip(background_ds.astype(np.int16) - image_ds.astype(np.int16), 0, 255).astype(np.uint8)
+    if dish_mask is not None:
+        diff_ds[dish_mask == 0] = 0
+    panel2 = cv2.cvtColor(diff_ds, cv2.COLOR_GRAY2BGR)
+
     mask_ds = (diff_ds >= ds_thresh).astype(np.uint8) * 255
-    
-    # Use slider values for morphology
-    # Ensure radii are at least 1 to avoid errors with disk(0)
     se1_ds = disk(max(1, ds_se1_radius))
     se4_ds = disk(max(1, ds_se4_radius))
     processed_mask_ds = erosion(dilation(erosion(mask_ds, se1_ds), se4_ds), se1_ds)
+    panel3 = cv2.cvtColor(processed_mask_ds, cv2.COLOR_GRAY2BGR)
 
-    # Panel 3 & 4: ROI View and Mask
-    roi_coords = roi_coords_full_array[frame_idx]
+    panel4 = cv2.cvtColor(image_ds, cv2.COLOR_GRAY2BGR)
     
-    if roi_coords[0] != -1: # Check if ROI is valid
-        x1, y1 = roi_coords
-        h, w = roi_image.shape
-        background_roi = background_full_array[y1:y1+h, x1:x1+w]
-        
-        if background_roi.shape == roi_image.shape:
-            diff_roi = np.clip(background_roi.astype(np.int16) - roi_image.astype(np.int16), 0, 255).astype(np.uint8)
-            mask_roi = (diff_roi >= roi_thresh).astype(np.uint8) * 255
-            
-            # Apply morphology operations
-            se1_roi = disk(max(1, roi_se1_radius))
-            se2_roi = disk(max(1, roi_se2_radius))
-            processed_mask_roi = erosion(dilation(erosion(mask_roi, se1_roi), se2_roi), se1_roi)
-        else:
-            diff_roi = np.zeros_like(roi_image)
-            processed_mask_roi = np.zeros_like(roi_image)
-    else:
-        diff_roi = np.zeros_like(roi_image)
-        processed_mask_roi = np.zeros_like(roi_image)
+    all_blobs = regionprops(label(processed_mask_ds))
+    valid_blobs = [r for r in all_blobs if min_area <= r.area <= max_area]
+    
+    for blob in valid_blobs:
+        min_r, min_c, max_r, max_c = blob.bbox
+        cv2.rectangle(panel4, (min_c, min_r), (max_c, max_r), (0, 255, 0), 2)
+        cv2.putText(panel4, f"A:{blob.area}", (min_c, min_r - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-    # Assemble Dashboard
     display_size = (480, 480)
     
-    diff_ds_bgr = cv2.cvtColor(diff_ds, cv2.COLOR_GRAY2BGR)
-    mask_ds_bgr = cv2.cvtColor(processed_mask_ds, cv2.COLOR_GRAY2BGR)
-    diff_roi_bgr = cv2.cvtColor(diff_roi, cv2.COLOR_GRAY2BGR)
-    mask_roi_bgr = cv2.cvtColor(processed_mask_roi, cv2.COLOR_GRAY2BGR)
+    cv2.putText(panel1, "Original DS Image", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    cv2.putText(panel2, "Background Difference", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    cv2.putText(panel3, f"Mask (thresh={ds_thresh}, se1={ds_se1_radius}, se4={ds_se4_radius})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    cv2.putText(panel4, f"Detections: {len(valid_blobs)} (Area: {min_area}-{max_area})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     
-    panel1 = cv2.resize(diff_ds_bgr, display_size)
-    panel2 = cv2.resize(mask_ds_bgr, display_size)
-    panel3 = cv2.resize(diff_roi_bgr, display_size)
-    panel4 = cv2.resize(mask_roi_bgr, display_size)
-
-    # Show morphology parameters on the panels
-    cv2.putText(panel1, f"Downsampled Diff", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    cv2.putText(panel2, f"Result (thresh={ds_thresh}, se1={ds_se1_radius}, se4={ds_se4_radius})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    cv2.putText(panel3, f"ROI Diff", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    cv2.putText(panel4, f"Result (thresh={roi_thresh}, se1={roi_se1_radius}, se2={roi_se2_radius})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    
-    top_row = np.hstack((panel1, panel2))
-    bottom_row = np.hstack((panel3, panel4))
+    top_row = np.hstack((cv2.resize(panel1, display_size), cv2.resize(panel2, display_size)))
+    bottom_row = np.hstack((cv2.resize(panel3, display_size), cv2.resize(panel4, display_size)))
     dashboard = np.vstack((top_row, bottom_row))
     
     return dashboard
 
 def main(zarr_path, start_frame):
-    global current_frame, ds_thresh, roi_thresh, ds_se1_radius, ds_se4_radius, roi_se1_radius, roi_se2_radius
+    global current_frame, ds_thresh, ds_se1_radius, ds_se4_radius, min_area, max_area
     current_frame = start_frame
     
+    config_path = Path("src/pipeline_config.yaml")
+
     try:
         zarr_root = zarr.open(zarr_path, mode='r')
         num_frames = zarr_root['raw_video/images_ds'].shape[0]
+        
+        # NOTE: This uses the latest detect_run if available, otherwise falls back to crop_run for mask params
+        latest_run_group = 'detect_runs' if 'detect_runs' in zarr_root else 'crop_runs'
+        latest_run = zarr_root[latest_run_group].attrs['latest']
+        run_params = zarr_root[f'{latest_run_group}/{latest_run}'].attrs['parameters']
+        
+        mask_params = run_params.get('dish_mask', {})
+        ds_img_shape = zarr_root['raw_video/images_ds'].shape[1:]
+        dish_mask = np.ones(ds_img_shape, dtype=np.uint8) * 255
+
+        if mask_params.get('shape') == 'rectangle' and 'roi' in mask_params:
+            x, y, w, h = mask_params['roi']
+            dish_mask = np.zeros(ds_img_shape, dtype=np.uint8)
+            cv2.rectangle(dish_mask, (x, y), (x+w, y+h), 255, -1)
+            print("✅ Loaded rectangular mask from Zarr.")
+
     except Exception as e:
         print(f"Error opening Zarr file: {e}")
         return
 
-    window_name = "Fish Tracker Threshold Tuner"
+    window_name = "Detection Parameter Tuner"
     cv2.namedWindow(window_name)
     
-    # Create trackbars
     cv2.createTrackbar("Frame", window_name, current_frame, num_frames - 1, update_frame)
     cv2.createTrackbar("ds_thresh", window_name, ds_thresh, 255, update_ds_thresh)
-    cv2.createTrackbar("roi_thresh", window_name, roi_thresh, 255, update_roi_thresh)
     cv2.createTrackbar("ds_erode(se1)", window_name, ds_se1_radius, 10, update_ds_se1)
     cv2.createTrackbar("ds_dilate(se4)", window_name, ds_se4_radius, 10, update_ds_se4)
-    cv2.createTrackbar("roi_erode(se1)", window_name, roi_se1_radius, 10, update_roi_se1)
-    cv2.createTrackbar("roi_dilate(se2)", window_name, roi_se2_radius, 10, update_roi_se2)
-    
-    print("Starting Threshold Tuner...")
-    print("Controls: Adjust sliders to see results. Press 'q' or Esc to quit.")
+    cv2.createTrackbar("min_area", window_name, min_area, 1000, update_min_area)
+    cv2.createTrackbar("max_area", window_name, max_area, 1000, update_max_area)
+
+    print("🚀 Starting Detection Parameter Tuner...")
+    print("Controls:")
+    print("  - Adjust sliders to see results.")
+    print("  - Press 's' to SAVE the current parameters to pipeline_config.yaml.")
+    print("  - Press 'q' or Esc to quit without saving.")
 
     while True:
-        dashboard = create_tuner_dashboard(current_frame, zarr_root)
-        
+        dashboard = create_tuner_dashboard(current_frame, zarr_root, dish_mask)
         if dashboard is not None:
             cv2.imshow(window_name, dashboard)
-        
         cv2.setTrackbarPos("Frame", window_name, current_frame)
         
         key = cv2.waitKey(30) & 0xFF
@@ -169,8 +151,31 @@ def main(zarr_path, start_frame):
             current_frame = min(num_frames - 1, current_frame + 1)
         elif key == 81: # Left arrow
             current_frame = max(0, current_frame - 1)
-            
+        # --- NEW: Save functionality on 's' key press ---
+        elif key == ord('s'):
+            try:
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                # Update the detect parameters to match the new pipeline structure
+                if 'detect' not in config:
+                    config['detect'] = {}
+                
+                config['detect']['ds_thresh'] = ds_thresh
+                config['detect']['se1_radius'] = ds_se1_radius
+                config['detect']['se4_radius'] = ds_se4_radius
+                config['detect']['min_area'] = min_area
+                config['detect']['max_area'] = max_area
+                
+                with open(config_path, 'w') as f:
+                    yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+                
+                print(f"✅ Parameters saved to {config_path}")
+            except Exception as e:
+                print(f"❌ Error saving parameters: {e}")
+
     cv2.destroyAllWindows()
+    print("\nTuner closed.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Interactively tune detection thresholds for the tracking pipeline.")
