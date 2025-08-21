@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Process videos with YOLO model and save detections to zarr format.
+Includes top-k filtering based on confidence scores.
 """
 
 import os
@@ -29,7 +30,7 @@ def get_video_info(video_path):
 
 def process_video_to_zarr(video_path, model_path, output_zarr_path, 
                          batch_size=1, conf_threshold=0.25, 
-                         max_detections=100, device='cuda:0'):
+                         max_detections=100, top_k=None, device='cuda:0'):
     """
     Process video with YOLO model and save detections to zarr.
     
@@ -39,7 +40,8 @@ def process_video_to_zarr(video_path, model_path, output_zarr_path,
         output_zarr_path: Path for output zarr file
         batch_size: Batch size for inference
         conf_threshold: Confidence threshold for detections
-        max_detections: Maximum number of detections per frame
+        max_detections: Maximum number of detections per frame (hard limit)
+        top_k: If specified, keep only top-k detections by confidence per frame
         device: Device for inference ('cuda:0' or 'cpu')
     """
     
@@ -51,6 +53,9 @@ def process_video_to_zarr(video_path, model_path, output_zarr_path,
     frame_count, fps, width, height = get_video_info(video_path)
     print(f"Video info: {frame_count} frames, {fps} fps, {width}x{height}")
     
+    # Determine effective max detections
+    effective_max_dets = min(max_detections, top_k) if top_k else max_detections
+    
     # Create zarr store
     store = zarr.DirectoryStore(output_zarr_path)
     root = zarr.group(store=store, overwrite=True)
@@ -59,8 +64,8 @@ def process_video_to_zarr(video_path, model_path, output_zarr_path,
     # Bounding boxes: [frame, detection_id, [x1, y1, x2, y2]]
     bboxes = root.create_dataset(
         'bboxes',
-        shape=(frame_count, max_detections, 4),
-        chunks=(100, max_detections, 4),
+        shape=(frame_count, effective_max_dets, 4),
+        chunks=(100, effective_max_dets, 4),
         dtype='float32',
         fill_value=-1
     )
@@ -68,8 +73,8 @@ def process_video_to_zarr(video_path, model_path, output_zarr_path,
     # Confidence scores: [frame, detection_id]
     scores = root.create_dataset(
         'scores',
-        shape=(frame_count, max_detections),
-        chunks=(100, max_detections),
+        shape=(frame_count, effective_max_dets),
+        chunks=(100, effective_max_dets),
         dtype='float32',
         fill_value=-1
     )
@@ -77,8 +82,8 @@ def process_video_to_zarr(video_path, model_path, output_zarr_path,
     # Class IDs: [frame, detection_id]
     class_ids = root.create_dataset(
         'class_ids',
-        shape=(frame_count, max_detections),
-        chunks=(100, max_detections),
+        shape=(frame_count, effective_max_dets),
+        chunks=(100, effective_max_dets),
         dtype='int32',
         fill_value=-1
     )
@@ -99,14 +104,24 @@ def process_video_to_zarr(video_path, model_path, output_zarr_path,
     root.attrs['fps'] = fps
     root.attrs['width'] = width
     root.attrs['height'] = height
-    root.attrs['max_detections'] = max_detections
+    root.attrs['max_detections'] = effective_max_dets
     root.attrs['conf_threshold'] = conf_threshold
+    root.attrs['top_k'] = top_k if top_k else 'None'
     root.attrs['processed_date'] = datetime.now().isoformat()
     
     # Process video
     cap = cv2.VideoCapture(str(video_path))
     
+    # Statistics tracking
+    total_raw_detections = 0
+    total_kept_detections = 0
+    frames_with_raw_detections = 0
+    frames_with_kept_detections = 0
+    
     print(f"Processing {frame_count} frames...")
+    if top_k:
+        print(f"Using top-{top_k} filtering per frame")
+    
     with tqdm(total=frame_count) as pbar:
         frame_idx = 0
         
@@ -121,20 +136,39 @@ def process_video_to_zarr(video_path, model_path, output_zarr_path,
             # Extract detections
             if len(results) > 0 and results[0].boxes is not None:
                 boxes = results[0].boxes
-                n_dets = min(len(boxes), max_detections)
+                raw_n_dets = len(boxes)
                 
-                if n_dets > 0:
-                    # Store bounding boxes (xyxy format)
-                    bboxes[frame_idx, :n_dets] = boxes.xyxy.cpu().numpy()[:n_dets]
+                if raw_n_dets > 0:
+                    frames_with_raw_detections += 1
+                    total_raw_detections += raw_n_dets
                     
-                    # Store confidence scores
-                    scores[frame_idx, :n_dets] = boxes.conf.cpu().numpy()[:n_dets]
+                    # Get detection data
+                    det_bboxes = boxes.xyxy.cpu().numpy()
+                    det_scores = boxes.conf.cpu().numpy()
+                    det_classes = boxes.cls.cpu().numpy().astype(int)
                     
-                    # Store class IDs
-                    class_ids[frame_idx, :n_dets] = boxes.cls.cpu().numpy()[:n_dets].astype(int)
+                    # Apply top-k filtering if specified
+                    if top_k and raw_n_dets > top_k:
+                        # Sort by confidence scores (descending)
+                        sorted_indices = np.argsort(det_scores)[::-1][:top_k]
+                        
+                        # Keep only top-k detections
+                        det_bboxes = det_bboxes[sorted_indices]
+                        det_scores = det_scores[sorted_indices]
+                        det_classes = det_classes[sorted_indices]
+                        n_dets = top_k
+                    else:
+                        n_dets = min(raw_n_dets, effective_max_dets)
                     
-                    # Store number of detections
+                    # Store the detections
+                    bboxes[frame_idx, :n_dets] = det_bboxes[:n_dets]
+                    scores[frame_idx, :n_dets] = det_scores[:n_dets]
+                    class_ids[frame_idx, :n_dets] = det_classes[:n_dets]
                     n_detections[frame_idx] = n_dets
+                    
+                    if n_dets > 0:
+                        frames_with_kept_detections += 1
+                        total_kept_detections += n_dets
             
             frame_idx += 1
             pbar.update(1)
@@ -145,60 +179,108 @@ def process_video_to_zarr(video_path, model_path, output_zarr_path,
     if hasattr(model.model, 'names'):
         root.attrs['class_names'] = json.dumps(model.model.names)
     
+    # Store filtering statistics
+    filtering_stats = {
+        'total_raw_detections': total_raw_detections,
+        'total_kept_detections': total_kept_detections,
+        'frames_with_raw_detections': frames_with_raw_detections,
+        'frames_with_kept_detections': frames_with_kept_detections,
+        'filtering_ratio': total_kept_detections / total_raw_detections if total_raw_detections > 0 else 0
+    }
+    root.attrs['filtering_statistics'] = json.dumps(filtering_stats)
+    
     print(f"Saved detections to {output_zarr_path}")
     
     # Print summary statistics
-    total_detections = n_detections[:].sum()
-    frames_with_detections = (n_detections[:] > 0).sum()
     print(f"\nSummary:")
-    print(f"  Total detections: {total_detections}")
-    print(f"  Frames with detections: {frames_with_detections}/{frame_count}")
-    print(f"  Average detections per frame: {total_detections/frame_count:.2f}")
+    print(f"  Total raw detections: {total_raw_detections}")
+    print(f"  Total kept detections: {total_kept_detections}")
+    print(f"  Frames with raw detections: {frames_with_raw_detections}/{frame_count} "
+          f"({frames_with_raw_detections/frame_count*100:.1f}%)")
+    print(f"  Frames with kept detections: {frames_with_kept_detections}/{frame_count} "
+          f"({frames_with_kept_detections/frame_count*100:.1f}%)")
     
-    return root
+    if top_k and total_raw_detections > total_kept_detections:
+        print(f"  Filtering: Kept {total_kept_detections}/{total_raw_detections} detections "
+              f"({total_kept_detections/total_raw_detections*100:.1f}%)")
+    
+    # Calculate average detections per frame
+    avg_raw_per_frame = total_raw_detections / frames_with_raw_detections if frames_with_raw_detections > 0 else 0
+    avg_kept_per_frame = total_kept_detections / frames_with_kept_detections if frames_with_kept_detections > 0 else 0
+    
+    print(f"  Avg raw detections per frame (with detections): {avg_raw_per_frame:.2f}")
+    print(f"  Avg kept detections per frame (with detections): {avg_kept_per_frame:.2f}")
+    
+    return True
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Process video with YOLO and save to zarr')
-    parser.add_argument('--video', type=str, required=True,
-                       help='Path to input video file')
-    parser.add_argument('--model', type=str, required=True,
-                       help='Path to YOLO model weights (.pt, .onnx, or .engine)')
-    parser.add_argument('--output', type=str, default=None,
-                       help='Path for output zarr file (default: based on video name)')
-    parser.add_argument('--conf', type=float, default=0.25,
-                       help='Confidence threshold (default: 0.25)')
+    parser = argparse.ArgumentParser(
+        description='Process video with YOLO model and save detections to zarr format',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Basic usage
+  %(prog)s video.mp4 yolov8n.pt output.zarr
+  
+  # With top-k filtering (keep only top 5 detections per frame)
+  %(prog)s video.mp4 model.pt output.zarr --top-k 5
+  
+  # Custom confidence threshold and top-k
+  %(prog)s video.mp4 model.pt output.zarr --conf 0.5 --top-k 3
+  
+  # Specify device
+  %(prog)s video.mp4 model.pt output.zarr --device cpu
+        """
+    )
+    
+    parser.add_argument('video_path', type=str, help='Path to input video')
+    parser.add_argument('model_path', type=str, help='Path to YOLO model weights')
+    parser.add_argument('output_zarr_path', type=str, help='Path for output zarr file')
+    
+    parser.add_argument('--batch-size', type=int, default=1,
+                      help='Batch size for inference (default: 1)')
+    parser.add_argument('--conf', '--conf-threshold', type=float, default=0.25,
+                      help='Confidence threshold for detections (default: 0.25)')
     parser.add_argument('--max-detections', type=int, default=100,
-                       help='Maximum detections per frame (default: 100)')
+                      help='Maximum number of detections per frame - hard limit (default: 100)')
+    parser.add_argument('--top-k', type=int, default=None,
+                      help='Keep only top-k detections by confidence per frame (default: no filtering)')
     parser.add_argument('--device', type=str, default='cuda:0',
-                       help='Device for inference (default: cuda:0)')
-    parser.add_argument('--h5-base', type=str, default=None,
-                       help='Base .h5 file to derive zarr name from')
+                      help='Device for inference (default: cuda:0)')
     
     args = parser.parse_args()
     
-    # Determine output path
-    if args.output:
-        output_path = args.output
-    elif args.h5_base:
-        # Use h5 file base name for zarr
-        h5_path = Path(args.h5_base)
-        output_path = h5_path.stem + '_detections.zarr'
-    else:
-        # Use video file base name
-        video_path = Path(args.video)
-        output_path = video_path.stem + '_detections.zarr'
+    # Validate inputs
+    video_path = Path(args.video_path)
+    if not video_path.exists():
+        print(f"Error: Video file not found: {video_path}")
+        return 1
+    
+    model_path = Path(args.model_path)
+    if not model_path.exists():
+        print(f"Error: Model file not found: {model_path}")
+        return 1
+    
+    # Validate top-k
+    if args.top_k is not None and args.top_k < 1:
+        print(f"Error: top-k must be >= 1")
+        return 1
     
     # Process video
-    process_video_to_zarr(
-        video_path=args.video,
-        model_path=args.model,
-        output_zarr_path=output_path,
+    success = process_video_to_zarr(
+        video_path=args.video_path,
+        model_path=args.model_path,
+        output_zarr_path=args.output_zarr_path,
+        batch_size=args.batch_size,
         conf_threshold=args.conf,
         max_detections=args.max_detections,
+        top_k=args.top_k,
         device=args.device
     )
+    
+    return 0 if success else 1
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
