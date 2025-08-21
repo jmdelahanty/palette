@@ -153,6 +153,10 @@ def fill_gaps(zarr_path, max_gap=10, method='linear', confidence_decay=0.95,
     print(f"\n{'='*60}")
     print("GAP INTERPOLATION")
     print(f"{'='*60}")
+    
+    # Normalize path to avoid double slashes in output
+    zarr_path = str(zarr_path).rstrip('/')
+    
     print(f"Zarr file: {zarr_path}")
     print(f"Max gap size: {max_gap} frames")
     print(f"Method: {method}")
@@ -160,33 +164,69 @@ def fill_gaps(zarr_path, max_gap=10, method='linear', confidence_decay=0.95,
     print()
     
     # Load zarr
-    root = zarr.open(str(zarr_path), mode='r+' if save else 'r')
+    root = zarr.open(zarr_path, mode='r+' if save else 'r')
     
     # Determine which data to use
     if source == 'latest':
-        # Try to use latest cleaned data, fall back to original
+        # Priority order:
+        # 1. Latest preprocessed data (from previous interpolation runs)
+        # 2. Latest filtered data (from frame_distance_analyzer.py)
+        # 3. Original data
+        
         if 'preprocessing' in root and 'latest' in root['preprocessing'].attrs:
             source_path = root['preprocessing'].attrs['latest']
             source_group = root['preprocessing'][source_path]
             print(f"Using latest preprocessed data: {source_path}")
-        elif 'cleaned_runs' in root and 'latest' in root['cleaned_runs'].attrs:
-            source_name = root['cleaned_runs'].attrs['latest']
-            source_group = root['cleaned_runs'][source_name]
-            print(f"Using latest cleaned data: {source_name}")
+            
+        elif 'filtered_runs' in root and 'latest' in root['filtered_runs'].attrs:
+            # Changed from 'cleaned_runs' to 'filtered_runs' to match frame_distance_analyzer.py
+            source_name = root['filtered_runs'].attrs['latest']
+            source_group = root['filtered_runs'][source_name]
+            print(f"Using latest filtered data: {source_name}")
+            
         else:
             source_group = root
-            print("Using original data")
+            print("Using original data (no preprocessing found)")
+            
     elif source == 'original':
         source_group = root
         print("Using original data")
+        
     else:
-        # Try to find specific run
+        # Try to find specific run in all possible locations
+        found = False
+        
+        # Check preprocessing group
         if 'preprocessing' in root and source in root['preprocessing']:
             source_group = root['preprocessing'][source]
-        elif 'cleaned_runs' in root and source in root['cleaned_runs']:
-            source_group = root['cleaned_runs'][source]
-        else:
+            print(f"Using preprocessing run: {source}")
+            found = True
+            
+        # Check filtered_runs group (from frame_distance_analyzer.py)
+        elif 'filtered_runs' in root and source in root['filtered_runs']:
+            source_group = root['filtered_runs'][source]
+            print(f"Using filtered run: {source}")
+            found = True
+            
+        if not found:
             print(f"Error: Could not find source '{source}'")
+            print("\nAvailable sources:")
+            
+            # List available preprocessing runs
+            if 'preprocessing' in root:
+                print("  In preprocessing/:")
+                for key in root['preprocessing'].keys():
+                    if key != 'metadata':  # Skip metadata entries
+                        print(f"    - {key}")
+                        
+            # List available filtered runs
+            if 'filtered_runs' in root:
+                print("  In filtered_runs/:")
+                for key in root['filtered_runs'].keys():
+                    if key != 'metadata':  # Skip metadata entries
+                        print(f"    - {key}")
+                        
+            print("\nUse --source with one of the above names, or 'latest' for the most recent, or 'original' for unprocessed data")
             return None
     
     # Load data

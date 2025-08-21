@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Simple Fish Metrics Calculator
+Fish Behavior Metrics Analyzer
 
-Calculates core behavioral metrics for fish tracking data:
-- Speed (instantaneous and smoothed)
-- Acceleration
+Calculates behavioral metrics from cleaned detection data:
 - Cumulative distance traveled
+- Instantaneous and smoothed speed
+- Acceleration patterns
+- Movement statistics
 
-These metrics are added to the existing zarr file for analysis.
+Stores results in zarr with full provenance tracking.
 """
 
 import zarr
@@ -15,186 +16,143 @@ import numpy as np
 import argparse
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Optional
-from scipy.ndimage import uniform_filter1d
+import json
 import matplotlib.pyplot as plt
+from scipy.ndimage import uniform_filter1d
+from scipy.interpolate import interp1d
+from typing import Dict, Tuple, Optional
 
 
-class SimpleFishMetrics:
-    """
-    Calculates simple behavioral metrics from fish tracking data.
-    """
+class FishMetricsAnalyzer:
+    """Analyze fish behavior from cleaned detection data."""
     
-    def __init__(self, 
-                 zarr_path: str,
-                 interpolation_run: Optional[str] = None,
-                 fps: float = 60.0,
-                 pixel_to_mm: float = None,
-                 verbose: bool = True):
+    def __init__(self, zarr_path: str, source: str = 'latest', verbose: bool = True):
         """
-        Initialize the metrics calculator.
+        Initialize analyzer.
         
         Args:
-            zarr_path: Path to zarr file with tracking data
-            interpolation_run: Specific interpolation run to use
-            fps: Frame rate of the video (Hz)
-            pixel_to_mm: Conversion factor from pixels to mm (optional)
+            zarr_path: Path to zarr file with detection data
+            source: Which data to use ('latest', 'interpolated', 'filtered', or specific version)
             verbose: Print progress messages
         """
         self.zarr_path = Path(zarr_path)
-        self.fps = fps
-        self.pixel_to_mm = pixel_to_mm
+        self.root = zarr.open(str(self.zarr_path), mode='r+')
         self.verbose = verbose
         
-        # Time between frames
-        self.dt = 1.0 / fps
+        # Load the appropriate data
+        self.data, self.source_info = self._load_data(source)
         
-        # Open zarr file
-        self.root = zarr.open(str(zarr_path), mode='r+')
+        # Get metadata
+        self.fps = self.root.attrs.get('fps', 60.0)
+        self.total_frames = len(self.data['n_detections'])
         
-        # Determine interpolation run
-        if interpolation_run is None and 'interpolation_runs' in self.root:
-            interpolation_run = self.root['interpolation_runs'].attrs.get('latest')
-            if self.verbose:
-                print(f"Using latest interpolation run: {interpolation_run}")
-        self.interpolation_run = interpolation_run
+        # Load calibration if available
+        self.calibration = self._load_calibration()
+        self.pixel_to_mm = None
+        self.fish_length_mm = 4.0  # Default larval zebrafish length
         
-        # Load fish positions
-        self._load_positions()
+        if self.calibration and 'pixel_to_mm' in self.calibration:
+            self.pixel_to_mm = self.calibration['pixel_to_mm']
+            if verbose:
+                print(f"Calibration loaded: 1 pixel = {self.pixel_to_mm:.4f} mm")
+        
+        if verbose:
+            print(f"Loaded {self.source_info['type']} data: {self.source_info['name']}")
+            print(f"Coverage: {self.source_info['coverage']*100:.1f}%")
+            print(f"FPS: {self.fps}")
+            if self.pixel_to_mm:
+                print(f"Real-world units: ENABLED (1 px = {self.pixel_to_mm:.4f} mm)")
+            else:
+                print(f"Real-world units: DISABLED (no calibration found)")
     
-    def _load_positions(self):
-        """Load fish position data from zarr."""
-        if self.verbose:
-            print("Loading fish position data...")
+    def _load_calibration(self) -> Optional[Dict]:
+        """Load calibration data if available."""
+        if 'calibration' not in self.root:
+            return None
         
-        # Try to load from chaser_comparison first (already computed positions)
-        if 'chaser_comparison' in self.root:
-            comp_group = self.root['chaser_comparison']
-            run_name = self.interpolation_run or comp_group.attrs.get('latest', 'original')
-            
-            if run_name in comp_group and 'fish_position_camera' in comp_group[run_name]:
-                self.positions = comp_group[run_name]['fish_position_camera'][:]
-                if self.verbose:
-                    print(f"  Loaded positions from chaser_comparison/{run_name}")
-                    valid = ~np.isnan(self.positions[:, 0])
-                    print(f"  Valid frames: {np.sum(valid)}/{len(self.positions)} ({np.sum(valid)/len(self.positions)*100:.1f}%)")
-                return
+        calib_group = self.root['calibration']
+        calibration = dict(calib_group.attrs)
         
-        # Otherwise, calculate from bounding boxes
-        if self.interpolation_run and f'interpolation_runs/{self.interpolation_run}' in self.root:
-            data_group = self.root[f'interpolation_runs/{self.interpolation_run}']
-        else:
+        # Load subgroups if needed
+        for group_name in ['arena', 'rig_info']:
+            if group_name in calib_group:
+                calibration[group_name] = dict(calib_group[group_name].attrs)
+        
+        return calibration
+    
+    def _load_data(self, source: str) -> Tuple[Dict, Dict]:
+        """Load detection data based on source specification."""
+        
+        if source == 'latest' or source == 'interpolated':
+            # Try interpolated first
+            if 'preprocessing' in self.root and 'latest' in self.root['preprocessing'].attrs:
+                latest = self.root['preprocessing'].attrs['latest']
+                data_group = self.root['preprocessing'][latest]
+                source_type = 'interpolated'
+                source_name = latest
+            elif 'filtered_runs' in self.root and 'latest' in self.root['filtered_runs'].attrs:
+                latest = self.root['filtered_runs'].attrs['latest']
+                data_group = self.root['filtered_runs'][latest]
+                source_type = 'filtered'
+                source_name = latest
+            else:
+                data_group = self.root
+                source_type = 'original'
+                source_name = 'root'
+        
+        elif source == 'filtered':
+            if 'filtered_runs' in self.root and 'latest' in self.root['filtered_runs'].attrs:
+                latest = self.root['filtered_runs'].attrs['latest']
+                data_group = self.root['filtered_runs'][latest]
+                source_type = 'filtered'
+                source_name = latest
+            else:
+                raise ValueError("No filtered data found")
+        
+        elif source == 'original':
             data_group = self.root
+            source_type = 'original'
+            source_name = 'root'
         
-        bboxes = data_group['bboxes'][:]
-        n_detections = data_group['n_detections'][:]
-        
-        # Calculate center positions from bboxes
-        self.positions = np.full((len(bboxes), 2), np.nan)
-        
-        for i in range(len(bboxes)):
-            if n_detections[i] > 0:
-                bbox = bboxes[i, 0]  # First detection
-                # Center of bounding box
-                self.positions[i, 0] = (bbox[0] + bbox[2]) / 2  # x
-                self.positions[i, 1] = (bbox[1] + bbox[3]) / 2  # y
-        
-        if self.verbose:
-            valid = ~np.isnan(self.positions[:, 0])
-            print(f"  Calculated positions from bboxes")
-            print(f"  Valid frames: {np.sum(valid)}/{len(self.positions)} ({np.sum(valid)/len(self.positions)*100:.1f}%)")
-    
-    def calculate_speed(self, smooth_window: int = 5) -> Dict[str, np.ndarray]:
-        """
-        Calculate fish speed over time.
-        
-        Args:
-            smooth_window: Window size for smoothing (frames)
-            
-        Returns:
-            Dictionary with speed metrics
-        """
-        if self.verbose:
-            print("\nCalculating speed...")
-        
-        n_frames = len(self.positions)
-        
-        # Initialize arrays
-        instantaneous_speed = np.full(n_frames, np.nan)
-        
-        # Calculate frame-to-frame displacement and speed
-        for i in range(1, n_frames):
-            if not np.isnan(self.positions[i, 0]) and not np.isnan(self.positions[i-1, 0]):
-                # Calculate displacement
-                dx = self.positions[i, 0] - self.positions[i-1, 0]
-                dy = self.positions[i, 1] - self.positions[i-1, 1]
-                
-                # Speed is displacement magnitude per unit time
-                frame_speed = np.sqrt(dx**2 + dy**2) / self.dt
-                instantaneous_speed[i] = frame_speed
-        
-        # Apply smoothing for cleaner signal
-        smoothed_speed = self._smooth_signal(instantaneous_speed, smooth_window)
-        
-        # Convert units if needed
-        if self.pixel_to_mm is not None:
-            instantaneous_speed *= self.pixel_to_mm
-            smoothed_speed *= self.pixel_to_mm
-            units = "mm/s"
         else:
-            units = "pixels/s"
+            # Try to find specific version
+            if 'preprocessing' in self.root and source in self.root['preprocessing']:
+                data_group = self.root['preprocessing'][source]
+                source_type = 'interpolated'
+                source_name = source
+            elif 'filtered_runs' in self.root and source in self.root['filtered_runs']:
+                data_group = self.root['filtered_runs'][source]
+                source_type = 'filtered'
+                source_name = source
+            else:
+                raise ValueError(f"Source '{source}' not found")
         
-        # Calculate statistics
-        valid_speeds = instantaneous_speed[~np.isnan(instantaneous_speed)]
-        if len(valid_speeds) > 0 and self.verbose:
-            print(f"  Speed statistics ({units}):")
-            print(f"    Mean: {np.mean(valid_speeds):.2f}")
-            print(f"    Median: {np.median(valid_speeds):.2f}")
-            print(f"    Max: {np.max(valid_speeds):.2f}")
-            print(f"    95th percentile: {np.percentile(valid_speeds, 95):.2f}")
-        
-        return {
-            'instantaneous_speed': instantaneous_speed,
-            'smoothed_speed': smoothed_speed,
-            'units': units
+        # Load arrays
+        data = {
+            'bboxes': data_group['bboxes'][:],
+            'scores': data_group['scores'][:],
+            'n_detections': data_group['n_detections'][:],
+            'class_ids': data_group['class_ids'][:]
         }
+        
+        # Add interpolation mask if available
+        if 'interpolation_mask' in data_group:
+            data['interpolation_mask'] = data_group['interpolation_mask'][:]
+        
+        # Calculate coverage
+        coverage = (data['n_detections'] > 0).sum() / len(data['n_detections'])
+        
+        source_info = {
+            'type': source_type,
+            'name': source_name,
+            'coverage': coverage
+        }
+        
+        return data, source_info
     
-    def calculate_acceleration(self, speed_data: Dict[str, np.ndarray]) -> np.ndarray:
+    def calculate_cumulative_distance(self) -> Dict:
         """
-        Calculate acceleration from speed data.
-        
-        Args:
-            speed_data: Dictionary from calculate_speed()
-            
-        Returns:
-            Acceleration array
-        """
-        if self.verbose:
-            print("\nCalculating acceleration...")
-        
-        smoothed_speed = speed_data['smoothed_speed']
-        n_frames = len(smoothed_speed)
-        acceleration = np.full(n_frames, np.nan)
-        
-        # Calculate acceleration as rate of change of speed
-        for i in range(1, n_frames):
-            if not np.isnan(smoothed_speed[i]) and not np.isnan(smoothed_speed[i-1]):
-                acceleration[i] = (smoothed_speed[i] - smoothed_speed[i-1]) / self.dt
-        
-        # Calculate statistics
-        valid_acc = acceleration[~np.isnan(acceleration)]
-        if len(valid_acc) > 0 and self.verbose:
-            print(f"  Acceleration statistics ({speed_data['units']}/s):")
-            print(f"    Mean: {np.mean(valid_acc):.2f}")
-            print(f"    Std: {np.std(valid_acc):.2f}")
-            print(f"    Max positive: {np.max(valid_acc):.2f}")
-            print(f"    Max negative: {np.min(valid_acc):.2f}")
-        
-        return acceleration
-    
-    def calculate_cumulative_distance(self) -> Dict[str, np.ndarray]:
-        """
-        Calculate cumulative distance traveled.
+        Calculate cumulative distance traveled across frames.
         
         Returns:
             Dictionary with distance metrics
@@ -202,84 +160,211 @@ class SimpleFishMetrics:
         if self.verbose:
             print("\nCalculating cumulative distance...")
         
-        n_frames = len(self.positions)
-        cumulative_distance = np.zeros(n_frames)
-        frame_distances = np.full(n_frames, np.nan)
+        # Extract centroids for valid detections
+        centroids = []
+        valid_frames = []
         
-        for i in range(1, n_frames):
-            if not np.isnan(self.positions[i, 0]) and not np.isnan(self.positions[i-1, 0]):
-                # Calculate frame-to-frame distance
-                dist = np.linalg.norm(self.positions[i] - self.positions[i-1])
-                frame_distances[i] = dist
-                cumulative_distance[i] = cumulative_distance[i-1] + dist
+        for frame_idx in range(self.total_frames):
+            if self.data['n_detections'][frame_idx] > 0:
+                bbox = self.data['bboxes'][frame_idx, 0]
+                centroid = np.array([(bbox[0] + bbox[2])/2, (bbox[1] + bbox[3])/2])
+                centroids.append(centroid)
+                valid_frames.append(frame_idx)
+        
+        if len(centroids) < 2:
+            print("Warning: Not enough detections for distance calculation")
+            return None
+        
+        centroids = np.array(centroids)
+        valid_frames = np.array(valid_frames)
+        
+        # Calculate frame-to-frame distances
+        distances = []
+        cumulative_distance = [0]
+        
+        for i in range(1, len(centroids)):
+            # Calculate Euclidean distance
+            dist = np.linalg.norm(centroids[i] - centroids[i-1])
+            
+            # Check if frames are consecutive or have a gap
+            frame_gap = valid_frames[i] - valid_frames[i-1]
+            
+            # Only add to cumulative if frames are reasonably close
+            # (large gaps might be unreliable)
+            if frame_gap <= 10:  # Threshold for acceptable gap
+                distances.append(dist)
+                cumulative_distance.append(cumulative_distance[-1] + dist)
             else:
-                # Carry forward the cumulative distance
-                cumulative_distance[i] = cumulative_distance[i-1]
+                # For large gaps, don't add distance but maintain cumulative
+                distances.append(np.nan)
+                cumulative_distance.append(cumulative_distance[-1])
         
-        # Convert units if needed
-        if self.pixel_to_mm is not None:
-            cumulative_distance *= self.pixel_to_mm
-            frame_distances *= self.pixel_to_mm
-            units = "mm"
-        else:
-            units = "pixels"
+        # Create full arrays with NaN for missing frames
+        full_distances = np.full(self.total_frames, np.nan)
+        full_cumulative = np.full(self.total_frames, np.nan)
+        
+        # Fill in the valid frames
+        for i, frame_idx in enumerate(valid_frames[1:]):
+            full_distances[frame_idx] = distances[i]
+        
+        for i, frame_idx in enumerate(valid_frames):
+            full_cumulative[frame_idx] = cumulative_distance[i]
+        
+        # Forward fill cumulative distance for visualization continuity
+        last_valid = 0
+        for i in range(self.total_frames):
+            if not np.isnan(full_cumulative[i]):
+                last_valid = full_cumulative[i]
+            else:
+                full_cumulative[i] = last_valid
+        
+        results = {
+            'cumulative_distance': full_cumulative,  # Always in pixels
+            'frame_distances': full_distances,       # Always in pixels
+            'total_distance': cumulative_distance[-1],
+            'mean_distance_per_frame': np.nanmean(distances),
+            'max_single_movement': np.nanmax(distances),
+            'valid_frame_indices': valid_frames,
+            'centroids': centroids
+        }
         
         if self.verbose:
-            print(f"  Total distance traveled: {cumulative_distance[-1]:.1f} {units}")
-            valid_dists = frame_distances[~np.isnan(frame_distances)]
-            if len(valid_dists) > 0:
-                print(f"  Mean step size: {np.mean(valid_dists):.2f} {units}")
+            print(f"  Total distance: {results['total_distance']:.1f} pixels", end="")
+            if self.pixel_to_mm:
+                print(f" ({results['total_distance'] * self.pixel_to_mm:.1f} mm)")
+            else:
+                print()
+            
+            print(f"  Mean movement: {results['mean_distance_per_frame']:.2f} pixels/frame", end="")
+            if self.pixel_to_mm:
+                print(f" ({results['mean_distance_per_frame'] * self.pixel_to_mm:.3f} mm/frame)")
+            else:
+                print()
+            
+            print(f"  Max movement: {results['max_single_movement']:.1f} pixels", end="")
+            if self.pixel_to_mm:
+                print(f" ({results['max_single_movement'] * self.pixel_to_mm:.2f} mm)")
+            else:
+                print()
         
-        return {
-            'cumulative_distance': cumulative_distance,
-            'frame_distances': frame_distances,
-            'units': units
-        }
+        return results
     
-    def _smooth_signal(self, signal: np.ndarray, window: int) -> np.ndarray:
-        """Apply moving average smoothing to a signal."""
-        if window <= 1:
-            return signal.copy()
+    def calculate_speed_and_acceleration(self, window_size: int = 5, max_speed_threshold: float = 1000.0) -> Dict:
+        """
+        Calculate instantaneous speed and acceleration.
         
-        smoothed = np.full_like(signal, np.nan)
+        Args:
+            window_size: Window for smoothing (frames)
+            max_speed_threshold: Maximum reasonable speed (pixels/second) - higher values are capped
         
-        # Only smooth where we have valid data
-        valid_mask = ~np.isnan(signal)
-        if np.sum(valid_mask) > window:
-            # Get valid segments
+        Returns:
+            Dictionary with speed and acceleration metrics
+        """
+        if self.verbose:
+            print("\nCalculating speed and acceleration...")
+        
+        distance_metrics = self.calculate_cumulative_distance()
+        if distance_metrics is None:
+            return None
+        
+        # Instantaneous speed (pixels per second)
+        instantaneous_speed = distance_metrics['frame_distances'] * self.fps
+        
+        # Cap unrealistic speeds (likely from gaps or jumps)
+        instantaneous_speed = np.where(
+            instantaneous_speed > max_speed_threshold,
+            np.nan,
+            instantaneous_speed
+        )
+        
+        # For smoothed speed, we work with the valid data as-is
+        # No additional interpolation - respect the preprocessing pipeline
+        smoothed_speed = np.full_like(instantaneous_speed, np.nan)
+        valid_mask = ~np.isnan(instantaneous_speed)
+        
+        if np.sum(valid_mask) > window_size:
+            # Apply smoothing only to valid data
             valid_indices = np.where(valid_mask)[0]
-            
-            # Apply uniform filter to each continuous segment
-            # This prevents smoothing across gaps
-            segments = []
-            current_segment = [valid_indices[0]]
-            
-            for i in range(1, len(valid_indices)):
-                if valid_indices[i] - valid_indices[i-1] == 1:
-                    current_segment.append(valid_indices[i])
-                else:
-                    segments.append(current_segment)
-                    current_segment = [valid_indices[i]]
-            segments.append(current_segment)
-            
-            # Smooth each segment
-            for segment in segments:
-                if len(segment) >= window:
-                    segment_signal = signal[segment]
-                    smoothed_segment = uniform_filter1d(segment_signal, size=window, mode='nearest')
-                    smoothed[segment] = smoothed_segment
-                else:
-                    # Segment too short to smooth
-                    smoothed[segment] = signal[segment]
+            for idx in valid_indices:
+                # Get window around this point
+                window_start = max(0, idx - window_size // 2)
+                window_end = min(len(instantaneous_speed), idx + window_size // 2 + 1)
+                window_data = instantaneous_speed[window_start:window_end]
+                
+                # Calculate mean of valid points in window
+                valid_in_window = window_data[~np.isnan(window_data)]
+                if len(valid_in_window) > 0:
+                    smoothed_speed[idx] = np.mean(valid_in_window)
         else:
-            # Not enough data to smooth
-            smoothed = signal.copy()
+            smoothed_speed = instantaneous_speed.copy()
         
-        return smoothed
+        # Acceleration (change in smoothed speed per second)
+        # Only calculate where we have consecutive valid smoothed speeds
+        acceleration = np.full(self.total_frames, np.nan)
+        
+        for i in range(1, len(smoothed_speed)):
+            if not np.isnan(smoothed_speed[i]) and not np.isnan(smoothed_speed[i-1]):
+                # Change in speed per frame, converted to per second
+                dt = 1.0 / self.fps  # Time between frames in seconds
+                acceleration[i] = (smoothed_speed[i] - smoothed_speed[i-1]) / dt
+        
+        # Calculate statistics, handling potential all-NaN cases
+        mean_accel = np.nanmean(acceleration) if not np.all(np.isnan(acceleration)) else 0.0
+        accel_std = np.nanstd(acceleration) if not np.all(np.isnan(acceleration)) else 0.0
+        
+        results = {
+            'instantaneous_speed': instantaneous_speed,  # Always in pixels/second
+            'smoothed_speed': smoothed_speed,           # Always in pixels/second
+            'acceleration': acceleration,                # Always in pixels/second²
+            'window_size': window_size,
+            'mean_speed': np.nanmean(instantaneous_speed),
+            'max_speed': np.nanmax(instantaneous_speed),
+            'speed_std': np.nanstd(instantaneous_speed),
+            'mean_acceleration': mean_accel,
+            'acceleration_std': accel_std
+        }
+        
+        if self.verbose:
+            print(f"  Mean speed: {results['mean_speed']:.1f} pixels/second", end="")
+            if self.pixel_to_mm:
+                mm_per_s = results['mean_speed'] * self.pixel_to_mm
+                bl_per_s = mm_per_s / self.fish_length_mm
+                print(f" ({mm_per_s:.2f} mm/s, {bl_per_s:.2f} BL/s)")
+            else:
+                print()
+            
+            print(f"  Max speed: {results['max_speed']:.1f} pixels/second", end="")
+            if self.pixel_to_mm:
+                mm_per_s = results['max_speed'] * self.pixel_to_mm
+                bl_per_s = mm_per_s / self.fish_length_mm
+                print(f" ({mm_per_s:.1f} mm/s, {bl_per_s:.1f} BL/s)")
+            else:
+                print()
+            
+            print(f"  Speed std: {results['speed_std']:.1f} pixels/second", end="")
+            if self.pixel_to_mm:
+                print(f" ({results['speed_std'] * self.pixel_to_mm:.2f} mm/s)")
+            else:
+                print()
+            
+            if not np.isnan(mean_accel):
+                print(f"  Mean acceleration: {mean_accel:.2f} pixels/second²", end="")
+                if self.pixel_to_mm:
+                    print(f" ({mean_accel * self.pixel_to_mm:.2f} mm/s²)")
+                else:
+                    print()
+                    
+                print(f"  Acceleration std: {accel_std:.2f} pixels/second²", end="")
+                if self.pixel_to_mm:
+                    print(f" ({accel_std * self.pixel_to_mm:.1f} mm/s²)")
+                else:
+                    print()
+        
+        return results
     
     def save_metrics(self, overwrite: bool = False):
         """
-        Save calculated metrics to the zarr file.
+        Save calculated metrics to zarr file.
         
         Args:
             overwrite: Whether to overwrite existing metrics
@@ -287,190 +372,251 @@ class SimpleFishMetrics:
         if self.verbose:
             print("\nSaving metrics to zarr...")
         
-        # Calculate all metrics
-        speed_data = self.calculate_speed()
-        acceleration = self.calculate_acceleration(speed_data)
-        distance_data = self.calculate_cumulative_distance()
+        # Check if metrics group exists
+        if 'behavior_metrics' in self.root and not overwrite:
+            print("Error: behavior_metrics already exists. Use --overwrite to replace.")
+            return False
         
-        # Create or access fish_metrics group
-        if 'fish_metrics' in self.root:
-            if overwrite:
-                del self.root['fish_metrics']
-            else:
-                print("  Fish metrics already exist. Use --overwrite to replace.")
-                return
+        # Create or overwrite metrics group
+        if 'behavior_metrics' in self.root:
+            del self.root['behavior_metrics']
         
-        metrics_group = self.root.create_group('fish_metrics')
+        metrics_group = self.root.create_group('behavior_metrics')
+        
+        # Add metadata
         metrics_group.attrs['created_at'] = datetime.now().isoformat()
+        metrics_group.attrs['source_type'] = self.source_info['type']
+        metrics_group.attrs['source_name'] = self.source_info['name']
+        metrics_group.attrs['source_coverage'] = float(self.source_info['coverage'])
         metrics_group.attrs['fps'] = self.fps
-        if self.pixel_to_mm:
-            metrics_group.attrs['pixel_to_mm'] = self.pixel_to_mm
-        if self.interpolation_run:
-            metrics_group.attrs['interpolation_run'] = self.interpolation_run
+        metrics_group.attrs['total_frames'] = self.total_frames
         
-        # Save speed
-        speed_inst = metrics_group.create_dataset(
-            'speed_instantaneous', 
-            data=speed_data['instantaneous_speed'], 
-            chunks=True
-        )
-        speed_inst.attrs['units'] = speed_data['units']
-        speed_inst.attrs['description'] = 'Frame-to-frame speed'
+        # Calculate and save distance metrics
+        distance_metrics = self.calculate_cumulative_distance()
+        if distance_metrics:
+            dist_group = metrics_group.create_group('distance')
+            
+            # Save arrays
+            dist_group.create_dataset('cumulative_distance', 
+                                     data=distance_metrics['cumulative_distance'],
+                                     chunks=True, compression='gzip')
+            dist_group.create_dataset('frame_distances', 
+                                     data=distance_metrics['frame_distances'],
+                                     chunks=True, compression='gzip')
+            dist_group.create_dataset('centroids', 
+                                     data=distance_metrics['centroids'],
+                                     chunks=True, compression='gzip')
+            dist_group.create_dataset('valid_frame_indices', 
+                                     data=distance_metrics['valid_frame_indices'],
+                                     chunks=True, compression='gzip')
+            
+            # Save summary statistics
+            dist_group.attrs['total_distance'] = float(distance_metrics['total_distance'])
+            dist_group.attrs['mean_distance_per_frame'] = float(distance_metrics['mean_distance_per_frame'])
+            dist_group.attrs['max_single_movement'] = float(distance_metrics['max_single_movement'])
+            dist_group.attrs['units'] = 'pixels'
         
-        speed_smooth = metrics_group.create_dataset(
-            'speed_smoothed', 
-            data=speed_data['smoothed_speed'], 
-            chunks=True
-        )
-        speed_smooth.attrs['units'] = speed_data['units']
-        speed_smooth.attrs['description'] = 'Smoothed speed (5-frame window)'
-        
-        # Save acceleration
-        acc_ds = metrics_group.create_dataset(
-            'acceleration', 
-            data=acceleration, 
-            chunks=True
-        )
-        acc_ds.attrs['units'] = f"{speed_data['units']}/s"
-        acc_ds.attrs['description'] = 'Rate of change of smoothed speed'
-        
-        # Save distance metrics
-        cum_dist = metrics_group.create_dataset(
-            'cumulative_distance', 
-            data=distance_data['cumulative_distance'], 
-            chunks=True
-        )
-        cum_dist.attrs['units'] = distance_data['units']
-        cum_dist.attrs['description'] = 'Total path length traveled'
-        
-        frame_dist = metrics_group.create_dataset(
-            'frame_distances', 
-            data=distance_data['frame_distances'], 
-            chunks=True
-        )
-        frame_dist.attrs['units'] = distance_data['units']
-        frame_dist.attrs['description'] = 'Distance moved per frame'
-        
-        # Save summary statistics
-        valid_speeds = speed_data['instantaneous_speed'][~np.isnan(speed_data['instantaneous_speed'])]
-        if len(valid_speeds) > 0:
-            metrics_group.attrs['mean_speed'] = float(np.mean(valid_speeds))
-            metrics_group.attrs['median_speed'] = float(np.median(valid_speeds))
-            metrics_group.attrs['max_speed'] = float(np.max(valid_speeds))
-            metrics_group.attrs['speed_95th_percentile'] = float(np.percentile(valid_speeds, 95))
-            metrics_group.attrs['total_distance'] = float(distance_data['cumulative_distance'][-1])
+        # Calculate and save speed/acceleration metrics
+        speed_metrics = self.calculate_speed_and_acceleration()
+        if speed_metrics:
+            speed_group = metrics_group.create_group('speed')
+            
+            # Save arrays
+            speed_group.create_dataset('instantaneous_speed', 
+                                      data=speed_metrics['instantaneous_speed'],
+                                      chunks=True, compression='gzip')
+            speed_group.create_dataset('smoothed_speed', 
+                                      data=speed_metrics['smoothed_speed'],
+                                      chunks=True, compression='gzip')
+            speed_group.create_dataset('acceleration', 
+                                      data=speed_metrics['acceleration'],
+                                      chunks=True, compression='gzip')
+            
+            # Save summary statistics
+            speed_group.attrs['mean_speed'] = float(speed_metrics['mean_speed'])
+            speed_group.attrs['max_speed'] = float(speed_metrics['max_speed'])
+            speed_group.attrs['speed_std'] = float(speed_metrics['speed_std'])
+            speed_group.attrs['window_size'] = speed_metrics['window_size']
+            speed_group.attrs['speed_units'] = 'pixels/second'
+            speed_group.attrs['acceleration_units'] = 'pixels/second^2'
         
         if self.verbose:
-            print("  ✅ Fish metrics saved successfully!")
+            print(f"  ✓ Metrics saved to {self.zarr_path}/behavior_metrics")
+            print(f"  ✓ Source: {self.source_info['name']} ({self.source_info['type']})")
+        
+        return True
     
-    def plot_metrics(self, save_path: Optional[str] = None, show_plot: bool = True):
-        """Create visualization of the metrics."""
-        if 'fish_metrics' not in self.root:
-            print("No fish metrics found. Run save_metrics() first.")
+    def plot_metrics(self, save_path: Optional[str] = None, show: bool = True):
+        """
+        Create visualization of behavioral metrics.
+        
+        Args:
+            save_path: Optional path to save figure
+            show: Whether to display the plot
+        """
+        distance_metrics = self.calculate_cumulative_distance()
+        speed_metrics = self.calculate_speed_and_acceleration()
+        
+        if not distance_metrics or not speed_metrics:
+            print("Error: Unable to calculate metrics for plotting")
             return
         
-        metrics = self.root['fish_metrics']
+        # Determine units for labels
+        if self.pixel_to_mm:
+            dist_unit = "mm"
+            dist_conv = self.pixel_to_mm
+            speed_unit = "mm/s"
+            speed_conv = self.pixel_to_mm
+            accel_unit = "mm/s²"
+        else:
+            dist_unit = "pixels"
+            dist_conv = 1.0
+            speed_unit = "pixels/s"
+            speed_conv = 1.0
+            accel_unit = "pixels/s²"
         
-        # Create figure with 4 subplots
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        # Create figure with subplots
+        fig, axes = plt.subplots(3, 2, figsize=(15, 12))
+        
+        # Add title with units info
+        title = f'Fish Behavior Metrics - {self.source_info["name"]}'
+        if self.pixel_to_mm:
+            title += f'\n(Calibrated: 1 pixel = {self.pixel_to_mm:.4f} mm)'
+        fig.suptitle(title, fontsize=14, fontweight='bold')
         
         # Time axis
-        n_frames = len(self.positions)
-        time = np.arange(n_frames) / self.fps
+        time_seconds = np.arange(self.total_frames) / self.fps
         
-        # Plot 1: Speed over time
+        # 1. Trajectory
         ax = axes[0, 0]
-        speed_smooth = metrics['speed_smoothed'][:]
-        speed_inst = metrics['speed_instantaneous'][:]
-        speed_units = metrics['speed_smoothed'].attrs['units']
+        centroids = distance_metrics['centroids']
+        ax.plot(centroids[:, 0], centroids[:, 1], 'b-', alpha=0.5, linewidth=0.5)
+        scatter = ax.scatter(centroids[:, 0], centroids[:, 1], 
+                           c=distance_metrics['valid_frame_indices'],
+                           cmap='viridis', s=1, alpha=0.7)
+        ax.set_xlabel('X Position (pixels)')
+        ax.set_ylabel('Y Position (pixels)')
+        ax.set_title('Movement Trajectory')
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3)
+        plt.colorbar(scatter, ax=ax, label='Frame')
         
-        # Plot instantaneous as light line, smoothed as bold
-        ax.plot(time, speed_inst, 'b-', alpha=0.3, linewidth=0.5, label='Instantaneous')
-        ax.plot(time, speed_smooth, 'b-', alpha=0.8, linewidth=2, label='Smoothed')
+        # 2. Cumulative Distance
+        ax = axes[0, 1]
+        cumulative_display = distance_metrics['cumulative_distance'] * dist_conv
+        ax.plot(time_seconds, cumulative_display, 'g-', linewidth=2)
+        ax.set_xlabel('Time (seconds)')
+        ax.set_ylabel(f'Cumulative Distance ({dist_unit})')
+        total_dist = distance_metrics["total_distance"] * dist_conv
+        ax.set_title(f'Total Distance Traveled: {total_dist:.1f} {dist_unit}')
+        ax.grid(True, alpha=0.3)
+        
+        # 3. Frame-to-frame Distance
+        ax = axes[1, 0]
+        frame_dist_display = distance_metrics['frame_distances'] * dist_conv
+        valid_mask = ~np.isnan(frame_dist_display)
+        ax.scatter(time_seconds[valid_mask], frame_dist_display[valid_mask],
+                  alpha=0.5, s=1, c='blue')
+        ax.set_xlabel('Time (seconds)')
+        ax.set_ylabel(f'Distance ({dist_unit})')
+        ax.set_title('Frame-to-Frame Movement Distance')
+        ax.grid(True, alpha=0.3)
         
         # Add mean line
-        valid_speeds = speed_smooth[~np.isnan(speed_smooth)]
-        if len(valid_speeds) > 0:
-            mean_speed = np.mean(valid_speeds)
-            ax.axhline(mean_speed, color='r', linestyle='--', alpha=0.5, 
-                      label=f'Mean: {mean_speed:.1f}')
+        mean_dist = distance_metrics['mean_distance_per_frame'] * dist_conv
+        ax.axhline(y=mean_dist, color='r', linestyle='--', alpha=0.5,
+                  label=f'Mean: {mean_dist:.2f} {dist_unit}')
+        ax.legend()
         
-        ax.set_xlabel('Time (s)', fontsize=11)
-        ax.set_ylabel(f'Speed ({speed_units})', fontsize=11)
-        ax.set_title('Fish Swimming Speed', fontsize=12, fontweight='bold')
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3)
-        
-        # Plot 2: Acceleration
-        ax = axes[0, 1]
-        acc = metrics['acceleration'][:]
-        acc_units = metrics['acceleration'].attrs['units']
-        
-        # Color positive and negative acceleration differently
-        ax.fill_between(time, 0, acc, where=(acc > 0), color='green', alpha=0.3, label='Accelerating')
-        ax.fill_between(time, 0, acc, where=(acc < 0), color='red', alpha=0.3, label='Decelerating')
-        ax.plot(time, acc, 'k-', alpha=0.5, linewidth=1)
-        ax.axhline(0, color='k', linestyle='-', alpha=0.3)
-        
-        ax.set_xlabel('Time (s)', fontsize=11)
-        ax.set_ylabel(f'Acceleration ({acc_units})', fontsize=11)
-        ax.set_title('Acceleration', fontsize=12, fontweight='bold')
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3)
-        
-        # Plot 3: Cumulative distance
-        ax = axes[1, 0]
-        cum_dist = metrics['cumulative_distance'][:]
-        dist_units = metrics['cumulative_distance'].attrs['units']
-        
-        ax.plot(time, cum_dist, 'm-', alpha=0.8, linewidth=2)
-        ax.fill_between(time, 0, cum_dist, alpha=0.2, color='m')
-        
-        # Add total distance text
-        total_dist = cum_dist[-1]
-        ax.text(0.05, 0.95, f'Total: {total_dist:.1f} {dist_units}', 
-               transform=ax.transAxes, fontsize=11,
-               bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        
-        ax.set_xlabel('Time (s)', fontsize=11)
-        ax.set_ylabel(f'Distance ({dist_units})', fontsize=11)
-        ax.set_title('Cumulative Distance Traveled', fontsize=12, fontweight='bold')
-        ax.grid(True, alpha=0.3)
-        
-        # Plot 4: Trajectory colored by speed
+        # 4. Speed over time
         ax = axes[1, 1]
-        valid = ~np.isnan(self.positions[:, 0]) & ~np.isnan(speed_smooth)
+        inst_speed_display = speed_metrics['instantaneous_speed'] * speed_conv
+        smooth_speed_display = speed_metrics['smoothed_speed'] * speed_conv
+        valid_mask = ~np.isnan(inst_speed_display)
         
-        if np.any(valid):
-            scatter = ax.scatter(self.positions[valid, 0], self.positions[valid, 1],
-                               c=speed_smooth[valid], cmap='viridis', 
-                               s=1, alpha=0.6)
-            plt.colorbar(scatter, ax=ax, label=f'Speed ({speed_units})')
+        ax.plot(time_seconds[valid_mask], inst_speed_display[valid_mask],
+               'b-', alpha=0.3, linewidth=0.5, label='Instantaneous')
+        ax.plot(time_seconds[valid_mask], smooth_speed_display[valid_mask],
+               'r-', linewidth=2, label='Smoothed')
+        ax.set_xlabel('Time (seconds)')
+        ax.set_ylabel(f'Speed ({speed_unit})')
+        
+        mean_speed = speed_metrics["mean_speed"] * speed_conv
+        title_str = f'Swimming Speed (Mean: {mean_speed:.1f} {speed_unit}'
+        if self.pixel_to_mm:
+            bl_per_s = mean_speed / self.fish_length_mm
+            title_str += f', {bl_per_s:.1f} BL/s'
+        title_str += ')'
+        ax.set_title(title_str)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 5. Speed distribution
+        ax = axes[2, 0]
+        valid_speeds = inst_speed_display[~np.isnan(inst_speed_display)]
+        ax.hist(valid_speeds, bins=50, alpha=0.7, color='blue', edgecolor='black')
+        
+        mean_s = speed_metrics['mean_speed'] * speed_conv
+        max_s = speed_metrics['max_speed'] * speed_conv
+        ax.axvline(x=mean_s, color='r', linestyle='--',
+                  label=f'Mean: {mean_s:.1f} {speed_unit}')
+        ax.axvline(x=max_s, color='orange', linestyle='--',
+                  label=f'Max: {max_s:.1f} {speed_unit}')
+        
+        if self.pixel_to_mm:
+            # Add body length markers
+            for bl in [1, 2, 5, 10]:
+                bl_speed = bl * self.fish_length_mm
+                if bl_speed < max_s:
+                    ax.axvline(x=bl_speed, color='green', linestyle=':', alpha=0.5)
+                    ax.text(bl_speed, ax.get_ylim()[1]*0.9, f'{bl} BL/s',
+                           rotation=90, va='top', fontsize=8, color='green')
+        
+        ax.set_xlabel(f'Speed ({speed_unit})')
+        ax.set_ylabel('Frequency')
+        ax.set_title('Speed Distribution')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 6. Acceleration
+        ax = axes[2, 1]
+        accel_display = speed_metrics['acceleration'] * dist_conv
+        valid_mask = ~np.isnan(accel_display)
+        if np.sum(valid_mask) > 0:
+            accel_data = accel_display[valid_mask]
+            time_data = time_seconds[valid_mask]
             
-            # Mark start and end
-            first_valid = np.where(valid)[0][0]
-            last_valid = np.where(valid)[0][-1]
-            ax.plot(self.positions[first_valid, 0], self.positions[first_valid, 1], 
-                   'go', markersize=10, label='Start')
-            ax.plot(self.positions[last_valid, 0], self.positions[last_valid, 1], 
-                   'ro', markersize=10, label='End')
-            ax.legend()
+            ax.plot(time_data, accel_data, 'purple', alpha=0.6, linewidth=0.5)
+            ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+            
+            # Set reasonable y-limits based on data
+            accel_std = np.std(accel_data)
+            accel_mean = np.mean(accel_data)
+            y_limit = max(abs(accel_mean - 3*accel_std), abs(accel_mean + 3*accel_std))
+            if y_limit > 0:
+                ax.set_ylim([-y_limit, y_limit])
+            
+            # Add statistics
+            stats_text = f'Mean: {accel_mean:.1f} {accel_unit}\nStd: {accel_std:.1f} {accel_unit}'
+            ax.text(0.02, 0.98, stats_text,
+                   transform=ax.transAxes, verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        else:
+            ax.text(0.5, 0.5, 'No acceleration data', 
+                   ha='center', va='center', transform=ax.transAxes)
         
-        ax.set_xlabel('X (pixels)', fontsize=11)
-        ax.set_ylabel('Y (pixels)', fontsize=11)
-        ax.set_title('Swimming Trajectory (colored by speed)', fontsize=12, fontweight='bold')
-        ax.set_aspect('equal')
-        ax.invert_yaxis()  # Invert y-axis for image coordinates
+        ax.set_xlabel('Time (seconds)')
+        ax.set_ylabel(f'Acceleration ({accel_unit})')
+        ax.set_title('Acceleration Profile')
+        ax.grid(True, alpha=0.3)
         
-        plt.suptitle('Fish Behavioral Metrics', fontsize=14, fontweight='bold')
         plt.tight_layout()
         
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            if self.verbose:
-                print(f"✅ Plot saved to: {save_path}")
+            print(f"✓ Figure saved to: {save_path}")
         
-        if show_plot:
+        if show:
             plt.show()
         else:
             plt.close()
@@ -478,55 +624,56 @@ class SimpleFishMetrics:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Calculate simple fish behavioral metrics',
+        description='Calculate fish behavior metrics from detection data',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Calculate metrics using latest cleaned data
   %(prog)s detections.zarr
-  %(prog)s detections.zarr --fps 60
-  %(prog)s detections.zarr --pixel-to-mm 0.1
-  %(prog)s detections.zarr --plot --save-plot metrics.png
+  
+  # Use specific data source
+  %(prog)s detections.zarr --source v3_interpolated_20250821_141332
+  
+  # Overwrite existing metrics
   %(prog)s detections.zarr --overwrite
+  
+  # Save visualization
+  %(prog)s detections.zarr --plot --save-plot metrics.png
         """
     )
     
-    parser.add_argument('zarr_path', help='Path to zarr file with tracking data')
-    parser.add_argument('--run', dest='interpolation_run',
-                       help='Specific interpolation run to use')
-    parser.add_argument('--fps', type=float, default=60.0,
-                       help='Video frame rate (default: 60 Hz)')
-    parser.add_argument('--pixel-to-mm', type=float,
-                       help='Conversion factor from pixels to millimeters')
+    parser.add_argument('zarr_path', help='Path to zarr file')
+    
+    parser.add_argument('--source', default='latest',
+                       help='Data source: latest, interpolated, filtered, original, or specific version')
+    
     parser.add_argument('--overwrite', action='store_true',
                        help='Overwrite existing metrics')
+    
     parser.add_argument('--plot', action='store_true',
                        help='Generate visualization plots')
-    parser.add_argument('--save-plot', help='Path to save plot')
-    parser.add_argument('--no-show', action='store_true',
-                       help="Don't display the plot")
-    parser.add_argument('-q', '--quiet', action='store_true',
-                       help='Suppress verbose output')
+    
+    parser.add_argument('--save-plot', dest='save_plot',
+                       help='Path to save plot')
+    
+    parser.add_argument('--no-save', action='store_true',
+                       help="Don't save metrics to zarr (preview only)")
     
     args = parser.parse_args()
     
-    # Create analyzer
-    analyzer = SimpleFishMetrics(
-        zarr_path=args.zarr_path,
-        interpolation_run=args.interpolation_run,
-        fps=args.fps,
-        pixel_to_mm=args.pixel_to_mm,
-        verbose=not args.quiet
-    )
+    # Initialize analyzer
+    analyzer = FishMetricsAnalyzer(args.zarr_path, source=args.source)
     
     # Save metrics
-    analyzer.save_metrics(overwrite=args.overwrite)
+    if not args.no_save:
+        success = analyzer.save_metrics(overwrite=args.overwrite)
+        if not success and not args.overwrite:
+            print("\nTip: Use --overwrite to replace existing metrics")
+            return 1
     
-    # Plot if requested
+    # Generate plots if requested
     if args.plot or args.save_plot:
-        analyzer.plot_metrics(
-            save_path=args.save_plot,
-            show_plot=not args.no_show
-        )
+        analyzer.plot_metrics(save_path=args.save_plot, show=args.plot)
     
     return 0
 

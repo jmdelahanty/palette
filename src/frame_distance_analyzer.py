@@ -48,6 +48,9 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
     if drop_jumps:
         print(f"Drop mode: ENABLED - will remove jumps > {threshold} pixels")
     print()
+
+    # Ensure zarr_path is a string without trailing slashes, users might supply it other times they might not
+    zarr_path = str(zarr_path).rstrip('/')
     
     # Load zarr data
     root = zarr.open(str(zarr_path), mode='r+' if save_cleaned else 'r')
