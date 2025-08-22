@@ -26,17 +26,19 @@ def calculate_distance(centroid1, centroid2):
 
 
 def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
-                           drop_jumps=False, save_cleaned=False, min_segment_length=10):
+                           drop_jumps=False, save_cleaned=False, min_segment_length=10,
+                           segment_threshold_multiplier=1.5):
     """
-    Analyze frame-to-frame movement distances and filter outliers.
-
+    Analyze frame-to-frame movement distances and filter outliers using a multi-stage process.
+    
     Args:
         zarr_path: Path to YOLO detection zarr file.
-        threshold: Distance threshold for flagging jumps (pixels).
+        threshold: Distance threshold for flagging jumps and islands (pixels).
         visualize: If True, plot detailed before/after comparison graphs.
-        drop_jumps: If True, perform the filtering of jumps and short segments.
+        drop_jumps: If True, perform the filtering of jumps, islands, and short segments.
         save_cleaned: If True, save cleaned data to a new group in the zarr file.
         min_segment_length: Minimum number of frames for a trajectory segment to be kept.
+        segment_threshold_multiplier: Multiplier for threshold to check segment spatial continuity.
     
     Returns:
         Dictionary with analysis results.
@@ -45,10 +47,13 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
     print("FRAME-TO-FRAME DISTANCE ANALYZER")
     print(f"{'='*60}")
     print(f"Zarr file: {zarr_path}")
-    print(f"Jump threshold: {threshold} pixels")
+    print(f"Blip/Island threshold: {threshold} pixels")
     if drop_jumps:
+        segment_continuity_threshold = threshold * segment_threshold_multiplier
         print(f"Drop mode: ENABLED")
-        print(f"  - Removing blips > {threshold} pixels")
+        print(f"  - Removing single-frame blips > {threshold} pixels")
+        print(f"  - Removing island segments")
+        print(f"  - Breaking segments on jumps > {segment_continuity_threshold:.1f} pixels")
         print(f"  - Removing segments < {min_segment_length} frames")
     print()
 
@@ -64,7 +69,12 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
     total_frames = len(n_detections)
     frames_with_detections = np.sum(n_detections > 0)
     
+    # Get image dimensions from zarr attributes
+    img_width = root.attrs.get('width', 4512)
+    img_height = root.attrs.get('height', 4512)
+    
     print(f"Video info: {total_frames} frames @ {fps} FPS")
+    print(f"Image dimensions: {img_width} x {img_height} pixels")
     print(f"Frames with detections: {frames_with_detections}/{total_frames} "
           f"({frames_with_detections/total_frames*100:.1f}%)")
     print()
@@ -120,15 +130,17 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
     cleaned_bboxes, cleaned_scores, cleaned_n_detections = None, None, None
     drop_reasons = np.zeros(total_frames, dtype=np.int8)
     frames_from_short_segments = set()
+    frames_from_islands = set()
 
     if drop_jumps:
         print(f"\n{'='*60}")
         print("FILTERING DATA")
         print(f"{'='*60}")
         
-        # 0=kept, 1=jump, 2=short_segment
+        # 0=kept, 1=blip, 2=island, 3=short_segment
         
-        # --- Stage 1: Iteratively remove blips ---
+        # --- Stage 1: Remove single-frame blips ---
+        print("\nStage 1: Searching for single-frame blips...")
         max_iterations, iteration = 10, 0
         while iteration < max_iterations:
             iteration += 1
@@ -159,50 +171,93 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
                     if drop_reasons[current_idx] == 0:
                         drop_reasons[current_idx] = 1
                         new_drops_found = True
-                        print(f"  Iter {iteration}: Dropping frame {current_idx} (blip detected between {prev_idx} and {next_idx})")
+                        print(f"  Iter {iteration}: Dropping frame {current_idx} (blip between {prev_idx} and {next_idx})")
 
             if not new_drops_found:
                 print(f"  Converged after {iteration} iterations.")
                 break
         
-        # --- Stage 2: Filter by minimum segment length (using temporal AND spatial continuity) ---
-        if min_segment_length > 1:
-            print(f"\nFiltering for segments shorter than {min_segment_length} frames...")
-            surviving_frames = sorted([
-                f for f in range(total_frames)
-                if n_detections[f] > 0 and drop_reasons[f] == 0
-            ])
+        # --- Stage 2: Remove Island Segments ---
+        print("\nStage 2: Searching for island segments...")
+        surviving_frames = sorted([f for f in range(total_frames) if n_detections[f] > 0 and drop_reasons[f] == 0])
+        
+        if len(surviving_frames) > 2:
+            segment_continuity_threshold = threshold * segment_threshold_multiplier
+            all_segments = []
+            current_segment = [surviving_frames[0]]
             
-            if surviving_frames:
-                segments, current_segment = [], [surviving_frames[0]]
-                for i in range(1, len(surviving_frames)):
-                    prev_frame_idx = surviving_frames[i-1]
-                    curr_frame_idx = surviving_frames[i]
-
-                    # A segment is continuous if frames are consecutive AND the jump is below threshold
-                    is_temporally_continuous = (curr_frame_idx == prev_frame_idx + 1)
-                    distance = calculate_distance(centroids[prev_frame_idx]['centroid'], centroids[curr_frame_idx]['centroid'])
-                    is_spatially_continuous = (distance <= threshold)
-
-                    if is_temporally_continuous and is_spatially_continuous:
-                        current_segment.append(curr_frame_idx)
-                    else:
-                        segments.append(current_segment)
-                        current_segment = [curr_frame_idx]
-                segments.append(current_segment)
+            # Build segments based on continuity
+            for i in range(1, len(surviving_frames)):
+                prev_f, curr_f = surviving_frames[i-1], surviving_frames[i]
+                distance = calculate_distance(centroids[prev_f]['centroid'], centroids[curr_f]['centroid'])
+                is_cont = (curr_f == prev_f + 1) and (distance <= segment_continuity_threshold)
                 
-                for segment in segments:
-                    if len(segment) < min_segment_length:
-                        frames_from_short_segments.update(segment)
-                
-                if frames_from_short_segments:
-                    print(f"  Found {len(frames_from_short_segments)} frames in short segments. Marking for removal.")
-                    for frame_idx in frames_from_short_segments:
-                        # Only mark as short_segment if not already marked as a blip
-                        if drop_reasons[frame_idx] == 0:
-                            drop_reasons[frame_idx] = 2
+                if is_cont:
+                    current_segment.append(curr_f)
                 else:
-                    print("  No segments found shorter than the minimum.")
+                    all_segments.append(current_segment)
+                    current_segment = [curr_f]
+            all_segments.append(current_segment)
+
+            # Check for island segments (segments with large jumps in and out)
+            if len(all_segments) > 2:
+                for i in range(1, len(all_segments) - 1):
+                    prev_segment = all_segments[i-1]
+                    island_segment = all_segments[i]
+                    next_segment = all_segments[i+1]
+                    
+                    before_p = centroids[prev_segment[-1]]['centroid']
+                    start_p = centroids[island_segment[0]]['centroid']
+                    end_p = centroids[island_segment[-1]]['centroid']
+                    after_p = centroids[next_segment[0]]['centroid']
+
+                    entry_dist = calculate_distance(before_p, start_p)
+                    exit_dist = calculate_distance(end_p, after_p)
+                    shortcut_dist = calculate_distance(before_p, after_p)
+
+                    if entry_dist > threshold and exit_dist > threshold and shortcut_dist < threshold:
+                        print(f"  Dropping island segment (frames {island_segment[0]}-{island_segment[-1]}, length {len(island_segment)})")
+                        for frame_idx in island_segment:
+                            drop_reasons[frame_idx] = 2
+                            frames_from_islands.add(frame_idx)
+        
+        # --- Stage 3: Filter by minimum segment length ---
+        print(f"\nStage 3: Filtering for segments shorter than {min_segment_length} frames...")
+        surviving_frames = sorted([
+            f for f in range(total_frames)
+            if n_detections[f] > 0 and drop_reasons[f] == 0
+        ])
+        
+        if surviving_frames:
+            segments, current_segment = [], [surviving_frames[0]]
+            for i in range(1, len(surviving_frames)):
+                prev_frame_idx = surviving_frames[i-1]
+                curr_frame_idx = surviving_frames[i]
+
+                # A segment is continuous if frames are consecutive AND the jump is below threshold
+                is_temporally_continuous = (curr_frame_idx == prev_frame_idx + 1)
+                distance = calculate_distance(centroids[prev_frame_idx]['centroid'], centroids[curr_frame_idx]['centroid'])
+                is_spatially_continuous = (distance <= threshold * segment_threshold_multiplier)
+
+                if is_temporally_continuous and is_spatially_continuous:
+                    current_segment.append(curr_frame_idx)
+                else:
+                    segments.append(current_segment)
+                    current_segment = [curr_frame_idx]
+            segments.append(current_segment)
+            
+            for segment in segments:
+                if len(segment) < min_segment_length:
+                    frames_from_short_segments.update(segment)
+            
+            if frames_from_short_segments:
+                print(f"  Found {len(frames_from_short_segments)} frames in short segments. Marking for removal.")
+                for frame_idx in frames_from_short_segments:
+                    # Only mark as short_segment if not already marked
+                    if drop_reasons[frame_idx] == 0:
+                        drop_reasons[frame_idx] = 3
+            else:
+                print("  No segments found shorter than the minimum.")
 
         frames_dropped_count = np.count_nonzero(drop_reasons)
         print(f"\nTotal: Dropping {frames_dropped_count} detections.")
@@ -211,6 +266,10 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
         cleaned_scores = scores.copy()
         cleaned_n_detections = n_detections.copy()
         cleaned_n_detections[drop_reasons > 0] = 0
+        
+        # Zero out the data for dropped frames
+        cleaned_bboxes[drop_reasons > 0, :] = 0
+        cleaned_scores[drop_reasons > 0, :] = 0
         
         cleaned_frames_with_detections = np.sum(cleaned_n_detections > 0)
         print(f"Original frames with detections: {frames_with_detections}")
@@ -230,15 +289,19 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
         dropped_indices = np.where(drop_reasons > 0)[0].tolist()
         
         run_group.attrs['created_at'] = datetime.now().isoformat()
-        run_group.attrs['pipeline_step'] = 'remove_jumps_and_segments'
+        run_group.attrs['pipeline_step'] = 'remove_jumps_islands_and_segments'
         run_group.attrs['frames_dropped'] = frames_dropped_count
         run_group.attrs['dropped_frame_indices'] = dropped_indices
         run_group.attrs['parameters'] = {
             'threshold_pixels': threshold,
             'min_segment_length_frames': min_segment_length,
+            'segment_threshold_multiplier': segment_threshold_multiplier,
             'initial_consecutive_jumps': len(consecutive_jumps),
             'initial_gap_jumps': len(gap_jumps),
-            'frames_removed_total': frames_dropped_count
+            'frames_removed_total': frames_dropped_count,
+            'frames_removed_blips': int(np.sum(drop_reasons == 1)),
+            'frames_removed_islands': int(np.sum(drop_reasons == 2)),
+            'frames_removed_short_segments': int(np.sum(drop_reasons == 3))
         }
         
         run_group.create_dataset('bboxes', data=cleaned_bboxes, dtype='float32')
@@ -250,6 +313,9 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
         filtered_group.attrs['latest'] = run_name
         print(f"✓ Filtered data saved to: {zarr_path}/filtered_runs/{run_name}")
         print(f"✓ Frames removed: {frames_dropped_count}")
+        print(f"  - Blips: {np.sum(drop_reasons == 1)}")
+        print(f"  - Islands: {np.sum(drop_reasons == 2)}")
+        print(f"  - Short segments: {np.sum(drop_reasons == 3)}")
         print("="*60)
         
     if save_cleaned and not visualize and drop_jumps:
@@ -274,7 +340,12 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
         ax2 = axes[0, 1]
         valid_centroids_before = np.array([c['centroid'] for c in centroids if not np.isnan(c['centroid']).any()])
         valid_frames_before = [c['frame'] for c in centroids if not np.isnan(c['centroid']).any()]
-        scatter = ax2.scatter(valid_centroids_before[:, 0], valid_centroids_before[:, 1], c=valid_frames_before, cmap='viridis', s=5, alpha=0.5, zorder=2)
+        scatter = ax2.scatter(valid_centroids_before[:, 0], valid_centroids_before[:, 1], 
+                            c=valid_frames_before, cmap='viridis', s=5, alpha=0.5, zorder=2)
+        
+        # Set axis limits to full image dimensions
+        ax2.set_xlim(0, img_width)
+        ax2.set_ylim(0, img_height)  # Normal y-axis orientation
         
         # Plot segments for context
         valid_indices = [i for i, c in enumerate(centroids) if not np.isnan(c['centroid']).any()]
@@ -292,21 +363,29 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
                 ax2.plot(segment[:, 0], segment[:, 1], '-', color='gray', alpha=0.4, lw=1, zorder=1)
 
         all_jump_frames = {t['to_frame'] for t in consecutive_jumps + gap_jumps}
-        # Mark frames from short segments in Cyan (with a smaller size)
+        
+        # Mark islands in Magenta
+        for frame_idx in frames_from_islands:
+            if not np.isnan(centroids[frame_idx]['centroid']).any():
+                ax2.plot(centroids[frame_idx]['centroid'][0], centroids[frame_idx]['centroid'][1],
+                        'o', color='m', markersize=5,
+                        markeredgecolor='white', alpha=0.8, mew=0.5, zorder=3)
+        
+        # Mark frames from short segments in Cyan
         for frame_idx in frames_from_short_segments:
             if not np.isnan(centroids[frame_idx]['centroid']).any():
                 ax2.plot(centroids[frame_idx]['centroid'][0], centroids[frame_idx]['centroid'][1],
                         'o', color='c', markersize=4,
                         markeredgecolor='black', alpha=0.8, mew=0.5, zorder=3)
 
-        # Mark jumps in Red (with a smaller size)
+        # Mark jumps in Red
         for frame_idx in all_jump_frames:
             if not np.isnan(centroids[frame_idx]['centroid']).any():
                 ax2.plot(centroids[frame_idx]['centroid'][0], centroids[frame_idx]['centroid'][1],
                         'ro', markersize=6,
                         markeredgecolor='white', zorder=4)
 
-        ax2.set_title(f'Trajectory - BEFORE (Red=Jumps, Cyan=Short Segments)')
+        ax2.set_title(f'Trajectory - BEFORE (Red=Jumps, Magenta=Islands, Cyan=Short)')
         ax2.set(xlabel='X Position (pixels)', ylabel='Y Position (pixels)')
         ax2.set_aspect('equal')
         ax2.grid(True, alpha=0.3)
@@ -314,14 +393,23 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
         ax3 = axes[0, 2]
         ax3.axis('off')
         stats_text = f"""BEFORE FILTERING:
-        \nFrames with detections: {frames_with_detections}
-        \nTotal initial jumps: {len(all_jump_frames)}
-        \nMovement (consecutive):
-        - Mean: {np.mean(consecutive_distances):.2f} px
-        - Median: {np.median(consecutive_distances):.2f} px
-        - 95th percentile: {np.percentile(consecutive_distances, 95):.2f} px"""
-        ax3.text(0.05, 0.5, stats_text, transform=ax3.transAxes, fontsize=11, verticalalignment='center',
-                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+Frames with detections: {frames_with_detections}
+Total jumps > {threshold}px: {len(all_jump_frames)}
+
+Movement (consecutive):
+- Mean: {np.mean(consecutive_distances):.2f} px
+- Median: {np.median(consecutive_distances):.2f} px
+- 95th percentile: {np.percentile(consecutive_distances, 95):.2f} px
+- Max: {np.max(consecutive_distances):.2f} px
+
+Detection issues found:
+- Single-frame blips: {np.sum(drop_reasons == 1)}
+- Island segments: {np.sum(drop_reasons == 2)}
+- Short segments: {np.sum(drop_reasons == 3)}"""
+        ax3.text(0.05, 0.5, stats_text, transform=ax3.transAxes, fontsize=10, 
+                verticalalignment='center',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
         # === AFTER (Bottom Row) ===
         cleaned_consecutive_distances = []
@@ -349,7 +437,12 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
         valid_frames_after = np.where(cleaned_n_detections > 0)[0]
         if len(valid_frames_after) > 0:
             valid_centroids_after = np.array([centroids[i]['centroid'] for i in valid_frames_after])
-            ax5.scatter(valid_centroids_after[:, 0], valid_centroids_after[:, 1], c=valid_frames_after, cmap='viridis', s=5, alpha=0.8, zorder=2)
+            ax5.scatter(valid_centroids_after[:, 0], valid_centroids_after[:, 1], 
+                       c=valid_frames_after, cmap='viridis', s=5, alpha=0.8, zorder=2)
+            
+            # Set axis limits to full image dimensions
+            ax5.set_xlim(0, img_width)
+            ax5.set_ylim(0, img_height)  # Normal y-axis orientation
             
             # Segmented plotting for better visualization of trajectory breaks
             segments_after, current_segment_after = [], []
@@ -359,14 +452,35 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
                     if valid_frames_after[i] == valid_frames_after[i-1] + 1:
                         current_segment_after.append(valid_centroids_after[i])
                     else:
-                        if len(current_segment_after) > 1: segments_after.append(np.array(current_segment_after))
+                        if len(current_segment_after) > 1: 
+                            segments_after.append(np.array(current_segment_after))
                         current_segment_after = [valid_centroids_after[i]]
-                if len(current_segment_after) > 1: segments_after.append(np.array(current_segment_after))
+                if len(current_segment_after) > 1: 
+                    segments_after.append(np.array(current_segment_after))
             
             for segment in segments_after:
-                ax5.plot(segment[:, 0], segment[:, 1], '-', color='#228B22', alpha=0.6, lw=1.5, zorder=1) # ForestGreen
+                ax5.plot(segment[:, 0], segment[:, 1], '-', color='#228B22', 
+                        alpha=0.6, lw=1.5, zorder=1) # ForestGreen
+            
+            # Add START and STOP markers (smaller, no annotations)
+            # START marker - first valid detection
+            start_point = valid_centroids_after[0]
+            ax5.plot(start_point[0], start_point[1], 'g^', markersize=10, 
+                    markeredgecolor='darkgreen', markeredgewidth=1.5, zorder=5, label='START')
+            
+            # STOP marker - last valid detection
+            stop_point = valid_centroids_after[-1]
+            ax5.plot(stop_point[0], stop_point[1], 'rs', markersize=10,
+                    markeredgecolor='darkred', markeredgewidth=1.5, zorder=5, label='STOP')
+            
+            # Add legend for start/stop markers
+            ax5.legend(loc='best', framealpha=0.9)
+        else:
+            # Even if no detections, set the axis limits
+            ax5.set_xlim(0, img_width)
+            ax5.set_ylim(0, img_height)
 
-        ax5.set_title('Trajectory - AFTER (Filtered)')
+        ax5.set_title('Trajectory - AFTER (Filtered with Start/Stop)')
         ax5.set(xlabel='X Position (pixels)', ylabel='Y Position (pixels)')
         ax5.set_aspect('equal')
         ax5.grid(True, alpha=0.3)
@@ -374,17 +488,36 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
         ax6 = axes[1, 2]
         ax6.axis('off')
         frames_dropped_count = np.count_nonzero(drop_reasons)
-        stats_text_after = f"""AFTER FILTERING:
-        \nFrames with detections: {cleaned_frames_with_detections}
-        \nFrames removed: {frames_dropped_count} ({frames_dropped_count/frames_with_detections*100:.1f}% of detected)
-        - Blips: {np.sum(drop_reasons == 1)}
-        - Short Segments: {np.sum(drop_reasons == 2)}
-        \nMovement (consecutive):
-        - Mean: {np.mean(cleaned_consecutive_distances):.2f} px
-        - Median: {np.median(cleaned_consecutive_distances):.2f} px
-        - Max: {np.max(cleaned_consecutive_distances):.2f} px""" if len(cleaned_consecutive_distances) > 0 else "AFTER FILTERING:\n\nNo consecutive frames remaining."
-        ax6.text(0.05, 0.5, stats_text_after, transform=ax6.transAxes, fontsize=11, verticalalignment='center',
-                 bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5))
+        if len(cleaned_consecutive_distances) > 0:
+            stats_text_after = f"""AFTER FILTERING:
+
+Frames with detections: {cleaned_frames_with_detections}
+Frames removed: {frames_dropped_count} 
+({frames_dropped_count/frames_with_detections*100:.1f}% of detected)
+
+Removal breakdown:
+- Blips: {np.sum(drop_reasons == 1)}
+- Islands: {np.sum(drop_reasons == 2)}
+- Short Segments: {np.sum(drop_reasons == 3)}
+
+Movement (consecutive):
+- Mean: {np.mean(cleaned_consecutive_distances):.2f} px
+- Median: {np.median(cleaned_consecutive_distances):.2f} px
+- 95th percentile: {np.percentile(cleaned_consecutive_distances, 95):.2f} px
+- Max: {np.max(cleaned_consecutive_distances):.2f} px
+
+Coverage: {cleaned_frames_with_detections}/{total_frames}
+({cleaned_frames_with_detections/total_frames*100:.1f}%)"""
+        else:
+            stats_text_after = f"""AFTER FILTERING:
+
+No consecutive frames remaining.
+
+All detections were removed as outliers."""
+            
+        ax6.text(0.05, 0.5, stats_text_after, transform=ax6.transAxes, fontsize=10, 
+                verticalalignment='center',
+                bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5))
 
         plt.tight_layout(rect=[0, 0.05, 1, 0.96])
         fig.text(0.5, 0.02, "Press 'W' to save filtered data | 'Q' to quit | Close window to cancel",
@@ -408,21 +541,25 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
     print(f"\n{'='*60}\nANALYSIS RESULTS\n{'='*60}")
     print(f"\nMOVEMENT STATISTICS (Initial):")
     if len(consecutive_distances) > 0:
-        print(f"  - Mean: {np.mean(consecutive_distances):.2f} px, Median: {np.median(consecutive_distances):.2f} px, "
-              f"95th percentile: {np.percentile(consecutive_distances, 95):.2f} px")
+        print(f"  - Mean: {np.mean(consecutive_distances):.2f} px")
+        print(f"  - Median: {np.median(consecutive_distances):.2f} px")
+        print(f"  - 95th percentile: {np.percentile(consecutive_distances, 95):.2f} px")
     print(f"  - Total initial jumps found (> {threshold} px): {len(consecutive_jumps) + len(gap_jumps)}")
     if drop_jumps:
         frames_dropped_count = np.count_nonzero(drop_reasons)
         print(f"\nFILTERING RESULTS:")
         print(f"  - Total frames removed: {frames_dropped_count}")
         print(f"    - Due to blips: {np.sum(drop_reasons == 1)}")
-        print(f"    - Due to short segments: {np.sum(drop_reasons == 2)}")
+        print(f"    - Due to islands: {np.sum(drop_reasons == 2)}")  
+        print(f"    - Due to short segments: {np.sum(drop_reasons == 3)}")
         print(f"  - Remaining frames with detections: {np.sum(cleaned_n_detections > 0)}")
 
     return {
         'frames_dropped': np.count_nonzero(drop_reasons) if drop_jumps else 0,
         'drop_reasons': drop_reasons if drop_jumps else None,
-        'statistics': { 'jump_rate': len(consecutive_jumps)/len(consecutive_distances) if len(consecutive_distances) > 0 else 0 },
+        'statistics': { 
+            'jump_rate': len(consecutive_jumps)/len(consecutive_distances) if len(consecutive_distances) > 0 else 0 
+        },
         'consecutive_distances': consecutive_distances
     }
 
@@ -435,21 +572,26 @@ Examples:
   # Basic analysis and visualization
   %(prog)s detections.zarr --visualize
 
-  # Filter jumps and short segments, then visualize
+  # Filter jumps, islands, and short segments, then visualize
   %(prog)s detections.zarr --drop --threshold 75 --min-segment-length 15 --visualize
   
   # Filter and save the cleaned data without opening a plot
   %(prog)s detections.zarr --drop --save --threshold 75
+  
+  # Adjust segment continuity threshold multiplier
+  %(prog)s detections.zarr --drop --threshold 75 --segment-threshold-multiplier 2.0 --visualize
         """
     )
     parser.add_argument('zarr_path', help='Path to YOLO detection zarr file.')
     parser.add_argument('--threshold', type=float, default=100.0,
                         help='Distance threshold for flagging jumps (pixels). Default: 100')
     parser.add_argument('--visualize', action='store_true', help='Show detailed before/after comparison plots.')
-    parser.add_argument('--drop', action='store_true', help='Enable filtering of jumps and short segments.')
+    parser.add_argument('--drop', action='store_true', help='Enable filtering of jumps, islands, and short segments.')
     parser.add_argument('--save', action='store_true', help='Save cleaned data to zarr (requires --drop).')
     parser.add_argument('--min-segment-length', type=int, default=10,
                         help='(Requires --drop) Minimum frames for a trajectory segment to be kept. Default: 10')
+    parser.add_argument('--segment-threshold-multiplier', type=float, default=1.5,
+                        help='(Requires --drop) Multiplier for threshold to check segment spatial continuity. Default: 1.5')
     args = parser.parse_args()
     
     if args.save and not args.drop:
@@ -461,7 +603,8 @@ Examples:
         visualize=args.visualize,
         drop_jumps=args.drop,
         save_cleaned=args.save,
-        min_segment_length=args.min_segment_length
+        min_segment_length=args.min_segment_length,
+        segment_threshold_multiplier=args.segment_threshold_multiplier
     )
     
     print(f"\n{'='*60}\nAnalysis complete!\n{'='*60}")
