@@ -58,7 +58,9 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
     print()
 
     zarr_path = str(zarr_path).rstrip('/')
-    root = zarr.open(zarr_path, mode='r+' if save_cleaned else 'r')
+    # Open in read-write mode if we might save (either with --save or interactively with --visualize)
+    open_mode = 'r+' if (save_cleaned or visualize) and drop_jumps else 'r'
+    root = zarr.open(zarr_path, mode=open_mode)
 
     bboxes = root['bboxes'][:]
     scores = root['scores'][:]
@@ -288,6 +290,20 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
         frames_dropped_count = np.count_nonzero(drop_reasons)
         dropped_indices = np.where(drop_reasons > 0)[0].tolist()
         
+        # Calculate gap statistics for the cleaned data
+        valid_frames_after = np.where(cleaned_n_detections > 0)[0]
+        gaps = []
+        if len(valid_frames_after) > 1:
+            for i in range(1, len(valid_frames_after)):
+                gap_size = valid_frames_after[i] - valid_frames_after[i-1] - 1
+                if gap_size > 0:
+                    gaps.append({
+                        'start_frame': valid_frames_after[i-1],
+                        'end_frame': valid_frames_after[i],
+                        'gap_size': gap_size
+                    })
+        
+        # Store comprehensive metadata
         run_group.attrs['created_at'] = datetime.now().isoformat()
         run_group.attrs['pipeline_step'] = 'remove_jumps_islands_and_segments'
         run_group.attrs['frames_dropped'] = frames_dropped_count
@@ -304,6 +320,27 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
             'frames_removed_short_segments': int(np.sum(drop_reasons == 3))
         }
         
+        # Add statistics about the cleaned data
+        run_group.attrs['output_statistics'] = {
+            'total_frames': total_frames,
+            'frames_with_detections': int(np.sum(cleaned_n_detections > 0)),
+            'coverage_percentage': float(np.sum(cleaned_n_detections > 0) / total_frames * 100),
+            'number_of_gaps': len(gaps),
+            'gap_frames_total': sum(g['gap_size'] for g in gaps),
+            'largest_gap': max(g['gap_size'] for g in gaps) if gaps else 0,
+            'gaps': gaps  # Store gap information for interpolation step
+        }
+        
+        # Add source information
+        run_group.attrs['source_info'] = {
+            'zarr_path': zarr_path,
+            'original_frames_with_detections': int(frames_with_detections),
+            'original_coverage_percentage': float(frames_with_detections / total_frames * 100),
+            'video_fps': fps,
+            'image_width': img_width,
+            'image_height': img_height
+        }
+        
         run_group.create_dataset('bboxes', data=cleaned_bboxes, dtype='float32')
         run_group.create_dataset('scores', data=cleaned_scores, dtype='float32')
         run_group.create_dataset('class_ids', data=class_ids, dtype='int32')
@@ -316,6 +353,7 @@ def analyze_frame_distances(zarr_path, threshold=100.0, visualize=False,
         print(f"  - Blips: {np.sum(drop_reasons == 1)}")
         print(f"  - Islands: {np.sum(drop_reasons == 2)}")
         print(f"  - Short segments: {np.sum(drop_reasons == 3)}")
+        print(f"✓ Gaps remaining: {len(gaps)} gaps totaling {sum(g['gap_size'] for g in gaps) if gaps else 0} frames")
         print("="*60)
         
     if save_cleaned and not visualize and drop_jumps:
@@ -458,9 +496,20 @@ Detection issues found:
                 if len(current_segment_after) > 1: 
                     segments_after.append(np.array(current_segment_after))
             
+            # Plot continuous segments in green
             for segment in segments_after:
                 ax5.plot(segment[:, 0], segment[:, 1], '-', color='#228B22', 
                         alpha=0.6, lw=1.5, zorder=1) # ForestGreen
+            
+            # Add red dotted lines connecting discontinuous segments (gaps)
+            if len(valid_frames_after) > 1:
+                for i in range(1, len(valid_frames_after)):
+                    if valid_frames_after[i] - valid_frames_after[i-1] > 1:
+                        # There's a gap here - draw a red dotted line
+                        gap_start = valid_centroids_after[i-1]
+                        gap_end = valid_centroids_after[i]
+                        ax5.plot([gap_start[0], gap_end[0]], [gap_start[1], gap_end[1]], 
+                                'r--', alpha=0.5, lw=1, zorder=1, label='Gap' if i == 1 else "")
             
             # Add START and STOP markers (smaller, no annotations)
             # START marker - first valid detection
@@ -473,8 +522,11 @@ Detection issues found:
             ax5.plot(stop_point[0], stop_point[1], 'rs', markersize=10,
                     markeredgecolor='darkred', markeredgewidth=1.5, zorder=5, label='STOP')
             
-            # Add legend for start/stop markers
-            ax5.legend(loc='best', framealpha=0.9)
+            # Add legend for start/stop markers and gaps
+            # Remove duplicate labels
+            handles, labels = ax5.get_legend_handles_labels()
+            by_label = dict(zip(labels, handles))
+            ax5.legend(by_label.values(), by_label.keys(), loc='best', framealpha=0.9)
         else:
             # Even if no detections, set the axis limits
             ax5.set_xlim(0, img_width)
