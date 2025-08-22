@@ -4,6 +4,8 @@ Trial Data Inspector
 
 Diagnostic tool to examine the alignment between chase events and available data
 in H5 files. Helps identify why trials might appear to have missing data.
+
+Updated to use the new camera_frame_id field in events for better alignment.
 """
 
 import h5py
@@ -16,8 +18,14 @@ import json
 
 # Event type mappings
 EXPERIMENT_EVENT_TYPE = {
-    27: "CHASER_CHASE_SEQUENCE_START",
-    28: "CHASER_CHASE_SEQUENCE_END"
+    0: "PROTOCOL_START", 1: "PROTOCOL_STOP", 2: "PROTOCOL_PAUSE", 3: "PROTOCOL_RESUME", 4: "PROTOCOL_FINISH",
+    5: "PROTOCOL_CLEAR", 6: "PROTOCOL_LOAD", 7: "STEP_ADD", 8: "STEP_REMOVE", 9: "STEP_MOVE_UP",
+    10: "STEP_MOVE_DOWN", 11: "STEP_START", 12: "STEP_END", 13: "ITI_START", 14: "ITI_END",
+    15: "PARAMS_APPLIED", 16: "MANAGER_REINIT", 17: "MANAGER_REINIT_FAIL", 18: "LOOM_AUTO_REPEAT_TRIGGER",
+    19: "LOOM_MANUAL_START", 20: "USER_INTERVENTION", 21: "ERROR_RUNTIME", 22: "LOG_MESSAGE",
+    23: "IPC_BOUNDING_BOX_RECEIVED", 24: "CHASER_PRE_PERIOD_START", 25: "CHASER_TRAINING_START",
+    26: "CHASER_POST_PERIOD_START", 27: "CHASER_CHASE_SEQUENCE_START", 28: "CHASER_CHASE_SEQUENCE_END",
+    29: "CHASER_RANDOM_TARGET_SET"
 }
 
 class TrialDataInspector:
@@ -69,8 +77,32 @@ class TrialDataInspector:
                 print(f"  Start time: {start_time_ns / 1e9:.3f}s")
                 print(f"  End time: {end_time_ns / 1e9:.3f}s")
                 
-                # Find closest stimulus frames based on timestamps
-                # Chaser states have both timestamp and stimulus frame number
+                # NEW: Use camera_frame_id from events if available
+                if 'camera_frame_id' in start_event.dtype.names:
+                    start_camera_frame = start_event['camera_frame_id']
+                    end_camera_frame = end_event['camera_frame_id']
+                    
+                    print(f"\n  📷 Camera frames from events:")
+                    print(f"     Start camera frame: {start_camera_frame}")
+                    print(f"     End camera frame: {end_camera_frame}")
+                    
+                    # Check bounding boxes for these camera frames directly
+                    if start_camera_frame > 0 and end_camera_frame > 0:
+                        # Find bboxes within the camera frame range
+                        bbox_mask = (bounding_boxes['payload_frame_id'] >= start_camera_frame) & \
+                                   (bounding_boxes['payload_frame_id'] <= end_camera_frame)
+                        trial_bboxes_direct = bounding_boxes[bbox_mask]
+                        
+                        if len(trial_bboxes_direct) > 0:
+                            print(f"     Bounding boxes in camera frame range: {len(trial_bboxes_direct)}")
+                            unique_bbox_frames = np.unique(trial_bboxes_direct['payload_frame_id'])
+                            expected_frames = end_camera_frame - start_camera_frame + 1
+                            coverage = len(unique_bbox_frames) / expected_frames * 100
+                            print(f"     Detection coverage: {coverage:.1f}% ({len(unique_bbox_frames)}/{expected_frames} frames)")
+                        else:
+                            print(f"     ⚠️  No bounding boxes found for camera frames {start_camera_frame}-{end_camera_frame}")
+                
+                # Original analysis using chaser states and timestamps
                 time_mask = (chaser_states['timestamp_ns_session'] >= start_time_ns) & \
                            (chaser_states['timestamp_ns_session'] <= end_time_ns)
                 
@@ -84,7 +116,7 @@ class TrialDataInspector:
                     print(f"\n  📍 Stimulus frames: {min_stim} to {max_stim}")
                     print(f"     Chaser states in trial: {len(trial_chaser_states)}")
                     
-                    # Now check frame metadata using stimulus frames
+                    # Check frame metadata using stimulus frames
                     meta_mask = (frame_metadata['stimulus_frame_num'] >= min_stim) & \
                                (frame_metadata['stimulus_frame_num'] <= max_stim)
                     trial_metadata = frame_metadata[meta_mask]
@@ -92,30 +124,37 @@ class TrialDataInspector:
                     if len(trial_metadata) > 0:
                         print(f"     Frame metadata records: {len(trial_metadata)}")
                         
-                        # Get camera frames for this trial
+                        # Get camera frames from metadata
                         camera_frames = trial_metadata['triggering_camera_frame_id']
                         unique_camera_frames = np.unique(camera_frames)
-                        print(f"     Unique camera frames: {len(unique_camera_frames)}")
-                        print(f"     Camera frame range: {camera_frames.min()} to {camera_frames.max()}")
+                        print(f"     Unique camera frames (from metadata): {len(unique_camera_frames)}")
+                        print(f"     Camera frame range (from metadata): {camera_frames.min()} to {camera_frames.max()}")
+                        
+                        # Compare with event camera frames if available
+                        if 'camera_frame_id' in start_event.dtype.names and start_camera_frame > 0:
+                            if camera_frames.min() != start_camera_frame or camera_frames.max() != end_camera_frame:
+                                print(f"     ⚠️  Camera frame mismatch:")
+                                print(f"        Events: {start_camera_frame} to {end_camera_frame}")
+                                print(f"        Metadata: {camera_frames.min()} to {camera_frames.max()}")
                         
                         # Check bounding boxes for these camera frames
                         bbox_mask = np.isin(bounding_boxes['payload_frame_id'], unique_camera_frames)
                         trial_bboxes = bounding_boxes[bbox_mask]
                         
                         if len(trial_bboxes) > 0:
-                            print(f"     Bounding boxes: {len(trial_bboxes)}")
+                            print(f"     Bounding boxes (via metadata): {len(trial_bboxes)}")
                             unique_bbox_frames = np.unique(trial_bboxes['payload_frame_id'])
                             coverage = len(unique_bbox_frames) / len(unique_camera_frames) * 100
-                            print(f"     Detection coverage: {coverage:.1f}%")
+                            print(f"     Detection coverage (via metadata): {coverage:.1f}%")
                         else:
-                            print(f"     ⚠️  No bounding boxes found")
+                            print(f"     ⚠️  No bounding boxes found via metadata")
                     else:
                         print(f"     ⚠️  No frame metadata found for stimulus frames {min_stim}-{max_stim}")
                 else:
                     print(f"  ⚠️  No chaser states found in time window")
                 
-                # Also check what's happening with timestamps
-                if len(trial_metadata) > 0:
+                # Check what's happening with timestamps
+                if 'trial_metadata' in locals() and len(trial_metadata) > 0:
                     meta_times = trial_metadata['timestamp_ns']
                     print(f"\n  ⏱️  Metadata timestamps:")
                     print(f"     First: {meta_times.min() / 1e9:.3f}s")
@@ -135,10 +174,19 @@ class TrialDataInspector:
                 # Summary for this trial
                 has_chaser = len(trial_chaser_states) > 0
                 has_metadata = len(trial_metadata) > 0 if 'trial_metadata' in locals() else False
-                has_bboxes = len(trial_bboxes) > 0 if 'trial_bboxes' in locals() else False
+                has_bboxes = (len(trial_bboxes_direct) > 0 if 'trial_bboxes_direct' in locals() else 
+                             len(trial_bboxes) > 0 if 'trial_bboxes' in locals() else False)
                 
                 status = "✅ Complete" if all([has_chaser, has_metadata, has_bboxes]) else "⚠️  Incomplete"
                 print(f"\n  Status: {status}")
+                
+                # Clear local variables for next iteration
+                if 'trial_metadata' in locals():
+                    del trial_metadata
+                if 'trial_bboxes' in locals():
+                    del trial_bboxes
+                if 'trial_bboxes_direct' in locals():
+                    del trial_bboxes_direct
                 
                 if i >= 4 and not self.verbose:  # Limit output unless verbose
                     remaining = len(chase_starts) - i - 1
@@ -164,6 +212,16 @@ class TrialDataInspector:
                     'max': events['timestamp_ns_session'].max() / 1e9,
                     'span': (events['timestamp_ns_session'].max() - events['timestamp_ns_session'].min()) / 1e9
                 }
+                
+                # NEW: Check camera_frame_id range in events
+                if 'camera_frame_id' in events.dtype.names:
+                    valid_frames = events['camera_frame_id'][events['camera_frame_id'] > 0]
+                    if len(valid_frames) > 0:
+                        ranges['events']['camera_frames'] = {
+                            'min': valid_frames.min(),
+                            'max': valid_frames.max(),
+                            'count': len(np.unique(valid_frames))
+                        }
             
             # Chaser states
             if '/tracking_data/chaser_states' in f:
@@ -180,7 +238,12 @@ class TrialDataInspector:
                 ranges['frame_metadata'] = {
                     'min': metadata['timestamp_ns'].min() / 1e9,
                     'max': metadata['timestamp_ns'].max() / 1e9,
-                    'span': (metadata['timestamp_ns'].max() - metadata['timestamp_ns'].min()) / 1e9
+                    'span': (metadata['timestamp_ns'].max() - metadata['timestamp_ns'].min()) / 1e9,
+                    'camera_frames': {
+                        'min': metadata['triggering_camera_frame_id'].min(),
+                        'max': metadata['triggering_camera_frame_id'].max(),
+                        'count': len(np.unique(metadata['triggering_camera_frame_id']))
+                    }
                 }
             
             # Bounding boxes
@@ -189,7 +252,12 @@ class TrialDataInspector:
                 ranges['bounding_boxes'] = {
                     'min': bboxes['payload_timestamp_ns_epoch'].min() / 1e9,
                     'max': bboxes['payload_timestamp_ns_epoch'].max() / 1e9,
-                    'span': (bboxes['payload_timestamp_ns_epoch'].max() - bboxes['payload_timestamp_ns_epoch'].min()) / 1e9
+                    'span': (bboxes['payload_timestamp_ns_epoch'].max() - bboxes['payload_timestamp_ns_epoch'].min()) / 1e9,
+                    'camera_frames': {
+                        'min': bboxes['payload_frame_id'].min(),
+                        'max': bboxes['payload_frame_id'].max(),
+                        'count': len(np.unique(bboxes['payload_frame_id']))
+                    }
                 }
             
             # Find the reference time (earliest timestamp)
@@ -203,6 +271,11 @@ class TrialDataInspector:
                 print(f"    Start: {offset_start:.3f}s")
                 print(f"    End:   {offset_end:.3f}s")
                 print(f"    Span:  {r['span']:.3f}s")
+                
+                # NEW: Show camera frame info if available
+                if 'camera_frames' in r:
+                    cf = r['camera_frames']
+                    print(f"    Camera frames: {cf['min']} to {cf['max']} ({cf['count']} unique)")
             
             # Check for epoch vs session timestamps
             if 'bounding_boxes' in ranges:
@@ -224,9 +297,19 @@ class TrialDataInspector:
             # Get frame ID ranges
             metadata = f['/video_metadata/frame_metadata'][:]
             bboxes = f['/tracking_data/bounding_boxes'][:]
+            events = f['/events'][:]
             
             meta_camera_frames = np.unique(metadata['triggering_camera_frame_id'])
             bbox_camera_frames = np.unique(bboxes['payload_frame_id'])
+            
+            # NEW: Get camera frames from events
+            event_camera_frames = None
+            if 'camera_frame_id' in events.dtype.names:
+                valid_event_frames = events['camera_frame_id'][events['camera_frame_id'] > 0]
+                if len(valid_event_frames) > 0:
+                    event_camera_frames = np.unique(valid_event_frames)
+                    print(f"\n  Event camera frames: {len(event_camera_frames)}")
+                    print(f"    Range: {event_camera_frames.min()} to {event_camera_frames.max()}")
             
             # Find intersection and differences
             common_frames = np.intersect1d(meta_camera_frames, bbox_camera_frames)
@@ -234,17 +317,46 @@ class TrialDataInspector:
             bbox_only = np.setdiff1d(bbox_camera_frames, meta_camera_frames)
             
             print(f"\n  Frame metadata camera frames: {len(meta_camera_frames)}")
+            print(f"    Range: {meta_camera_frames.min()} to {meta_camera_frames.max()}")
             print(f"  Bounding box camera frames: {len(bbox_camera_frames)}")
-            print(f"  Common frames: {len(common_frames)}")
+            print(f"    Range: {bbox_camera_frames.min()} to {bbox_camera_frames.max()}")
+            print(f"\n  Common frames: {len(common_frames)}")
             print(f"  Frames in metadata only: {len(meta_only)}")
             print(f"  Frames in bboxes only: {len(bbox_only)}")
             
-            if len(meta_only) > 0:
+            # Check alignment with event frames
+            if event_camera_frames is not None:
+                print(f"\n  Alignment with events:")
+                events_in_meta = np.intersect1d(event_camera_frames, meta_camera_frames)
+                events_in_bbox = np.intersect1d(event_camera_frames, bbox_camera_frames)
+                print(f"    Event frames in metadata: {len(events_in_meta)}/{len(event_camera_frames)}")
+                print(f"    Event frames in bboxes: {len(events_in_bbox)}/{len(event_camera_frames)}")
+                
+                # Check specific chase event frames
+                chase_start_frames = events['camera_frame_id'][events['event_type_id'] == 27]
+                chase_end_frames = events['camera_frame_id'][events['event_type_id'] == 28]
+                
+                chase_frames_valid = chase_start_frames[chase_start_frames > 0]
+                if len(chase_frames_valid) > 0:
+                    print(f"\n  Chase event camera frames:")
+                    for j, (start_frame, end_frame) in enumerate(zip(chase_start_frames[chase_start_frames > 0], 
+                                                                     chase_end_frames[chase_end_frames > 0])):
+                        if j >= 3 and not self.verbose:
+                            print(f"    ... and {len(chase_frames_valid) - j} more trials")
+                            break
+                        
+                        # Check if these frames have bounding boxes
+                        bbox_in_range = bboxes[(bboxes['payload_frame_id'] >= start_frame) & 
+                                              (bboxes['payload_frame_id'] <= end_frame)]
+                        coverage = len(np.unique(bbox_in_range['payload_frame_id'])) / (end_frame - start_frame + 1) * 100
+                        print(f"    Trial {j+1}: frames {start_frame}-{end_frame}, bbox coverage: {coverage:.1f}%")
+            
+            if len(meta_only) > 0 and self.verbose:
                 print(f"\n  📍 Sample frames in metadata but not bboxes:")
                 for frame in meta_only[:5]:
                     print(f"     Frame {frame}")
             
-            if len(bbox_only) > 0:
+            if len(bbox_only) > 0 and self.verbose:
                 print(f"\n  📍 Sample frames in bboxes but not metadata:")
                 for frame in bbox_only[:5]:
                     print(f"     Frame {frame}")
@@ -258,6 +370,7 @@ def main():
         epilog="""
 This inspector helps diagnose trial coverage issues by:
 - Examining each chase trial individually
+- Using camera_frame_id from events for direct alignment
 - Checking time alignment between datasets
 - Verifying frame ID consistency
 

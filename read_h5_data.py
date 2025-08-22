@@ -81,6 +81,8 @@ def read_events(hf):
         'name_or_context': [s.decode('utf-8').strip('\x00') for s in events_data['name_or_context']],
         'stimulus_mode_id': events_data['stimulus_mode_id'],
         'details_json': [s.decode('utf-8').strip('\x00') for s in events_data['details_json']],
+        'stimulus_frame_num': events_data['stimulus_frame_num'],
+        'camera_frame_id': events_data['camera_frame_id'],
     })
 
     df = df.with_columns([
@@ -89,7 +91,8 @@ def read_events(hf):
         pl.from_epoch("timestamp_ns_epoch", time_unit="ns").alias("timestamp")
     ])
 
-    display_cols = ['timestamp', 'event_type_str', 'current_step_index', 'name_or_context', 'stimulus_mode_str', 'details_json']
+    display_cols = ['timestamp', 'event_type_str', 'current_step_index', 'name_or_context', 
+                    'stimulus_mode_str', 'stimulus_frame_num', 'camera_frame_id', 'details_json']
     with pl.Config(tbl_rows=-1, tbl_cols=-1, tbl_width_chars=180):
         print(df.select(display_cols))
 
@@ -206,6 +209,43 @@ def read_calibration_snapshot(hf, output_dir):
                 except Exception as e:
                     print(f"Could not save {name}. Error: {e}")
 
+def read_stimulus_coordinates(hf):
+    """Reads and displays the /stimulus_coordinates group with texture dimensions."""
+    print("\n--- Reading /stimulus_coordinates ---")
+    coord_group = get_h5_object(hf, '/stimulus_coordinates')
+    if coord_group is None:
+        print("No stimulus coordinate info found.")
+        return
+    
+    print("Stimulus Coordinate Information:")
+    
+    # Read attributes from the main group
+    if coord_group.attrs:
+        print("\nMain attributes:")
+        for key, value in coord_group.attrs.items():
+            if isinstance(value, bytes):
+                value = value.decode('utf-8', 'ignore')
+            print(f"  {key}: {value}")
+    
+    # Check for arena-specific groups (if multiple arenas)
+    for arena_name in coord_group.keys():
+        if isinstance(coord_group[arena_name], h5py.Group):
+            arena_group = coord_group[arena_name]
+            print(f"\nArena: {arena_name}")
+            
+            # Read arena attributes
+            for key, value in arena_group.attrs.items():
+                if isinstance(value, bytes):
+                    value = value.decode('utf-8', 'ignore')
+                print(f"  {key}: {value}")
+            
+            # Check for custom_coordinates subgroup
+            if 'custom_coordinates' in arena_group:
+                custom_group = arena_group['custom_coordinates']
+                print("  Custom coordinates:")
+                for key, value in custom_group.attrs.items():
+                    print(f"    {key}: {value}")
+
 def main():
     parser = argparse.ArgumentParser(description="Inspect components of a citrus HDF5 log file using Polars.")
     parser.add_argument("filepath", help="Path to the HDF5 file.")
@@ -218,6 +258,7 @@ def main():
     parser.add_argument("--frames", action="store_true", help="Inspect the video frame metadata.")
     parser.add_argument("--protocol", action="store_true", help="Inspect the protocol snapshot.")
     parser.add_argument("--calib", action="store_true", help="Inspect the calibration snapshot.")
+    parser.add_argument("--coords", action="store_true", help="Inspect the stimulus coordinate info.")  # NEW
     parser.add_argument("--output_dir", default=".", help="Directory to save extracted files (like calibration images).")
 
     args = parser.parse_args()
@@ -248,6 +289,8 @@ def main():
             read_protocol_snapshot(hf)
         if args.calib or args.all:
             read_calibration_snapshot(hf, args.output_dir)
+        if args.coords or args.all:  # NEW
+            read_stimulus_coordinates(hf)
 
     print("\n--- Inspection Complete ---")
 

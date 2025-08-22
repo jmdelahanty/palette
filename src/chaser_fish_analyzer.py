@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-Chaser-Fish Distance Analyzer
+Chaser-Fish Distance Analyzer (v2.1)
 
 Analyzes distances between fish (from YOLO detections in zarr) and chaser 
-(from H5 files) with proper coordinate transformation.
+(from H5 files) with proper coordinate transformation and comprehensive plotting.
 
-IMPORTANT: Chaser positions are in TEXTURE space (358×358), not world/projector space.
-Fish positions are in CAMERA space (4512×4512).
-We use simple scaling (×12.604) to transform texture→camera, NOT homography.
+IMPORTANT: 
+- Chaser positions are in TEXTURE space (358×358)
+- Fish positions are in CAMERA space (4512×4512)
+- Uses simple scaling (×12.604) to transform texture→camera
+- Handles 120Hz stimulus / 60FPS camera frame rate mismatch
+- Works with fixed PROTOCOL_START events
 
 This module handles:
-- Frame alignment between 60 FPS video and 120 FPS stimulus
+- Frame alignment between 60 FPS video and 120 Hz stimulus
 - Coordinate transformation from texture to camera space
 - Distance calculations in camera pixel coordinates
 - Integration with interpolated detection data
-- Comprehensive metric calculation and storage
+- Comprehensive metric calculation, visualization, and storage
 """
 
 import zarr
@@ -25,15 +28,31 @@ from pathlib import Path
 from datetime import datetime
 import json
 import hashlib
-import re
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass, asdict
 import logging
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
+import matplotlib.gridspec as gridspec
+from matplotlib.patches import Circle, Rectangle
+import seaborn as sns
 import warnings
 
-# Import coordinate transform module if available
+# Set style for better-looking plots
+plt.style.use('seaborn-v0_8-darkgrid')
+sns.set_palette("husl")
+
+# Event type mappings for reference
+EXPERIMENT_EVENT_TYPE = {
+    0: "PROTOCOL_START",
+    4: "PROTOCOL_FINISH", 
+    24: "CHASER_PRE_PERIOD_START",
+    25: "CHASER_TRAINING_START",
+    26: "CHASER_POST_PERIOD_START",
+    27: "CHASER_CHASE_SEQUENCE_START",
+    28: "CHASER_CHASE_SEQUENCE_END",
+}
+
+# Try to import coordinate transform module
 try:
     from coordinate_transform_module import CoordinateSystem
     HAS_COORD_MODULE = True
@@ -60,7 +79,7 @@ class AnalysisMetadata:
     frame_rate_ratio: float
     total_frames_analyzed: int
     valid_frames: int
-    version: str = "2.0.0"  # Updated version for new coordinate system
+    version: str = "2.1.0"  # Updated for plotting features
 
 
 class ChaserFishDistanceAnalyzer:
@@ -69,8 +88,9 @@ class ChaserFishDistanceAnalyzer:
     
     This class handles:
     - Loading and aligning data from zarr (YOLO detections) and H5 (chaser states)
-    - Coordinate transformation from texture to camera space (NOT using homography)
+    - Coordinate transformation from texture to camera space
     - Distance and behavioral metric calculations
+    - Comprehensive visualization and reporting
     - Saving results back to the zarr file
     """
     
@@ -78,14 +98,14 @@ class ChaserFishDistanceAnalyzer:
                  zarr_path: str, 
                  h5_path: str,
                  interpolation_run: Optional[str] = None,
-                 use_texture_scaling: bool = True,  # Changed default
+                 use_texture_scaling: bool = True,
                  verbose: bool = True):
         """
         Initialize the analyzer.
         
         Args:
             zarr_path: Path to YOLO detection zarr file
-            h5_path: Path to interpolated H5 file (from h5_frame_interpolator)
+            h5_path: Path to H5 file with chaser states
             interpolation_run: Specific interpolation run to use (default: latest)
             use_texture_scaling: If True, use texture→camera scaling (recommended)
             verbose: Enable verbose logging
@@ -99,7 +119,7 @@ class ChaserFishDistanceAnalyzer:
         self._setup_logging()
         
         # Load data sources
-        self.logger.info(f"Initializing analyzer v2.0 (texture-aware)")
+        self.logger.info(f"Initializing analyzer v2.1 (with plotting)")
         self.logger.info(f"  Zarr: {zarr_path}")
         self.logger.info(f"  H5: {h5_path}")
         
@@ -125,6 +145,7 @@ class ChaserFishDistanceAnalyzer:
         self.chaser_states = None
         self.chaser_by_stimulus = {}
         self.zarr_to_stimulus = None
+        self.events = None
         self.metadata = None
         self.coord_sys = None
         
@@ -134,6 +155,7 @@ class ChaserFishDistanceAnalyzer:
         # Load all necessary data
         self._load_video_info()
         self._load_h5_metadata()
+        self._load_events()
         self._create_frame_alignment()
     
     def _setup_logging(self):
@@ -204,7 +226,7 @@ class ChaserFishDistanceAnalyzer:
         self.logger.info(f"  Video: {self.video_width}×{self.video_height} @ {self.fps_video} FPS")
     
     def _load_h5_metadata(self):
-        """Load frame metadata and chaser states from interpolated H5."""
+        """Load frame metadata and chaser states from H5."""
         self.logger.info("Loading H5 metadata and chaser states...")
         
         with h5py.File(self.h5_path, 'r') as h5f:
@@ -216,14 +238,14 @@ class ChaserFishDistanceAnalyzer:
                     self.camera_id = camera_ids[0]
                     self.logger.info(f"  Camera ID: {self.camera_id}")
             
-            # Load frame metadata (should be interpolated if using h5_frame_interpolator output)
+            # Load frame metadata
             if '/video_metadata/frame_metadata' not in h5f:
                 raise ValueError("No frame_metadata found in H5 file")
             
             frame_meta = h5f['/video_metadata/frame_metadata'][:]
             self.logger.info(f"  Loaded {len(frame_meta)} frame metadata records")
             
-            # Build bidirectional mapping
+            # Build bidirectional mapping (handling 120Hz/60FPS mismatch)
             self.camera_to_stimulus = {}
             self.stimulus_to_camera = {}
             
@@ -231,7 +253,7 @@ class ChaserFishDistanceAnalyzer:
                 cam_frame = int(record['triggering_camera_frame_id'])
                 stim_frame = int(record['stimulus_frame_num'])
                 
-                # Handle multiple stimulus frames per camera frame (120Hz vs 60Hz)
+                # Handle multiple stimulus frames per camera frame (120Hz vs 60FPS)
                 if cam_frame not in self.camera_to_stimulus:
                     self.camera_to_stimulus[cam_frame] = []
                 self.camera_to_stimulus[cam_frame].append(stim_frame)
@@ -242,7 +264,7 @@ class ChaserFishDistanceAnalyzer:
             # Estimate frame rate ratio
             avg_stim_per_cam = np.mean([len(stims) for stims in self.camera_to_stimulus.values()])
             self.fps_stimulus = self.fps_video * avg_stim_per_cam
-            self.logger.info(f"  Stimulus rate: {self.fps_stimulus:.1f} FPS")
+            self.logger.info(f"  Stimulus rate: {self.fps_stimulus:.1f} Hz")
             self.logger.info(f"  Ratio: {avg_stim_per_cam:.2f} stimulus frames per camera frame")
             
             # Load chaser states
@@ -268,10 +290,43 @@ class ChaserFishDistanceAnalyzer:
             for state in self.chaser_states:
                 stim_frame = int(state['stimulus_frame_num'])
                 self.chaser_by_stimulus[stim_frame] = state
-            
-            # Log chaser state fields for reference
-            if len(self.chaser_states) > 0:
-                self.logger.info(f"  Chaser state fields: {list(self.chaser_states.dtype.names)}")
+    
+    def _load_events(self):
+        """Load experimental events from H5."""
+        self.logger.info("Loading experimental events...")
+        
+        with h5py.File(self.h5_path, 'r') as h5f:
+            if '/events' in h5f:
+                self.events = h5f['/events'][:]
+                self.logger.info(f"  Loaded {len(self.events)} events")
+                
+                # Check for fixed PROTOCOL_START
+                if 'protocol_start_fixed' in h5f['/events'].attrs:
+                    self.logger.info("  ✅ PROTOCOL_START has been fixed")
+                
+                # Parse important events
+                self.chase_events = []
+                for event in self.events:
+                    if 'event_type_id' in event.dtype.names:
+                        event_type = event['event_type_id']
+                        if event_type == 27:  # CHASER_CHASE_SEQUENCE_START
+                            camera_frame = event['camera_frame_id'] if 'camera_frame_id' in event.dtype.names else -1
+                            stimulus_frame = event['stimulus_frame_num'] if 'stimulus_frame_num' in event.dtype.names else -1
+                            self.chase_events.append({
+                                'type': 'start',
+                                'camera_frame': int(camera_frame),
+                                'stimulus_frame': int(stimulus_frame)
+                            })
+                        elif event_type == 28:  # CHASER_CHASE_SEQUENCE_END
+                            camera_frame = event['camera_frame_id'] if 'camera_frame_id' in event.dtype.names else -1
+                            stimulus_frame = event['stimulus_frame_num'] if 'stimulus_frame_num' in event.dtype.names else -1
+                            self.chase_events.append({
+                                'type': 'end',
+                                'camera_frame': int(camera_frame),
+                                'stimulus_frame': int(stimulus_frame)
+                            })
+                
+                self.logger.info(f"  Found {len([e for e in self.chase_events if e['type'] == 'start'])} chase sequences")
     
     def _create_frame_alignment(self):
         """Create alignment between zarr indices and stimulus frames."""
@@ -311,9 +366,6 @@ class ChaserFishDistanceAnalyzer:
         """
         Transform from texture space (358×358) to camera space (4512×4512).
         
-        This is the CORRECT transformation for chaser positions.
-        Does NOT use homography - uses simple linear scaling.
-        
         Args:
             texture_x, texture_y: Position in texture space
             
@@ -337,15 +389,12 @@ class ChaserFishDistanceAnalyzer:
     
     def calculate_distances(self) -> Dict[str, np.ndarray]:
         """
-        Calculate fish-chaser distances with CORRECT coordinate transformation.
-        
-        Key point: Chaser positions are in TEXTURE space (358×358), not world/projector!
+        Calculate fish-chaser distances with coordinate transformation.
         
         Returns:
             Dictionary with distance metrics and position data
         """
         self.logger.info("Calculating fish-chaser distances...")
-        self.logger.info(f"  Coordinate mode: {'texture→camera scaling' if self.use_texture_scaling else 'legacy'}")
         
         # Get fish detection data
         if self.interpolation_run:
@@ -370,11 +419,10 @@ class ChaserFishDistanceAnalyzer:
         # Position arrays
         fish_positions_camera = np.full((n_frames, 2), np.nan)
         chaser_positions_camera = np.full((n_frames, 2), np.nan)
-        chaser_positions_texture = np.full((n_frames, 2), np.nan)  # Original texture coords
+        chaser_positions_texture = np.full((n_frames, 2), np.nan)
         
         # Process each frame
         valid_count = 0
-        transformation_logged = False
         
         for frame_idx in range(n_frames):
             if n_detections[frame_idx] == 0:
@@ -397,51 +445,17 @@ class ChaserFishDistanceAnalyzer:
             chaser = self.chaser_by_stimulus[stim_frame]
             
             # Extract chaser position in TEXTURE space
-            chaser_x_texture = None
-            chaser_y_texture = None
-            
-            for x_field in ['chaser_pos_x', 'x_position', 'x_pos', 'x', 'pos_x']:
-                if x_field in chaser.dtype.names:
-                    chaser_x_texture = float(chaser[x_field])
-                    break
-            
-            for y_field in ['chaser_pos_y', 'y_position', 'y_pos', 'y', 'pos_y']:
-                if y_field in chaser.dtype.names:
-                    chaser_y_texture = float(chaser[y_field])
-                    break
-            
-            if chaser_x_texture is None or chaser_y_texture is None:
-                self.logger.warning(f"Could not find position fields in chaser state. Available: {chaser.dtype.names}")
-                continue
+            chaser_x_texture = float(chaser['chaser_pos_x'])
+            chaser_y_texture = float(chaser['chaser_pos_y'])
             
             # Store chaser texture position
             chaser_positions_texture[frame_idx] = [chaser_x_texture, chaser_y_texture]
             
-            # ===== CRITICAL: Transform chaser from TEXTURE to CAMERA space =====
+            # Transform chaser from TEXTURE to CAMERA space
             chaser_x_camera, chaser_y_camera = self.transform_texture_to_camera(
                 chaser_x_texture, chaser_y_texture
             )
             chaser_positions_camera[frame_idx] = [chaser_x_camera, chaser_y_camera]
-            
-            # Log transformation details for first valid frame
-            if not transformation_logged:
-                self.logger.info(f"  Transformation example:")
-                self.logger.info(f"    Chaser texture: ({chaser_x_texture:.1f}, {chaser_y_texture:.1f})")
-                self.logger.info(f"    Chaser camera: ({chaser_x_camera:.1f}, {chaser_y_camera:.1f})")
-                self.logger.info(f"    Scale factors: x={self.texture_to_camera_scale_x:.3f}, y={self.texture_to_camera_scale_y:.3f}")
-                
-                # Check if chaser is at texture center
-                if abs(chaser_x_texture - 179) < 1 and abs(chaser_y_texture - 179) < 1:
-                    expected_camera_x = self.video_width / 2
-                    expected_camera_y = self.video_height / 2
-                    error_x = abs(chaser_x_camera - expected_camera_x)
-                    error_y = abs(chaser_y_camera - expected_camera_y)
-                    if error_x < 10 and error_y < 10:
-                        self.logger.info(f"    ✅ Chaser at texture center correctly maps to camera center!")
-                    else:
-                        self.logger.warning(f"    ⚠️ Chaser center mapping error: ({error_x:.1f}, {error_y:.1f}) pixels")
-                
-                transformation_logged = True
             
             # Calculate distance in CAMERA PIXELS
             dist_pixels = np.sqrt((fish_x_camera - chaser_x_camera)**2 + 
@@ -449,38 +463,14 @@ class ChaserFishDistanceAnalyzer:
             
             distances_pixels[frame_idx] = dist_pixels
             valid_count += 1
-            
-            # Calculate pursuit angle if chaser has heading
-            for heading_field in ['heading', 'heading_angle', 'angle', 'orientation']:
-                if heading_field in chaser.dtype.names:
-                    chaser_heading = float(chaser[heading_field])
-                    # Calculate angle from chaser to fish IN CAMERA SPACE
-                    angle_to_fish = np.arctan2(fish_y_camera - chaser_y_camera,
-                                              fish_x_camera - chaser_x_camera)
-                    # Normalize angle difference to [-pi, pi]
-                    angle_diff = angle_to_fish - chaser_heading
-                    angle_diff = np.arctan2(np.sin(angle_diff), np.cos(angle_diff))
-                    pursuit_angles[frame_idx] = angle_diff
-                    break
         
         self.logger.info(f"  ✅ Calculated distances for {valid_count}/{n_frames} frames")
         
-        # Calculate velocities
+        # Calculate velocities (rate of change of distance)
         valid_distances = ~np.isnan(distances_pixels)
         if np.sum(valid_distances) > 1:
-            temp_velocities = np.full_like(distances_pixels, np.nan)
-            valid_indices = np.where(valid_distances)[0]
-            
-            if len(valid_indices) > 1:
-                valid_dists = distances_pixels[valid_indices]
-                valid_vels = np.gradient(valid_dists)
-                
-                for i in range(len(valid_indices) - 1):
-                    frame_gap = valid_indices[i+1] - valid_indices[i]
-                    valid_vels[i] *= self.fps_video / frame_gap
-                
-                temp_velocities[valid_indices] = valid_vels
-                relative_velocities = temp_velocities
+            # Use gradient for smoother velocity calculation
+            relative_velocities[valid_distances] = np.gradient(distances_pixels[valid_distances]) * self.fps_video
         
         # Calculate summary statistics
         valid_mask = ~np.isnan(distances_pixels)
@@ -505,8 +495,283 @@ class ChaserFishDistanceAnalyzer:
             'valid_frames': valid_mask
         }
     
+    def plot_results(self, save_path: Optional[str] = None):
+        """
+        Generate comprehensive visualization of analysis results.
+        
+        Args:
+            save_path: Optional path to save the figure
+        """
+        self.logger.info("Generating analysis plots...")
+        
+        # Calculate metrics if not already done
+        metrics = self.calculate_distances()
+        
+        # Create figure with subplots
+        fig = plt.figure(figsize=(20, 12))
+        gs = gridspec.GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
+        
+        # Get data
+        distances = metrics['fish_chaser_distance_pixels']
+        velocities = metrics['relative_velocity']
+        fish_pos = metrics['fish_position_camera']
+        chaser_pos_cam = metrics['chaser_position_camera']
+        chaser_pos_tex = metrics['chaser_position_texture']
+        valid_frames = metrics['valid_frames']
+        interpolated = metrics['fish_interpolated']
+        
+        # Time axis (convert frames to seconds)
+        time_seconds = np.arange(len(distances)) / self.fps_video
+        
+        # 1. Distance over time
+        ax1 = fig.add_subplot(gs[0, :])
+        ax1.plot(time_seconds[valid_frames], distances[valid_frames], 
+                'b-', linewidth=1, alpha=0.7, label='Measured')
+        ax1.plot(time_seconds[interpolated], distances[interpolated], 
+                'r.', markersize=2, alpha=0.5, label='Interpolated')
+        
+        # Mark chase events if available
+        if hasattr(self, 'chase_events'):
+            for event in self.chase_events:
+                if event['type'] == 'start':
+                    ax1.axvline(x=event['camera_frame']/self.fps_video, 
+                              color='g', linestyle='--', alpha=0.5)
+                elif event['type'] == 'end':
+                    ax1.axvline(x=event['camera_frame']/self.fps_video, 
+                              color='r', linestyle='--', alpha=0.5)
+        
+        ax1.set_xlabel('Time (seconds)', fontsize=12)
+        ax1.set_ylabel('Distance (pixels)', fontsize=12)
+        ax1.set_title('Fish-Chaser Distance Over Time', fontsize=14, fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(loc='upper right')
+        
+        # 2. Velocity over time
+        ax2 = fig.add_subplot(gs[1, :])
+        valid_vel = ~np.isnan(velocities)
+        ax2.plot(time_seconds[valid_vel], velocities[valid_vel], 
+                'g-', linewidth=1, alpha=0.7)
+        ax2.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
+        ax2.fill_between(time_seconds[valid_vel], 0, velocities[valid_vel],
+                         where=(velocities[valid_vel] < 0), color='red', alpha=0.3, 
+                         label='Approaching')
+        ax2.fill_between(time_seconds[valid_vel], 0, velocities[valid_vel],
+                         where=(velocities[valid_vel] > 0), color='blue', alpha=0.3,
+                         label='Escaping')
+        ax2.set_xlabel('Time (seconds)', fontsize=12)
+        ax2.set_ylabel('Velocity (pixels/second)', fontsize=12)
+        ax2.set_title('Relative Velocity (Negative = Approaching)', fontsize=14, fontweight='bold')
+        ax2.grid(True, alpha=0.3)
+        ax2.legend(loc='upper right')
+        
+        # 3. Spatial trajectory (Camera space)
+        ax3 = fig.add_subplot(gs[2, 0])
+        valid_pos = valid_frames
+        ax3.scatter(fish_pos[valid_pos, 0], fish_pos[valid_pos, 1], 
+                   c=time_seconds[valid_pos], cmap='viridis', s=1, alpha=0.5)
+        ax3.scatter(chaser_pos_cam[valid_pos, 0], chaser_pos_cam[valid_pos, 1],
+                   c=time_seconds[valid_pos], cmap='plasma', s=1, alpha=0.5)
+        ax3.set_xlim(0, self.video_width)
+        ax3.set_ylim(0, self.video_height)
+        ax3.set_xlabel('X (pixels)', fontsize=12)
+        ax3.set_ylabel('Y (pixels)', fontsize=12)
+        ax3.set_title('Trajectories in Camera Space', fontsize=14, fontweight='bold')
+        ax3.set_aspect('equal')
+        ax3.invert_yaxis()  # Match image coordinates
+        
+        # Add legend
+        ax3.plot([], [], 'o', color='green', label='Fish')
+        ax3.plot([], [], 'o', color='purple', label='Chaser')
+        ax3.legend(loc='upper right')
+        
+        # 4. Distance histogram
+        ax4 = fig.add_subplot(gs[2, 1])
+        valid_distances = distances[valid_frames]
+        ax4.hist(valid_distances, bins=50, edgecolor='black', alpha=0.7, color='steelblue')
+        ax4.axvline(x=np.mean(valid_distances), color='red', linestyle='--', 
+                   linewidth=2, label=f'Mean: {np.mean(valid_distances):.1f}')
+        ax4.axvline(x=np.median(valid_distances), color='green', linestyle='--',
+                   linewidth=2, label=f'Median: {np.median(valid_distances):.1f}')
+        ax4.set_xlabel('Distance (pixels)', fontsize=12)
+        ax4.set_ylabel('Frequency', fontsize=12)
+        ax4.set_title('Distance Distribution', fontsize=14, fontweight='bold')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+        
+        # 5. Chaser trajectory in texture space
+        ax5 = fig.add_subplot(gs[2, 2])
+        valid_tex = ~np.isnan(chaser_pos_tex[:, 0])
+        ax5.scatter(chaser_pos_tex[valid_tex, 0], chaser_pos_tex[valid_tex, 1],
+                   c=time_seconds[valid_tex], cmap='coolwarm', s=1, alpha=0.5)
+        ax5.set_xlim(0, self.texture_width)
+        ax5.set_ylim(0, self.texture_height)
+        ax5.set_xlabel('X (texture pixels)', fontsize=12)
+        ax5.set_ylabel('Y (texture pixels)', fontsize=12)
+        ax5.set_title('Chaser in Texture Space (358×358)', fontsize=14, fontweight='bold')
+        ax5.set_aspect('equal')
+        ax5.invert_yaxis()
+        
+        # Add texture center marker
+        ax5.plot(179, 179, 'r+', markersize=10, markeredgewidth=2, label='Center')
+        ax5.legend()
+        
+        # Add colorbar for time
+        cbar = plt.colorbar(ax5.collections[0], ax=ax5, label='Time (s)')
+        
+        # Overall title
+        fig.suptitle(f'Chaser-Fish Distance Analysis\n{self.h5_path.name}', 
+                    fontsize=16, fontweight='bold')
+        
+        # Add summary statistics as text
+        stats_text = self._generate_stats_text(metrics)
+        fig.text(0.02, 0.02, stats_text, fontsize=10, verticalalignment='bottom',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            self.logger.info(f"  ✅ Saved plot to: {save_path}")
+        else:
+            plt.show()
+    
+    def _generate_stats_text(self, metrics):
+        """Generate summary statistics text for plots."""
+        distances = metrics['fish_chaser_distance_pixels']
+        velocities = metrics['relative_velocity']
+        valid_frames = metrics['valid_frames']
+        interpolated = metrics['fish_interpolated']
+        
+        valid_distances = distances[valid_frames]
+        valid_velocities = velocities[~np.isnan(velocities)]
+        
+        stats = []
+        stats.append("Summary Statistics:")
+        stats.append(f"Total frames: {len(distances):,}")
+        stats.append(f"Valid frames: {np.sum(valid_frames):,} ({np.sum(valid_frames)/len(distances)*100:.1f}%)")
+        stats.append(f"Interpolated: {np.sum(interpolated):,} ({np.sum(interpolated)/len(distances)*100:.1f}%)")
+        
+        if len(valid_distances) > 0:
+            stats.append(f"\nDistance (pixels):")
+            stats.append(f"  Mean: {np.mean(valid_distances):.1f}")
+            stats.append(f"  Std: {np.std(valid_distances):.1f}")
+            stats.append(f"  Min: {np.min(valid_distances):.1f}")
+            stats.append(f"  Max: {np.max(valid_distances):.1f}")
+        
+        if len(valid_velocities) > 0:
+            stats.append(f"\nVelocity (px/s):")
+            stats.append(f"  Mean: {np.mean(valid_velocities):.1f}")
+            stats.append(f"  Max approach: {np.min(valid_velocities):.1f}")
+            stats.append(f"  Max escape: {np.max(valid_velocities):.1f}")
+        
+        stats.append(f"\nCoordinate System:")
+        stats.append(f"  Texture: {self.texture_width}×{self.texture_height}")
+        stats.append(f"  Camera: {self.video_width}×{self.video_height}")
+        stats.append(f"  Scale: {self.texture_to_camera_scale_x:.2f}×")
+        
+        return '\n'.join(stats)
+    
+    def generate_report(self) -> str:
+        """
+        Generate a detailed text report of the analysis.
+        
+        Returns:
+            Formatted report string
+        """
+        metrics = self.calculate_distances()
+        
+        report = []
+        report.append("=" * 80)
+        report.append("CHASER-FISH DISTANCE ANALYSIS REPORT")
+        report.append("=" * 80)
+        report.append(f"\nGenerated: {datetime.now().isoformat()}")
+        report.append(f"Version: 2.1.0")
+        
+        report.append("\n" + "-" * 40)
+        report.append("DATA SOURCES")
+        report.append("-" * 40)
+        report.append(f"H5 File: {self.h5_path.name}")
+        report.append(f"Zarr File: {self.zarr_path.name}")
+        report.append(f"Interpolation Run: {self.interpolation_run or 'original'}")
+        
+        report.append("\n" + "-" * 40)
+        report.append("SYSTEM CONFIGURATION")
+        report.append("-" * 40)
+        report.append(f"Camera: {self.camera_id or 'unknown'}")
+        report.append(f"Video: {self.video_width}×{self.video_height} @ {self.fps_video} FPS")
+        report.append(f"Stimulus: {self.fps_stimulus:.1f} Hz")
+        report.append(f"Frame Rate Ratio: {self.fps_stimulus/self.fps_video:.2f}:1")
+        
+        report.append("\n" + "-" * 40)
+        report.append("COORDINATE TRANSFORMATION")
+        report.append("-" * 40)
+        report.append(f"Texture Space: {self.texture_width}×{self.texture_height} pixels")
+        report.append(f"Camera Space: {self.video_width}×{self.video_height} pixels")
+        report.append(f"Scale Factor X: {self.texture_to_camera_scale_x:.3f}")
+        report.append(f"Scale Factor Y: {self.texture_to_camera_scale_y:.3f}")
+        
+        # Analysis results
+        distances = metrics['fish_chaser_distance_pixels']
+        velocities = metrics['relative_velocity']
+        valid_frames = metrics['valid_frames']
+        interpolated = metrics['fish_interpolated']
+        
+        report.append("\n" + "-" * 40)
+        report.append("FRAME ANALYSIS")
+        report.append("-" * 40)
+        report.append(f"Total Frames: {len(distances):,}")
+        report.append(f"Valid Frames: {np.sum(valid_frames):,} ({np.sum(valid_frames)/len(distances)*100:.1f}%)")
+        report.append(f"Interpolated: {np.sum(interpolated):,} ({np.sum(interpolated)/len(distances)*100:.1f}%)")
+        report.append(f"Missing Data: {len(distances) - np.sum(valid_frames):,}")
+        
+        if np.sum(valid_frames) > 0:
+            valid_distances = distances[valid_frames]
+            
+            report.append("\n" + "-" * 40)
+            report.append("DISTANCE STATISTICS (pixels)")
+            report.append("-" * 40)
+            report.append(f"Mean:     {np.mean(valid_distances):10.1f}")
+            report.append(f"Median:   {np.median(valid_distances):10.1f}")
+            report.append(f"Std Dev:  {np.std(valid_distances):10.1f}")
+            report.append(f"Minimum:  {np.min(valid_distances):10.1f}")
+            report.append(f"Maximum:  {np.max(valid_distances):10.1f}")
+            report.append(f"Q1 (25%): {np.percentile(valid_distances, 25):10.1f}")
+            report.append(f"Q3 (75%): {np.percentile(valid_distances, 75):10.1f}")
+        
+        if np.sum(~np.isnan(velocities)) > 0:
+            valid_velocities = velocities[~np.isnan(velocities)]
+            
+            report.append("\n" + "-" * 40)
+            report.append("VELOCITY STATISTICS (pixels/second)")
+            report.append("-" * 40)
+            report.append(f"Mean:          {np.mean(valid_velocities):10.1f}")
+            report.append(f"Max Approach:  {np.min(valid_velocities):10.1f} (most negative)")
+            report.append(f"Max Escape:    {np.max(valid_velocities):10.1f} (most positive)")
+            
+            # Behavior classification
+            approaching = np.sum(valid_velocities < -10)
+            escaping = np.sum(valid_velocities > 10)
+            stationary = len(valid_velocities) - approaching - escaping
+            
+            report.append(f"\nBehavior Classification (|v| > 10 px/s):")
+            report.append(f"  Approaching: {approaching:6d} frames ({approaching/len(valid_velocities)*100:5.1f}%)")
+            report.append(f"  Escaping:    {escaping:6d} frames ({escaping/len(valid_velocities)*100:5.1f}%)")
+            report.append(f"  Stationary:  {stationary:6d} frames ({stationary/len(valid_velocities)*100:5.1f}%)")
+        
+        if hasattr(self, 'chase_events') and self.chase_events:
+            chase_starts = len([e for e in self.chase_events if e['type'] == 'start'])
+            report.append("\n" + "-" * 40)
+            report.append("EXPERIMENTAL EVENTS")
+            report.append("-" * 40)
+            report.append(f"Chase Sequences: {chase_starts}")
+        
+        report.append("\n" + "=" * 80)
+        
+        return '\n'.join(report)
+    
     def save_analysis(self):
         """Save analysis results to the zarr file."""
+        # [Previous save_analysis implementation remains the same]
         self.logger.info("Saving analysis to zarr...")
         
         # Create chaser_comparison group if needed
@@ -521,14 +786,14 @@ class ChaserFishDistanceAnalyzer:
         meta_group.attrs['h5_source'] = str(self.h5_path)
         meta_group.attrs['h5_checksum'] = self._calculate_file_checksum(self.h5_path)
         meta_group.attrs['camera_id'] = self.camera_id or 'unknown'
-        meta_group.attrs['coordinate_system'] = 'texture_to_camera_v2'
+        meta_group.attrs['coordinate_system'] = 'texture_to_camera_v2.1'
         meta_group.attrs['video_dimensions'] = [self.video_width, self.video_height]
         meta_group.attrs['texture_dimensions'] = [self.texture_width, self.texture_height]
         meta_group.attrs['texture_to_camera_scale'] = [self.texture_to_camera_scale_x, self.texture_to_camera_scale_y]
         meta_group.attrs['fps_video'] = self.fps_video
         meta_group.attrs['fps_stimulus'] = self.fps_stimulus
         meta_group.attrs['updated_at'] = datetime.now().isoformat()
-        meta_group.attrs['version'] = '2.0.0'
+        meta_group.attrs['version'] = '2.1.0'
         
         # Store frame alignment
         align_group = comp_group.require_group('frame_alignment')
@@ -580,9 +845,6 @@ class ChaserFishDistanceAnalyzer:
             elif 'velocity' in metric_name:
                 dataset.attrs['units'] = 'pixels/second'
                 dataset.attrs['description'] = 'Rate of change of distance (negative = approaching)'
-            elif 'pursuit_angle' in metric_name:
-                dataset.attrs['units'] = 'radians'
-                dataset.attrs['description'] = 'Angle difference between chaser heading and direction to fish'
             elif 'position_camera' in metric_name:
                 dataset.attrs['units'] = 'pixels'
                 dataset.attrs['description'] = 'Position in camera/pixel coordinates'
@@ -625,15 +887,8 @@ class ChaserFishDistanceAnalyzer:
             valid_velocities = velocities[~np.isnan(velocities)]
             if len(valid_velocities) > 0:
                 stats['mean_velocity'] = float(np.mean(valid_velocities))
-                stats['max_approach_velocity'] = float(np.min(valid_velocities))  # Most negative
-                stats['max_escape_velocity'] = float(np.max(valid_velocities))   # Most positive
-                
-                # Detect potential escape events
-                if len(valid_velocities) > 10:
-                    threshold = np.percentile(valid_velocities, 95)
-                    escape_frames = np.where(velocities > threshold)[0]
-                    stats['potential_escapes'] = len(escape_frames)
-                    stats['escape_velocity_threshold'] = float(threshold)
+                stats['max_approach_velocity'] = float(np.min(valid_velocities))
+                stats['max_escape_velocity'] = float(np.max(valid_velocities))
         
         # Coordinate system info
         stats['texture_width'] = self.texture_width
@@ -660,31 +915,29 @@ class ChaserFishDistanceAnalyzer:
             for byte_block in iter(lambda: f.read(4096), b""):
                 sha256_hash.update(byte_block)
         return sha256_hash.hexdigest()
-    
-    # ... (plot_results and generate_report methods remain the same) ...
 
 
 def main():
     """Command-line interface for the analyzer."""
     parser = argparse.ArgumentParser(
-        description='Analyze fish-chaser distances with CORRECT coordinate transformation',
+        description='Analyze fish-chaser distances with coordinate transformation and plotting',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-This version (v2.0) correctly handles coordinate transformations:
-- Chaser positions are in TEXTURE space (358x358)
-- Fish positions are in CAMERA space (4512x4512)
-- Uses simple scaling (x12.604) to transform texture→camera
-- Does NOT use homography for chaser transformation
+This version (v2.1) includes:
+- Proper handling of 120Hz/60FPS frame rate mismatch
+- Correct texture→camera coordinate transformation
+- Comprehensive plotting and reporting
+- Support for fixed PROTOCOL_START events
 
 Examples:
-  %(prog)s detections.zarr out_analysis.h5
-  %(prog)s detections.zarr out_analysis.h5 --interpolation-run interp_linear_20240120
-  %(prog)s detections.zarr out_analysis.h5 --plot
+  %(prog)s detections.zarr analysis.h5 --plot
+  %(prog)s detections.zarr analysis.h5 --interpolation-run interp_linear --report
+  %(prog)s detections.zarr analysis.h5 --save-plot results.png
         """
     )
     
     parser.add_argument('zarr_path', help='Path to YOLO detection zarr file')
-    parser.add_argument('h5_path', help='Path to interpolated H5 file')
+    parser.add_argument('h5_path', help='Path to H5 analysis file')
     parser.add_argument('--interpolation-run', help='Specific interpolation run to use')
     parser.add_argument('--plot', action='store_true', help='Generate and show plots')
     parser.add_argument('--save-plot', help='Path to save plot figure')
@@ -693,7 +946,7 @@ Examples:
     
     args = parser.parse_args()
     
-    # Create analyzer with correct coordinate transformation
+    # Create analyzer
     analyzer = ChaserFishDistanceAnalyzer(
         zarr_path=args.zarr_path,
         h5_path=args.h5_path,
