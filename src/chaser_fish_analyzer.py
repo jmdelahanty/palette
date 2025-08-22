@@ -157,6 +157,9 @@ class ChaserFishDistanceAnalyzer:
         self._load_h5_metadata()
         self._load_events()
         self._create_frame_alignment()
+        # Load smoothed fish speed if available
+        self.smoothed_speed_px_s, self.speed_window = self._load_smoothed_speed()
+
     
     def _setup_logging(self):
         """Configure logging."""
@@ -362,6 +365,145 @@ class ChaserFishDistanceAnalyzer:
         if aligned_count == 0:
             self.logger.warning("  ⚠️ No frames could be aligned - check frame numbering!")
     
+    def _load_smoothed_speed(self, preferred_window=(10, 20, 30)):
+        """Return (smoothed_speed_px_s, chosen_window) or (None, None) if absent."""
+        if 'speed_metrics' not in self.zarr_root:
+            self.logger.info("  No speed_metrics group in zarr; skipping smoothed speed.")
+            return None, None
+
+        sm = self.zarr_root['speed_metrics']
+        if 'batch_processing' not in sm or 'latest' not in sm['batch_processing'].attrs:
+            self.logger.info("  No latest speed batch found; skipping smoothed speed.")
+            return None, None
+
+        batch_name = sm['batch_processing'].attrs['latest']
+        batch = sm['batch_processing'][batch_name]
+
+        # try preferred windows first
+        for w in preferred_window:
+            key = f'window_{w}'
+            if key in batch and 'smoothed_speed_px_s' in batch[key]:
+                arr = batch[key]['smoothed_speed_px_s'][:].astype(np.float32)
+                self.logger.info(f"  Loaded smoothed speed (window={w} frames) from {batch_name}")
+                return arr, w
+
+        # fallback: smallest available window
+        windows = sorted(int(k.split('_')[1]) for k in batch.group_keys() if k.startswith('window_'))
+        if windows:
+            w = windows[0]
+            arr = batch[f'window_{w}']['smoothed_speed_px_s'][:].astype(np.float32)
+            self.logger.info(f"  Loaded smoothed speed (window={w} frames) from {batch_name}")
+            return arr, w
+
+        self.logger.info("  No smoothed speed arrays present.")
+        return None, None
+    
+    def _detect_escapes(self, dist_px, rel_vel_px_s, speed_px_s, fps):
+        """
+        Returns a dict with:
+        escape_onset [bool], escape_mask [bool], triggered_by_approach [bool],
+        near_and_approach [bool], near_and_approach_lag [bool],
+        thresholds {D_thresh, S_escape, V_close, tau_close, tau_escape, lag_frames},
+        latency_ms (array for triggered escapes)
+        """
+        import numpy as np
+
+        n = len(dist_px)
+        valid_speed = speed_px_s[~np.isnan(speed_px_s)] if speed_px_s is not None else np.array([])
+        valid_dist  = dist_px[~np.isnan(dist_px)]
+        valid_vel   = rel_vel_px_s[~np.isnan(rel_vel_px_s)]
+
+        if speed_px_s is None or valid_speed.size < 50 or valid_dist.size < 50:
+            # Not enough info
+            return {
+                "escape_onset": np.zeros(n, dtype=bool),
+                "escape_mask": np.zeros(n, dtype=bool),
+                "triggered_by_approach": np.zeros(n, dtype=bool),
+                "near_and_approach": np.zeros(n, dtype=bool),
+                "near_and_approach_lag": np.zeros(n, dtype=bool),
+                "thresholds": {"D_thresh": np.nan, "S_escape": np.nan,
+                            "V_close": np.nan, "tau_close": 0, "tau_escape": 0,
+                            "lag_frames": 0},
+                "latency_ms": np.array([], dtype=float),
+            }
+
+        # --- thresholds (robust) ---
+        baseline = np.nanmedian(valid_speed)
+        mad = np.nanmedian(np.abs(valid_speed - baseline))
+        robust_sd = 1.4826 * mad if mad > 0 else np.nanstd(valid_speed)
+        S_escape = baseline + 3.0 * robust_sd
+
+        D_thresh = np.nanpercentile(valid_dist, 20)  # “near” = closest 20%
+
+        # chaser “approach” = distance decreasing fast enough
+        V_close = -100.0  # px/s default; tune as needed or expose as arg
+        tau_close  = max(2, int(round(0.05 * fps)))  # ~50 ms persistence
+        tau_escape = max(3, int(round(0.08 * fps)))  # ~80 ms persistence
+        lag_frames = max(1, int(round(0.10 * fps)))  # allow 100 ms from approach to escape
+
+        # --- primitive masks ---
+        near        = dist_px < D_thresh
+        approaching = rel_vel_px_s < V_close
+        fast_fish   = speed_px_s > S_escape
+
+        near = np.nan_to_num(near)
+        approaching = np.nan_to_num(approaching)
+        fast_fish = np.nan_to_num(fast_fish)
+
+        # --- persistence helper ---
+        def persist(mask, k):
+            if k <= 1: return mask.astype(bool)
+            out = np.zeros_like(mask, dtype=bool)
+            run = 0
+            for i, m in enumerate(mask.astype(bool)):
+                run = (run + 1) if m else 0
+                if run >= k:
+                    out[i] = True
+            return out
+
+        near_persist        = persist(near, 1)               # distance already fairly stable
+        approaching_persist = persist(approaching, tau_close)
+        escape_persist      = persist(fast_fish,   tau_escape)
+
+        # escape onset frames (first frame of a sustained run)
+        onset = escape_persist & (~np.roll(escape_persist, 1))
+        onset[0] = escape_persist[0]
+
+        # near & approach (with short look‑back lag)
+        near_and_approach = near_persist & approaching_persist
+        near_and_approach_lag = near_and_approach.copy()
+        for i in range(1, lag_frames + 1):
+            near_and_approach_lag[i:] |= near_and_approach[:-i]
+
+        # classify which onsets were “triggered” by near & approach in the last lag
+        triggered = onset & near_and_approach_lag
+
+        # latency from last near&approach to escape onset (ms)
+        latencies = []
+        idx_on = np.where(onset)[0]
+        naa = np.where(near_and_approach)[0]
+        for t in idx_on:
+            prev = naa[naa <= t]
+            if prev.size:
+                dt = (t - prev[-1]) / fps * 1000.0
+                if 0 <= dt <= (lag_frames / fps * 1000.0) + 500.0:  # bound outliers
+                    latencies.append(dt)
+        latency_ms = np.array(latencies, dtype=float)
+
+        return {
+            "escape_onset": onset,
+            "escape_mask": escape_persist,
+            "triggered_by_approach": triggered,
+            "near_and_approach": near_and_approach,
+            "near_and_approach_lag": near_and_approach_lag,
+            "thresholds": {
+                "D_thresh": float(D_thresh), "S_escape": float(S_escape),
+                "V_close": float(V_close), "tau_close": int(tau_close),
+                "tau_escape": int(tau_escape), "lag_frames": int(lag_frames),
+            },
+            "latency_ms": latency_ms,
+        }
+            
     def transform_texture_to_camera(self, texture_x: float, texture_y: float) -> Tuple[float, float]:
         """
         Transform from texture space (358×358) to camera space (4512×4512).
@@ -484,7 +626,7 @@ class ChaserFishDistanceAnalyzer:
             self.logger.info(f"    Min: {min_dist:.1f}")
             self.logger.info(f"    Max: {max_dist:.1f}")
         
-        return {
+        results = {
             'fish_chaser_distance_pixels': distances_pixels,
             'relative_velocity': relative_velocities,
             'pursuit_angle': pursuit_angles,
@@ -494,6 +636,10 @@ class ChaserFishDistanceAnalyzer:
             'fish_interpolated': mask,
             'valid_frames': valid_mask
         }
+        if self.smoothed_speed_px_s is not None:
+            results['smoothed_speed_px_s'] = self.smoothed_speed_px_s
+
+        return results
     
     def plot_results(self, save_path: Optional[str] = None):
         """
@@ -506,7 +652,19 @@ class ChaserFishDistanceAnalyzer:
         
         # Calculate metrics if not already done
         metrics = self.calculate_distances()
-        
+        if metrics is None:
+            raise RuntimeError("calculate_distances() returned None")
+
+        # Try to detect escapes if we have smoothed speed
+        esc = None
+        if 'smoothed_speed_px_s' in metrics:
+            esc = self._detect_escapes(
+                metrics['fish_chaser_distance_pixels'],
+                metrics['relative_velocity'],
+                metrics['smoothed_speed_px_s'],
+                self.fps_video
+            )
+
         # Create figure with subplots
         fig = plt.figure(figsize=(20, 12))
         gs = gridspec.GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
@@ -539,6 +697,37 @@ class ChaserFishDistanceAnalyzer:
                 elif event['type'] == 'end':
                     ax1.axvline(x=event['camera_frame']/self.fps_video, 
                               color='r', linestyle='--', alpha=0.5)
+        
+        # Mark escape onsets and approach windows
+        if esc is not None:
+            t = time_seconds
+
+            # Mark escape onsets with vertical crimson lines
+            onset_idx = np.where(esc['escape_onset'])[0]
+            if onset_idx.size:
+                ax1.vlines(
+                    t[onset_idx],
+                    ymin=np.nanmin(distances),
+                    ymax=np.nanmax(distances),
+                    colors='crimson',
+                    alpha=0.4,
+                    linewidth=1.0,
+                    label='Escape onset'
+                )
+
+            # Shade time spans where fish was near & chaser approaching (with lag)
+            naa = esc['near_and_approach_lag']
+            in_block = False
+            start = 0
+            for i, flag in enumerate(naa):
+                if flag and not in_block:
+                    in_block = True
+                    start = i
+                if in_block and (not flag or i == len(naa)-1):
+                    end = i if not flag else i + 1
+                    ax1.axvspan(t[start], t[end - 1], color='lime', alpha=0.08)
+                    in_block = False
+
         
         ax1.set_xlabel('Time (seconds)', fontsize=12)
         ax1.set_ylabel('Distance (pixels)', fontsize=12)
@@ -624,6 +813,16 @@ class ChaserFishDistanceAnalyzer:
         
         # Add summary statistics as text
         stats_text = self._generate_stats_text(metrics)
+        if esc is not None:
+            on = int(esc['escape_onset'].sum())
+            tr = int(esc['triggered_by_approach'].sum())
+            frac = (tr / on * 100.0) if on else 0.0
+            stats_text += (
+                f"\nEscapes: {on}  Triggered: {tr} ({frac:.1f}%)"
+                f"\nD_thresh: {esc['thresholds']['D_thresh']:.1f}px"
+                f"  S_escape: {esc['thresholds']['S_escape']:.1f}px/s"
+                f"  V_close: {esc['thresholds']['V_close']:.0f}px/s"
+            )
         fig.text(0.02, 0.02, stats_text, fontsize=10, verticalalignment='bottom',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
@@ -765,6 +964,29 @@ class ChaserFishDistanceAnalyzer:
             report.append("-" * 40)
             report.append(f"Chase Sequences: {chase_starts}")
         
+        # Escape-trigger summary if smoothed speed available
+        if 'smoothed_speed_px_s' in metrics:
+            esc = self._detect_escapes(
+                distances, velocities, metrics['smoothed_speed_px_s'], self.fps_video
+            )
+            on = int(esc['escape_onset'].sum())
+            tr = int(esc['triggered_by_approach'].sum())
+            frac = (tr / on * 100.0) if on else 0.0
+
+            report.append("\n" + "-" * 40)
+            report.append("ESCAPE TRIGGER ANALYSIS")
+            report.append("-" * 40)
+            report.append(f"Escapes detected: {on}")
+            report.append(f"Triggered by near & approaching: {tr} ({frac:.1f}%)")
+            report.append(f"D_thresh (near): {esc['thresholds']['D_thresh']:.1f} px")
+            report.append(f"S_escape (speed): {esc['thresholds']['S_escape']:.1f} px/s (window={self.speed_window or 'n/a'})")
+            report.append(f"V_close (approach): {esc['thresholds']['V_close']:.0f} px/s")
+            if esc['latency_ms'].size:
+                report.append(
+                    f"Latency (approach→escape): median {np.median(esc['latency_ms']):.0f} ms "
+                    f"[IQR {np.percentile(esc['latency_ms'],25):.0f}–{np.percentile(esc['latency_ms'],75):.0f} ms]"
+                )
+
         report.append("\n" + "=" * 80)
         
         return '\n'.join(report)
@@ -800,21 +1022,21 @@ class ChaserFishDistanceAnalyzer:
         if 'zarr_to_stimulus' in align_group:
             del align_group['zarr_to_stimulus']
         align_group.create_dataset('zarr_to_stimulus', data=self.zarr_to_stimulus)
-        
+
         # Calculate metrics
         metrics = self.calculate_distances()
-        
+
         # Create run-specific group
         run_name = self.interpolation_run or 'original'
         if run_name in comp_group:
             self.logger.info(f"  Overwriting existing analysis for run: {run_name}")
             del comp_group[run_name]
-        
+
         run_group = comp_group.create_group(run_name)
         run_group.attrs['created_at'] = datetime.now().isoformat()
         run_group.attrs['interpolation_source'] = self.interpolation_run or 'original_detections'
         run_group.attrs['coordinate_transform'] = 'texture_to_camera_scaling'
-        
+
         # Save all metrics
         for metric_name, metric_data in metrics.items():
             # Handle different data types
@@ -824,20 +1046,20 @@ class ChaserFishDistanceAnalyzer:
                 dtype = bool
             else:
                 dtype = metric_data.dtype
-            
+
             # Create dataset with appropriate chunking
             if metric_data.ndim == 1:
                 chunks = (min(10000, len(metric_data)),)
             else:
                 chunks = (min(10000, metric_data.shape[0]), metric_data.shape[1])
-            
+
             dataset = run_group.create_dataset(
                 metric_name,
                 data=metric_data,
                 chunks=chunks,
                 dtype=dtype
             )
-            
+
             # Add descriptive attributes
             if 'distance_pixels' in metric_name:
                 dataset.attrs['units'] = 'pixels'
@@ -851,15 +1073,67 @@ class ChaserFishDistanceAnalyzer:
             elif 'position_texture' in metric_name:
                 dataset.attrs['units'] = 'texture_pixels'
                 dataset.attrs['description'] = 'Original position in texture space (358×358)'
-        
+
         # Calculate and save summary statistics
         self._save_summary_statistics(run_group, metrics)
-        
-        # Update latest run
+
+        # ---------- INSERTED BLOCK: escape detection & saving ----------
+        # Use smoothed speed if present (from speed_metrics batch)
+        speed_px_s = metrics.get('smoothed_speed_px_s', None)
+
+        esc = self._detect_escapes(
+            metrics['fish_chaser_distance_pixels'],
+            metrics['relative_velocity'],
+            speed_px_s,
+            self.fps_video
+        )
+
+        # Save boolean masks as compact uint8 arrays with attrs describing meaning
+        for name in ['escape_onset', 'escape_mask', 'triggered_by_approach',
+                    'near_and_approach', 'near_and_approach_lag']:
+            data = esc[name].astype(np.uint8)
+            if name in run_group:
+                del run_group[name]
+            run_group.create_dataset(name, data=data, chunks=(min(10000, len(data)),))
+            run_group[name].attrs['dtype'] = 'bool'
+            run_group[name].attrs['description'] = (
+                '1=TRUE; ' +
+                ('escape onset' if name == 'escape_onset' else
+                'sustained escape' if name == 'escape_mask' else
+                'approach-triggered onset' if name == 'triggered_by_approach' else
+                'near & approaching (strict)' if name == 'near_and_approach' else
+                'near & approaching with look-back lag')
+            )
+
+        # Merge thresholds & counts into the existing summary
+        summary = run_group.attrs.get('summary', {})
+        summary.update({
+            'escape_onsets': int(esc['escape_onset'].sum()),
+            'escape_onsets_triggered': int(esc['triggered_by_approach'].sum()),
+            'trigger_fraction': float(
+                esc['triggered_by_approach'].sum() / max(1, esc['escape_onset'].sum())
+            ),
+        })
+        summary.update(esc['thresholds'])
+        run_group.attrs['summary'] = summary
+
+        # Latency distribution (ms) for triggered escapes
+        if esc['latency_ms'].size:
+            if 'latency_ms' in run_group:
+                del run_group['latency_ms']
+            run_group.create_dataset(
+                'latency_ms',
+                data=esc['latency_ms'].astype('float32'),
+                chunks=(min(10000, len(esc['latency_ms'])),)
+            )
+        # ---------- END INSERTED BLOCK ----------
+
+        # Update latest run pointer
         comp_group.attrs['latest'] = run_name
-        
+
         self.logger.info(f"  ✅ Saved analysis for run: {run_name}")
         self.logger.info(f"  Zarr file: {self.zarr_path}")
+
     
     def _save_summary_statistics(self, group, metrics):
         """Calculate and save summary statistics."""
