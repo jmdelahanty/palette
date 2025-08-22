@@ -403,7 +403,7 @@ Examples:
                        help='Run parameter sweep')
     
     parser.add_argument('--max-gaps', nargs='+', type=int,
-                       default=[5, 10, 15, 20],
+                       default=[5, 10, 15, 20, 30, 50],
                        help='Max gap sizes to test in sweep')
     
     parser.add_argument('--source', default='latest',
