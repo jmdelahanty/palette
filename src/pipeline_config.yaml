@@ -8,9 +8,9 @@ background:
   sample_size: 100
   seed: 42
 detect:
-  ds_thresh: 25
+  ds_thresh: 22
   se1_radius: 1
-  se4_radius: 8
+  se4_radius: 9
   dish_mask:
     shape: rectangle
     roi:
@@ -18,7 +18,7 @@ detect:
     - 60
     - 530
     - 407
-  min_area: 50
+  min_area: 85
   max_area: 500
   max_fish: 12
 crop:
@@ -30,6 +30,13 @@ crop:
   se4_radius: 8
   min_fish_area: 50
   max_fish_area: 500
+  dish_mask:
+    shape: rectangle
+    roi:
+    - 59
+    - 68
+    - 520
+    - 392
 refine:
   max_jump_norm: 0.1
 track:

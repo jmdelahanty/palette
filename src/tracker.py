@@ -675,7 +675,14 @@ def main():
     parser.add_argument("zarr_path", type=str, help="Path to the output Zarr file.")
     parser.add_argument("--video-path", type=str, help="Path to the input video file (required for 'import' or 'all' stages).")
     parser.add_argument("--config", type=str, default="src/pipeline_config.yaml", help="Path to the pipeline configuration YAML file.")
-    parser.add_argument("--stage", required=True, choices=['import', 'background', 'detect', 'crop', 'track', 'assign_ids', 'all'], help="Processing stage to run.")
+    # MODIFIED: Allow multiple stages to be passed
+    parser.add_argument(
+        "--stage", 
+        required=True, 
+        nargs='+', 
+        choices=['import', 'background', 'detect', 'crop', 'track', 'assign_ids', 'all'], 
+        help="One or more processing stages to run in order (e.g., import background detect)."
+    )
     parser.add_argument("--scheduler", default='processes', choices=['processes', 'threads', 'single-thread'], help="Dask scheduler.")
     parser.add_argument("--num-workers", type=int, default=None, help="Number of workers.")
     parser.add_argument("--roi-thresh", type=int, help="Override roi_thresh in the config file.")
@@ -683,8 +690,9 @@ def main():
 
     console.print(Panel("[bold cyan]Multi-Fish Tracking Pipeline[/bold cyan]", subtitle="[yellow]Powered by Dask & Zarr![/yellow]", expand=False))
 
-    if args.stage in ['import', 'all'] and not args.video_path:
-        parser.error("--video-path is required for the 'import' and 'all' stages.")
+    # MODIFIED: Check if 'import' is in the list of stages
+    if ('import' in args.stage or 'all' in args.stage) and not args.video_path:
+        parser.error("--video-path is required when running the 'import' or 'all' stages.")
 
     try:
         with open(args.config, 'r') as f:
@@ -702,13 +710,16 @@ def main():
     overall_start_time = time.perf_counter()
     cli_args_dict = vars(args)
 
-    if args.stage in ['import', 'all']: run_import_stage_parallel_io(args.video_path, args.zarr_path, pipeline_params, cli_args_dict, console)
-    if args.stage in ['background', 'all']: run_background_stage(args.zarr_path, pipeline_params, console)
-    if args.stage in ['detect', 'all']: run_detect_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)
-    if args.stage in ['assign_ids', 'all']: run_assign_ids_stage(args.zarr_path, pipeline_params, console)
-    if args.stage in ['crop', 'all']: run_crop_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)
-    if args.stage in ['track', 'all']: run_tracking_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)    
-    if args.stage == 'all':
+    # MODIFIED: Logic to run stages based on list membership
+    if 'import' in args.stage or 'all' in args.stage: run_import_stage_parallel_io(args.video_path, args.zarr_path, pipeline_params, cli_args_dict, console)
+    if 'background' in args.stage or 'all' in args.stage: run_background_stage(args.zarr_path, pipeline_params, console)
+    if 'detect' in args.stage or 'all' in args.stage: run_detect_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)
+    if 'assign_ids' in args.stage or 'all' in args.stage: run_assign_ids_stage(args.zarr_path, pipeline_params, console)
+    if 'crop' in args.stage or 'all' in args.stage: run_crop_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)
+    if 'track' in args.stage or 'all' in args.stage: run_tracking_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)    
+    
+    # MODIFIED: Check if 'all' was specified for the final summary
+    if 'all' in args.stage:
         root = zarr.open_group(args.zarr_path, mode='a')
         root.attrs.update({'total_pipeline_duration_seconds': time.perf_counter() - overall_start_time, 'pipeline_version': '2.0-multi-fish'})
         latest_track_run = root['tracking_runs'].attrs['latest']

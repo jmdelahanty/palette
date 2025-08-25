@@ -7,7 +7,7 @@ from skimage.measure import label, regionprops
 from pathlib import Path
 import yaml
 
-# Global variables to store trackbar values
+# Global variables to store trackbar values (used as a fallback)
 ds_thresh = 55
 current_frame = 1
 ds_se1_radius = 1
@@ -52,6 +52,7 @@ def create_tuner_dashboard(frame_idx, zarr_root, dish_mask):
         background_ds_array = zarr_root[f'background_runs/{latest_bg_run}/background_ds']
     except KeyError as e:
         print(f"Error: Missing necessary data in Zarr file: {e}")
+        print("Please ensure you have run the 'import' and 'background' stages.")
         return None
 
     image_ds = images_ds_array[frame_idx]
@@ -98,28 +99,52 @@ def main(zarr_path, start_frame):
     current_frame = start_frame
     
     config_path = Path("src/pipeline_config.yaml")
+    config = {}
+    
+    # --- NEW: Load parameters from config file first ---
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+            detect_params = config.get('detect', {})
+            ds_thresh = detect_params.get('ds_thresh', ds_thresh)
+            ds_se1_radius = detect_params.get('se1_radius', ds_se1_radius)
+            ds_se4_radius = detect_params.get('se4_radius', ds_se4_radius)
+            min_area = detect_params.get('min_area', min_area)
+            max_area = detect_params.get('max_area', max_area)
+            print(f"✅ Loaded initial parameters from {config_path}")
+    except FileNotFoundError:
+        print(f"⚠️ Config file not found at {config_path}. Using default parameters.")
+    except Exception as e:
+        print(f"❌ Error reading config file: {e}. Using default parameters.")
 
     try:
         zarr_root = zarr.open(zarr_path, mode='r')
         num_frames = zarr_root['raw_video/images_ds'].shape[0]
-        
-        # NOTE: This uses the latest detect_run if available, otherwise falls back to crop_run for mask params
-        latest_run_group = 'detect_runs' if 'detect_runs' in zarr_root else 'crop_runs'
-        latest_run = zarr_root[latest_run_group].attrs['latest']
-        run_params = zarr_root[f'{latest_run_group}/{latest_run}'].attrs['parameters']
-        
-        mask_params = run_params.get('dish_mask', {})
         ds_img_shape = zarr_root['raw_video/images_ds'].shape[1:]
-        dish_mask = np.ones(ds_img_shape, dtype=np.uint8) * 255
-
+        
+        # --- NEW: Robustly load dish mask ---
+        mask_params = {}
+        # Priority 1: Load from the latest detect run
+        if 'detect_runs' in zarr_root:
+            latest_run = zarr_root['detect_runs'].attrs['latest']
+            mask_params = zarr_root[f'detect_runs/{latest_run}'].attrs.get('parameters', {}).get('dish_mask', {})
+            print("Found 'detect_runs'. Will use mask parameters from the latest run.")
+        # Priority 2: Load from the config file if detect has not been run
+        elif config:
+             mask_params = config.get('detect', {}).get('dish_mask', {})
+             print("No 'detect_runs' found. Will use mask parameters from config file.")
+        
+        dish_mask = None # By default, no mask
         if mask_params.get('shape') == 'rectangle' and 'roi' in mask_params:
             x, y, w, h = mask_params['roi']
             dish_mask = np.zeros(ds_img_shape, dtype=np.uint8)
-            cv2.rectangle(dish_mask, (x, y), (x+w, y+h), 255, -1)
-            print("✅ Loaded rectangular mask from Zarr.")
+            cv2.rectangle(dish_mask, (x, y), (x + w, y + h), 255, -1)
+            print("✅ Loaded rectangular dish mask.")
+        else:
+            print("ℹ️ No dish mask defined or found. Processing the full frame.")
 
     except Exception as e:
-        print(f"Error opening Zarr file: {e}")
+        print(f"❌ Error opening Zarr file or loading data: {e}")
         return
 
     window_name = "Detection Parameter Tuner"
@@ -132,16 +157,19 @@ def main(zarr_path, start_frame):
     cv2.createTrackbar("min_area", window_name, min_area, 1000, update_min_area)
     cv2.createTrackbar("max_area", window_name, max_area, 1000, update_max_area)
 
-    print("🚀 Starting Detection Parameter Tuner...")
+    print("\n🚀 Starting Detection Parameter Tuner...")
     print("Controls:")
     print("  - Adjust sliders to see results.")
+    print("  - Use Left/Right arrow keys to step through frames.")
     print("  - Press 's' to SAVE the current parameters to pipeline_config.yaml.")
     print("  - Press 'q' or Esc to quit without saving.")
 
     while True:
         dashboard = create_tuner_dashboard(current_frame, zarr_root, dish_mask)
-        if dashboard is not None:
-            cv2.imshow(window_name, dashboard)
+        if dashboard is None:
+            break # Exit if there was a critical error creating the dashboard
+        
+        cv2.imshow(window_name, dashboard)
         cv2.setTrackbarPos("Frame", window_name, current_frame)
         
         key = cv2.waitKey(30) & 0xFF
@@ -151,16 +179,19 @@ def main(zarr_path, start_frame):
             current_frame = min(num_frames - 1, current_frame + 1)
         elif key == 81: # Left arrow
             current_frame = max(0, current_frame - 1)
-        # --- NEW: Save functionality on 's' key press ---
         elif key == ord('s'):
             try:
-                with open(config_path, 'r') as f:
-                    config = yaml.safe_load(f)
+                # Re-read the config in case it changed
+                if config_path.exists():
+                    with open(config_path, 'r') as f:
+                        config = yaml.safe_load(f)
+                else:
+                    config = {} # Create a new config dict if file doesn't exist
                 
-                # Update the detect parameters to match the new pipeline structure
                 if 'detect' not in config:
                     config['detect'] = {}
                 
+                # Update parameters
                 config['detect']['ds_thresh'] = ds_thresh
                 config['detect']['se1_radius'] = ds_se1_radius
                 config['detect']['se4_radius'] = ds_se4_radius
