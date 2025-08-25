@@ -50,7 +50,73 @@ assign_ids:
   sub_dish_rois:
   - id: 0
     roi_pixels:
-    - 92
-    - 123
-    - 482
-    - 382
+    - 59
+    - 73
+    - 71
+    - 180
+  - id: 1
+    roi_pixels:
+    - 139
+    - 74
+    - 71
+    - 178
+  - id: 2
+    roi_pixels:
+    - 241
+    - 76
+    - 70
+    - 180
+  - id: 3
+    roi_pixels:
+    - 320
+    - 73
+    - 70
+    - 183
+  - id: 4
+    roi_pixels:
+    - 425
+    - 76
+    - 71
+    - 183
+  - id: 5
+    roi_pixels:
+    - 503
+    - 70
+    - 73
+    - 188
+  - id: 6
+    roi_pixels:
+    - 53
+    - 272
+    - 75
+    - 183
+  - id: 7
+    roi_pixels:
+    - 137
+    - 275
+    - 71
+    - 181
+  - id: 8
+    roi_pixels:
+    - 236
+    - 271
+    - 72
+    - 185
+  - id: 9
+    roi_pixels:
+    - 317
+    - 272
+    - 70
+    - 185
+  - id: 10
+    roi_pixels:
+    - 421
+    - 273
+    - 73
+    - 185
+  - id: 11
+    roi_pixels:
+    - 502
+    - 275
+    - 70
+    - 184
