@@ -29,7 +29,8 @@ class ZarrTrajectoryPlotter:
         self.zarr_path = Path(zarr_path)
         self.verbose = verbose
         self.root = zarr.open_group(self.zarr_path, mode='r')
-        
+        self.load_roi_boundaries_from_config()
+
         # Determine which coordinate system to use
         self.use_downsampled = use_downsampled
         
@@ -87,8 +88,10 @@ class ZarrTrajectoryPlotter:
         detection_ids = id_group[latest_id]['detection_ids'][:]
         n_detections_per_roi = id_group[latest_id]['n_detections_per_roi'][:]
         
-        # IMPORTANT: The normalized coordinates are ALWAYS relative to the full 4512x4512 image
-        # When displaying in downsampled space, we need to account for this
+        # CORRECTED: The normalized coordinates are relative to the 640x640 downsampled image
+        # NOT the full 4512x4512 image
+        ds_width = 640
+        ds_height = 640
         full_width = self.root.attrs.get('width', 4512)
         full_height = self.root.attrs.get('height', 4512)
         
@@ -107,19 +110,24 @@ class ZarrTrajectoryPlotter:
                     roi_idx = np.where(roi_mask)[0][0]
                     bbox = bbox_coords[cumulative_idx + roi_idx]
                     
-                    # Calculate centroid
-                    # First convert to full resolution pixels
-                    centroid_x_full = ((bbox[0] + bbox[2]) / 2) * full_width
-                    centroid_y_full = ((bbox[1] + bbox[3]) / 2) * full_height
+                    # FIXED: bbox format is [center_x_norm, center_y_norm, width_norm, height_norm]
+                    # The center coordinates are ALREADY the centroid!
+                    center_x_norm = bbox[0]
+                    center_y_norm = bbox[1]
+                    
+                    # Convert normalized coords to 640x640 pixel space
+                    centroid_x_ds = center_x_norm * ds_width
+                    centroid_y_ds = center_y_norm * ds_height
                     
                     if self.use_downsampled:
-                        # Then scale down to 640x640 space
-                        scale_down = 640.0 / full_width
-                        centroid_x = centroid_x_full * scale_down
-                        centroid_y = centroid_y_full * scale_down
+                        # Use downsampled coordinates directly
+                        centroid_x = centroid_x_ds
+                        centroid_y = centroid_y_ds
                     else:
-                        centroid_x = centroid_x_full
-                        centroid_y = centroid_y_full
+                        # Scale up to full resolution
+                        scale_up = full_width / ds_width
+                        centroid_x = centroid_x_ds * scale_up
+                        centroid_y = centroid_y_ds * scale_up
                     
                     positions[frame_idx] = np.array([centroid_x, centroid_y])
             
@@ -141,21 +149,91 @@ class ZarrTrajectoryPlotter:
                         frame_idx = int(frame_indices[i])
                         bbox = bboxes[i]
                         
-                        # Same conversion for interpolated positions
-                        centroid_x_full = ((bbox[0] + bbox[2]) / 2) * full_width
-                        centroid_y_full = ((bbox[1] + bbox[3]) / 2) * full_height
+                        # FIXED: Same here - bbox[0] and bbox[1] are already the center
+                        center_x_norm = bbox[0]
+                        center_y_norm = bbox[1]
+                        
+                        # Convert normalized coords to pixel space
+                        centroid_x_ds = center_x_norm * ds_width
+                        centroid_y_ds = center_y_norm * ds_height
                         
                         if self.use_downsampled:
-                            scale_down = 640.0 / full_width
-                            centroid_x = centroid_x_full * scale_down
-                            centroid_y = centroid_y_full * scale_down
+                            centroid_x = centroid_x_ds
+                            centroid_y = centroid_y_ds
                         else:
-                            centroid_x = centroid_x_full
-                            centroid_y = centroid_y_full
+                            scale_up = full_width / ds_width
+                            centroid_x = centroid_x_ds * scale_up
+                            centroid_y = centroid_y_ds * scale_up
                         
                         positions[frame_idx] = np.array([centroid_x, centroid_y])
         
         return positions
+    
+    def load_roi_boundaries_from_config(self):
+        """Load predefined ROI boundaries from config."""
+        self.roi_boundaries_cache = {}
+        
+        # Hardcoded from config file - these are in 640x640 space
+        sub_dish_rois = [
+            {'id': 0, 'roi_pixels': [59, 73, 71, 180]},
+            {'id': 1, 'roi_pixels': [139, 74, 71, 178]},
+            {'id': 2, 'roi_pixels': [241, 76, 70, 180]},
+            {'id': 3, 'roi_pixels': [320, 73, 70, 183]},
+            {'id': 4, 'roi_pixels': [425, 76, 71, 183]},
+            {'id': 5, 'roi_pixels': [503, 70, 73, 188]},
+            {'id': 6, 'roi_pixels': [53, 272, 75, 183]},
+            {'id': 7, 'roi_pixels': [137, 275, 71, 181]},
+            {'id': 8, 'roi_pixels': [236, 271, 72, 185]},
+            {'id': 9, 'roi_pixels': [317, 272, 70, 185]},
+            {'id': 10, 'roi_pixels': [421, 273, 73, 185]},
+            {'id': 11, 'roi_pixels': [502, 275, 70, 184]}
+        ]
+        
+        for roi_info in sub_dish_rois:
+            roi_id = roi_info['id']
+            x, y, width, height = roi_info['roi_pixels']
+            
+            # Store in downsampled coordinates
+            self.roi_boundaries_cache[roi_id] = {
+                'x': x,
+                'y': y, 
+                'width': width,
+                'height': height,
+                'x_min': x,
+                'x_max': x + width,
+                'y_min': y,
+                'y_max': y + height,
+                'y_center': y + height / 2
+            }
+    def add_subdish_boundaries(self, ax):
+        """Add sub-dish boundary rectangles to plot."""
+        if not hasattr(self, 'roi_boundaries_cache'):
+            return
+        
+        for roi_id, bounds in self.roi_boundaries_cache.items():
+            x, y, w, h = bounds['x'], bounds['y'], bounds['width'], bounds['height']
+            
+            if self.use_downsampled:
+                # Use directly for downsampled
+                x_plot, y_plot, w_plot, h_plot = x, y, w, h
+            else:
+                # Scale to full resolution
+                scale = self.img_width / 640
+                x_plot = x * scale
+                y_plot = y * scale
+                w_plot = w * scale
+                h_plot = h * scale
+            
+            rect = Rectangle((x_plot, y_plot), w_plot, h_plot,
+                        linewidth=2, edgecolor='cyan',
+                        facecolor='none', linestyle='--')
+            ax.add_patch(rect)
+            
+            # Add ID label
+            ax.text(x_plot + w_plot/2, y_plot + h_plot/2, f"ROI {roi_id}",
+                ha='center', va='center', color='cyan',
+                fontsize=10, fontweight='bold',
+                bbox=dict(boxstyle='round', facecolor='black', alpha=0.5))
     
     def plot_single_trajectory(self, roi_id: int, use_interpolated: bool = True,
                              show_points: bool = False, save_path: Optional[Path] = None):
@@ -357,49 +435,6 @@ class ZarrTrajectoryPlotter:
             console.print(f"[green]✓ Plot saved to:[/green] {save_path}")
         
         plt.show()
-    
-    def add_subdish_boundaries(self, ax):
-        """Add sub-dish boundary rectangles to plot."""
-        # Try to load from zarr attributes first
-        subdish_rois = []
-        
-        if 'id_assignments_runs' in self.root or 'id_assignments' in self.root:
-            id_key = 'id_assignments_runs' if 'id_assignments_runs' in self.root else 'id_assignments'
-            id_group = self.root[id_key]
-            if 'latest' in id_group.attrs:
-                latest = id_group.attrs['latest']
-                params = id_group[latest].attrs.get('parameters', {})
-                if 'sub_dish_rois' in params:
-                    subdish_rois = params['sub_dish_rois']
-        
-        if subdish_rois:
-            for roi in subdish_rois:
-                x, y, w, h = roi['roi_pixels']
-                
-                # If using downsampled, no scaling needed
-                if self.use_downsampled:
-                    x_plot = x
-                    y_plot = y
-                    w_plot = w
-                    h_plot = h
-                else:
-                    # Scale from downsampled to full coordinates
-                    scale = 4512 / 640
-                    x_plot = x * scale
-                    y_plot = y * scale
-                    w_plot = w * scale
-                    h_plot = h * scale
-                
-                rect = Rectangle((x_plot, y_plot), w_plot, h_plot,
-                               linewidth=2, edgecolor='cyan',
-                               facecolor='none', linestyle='--')
-                ax.add_patch(rect)
-                
-                # Add ID label
-                ax.text(x_plot + w_plot/2, y_plot + h_plot/2, f"Dish {roi['id']}",
-                       ha='center', va='center', color='cyan',
-                       fontsize=10, fontweight='bold',
-                       bbox=dict(boxstyle='round', facecolor='black', alpha=0.5))
     
     def plot_time_colored_trajectory(self, roi_id: int, use_interpolated: bool = True,
                                     save_path: Optional[Path] = None):

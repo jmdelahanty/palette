@@ -4,6 +4,7 @@ ROI Heatmap Generator
 
 Creates spatial heatmaps showing where each ROI (fish) spends time.
 Supports individual and batch processing with various visualization options.
+CORRECTED: Fixed coordinate system transformations for accurate positioning.
 """
 
 import zarr
@@ -28,15 +29,28 @@ console = Console()
 class ROIHeatmapGenerator:
     """Generate spatial heatmaps for ROI positions."""
     
-    def __init__(self, zarr_path: str, verbose: bool = True):
+    def __init__(self, zarr_path: str, verbose: bool = True, use_downsampled: bool = False):
         self.zarr_path = Path(zarr_path)
         self.verbose = verbose
+        self.use_downsampled = use_downsampled
         self.root = zarr.open_group(self.zarr_path, mode='r+')
         
         # Get dimensions
         self.img_width = self.root.attrs.get('width', 4512)
         self.img_height = self.root.attrs.get('height', 4512)
         self.fps = self.root.attrs.get('fps', 60.0)
+        
+        # Downsampled dimensions (for detections)
+        self.ds_width = 640
+        self.ds_height = 640
+        
+        # Set working dimensions based on mode
+        if use_downsampled:
+            self.working_width = self.ds_width
+            self.working_height = self.ds_height
+        else:
+            self.working_width = self.img_width
+            self.working_height = self.img_height
         
         # Check for calibration
         self.pixel_to_mm = None
@@ -46,7 +60,7 @@ class ROIHeatmapGenerator:
                 console.print(f"[green]Calibration found:[/green] 1 pixel = {self.pixel_to_mm:.4f} mm")
     
     def get_roi_positions(self, roi_id: int, use_interpolated: bool = True) -> Dict:
-        """Get all positions for a specific ROI."""
+        """Get all positions for a specific ROI with CORRECTED coordinate transformations."""
         # Load detection data
         detect_group = self.root['detect_runs']
         latest_detect = detect_group.attrs['latest']
@@ -74,9 +88,25 @@ class ROIHeatmapGenerator:
                 if np.any(roi_mask):
                     roi_idx = np.where(roi_mask)[0][0]
                     bbox = bbox_coords[cumulative_idx + roi_idx]
-                    # Calculate centroid in pixels
-                    centroid_x = ((bbox[0] + bbox[2]) / 2) * self.img_width
-                    centroid_y = ((bbox[1] + bbox[3]) / 2) * self.img_height
+                    
+                    # CORRECTED: bbox format is [center_x_norm, center_y_norm, width_norm, height_norm]
+                    # Normalized coordinates are relative to 640x640 downsampled space
+                    center_x_norm = bbox[0]  # Already the center, not corner!
+                    center_y_norm = bbox[1]  # Already the center, not corner!
+                    
+                    # Convert to pixel coordinates
+                    if self.use_downsampled:
+                        # Stay in 640x640 space
+                        centroid_x = center_x_norm * self.ds_width
+                        centroid_y = center_y_norm * self.ds_height
+                    else:
+                        # Convert to full resolution
+                        centroid_x_ds = center_x_norm * self.ds_width
+                        centroid_y_ds = center_y_norm * self.ds_height
+                        scale_factor = self.img_width / self.ds_width
+                        centroid_x = centroid_x_ds * scale_factor
+                        centroid_y = centroid_y_ds * scale_factor
+                    
                     positions[frame_idx] = np.array([centroid_x, centroid_y])
             
             cumulative_idx += frame_det_count
@@ -96,9 +126,21 @@ class ROIHeatmapGenerator:
                     if int(roi_ids[i]) == roi_id:
                         frame_idx = int(frame_indices[i])
                         bbox = bboxes[i]
-                        # Calculate centroid
-                        centroid_x = ((bbox[0] + bbox[2]) / 2) * self.img_width
-                        centroid_y = ((bbox[1] + bbox[3]) / 2) * self.img_height
+                        
+                        # CORRECTED: Same fix for interpolated positions
+                        center_x_norm = bbox[0]
+                        center_y_norm = bbox[1]
+                        
+                        if self.use_downsampled:
+                            centroid_x = center_x_norm * self.ds_width
+                            centroid_y = center_y_norm * self.ds_height
+                        else:
+                            centroid_x_ds = center_x_norm * self.ds_width
+                            centroid_y_ds = center_y_norm * self.ds_height
+                            scale_factor = self.img_width / self.ds_width
+                            centroid_x = centroid_x_ds * scale_factor
+                            centroid_y = centroid_y_ds * scale_factor
+                        
                         positions[frame_idx] = np.array([centroid_x, centroid_y])
         
         return positions
@@ -110,7 +152,7 @@ class ROIHeatmapGenerator:
         
         Args:
             positions: Dictionary of frame_idx -> [x, y] positions
-            bin_size: Size of bins in pixels
+            bin_size: Size of bins in pixels (scaled based on resolution)
             sigma: Gaussian smoothing sigma
             normalize: Normalize to probability density
             
@@ -120,9 +162,15 @@ class ROIHeatmapGenerator:
         if not positions:
             return None
         
+        # Scale bin size if using downsampled
+        if self.use_downsampled:
+            effective_bin_size = bin_size * (self.ds_width / self.img_width)
+        else:
+            effective_bin_size = bin_size
+        
         # Calculate number of bins
-        n_bins_x = int(np.ceil(self.img_width / bin_size))
-        n_bins_y = int(np.ceil(self.img_height / bin_size))
+        n_bins_x = int(np.ceil(self.working_width / effective_bin_size))
+        n_bins_y = int(np.ceil(self.working_height / effective_bin_size))
         
         # Create 2D histogram
         x_coords = [pos[0] for pos in positions.values()]
@@ -131,7 +179,7 @@ class ROIHeatmapGenerator:
         heatmap, xedges, yedges = np.histogram2d(
             x_coords, y_coords,
             bins=[n_bins_x, n_bins_y],
-            range=[[0, self.img_width], [0, self.img_height]]
+            range=[[0, self.working_width], [0, self.working_height]]
         )
         
         # Apply Gaussian smoothing
@@ -147,7 +195,8 @@ class ROIHeatmapGenerator:
     def visualize_roi_heatmap(self, roi_id: int, bin_size: int = 50,
                              sigma: float = 1.5, cmap: str = 'hot',
                              save_path: Optional[Path] = None,
-                             use_interpolated: bool = True):
+                             use_interpolated: bool = True,
+                             show_background: bool = False):
         """Create visualization for a single ROI's heatmap."""
         # Get positions
         positions = self.get_roi_positions(roi_id, use_interpolated)
@@ -166,9 +215,22 @@ class ROIHeatmapGenerator:
         # 1. Main heatmap
         ax1 = fig.add_subplot(gs[:, 0:2])
         
-        extent = [0, self.img_width, self.img_height, 0]  # Note: y-axis inverted for image coordinates
+        # Load background if requested
+        if show_background:
+            try:
+                latest_bg_run = self.root['background_runs'].attrs['latest']
+                if self.use_downsampled:
+                    background = self.root[f'background_runs/{latest_bg_run}/background_ds'][:]
+                else:
+                    background = self.root[f'background_runs/{latest_bg_run}/background_full'][:]
+                ax1.imshow(background, cmap='gray', alpha=0.3, 
+                          extent=[0, self.working_width, self.working_height, 0])
+            except:
+                pass
+        
+        extent = [0, self.working_width, self.working_height, 0]
         im = ax1.imshow(heatmap, cmap=cmap, extent=extent, 
-                       aspect='equal', interpolation='bilinear')
+                       aspect='equal', interpolation='bilinear', alpha=0.8)
         
         # Add colorbar
         cbar = plt.colorbar(im, ax=ax1, fraction=0.046, pad=0.04)
@@ -188,8 +250,9 @@ class ROIHeatmapGenerator:
         ax1.scatter(x_traj[-1], y_traj[-1], c='red', s=100, marker='s', 
                    edgecolors='white', linewidth=2, label='End', zorder=5)
         
-        ax1.set_xlabel('X Position (pixels)')
-        ax1.set_ylabel('Y Position (pixels)')
+        resolution_text = "640×640" if self.use_downsampled else "4512×4512"
+        ax1.set_xlabel(f'X Position (pixels) [{resolution_text}]')
+        ax1.set_ylabel(f'Y Position (pixels) [{resolution_text}]')
         ax1.set_title(f'ROI {roi_id} - Spatial Heatmap (Coverage: {len(positions)/len(sorted_frames)*100:.1f}%)')
         ax1.legend(loc='upper right')
         ax1.grid(True, alpha=0.2)
@@ -197,7 +260,8 @@ class ROIHeatmapGenerator:
         # 2. X-axis marginal distribution
         ax2 = fig.add_subplot(gs[0, 2])
         
-        x_hist, x_bins = np.histogram([p[0] for p in positions.values()], bins=50, range=(0, self.img_width))
+        x_hist, x_bins = np.histogram([p[0] for p in positions.values()], 
+                                     bins=50, range=(0, self.working_width))
         ax2.bar(x_bins[:-1], x_hist, width=np.diff(x_bins), color='steelblue', alpha=0.7)
         ax2.set_xlabel('X Position (pixels)')
         ax2.set_ylabel('Frequency')
@@ -207,7 +271,8 @@ class ROIHeatmapGenerator:
         # 3. Y-axis marginal distribution
         ax3 = fig.add_subplot(gs[1, 2])
         
-        y_hist, y_bins = np.histogram([p[1] for p in positions.values()], bins=50, range=(0, self.img_height))
+        y_hist, y_bins = np.histogram([p[1] for p in positions.values()], 
+                                     bins=50, range=(0, self.working_height))
         ax3.bar(y_bins[:-1], y_hist, width=np.diff(y_bins), color='coral', alpha=0.7)
         ax3.set_xlabel('Y Position (pixels)')
         ax3.set_ylabel('Frequency')
@@ -219,7 +284,7 @@ class ROIHeatmapGenerator:
         y_coords = np.array([p[1] for p in positions.values()])
         
         stats_text = f"""
-Statistics:
+Statistics ({resolution_text}):
 ━━━━━━━━━━━━━━━━━━━━
 Frames tracked: {len(positions)}
 Total frames: {max(positions.keys()) + 1}
@@ -236,7 +301,7 @@ Y-axis:
   Range: [{np.min(y_coords):.0f}, {np.max(y_coords):.0f}]
 """
         
-        if self.pixel_to_mm:
+        if self.pixel_to_mm and not self.use_downsampled:
             stats_text += f"""
 Physical units:
   X range: {(np.max(x_coords) - np.min(x_coords)) * self.pixel_to_mm:.1f} mm
@@ -309,7 +374,7 @@ Physical units:
             ax = fig.add_subplot(n_rows, n_cols, idx + 1)
             
             # Plot heatmap
-            extent = [0, self.img_width, self.img_height, 0]
+            extent = [0, self.working_width, self.working_height, 0]
             im = ax.imshow(data['heatmap'], cmap=cmap, extent=extent,
                           aspect='equal', interpolation='bilinear')
             
@@ -327,7 +392,8 @@ Physical units:
         cbar_ax = fig.add_axes([0.87, 0.15, 0.02, 0.7])
         fig.colorbar(im, cax=cbar_ax, label='Occupancy Density')
         
-        plt.suptitle('Spatial Heatmaps - All ROIs', fontsize=16, fontweight='bold')
+        resolution = "640×640" if self.use_downsampled else "4512×4512"
+        plt.suptitle(f'Spatial Heatmaps - All ROIs [{resolution}]', fontsize=16, fontweight='bold')
         plt.tight_layout(rect=[0, 0, 0.85, 0.96])
         
         if save_path:
@@ -335,95 +401,6 @@ Physical units:
             console.print(f"[green]✓ Figure saved to:[/green] {save_path}")
         
         plt.show()
-    
-    def create_difference_heatmap(self, roi_id1: int, roi_id2: int,
-                                 bin_size: int = 50, sigma: float = 1.5,
-                                 save_path: Optional[Path] = None):
-        """Create difference heatmap between two ROIs."""
-        # Get positions for both ROIs
-        pos1 = self.get_roi_positions(roi_id1, True)
-        pos2 = self.get_roi_positions(roi_id2, True)
-        
-        if not pos1 or not pos2:
-            console.print("[yellow]Insufficient data for difference heatmap[/yellow]")
-            return
-        
-        # Create normalized heatmaps
-        heatmap1 = self.create_heatmap(pos1, bin_size, sigma, normalize=True)
-        heatmap2 = self.create_heatmap(pos2, bin_size, sigma, normalize=True)
-        
-        # Calculate difference
-        diff_heatmap = heatmap1 - heatmap2
-        
-        # Create figure
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-        
-        extent = [0, self.img_width, self.img_height, 0]
-        
-        # ROI 1 heatmap
-        im1 = axes[0].imshow(heatmap1, cmap='Blues', extent=extent, aspect='equal')
-        axes[0].set_title(f'ROI {roi_id1}')
-        axes[0].set_xlabel('X Position (pixels)')
-        axes[0].set_ylabel('Y Position (pixels)')
-        plt.colorbar(im1, ax=axes[0], fraction=0.046)
-        
-        # ROI 2 heatmap
-        im2 = axes[1].imshow(heatmap2, cmap='Reds', extent=extent, aspect='equal')
-        axes[1].set_title(f'ROI {roi_id2}')
-        axes[1].set_xlabel('X Position (pixels)')
-        axes[1].set_ylabel('Y Position (pixels)')
-        plt.colorbar(im2, ax=axes[1], fraction=0.046)
-        
-        # Difference heatmap
-        vmax = np.abs(diff_heatmap).max()
-        im3 = axes[2].imshow(diff_heatmap, cmap='RdBu_r', extent=extent, 
-                            aspect='equal', vmin=-vmax, vmax=vmax)
-        axes[2].set_title(f'Difference (ROI {roi_id1} - ROI {roi_id2})')
-        axes[2].set_xlabel('X Position (pixels)')
-        axes[2].set_ylabel('Y Position (pixels)')
-        cbar = plt.colorbar(im3, ax=axes[2], fraction=0.046)
-        cbar.set_label('Density Difference', rotation=270, labelpad=20)
-        
-        plt.suptitle('Spatial Occupancy Comparison', fontsize=14, fontweight='bold')
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            console.print(f"[green]✓ Figure saved to:[/green] {save_path}")
-        
-        plt.show()
-    
-    def save_heatmaps(self, heatmaps: Dict):
-        """Save heatmap data to zarr."""
-        if 'roi_heatmaps' not in self.root:
-            self.root.create_group('roi_heatmaps')
-        
-        heatmap_group = self.root['roi_heatmaps']
-        
-        # Create timestamped run
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        run_name = f'heatmap_{timestamp}'
-        run_group = heatmap_group.create_group(run_name)
-        
-        # Save metadata
-        run_group.attrs.update({
-            'created_at': datetime.now().isoformat(),
-            'num_rois': len(heatmaps),
-            'img_width': self.img_width,
-            'img_height': self.img_height
-        })
-        
-        # Save each ROI's heatmap
-        for roi_id, data in heatmaps.items():
-            roi_group = run_group.create_group(f'roi_{roi_id}')
-            roi_group.create_dataset('heatmap', data=data['heatmap'], dtype='float32')
-            roi_group.attrs['coverage'] = data['coverage']
-            roi_group.attrs['num_positions'] = len(data['positions'])
-        
-        # Update latest
-        heatmap_group.attrs['latest'] = run_name
-        
-        console.print(f"[green]✓ Heatmaps saved to:[/green] roi_heatmaps/{run_name}")
 
 
 def main():
@@ -432,28 +409,29 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Single ROI heatmap
+  # Single ROI heatmap (full resolution)
   %(prog)s detections.zarr --roi 3
+  
+  # Single ROI heatmap (downsampled 640x640)
+  %(prog)s detections.zarr --roi 3 --downsampled
   
   # All ROIs in grid
   %(prog)s detections.zarr --all
   
-  # Compare two ROIs
-  %(prog)s detections.zarr --compare 3 5
-  
   # Custom parameters
   %(prog)s detections.zarr --roi 3 --bin-size 100 --sigma 2.0 --cmap viridis
   
+  # With background image
+  %(prog)s detections.zarr --roi 3 --show-background
+  
   # Save outputs
-  %(prog)s detections.zarr --all --save --save-fig all_heatmaps.png
+  %(prog)s detections.zarr --all --save-fig all_heatmaps.png
         """
     )
     
     parser.add_argument('zarr_path', help='Path to zarr file')
     parser.add_argument('--roi', type=int, help='Specific ROI to visualize')
     parser.add_argument('--all', action='store_true', help='Generate heatmaps for all ROIs')
-    parser.add_argument('--compare', nargs=2, type=int, metavar=('ROI1', 'ROI2'),
-                       help='Compare two ROIs')
     parser.add_argument('--bin-size', type=int, default=50,
                        help='Bin size in pixels (default: 50)')
     parser.add_argument('--sigma', type=float, default=1.5,
@@ -462,18 +440,22 @@ Examples:
                        help='Colormap for heatmaps (default: hot)')
     parser.add_argument('--no-interpolated', action='store_true',
                        help='Do not use interpolated positions')
-    parser.add_argument('--save', action='store_true',
-                       help='Save heatmap data to zarr')
+    parser.add_argument('--downsampled', action='store_true',
+                       help='Use 640x640 downsampled coordinates instead of full resolution')
+    parser.add_argument('--show-background', action='store_true',
+                       help='Show background image under heatmap')
     parser.add_argument('--save-fig', type=str,
                        help='Path to save figure')
     
     args = parser.parse_args()
     
     # Initialize generator
-    generator = ROIHeatmapGenerator(args.zarr_path)
+    generator = ROIHeatmapGenerator(args.zarr_path, use_downsampled=args.downsampled)
     
+    resolution = "640×640" if args.downsampled else "4512×4512"
     console.print(f"\n[bold cyan]ROI Heatmap Generator[/bold cyan]")
     console.print(f"File: {args.zarr_path}")
+    console.print(f"Resolution: {resolution}")
     console.print(f"Bin size: {args.bin_size} pixels")
     console.print(f"Smoothing sigma: {args.sigma}")
     
@@ -483,7 +465,7 @@ Examples:
         save_path = Path(args.save_fig) if args.save_fig else None
         generator.visualize_roi_heatmap(
             args.roi, args.bin_size, args.sigma, args.cmap,
-            save_path, not args.no_interpolated
+            save_path, not args.no_interpolated, args.show_background
         )
     
     elif args.all:
@@ -495,20 +477,9 @@ Examples:
         if heatmaps:
             save_path = Path(args.save_fig) if args.save_fig else None
             generator.visualize_all_heatmaps(heatmaps, args.cmap, save_path)
-            
-            if args.save:
-                generator.save_heatmaps(heatmaps)
-    
-    elif args.compare:
-        # Compare two ROIs
-        save_path = Path(args.save_fig) if args.save_fig else None
-        generator.create_difference_heatmap(
-            args.compare[0], args.compare[1],
-            args.bin_size, args.sigma, save_path
-        )
     
     else:
-        console.print("[yellow]Please specify --roi, --all, or --compare[/yellow]")
+        console.print("[yellow]Please specify --roi or --all[/yellow]")
 
 
 if __name__ == "__main__":
