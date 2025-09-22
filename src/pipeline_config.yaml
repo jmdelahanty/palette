@@ -49,6 +49,6 @@ track:
   roi_sz:
   - 256
   - 256
-  roi_thresh: 134
-  se1_radius: 4
-  se2_radius: 7
+  roi_thresh: 116
+  se1_radius: 5
+  se2_radius: 8

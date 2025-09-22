@@ -708,93 +708,72 @@ def track_chunk_delayed(zarr_path, chunk_slice, roi_sz, roi_thresh, se1_radius, 
     with zarr.open(zarr_path, mode='r') as root:
         # Get the latest runs
         latest_crop_run = root['crop_runs'].attrs['latest']
-        latest_detect_run = root[f'crop_runs/{latest_crop_run}'].attrs.get('source_detect_run')
-        if not latest_detect_run:
-            latest_detect_run = root['detect_runs'].attrs['latest']
         
-        # Get detection counts for this chunk
-        n_detections_per_frame = root[f'detect_runs/{latest_detect_run}/n_detections'][chunk_slice]
+        # --- FIX: Get the source detect run from the crop stage's attributes ---
+        source_detect_run = root[f'crop_runs/{latest_crop_run}'].attrs.get('source_detect_run')
+        if not source_detect_run:
+            # Fallback if the attribute isn't there for some reason
+            source_detect_run = root['detect_runs'].attrs['latest']
         
-        # Calculate the detection indices for this chunk
-        start_detection_idx = int(np.sum(root[f'detect_runs/{latest_detect_run}/n_detections'][:chunk_slice.start]))
+        # Get detection counts for this chunk from the correct detect run
+        n_detections_per_frame = root[f'detect_runs/{source_detect_run}/n_detections'][chunk_slice]
+        
+        # Calculate the global detection indices for this chunk
+        start_detection_idx = int(np.sum(root[f'detect_runs/{source_detect_run}/n_detections'][:chunk_slice.start]))
         end_detection_idx = start_detection_idx + int(np.sum(n_detections_per_frame))
         detection_slice = slice(start_detection_idx, end_detection_idx)
         
-        # Load ROI images and coordinates
+        # Load ROI images and full-res coordinates from the CROP run
         rois_chunk = root[f'crop_runs/{latest_crop_run}/roi_images'][detection_slice]
         coords_full_chunk = root[f'crop_runs/{latest_crop_run}/roi_coordinates_full'][detection_slice]
         
-        # Calculate downsampled coordinates
-        ds_img_shape = root['raw_video/images_ds'].shape[1:]
-        full_img_shape = root['raw_video/images_full'].shape[1:]
-        scale_factor = ds_img_shape[0] / full_img_shape[0]
-        coords_ds_chunk = coords_full_chunk * scale_factor
+        # --- FIX: Load initial bounding boxes from the DETECT run ---
+        bbox_coords_chunk = root[f'detect_runs/{source_detect_run}/bbox_norm_coords'][detection_slice]
         
-        # Get background for difference calculation
+        # --- FIX: Correctly load the background image ---
         latest_bg_run = root['background_runs'].attrs['latest']
         bg_group = root[f'background_runs/{latest_bg_run}']
         
-        # Check what background arrays are available and use the appropriate one
         if 'background_full' in bg_group:
-            background = bg_group['background_full'][:]
-            use_full_background = True
-        elif 'background' in bg_group:
-            background = bg_group['background'][:]
-            use_full_background = True
+            background_full = bg_group['background_full'][:]
         elif 'background_ds' in bg_group:
-            # Only downsampled background available - we'll need to work with downsampled ROIs
+            # Fallback to upscaling the downsampled background
             background_ds = bg_group['background_ds'][:]
-            use_full_background = False
-            import cv2
-            # Upscale to full resolution for ROI extraction
-            background = cv2.resize(background_ds, (full_img_shape[1], full_img_shape[0]), 
-                                   interpolation=cv2.INTER_LINEAR)
+            full_img_shape = root['raw_video/images_full'].shape[1:]
+            background_full = cv2.resize(background_ds, (full_img_shape[1], full_img_shape[0]), interpolation=cv2.INTER_LINEAR)
         else:
-            raise KeyError(f"No background array found in {latest_bg_run}")
+            raise KeyError("Could not find 'background_full' or 'background_ds' in the background run.")
+
+        # Get image shapes for coordinate conversion
+        full_img_shape = root['raw_video/images_full'].shape[1:]
+        ds_img_shape = root['raw_video/images_ds'].shape[1:]
         
-        # Get initial bounding boxes from detect stage
-        bbox_coords_chunk = root[f'detect_runs/{latest_detect_run}/bbox_norm_coords'][detection_slice]
-    
     chunk_len = len(rois_chunk)
     chunk_results = np.full((chunk_len, 21), np.nan, dtype='f8')
     
     for i in range(chunk_len):
         try:
-            # Start with the detection bbox as fallback
             initial_bbox = bbox_coords_chunk[i]
             if not np.isnan(initial_bbox[0]):
-                # Store initial bbox in downsampled coordinates (columns 7-10)
                 chunk_results[i, 7:11] = initial_bbox
-            
-            # Now attempt keypoint detection for more precise tracking
+            else:
+                continue
+
             roi = rois_chunk[i]
             coords_full = coords_full_chunk[i]
-            coords_ds = coords_ds_chunk[i]
-            
+
             if np.all(roi == 0) or coords_full[0] == -1:
                 continue
             
-            # Extract background ROI
-            roi_y1 = int(coords_full[1])
-            roi_x1 = int(coords_full[0])
-            roi_y2 = roi_y1 + roi.shape[0]
-            roi_x2 = roi_x1 + roi.shape[1]
+            roi_y1, roi_x1 = int(coords_full[1]), int(coords_full[0])
+            roi_y2, roi_x2 = roi_y1 + roi.shape[0], roi_x1 + roi.shape[1]
             
-            # Ensure coordinates are within bounds
-            roi_y1 = max(0, roi_y1)
-            roi_x1 = max(0, roi_x1)
-            roi_y2 = min(background_full.shape[0], roi_y2)
-            roi_x2 = min(background_full.shape[1], roi_x2)
+            background_roi = background_full[roi_y1:roi_y2, roi_x1:roi_x2]
             
-            background_roi = background[roi_y1:roi_y2, roi_x1:roi_x2]
+            if background_roi.shape != roi.shape: continue
             
-            if background_roi.shape != roi.shape:
-                continue
-            
-            # Calculate difference image
             diff_roi = np.clip(background_roi.astype(np.int16) - roi.astype(np.int16), 0, 255).astype(np.uint8)
             
-            # Adaptive thresholding to find keypoints
             current_thresh = roi_thresh
             roi_stat = []
             for _ in range(5):
@@ -803,64 +782,40 @@ def track_chunk_delayed(zarr_path, chunk_slice, roi_sz, roi_thresh, se1_radius, 
                 if len(roi_stat) >= 3:
                     break
                 current_thresh -= 5
-            
-            # If we found 3+ keypoints, process them
+
             if len(roi_stat) >= 3:
                 keypoint_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
                 pts = np.array([s.centroid[::-1] for s in keypoint_stats])
-                
-                # Use triangle geometry to identify keypoints
                 angles, _ = triangle_calculations(pts[0], pts[1], pts[2])
                 kp_idx = np.argsort(angles)
-                
-                # The point with smallest angle is the swim bladder
-                # The other two are eyes
                 eye_mean = np.mean(pts[kp_idx[1:3]], axis=0)
                 head_vec = eye_mean - pts[kp_idx[0]]
                 heading = np.rad2deg(np.arctan2(-head_vec[1], head_vec[0]))
                 
-                # Determine which eye is left/right using rotation
-                R = np.array([[np.cos(np.deg2rad(heading)), -np.sin(np.deg2rad(heading))], 
-                             [np.sin(np.deg2rad(heading)), np.cos(np.deg2rad(heading))]])
+                R = np.array([[np.cos(np.deg2rad(heading)), -np.sin(np.deg2rad(heading))], [np.sin(np.deg2rad(heading)), np.cos(np.deg2rad(heading))]])
                 rotpts = (pts - eye_mean) @ R.T
                 eye_r_idx, eye_l_idx = (kp_idx[1], kp_idx[2]) if rotpts[kp_idx[1], 1] > rotpts[kp_idx[2], 1] else (kp_idx[2], kp_idx[1])
                 ordered_stats = [keypoint_stats[kp_idx[0]], keypoint_stats[eye_l_idx], keypoint_stats[eye_r_idx]]
                 
-                # Calculate bounding boxes at multiple scales
                 bbox_data = calculate_multi_scale_bounding_boxes(ordered_stats, roi_sz)
-                if bbox_data is None:
-                    continue
+                if bbox_data is None: continue
                 
-                multi_scale_data = transform_bbox_to_image_scales(
-                    bbox_data, coords_full, coords_ds, tuple(roi_sz),
-                    full_img_shape, ds_img_shape
-                )
-                if multi_scale_data is None:
-                    continue
+                # --- FIX: Calculate coords_ds on the fly ---
+                scale_factor = ds_img_shape[0] / full_img_shape[0]
+                coords_ds = coords_full * scale_factor
                 
-                # Calculate confidence based on keypoint area
+                multi_scale_data = transform_bbox_to_image_scales(bbox_data, coords_full, coords_ds, tuple(roi_sz), full_img_shape, ds_img_shape)
+                if multi_scale_data is None: continue
+                
                 confidence = min(1.0, np.mean([s.area for s in ordered_stats]) / 100.0)
                 
-                # Store all tracking data
-                chunk_results[i, :] = [
-                    heading,
-                    *bbox_data['bladder_roi_norm'],
-                    *bbox_data['eye_l_roi_norm'],
-                    *bbox_data['eye_r_roi_norm'],
-                    *multi_scale_data['ds_scale']['center_norm'],
-                    *multi_scale_data['ds_scale']['extent_norm'],
-                    *multi_scale_data['full_scale']['center_norm'],
-                    *multi_scale_data['full_scale']['extent_norm'],
-                    *coords_full,
-                    *coords_ds,
-                    confidence,
-                    current_thresh
-                ]
-        except Exception as e:
-            # Silent failure - keep the initial bbox data
+                chunk_results[i, :] = [heading, *bbox_data['bladder_roi_norm'], *bbox_data['eye_l_roi_norm'], *bbox_data['eye_r_roi_norm'], 
+                                       *multi_scale_data['ds_scale']['center_norm'], *multi_scale_data['ds_scale']['extent_norm'], 
+                                       *multi_scale_data['full_scale']['center_norm'], *multi_scale_data['full_scale']['extent_norm'], 
+                                       *coords_full, *coords_ds, confidence, current_thresh]
+        except Exception:
             continue
-    
-    # Count successful tracks per frame
+            
     frame_counts = np.zeros(len(n_detections_per_frame), dtype='i4')
     detection_idx = 0
     for frame_idx, n_dets in enumerate(n_detections_per_frame):
@@ -868,7 +823,7 @@ def track_chunk_delayed(zarr_path, chunk_slice, roi_sz, roi_thresh, se1_radius, 
             frame_results = chunk_results[detection_idx:detection_idx+n_dets]
             frame_counts[frame_idx] = np.sum(~np.isnan(frame_results[:, 0]))
             detection_idx += n_dets
-    
+            
     return detection_slice, chunk_results, frame_counts
 
 def run_tracking_stage(zarr_path, scheduler_name, params, console):
