@@ -101,7 +101,7 @@ def main(zarr_path, start_frame):
     config_path = Path("src/pipeline_config.yaml")
     config = {}
     
-    # --- NEW: Load parameters from config file first ---
+    # Load parameters from config file first
     try:
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
@@ -122,7 +122,7 @@ def main(zarr_path, start_frame):
         num_frames = zarr_root['raw_video/images_ds'].shape[0]
         ds_img_shape = zarr_root['raw_video/images_ds'].shape[1:]
         
-        # --- NEW: Robustly load dish mask ---
+        # Robustly load dish mask with support for both rectangle and circle
         mask_params = {}
         # Priority 1: Load from the latest detect run
         if 'detect_runs' in zarr_root:
@@ -131,15 +131,26 @@ def main(zarr_path, start_frame):
             print("Found 'detect_runs'. Will use mask parameters from the latest run.")
         # Priority 2: Load from the config file if detect has not been run
         elif config:
-             mask_params = config.get('detect', {}).get('dish_mask', {})
-             print("No 'detect_runs' found. Will use mask parameters from config file.")
+            mask_params = config.get('detect', {}).get('dish_mask', {})
+            print("No 'detect_runs' found. Will use mask parameters from config file.")
         
-        dish_mask = None # By default, no mask
-        if mask_params.get('shape') == 'rectangle' and 'roi' in mask_params:
+        # Create the mask based on shape - NOW SUPPORTS BOTH RECTANGLE AND CIRCLE
+        dish_mask = None
+        dish_shape = mask_params.get('shape')
+        
+        if dish_shape == 'rectangle' and 'roi' in mask_params:
             x, y, w, h = mask_params['roi']
             dish_mask = np.zeros(ds_img_shape, dtype=np.uint8)
             cv2.rectangle(dish_mask, (x, y), (x + w, y + h), 255, -1)
             print("✅ Loaded rectangular dish mask.")
+            
+        elif dish_shape == 'circle' and 'center' in mask_params and 'radius' in mask_params:
+            center = mask_params['center']
+            radius = mask_params['radius']
+            dish_mask = np.zeros(ds_img_shape, dtype=np.uint8)
+            cv2.circle(dish_mask, tuple(center), radius, 255, -1)
+            print(f"✅ Loaded circular dish mask (center={center}, radius={radius}).")
+            
         else:
             print("ℹ️ No dish mask defined or found. Processing the full frame.")
 
@@ -167,7 +178,7 @@ def main(zarr_path, start_frame):
     while True:
         dashboard = create_tuner_dashboard(current_frame, zarr_root, dish_mask)
         if dashboard is None:
-            break # Exit if there was a critical error creating the dashboard
+            break  # Exit if there was a critical error creating the dashboard
         
         cv2.imshow(window_name, dashboard)
         cv2.setTrackbarPos("Frame", window_name, current_frame)
@@ -175,9 +186,9 @@ def main(zarr_path, start_frame):
         key = cv2.waitKey(30) & 0xFF
         if key == ord('q') or key == 27:
             break
-        elif key == 83: # Right arrow
+        elif key == 83:  # Right arrow
             current_frame = min(num_frames - 1, current_frame + 1)
-        elif key == 81: # Left arrow
+        elif key == 81:  # Left arrow
             current_frame = max(0, current_frame - 1)
         elif key == ord('s'):
             try:
@@ -186,7 +197,7 @@ def main(zarr_path, start_frame):
                     with open(config_path, 'r') as f:
                         config = yaml.safe_load(f)
                 else:
-                    config = {} # Create a new config dict if file doesn't exist
+                    config = {}  # Create a new config dict if file doesn't exist
                 
                 if 'detect' not in config:
                     config['detect'] = {}

@@ -410,15 +410,14 @@ def detect_chunk_delayed(zarr_path, chunk_slice, detect_params, dish_mask):
             
     return chunk_slice, frame_detection_counts, all_bbox_norms
 
-
-# NEW: The dedicated detection stage
 def run_detect_stage(zarr_path, scheduler_name, params, console):
     console.rule(f"[bold]Stage 3: Detecting Fish (Dask {scheduler_name.title()} Scheduler)[/bold]")
     start_time = time.perf_counter()
     root = zarr.open_group(zarr_path, mode='a')
-    if 'background_runs' not in root: raise ValueError("Background stage not run.")
+    if 'background_runs' not in root: 
+        raise ValueError("Background stage not run.")
     
-    detect_params = params['detect'] # NEW: Using 'detect' section from config
+    detect_params = params['detect']
     detect_group = get_run_group(root, 'detect', console)
     latest_bg_run = root['background_runs'].attrs['latest']
     
@@ -429,20 +428,12 @@ def run_detect_stage(zarr_path, scheduler_name, params, console):
         'source_background_run': latest_bg_run
     })
     
-    # ... (Dish mask logic is the same as the old crop stage) ...
+    # Create dish mask using the new function that supports both rectangle and circle
     background_ds = root[f'background_runs/{latest_bg_run}/background_ds'][:]
     ds_img_shape = background_ds.shape
-    mask = None
     mask_params = detect_params.get('dish_mask', {})
-    dish_shape = mask_params.get('shape', 'circle')
-
-    if dish_shape == 'rectangle' and 'roi' in mask_params:
-        x, y, w, h = mask_params['roi']
-        mask = np.zeros(ds_img_shape, dtype=np.uint8)
-        cv2.rectangle(mask, (x, y), (x+w, y+h), 255, -1)
-        console.print(f"  [green]✓[/green] Using manually defined rectangular mask from config.")
-    # ... (rest of mask logic) ...
-
+    mask = create_dish_mask(mask_params, ds_img_shape, console)
+    
     num_images = root['raw_video/images_ds'].shape[0]
     chunk_size = params['import']['chunk_size']
     
@@ -474,7 +465,12 @@ def run_detect_stage(zarr_path, scheduler_name, params, console):
     frames_with_detections = np.sum(n_detections[:] > 0)
     percent_detected = (frames_with_detections / num_images) * 100 if num_images > 0 else 0
     
-    summary_stats = {'total_frames': num_images, 'frames_with_detections': int(frames_with_detections), 'total_detections': int(total_detections), 'percent_frames_with_detections': round(percent_detected, 2)}
+    summary_stats = {
+        'total_frames': num_images, 
+        'frames_with_detections': int(frames_with_detections), 
+        'total_detections': int(total_detections), 
+        'percent_frames_with_detections': round(percent_detected, 2)
+    }
     detect_group.attrs['summary_statistics'] = summary_stats
     detect_group.attrs['duration_seconds'] = time.perf_counter() - start_time
     
@@ -528,12 +524,12 @@ def crop_chunk_from_bbox_delayed(zarr_path, chunk_slice, roi_sz):
 
     return chunk_slice, all_rois, all_coords_full
 
-# MODIFIED: The refactored crop stage
 def run_crop_stage(zarr_path, scheduler_name, params, console):
     console.rule(f"[bold]Stage 4: Cropping ROIs from Detections (Dask {scheduler_name.title()} Scheduler)[/bold]")
     start_time = time.perf_counter()
     root = zarr.open_group(zarr_path, mode='a')
-    if 'detect_runs' not in root: raise ValueError("Detect stage not run.")
+    if 'detect_runs' not in root: 
+        raise ValueError("Detect stage not run.")
     
     crop_params = params['crop']
     crop_group = get_run_group(root, 'crop', console)
@@ -554,8 +550,21 @@ def run_crop_stage(zarr_path, scheduler_name, params, console):
     total_detections = int(n_detections.sum())
     
     # Create Zarr arrays for cropped data
-    roi_images = crop_group.create_dataset('roi_images', shape=(total_detections, *crop_params['roi_sz']), chunks=(chunk_size, None, None), dtype='uint8', overwrite=True, compressor=zarr.Blosc(cname='lz4', clevel=1, shuffle=zarr.Blosc.BITSHUFFLE))
-    roi_coordinates_full = crop_group.create_dataset('roi_coordinates_full', shape=(total_detections, 2), chunks=(chunk_size * 4, None), dtype='i4', overwrite=True)
+    roi_images = crop_group.create_dataset(
+        'roi_images', 
+        shape=(total_detections, *crop_params['roi_sz']), 
+        chunks=(chunk_size, None, None), 
+        dtype='uint8', 
+        overwrite=True, 
+        compressor=zarr.Blosc(cname='lz4', clevel=1, shuffle=zarr.Blosc.BITSHUFFLE)
+    )
+    roi_coordinates_full = crop_group.create_dataset(
+        'roi_coordinates_full', 
+        shape=(total_detections, 2), 
+        chunks=(chunk_size * 4, None), 
+        dtype='i4', 
+        overwrite=True
+    )
     
     chunk_slices = [slice(i, min(i + chunk_size, num_images)) for i in range(0, num_images, chunk_size)]
     console.print(f"Creating [yellow]{len(chunk_slices)}[/yellow] Dask tasks for cropping...")
@@ -579,81 +588,426 @@ def run_crop_stage(zarr_path, scheduler_name, params, console):
     frames_with_crops = np.sum(n_detections > 0)
     percent_cropped = (frames_with_crops / num_images) * 100 if num_images > 0 else 0
     
-    summary_stats = {'total_frames': num_images, 'frames_with_crops': int(frames_with_crops), 'total_rois_cropped': int(total_detections), 'percent_frames_with_crops': round(percent_cropped, 2)}
+    summary_stats = {
+        'total_frames': num_images, 
+        'frames_with_crops': int(frames_with_crops), 
+        'total_rois_cropped': int(total_detections), 
+        'percent_frames_with_crops': round(percent_cropped, 2)
+    }
     crop_group.attrs['summary_statistics'] = summary_stats
     crop_group.attrs['duration_seconds'] = time.perf_counter() - start_time
     
     console.print(f"Cropping stage completed in [green]{crop_group.attrs['duration_seconds']:.2f}[/green] seconds.")
+    console.print(f"  Found [green]{total_detections}[/green] cropped ROIs in [green]{frames_with_crops}/{num_images}[/green] frames ([cyan]{percent_cropped:.2f}%[/cyan]).")
 
-# --- MODIFIED: run_tracking_stage for multi-fish ---
+def triangle_calculations(p1, p2, p3):
+    """Calculate angles and area of a triangle formed by three points."""
+    # Calculate distances between points
+    d12 = np.linalg.norm(p2 - p1)
+    d23 = np.linalg.norm(p3 - p2)
+    d31 = np.linalg.norm(p1 - p3)
+    
+    # Calculate angles using law of cosines
+    # Angle at p1
+    cos_angle1 = (d12**2 + d31**2 - d23**2) / (2 * d12 * d31)
+    angle1 = np.arccos(np.clip(cos_angle1, -1, 1))
+    
+    # Angle at p2
+    cos_angle2 = (d12**2 + d23**2 - d31**2) / (2 * d12 * d23)
+    angle2 = np.arccos(np.clip(cos_angle2, -1, 1))
+    
+    # Angle at p3
+    cos_angle3 = (d23**2 + d31**2 - d12**2) / (2 * d23 * d31)
+    angle3 = np.arccos(np.clip(cos_angle3, -1, 1))
+    
+    angles = np.array([angle1, angle2, angle3])
+    
+    # Calculate area using Heron's formula
+    s = (d12 + d23 + d31) / 2  # semi-perimeter
+    area = np.sqrt(s * (s - d12) * (s - d23) * (s - d31))
+    
+    return angles, area
+
+def calculate_multi_scale_bounding_boxes(keypoint_stats, roi_sz, margin_factor=1.5, min_bbox_size=0.05):
+    """
+    Calculate bounding boxes from keypoints at multiple scales.
+    
+    Args:
+        keypoint_stats: List of 3 regionprops objects [bladder, eye_l, eye_r]
+        roi_sz: Tuple of ROI dimensions (height, width)
+        margin_factor: Factor to expand bbox beyond keypoints
+        min_bbox_size: Minimum bbox size as fraction of ROI
+    
+    Returns:
+        Dictionary with bbox data and keypoint positions
+    """
+    if len(keypoint_stats) != 3:
+        return None
+    
+    all_positions = np.array([s.centroid[::-1] for s in keypoint_stats])
+    min_pos, max_pos = np.min(all_positions, axis=0), np.max(all_positions, axis=0)
+    center_roi_px = (min_pos + max_pos) / 2.0
+    center_roi_norm = center_roi_px / np.array(roi_sz[::-1])
+    
+    keypoint_extent_px = max_pos - min_pos
+    margin_px = keypoint_extent_px * (margin_factor - 1.0)
+    tight_extent_px = keypoint_extent_px + margin_px
+    min_size_px = np.array(roi_sz[::-1]) * min_bbox_size
+    tight_extent_px = np.maximum(tight_extent_px, min_size_px)
+    extent_roi_norm = tight_extent_px / np.array(roi_sz[::-1])
+    extent_roi_norm = np.minimum(extent_roi_norm, [1.0, 1.0])
+    
+    return {
+        'center_roi_norm': center_roi_norm, 
+        'extent_roi_norm': extent_roi_norm,
+        'bladder_roi_norm': all_positions[0] / np.array(roi_sz[::-1]),
+        'eye_l_roi_norm': all_positions[1] / np.array(roi_sz[::-1]),
+        'eye_r_roi_norm': all_positions[2] / np.array(roi_sz[::-1]),
+        'keypoint_count': len(keypoint_stats)
+    }
+
+def transform_bbox_to_image_scales(bbox_data, roi_coords_full, roi_coords_ds, roi_sz,
+                                   full_img_shape=(4512, 4512), ds_img_shape=(640, 640)):
+    """Transform bounding box coordinates to multiple image scales."""
+    if bbox_data is None:
+        return None
+    
+    center_roi_norm, extent_roi_norm = bbox_data['center_roi_norm'], bbox_data['extent_roi_norm']
+    
+    # Full resolution scale
+    center_full_norm, extent_full_norm = [np.nan, np.nan], [np.nan, np.nan]
+    if roi_coords_full[0] != -1:
+        center_full_px = np.array(roi_coords_full) + center_roi_norm * np.array(roi_sz[::-1])
+        extent_full_px = extent_roi_norm * np.array(roi_sz[::-1])
+        center_full_norm = center_full_px / np.array(full_img_shape[::-1])
+        extent_full_norm = extent_full_px / np.array(full_img_shape[::-1])
+    
+    # Downsampled scale
+    center_ds_norm, extent_ds_norm = [np.nan, np.nan], [np.nan, np.nan]
+    if roi_coords_ds[0] != -1:
+        roi_sz_ds = np.array(roi_sz) * (ds_img_shape[0] / full_img_shape[0])
+        center_ds_px = np.array(roi_coords_ds) + center_roi_norm * roi_sz_ds[::-1]
+        extent_ds_px = extent_roi_norm * roi_sz_ds[::-1]
+        center_ds_norm = center_ds_px / np.array(ds_img_shape[::-1])
+        extent_ds_norm = extent_ds_px / np.array(ds_img_shape[::-1])
+    
+    return {
+        'full_scale': {'center_norm': center_full_norm, 'extent_norm': extent_full_norm},
+        'ds_scale': {'center_norm': center_ds_norm, 'extent_norm': extent_ds_norm},
+        'roi_scale': {'center_norm': center_roi_norm, 'extent_norm': extent_roi_norm}
+    }
+
+@delayed
+def track_chunk_delayed(zarr_path, chunk_slice, roi_sz, roi_thresh, se1_radius, se2_radius):
+    """
+    Process tracking for a chunk of ROIs using keypoint detection.
+    Detects swim bladder and eyes, calculates heading, and creates multi-scale bounding boxes.
+    """
+    se1, se2 = disk(se1_radius), disk(se2_radius)
+    
+    with zarr.open(zarr_path, mode='r') as root:
+        # Get the latest runs
+        latest_crop_run = root['crop_runs'].attrs['latest']
+        latest_detect_run = root[f'crop_runs/{latest_crop_run}'].attrs.get('source_detect_run')
+        if not latest_detect_run:
+            latest_detect_run = root['detect_runs'].attrs['latest']
+        
+        # Get detection counts for this chunk
+        n_detections_per_frame = root[f'detect_runs/{latest_detect_run}/n_detections'][chunk_slice]
+        
+        # Calculate the detection indices for this chunk
+        start_detection_idx = int(np.sum(root[f'detect_runs/{latest_detect_run}/n_detections'][:chunk_slice.start]))
+        end_detection_idx = start_detection_idx + int(np.sum(n_detections_per_frame))
+        detection_slice = slice(start_detection_idx, end_detection_idx)
+        
+        # Load ROI images and coordinates
+        rois_chunk = root[f'crop_runs/{latest_crop_run}/roi_images'][detection_slice]
+        coords_full_chunk = root[f'crop_runs/{latest_crop_run}/roi_coordinates_full'][detection_slice]
+        
+        # Calculate downsampled coordinates
+        ds_img_shape = root['raw_video/images_ds'].shape[1:]
+        full_img_shape = root['raw_video/images_full'].shape[1:]
+        scale_factor = ds_img_shape[0] / full_img_shape[0]
+        coords_ds_chunk = coords_full_chunk * scale_factor
+        
+        # Get background for difference calculation
+        latest_bg_run = root['background_runs'].attrs['latest']
+        bg_group = root[f'background_runs/{latest_bg_run}']
+        
+        # Check what background arrays are available and use the appropriate one
+        if 'background_full' in bg_group:
+            background = bg_group['background_full'][:]
+            use_full_background = True
+        elif 'background' in bg_group:
+            background = bg_group['background'][:]
+            use_full_background = True
+        elif 'background_ds' in bg_group:
+            # Only downsampled background available - we'll need to work with downsampled ROIs
+            background_ds = bg_group['background_ds'][:]
+            use_full_background = False
+            import cv2
+            # Upscale to full resolution for ROI extraction
+            background = cv2.resize(background_ds, (full_img_shape[1], full_img_shape[0]), 
+                                   interpolation=cv2.INTER_LINEAR)
+        else:
+            raise KeyError(f"No background array found in {latest_bg_run}")
+        
+        # Get initial bounding boxes from detect stage
+        bbox_coords_chunk = root[f'detect_runs/{latest_detect_run}/bbox_norm_coords'][detection_slice]
+    
+    chunk_len = len(rois_chunk)
+    chunk_results = np.full((chunk_len, 21), np.nan, dtype='f8')
+    
+    for i in range(chunk_len):
+        try:
+            # Start with the detection bbox as fallback
+            initial_bbox = bbox_coords_chunk[i]
+            if not np.isnan(initial_bbox[0]):
+                # Store initial bbox in downsampled coordinates (columns 7-10)
+                chunk_results[i, 7:11] = initial_bbox
+            
+            # Now attempt keypoint detection for more precise tracking
+            roi = rois_chunk[i]
+            coords_full = coords_full_chunk[i]
+            coords_ds = coords_ds_chunk[i]
+            
+            if np.all(roi == 0) or coords_full[0] == -1:
+                continue
+            
+            # Extract background ROI
+            roi_y1 = int(coords_full[1])
+            roi_x1 = int(coords_full[0])
+            roi_y2 = roi_y1 + roi.shape[0]
+            roi_x2 = roi_x1 + roi.shape[1]
+            
+            # Ensure coordinates are within bounds
+            roi_y1 = max(0, roi_y1)
+            roi_x1 = max(0, roi_x1)
+            roi_y2 = min(background_full.shape[0], roi_y2)
+            roi_x2 = min(background_full.shape[1], roi_x2)
+            
+            background_roi = background[roi_y1:roi_y2, roi_x1:roi_x2]
+            
+            if background_roi.shape != roi.shape:
+                continue
+            
+            # Calculate difference image
+            diff_roi = np.clip(background_roi.astype(np.int16) - roi.astype(np.int16), 0, 255).astype(np.uint8)
+            
+            # Adaptive thresholding to find keypoints
+            current_thresh = roi_thresh
+            roi_stat = []
+            for _ in range(5):
+                im_roi = erosion(dilation(erosion(diff_roi >= current_thresh, se1), se2), se1)
+                roi_stat = [r for r in regionprops(label(im_roi)) if r.area > 5]
+                if len(roi_stat) >= 3:
+                    break
+                current_thresh -= 5
+            
+            # If we found 3+ keypoints, process them
+            if len(roi_stat) >= 3:
+                keypoint_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
+                pts = np.array([s.centroid[::-1] for s in keypoint_stats])
+                
+                # Use triangle geometry to identify keypoints
+                angles, _ = triangle_calculations(pts[0], pts[1], pts[2])
+                kp_idx = np.argsort(angles)
+                
+                # The point with smallest angle is the swim bladder
+                # The other two are eyes
+                eye_mean = np.mean(pts[kp_idx[1:3]], axis=0)
+                head_vec = eye_mean - pts[kp_idx[0]]
+                heading = np.rad2deg(np.arctan2(-head_vec[1], head_vec[0]))
+                
+                # Determine which eye is left/right using rotation
+                R = np.array([[np.cos(np.deg2rad(heading)), -np.sin(np.deg2rad(heading))], 
+                             [np.sin(np.deg2rad(heading)), np.cos(np.deg2rad(heading))]])
+                rotpts = (pts - eye_mean) @ R.T
+                eye_r_idx, eye_l_idx = (kp_idx[1], kp_idx[2]) if rotpts[kp_idx[1], 1] > rotpts[kp_idx[2], 1] else (kp_idx[2], kp_idx[1])
+                ordered_stats = [keypoint_stats[kp_idx[0]], keypoint_stats[eye_l_idx], keypoint_stats[eye_r_idx]]
+                
+                # Calculate bounding boxes at multiple scales
+                bbox_data = calculate_multi_scale_bounding_boxes(ordered_stats, roi_sz)
+                if bbox_data is None:
+                    continue
+                
+                multi_scale_data = transform_bbox_to_image_scales(
+                    bbox_data, coords_full, coords_ds, tuple(roi_sz),
+                    full_img_shape, ds_img_shape
+                )
+                if multi_scale_data is None:
+                    continue
+                
+                # Calculate confidence based on keypoint area
+                confidence = min(1.0, np.mean([s.area for s in ordered_stats]) / 100.0)
+                
+                # Store all tracking data
+                chunk_results[i, :] = [
+                    heading,
+                    *bbox_data['bladder_roi_norm'],
+                    *bbox_data['eye_l_roi_norm'],
+                    *bbox_data['eye_r_roi_norm'],
+                    *multi_scale_data['ds_scale']['center_norm'],
+                    *multi_scale_data['ds_scale']['extent_norm'],
+                    *multi_scale_data['full_scale']['center_norm'],
+                    *multi_scale_data['full_scale']['extent_norm'],
+                    *coords_full,
+                    *coords_ds,
+                    confidence,
+                    current_thresh
+                ]
+        except Exception as e:
+            # Silent failure - keep the initial bbox data
+            continue
+    
+    # Count successful tracks per frame
+    frame_counts = np.zeros(len(n_detections_per_frame), dtype='i4')
+    detection_idx = 0
+    for frame_idx, n_dets in enumerate(n_detections_per_frame):
+        if n_dets > 0:
+            frame_results = chunk_results[detection_idx:detection_idx+n_dets]
+            frame_counts[frame_idx] = np.sum(~np.isnan(frame_results[:, 0]))
+            detection_idx += n_dets
+    
+    return detection_slice, chunk_results, frame_counts
+
 def run_tracking_stage(zarr_path, scheduler_name, params, console):
-    console.rule(f"[bold]Stage 4: Tracking with Multi-Fish Data (Dask {scheduler_name.title()} Scheduler)[/bold]")
+    console.rule(f"[bold]Stage 5: Tracking with Multi-Fish Data (Dask {scheduler_name.title()} Scheduler)[/bold]")
     start_time = time.perf_counter()
     root = zarr.open_group(zarr_path, mode='a')
-    if 'crop_runs' not in root: raise ValueError("Crop stage not run.")
+    if 'crop_runs' not in root: 
+        raise ValueError("Crop stage not run.")
     
     track_params = params['track']
     track_group = get_run_group(root, 'tracking', console)
     
-    source_run_name = root['crop_runs'].attrs['latest'] # Tracking now builds on crop, not refine
+    source_run_name = root['crop_runs'].attrs['latest']
     source_type = 'crop'
-    console.print(f"Using cropped data from run: [cyan]{source_run_name}[/cyan]")
+    console.print(f"  Using cropped data from run: [cyan]{source_run_name}[/cyan]")
+    
+    # Get the detect run that the crop was based on
+    source_detect_run = root[f'crop_runs/{source_run_name}'].attrs.get('source_detect_run')
+    if not source_detect_run:
+        # Fallback to latest detect run if not stored
+        source_detect_run = root['detect_runs'].attrs['latest']
+    console.print(f"  Using detections from run: [cyan]{source_detect_run}[/cyan]")
 
     track_group.attrs.update({
         'tracking_timestamp_utc': datetime.now(timezone.utc).isoformat(), 
         'dask_scheduler': scheduler_name,
         'parameters': track_params,
-        f'source_{source_type}_run': source_run_name
+        f'source_{source_type}_run': source_run_name,
+        'source_detect_run': source_detect_run
     })
 
     num_images = root['raw_video/images_ds'].shape[0]
-    total_detections = root[f'crop_runs/{source_run_name}/n_detections'][:].sum()
+    
+    # Get n_detections from the detect stage, not crop stage
+    n_detections_array = root[f'detect_runs/{source_detect_run}/n_detections']
+    temp_n_detections = n_detections_array[:]
+    total_detections = int(temp_n_detections.sum())
+    
+    if total_detections == 0:
+        console.print(f"  [yellow]⚠[/yellow] No detections found in detect stage. Skipping tracking.")
+        track_group.attrs['summary_statistics'] = {
+            'total_frames': num_images,
+            'frames_with_tracks': 0,
+            'total_successful_tracks': 0,
+            'percent_frames_tracked': 0.0
+        }
+        track_group.attrs['duration_seconds'] = time.perf_counter() - start_time
+        return
+    
+    # Get chunk size from crop stage
     track_chunk_size = root[f"crop_runs/{source_run_name}/roi_images"].chunks[0]
 
-    # Create new ragged arrays for tracking results
-    n_tracked_detections = track_group.create_dataset('n_detections', shape=(num_images,), chunks=(track_chunk_size * 4,), dtype='i4', overwrite=True)
-    tracking_results = track_group.create_dataset('tracking_results', shape=(total_detections, 21), chunks=(track_chunk_size * 4, None), dtype='f8', overwrite=True)
+    # Create new arrays for tracking results
+    n_tracked_detections = track_group.create_dataset(
+        'n_detections', 
+        shape=(num_images,), 
+        chunks=(track_chunk_size * 4,), 
+        dtype='i4', 
+        overwrite=True
+    )
+    
+    tracking_results = track_group.create_dataset(
+        'tracking_results', 
+        shape=(total_detections, 21), 
+        chunks=(track_chunk_size * 4, None), 
+        dtype='f8', 
+        overwrite=True
+    )
     tracking_results[:] = np.nan
-    tracking_results.attrs['column_names'] = ['heading_degrees', 'bladder_x_roi_norm', 'bladder_y_roi_norm', 'eye_l_x_roi_norm', 'eye_l_y_roi_norm', 'eye_r_x_roi_norm', 'eye_r_y_roi_norm', 'bbox_x_norm_ds', 'bbox_y_norm_ds', 'bbox_width_norm_ds', 'bbox_height_norm_ds', 'bbox_x_norm_full', 'bbox_y_norm_full', 'bbox_width_norm_full', 'bbox_height_norm_full', 'roi_x1_full', 'roi_y1_full', 'roi_x1_ds', 'roi_y1_ds', 'confidence_score', 'effective_threshold']
+    tracking_results.attrs['column_names'] = [
+        'heading_degrees', 'bladder_x_roi_norm', 'bladder_y_roi_norm', 
+        'eye_l_x_roi_norm', 'eye_l_y_roi_norm', 'eye_r_x_roi_norm', 'eye_r_y_roi_norm',
+        'bbox_x_norm_ds', 'bbox_y_norm_ds', 'bbox_width_norm_ds', 'bbox_height_norm_ds',
+        'bbox_x_norm_full', 'bbox_y_norm_full', 'bbox_width_norm_full', 'bbox_height_norm_full',
+        'roi_x1_full', 'roi_y1_full', 'roi_x1_ds', 'roi_y1_ds', 
+        'confidence_score', 'effective_threshold'
+    ]
     
     chunk_slices = [slice(i, min(i + track_chunk_size, num_images)) for i in range(0, num_images, track_chunk_size)]
-    console.print(f"Creating [yellow]{len(chunk_slices)}[/yellow] tracking tasks...")
-    delayed_tasks = [track_chunk_delayed(zarr_path, s, roi_sz=tuple(track_params['roi_sz']), roi_thresh=track_params['roi_thresh'], se1_radius=track_params['se1_radius'], se2_radius=track_params['se2_radius']) for s in chunk_slices]
+    console.print(f"  Creating [yellow]{len(chunk_slices)}[/yellow] tracking tasks...")
     
-    with ProgressBar(): results = dask.compute(*delayed_tasks)
+    delayed_tasks = [
+        track_chunk_delayed(
+            zarr_path, s, 
+            roi_sz=tuple(track_params['roi_sz']), 
+            roi_thresh=track_params['roi_thresh'], 
+            se1_radius=track_params['se1_radius'], 
+            se2_radius=track_params['se2_radius']
+        ) for s in chunk_slices
+    ]
     
-    console.print("Writing tracking results to Zarr...")
+    with ProgressBar(): 
+        results = dask.compute(*delayed_tasks)
+    
+    console.print("  Writing tracking results to Zarr...")
     for det_slc, chunk_res, counts in tqdm(results, desc="Writing Tracking Chunks"):
         tracking_results[det_slc] = chunk_res
-        # We need to count successful tracks per frame from the results
         
     # Recalculate detection counts based on successful tracks
-    temp_n_detections = root[f'crop_runs/{source_run_name}/n_detections'][:]
     cumulative_counts = np.cumsum(np.insert(temp_n_detections, 0, 0))
     
     for i in range(num_images):
         start_idx = cumulative_counts[i]
         end_idx = cumulative_counts[i+1]
-        frame_results = tracking_results[start_idx:end_idx]
-        n_tracked_detections[i] = np.sum(~np.isnan(frame_results[:, 0]))
+        if end_idx > start_idx:
+            frame_results = tracking_results[start_idx:end_idx]
+            n_tracked_detections[i] = np.sum(~np.isnan(frame_results[:, 0]))
+        else:
+            n_tracked_detections[i] = 0
 
-    successful_tracks = n_tracked_detections[:].sum()
-    frames_with_tracks = np.sum(n_tracked_detections[:] > 0)
+    successful_tracks = int(n_tracked_detections[:].sum())
+    frames_with_tracks = int(np.sum(n_tracked_detections[:] > 0))
     percent_tracked = (frames_with_tracks / num_images) * 100 if num_images > 0 else 0
-    summary_stats = {'total_frames': num_images, 'frames_with_tracks': int(frames_with_tracks), 'total_successful_tracks': int(successful_tracks), 'percent_frames_tracked': round(percent_tracked, 2)}
+    
+    summary_stats = {
+        'total_frames': num_images, 
+        'frames_with_tracks': frames_with_tracks, 
+        'total_successful_tracks': successful_tracks, 
+        'percent_frames_tracked': round(percent_tracked, 2)
+    }
     
     if successful_tracks > 0:
         valid_indices = np.where(~np.isnan(tracking_results[:, 0]))[0]
-        summary_stats['confidence_stats'] = {'mean': float(np.nanmean(tracking_results[valid_indices, 19])), 'std': float(np.nanstd(tracking_results[valid_indices, 19])), 'min': float(np.nanmin(tracking_results[valid_indices, 19])), 'max': float(np.nanmax(tracking_results[valid_indices, 19]))}
+        summary_stats['confidence_stats'] = {
+            'mean': float(np.nanmean(tracking_results[valid_indices, 19])), 
+            'std': float(np.nanstd(tracking_results[valid_indices, 19])), 
+            'min': float(np.nanmin(tracking_results[valid_indices, 19])), 
+            'max': float(np.nanmax(tracking_results[valid_indices, 19]))
+        }
         
     track_group.attrs['summary_statistics'] = summary_stats
     track_group.attrs['duration_seconds'] = time.perf_counter() - start_time
     
-    console.print(f"Tracking: [green]{successful_tracks}[/green] total tracks in [green]{frames_with_tracks}/{num_images}[/green] frames ([cyan]{percent_tracked:.2f}%[/cyan]).")
+    console.print(f"  [bold green]✓[/bold green] Tracking completed in [green]{track_group.attrs['duration_seconds']:.2f}[/green] seconds.")
+    console.print(f"  Found [green]{successful_tracks}[/green] successful tracks in [green]{frames_with_tracks}/{num_images}[/green] frames ([cyan]{percent_tracked:.2f}%[/cyan]).")
     
     parent_group = root['tracking_runs']
     if 'best' not in parent_group.attrs or percent_tracked > parent_group.attrs['best']['percent_frames_tracked']:
-        console.print(f"[bold green]New best tracking run found! Success rate: {percent_tracked:.2f}% of frames[/bold green]")
+        console.print(f"  [bold green] New best tracking run! Success rate: {percent_tracked:.2f}% of frames[/bold green]")
         parent_group.attrs['best'] = {'run_name': track_group.name, **summary_stats}
 
 def run_refine_stage(zarr_path, params, console):
@@ -669,13 +1023,49 @@ def run_refine_stage(zarr_path, params, console):
     console.print("Skipping refinement stage for multi-fish workflow.")
 
 
+def create_dish_mask(mask_params, img_shape, console=None):
+    """
+    Create a dish mask based on the shape specified in mask_params.
+    Supports both 'rectangle' and 'circle' shapes.
+    
+    Args:
+        mask_params: Dictionary containing mask parameters
+        img_shape: Tuple of (height, width) for the image
+        console: Rich Console object for formatted printing (optional)
+    
+    Returns:
+        numpy array mask or None if no mask defined
+    """
+    if not mask_params:
+        return None
+    
+    dish_shape = mask_params.get('shape', 'circle')
+    mask = None
+    
+    if dish_shape == 'rectangle' and 'roi' in mask_params:
+        x, y, w, h = mask_params['roi']
+        mask = np.zeros(img_shape, dtype=np.uint8)
+        cv2.rectangle(mask, (x, y), (x+w, y+h), 255, -1)
+        if console:
+            console.print(f"  [green]✓[/green] Using rectangular mask from config.")
+        
+    elif dish_shape == 'circle' and 'center' in mask_params and 'radius' in mask_params:
+        center = mask_params['center']
+        radius = mask_params['radius']
+        mask = np.zeros(img_shape, dtype=np.uint8)
+        cv2.circle(mask, tuple(center), radius, 255, -1)
+        if console:
+            console.print(f"  [green]✓[/green] Using circular mask from config (center={center}, radius={radius}).")
+    
+    return mask
+
+
 def main():
     console = Console()
     parser = argparse.ArgumentParser(description="Fish tracking pipeline with YOLO-ready zarr data generation.")
     parser.add_argument("zarr_path", type=str, help="Path to the output Zarr file.")
     parser.add_argument("--video-path", type=str, help="Path to the input video file (required for 'import' or 'all' stages).")
     parser.add_argument("--config", type=str, default="src/pipeline_config.yaml", help="Path to the pipeline configuration YAML file.")
-    # MODIFIED: Allow multiple stages to be passed
     parser.add_argument(
         "--stage", 
         required=True, 
@@ -690,7 +1080,6 @@ def main():
 
     console.print(Panel("[bold cyan]Multi-Fish Tracking Pipeline[/bold cyan]", subtitle="[yellow]Powered by Dask & Zarr![/yellow]", expand=False))
 
-    # MODIFIED: Check if 'import' is in the list of stages
     if ('import' in args.stage or 'all' in args.stage) and not args.video_path:
         parser.error("--video-path is required when running the 'import' or 'all' stages.")
 
@@ -710,7 +1099,7 @@ def main():
     overall_start_time = time.perf_counter()
     cli_args_dict = vars(args)
 
-    # MODIFIED: Logic to run stages based on list membership
+    # Logic to run stages based on list membership
     if 'import' in args.stage or 'all' in args.stage: run_import_stage_parallel_io(args.video_path, args.zarr_path, pipeline_params, cli_args_dict, console)
     if 'background' in args.stage or 'all' in args.stage: run_background_stage(args.zarr_path, pipeline_params, console)
     if 'detect' in args.stage or 'all' in args.stage: run_detect_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)
@@ -718,7 +1107,7 @@ def main():
     if 'crop' in args.stage or 'all' in args.stage: run_crop_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)
     if 'track' in args.stage or 'all' in args.stage: run_tracking_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)    
     
-    # MODIFIED: Check if 'all' was specified for the final summary
+    # Check if 'all' was specified for the final summary
     if 'all' in args.stage:
         root = zarr.open_group(args.zarr_path, mode='a')
         root.attrs.update({'total_pipeline_duration_seconds': time.perf_counter() - overall_start_time, 'pipeline_version': '2.0-multi-fish'})
