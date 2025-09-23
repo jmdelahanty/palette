@@ -166,7 +166,7 @@ def visualize_preprocessing_pipeline(zarr_path, frame_range=None, save_path=None
     n_stages = len(datasets)
     
     if n_stages == 1:
-        print("\n⚠️  Only original data found. Run preprocessing steps first!")
+        print("\n  Only original data found. Run preprocessing steps first!")
         print("   1. python frame_distance_analyzer.py <zarr> --threshold 250 --drop --save")
         print("   2. python gap_interpolator.py <zarr> --save")
     
@@ -567,7 +567,7 @@ Examples:
             best = versions_info[0]['name']
             print(f"  python src/visualize_preprocessing.py {args.zarr_path} --version {best}")
         
-        return 0  # EXIT HERE - don't run visualization
+        return 0
     
     frame_range = None
     if args.frames:
