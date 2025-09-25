@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Enhanced Swimming Bout Analyzer with Calibration Support
+Enhanced Swimming Bout Analyzer with Calibration Support and Data Provenance
 
-Detects and analyzes swimming bouts with full calibration support:
+Detects and analyzes swimming bouts with full calibration support and provenance tracking:
 - Automatic unit conversion (pixels to mm/cm/body lengths)
 - Dual unit display throughout analysis
 - Calibration-aware statistics
 - Enhanced visualizations with real-world units
+- Complete data provenance and reproducibility tracking
 """
 
 import numpy as np
@@ -21,6 +22,64 @@ import argparse
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Literal
 from dataclasses import dataclass, field
+from datetime import datetime
+import subprocess
+import socket
+import os
+import sys
+import json
+
+
+def get_git_info() -> Dict:
+    """Get current git commit and status."""
+    try:
+        # Get current commit hash
+        commit = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'], 
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        
+        # Check if repo is dirty
+        status = subprocess.check_output(
+            ['git', 'status', '--porcelain'],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        is_dirty = len(status) > 0
+        
+        # Get branch name
+        branch = subprocess.check_output(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        
+        return {
+            'commit': commit[:8],
+            'commit_full': commit,
+            'branch': branch,
+            'dirty': is_dirty
+        }
+    except:
+        return {
+            'commit': 'unknown',
+            'commit_full': 'unknown',
+            'branch': 'unknown',
+            'dirty': False
+        }
+
+
+def get_environment_info() -> Dict:
+    """Get environment information."""
+    return {
+        'python_version': sys.version,
+        'numpy_version': np.__version__,
+        'scipy_version': __import__('scipy').__version__,
+        'pandas_version': pd.__version__,
+        'zarr_version': zarr.__version__,
+        'matplotlib_version': __import__('matplotlib').__version__,
+        'hostname': socket.gethostname(),
+        'username': os.environ.get('USER', 'unknown'),
+        'platform': sys.platform
+    }
 
 
 @dataclass
@@ -71,7 +130,7 @@ class BoutWithUnits:
 
 
 class EnhancedBoutAnalyzer:
-    """Analyze swimming bouts with full calibration support."""
+    """Analyze swimming bouts with full calibration and provenance support."""
     
     def __init__(
         self,
@@ -103,6 +162,18 @@ class EnhancedBoutAnalyzer:
         self.min_bout_duration_s = min_bout_duration_s
         self.min_gap_duration_s = min_gap_duration_s
         self.verbose = verbose
+        
+        # Store initialization parameters for provenance
+        self.init_params = {
+            'zarr_path': str(zarr_path),
+            'source': source,
+            'speed_threshold_px_s': speed_threshold_px_s,
+            'speed_threshold_mm_s': speed_threshold_mm_s,
+            'speed_threshold_bl_s': speed_threshold_bl_s,
+            'min_bout_duration_s': min_bout_duration_s,
+            'min_gap_duration_s': min_gap_duration_s,
+            'display_units': display_units
+        }
         
         # Load zarr data
         self.root = zarr.open(str(self.zarr_path), mode='r')
@@ -191,7 +262,12 @@ class EnhancedBoutAnalyzer:
         # Store source info
         self.source_info = {'name': source, 'type': 'original'}
         
-        # Determine which data to load
+        # Check if this is a multi-fish tracker zarr
+        if 'detect_runs' in self.root:
+            self._load_from_multifish_tracker()
+            return
+        
+        # Determine which data to load for standard format
         if source == 'latest':
             # Try different preprocessing stages in order of preference
             if 'preprocessing' in self.root:
@@ -240,19 +316,34 @@ class EnhancedBoutAnalyzer:
         if 'bboxes' in data_group:
             self.bboxes = data_group['bboxes'][:]
             self.n_detections = data_group['n_detections'][:]
-        else:
-            # Handle different zarr structures (e.g., detect_runs)
-            if 'detect_runs' in self.root:
-                detect_group = self.root['detect_runs']
-                if 'latest' in detect_group.attrs:
-                    latest_detect = detect_group.attrs['latest']
-                    data_group = detect_group[latest_detect]
-                    
-                    # Handle normalized bbox coordinates
-                    if 'bbox_norm_coords' in data_group:
-                        self._load_from_normalized_coords(data_group)
-                        return
             
+            # Get metadata
+            self.fps = self.root.attrs.get('fps', 60.0)
+            self.total_frames = len(self.n_detections)
+            
+            # Extract positions from bounding boxes
+            self.positions_x = np.full(self.total_frames, np.nan)
+            self.positions_y = np.full(self.total_frames, np.nan)
+            
+            for frame_idx in range(self.total_frames):
+                if self.n_detections[frame_idx] > 0:
+                    bbox = self.bboxes[frame_idx, 0]  # First detection
+                    # Calculate centroid from bbox [x1, y1, x2, y2]
+                    cx = (bbox[0] + bbox[2]) / 2
+                    cy = (bbox[1] + bbox[3]) / 2
+                    self.positions_x[frame_idx] = cx
+                    self.positions_y[frame_idx] = cy
+            
+            # Create time axis
+            self.time_axis = np.arange(self.total_frames) / self.fps
+            
+            # Calculate speed
+            self._calculate_speed()
+            
+            if self.verbose:
+                coverage = np.sum(~np.isnan(self.positions_x)) / self.total_frames
+                print(f"Loaded {self.source_info['name']} data: {coverage*100:.1f}% coverage")
+        else:
             raise ValueError(f"Could not find 'bboxes' data in {self.source_info['name']}")
         
         # Get metadata
@@ -282,7 +373,128 @@ class EnhancedBoutAnalyzer:
             coverage = np.sum(~np.isnan(self.positions_x)) / self.total_frames
             print(f"Loaded {self.source_info['name']} data: {coverage*100:.1f}% coverage")
     
+    def _load_from_multifish_tracker(self):
+        """Load data from multi-fish tracker zarr structure."""
+        detect_group = self.root['detect_runs']
+        latest_detect = detect_group.attrs.get('latest', None)
+        
+        if not latest_detect:
+            # Try to find a run
+            run_names = sorted([name for name in detect_group.keys() if name.startswith('run_')])
+            if run_names:
+                latest_detect = run_names[-1]
+            else:
+                raise ValueError("No detect runs found in zarr")
+        
+        data_group = detect_group[latest_detect]
+        self.source_info = {'name': f"detect_runs/{latest_detect}", 'type': 'multifish'}
+        
+        # Load detection data
+        n_detections = data_group['n_detections'][:]
+        bbox_coords = data_group['bbox_norm_coords'][:]
+        
+        # Get metadata
+        self.fps = self.root.attrs.get('fps', 60.0)
+        
+        # Get image dimensions
+        if 'raw_video' in self.root and 'images_ds' in self.root['raw_video']:
+            width = self.root['raw_video/images_ds'].shape[2]
+            height = self.root['raw_video/images_ds'].shape[1]
+        else:
+            # Use downsampled dimensions from attributes or default
+            width = self.root.attrs.get('width_ds', 640)
+            height = self.root.attrs.get('height_ds', 640)
+        
+        self.total_frames = len(n_detections)
+        self.positions_x = np.full(self.total_frames, np.nan)
+        self.positions_y = np.full(self.total_frames, np.nan)
+        
+        # Check if we have ID assignments for multi-fish tracking
+        fish_id = 0  # Default to first fish
+        if 'id_assignments_runs' in self.root or 'id_assignments' in self.root:
+            id_key = 'id_assignments_runs' if 'id_assignments_runs' in self.root else 'id_assignments'
+            id_group = self.root[id_key]
+            latest_id = id_group.attrs.get('latest', None)
+            
+            if latest_id:
+                id_data = id_group[latest_id]
+                detection_ids = id_data['detection_ids'][:]
+                n_detections_per_roi = id_data['n_detections_per_roi'][:]
+                
+                # Extract positions for specific fish
+                cumulative_idx = 0
+                for frame_idx in range(self.total_frames):
+                    frame_det_count = int(n_detections[frame_idx])
+                    
+                    if frame_det_count > 0 and n_detections_per_roi[frame_idx, fish_id] > 0:
+                        frame_detection_ids = detection_ids[cumulative_idx:cumulative_idx + frame_det_count]
+                        roi_mask = frame_detection_ids == fish_id
+                        
+                        if np.any(roi_mask):
+                            roi_idx = np.where(roi_mask)[0][0]
+                            bbox = bbox_coords[cumulative_idx + roi_idx]
+                            
+                            # bbox format: [center_x_norm, center_y_norm, width_norm, height_norm]
+                            self.positions_x[frame_idx] = bbox[0] * width
+                            self.positions_y[frame_idx] = bbox[1] * height
+                    
+                    cumulative_idx += frame_det_count
+                
+                if self.verbose:
+                    print(f"Tracking fish ID {fish_id}")
+        else:
+            # No ID assignments - treat as single fish
+            cumulative_idx = 0
+            for frame_idx in range(self.total_frames):
+                if n_detections[frame_idx] > 0:
+                    bbox = bbox_coords[cumulative_idx]
+                    # bbox format: [center_x_norm, center_y_norm, width_norm, height_norm]
+                    self.positions_x[frame_idx] = bbox[0] * width
+                    self.positions_y[frame_idx] = bbox[1] * height
+                    cumulative_idx += 1
+
+        # Create time axis
+        self.time_axis = np.arange(self.total_frames) / self.fps
+        
+        # Calculate speed
+        self._calculate_speed()
+        
+        if self.verbose:
+            coverage = np.sum(~np.isnan(self.positions_x)) / self.total_frames
+            print(f"Loaded multi-fish tracker data: {coverage*100:.1f}% coverage")
+        
+    
     def _load_from_normalized_coords(self, data_group):
+        """Load data from normalized coordinate format."""
+        n_detections = data_group['n_detections'][:]
+        bbox_coords = data_group['bbox_norm_coords'][:]
+        
+        # Get metadata first (before using fps)
+        self.fps = self.root.attrs.get('fps', 60.0)
+        
+        # Get dimensions
+        width = self.root.attrs.get('width', 640)
+        height = self.root.attrs.get('height', 640)
+        
+        self.total_frames = len(n_detections)
+        self.positions_x = np.full(self.total_frames, np.nan)
+        self.positions_y = np.full(self.total_frames, np.nan)
+        
+        # Extract positions
+        cumulative = np.cumsum(np.insert(n_detections, 0, 0))
+        for frame_idx in range(self.total_frames):
+            if n_detections[frame_idx] > 0:
+                bbox_idx = cumulative[frame_idx]
+                # Normalized coords are [center_x, center_y, width, height]
+                self.positions_x[frame_idx] = bbox_coords[bbox_idx][0] * width
+                self.positions_y[frame_idx] = bbox_coords[bbox_idx][1] * height
+        
+        self.time_axis = np.arange(self.total_frames) / self.fps
+        self._calculate_speed()
+        
+        if self.verbose:
+            coverage = np.sum(~np.isnan(self.positions_x)) / self.total_frames
+            print(f"Loaded normalized coord data: {coverage*100:.1f}% coverage")
         """Load data from normalized coordinate format."""
         n_detections = data_group['n_detections'][:]
         bbox_coords = data_group['bbox_norm_coords'][:]
@@ -330,14 +542,20 @@ class EnhancedBoutAnalyzer:
         self.speed_px = np.full(self.total_frames, np.nan)
         self.speed_px[1:] = displacement * self.fps
         
-        # Smooth to reduce noise
+        # Smooth to reduce noise (only if we have enough valid data)
         valid_mask = ~np.isnan(self.speed_px)
         if np.sum(valid_mask) > 5:
-            self.speed_px[valid_mask] = savgol_filter(
-                self.speed_px[valid_mask],
-                window_length=min(5, np.sum(valid_mask)),
-                polyorder=2
-            )
+            from scipy.signal import savgol_filter
+            # Ensure window length is odd and less than data length
+            window_length = min(5, np.sum(valid_mask))
+            if window_length % 2 == 0:
+                window_length -= 1
+            if window_length >= 3:  # Minimum window for savgol
+                self.speed_px[valid_mask] = savgol_filter(
+                    self.speed_px[valid_mask],
+                    window_length=window_length,
+                    polyorder=min(2, window_length-1)
+                )
     
     def _detect_bouts(self) -> List[BoutWithUnits]:
         """Detect and characterize swimming bouts."""
@@ -611,17 +829,26 @@ class EnhancedBoutAnalyzer:
         bout_times = [b.start_time_s for b in self.bouts]
         if bout_times and distance_values:
             ax7.scatter(bout_times, distance_values, alpha=0.6, s=20)
+            
+            # Add moving average
+            window_size = min(20, len(bout_times) // 4)
+            if window_size > 2:
+                from scipy.ndimage import uniform_filter1d
+                smoothed = uniform_filter1d(distance_values, size=window_size, mode='nearest')
+                ax7.plot(bout_times, smoothed, 'r-', alpha=0.5, linewidth=2, label='Moving avg')
+            
             ax7.set_xlabel('Time (seconds)')
             ax7.set_ylabel(f'Distance ({distance_unit})')
             ax7.set_title('Bout Pattern Over Time')
+            ax7.legend()
             ax7.grid(True, alpha=0.3)
         
         # 8. Summary statistics box
         ax8 = fig.add_subplot(gs[3, :])
         ax8.axis('off')
         
-        # Create summary text with units
-        stats_text = self._create_summary_text()
+        # Create summary text with units and provenance
+        stats_text = self._create_summary_text_with_provenance()
         
         ax8.text(0.5, 0.5, stats_text, transform=ax8.transAxes,
                 fontsize=10, verticalalignment='center',
@@ -640,8 +867,8 @@ class EnhancedBoutAnalyzer:
         
         plt.show()
     
-    def _create_summary_text(self) -> str:
-        """Create formatted summary text with units."""
+    def _create_summary_text_with_provenance(self) -> str:
+        """Create formatted summary text with units and provenance info."""
         if not self.bouts:
             return "No bouts detected"
         
@@ -667,9 +894,6 @@ class EnhancedBoutAnalyzer:
         if self.calibration:
             lines.append("MEASUREMENTS (with calibration):")
             lines.append("-"*40)
-            
-            # Create table format
-            headers = ["Metric", "Pixels", "Millimeters", "Body Lengths"]
             
             # Distance
             dist_px = [b.distance_px for b in self.bouts]
@@ -716,78 +940,74 @@ class EnhancedBoutAnalyzer:
             lines.append(f"Speed: {np.mean(speed_px):.1f} ± {np.std(speed_px):.1f} px/s")
             lines.append(f"Total: {sum(dist_px):.1f} pixels")
         
+        lines.append("")
+        
+        # Add git info
+        git_info = get_git_info()
+        lines.append(f"Git: {git_info['commit']} ({'*dirty*' if git_info['dirty'] else 'clean'})")
+        lines.append(f"Analysis: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
         return "\n".join(lines)
     
-    def export_to_csv(self, csv_path: str):
-        """Export bout data to CSV with all units."""
-        data = []
-        
-        for bout in self.bouts:
-            row = {
-                'bout_id': bout.bout_id,
-                'start_frame': bout.start_frame,
-                'end_frame': bout.end_frame,
-                'start_time_s': bout.start_time_s,
-                'end_time_s': bout.end_time_s,
-                'duration_s': bout.duration_s,
-                'distance_px': bout.distance_px,
-                'mean_speed_px_s': bout.mean_speed_px_s,
-                'peak_speed_px_s': bout.peak_speed_px_s
-            }
-            
-            if self.calibration:
-                row.update({
-                    'distance_mm': bout.distance_mm,
-                    'distance_bl': bout.distance_bl,
-                    'mean_speed_mm_s': bout.mean_speed_mm_s,
-                    'mean_speed_bl_s': bout.mean_speed_bl_s,
-                    'peak_speed_mm_s': bout.peak_speed_mm_s,
-                    'peak_speed_bl_s': bout.peak_speed_bl_s
-                })
-            
-            data.append(row)
-        
-        df = pd.DataFrame(data)
-        
-        # Add IBI
-        ibis = [np.nan]
-        for i in range(1, len(self.bouts)):
-            ibi = self.bouts[i].start_time_s - self.bouts[i-1].end_time_s
-            ibis.append(ibi)
-        df['inter_bout_interval_s'] = ibis
-        
-        df.to_csv(csv_path, index=False)
-        print(f"Data exported to: {csv_path}")
-        
-        return df
-
-
     def save_to_zarr(self, group_name: str = 'bout_analysis'):
-        """Save bout analysis results to zarr file."""
-        if 'r+' not in str(self.root.mode):
-            print("Warning: Zarr file opened in read-only mode. Cannot save results.")
-            return
+        """Save bout analysis results to zarr file with complete provenance."""
+        # Open zarr in write mode
+        root = zarr.open(str(self.zarr_path), mode='r+')
+        
+        # Create timestamped run group
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        run_name = f"run_{timestamp}"
         
         # Create or get bout analysis group
-        if group_name in self.root:
-            bout_group = self.root[group_name]
-            print(f"Updating existing {group_name} group...")
+        if group_name not in root:
+            bout_group = root.create_group(group_name)
         else:
-            bout_group = self.root.create_group(group_name)
-            print(f"Creating new {group_name} group...")
+            bout_group = root[group_name]
         
-        # Save metadata
-        bout_group.attrs['analysis_date'] = datetime.now().isoformat()
-        bout_group.attrs['speed_threshold_px'] = self.speed_threshold_px
-        bout_group.attrs['min_bout_duration_s'] = self.min_bout_duration_s
-        bout_group.attrs['min_gap_duration_s'] = self.min_gap_duration_s
-        bout_group.attrs['n_bouts'] = len(self.bouts)
-        bout_group.attrs['source_data'] = self.source_info['name'] if hasattr(self, 'source_info') else 'unknown'
+        # Create runs group if it doesn't exist
+        if 'runs' not in bout_group:
+            runs_group = bout_group.create_group('runs')
+        else:
+            runs_group = bout_group['runs']
+        
+        # Create this run's group
+        run_group = runs_group.create_group(run_name)
+        
+        print(f"Saving to {group_name}/runs/{run_name}...")
+        
+        # Save provenance metadata
+        git_info = get_git_info()
+        env_info = get_environment_info()
+        
+        run_group.attrs['timestamp'] = datetime.now().isoformat()
+        run_group.attrs['git_commit'] = git_info['commit_full']
+        run_group.attrs['git_branch'] = git_info['branch']
+        run_group.attrs['git_dirty'] = git_info['dirty']
+        run_group.attrs['hostname'] = env_info['hostname']
+        run_group.attrs['username'] = env_info['username']
+        run_group.attrs['python_version'] = env_info['python_version']
+        run_group.attrs['numpy_version'] = env_info['numpy_version']
+        run_group.attrs['scipy_version'] = env_info['scipy_version']
+        
+        # Save analysis parameters
+        run_group.attrs['speed_threshold_px'] = self.speed_threshold_px
+        run_group.attrs['min_bout_duration_s'] = self.min_bout_duration_s
+        run_group.attrs['min_gap_duration_s'] = self.min_gap_duration_s
+        run_group.attrs['n_bouts'] = len(self.bouts)
+        run_group.attrs['source_data'] = self.source_info['name']
+        run_group.attrs['source_type'] = self.source_info['type']
+        
+        # Save all initialization parameters
+        run_group.attrs['init_params'] = json.dumps(self.init_params)
+        
+        # Calculate coverage
+        coverage = np.sum(~np.isnan(self.positions_x)) / self.total_frames
+        run_group.attrs['data_coverage'] = coverage
         
         if self.calibration:
-            bout_group.attrs['speed_threshold_mm'] = self.speed_threshold_px * self.calibration.pixel_to_mm
-            bout_group.attrs['speed_threshold_bl'] = (self.speed_threshold_px * self.calibration.pixel_to_mm / 
-                                                       self.calibration.fish_length_mm)
+            run_group.attrs['speed_threshold_mm'] = self.speed_threshold_px * self.calibration.pixel_to_mm
+            run_group.attrs['speed_threshold_bl'] = (self.speed_threshold_px * self.calibration.pixel_to_mm / 
+                                                      self.calibration.fish_length_mm)
         
         # Save bout data as arrays
         if self.bouts:
@@ -800,13 +1020,13 @@ class EnhancedBoutAnalyzer:
             peak_speeds_px = np.array([b.peak_speed_px_s for b in self.bouts])
             
             # Save arrays
-            bout_group.array('bout_ids', bout_ids, overwrite=True)
-            bout_group.array('start_frames', start_frames, overwrite=True)
-            bout_group.array('end_frames', end_frames, overwrite=True)
-            bout_group.array('durations_s', durations, overwrite=True)
-            bout_group.array('distances_px', distances_px, overwrite=True)
-            bout_group.array('mean_speeds_px_s', mean_speeds_px, overwrite=True)
-            bout_group.array('peak_speeds_px_s', peak_speeds_px, overwrite=True)
+            run_group.array('bout_ids', bout_ids)
+            run_group.array('start_frames', start_frames)
+            run_group.array('end_frames', end_frames)
+            run_group.array('durations_s', durations)
+            run_group.array('distances_px', distances_px)
+            run_group.array('mean_speeds_px_s', mean_speeds_px)
+            run_group.array('peak_speeds_px_s', peak_speeds_px)
             
             # Save calibrated measurements if available
             if self.calibration:
@@ -817,18 +1037,32 @@ class EnhancedBoutAnalyzer:
                 peak_speeds_mm = np.array([b.peak_speed_mm_s for b in self.bouts])
                 peak_speeds_bl = np.array([b.peak_speed_bl_s for b in self.bouts])
                 
-                bout_group.array('distances_mm', distances_mm, overwrite=True)
-                bout_group.array('distances_bl', distances_bl, overwrite=True)
-                bout_group.array('mean_speeds_mm_s', mean_speeds_mm, overwrite=True)
-                bout_group.array('mean_speeds_bl_s', mean_speeds_bl, overwrite=True)
-                bout_group.array('peak_speeds_mm_s', peak_speeds_mm, overwrite=True)
-                bout_group.array('peak_speeds_bl_s', peak_speeds_bl, overwrite=True)
+                run_group.array('distances_mm', distances_mm)
+                run_group.array('distances_bl', distances_bl)
+                run_group.array('mean_speeds_mm_s', mean_speeds_mm)
+                run_group.array('mean_speeds_bl_s', mean_speeds_bl)
+                run_group.array('peak_speeds_mm_s', peak_speeds_mm)
+                run_group.array('peak_speeds_bl_s', peak_speeds_bl)
+            
+            # Calculate and save inter-bout intervals
+            if len(self.bouts) > 1:
+                ibis = []
+                for i in range(1, len(self.bouts)):
+                    ibi = self.bouts[i].start_time_s - self.bouts[i-1].end_time_s
+                    ibis.append(ibi)
+                run_group.array('inter_bout_intervals_s', np.array(ibis))
             
             # Calculate and save summary statistics
             stats = self.calculate_summary_statistics()
-            bout_group.attrs.update(stats)
+            for key, value in stats.items():
+                run_group.attrs[f'stat_{key}'] = value
             
-            print(f"Saved {len(self.bouts)} bouts to zarr")
+            # Update latest pointer
+            bout_group.attrs['latest'] = f"runs/{run_name}"
+            
+            print(f"Saved {len(self.bouts)} bouts with full provenance")
+            print(f"Git: {git_info['commit'][:8]} ({'dirty' if git_info['dirty'] else 'clean'})")
+            print(f"Coverage: {coverage*100:.1f}%")
     
     def calculate_summary_statistics(self) -> Dict:
         """Calculate comprehensive summary statistics."""
@@ -908,11 +1142,95 @@ class EnhancedBoutAnalyzer:
             })
         
         return stats
+    
+    def export_to_csv(self, csv_path: str):
+        """Export bout data to CSV with all units."""
+        data = []
+        
+        for bout in self.bouts:
+            row = {
+                'bout_id': bout.bout_id,
+                'start_frame': bout.start_frame,
+                'end_frame': bout.end_frame,
+                'start_time_s': bout.start_time_s,
+                'end_time_s': bout.end_time_s,
+                'duration_s': bout.duration_s,
+                'distance_px': bout.distance_px,
+                'mean_speed_px_s': bout.mean_speed_px_s,
+                'peak_speed_px_s': bout.peak_speed_px_s
+            }
+            
+            if self.calibration:
+                row.update({
+                    'distance_mm': bout.distance_mm,
+                    'distance_bl': bout.distance_bl,
+                    'mean_speed_mm_s': bout.mean_speed_mm_s,
+                    'mean_speed_bl_s': bout.mean_speed_bl_s,
+                    'peak_speed_mm_s': bout.peak_speed_mm_s,
+                    'peak_speed_bl_s': bout.peak_speed_bl_s
+                })
+            
+            data.append(row)
+        
+        df = pd.DataFrame(data)
+        
+        # Add IBI
+        ibis = [np.nan]
+        for i in range(1, len(self.bouts)):
+            ibi = self.bouts[i].start_time_s - self.bouts[i-1].end_time_s
+            ibis.append(ibi)
+        df['inter_bout_interval_s'] = ibis
+        
+        # Add metadata
+        metadata_df = pd.DataFrame([{
+            'git_commit': get_git_info()['commit'],
+            'analysis_date': datetime.now().isoformat(),
+            'source_data': self.source_info['name'],
+            'speed_threshold_px': self.speed_threshold_px,
+            'n_bouts': len(self.bouts)
+        }])
+        
+        # Save both data and metadata
+        df.to_csv(csv_path, index=False)
+        metadata_path = csv_path.replace('.csv', '_metadata.csv')
+        metadata_df.to_csv(metadata_path, index=False)
+        
+        print(f"Data exported to: {csv_path}")
+        print(f"Metadata exported to: {metadata_path}")
+        
+        return df
+    
+    @staticmethod
+    def load_from_zarr(zarr_path: str, run_name: Optional[str] = None):
+        """Load a previous bout analysis run from zarr."""
+        root = zarr.open(zarr_path, mode='r')
+        
+        if 'bout_analysis' not in root:
+            raise ValueError("No bout analysis found in zarr")
+        
+        bout_group = root['bout_analysis']
+        
+        # Load specific run or latest
+        if run_name:
+            if 'runs' in bout_group and run_name in bout_group['runs']:
+                run_group = bout_group['runs'][run_name]
+            else:
+                raise ValueError(f"Run {run_name} not found")
+        else:
+            # Load latest
+            if 'latest' in bout_group.attrs:
+                latest = bout_group.attrs['latest']
+                run_group = bout_group[latest]
+            else:
+                raise ValueError("No runs found in bout analysis")
+        
+        # Return the run group with all data
+        return run_group
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Enhanced bout analyzer with calibration support',
+        description='Enhanced bout analyzer with calibration and provenance support',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -928,8 +1246,11 @@ Examples:
   # Force display in specific units
   %(prog)s detections.zarr --display-units mm
   
-  # Full analysis with exports
+  # Full analysis with exports and provenance tracking
   %(prog)s detections.zarr --threshold-mm 2.0 --output-plot bouts.png --output-csv bouts.csv --save-zarr
+  
+  # Load a previous run
+  %(prog)s detections.zarr --load-run runs/run_20250923_150000
         """
     )
     parser.add_argument('zarr_path', help='Path to zarr file')
@@ -956,11 +1277,22 @@ Examples:
     parser.add_argument('--output-csv', type=str,
                        help='Path to save CSV data')
     parser.add_argument('--save-zarr', action='store_true',
-                       help='Save bout analysis results to zarr file')
+                       help='Save bout analysis results with provenance to zarr file')
+    parser.add_argument('--load-run', type=str,
+                       help='Load a previous analysis run')
     parser.add_argument('--quiet', action='store_true',
                        help='Suppress verbose output')
     
     args = parser.parse_args()
+    
+    # Load previous run if specified
+    if args.load_run:
+        run_data = EnhancedBoutAnalyzer.load_from_zarr(args.zarr_path, args.load_run)
+        print(f"Loaded run: {args.load_run}")
+        print(f"  Timestamp: {run_data.attrs['timestamp']}")
+        print(f"  Git commit: {run_data.attrs['git_commit'][:8]}")
+        print(f"  N bouts: {run_data.attrs['n_bouts']}")
+        return 0
     
     # Initialize analyzer
     analyzer = EnhancedBoutAnalyzer(
@@ -991,6 +1323,4 @@ Examples:
 
 
 if __name__ == '__main__':
-    import sys
-    from datetime import datetime
     sys.exit(main())

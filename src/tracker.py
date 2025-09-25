@@ -196,7 +196,6 @@ def run_assign_ids_stage(zarr_path, params, console):
 
     detect_group = root[f'detect_runs/{latest_detect_run}']
     
-    # --- APPLYING THE FIX TO BOTH VARIABLES ---
     # 1. Get references to the Zarr array objects
     bbox_coords_zarr = detect_group['bbox_norm_coords']
     n_detections_zarr = detect_group['n_detections']
@@ -1018,16 +1017,25 @@ def create_dish_mask(mask_params, img_shape, console=None):
 def main():
     console = Console()
     parser = argparse.ArgumentParser(description="Fish tracking pipeline with YOLO-ready zarr data generation.")
+
     parser.add_argument("zarr_path", type=str, help="Path to the output Zarr file.")
-    parser.add_argument("--video-path", type=str, help="Path to the input video file (required for 'import' or 'all' stages).")
+    parser.add_argument("--video-path", type=str, help="Path to the input video file (required for 'import' or '--all').")
     parser.add_argument("--config", type=str, default="src/pipeline_config.yaml", help="Path to the pipeline configuration YAML file.")
-    parser.add_argument(
+
+    # Mutually exclusive: either --stage or --all
+    stage_group = parser.add_mutually_exclusive_group(required=True)
+    stage_group.add_argument(
         "--stage", 
-        required=True, 
-        nargs='+', 
-        choices=['import', 'background', 'detect', 'crop', 'track', 'assign_ids', 'all'], 
+        nargs='+',
+        choices=['import', 'background', 'detect', 'crop', 'track', 'assign_ids'],
         help="One or more processing stages to run in order (e.g., import background detect)."
     )
+    stage_group.add_argument(
+        "--all",
+        action="store_true",
+        help="Run all stages in canonical order."
+    )
+
     parser.add_argument("--scheduler", default='processes', choices=['processes', 'threads', 'single-thread'], help="Dask scheduler.")
     parser.add_argument("--num-workers", type=int, default=None, help="Number of workers.")
     parser.add_argument("--roi-thresh", type=int, help="Override roi_thresh in the config file.")
@@ -1035,48 +1043,61 @@ def main():
 
     console.print(Panel("[bold cyan]Multi-Fish Tracking Pipeline[/bold cyan]", subtitle="[yellow]Powered by Dask & Zarr![/yellow]", expand=False))
 
-    if ('import' in args.stage or 'all' in args.stage) and not args.video_path:
-        parser.error("--video-path is required when running the 'import' or 'all' stages.")
+    # Require video-path if import is needed
+    if (args.all or (args.stage and 'import' in args.stage)) and not args.video_path:
+        parser.error("--video-path is required when running the 'import' stage or '--all'.")
 
     try:
         with open(args.config, 'r') as f:
             pipeline_params = yaml.safe_load(f)
         console.print(f"Loaded pipeline parameters from: [green]{args.config}[/green]")
     except FileNotFoundError:
-        console.print(f"[bold red]Error:[/bold red] Config file not found at {args.config}"); return
+        console.print(f"[bold red]Error:[/bold red] Config file not found at {args.config}")
+        return
+
     if args.roi_thresh is not None:
         pipeline_params['track']['roi_thresh'] = args.roi_thresh
         console.print(f"Overriding [magenta]track:roi_thresh[/magenta] with CLI value: [yellow]{args.roi_thresh}[/yellow]")
-    
+
     dask.config.set(scheduler=args.scheduler, num_workers=args.num_workers or os.cpu_count())
     console.print(f"Using Dask '[yellow]{dask.config.get('scheduler')}[/yellow]' scheduler with [yellow]{dask.config.get('num_workers')}[/yellow] workers.")
-    
+
     overall_start_time = time.perf_counter()
     cli_args_dict = vars(args)
 
-    # Logic to run stages based on list membership
-    if 'import' in args.stage or 'all' in args.stage: run_import_stage_parallel_io(args.video_path, args.zarr_path, pipeline_params, cli_args_dict, console)
-    if 'background' in args.stage or 'all' in args.stage: run_background_stage(args.zarr_path, pipeline_params, console)
-    if 'detect' in args.stage or 'all' in args.stage: run_detect_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)
-    if 'assign_ids' in args.stage or 'all' in args.stage: run_assign_ids_stage(args.zarr_path, pipeline_params, console)
-    if 'crop' in args.stage or 'all' in args.stage: run_crop_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)
-    if 'track' in args.stage or 'all' in args.stage: run_tracking_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)    
-    
-    # Check if 'all' was specified for the final summary
-    if 'all' in args.stage:
+    # Canonical stage order
+    ordered = ['import','background','detect','crop','track','assign_ids']
+    selected = ordered if args.all else [s for s in ordered if s in args.stage]
+
+    for s in selected:
+        if s == 'import':
+            run_import_stage_parallel_io(args.video_path, args.zarr_path, pipeline_params, cli_args_dict, console)
+        elif s == 'background':
+            run_background_stage(args.zarr_path, pipeline_params, console)
+        elif s == 'detect':
+            run_detect_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)
+        elif s == 'crop':
+            run_crop_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)
+        elif s == 'track':
+            run_tracking_stage(args.zarr_path, dask.config.get('scheduler'), pipeline_params, console)
+        elif s == 'assign_ids':
+            run_assign_ids_stage(args.zarr_path, pipeline_params, console)
+
+    # Final summary only for --all
+    if args.all:
         root = zarr.open_group(args.zarr_path, mode='a')
         root.attrs.update({'total_pipeline_duration_seconds': time.perf_counter() - overall_start_time, 'pipeline_version': '2.0-multi-fish'})
         latest_track_run = root['tracking_runs'].attrs['latest']
         successful_tracks = root[f'tracking_runs/{latest_track_run}'].attrs['summary_statistics']['total_successful_tracks']
         root.attrs['yolo_ready'] = successful_tracks > 0
-        
+
         console.rule("[bold]Pipeline Complete[/bold]")
         if successful_tracks > 0:
             console.print(f"Pipeline completed! Total time: [bold green]{root.attrs['total_pipeline_duration_seconds']:.2f}[/bold green] seconds.")
             console.print(f"[cyan]Data is ready for YOLO training. Next step:[/] python zarr_yolo_dataset_loader.py {args.zarr_path}")
         else:
             console.print(f"[bold yellow]Pipeline completed but no fish were successfully tracked![/bold yellow]")
-    
+
     console.print("\n[bold]Tracking complete![/bold]")
 
 if __name__ == "__main__":

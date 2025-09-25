@@ -1,0 +1,1 @@
+"""Zarr schema definitions."""
