@@ -4,13 +4,23 @@ Standardized Zarr schema for the Palette ecosystem using Zarr v3.
 This schema defines the structure that all packages expect and produce.
 """
 
-from typing import Dict, Any, Optional, List
-from datetime import datetime
-import json
-import numpy as np
+from typing import Dict, Any, Optional, Tuple, List
 import zarr
 from zarr.storage import LocalStore
 import zarr.codecs
+import numpy as np
+from datetime import datetime, timezone
+from pathlib import Path
+import platform
+
+# Import our existing system utilities
+from fisheye.utils.system import (
+    get_git_info,
+    get_platform_info,
+    get_gpu_info,
+    get_software_versions,
+    get_environment_summary
+)
 
 ZARR_SCHEMA_VERSION = "3.0.0"
 
@@ -167,395 +177,384 @@ def create_palette_zarr(
     path: str,
     video_metadata: Dict[str, Any],
     config: Dict[str, Any],
-    use_sharding: bool = False,
+    use_sharding: bool = False,   # placeholder; not used here yet
     cli_args: Optional[Dict[str, Any]] = None
 ) -> zarr.Group:
-    """
-    Create a Zarr store with Palette/FishEye structure using Zarr v3.
-    
-    Args:
-        path: Path to create the zarr store
-        video_metadata: Dictionary containing video information
-        config: Pipeline configuration dictionary
-        use_sharding: Whether to use sharding (not yet implemented in v3)
-        cli_args: Optional command line arguments to store
-    
-    Returns:
-        Root zarr group
-    """
-    # Create store using LocalStore for v3
     store = LocalStore(path)
-    root = zarr.open_group(store=store, mode='w')
-    
-    # Set root attributes
-    root.attrs.update({
-        'schema_version': ZARR_SCHEMA_VERSION,
-        'zarr_version': zarr.__version__,
-        'created_at': datetime.utcnow().isoformat(),
-        'fisheye_version': '0.1.0',
-        'pipeline_version': config.get('pipeline_version', '2.0-multi-fish'),
-        **video_metadata
-    })
-    
-    # Store command line args if provided
+    root = zarr.open_group(store=store, mode='w', zarr_format=3)
+
+    # ---- Root attrs ---------------------------------------------------------
     if cli_args:
         root.attrs['command_line_args'] = cli_args
-    
-    # Create main groups
-    raw_video = root.create_group('raw_video')
-    processing = root.create_group('processing')
-    analysis = root.create_group('analysis')
+
+    root.attrs['git_info'] = get_git_info()
+
+    # NOTE: ensure this matches your utils signature; if it expects ip_opt_in, rename kwarg
+    root.attrs['platform_info'] = get_platform_info(collect_ip=False, disk_path=path)
+
+    root.attrs['source_video_metadata'] = video_metadata
+
+    env_summary = get_environment_summary()
+    root.attrs['software_versions'] = env_summary.get('key_packages', {})
+    root.attrs['environment'] = {
+        'type': env_summary.get('environment_type', 'unknown'),
+        'name': env_summary.get('environment_name', 'none'),
+        'python_version': env_summary.get('python_version', platform.python_version()),
+    }
+
+    root.attrs['pipeline_version'] = '2.0-multi-fish'
+    root.attrs['zarr_format'] = 3                  # <- spec field
+    root.attrs['zarr_python'] = zarr.__version__   # <- library version (optional)
+    root.attrs['schema_version'] = '3.0.0'         # <- match your constant
+
+    # ---- Pipeline params ----------------------------------------------------
+    param_group = root.create_group('pipeline_params')
+    for stage, stage_params in config.items():
+        param_group.attrs[stage] = stage_params  # OK if JSON-serializable
+
+    # ---- Groups -------------------------------------------------------------
     metadata = root.create_group('metadata')
-    
-    # Create pipeline_params group to store configuration
-    pipeline_params = root.create_group('pipeline_params')
-    for stage_name, stage_config in config.items():
-        pipeline_params.attrs[stage_name] = stage_config
-    
-    # Create processing subgroups and run groups
-    processing.create_group('background')
-    processing.create_group('detection')
-    processing.create_group('tracking')
-    
-    # Create run groups that tracker.py expects
-    processing.create_group('background_runs')
-    processing.create_group('detect_runs')
-    processing.create_group('crop_runs')
-    processing.create_group('tracking_runs')
-    processing.create_group('id_assignments_runs')
-    
-    # Create analysis subgroups
-    analysis.create_group('metrics')
-    analysis.create_group('filtered')
-    analysis.create_group('interpolated')
-    
-    # Get dimensions
-    height = video_metadata.get('height', 1080)
-    width = video_metadata.get('width', 1920)
-    n_frames = video_metadata.get('total_frames', 100)
-    
+    raw_video = root.create_group('raw_video')
+
+    height = int(video_metadata.get('height', 1080))
+    width  = int(video_metadata.get('width', 1920))
+    n_frames = int(video_metadata.get('total_frames', 1))
+
     import_config = config.get('import', {})
-    ds_height, ds_width = import_config.get('downsample_size', [540, 960])
-    chunk_size = import_config.get('chunk_size', 100)
-    
-    # Add raw_video attributes for import stage compatibility
+    ds_height, ds_width = import_config.get('downsample_size', [480, 640])
+
+    # v3 codecs
+    ser = zarr.codecs.BytesCodec()
+    lz4 = zarr.codecs.BloscCodec(cname='lz4', clevel=1, shuffle='bitshuffle')
+
+    # Raw-video attrs
     raw_video.attrs.update({
-        'import_timestamp_utc': datetime.utcnow().isoformat(),
+        'import_timestamp_utc': datetime.now(timezone.utc).isoformat(),
         'original_resolution': (height, width),
         'downsampled_resolution': (ds_height, ds_width),
         'fps': video_metadata.get('fps', 30),
         'total_frames': n_frames,
-        'source_video': video_metadata.get('source_video', 'unknown')
+        'source_video': video_metadata.get('source_video', 'unknown'),
+        'decoding_device': (get_gpu_info().get('devices', [{'name': 'N/A'}])[0].get('name', 'N/A')),
+        'compressor': {'cname': 'lz4', 'clevel': 1, 'shuffle': 'bitshuffle'},  # <- fixed
+        'duration_seconds': None,
     })
-    
-    # Setup compressors for v3 (use 'compressors' for single codec)
-    compressors = zarr.codecs.BloscCodec(cname='zstd', clevel=1, shuffle='bitshuffle')
-    
-    # Create arrays using v3 API with compressors
+
+    # Arrays (frame-major; 1 frame per chunk)
     raw_video.create_array(
-        'images_full',
+        name='images_full',
         shape=(n_frames, height, width),
-        chunks=(chunk_size, height, width),
+        chunks=(1, height, width),
         dtype=np.uint8,
-        compressors=compressors,
-        fill_value=0
+        fill_value=0,
+        serializer=ser,
+        compressors=[lz4],
     )
-    
     raw_video.create_array(
-        'images_ds',
+        name='images_ds',
         shape=(n_frames, ds_height, ds_width),
-        chunks=(chunk_size, ds_height, ds_width),
+        chunks=(1, ds_height, ds_width),
         dtype=np.uint8,
-        compressors=compressors,
-        fill_value=0
+        fill_value=0,
+        serializer=ser,
+        compressors=[lz4],
     )
-    
     raw_video.create_array(
-        'timestamps',
+        name='timestamps',
         shape=(n_frames,),
-        chunks=(n_frames,),
+        chunks=(min(1000, n_frames),),
         dtype=np.float64,
-        compressors=None,  # No compression for small 1D array
-        fill_value=0.0
+        fill_value=np.nan,
+        serializer=ser,
+        compressors=[],  # no compression
     )
-    
+
+    # Processing / runs
+    processing = root.create_group('processing')
+    for g in ('background', 'detection', 'tracking',
+              'background_runs', 'detect_runs', 'crop_runs',
+              'tracking_runs', 'id_assignments_runs'):
+        processing.create_group(g)
+    for g in ('background_runs', 'detect_runs', 'crop_runs', 'tracking_runs', 'id_assignments_runs'):
+        processing[g].attrs['latest'] = None
+    processing['tracking_runs'].attrs['best'] = None
+
+    # Results
+    results = root.create_group('results')
+    for g in ('detections', 'tracks', 'keypoints'):
+        results.create_group(g)
+
+    # ---- Prefer attrs over scalar arrays for metadata -----------------------
+    gi = get_git_info()
+    metadata.attrs.update({
+        'git_commit': gi.get('commit_hash', 'N/A'),
+        'git_branch': gi.get('branch', 'N/A'),
+        'git_dirty': gi.get('is_dirty', False),
+    })
+
+    pi = root.attrs['platform_info']
+    metadata.attrs.update({
+        'hostname': pi.get('hostname', 'unknown'),
+        'system': pi.get('system', 'unknown'),
+        'cpu_cores': pi.get('cpu_cores', 1),
+    })
+
     return root
 
 
-def get_run_group(root: zarr.Group, run_name: str, stage: Optional[str] = None) -> zarr.Group:
+
+def get_run_group(root: zarr.Group, stage_name: str, create_new: bool = True) -> zarr.Group:
     """
-    Get or create a run group in the processing section.
+    Get or create a new timestamped group for a pipeline stage run.
+    Mimics the tracker.py get_run_group function.
     
     Args:
         root: Root zarr group
-        run_name: Name of the run
-        stage: Optional stage name (e.g., 'detection', 'tracking')
+        stage_name: Name of the pipeline stage
+        create_new: If True, create a new run. If False, return latest.
     
     Returns:
         Run group
     """
-    processing = root['processing']
+    parent_group_name = f"{stage_name}_runs"
     
-    # If stage is specified, get the stage group first
-    if stage:
-        if stage not in processing:
-            raise ValueError(f"Stage '{stage}' not found in processing groups")
-        parent_group = processing[stage]
+    # Handle special case where stage_name might already include '_runs'
+    if stage_name.endswith('_runs'):
+        parent_group_name = stage_name
+        stage_name = stage_name.replace('_runs', '')
+    
+    # Navigate to processing group if needed
+    if 'processing' in root and parent_group_name in root['processing']:
+        parent_group = root['processing'][parent_group_name]
+    elif parent_group_name in root:
+        parent_group = root[parent_group_name]
     else:
-        parent_group = processing
+        parent_group = root.require_group(parent_group_name)
     
-    # Get or create the run group
-    if run_name in parent_group:
-        return parent_group[run_name]
-    return parent_group.create_group(run_name)
+    if not create_new and 'latest' in parent_group.attrs:
+        latest_run_name = parent_group.attrs['latest']
+        if latest_run_name and latest_run_name in parent_group:
+            return parent_group[latest_run_name]
+    
+    # Create new timestamped run
+    timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
+    run_group_name = f"{stage_name}_{timestamp}"
+    run_group = parent_group.create_group(run_group_name)
+    
+    # Update latest marker
+    parent_group.attrs['latest'] = run_group_name
+    
+    # Add creation timestamp
+    run_group.attrs['created_utc'] = datetime.now(timezone.utc).isoformat()
+    
+    return run_group
+
+def create_background_arrays(
+    bg_group: zarr.Group,
+    img_shape: Tuple[int, int],
+    ds_img_shape: Tuple[int, int] | None = None,
+    source_frame_indices: Any = None,
+) -> tuple[zarr.Array, zarr.Array]:
+    """
+    Create arrays for storing background calculation results (Zarr v3 API).
+
+    Returns:
+        (background_full, background_ds)
+    """
+    ser = zarr.codecs.BytesCodec()
+    lz4 = zarr.codecs.BloscCodec(cname="lz4", clevel=1, shuffle="bitshuffle")
+
+    if ds_img_shape is None:
+        ds_img_shape = img_shape
+
+    # Single-chunk scalar images are fine for backgrounds.
+    background_full = bg_group.create_array(
+        "background_full",
+        shape=img_shape,
+        chunks=img_shape,
+        dtype="uint8",
+        fill_value=0,
+        serializer=ser,
+        compressors=[lz4],
+    )
+
+    background_ds = bg_group.create_array(
+        "background_ds",
+        shape=ds_img_shape,
+        chunks=ds_img_shape,
+        dtype="uint8",
+        fill_value=0,
+        serializer=ser,
+        compressors=[lz4],
+    )
+
+    # Store frame indices used
+    if source_frame_indices is not None:
+        if isinstance(source_frame_indices, str) and source_frame_indices == "all":
+            bg_group.attrs["source_frame_indices"] = "all"
+        else:
+            if hasattr(source_frame_indices, "tolist"):
+                source_frame_indices = source_frame_indices.tolist()
+            bg_group.attrs["source_frame_indices"] = source_frame_indices
+
+    return background_full, background_ds
 
 
 def create_detection_arrays(
-    run_group: zarr.Group,
+    detect_group: zarr.Group,
     n_frames: int,
-    n_rois: int,
-    chunk_size: int = 100
-) -> Dict[str, zarr.Array]:
+    chunk_size: int = 32,
+) -> tuple[zarr.Array, zarr.Array]:
     """
-    Create arrays for detection data in a run group.
-    
-    Args:
-        run_group: The run group to create arrays in
-        n_frames: Number of frames
-        n_rois: Number of ROIs/detections per frame
-        chunk_size: Chunk size for arrays
-    
+    Create arrays for storing detection results (Zarr v3 API).
+
     Returns:
-        Dictionary of created arrays
+        (n_detections, bbox_norm_coords)
     """
-    # Setup compressors for v3
-    compressors = zarr.codecs.BloscCodec(cname='zstd', clevel=3, shuffle='bitshuffle')
-    
-    arrays = {}
-    
-    # Create bounding boxes array
-    arrays['bboxes'] = run_group.create_array(
-        'bboxes',
-        shape=(n_frames, n_rois, 4),
-        dtype=np.float32,
-        chunks=(chunk_size, n_rois, 4),
-        compressors=compressors,
-        fill_value=np.nan
+    ser = zarr.codecs.BytesCodec()
+    lz4 = zarr.codecs.BloscCodec(cname="lz4", clevel=1, shuffle="bitshuffle")
+
+    # Per-frame counts
+    n_detections = detect_group.create_array(
+        "n_detections",
+        shape=(n_frames,),
+        chunks=(max(1, chunk_size * 4),),
+        dtype="i4",
+        fill_value=0,
+        serializer=ser,
+        compressors=[lz4],
     )
-    
-    # Create scores array
-    arrays['scores'] = run_group.create_array(
-        'scores',
-        shape=(n_frames, n_rois),
-        dtype=np.float32,
-        chunks=(chunk_size, n_rois),
-        compressors=compressors,
-        fill_value=0.0
+
+    # Growable table of boxes: start with 0 rows; each row = [x, y, w, h] (normalized)
+    bbox_norm_coords = detect_group.create_array(
+        "bbox_norm_coords",
+        shape=(0, 4),                            # start empty; use .resize(new_rows, 4) when appending
+        chunks=(max(1, chunk_size * 4), 4),     # chunks must be all integers (no None)
+        dtype="f8",
+        fill_value=np.nan,
+        serializer=ser,
+        compressors=[lz4],
     )
-    
-    # Create ROI IDs array
-    arrays['roi_ids'] = run_group.create_array(
-        'roi_ids',
-        shape=(n_frames, n_rois),
-        dtype=np.int32,
-        chunks=(chunk_size, n_rois),
-        compressors=compressors,
-        fill_value=-1
-    )
-    
-    return arrays
+
+    return n_detections, bbox_norm_coords
 
 
 def create_tracking_arrays(
-    run_group: zarr.Group,
+    track_group: zarr.Group,
     n_frames: int,
-    n_rois: int,
-    n_keypoints: int = 3,
-    chunk_size: int = 100
-) -> Dict[str, zarr.Array]:
+    total_detections: int = 0,
+    chunk_size: int = 32,
+) -> tuple[zarr.Array, zarr.Array]:
     """
-    Create arrays for tracking data using Zarr v3 compressors.
-    
-    Args:
-        run_group: Run group to create arrays in
-        n_frames: Number of frames
-        n_rois: Number of ROIs  
-        n_keypoints: Number of keypoints per detection
-        chunk_size: Chunk size for arrays
-    
+    Create arrays for storing tracking results (Zarr v3 API).
+
     Returns:
-        Dictionary of created arrays
+        (n_detections, tracking_results)
     """
-    compressors = zarr.codecs.BloscCodec(cname='zstd', clevel=3, shuffle='bitshuffle')
-    
-    arrays = {}
-    
-    # Keypoint coordinates (x, y) per keypoint per ROI per frame
-    arrays['keypoints'] = run_group.create_array(
-        'keypoints',
-        shape=(n_frames, n_rois, n_keypoints, 2),
-        dtype=np.float32,
-        chunks=(chunk_size, n_rois, n_keypoints, 2),
-        compressors=compressors,
-        fill_value=np.nan
+    ser = zarr.codecs.BytesCodec()
+    lz4 = zarr.codecs.BloscCodec(cname="lz4", clevel=1, shuffle="bitshuffle")
+
+    # Per-frame tracked counts
+    n_tracked = track_group.create_array(
+        "n_detections",
+        shape=(n_frames,),
+        chunks=(max(1, chunk_size * 4),),
+        dtype="i4",
+        fill_value=0,
+        serializer=ser,
+        compressors=[lz4],
     )
-    
-    # Keypoint confidence scores
-    arrays['keypoint_scores'] = run_group.create_array(
-        'keypoint_scores',
-        shape=(n_frames, n_rois, n_keypoints),
-        dtype=np.float32,
-        chunks=(chunk_size, n_rois, n_keypoints),
-        compressors=compressors,
-        fill_value=0.0
+
+    # Growable table of tracking features; start empty
+    # If you already know an upper bound, you can start with (total_detections, 21) instead.
+    tracking_results = track_group.create_array(
+        "tracking_results",
+        shape=(0, 21),
+        chunks=(max(1, chunk_size * 4), 21),
+        dtype="f8",
+        fill_value=np.nan,
+        serializer=ser,
+        compressors=[lz4],
     )
-    
-    # Track IDs for identity tracking
-    arrays['track_ids'] = run_group.create_array(
-        'track_ids',
-        shape=(n_frames, n_rois),
-        dtype=np.int32,
-        chunks=(chunk_size, n_rois),
-        compressors=compressors,
-        fill_value=-1
-    )
-    
-    return arrays
 
+    tracking_results.attrs["column_names"] = [
+        "heading_degrees", "bladder_x_roi_norm", "bladder_y_roi_norm",
+        "eye_l_x_roi_norm", "eye_l_y_roi_norm", "eye_r_x_roi_norm", "eye_r_y_roi_norm",
+        "bbox_x_norm_ds", "bbox_y_norm_ds", "bbox_width_norm_ds", "bbox_height_norm_ds",
+        "bbox_x_norm_full", "bbox_y_norm_full", "bbox_width_norm_full", "bbox_height_norm_full",
+        "roi_x1_full", "roi_y1_full", "roi_x1_ds", "roi_y1_ds",
+        "confidence_score", "effective_threshold",
+    ]
 
-def add_calibration_data(
-    root: zarr.Group,
-    pixel_to_mm: float,
-    arena_info: Optional[Dict[str, Any]] = None
-) -> zarr.Group:
-    """
-    Add calibration information to the zarr store.
-    
-    Args:
-        root: Root zarr group
-        pixel_to_mm: Conversion factor from pixels to millimeters
-        arena_info: Optional arena information (diameter, shape, etc.)
-    
-    Returns:
-        Calibration group
-    """
-    if 'calibration' not in root:
-        calib_group = root.create_group('calibration')
-    else:
-        calib_group = root['calibration']
-    
-    calib_group.attrs['pixel_to_mm'] = pixel_to_mm
-    calib_group.attrs['pixels_per_mm'] = 1.0 / pixel_to_mm
-    calib_group.attrs['calibrated_at'] = datetime.utcnow().isoformat()
-    
-    if arena_info:
-        calib_group.attrs.update(arena_info)
-    
-    return calib_group
-
-
-def validate_zarr_structure(path: str) -> Dict[str, Any]:
-    """
-    Validate that a zarr store follows the expected schema.
-    
-    Args:
-        path: Path to zarr store
-    
-    Returns:
-        Validation report dictionary
-    """
-    report = {
-        'valid': True,
-        'errors': [],
-        'warnings': [],
-        'schema_version': None,
-        'zarr_version': None
-    }
-    
-    try:
-        # Open the store in read mode using LocalStore for v3
-        store = LocalStore(path)
-        root = zarr.open_group(store=store, mode='r')
-        
-        # Check schema version
-        if 'schema_version' not in root.attrs:
-            report['errors'].append('Missing schema_version in root attributes')
-            report['valid'] = False
-        else:
-            report['schema_version'] = root.attrs['schema_version']
-        
-        # Check zarr version
-        if 'zarr_version' in root.attrs:
-            report['zarr_version'] = root.attrs['zarr_version']
-        
-        # Check required groups
-        required_groups = ['raw_video', 'processing', 'analysis', 'metadata']
-        for group_name in required_groups:
-            if group_name not in root:
-                report['errors'].append(f'Missing required group: {group_name}')
-                report['valid'] = False
-        
-        # Check raw_video arrays
-        if 'raw_video' in root:
-            expected_arrays = ['images_full', 'images_ds', 'timestamps']
-            for array_name in expected_arrays:
-                if array_name not in root['raw_video']:
-                    report['warnings'].append(f'Missing expected array: raw_video/{array_name}')
-        
-        # Check processing subgroups
-        if 'processing' in root:
-            expected_subgroups = ['background', 'detection', 'tracking']
-            for subgroup_name in expected_subgroups:
-                if subgroup_name not in root['processing']:
-                    report['warnings'].append(f'Missing expected processing subgroup: {subgroup_name}')
-        
-        # Check analysis subgroups
-        if 'analysis' in root:
-            expected_subgroups = ['metrics', 'filtered', 'interpolated']
-            for subgroup_name in expected_subgroups:
-                if subgroup_name not in root['analysis']:
-                    report['warnings'].append(f'Missing expected analysis subgroup: {subgroup_name}')
-                    
-    except Exception as e:
-        report['errors'].append(f'Failed to open zarr store: {str(e)}')
-        report['valid'] = False
-    
-    return report
+    return n_tracked, tracking_results
 
 
 def add_processing_run(
     root: zarr.Group,
     stage: str,
-    run_name: str,
-    parameters: Dict[str, Any]
+    parameters: Dict[str, Any],
+    source_runs: Optional[Dict[str, str]] = None,
+    summary_stats: Optional[Dict[str, Any]] = None,
+    duration_seconds: Optional[float] = None,
+    extra_attrs: Optional[Dict[str, Any]] = None
 ) -> zarr.Group:
     """
-    Add a new processing run to the zarr store.
+    Add a new processing run with full metadata.
     
     Args:
         root: Root zarr group
-        stage: Stage name ('detection', 'tracking', etc.)
-        run_name: Name for this run
-        parameters: Parameters used for this run
+        stage: Stage name (e.g., 'background', 'detect', 'track')
+        parameters: Stage parameters used
+        source_runs: Dict of source stage names to run names
+        summary_stats: Optional summary statistics
+        duration_seconds: Processing duration
+        extra_attrs: Additional stage-specific attributes
     
     Returns:
         The created run group
     """
-    run_group = get_run_group(root, run_name, stage)
+    run_group = get_run_group(root, stage, create_new=True)
     
-    # Add run metadata
+    # Add standard metadata
     run_group.attrs.update({
-        'created_at': datetime.utcnow().isoformat(),
-        'stage': stage,
-        'parameters': parameters
+        f'{stage}_timestamp_utc': datetime.now(timezone.utc).isoformat(),
+        'parameters': parameters,
     })
+    
+    # Add source run references
+    if source_runs:
+        for source_stage, source_run in source_runs.items():
+            run_group.attrs[f'source_{source_stage}_run'] = source_run
+    
+    # Add summary statistics
+    if summary_stats:
+        run_group.attrs['summary_statistics'] = summary_stats
+    
+    # Add duration
+    if duration_seconds is not None:
+        run_group.attrs['duration_seconds'] = duration_seconds
+    
+    # Add any extra stage-specific attributes
+    if extra_attrs:
+        run_group.attrs.update(extra_attrs)
+    
+    # Add system info at time of processing
+    run_group.attrs['processing_host'] = platform.node()
+    
+    # Check if GPU was used
+    gpu_info = get_gpu_info()
+    if gpu_info and gpu_info.get('available'):
+        run_group.attrs['gpu_used'] = True
+        run_group.attrs['gpu_device'] = gpu_info['devices'][0].get('name', 'Unknown')
+    else:
+        run_group.attrs['gpu_used'] = False
     
     return run_group
 
 
 def get_latest_run(root: zarr.Group, stage: str) -> Optional[zarr.Group]:
     """
-    Get the most recent run for a given stage.
+    Get the latest run for a given stage.
     
     Args:
         root: Root zarr group
@@ -564,23 +563,101 @@ def get_latest_run(root: zarr.Group, stage: str) -> Optional[zarr.Group]:
     Returns:
         Latest run group or None if no runs exist
     """
-    if 'processing' not in root or stage not in root['processing']:
+    parent_group_name = f"{stage}_runs"
+    
+    # Navigate to the runs group
+    if 'processing' in root and parent_group_name in root['processing']:
+        parent_group = root['processing'][parent_group_name]
+    elif parent_group_name in root:
+        parent_group = root[parent_group_name]
+    else:
         return None
     
-    stage_group = root['processing'][stage]
-    
-    # Get all run groups with timestamps
-    runs_with_time = []
-    for run_name in stage_group.group_keys():
-        run_group = stage_group[run_name]
-        if 'created_at' in run_group.attrs:
-            runs_with_time.append((run_name, run_group.attrs['created_at']))
-    
-    if not runs_with_time:
+    if 'latest' not in parent_group.attrs:
         return None
     
-    # Sort by timestamp and return the latest
-    runs_with_time.sort(key=lambda x: x[1])
-    latest_run_name = runs_with_time[-1][0]
+    latest_run_name = parent_group.attrs['latest']
+    if not latest_run_name or latest_run_name not in parent_group:
+        return None
     
-    return stage_group[latest_run_name]
+    return parent_group[latest_run_name]
+
+
+def update_import_duration(root: zarr.Group, duration_seconds: float) -> None:
+    """
+    Update the raw_video group with import duration after completion.
+    
+    Args:
+        root: Root zarr group
+        duration_seconds: Time taken for import in seconds
+    """
+    if 'raw_video' in root:
+        root['raw_video'].attrs['duration_seconds'] = duration_seconds
+
+
+def validate_zarr_structure(zarr_path: str) -> Dict[str, Any]:
+    """
+    Validate that a zarr store has the expected structure.
+    
+    Args:
+        zarr_path: Path to zarr store
+    
+    Returns:
+        Dict with validation results
+    """
+    results = {
+        'valid': True,
+        'errors': [],
+        'warnings': [],
+        'info': {}
+    }
+    
+    try:
+        store = LocalStore(zarr_path)
+        root = zarr.open_group(store=store, mode='r', zarr_format=3)
+    except Exception as e:
+        results['valid'] = False
+        results['errors'].append(f"Could not open zarr store: {e}")
+        return results
+    
+    # Check required groups
+    required_groups = ['raw_video', 'metadata', 'processing', 'results', 'pipeline_params']
+    for group_name in required_groups:
+        if group_name not in root:
+            results['errors'].append(f"Missing required group: {group_name}")
+            results['valid'] = False
+    
+    # Check required attributes
+    required_attrs = ['git_info', 'platform_info', 'software_versions', 'source_video_metadata']
+    for attr in required_attrs:
+        if attr not in root.attrs:
+            results['warnings'].append(f"Missing recommended attribute: {attr}")
+    
+    # Check raw_video arrays
+    if 'raw_video' in root:
+        raw_video = root['raw_video']
+        required_arrays = ['images_full', 'images_ds']
+        for array_name in required_arrays:
+            if array_name not in raw_video:
+                results['errors'].append(f"Missing required array: raw_video/{array_name}")
+                results['valid'] = False
+            else:
+                array = raw_video[array_name]
+                results['info'][f'{array_name}_shape'] = array.shape
+                results['info'][f'{array_name}_dtype'] = str(array.dtype)
+    
+    # Check processing run groups
+    if 'processing' in root:
+        processing = root['processing']
+        run_groups = ['background_runs', 'detect_runs', 'tracking_runs']
+        for run_group in run_groups:
+            if run_group in processing:
+                group = processing[run_group]
+                if 'latest' in group.attrs:
+                    results['info'][f'{run_group}_latest'] = group.attrs['latest']
+                    
+                    # Count total runs
+                    num_runs = len([k for k in group.keys() if not k.startswith('.')])
+                    results['info'][f'{run_group}_count'] = num_runs
+    
+    return results
