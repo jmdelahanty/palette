@@ -13,6 +13,9 @@ import cv2
 import queue
 import threading
 import time
+from math import lcm
+from concurrent.futures import ThreadPoolExecutor
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
@@ -105,15 +108,35 @@ def import_video(
     raw_video_group = root['raw_video']
     images_full = raw_video_group['images_full']
     images_ds = raw_video_group['images_ds']
-    
-    # Update with actual parameters used
+
+    # --- Shard alignment ---------------------------------------------------------
+    # Read frames-per-shard we recorded in root attrs during schema creation.
+    sharding_info = raw_video_group.attrs.get('sharding', {})
+    sf_full = int(sharding_info.get('images_full', {}).get('frames_per_shard', 1))
+    sf_ds   = int(sharding_info.get('images_ds',   {}).get('frames_per_shard', 1))
+    write_quantum = lcm(max(sf_full, 1), max(sf_ds, 1))
+
+    target = batch_size * 4
+    max_shards_per_batch = 3
+    k = max(1, min(max_shards_per_batch, target // write_quantum))
+    io_batch_size = write_quantum * k
+
+
+    raw_video_group.attrs['io_alignment'] = {
+        'frames_per_shard_full': sf_full,
+        'frames_per_shard_ds': sf_ds,
+        'write_quantum_frames': write_quantum,
+        'io_batch_size_aligned': io_batch_size,
+        'max_shards_per_batch': max_shards_per_batch,
+    }
+
     raw_video_group.attrs.update({
         'actual_chunk_size': optimal_chunk_size,
         'batch_size': batch_size,
-        'io_batch_size': batch_size * 4,
+        'io_batch_size': io_batch_size,   # aligned
         'decoding_device': device
     })
-    
+
     # Console output
     console.print(f"Video: [cyan]{video_path.name}[/cyan]")
     console.print(f"Frames: [yellow]{n_frames}[/yellow]")
@@ -121,11 +144,20 @@ def import_video(
     console.print(f"Downsampled: {ds_size[0]}×{ds_size[1]}")
     console.print(f"Chunk size: {optimal_chunk_size}")
     console.print(f"Device: [green]{device}[/green]")
+    console.print(f"I/O batch (aligned): {io_batch_size} frames "
+              f"(quantum={write_quantum}, shard_full={sf_full}, shard_ds={sf_ds})")
+
     
+    # Determine max writers based on CPU cores
+    max_writers = min(8, os.cpu_count() or 8)
+
     # Process video with parallel I/O
     _process_video_parallel(
         vr, n_frames, batch_size, ds_size, device,
-        images_full, images_ds, console
+        images_full, images_ds, console,
+        io_batch_size=io_batch_size,
+        write_quantum=write_quantum,
+        max_writers=max_writers
     )
     
     # Record performance metrics
@@ -214,170 +246,163 @@ def _get_video_metadata(
 
 
 def _process_video_parallel(
-    vr: decord.VideoReader,
-    n_frames: int,
-    batch_size: int,
-    ds_size: Tuple[int, int],
-    device: str,
-    images_full: zarr.Array,
-    images_ds: zarr.Array,
-    console: Console
+    vr, n_frames, batch_size, ds_size, device,
+    images_full, images_ds, console,
+    io_batch_size=None,
+    write_quantum: int = 1,
+    max_writers: int = 4,
 ) -> None:
-    """Process video with parallel I/O pipeline."""
-    
-    # Setup processing pipeline
-    io_batch_size = batch_size * 4
-    data_queue = queue.Queue(maxsize=4)
-    
-    # Writer thread
-    def writer_thread():
+    if io_batch_size is None:
+        io_batch_size = batch_size * 4
+
+    # queue holds shard-sized tasks
+    data_queue = queue.Queue(maxsize=write_quantum * 2)
+
+    def write_slice(start_idx, end_idx, full_data, ds_data):
+        # one full shard write (end_idx - start_idx == write_quantum for all but tail)
+        images_full[start_idx:end_idx] = full_data
+        images_ds[start_idx:end_idx] = ds_data
+
+    # small pool: one shard per task, disjoint shards in parallel
+    executor = ThreadPoolExecutor(max_workers=max_writers)
+
+    def writer_drain():
+        # pull tasks and submit to pool
         while True:
             item = data_queue.get()
             if item is None:
                 break
-            start_idx, end_idx, full_data, ds_data = item
-            images_full[start_idx:end_idx] = full_data
-            images_ds[start_idx:end_idx] = ds_data
+            s, e, fblk, dblk = item
+            executor.submit(write_slice, s, e, fblk, dblk)
             data_queue.task_done()
-    
-    writer = threading.Thread(target=writer_thread, daemon=True)
-    writer.start()
-    
-    # Process based on device
+
+    wt = threading.Thread(target=writer_drain, daemon=True)
+    wt.start()
+
     try:
         if device == 'cuda:0':
-            _process_gpu_batches(
+            gray_weights = torch.tensor([0.2989, 0.5870, 0.1140], device='cuda:0')
+            _process_video_gpu(
                 vr, n_frames, io_batch_size, batch_size,
-                ds_size, data_queue, console
+                ds_size, gray_weights, data_queue, write_quantum
             )
         else:
-            _process_cpu_batches(
+            gray_weights = np.array([0.2989, 0.5870, 0.1140], dtype=np.float32)
+            _process_video_cpu(
                 vr, n_frames, io_batch_size, batch_size,
-                ds_size, data_queue, console
+                ds_size, gray_weights, data_queue, write_quantum
             )
     finally:
-        # Ensure writer thread completes
         data_queue.put(None)
-        writer.join()
+        wt.join()
+        executor.shutdown(wait=True)
 
 
-def _process_gpu_batches(
-    vr: decord.VideoReader,
+
+def _process_video_gpu(
+    vr,
     n_frames: int,
     io_batch_size: int,
     batch_size: int,
     ds_size: Tuple[int, int],
-    data_queue: queue.Queue,
-    console: Console
-) -> None:
-    """Process video batches on GPU."""
-    
-    # Grayscale weights on GPU
-    gray_weights = torch.tensor([0.2989, 0.5870, 0.1140], device='cuda:0')
-    
-    with tqdm(total=n_frames, desc="GPU Import", unit="frames") as pbar:
-        for i in range(0, n_frames, io_batch_size):
+    gray_weights: torch.Tensor,          # shape (3,), on GPU
+    data_queue: "queue.Queue",
+    write_quantum: int,
+):
+    """
+    Decode + grayscale + downsample on GPU, enqueue shard-sized slices.
+    Ensures NCHW for interpolate to avoid massive allocations.
+    """
+    # weights as fp16 on GPU
+    w = gray_weights.to(device="cuda", dtype=torch.float16).view(1, 1, 1, 3)
+
+    with torch.no_grad():
+        for i in tqdm(range(0, n_frames, io_batch_size), desc="GPU Import", unit="batch", ascii=True, ncols=100):
             io_batch_end = min(i + io_batch_size, n_frames)
-            full_batch_data = []
-            ds_batch_data = []
-            
-            for j in range(i, io_batch_end, batch_size):
-                sub_batch_end = min(j + batch_size, io_batch_end)
-                indices = list(range(j, sub_batch_end))
-                if not indices:
-                    continue
-                
-                # Decode batch
-                batch_tensor = vr.get_batch(indices)
-                
-                # Convert to grayscale
-                gray_batch = torch.matmul(
-                    batch_tensor.float(), gray_weights
-                ).unsqueeze(1)
-                
-                # Downsample
-                ds_batch = F.interpolate(
-                    gray_batch,
-                    size=ds_size,
-                    mode='bilinear',
-                    align_corners=False
-                )
-                
-                # Transfer to CPU
-                full_batch_data.append(
-                    gray_batch.squeeze(1).byte().cpu().numpy()
-                )
-                ds_batch_data.append(
-                    ds_batch.squeeze(1).byte().cpu().numpy()
-                )
-                
-                # Clean GPU memory
-                del batch_tensor, gray_batch, ds_batch
-                if j % (batch_size * 8) == 0:  # Periodic cleanup
-                    torch.cuda.empty_cache()
-                
-                pbar.update(len(indices))
-            
-            if full_batch_data:
-                # Combine and queue
-                full_combined = np.concatenate(full_batch_data, axis=0)
-                ds_combined = np.concatenate(ds_batch_data, axis=0)
-                data_queue.put((i, io_batch_end, full_combined, ds_combined))
+            n_this_batch = io_batch_end - i
+
+            full_parts: list[np.ndarray] = []
+            ds_parts:   list[np.ndarray] = []
+
+            j = i
+            while j < io_batch_end:
+                sub_end = min(j + batch_size, io_batch_end)
+                idx = list(range(j, sub_end))
+                if not idx:
+                    break
+
+                # Decode to GPU: (N, H, W, 3) uint8
+                batch_tensor = vr.get_batch(idx)
+
+                # -> fp16, compute gray in NHWC, then convert to NCHW
+                x    = batch_tensor.to(torch.float16, non_blocking=True)          # (N,H,W,3)
+                gray = (x * w).sum(dim=-1)                                        # (N,H,W)
+                gray = gray.unsqueeze(1)                                           # (N,1,H,W)
+
+                # Downsample on GPU (expects NCHW)
+                ds = F.interpolate(gray, size=ds_size, mode="bilinear", align_corners=False)  # (N,1,dsH,dsW)
+
+                # Move to CPU uint8
+                full_parts.append(gray.squeeze(1).to(torch.uint8).cpu().numpy())  # (N,H,W)
+                ds_parts.append(  ds.squeeze(1).to(torch.uint8).cpu().numpy())    # (N,dsH,dsW)
+
+                del batch_tensor, x, gray, ds
+                j = sub_end
+
+            if not full_parts:
+                continue
+
+            full_combined = np.concatenate(full_parts, axis=0)
+            ds_combined   = np.concatenate(ds_parts,   axis=0)
+            assert full_combined.shape[0] == n_this_batch == ds_combined.shape[0]
+
+            # shard-aligned enqueue
+            s = i
+            while s < io_batch_end:
+                e  = min(s + write_quantum, io_batch_end)
+                lo = s - i
+                hi = e - i
+                data_queue.put((s, e, full_combined[lo:hi], ds_combined[lo:hi]))
+                s = e
+
+            torch.cuda.empty_cache()
 
 
-def _process_cpu_batches(
-    vr: decord.VideoReader,
-    n_frames: int,
-    io_batch_size: int,
-    batch_size: int,
-    ds_size: Tuple[int, int],
-    data_queue: queue.Queue,
-    console: Console
-) -> None:
-    """Process video batches on CPU."""
-    
-    # Grayscale weights for CPU
-    gray_weights = np.array([0.2989, 0.5870, 0.1140])
-    
-    with tqdm(total=n_frames, desc="CPU Import", unit="frames") as pbar:
-        for i in range(0, n_frames, io_batch_size):
-            io_batch_end = min(i + io_batch_size, n_frames)
-            full_batch_data = []
-            ds_batch_data = []
-            
-            for j in range(i, io_batch_end, batch_size):
-                sub_batch_end = min(j + batch_size, io_batch_end)
-                indices = list(range(j, sub_batch_end))
-                if not indices:
-                    continue
-                
-                # Decode batch
-                batch = vr.get_batch(indices)
-                
-                # Convert to grayscale
-                gray_batch = np.dot(batch, gray_weights).astype(np.uint8)
-                
-                # Downsample each frame
-                ds_batch = np.zeros(
-                    (len(indices), ds_size[0], ds_size[1]),
-                    dtype=np.uint8
-                )
-                for idx, frame in enumerate(gray_batch):
-                    ds_batch[idx] = cv2.resize(
-                        frame,
-                        (ds_size[1], ds_size[0]),  # cv2 uses (width, height)
-                        interpolation=cv2.INTER_LINEAR
-                    )
-                
-                full_batch_data.append(gray_batch)
-                ds_batch_data.append(ds_batch)
-                pbar.update(len(indices))
-            
-            if full_batch_data:
-                # Combine and queue
-                full_combined = np.concatenate(full_batch_data, axis=0)
-                ds_combined = np.concatenate(ds_batch_data, axis=0)
-                data_queue.put((i, io_batch_end, full_combined, ds_combined))
+
+
+def _process_video_cpu(vr, n_frames, io_batch_size, batch_size, ds_size, gray_weights, data_queue, write_quantum):
+    ds_h, ds_w = ds_size
+    for i in tqdm(range(0, n_frames, io_batch_size), desc="CPU Import", unit="batch", ascii=True, ncols=100):
+        io_batch_end = min(i + io_batch_size, n_frames)
+        full_batch_data, ds_batch_data = [], []
+
+        for j in range(i, io_batch_end, batch_size):
+            sub_batch_end = min(j + batch_size, io_batch_end)
+            idx = list(range(j, sub_batch_end))
+            if not idx:
+                continue
+
+            batch = vr.get_batch(idx)                    # numpy (N,H,W,3)
+            gray  = np.dot(batch, gray_weights).astype(np.uint8)  # (N,H,W)
+
+            ds = np.empty((gray.shape[0], ds_size[0], ds_size[1]), dtype=np.uint8)
+            for k, frame in enumerate(gray):
+                ds[k] = cv2.resize(frame, (ds_w, ds_h), interpolation=cv2.INTER_LINEAR)
+
+            full_batch_data.append(gray)
+            ds_batch_data.append(ds)
+
+        if not full_batch_data:
+            continue
+
+        full_combined = np.concatenate(full_batch_data, axis=0)
+        ds_combined   = np.concatenate(ds_batch_data,   axis=0)
+
+        for s in range(i, io_batch_end, write_quantum):
+            e  = min(s + write_quantum, io_batch_end)
+            lo = s - i
+            hi = e - i
+            data_queue.put((s, e, full_combined[lo:hi], ds_combined[lo:hi]))
 
 
 # Additional utility functions

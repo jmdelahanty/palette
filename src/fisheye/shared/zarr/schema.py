@@ -38,7 +38,6 @@ ZARR_SCHEMA = {
         "total_frames": "Total number of frames",
         "width": "Video width in pixels",
         "height": "Video height in pixels",
-        "experiment_type": "Type of experiment (chaser/grating/etc)",
         "processing_history": "List of processing steps applied"
     },
     
@@ -172,12 +171,21 @@ ZARR_SCHEMA = {
         }
     }
 }
+def _auto_shard_frames(height: int, width: int, bytes_per_pixel: int = 1,
+                       target_mb: int = 128, min_frames: int = 1, max_frames: int = 64) -> int:
+    """Choose frames/shard so each shard ≈ target_mb (clamped)."""
+    bytes_per_frame = height * width * bytes_per_pixel
+    if bytes_per_frame == 0:
+        return min_frames
+    frames = max(min_frames, int((target_mb * 1024 * 1024) // bytes_per_frame))
+    return max(min_frames, min(max_frames, frames))
+
 
 def create_palette_zarr(
     path: str,
     video_metadata: Dict[str, Any],
     config: Dict[str, Any],
-    use_sharding: bool = False,   # placeholder; not used here yet
+    use_sharding: bool = False,
     cli_args: Optional[Dict[str, Any]] = None
 ) -> zarr.Group:
     store = LocalStore(path)
@@ -204,13 +212,13 @@ def create_palette_zarr(
 
     root.attrs['pipeline_version'] = '2.0-multi-fish'
     root.attrs['zarr_format'] = 3                  # <- spec field
-    root.attrs['zarr_python'] = zarr.__version__   # <- library version (optional)
-    root.attrs['schema_version'] = '3.0.0'         # <- match your constant
+    root.attrs['zarr_python'] = zarr.__version__   # <- library version
+    root.attrs['schema_version'] = '3'
 
     # ---- Pipeline params ----------------------------------------------------
     param_group = root.create_group('pipeline_params')
     for stage, stage_params in config.items():
-        param_group.attrs[stage] = stage_params  # OK if JSON-serializable
+        param_group.attrs[stage] = stage_params
 
     # ---- Groups -------------------------------------------------------------
     metadata = root.create_group('metadata')
@@ -223,9 +231,23 @@ def create_palette_zarr(
     import_config = config.get('import', {})
     ds_height, ds_width = import_config.get('downsample_size', [480, 640])
 
-    # v3 codecs
+    # === Setup codecs for arrays ===
     ser = zarr.codecs.BytesCodec()
     lz4 = zarr.codecs.BloscCodec(cname='lz4', clevel=1, shuffle='bitshuffle')
+
+    # Pick frames/shard (override via config['import']['shard_frames'])
+    shard_frames_full = int(config.get('import', {}).get(
+        'shard_frames', _auto_shard_frames(height, width, bytes_per_pixel=1)
+    ))
+    shard_frames_ds = int(config.get('import', {}).get(
+        'shard_frames_ds', shard_frames_full
+    ))
+
+    # Record sharding choices (purely informational)
+    raw_video.attrs['sharding'] = {
+        'images_full': {'frames_per_shard': shard_frames_full, 'shard_shape': (shard_frames_full, height, width)},
+        'images_ds':   {'frames_per_shard': shard_frames_ds,   'shard_shape': (shard_frames_ds, ds_height, ds_width)},
+    }
 
     # Raw-video attrs
     raw_video.attrs.update({
@@ -240,11 +262,12 @@ def create_palette_zarr(
         'duration_seconds': None,
     })
 
-    # Arrays (frame-major; 1 frame per chunk)
+    # Arrays (frame-major; 1 frame per chunk, optionally sharded)
     raw_video.create_array(
         name='images_full',
         shape=(n_frames, height, width),
         chunks=(1, height, width),
+        shards=(shard_frames_full, height, width),
         dtype=np.uint8,
         fill_value=0,
         serializer=ser,
@@ -254,6 +277,7 @@ def create_palette_zarr(
         name='images_ds',
         shape=(n_frames, ds_height, ds_width),
         chunks=(1, ds_height, ds_width),
+        shards=(shard_frames_ds, ds_height, ds_width),
         dtype=np.uint8,
         fill_value=0,
         serializer=ser,
@@ -284,7 +308,6 @@ def create_palette_zarr(
     for g in ('detections', 'tracks', 'keypoints'):
         results.create_group(g)
 
-    # ---- Prefer attrs over scalar arrays for metadata -----------------------
     gi = get_git_info()
     metadata.attrs.update({
         'git_commit': gi.get('commit_hash', 'N/A'),

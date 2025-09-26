@@ -1,0 +1,54 @@
+import:
+  downsample_size:
+  - 640
+  - 640
+  chunk_size: 32
+  batch_size: 32
+background:
+  sample_size: 100
+  seed: 42
+detect:
+  ds_thresh: 45
+  se1_radius: 1
+  se4_radius: 9
+  dish_mask:
+    shape: circle
+    center:
+    - 320
+    - 330
+    radius: 290
+    hough_params:
+      param1: 50
+      param2: 30
+      radius_adjustment: 0
+  min_area: 150
+  max_area: 651
+  max_fish: 1
+crop:
+  roi_sz:
+  - 256
+  - 256
+  ds_thresh: 25
+  se1_radius: 1
+  se4_radius: 8
+  min_fish_area: 50
+  max_fish_area: 500
+  dish_mask:
+    shape: circle
+    center:
+    - 320
+    - 330
+    radius: 290
+    hough_params:
+      param1: 50
+      param2: 30
+      radius_adjustment: 0
+refine:
+  max_jump_norm: 0.1
+track:
+  roi_sz:
+  - 256
+  - 256
+  roi_thresh: 116
+  se1_radius: 5
+  se2_radius: 8
