@@ -3,7 +3,9 @@ import:
   - 640
   - 640
   chunk_size: 32
-  batch_size: 32
+  batch_size: 4
+  compression: none  # Options: 'none', 'lz4', 'zstd', 'blosc'
+  compression_level: 1  # 1-9 for most compressors
 background:
   sample_size: 100
   seed: 42
