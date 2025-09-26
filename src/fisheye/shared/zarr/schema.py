@@ -194,12 +194,8 @@ def create_palette_zarr(
     # ---- Root attrs ---------------------------------------------------------
     if cli_args:
         root.attrs['command_line_args'] = cli_args
-
     root.attrs['git_info'] = get_git_info()
-
-    # NOTE: ensure this matches your utils signature; if it expects ip_opt_in, rename kwarg
     root.attrs['platform_info'] = get_platform_info(collect_ip=False, disk_path=path)
-
     root.attrs['source_video_metadata'] = video_metadata
 
     env_summary = get_environment_summary()
@@ -209,11 +205,10 @@ def create_palette_zarr(
         'name': env_summary.get('environment_name', 'none'),
         'python_version': env_summary.get('python_version', platform.python_version()),
     }
-
     root.attrs['pipeline_version'] = '2.0-multi-fish'
-    root.attrs['zarr_format'] = 3                  # <- spec field
-    root.attrs['zarr_python'] = zarr.__version__   # <- library version
-    root.attrs['schema_version'] = '3'
+    root.attrs['zarr_format'] = 3
+    root.attrs['zarr_python'] = zarr.__version__
+    root.attrs['schema_version'] = '3.0.0'  # keep consistent with your constant
 
     # ---- Pipeline params ----------------------------------------------------
     param_group = root.create_group('pipeline_params')
@@ -224,32 +219,45 @@ def create_palette_zarr(
     metadata = root.create_group('metadata')
     raw_video = root.create_group('raw_video')
 
-    height = int(video_metadata.get('height', 1080))
-    width  = int(video_metadata.get('width', 1920))
+    height  = int(video_metadata.get('height', 1080))
+    width   = int(video_metadata.get('width', 1920))
     n_frames = int(video_metadata.get('total_frames', 1))
 
+    # Import config
     import_config = config.get('import', {})
-    ds_height, ds_width = import_config.get('downsample_size', [480, 640])
+    ds_height, ds_width = import_config.get('downsample_size', [640, 640])
 
-    # === Setup codecs for arrays ===
-    ser = zarr.codecs.BytesCodec()
-    lz4 = zarr.codecs.BloscCodec(cname='lz4', clevel=1, shuffle='bitshuffle')
+    # ---- compression mapping ------------------------------------------------
+    comp_name = (import_config.get('compression', 'lz4') or 'none').lower()
+    clevel    = int(import_config.get('compression_level', 1))
 
-    # Pick frames/shard (override via config['import']['shard_frames'])
-    shard_frames_full = int(config.get('import', {}).get(
-        'shard_frames', _auto_shard_frames(height, width, bytes_per_pixel=1)
-    ))
-    shard_frames_ds = int(config.get('import', {}).get(
-        'shard_frames_ds', shard_frames_full
-    ))
+    def compressors_for(name: str, level: int):
+        if name == 'none':
+            return []
+        if name in ('lz4', 'zstd'):
+            return [zarr.codecs.BloscCodec(cname=name, clevel=level, shuffle='bitshuffle')]
+        if name == 'blosc':  # treat 'blosc' as lz4 default
+            return [zarr.codecs.BloscCodec(cname='lz4', clevel=level, shuffle='bitshuffle')]
+        # fallback: no compression
+        return []
 
-    # Record sharding choices (purely informational)
+    compressors_full = compressors_for(comp_name, clevel)
+    compressors_ds   = compressors_for(comp_name, clevel)
+
+    # ---- shard sizes ----------------------------------
+    shard_size_full = int(import_config.get('shard_size', _auto_shard_frames(height, width, 1)))
+    shard_size_ds   = int(import_config.get('shard_size_ds', shard_size_full))
+
+    # ---- serializer (CRC enabled; set checksum=False to disable) ------------
+    ser = zarr.codecs.BytesCodec()  # or BytesCodec(checksum=False) while debugging
+
+    # Record sharding choices
     raw_video.attrs['sharding'] = {
-        'images_full': {'frames_per_shard': shard_frames_full, 'shard_shape': (shard_frames_full, height, width)},
-        'images_ds':   {'frames_per_shard': shard_frames_ds,   'shard_shape': (shard_frames_ds, ds_height, ds_width)},
+        'images_full': {'frames_per_shard': shard_size_full, 'shard_shape': (shard_size_full, height,  width)},
+        'images_ds':   {'frames_per_shard': shard_size_ds,   'shard_shape': (shard_size_ds,   ds_height, ds_width)},
     }
 
-    # Raw-video attrs
+    # Raw-video attrs (reflect actual compressor choice)
     raw_video.attrs.update({
         'import_timestamp_utc': datetime.now(timezone.utc).isoformat(),
         'original_resolution': (height, width),
@@ -258,30 +266,30 @@ def create_palette_zarr(
         'total_frames': n_frames,
         'source_video': video_metadata.get('source_video', 'unknown'),
         'decoding_device': (get_gpu_info().get('devices', [{'name': 'N/A'}])[0].get('name', 'N/A')),
-        'compressor': {'cname': 'lz4', 'clevel': 1, 'shuffle': 'bitshuffle'},  # <- fixed
+        'compressor': {'name': comp_name, 'clevel': clevel, 'shuffle': 'bitshuffle'},
         'duration_seconds': None,
     })
 
-    # Arrays (frame-major; 1 frame per chunk, optionally sharded)
+    # ---- arrays -------------------------------------------------------------
     raw_video.create_array(
         name='images_full',
         shape=(n_frames, height, width),
         chunks=(1, height, width),
-        shards=(shard_frames_full, height, width),
+        shards=(shard_size_full, height, width),
         dtype=np.uint8,
         fill_value=0,
         serializer=ser,
-        compressors=[lz4],
+        compressors=compressors_full,
     )
     raw_video.create_array(
         name='images_ds',
         shape=(n_frames, ds_height, ds_width),
         chunks=(1, ds_height, ds_width),
-        shards=(shard_frames_ds, ds_height, ds_width),
+        shards=(shard_size_ds, ds_height, ds_width),
         dtype=np.uint8,
         fill_value=0,
         serializer=ser,
-        compressors=[lz4],
+        compressors=compressors_ds,
     )
     raw_video.create_array(
         name='timestamps',
@@ -290,7 +298,7 @@ def create_palette_zarr(
         dtype=np.float64,
         fill_value=np.nan,
         serializer=ser,
-        compressors=[],  # no compression
+        compressors=[],  # no compression for small 1D
     )
 
     # Processing / runs
@@ -303,7 +311,6 @@ def create_palette_zarr(
         processing[g].attrs['latest'] = None
     processing['tracking_runs'].attrs['best'] = None
 
-    # Results
     results = root.create_group('results')
     for g in ('detections', 'tracks', 'keypoints'):
         results.create_group(g)
@@ -314,15 +321,14 @@ def create_palette_zarr(
         'git_branch': gi.get('branch', 'N/A'),
         'git_dirty': gi.get('is_dirty', False),
     })
-
     pi = root.attrs['platform_info']
     metadata.attrs.update({
         'hostname': pi.get('hostname', 'unknown'),
         'system': pi.get('system', 'unknown'),
         'cpu_cores': pi.get('cpu_cores', 1),
     })
-
     return root
+
 
 
 

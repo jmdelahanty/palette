@@ -45,7 +45,7 @@ def test_utils():
 def test_video_import():
     """Test video import (if zarr schema exists)."""
     try:
-        from fisheye.capture.video import import_video
+        from fisheye.capture.import_video import import_video
         print("\n✓ Video import module loads")
         return True
     except ImportError as e:

@@ -3,9 +3,13 @@ import:
   - 640
   - 640
   chunk_size: 32
+  shard_size: 64
+  shard_size_ds: 128
   batch_size: 4
   compression: none  # Options: 'none', 'lz4', 'zstd', 'blosc'
   compression_level: 1  # 1-9 for most compressors
+  max_writers: 10  # Number of parallel writers for I/O operations
+  max_inflight: 16  # Maximum number of in-flight write operations
 background:
   sample_size: 100
   seed: 42

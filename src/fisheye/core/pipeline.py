@@ -17,7 +17,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 
 # Import stage modules
-from ..capture.video import import_video, validate_import, get_import_stats
+from ..capture.import_video import import_video, validate_import, get_import_stats
 # from ..preprocessing.background import calculate_background
 # from ..detection.blob import detect_blobs
 # from ..tracking.keypoints import track_keypoints

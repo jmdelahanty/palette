@@ -14,7 +14,7 @@ cv2 = pytest.importorskip("cv2", reason="OpenCV not installed")
 decord = pytest.importorskip("decord", reason="Decord not installed")
 torch = pytest.importorskip("torch", reason="PyTorch not installed")
 
-from fisheye.capture.video import (
+from fisheye.capture.import_video import (
     _process_video_cpu,
     _process_video_gpu
 )
