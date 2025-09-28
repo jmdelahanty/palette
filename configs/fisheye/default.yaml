@@ -1,60 +1,19 @@
 import:
-  downsample_size:
-  - 640
-  - 640
+  # existing
+  downsample_size: [640, 640]
   chunk_size: 32
   shard_size: 64
   shard_size_ds: 128
-  batch_size: 4
-  compression: none  # Options: 'none', 'lz4', 'zstd', 'blosc'
-  compression_level: 1  # 1-9 for most compressors
-  max_writers: 10  # Number of parallel writers for I/O operations
-  max_inflight: 16  # Maximum number of in-flight write operations
-background:
-  sample_size: 100
-  seed: 42
-detect:
-  ds_thresh: 45
-  se1_radius: 1
-  se4_radius: 9
-  dish_mask:
-    shape: circle
-    center:
-    - 320
-    - 330
-    radius: 290
-    hough_params:
-      param1: 50
-      param2: 30
-      radius_adjustment: 0
-  min_area: 150
-  max_area: 651
-  max_fish: 1
-crop:
-  roi_sz:
-  - 256
-  - 256
-  ds_thresh: 25
-  se1_radius: 1
-  se4_radius: 8
-  min_fish_area: 50
-  max_fish_area: 500
-  dish_mask:
-    shape: circle
-    center:
-    - 320
-    - 330
-    radius: 290
-    hough_params:
-      param1: 50
-      param2: 30
-      radius_adjustment: 0
-refine:
-  max_jump_norm: 0.1
-track:
-  roi_sz:
-  - 256
-  - 256
-  roi_thresh: 116
-  se1_radius: 5
-  se2_radius: 8
+  batch_size: 64
+  compression: none        # 'none' | 'lz4' | 'zstd' | 'blosc'
+  compression_level: 1
+  max_writers: 10
+  max_inflight: 16
+
+  # new (GDS-capable path)
+  gpu_fp16: true           # already supported by the code; keep true for speed
+
+  # --- GDS controls ---
+  import_gds_enable: true  # turn on GDS shard writes when on CUDA
+  gds_dir: "/nvme1/fish_runs/run_001"   # NVMe ext4/xfs directory (must exist & be writable)
+  gds_require: true       # if true, error instead of falling back to CPU/Zarr
