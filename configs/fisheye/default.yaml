@@ -1,19 +1,31 @@
 import:
-  # existing
-  downsample_size: [640, 640]
-  chunk_size: 32
-  shard_size: 64
-  shard_size_ds: 128
-  batch_size: 64
-  compression: none        # 'none' | 'lz4' | 'zstd' | 'blosc'
-  compression_level: 1
-  max_writers: 10
-  max_inflight: 16
+  
+  # Chunk and shard configuration
+  chunk_size: 64               # Frames per chunk (smallest storage unit)
+  use_sharding: false           # Enable Zarr v3 sharding (groups chunks into shards)
+  chunks_per_shard: 2         # Number of chunks per shard (only if use_sharding=true)
+  # Note - computed at runtime: io_batch_size = chunk_size * chunks_per_shard (if sharding) or chunk_size (if not)
+  
+  # Processing configuration  
+  batch_size: 64               # Frames decoded at once from video
+  gpu_fp16: true               # Use float16 for GPU grayscale conversion
+  
+  # Compression settings (for standard Zarr path)
+  compression: none            # Options: 'none', 'lz4', 'zstd', 'blosc'
+  compression_level: 1         # 1-9, higher = better compression, slower
+  
+  # GPU Direct Storage options (choose one approach)
+  # Option A: kvikIO Zarr (direct GPU→Zarr writes)
+  use_kvikio_zarr: true        # Enable kvikIO for GPU→Zarr direct writes
+  
+  # Option B: GDS binary shards (fastest raw throughput)
+  import_gds_enable: false     # Write binary shards with GDS (alternative to kvikIO)
+  gds_dir: null                # Directory for GDS binary shards (e.g., "/nvme1/temp/shards")
+  gds_require: false           # Fail if GDS not available (vs falling back to CPU)
+  
+  # CPU/threading settings (used when neither kvikIO nor GDS binary enabled)
+  max_writers: 10              # Number of concurrent write threads
+  max_inflight: 16             # Maximum queued writes
 
-  # new (GDS-capable path)
-  gpu_fp16: true           # already supported by the code; keep true for speed
-
-  # --- GDS controls ---
-  import_gds_enable: true  # turn on GDS shard writes when on CUDA
-  gds_dir: "/nvme1/fish_runs/run_001"   # NVMe ext4/xfs directory (must exist & be writable)
-  gds_require: true       # if true, error instead of falling back to CPU/Zarr
+  # Misc settings
+  include_system_info: true
