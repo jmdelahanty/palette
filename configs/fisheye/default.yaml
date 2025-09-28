@@ -3,7 +3,7 @@ import:
   # Chunk and shard configuration
   chunk_size: 64               # Frames per chunk (smallest storage unit)
   use_sharding: false           # Enable Zarr v3 sharding (groups chunks into shards)
-  chunks_per_shard: 2         # Number of chunks per shard (only if use_sharding=true)
+  chunks_per_shard: 1         # Number of chunks per shard (only if use_sharding=true)
   # Note - computed at runtime: io_batch_size = chunk_size * chunks_per_shard (if sharding) or chunk_size (if not)
   
   # Processing configuration  

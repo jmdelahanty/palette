@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "properties": {
+    "use_compat_mode": false,
+    "force_compat_mode": false
+  },
+  "filesystems": {
+    "ext4": { "allow_odirect": true },
+    "xfs":  { "allow_odirect": true }
+  },
+  "mountPoints": [
+    { "path": "/nvme1", "fs": "ext4", "allow_odirect": true }
+  ]
+}

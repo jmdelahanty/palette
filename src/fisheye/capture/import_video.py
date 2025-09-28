@@ -5,6 +5,8 @@ Supports CPU or GPU-accelerated decoding, with optional GPUDirect Storage writes
 
 import os
 os.environ.setdefault("BLOSC_NTHREADS", "4")
+# Force kvikIO to use GDS mode, not compatibility mode
+os.environ["KVIKIO_COMPAT_MODE"] = "OFF"
 
 import zarr
 import numpy as np
@@ -52,8 +54,9 @@ def _probe_gds(console: Console) -> Tuple[bool, Optional[str]]:
     
     # Check if GDS is actually available
     try:
-        import kvikio
-        if not kvikio.defaults.compat_mode():
+        import kvikio.defaults as defaults
+
+        if not defaults.compat_mode():
             return True, None
         else:
             return False, "kvikio in compatibility mode (no GDS)"
@@ -288,6 +291,8 @@ def import_video(
         
         # Enable GPU support
         zarr.config.enable_gpu()
+
+        console.print(f"[cyan]Zarr GPU support enabled[/cyan]")
         
         # Create directory structure
         zarr_path_obj = Path(zarr_path)
