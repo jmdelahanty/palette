@@ -59,7 +59,7 @@ def downsample_video(
     ds_config = config.get('downsample', {})
     
     # Extract parameters with defaults
-    target_size = tuple(ds_config.get('size', [256, 256]))
+    target_size = tuple(map(int, ds_config.get('size', [256, 256])))
     batch_size = ds_config.get('batch_size', 128)
     chunk_size = ds_config.get('chunk_size', 128)
     method = ds_config.get('method', 'bilinear')
@@ -137,7 +137,7 @@ def downsample_video(
                     batch_tensor,
                     size=target_size,
                     mode=method,
-                    align_corners=False if method in ['bilinear', 'bicubic'] else None
+                    align_corners=align_corners if method in ['bilinear', 'bicubic'] else None
                 )
             
             # Convert back to uint8 and numpy

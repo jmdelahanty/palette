@@ -51,5 +51,5 @@ downsample:
   compression_level: 1          # Fast compression since data is smaller
   
   # Execution options
-  skip_if_exists: true          # Skip if images_ds already exists
-  force_recompute: false        # Override skip_if_exists
+  skip_if_exists: false          # Skip if images_ds already exists
+  force_recompute: true        # Override skip_if_exists
