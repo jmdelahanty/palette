@@ -11,16 +11,20 @@ detect:
   ds_thresh: 45
   se1_radius: 1
   se4_radius: 9
-  dish_mask:
+  dish_mask: &id001
     shape: circle
     center:
-    - 320
-    - 330
-    radius: 290
+    - 322
+    - 328
+    radius: 288
     hough_params:
       param1: 50
       param2: 30
       radius_adjustment: 0
+    source:
+      array: images_ds
+      frame: 22813
+      timestamp: '2025-09-29T15:12:30.472836'
   min_area: 150
   max_area: 651
   max_fish: 1
@@ -33,16 +37,7 @@ crop:
   se4_radius: 8
   min_fish_area: 50
   max_fish_area: 500
-  dish_mask:
-    shape: circle
-    center:
-    - 320
-    - 330
-    radius: 290
-    hough_params:
-      param1: 50
-      param2: 30
-      radius_adjustment: 0
+  dish_mask: *id001
 refine:
   max_jump_norm: 0.1
 track:

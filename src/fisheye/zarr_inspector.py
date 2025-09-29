@@ -34,6 +34,9 @@ def format_timestamp(iso_str):
 
 def count_chunks(array_path):
     """Count actual chunk files on disk for Zarr v3."""
+    if not isinstance(array_path, Path):
+        array_path = Path(array_path)
+    
     chunk_dir = array_path / "c"
     if not chunk_dir.exists():
         return 0, 0
@@ -41,11 +44,21 @@ def count_chunks(array_path):
     chunk_count = 0
     total_size = 0
     
-    # In Zarr v3, chunks are stored as c/0, c/1, c/2, etc.
-    for chunk_file in chunk_dir.iterdir():
-        if chunk_file.is_file():
-            chunk_count += 1
-            total_size += chunk_file.stat().st_size
+    # In this Zarr v3 structure, chunks are stored as c/0/0/0, c/1/0/0, etc.
+    # The pattern is c/{chunk_index}/0/0
+    for chunk_index_dir in chunk_dir.iterdir():
+        if chunk_index_dir.is_dir() and chunk_index_dir.name.isdigit():
+            # Look for the actual chunk file at {chunk_index}/0/0
+            chunk_file = chunk_index_dir / "0" / "0"
+            if chunk_file.exists():
+                chunk_count += 1
+                if chunk_file.is_file():
+                    total_size += chunk_file.stat().st_size
+                elif chunk_file.is_dir():
+                    # If it's still a directory, sum all files within
+                    for f in chunk_file.rglob('*'):
+                        if f.is_file():
+                            total_size += f.stat().st_size
     
     return chunk_count, total_size
 
@@ -211,6 +224,239 @@ def display_full_environment_info(attrs, console):
             return False
     return False
 
+def display_background_metadata(zarr_path, console):
+    """Display background computation metadata."""
+    try:
+        import zarr
+        root = zarr.open(zarr_path, mode='r')
+        
+        if 'background_runs' not in root:
+            return False
+        
+        bg_runs = root['background_runs']
+        
+        # Get list of all runs
+        run_names = [name for name in bg_runs.group_keys()]
+        
+        if not run_names:
+            return False
+        
+        # Display summary table
+        bg_table = Table(title=" Background Computations", box=box.ROUNDED)
+        bg_table.add_column("Run", style="cyan")
+        bg_table.add_column("Timestamp", style="yellow")
+        bg_table.add_column("Method", style="magenta")
+        bg_table.add_column("Frames", style="green")
+        bg_table.add_column("Duration", style="blue")
+        
+        latest_run = bg_runs.attrs.get('latest', '')
+        
+        for run_name in sorted(run_names):
+            run = bg_runs[run_name]
+            attrs = run.attrs
+            
+            # Mark latest run
+            if run_name == latest_run:
+                run_display = f"{run_name} [bold green]★[/bold green]"
+            else:
+                run_display = run_name
+            
+            timestamp = format_timestamp(attrs.get('background_timestamp_utc', ''))
+            method = attrs.get('parameters', {}).get('method', 'unknown')
+            frames = attrs.get('n_frames_used', 0)
+            duration = attrs.get('duration_seconds', 0)
+            
+            bg_table.add_row(
+                run_display,
+                timestamp,
+                method,
+                str(frames),
+                f"{duration:.1f}s"
+            )
+        
+        console.print(bg_table)
+        
+        # Show details of latest run
+        if latest_run and latest_run in bg_runs:
+            latest = bg_runs[latest_run]
+            params = latest.attrs.get('parameters', {})
+            
+            detail_table = Table(title=f"Latest Background Parameters ({latest_run})", box=box.SIMPLE)
+            detail_table.add_column("Parameter", style="cyan")
+            detail_table.add_column("Value", style="yellow")
+            
+            detail_table.add_row("Sample size", str(params.get('sample_size', 'unknown')))
+            detail_table.add_row("Random seed", str(params.get('seed', 'unknown')))
+            detail_table.add_row("Method", params.get('method', 'unknown'))
+            
+            # Check which backgrounds exist
+            has_full = 'background_full' in latest
+            has_ds = 'background_ds' in latest
+            
+            if has_full:
+                detail_table.add_row("Full resolution", f"✓ {latest['background_full'].shape}")
+            if has_ds:
+                detail_table.add_row("Downsampled", f"✓ {latest['background_ds'].shape}")
+            
+            console.print(detail_table)
+        
+        return True
+        
+    except Exception as e:
+        console.print(f"[yellow]Could not load background metadata: {e}[/yellow]")
+        return False
+
+def display_detection_metadata(zarr_path, console):
+    """Display fish detection run metadata."""
+    try:
+        import zarr
+        root = zarr.open(zarr_path, mode='r')
+
+        if 'detect_runs' not in root:
+            return False
+
+        detect_runs = root['detect_runs']
+        run_names = [name for name in detect_runs.group_keys()]
+
+        if not run_names:
+            return False
+
+        # Summary table of all runs
+        summary_table = Table(title=" Fish Detection Runs", box=box.ROUNDED)
+        summary_table.add_column("Run", style="cyan")
+        summary_table.add_column("Timestamp", style="yellow")
+        summary_table.add_column("Total Detections", style="green")
+        summary_table.add_column("Frames w/ Detections", style="magenta")
+        summary_table.add_column("Source BG", style="blue")
+        summary_table.add_column("Duration", style="blue")
+
+        latest_run = detect_runs.attrs.get('latest', '')
+
+        for run_name in sorted(run_names):
+            run = detect_runs[run_name]
+            attrs = run.attrs
+            stats = attrs.get('summary_statistics', {})
+
+            run_display = f"{run_name} [bold green]★[/bold green]" if run_name == latest_run else run_name
+
+            timestamp = format_timestamp(attrs.get('detect_timestamp_utc', ''))
+            total_detections = stats.get('total_detections', 0)
+            frames_with_detections = stats.get('frames_with_detections', 0)
+            percent_frames = stats.get('percent_frames_with_detections', 0)
+            source_bg = attrs.get('source_background_run', 'unknown').replace('background_', '')
+            duration = attrs.get('duration_seconds', 0)
+
+            frames_display = f"{frames_with_detections} ({percent_frames}%)"
+
+            summary_table.add_row(
+                run_display,
+                timestamp,
+                str(total_detections),
+                frames_display,
+                source_bg,
+                f"{duration:.1f}s"
+            )
+        
+        console.print(summary_table)
+
+        # Detail view for the latest run
+        if latest_run and latest_run in detect_runs:
+            latest = detect_runs[latest_run]
+            params = latest.attrs.get('parameters', {})
+            
+            detail_table = Table(title=f"Latest Detection Parameters ({latest_run})", box=box.SIMPLE)
+            detail_table.add_column("Parameter", style="cyan")
+            detail_table.add_column("Value", style="yellow")
+
+            for key, value in params.items():
+                detail_table.add_row(str(key), str(value))
+            
+            # Also show array info
+            if 'n_detections' in latest:
+                detail_table.add_row("Counts array", f"✓ {latest['n_detections'].shape} | {latest['n_detections'].dtype}")
+            if 'bbox_norm_coords' in latest:
+                detail_table.add_row("BBox array", f"✓ {latest['bbox_norm_coords'].shape} | {latest['bbox_norm_coords'].dtype}")
+
+            console.print(detail_table)
+
+        return True
+
+    except Exception as e:
+        console.print(f"[yellow]Could not load detection metadata: {e}[/yellow]")
+        return False
+
+def display_analysis_metadata(zarr_path, console):
+    """Display analysis metadata including mask and detection tuning."""
+    try:
+        import zarr
+        root = zarr.open(zarr_path, mode='r')
+        
+        if 'analysis_metadata' not in root:
+            return False
+        
+        analysis_meta = root['analysis_metadata']
+        
+        tables_shown = False
+        
+        # Check for dish mask tuning
+        if 'dish_mask' in analysis_meta.attrs:
+            mask_data = analysis_meta.attrs['dish_mask']
+            
+            mask_table = Table(title="🎯 Dish Mask Calibration", box=box.ROUNDED)
+            mask_table.add_column("Property", style="cyan")
+            mask_table.add_column("Value", style="yellow")
+            
+            # Basic mask info
+            circle = mask_data.get('detected_circle', {})
+            mask_table.add_row("Center", f"({circle.get('center', [0,0])[0]}, {circle.get('center', [0,0])[1]})")
+            mask_table.add_row("Radius", f"{circle.get('radius', 0)} pixels")
+            
+            # Tuning details
+            mask_table.add_row("Tuned on array", mask_data.get('tuned_on_array', 'Unknown'))
+            mask_table.add_row("Tuned on frame", str(mask_data.get('tuned_on_frame', 0)))
+            
+            # Hough parameters
+            mask_table.add_row("Hough param1", str(circle.get('hough_param1', 0)))
+            mask_table.add_row("Hough param2", str(circle.get('hough_param2', 0)))
+            mask_table.add_row("Radius adjustment", str(circle.get('radius_adjustment', 0)))
+            
+            # Metadata
+            if 'tuned_timestamp' in mask_data:
+                mask_table.add_row("Tuned at", format_timestamp(mask_data['tuned_timestamp']))
+            
+            console.print(mask_table)
+            tables_shown = True
+        
+        # Check for detection tuning
+        if 'detection_tuning' in analysis_meta.attrs:
+            detect_data = analysis_meta.attrs['detection_tuning']
+            params = detect_data.get('tuned_parameters', {})
+            
+            detect_table = Table(title="🐠 Detection Parameters", box=box.ROUNDED)
+            detect_table.add_column("Parameter", style="cyan")
+            detect_table.add_column("Value", style="yellow")
+            
+            detect_table.add_row("Threshold", str(params.get('ds_thresh', 'unknown')))
+            detect_table.add_row("Erosion radius", str(params.get('se1_radius', 'unknown')))
+            detect_table.add_row("Dilation radius", str(params.get('se4_radius', 'unknown')))
+            detect_table.add_row("Min area", str(params.get('min_area', 'unknown')))
+            detect_table.add_row("Max area", str(params.get('max_area', 'unknown')))
+            
+            if 'tuned_on_frame' in detect_data:
+                detect_table.add_row("Tuned on frame", str(detect_data['tuned_on_frame']))
+            
+            if 'tuned_timestamp' in detect_data:
+                detect_table.add_row("Tuned at", format_timestamp(detect_data['tuned_timestamp']))
+            
+            console.print(detect_table)
+            tables_shown = True
+        
+        return tables_shown
+            
+    except Exception as e:
+        console.print(f"[yellow]Could not load analysis metadata: {e}[/yellow]")
+        return False
+
 def inspect_video_zarr(zarr_path, show_full_env=False):
     """
     Inspect a video Zarr archive created by kvikIO import.
@@ -236,14 +482,20 @@ def inspect_video_zarr(zarr_path, show_full_env=False):
         with open(root_json) as f:
             root_meta = json.load(f)
             if root_meta.get('node_type') == 'group':
-                console.print("[green]✓[/green] Valid Zarr v3 group")
+                console.print("[green]Valid Zarr v3 group[/green]")
+    
+    analysis_meta_path = zarr_path / "analysis_metadata"
+    if analysis_meta_path.exists():
+        console.print("[green] Analysis metadata found[/green]")
+        display_analysis_metadata(zarr_path, console)
+        console.print()
     
     # Check raw_video group
     raw_video_path = zarr_path / "raw_video"
     raw_video_json = raw_video_path / "zarr.json"
     
     if not raw_video_json.exists():
-        console.print("[yellow]⚠[/yellow] raw_video group metadata not found")
+        console.print("[yellow] raw_video group metadata not found[/yellow]")
         return
     
     with open(raw_video_json) as f:
@@ -409,11 +661,19 @@ def inspect_video_zarr(zarr_path, show_full_env=False):
         for item in items[:20]:  # Limit items shown
             if item.is_dir():
                 if item.name == 'c':  # This is a chunks directory
-                    # Count chunks in THIS directory
-                    chunk_count = len(list(item.iterdir()))  # Simple count of files/dirs in c/
+                    chunk_count = len(list(item.iterdir()))
                     node = parent_node.add(f"[blue]{item.name}/[/blue] [dim]({chunk_count} chunks)[/dim]")
+                elif item.name == 'analysis_metadata':
+                    # Special highlight for analysis metadata
+                    node = parent_node.add(f"[magenta]{item.name}/[/magenta] [dim](calibration data)[/dim]")
+                    add_tree_node(node, item, max_depth, current_depth + 1)
+                elif item.name in ['background_runs', 'detect_runs']: # HIGHLIGHT RUNS
+                    node = parent_node.add(f"[yellow]{item.name}/[/yellow] [dim](processing runs)[/dim]")
+                    add_tree_node(node, item, max_depth, current_depth + 1)
+                elif item.name == 'raw_video':
+                    node = parent_node.add(f"[green]{item.name}/[/green] [dim](video data)[/dim]")
+                    add_tree_node(node, item, max_depth, current_depth + 1)
                 elif item.name in ['images_full', 'images_ds']:
-                    # Special handling for array directories
                     if (item / 'zarr.json').exists():
                         node = parent_node.add(f"[green]{item.name}/[/green] [dim](array)[/dim]")
                     else:
@@ -431,7 +691,19 @@ def inspect_video_zarr(zarr_path, show_full_env=False):
     
     add_tree_node(tree, zarr_path, max_depth=3)
     console.print(tree)
-    
+
+    background_path = zarr_path / "background_runs"
+    if background_path.exists():
+        console.print("[green] Background computations found[/green]")
+        display_background_metadata(zarr_path, console)
+        console.print()
+        
+    detect_path = zarr_path / "detect_runs"
+    if detect_path.exists():
+        console.print("[green] Fish detection runs found[/green]")
+        display_detection_metadata(zarr_path, console)
+        console.print()
+        
     # Optionally display full environment info
     if show_full_env:
         display_full_environment_info(attrs, console)

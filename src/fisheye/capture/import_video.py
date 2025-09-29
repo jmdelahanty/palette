@@ -20,7 +20,6 @@ import cupy as cp
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
-from tqdm import tqdm
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
@@ -550,7 +549,7 @@ def import_video(
             console.print(Panel.fit(
                 f"[cyan]Video:[/cyan] {video_path.name}\n"
                 f"[cyan]Frames:[/cyan] {n_frames}\n"
-                f"[cyan]Resolutions:[/cyan] {', '.join(res_info)}\n"  # Show what we're creating
+                f"[cyan]Resolutions:[/cyan] {', '.join(res_info)}\n"
                 f"[cyan]Device:[/cyan] {device}\n"
                 f"[cyan]Chunk size:[/cyan] {chunk_size} frames\n"
                 f"[cyan]Write size:[/cyan] {io_batch_size} frames ({write_mode})\n"
@@ -567,7 +566,7 @@ def import_video(
                     gpu_fp16, arrays, config, console
                 )
             else:
-                # TODO: Add CPU processing path here if needed
+                # TODO: Add CPU processing path 
                 console.print("[red]CPU processing not implemented in this example[/red]")
                 raise NotImplementedError("CPU processing path not shown")
 
@@ -687,7 +686,7 @@ def import_video(
                             "disk_percent_used": disk.get('percent_used', 0),
                         })
                     
-                    # Add HPC scheduler info (LSF/SLURM) if present
+                    # Add HPC scheduler info (LSF at Janelia/SLURM) if present
                     if 'lsf' in env_info['platform']:
                         lsf = env_info['platform']['lsf']
                         system_metadata.update({

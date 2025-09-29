@@ -1,39 +1,56 @@
 import:
-  # Resolution configuration - what to generate during import
-  resolutions: both              # Options: 'full', 'downsampled', 'both'
-  
-  # Chunk and shard configuration (applies to all resolutions)
-  chunk_size: 128               # Frames per chunk (smallest storage unit)
-  use_sharding: false           # Enable Zarr v3 sharding (groups chunks into shards)
-  chunks_per_shard: 1           # Number of chunks per shard (only if use_sharding=true)
-
-  # Processing configuration
-  batch_size: 64                # Frames decoded at once from video
-  gpu_fp16: true                # Use float16 for GPU grayscale conversion
-  
-  # GPU Direct Storage options
-  use_kvikio_zarr: true         # Enable kvikIO for GPU→Zarr direct writes
-  
-  # Full resolution settings (used when resolutions includes 'full')
-  full:
-    # Inherits chunk_size from parent by default
-    # No compression - GDS writes raw data directly
-    
-  # Downsampled settings (used when resolutions includes 'downsampled')  
+  resolutions: both
+  chunk_size: 128
+  use_sharding: false
+  chunks_per_shard: 1
+  batch_size: 64
+  gpu_fp16: true
+  use_kvikio_zarr: true
+  full: null
   downsampled:
-    size: [640, 640]           # Target [height, width] for downsampled frames
-    method: area               # Options: 'nearest', 'bilinear', 'bicubic', 'area', 'lanczos'
-    chunk_size: 128            # Can differ from full resolution chunks
-    preserve_aspect: false     # If true, pad instead of stretch
-    # No compression - GDS writes raw data directly
-    
-  # Optional post-processing compression (separate stage after import)
+    size:
+    - 640
+    - 640
+    method: area
+    chunk_size: 128
+    preserve_aspect: false
   post_compress:
-    enable: false              # Run compression as separate stage after import
-    targets: ['downsampled']   # Which arrays to compress: ['full', 'downsampled', 'both']
-    method: lz4                # Compression method for post-processing
-    level: 1                   # Compression level
-    delete_uncompressed: false # Whether to remove uncompressed version
-    
-  # Misc settings
+    enable: false
+    targets:
+    - downsampled
+    method: lz4
+    level: 1
+    delete_uncompressed: false
   include_system_info: true
+background:
+  sample_size: 500
+  seed: 195
+  method: mode
+  compute_full: true
+  compute_ds: true
+detect:
+  ds_thresh: 21
+  se1_radius: 2
+  se4_radius: 10
+  min_area: 85
+  max_area: 500
+  max_fish: 1
+  dish_mask: &id001
+    shape: circle
+    center:
+    - 324
+    - 328
+    radius: 291
+    hough_params:
+      param1: 50
+      param2: 30
+      radius_adjustment: 3
+    source:
+      array: images_ds
+      frame: 900
+      timestamp: '2025-09-29T17:38:13.138667'
+crop:
+  dish_mask: *id001
+  roi_sz:
+  - 128
+  - 128

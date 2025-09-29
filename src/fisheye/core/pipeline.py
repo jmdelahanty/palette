@@ -17,10 +17,9 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 
 # Import stage modules
-from ..capture.import_video import import_video, validate_import, get_import_stats
-from ..preprocessing.downsample_video import downsample_video
-# from ..preprocessing.background import calculate_background
-# from ..detection.blob import detect_blobs
+from ..capture.import_video import import_video, get_import_stats
+from ..preprocessing.background import compute_background
+from ..detection.detect_traditional import detect_fish
 # from ..tracking.keypoints import track_keypoints
 # from ..tracking.crop import crop_detections
 from ..shared.zarr.schema import validate_zarr_structure
@@ -79,13 +78,16 @@ class Pipeline:
     STAGE_DEPENDENCIES = {
         'import': [],
         'downsample': ['import'],
-        'background': ['downsample'],
+        'background': ['import'],
         'detect': ['background'],
         'crop': ['detect'],
         'track': ['crop'],
         'refine': ['track'],
         'assign_ids': ['detect']
     }
+
+    ANALYSIS_STAGES = {'background', 'detect', 'track', 'refine'}
+    DATA_STAGES = {'import', 'downsample'}
     
     def __init__(
         self,
@@ -197,40 +199,6 @@ class Pipeline:
         for stage in stages_to_run:
             self._run_stage(stage)
         
-        # # Run stages
-        # with Progress(
-        #     SpinnerColumn(),
-        #     TextColumn("[progress.description]{task.description}"),
-        #     BarColumn(),
-        #     TimeRemainingColumn(),
-        #     console=self.console
-        # ) as progress:
-            
-        #     task = progress.add_task(
-        #         "Running pipeline...",
-        #         total=len(stages_to_run)
-        #     )
-            
-        #     for stage in stages_to_run:
-        #         stage_start = time.perf_counter()
-                
-        #         try:
-        #             self._run_stage(stage)
-                    
-        #             if validate:
-        #                 self._validate_stage(stage)
-                    
-        #         except Exception as e:
-        #             self.console.print(f"[red]Error in stage '{stage}': {e}[/red]")
-        #             if self.config.verbose:
-        #                 import traceback
-        #                 self.console.print(traceback.format_exc())
-        #             raise
-                
-        #         finally:
-        #             self.stage_timings[stage] = time.perf_counter() - stage_start
-        #             progress.update(task, advance=1)
-        
         # Display summary
         total_time = time.perf_counter() - pipeline_start
         self._display_summary(stages_to_run, total_time)
@@ -241,13 +209,33 @@ class Pipeline:
         """Resolve stage dependencies and return ordered list of stages to run."""
         required_stages = set()
         
+        # Open zarr to check what exists (if it exists)
+        existing_stages = set()
+        if Path(self.config.zarr_path).exists():
+            try:
+                root = zarr.open_group(self.config.zarr_path, mode='r')
+                
+                # Check which stages have outputs
+                if 'raw_video' in root:
+                    existing_stages.add('import')
+                    if 'images_ds' in root['raw_video']:
+                        existing_stages.add('downsample')
+                if 'background_runs' in root and root['background_runs'].attrs.get('latest'):
+                    existing_stages.add('background')
+                if 'detect_runs' in root and root['detect_runs'].attrs.get('latest'):
+                    existing_stages.add('detect')
+            except:
+                pass
+        
         for stage in requested_stages:
             # Add the stage itself
             required_stages.add(stage)
             
-            # Add all dependencies
+            # Add only MISSING dependencies
             deps = self.STAGE_DEPENDENCIES.get(stage, [])
-            required_stages.update(deps)
+            for dep in deps:
+                if dep not in existing_stages:
+                    required_stages.add(dep)
         
         # Return in proper order
         return [s for s in self.STAGE_ORDER if s in required_stages]
@@ -256,30 +244,35 @@ class Pipeline:
         """Run a single pipeline stage."""
         self.console.rule(f"[bold]Stage: {stage.title()}[/bold]")
         
-        # Check if stage already completed
-        if self._is_stage_complete(stage):
+        # Only check completion for data import stages
+        if stage in ['import', 'downsample'] and self._is_stage_complete(stage):
             self.console.print(f"[green]✓ Stage '{stage}' already complete, skipping[/green]")
             return
+        
+        stage_start = time.perf_counter()
+        
+        try:
+            if stage == 'import':
+                self._run_import()
+            elif stage == 'downsample':
+                self._run_downsample()
+            elif stage == 'background':
+                self._run_background()
+            elif stage == 'detect':
+                self._run_detect()
+            elif stage == 'crop':
+                self._run_crop()
+            elif stage == 'track':
+                self._run_track()
+            elif stage == 'refine':
+                self._run_refine()
+            elif stage == 'assign_ids':
+                self._run_assign_ids()
+            else:
+                raise ValueError(f"Unknown stage: {stage}")
+        finally:
+            self.stage_timings[stage] = time.perf_counter() - stage_start
 
-        if stage == 'import':
-            self._run_import()
-        elif stage == 'downsample':
-            self._run_downsample()
-        elif stage == 'background':
-            self._run_background()
-        elif stage == 'detect':
-            self._run_detect()
-        elif stage == 'crop':
-            self._run_crop()
-        elif stage == 'track':
-            self._run_track()
-        elif stage == 'refine':
-            self._run_refine()
-        elif stage == 'assign_ids':
-            self._run_assign_ids()
-        else:
-            raise ValueError(f"Unknown stage: {stage}")
-    
     def _run_import(self) -> None:
         """Run video import stage."""
         if not self.config.video_path:
@@ -294,34 +287,44 @@ class Pipeline:
             force_cpu=self.config.force_cpu
         )
 
-    def _run_downsample(self) -> None:
-        """Run video downsampling stage."""
-        if self.zarr_root is None:
-            self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
-        
-        downsample_video(
-            zarr_path=self.config.zarr_path,
-            config=self.pipeline_params,
-            console=self.console
-        )
-
     
     def _run_background(self) -> None:
         """Run background calculation stage."""
         if self.zarr_root is None:
             self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
         
-        # Import would be from preprocessing.background module
-        self.console.print("[yellow]Background stage not yet implemented[/yellow]")
-        # calculate_background(self.zarr_root, self.pipeline_params['background'], self.console)
+        # Get background parameters from pipeline config
+        bg_params = self.pipeline_params.get('background', {})
+        
+        # Run background computation
+        results = compute_background(
+            zarr_path=self.config.zarr_path,
+            sample_size=bg_params.get('sample_size'),
+            seed=bg_params.get('seed'),
+            method=bg_params.get('method'),
+            compute_full=bg_params.get('compute_full'),
+            compute_ds=bg_params.get('compute_ds'),
+            config_path=self.config.config_path,
+            console=self.console
+        )
+        
+        self.console.print(f"✓ Background computed using {results['frames_used']} frames")
     
     def _run_detect(self) -> None:
         """Run detection stage."""
         if self.zarr_root is None:
             self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
         
-        self.console.print("[yellow]Detection stage not yet implemented[/yellow]")
-        # detect_blobs(self.zarr_root, self.pipeline_params['detect'], self.config.scheduler, self.console)
+        # Run fish detection
+        results = detect_fish(
+            zarr_path=self.config.zarr_path,
+            config_path=self.config.config_path,
+            scheduler=self.config.scheduler,
+            num_workers=self.config.num_workers,
+            console=self.console
+        )
+        
+        self.console.print(f"✓ Detected {results['total_detections']} fish in {results['frames_with_detections']} frames")
     
     def _run_crop(self) -> None:
         """Run cropping stage."""
@@ -416,11 +419,19 @@ class Pipeline:
             root = zarr.open_group(self.config.zarr_path, mode='r')
             
             if stage == 'import':
-                # Check if raw_video/images_full exists
                 return 'raw_video' in root and 'images_full' in root['raw_video']
             elif stage == 'downsample':
-                # Check if raw_video/images_ds exists
                 return 'raw_video' in root and 'images_ds' in root['raw_video']
+            elif stage == 'background':
+                # Check if background_runs exists with at least one run
+                if 'background_runs' not in root:
+                    return False
+                return len(list(root['background_runs'].group_keys())) > 0
+            elif stage == 'detect':
+                # Check if detect_runs exists with at least one run
+                if 'detect_runs' not in root:
+                    return False
+                return len(list(root['detect_runs'].group_keys())) > 0
             # Add more stage checks as needed
             
         except Exception:
