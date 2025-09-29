@@ -23,7 +23,7 @@ from typing import Dict, Any, Optional, Tuple
 from tqdm import tqdm
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, SpinnerColumn, MofNCompleteColumn
+from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
 
 # Optional deps
 try:
@@ -39,7 +39,7 @@ try:
 except Exception:
     _HAVE_KVIKIO = False
 
-from ..utils.system import get_git_info, get_platform_info, get_gpu_info, get_environment_info, get_gds_config
+from ..utils.system import get_git_info, get_environment_info, get_gds_config
 from ..shared.zarr.schema import create_palette_zarr, update_import_duration
 
 
@@ -69,12 +69,11 @@ def _process_video_gpu_kvikio(
     io_batch_size: int,
     batch_size: int,
     use_fp16: bool,
-    full_shape: Tuple[int, int],
-    zarr_array,
+    arrays: Dict[str, Any],
+    config: Dict[str, Any],
     console: Console
 ):
-    
-    full_h, full_w = full_shape
+    import torch.nn.functional as F
     
     # Clear cache before allocating
     torch.cuda.empty_cache()
@@ -82,26 +81,39 @@ def _process_video_gpu_kvikio(
         mempool = cp.get_default_memory_pool()
         mempool.free_all_blocks()
     
-    # Determine write size based on whether we're using sharding
-    if hasattr(zarr_array, 'shards') and zarr_array.shards:
-        frames_per_write = zarr_array.shards[0]
-        required_gb = frames_per_write * full_h * full_w / (1024**3)
-        console.print(f"[yellow]Shard buffer requires {required_gb:.2f} GB[/yellow]")
-        
-        # Check if we have enough memory
-        available = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)) / 1024**3
-        if required_gb > available * 0.9:  # Leave 10% buffer
-            console.print(f"[red]Not enough GPU memory! Required: {required_gb:.2f} GB, Available: {available:.2f} GB[/red]")
-            console.print("[yellow]Falling back to chunk-based writes[/yellow]")
-            frames_per_write = io_batch_size
-    else:
-        frames_per_write = io_batch_size
+    # Get shapes and configs for each resolution
+    shapes = {}
+    buffers = {}
+    frames_per_write = io_batch_size  # Default
     
-    # Allocate buffer for the write size
-    gpu_shard_buffer = torch.empty((frames_per_write, full_h, full_w), device='cuda', dtype=torch.uint8)
+    for key, arr in arrays.items():
+        h, w = arr.shape[1], arr.shape[2]
+        shapes[key] = (h, w)
+        
+        # Check sharding for write size
+        if hasattr(arr, 'shards') and arr.shards:
+            frames_per_write = max(frames_per_write, arr.shards[0])
+    
+    # Allocate buffers for each resolution
+    if 'full' in arrays:
+        full_h, full_w = shapes['full']
+        buffers['full'] = torch.empty((frames_per_write, full_h, full_w), 
+                                      device='cuda', dtype=torch.uint8)
+        console.print(f"[cyan]Full resolution buffer: {frames_per_write}×{full_h}×{full_w}[/cyan]")
+    
+    if 'downsampled' in arrays:
+        down_h, down_w = shapes['downsampled']
+        buffers['downsampled'] = torch.empty((frames_per_write, down_h, down_w),
+                                            device='cuda', dtype=torch.uint8)
+        console.print(f"[cyan]Downsampled buffer: {frames_per_write}×{down_h}×{down_w}[/cyan]")
+    
+    # Grayscale conversion weights
     weights = torch.tensor([0.2989, 0.5870, 0.1140], device='cuda',
-                           dtype=torch.float16 if use_fp16 else torch.float32).view(1, 1, 1, 3)
-
+                          dtype=torch.float16 if use_fp16 else torch.float32).view(1, 1, 1, 3)
+    
+    # Get downsample method if needed
+    down_method = config['import'].get('downsampled', {}).get('method', 'area')
+    
     write_times = []
     torch.cuda.synchronize()
     
@@ -110,7 +122,7 @@ def _process_video_gpu_kvikio(
     
     with torch.no_grad():
         with Progress(
-            TextColumn("[bold blue]GPU --> Zarr GDS"),
+            TextColumn("[bold blue]GPU → Zarr GDS"),
             BarColumn(),
             MofNCompleteColumn(),
             TextColumn("•"),
@@ -125,7 +137,7 @@ def _process_video_gpu_kvikio(
         ) as progress:
             
             task = progress.add_task(
-                "Processing",
+                f"Processing ({', '.join(arrays.keys())})",
                 total=total_writes,
                 mb=0.0,
                 speed=0.0,
@@ -137,47 +149,76 @@ def _process_video_gpu_kvikio(
                 actual_write_size = write_end - write_idx
                 buffer_position = 0
                 
-                # Fill GPU buffer with grayscale frames
+                # Fill buffers with frames (single decode pass)
                 for batch_start in range(write_idx, write_end, batch_size):
                     batch_end = min(batch_start + batch_size, write_end)
+                    batch_size_actual = batch_end - batch_start
+                    
+                    # Decode frames once
                     frames = vr.get_batch(list(range(batch_start, batch_end)))
                     x = frames.half() if use_fp16 else frames.float()
                     gray = (x * weights).sum(dim=-1)
                     gray_uint8 = gray.to(torch.uint8)
-                    gpu_shard_buffer[buffer_position:buffer_position+len(frames)] = gray_uint8
-                    buffer_position += len(frames)
+                    
+                    # Store full resolution if needed
+                    if 'full' in buffers:
+                        buffers['full'][buffer_position:buffer_position+batch_size_actual] = gray_uint8
+                    
+                    # Generate and store downsampled if needed
+                    if 'downsampled' in buffers:
+                        down_h, down_w = shapes['downsampled']
+                        # Add batch and channel dims for interpolation
+                        gray_for_interp = gray_uint8.unsqueeze(1).float()  # [B, 1, H, W]
+                        
+                        gray_down = F.interpolate(
+                            gray_for_interp,
+                            size=(down_h, down_w),
+                            mode=down_method,
+                            align_corners=False if down_method in ['bilinear', 'bicubic'] else None
+                        ).squeeze(1).to(torch.uint8)  # Remove channel dim
+                        
+                        buffers['downsampled'][buffer_position:buffer_position+batch_size_actual] = gray_down
+                        del gray_down, gray_for_interp
+                    
+                    buffer_position += batch_size_actual
                     del frames, x, gray, gray_uint8
-
-                # Convert to CuPy and write
+                
+                # Write all buffers to their arrays
                 t0 = time.perf_counter()
                 
-                # Convert PyTorch to CuPy (zero-copy)
-                cupy_shard = cp.from_dlpack(
-                    gpu_shard_buffer[:actual_write_size].contiguous()
-                )
+                total_bytes_written = 0
+                for key, buffer in buffers.items():
+                    # Convert PyTorch to CuPy (zero-copy)
+                    cupy_data = cp.from_dlpack(
+                        buffer[:actual_write_size].contiguous()
+                    )
+                    
+                    # Direct CuPy write (triggers GDS)
+                    arrays[key][write_idx:write_end] = cupy_data
+                    
+                    # Track data size
+                    h, w = shapes[key]
+                    total_bytes_written += actual_write_size * h * w
                 
-                # Direct CuPy write (should trigger GDS)
-                zarr_array[write_idx:write_end] = cupy_shard
                 cp.cuda.Stream.null.synchronize()
-                
                 dt = time.perf_counter() - t0
                 write_times.append(dt)
                 
                 # Calculate metrics
-                size_mb = actual_write_size * full_h * full_w / (1024 * 1024)
+                size_mb = total_bytes_written / (1024 * 1024)
                 speed_mbps = size_mb / max(dt, 1e-9)
-                avg_speed = sum((actual_write_size * full_h * full_w / (1024 * 1024)) / max(t, 1e-9) 
+                avg_speed = sum(total_bytes_written / (1024 * 1024) / max(t, 1e-9) 
                               for t in write_times) / len(write_times)
                 
                 # Update progress
                 progress.update(
-                    task, 
+                    task,
                     advance=1,
                     mb=size_mb,
                     speed=speed_mbps,
                     avg_speed=avg_speed
                 )
-
+                
                 if write_idx % (frames_per_write * 20) == 0:
                     torch.cuda.empty_cache()
                     import gc; gc.collect()
@@ -283,8 +324,32 @@ def import_video(
             video_path = Path(video_path)
             if not video_path.exists():
                 raise FileNotFoundError(f"Video file not found: {video_path}")
+            
+            # ---- Configuration -------------------------------------------------------
+            ip = config.get("import", {})
+            chunk_size = int(ip.get("chunk_size", 64))
+            batch_size = int(ip.get("batch_size", 32))
+            gpu_fp16 = bool(ip.get("gpu_fp16", True))
+            
+            # kvikIO and sharding configuration
+            use_kvikio_zarr = bool(ip.get("use_kvikio_zarr", True))  # Default to True for GPU
+            use_sharding = bool(ip.get("use_sharding", False))
+            
+            resolutions_mode = ip.get("resolutions", "full")
+            full_config = ip.get("full", {})
+            down_config = ip.get("downsampled", {})
+            
+            create_full = resolutions_mode in ["full", "both"]
+            create_down = resolutions_mode in ["downsampled", "both"]
 
-            console.rule("[bold]Video Import (Full Resolution) | Worker Process[/bold]")
+            mode_text = {
+                "full": "Full Resolution",
+                "downsampled": "Downsampled Only", 
+                "both": "Full + Downsampled"
+            }.get(resolutions_mode, "Unknown")
+
+            console.rule(f"[bold]Video Import ({mode_text}) | Worker Process[/bold]")
+
             start_time = time.perf_counter()
 
             # ---- Setup decoder -------------------------------------------------------
@@ -296,15 +361,6 @@ def import_video(
             first = vr[0]
             full_h, full_w = int(first.shape[0]), int(first.shape[1])
 
-            # ---- Configuration -------------------------------------------------------
-            ip = config.get("import", {})
-            chunk_size = int(ip.get("chunk_size", 64))
-            batch_size = int(ip.get("batch_size", 32))
-            gpu_fp16 = bool(ip.get("gpu_fp16", True))
-            
-            # kvikIO and sharding configuration
-            use_kvikio_zarr = bool(ip.get("use_kvikio_zarr", True))  # Default to True for GPU
-            use_sharding = bool(ip.get("use_sharding", False))
             
             # Determine io_batch_size based on sharding
             if use_sharding:
@@ -358,51 +414,84 @@ def import_video(
                 root = zarr.open_group(store, mode='w', zarr_format=3)
                 raw = root.create_group("raw_video", overwrite=True)
 
-                # Create array with optional sharding
-                if use_sharding:
-                    console.print(f"[cyan]Creating sharded array[/cyan]")
-                    console.print(f"[cyan]Chunks: {chunk_size} frames, Shards: {io_batch_size} frames[/cyan]")
+                                # Create arrays based on resolution mode
+                arrays = {}
+
+                if create_full:
+                    if use_sharding:
+                        arrays['full'] = raw.create_array(
+                            name='images_full',
+                            shape=(n_frames, full_h, full_w),
+                            chunks=(chunk_size, full_h, full_w),
+                            shards=(io_batch_size, full_h, full_w),
+                            dtype="uint8",
+                            fill_value=0,
+                            compressors=None,
+                            overwrite=True
+                        )
+                    else:
+                        arrays['full'] = raw.create_array(
+                            name='images_full',
+                            shape=(n_frames, full_h, full_w),
+                            chunks=(io_batch_size, full_h, full_w),
+                            dtype="uint8",
+                            fill_value=0,
+                            compressors=None,
+                            overwrite=True
+                        )
+                
+                if create_down:
+                    target_size = down_config.get("size", [640, 640])
+                    down_h, down_w = target_size
+                    down_chunk_size = down_config.get("chunk_size", chunk_size)
                     
-                    arr_full = raw.create_array(
-                        name='images_full',
-                        shape=(n_frames, full_h, full_w),
-                        chunks=(chunk_size, full_h, full_w),
-                        shards=(io_batch_size, full_h, full_w),
-                        dtype="uint8",
-                        fill_value=0,
-                        compressors=None,
-                        overwrite=True
-                    )
-                else:
-                    console.print(f"[cyan]Creating standard array[/cyan]")
-                    console.print(f"[cyan]Chunks: {io_batch_size} frames[/cyan]")
-                    
-                    arr_full = raw.create_array(
-                        name='images_full',
-                        shape=(n_frames, full_h, full_w),
-                        chunks=(io_batch_size, full_h, full_w),
-                        dtype="uint8",
-                        fill_value=0,
-                        compressors=None,
-                        overwrite=True
-                    )
+                    if use_sharding:
+                        down_io_batch = down_chunk_size * chunks_per_shard
+                        arrays['downsampled'] = raw.create_array(
+                            name='images_ds',
+                            shape=(n_frames, down_h, down_w),
+                            chunks=(down_chunk_size, down_h, down_w),
+                            shards=(down_io_batch, down_h, down_w),
+                            dtype="uint8",
+                            fill_value=0,
+                            compressors=None,
+                            overwrite=True
+                        )
+                    else:
+                        arrays['downsampled'] = raw.create_array(
+                            name='images_ds',
+                            shape=(n_frames, down_h, down_w),
+                            chunks=(down_chunk_size, down_h, down_w),
+                            dtype="uint8",
+                            fill_value=0,
+                            compressors=None,
+                            overwrite=True
+                        )
 
                 # Build metadata
                 metadata = {
                     "import_method": "kvikio_zarr",
+                    "resolutions_mode": resolutions_mode,
                     "device": device,
                     "chunk_size": chunk_size,
                     "io_batch_size": io_batch_size,
                     "batch_size": batch_size,
-                    "import_stage": "full_resolution",
-                    "downsampled": False,
-                    "original_resolution": (full_h, full_w),
+                    "import_stage": "complete",
+                    "original_resolution": [full_h, full_w],
                     "fps": vid_meta.get("fps", 30),
                     "total_frames": n_frames,
                     "source_video": str(video_path.name),
                     "source_path": str(video_path.absolute()),
                     "import_timestamp": datetime.now(timezone.utc).isoformat(),
                 }
+                
+                if create_full:
+                    metadata["has_full_resolution"] = True
+                
+                if create_down:
+                    metadata["has_downsampled"] = True
+                    metadata["downsampled_resolution"] = list(target_size)
+                    metadata["downsample_method"] = down_config.get("method", "area")
                 
                 if use_sharding:
                     metadata["sharding_enabled"] = True
@@ -450,10 +539,18 @@ def import_video(
             method = "kvikIO GPU --> Zarr" if (kvikio_available and use_kvikio_zarr) else "Standard Zarr"
             write_mode = "sharded" if use_sharding else "chunked"
             
+            # Build resolution info for display
+            res_info = []
+            if create_full:
+                res_info.append(f"Full: {full_h}×{full_w}")
+            if create_down:
+                target_size = down_config.get("size", [640, 640])
+                res_info.append(f"Downsampled: {target_size[0]}×{target_size[1]}")
+
             console.print(Panel.fit(
                 f"[cyan]Video:[/cyan] {video_path.name}\n"
                 f"[cyan]Frames:[/cyan] {n_frames}\n"
-                f"[cyan]Resolution:[/cyan] {full_h}×{full_w}\n"
+                f"[cyan]Resolutions:[/cyan] {', '.join(res_info)}\n"  # Show what we're creating
                 f"[cyan]Device:[/cyan] {device}\n"
                 f"[cyan]Chunk size:[/cyan] {chunk_size} frames\n"
                 f"[cyan]Write size:[/cyan] {io_batch_size} frames ({write_mode})\n"
@@ -467,7 +564,7 @@ def import_video(
                 console.print("[green]Using kvikIO direct GPU --> Zarr writes[/green]")
                 _process_video_gpu_kvikio(
                     vr, n_frames, io_batch_size, batch_size,
-                    gpu_fp16, (full_h, full_w), arr_full, console
+                    gpu_fp16, arrays, config, console
                 )
             else:
                 # TODO: Add CPU processing path here if needed
@@ -478,16 +575,23 @@ def import_video(
             duration = time.perf_counter() - start_time
             update_import_duration(root, duration)
             
+            total_gb = 0
+            if 'full' in arrays:
+                total_gb += (n_frames * full_h * full_w) / (1024**3)
+            if 'downsampled' in arrays:
+                down_h, down_w = down_config.get("size", [640, 640])
+                total_gb += (n_frames * down_h * down_w) / (1024**3)
+
+            throughput_gbps = total_gb / max(duration, 1e-9)
+
             fps = n_frames / max(duration, 1e-9)
-            gb_processed = (n_frames * full_h * full_w) / (1024**3)
-            throughput_gbps = gb_processed / max(duration, 1e-9)
 
             # Store performance metadata
             performance_metadata = {
                 "import_duration_seconds": duration,
                 "throughput_gbps": throughput_gbps,
                 "frames_per_second": fps,
-                "data_size_gb": gb_processed,
+                "data_size_gb": total_gb
             }
             raw.attrs.update(performance_metadata)
 
@@ -663,6 +767,13 @@ def import_video(
                     console.print(f"[dim]{traceback.format_exc()}[/dim]")
 
             # ---- Display completion info ---------------------------------------------
+            output_arrays = []
+            if 'full' in arrays:
+                output_arrays.append(f"  - raw_video/images_full: ({n_frames}, {full_h}, {full_w})")
+            if 'downsampled' in arrays:
+                down_h, down_w = down_config.get("size", [640, 640])
+                output_arrays.append(f"  - raw_video/images_ds: ({n_frames}, {down_h}, {down_w})")
+
             console.print(Panel(
                 f"[green]✓ Import completed successfully[/green]\n\n"
                 f"[yellow]Performance:[/yellow]\n"
@@ -671,8 +782,7 @@ def import_video(
                 f"  Throughput: {throughput_gbps:.2f} GB/s\n\n"
                 f"[yellow]Output:[/yellow]\n"
                 f"  Path: {zarr_path}\n"
-                f"  Array: raw_video/images_full\n"
-                f"  Shape: ({n_frames}, {full_h}, {full_w})",
+                f"[yellow]Arrays created:[/yellow]\n" + "\n".join(output_arrays),
                 title="Import Complete",
                 expand=False
             ))
@@ -722,15 +832,28 @@ def validate_import(zarr_path: str, expected_frames: int) -> bool:
     try:
         root = zarr.open_group(zarr_path, mode='r')
         raw = root.get('raw_video')
-        if raw is None or 'images_full' not in raw:
+        if raw is None:
             return False
-        actual_frames = raw['images_full'].shape[0]
-        if actual_frames != expected_frames:
-            print(f"Frame count mismatch: expected {expected_frames}, got {actual_frames}")
-            return False
-        if raw.attrs.get('import_stage') != 'full_resolution':
+        
+        # Check what was imported based on metadata
+        resolutions_mode = raw.attrs.get('resolutions_mode', 'full')
+        
+        if resolutions_mode in ['full', 'both'] and 'images_full' in raw:
+            actual_frames = raw['images_full'].shape[0]
+            if actual_frames != expected_frames:
+                print(f"Full resolution frame count mismatch: expected {expected_frames}, got {actual_frames}")
+                return False
+                
+        if resolutions_mode in ['downsampled', 'both'] and 'images_ds' in raw:
+            actual_frames = raw['images_ds'].shape[0]
+            if actual_frames != expected_frames:
+                print(f"Downsampled frame count mismatch: expected {expected_frames}, got {actual_frames}")
+                return False
+        
+        if raw.attrs.get('import_stage') != 'complete':
             print("Import stage not marked as complete")
             return False
+            
         return True
     except Exception as e:
         print(f"Validation error: {e}")

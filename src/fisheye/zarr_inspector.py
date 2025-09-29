@@ -33,7 +33,7 @@ def format_timestamp(iso_str):
         return iso_str
 
 def count_chunks(array_path):
-    """Count actual chunk files on disk."""
+    """Count actual chunk files on disk for Zarr v3."""
     chunk_dir = array_path / "c"
     if not chunk_dir.exists():
         return 0, 0
@@ -41,14 +41,11 @@ def count_chunks(array_path):
     chunk_count = 0
     total_size = 0
     
-    # Iterate through chunk directories
-    for chunk_idx in chunk_dir.iterdir():
-        if chunk_idx.is_dir():
-            # Check for the actual chunk file at c/idx/0/0
-            chunk_file = chunk_idx / "0" / "0"
-            if chunk_file.exists():
-                chunk_count += 1
-                total_size += chunk_file.stat().st_size
+    # In Zarr v3, chunks are stored as c/0, c/1, c/2, etc.
+    for chunk_file in chunk_dir.iterdir():
+        if chunk_file.is_file():
+            chunk_count += 1
+            total_size += chunk_file.stat().st_size
     
     return chunk_count, total_size
 
@@ -255,7 +252,7 @@ def inspect_video_zarr(zarr_path, show_full_env=False):
     # Get attributes
     attrs = raw_meta.get('attributes', {})
     
-    # Display import metadata
+    # Display import metadata with resolution info
     import_table = Table(title="Import Configuration", box=box.ROUNDED)
     import_table.add_column("Parameter", style="cyan")
     import_table.add_column("Value", style="yellow")
@@ -263,8 +260,23 @@ def inspect_video_zarr(zarr_path, show_full_env=False):
     # Basic info
     import_table.add_row("Source video", attrs.get('source_video', 'Unknown'))
     import_table.add_row("Import method", attrs.get('import_method', 'Unknown'))
+    
+    # Resolution mode info
+    resolutions_mode = attrs.get('resolutions_mode', 'full')
+    import_table.add_row("Resolution mode", resolutions_mode.title())
+    
     import_table.add_row("Total frames", str(attrs.get('total_frames', 0)))
-    import_table.add_row("Resolution", f"{attrs.get('video_width', 0)}×{attrs.get('video_height', 0)}")
+    
+    # Show original resolution
+    orig_res = attrs.get('original_resolution', [0, 0])
+    import_table.add_row("Original resolution", f"{orig_res[1]}×{orig_res[0]}")
+    
+    # Show downsampled resolution if present
+    if attrs.get('has_downsampled'):
+        down_res = attrs.get('downsampled_resolution', [0, 0])
+        import_table.add_row("Downsampled resolution", f"{down_res[1]}×{down_res[0]}")
+        import_table.add_row("Downsample method", attrs.get('downsample_method', 'unknown'))
+    
     import_table.add_row("FPS", f"{attrs.get('fps', 0):.1f}")
     import_table.add_row("Duration", f"{attrs.get('video_duration_seconds', 0):.1f} seconds")
     
@@ -273,7 +285,6 @@ def inspect_video_zarr(zarr_path, show_full_env=False):
     import_table.add_row("Chunk size", f"{attrs.get('chunk_size', 0)} frames")
     import_table.add_row("IO batch size", f"{attrs.get('io_batch_size', 0)} frames")
     import_table.add_row("Device", attrs.get('device', 'Unknown'))
-    import_table.add_row("Compression", attrs.get('compression', 'none'))
     
     if attrs.get('gpu_fp16'):
         import_table.add_row("GPU FP16", "Yes")
@@ -303,15 +314,25 @@ def inspect_video_zarr(zarr_path, show_full_env=False):
     console.print("\n[bold]Processing Environment[/bold]")
     display_system_metadata(attrs, console)
     
-    # Check array metadata and actual chunks
-    array_path = raw_video_path / "images_full"
-    array_json = array_path / "zarr.json"
+    # Check BOTH arrays if they exist (UPDATED)
+    arrays_to_check = []
+    if attrs.get('has_full_resolution', True):  # Default to True for backward compat
+        arrays_to_check.append(('images_full', 'Full Resolution'))
+    if attrs.get('has_downsampled', False):
+        arrays_to_check.append(('images_ds', 'Downsampled'))
     
-    if array_json.exists():
+    for array_name, array_label in arrays_to_check:
+        array_path = raw_video_path / array_name
+        array_json = array_path / "zarr.json"
+        
+        if not array_json.exists():
+            console.print(f"\n[yellow] {array_label} array ({array_name}) not found[/yellow]")
+            continue
+        
         with open(array_json) as f:
             array_meta = json.load(f)
         
-        console.print("\n[bold]Array Structure[/bold]")
+        console.print(f"\n[bold]{array_label} Array Structure[/bold]")
         array_table = Table(box=box.ROUNDED)
         array_table.add_column("Property", style="cyan")
         array_table.add_column("Value", style="yellow")
@@ -341,32 +362,38 @@ def inspect_video_zarr(zarr_path, show_full_env=False):
                 array_table.add_row("Expected chunks", str(expected_chunks))
         
         console.print(array_table)
-    
-    # Storage analysis
-    console.print("\n[bold]Storage Analysis[/bold]")
-    
-    chunk_count, total_chunk_size = count_chunks(array_path)
-    
-    storage_table = Table(box=box.ROUNDED)
-    storage_table.add_column("Metric", style="cyan")
-    storage_table.add_column("Value", style="yellow")
-    
-    storage_table.add_row("Chunk files found", str(chunk_count))
-    storage_table.add_row("Total chunk size", format_bytes(total_chunk_size))
-    
-    if chunk_count > 0 and 'shape' in locals() and 'chunk_shape' in locals():
-        expected_chunks = -(-shape[0] // chunk_shape[0])
-        completion = (chunk_count / expected_chunks) * 100
-        storage_table.add_row("Completion", f"{completion:.1f}%")
         
-        avg_chunk_size = total_chunk_size / chunk_count
-        storage_table.add_row("Average chunk size", format_bytes(avg_chunk_size))
+        # Storage analysis for this array
+        chunk_count, total_chunk_size = count_chunks(array_path)
+        
+        storage_table = Table(title=f"{array_label} Storage", box=box.ROUNDED)
+        storage_table.add_column("Metric", style="cyan")
+        storage_table.add_column("Value", style="yellow")
+        
+        storage_table.add_row("Chunk files found", str(chunk_count))
+        storage_table.add_row("Total chunk size", format_bytes(total_chunk_size))
+        
+        if chunk_count > 0 and shape and chunk_shape:
+            expected_chunks = -(-shape[0] // chunk_shape[0])
+            completion = (chunk_count / expected_chunks) * 100
+            storage_table.add_row("Completion", f"{completion:.1f}%")
+            
+            avg_chunk_size = total_chunk_size / chunk_count
+            storage_table.add_row("Average chunk size", format_bytes(avg_chunk_size))
+        
+        console.print(storage_table)
     
-    # Total Zarr size
+    # Total Zarr size (across all arrays)
+    console.print("\n[bold]Overall Storage[/bold]")
     total_zarr_size = sum(f.stat().st_size for f in zarr_path.rglob('*') if f.is_file())
-    storage_table.add_row("Total Zarr size", format_bytes(total_zarr_size))
     
-    console.print(storage_table)
+    overall_table = Table(box=box.ROUNDED)
+    overall_table.add_column("Metric", style="cyan")
+    overall_table.add_column("Value", style="yellow")
+    overall_table.add_row("Total Zarr size", format_bytes(total_zarr_size))
+    overall_table.add_row("Arrays present", ", ".join([name for name, _ in arrays_to_check]))
+    
+    console.print(overall_table)
     
     # Directory tree (compact view)
     console.print("\n[bold]Directory Structure[/bold]")
@@ -381,10 +408,17 @@ def inspect_video_zarr(zarr_path, show_full_env=False):
         
         for item in items[:20]:  # Limit items shown
             if item.is_dir():
-                if item.name == 'c' and current_depth == 1:
-                    # Special handling for chunk directory
-                    chunk_count, _ = count_chunks(path)
+                if item.name == 'c':  # This is a chunks directory
+                    # Count chunks in THIS directory
+                    chunk_count = len(list(item.iterdir()))  # Simple count of files/dirs in c/
                     node = parent_node.add(f"[blue]{item.name}/[/blue] [dim]({chunk_count} chunks)[/dim]")
+                elif item.name in ['images_full', 'images_ds']:
+                    # Special handling for array directories
+                    if (item / 'zarr.json').exists():
+                        node = parent_node.add(f"[green]{item.name}/[/green] [dim](array)[/dim]")
+                    else:
+                        node = parent_node.add(f"[yellow]{item.name}/[/yellow] [dim](no metadata)[/dim]")
+                    add_tree_node(node, item, max_depth, current_depth + 1)
                 else:
                     node = parent_node.add(f"[blue]{item.name}/[/blue]")
                     add_tree_node(node, item, max_depth, current_depth + 1)
@@ -402,24 +436,22 @@ def inspect_video_zarr(zarr_path, show_full_env=False):
     if show_full_env:
         display_full_environment_info(attrs, console)
     
-    # Validation summary
+    # Validation summary (UPDATED for multi-resolution)
     console.print("\n[bold]Validation Summary[/bold]")
     
     issues = []
     warnings = []
     
-    if not array_json.exists():
-        issues.append("Array metadata (zarr.json) missing")
+    # Check expected arrays exist
+    if attrs.get('has_full_resolution', True) and not (raw_video_path / 'images_full' / 'zarr.json').exists():
+        issues.append("Full resolution array metadata missing")
     
-    if chunk_count == 0:
-        issues.append("No chunk files found")
-    elif 'shape' in locals() and 'chunk_shape' in locals():
-        expected_chunks = -(-shape[0] // chunk_shape[0])
-        if chunk_count < expected_chunks:
-            warnings.append(f"Only {chunk_count}/{expected_chunks} chunks present")
+    if attrs.get('has_downsampled', False) and not (raw_video_path / 'images_ds' / 'zarr.json').exists():
+        issues.append("Downsampled array metadata missing")
     
-    if attrs.get('import_method') == 'kvikio_zarr' and attrs.get('compression') != 'none':
-        warnings.append("kvikIO arrays should not use compression")
+    # Check for mismatched resolution config
+    if resolutions_mode == 'both' and not (attrs.get('has_full_resolution') and attrs.get('has_downsampled')):
+        warnings.append("Resolution mode is 'both' but not all arrays are marked present")
     
     if issues:
         console.print("[red]Issues found:[/red]")
@@ -432,16 +464,7 @@ def inspect_video_zarr(zarr_path, show_full_env=False):
             console.print(f"  • {warning}")
     
     if not issues and not warnings:
-        console.print("[green]✓ Array structure looks good![/green]")
-    
-    # Tips based on metadata
-    console.print("\n[dim]Tips:[/dim]")
-    if attrs.get('import_method') == 'kvikio_zarr':
-        console.print("[dim]• Use kvikIO GDSStore to read this array with GPU[/dim]")
-    console.print("[dim]• Array can be read with standard Zarr if metadata exists[/dim]")
-    
-    if not show_full_env and '_full_environment_info' in attrs:
-        console.print("[dim]• Run with --full-env flag to see complete environment metadata[/dim]")
+        console.print("[green]Array structure looks good![/green]")
 
 if __name__ == "__main__":
     import sys

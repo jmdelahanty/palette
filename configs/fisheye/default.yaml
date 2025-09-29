@@ -1,55 +1,39 @@
 import:
+  # Resolution configuration - what to generate during import
+  resolutions: both              # Options: 'full', 'downsampled', 'both'
   
-  # Chunk and shard configuration
+  # Chunk and shard configuration (applies to all resolutions)
   chunk_size: 128               # Frames per chunk (smallest storage unit)
   use_sharding: false           # Enable Zarr v3 sharding (groups chunks into shards)
-  chunks_per_shard: 1         # Number of chunks per shard (only if use_sharding=true)
-  # Note - computed at runtime: io_batch_size = chunk_size * chunks_per_shard (if sharding) or chunk_size (if not)
+  chunks_per_shard: 1           # Number of chunks per shard (only if use_sharding=true)
 
   # Processing configuration
-  batch_size: 64               # Frames decoded at once from video
-  gpu_fp16: true               # Use float16 for GPU grayscale conversion
+  batch_size: 64                # Frames decoded at once from video
+  gpu_fp16: true                # Use float16 for GPU grayscale conversion
   
-  # Compression settings (for standard Zarr path)
-  compression: none            # Options: 'none', 'lz4', 'zstd', 'blosc'
-  compression_level: 1         # 1-9, higher = better compression, slower
+  # GPU Direct Storage options
+  use_kvikio_zarr: true         # Enable kvikIO for GPU→Zarr direct writes
   
-  # GPU Direct Storage options (choose one approach)
-  # Option A: kvikIO Zarr (direct GPU→Zarr writes)
-  use_kvikio_zarr: true        # Enable kvikIO for GPU→Zarr direct writes
-  
-  # Option B: GDS binary shards (fastest raw throughput)
-  import_gds_enable: false     # Write binary shards with GDS (alternative to kvikIO)
-  gds_dir: null                # Directory for GDS binary shards (e.g., "/nvme1/temp/shards")
-  gds_require: false           # Fail if GDS not available (vs falling back to CPU)
-  
-  # CPU/threading settings (used when neither kvikIO nor GDS binary enabled)
-  max_writers: 10              # Number of concurrent write threads
-  max_inflight: 16             # Maximum queued writes
-
+  # Full resolution settings (used when resolutions includes 'full')
+  full:
+    # Inherits chunk_size from parent by default
+    # No compression - GDS writes raw data directly
+    
+  # Downsampled settings (used when resolutions includes 'downsampled')  
+  downsampled:
+    size: [640, 640]           # Target [height, width] for downsampled frames
+    method: area               # Options: 'nearest', 'bilinear', 'bicubic', 'area', 'lanczos'
+    chunk_size: 128            # Can differ from full resolution chunks
+    preserve_aspect: false     # If true, pad instead of stretch
+    # No compression - GDS writes raw data directly
+    
+  # Optional post-processing compression (separate stage after import)
+  post_compress:
+    enable: false              # Run compression as separate stage after import
+    targets: ['downsampled']   # Which arrays to compress: ['full', 'downsampled', 'both']
+    method: lz4                # Compression method for post-processing
+    level: 1                   # Compression level
+    delete_uncompressed: false # Whether to remove uncompressed version
+    
   # Misc settings
   include_system_info: true
-
-downsample:
-  # Target resolution
-  size: [640, 640]              # Target [height, width] for downsampled frames
-  
-  # Processing configuration  
-  batch_size: 128               # Frames to process at once (can be larger than import since reading from Zarr)
-  chunk_size: 128               # Chunk size for output Zarr array
-  
-  # Interpolation settings
-  method: bilinear              # Options: 'nearest', 'bilinear', 'bicubic', 'area', 'lanczos'
-  align_corners: false          # For bilinear/bicubic - impacts pixel alignment
-  
-  # Compute settings
-  use_gpu: true                 # Use GPU acceleration if available
-  gpu_fp16: false               # Use float16 (usually not needed for downsampling)
-  
-  # Storage settings
-  compression: lz4              # Compression for downsampled data
-  compression_level: 1          # Fast compression since data is smaller
-  
-  # Execution options
-  skip_if_exists: false          # Skip if images_ds already exists
-  force_recompute: true        # Override skip_if_exists
