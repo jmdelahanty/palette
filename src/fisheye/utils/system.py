@@ -22,13 +22,17 @@ def _which(cmd: str) -> bool:
 def _run(cmd: List[str], cwd: Optional[Path] = None, timeout: float = 5.0) -> Optional[str]:
     """Run command safely with timeout."""
     try:
+        # Convert Path to string if provided - subprocess needs strings
+        working_dir = str(cwd) if cwd else None
+        
         result = subprocess.run(
             cmd, 
-            cwd=cwd, 
-            capture_output=True, 
+            cwd=working_dir,
+            stdout=subprocess.PIPE,  # Capture stdout
+            stderr=subprocess.DEVNULL,  # Suppress stderr
             text=True, 
             timeout=timeout,
-            stderr=subprocess.DEVNULL
+            env=os.environ.copy()
         )
         return result.stdout.strip() if result.returncode == 0 else None
     except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
@@ -649,20 +653,10 @@ def get_environment_summary() -> Dict[str, Any]:
 def get_environment_info(
     include_all_packages: bool = False,
     disk_path: Optional[str] = None,
-    collect_ip: bool = False
+    collect_ip: bool = False,
+    capture_env_vars: bool = True  # New parameter
 ) -> Dict[str, Any]:
-    """
-    Get comprehensive environment information.
-    
-    Args:
-        include_all_packages: If True, include all packages. 
-                             If False, only include relevant ones.
-        disk_path: Path to check disk usage (e.g., zarr write location)
-        collect_ip: Whether to collect IP address (may hang on some networks)
-    
-    Returns:
-        Dict with complete environment details
-    """
+    """Get comprehensive environment information."""
     env_info = {
         'git': get_git_info(),
         'platform': get_platform_info(collect_ip=collect_ip, disk_path=disk_path),
@@ -670,19 +664,121 @@ def get_environment_info(
         'environment': get_environment_summary()
     }
     
+    if capture_env_vars:
+        env_info['env_vars'] = get_critical_env_vars()
+    
     if include_all_packages:
         env_info['all_packages'] = get_software_versions()
     
     return env_info
 
-# === Backward Compatibility ===
-
-def get_software_versions_filtered() -> Dict[str, str]:
+def get_gds_config() -> Dict[str, Any]:
     """
-    Get only relevant software versions (backward compatibility).
+    Capture GDS/kvikIO configuration for reproducibility.
+    Includes cufile.json and runtime settings.
+    """
+    gds_info = {}
     
-    Returns:
-        Dict of relevant packages only
+    # Check for cufile.json in standard locations
+    cufile_paths = [
+        Path('/etc/cufile.json'),
+        Path.home() / '.cufile.json',
+        Path(os.environ.get('CUFILE_CONFIG_PATH', '/nonexistent'))
+    ]
+    
+    for path in cufile_paths:
+        if path.exists():
+            try:
+                with open(path, 'r') as f:
+                    gds_info['cufile_json'] = json.load(f)
+                    gds_info['cufile_json_path'] = str(path)
+                break
+            except Exception as e:
+                gds_info['cufile_json_error'] = str(e)
+    
+    # Check kvikIO runtime settings if available
+    try:
+        import kvikio
+        import kvikio.defaults
+        
+        # In system.py, fix the kvikio section:
+        gds_info['kvikio'] = {
+            'compat_mode': kvikio.defaults.get("compat_mode"),
+            'thread_pool_size': kvikio.defaults.get("num_threads"),
+            'task_size': kvikio.defaults.get("task_size"),
+            'gds_enabled': not kvikio.defaults.get("compat_mode"),
+            'bounce_buffer_size': kvikio.defaults.get("bounce_buffer_size") if hasattr(kvikio.defaults, 'bounce_buffer_size') else None,
+        }
+        
+        # Try to get kvikIO version
+        if hasattr(kvikio, '__version__'):
+            gds_info['kvikio']['version'] = kvikio.__version__
+            
+    except ImportError:
+        gds_info['kvikio'] = {'available': False}
+    except Exception as e:
+        gds_info['kvikio'] = {'error': str(e)}
+    
+    # Check for GDS driver/module
+    gds_module_check = subprocess.run(
+        ['lsmod'], 
+        capture_output=True, 
+        text=True
+    )
+    if gds_module_check.returncode == 0:
+        for line in gds_module_check.stdout.split('\n'):
+            if 'nvidia_fs' in line:
+                gds_info['nvidia_fs_module'] = True
+                break
+    
+    # Check GDS mount points
+    mount_check = subprocess.run(
+        ['mount'], 
+        capture_output=True, 
+        text=True
+    )
+    if mount_check.returncode == 0:
+        gds_mounts = []
+        for line in mount_check.stdout.split('\n'):
+            if 'gpfs' in line or 'lustre' in line or 'nvme' in line:
+                # These are typical GDS-capable filesystems
+                gds_mounts.append(line.strip())
+        if gds_mounts:
+            gds_info['gds_capable_mounts'] = gds_mounts[:5]  # Limit to 5
+    
+    return gds_info
+
+
+def get_critical_env_vars() -> Dict[str, str]:
     """
-    summary = get_environment_summary()
-    return summary.get('key_packages', {})
+    Capture critical environment variables for reproducibility.
+    Only captures relevant variables to avoid storing sensitive data.
+    """
+    # Define which environment variables to capture
+    relevant_patterns = [
+        # CUDA/GPU related
+        'CUDA_', 'CUDNN_', 'NCCL_', 'NVIDIA_',
+        # kvikIO/GDS
+        'KVIKIO_', 'GDS_',
+        # Performance/threading
+        'OMP_', 'MKL_', 'BLOSC_', 'NUMEXPR_',
+        # Python/conda
+        'CONDA_', 'VIRTUAL_ENV', 'PYTHONPATH',
+        # HPC/scheduler
+        'LSB_', 'SLURM_', 'PBS_',
+        # Library paths (but not full PATH for security)
+        'LD_LIBRARY_PATH', 'LD_PRELOAD',
+    ]
+    
+    captured_vars = {}
+    for var, value in os.environ.items():
+        # Check if variable matches any relevant pattern
+        for pattern in relevant_patterns:
+            if var.startswith(pattern):
+                captured_vars[var] = value
+                break
+        # Also capture exact matches
+        if var in ['HOME', 'USER', 'SHELL', 'TERM']:
+            captured_vars[var] = value
+    
+    return captured_vars

@@ -18,6 +18,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRe
 
 # Import stage modules
 from ..capture.import_video import import_video, validate_import, get_import_stats
+from ..preprocessing.downsample_video import downsample_video
 # from ..preprocessing.background import calculate_background
 # from ..detection.blob import detect_blobs
 # from ..tracking.keypoints import track_keypoints
@@ -66,6 +67,7 @@ class Pipeline:
     # Define stage order and dependencies
     STAGE_ORDER = [
         'import',
+        'downsample',
         'background', 
         'detect',
         'crop',
@@ -76,7 +78,8 @@ class Pipeline:
     
     STAGE_DEPENDENCIES = {
         'import': [],
-        'background': ['import'],
+        'downsample': ['import'],
+        'background': ['downsample'],
         'detect': ['background'],
         'crop': ['detect'],
         'track': ['crop'],
@@ -190,40 +193,43 @@ class Pipeline:
         
         # Initialize timing
         pipeline_start = time.perf_counter()
+
+        for stage in stages_to_run:
+            self._run_stage(stage)
         
-        # Run stages
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TimeRemainingColumn(),
-            console=self.console
-        ) as progress:
+        # # Run stages
+        # with Progress(
+        #     SpinnerColumn(),
+        #     TextColumn("[progress.description]{task.description}"),
+        #     BarColumn(),
+        #     TimeRemainingColumn(),
+        #     console=self.console
+        # ) as progress:
             
-            task = progress.add_task(
-                "Running pipeline...",
-                total=len(stages_to_run)
-            )
+        #     task = progress.add_task(
+        #         "Running pipeline...",
+        #         total=len(stages_to_run)
+        #     )
             
-            for stage in stages_to_run:
-                stage_start = time.perf_counter()
+        #     for stage in stages_to_run:
+        #         stage_start = time.perf_counter()
                 
-                try:
-                    self._run_stage(stage)
+        #         try:
+        #             self._run_stage(stage)
                     
-                    if validate:
-                        self._validate_stage(stage)
+        #             if validate:
+        #                 self._validate_stage(stage)
                     
-                except Exception as e:
-                    self.console.print(f"[red]Error in stage '{stage}': {e}[/red]")
-                    if self.config.verbose:
-                        import traceback
-                        self.console.print(traceback.format_exc())
-                    raise
+        #         except Exception as e:
+        #             self.console.print(f"[red]Error in stage '{stage}': {e}[/red]")
+        #             if self.config.verbose:
+        #                 import traceback
+        #                 self.console.print(traceback.format_exc())
+        #             raise
                 
-                finally:
-                    self.stage_timings[stage] = time.perf_counter() - stage_start
-                    progress.update(task, advance=1)
+        #         finally:
+        #             self.stage_timings[stage] = time.perf_counter() - stage_start
+        #             progress.update(task, advance=1)
         
         # Display summary
         total_time = time.perf_counter() - pipeline_start
@@ -250,8 +256,15 @@ class Pipeline:
         """Run a single pipeline stage."""
         self.console.rule(f"[bold]Stage: {stage.title()}[/bold]")
         
+        # Check if stage already completed
+        if self._is_stage_complete(stage):
+            self.console.print(f"[green]✓ Stage '{stage}' already complete, skipping[/green]")
+            return
+
         if stage == 'import':
             self._run_import()
+        elif stage == 'downsample':
+            self._run_downsample()
         elif stage == 'background':
             self._run_background()
         elif stage == 'detect':
@@ -280,6 +293,18 @@ class Pipeline:
             use_gpu=self.config.use_gpu,
             force_cpu=self.config.force_cpu
         )
+
+    def _run_downsample(self) -> None:
+        """Run video downsampling stage."""
+        if self.zarr_root is None:
+            self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
+        
+        downsample_video(
+            zarr_path=self.config.zarr_path,
+            config=self.pipeline_params,
+            console=self.console
+        )
+
     
     def _run_background(self) -> None:
         """Run background calculation stage."""
@@ -382,6 +407,27 @@ class Pipeline:
                 style="green"
             ))
 
+    def _is_stage_complete(self, stage: str) -> bool:
+        """Check if a stage has already been completed."""
+        if not Path(self.config.zarr_path).exists():
+            return False
+
+        try:
+            root = zarr.open_group(self.config.zarr_path, mode='r')
+            
+            if stage == 'import':
+                # Check if raw_video/images_full exists
+                return 'raw_video' in root and 'images_full' in root['raw_video']
+            elif stage == 'downsample':
+                # Check if raw_video/images_ds exists
+                return 'raw_video' in root and 'images_ds' in root['raw_video']
+            # Add more stage checks as needed
+            
+        except Exception:
+            return False
+
+        return False
+
 
 def main():
     """Main entry point for the pipeline CLI."""
@@ -414,7 +460,7 @@ def main():
     parser.add_argument(
         "--stages",
         nargs='+',
-        choices=['import', 'background', 'detect', 'crop', 'track', 'refine', 'assign_ids', 'all'],
+        choices=['import', 'downsample', 'background', 'detect', 'crop', 'track', 'refine', 'assign_ids', 'all'],
         default=['all'],
         help="Stages to run"
     )

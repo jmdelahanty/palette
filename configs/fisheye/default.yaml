@@ -1,12 +1,12 @@
 import:
   
   # Chunk and shard configuration
-  chunk_size: 64               # Frames per chunk (smallest storage unit)
+  chunk_size: 128               # Frames per chunk (smallest storage unit)
   use_sharding: false           # Enable Zarr v3 sharding (groups chunks into shards)
   chunks_per_shard: 1         # Number of chunks per shard (only if use_sharding=true)
   # Note - computed at runtime: io_batch_size = chunk_size * chunks_per_shard (if sharding) or chunk_size (if not)
-  
-  # Processing configuration  
+
+  # Processing configuration
   batch_size: 64               # Frames decoded at once from video
   gpu_fp16: true               # Use float16 for GPU grayscale conversion
   
@@ -29,3 +29,27 @@ import:
 
   # Misc settings
   include_system_info: true
+
+downsample:
+  # Target resolution
+  size: [640, 640]              # Target [height, width] for downsampled frames
+  
+  # Processing configuration  
+  batch_size: 128               # Frames to process at once (can be larger than import since reading from Zarr)
+  chunk_size: 128               # Chunk size for output Zarr array
+  
+  # Interpolation settings
+  method: bilinear              # Options: 'nearest', 'bilinear', 'bicubic', 'area', 'lanczos'
+  align_corners: false          # For bilinear/bicubic - impacts pixel alignment
+  
+  # Compute settings
+  use_gpu: true                 # Use GPU acceleration if available
+  gpu_fp16: false               # Use float16 (usually not needed for downsampling)
+  
+  # Storage settings
+  compression: lz4              # Compression for downsampled data
+  compression_level: 1          # Fast compression since data is smaller
+  
+  # Execution options
+  skip_if_exists: true          # Skip if images_ds already exists
+  force_recompute: false        # Override skip_if_exists
