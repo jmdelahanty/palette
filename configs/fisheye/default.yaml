@@ -52,5 +52,5 @@ detect:
 crop:
   dish_mask: *id001
   roi_sz:
-  - 128
-  - 128
+  - 256
+  - 256

@@ -20,8 +20,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRe
 from ..capture.import_video import import_video, get_import_stats
 from ..preprocessing.background import compute_background
 from ..detection.detect_traditional import detect_fish
-# from ..tracking.keypoints import track_keypoints
-# from ..tracking.crop import crop_detections
+from ..tracking.crop import crop_detections
 from ..shared.zarr.schema import validate_zarr_structure
 
 
@@ -148,7 +147,7 @@ class Pipeline:
                 'max_fish': 20
             },
             'crop': {
-                'roi_sz': [128, 128]
+                'roi_sz': [256, 256]
             },
             'track': {
                 'roi_thresh': 25,
@@ -308,7 +307,7 @@ class Pipeline:
             console=self.console
         )
         
-        self.console.print(f"✓ Background computed using {results['frames_used']} frames")
+        self.console.print(f" Background computed using {results['frames_used']} frames")
     
     def _run_detect(self) -> None:
         """Run detection stage."""
@@ -324,15 +323,23 @@ class Pipeline:
             console=self.console
         )
         
-        self.console.print(f"✓ Detected {results['total_detections']} fish in {results['frames_with_detections']} frames")
+        self.console.print(f" Detected {results['total_detections']} fish in {results['frames_with_detections']} frames")
     
     def _run_crop(self) -> None:
-        """Run cropping stage."""
+        """Run cropping stage to extract ROIs from detections."""
         if self.zarr_root is None:
             self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
         
-        self.console.print("[yellow]Crop stage not yet implemented[/yellow]")
-        # crop_detections(self.zarr_root, self.pipeline_params['crop'], self.config.scheduler, self.console)
+        # Run cropping
+        results = crop_detections(
+            zarr_path=self.config.zarr_path,
+            config=self.pipeline_params,
+            scheduler=self.config.scheduler,
+            num_workers=self.config.num_workers,
+            console=self.console
+        )
+        
+        self.console.print(f" Cropped {results['total_crops']} ROIs from {results['frames_with_crops']} frames")
     
     def _run_track(self) -> None:
         """Run tracking stage."""
