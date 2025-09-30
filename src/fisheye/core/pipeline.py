@@ -253,8 +253,6 @@ class Pipeline:
         try:
             if stage == 'import':
                 self._run_import()
-            elif stage == 'downsample':
-                self._run_downsample()
             elif stage == 'background':
                 self._run_background()
             elif stage == 'detect':
@@ -485,7 +483,7 @@ def main():
     
     parser.add_argument(
         "--scheduler",
-        choices=['processes', 'threads', 'single-thread'],
+        choices=['processes', 'threads', 'single-thread', 'distributed'],
         default='processes',
         help="Dask scheduler to use"
     )

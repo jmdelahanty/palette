@@ -1,9 +1,9 @@
 import:
   resolutions: both
-  chunk_size: 128
+  chunk_size: 32
   use_sharding: false
   chunks_per_shard: 1
-  batch_size: 64
+  batch_size: 32
   gpu_fp16: true
   use_kvikio_zarr: true
   full: null
@@ -12,7 +12,7 @@ import:
     - 640
     - 640
     method: area
-    chunk_size: 128
+    chunk_size: 32
     preserve_aspect: false
   post_compress:
     enable: false
@@ -51,6 +51,6 @@ detect:
       timestamp: '2025-09-29T17:38:13.138667'
 crop:
   dish_mask: *id001
-  roi_sz:
-  - 256
-  - 256
+  roi_sz: [256, 256]
+  scheduler: "distributed" # "threads", "processes", or "distributed"
+  num_workers: 10 # null for os.cpu_count(), for dask distributed specifically here
