@@ -11,8 +11,8 @@ import:
     size:
     - 640
     - 640
-    method: area
-    chunk_size: 32
+    method: bilinear
+    chunk_size: 128
     preserve_aspect: false
   post_compress:
     enable: false
@@ -54,3 +54,10 @@ crop:
   roi_sz: [256, 256]
   scheduler: "distributed" # "threads", "processes", or "distributed"
   num_workers: 10 # null for os.cpu_count(), for dask distributed specifically here
+keypoints:
+  roi_thresh: 50
+  se1_radius: 1
+  se2_radius: 2
+  min_area: 5
+  adaptive_steps: 5
+  thresh_decrement: 5
