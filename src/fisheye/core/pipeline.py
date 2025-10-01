@@ -3,6 +3,7 @@ Core pipeline orchestrator for FishEye tracking system.
 Manages the execution of video processing stages in sequence.
 """
 
+import sys
 import yaml
 import time
 import argparse
@@ -615,19 +616,73 @@ class Pipeline:
 
 def main():
     """Main entry point for the pipeline CLI."""
+    
+    # Check for --interactive flag early
+    if "--interactive" in sys.argv or "-i" in sys.argv:
+        from ..cli.interactive_launcher import run_interactive_launcher
+        cmd = run_interactive_launcher()
+        
+        if not cmd:
+            print("Pipeline launch cancelled")
+            return 0
+        
+        # Remove the script name and replace with actual args
+        sys.argv = cmd
+        # Fall through to normal argument parsing
+    
     parser = argparse.ArgumentParser(
         description="FishEye tracking pipeline",
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run full pipeline
+  python -m fisheye data.zarr --video-path video.mp4 --stages all
+  
+  # Run specific stages
+  python -m fisheye data.zarr --stages import background detect
+  
+  # Tune parameters before running pipeline
+  python -m fisheye data.zarr --tune mask
+  python -m fisheye data.zarr --tune detect --frame 100
+  
+  # List available tuners
+  python -m fisheye --list-tuners
+        """
     )
     
-    # Required arguments
+    # Tuning arguments (mutually exclusive with normal pipeline operation)
+    tuner_group = parser.add_argument_group('tuning')
+    tuner_group.add_argument(
+        "--tune",
+        type=str,
+        metavar="TUNER",
+        help="Run interactive parameter tuner (mask, detect, threshold)"
+    )
+    tuner_group.add_argument(
+        "--list-tuners",
+        action="store_true",
+        help="List available tuners and exit"
+    )
+    tuner_group.add_argument(
+        "--frame",
+        type=int,
+        help="Specific frame index to use in tuner"
+    )
+    tuner_group.add_argument(
+        "--full",
+        action="store_true",
+        help="Use full resolution in tuner (instead of downsampled)"
+    )
+    
+    # Required arguments (not required if using --list-tuners)
     parser.add_argument(
         "zarr_path",
         type=str,
+        nargs='?',  # Make optional for --list-tuners
         help="Path to output zarr file"
     )
     
-    # Optional arguments
+    # Optional arguments for pipeline
     parser.add_argument(
         "--video-path",
         type=str,
@@ -698,15 +753,41 @@ def main():
     
     args = parser.parse_args()
     
+    # Create console
+    console = Console()
+    
+    # Handle --list-tuners
+    if args.list_tuners:
+        from ..tune.dispatcher import list_tuners
+        list_tuners(console)
+        return 0
+    
+    # Handle --tune
+    if args.tune:
+        if not args.zarr_path:
+            parser.error("zarr_path is required when using --tune")
+        
+        from ..tune.dispatcher import run_tuner
+        return run_tuner(
+            tuner_name=args.tune,
+            zarr_path=args.zarr_path,
+            config_path=args.config,
+            frame_idx=args.frame,
+            use_full_res=args.full,
+            console=console
+        )
+    
+    # Validate requirements for normal pipeline operation
+    if not args.zarr_path:
+        parser.error("zarr_path is required")
+    
+    if 'import' in args.stages and not args.video_path:
+        parser.error("--video-path required when running import stage")
+    
     # Create pipeline config
     config = PipelineConfig.from_args(args)
     
-    # Validate requirements
-    if 'import' in config.stages and not config.video_path:
-        parser.error("--video-path required when running import stage")
-    
     # Create and run pipeline
-    console = Console()
     pipeline = Pipeline(config, console)
     
     try:
@@ -716,11 +797,13 @@ def main():
         return 1
     except Exception as e:
         console.print(f"\n[red]Pipeline failed: {e}[/red]")
+        if args.verbose:
+            import traceback
+            console.print(traceback.format_exc())
         return 1
     
     return 0
 
 
 if __name__ == "__main__":
-    import sys
     sys.exit(main())

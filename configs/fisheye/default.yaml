@@ -38,22 +38,24 @@ detect:
   dish_mask: &id001
     shape: circle
     center:
-    - 324
     - 328
-    radius: 291
+    - 310
+    radius: 295
     hough_params:
       param1: 50
       param2: 30
-      radius_adjustment: 3
+      radius_adjustment: 4
     source:
       array: images_ds
-      frame: 900
-      timestamp: '2025-09-29T17:38:13.138667'
+      frame: 22724
+      timestamp: '2025-09-30T23:21:53.102671'
 crop:
   dish_mask: *id001
-  roi_sz: [256, 256]
-  scheduler: "distributed" # "threads", "processes", or "distributed"
-  num_workers: 10 # null for os.cpu_count(), for dask distributed specifically here
+  roi_sz:
+  - 256
+  - 256
+  scheduler: distributed
+  num_workers: 10
 keypoints:
   roi_thresh: 50
   se1_radius: 1

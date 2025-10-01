@@ -1,0 +1,14 @@
+# configs/launcher.yaml
+start_directory: "/nvme1"
+
+bookmarks:
+  - name: "NVMe"
+    path: "/nvme1"
+  - name: "Desktop"
+    path: "~/Desktop"
+  - name: "Home"
+    path: "~"
+  - name: "Data"
+    path: "/nvme1/data"
+
+default_pipeline_config: "configs/fisheye/default.yaml"
