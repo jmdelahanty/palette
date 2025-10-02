@@ -20,7 +20,7 @@ def run_tuner(
     Run a specific tuner.
     
     Args:
-        tuner_name: Name of the tuner to run ('mask', 'detect', 'threshold', etc.)
+        tuner_name: Name of the tuner to run ('mask', 'detect', 'threshold', 'keypoint', etc.)
         zarr_path: Path to zarr file
         config_path: Path to config YAML
         frame_idx: Specific frame index to use
@@ -66,7 +66,22 @@ def run_tuner(
             
             detect_main(
                 zarr_path=zarr_path,
-                config_path=config_path
+                config_path=config_path,
+                start_frame=frame_idx if frame_idx else 1
+            )
+            return 0
+            
+        elif tuner_name == 'keypoint' or tuner_name == 'keypoints':
+            from .keypoint_tuner import main as keypoint_main
+            console.print("[bold cyan]🎯 Starting Keypoint Detection Tuner[/bold cyan]")
+            console.print(f"Zarr: {zarr_path}")
+            if config_path:
+                console.print(f"Config: {config_path}")
+            print()  # blank line for tuner output
+            
+            keypoint_main(
+                zarr_path=zarr_path,
+                start_frame=frame_idx if frame_idx else 1
             )
             return 0
             
@@ -76,6 +91,8 @@ def run_tuner(
             console.print("  • mask      - Tune dish mask detection (Hough circles)")
             console.print("  • detect    - Tune fish detection thresholds")
             console.print("  • threshold - Alias for 'detect'")
+            console.print("  • keypoint  - Tune anatomical keypoint detection (swim bladder & eyes)")
+            console.print("  • keypoints - Alias for 'keypoint'")
             return 1
             
     except ImportError as e:
@@ -100,10 +117,16 @@ def list_tuners(console: Optional[Console] = None):
         ("mask", "Tune dish mask detection using Hough circle detection"),
         ("detect", "Tune fish detection thresholds and morphological parameters"),
         ("threshold", "Alias for 'detect' tuner"),
+        ("keypoint", "Tune anatomical keypoint detection (swim bladder and eyes)"),
+        ("keypoints", "Alias for 'keypoint' tuner"),
     ]
     
     for name, description in tuners:
         console.print(f"  [cyan]{name:12}[/cyan] {description}")
     
     console.print("\n[dim]Usage: python -m fisheye --tune <tuner_name> --zarr-path <path>[/dim]")
+    console.print("\n[bold]Examples:[/bold]")
+    console.print("  python -m fisheye data.zarr --tune mask")
+    console.print("  python -m fisheye data.zarr --tune detect --frame 100")
+    console.print("  python -m fisheye data.zarr --tune keypoint --frame 50")
     console.print()

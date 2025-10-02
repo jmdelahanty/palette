@@ -85,6 +85,8 @@ TUNER_INFO = {
     'mask': 'Tune dish mask detection (Hough circles)',
     'detect': 'Tune fish detection thresholds',
     'threshold': 'Alias for detect tuner',
+    'keypoint': 'Tune anatomical keypoint detection (swim bladder & eyes)',
+    'keypoints': 'Alias for keypoint tuner',
 }
 
 
@@ -597,7 +599,7 @@ class PipelineLauncherApp(App):
                 except subprocess.CalledProcessError as e:
                     self.status_message = f"❌ Tuner failed with exit code {e.returncode}"
                 except KeyboardInterrupt:
-                    self.status_message = "⚠ Tuner interrupted"
+                    self.status_message = "Tuner interrupted"
             
             if self.progress_log:
                 self.progress_log.write(f"[cyan]Tuner session ended: {self.status_message}[/]\n")

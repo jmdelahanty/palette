@@ -8,6 +8,7 @@ Zarr-first implementation that reads from crop_runs and writes directly to keypo
 import numpy as np
 import zarr
 import time
+import os
 from typing import Dict, Optional, Tuple, List, Any
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,10 +23,12 @@ import dask
 from dask import delayed
 from dask.diagnostics import ProgressBar
 
+from ..shared.zarr.schema import get_run_group
+
 # Optional distributed
 try:
     from dask.distributed import Client, LocalCluster
-    HAVE_DISTRIBUTED = False  # Disabled for keypoints (memory concerns)
+    HAVE_DISTRIBUTED = True  # Enable distributed
 except:
     HAVE_DISTRIBUTED = False
 
@@ -42,7 +45,9 @@ def detect_keypoints_traditional(
     se2_radius: int = 2,
     min_area: int = 5,
     adaptive_steps: int = 5,
-    thresh_decrement: int = 5
+    thresh_decrement: int = 5,
+    min_valid_angle: float = 10.0,
+    min_triangle_area: float = 100.0
 ) -> Optional[Dict[str, Any]]:
     """
     Detect keypoints (swim bladder and eyes) in a fish ROI using traditional CV methods.
@@ -56,6 +61,8 @@ def detect_keypoints_traditional(
         min_area: Minimum area for valid blobs
         adaptive_steps: Number of adaptive threshold steps to try
         thresh_decrement: Amount to decrease threshold each adaptive step
+        min_valid_angle: Minimum angle in degrees for valid triangle
+        min_triangle_area: Minimum triangle area in pixels^2
     
     Returns:
         Dictionary with keypoint positions and metadata, or None if detection fails
@@ -82,8 +89,17 @@ def detect_keypoints_traditional(
         roi_stat = [r for r in regionprops(label(im_roi)) if r.area > min_area]
         
         if len(roi_stat) >= 3:
-            keypoint_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
-            break
+            # Take top 3 by area
+            candidate_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
+            
+            # Calculate triangle geometry for validation
+            centroids = np.array([r.centroid for r in candidate_stats])
+            angles, tri_area = calculate_triangle_metrics(centroids[0], centroids[1], centroids[2])
+            
+            # Check if angles form a valid triangle AND triangle is large enough
+            if np.all(angles >= np.deg2rad(min_valid_angle)) and tri_area >= min_triangle_area:
+                keypoint_stats = candidate_stats
+                break
             
         current_thresh -= thresh_decrement
     
@@ -121,6 +137,7 @@ def identify_keypoints_by_geometry(
     angles, _ = calculate_triangle_metrics(pts[0], pts[1], pts[2])
     kp_idx = np.argsort(angles)
     
+    # Bladder at smallest angle (furthest from eye pair)
     bladder_idx = kp_idx[0]
     eye_indices = kp_idx[1:3]
     
@@ -171,6 +188,7 @@ def calculate_triangle_metrics(
         cos_angle = (a**2 + b**2 - c**2) / (2 * a * b)
         angles[2] = np.arccos(np.clip(cos_angle, -1.0, 1.0))
     
+    # Calculate area using Heron's formula
     s = (a + b + c) / 2
     area = np.sqrt(max(0, s * (s - a) * (s - b) * (s - c)))
     
@@ -270,7 +288,9 @@ def process_keypoint_chunk_delayed(
             se2_radius=detection_params.get('se2_radius', 2),
             min_area=detection_params.get('min_area', 5),
             adaptive_steps=detection_params.get('adaptive_steps', 5),
-            thresh_decrement=detection_params.get('thresh_decrement', 5)
+            thresh_decrement=detection_params.get('thresh_decrement', 5),
+            min_valid_angle=detection_params.get('min_valid_angle', 10.0),
+            min_triangle_area=detection_params.get('min_triangle_area', 100.0)
         )
         
         if keypoints is None:
@@ -311,6 +331,42 @@ def process_keypoint_chunk_delayed(
     return results, num_successful, num_failed
 
 
+def get_keypoint_parameters(root: zarr.Group, config: Dict[str, Any], console: Optional[Console] = None) -> Tuple[Dict[str, Any], str]:
+    """
+    Get keypoint detection parameters with priority order:
+    1. Zarr analysis_metadata (if keypoint tuning exists)
+    2. Config file defaults
+    """
+    # Start with config defaults
+    keypoint_params = config.get('keypoints', {}).copy()
+    keypoint_params.setdefault('roi_thresh', 50)
+    keypoint_params.setdefault('se1_radius', 1)
+    keypoint_params.setdefault('se2_radius', 2)
+    keypoint_params.setdefault('min_area', 5)
+    keypoint_params.setdefault('adaptive_steps', 5)
+    keypoint_params.setdefault('thresh_decrement', 5)
+    keypoint_params.setdefault('min_valid_angle', 10.0)
+    keypoint_params.setdefault('min_triangle_area', 100.0)
+    
+    param_source = 'config_default'
+    
+    # Check for tuned parameters in zarr
+    if 'analysis_metadata' in root:
+        analysis_meta = root['analysis_metadata']
+        
+        if 'keypoint_tuning' in analysis_meta.attrs:
+            tuning_data = analysis_meta.attrs['keypoint_tuning']
+            tuned_params = tuning_data.get('tuned_parameters', {})
+            if tuned_params:
+                keypoint_params.update(tuned_params)
+                param_source = 'zarr_tuned'
+                if console:
+                    console.print(f"[green]✓ Using tuned keypoint parameters from zarr[/green]")
+                    console.print(f"  Tuned on: {tuning_data.get('tuned_timestamp', 'unknown')}")
+    
+    return keypoint_params, param_source
+
+
 def detect_keypoints(
     zarr_path: str,
     config: Dict[str, Any],
@@ -324,7 +380,7 @@ def detect_keypoints(
     Args:
         zarr_path: Path to zarr archive
         config: Pipeline configuration dictionary
-        scheduler: Dask scheduler ('processes', 'threads', 'single-threaded')
+        scheduler: Dask scheduler ('processes', 'threads', 'single-threaded', 'distributed')
         num_workers: Number of workers
         console: Rich console for output
         
@@ -346,7 +402,7 @@ def detect_keypoints(
         raise ValueError("Background stage not run. Run background before keypoints.")
     
     # Get parameters
-    keypoints_params = config.get('keypoints', {})
+    keypoints_params, param_source = get_keypoint_parameters(root, config, console)
     
     if scheduler is None:
         scheduler = keypoints_params.get('scheduler', 'processes')
@@ -355,25 +411,40 @@ def detect_keypoints(
     
     chunk_size = config.get('import', {}).get('chunk_size', 32)
     
+    # Distributed-specific settings
+    threads_per_worker = keypoints_params.get('threads_per_worker', 1)
+    memory_limit = keypoints_params.get('memory_limit', '4GB')
+    
     console.print(f"Scheduler: {scheduler}, Workers: {num_workers or 'default'}")
     console.print(f"Chunk size: {chunk_size} ROIs per task")
+    console.print(f"Parameter source: {param_source}")
     
     # Create run group
-    from ..shared.zarr import get_run_group
     keypoint_group, run_group_name = get_run_group(root, 'keypoints', console)
     
     # Store metadata
     latest_crop = root['crop_runs'].attrs['latest']
     latest_background = root['background_runs'].attrs['latest']
     
-    keypoint_group.attrs.update({
+    # Build metadata dictionary
+    metadata_dict = {
         'keypoints_timestamp_utc': datetime.now(timezone.utc).isoformat(),
         'dask_scheduler': scheduler,
-        'dask_num_workers': num_workers or dask.system.CPU_COUNT,
+        'dask_num_workers': num_workers or os.cpu_count(),
         'parameters': keypoints_params,
+        'parameter_source': param_source,
         'source_crop_run': latest_crop,
         'source_background_run': latest_background
-    })
+    }
+    
+    # Add distributed-specific metadata if using distributed
+    use_distributed = (scheduler == 'distributed') and HAVE_DISTRIBUTED
+    
+    if use_distributed:
+        metadata_dict['dask_threads_per_worker'] = threads_per_worker
+        metadata_dict['dask_memory_limit'] = memory_limit
+    
+    keypoint_group.attrs.update(metadata_dict)
     
     # Get ROI count
     crop_group = root[f'crop_runs/{latest_crop}']
@@ -418,10 +489,26 @@ def detect_keypoints(
     
     console.print(f"Creating [yellow]{len(chunks)}[/yellow] Dask tasks...")
     
-    # Configure Dask
-    dask.config.set(scheduler=scheduler)
-    if num_workers:
-        dask.config.set(num_workers=num_workers)
+    # Setup distributed cluster if requested
+    client = None
+    cluster = None
+    
+    if use_distributed:
+        console.print("[yellow]Setting up distributed LocalCluster...[/yellow]")
+        cluster = LocalCluster(
+            n_workers=num_workers or None,
+            threads_per_worker=threads_per_worker,
+            memory_limit=memory_limit,
+            processes=True
+        )
+        client = Client(cluster)
+        console.print(f"Dashboard: [link={client.dashboard_link}]{client.dashboard_link}[/link]")
+        console.print(f"Workers: {len(client.scheduler_info()['workers'])}")
+    else:
+        # Configure local Dask
+        dask.config.set(scheduler=scheduler)
+        if num_workers:
+            dask.config.set(num_workers=num_workers)
     
     # Create delayed tasks
     delayed_tasks = [
@@ -431,20 +518,39 @@ def detect_keypoints(
     
     # Execute with progress
     console.print("Processing keypoints...")
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TimeRemainingColumn(),
-        console=console
-    ) as progress:
-        task = progress.add_task(f"[cyan]Detecting keypoints ({scheduler})...", total=len(delayed_tasks))
-        
-        results = []
-        for dt in delayed_tasks:
-            result = dt.compute()
-            results.append(result)
-            progress.update(task, advance=1)
+    
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TimeRemainingColumn(),
+            console=console
+        ) as progress:
+            task = progress.add_task(f"[cyan]Detecting keypoints ({scheduler})...", total=len(delayed_tasks))
+            
+            results = []
+            
+            if use_distributed:
+                # Use distributed client
+                futures = client.compute(delayed_tasks)
+                for future in futures:
+                    result = future.result()
+                    results.append(result)
+                    progress.update(task, advance=1)
+            else:
+                # Use local scheduler
+                for dt in delayed_tasks:
+                    result = dt.compute()
+                    results.append(result)
+                    progress.update(task, advance=1)
+    
+    finally:
+        # Cleanup distributed resources
+        if use_distributed and client is not None:
+            client.close()
+            if cluster is not None:
+                cluster.close()
     
     # Aggregate statistics
     total_successful = sum(r[1] for r in results)

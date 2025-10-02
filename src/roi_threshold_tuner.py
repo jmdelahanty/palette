@@ -312,7 +312,7 @@ def main(zarr_path, start_frame=1):
     roi_coordinates = zarr_root[f'crop_runs/{latest_crop_run}/roi_coordinates_full']
     n_detections = zarr_root[f'detect_runs/{latest_detect_run}/n_detections'][:]
     
-    total_rois = len(roi_images)
+    total_rois = roi_images.shape[0]
     num_frames = len(n_detections)
     max_detections_per_frame = int(n_detections.max()) if n_detections.max() > 0 else 1
     

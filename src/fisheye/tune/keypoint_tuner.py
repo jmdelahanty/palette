@@ -12,7 +12,7 @@ Usage:
 Controls:
     - Arrow keys: Navigate frames
     - Trackbars: Adjust detection parameters
-    - 's': Save parameters to config
+    - 's': Save parameters to Zarr metadata
     - 'd': Toggle difference image
     - 'g': Toggle geometry visualization
     - 'q' or ESC: Quit
@@ -24,11 +24,14 @@ import zarr
 import argparse
 from pathlib import Path
 import yaml
+from datetime import datetime, timezone
 from skimage.morphology import disk, erosion, dilation
 from skimage.measure import label, regionprops
 
 # Global variables for trackbar values
 current_frame = 1
+min_valid_angle = 10
+min_triangle_area = 100
 current_detection = 0
 roi_thresh = 50
 se1_radius = 1
@@ -79,6 +82,251 @@ def update_show_geometry(val):
     global show_geometry
     show_geometry = val
 
+def update_min_valid_angle(val):
+    global min_valid_angle
+    min_valid_angle = max(1, val)
+
+def update_min_triangle_area(val):
+    global min_triangle_area
+    min_triangle_area = max(1, val)
+
+def calculate_triangle_area(p1, p2, p3):
+    """Calculate area of triangle using cross product method."""
+    # Vectors from p1 to p2 and p1 to p3
+    v1 = p2 - p1
+    v2 = p3 - p1
+    # Area = 0.5 * |cross product|
+    area = 0.5 * abs(v1[0] * v2[1] - v1[1] * v2[0])
+    return area
+
+def process_roi_for_keypoints(roi_image, background_roi, params):
+    """
+    Process an ROI image to detect keypoints using adaptive thresholding.
+    Returns processed image, all regions, and identified keypoints.
+    """
+    if roi_image is None or roi_image.size == 0:
+        return None, [], None
+    
+    # Use difference image
+    if params['use_diff'] and background_roi is not None:
+        diff_roi = np.clip(
+            background_roi.astype(np.int16) - roi_image.astype(np.int16), 
+            0, 255
+        ).astype(np.uint8)
+    else:
+        diff_roi = roi_image
+    
+    # Adaptive thresholding with geometry validation
+    se1 = disk(params['se1_radius'])
+    se2 = disk(params['se2_radius'])
+    
+    current_thresh = params['roi_thresh']
+    keypoint_stats = []
+    effective_thresh = current_thresh
+    min_angle_threshold = params.get('min_valid_angle', 10.0)
+    min_triangle_area = params.get('min_triangle_area', 100.0)  # NEW
+    
+    for step in range(params['adaptive_steps']):
+        # Apply morphological operations
+        im_roi = erosion(dilation(erosion(
+            diff_roi >= current_thresh, se1), se2), se1
+        )
+        
+        # Find regions
+        roi_stat = [r for r in regionprops(label(im_roi)) 
+                    if r.area > params['min_area']]
+        
+        if len(roi_stat) >= 3:
+            # Take top 3 by area
+            candidate_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
+            
+            # Calculate triangle geometry for validation
+            centroids = np.array([r.centroid for r in candidate_stats])
+            angles = calculate_triangle_angles(centroids[0], centroids[1], centroids[2])
+            tri_area = calculate_triangle_area(centroids[0], centroids[1], centroids[2])
+            
+            # Check if angles form a valid triangle AND triangle is large enough
+            if np.all(angles >= min_angle_threshold) and tri_area >= min_triangle_area:
+                keypoint_stats = candidate_stats
+                effective_thresh = current_thresh
+                break
+            # Otherwise continue adaptive search
+        
+        current_thresh -= params['thresh_decrement']
+    
+    # Try to identify keypoints if we have valid 3 blobs
+    keypoint_id = None
+    if len(keypoint_stats) == 3:
+        keypoint_id = identify_keypoints_by_geometry(keypoint_stats)
+        if keypoint_id:
+            keypoint_id['effective_thresh'] = effective_thresh
+    
+    # Return final processed image
+    final_processed = erosion(dilation(erosion(
+        diff_roi >= effective_thresh, se1), se2), se1
+    )
+    
+    return final_processed, keypoint_stats, keypoint_id
+
+# Add this function after process_roi_for_keypoints():
+
+def run_adaptive_threshold_demo(roi_image, background_roi, params, window_name="Adaptive Demo"):
+    """
+    Run adaptive threshold step-by-step with visualization.
+    Shows each threshold iteration until valid keypoints are found.
+    """
+    if roi_image is None or roi_image.size == 0:
+        print("No ROI available for demo")
+        return
+    
+    # Use difference image
+    if params['use_diff'] and background_roi is not None:
+        diff_roi = np.clip(
+            background_roi.astype(np.int16) - roi_image.astype(np.int16), 
+            0, 255
+        ).astype(np.uint8)
+    else:
+        diff_roi = roi_image
+    
+    se1 = disk(params['se1_radius'])
+    se2 = disk(params['se2_radius'])
+    
+    current_thresh = params['roi_thresh']
+    min_angle = params.get('min_valid_angle', 10.0)
+    
+    print("\n=== ADAPTIVE THRESHOLD DEMO ===")
+    print(f"Starting threshold: {current_thresh}")
+    print(f"Min valid angle: {min_angle}°")
+    print(f"Max steps: {params['adaptive_steps']}")
+    print("Press any key to advance to next step...")
+    
+    for step in range(params['adaptive_steps']):
+        # Apply morphological operations
+        im_roi = erosion(dilation(erosion(
+            diff_roi >= current_thresh, se1), se2), se1
+        )
+        
+        # Find regions
+        roi_stat = [r for r in regionprops(label(im_roi)) 
+                    if r.area > params['min_area']]
+        
+        # Visualize this step
+        vis_panel = cv2.cvtColor((im_roi * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        
+        # Draw detected blobs
+        for i, region in enumerate(sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]):
+            y, x = map(int, region.centroid)
+            color = [(0, 255, 0), (255, 0, 0), (0, 0, 255)][i] if i < 3 else (128, 128, 128)
+            cv2.circle(vis_panel, (x, y), 5, color, -1)
+            cv2.putText(vis_panel, f"A:{region.area}", (x+8, y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
+        
+        # Status text
+        status = f"Step {step+1}/{params['adaptive_steps']} | Thresh: {current_thresh} | Blobs: {len(roi_stat)}"
+        cv2.putText(vis_panel, status, (5, 15), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+        
+        
+        # Check if we have valid keypoints
+        valid = False
+        if len(roi_stat) >= 3:
+            candidate_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
+            centroids = np.array([r.centroid for r in candidate_stats])
+            angles = calculate_triangle_angles(centroids[0], centroids[1], centroids[2])
+            tri_area = calculate_triangle_area(centroids[0], centroids[1], centroids[2])
+            
+            if np.all(angles >= min_angle) and tri_area >= params.get('min_triangle_area', 100):
+                valid = True
+                msg = f"VALID! A:{tri_area:.1f} Ang:{angles[0]:.1f},{angles[1]:.1f},{angles[2]:.1f}"
+                color = (0, 255, 0)
+            else:
+                msg = f"Invalid angles: {angles[0]:.1f}, {angles[1]:.1f}, {angles[2]:.1f}"
+                color = (0, 165, 255)
+        else:
+            msg = f"Need 3 blobs (have {len(roi_stat)})"
+            color = (0, 0, 255)
+        
+        cv2.putText(vis_panel, msg, (5, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+        
+        # Show
+        cv2.imshow(window_name, cv2.resize(vis_panel, (600, 600)))
+        print(f"  Step {step+1}: thresh={current_thresh}, blobs={len(roi_stat)}, {msg}")
+        
+        if valid:
+            print("  ✓ Valid keypoints found!")
+            cv2.waitKey(2000)  # Show for 2 seconds
+            break
+        
+        cv2.waitKey(0)  # Wait for keypress
+        current_thresh -= params['thresh_decrement']
+    
+    cv2.destroyWindow(window_name)
+    print("=== DEMO COMPLETE ===\n")
+
+def save_keypoint_params(zarr_path, params):
+    """
+    Save keypoint detection parameters to Zarr metadata ONLY.
+    
+    Config file remains as a template - tuned parameters go in zarr.
+    
+    Args:
+        zarr_path: Path to zarr file
+        params: Dictionary of parameters including roi_thresh, se1_radius, etc.
+    
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    try:
+        # Save to Zarr analysis_metadata
+        root = zarr.open_group(zarr_path, mode='r+')
+        
+        if 'analysis_metadata' not in root:
+            analysis_meta = root.create_group('analysis_metadata')
+        else:
+            analysis_meta = root['analysis_metadata']
+        
+        # Get existing attrs or create new dict
+        metadata = dict(analysis_meta.attrs) if analysis_meta.attrs else {}
+        
+        # Add/update keypoint tuning data
+        metadata['keypoint_tuning'] = {
+            'method': 'adaptive_threshold_morphology',
+            'version': '1.0',
+            'tuned_timestamp': datetime.now(timezone.utc).isoformat(),
+            'tuned_parameters': {
+                'roi_thresh': params['roi_thresh'],
+                'se1_radius': params['se1_radius'],
+                'se2_radius': params['se2_radius'],
+                'min_area': params['min_area'],
+                'adaptive_steps': params['adaptive_steps'],
+                'thresh_decrement': params['thresh_decrement'],
+                'min_valid_angle': params.get('min_valid_angle', 10),
+                'min_triangle_area': params.get('min_triangle_area', 100),
+            },
+            'tuned_on_frame': params.get('frame_index', None),
+            'tuned_on_detection': params.get('detection_index', None)
+        }
+        
+        # Save back to attrs
+        analysis_meta.attrs.update(metadata)
+        
+        print(f"\n✓ Parameters saved to zarr: {zarr_path}")
+        print(f"   Location: analysis_metadata/attrs['keypoint_tuning']")
+        print(f"   roi_thresh: {params['roi_thresh']}")
+        print(f"   se1_radius: {params['se1_radius']}")
+        print(f"   se2_radius: {params['se2_radius']}")
+        print(f"   min_area: {params['min_area']}")
+        print(f"   adaptive_steps: {params['adaptive_steps']}")
+        print(f"   thresh_decrement: {params['thresh_decrement']}")
+        print(f"   Tuned on frame: {params.get('frame_index', 'N/A')}")
+        print(f"   Tuned on detection: {params.get('detection_index', 'N/A')}")
+        
+        return True, "Parameters saved to zarr"
+        
+    except Exception as e:
+        return False, f"Error saving parameters: {e}"
+
 
 def calculate_triangle_angles(p1, p2, p3):
     """Calculate angles at each vertex of a triangle."""
@@ -107,319 +355,165 @@ def calculate_triangle_angles(p1, p2, p3):
 def identify_keypoints_by_geometry(keypoint_stats):
     """
     Identify which blob is the bladder and which are eyes.
-    Returns indices in order: [bladder_idx, eye_left_idx, eye_right_idx]
+    
+    Uses geometric criteria:
+    - Bladder should be at vertex with largest angle (obtuse)
+    - Eyes should form acute angles with bladder
     """
     if len(keypoint_stats) != 3:
         return None
     
-    # Get centroid positions (y, x) -> (x, y)
-    pts = np.array([s.centroid[::-1] for s in keypoint_stats])
+    # Get centroids
+    centroids = np.array([r.centroid for r in keypoint_stats])
     
-    # Calculate triangle angles
-    angles = calculate_triangle_angles(pts[0], pts[1], pts[2])
-    kp_idx = np.argsort(angles)
+    # Calculate angles at each vertex
+    angles = calculate_triangle_angles(centroids[0], centroids[1], centroids[2])
     
-    # Smallest angle vertex is opposite the largest angle = bladder
-    bladder_idx = kp_idx[0]
-    eye_indices = kp_idx[1:3]
+    # Bladder should be at the vertex with the largest angle (typically obtuse)
+    bladder_idx = np.argmin(angles)
+    eye_indices = [i for i in range(3) if i != bladder_idx]
     
-    # Calculate heading
-    eye_mean = np.mean(pts[eye_indices], axis=0)
-    head_vec = eye_mean - pts[bladder_idx]
-    heading = np.rad2deg(np.arctan2(-head_vec[1], head_vec[0]))
-    
-    # Rotate to determine left/right
-    angle_rad = np.deg2rad(heading)
-    R = np.array([[np.cos(angle_rad), -np.sin(angle_rad)],
-                  [np.sin(angle_rad), np.cos(angle_rad)]])
-    rotated_pts = (pts - eye_mean) @ R.T
-    
-    if rotated_pts[eye_indices[0], 1] > rotated_pts[eye_indices[1], 1]:
-        eye_r_idx, eye_l_idx = eye_indices[0], eye_indices[1]
+    # Determine left/right eye based on x-coordinate
+    eye_x = [centroids[i][1] for i in eye_indices]
+    if eye_x[0] < eye_x[1]:
+        left_eye_idx, right_eye_idx = eye_indices[0], eye_indices[1]
     else:
-        eye_r_idx, eye_l_idx = eye_indices[1], eye_indices[0]
+        left_eye_idx, right_eye_idx = eye_indices[1], eye_indices[0]
     
     return {
+        'bladder': keypoint_stats[bladder_idx],
+        'left_eye': keypoint_stats[left_eye_idx],
+        'right_eye': keypoint_stats[right_eye_idx],
         'bladder_idx': bladder_idx,
-        'eye_l_idx': eye_l_idx,
-        'eye_r_idx': eye_r_idx,
-        'heading': heading,
-        'angles': angles,
-        'kp_idx': kp_idx
+        'left_eye_idx': left_eye_idx,
+        'right_eye_idx': right_eye_idx,
+        'angles': angles
     }
-
-
-def detect_keypoints_with_params(roi_image, background_roi, params):
-    """
-    Mimics the actual keypoint detection algorithm.
-    Returns processed image, all regions, and identified keypoints.
-    """
-    if roi_image is None or roi_image.size == 0:
-        return None, [], None
-    
-    # Use difference image (this is what the pipeline does)
-    if params['use_diff'] and background_roi is not None:
-        diff_roi = np.clip(
-            background_roi.astype(np.int16) - roi_image.astype(np.int16), 
-            0, 255
-        ).astype(np.uint8)
-    else:
-        diff_roi = roi_image
-    
-    # Adaptive thresholding
-    se1 = disk(params['se1_radius'])
-    se2 = disk(params['se2_radius'])
-    
-    current_thresh = params['roi_thresh']
-    keypoint_stats = []
-    effective_thresh = current_thresh
-    
-    for step in range(params['adaptive_steps']):
-        # Apply morphological operations (matching pipeline)
-        im_roi = erosion(dilation(erosion(
-            diff_roi >= current_thresh, se1), se2), se1
-        )
-        
-        # Find regions
-        roi_stat = [r for r in regionprops(label(im_roi)) 
-                    if r.area > params['min_area']]
-        
-        if len(roi_stat) >= 3:
-            keypoint_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
-            effective_thresh = current_thresh
-            break
-        
-        current_thresh -= params['thresh_decrement']
-    
-    # Try to identify keypoints if we have 3 blobs
-    keypoint_id = None
-    if len(keypoint_stats) == 3:
-        keypoint_id = identify_keypoints_by_geometry(keypoint_stats)
-        if keypoint_id:
-            keypoint_id['effective_thresh'] = effective_thresh
-    
-    # Return final processed image
-    final_processed = erosion(dilation(erosion(
-        diff_roi >= effective_thresh, se1), se2), se1
-    )
-    
-    return final_processed, keypoint_stats, keypoint_id
 
 
 def create_keypoint_dashboard(roi_image, background_roi, params, frame_num, det_num, roi_idx):
     """
     Create comprehensive visualization for keypoint detection tuning.
     """
-    if roi_image is None or roi_image.size == 0:
-        dashboard = np.zeros((800, 1600, 3), dtype=np.uint8)
-        cv2.putText(dashboard, "No ROI data available", (600, 400),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-        return dashboard
+    display_size = (400, 400)
     
-    # Detect keypoints
-    processed, keypoint_stats, keypoint_id = detect_keypoints_with_params(
+    if roi_image is None:
+        # Create blank dashboard
+        blank = np.zeros((display_size[1] * 2, display_size[0] * 2, 3), dtype=np.uint8)
+        cv2.putText(blank, "No detection at this frame", (50, display_size[1]), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        return blank
+    
+    # Process the ROI
+    processed, keypoint_stats, keypoint_id = process_roi_for_keypoints(
         roi_image, background_roi, params
     )
     
-    display_size = (400, 400)
+    # Panel 1: Original ROI
+    panel1 = cv2.cvtColor(roi_image, cv2.COLOR_GRAY2BGR)
+    cv2.putText(panel1, "Original ROI", (10, 20), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
     
-    # ========== Panel 1: Original or Difference ==========
+    # Panel 2: Background ROI (if available)
+    if background_roi is not None:
+        panel2 = cv2.cvtColor(background_roi, cv2.COLOR_GRAY2BGR)
+        cv2.putText(panel2, "Background ROI", (10, 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    else:
+        panel2 = np.zeros_like(panel1)
+        cv2.putText(panel2, "No Background", (10, 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
+    
+    # Panel 3: Difference image (if using diff mode)
     if params['use_diff'] and background_roi is not None:
-        diff_image = np.clip(background_roi.astype(np.int16) - roi_image.astype(np.int16), 
-                            0, 255).astype(np.uint8)
-        panel1 = cv2.cvtColor(diff_image, cv2.COLOR_GRAY2BGR)
-        title1 = "Difference Image"
+        diff_roi = np.clip(
+            background_roi.astype(np.int16) - roi_image.astype(np.int16), 
+            0, 255
+        ).astype(np.uint8)
+        panel3 = cv2.cvtColor(diff_roi, cv2.COLOR_GRAY2BGR)
+        cv2.putText(panel3, "Difference (BG - ROI)", (10, 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
     else:
-        panel1 = cv2.cvtColor(roi_image, cv2.COLOR_GRAY2BGR)
-        title1 = "Original ROI"
+        panel3 = np.zeros_like(panel1)
+        cv2.putText(panel3, "Diff mode OFF", (10, 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
     
-    panel1 = cv2.resize(panel1, display_size, interpolation=cv2.INTER_NEAREST)
-    cv2.putText(panel1, title1, (10, 30),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    # Panel 4: Processed with keypoint detection
+    panel4 = cv2.cvtColor((processed * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
     
-    # ========== Panel 2: After Morphological Operations ==========
-    if processed is not None:
-        panel2 = cv2.cvtColor(processed.astype(np.uint8) * 255, cv2.COLOR_GRAY2BGR)
-    else:
-        panel2 = np.zeros((display_size[0], display_size[1], 3), dtype=np.uint8)
+    # Draw detected keypoints
+    color_map = {
+        'bladder': (0, 255, 0),      # Green
+        'left_eye': (255, 0, 0),     # Blue
+        'right_eye': (0, 0, 255)     # Red
+    }
     
-    panel2 = cv2.resize(panel2, display_size, interpolation=cv2.INTER_NEAREST)
-    cv2.putText(panel2, f"Processed (thresh={params['roi_thresh']})", (10, 30),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-    
-    # ========== Panel 3: Keypoint Identification ==========
-    panel3 = cv2.cvtColor(roi_image, cv2.COLOR_GRAY2BGR)
-    
-    success = keypoint_id is not None and len(keypoint_stats) == 3
-    
-    if success:
-        # Draw identified keypoints with colors
-        colors = {
-            'bladder': (0, 255, 0),    # Green
-            'eye_l': (255, 0, 0),      # Blue  
-            'eye_r': (0, 0, 255)       # Red
-        }
+    if keypoint_id:
+        # Draw labeled keypoints
+        for key, stat in [('bladder', keypoint_id['bladder']),
+                         ('left_eye', keypoint_id['left_eye']),
+                         ('right_eye', keypoint_id['right_eye'])]:
+            y, x = map(int, stat.centroid)
+            color = color_map[key]
+            cv2.circle(panel4, (x, y), 5, color, -1)
+            cv2.putText(panel4, key.split('_')[0][:4].upper(), (x + 8, y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
         
-        bladder = keypoint_stats[keypoint_id['bladder_idx']]
-        eye_l = keypoint_stats[keypoint_id['eye_l_idx']]
-        eye_r = keypoint_stats[keypoint_id['eye_r_idx']]
-        
-        for kp, color, name in [(bladder, colors['bladder'], 'Bladder'),
-                                 (eye_l, colors['eye_l'], 'L Eye'),
-                                 (eye_r, colors['eye_r'], 'R Eye')]:
-            minr, minc, maxr, maxc = kp.bbox
-            cy, cx = kp.centroid
+        # Draw triangle if geometry is enabled
+        if params['show_geometry']:
+            pts = np.array([
+                [int(keypoint_id['bladder'].centroid[1]), int(keypoint_id['bladder'].centroid[0])],
+                [int(keypoint_id['left_eye'].centroid[1]), int(keypoint_id['left_eye'].centroid[0])],
+                [int(keypoint_id['right_eye'].centroid[1]), int(keypoint_id['right_eye'].centroid[0])]
+            ])
+            cv2.polylines(panel4, [pts], True, (255, 255, 0), 1)
             
-            cv2.rectangle(panel3, (minc, minr), (maxc, maxr), color, 2)
-            cv2.circle(panel3, (int(cx), int(cy)), 4, color, -1)
-            cv2.putText(panel3, f"{name}", (minc, minr-5),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            # Display angles
+            angles = keypoint_id['angles']
+            y_offset = roi_image.shape[0] - 40
+            cv2.putText(panel4, f"Angles: {angles[0]:.1f}, {angles[1]:.1f}, {angles[2]:.1f}", 
+                       (5, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 0), 1)
         
-        # Draw heading vector
-        bladder_pos = np.array(bladder.centroid[::-1])
-        eye_mean = (np.array(eye_l.centroid[::-1]) + np.array(eye_r.centroid[::-1])) / 2
-        head_vec = (eye_mean - bladder_pos) * 0.8  # Scale for visibility
-        
-        cv2.arrowedLine(panel3, 
-                       tuple(bladder_pos.astype(int)),
-                       tuple((bladder_pos + head_vec).astype(int)),
-                       (255, 255, 0), 2, tipLength=0.3)
-        
-        status_text = f"SUCCESS! Heading: {keypoint_id['heading']:.1f}°"
+        status = f"IDENTIFIED - Thresh: {keypoint_id['effective_thresh']}"
         status_color = (0, 255, 0)
     else:
-        # Draw all detected blobs
-        for i, region in enumerate(keypoint_stats):
-            minr, minc, maxr, maxc = region.bbox
-            cv2.rectangle(panel3, (minc, minr), (maxc, maxr), (128, 128, 128), 1)
+        # Draw unidentified blobs
+        for stat in keypoint_stats:
+            y, x = map(int, stat.centroid)
+            cv2.circle(panel4, (x, y), 5, (128, 128, 128), -1)
         
-        status_text = f"FAILED: {len(keypoint_stats)} blobs"
-        status_color = (0, 0, 255)
+        status = f"Found {len(keypoint_stats)} blobs (need 3)"
+        status_color = (0, 165, 255)
     
-    panel3 = cv2.resize(panel3, display_size, interpolation=cv2.INTER_NEAREST)
-    cv2.putText(panel3, status_text, (10, 30),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+    cv2.putText(panel4, status, (10, 20), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.4, status_color, 1)
     
-    # ========== Panel 4: Geometry Analysis ==========
-    panel4 = np.zeros((display_size[0], display_size[1], 3), dtype=np.uint8)
+    # Resize all panels
+    panel1 = cv2.resize(panel1, display_size)
+    panel2 = cv2.resize(panel2, display_size)
+    panel3 = cv2.resize(panel3, display_size)
+    panel4 = cv2.resize(panel4, display_size)
     
-    if success and params['show_geometry']:
-        # Draw triangle geometry
-        panel4_img = cv2.cvtColor(roi_image, cv2.COLOR_GRAY2BGR)
-        
-        bladder_pos = np.array(bladder.centroid[::-1])
-        eye_l_pos = np.array(eye_l.centroid[::-1])
-        eye_r_pos = np.array(eye_r.centroid[::-1])
-        
-        # Draw triangle
-        pts = np.array([bladder_pos, eye_l_pos, eye_r_pos], dtype=np.int32)
-        cv2.polylines(panel4_img, [pts], True, (255, 255, 0), 2)
-        
-        # Draw angle arcs at each vertex
-        for i, (pt, angle) in enumerate(zip([bladder_pos, eye_l_pos, eye_r_pos],
-                                            keypoint_id['angles'])):
-            cv2.putText(panel4_img, f"{angle:.1f}°", 
-                       tuple((pt + [10, -10]).astype(int)),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
-        
-        panel4 = cv2.resize(panel4_img, display_size, interpolation=cv2.INTER_NEAREST)
-        cv2.putText(panel4, "Triangle Geometry", (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-    else:
-        cv2.putText(panel4, "Geometry unavailable", (80, 200),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
+    # Add frame info to panel 1
+    info_text = f"Frame: {frame_num}, Det: {det_num}, ROI: {roi_idx}"
+    cv2.putText(panel1, info_text, (10, panel1.shape[0] - 10), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
     
-    # ========== Panel 5: Statistics ==========
-    stats_panel = np.zeros((display_size[0], display_size[1], 3), dtype=np.uint8)
-    y_offset = 40
-    line_height = 25
-    
-    stats_text = [
-        f"Frame: {frame_num}",
-        f"Detection: {det_num + 1}",
-        f"ROI Index: {roi_idx}",
-        "",
-        "Parameters:",
-        f"  Threshold: {params['roi_thresh']}",
-        f"  SE1 Radius: {params['se1_radius']}",
-        f"  SE2 Radius: {params['se2_radius']}",
-        f"  Min Area: {params['min_area']}",
-        f"  Adaptive Steps: {params['adaptive_steps']}",
-        f"  Thresh Dec: {params['thresh_decrement']}",
-        "",
-        f"Blobs Found: {len(keypoint_stats)}",
-    ]
-    
-    if success:
-        stats_text.extend([
-            "",
-            "KEYPOINT DETECTION ✓",
-            f"Heading: {keypoint_id['heading']:.1f}°",
-            f"Effective Thresh: {keypoint_id['effective_thresh']}",
-            "",
-            "Areas:",
-            f"  Bladder: {bladder.area}",
-            f"  Left Eye: {eye_l.area}",
-            f"  Right Eye: {eye_r.area}",
-        ])
-    else:
-        stats_text.extend([
-            "",
-            f"NEED 3 BLOBS!",
-            f"(currently: {len(keypoint_stats)})",
-            "",
-            "Adjust parameters to",
-            "get exactly 3 distinct",
-            "high-contrast blobs"
-        ])
-    
-    for text in stats_text:
-        color = (0, 255, 0) if "✓" in text else (255, 255, 255)
-        cv2.putText(stats_panel, text, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-        y_offset += line_height
-    
-    # ========== Panel 6: Histogram ==========
-    hist_panel = np.zeros((display_size[0], display_size[1], 3), dtype=np.uint8)
-    
-    source_img = diff_image if (params['use_diff'] and background_roi is not None) else roi_image
-    hist = cv2.calcHist([source_img], [0], None, [256], [0, 256])
-    hist = hist.flatten()
-    hist = hist / hist.max() * (display_size[0] - 40)
-    
-    for i in range(256):
-        cv2.line(hist_panel,
-                (i * display_size[1] // 256, display_size[0] - 20),
-                (i * display_size[1] // 256, display_size[0] - 20 - int(hist[i])),
-                (128, 128, 128), 1)
-    
-    # Draw threshold line
-    thresh_x = params['roi_thresh'] * display_size[1] // 256
-    cv2.line(hist_panel, (thresh_x, 0), (thresh_x, display_size[0]), (0, 255, 255), 2)
-    
-    if success:
-        effective_x = keypoint_id['effective_thresh'] * display_size[1] // 256
-        cv2.line(hist_panel, (effective_x, 0), (effective_x, display_size[0]), (0, 255, 0), 1)
-    
-    cv2.putText(hist_panel, "Intensity Histogram", (10, 30),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-    
-    # ========== Combine panels ==========
-    top_row = np.hstack([panel1, panel2, panel3, panel4])
-    bottom_row = np.hstack([stats_panel, hist_panel, 
-                           np.zeros((display_size[0], display_size[1] * 2, 3), dtype=np.uint8)])
-    dashboard = np.vstack([top_row, bottom_row])
+    # Combine into 2x2 grid
+    top_row = np.hstack((panel1, panel2))
+    bottom_row = np.hstack((panel3, panel4))
+    dashboard = np.vstack((top_row, bottom_row))
     
     return dashboard
 
 
 def main(zarr_path, start_frame=1):
     global current_frame, roi_thresh, se1_radius, se2_radius
-    global min_area, adaptive_steps, thresh_decrement, use_difference
+    global min_area, adaptive_steps, thresh_decrement, use_difference, show_geometry
     
     current_frame = start_frame
     
-    # Load config
+    # Load config for initial values
     config_path = Path("configs/fisheye/default.yaml")
     if config_path.exists():
         with open(config_path, 'r') as f:
@@ -431,7 +525,7 @@ def main(zarr_path, start_frame=1):
             min_area = kp_params.get('min_area', min_area)
             adaptive_steps = kp_params.get('adaptive_steps', adaptive_steps)
             thresh_decrement = kp_params.get('thresh_decrement', thresh_decrement)
-            print(f"Loaded parameters from {config_path}")
+            print(f"✓ Loaded initial parameters from {config_path}")
     
     # Open zarr
     try:
@@ -469,7 +563,7 @@ def main(zarr_path, start_frame=1):
     roi_coords = zarr_root[f'crop_runs/{latest_crop}/roi_coordinates_full']
     n_detections = zarr_root[f'detect_runs/{latest_detect}/n_detections'][:]
     
-    total_rois = len(roi_images)
+    total_rois = roi_images.shape[0]  # Use .shape[0] instead of len() for Zarr arrays
     num_frames = len(n_detections)
     max_dets = int(n_detections.max()) if n_detections.max() > 0 else 1
     
@@ -489,15 +583,18 @@ def main(zarr_path, start_frame=1):
     cv2.createTrackbar("Min Area", window_name, min_area, 50, update_min_area)
     cv2.createTrackbar("Adaptive Steps", window_name, adaptive_steps, 10, update_adaptive_steps)
     cv2.createTrackbar("Thresh Dec", window_name, thresh_decrement, 20, update_thresh_decrement)
+    cv2.createTrackbar("Min Angle", window_name, min_valid_angle, 90, update_min_valid_angle)
+    cv2.createTrackbar("Min Tri Area", window_name, min_triangle_area, 500, update_min_triangle_area)
     if background is not None:
         cv2.createTrackbar("Use Diff", window_name, use_difference, 1, update_use_difference)
     cv2.createTrackbar("Show Geometry", window_name, show_geometry, 1, update_show_geometry)
     
     print("\nControls:")
     print("  Arrow keys: Navigate frames")
-    print("  s: Save parameters")
+    print("  s: Save parameters to Zarr metadata")
     print("  d: Toggle difference mode")
     print("  g: Toggle geometry display")
+    print("  a: Run adaptive threshold demo")
     print("  q/ESC: Quit")
     
     while True:
@@ -505,6 +602,7 @@ def main(zarr_path, start_frame=1):
         n_dets_frame = n_detections[frame_idx] if frame_idx < num_frames else 0
         
         if n_dets_frame > 0:
+            # Calculate ROI index
             cumulative_dets = np.cumsum(np.insert(n_detections[:frame_idx+1], 0, 0))
             det_idx = min(current_detection, n_dets_frame - 1)
             roi_idx = cumulative_dets[frame_idx] + det_idx
@@ -537,8 +635,10 @@ def main(zarr_path, start_frame=1):
             'min_area': min_area,
             'adaptive_steps': adaptive_steps,
             'thresh_decrement': thresh_decrement,
+            'min_valid_angle': min_valid_angle,
             'use_diff': use_difference,
-            'show_geometry': show_geometry
+            'show_geometry': show_geometry,
+            'min_triangle_area': min_triangle_area
         }
         
         dashboard = create_keypoint_dashboard(
@@ -553,34 +653,30 @@ def main(zarr_path, start_frame=1):
         if key == ord('q') or key == 27:
             break
         elif key == ord('s'):
-            # Save parameters
+            # Save parameters to Zarr
             try:
-                if config_path.exists():
-                    with open(config_path, 'r') as f:
-                        config = yaml.safe_load(f)
-                else:
-                    config = {}
-                
-                if 'keypoints' not in config:
-                    config['keypoints'] = {}
-                
-                config['keypoints'].update({
+                params = {
                     'roi_thresh': roi_thresh,
                     'se1_radius': se1_radius,
                     'se2_radius': se2_radius,
                     'min_area': min_area,
                     'adaptive_steps': adaptive_steps,
-                    'thresh_decrement': thresh_decrement
-                })
+                    'thresh_decrement': thresh_decrement,
+                    'min_valid_angle': min_valid_angle,
+                    'min_triangle_area': min_triangle_area,
+                    'frame_index': current_frame,
+                    'detection_index': current_detection
+                }
                 
-                with open(config_path, 'w') as f:
-                    yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+                success, message = save_keypoint_params(zarr_path, params)
                 
-                print(f"\n✓ Saved to {config_path}")
-                for k, v in config['keypoints'].items():
-                    print(f"  {k}: {v}")
+                if success:
+                    print(f"✓ {message}")
+                else:
+                    print(f"✗ {message}")
+                    
             except Exception as e:
-                print(f"Error saving: {e}")
+                print(f"✗ Error saving: {e}")
         elif key == ord('d'):
             use_difference = 1 - use_difference
             if background is not None:
@@ -588,6 +684,10 @@ def main(zarr_path, start_frame=1):
         elif key == ord('g'):
             show_geometry = 1 - show_geometry
             cv2.setTrackbarPos("Show Geometry", window_name, show_geometry)
+        elif key == ord('a'):  # 'a' for adaptive demo
+            print("\n[Starting adaptive threshold demo...]")
+            run_adaptive_threshold_demo(roi_image, background_roi, params, 
+                                        window_name="Adaptive Threshold Demo")
         elif key == 83:  # Right arrow
             current_frame = min(num_frames, current_frame + 1)
             cv2.setTrackbarPos("Frame", window_name, current_frame)

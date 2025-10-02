@@ -57,9 +57,15 @@ crop:
   scheduler: distributed
   num_workers: 30
 keypoints:
+  scheduler: distributed  # or 'processes', 'threads'
+  num_workers: 10
+  threads_per_worker: 2
+  memory_limit: '50GB'
   roi_thresh: 50
   se1_radius: 1
   se2_radius: 2
   min_area: 5
   adaptive_steps: 5
   thresh_decrement: 5
+  min_valid_angle: 10.0
+  min_triangle_area: 100.0

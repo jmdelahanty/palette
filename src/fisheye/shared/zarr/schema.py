@@ -332,51 +332,48 @@ def create_palette_zarr(
 
 
 
-def get_run_group(root: zarr.Group, stage_name: str, create_new: bool = True) -> zarr.Group:
+def get_run_group(
+    root: zarr.Group, 
+    stage_name: str, 
+    console: Optional[Console] = None,
+    create_new: bool = True
+) -> Tuple[zarr.Group, str]:
     """
-    Get or create a new timestamped group for a pipeline stage run.
-    Mimics the tracker.py get_run_group function.
+    Get or create a run group for a pipeline stage with timestamp.
     
     Args:
-        root: Root zarr group
-        stage_name: Name of the pipeline stage
-        create_new: If True, create a new run. If False, return latest.
-    
+        root: Zarr root group
+        stage_name: Stage name (e.g., 'detect', 'crop', 'keypoints')
+        console: Rich console for output (optional)
+        create_new: Whether to create a new run group
+        
     Returns:
-        Run group
+        Tuple of (run_group, run_group_name)
     """
-    parent_group_name = f"{stage_name}_runs"
+    from datetime import datetime, timezone
     
-    # Handle special case where stage_name might already include '_runs'
-    if stage_name.endswith('_runs'):
-        parent_group_name = stage_name
-        stage_name = stage_name.replace('_runs', '')
+    parent_group_name = f'{stage_name}_runs'
     
-    # Navigate to processing group if needed
-    if 'processing' in root and parent_group_name in root['processing']:
-        parent_group = root['processing'][parent_group_name]
-    elif parent_group_name in root:
-        parent_group = root[parent_group_name]
+    if parent_group_name not in root:
+        parent_group = root.create_group(parent_group_name)
     else:
-        parent_group = root.require_group(parent_group_name)
+        parent_group = root[parent_group_name]
     
-    if not create_new and 'latest' in parent_group.attrs:
-        latest_run_name = parent_group.attrs['latest']
-        if latest_run_name and latest_run_name in parent_group:
-            return parent_group[latest_run_name]
+    if create_new:
+        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
+        run_group_name = f'{stage_name}_{timestamp}'
+        run_group = parent_group.create_group(run_group_name)
+        parent_group.attrs['latest'] = run_group_name
+        
+        if console:
+            console.print(f"Created run group: [cyan]{parent_group_name}/{run_group_name}[/cyan]")
+    else:
+        run_group_name = parent_group.attrs.get('latest')
+        if not run_group_name:
+            raise ValueError(f"No existing run found for {stage_name}")
+        run_group = parent_group[run_group_name]
     
-    # Create new timestamped run
-    timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
-    run_group_name = f"{stage_name}_{timestamp}"
-    run_group = parent_group.create_group(run_group_name)
-    
-    # Update latest marker
-    parent_group.attrs['latest'] = run_group_name
-    
-    # Add creation timestamp
-    run_group.attrs['created_utc'] = datetime.now(timezone.utc).isoformat()
-    
-    return run_group
+    return run_group, run_group_name
 
 def create_background_arrays(
     bg_group: zarr.Group,
