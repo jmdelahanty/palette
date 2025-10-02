@@ -32,60 +32,28 @@ def update_frame(val):
     global frame_index
     frame_index = val
 
-def save_to_zarr(zarr_path, array_name, frame_index, detected_circle, params, auto_detected=False):
-    """Save mask parameters to Zarr analysis metadata"""
+def save_mask_to_zarr(zarr_path, detected_circle, params, array_name, frame_index):
+    """Save mask parameters to Zarr metadata ONLY."""
     try:
         zarr_root = zarr.open(zarr_path, mode='r+')
         
-        # Create analysis_metadata group if it doesn't exist
         if 'analysis_metadata' not in zarr_root:
-            analysis_meta = zarr_root.create_group('analysis_metadata')
+            meta = zarr_root.create_group('analysis_metadata')
         else:
-            analysis_meta = zarr_root['analysis_metadata']
+            meta = zarr_root['analysis_metadata']
         
-        # Get existing attrs or create new dict
-        metadata = dict(analysis_meta.attrs) if analysis_meta.attrs else {}
+        # Get existing metadata
+        metadata = dict(meta.attrs) if meta.attrs else {}
         
-        # Add/update dish mask data
+        # Store mask data
         metadata['dish_mask'] = {
+            'method': 'hough_circle',
+            'version': '1.0',
             'tuned_timestamp': datetime.now().isoformat(),
-            'tuned_on_frame': int(frame_index),
-            'tuned_on_array': array_name,
             'detected_circle': {
                 'center': [int(detected_circle[0]), int(detected_circle[1])],
-                'radius': int(detected_circle[2]),
-                'hough_param1': int(params['param1']),
-                'hough_param2': int(params['param2']),
-                'radius_adjustment': int(params['radius_adjustment'])
+                'radius': int(detected_circle[2])
             },
-            'auto_detected': auto_detected,
-            'version': '1.0'  # Track schema version
-        }
-        
-        # Save back to attrs
-        analysis_meta.attrs.update(metadata)
-        
-        print(f" Saved to Zarr at analysis_metadata.attrs['dish_mask']")
-        return True
-    except Exception as e:
-        print(f" Error saving to Zarr: {e}")
-        return False
-
-def save_to_yaml(config_path, array_name, frame_index, detected_circle, params):
-    """Save mask parameters to YAML config"""
-    try:
-        # Load existing config
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f) or {}
-        else:
-            config = {}
-        
-        # Prepare the circle mask parameters
-        circle_mask = {
-            'shape': 'circle',
-            'center': [int(detected_circle[0]), int(detected_circle[1])],
-            'radius': int(detected_circle[2]),
             'hough_params': {
                 'param1': int(params['param1']),
                 'param2': int(params['param2']),
@@ -93,28 +61,21 @@ def save_to_yaml(config_path, array_name, frame_index, detected_circle, params):
             },
             'source': {
                 'array': array_name,
-                'frame': int(frame_index),
-                'timestamp': datetime.now().isoformat()
+                'frame': int(frame_index)
             }
         }
         
-        # Update both detect and crop sections
-        if 'detect' not in config:
-            config['detect'] = {}
-        config['detect']['dish_mask'] = circle_mask
+        meta.attrs.update(metadata)
         
-        if 'crop' not in config:
-            config['crop'] = {}
-        config['crop']['dish_mask'] = circle_mask
+        print(f"\n✅ Mask saved to zarr: {zarr_path}")
+        print(f"   Location: analysis_metadata/attrs['dish_mask']")
+        print(f"   Center: {metadata['dish_mask']['detected_circle']['center']}")
+        print(f"   Radius: {metadata['dish_mask']['detected_circle']['radius']}")
+        print(f"   This mask will be used automatically in detect and crop stages")
         
-        # Save updated config
-        with open(config_path, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-        
-        print(f" Saved to YAML config at {config_path}")
         return True
     except Exception as e:
-        print(f" Error saving to YAML: {e}")
+        print(f"❌ Error saving to Zarr: {e}")
         return False
 
 def load_from_zarr(zarr_path):
@@ -143,7 +104,7 @@ def load_from_zarr(zarr_path):
         print(f"Could not load existing mask data: {e}")
         return None
 
-def main(zarr_path, use_full_res=False, frame_idx=None, save_to='both', config_path=None):
+def main(zarr_path, use_full_res=False, frame_idx=None, config_path=None):
     global hough_param1, hough_param2, radius_adjustment, detected_circle, frame_index, max_frames
     
     if config_path is None:
@@ -209,11 +170,11 @@ def main(zarr_path, use_full_res=False, frame_idx=None, save_to='both', config_p
     cv2.createTrackbar("param2", window_name, hough_param2, 200, update_param2)
     cv2.createTrackbar("Radius Adjust", window_name, radius_adjustment + 20, 40, update_radius_adj)
     
-    print(f"\n Starting Dish Mask Tuner (save to: {save_to})")
+    print(f"\n Starting Dish Mask Tuner...")
     print("Controls:")
     print("  - Use 'Frame' slider to select different frames")
     print("  - Adjust Hough sliders to find the best circle fit")
-    print(f"  - Press 's' to SAVE the circle parameters ({save_to})")
+    print(f"  - Press 's' to SAVE the circle parameters to Zarr")
     print("  - Press 'a' to auto-detect best parameters")
     print("  - Press 'q' or Esc to quit without saving")
     print("\nGoal: Find parameters that draw a single, stable green circle around the dish.")
@@ -270,43 +231,32 @@ def main(zarr_path, use_full_res=False, frame_idx=None, save_to='both', config_p
             info_text = f"Circle: center=({detected_circle[0]}, {detected_circle[1]}), radius={detected_circle[2]}"
             cv2.putText(display_image, info_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         
-        save_text = f"Save to: {save_to}"
-        cv2.putText(display_image, save_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        
         cv2.imshow(window_name, display_image)
         
         key = cv2.waitKey(30) & 0xFF
         if key == ord('q') or key == 27:
             break
         elif key == ord('s'):
-            if detected_circle:
+            if detected_circle is not None:
+                # define params before using it
                 params = {
                     'param1': hough_param1,
                     'param2': hough_param2,
                     'radius_adjustment': radius_adjustment
                 }
                 
-                print(f"\n Saving mask parameters...")
-                
-                success = True
-                if save_to in ['zarr', 'both']:
-                    success &= save_to_zarr(zarr_path, array_name, frame_index, 
-                                           detected_circle, params, auto_detected)
-                
-                if save_to in ['yaml', 'both']:
-                    success &= save_to_yaml(config_path, array_name, frame_index, 
-                                           detected_circle, params)
+                success = save_mask_to_zarr(
+                    zarr_path,
+                    detected_circle,
+                    params,
+                    array_name,
+                    frame_index
+                )
                 
                 if success:
-                    print(f"\n Summary:")
-                    print(f"   Array: {array_name}")
-                    print(f"   Frame: {frame_index}")
-                    print(f"   Center: ({detected_circle[0]}, {detected_circle[1]})")
-                    print(f"   Radius: {detected_circle[2]}")
-                    print(f"   Params: param1={hough_param1}, param2={hough_param2}, radius_adj={radius_adjustment}")
-                    print(f"   Auto-detected: {auto_detected}")
+                    print("Press 'q' to quit or continue tuning")
             else:
-                print(" No circle detected. Please adjust parameters until a circle is detected.")
+                print(" No circle detected - adjust parameters and try again")
         elif key == ord('a'):
             # Auto-detect mode
             print("\n🔍 Auto-detecting best parameters...")
@@ -341,10 +291,8 @@ if __name__ == "__main__":
     parser.add_argument("zarr_path", type=str, help="Path to the Zarr file containing imported video.")
     parser.add_argument("--full", action="store_true", help="Use full resolution array instead of downsampled")
     parser.add_argument("--frame", type=int, help="Specific frame index to use")
-    parser.add_argument("--save-to", choices=['zarr', 'yaml', 'both'], default='both',
-                       help="Where to save parameters (default: both)")
     parser.add_argument("--config", type=str, help="Path to YAML config file (default: src/pipeline_config.yaml)")
     args = parser.parse_args()
-    
-    main(args.zarr_path, use_full_res=args.full, frame_idx=args.frame, 
-         save_to=args.save_to, config_path=args.config)
+
+    main(args.zarr_path, use_full_res=args.full, frame_idx=args.frame,
+         config_path=args.config)

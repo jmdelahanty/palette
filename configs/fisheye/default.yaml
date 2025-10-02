@@ -29,7 +29,7 @@ background:
   compute_full: true
   compute_ds: true
 detect:
-  ds_thresh: 21
+  ds_thresh: 13
   se1_radius: 2
   se4_radius: 10
   min_area: 85
@@ -55,7 +55,7 @@ crop:
   - 256
   - 256
   scheduler: distributed
-  num_workers: 10
+  num_workers: 30
 keypoints:
   roi_thresh: 50
   se1_radius: 1

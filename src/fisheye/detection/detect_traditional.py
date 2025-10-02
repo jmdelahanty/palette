@@ -1,5 +1,6 @@
 """
 Fish detection module using blob detection on background-subtracted frames.
+Updated to use zarr-first parameter resolution.
 """
 
 import time
@@ -19,6 +20,83 @@ from dask import delayed
 from dask.diagnostics import ProgressBar
 
 from ..utils.system import get_git_info, get_platform_info
+
+
+def get_detection_parameters(
+    root: zarr.Group,
+    config: Dict[str, Any],
+    console: Optional[Console] = None
+) -> Tuple[Dict[str, Any], str]:
+    """
+    Get detection parameters with zarr-first resolution.
+    
+    Priority order:
+    1. Zarr analysis_metadata (tuned parameters)
+    2. Config file defaults
+    
+    Args:
+        root: Zarr root group
+        config: Loaded config dictionary
+        console: Rich console for output
+    
+    Returns:
+        Tuple of (parameters dict, source string)
+        source is either 'zarr_tuned' or 'config_default'
+    """
+    # Start with config defaults
+    detect_params = config.get('detect', {}).copy()
+    detect_params.setdefault('ds_thresh', 55)
+    detect_params.setdefault('se1_radius', 1)
+    detect_params.setdefault('se4_radius', 4)
+    detect_params.setdefault('min_area', 50)
+    detect_params.setdefault('max_area', 500)
+    detect_params.setdefault('max_fish', 20)
+    
+    # Check for tuned parameters in zarr
+    if 'analysis_metadata' in root:
+        analysis_meta = root['analysis_metadata']
+        
+        # Check for blob detection tuning (current method)
+        if 'detection_tuning' in analysis_meta.attrs:
+            tuning_data = analysis_meta.attrs['detection_tuning']
+            tuned_params = tuning_data.get('tuned_parameters', {})
+            
+            if tuned_params:
+                # Merge tuned parameters over config defaults
+                detect_params.update(tuned_params)
+                
+                if console:
+                    tuned_date = tuning_data.get('tuned_timestamp', 'unknown')[:10]
+                    console.print(f"[green]✓ Using tuned parameters from zarr[/green] (tuned: {tuned_date})")
+                    console.print(f"  Threshold: {detect_params['ds_thresh']}, "
+                                f"Min area: {detect_params['min_area']}, "
+                                f"Max area: {detect_params['max_area']}, "
+                                f"Max fish: {detect_params['max_fish']}")
+                
+                return detect_params, 'zarr_tuned'
+        
+        # Check for mask tuning
+        if 'dish_mask' in analysis_meta.attrs:
+            mask_data = analysis_meta.attrs['dish_mask']
+            if 'detected_circle' in mask_data:
+                # Override config mask with tuned mask
+                if 'dish_mask' not in detect_params:
+                    detect_params['dish_mask'] = {}
+                detect_params['dish_mask'].update({
+                    'shape': 'circle',
+                    'center': mask_data['detected_circle']['center'],
+                    'radius': mask_data['detected_circle']['radius']
+                })
+                if console:
+                    console.print(f"[green]✓ Using tuned dish mask from zarr[/green]")
+    
+    # No tuned parameters found - using config
+    if console:
+        console.print(f"[yellow]⚠️  Using default config parameters - consider tuning first[/yellow]")
+        console.print(f"  Run: python -m fisheye --tune mask")
+        console.print(f"  Run: python -m fisheye --tune detect")
+    
+    return detect_params, 'config_default'
 
 
 def create_dish_mask(mask_params: Dict, img_shape: Tuple[int, int], console: Optional[Console] = None) -> Optional[np.ndarray]:
@@ -133,19 +211,7 @@ def detect_fish(
     num_workers: Optional[int] = None,
     console: Optional[Console] = None
 ) -> Dict[str, Any]:
-    """
-    Detect fish in video frames using blob detection.
-    
-    Args:
-        zarr_path: Path to zarr archive
-        config_path: Path to pipeline config
-        scheduler: Dask scheduler type
-        num_workers: Number of workers for parallel processing
-        console: Rich console for output
-    
-    Returns:
-        Dictionary with detection results and metadata
-    """
+    """Detect fish in video frames using blob detection."""
     if console is None:
         console = Console()
     
@@ -161,25 +227,18 @@ def detect_fish(
         with open(config_path) as f:
             config = yaml.safe_load(f)
     
-    detect_params = config.get('detect', {})
-    
-    # Set defaults if not in config
-    detect_params.setdefault('ds_thresh', 55)
-    detect_params.setdefault('se1_radius', 1)
-    detect_params.setdefault('se4_radius', 4)
-    detect_params.setdefault('min_area', 50)
-    detect_params.setdefault('max_area', 500)
-    detect_params.setdefault('max_fish', 20)
-    
-    # Get version info
-    git_info = get_git_info()
-    platform_info = get_platform_info(collect_ip=False, disk_path=zarr_path)
-    
     # Open zarr
     root = zarr.open_group(zarr_path, mode='r+')
     
     if 'background_runs' not in root:
         raise ValueError("Background stage not run. Run background computation first.")
+    
+    # Get detection parameters with zarr-first resolution
+    detect_params, param_source = get_detection_parameters(root, config, console)
+    
+    # Get version info
+    git_info = get_git_info()
+    platform_info = get_platform_info(collect_ip=False, disk_path=zarr_path)
     
     latest_bg_run = root['background_runs'].attrs['latest']
     console.print(f"Using background: [cyan]{latest_bg_run}[/cyan]")
@@ -193,21 +252,8 @@ def detect_fish(
     
     console.print(f"Created new run: [cyan]detect_runs/{run_name}[/cyan]")
     
-    # Load or create dish mask
+    # Create dish mask
     mask_params = detect_params.get('dish_mask', {})
-    
-    # Check analysis_metadata for mask from tuner
-    if 'analysis_metadata' in root and 'dish_mask' in root['analysis_metadata'].attrs:
-        tuned_mask = root['analysis_metadata'].attrs['dish_mask']
-        if 'detected_circle' in tuned_mask:
-            mask_params = {
-                'shape': 'circle',
-                'center': tuned_mask['detected_circle']['center'],
-                'radius': tuned_mask['detected_circle']['radius']
-            }
-            console.print("Using mask from mask tuner")
-    
-    # Create the mask
     background_ds = root[f'background_runs/{latest_bg_run}/background_ds'][:]
     ds_img_shape = background_ds.shape
     mask = create_dish_mask(mask_params, ds_img_shape, console)
@@ -236,54 +282,38 @@ def detect_fish(
         overwrite=True
     )
     
-    # Create detection tasks
+    # Create dask tasks
     chunk_slices = [slice(i, min(i + chunk_size, num_images)) for i in range(0, num_images, chunk_size)]
-    console.print(f"Creating [yellow]{len(chunk_slices)}[/yellow] detection tasks...")
+    console.print(f"Creating [yellow]{len(chunk_slices)}[/yellow] Dask tasks for detection...")
     
-    # Configure dask
-    import os
-    dask.config.set(scheduler=scheduler, num_workers=num_workers or os.cpu_count())
+    delayed_tasks = [detect_chunk_delayed(zarr_path, s, detect_params, mask, latest_bg_run) for s in chunk_slices]
     
-    # Create delayed tasks
-    delayed_tasks = [
-        detect_chunk_delayed(zarr_path, s, detect_params, mask, latest_bg_run) 
-        for s in chunk_slices
-    ]
-    
-    # Run detection
     with ProgressBar():
         results = dask.compute(*delayed_tasks)
     
-    console.print("Writing detection results...")
+    console.print("Writing detection results to Zarr...")
     
-    # A list to hold all the bounding box arrays from each chunk
+    # Collect all bboxes first, then do single resize and write
     all_chunk_bboxes = []
     total_detections = 0
     
-    # This loop just collects results, no writing to bbox_norm_coords yet
     for slc, counts, bboxes in tqdm(results, desc="Processing chunks"):
-        n_detections[slc] = counts # This write is fine, as the array is pre-sized
-        if bboxes: # Check if the list of bboxes is not empty
-            all_chunk_bboxes.append(np.array(bboxes))
+        n_detections[slc] = counts
+        if bboxes:
+            all_chunk_bboxes.append(np.array(bboxes, dtype='f8'))
             total_detections += len(bboxes)
-
+    
     console.print(f"Aggregating {total_detections} total detections...")
-
-    # Now, resize and write just ONCE after the loop
+    
+    # Now resize and write just ONCE
     if total_detections > 0:
-        # Resize the Zarr array to the final correct shape, passed as a TUPLE
-        bbox_norm_coords.resize((total_detections, 4)) 
-        
-        # Concatenate all collected bounding boxes into one large array
+        bbox_norm_coords.resize((total_detections, 4))
         final_bboxes = np.concatenate(all_chunk_bboxes, axis=0)
-        
-        # Write all the data in a single operation
         bbox_norm_coords[:] = final_bboxes
     else:
-        # If no detections were found, resize to an empty array, passed as a TUPLE
         bbox_norm_coords.resize((0, 4))
 
-    # Calculate statistics (this part remains the same)
+    # Calculate statistics
     frames_with_detections = np.sum(n_detections[:] > 0)
     percent_detected = (frames_with_detections / num_images) * 100 if num_images > 0 else 0
     
@@ -293,7 +323,9 @@ def detect_fish(
     detect_group.attrs.update({
         'detect_timestamp_utc': datetime.now(timezone.utc).isoformat(),
         'duration_seconds': duration,
+        'method': 'blob_detection',
         'parameters': detect_params,
+        'parameter_source': param_source,
         'source_background_run': latest_bg_run,
         'dask_scheduler': scheduler,
         'summary_statistics': {
@@ -324,5 +356,6 @@ def detect_fish(
         'duration_seconds': duration,
         'total_detections': total_detections,
         'frames_with_detections': frames_with_detections,
-        'run_name': run_name
+        'run_name': run_name,
+        'parameter_source': param_source
     }

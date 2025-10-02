@@ -52,7 +52,6 @@ def run_tuner(
                 zarr_path=zarr_path,
                 use_full_res=use_full_res,
                 frame_idx=frame_idx,
-                save_to='both',
                 config_path=config_path
             )
             return 0

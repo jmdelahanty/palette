@@ -21,7 +21,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRe
 from ..capture.import_video import import_video, get_import_stats
 from ..preprocessing.background import compute_background
 from ..detection.detect_traditional import detect_fish
-from ..detection.keypoints_traditional import detect_keypoints_traditional
+from ..detection.detect_keypoints_traditional import detect_keypoints
 from ..tracking.crop import crop_detections
 from ..shared.zarr.schema import validate_zarr_structure
 
@@ -153,13 +153,23 @@ class Pipeline:
             'crop': {
                 'roi_sz': [256, 256]
             },
+            'keypoints': {  # ← Added
+                'roi_thresh': 50,
+                'se1_radius': 1,
+                'se2_radius': 2,
+                'min_area': 5,
+                'adaptive_steps': 5,
+                'thresh_decrement': 5,
+                'scheduler': 'processes',
+                'num_workers': None
+            },
             'track': {
                 'roi_thresh': 25,
                 'se1_radius': 3,
                 'se2_radius': 5
             }
         }
-    
+        
     def run(
         self,
         stages: Optional[List[str]] = None,
@@ -346,174 +356,22 @@ class Pipeline:
         self.console.print(f" Cropped {results['total_crops']} ROIs from {results['frames_with_crops']} frames")
 
     def _run_keypoints(self) -> None:
-        """Run keypoints stage to detect keypoints in cropped ROIs."""
+        """Run keypoints stage to detect anatomical keypoints in cropped ROIs."""
         if self.zarr_root is None:
             self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
         
-        # Import the keypoint detection module
-        from ..detection.keypoints_traditional import process_roi_keypoints
-        
-        # Check prerequisites
-        if 'crop_runs' not in self.zarr_root:
-            raise ValueError("Crop stage has not been run. Please run crop before keypoint detection.")
-        
-        if 'background_runs' not in self.zarr_root:
-            raise ValueError("Background stage has not been run. Please run background before keypoint detection.")
-
-        # Get keypoints parameters
-        keypoints_params = self.pipeline_params.get('keypoints', {})
-
-        # Create keypoints run group
-        from ..shared.zarr.schema import create_stage_metadata
-        keypoints_group = create_stage_metadata(
-            root=self.zarr_root,
-            stage='keypoints',
-            parameters=keypoints_params,
-            source_runs={
-                'crop': self.zarr_root['crop_runs'].attrs['latest'],
-                'background': self.zarr_root['background_runs'].attrs['latest']
-            }
+        # Run keypoint detection
+        results = detect_keypoints(
+            zarr_path=self.config.zarr_path,
+            config=self.pipeline_params,
+            scheduler=self.config.scheduler,
+            num_workers=self.config.num_workers,
+            console=self.console
         )
-        
-        # Get latest runs
-        latest_crop = self.zarr_root['crop_runs'].attrs['latest']
-        latest_background = self.zarr_root['background_runs'].attrs['latest']
-        
-        # Load data references
-        crop_group = self.zarr_root[f'crop_runs/{latest_crop}']
-        roi_images = crop_group['roi_images']
-        roi_coordinates_full = crop_group['roi_coordinates_full']
-        
-        # Get background
-        background_full = self.zarr_root[f'background_runs/{latest_background}/background_full'][:]
-        
-        # Get image dimensions
-        full_img_shape = self.zarr_root['raw_video/images_full'].shape[1:]
-        roi_shape = roi_images.shape[1:]  # (height, width) of each ROI
-        
-        total_rois = roi_images.shape[0]
-        
-        # Create output arrays for keypoints results
-        import numpy as np
-        keypoint_results = keypoints_group.create_array(
-            'keypoint_results',
-            shape=(total_rois, 21),  # Adjust columns as needed
-            chunks=(min(1000, total_rois), 21),
-            dtype='f8',
-            fill_value=np.nan,
-            overwrite=True
-        )
-        
-        # Column names for documentation
-        keypoint_results.attrs['columns'] = [
-            'heading_degrees',
-            'bladder_x_roi_norm', 'bladder_y_roi_norm',
-            'eye_left_x_roi_norm', 'eye_left_y_roi_norm', 
-            'eye_right_x_roi_norm', 'eye_right_y_roi_norm',
-            'bladder_x_img_norm', 'bladder_y_img_norm',
-            'eye_left_x_img_norm', 'eye_left_y_img_norm',
-            'eye_right_x_img_norm', 'eye_right_y_img_norm',
-            'bbox_center_x_norm', 'bbox_center_y_norm',
-            'bbox_extent_x_norm', 'bbox_extent_y_norm',
-            'roi_x_full', 'roi_y_full',
-            'confidence', 'effective_threshold'
-        ]
-        
-        # Process in chunks for memory efficiency
-        from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
-        
-        chunk_size = 100  # Process 100 ROIs at a time
-        successful_tracks = 0
-        
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TimeRemainingColumn(),
-            console=self.console,
-            transient=True
-        ) as progress:
-            task = progress.add_task(
-                f"[cyan]Detecting keypoints in {total_rois} ROIs...", 
-                total=total_rois
-            )
-            
-            for start_idx in range(0, total_rois, chunk_size):
-                end_idx = min(start_idx + chunk_size, total_rois)
-                
-                # Load chunk of ROIs
-                roi_chunk = roi_images[start_idx:end_idx]
-                coords_chunk = roi_coordinates_full[start_idx:end_idx]
-                
-                # Process each ROI in the chunk
-                for i, (roi, coords) in enumerate(zip(roi_chunk, coords_chunk)):
-                    global_idx = start_idx + i
-                    
-                    # Skip invalid ROIs
-                    if coords[0] == -1 or np.all(roi == 0):
-                        continue
-                    
-                    # Extract background patch for this ROI
-                    x1, y1 = int(coords[0]), int(coords[1])
-                    x2, y2 = x1 + roi_shape[1], y1 + roi_shape[0]
-                    
-                    # Handle edge cases
-                    if x2 > full_img_shape[1] or y2 > full_img_shape[0]:
-                        continue
-                        
-                    background_patch = background_full[y1:y2, x1:x2]
-                    
-                    # Detect keypoints
-                    results = process_roi_keypoints(
-                        roi=roi,
-                        background_roi=background_patch,
-                        roi_coords_full=(x1, y1),
-                        roi_shape=roi_shape,
-                        full_img_shape=full_img_shape,
-                        detection_params=keypoints_params
-                    )
-                    
-                    if results is not None:
-                        # Pack results into array
-                        keypoint_results[global_idx] = [
-                            results.get('heading', np.nan),
-                            results.get('bladder_roi_norm', [np.nan, np.nan])[0],
-                            results.get('bladder_roi_norm', [np.nan, np.nan])[1],
-                            results.get('eye_left_roi_norm', [np.nan, np.nan])[0],
-                            results.get('eye_left_roi_norm', [np.nan, np.nan])[1],
-                            results.get('eye_right_roi_norm', [np.nan, np.nan])[0],
-                            results.get('eye_right_roi_norm', [np.nan, np.nan])[1],
-                            results.get('bladder_img_norm', [np.nan, np.nan])[0],
-                            results.get('bladder_img_norm', [np.nan, np.nan])[1],
-                            results.get('eye_left_img_norm', [np.nan, np.nan])[0],
-                            results.get('eye_left_img_norm', [np.nan, np.nan])[1],
-                            results.get('eye_right_img_norm', [np.nan, np.nan])[0],
-                            results.get('eye_right_img_norm', [np.nan, np.nan])[1],
-                            results.get('bbox_center_norm', [np.nan, np.nan])[0],
-                            results.get('bbox_center_norm', [np.nan, np.nan])[1],
-                            results.get('bbox_extent_norm', [np.nan, np.nan])[0],
-                            results.get('bbox_extent_norm', [np.nan, np.nan])[1],
-                            x1, y1,
-                            results.get('confidence', 0.0),
-                            results.get('effective_threshold', np.nan)
-                        ]
-                        successful_tracks += 1
-                
-                progress.update(task, advance=(end_idx - start_idx))
-        
-        # Calculate and store summary statistics
-        success_rate = (successful_tracks / total_rois * 100) if total_rois > 0 else 0.0
-
-        keypoints_group.attrs['summary_statistics'] = {
-            'total_rois': total_rois,
-            'successful_keypoint_detections': successful_tracks,
-            'success_rate': round(success_rate, 2),
-            'parameters_used': keypoints_params
-        }
         
         self.console.print(
-            f" Detected keypoints in {successful_tracks}/{total_rois} ROIs "
-            f"({success_rate:.1f}% success rate)"
+            f"✓ Detected keypoints in {results['successful_detections']}/{results['total_rois']} "
+            f"ROIs ({results['success_rate_percent']:.1f}% success rate)"
         )
     
     def _run_refine(self) -> None:

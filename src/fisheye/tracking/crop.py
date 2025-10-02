@@ -34,6 +34,54 @@ except Exception:
 
 from ..utils.system import get_environment_info
 
+def get_crop_parameters(
+    root: zarr.Group,
+    config: Dict[str, Any],
+    console: Optional[Console] = None
+) -> Tuple[Dict[str, Any], str]:
+    """
+    Get crop parameters with zarr-first resolution.
+    
+    Priority order:
+    1. Zarr analysis_metadata (if crop tuning exists)
+    2. Config file defaults
+    """
+    # Start with config defaults
+    crop_params = config.get('crop', {}).copy()
+    crop_params.setdefault('roi_sz', [256, 256])
+    
+    param_source = 'config_default'
+    
+    # Check for tuned parameters in zarr (future: crop tuning)
+    if 'analysis_metadata' in root:
+        analysis_meta = root['analysis_metadata']
+        
+        # Future: if we add crop parameter tuning
+        if 'crop_tuning' in analysis_meta.attrs:
+            tuning_data = analysis_meta.attrs['crop_tuning']
+            tuned_params = tuning_data.get('tuned_parameters', {})
+            if tuned_params:
+                crop_params.update(tuned_params)
+                param_source = 'zarr_tuned'
+                if console:
+                    console.print(f"[green]✓ Using tuned crop parameters from zarr[/green]")
+        
+        # Check for mask tuning (this is the main one)
+        if 'dish_mask' in analysis_meta.attrs:
+            mask_data = analysis_meta.attrs['dish_mask']
+            if 'detected_circle' in mask_data:
+                if 'dish_mask' not in crop_params:
+                    crop_params['dish_mask'] = {}
+                crop_params['dish_mask'].update({
+                    'shape': 'circle',
+                    'center': mask_data['detected_circle']['center'],
+                    'radius': mask_data['detected_circle']['radius']
+                })
+                if console:
+                    console.print(f"[green]✓ Using tuned dish mask from zarr[/green]")
+    
+    return crop_params, param_source
+
 
 # -------- Worker task: compute + WRITE directly into Zarr -------- #
 
@@ -162,7 +210,7 @@ def crop_detections(
     root = zarr.open_group(zarr_path, mode='a')
 
     # Get crop parameters including scheduler settings
-    crop_params = config.get('crop', {})
+    crop_params, param_source = get_crop_parameters(root, config, console)
     
     # Use config values if not explicitly provided
     if scheduler is None:
@@ -190,6 +238,7 @@ def crop_detections(
         'dask_scheduler': scheduler,
         'dask_num_workers': num_workers or os.cpu_count(),
         'parameters': crop_params,
+        'parameter_source': param_source,
         'source_detect_run': latest_detect_run,
         'roi_size': roi_sz
     }

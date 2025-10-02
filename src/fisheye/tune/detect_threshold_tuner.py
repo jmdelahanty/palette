@@ -9,12 +9,17 @@ from pathlib import Path
 import yaml
 
 # Global variables to store trackbar values
+max_fish = 20
 ds_thresh = 55
 current_frame = 1
 ds_se1_radius = 1
 ds_se4_radius = 4
-min_area = 50
-max_area = 500
+min_area = 25
+max_area = 700
+
+def update_max_fish(val):
+    global max_fish
+    max_fish = val
 
 def update_ds_thresh(val):
     global ds_thresh
@@ -40,31 +45,20 @@ def update_max_area(val):
     global max_area
     max_area = val
 
-def save_detection_params(zarr_path, params, config_path):
-    """Save detection parameters to both Zarr and config file."""
+def save_detection_params(zarr_path, params):
+    """
+    Save detection parameters to Zarr metadata ONLY.
+    
+    Config file remains as a template - tuned parameters go in zarr.
+    
+    Args:
+        zarr_path: Path to zarr file
+        params: Dictionary of parameters including ds_thresh, se1_radius, etc.
+    
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
     try:
-        # Save to config file
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f) or {}
-        else:
-            config = {}
-        
-        if 'detect' not in config:
-            config['detect'] = {}
-        
-        # Update detection parameters
-        config['detect'].update({
-            'ds_thresh': params['ds_thresh'],
-            'se1_radius': params['se1_radius'],
-            'se4_radius': params['se4_radius'],
-            'min_area': params['min_area'],
-            'max_area': params['max_area']
-        })
-        
-        with open(config_path, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-        
         # Save to Zarr analysis_metadata
         root = zarr.open_group(zarr_path, mode='r+')
         
@@ -78,16 +72,32 @@ def save_detection_params(zarr_path, params, config_path):
         
         # Add/update detection tuning data
         metadata['detection_tuning'] = {
+            'method': 'blob_detection',  # Store method type for future expansion
+            'version': '1.0',
             'tuned_timestamp': datetime.now(timezone.utc).isoformat(),
-            'tuned_parameters': params,
-            'tuned_on_frame': params.get('frame_index', None),
-            'version': '1.0'
+            'tuned_parameters': {
+                'ds_thresh': params['ds_thresh'],
+                'se1_radius': params['se1_radius'],
+                'se4_radius': params['se4_radius'],
+                'min_area': params['min_area'],
+                'max_area': params['max_area']
+            },
+            'tuned_on_frame': params.get('frame_index', None)
         }
         
         # Save back to attrs
         analysis_meta.attrs.update(metadata)
         
-        return True, "Parameters saved to both config and Zarr"
+        print(f"\n Parameters saved to zarr: {zarr_path}")
+        print(f"   Location: analysis_metadata/attrs['detection_tuning']")
+        print(f"   ds_thresh: {params['ds_thresh']}")
+        print(f"   se1_radius: {params['se1_radius']}")
+        print(f"   se4_radius: {params['se4_radius']}")
+        print(f"   min_area: {params['min_area']}")
+        print(f"   max_area: {params['max_area']}")
+        print(f"   Tuned on frame: {params.get('frame_index', 'N/A')}")
+        
+        return True, "Parameters saved to zarr"
         
     except Exception as e:
         return False, f"Error saving parameters: {e}"
@@ -176,11 +186,11 @@ def main(zarr_path, start_frame=1, config_path="pipeline_config.yaml"):
             ds_se4_radius = detect_params.get('se4_radius', ds_se4_radius)
             min_area = detect_params.get('min_area', min_area)
             max_area = detect_params.get('max_area', max_area)
-            print(f"✅ Loaded initial parameters from {config_path}")
+            print(f"Loaded initial parameters from {config_path}")
     except FileNotFoundError:
-        print(f"⚠️ Config file not found at {config_path}. Using default parameters.")
+        print(f"Config file not found at {config_path}. Using default parameters.")
     except Exception as e:
-        print(f"❌ Error reading config file: {e}. Using default parameters.")
+        print(f"Error reading config file: {e}. Using default parameters.")
 
     try:
         zarr_root = zarr.open(zarr_path, mode='r')
@@ -190,7 +200,7 @@ def main(zarr_path, start_frame=1, config_path="pipeline_config.yaml"):
             images_array = zarr_root['raw_video/images_ds']
             print("Using downsampled images")
         else:
-            print("❌ No downsampled images found. Please run import with downsampling enabled.")
+            print("No downsampled images found. Please run import with downsampling enabled.")
             return
             
         num_frames = images_array.shape[0]
@@ -210,7 +220,7 @@ def main(zarr_path, start_frame=1, config_path="pipeline_config.yaml"):
                     'center': circle.get('center'),
                     'radius': circle.get('radius')
                 }
-                print(f"✅ Loaded mask from analysis_metadata")
+                print(f" Loaded mask from analysis_metadata")
         
         # Priority 2: Load from config file
         if not mask_params and config:
@@ -225,25 +235,26 @@ def main(zarr_path, start_frame=1, config_path="pipeline_config.yaml"):
             x, y, w, h = mask_params['roi']
             dish_mask = np.zeros(ds_img_shape, dtype=np.uint8)
             cv2.rectangle(dish_mask, (x, y), (x + w, y + h), 255, -1)
-            print(f"✅ Created rectangular dish mask")
+            print(f" Created rectangular dish mask")
             
         elif dish_shape == 'circle' and 'center' in mask_params and 'radius' in mask_params:
             center = mask_params['center']
             radius = mask_params['radius']
             dish_mask = np.zeros(ds_img_shape, dtype=np.uint8)
             cv2.circle(dish_mask, tuple(center), radius, 255, -1)
-            print(f"✅ Created circular dish mask (center={center}, radius={radius})")
+            print(f" Created circular dish mask (center={center}, radius={radius})")
             
         else:
-            print("ℹ️ No dish mask defined. Processing the full frame.")
+            print("ℹ No dish mask defined. Processing the full frame.")
 
     except Exception as e:
-        print(f"❌ Error opening Zarr file or loading data: {e}")
+        print(f" Error opening Zarr file or loading data: {e}")
         return
 
     window_name = "Detection Parameter Tuner"
     cv2.namedWindow(window_name)
     
+    cv2.createTrackbar("max_fish", window_name, max_fish, 30, update_max_fish)
     cv2.createTrackbar("Frame", window_name, current_frame, num_frames - 1, update_frame)
     cv2.createTrackbar("ds_thresh", window_name, ds_thresh, 255, update_ds_thresh)
     cv2.createTrackbar("ds_erode(se1)", window_name, ds_se1_radius, 10, update_ds_se1)
@@ -251,7 +262,7 @@ def main(zarr_path, start_frame=1, config_path="pipeline_config.yaml"):
     cv2.createTrackbar("min_area", window_name, min_area, 1000, update_min_area)
     cv2.createTrackbar("max_area", window_name, max_area, 1000, update_max_area)
 
-    print("\n🚀 Starting Detection Parameter Tuner...")
+    print("\n Starting Detection Parameter Tuner...")
     print("Controls:")
     print("  - Adjust sliders to see results")
     print("  - Use Left/Right arrow keys to step through frames")
@@ -275,69 +286,25 @@ def main(zarr_path, start_frame=1, config_path="pipeline_config.yaml"):
             current_frame = max(0, current_frame - 1)
         elif key == ord('s'):
             try:
-                # Re-read the config
-                if config_path.exists():
-                    with open(config_path, 'r') as f:
-                        config = yaml.safe_load(f) or {}
-                else:
-                    config = {}
-                
-                if 'detect' not in config:
-                    config['detect'] = {}
-                
-                # Update parameters
-                config['detect']['ds_thresh'] = ds_thresh
-                config['detect']['se1_radius'] = ds_se1_radius
-                config['detect']['se4_radius'] = ds_se4_radius
-                config['detect']['min_area'] = min_area
-                config['detect']['max_area'] = max_area
-                
-                # Preserve existing dish_mask if present
-                # (don't overwrite mask settings)
-                
-                with open(config_path, 'w') as f:
-                    yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-                
-                print(f"✅ Parameters saved to {config_path}")
-                
-                # Also save to Zarr for audit trail
-                zarr_root_write = zarr.open_group(zarr_path, mode='r+')
-                
-                if 'analysis_metadata' not in zarr_root_write:
-                    analysis_meta = zarr_root_write.create_group('analysis_metadata')
-                else:
-                    analysis_meta = zarr_root_write['analysis_metadata']
-                
-                # Get existing attrs or create new dict
-                metadata = dict(analysis_meta.attrs) if analysis_meta.attrs else {}
-                
-                # Add/update detection tuning data
-                from datetime import datetime, timezone
-                metadata['detection_tuning'] = {
-                    'tuned_timestamp': datetime.now(timezone.utc).isoformat(),
-                    'tuned_parameters': {
-                        'ds_thresh': ds_thresh,
-                        'se1_radius': ds_se1_radius,
-                        'se4_radius': ds_se4_radius,
-                        'min_area': min_area,
-                        'max_area': max_area
-                    },
-                    'tuned_on_frame': current_frame
+                params = {
+                    'ds_thresh': ds_thresh,
+                    'se1_radius': ds_se1_radius,
+                    'se4_radius': ds_se4_radius,
+                    'min_area': min_area,
+                    'max_area': max_area,
+                    'max_fish': max_fish,
+                    'frame_index': current_frame
                 }
                 
-                # Save back to attrs
-                analysis_meta.attrs.update(metadata)
+                success, message = save_detection_params(zarr_path, params)
                 
-                print(f"✅ Also saved to Zarr analysis_metadata")
-                print(f"   ds_thresh: {ds_thresh}")
-                print(f"   se1_radius: {ds_se1_radius}")
-                print(f"   se4_radius: {ds_se4_radius}")
-                print(f"   min_area: {min_area}")
-                print(f"   max_area: {max_area}")
-                print(f"   Tuned on frame: {current_frame}")
-                
+                if success:
+                    print(f" {message}")
+                else:
+                    print(f" {message}")
+                    
             except Exception as e:
-                print(f"❌ Error saving parameters: {e}")
+                print(f" Error saving: {e}")
 
     cv2.destroyAllWindows()
     print("\nTuner closed.")
