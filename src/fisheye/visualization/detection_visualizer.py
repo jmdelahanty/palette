@@ -2,6 +2,53 @@ import argparse
 import os, sys, shutil, subprocess
 from pathlib import Path
 
+quality_flags = None
+island_frames = None
+blip_frames = None
+jump_frames = None
+current_artifact_index = 0
+all_artifact_frames = []
+
+def load_quality_data(zarr_root, detect_run_name):
+    """Load quality report data if available."""
+    global quality_flags, island_frames, blip_frames, jump_frames, all_artifact_frames
+    
+    try:
+        detect_group = zarr_root[f'detect_runs/{detect_run_name}']
+        
+        if 'quality_reports' not in detect_group:
+            print("No quality reports found for this detect run")
+            return False
+        
+        latest_quality = detect_group['quality_reports'].attrs.get('latest')
+        if not latest_quality:
+            print("No quality reports found")
+            return False
+        
+        quality_group = detect_group[f'quality_reports/{latest_quality}']
+        
+        # Load quality data
+        quality_flags = quality_group['quality_flags'][:]
+        island_frames = list(quality_group['island_frames'][:])
+        blip_frames = list(quality_group['blip_frames'][:])
+        jump_frames = list(quality_group['jump_frames'][:])
+        
+        # Combine and sort all artifact frames
+        all_artifact_frames = sorted(set(island_frames + blip_frames + jump_frames))
+        
+        print(f"\n🔍 Quality Report Loaded:")
+        print(f"  - Islands: {len(island_frames)}")
+        print(f"  - Blips: {len(blip_frames)}")
+        print(f"  - Jumps: {len(jump_frames)}")
+        print(f"  - Total artifacts: {len(all_artifact_frames)}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"Could not load quality data: {e}")
+        return False
+
+
 def pick_zarr_path_textual(start_dir: str) -> str | None:
     """Open a terminal UI to pick a Zarr directory. Returns path or None."""
     start_dir = os.path.expanduser(start_dir)
@@ -301,7 +348,34 @@ def update_frame(frame_idx):
 
     # Get number of detections in this frame
     num_dets_in_frame = int(n_detections[frame_idx])
-    ax.set_title(f"Frame: {frame_idx} | Detections: {num_dets_in_frame}", fontsize=12)
+    
+    # Build title with quality flag info
+    title = f"Frame: {frame_idx} | Detections: {num_dets_in_frame}"
+    
+    # Add quality flag to title if available
+    if quality_flags is not None and frame_idx < len(quality_flags):
+        flag = quality_flags[frame_idx]
+        flag_labels = {
+            0: "",  # Good - no label
+            1: " [ISLAND]",
+            2: " [BLIP]",
+            3: " [JUMP]",
+            4: " [MULTI-DET]"
+        }
+        flag_colors = {
+            0: 'black',
+            1: 'red',
+            2: 'orange',
+            3: 'magenta',
+            4: 'yellow'
+        }
+        if flag > 0:
+            title += flag_labels.get(flag, "")
+            ax.set_title(title, fontsize=12, color=flag_colors.get(flag, 'black'), fontweight='bold')
+        else:
+            ax.set_title(title, fontsize=12)
+    else:
+        ax.set_title(title, fontsize=12)
 
     if num_dets_in_frame > 0:
         # Calculate start and end indices for this frame's detections
@@ -317,7 +391,12 @@ def update_frame(frame_idx):
         # Draw each bounding box
         for i, bbox in enumerate(frame_bboxes):
             assigned_id = int(frame_ids[i]) if detection_ids is not None else -1
-            box_color = 'lime' if assigned_id != -1 else 'red'
+            
+            # Use red for flagged frames, otherwise use normal colors
+            if quality_flags is not None and frame_idx < len(quality_flags) and quality_flags[frame_idx] > 0:
+                box_color = 'red'
+            else:
+                box_color = 'lime' if assigned_id != -1 else 'cyan'
 
             # Bbox is in normalized format [center_x, center_y, width, height]
             center_x_norm, center_y_norm, width_norm, height_norm = bbox
@@ -346,6 +425,50 @@ def update_frame(frame_idx):
     fig.canvas.draw_idle()
 
 
+def jump_to_next_artifact():
+    """Jump to the next artifact frame."""
+    global current_artifact_index, frame_slider, all_artifact_frames
+    
+    if not all_artifact_frames:
+        print("No artifacts to navigate to")
+        return
+    
+    current_frame = int(frame_slider.val)
+    
+    # Find next artifact after current frame
+    next_artifacts = [f for f in all_artifact_frames if f > current_frame]
+    
+    if next_artifacts:
+        frame_slider.set_val(next_artifacts[0])
+        print(f"Jumped to artifact at frame {next_artifacts[0]}")
+    else:
+        # Wrap around to first artifact
+        frame_slider.set_val(all_artifact_frames[0])
+        print(f"Wrapped to first artifact at frame {all_artifact_frames[0]}")
+
+
+def jump_to_prev_artifact():
+    """Jump to the previous artifact frame."""
+    global current_artifact_index, frame_slider, all_artifact_frames
+    
+    if not all_artifact_frames:
+        print("No artifacts to navigate to")
+        return
+    
+    current_frame = int(frame_slider.val)
+    
+    # Find previous artifact before current frame
+    prev_artifacts = [f for f in all_artifact_frames if f < current_frame]
+    
+    if prev_artifacts:
+        frame_slider.set_val(prev_artifacts[-1])
+        print(f"Jumped to artifact at frame {prev_artifacts[-1]}")
+    else:
+        # Wrap around to last artifact
+        frame_slider.set_val(all_artifact_frames[-1])
+        print(f"Wrapped to last artifact at frame {all_artifact_frames[-1]}")
+
+
 def on_key_press(event):
     global frame_slider
     if event.key == 's':
@@ -356,6 +479,10 @@ def on_key_press(event):
     elif event.key == 'left' and frame_slider is not None:
         new_val = max(frame_slider.val - 1, frame_slider.valmin)
         frame_slider.set_val(new_val)
+    elif event.key == 'n':  # Next artifact
+        jump_to_next_artifact()
+    elif event.key == 'p':  # Previous artifact
+        jump_to_prev_artifact()
     elif event.key in ('q', 'escape'):
         print("Closing figure...")
         plt.close(fig)
@@ -436,6 +563,11 @@ def main(args):
                 print("No completed ID assignment runs found")
         else:
             print("No ID assignment data found. Will only display bounding boxes.")
+        
+        if 'detect_runs' in zarr_root:
+            latest_detect_run = zarr_root['detect_runs'].attrs.get('latest')
+            if latest_detect_run:
+                load_quality_data(zarr_root, latest_detect_run)
 
         # Print summary
         num_frames = images_ds.shape[0]
@@ -477,12 +609,13 @@ def main(args):
     # Display initial frame
     update_frame(args.start_frame)
 
-    print("\n🚀 Starting Detection Visualizer...")
+    print("\n Starting Detection Visualizer...")
     print("Controls:")
     print("  - Use slider or arrow keys to navigate frames")
+    print("  - Press 'n' to jump to NEXT artifact frame")
+    print("  - Press 'p' to jump to PREVIOUS artifact frame")
     print("  - Press 's' to save the current view as a PNG")
     print("  - Press 'q' or 'Esc' to close the figure")
-    print("  - Close the window to quit")
 
     plt.show()
 

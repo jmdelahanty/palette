@@ -20,6 +20,7 @@ from dask import delayed
 from dask.diagnostics import ProgressBar
 
 from ..utils.system import get_git_info, get_platform_info
+from ..refinement.detect_quality import analyze_detect_quality, save_quality_report
 
 
 def get_detection_parameters(
@@ -352,6 +353,26 @@ def detect_fish(
     console.print(f"[green]Detection completed in {duration:.2f} seconds[/green]")
     console.print(f"Found [green]{total_detections}[/green] fish in [green]{frames_with_detections}/{num_images}[/green] frames ([cyan]{percent_detected:.2f}%[/cyan])")
     
+    # Run quality analysis
+    console.print("\n[bold]Running detection quality analysis...[/bold]")
+    try:
+        quality_report = analyze_detect_quality(
+            zarr_path=zarr_path,
+            run_name=run_name,  # Use the run we just created
+            jump_threshold=100.0  # Could make this configurable
+        )
+        
+        save_quality_report(zarr_path, quality_report, console=console)
+        
+        # Print quick quality summary
+        score = quality_report['quality_score']
+        console.print(f"Quality Grade: [bold]{score['grade']}[/bold] ({score['overall_score']:.1f}/100)")
+        console.print(f"  Artifacts found: {quality_report['artifacts']['total_artifacts']}")
+        
+    except Exception as e:
+        console.print(f"[yellow]Quality analysis failed: {e}[/yellow]")
+        # Don't fail the whole detection if quality check fails
+
     return {
         'duration_seconds': duration,
         'total_detections': total_detections,
