@@ -258,14 +258,21 @@ class Pipeline:
         self.console.rule(f"[bold]Stage: {stage.title()}[/bold]")
         
         # Only check completion for data import stages
-        if stage in ['import', 'downsample'] and self._is_stage_complete(stage):
+        if stage in [
+            'import',
+            'downsample',
+            'background',
+            'detect',
+            'crop',
+            'keypoints',
+            'assign_ids'] and self._is_stage_complete(stage):
             self.console.print(f"[green]✓ Stage '{stage}' already complete, skipping[/green]")
             return
         
         stage_start = time.perf_counter()
         
         try:
-            if stage == 'import':
+            if stage == 'import':   
                 self._run_import()
             elif stage == 'background':
                 self._run_background()
@@ -383,8 +390,20 @@ class Pipeline:
         if self.zarr_root is None:
             self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
         
-        self.console.print("[yellow]ID assignment stage not yet implemented[/yellow]")
-        # assign_ids(self.zarr_root, self.pipeline_params.get('assign_ids', {}), self.console)
+        # Import the spatial assignment function
+        from ..tracking.assign_ids import assign_ids_spatial
+        
+        # Run spatial ID assignment
+        results = assign_ids_spatial(
+            zarr_path=self.config.zarr_path,
+            config=self.pipeline_params,
+            console=self.console
+        )
+        
+        self.console.print(
+            f"✓ Assigned IDs to {results['assigned_detections']}/{results['total_detections']} "
+            f"detections ({results['assignment_rate_percent']:.1f}% success rate)"
+        )
     
     def _validate_stage(self, stage: str) -> None:
         """Validate the output of a stage."""
@@ -464,6 +483,20 @@ class Pipeline:
                 if 'detect_runs' not in root:
                     return False
                 return len(list(root['detect_runs'].group_keys())) > 0
+            elif stage == 'crop':
+                # Check if crop_runs exists with at least one run
+                if 'crop_runs' not in root:
+                    return False
+                return len(list(root['crop_runs'].group_keys())) > 0
+            elif stage == 'keypoints':
+                # Check if keypoints_runs exists with at least one run
+                if 'keypoints_runs' not in root:
+                    return False
+                return len(list(root['keypoints_runs'].group_keys())) > 0
+            elif stage == 'assign_ids':
+                if 'id_assignment_runs' not in root:
+                    return False
+                return len(list(root['id_assignment_runs'].group_keys())) > 0
             # Add more stage checks as needed
             
         except Exception:

@@ -4,7 +4,7 @@ Interactive Textual UI for launching the FishEye pipeline.
 
 Provides a user-friendly interface for:
 - Browsing and selecting files with DirectoryTree
-- Choosing pipeline stages
+- Choosing pipeline stages with real-time status display
 - Running tuners
 - Real-time pipeline progress display
 """
@@ -83,10 +83,10 @@ STAGE_ORDER = ['import', 'downsample', 'background', 'detect', 'crop', 'keypoint
 
 TUNER_INFO = {
     'mask': 'Tune dish mask detection (Hough circles)',
+    'subdish': 'Define sub-dish masks for spatial ID assignment',
     'detect': 'Tune fish detection thresholds',
     'threshold': 'Alias for detect tuner',
-    'keypoint': 'Tune anatomical keypoint detection (swim bladder & eyes)',
-    'keypoints': 'Alias for keypoint tuner',
+    'keypoints': 'Tune anatomical keypoint detection (swim bladder & eyes)',
 }
 
 
@@ -175,6 +175,13 @@ class PipelineLauncherApp(App):
         height: 1fr;
         border: solid gray;
     }
+    
+    #stage_status_panel {
+        height: auto;
+        border: solid green;
+        padding: 1;
+        margin-top: 1;
+    }
     """
     
     BINDINGS = [
@@ -225,6 +232,155 @@ class PipelineLauncherApp(App):
         start_dir = self.config.get('start_directory', '~/Desktop')
         return os.path.expanduser(start_dir)
     
+    def _check_zarr_stage_status(self, zarr_path: str) -> dict:
+        """
+        Check which stages are complete in a zarr file.
+        
+        Returns:
+            Dictionary mapping stage names to completion status
+        """
+        import zarr
+        from pathlib import Path
+        
+        status = {stage: '○ Not Run' for stage in STAGE_ORDER}
+        
+        if not zarr_path or not Path(zarr_path).exists():
+            return status
+        
+        try:
+            root = zarr.open_group(zarr_path, mode='r')
+            
+            # Check import
+            if 'raw_video' in root and 'images_full' in root['raw_video']:
+                status['import'] = '✓ Complete'
+                
+            # Check downsample
+            if 'raw_video' in root and 'images_ds' in root['raw_video']:
+                status['downsample'] = '✓ Complete'
+                
+            # Check background
+            if 'background_runs' in root and len(list(root['background_runs'].group_keys())) > 0:
+                latest = root['background_runs'].attrs.get('latest')
+                status['background'] = f'✓ Complete ({latest})' if latest else '✓ Complete'
+                
+            # Check detect
+            if 'detect_runs' in root and len(list(root['detect_runs'].group_keys())) > 0:
+                latest = root['detect_runs'].attrs.get('latest')
+                detect_group = root[f'detect_runs/{latest}'] if latest else None
+                if detect_group and 'summary_statistics' in detect_group.attrs:
+                    stats = detect_group.attrs['summary_statistics']
+                    n_detections = stats.get('total_detections', 0)
+                    frames_with_detections = stats.get('frames_with_detections', 0)
+                    total_frames = stats.get('total_frames', 0)
+                    if total_frames > 0:
+                        percent = (frames_with_detections / total_frames) * 100
+                        status['detect'] = f'✓ Complete ({n_detections} detections, {percent:.1f}%)'
+                    else:
+                        status['detect'] = f'✓ Complete ({n_detections} detections)'
+                else:
+                    status['detect'] = '✓ Complete'
+                    
+            # Check crop
+            if 'crop_runs' in root and len(list(root['crop_runs'].group_keys())) > 0:
+                latest = root['crop_runs'].attrs.get('latest')
+                crop_group = root[f'crop_runs/{latest}'] if latest else None
+                if crop_group and 'summary_statistics' in crop_group.attrs:
+                    stats = crop_group.attrs['summary_statistics']
+                    n_crops = stats.get('total_rois_cropped', 0)
+                    frames_with_crops = stats.get('frames_with_crops', 0)
+                    total_frames = stats.get('total_frames', 0)
+                    if total_frames > 0:
+                        percent = (frames_with_crops / total_frames) * 100
+                        status['crop'] = f'✓ Complete ({n_crops} ROIs, {percent:.1f}%)'
+                    else:
+                        status['crop'] = f'✓ Complete ({n_crops} ROIs)'
+                else:
+                    status['crop'] = '✓ Complete'
+                    
+            # Check keypoints
+            keypoint_group_name = None
+            if 'keypoints_runs' in root and len(list(root['keypoints_runs'].group_keys())) > 0:
+                keypoint_group_name = 'keypoints_runs'
+            
+            if keypoint_group_name:
+                latest = root[keypoint_group_name].attrs.get('latest')
+                keypoint_group = root[f'{keypoint_group_name}/{latest}'] if latest else None
+                if keypoint_group and 'summary_statistics' in keypoint_group.attrs:
+                    n_success = keypoint_group.attrs['summary_statistics'].get('successful_detections', 0)
+                    success_rate = keypoint_group.attrs['summary_statistics'].get('success_rate_percent', 0)
+                    status['keypoints'] = f'✓ Complete ({n_success} successful, {success_rate:.1f}%)'
+                else:
+                    status['keypoints'] = '✓ Complete'
+                    
+            # Check track
+            if 'tracking_runs' in root and len(list(root['tracking_runs'].group_keys())) > 0:
+                latest = root['tracking_runs'].attrs.get('latest')
+                status['track'] = f'✓ Complete ({latest})' if latest else '✓ Complete'
+                
+            # Check refine
+            if 'refine_runs' in root and len(list(root['refine_runs'].group_keys())) > 0:
+                latest = root['refine_runs'].attrs.get('latest')
+                status['refine'] = f'✓ Complete ({latest})' if latest else '✓ Complete'
+                
+            # Check assign_ids
+            if 'id_assignment_runs' in root and len(list(root['id_assignment_runs'].group_keys())) > 0:
+                latest = root['id_assignment_runs'].attrs.get('latest')
+                assign_group = root[f'id_assignment_runs/{latest}'] if latest else None
+                if assign_group and 'summary_statistics' in assign_group.attrs:
+                    stats = assign_group.attrs['summary_statistics']
+                    n_assigned = stats.get('assigned_detections', 0)
+                    assignment_rate = stats.get('assignment_rate_percent', 0)
+                    status['assign_ids'] = f'✓ Complete ({n_assigned} assigned, {assignment_rate:.1f}%)'
+                else:
+                    status['assign_ids'] = '✓ Complete'
+                
+        except Exception as e:
+            # If there's an error reading zarr, mark all as unknown
+            for stage in STAGE_ORDER:
+                status[stage] = f'? Error: {str(e)[:30]}'
+        
+        return status
+    
+    def _update_stage_status_display(self) -> None:
+        """Update the stage status display based on selected zarr file."""
+        if not self.selected_zarr:
+            # No zarr selected, show default message
+            try:
+                status_widget = self.query_one("#stage_status_panel", Static)
+                status_widget.update("[dim]Select a zarr file to view stage status[/dim]")
+            except:
+                pass
+            return
+        
+        status = self._check_zarr_stage_status(self.selected_zarr)
+        
+        # Build a simple formatted list instead of a table
+        lines = ["[bold cyan]Stage Status:[/bold cyan]\n"]
+        
+        for stage in STAGE_ORDER:
+            stage_status = status[stage]
+            
+            # Color coding with emoji indicators
+            if stage_status.startswith('✓'):
+                status_display = f"[green]{stage_status}[/green]"
+            elif stage_status.startswith('○'):
+                status_display = f"[dim]{stage_status}[/dim]"
+            elif stage_status.startswith('?'):
+                status_display = f"[yellow]{stage_status}[/yellow]"
+            else:
+                status_display = stage_status
+            
+            # Format: stage name (padded) : status
+            lines.append(f"  [cyan]{stage:12s}[/cyan] : {status_display}")
+        
+        display_text = "\n".join(lines)
+        
+        try:
+            status_widget = self.query_one("#stage_status_panel", Static)
+            status_widget.update(display_text)
+        except:
+            pass
+    
     def compose(self) -> ComposeResult:
         """Create the UI layout."""
         yield Header(show_clock=True)
@@ -254,6 +410,13 @@ class PipelineLauncherApp(App):
                 yield Static("Zarr: None", id="zarr_display")
                 yield Static("Video: None", id="video_display")
                 yield Static("Config: configs/fisheye/default.yaml", id="config_display")
+                
+                # NEW: Stage Status Display
+                yield Label("\n📊 Stage Status:", classes="section_header")
+                yield Static(
+                    "[dim]Select a zarr file to view stage status[/dim]", 
+                    id="stage_status_panel"
+                )
             
             # Right panel - Stage selection and actions
             with ScrollableContainer(id="right_panel"):
@@ -278,7 +441,7 @@ class PipelineLauncherApp(App):
                 )
                 yield Button("🔧 Run Tuner", id="run_tuner_btn", variant="success")
                 
-                # NEW: Advanced Settings Section
+                # Advanced Settings Section
                 yield Label("\n⚙️ Advanced Settings", classes="section_header")
                 yield Label("Execution scheduler:", classes="info_text")
                 yield Select(
@@ -336,43 +499,69 @@ class PipelineLauncherApp(App):
         """Handle selection of a file from the tree."""
         path_str = str(path)
         
-        if path_str.endswith('.zarr') or self._is_zarr_dir(path_str):
+        if self._is_zarr_dir(path_str):
             self.selected_zarr = path_str
-            zarr_display = self.query_one("#zarr_display", Static)
-            zarr_display.update(f"[green]Zarr: {os.path.basename(path_str)}[/green]")
-            self.status_message = f"✓ Selected zarr: {os.path.basename(path_str)}"
-            if self.progress_log:
-                self.progress_log.write(f"[green]✓[/] Selected zarr: {os.path.basename(path_str)}")
+            self.status_message = f"Selected zarr: {os.path.basename(path_str)}"
         elif self._is_video_file(path_str):
             self.selected_video = path_str
-            video_display = self.query_one("#video_display", Static)
-            video_display.update(f"[green]Video: {os.path.basename(path_str)}[/green]")
-            self.status_message = f"✓ Selected video: {os.path.basename(path_str)}"
-            if self.progress_log:
-                self.progress_log.write(f"[green]✓[/] Selected video: {os.path.basename(path_str)}")
-        elif path_str.endswith(('.yaml', '.yml')):
-            self.selected_config = path_str
-            config_display = self.query_one("#config_display", Static)
-            config_display.update(f"[green]Config: {os.path.basename(path_str)}[/green]")
-            self.status_message = f"✓ Selected config: {os.path.basename(path_str)}"
-            if self.progress_log:
-                self.progress_log.write(f"[green]✓[/] Selected config: {os.path.basename(path_str)}")
+            self.status_message = f"Selected video: {os.path.basename(path_str)}"
         else:
-            self.status_message = "ℹ️ Select a .zarr directory, video file (.mp4, .avi, etc), or .yaml config"
+            self.status_message = f"Selected: {os.path.basename(path_str)} (not zarr or video)"
     
     def _is_zarr_dir(self, path: str) -> bool:
         """Check if path is a zarr directory."""
         if not os.path.isdir(path):
             return False
-        return (
-            os.path.exists(os.path.join(path, '.zarray')) or
-            os.path.exists(os.path.join(path, '.zgroup'))
-        )
+        
+        # Check if it's a zarr root by looking for:
+        # 1. .zarray or .zgroup files directly
+        # 2. .zarr extension
+        # 3. Common zarr subdirectories (raw_video, detect_runs, etc.)
+        if (os.path.exists(os.path.join(path, '.zarray')) or
+            os.path.exists(os.path.join(path, '.zgroup'))):
+            return True
+        
+        # Check for .zarr extension
+        if path.endswith('.zarr'):
+            return True
+        
+        # Check for common pipeline zarr structure
+        zarr_indicators = ['raw_video', 'detect_runs', 'background_runs', 'crop_runs', 'keypoints_runs']
+        for indicator in zarr_indicators:
+            if os.path.isdir(os.path.join(path, indicator)):
+                return True
+        
+        return False
     
     def _is_video_file(self, path: str) -> bool:
         """Check if path is a video file."""
         video_exts = {'.mp4', '.avi', '.mov', '.mkv', '.mpeg', '.mpg', '.wmv', '.flv', '.webm'}
         return Path(path).suffix.lower() in video_exts
+    
+    def watch_selected_zarr(self, value: str) -> None:
+        """Update zarr display when selection changes."""
+        try:
+            display = self.query_one("#zarr_display", Static)
+            if value:
+                display.update(f"Zarr: [cyan]{os.path.basename(value)}[/cyan]")
+                # Update stage status display
+                self._update_stage_status_display()
+            else:
+                display.update("Zarr: [dim]None[/dim]")
+                self._update_stage_status_display()
+        except Exception:
+            pass
+    
+    def watch_selected_video(self, value: str) -> None:
+        """Update video display when selection changes."""
+        try:
+            display = self.query_one("#video_display", Static)
+            if value:
+                display.update(f"Video: [cyan]{os.path.basename(value)}[/cyan]")
+            else:
+                display.update("Video: [dim]None[/dim]")
+        except:
+            pass
     
     def watch_status_message(self, value: str) -> None:
         """Update status bar when message changes."""
@@ -484,7 +673,9 @@ class PipelineLauncherApp(App):
     
     def _run_subprocess_with_output(self, cmd: List[str]) -> None:
         """Run subprocess and capture output in real-time."""
-        self.progress_log.write(f"\n[bold cyan]▶ Running:[/] {' '.join(cmd)}\n")
+        if self.progress_log:
+            self.progress_log.clear()
+            self.progress_log.write(f"\n[bold cyan]▶ Running:[/] {' '.join(cmd)}\n")
         
         zarr_file = os.path.basename(self.selected_zarr) if self.selected_zarr else "unknown"
         stages = self._get_selected_stages()
@@ -522,6 +713,8 @@ class PipelineLauncherApp(App):
             if process.returncode == 0:
                 self.progress_log.write("\n[bold green]✓ Pipeline completed successfully![/]\n")
                 self.status_message = f"✓ Completed: {zarr_file} ({', '.join(stages)})"
+                # Refresh stage status after completion
+                self._update_stage_status_display()
             else:
                 self.progress_log.write(f"\n[bold red]❌ Pipeline failed (exit code {process.returncode})[/]\n")
                 self.status_message = f"❌ Failed: {zarr_file} (exit {process.returncode})"
@@ -596,6 +789,8 @@ class PipelineLauncherApp(App):
                 try:
                     result = subprocess.run(cmd, check=True)
                     self.status_message = f"✓ Tuner completed successfully!"
+                    # Refresh stage status after tuning
+                    self._update_stage_status_display()
                 except subprocess.CalledProcessError as e:
                     self.status_message = f"❌ Tuner failed with exit code {e.returncode}"
                 except KeyboardInterrupt:

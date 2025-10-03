@@ -12,6 +12,7 @@ import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
 import platform
+from rich.console import Console
 
 # Import our existing system utilities
 from fisheye.utils.system import (
