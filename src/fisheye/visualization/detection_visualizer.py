@@ -10,8 +10,9 @@ current_artifact_index = 0
 all_artifact_frames = []
 
 def load_quality_data(zarr_root, detect_run_name):
-    """Load quality report data if available."""
-    global quality_flags, island_frames, blip_frames, jump_frames, all_artifact_frames
+    """Load quality report data and the jump threshold used for analysis."""
+
+    global quality_flags, island_frames, blip_frames, jump_frames, all_artifact_frames, jump_threshold_px
     
     try:
         detect_group = zarr_root[f'detect_runs/{detect_run_name}']
@@ -27,6 +28,11 @@ def load_quality_data(zarr_root, detect_run_name):
         
         quality_group = detect_group[f'quality_reports/{latest_quality}']
         
+        # This will now correctly update the global variable
+        if 'artifact_detection_params' in quality_group.attrs:
+            params = quality_group.attrs['artifact_detection_params']
+            jump_threshold_px = params.get('jump_threshold', 0.0)
+        
         # Load quality data
         quality_flags = quality_group['quality_flags'][:]
         island_frames = list(quality_group['island_frames'][:])
@@ -37,6 +43,8 @@ def load_quality_data(zarr_root, detect_run_name):
         all_artifact_frames = sorted(set(island_frames + blip_frames + jump_frames))
         
         print(f"\n🔍 Quality Report Loaded:")
+        if jump_threshold_px > 0:
+            print(f"  - Jump Threshold: {jump_threshold_px:.2f} pixels") # Moved print statement for cleaner output
         print(f"  - Islands: {len(island_frames)}")
         print(f"  - Blips: {len(blip_frames)}")
         print(f"  - Jumps: {len(jump_frames)}")
@@ -333,11 +341,12 @@ detection_ids = None
 cumulative_detections = None
 output_dir = None
 frame_slider = None
+jump_threshold_px = 0.0
 
 
 def update_frame(frame_idx):
     """
-    Called when the slider moves. Draws the frame, detections, and IDs.
+    Called when the slider moves. Draws a circle on 'clean' frames.
     """
     frame_idx = int(frame_idx)
     ax.clear()
@@ -352,74 +361,68 @@ def update_frame(frame_idx):
     # Build title with quality flag info
     title = f"Frame: {frame_idx} | Detections: {num_dets_in_frame}"
     
-    # Add quality flag to title if available
+    # Get the quality flag for the current frame
+    flag = 0 # Default to 'good' if flags are not loaded
     if quality_flags is not None and frame_idx < len(quality_flags):
         flag = quality_flags[frame_idx]
-        flag_labels = {
-            0: "",  # Good - no label
-            1: " [ISLAND]",
-            2: " [BLIP]",
-            3: " [JUMP]",
-            4: " [MULTI-DET]"
-        }
-        flag_colors = {
-            0: 'black',
-            1: 'red',
-            2: 'orange',
-            3: 'magenta',
-            4: 'yellow'
-        }
-        if flag > 0:
-            title += flag_labels.get(flag, "")
-            ax.set_title(title, fontsize=12, color=flag_colors.get(flag, 'black'), fontweight='bold')
-        else:
-            ax.set_title(title, fontsize=12)
+    
+    flag_labels = {0: "", 1: " [ISLAND]", 2: " [BLIP]", 3: " [JUMP]", 4: " [MULTI-DET]"}
+    flag_colors = {0: 'black', 1: 'red', 2: 'orange', 3: 'magenta', 4: 'yellow'}
+    
+    if flag > 0:
+        title += flag_labels.get(flag, "")
+        ax.set_title(title, fontsize=12, color=flag_colors.get(flag, 'black'), fontweight='bold')
     else:
-        ax.set_title(title, fontsize=12)
+        # Add a label for clean frames to make it obvious
+        title += " [CLEAN]"
+        ax.set_title(title, fontsize=12, color='green', fontweight='bold')
 
     if num_dets_in_frame > 0:
-        # Calculate start and end indices for this frame's detections
         start_idx = int(cumulative_detections[frame_idx])
         end_idx = int(cumulative_detections[frame_idx + 1])
-
-        # Get bounding boxes for this frame
         frame_bboxes = bbox_coords[start_idx:end_idx]
-        
-        # Get IDs if available
         frame_ids = detection_ids[start_idx:end_idx] if detection_ids is not None else [-1] * num_dets_in_frame
 
-        # Draw each bounding box
         for i, bbox in enumerate(frame_bboxes):
             assigned_id = int(frame_ids[i]) if detection_ids is not None else -1
             
-            # Use red for flagged frames, otherwise use normal colors
-            if quality_flags is not None and frame_idx < len(quality_flags) and quality_flags[frame_idx] > 0:
-                box_color = 'red'
-            else:
-                box_color = 'lime' if assigned_id != -1 else 'cyan'
+            # Use green for clean frames, red for flagged frames
+            box_color = 'lime' if flag == 0 else 'red'
 
-            # Bbox is in normalized format [center_x, center_y, width, height]
             center_x_norm, center_y_norm, width_norm, height_norm = bbox
             
-            # Convert to pixel coordinates
             img_height, img_width = image.shape[:2]
             center_x = float(center_x_norm) * img_width
             center_y = float(center_y_norm) * img_height
             box_w = float(width_norm) * img_width
             box_h = float(height_norm) * img_height
 
-            # Calculate top-left corner
             x1 = center_x - (box_w / 2)
             y1 = center_y - (box_h / 2)
 
-            # Draw rectangle
-            rect = patches.Rectangle((x1, y1), box_w, box_h, 
-                                    linewidth=2, edgecolor=box_color, facecolor='none')
+            rect = patches.Rectangle((x1, y1), box_w, box_h, linewidth=2, edgecolor=box_color, facecolor='none')
             ax.add_patch(rect)
 
-            # Add ID label
             id_text = f"ID: {assigned_id}" if assigned_id != -1 else "Unassigned"
             ax.text(x1, y1 - 5, id_text, color=box_color, fontsize=10, fontweight='bold')
+            
+            # ▼▼▼ LOGIC CHANGE IS HERE ▼▼▼
+            # Check if the frame has no flags (flag == 0) and a threshold is loaded
+            if flag == 0 and jump_threshold_px > 0:
+                # Draw a solid green circle for 'good' frames
+                circle = patches.Circle((center_x, center_y), jump_threshold_px,
+                                        linewidth=1.5,
+                                        linestyle='-', # Solid line
+                                        edgecolor='lime',
+                                        facecolor='none')
+                ax.add_patch(circle)
+            # ▲▲▲ END OF CHANGE ▲▲▲
+
+    ax.axis('off')
+    fig.canvas.draw_idle()
+
+    ax.axis('off')
+    fig.canvas.draw_idle()
 
     ax.axis('off')
     fig.canvas.draw_idle()

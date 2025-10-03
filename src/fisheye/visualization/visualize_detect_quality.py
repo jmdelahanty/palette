@@ -66,7 +66,7 @@ def load_quality_report(zarr_path: str,
         'quality_score': quality_score,
         'coverage_stats': coverage_stats,
         'bbox_validation': bbox_validation,
-        'source_run': detect_run
+        'source_run': detect_run  # Changed: use the detect_run we already have
     }
     
     # Load corresponding detection data - source_run is the detect_run itself
