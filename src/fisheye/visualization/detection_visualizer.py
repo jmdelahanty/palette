@@ -386,14 +386,13 @@ def main(args):
         zarr_root = zarr.open(args.zarr_path, mode='r')
         
         # Try to get the latest detection run
-        if 'detect_runs' in zarr_root and 'latest' in zarr_root['detect_runs'].attrs:
-            latest_detect_run = zarr_root['detect_runs'].attrs['latest']
-            detect_group = zarr_root[f'detect_runs/{latest_detect_run}']
-            print(f"Using detection run: {latest_detect_run}")
-        else:
-            # Fallback to old structure if new structure not found
-            print("No detect_runs found, trying legacy structure...")
-            detect_group = zarr_root
+        if 'detect_runs' in zarr_root:
+            latest_detect_run = zarr_root['detect_runs'].attrs.get('latest')
+            if latest_detect_run:  # Check it's not None
+                detect_group = zarr_root[f'detect_runs/{latest_detect_run}']
+            else:
+                print("No completed detect runs found!")
+                return
 
         # Load video frames - try different locations
         if 'raw_video/images_ds' in zarr_root:
@@ -422,16 +421,19 @@ def main(args):
 
         # Try to load detection IDs if available
         detection_ids = None
-        if 'id_assignments_runs' in zarr_root and 'latest' in zarr_root['id_assignments_runs'].attrs:
-            latest_id_run = zarr_root['id_assignments_runs'].attrs['latest']
-            id_group = zarr_root[f'id_assignments_runs/{latest_id_run}']
-            if 'detection_ids' in id_group:
-                detection_ids = id_group['detection_ids'][:]
-                print(f"Loaded detection IDs from {latest_id_run}")
-        elif 'detection_ids' in detect_group:
-            # Try old location
-            detection_ids = detect_group['detection_ids'][:]
-            print("Loaded detection IDs from detect_group")
+        if 'id_assignment_runs' in zarr_root:  # Fixed: singular 'assignment'
+            latest_id_run = zarr_root['id_assignment_runs'].attrs.get('latest')
+            if latest_id_run:  # Check it's not None
+                id_group = zarr_root[f'id_assignment_runs/{latest_id_run}']
+                if 'detection_ids' in id_group:
+                    detection_ids = id_group['detection_ids'][:]
+                    print(f"Loaded detection IDs from {latest_id_run}")
+                    
+                    # Print ID distribution
+                    unique_ids, counts = np.unique(detection_ids, return_counts=True)
+                    print(f"  ID distribution: {dict(zip(unique_ids, counts))}")
+            else:
+                print("No completed ID assignment runs found")
         else:
             print("No ID assignment data found. Will only display bounding boxes.")
 

@@ -82,7 +82,17 @@ STAGE_INFO = {
     }
 }
 
-STAGE_ORDER = ['import', 'downsample', 'background', 'detect', 'crop', 'keypoints', 'track', 'refine', 'assign_ids']
+STAGE_ORDER = [
+    'import',
+    'downsample',
+    'background',
+    'detect',
+    'crop',
+    'keypoints',
+    'track',
+    'refine',
+    'assign_ids'
+]
 
 TUNER_INFO = {
     'mask': 'Tune dish mask detection (Hough circles)',
@@ -90,6 +100,14 @@ TUNER_INFO = {
     'detect': 'Tune fish detection thresholds',
     'threshold': 'Alias for detect tuner',
     'keypoints': 'Tune anatomical keypoint detection (swim bladder & eyes)',
+}
+
+VIZ_INFO = {
+    'detections': {
+        'script': 'visualization/detection_visualizer.py',
+        'desc': 'Interactive detection viewer with ID labels',
+        'requires': ['detect']
+    }
 }
 
 
@@ -537,6 +555,18 @@ class PipelineLauncherApp(App):
                     id="tuner_select"
                 )
                 yield Button("🔧 Run Tuner", id="run_tuner_btn", variant="success")
+
+
+                yield Label("\n📊 Visualization Tools", classes="section_header")
+                yield Label("View and inspect results:", classes="info_text")
+
+                yield Select(
+                    [(name, name) for name in VIZ_INFO.keys()],
+                    prompt="Choose visualization",
+                    id="viz_select"
+                )
+
+                yield Button("Open Visualizer", id="run_viz_button", variant="primary")
                 
                 # Advanced Settings Section
                 yield Label("\n⚙️ Advanced Settings", classes="section_header")
@@ -726,8 +756,10 @@ class PipelineLauncherApp(App):
         elif button_id == "dry_run_btn":
             self._run_dry_run()
         elif button_id == "run_tuner_btn":
-            self.action_run_tuner()
-    
+            self._action_run_tuner()
+        elif button_id == "run_viz_button":
+            self._action_run_visualizer()
+
     def _jump_to_bookmark(self, bookmark_name: str) -> None:
         """Jump to a bookmarked location."""
         bookmarks = self.config.get('bookmarks', [])
@@ -1090,7 +1122,7 @@ class PipelineLauncherApp(App):
                 self.progress_log.write(f"\n[yellow]Would run:[/] {' '.join(cmd)}\n")
             self.status_message = "Dry run - see log for command"
 
-    def action_run_tuner(self) -> None:
+    def _action_run_tuner(self) -> None:
         """Run a tuner."""
         zarr_path = self.selected_zarr
         
@@ -1139,6 +1171,74 @@ class PipelineLauncherApp(App):
             self.status_message = f"❌ Error: {e}"
             if self.progress_log:
                 self.progress_log.write(f"[red]❌ Error: {e}[/]\n")
+    
+    def _action_run_visualizer(self) -> None:
+        """Run the selected visualization tool."""
+        viz_select = self.query_one("#viz_select", Select)
+        
+        if not self.selected_zarr:
+            self.status_message = "❌ Error: Please select a zarr file first!"
+            if self.progress_log:
+                self.progress_log.write("[red]❌ Please select a zarr file first![/red]\n")
+            return
+        
+        zarr_path = self.selected_zarr
+        if not Path(zarr_path).exists():
+            self.status_message = f"❌ Error: Zarr path does not exist: {zarr_path}"
+            if self.progress_log:
+                self.progress_log.write(f"[red]❌ Zarr path does not exist: {zarr_path}[/red]\n")
+            return
+        
+        viz_name = str(viz_select.value)
+        if viz_name == Select.BLANK:
+            self.status_message = "❌ Error: Please select a visualization tool"
+            return
+
+        viz_info = VIZ_INFO.get(viz_name)
+        if not viz_info:
+            self.status_message = f"❌ Error: Unknown visualizer: {viz_name}"
+            return
+
+        # Use the friendly description in messages
+        self.status_message = f"Launching {viz_info['desc']}..."
+        
+        # Check requirements
+        status = self._check_zarr_stage_status(zarr_path)
+        missing_reqs = [req for req in viz_info['requires'] if 'Complete' not in status.get(req, '')]
+        
+        if missing_reqs:
+            self.status_message = f"❌ Cannot run {viz_name}: missing stages {', '.join(missing_reqs)}"
+            if self.progress_log:
+                self.progress_log.write(f"[red]❌ Missing required stages: {', '.join(missing_reqs)}[/red]\n")
+            return
+        
+        # Launch the visualizer
+        viz_script = Path(__file__).parent.parent / viz_info['script']
+        
+        if not viz_script.exists():
+            self.status_message = f"❌ Visualizer script not found: {viz_script}"
+            if self.progress_log:
+                self.progress_log.write(f"[red]❌ Script not found: {viz_script}[/red]\n")
+            return
+        
+        self.status_message = f"Launching {viz_info['desc']}..."
+        if self.progress_log:
+            self.progress_log.write(f"\n[cyan]Launching {viz_info['desc']}...[/cyan]\n")
+        
+        try:
+            # Run in background so TUI stays responsive
+            subprocess.Popen([
+                sys.executable,
+                str(viz_script),
+                zarr_path
+            ])
+            self.status_message = f"✓ Visualizer launched! Check your display."
+            if self.progress_log:
+                self.progress_log.write("[green]✓ Visualizer window opened[/green]\n")
+        except Exception as e:
+            self.status_message = f"❌ Failed to launch visualizer: {e}"
+            if self.progress_log:
+                self.progress_log.write(f"[red]❌ Error: {e}[/red]\n")
     
     def action_configure_experiment(self) -> None:
         """Open experiment setup configuration."""

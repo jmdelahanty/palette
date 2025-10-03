@@ -115,6 +115,7 @@ class Pipeline:
         self.pipeline_params = self._load_pipeline_params()
         self.zarr_root = None
         self.stage_timings = {}
+        self.stage_results = {}
         
     def _load_pipeline_params(self) -> Dict[str, Any]:
         """Load pipeline parameters from YAML config file."""
@@ -715,6 +716,9 @@ class Pipeline:
 
     def _is_stage_complete(self, stage: str) -> bool:
         """Check if a stage has already been completed."""
+        if not Path(self.config.zarr_path).exists():
+            return False
+        
         try:
             root = zarr.open(self.config.zarr_path, mode='r')
             
@@ -724,32 +728,38 @@ class Pipeline:
             elif stage == 'background':
                 if 'background_runs' not in root:
                     return False
-                return 'latest' in root['background_runs'].attrs
+                latest = root['background_runs'].attrs.get('latest')
+                return latest is not None  # ← Check value, not just key
             
             elif stage == 'detect':
                 if 'detect_runs' not in root:
                     return False
-                return 'latest' in root['detect_runs'].attrs
+                latest = root['detect_runs'].attrs.get('latest')
+                return latest is not None  # ← Check value, not just key
             
             elif stage == 'crop':
                 if 'crop_runs' not in root:
                     return False
-                return 'latest' in root['crop_runs'].attrs
+                latest = root['crop_runs'].attrs.get('latest')
+                return latest is not None  # ← Check value, not just key
             
             elif stage == 'keypoints':
                 if 'keypoint_runs' not in root:
                     return False
-                return 'latest' in root['keypoint_runs'].attrs
+                latest = root['keypoint_runs'].attrs.get('latest')
+                return latest is not None  # ← Check value, not just key
             
-            elif stage == 'assign_ids':  # ← Add this
+            elif stage == 'assign_ids':
                 if 'id_assignment_runs' not in root:
                     return False
-                return 'latest' in root['id_assignment_runs'].attrs
+                latest = root['id_assignment_runs'].attrs.get('latest')
+                return latest is not None  # ← Check value, not just key
             
             elif stage == 'track':
                 if 'tracking_runs' not in root:
                     return False
-                return 'latest' in root['tracking_runs'].attrs
+                latest = root['tracking_runs'].attrs.get('latest')
+                return latest is not None  # ← Check value, not just key
             
             return False
             

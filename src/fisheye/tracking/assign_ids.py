@@ -239,7 +239,7 @@ def assign_ids_spatial(
     
     # Store metadata
     metadata_dict = {
-        'assignment_timestamp_utc': datetime.now(timezone.utc).isoformat(),
+        'assign_ids_timestamp_utc': datetime.now(timezone.utc).isoformat(),
         'parameters': {
             'num_masks': len(subdish_masks), 
             'masks': subdish_masks,
@@ -316,7 +316,7 @@ def assign_ids_spatial(
     assign_group.create_array(
         'n_detections_per_mask',
         data=per_mask_counts,
-        chunks=(min(100, n_frames), None),
+        chunks=(min(100, n_frames), n_masks),
         overwrite=True
     )
     
