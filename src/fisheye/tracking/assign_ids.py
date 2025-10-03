@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
+from datetime import datetime, timezone
 
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info

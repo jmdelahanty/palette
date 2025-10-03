@@ -15,6 +15,8 @@ from typing import Optional, List
 import subprocess
 import sys
 import zarr
+import time
+from typing import Set
 
 try:
     from textual.app import App, ComposeResult
@@ -197,11 +199,30 @@ class PipelineLauncherApp(App):
         margin-top: 1;
         background: $surface;
     }
+
+    #batch_display {
+        height: auto;
+        border: solid magenta;
+        padding: 1;
+        margin-top: 1;
+        background: $surface;
+        min-height: 5;
+        max-height: 12;
+    }
+    
+    .batch_mode_active #batch_display {
+        border: solid yellow;
+        background: $panel;
+    }
     """
     
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),
         Binding("r", "run_pipeline", "Run Pipeline", show=True),
+        Binding("b", "toggle_batch_mode", "Batch Mode", show=True),
+        Binding("B", "run_batch", "Run Batch", show=True),
+        Binding("x", "clear_batch", "Clear Batch", show=True),
+        Binding("i", "inspect_zarr", "Inspect Zarr", show=True),
         Binding("t", "run_tuner", "Run Tuner", show=True),
         Binding("e", "configure_experiment", "Setup Experiment", show=True),
         Binding("a", "toggle_all_stages", "Toggle All", show=True),
@@ -215,6 +236,7 @@ class PipelineLauncherApp(App):
     status_message = reactive("Ready to launch pipeline")
     is_running = reactive(False)
     current_stage = reactive("")
+    batch_mode = reactive(False)
     
     def __init__(self):
         super().__init__()
@@ -222,6 +244,7 @@ class PipelineLauncherApp(App):
         self.config = self._load_launcher_config()
         self.start_dir = self._get_start_directory()
         self.progress_log = None
+        self.batch_queue: Set[str] = set()
     
     def _load_launcher_config(self) -> dict:
         """Load launcher configuration."""
@@ -240,6 +263,7 @@ class PipelineLauncherApp(App):
             'bookmarks': [
                 {'name': 'Desktop', 'path': '~/Desktop'},
                 {'name': 'Home', 'path': '~'},
+                {'name': 'nvme-local', 'path': '/nvme1'}
             ]
         }
     
@@ -486,6 +510,10 @@ class PipelineLauncherApp(App):
                     "[dim]Select a zarr file to view stage status[/dim]", 
                     id="stage_status_panel"
                 )
+
+
+                yield Label("\n📋 Batch Queue", classes="section_header")
+                yield Static("[dim]No files in batch queue[/dim]", id="batch_display")
             
             # Right panel - Stage selection and actions
             with ScrollableContainer(id="right_panel"):
@@ -569,13 +597,27 @@ class PipelineLauncherApp(App):
         path_str = str(path)
         
         if self._is_zarr_dir(path_str):
-            self.selected_zarr = path_str
-            self.status_message = f"Selected zarr: {os.path.basename(path_str)}"
-        elif self._is_video_file(path_str):
-            self.selected_video = path_str
-            self.status_message = f"Selected video: {os.path.basename(path_str)}"
-        else:
-            self.status_message = f"Selected: {os.path.basename(path_str)} (not zarr or video)"
+            if self.batch_mode:
+                # Batch mode: add/remove from queue
+                if path_str in self.batch_queue:
+                    self.batch_queue.remove(path_str)
+                    self.status_message = f"Removed from batch: {os.path.basename(path_str)} | {len(self.batch_queue)} in queue"
+                    if self.progress_log:
+                        self.progress_log.write(f"[yellow]Removed:[/yellow] {os.path.basename(path_str)}\n")
+                else:
+                    self.batch_queue.add(path_str)
+                    self.status_message = f"Added to batch: {os.path.basename(path_str)} | {len(self.batch_queue)} in queue"
+                    if self.progress_log:
+                        self.progress_log.write(f"[green]Added:[/green] {os.path.basename(path_str)}\n")
+                
+                # Update selected_zarr so panels show info for this file
+                self.selected_zarr = path_str
+                
+                self._update_batch_display()
+            else:
+                # Normal mode: set as selected file
+                self.selected_zarr = path_str
+                self.status_message = f"Selected zarr: {os.path.basename(path_str)}"
     
     def _is_zarr_dir(self, path: str) -> bool:
         """Check if path is a zarr directory."""
@@ -639,11 +681,17 @@ class PipelineLauncherApp(App):
         try:
             status = self.query_one("#status_bar", Static)
             if self.is_running:
-                zarr_file = os.path.basename(self.selected_zarr) if self.selected_zarr else "..."
-                if self.current_stage:
-                    status.update(f"[yellow]⏳ RUNNING[/yellow] | [cyan]{self.current_stage}[/cyan] on [dim]{zarr_file}[/dim]")
+                # Check if this is batch processing or single file
+                if "/" in str(self.current_stage) and self.current_stage.split("/")[0].isdigit():
+                    # Batch processing - current_stage is like "1/3"
+                    status.update(f"[yellow]⏳ BATCH RUNNING[/yellow] | {value}")
                 else:
-                    status.update(f"[yellow]⏳ RUNNING[/yellow] | [dim]{zarr_file}[/dim]")
+                    # Single file processing
+                    zarr_file = os.path.basename(self.selected_zarr) if self.selected_zarr else "..."
+                    if self.current_stage:
+                        status.update(f"[yellow]⏳ RUNNING[/yellow] | [cyan]{self.current_stage}[/cyan] on [dim]{zarr_file}[/dim]")
+                    else:
+                        status.update(f"[yellow]⏳ RUNNING[/yellow] | [dim]{zarr_file}[/dim]")
             else:
                 status.update(value)
         except:
@@ -657,6 +705,14 @@ class PipelineLauncherApp(App):
         """Update status bar when current stage changes."""
         if self.is_running:
             self.watch_status_message(self.status_message)
+    
+    def watch_batch_mode(self, value: bool) -> None:
+        """Update display when batch mode changes."""
+        self._update_batch_display()
+        if value:
+            self.status_message = f"[yellow]BATCH MODE[/yellow] | {len(self.batch_queue)} files queued"
+        else:
+            self.status_message = f"Ready | {len(self.batch_queue)} files in batch queue"
     
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses."""
@@ -772,6 +828,183 @@ class PipelineLauncherApp(App):
         
         status_text = "\n".join(status_lines)
         status_panel.update(status_text)
+    
+    def _update_batch_display(self) -> None:
+        """Update the batch queue display panel."""
+        try:
+            batch_display = self.query_one("#batch_display", Static)
+            
+            if not self.batch_queue:
+                batch_display.update("[dim]No files in batch queue[/dim]")
+            else:
+                lines = [f"[bold cyan]Batch Queue ({len(self.batch_queue)} files):[/bold cyan]"]
+                for i, path in enumerate(sorted(self.batch_queue), 1):
+                    filename = os.path.basename(path)
+                    lines.append(f"  {i}. [cyan]{filename}[/cyan]")
+                batch_display.update("\n".join(lines))
+        except:
+            pass
+
+    def _build_command_for_file(self, zarr_path: str, stages: List[str]) -> Optional[List[str]]:
+        """Build command for a specific file in batch."""
+        cmd = [sys.executable, "-m", "fisheye", zarr_path]
+        
+        cmd.extend(["--stages"] + stages)
+        
+        if self.selected_config:
+            cmd.extend(["--config", self.selected_config])
+        
+        try:
+            scheduler_select = self.query_one("#scheduler_select", Select)
+            scheduler = scheduler_select.value
+            if scheduler and scheduler != Select.BLANK:
+                cmd.extend(["--scheduler", str(scheduler)])
+        except:
+            pass
+        
+        return cmd
+    
+
+    def _run_batch_worker(self, zarr_files: List[str], stages: List[str]) -> None:
+        """Worker thread for batch processing."""
+        results = {
+            'total': len(zarr_files),
+            'success': 0,
+            'failed': 0,
+            'errors': []
+        }
+        
+        for i, zarr_path in enumerate(zarr_files, 1):
+            zarr_name = os.path.basename(zarr_path)
+            self.current_stage = f"{i}/{len(zarr_files)}"
+            
+            if self.progress_log:
+                self.progress_log.write(f"\n[bold cyan]▶ Processing {i}/{len(zarr_files)}: {zarr_name}[/bold cyan]")
+            
+            cmd = self._build_command_for_file(zarr_path, stages)
+            
+            if not cmd:
+                results['failed'] += 1
+                results['errors'].append(f"{zarr_name}: Failed to build command")
+                if self.progress_log:
+                    self.progress_log.write(f"[red]  ✗ Failed to build command[/red]")
+                continue
+            
+            try:
+                start_time = time.time()
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
+                )
+                
+                for line in process.stdout:
+                    line = line.rstrip()
+                    if line and self.progress_log:
+                        if "Running stage:" in line:
+                            stage_name = line.split("Running stage:")[-1].strip()
+                            self.progress_log.write(f"  [cyan]{stage_name}[/cyan]")
+                        else:
+                            self.progress_log.write(f"  {line}")
+                
+                return_code = process.wait()
+                duration = time.time() - start_time
+                
+                if return_code == 0:
+                    results['success'] += 1
+                    if self.progress_log:
+                        self.progress_log.write(f"[green]  ✓ Completed in {duration:.1f}s[/green]\n")
+                else:
+                    results['failed'] += 1
+                    results['errors'].append(f"{zarr_name}: Exit code {return_code}")
+                    if self.progress_log:
+                        self.progress_log.write(f"[red]  ✗ Failed with exit code {return_code}[/red]\n")
+                    
+            except Exception as e:
+                results['failed'] += 1
+                results['errors'].append(f"{zarr_name}: {str(e)}")
+                if self.progress_log:
+                    self.progress_log.write(f"[red]  ✗ Error: {e}[/red]\n")
+        
+        self.is_running = False
+        self.current_stage = ""
+        
+        if self.progress_log:
+            self.progress_log.write(f"\n[bold cyan]═══════════════════════════════════[/bold cyan]")
+            self.progress_log.write(f"[bold cyan]  BATCH COMPLETE[/bold cyan]")
+            self.progress_log.write(f"[bold cyan]═══════════════════════════════════[/bold cyan]")
+            self.progress_log.write(f"Total:      {results['total']}")
+            self.progress_log.write(f"[green]Success:    {results['success']}[/green]")
+            self.progress_log.write(f"[red]Failed:     {results['failed']}[/red]")
+            
+            if results['errors']:
+                self.progress_log.write("\n[yellow]Errors:[/yellow]")
+                for error in results['errors']:
+                    self.progress_log.write(f"  [red]•[/red] {error}")
+        
+        self.status_message = f"Batch complete: {results['success']}/{results['total']} succeeded"
+
+    def action_toggle_batch_mode(self) -> None:
+        """Toggle batch selection mode."""
+        self.batch_mode = not self.batch_mode
+        
+        if self.batch_mode:
+            self.status_message = f"[yellow]BATCH MODE[/yellow] - Select files with 's' or Enter | {len(self.batch_queue)} in queue"
+            if self.progress_log:
+                self.progress_log.write("\n[yellow]══════ BATCH MODE ACTIVATED ══════[/yellow]")
+                self.progress_log.write("[dim]Select multiple zarr files to process sequentially[/dim]")
+                self.progress_log.write("[dim]Press 's' or Enter to add files to batch queue[/dim]")
+                self.progress_log.write("[dim]Press 'B' to run batch or 'x' to clear queue[/dim]\n")
+        else:
+            self.status_message = f"Batch mode OFF | {len(self.batch_queue)} files queued"
+            if self.progress_log:
+                self.progress_log.write(f"\n[cyan]Batch mode deactivated - {len(self.batch_queue)} files in queue[/cyan]\n")
+    
+    def action_clear_batch(self) -> None:
+        """Clear the batch queue."""
+        count = len(self.batch_queue)
+        self.batch_queue.clear()
+        self.status_message = f"Cleared {count} files from batch queue"
+        
+        if self.progress_log:
+            self.progress_log.write(f"[yellow]Cleared {count} files from batch queue[/yellow]\n")
+        
+        self._update_batch_display()
+    
+    def action_run_batch(self) -> None:
+        """Run pipeline on all files in batch queue."""
+        if not self.batch_queue:
+            self.status_message = "❌ Batch queue is empty!"
+            if self.progress_log:
+                self.progress_log.write("[red]❌ Batch queue is empty! Add files with batch mode first.[/red]\n")
+            return
+        
+        if self.is_running:
+            self.status_message = "❌ Pipeline already running!"
+            return
+        
+        stages = self._get_selected_stages()
+        if not stages:
+            self.status_message = "❌ No stages selected!"
+            if self.progress_log:
+                self.progress_log.write("[red]❌ Select at least one stage first![/red]\n")
+            return
+        
+        self.is_running = True
+        batch_files = list(self.batch_queue)
+        
+        if self.progress_log:
+            self.progress_log.write(f"\n[bold cyan]═══════════════════════════════════[/bold cyan]")
+            self.progress_log.write(f"[bold cyan]  BATCH PROCESSING: {len(batch_files)} FILES[/bold cyan]")
+            self.progress_log.write(f"[bold cyan]═══════════════════════════════════[/bold cyan]\n")
+            self.progress_log.write(f"Stages: [yellow]{', '.join(stages)}[/yellow]\n")
+        
+        self.run_worker(
+            lambda: self._run_batch_worker(batch_files, stages),
+            thread=True
+        )
     
     def _run_subprocess_with_output(self, cmd: List[str]) -> None:
         """Run subprocess and capture output in real-time."""
@@ -916,7 +1149,6 @@ class PipelineLauncherApp(App):
             return
         
         # Check if zarr exists
-        from pathlib import Path
         if not Path(self.selected_zarr).exists():
             self.status_message = "❌ Zarr file doesn't exist yet - run import first"
             if self.progress_log:
@@ -973,6 +1205,59 @@ class PipelineLauncherApp(App):
             checkbox.value = new_state
         
         self.status_message = f"{'✓' if new_state else '○'} {'Selected' if new_state else 'Deselected'} all stages"
+
+    def action_inspect_zarr(self) -> None:
+        """Open zarr inspector for the selected file."""
+        if not self.selected_zarr:
+            self.status_message = "❌ Please select a zarr file first"
+            if self.progress_log:
+                self.progress_log.write("[red]❌ Please select a zarr file first[/red]\n")
+            return
+        
+        # Check if zarr exists
+        if not Path(self.selected_zarr).exists():
+            self.status_message = "❌ Zarr file doesn't exist"
+            if self.progress_log:
+                self.progress_log.write("[red]❌ Zarr file doesn't exist[/red]\n")
+            return
+        
+        # Find zarr inspector script
+        inspector_script = Path(__file__).parent.parent / "zarr_inspector.py"
+        
+        if not inspector_script.exists():
+            self.status_message = "❌ zarr_inspector.py not found"
+            if self.progress_log:
+                self.progress_log.write(f"[red]❌ Inspector script not found at: {inspector_script}[/red]\n")
+            return
+        
+        self.status_message = "Opening zarr inspector..."
+        if self.progress_log:
+            self.progress_log.write(f"\n[cyan]Opening inspector for: {os.path.basename(self.selected_zarr)}[/cyan]\n")
+        
+        # Suspend TUI and run inspector
+        with self.suspend():
+            try:
+                result = subprocess.run([
+                    sys.executable,
+                    str(inspector_script),
+                    self.selected_zarr
+                ])
+                
+                if result.returncode == 0:
+                    self.status_message = "✓ Inspector closed"
+                else:
+                    self.status_message = "Inspector exited with errors"
+                    
+            except Exception as e:
+                self.status_message = f"❌ Error running inspector: {e}"
+                if self.progress_log:
+                    self.progress_log.write(f"[red]❌ Error: {e}[/red]\n")
+        
+        if self.progress_log:
+            self.progress_log.write("[cyan]Returned to TUI[/cyan]\n")
+        
+        # Refresh displays in case anything changed
+        self.refresh()
 
 
 def run_interactive_launcher(start_dir: str = "~/Desktop") -> Optional[List[str]]:

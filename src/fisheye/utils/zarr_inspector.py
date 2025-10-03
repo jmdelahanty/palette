@@ -31,6 +31,145 @@ def format_timestamp(iso_str):
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except:
         return iso_str
+    
+def show_parameter_provenance(zarr_path, console):
+    """Show where parameters came from for each completed stage."""
+    try:
+        import zarr
+        root = zarr.open(zarr_path, mode='r')
+        
+        prov_table = Table(title="📋 Parameter Provenance", box=box.ROUNDED)
+        prov_table.add_column("Stage", style="cyan")
+        prov_table.add_column("Run", style="yellow")
+        prov_table.add_column("Source", style="magenta")
+        prov_table.add_column("Details", style="dim")
+        
+        stages_checked = []
+        
+        # Check each possible stage
+        stage_groups = {
+            'background': 'background_runs',
+            'detect': 'detect_runs',
+            'crop': 'crop_runs',
+            'keypoints': 'keypoints_runs',
+            'track': 'tracking_runs',
+            'assign_ids': 'id_assignment_runs'
+        }
+        
+        for stage_name, group_name in stage_groups.items():
+            if group_name not in root:
+                continue
+            
+            stage_group = root[group_name]
+            latest = stage_group.attrs.get('latest')
+            
+            if not latest or latest not in stage_group:
+                continue
+            
+            run = stage_group[latest]
+            params = run.attrs.get('parameters', {})
+            
+            # Determine source
+            param_source = "Unknown"
+            details = ""
+            
+            # Check if from tuning
+            if 'analysis_metadata' in root:
+                analysis = root['analysis_metadata']
+                tuning_key = f"{stage_name}_tuning"
+                if tuning_key in analysis.attrs:
+                    param_source = "Zarr (tuned)"
+                    tuning_data = analysis.attrs[tuning_key]
+                    if 'tuned_timestamp' in tuning_data:
+                        details = format_timestamp(tuning_data['tuned_timestamp'])
+            
+            # Check if from config
+            if 'pipeline_params' in root:
+                pipeline_params = root['pipeline_params']
+                if stage_name in pipeline_params.attrs:
+                    if param_source == "Unknown":
+                        param_source = "Config file"
+            
+            # Default fallback
+            if param_source == "Unknown":
+                param_source = "Code defaults"
+            
+            prov_table.add_row(
+                stage_name,
+                latest,
+                param_source,
+                details
+            )
+            stages_checked.append(stage_name)
+        
+        if stages_checked:
+            console.print(prov_table)
+            return True
+        return False
+        
+    except Exception as e:
+        console.print(f"[dim]Could not load parameter provenance: {e}[/dim]")
+        return False
+
+def show_quick_summary(zarr_path, console):
+    """Show a quick 5-line summary of the zarr status."""
+    try:
+        import zarr
+        root = zarr.open(zarr_path, mode='r')
+        
+        # Count completed stages
+        stages = ['import', 'background', 'detect', 'crop', 'keypoints', 'track', 'assign_ids']
+        completed = []
+        
+        if 'raw_video' in root and 'images_full' in root['raw_video']:
+            completed.append('import')
+        if 'background_runs' in root and root['background_runs'].attrs.get('latest'):
+            completed.append('background')
+        if 'detect_runs' in root and root['detect_runs'].attrs.get('latest'):
+            completed.append('detect')
+        if 'crop_runs' in root and root['crop_runs'].attrs.get('latest'):
+            completed.append('crop')
+        if 'keypoints_runs' in root and root['keypoints_runs'].attrs.get('latest'):
+            completed.append('keypoints')
+        if 'tracking_runs' in root and root['tracking_runs'].attrs.get('latest'):
+            completed.append('track')
+        if 'id_assignment_runs' in root and root['id_assignment_runs'].attrs.get('latest'):
+            completed.append('assign_ids')
+        
+        # Get detection coverage if available
+        coverage_str = "N/A"
+        if 'detect_runs' in root:
+            latest = root['detect_runs'].attrs.get('latest')
+            if latest and latest in root['detect_runs']:
+                stats = root['detect_runs'][latest].attrs.get('summary_statistics', {})
+                coverage_str = f"{stats.get('percent_frames_with_detections', 0):.1f}%"
+        
+        # Get experiment setup
+        exp_setup = root.attrs.get('experiment_setup', {})
+        setup_type = exp_setup.get('setup_type', 'Not configured')
+        
+        # Get last modified
+        zarr_path_obj = Path(zarr_path)
+        last_mod = datetime.fromtimestamp(zarr_path_obj.stat().st_mtime)
+        
+        # Build summary
+        summary_panel = Panel(
+            f"[cyan]Stages:[/cyan] {len(completed)}/{len(stages)} completed ({', '.join(completed) if completed else 'none'})\n"
+            f"[cyan]Detection Coverage:[/cyan] {coverage_str}\n"
+            f"[cyan]Experiment Type:[/cyan] {setup_type}\n"
+            f"[cyan]Last Modified:[/cyan] {last_mod.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"[cyan]Size:[/cyan] {format_bytes(sum(f.stat().st_size for f in zarr_path_obj.rglob('*') if f.is_file()))}",
+            title="Quick Summary",
+            border_style="cyan",
+            box=box.ROUNDED
+        )
+        
+        console.print(summary_panel)
+        return True
+        
+    except Exception as e:
+        console.print(f"[red]Error generating summary: {e}[/red]")
+        return False
 
 def count_chunks(array_path):
     """Count actual chunk files on disk for Zarr v3."""
@@ -456,10 +595,309 @@ def display_analysis_metadata(zarr_path, console):
     except Exception as e:
         console.print(f"[yellow]Could not load analysis metadata: {e}[/yellow]")
         return False
+    
 
-def inspect_video_zarr(zarr_path, show_full_env=False):
+def display_crop_metadata(zarr_path, console):
+    """Display crop run metadata."""
+    try:
+        import zarr
+        root = zarr.open(zarr_path, mode='r')
+
+        if 'crop_runs' not in root:
+            return False
+
+        crop_runs = root['crop_runs']
+        run_names = [name for name in crop_runs.group_keys()]
+
+        if not run_names:
+            return False
+
+        summary_table = Table(title="🔲 Crop Runs", box=box.ROUNDED)
+        summary_table.add_column("Run", style="cyan")
+        summary_table.add_column("Timestamp", style="yellow")
+        summary_table.add_column("Total ROIs", style="green")
+        summary_table.add_column("Frames w/ Crops", style="magenta")
+        summary_table.add_column("ROI Size", style="blue")
+        summary_table.add_column("Duration", style="blue")
+
+        latest_run = crop_runs.attrs.get('latest', '')
+
+        for run_name in sorted(run_names):
+            run = crop_runs[run_name]
+            attrs = run.attrs
+            stats = attrs.get('summary_statistics', {})
+
+            run_display = f"{run_name} [bold green]★[/bold green]" if run_name == latest_run else run_name
+
+            timestamp = format_timestamp(attrs.get('crop_timestamp_utc', ''))
+            total_rois = stats.get('total_rois_cropped', 0)
+            frames_with_crops = stats.get('frames_with_crops', 0)
+            roi_size = stats.get('roi_size', [0, 0])
+            duration = attrs.get('duration_seconds', 0)
+
+            summary_table.add_row(
+                run_display,
+                timestamp,
+                str(total_rois),
+                str(frames_with_crops),
+                f"{roi_size[0]}×{roi_size[1]}",
+                f"{duration:.1f}s"
+            )
+        
+        console.print(summary_table)
+
+        # Detail view for latest run
+        if latest_run and latest_run in crop_runs:
+            latest = crop_runs[latest_run]
+            params = latest.attrs.get('parameters', {})
+            
+            detail_table = Table(title=f"Latest Crop Parameters ({latest_run})", box=box.SIMPLE)
+            detail_table.add_column("Parameter", style="cyan")
+            detail_table.add_column("Value", style="yellow")
+
+            for key, value in params.items():
+                detail_table.add_row(str(key), str(value))
+            
+            console.print(detail_table)
+
+        return True
+
+    except Exception as e:
+        console.print(f"[yellow]Could not load crop metadata: {e}[/yellow]")
+        return False
+
+
+def display_keypoints_metadata(zarr_path, console):
+    """Display keypoints run metadata."""
+    try:
+        import zarr
+        root = zarr.open(zarr_path, mode='r')
+
+        if 'keypoints_runs' not in root:
+            return False
+
+        kp_runs = root['keypoints_runs']
+        run_names = [name for name in kp_runs.group_keys()]
+
+        if not run_names:
+            return False
+
+        summary_table = Table(title="👁️ Keypoints Runs", box=box.ROUNDED)
+        summary_table.add_column("Run", style="cyan")
+        summary_table.add_column("Timestamp", style="yellow")
+        summary_table.add_column("Success Rate", style="green")
+        summary_table.add_column("Successful", style="magenta")
+        summary_table.add_column("Duration", style="blue")
+
+        latest_run = kp_runs.attrs.get('latest', '')
+
+        for run_name in sorted(run_names):
+            run = kp_runs[run_name]
+            attrs = run.attrs
+            stats = attrs.get('summary_statistics', {})
+
+            run_display = f"{run_name} [bold green]★[/bold green]" if run_name == latest_run else run_name
+
+            timestamp = format_timestamp(attrs.get('keypoints_timestamp_utc', ''))
+            success_rate = stats.get('success_rate_percent', 0)
+            successful = stats.get('successful_detections', 0)
+            duration = attrs.get('duration_seconds', 0)
+
+            summary_table.add_row(
+                run_display,
+                timestamp,
+                f"{success_rate:.1f}%",
+                str(successful),
+                f"{duration:.1f}s"
+            )
+        
+        console.print(summary_table)
+
+        # Detail view for latest run
+        if latest_run and latest_run in kp_runs:
+            latest = kp_runs[latest_run]
+            params = latest.attrs.get('parameters', {})
+            
+            detail_table = Table(title=f"Latest Keypoint Parameters ({latest_run})", box=box.SIMPLE)
+            detail_table.add_column("Parameter", style="cyan")
+            detail_table.add_column("Value", style="yellow")
+
+            for key, value in params.items():
+                detail_table.add_row(str(key), str(value))
+            
+            console.print(detail_table)
+
+        return True
+
+    except Exception as e:
+        console.print(f"[yellow]Could not load keypoints metadata: {e}[/yellow]")
+        return False
+
+
+def display_tracking_metadata(zarr_path, console):
+    """Display tracking run metadata."""
+    try:
+        import zarr
+        root = zarr.open(zarr_path, mode='r')
+
+        if 'tracking_runs' not in root:
+            return False
+
+        track_runs = root['tracking_runs']
+        run_names = [name for name in track_runs.group_keys()]
+
+        if not run_names:
+            return False
+
+        summary_table = Table(title="🎯 Tracking Runs", box=box.ROUNDED)
+        summary_table.add_column("Run", style="cyan")
+        summary_table.add_column("Timestamp", style="yellow")
+        summary_table.add_column("Method", style="magenta")
+        summary_table.add_column("Duration", style="blue")
+
+        latest_run = track_runs.attrs.get('latest', '')
+
+        for run_name in sorted(run_names):
+            run = track_runs[run_name]
+            attrs = run.attrs
+
+            run_display = f"{run_name} [bold green]★[/bold green]" if run_name == latest_run else run_name
+
+            timestamp = format_timestamp(attrs.get('tracking_timestamp_utc', ''))
+            method = attrs.get('parameters', {}).get('method', 'unknown')
+            duration = attrs.get('duration_seconds', 0)
+
+            summary_table.add_row(
+                run_display,
+                timestamp,
+                method,
+                f"{duration:.1f}s"
+            )
+        
+        console.print(summary_table)
+
+        return True
+
+    except Exception as e:
+        console.print(f"[yellow]Could not load tracking metadata: {e}[/yellow]")
+        return False
+
+
+def display_id_assignment_metadata(zarr_path, console):
+    """Display ID assignment run metadata."""
+    try:
+        import zarr
+        root = zarr.open(zarr_path, mode='r')
+
+        if 'id_assignment_runs' not in root:
+            return False
+
+        id_runs = root['id_assignment_runs']
+        run_names = [name for name in id_runs.group_keys()]
+
+        if not run_names:
+            return False
+
+        summary_table = Table(title="🏷️ ID Assignment Runs", box=box.ROUNDED)
+        summary_table.add_column("Run", style="cyan")
+        summary_table.add_column("Timestamp", style="yellow")
+        summary_table.add_column("Setup Type", style="magenta")
+        summary_table.add_column("Assigned", style="green")
+        summary_table.add_column("Duration", style="blue")
+
+        latest_run = id_runs.attrs.get('latest', '')
+
+        for run_name in sorted(run_names):
+            run = id_runs[run_name]
+            attrs = run.attrs
+            stats = attrs.get('summary_statistics', {})
+
+            run_display = f"{run_name} [bold green]★[/bold green]" if run_name == latest_run else run_name
+
+            timestamp = format_timestamp(attrs.get('assign_ids_timestamp_utc', ''))
+            setup_type = stats.get('setup_type', 'unknown')
+            assigned = stats.get('assigned_detections', 0)
+            total = stats.get('total_detections', 0)
+            duration = attrs.get('duration_seconds', 0)
+
+            assigned_str = f"{assigned}/{total}"
+            if total > 0:
+                pct = (assigned / total) * 100
+                assigned_str += f" ({pct:.0f}%)"
+
+            summary_table.add_row(
+                run_display,
+                timestamp,
+                setup_type,
+                assigned_str,
+                f"{duration:.1f}s"
+            )
+        
+        console.print(summary_table)
+
+        return True
+
+    except Exception as e:
+        console.print(f"[yellow]Could not load ID assignment metadata: {e}[/yellow]")
+        return False
+
+
+def display_import_metadata(zarr_path, console):
+    """Display import/raw_video metadata."""
+    try:
+        raw_video_path = zarr_path / "raw_video"
+        raw_video_json = raw_video_path / "zarr.json"
+        
+        if not raw_video_json.exists():
+            return False
+        
+        with open(raw_video_json) as f:
+            raw_meta = json.load(f)
+        
+        attrs = raw_meta.get('attributes', {})
+        
+        # Import info
+        import_table = Table(title=" Import Information", box=box.ROUNDED)
+        import_table.add_column("Property", style="cyan")
+        import_table.add_column("Value", style="yellow")
+        
+        import_table.add_row("Source video", attrs.get('source_video', 'Unknown'))
+        import_table.add_row("Import method", attrs.get('import_method', 'Unknown'))
+        import_table.add_row("Total frames", str(attrs.get('total_frames', 0)))
+        
+        orig_res = attrs.get('original_resolution', [0, 0])
+        import_table.add_row("Resolution", f"{orig_res[1]}×{orig_res[0]}")
+        
+        import_table.add_row("FPS", f"{attrs.get('fps', 0):.1f}")
+        import_table.add_row("Duration", f"{attrs.get('video_duration_seconds', 0):.1f}s")
+        import_table.add_row("Device", attrs.get('device', 'Unknown'))
+        
+        if attrs.get('import_timestamp'):
+            import_table.add_row("Imported at", format_timestamp(attrs['import_timestamp']))
+        
+        console.print(import_table)
+        
+        # Performance
+        perf_table = Table(title="Performance", box=box.SIMPLE)
+        perf_table.add_column("Metric", style="cyan")
+        perf_table.add_column("Value", style="yellow")
+        
+        duration = attrs.get('import_duration_seconds', 0)
+        perf_table.add_row("Import time", f"{duration:.1f}s")
+        perf_table.add_row("Throughput", f"{attrs.get('throughput_gbps', 0):.2f} GB/s")
+        perf_table.add_row("Processing speed", f"{attrs.get('frames_per_second', 0):.1f} fps")
+        
+        console.print(perf_table)
+        
+        return True
+        
+    except Exception as e:
+        console.print(f"[yellow]Could not load import metadata: {e}[/yellow]")
+        return False
+
+def inspect_video_zarr(zarr_path, mode='normal', show_full_env=False, focus_stage=None):
     """
-    Inspect a video Zarr archive created by kvikIO import.
+    Inspect a video Zarr archive.
     
     Args:
         zarr_path: Path to the Zarr archive
@@ -472,9 +910,56 @@ def inspect_video_zarr(zarr_path, show_full_env=False):
         console.print(f"[red]Error: Path does not exist: {zarr_path}[/red]")
         return
     
+    if mode == 'quick':
+       console.rule(f"[bold cyan]Quick Summary: {zarr_path.name}[/bold cyan]")
+       show_quick_summary(zarr_path, console)
+    
     # Header
-    console.rule("[bold cyan]Enhanced Video Zarr Inspector[/bold cyan]")
-    console.print(f"[dim]Path: {zarr_path.absolute()}[/dim]\n")
+    if mode != 'quick':
+        console.rule("[bold cyan]Zarr Inspector[/bold cyan]")
+        console.print(f"[dim]Path: {zarr_path.absolute()}[/dim]")
+        if focus_stage:
+            console.print(f"[dim]Focusing on: {focus_stage}[/dim]")
+        console.print()
+    
+    # If focusing on specific stage, show only that stage's details
+    if focus_stage:
+        console.print(f"[bold cyan]Stage: {focus_stage}[/bold cyan]\n")
+        
+        stage_shown = False
+        
+        if focus_stage == 'background':
+            stage_shown = display_background_metadata(zarr_path, console)
+            
+        elif focus_stage == 'detect':
+            stage_shown = display_detection_metadata(zarr_path, console)
+            
+        elif focus_stage == 'crop':
+            stage_shown = display_crop_metadata(zarr_path, console)
+            
+        elif focus_stage == 'keypoints':
+            stage_shown = display_keypoints_metadata(zarr_path, console)
+            
+        elif focus_stage == 'track':
+            stage_shown = display_tracking_metadata(zarr_path, console)
+            
+        elif focus_stage == 'assign_ids':
+            stage_shown = display_id_assignment_metadata(zarr_path, console)
+            
+        elif focus_stage == 'import':
+            # Show import/raw_video info
+            stage_shown = display_import_metadata(zarr_path, console)
+            
+        else:
+            console.print(f"[yellow]Unknown stage: {focus_stage}[/yellow]")
+            console.print("[dim]Valid stages: import, background, detect, crop, keypoints, track, assign_ids[/dim]")
+        
+        if not stage_shown:
+            console.print(f"[yellow]Stage '{focus_stage}' has not been run yet[/yellow]")
+        
+        console.print("\n[dim]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/dim]")
+        console.print("[dim]Press any key to return to TUI...[/dim]")
+        return
     
     # Check root metadata
     root_json = zarr_path / "zarr.json"
@@ -483,6 +968,14 @@ def inspect_video_zarr(zarr_path, show_full_env=False):
             root_meta = json.load(f)
             if root_meta.get('node_type') == 'group':
                 console.print("[green]Valid Zarr v3 group[/green]")
+    
+    # Show quick summary even in normal mode
+    show_quick_summary(zarr_path, console)
+    console.print()
+    
+    # Show parameter provenance
+    show_parameter_provenance(zarr_path, console)
+    console.print()
     
     analysis_meta_path = zarr_path / "analysis_metadata"
     if analysis_meta_path.exists():
@@ -738,15 +1231,51 @@ def inspect_video_zarr(zarr_path, show_full_env=False):
     if not issues and not warnings:
         console.print("[green]Array structure looks good![/green]")
 
+    # Add a helpful footer for TUI users
+    console.print("\n[dim]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/dim]")
+    console.print("[dim]Press any key to return to TUI...[/dim]")
+
 if __name__ == "__main__":
     import sys
     import argparse
     
-    parser = argparse.ArgumentParser(description="Inspect kvikIO/GDS Zarr video archives")
+    parser = argparse.ArgumentParser(
+        description="Inspect Zarr video archives",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Display Modes:
+  quick   - Essential info only (stages, coverage, parameters)
+  normal  - Standard inspection (default)
+  full    - Everything including system metadata and environment
+
+Examples:
+  # Quick summary
+  python zarr_inspector.py data.zarr --mode quick
+  
+  # Normal inspection
+  python zarr_inspector.py data.zarr
+  
+  # Full details with environment
+  python zarr_inspector.py data.zarr --mode full --full-env
+  
+  # Focus on specific stage
+  python zarr_inspector.py data.zarr --stage detect
+        """
+    )
+    
     parser.add_argument("zarr_path", help="Path to Zarr archive")
+    parser.add_argument("--mode", choices=['quick', 'normal', 'full'],
+                       default='normal', help="Display verbosity level")
     parser.add_argument("--full-env", action="store_true", 
                        help="Display complete environment information JSON")
+    parser.add_argument("--stage", 
+                       help="Focus on specific stage (background, detect, crop, etc.)")
     
     args = parser.parse_args()
     
-    inspect_video_zarr(args.zarr_path, show_full_env=args.full_env)
+    inspect_video_zarr(
+        args.zarr_path, 
+        mode=args.mode,
+        show_full_env=args.full_env,
+        focus_stage=args.stage
+    )
