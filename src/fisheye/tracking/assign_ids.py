@@ -9,7 +9,7 @@ TODO: Add trajectory-based tracking for free-swimming fish.
 import numpy as np
 import zarr
 import time
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 from datetime import datetime, timezone
 from pathlib import Path
 from rich.console import Console
@@ -17,6 +17,91 @@ from rich.panel import Panel
 
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info
+
+
+def get_single_dish_roi_from_mask(root: zarr.Group, console: Console) -> Optional[List[Dict]]:
+    """
+    Create a single ROI from the dish mask for single-fish experiments.
+    
+    Args:
+        root: Zarr root group
+        console: Rich console for output
+        
+    Returns:
+        List with single ROI dictionary, or None if no dish mask found
+    """
+    # Try to get dish mask from analysis_metadata
+    if 'analysis_metadata' not in root:
+        return None
+    
+    analysis_meta = root['analysis_metadata']
+    
+    # Check for tuned dish mask
+    if 'dish_mask' in analysis_meta.attrs:
+        mask_data = analysis_meta.attrs['dish_mask']
+        
+        if 'detected_circle' in mask_data:
+            circle = mask_data['detected_circle']
+            center = circle.get('center', [0, 0])
+            radius = circle.get('radius', 0)
+            
+            # Convert circle to bounding box
+            x = int(center[0] - radius)
+            y = int(center[1] - radius)
+            w = int(radius * 2)
+            h = int(radius * 2)
+            
+            console.print(f"[green]✓ Using dish mask as single ROI[/green]")
+            console.print(f"  Circle center: {center}, radius: {radius}")
+            console.print(f"  Bounding box: x={x}, y={y}, w={w}, h={h}")
+            
+            return [{
+                'id': 0,
+                'roi_pixels': [x, y, w, h],
+                'source': 'dish_mask_circle'
+            }]
+    
+    # Try detection config as fallback
+    # Look for detect_runs to get dish_mask parameters
+    if 'detect_runs' in root:
+        latest_detect = root['detect_runs'].attrs.get('latest')
+        if latest_detect:
+            detect_group = root[f'detect_runs/{latest_detect}']
+            if 'parameters' in detect_group.attrs:
+                params = detect_group.attrs['parameters']
+                dish_mask = params.get('dish_mask', {})
+                
+                if dish_mask.get('shape') == 'rectangle' and 'roi' in dish_mask:
+                    x, y, w, h = dish_mask['roi']
+                    console.print(f"[green]✓ Using rectangular dish mask as single ROI[/green]")
+                    console.print(f"  Bounding box: x={x}, y={y}, w={w}, h={h}")
+                    
+                    return [{
+                        'id': 0,
+                        'roi_pixels': [x, y, w, h],
+                        'source': 'dish_mask_rectangle'
+                    }]
+                
+                elif dish_mask.get('shape') == 'circle':
+                    center = dish_mask.get('center', [0, 0])
+                    radius = dish_mask.get('radius', 0)
+                    
+                    x = int(center[0] - radius)
+                    y = int(center[1] - radius)
+                    w = int(radius * 2)
+                    h = int(radius * 2)
+                    
+                    console.print(f"[green]✓ Using circular dish mask as single ROI[/green]")
+                    console.print(f"  Circle center: {center}, radius: {radius}")
+                    console.print(f"  Bounding box: x={x}, y={y}, w={w}, h={h}")
+                    
+                    return [{
+                        'id': 0,
+                        'roi_pixels': [x, y, w, h],
+                        'source': 'dish_mask_circle'
+                    }]
+    
+    return None
 
 
 def assign_ids_spatial(
@@ -31,6 +116,12 @@ def assign_ids_spatial(
     predefined ROI it falls into. Suitable for experiments where fish
     are confined to specific regions and don't move between ROIs.
     
+    For single-dish experiments (num_dishes=1), automatically uses the
+    dish mask as a single ROI without requiring sub-dish tuning.
+    
+    For multi-dish experiments (num_dishes>1), requires sub-dish ROI
+    definitions from tuning or config.
+    
     Args:
         zarr_path: Path to zarr archive
         config: Pipeline configuration dictionary
@@ -40,7 +131,10 @@ def assign_ids_spatial(
         Dictionary with summary statistics
         
     Note:
-        Requires 'subdish_mask_tuning' in zarr analysis_metadata OR
+        Checks experiment_setup metadata to determine single vs multi-dish mode.
+        
+        Single-dish mode uses dish mask automatically.
+        Multi-dish mode requires 'subdish_mask_tuning' in zarr analysis_metadata OR
         'sub_dish_rois' in config['assign_ids'] with format:
         [
             {'id': 0, 'roi_pixels': [x, y, w, h]},
@@ -60,36 +154,80 @@ def assign_ids_spatial(
     if 'detect_runs' not in root:
         raise ValueError("Detection stage not run. Run detect before assign_ids.")
     
-    # Get sub-dish masks - Priority: zarr tuning > config
+    # Check experiment setup metadata
+    experiment_setup = root.attrs.get('experiment_setup', {})
+    setup_type = experiment_setup.get('setup_type', 'unknown')
+    num_dishes = experiment_setup.get('num_dishes', 0)
+    
+    if experiment_setup:
+        console.print(f"[cyan]Experiment setup detected:[/cyan]")
+        console.print(f"  Setup type: {setup_type}")
+        console.print(f"  Dishes: {num_dishes}")
+        console.print(f"  Fish per dish: {experiment_setup.get('fish_per_dish', '?')}")
+        console.print(f"  Expected total: {experiment_setup.get('total_expected_fish', '?')}")
+        console.print()
+    else:
+        console.print("[yellow]No experiment setup metadata found.[/yellow]")
+        console.print("[yellow]Run: python setup_experiment_metadata.py data.zarr --interactive[/yellow]")
+        console.print("[yellow]Defaulting to multi-dish mode...[/yellow]\n")
+        setup_type = 'multi_dish'
+    
+    # Get sub-dish masks based on setup type
     subdish_masks = None
     param_source = 'none'
     
-    # Priority 1: Check for tuned sub-dish masks in zarr
-    if 'analysis_metadata' in root:
-        analysis_meta = root['analysis_metadata']
-        if 'subdish_mask_tuning' in analysis_meta.attrs:
-            mask_data = analysis_meta.attrs['subdish_mask_tuning']
-            subdish_masks = mask_data['masks']
-            param_source = 'zarr_tuned'
-            console.print(f"[green]✓ Using tuned sub-dish masks from zarr[/green]")
-            console.print(f"  Tuned on: {mask_data.get('tuned_timestamp', 'unknown')}")
+    # SINGLE-DISH MODE: Use dish mask as single ROI
+    if setup_type == 'single_dish':
+        console.print("[bold cyan]Single-dish mode:[/bold cyan] Using dish mask as single ROI")
+        subdish_masks = get_single_dish_roi_from_mask(root, console)
+        
+        if subdish_masks:
+            param_source = 'dish_mask_auto'
+        else:
+            console.print("[yellow]Warning: Could not extract dish mask for single-dish mode.[/yellow]")
+            console.print("[yellow]Make sure dish mask is tuned: python -m fisheye data.zarr --tune mask[/yellow]")
+            return {'total_detections': 0, 'assigned': 0, 'unassigned': 0}
     
-    # Priority 2: Fall back to config
-    if subdish_masks is None:
-        assign_params = config.get('assign_ids', {})
-        if assign_params and 'sub_dish_rois' in assign_params:
-            subdish_masks = assign_params['sub_dish_rois']
-            param_source = 'config'
-            console.print(f"[yellow]Using sub-dish ROIs from config[/yellow]")
+    # MULTI-DISH MODE: Require sub-dish ROI definitions
+    else:
+        console.print("[bold cyan]Multi-dish mode:[/bold cyan] Loading sub-dish ROI definitions")
+        
+        # Priority 1: Check for tuned sub-dish masks in zarr
+        if 'analysis_metadata' in root:
+            analysis_meta = root['analysis_metadata']
+            if 'subdish_mask_tuning' in analysis_meta.attrs:
+                mask_data = analysis_meta.attrs['subdish_mask_tuning']
+                subdish_masks = mask_data['masks']
+                param_source = 'zarr_tuned'
+                console.print(f"[green]✓ Using tuned sub-dish masks from zarr[/green]")
+                console.print(f"  Tuned on: {mask_data.get('tuned_timestamp', 'unknown')}")
+        
+        # Priority 2: Fall back to config
+        if subdish_masks is None:
+            assign_params = config.get('assign_ids', {})
+            if assign_params and 'sub_dish_rois' in assign_params:
+                subdish_masks = assign_params['sub_dish_rois']
+                param_source = 'config'
+                console.print(f"[yellow]Using sub-dish ROIs from config[/yellow]")
+        
+        # No masks found
+        if subdish_masks is None:
+            console.print("[yellow]Warning: No sub-dish masks defined.[/yellow]")
+            console.print("[yellow]Run the tuner first: python -m fisheye data.zarr --tune subdish[/yellow]")
+            console.print("[yellow]Or add 'sub_dish_rois' to config under 'assign_ids'[/yellow]")
+            return {'total_detections': 0, 'assigned': 0, 'unassigned': 0}
     
-    # No masks found
-    if subdish_masks is None:
-        console.print("[yellow]Warning: No sub-dish masks defined.[/yellow]")
-        console.print("[yellow]Run the tuner first: python -m fisheye data.zarr --tune subdish[/yellow]")
-        console.print("[yellow]Or add 'sub_dish_rois' to config under 'assign_ids'[/yellow]")
-        return {'total_detections': 0, 'assigned': 0, 'unassigned': 0}
+    # Validate expected vs actual number of ROIs
+    if experiment_setup and num_dishes > 0:
+        expected_rois = num_dishes
+        actual_rois = len(subdish_masks)
+        
+        if expected_rois != actual_rois:
+            console.print(f"[yellow]⚠️  Warning: ROI count mismatch![/yellow]")
+            console.print(f"  Expected {expected_rois} dishes, found {actual_rois} ROIs")
+            console.print(f"  Proceeding with {actual_rois} ROIs...")
     
-    console.print(f"Assigning IDs based on [cyan]{len(subdish_masks)}[/cyan] sub-dish masks ({param_source})")
+    console.print(f"\nAssigning IDs based on [cyan]{len(subdish_masks)}[/cyan] ROI(s) ({param_source})")
     
     # Create run group
     assign_group, run_group_name = get_run_group(root, 'id_assignment', console)
@@ -101,7 +239,12 @@ def assign_ids_spatial(
     # Store metadata
     metadata_dict = {
         'assignment_timestamp_utc': datetime.now(timezone.utc).isoformat(),
-        'parameters': {'num_masks': len(subdish_masks), 'masks': subdish_masks},
+        'parameters': {
+            'num_masks': len(subdish_masks), 
+            'masks': subdish_masks,
+            'setup_type': setup_type,
+            'experiment_setup': experiment_setup
+        },
         'parameter_source': param_source,
         'source_detect_run': latest_detect_run,
         'assignment_method': 'spatial',
@@ -125,7 +268,7 @@ def assign_ids_spatial(
     bbox_coords_px[:, 1] *= ds_img_shape[0]  # center_y
     
     # Initialize detection IDs array (-1 = unassigned)
-    detection_ids = np.full(len(bbox_coords), -1, dtype='i4')
+    detection_ids = np.full(len(bbox_coords), -1, dtype=np.int32)
     
     # Assign IDs based on which sub-dish mask each detection falls into
     for mask in subdish_masks:
@@ -147,14 +290,13 @@ def assign_ids_spatial(
         'detection_ids',
         data=detection_ids,
         chunks=(min(1000, len(detection_ids)),),
-        dtype='i4',
         overwrite=True
     )
     
     # Calculate per-mask detection counts per frame
     n_frames = len(n_detections)
     n_masks = len(subdish_masks)
-    per_mask_counts = np.zeros((n_frames, n_masks), dtype='i4')
+    per_mask_counts = np.zeros((n_frames, n_masks), dtype=np.int32)
     
     # Use cumulative detection indices to map detections to frames
     cumulative_detections = np.cumsum(np.insert(n_detections, 0, 0))
@@ -174,7 +316,6 @@ def assign_ids_spatial(
         'n_detections_per_mask',
         data=per_mask_counts,
         chunks=(min(100, n_frames), None),
-        dtype='i4',
         overwrite=True
     )
     
@@ -207,7 +348,8 @@ def assign_ids_spatial(
         'unassigned_detections': int(n_unassigned),
         'assignment_rate_percent': round(assignment_rate, 2),
         'num_masks': n_masks,
-        'per_mask_statistics': mask_stats
+        'per_mask_statistics': mask_stats,
+        'setup_type': setup_type
     }
     
     assign_group.attrs['summary_statistics'] = summary_stats
@@ -227,11 +369,21 @@ def assign_ids_spatial(
     
     # Completion panel
     mask_summary = "\n".join([
-        f"    Mask {s['mask_id']}: {s['total_detections']} detections ({s['coverage_percent']:.1f}% frames)"
+        f"    {'Dish' if setup_type == 'single_dish' else 'Mask'} {s['mask_id']}: {s['total_detections']} detections ({s['coverage_percent']:.1f}% frames)"
         for s in mask_stats
     ])
     
+    # Add validation info if experiment setup exists
+    validation_text = ""
+    if experiment_setup and num_dishes > 0:
+        expected_fish = experiment_setup.get('total_expected_fish', 0)
+        validation_text = f"\n[bold]Validation:[/bold]\n  Expected: {expected_fish} fish\n  Found: {n_masks} ROI(s)"
+    
     completion_text = f"""[green]✓[/green] ID assignment completed
+
+[bold]Setup:[/bold]
+  Mode: {setup_type}
+  Source: {param_source}
 
 [bold]Performance:[/bold]
   Time: {duration:.1f}s
@@ -239,8 +391,9 @@ def assign_ids_spatial(
 [bold]Results:[/bold]
   Assigned: {n_assigned}/{len(detection_ids)} ({assignment_rate:.1f}%)
   Unassigned: {n_unassigned}
+{validation_text}
   
-[bold]Per-Mask Summary:[/bold]
+[bold]Per-ROI Summary:[/bold]
 {mask_summary}
 
 [bold]Output:[/bold]

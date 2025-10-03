@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional, List
 import subprocess
 import sys
+import zarr
 
 try:
     from textual.app import App, ComposeResult
@@ -73,7 +74,7 @@ STAGE_INFO = {
         'color': 'blue'
     },
     'assign_ids': {
-        'desc': 'Assign consistent IDs',
+        'desc': 'Assign consistent IDs (auto for single-dish)',
         'requires': ['detect'],
         'color': 'yellow'
     }
@@ -83,7 +84,7 @@ STAGE_ORDER = ['import', 'downsample', 'background', 'detect', 'crop', 'keypoint
 
 TUNER_INFO = {
     'mask': 'Tune dish mask detection (Hough circles)',
-    'subdish': 'Define sub-dish masks for spatial ID assignment',
+    'subdish': 'Define sub-dish masks for spatial ID assignment (multi-dish only)',
     'detect': 'Tune fish detection thresholds',
     'threshold': 'Alias for detect tuner',
     'keypoints': 'Tune anatomical keypoint detection (swim bladder & eyes)',
@@ -97,7 +98,7 @@ class PipelineLauncherApp(App):
     Screen {
         layout: vertical;
     }
-    
+
     #header_info {
         height: 3;
         background: $primary;
@@ -105,82 +106,96 @@ class PipelineLauncherApp(App):
         content-align: center middle;
         text-style: bold;
     }
-    
+
     #main_container {
         height: 1fr;
         layout: horizontal;
     }
-    
+
     #left_panel {
-        width: 1fr;
+        width: 40%;
         border: solid $primary;
         padding: 1;
     }
-    
+
+    #file_tree {
+        height: 15;
+        min-height: 8;
+    }
+
     #right_panel {
-        width: 2fr;
+        width: 60%;
         border: solid $accent;
         padding: 1;
         layout: vertical;
     }
-    
+
     #status_bar {
         height: 3;
         background: $surface;
         color: $text;
         padding: 0 1;
     }
-    
+
     .bookmark_bar {
         height: auto;
         margin: 0 0 1 0;
     }
-    
+
     .bookmark_bar Button {
         margin: 0 1 0 0;
         min-width: 10;
     }
-    
+
     .stage_checkbox {
         margin: 0 2;
     }
-    
+
     .section_header {
         text-style: bold;
         color: $accent;
         margin: 1 0;
     }
-    
+
     Button {
         margin: 1 2;
     }
-    
+
     .file_input {
         margin: 0 2;
     }
-    
+
     .info_text {
         color: $text-muted;
         margin: 0 2;
     }
-    
+
     #progress_panel {
         height: 15;
         border: solid yellow;
         padding: 1;
         margin-top: 1;
     }
-    
+
     #progress_log {
         height: 1fr;
         border: solid gray;
     }
-    
+
+    #experiment_info_panel {
+        height: auto;
+        border: solid cyan;
+        padding: 1;
+        margin-top: 1;
+        background: $surface;
+    }
+
     #stage_status_panel {
         height: auto;
         border: solid green;
         padding: 1;
         margin-top: 1;
+        background: $surface;
     }
     """
     
@@ -188,6 +203,7 @@ class PipelineLauncherApp(App):
         Binding("q", "quit", "Quit", show=True),
         Binding("r", "run_pipeline", "Run Pipeline", show=True),
         Binding("t", "run_tuner", "Run Tuner", show=True),
+        Binding("e", "configure_experiment", "Setup Experiment", show=True),
         Binding("a", "toggle_all_stages", "Toggle All", show=True),
         Binding("s", "select_file", "Select File", show=True),
         Binding("c", "clear_log", "Clear Log", show=True),
@@ -323,16 +339,31 @@ class PipelineLauncherApp(App):
                 status['refine'] = f'✓ Complete ({latest})' if latest else '✓ Complete'
                 
             # Check assign_ids
-            if 'id_assignment_runs' in root and len(list(root['id_assignment_runs'].group_keys())) > 0:
-                latest = root['id_assignment_runs'].attrs.get('latest')
-                assign_group = root[f'id_assignment_runs/{latest}'] if latest else None
-                if assign_group and 'summary_statistics' in assign_group.attrs:
-                    stats = assign_group.attrs['summary_statistics']
-                    n_assigned = stats.get('assigned_detections', 0)
-                    assignment_rate = stats.get('assignment_rate_percent', 0)
-                    status['assign_ids'] = f'✓ Complete ({n_assigned} assigned, {assignment_rate:.1f}%)'
-                else:
-                    status['assign_ids'] = '✓ Complete'
+            if 'id_assignment_runs' in root:
+                try:
+                    latest = root['id_assignment_runs'].attrs.get('latest')
+                    if latest:
+                        assign_group = root[f'id_assignment_runs/{latest}']
+                        if 'summary_statistics' in assign_group.attrs:
+                            stats = assign_group.attrs['summary_statistics']
+                            assigned = stats.get('assigned_detections', 0)
+                            total = stats.get('total_detections', 0)
+                            setup_type = stats.get('setup_type', 'unknown')
+                            if total > 0:
+                                percent = (assigned / total) * 100
+                                status['assign_ids'] = f'✓ Complete ({setup_type}, {percent:.0f}% assigned)'
+                            else:
+                                status['assign_ids'] = f'✓ Complete ({setup_type})'
+                        else:
+                            status['assign_ids'] = '✓ Complete'
+                except Exception as e:
+                    pass  # Silently fail and leave as "Not Run"
+
+
+            experiment_setup = root.attrs.get('experiment_setup', {})
+            if experiment_setup:
+                setup_type = experiment_setup.get('setup_type', 'unknown')
+                num_dishes = experiment_setup.get('num_dishes', '?')
                 
         except Exception as e:
             # If there's an error reading zarr, mark all as unknown
@@ -341,45 +372,76 @@ class PipelineLauncherApp(App):
         
         return status
     
-    def _update_stage_status_display(self) -> None:
-        """Update the stage status display based on selected zarr file."""
-        if not self.selected_zarr:
-            # No zarr selected, show default message
-            try:
-                status_widget = self.query_one("#stage_status_panel", Static)
-                status_widget.update("[dim]Select a zarr file to view stage status[/dim]")
-            except:
-                pass
+    def _update_experiment_info_display(self) -> None:
+        """Update the experiment setup information panel."""
+        import zarr
+        from pathlib import Path
+        
+        experiment_panel = self.query_one("#experiment_info_panel", Static)
+        
+        if not self.selected_zarr or not Path(self.selected_zarr).exists():
+            experiment_panel.update("[dim]Select a zarr file to view experiment configuration[/dim]")
             return
         
-        status = self._check_zarr_stage_status(self.selected_zarr)
-        
-        # Build a simple formatted list instead of a table
-        lines = ["[bold cyan]Stage Status:[/bold cyan]\n"]
-        
-        for stage in STAGE_ORDER:
-            stage_status = status[stage]
-            
-            # Color coding with emoji indicators
-            if stage_status.startswith('✓'):
-                status_display = f"[green]{stage_status}[/green]"
-            elif stage_status.startswith('○'):
-                status_display = f"[dim]{stage_status}[/dim]"
-            elif stage_status.startswith('?'):
-                status_display = f"[yellow]{stage_status}[/yellow]"
-            else:
-                status_display = stage_status
-            
-            # Format: stage name (padded) : status
-            lines.append(f"  [cyan]{stage:12s}[/cyan] : {status_display}")
-        
-        display_text = "\n".join(lines)
-        
         try:
-            status_widget = self.query_one("#stage_status_panel", Static)
-            status_widget.update(display_text)
-        except:
-            pass
+            root = zarr.open(self.selected_zarr, mode='r')
+            experiment_setup = root.attrs.get('experiment_setup', {})
+            
+            if not experiment_setup:
+                # Check if this is a valid zarr that just hasn't been configured
+                if 'raw_video' in root or 'detect_runs' in root:
+                    experiment_panel.update(
+                        "[yellow]⚠ No experiment setup configured[/]\n"
+                        "[dim]Press 'e' to configure[/dim]"
+                    )
+                else:
+                    experiment_panel.update("[dim]Not a valid FishEye zarr file[/dim]")
+                return
+            
+            # Build formatted display
+            setup_type = experiment_setup.get('setup_type', 'unknown')
+            num_dishes = experiment_setup.get('num_dishes', '?')
+            fish_per_dish = experiment_setup.get('fish_per_dish', '?')
+            total_fish = experiment_setup.get('total_expected_fish', '?')
+            source = experiment_setup.get('source', 'unknown')
+            configured_at = experiment_setup.get('configured_at', 'unknown')
+            
+            # Color code based on setup type
+            if setup_type == 'single_dish':
+                type_color = 'cyan'
+                type_icon = ''
+            elif setup_type == 'multi_dish':
+                type_color = 'yellow'
+                type_icon = ''
+            else:
+                type_color = 'red'
+                type_icon = '❓'
+            
+            info_text = (
+                f"{type_icon} [bold {type_color}]{setup_type.replace('_', ' ').title()}[/bold {type_color}]\n"
+                f"[bold]Dishes:[/] {num_dishes}\n"
+                f"[bold]Fish/dish:[/] {fish_per_dish}\n"
+                f"[bold]Total fish:[/] {total_fish}\n"
+                f"[dim]Source: {source}[/dim]"
+            )
+            
+            # Add validation status if assign_ids has run
+            if 'id_assignment_runs' in root and root['id_assignment_runs'].attrs.get('latest'):
+                latest = root['id_assignment_runs'].attrs['latest']
+                assign_group = root[f'id_assignment_runs/{latest}']
+                if 'summary_statistics' in assign_group.attrs:
+                    stats = assign_group.attrs['summary_statistics']
+                    num_rois = stats.get('num_masks', 0)
+                    
+                    if num_rois == num_dishes:
+                        info_text += f"\n[green]✓ {num_rois} ROIs tracked[/green]"
+                    else:
+                        info_text += f"\n[yellow]⚠ {num_rois} ROIs tracked (expected {num_dishes})[/yellow]"
+            
+            experiment_panel.update(info_text)
+            
+        except Exception as e:
+            experiment_panel.update(f"[red]Error reading zarr: {e}[/red]")
     
     def compose(self) -> ComposeResult:
         """Create the UI layout."""
@@ -389,12 +451,12 @@ class PipelineLauncherApp(App):
         
         with Container(id="main_container"):
             # Left panel - File browsing
-            with Vertical(id="left_panel"):
+            with ScrollableContainer(id="left_panel"):
                 yield Label("📁 File Browser", classes="section_header")
                 
                 bookmarks = self.config.get('bookmarks', [])
                 if bookmarks:
-                    yield Label("Quick Jump:", classes="info_text")
+                    yield Label("Quick Access:", classes="info_text")
                     with Horizontal(classes="bookmark_bar"):
                         for bookmark in bookmarks:
                             yield Button(
@@ -410,8 +472,15 @@ class PipelineLauncherApp(App):
                 yield Static("Zarr: None", id="zarr_display")
                 yield Static("Video: None", id="video_display")
                 yield Static("Config: configs/fisheye/default.yaml", id="config_display")
-                
-                # NEW: Stage Status Display
+
+                yield Label("\n Experiment Setup:", classes="section_header")
+                yield Static(
+                    "[dim]Select a zarr file to view experiment configuration[/dim]",
+                    id="experiment_info_panel",
+                    classes="info_text"
+                )
+
+                # Stage Status Display
                 yield Label("\n📊 Stage Status:", classes="section_header")
                 yield Static(
                     "[dim]Select a zarr file to view stage status[/dim]", 
@@ -544,11 +613,13 @@ class PipelineLauncherApp(App):
             display = self.query_one("#zarr_display", Static)
             if value:
                 display.update(f"Zarr: [cyan]{os.path.basename(value)}[/cyan]")
-                # Update stage status display
+                # Update both stage status and experiment info
                 self._update_stage_status_display()
+                self._update_experiment_info_display()
             else:
                 display.update("Zarr: [dim]None[/dim]")
                 self._update_stage_status_display()
+                self._update_experiment_info_display()
         except Exception:
             pass
     
@@ -671,6 +742,37 @@ class PipelineLauncherApp(App):
         
         return cmd
     
+    def _update_stage_status_display(self) -> None:
+        """Update the stage status display panel."""
+        status_panel = self.query_one("#stage_status_panel", Static)
+        
+        if not self.selected_zarr:
+            status_panel.update("[dim]Select a zarr file to view stage status[/dim]")
+            return
+        
+        # Also update experiment info when updating stage status
+        self._update_experiment_info_display()
+        
+        status = self._check_zarr_stage_status(self.selected_zarr)
+        
+        # Build formatted status display
+        status_lines = []
+        for stage in STAGE_ORDER:
+            stage_status = status.get(stage, '○ Not Run')
+            
+            # Color code based on status
+            if '✓' in stage_status:
+                color = 'green'
+            elif '?' in stage_status:
+                color = 'red'
+            else:
+                color = 'dim'
+            
+            status_lines.append(f"[{color}]{stage}:[/{color}] {stage_status}")
+        
+        status_text = "\n".join(status_lines)
+        status_panel.update(status_text)
+    
     def _run_subprocess_with_output(self, cmd: List[str]) -> None:
         """Run subprocess and capture output in real-time."""
         if self.progress_log:
@@ -726,6 +828,7 @@ class PipelineLauncherApp(App):
         finally:
             self.is_running = False
             self.current_stage = ""
+            self.call_later(self._update_stage_status_display)
             self.call_later(self.refresh)
     
     def action_run_pipeline(self) -> None:
@@ -803,6 +906,56 @@ class PipelineLauncherApp(App):
             self.status_message = f"❌ Error: {e}"
             if self.progress_log:
                 self.progress_log.write(f"[red]❌ Error: {e}[/]\n")
+    
+    def action_configure_experiment(self) -> None:
+        """Open experiment setup configuration."""
+        if not self.selected_zarr:
+            self.status_message = "❌ Please select a zarr file first"
+            if self.progress_log:
+                self.progress_log.write("[red]❌ Please select a zarr file first[/]")
+            return
+        
+        # Check if zarr exists
+        from pathlib import Path
+        if not Path(self.selected_zarr).exists():
+            self.status_message = "❌ Zarr file doesn't exist yet - run import first"
+            if self.progress_log:
+                self.progress_log.write("[red]❌ Zarr doesn't exist - run import first[/]")
+            return
+        
+        # Run setup tool
+        setup_script = Path(__file__).parent.parent.parent / "setup_experiment_metadata.py"
+        
+        self.status_message = "Running experiment setup..."
+        if self.progress_log:
+            self.progress_log.write("\n[cyan]Opening experiment setup tool...[/]\n")
+        
+        with self.suspend():  # Suspend TUI while running interactive tool
+            try:
+                result = subprocess.run([
+                    sys.executable,
+                    str(setup_script),
+                    self.selected_zarr,
+                    "--interactive"
+                ])
+                
+                if result.returncode == 0:
+                    self.status_message = "✓ Experiment setup configured"
+                    if self.progress_log:
+                        self.progress_log.write("[green]✓ Experiment setup configured[/]\n")
+                else:
+                    self.status_message = "❌ Setup cancelled or failed"
+                    if self.progress_log:
+                        self.progress_log.write("[yellow]Setup cancelled[/]\n")
+            except Exception as e:
+                self.status_message = f"❌ Error: {e}"
+                if self.progress_log:
+                    self.progress_log.write(f"[red]❌ Error: {e}[/]\n")
+        
+        # Refresh displays after configuration
+        self._update_experiment_info_display()  # UPDATE experiment info
+        self._update_stage_status_display()     # UPDATE stage status
+        self.refresh()
     
     def action_clear_log(self) -> None:
         """Clear the progress log."""

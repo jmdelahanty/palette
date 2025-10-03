@@ -12,6 +12,7 @@ from typing import Dict, Any, List, Optional, Union
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 import zarr
+from rich import box
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -23,6 +24,7 @@ from ..preprocessing.background import compute_background
 from ..detection.detect_traditional import detect_fish
 from ..detection.detect_keypoints_traditional import detect_keypoints
 from ..tracking.crop import crop_detections
+from ..tracking.assign_ids import assign_ids_spatial
 from ..shared.zarr.schema import validate_zarr_structure
 
 
@@ -72,9 +74,9 @@ class Pipeline:
         'detect',
         'crop',
         'keypoints',
+        'assign_ids',
         'track',
         'refine',
-        'assign_ids'
     ]
     
     STAGE_DEPENDENCIES = {
@@ -84,9 +86,9 @@ class Pipeline:
         'detect': ['background'],
         'crop': ['detect'],
         'keypoints': ['crop', 'background'],
+        'assign_ids': ['detect'],
         'track': ['keypoints'],
         'refine': ['keypoints'],
-        'assign_ids': ['detect']
     }
 
     ANALYSIS_STAGES = {'background', 'detect', 'track', 'refine'}
@@ -220,7 +222,7 @@ class Pipeline:
     
     def _resolve_dependencies(self, requested_stages: List[str]) -> List[str]:
         """Resolve stage dependencies and return ordered list of stages to run."""
-        required_stages = set()
+        required_stages = set()  # Using set to avoid duplicates
         
         # Open zarr to check what exists (if it exists)
         existing_stages = set()
@@ -237,12 +239,14 @@ class Pipeline:
                     existing_stages.add('background')
                 if 'detect_runs' in root and root['detect_runs'].attrs.get('latest'):
                     existing_stages.add('detect')
+                if 'id_assignment_runs' in root and root['id_assignment_runs'].attrs.get('latest'):
+                    existing_stages.add('assign_ids')
             except:
                 pass
         
         for stage in requested_stages:
             # Add the stage itself
-            required_stages.add(stage)
+            required_stages.add(stage)  # Set automatically handles duplicates
             
             # Add only MISSING dependencies
             deps = self.STAGE_DEPENDENCIES.get(stage, [])
@@ -386,24 +390,84 @@ class Pipeline:
         self.console.print("[yellow]Refinement stage not needed for multi-fish tracking[/yellow]")
     
     def _run_assign_ids(self) -> None:
-        """Run ID assignment stage."""
-        if self.zarr_root is None:
-            self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
+        """
+        Run ID assignment stage.
         
-        # Import the spatial assignment function
-        from ..tracking.assign_ids import assign_ids_spatial
+        For single-dish experiments: Automatically uses dish mask as single ROI
+        For multi-dish experiments: Requires sub-dish ROI definitions
         
-        # Run spatial ID assignment
+        Checks experiment_setup metadata to determine mode automatically.
+        """
+        # Check if experiment setup is configured
+        root = zarr.open(self.config.zarr_path, mode='r')
+        
+        has_setup = 'experiment_setup' in root.attrs
+        if not has_setup:
+            self.console.print("[yellow]⚠️  No experiment setup metadata found[/yellow]")
+            self.console.print("[yellow]This helps determine single vs multi-dish mode[/yellow]")
+            self.console.print()
+            
+            # Prompt user to configure
+            response = input("Configure experiment setup now? (Y/n): ").strip().lower()
+            if response != 'n':
+                import subprocess
+                setup_script = Path(__file__).parent.parent.parent / "setup_experiment_metadata.py"
+                subprocess.run([
+                    sys.executable, 
+                    str(setup_script), 
+                    self.config.zarr_path,
+                    "--interactive"
+                ])
+                
+                # Reload to check if configured
+                root = zarr.open(self.config.zarr_path, mode='r')
+                if 'experiment_setup' not in root.attrs:
+                    self.console.print("[yellow]Setup not configured, continuing anyway...[/yellow]")
+        
+        # Get experiment setup info
+        experiment_setup = root.attrs.get('experiment_setup', {})
+        setup_type = experiment_setup.get('setup_type', 'unknown')
+        
+        # For multi-dish, check if subdish masks are defined
+        if setup_type == 'multi_dish':
+            has_subdish_masks = False
+            
+            if 'analysis_metadata' in root:
+                has_subdish_masks = 'subdish_mask_tuning' in root['analysis_metadata'].attrs
+            
+            if not has_subdish_masks:
+                # Check config as fallback
+                assign_params = self.pipeline_params.get('assign_ids', {})
+                has_subdish_masks = 'sub_dish_rois' in assign_params
+            
+            if not has_subdish_masks:
+                self.console.print("[yellow]⚠️  Multi-dish mode requires sub-dish ROI definitions[/yellow]")
+                self.console.print()
+                response = input("Run sub-dish mask tuner now? (Y/n): ").strip().lower()
+                
+                if response != 'n':
+                    import subprocess
+                    tune_script = Path(__file__).parent.parent / "tune" / "subdish_mask_tuner.py"
+                    subprocess.run([
+                        sys.executable,
+                        str(tune_script),
+                        self.config.zarr_path
+                    ])
+                else:
+                    self.console.print("[red]Cannot proceed without sub-dish masks[/red]")
+                    return
+        
+        # Run assign_ids
+        self.console.print(f"\n[bold cyan]Running ID Assignment ({setup_type} mode)[/bold cyan]\n")
+        
         results = assign_ids_spatial(
             zarr_path=self.config.zarr_path,
             config=self.pipeline_params,
             console=self.console
         )
         
-        self.console.print(
-            f"✓ Assigned IDs to {results['assigned_detections']}/{results['total_detections']} "
-            f"detections ({results['assignment_rate_percent']:.1f}% success rate)"
-        )
+        # Store results
+        self.stage_results['assign_ids'] = results
     
     def _validate_stage(self, stage: str) -> None:
         """Validate the output of a stage."""
@@ -414,95 +478,283 @@ class Pipeline:
                 self.console.print(f"✓ Imported {stats['total_frames']} frames")
     
     def _display_pipeline_plan(self, stages: List[str]) -> None:
-        """Display the pipeline execution plan."""
-        table = Table(title="Pipeline Execution Plan", show_header=True)
+        """Display the pipeline execution plan with experiment setup info."""
+        from rich.table import Table
+        from rich.panel import Panel
+        
+        # Check for experiment setup
+        setup_panel = None
+        if Path(self.config.zarr_path).exists():
+            try:
+                root = zarr.open(self.config.zarr_path, mode='r')
+                experiment_setup = root.attrs.get('experiment_setup', {})
+                
+                if experiment_setup:
+                    # Create experiment setup info panel
+                    setup_type = experiment_setup.get('setup_type', 'unknown')
+                    num_dishes = experiment_setup.get('num_dishes', '?')
+                    fish_per_dish = experiment_setup.get('fish_per_dish', '?')
+                    total_fish = experiment_setup.get('total_expected_fish', '?')
+                    source = experiment_setup.get('source', 'unknown')
+                    
+                    # Color code based on setup type
+                    setup_color = "cyan" if setup_type == "single_dish" else "yellow"
+                    
+                    setup_text = (
+                        f"[bold {setup_color}]Setup Type:[/bold {setup_color}] {setup_type}\n"
+                        f"[bold]Dishes:[/bold] {num_dishes}\n"
+                        f"[bold]Fish per dish:[/bold] {fish_per_dish}\n"
+                        f"[bold]Total expected:[/bold] {total_fish} fish\n"
+                        f"[dim]Source: {source}[/dim]"
+                    )
+                    
+                    setup_panel = Panel(
+                        setup_text,
+                        title="🐠 Experiment Configuration",
+                        border_style=setup_color,
+                        padding=(1, 2)
+                    )
+            except Exception as e:
+                # Silently fail if can't read zarr
+                pass
+        
+        # Display experiment setup if available
+        if setup_panel:
+            self.console.print(setup_panel)
+            self.console.print()
+        else:
+            # Warn if assign_ids is in stages but no setup
+            if 'assign_ids' in stages:
+                self.console.print(
+                    "[yellow]ℹ No experiment setup configured. "
+                    "Run with --setup to configure.[/yellow]\n"
+                )
+        
+        # Display stage execution plan
+        table = Table(title="Pipeline Execution Plan", show_header=True, box=box.ROUNDED)
+        table.add_column("Order", style="dim", width=6)
         table.add_column("Stage", style="cyan")
         table.add_column("Status", style="yellow")
         table.add_column("Dependencies", style="green")
         
-        for stage in stages:
+        for i, stage in enumerate(stages, 1):
             deps = self.STAGE_DEPENDENCIES.get(stage, [])
             deps_str = ", ".join(deps) if deps else "None"
-            table.add_row(stage.title(), "Pending", deps_str)
+            
+            # Check if stage is complete
+            is_complete = self._is_stage_complete(stage)
+            status = "✓ Complete" if is_complete else "→ Pending"
+            status_style = "green" if is_complete else "yellow"
+            
+            table.add_row(
+                str(i),
+                stage.title(),
+                f"[{status_style}]{status}[/{status_style}]",
+                deps_str
+            )
         
         self.console.print(table)
-    
+        self.console.print()
+
+
     def _display_summary(self, stages_run: List[str], total_time: float) -> None:
-        """Display pipeline execution summary."""
-        table = Table(title="Pipeline Summary", show_header=True)
-        table.add_column("Stage", style="cyan")
-        table.add_column("Time (s)", style="yellow", justify="right")
-        table.add_column("Percentage", style="green", justify="right")
+        """Display pipeline execution summary with experiment results."""
+        from rich.table import Table
+        from rich.panel import Panel
+        
+        # Timing table
+        timing_table = Table(
+            title="Pipeline Timing", 
+            show_header=True, 
+            box=box.ROUNDED
+        )
+        timing_table.add_column("Stage", style="cyan")
+        timing_table.add_column("Time (s)", style="yellow", justify="right")
+        timing_table.add_column("Percentage", style="green", justify="right")
         
         for stage in stages_run:
             stage_time = self.stage_timings.get(stage, 0)
             percentage = (stage_time / total_time * 100) if total_time > 0 else 0
-            table.add_row(
+            timing_table.add_row(
                 stage.title(),
                 f"{stage_time:.2f}",
                 f"{percentage:.1f}%"
             )
         
-        table.add_row(
+        timing_table.add_row(
             "[bold]Total[/bold]",
             f"[bold]{total_time:.2f}[/bold]",
             "[bold]100%[/bold]"
         )
         
-        self.console.print(table)
+        self.console.print(timing_table)
+        self.console.print()
         
-        # Final status
-        if self.config.zarr_path and Path(self.config.zarr_path).exists():
-            self.console.print(Panel(
-                f"✓ Pipeline completed successfully\n"
-                f"Output: {self.config.zarr_path}\n"
-                f"Total time: {total_time:.1f} seconds",
-                title="Success",
-                style="green"
-            ))
+        # Results summary if zarr exists
+        if Path(self.config.zarr_path).exists():
+            try:
+                root = zarr.open(self.config.zarr_path, mode='r')
+                
+                # Get experiment setup
+                experiment_setup = root.attrs.get('experiment_setup', {})
+                
+                # Build results summary
+                results_lines = []
+                
+                # Experiment configuration
+                if experiment_setup:
+                    setup_type = experiment_setup.get('setup_type', 'unknown')
+                    total_expected = experiment_setup.get('total_expected_fish', '?')
+                    results_lines.append(f"[bold cyan]Experiment:[/bold cyan] {setup_type}")
+                    results_lines.append(f"[bold]Expected fish:[/bold] {total_expected}")
+                
+                # Detection results
+                if 'detect_runs' in root and root['detect_runs'].attrs.get('latest'):
+                    latest_detect = root['detect_runs'].attrs['latest']
+                    detect_group = root[f'detect_runs/{latest_detect}']
+                    if 'summary_statistics' in detect_group.attrs:
+                        stats = detect_group.attrs['summary_statistics']
+                        total_detections = stats.get('total_detections', 0)
+                        frames_with_detections = stats.get('frames_with_detections', 0)
+                        total_frames = stats.get('total_frames', 1)
+                        detection_rate = (frames_with_detections / total_frames) * 100
+                        
+                        results_lines.append(f"[bold]Detections:[/bold] {total_detections:,} total")
+                        results_lines.append(f"[bold]Detection rate:[/bold] {detection_rate:.1f}% of frames")
+                
+                # ID assignment results
+                if 'id_assignment_runs' in root and root['id_assignment_runs'].attrs.get('latest'):
+                    latest_assign = root['id_assignment_runs'].attrs['latest']
+                    assign_group = root[f'id_assignment_runs/{latest_assign}']
+                    if 'summary_statistics' in assign_group.attrs:
+                        stats = assign_group.attrs['summary_statistics']
+                        assigned = stats.get('assigned_detections', 0)
+                        total = stats.get('total_detections', 1)
+                        assignment_rate = stats.get('assignment_rate_percent', 0)
+                        num_masks = stats.get('num_masks', 0)
+                        
+                        results_lines.append(f"[bold]ID Assignment:[/bold] {assigned:,}/{total:,} ({assignment_rate:.1f}%)")
+                        results_lines.append(f"[bold]ROIs tracked:[/bold] {num_masks}")
+                        
+                        # Per-mask summary
+                        per_mask_stats = stats.get('per_mask_statistics', [])
+                        if per_mask_stats:
+                            results_lines.append("\n[bold]Per-ROI Coverage:[/bold]")
+                            for mask_stat in per_mask_stats:
+                                mask_id = mask_stat['mask_id']
+                                coverage = mask_stat['coverage_percent']
+                                detections = mask_stat['total_detections']
+                                
+                                # Color code based on coverage
+                                if coverage > 80:
+                                    color = "green"
+                                elif coverage > 50:
+                                    color = "yellow"
+                                else:
+                                    color = "red"
+                                
+                                roi_label = "Dish" if experiment_setup.get('setup_type') == 'single_dish' else f"ROI {mask_id}"
+                                results_lines.append(
+                                    f"  [{color}]{roi_label}:[/{color}] "
+                                    f"{coverage:.1f}% coverage ({detections:,} detections)"
+                                )
+                
+                # Keypoint results
+                if 'keypoint_runs' in root and root['keypoint_runs'].attrs.get('latest'):
+                    latest_kp = root['keypoint_runs'].attrs['latest']
+                    kp_group = root[f'keypoint_runs/{latest_kp}']
+                    if 'summary_statistics' in kp_group.attrs:
+                        stats = kp_group.attrs['summary_statistics']
+                        successful = stats.get('successful_detections', 0)
+                        total_rois = stats.get('total_rois', 1)
+                        success_rate = (successful / total_rois) * 100
+                        
+                        results_lines.append(f"[bold]Keypoints:[/bold] {successful:,}/{total_rois:,} ({success_rate:.1f}%)")
+                
+                # Display results panel
+                if results_lines:
+                    results_text = "\n".join(results_lines)
+                    results_panel = Panel(
+                        results_text,
+                        title="📊 Pipeline Results",
+                        border_style="green",
+                        padding=(1, 2)
+                    )
+                    self.console.print(results_panel)
+                    self.console.print()
+            
+            except Exception as e:
+                # Silently fail if can't read results
+                pass
+        
+        # Final status panel
+        status_text = (
+            f"[green]✓[/green] Pipeline completed successfully\n"
+            f"[bold]Output:[/bold] {self.config.zarr_path}\n"
+            f"[bold]Total time:[/bold] {total_time:.1f} seconds"
+        )
+        
+        # Add next steps based on what was run
+        if 'assign_ids' in stages_run:
+            status_text += "\n\n[bold cyan]Next steps:[/bold cyan]"
+            if Path(self.config.zarr_path).exists():
+                root = zarr.open(self.config.zarr_path, mode='r')
+                experiment_setup = root.attrs.get('experiment_setup', {})
+                
+                # Suggest interpolation and analysis
+                status_text += "\n  • Run interpolation: python batch_roi_interpolator.py"
+                status_text += "\n  • Analyze behavior: python fish_behavior_metrics.py"
+                status_text += "\n  • Visualize: python roi_heatmap_generator.py"
+        
+        self.console.print(Panel(
+            status_text,
+            title="✨ Success",
+            border_style="bold green",
+            padding=(1, 2)
+        ))
 
     def _is_stage_complete(self, stage: str) -> bool:
         """Check if a stage has already been completed."""
-        if not Path(self.config.zarr_path).exists():
-            return False
-
         try:
-            root = zarr.open_group(self.config.zarr_path, mode='r')
+            root = zarr.open(self.config.zarr_path, mode='r')
             
             if stage == 'import':
-                return 'raw_video' in root and 'images_full' in root['raw_video']
-            elif stage == 'downsample':
                 return 'raw_video' in root and 'images_ds' in root['raw_video']
+            
             elif stage == 'background':
-                # Check if background_runs exists with at least one run
                 if 'background_runs' not in root:
                     return False
-                return len(list(root['background_runs'].group_keys())) > 0
+                return 'latest' in root['background_runs'].attrs
+            
             elif stage == 'detect':
-                # Check if detect_runs exists with at least one run
                 if 'detect_runs' not in root:
                     return False
-                return len(list(root['detect_runs'].group_keys())) > 0
+                return 'latest' in root['detect_runs'].attrs
+            
             elif stage == 'crop':
-                # Check if crop_runs exists with at least one run
                 if 'crop_runs' not in root:
                     return False
-                return len(list(root['crop_runs'].group_keys())) > 0
+                return 'latest' in root['crop_runs'].attrs
+            
             elif stage == 'keypoints':
-                # Check if keypoints_runs exists with at least one run
-                if 'keypoints_runs' not in root:
+                if 'keypoint_runs' not in root:
                     return False
-                return len(list(root['keypoints_runs'].group_keys())) > 0
-            elif stage == 'assign_ids':
+                return 'latest' in root['keypoint_runs'].attrs
+            
+            elif stage == 'assign_ids':  # ← Add this
                 if 'id_assignment_runs' not in root:
                     return False
-                return len(list(root['id_assignment_runs'].group_keys())) > 0
-            # Add more stage checks as needed
+                return 'latest' in root['id_assignment_runs'].attrs
+            
+            elif stage == 'track':
+                if 'tracking_runs' not in root:
+                    return False
+                return 'latest' in root['tracking_runs'].attrs
+            
+            return False
             
         except Exception:
             return False
-
-        return False
 
 
 def main():
