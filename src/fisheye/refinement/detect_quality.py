@@ -4,7 +4,7 @@ Detection quality assessment and artifact identification.
 
 Evaluates the quality of detection data from detect_runs by:
 1. Analyzing coverage and gaps
-2. Identifying temporal artifacts (islands, blips, jumps)
+2. Identifying temporal artifacts (jumps and blips)
 3. Validating bounding boxes
 4. Computing overall quality score
 """
@@ -15,71 +15,20 @@ from typing import Dict, List, Optional, Tuple, Any
 from .utils import identify_gaps, categorize_gaps, calculate_coverage_stats, Gap
 
 
-def _is_mostly_consecutive(frames: np.ndarray, tolerance: int = 2) -> bool:
-    """True if there are at most `tolerance` non-1 gaps across consecutive frames."""
-    if len(frames) <= 1:
-        return True
-    gaps = np.diff(frames)
-    return int(np.sum(gaps != 1)) <= int(tolerance)
-
-
-def _build_prev_anchor_indices(
-    frame_indices: np.ndarray,
-    flagged_frames_set: set,
-    max_gap_for_valid: int,
-    minimum_valid_streak: int,
-) -> np.ndarray:
-    """
-    For each detection index i (NOT frame number), prev_anchor[i] is the index
-    of the most recent detection that ended a valid streak (length >= minimum_valid_streak)
-    consisting of UNFLAGGED detections with internal gaps <= max_gap_for_valid.
-    If none exists yet, prev_anchor[i] = -1.
-    """
-    n = len(frame_indices)
-    prev_anchor = np.full(n, -1, dtype=np.int32)
-
-    streak_len = 0
-    last_det_idx_in_streak = -1
-    current_anchor = -1
-
-    for i in range(n):
-        f = int(frame_indices[i])
-        if f in flagged_frames_set:
-            # break the streak on flagged frames
-            streak_len = 0
-            last_det_idx_in_streak = -1
-        else:
-            if last_det_idx_in_streak >= 0 and (
-                f - int(frame_indices[last_det_idx_in_streak])
-            ) <= max_gap_for_valid:
-                streak_len += 1
-            else:
-                streak_len = 1
-            last_det_idx_in_streak = i
-
-            if streak_len >= minimum_valid_streak:
-                current_anchor = i  # end of a valid streak becomes the anchor
-
-        prev_anchor[i] = current_anchor
-
-    return prev_anchor
-
-
 def identify_temporal_artifacts(
     bbox_coords: np.ndarray,
     n_detections: np.ndarray,
     width: float,
     height: float,
-    jump_threshold_pixels: float = 20.0,
-    max_gap_for_valid: int = 100,
-    minimum_valid_streak: int = 3,
-    *,
+    jump_threshold_pixels: float = 100.0,
     blip_gap_threshold: int = 10,
-    max_island_len: int = 20,
-    require_consecutive_for_island: bool = True,
 ) -> Dict:
     """
     Identify temporal artifacts in detection data.
+    
+    Flags detections that:
+    1. Jump too far from the last known valid position (jumps)
+    2. Appear after long gaps in detections (blips)
     """
     # Convert to pixel coordinates
     centroids_px = []
@@ -96,174 +45,63 @@ def identify_temporal_artifacts(
 
     if len(centroids_px) < 2:
         return {
-            "islands": [],
             "blips": [],
             "jumps": [],
             "total_artifacts": 0,
             "distances": np.array([]),
             "frame_gaps": np.array([]),
             "jump_threshold": jump_threshold_pixels,
-            "max_gap_for_valid": max_gap_for_valid,
-            "minimum_valid_streak": minimum_valid_streak,
         }
 
     centroids_px = np.array(centroids_px, dtype=np.float32)
     frame_indices = np.array(frame_indices, dtype=np.int32)
 
+    # Calculate distances and gaps between consecutive detections
     distances = np.linalg.norm(np.diff(centroids_px, axis=0), axis=1)
     frame_gaps = np.diff(frame_indices)
-    outlier_indices = np.where(distances > jump_threshold_pixels)[0]
 
-    # ---------- PASS 1: Build initial anchors (motion-based only) ----------
-    # Build anchors assuming no islands yet - just skip outlier detections
-    initial_flagged = set()
-    for idx in outlier_indices:
-        initial_flagged.add(int(frame_indices[idx + 1]))  # Flag detection after big jump
-    
-    prev_anchor = _build_prev_anchor_indices(
-        frame_indices, initial_flagged, max_gap_for_valid, minimum_valid_streak
-    )
-
-    # ---------- PASS 2: Identify island CANDIDATES (motion pattern) ----------
-    island_candidates = []  # List of (start_det, end_det, entry_idx, exit_idx)
     jumps = []
-    processed_indices = set()
-
-    for idx in outlier_indices:
-        if idx in processed_indices:
-            continue
-
-        entry_idx = idx
-        start_det = idx + 1
-        j = start_det
-
-        # Walk forward through calm region
-        while j < len(distances) and distances[j] <= jump_threshold_pixels:
-            j += 1
-
-        exit_exists = (j < len(distances) and distances[j] > jump_threshold_pixels)
-        end_det = j
-
-        candidate_det_indices = np.arange(start_det, end_det + 1, dtype=np.int32)
-        candidate_frames = frame_indices[candidate_det_indices] if len(candidate_det_indices) else np.array([], dtype=np.int32)
-        island_len = int(len(candidate_frames))
-
-        if exit_exists:
-            ok_len = (island_len > 0 and island_len <= max_island_len)
-            ok_consec = True if not require_consecutive_for_island else _is_mostly_consecutive(candidate_frames, tolerance=2)
-
-            if ok_len and ok_consec:
-                # Store as candidate for spatial validation
-                island_candidates.append((start_det, end_det, entry_idx, j))
-                processed_indices.add(idx)
-                for k in range(idx + 1, end_det + 1):
-                    processed_indices.add(k)
-                continue
-            else:
-                # Too long or not consecutive
-                jumps.append(int(frame_indices[start_det]))
-                processed_indices.add(idx)
-                continue
-        else:
-            # No exit jump
-            jumps.append(int(frame_indices[start_det]))
-            processed_indices.add(idx)
-
-    # ---------- PASS 3: Validate island candidates spatially ----------
-    islands = []
-    
-    for start_det, end_det, entry_idx, exit_idx in island_candidates:
-        candidate_det_indices = np.arange(start_det, end_det + 1, dtype=np.int32)
-        
-        # Find anchor before the island
-        anchor_before_idx = int(prev_anchor[start_det - 1]) if start_det > 0 else -1
-        
-        if anchor_before_idx >= 0:
-            # Check if ANY detection in the candidate island is far from anchor
-            is_actually_far = False
-            for cand_idx in candidate_det_indices:
-                dist_to_anchor = float(np.linalg.norm(centroids_px[cand_idx] - centroids_px[anchor_before_idx]))
-                if dist_to_anchor > jump_threshold_pixels:
-                    is_actually_far = True
-                    break
-            
-            if is_actually_far:
-                # Confirmed as island - add all frames
-                islands.extend([int(frame_indices[i]) for i in candidate_det_indices])
-            else:
-                # Motion pattern looked like island, but spatially on trajectory
-                # Don't flag as island
-                pass
-        else:
-            # No anchor available - accept based on motion pattern alone (early in video)
-            islands.extend([int(frame_indices[i]) for i in candidate_det_indices])
-
-    # ---------- PASS 4: Rebuild anchors with confirmed islands ----------
-    all_flagged_frames = set(islands + jumps)
-    prev_anchor = _build_prev_anchor_indices(
-        frame_indices, all_flagged_frames, max_gap_for_valid, minimum_valid_streak
-    )
-
-    # ---------- PASS 5: Check returns after islands ----------
-    unique_islands = sorted(set(islands))
-    island_idx_map = {f: int(np.where(frame_indices == f)[0][0]) for f in unique_islands if np.any(frame_indices == f)}
-
-    for island_frame in unique_islands:
-        island_det_idx = island_idx_map.get(island_frame, None)
-        if island_det_idx is None:
-            continue
-
-        # Find island cluster start
-        island_cluster_start = island_det_idx
-        while island_cluster_start > 0 and frame_indices[island_cluster_start - 1] in all_flagged_frames:
-            island_cluster_start -= 1
-        
-        # Get anchor from before cluster
-        anchor_idx = int(prev_anchor[island_cluster_start - 1]) if island_cluster_start > 0 else -1
-        if anchor_idx == -1:
-            continue
-
-        # Check frames after this island
-        for check_idx in range(island_det_idx + 1, min(island_det_idx + 4, len(frame_indices))):
-            check_frame = int(frame_indices[check_idx])
-            if check_frame in all_flagged_frames:
-                continue
-            
-            dist_to_anchor = float(np.linalg.norm(centroids_px[check_idx] - centroids_px[anchor_idx]))
-            if dist_to_anchor > jump_threshold_pixels:
-                islands.append(check_frame)
-                all_flagged_frames.add(check_frame)
-            else:
-                break
-
-    # ---------- PASS 6: Blips after long gaps ----------
     blips = []
-    for det_idx in range(1, len(frame_indices)):
-        frame_gap = int(frame_indices[det_idx] - frame_indices[det_idx - 1])
+    
+    # Track the last known valid position
+    last_valid_idx = 0
+    last_valid_pos = centroids_px[0].copy()
+
+    # Check each detection
+    for det_idx in range(1, len(centroids_px)):
+        current_pos = centroids_px[det_idx]
         current_frame = int(frame_indices[det_idx])
+        frame_gap = int(frame_gaps[det_idx - 1])
+        
+        # Calculate distance from last known valid position
+        dist_from_valid = float(np.linalg.norm(current_pos - last_valid_pos))
+        
+        # Check if this is a jump
+        if dist_from_valid > jump_threshold_pixels:
+            # This is a jump - flag this frame
+            jumps.append(current_frame)
+            # Don't update last_valid - keep it at the previous valid position
+        else:
+            # Valid detection - update last known valid position
+            last_valid_idx = det_idx
+            last_valid_pos = current_pos.copy()
+        
+        # Also flag as blip if there was a long gap (regardless of jump status)
+        if frame_gap >= blip_gap_threshold:
+            if current_frame not in jumps:
+                blips.append(current_frame)
 
-        if current_frame in all_flagged_frames or frame_gap < blip_gap_threshold:
-            continue
-
-        anchor_idx = int(prev_anchor[det_idx - 1])
-        if anchor_idx == -1:
-            continue
-
-        dist_to_anchor = float(np.linalg.norm(centroids_px[det_idx] - centroids_px[anchor_idx]))
-        if dist_to_anchor > jump_threshold_pixels:
-            blips.append(current_frame)
-            all_flagged_frames.add(current_frame)
+    # Remove duplicates and sort
+    jumps = sorted(set(jumps))
+    blips = sorted(set(blips))
 
     return {
-        "islands": islands,
         "blips": blips,
         "jumps": jumps,
-        "total_artifacts": len(islands) + len(blips) + len(jumps),
+        "total_artifacts": len(jumps) + len(blips),
         "distances": distances,
         "frame_gaps": frame_gaps,
         "jump_threshold": jump_threshold_pixels,
-        "max_gap_for_valid": max_gap_for_valid,
-        "minimum_valid_streak": minimum_valid_streak,
     }
 
 
@@ -384,45 +222,6 @@ def calculate_quality_score(
     }
 
 
-def check_data_integrity(detect_group: zarr.Group, n_detections: np.ndarray) -> Dict:
-    """
-    Check basic data integrity issues.
-
-    Args:
-        detect_group: Zarr group containing detection data
-        n_detections: Detection counts array
-
-    Returns:
-        Integrity check results
-    """
-    issues = []
-
-    # Check array consistency
-    bbox_coords = detect_group["bbox_norm_coords"][:]
-    expected_bbox_count = int(np.sum(n_detections))
-    actual_bbox_count = int(len(bbox_coords))
-
-    if expected_bbox_count != actual_bbox_count:
-        issues.append({
-            "type": "array_mismatch",
-            "message": f"n_detections sum ({expected_bbox_count}) != bbox array length ({actual_bbox_count})",
-        })
-
-    # Check for NaN coordinates
-    nan_count = int(np.sum(np.isnan(bbox_coords)))
-    if nan_count > 0:
-        issues.append({
-            "type": "nan_coordinates",
-            "message": f"Found {nan_count} NaN values in bbox coordinates",
-        })
-
-    return {
-        "has_issues": len(issues) > 0,
-        "issue_count": int(len(issues)),
-        "issues": issues,
-    }
-
-
 def save_quality_report(
     zarr_path: str,
     quality_report: Dict,
@@ -471,19 +270,14 @@ def save_quality_report(
     quality_group.attrs["bbox_validation"] = quality_report["bbox_validation"]
     quality_group.attrs["artifact_detection_params"] = {
         "jump_threshold": quality_report["artifacts"]["jump_threshold"],
-        "max_gap_for_valid": quality_report["artifacts"]["max_gap_for_valid"],
-        "minimum_valid_streak": quality_report["artifacts"]["minimum_valid_streak"],
     }
 
     # Create per-frame quality flags array
-    # 0 = good, 1 = island, 2 = blip, 3 = jump, 4 = multi-detection
+    # 0 = good, 2 = blip, 3 = jump, 4 = multi-detection
     n_frames = int(quality_report["coverage"]["total_frames"])
     quality_flags = np.zeros(n_frames, dtype="i1")
 
     # Mark artifacts
-    for frame_idx in quality_report["artifacts"]["islands"]:
-        if 0 <= frame_idx < n_frames:
-            quality_flags[frame_idx] = 1
     for frame_idx in quality_report["artifacts"]["blips"]:
         if 0 <= frame_idx < n_frames:
             quality_flags[frame_idx] = 2
@@ -500,10 +294,6 @@ def save_quality_report(
     quality_group.create_array("quality_flags", data=quality_flags, chunks=(10000,))
 
     # Save artifact frame indices as separate arrays for easy access
-    quality_group.create_array(
-        "island_frames",
-        data=np.array(quality_report["artifacts"]["islands"], dtype="i4"),
-    )
     quality_group.create_array(
         "blip_frames",
         data=np.array(quality_report["artifacts"]["blips"], dtype="i4"),
@@ -534,8 +324,6 @@ def analyze_detect_quality(
     zarr_path: str,
     run_name: Optional[str] = None,
     jump_threshold: float = 100.0,
-    max_gap_for_valid: int = 3,
-    minimum_valid_streak: int = 3,
 ) -> Dict:
     """
     Comprehensive detection quality analysis.
@@ -544,7 +332,6 @@ def analyze_detect_quality(
         zarr_path: Path to zarr file
         run_name: Specific detect run to analyze (default: latest)
         jump_threshold: Distance threshold for jump detection (pixels)
-        max_gap_for_valid: Max gap size to still consider previous detection as "known valid"
 
     Returns:
         Complete quality analysis report
@@ -583,8 +370,6 @@ def analyze_detect_quality(
         width,
         height,
         jump_threshold_pixels=jump_threshold,
-        max_gap_for_valid=max_gap_for_valid,
-        minimum_valid_streak=minimum_valid_streak,
     )
 
     # Bounding box validation
@@ -647,12 +432,6 @@ Examples:
         "--threshold", type=float, default=100.0, help="Jump threshold in pixels (default: 100)"
     )
     parser.add_argument(
-        "--max-gap", type=int, default=3, help="Max gap for valid streak continuity (default: 3)"
-    )
-    parser.add_argument(
-        "--min-streak", type=int, default=3, help="Minimum valid streak length (default: 3)"
-    )
-    parser.add_argument(
         "--save", action="store_true", default=True, help="Save quality report to zarr (default: True)"
     )
     parser.add_argument(
@@ -663,13 +442,11 @@ Examples:
 
     console = Console()
 
-    console.rule("[bold]Detection Quality Analysis[/bold]")
+    console.rule("[bold]Detection Quality Analysis (Simplified)[/bold]")
     console.print(f"Zarr: {args.zarr_path}")
     if args.run:
         console.print(f"Run: {args.run}")
-    console.print(f"Jump threshold: {args.threshold} pixels")
-    console.print(f"Max gap for valid streak: {args.max_gap}")
-    console.print(f"Minimum valid streak: {args.min_streak}\n")
+    console.print(f"Jump threshold: {args.threshold} pixels\n")
 
     try:
         # Run analysis
@@ -677,8 +454,6 @@ Examples:
             args.zarr_path,
             run_name=args.run,
             jump_threshold=args.threshold,
-            max_gap_for_valid=args.max_gap,
-            minimum_valid_streak=args.min_streak,
         )
 
         # Print detailed summary
@@ -693,15 +468,9 @@ Examples:
         console.print(f"  Total: {gaps['total_count']}")
         console.print(f"  Longest: {gaps['longest_gap']} frames")
         console.print(f"  Mean: {gaps['mean_gap_size']:.1f} frames")
-        if gaps["total_count"] > 0:
-            console.print("  Categories:")
-            for cat, count in gaps["categories"].items():
-                if count > 0:
-                    console.print(f"    {cat}: {count}")
 
         console.print("\n[bold red]ARTIFACTS[/bold red]")
         art = report["artifacts"]
-        console.print(f"  Islands: {len(art['islands'])}")
         console.print(f"  Blips: {len(art['blips'])}")
         console.print(f"  Jumps: {len(art['jumps'])}")
         console.print(f"  Total: {art['total_artifacts']}")

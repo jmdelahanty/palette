@@ -3,16 +3,17 @@ import os, sys, shutil, subprocess
 from pathlib import Path
 
 quality_flags = None
-island_frames = None
 blip_frames = None
 jump_frames = None
 current_artifact_index = 0
 all_artifact_frames = []
+detection_history = []
+HISTORY_WINDOW = 10
 
 def load_quality_data(zarr_root, detect_run_name):
     """Load quality report data and the jump threshold used for analysis."""
 
-    global quality_flags, island_frames, blip_frames, jump_frames, all_artifact_frames, jump_threshold_px
+    global quality_flags, blip_frames, jump_frames, all_artifact_frames, jump_threshold_px
     
     try:
         detect_group = zarr_root[f'detect_runs/{detect_run_name}']
@@ -28,29 +29,31 @@ def load_quality_data(zarr_root, detect_run_name):
         
         quality_group = detect_group[f'quality_reports/{latest_quality}']
         
-        # This will now correctly update the global variable
+        # Load jump threshold
         if 'artifact_detection_params' in quality_group.attrs:
             params = quality_group.attrs['artifact_detection_params']
             jump_threshold_px = params.get('jump_threshold', 0.0)
         
-        # Load quality data
+        # Load quality data (no more islands)
         quality_flags = quality_group['quality_flags'][:]
-        island_frames = list(quality_group['island_frames'][:])
         blip_frames = list(quality_group['blip_frames'][:])
         jump_frames = list(quality_group['jump_frames'][:])
         
         # Combine and sort all artifact frames
-        all_artifact_frames = sorted(set(island_frames + blip_frames + jump_frames))
+        all_artifact_frames = sorted(set(blip_frames + jump_frames))
         
-        print(f"\n🔍 Quality Report Loaded:")
+        print(f"\n Quality Report Loaded:")
         if jump_threshold_px > 0:
-            print(f"  - Jump Threshold: {jump_threshold_px:.2f} pixels") # Moved print statement for cleaner output
-        print(f"  - Islands: {len(island_frames)}")
+            print(f"  - Jump Threshold: {jump_threshold_px:.2f} pixels")
         print(f"  - Blips: {len(blip_frames)}")
         print(f"  - Jumps: {len(jump_frames)}")
         print(f"  - Total artifacts: {len(all_artifact_frames)}")
         
         return True
+        
+    except Exception as e:
+        print(f"Could not load quality data: {e}")
+        return False
         
     except Exception as e:
         print(f"Could not load quality data: {e}")
@@ -346,9 +349,36 @@ jump_threshold_px = 0.0
 
 def update_frame(frame_idx):
     """
-    Called when the slider moves. Draws a circle on 'clean' frames.
+    Called when the slider moves. Draws a circle on 'clean' frames and dots on previous detections.
     """
+    global detection_history
+    
     frame_idx = int(frame_idx)
+    
+    # When jumping (large frame gap), ensure we have at least the previous detection
+    if detection_history:
+        last_frame_in_history = detection_history[-1][0]
+        if frame_idx - last_frame_in_history > HISTORY_WINDOW:
+            # We jumped - find the most recent detection before current frame
+            detection_history = []
+            for prev_frame in range(frame_idx - 1, max(0, frame_idx - HISTORY_WINDOW), -1):
+                if n_detections[prev_frame] > 0:
+                    # Found a previous detection, add it to history
+                    start_idx = int(cumulative_detections[prev_frame])
+                    prev_bbox = bbox_coords[start_idx]
+                    center_x_norm, center_y_norm = prev_bbox[0], prev_bbox[1]
+                    img_height, img_width = images_ds[prev_frame].shape[:2]
+                    center_x = float(center_x_norm) * img_width
+                    center_y = float(center_y_norm) * img_height
+                    
+                    # Check if it was a clean frame
+                    prev_flag = 0
+                    if quality_flags is not None and prev_frame < len(quality_flags):
+                        prev_flag = quality_flags[prev_frame]
+                    is_clean = (prev_flag == 0)
+                    
+                    detection_history.append((prev_frame, center_x, center_y, is_clean))
+                    break  # Only need the most recent one
     ax.clear()
 
     # Load and display the frame
@@ -366,8 +396,8 @@ def update_frame(frame_idx):
     if quality_flags is not None and frame_idx < len(quality_flags):
         flag = quality_flags[frame_idx]
     
-    flag_labels = {0: "", 1: " [ISLAND]", 2: " [BLIP]", 3: " [JUMP]", 4: " [MULTI-DET]"}
-    flag_colors = {0: 'black', 1: 'red', 2: 'orange', 3: 'magenta', 4: 'yellow'}
+    flag_labels = {0: "", 2: " [BLIP]", 3: " [JUMP]", 4: " [MULTI-DET]"}
+    flag_colors = {0: 'black', 2: 'orange', 3: 'magenta', 4: 'yellow'}
     
     if flag > 0:
         title += flag_labels.get(flag, "")
@@ -406,23 +436,39 @@ def update_frame(frame_idx):
             id_text = f"ID: {assigned_id}" if assigned_id != -1 else "Unassigned"
             ax.text(x1, y1 - 5, id_text, color=box_color, fontsize=10, fontweight='bold')
             
-            # ▼▼▼ LOGIC CHANGE IS HERE ▼▼▼
-            # Check if the frame has no flags (flag == 0) and a threshold is loaded
+            # Draw circle for good frames with threshold
             if flag == 0 and jump_threshold_px > 0:
-                # Draw a solid green circle for 'good' frames
                 circle = patches.Circle((center_x, center_y), jump_threshold_px,
                                         linewidth=1.5,
-                                        linestyle='-', # Solid line
+                                        linestyle='-',
                                         edgecolor='lime',
                                         facecolor='none')
                 ax.add_patch(circle)
-            # ▲▲▲ END OF CHANGE ▲▲▲
-
-    ax.axis('off')
-    fig.canvas.draw_idle()
-
-    ax.axis('off')
-    fig.canvas.draw_idle()
+            
+            # Add current detection to history
+            is_clean = (flag == 0)
+            detection_history.append((frame_idx, center_x, center_y, is_clean))
+    
+    # Clean up old history entries outside the window
+    detection_history = [(f, x, y, clean) for f, x, y, clean in detection_history 
+                        if frame_idx - f < HISTORY_WINDOW]
+    
+    # Draw dots for previous detections (excluding current frame)
+    for past_frame, past_x, past_y, was_clean in detection_history:
+        if past_frame < frame_idx:  # Don't draw dot on current frame
+            # Calculate age and alpha for fade effect
+            age = frame_idx - past_frame
+            alpha = 1.0 - (age / HISTORY_WINDOW)
+            
+            # Use cyan for clean detections, orange for flagged ones
+            dot_color = 'cyan' if was_clean else 'orange'
+            
+            # Draw a small dot
+            ax.plot(past_x, past_y, 'o', 
+                   color=dot_color, 
+                   markersize=4, 
+                   alpha=alpha, 
+                   zorder=10)
 
     ax.axis('off')
     fig.canvas.draw_idle()
