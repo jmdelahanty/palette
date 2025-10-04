@@ -69,3 +69,10 @@ keypoints:
   thresh_decrement: 5
   min_valid_angle: 10.0
   min_triangle_area: 100.0
+refine_detect:
+  filters:
+    remove_jumps: true
+    remove_blips: false  # Usually keep blips, they're just after gaps
+  
+  max_gap: 50
+  interpolation_method: linear # currently just linear available...
