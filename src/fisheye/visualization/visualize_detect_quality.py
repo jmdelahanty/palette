@@ -49,27 +49,37 @@ def load_quality_report(zarr_path: str,
     
     # Load quality data
     quality_flags = quality_group['quality_flags'][:]
-    island_frames = quality_group['island_frames'][:]
-    blip_frames = quality_group['blip_frames'][:]
-    jump_frames = quality_group['jump_frames'][:]
+    detection_quality_labels = quality_group['detection_quality_labels'][:]
+    
+    # Compute artifact frame lists from quality_flags
+    empty_frames = np.where(quality_flags == -1)[0]
+    clean_frames = np.where(quality_flags == 0)[0]
+    blip_frames = np.where(quality_flags == 2)[0]
+    jump_frames = np.where(quality_flags == 3)[0]
+    multi_frames = np.where(quality_flags == 4)[0]
     
     # Load attributes
     quality_score = dict(quality_group.attrs['quality_score'])
     coverage_stats = dict(quality_group.attrs['coverage_stats'])
     bbox_validation = dict(quality_group.attrs['bbox_validation'])
+    detection_summary = dict(quality_group.attrs['detection_quality_summary'])
     
     quality_data = {
         'quality_flags': quality_flags,
-        'island_frames': island_frames,
+        'detection_quality_labels': detection_quality_labels,
+        'empty_frames': empty_frames,
+        'clean_frames': clean_frames,
         'blip_frames': blip_frames,
         'jump_frames': jump_frames,
+        'multi_frames': multi_frames,
         'quality_score': quality_score,
         'coverage_stats': coverage_stats,
         'bbox_validation': bbox_validation,
-        'source_run': detect_run  # Changed: use the detect_run we already have
+        'detection_summary': detection_summary,
+        'source_run': detect_run
     }
     
-    # Load corresponding detection data - source_run is the detect_run itself
+    # Load corresponding detection data
     n_detections = detect_group['n_detections'][:]
     bbox_coords = detect_group['bbox_norm_coords'][:]
     
@@ -104,6 +114,7 @@ def load_quality_report(zarr_path: str,
     
     return quality_data, detection_data
 
+
 def create_quality_visualization(quality_data: Dict,
                                  detection_data: Dict,
                                  save_path: Optional[str] = None):
@@ -126,18 +137,11 @@ def create_quality_visualization(quality_data: Dict,
         ax1.plot(centroids[:, 0], centroids[:, 1], 
                 'b-', alpha=0.3, linewidth=0.5, zorder=1)
         
-        # Good detections
-        good_mask = quality_data['quality_flags'][frame_indices] == 0
-        ax1.scatter(centroids[good_mask, 0], centroids[good_mask, 1],
-                   c=frame_indices[good_mask], cmap='viridis', 
-                   s=10, alpha=0.6, zorder=2, label='Good')
-        
-        # Mark islands
-        if len(quality_data['island_frames']) > 0:
-            island_mask = np.isin(frame_indices, quality_data['island_frames'])
-            ax1.scatter(centroids[island_mask, 0], centroids[island_mask, 1],
-                       color='red', s=100, marker='x', linewidths=2,
-                       zorder=5, label=f"Islands ({len(quality_data['island_frames'])})")
+        # Clean detections
+        clean_mask = quality_data['quality_flags'][frame_indices] == 0
+        ax1.scatter(centroids[clean_mask, 0], centroids[clean_mask, 1],
+                   c=frame_indices[clean_mask], cmap='viridis', 
+                   s=10, alpha=0.6, zorder=2, label='Clean')
         
         # Mark blips
         if len(quality_data['blip_frames']) > 0:
@@ -152,6 +156,13 @@ def create_quality_visualization(quality_data: Dict,
             ax1.scatter(centroids[jump_mask, 0], centroids[jump_mask, 1],
                        color='magenta', s=60, marker='^',
                        zorder=3, label=f"Jumps ({len(quality_data['jump_frames'])})")
+        
+        # Mark multi-detections (if any)
+        if len(quality_data['multi_frames']) > 0:
+            multi_mask = np.isin(frame_indices, quality_data['multi_frames'])
+            ax1.scatter(centroids[multi_mask, 0], centroids[multi_mask, 1],
+                       color='yellow', s=60, marker='D',
+                       zorder=3, label=f"Multi ({len(quality_data['multi_frames'])})")
         
         # Mark start/end
         ax1.plot(centroids[0, 0], centroids[0, 1], 'g^', 
@@ -174,6 +185,7 @@ def create_quality_visualization(quality_data: Dict,
     ax2.axis('off')
     
     score = quality_data['quality_score']
+    det_summary = quality_data['detection_summary']
     grade_color = {
         'A': 'green',
         'B': 'lightgreen',
@@ -181,6 +193,8 @@ def create_quality_visualization(quality_data: Dict,
         'D': 'orange',
         'F': 'red'
     }
+    
+    total_artifacts = len(quality_data['blip_frames']) + len(quality_data['jump_frames'])
     
     summary_text = f"""QUALITY SCORE
 
@@ -192,7 +206,9 @@ Component Scores:
 - Artifacts: {score['artifact_score']:.1f}/100
 - Bbox: {score['bbox_score']:.1f}/100
 
-Total Artifacts: {len(quality_data['island_frames']) + len(quality_data['blip_frames']) + len(quality_data['jump_frames'])}
+Detection Quality:
+- Clean: {det_summary['clean_detections']} ({det_summary['clean_percentage']:.1f}%)
+- Artifacts: {total_artifacts}
 """
     
     ax2.text(0.05, 0.95, summary_text, transform=ax2.transAxes,
@@ -205,15 +221,16 @@ Total Artifacts: {len(quality_data['island_frames']) + len(quality_data['blip_fr
     ax3.axis('off')
     
     cov = quality_data['coverage_stats']
+    det_summary = quality_data['detection_summary']
     
     coverage_text = f"""COVERAGE
 
-Total Frames: {cov['total_frames']}
-Detected: {cov['present_frames']}
-Missing: {cov['absent_frames']}
+Total Frames: {det_summary['total_frames']}
+Empty Frames: {det_summary['empty_frames']}
+With Detections: {det_summary['frames_with_detections']}
 Coverage: {cov['coverage_percent']:.1f}%
 
-Multi-detection: {cov['multi_detection_frames']}
+Clean Frames: {det_summary['clean_frames']}
 
 Gaps:
 - Total: {cov['gaps']['total_count']}
@@ -256,10 +273,10 @@ Size Stats:
     quality_flags = quality_data['quality_flags']
     
     # Create color map for quality flags
-    # 0=good(green), 1=island(red), 2=blip(orange), 3=jump(magenta), 4=multi(yellow)
+    # -1=empty(gray), 0=clean(green), 2=blip(orange), 3=jump(magenta), 4=multi(yellow)
     flag_colors = np.zeros((len(quality_flags), 3))
-    flag_colors[quality_flags == 0] = [0, 1, 0]  # Green
-    flag_colors[quality_flags == 1] = [1, 0, 0]  # Red (islands)
+    flag_colors[quality_flags == -1] = [0.5, 0.5, 0.5]  # Gray (empty)
+    flag_colors[quality_flags == 0] = [0, 1, 0]  # Green (clean)
     flag_colors[quality_flags == 2] = [1, 0.5, 0]  # Orange (blips)
     flag_colors[quality_flags == 3] = [1, 0, 1]  # Magenta (jumps)
     flag_colors[quality_flags == 4] = [1, 1, 0]  # Yellow (multi)
@@ -268,7 +285,7 @@ Size Stats:
     ax5.set_xlabel('Frame')
     ax5.set_ylabel('')
     ax5.set_yticks([])
-    ax5.set_title('Quality Flags Timeline (Green=Good, Red=Island, Orange=Blip, Magenta=Jump)')
+    ax5.set_title('Quality Flags Timeline (Gray=Empty, Green=Clean, Orange=Blip, Magenta=Jump)')
     
     # Add frame numbers
     n_ticks = 10
@@ -290,6 +307,7 @@ def main():
         description='Visualize detection quality analysis results'
     )
     parser.add_argument('zarr_path', help='Path to zarr file')
+    parser.add_argument('--detect-run', help='Specific detect run (default: latest)')
     parser.add_argument('--quality-run', help='Specific quality run to visualize (default: latest)')
     parser.add_argument('--output', '-o', help='Save visualization to file')
     
@@ -303,13 +321,20 @@ def main():
         # Load quality report
         quality_data, detection_data = load_quality_report(
             args.zarr_path,
+            detect_run=args.detect_run,
             quality_run=args.quality_run
         )
         
+        det_summary = quality_data['detection_summary']
+        
+        print(f"Detect run: {quality_data['source_run']}")
         print(f"Quality run: {args.quality_run or 'latest'}")
-        print(f"Source detect run: {quality_data['source_run']}")
         print(f"Overall grade: {quality_data['quality_score']['grade']}")
-        print(f"Total artifacts: {len(quality_data['island_frames']) + len(quality_data['blip_frames']) + len(quality_data['jump_frames'])}")
+        print(f"Total detections: {det_summary['total_detections']}")
+        print(f"Clean detections: {det_summary['clean_detections']} ({det_summary['clean_percentage']:.1f}%)")
+        print(f"Empty frames: {det_summary['empty_frames']}")
+        print(f"Blips: {det_summary['blip_detections']}")
+        print(f"Jumps: {det_summary['jump_detections']}")
         
         # Create visualization
         create_quality_visualization(quality_data, detection_data, args.output)

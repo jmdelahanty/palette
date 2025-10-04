@@ -231,9 +231,9 @@ def save_quality_report(
     Save quality report to zarr file within the source detect run.
 
     Creates a quality_reports subgroup within the detect run containing:
-    - Full quality metrics
-    - Frame indices of artifacts
-    - Quality flags array (per-frame quality indicators)
+    - Per-frame quality flags (-1=no detection, 0=clean, 2=blip, 3=jump, 4=multi)
+    - Per-detection quality labels (0=clean, 2=blip, 3=jump, 4=multi)
+    - Full quality metrics and parameters
 
     Args:
         zarr_path: Path to zarr file
@@ -270,14 +270,28 @@ def save_quality_report(
     quality_group.attrs["bbox_validation"] = quality_report["bbox_validation"]
     quality_group.attrs["artifact_detection_params"] = {
         "jump_threshold": quality_report["artifacts"]["jump_threshold"],
+        "blip_gap_threshold": quality_report["artifacts"].get("blip_gap_threshold", 10),
     }
 
-    # Create per-frame quality flags array
-    # 0 = good, 2 = blip, 3 = jump, 4 = multi-detection
+    # Load detection data
+    n_detections = detect_group["n_detections"][:]
     n_frames = int(quality_report["coverage"]["total_frames"])
+    
+    # ============================================================================
+    # Create per-frame quality flags
+    # ============================================================================
+    # -1 = no detection (empty frame)
+    #  0 = clean detection
+    #  2 = blip
+    #  3 = jump
+    #  4 = multi-detection
     quality_flags = np.zeros(n_frames, dtype="i1")
 
-    # Mark artifacts
+    # First, mark all empty frames as -1
+    no_detection_frames = np.where(n_detections == 0)[0]
+    quality_flags[no_detection_frames] = -1
+
+    # Then mark artifacts in frames that have detections
     for frame_idx in quality_report["artifacts"]["blips"]:
         if 0 <= frame_idx < n_frames:
             quality_flags[frame_idx] = 2
@@ -285,23 +299,60 @@ def save_quality_report(
         if 0 <= frame_idx < n_frames:
             quality_flags[frame_idx] = 3
 
-    # Mark multi-detection frames if any
-    n_detections = detect_group["n_detections"][:]
+    # Mark multi-detection frames (will be 0 if max_fish=1)
     multi_det_frames = np.where(n_detections > 1)[0]
     quality_flags[multi_det_frames] = 4
 
-    # Save quality flags array
+    # ============================================================================
+    # Create per-detection quality labels
+    # ============================================================================
+    # This array has one label per detection, matching the indexing of bbox_coords
+    # Note: Only includes detections, no entries for empty frames
+    total_detections = int(np.sum(n_detections))
+    detection_quality_labels = np.zeros(total_detections, dtype="i1")
+    
+    # Build cumulative index for mapping frames to detection indices
+    cumulative_detections = np.cumsum(np.insert(n_detections, 0, 0))
+    
+    # Assign quality labels to each detection based on its frame
+    for frame_idx in range(n_frames):
+        if n_detections[frame_idx] > 0:
+            start_idx = int(cumulative_detections[frame_idx])
+            end_idx = int(cumulative_detections[frame_idx + 1])
+            
+            # All detections in this frame get the frame's quality label
+            # Note: quality_flags[frame_idx] will be 0, 2, 3, or 4 (never -1 since n_detections > 0)
+            detection_quality_labels[start_idx:end_idx] = quality_flags[frame_idx]
+    
+    # ============================================================================
+    # Calculate summary statistics
+    # ============================================================================
+    n_empty_frames = int(np.sum(quality_flags == -1))
+    n_clean_frames = int(np.sum(quality_flags == 0))
+    
+    n_clean_detections = int(np.sum(detection_quality_labels == 0))
+    n_blip_detections = int(np.sum(detection_quality_labels == 2))
+    n_jump_detections = int(np.sum(detection_quality_labels == 3))
+    n_multi_detections = int(np.sum(detection_quality_labels == 4))
+    
+    quality_group.attrs["detection_quality_summary"] = {
+        "total_frames": n_frames,
+        "empty_frames": n_empty_frames,
+        "frames_with_detections": n_frames - n_empty_frames,
+        "clean_frames": n_clean_frames,
+        "total_detections": int(total_detections),
+        "clean_detections": n_clean_detections,
+        "blip_detections": n_blip_detections,
+        "jump_detections": n_jump_detections,
+        "multi_detections": n_multi_detections,
+        "clean_percentage": float(n_clean_detections / total_detections * 100) if total_detections > 0 else 0.0,
+    }
+    
+    # ============================================================================
+    # Save arrays
+    # ============================================================================
     quality_group.create_array("quality_flags", data=quality_flags, chunks=(10000,))
-
-    # Save artifact frame indices as separate arrays for easy access
-    quality_group.create_array(
-        "blip_frames",
-        data=np.array(quality_report["artifacts"]["blips"], dtype="i4"),
-    )
-    quality_group.create_array(
-        "jump_frames",
-        data=np.array(quality_report["artifacts"]["jumps"], dtype="i4"),
-    )
+    quality_group.create_array("detection_quality_labels", data=detection_quality_labels, chunks=(10000,))
 
     # Save gap information if any
     if quality_report["coverage"]["gaps"]["total_count"] > 0:
@@ -312,10 +363,37 @@ def save_quality_report(
             "categories": quality_report["coverage"]["gaps"]["categories"],
         }
 
+    # ============================================================================
+    # Print summary
+    # ============================================================================
     if console:
         console.print(f"[green]✓[/green] Quality report saved: {quality_group.path}")
+        console.print(f"[cyan]Frame Quality Summary:[/cyan]")
+        console.print(f"  Total frames: {n_frames}")
+        console.print(f"  Empty frames: {n_empty_frames}")
+        console.print(f"  Frames with detections: {n_frames - n_empty_frames}")
+        console.print(f"  Clean frames: {n_clean_frames}")
+        console.print(f"[cyan]Detection Quality Summary:[/cyan]")
+        console.print(f"  Total detections: {total_detections}")
+        console.print(f"  Clean: {n_clean_detections} ({n_clean_detections/total_detections*100:.1f}%)" if total_detections > 0 else "  Clean: 0 (0.0%)")
+        console.print(f"  Blips: {n_blip_detections}")
+        console.print(f"  Jumps: {n_jump_detections}")
+        if n_multi_detections > 0:
+            console.print(f"  Multi-detection: {n_multi_detections}")
     else:
         print(f"Quality report saved: {quality_group.path}")
+        print(f"Frame Quality Summary:")
+        print(f"  Total frames: {n_frames}")
+        print(f"  Empty frames: {n_empty_frames}")
+        print(f"  Frames with detections: {n_frames - n_empty_frames}")
+        print(f"  Clean frames: {n_clean_frames}")
+        print(f"Detection Quality Summary:")
+        print(f"  Total detections: {total_detections}")
+        print(f"  Clean: {n_clean_detections} ({n_clean_detections/total_detections*100:.1f}%)" if total_detections > 0 else "  Clean: 0 (0.0%)")
+        print(f"  Blips: {n_blip_detections}")
+        print(f"  Jumps: {n_jump_detections}")
+        if n_multi_detections > 0:
+            print(f"  Multi-detection: {n_multi_detections}")
 
     return quality_group.path
 
@@ -324,6 +402,7 @@ def analyze_detect_quality(
     zarr_path: str,
     run_name: Optional[str] = None,
     jump_threshold: float = 100.0,
+    blip_gap_threshold: int = 10,
 ) -> Dict:
     """
     Comprehensive detection quality analysis.
@@ -370,6 +449,7 @@ def analyze_detect_quality(
         width,
         height,
         jump_threshold_pixels=jump_threshold,
+        blip_gap_threshold=blip_gap_threshold
     )
 
     # Bounding box validation

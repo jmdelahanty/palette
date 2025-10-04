@@ -34,15 +34,17 @@ def load_quality_data(zarr_root, detect_run_name):
             params = quality_group.attrs['artifact_detection_params']
             jump_threshold_px = params.get('jump_threshold', 0.0)
         
-        # Load quality data (no more islands)
+        # Load quality flags array
         quality_flags = quality_group['quality_flags'][:]
-        blip_frames = list(quality_group['blip_frames'][:])
-        jump_frames = list(quality_group['jump_frames'][:])
+        
+        # Compute artifact frame lists from quality_flags
+        blip_frames = list(np.where(quality_flags == 2)[0])
+        jump_frames = list(np.where(quality_flags == 3)[0])
         
         # Combine and sort all artifact frames
         all_artifact_frames = sorted(set(blip_frames + jump_frames))
         
-        print(f"\n Quality Report Loaded:")
+        print(f"\n✓ Quality Report Loaded:")
         if jump_threshold_px > 0:
             print(f"  - Jump Threshold: {jump_threshold_px:.2f} pixels")
         print(f"  - Blips: {len(blip_frames)}")
@@ -50,10 +52,6 @@ def load_quality_data(zarr_root, detect_run_name):
         print(f"  - Total artifacts: {len(all_artifact_frames)}")
         
         return True
-        
-    except Exception as e:
-        print(f"Could not load quality data: {e}")
-        return False
         
     except Exception as e:
         print(f"Could not load quality data: {e}")
