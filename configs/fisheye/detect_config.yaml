@@ -1,77 +1,73 @@
 # ================================================================================
-# COMPREHENSIVE MULTI-ZARR YOLO TRAINING CONFIGURATION
+# YOLO DETECTION TRAINING CONFIGURATION
 # ================================================================================
 
 # --- Dummy paths for YOLOv8 trainer compatibility ---
 # Our custom dataloader ignores these paths, but they are required to pass initial checks.
-train: ./
-val: ./
+train: ./dummy_train.txt
+val: ./dummy_val.txt
 nc: 1
 names: ['fish']
 
-# Part 1: DATA CONFIGURATION
-# --------------------------------------------------------------------------------
-data_config:
-  zarr_paths:
-    - /home/delahantyj@hhmi.org/Desktop/
+# ================================================================================
+# DATASET CONFIGURATION
+# ================================================================================
+# Each dataset can independently specify which detection stage to use:
+# - 'detect': Original detections (blob/YOLO outputs, may contain jumps)
+# - 'filtered': Refined detections with jumps/outliers removed (RECOMMENDED)
+# - 'interpolated': Refined with gaps filled (includes synthetic data)
+#
+# RECOMMENDATION: Use 'filtered' as default for training on real data only.
+# ================================================================================
+
+datasets:
+  # Dataset 1
+  arena4_sesh3:
+    zarr_path: /nvme1/sesh3/2025-09-23T22-11-11Z_arena_4_chaser_arena4.zarr
+    source_type: filtered  # Use real detections with jumps removed (recommended)
+    
+    # Optional: Custom split ratios per dataset (defaults to global split below)
+    split:
+      train: 0.8
+      val: 0.2
   
-  task: detect
-  split_ratio: 0.8
-  random_seed: 42
+  # Add more datasets as needed:
+  # arena4_sesh1:
+  #   zarr_path: /path/to/another.zarr
+  #   source_type: filtered
+  #   split:
+  #     train: 0.8
+  #     val: 0.2
 
-  #  Interpolation Filtering
-  # --------------------------------------------------------------------------------
-  # filter_interpolated: Controls whether to include interpolated (synthetic) data
-  #
-  # false (default): Use ALL data (real detections + interpolated gap-fills)
-  #                  - Maximizes training data
-  #                  - Good when interpolated % is small (<5%)
-  #                  - Use when data quality is high
-  #
-  # true:            Use ONLY real detections (excludes interpolated)
-  #                  - Pure real-world data only
-  #                  - Better for scientific rigor
-  #                  - Use when you have plenty of real data
-  #
-  # The trainer will automatically detect and report interpolated data if present.
-  filter_interpolated: false
+# ================================================================================
+# GLOBAL DATASET SETTINGS
+# ================================================================================
+task: detect
+random_seed: 42
 
-  # sampling_strategy: Defines how to sample from multiple zarr_paths.
-  #
-  # --- Available Strategies ---
-  # "balanced": (Default) Takes an equal number of samples from each dataset,
-  #             matching the size of the smallest one. Prevents larger
-  #             datasets from dominating the training.
-  #
-  # "proportional": Uses all available valid frames from all datasets. The number
-  #                 of samples from each dataset will be proportional to its size.
-  #
-  # "weighted":     Allows you to manually define the importance of each dataset.
-  #                 Requires the 'dataset_weights' dictionary below.
-  #
-  sampling_strategy: balanced
-
-  # --- Example for 'weighted' strategy ---
-  # To use this, set sampling_strategy to "weighted" and uncomment the following lines.
-  # The keys must match the names of your zarr files (without the .zarr extension).
-  # The weights are relative. For example, a weight of 1.0 for 'video1' and 2.0 for
-  # 'video2' means you want twice as many samples from 'video2' relative to 'video1',
-  # assuming enough valid frames are available.
-  #
-  # dataset_weights:
-  #   20250731_omnifin0_arena4: 1.0
-  #   other_dataset: 2.0
-
-
-# Part 2: MODEL & TRAINING HYPERPARAMETERS
+# Sampling Strategy
 # --------------------------------------------------------------------------------
+# "balanced": Equal samples from each dataset (matches smallest dataset size)
+# "proportional": Sample proportionally to dataset size (uses all data)
+# "weighted": Manual control via dataset_weights below
+sampling_strategy: balanced
+
+# Optional: Only needed for 'weighted' sampling strategy
+# Uncomment and adjust weights as needed (must match dataset names above)
+# dataset_weights:
+#   arena4_sesh3: 1.0
+#   arena4_sesh1: 2.0
+
+# ================================================================================
+# MODEL & TRAINING HYPERPARAMETERS
+# ================================================================================
 training_params:
   # Model setup
-  model: yolov8n.pt
-
+  model: yolo11n.pt
+  
   # Core hyperparameters
-  epochs: 100  # Number of training epochs
-  batch: 48    # Batch size for training
+  epochs: 1  # Number of training epochs
+  batch: 128    # Batch size for training
   imgsz: 640   # Input image size for training
   lr0: 0.002   # Initial learning rate
   momentum: 0.9          # Momentum factor
@@ -80,11 +76,20 @@ training_params:
   device: '0'            # CUDA device
 
 # ================================================================================
-# Part 3: TRAINING HISTORY & METADATA
-# This section is automatically populated by the training script after a run.
-# It now includes complete data provenance tracking:
-# - Crop source type (detect/filtered/interpolated)
-# - Real vs. interpolated ROI counts
-# - Data quality metrics (jumps removed, gaps filled)
-# - Complete refinement pipeline information
+# TRAINING HISTORY & METADATA
+# ================================================================================
+# This section is automatically populated by the training script after each run.
+# It includes complete data provenance tracking:
+# 
+# Per-dataset metadata:
+# - Detection source type (detect/filtered/interpolated)
+# - Source run names and timestamps
+# - Real vs. interpolated detection counts (if applicable)
+# - Quality metrics (coverage, jumps removed, gaps filled)
+# - Refinement parameters used
+# 
+# Training metrics:
+# - Model performance (mAP, precision, recall)
+# - Training time and resource usage
+# - Final model checkpoint paths
 # ================================================================================

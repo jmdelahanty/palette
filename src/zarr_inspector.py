@@ -54,11 +54,11 @@ def detect_pipeline_components(root):
     }
     
     # Check for detection data
-    if 'bboxes' in root or 'detect_runs' in root:
+    if 'detect_runs' in root or 'bboxes' in root:
         components['detection'] = True
     
-    # Check for preprocessing
-    if 'filtered_runs' in root or 'preprocessing' in root:
+    # Check for preprocessing (refinement, cropping, filtering)
+    if any(group in root for group in ['refined_runs', 'filtered_runs', 'preprocessing', 'crop_runs']):
         components['preprocessing'] = True
     
     # Check for calibration
@@ -91,13 +91,29 @@ def detect_pipeline_components(root):
     
     return components
 
+
+def get_frame_counts_from_group(group, expected_length: int | None = None):
+    """Return per-frame detection counts from a group if available."""
+    if 'frame_counts' in group:
+        counts = group['frame_counts'][:]
+    elif 'frame_indices' in group:
+        indices = group['frame_indices'][:]
+        minlength = expected_length or (int(indices.max()) + 1 if indices.size else 0)
+        counts = np.bincount(indices.astype(np.int64, copy=False), minlength=minlength)
+    else:
+        return None
+
+    if expected_length is not None and len(counts) < expected_length:
+        counts = np.pad(counts, (0, expected_length - len(counts)), mode='constant')
+    return counts
+
 def analyze_calibration(root, console):
     """Analyze and display calibration information."""
     if 'calibration' not in root:
         return
     
     calib = root['calibration']
-    calib_table = Table(title="📐 Calibration Data", box=box.ROUNDED)
+    calib_table = Table(title="Calibration Data", box=box.ROUNDED)
     calib_table.add_column("Parameter", style="cyan")
     calib_table.add_column("Value", style="yellow")
     calib_table.add_column("Units", style="green")
@@ -139,7 +155,7 @@ def analyze_bout_phases(root, console):
     if 'summary_statistics' in run_group.attrs:
         stats = run_group.attrs['summary_statistics']
         
-        phase_table = Table(title="🏊 Training Phase Bout Analysis", box=box.ROUNDED)
+        phase_table = Table(title="Training Phase Bout Analysis", box=box.ROUNDED)
         phase_table.add_column("Phase", style="cyan")
         phase_table.add_column("Bouts", style="yellow", justify="right")
         phase_table.add_column("Rate (bouts/min)", style="green", justify="right")
@@ -176,7 +192,7 @@ def analyze_behavior_metrics(root, console):
     
     metrics = root['behavior_metrics']
     
-    metrics_table = Table(title="📊 Behavior Metrics", box=box.ROUNDED)
+    metrics_table = Table(title="Behavior Metrics", box=box.ROUNDED)
     metrics_table.add_column("Metric", style="cyan")
     metrics_table.add_column("Value", style="yellow")
     metrics_table.add_column("Units", style="green")
@@ -216,33 +232,29 @@ def analyze_preprocessing_pipeline(root, console):
     """Analyze the preprocessing pipeline stages."""
     stages = []
     
-    # Original data
-    if 'n_detections' in root:
-        n_det = root['n_detections'][:]
-        coverage = (n_det > 0).sum() / len(n_det) * 100
-        stages.append(('Original', coverage, len(n_det)))
+    detect_counts = None
+    if 'detect_runs' in root and root['detect_runs'].attrs.get('latest'):
+        latest_detect = root['detect_runs'].attrs['latest']
+        detect_group = root[f'detect_runs/{latest_detect}']
+        detect_counts = get_frame_counts_from_group(detect_group)
+        if detect_counts is not None and len(detect_counts) > 0:
+            coverage = (detect_counts > 0).sum() / len(detect_counts) * 100
+            stages.append(('Detected', coverage, len(detect_counts)))
     
-    # Filtered data
-    if 'filtered_runs' in root and 'latest' in root['filtered_runs'].attrs:
-        latest = root['filtered_runs'].attrs['latest']
-        n_det = root['filtered_runs'][latest]['n_detections'][:]
-        coverage = (n_det > 0).sum() / len(n_det) * 100
-        stages.append(('Filtered', coverage, len(n_det)))
-    
-    # Interpolated data
-    if 'preprocessing' in root:
-        if 'interpolated_runs' in root['preprocessing']:
-            runs = root['preprocessing']['interpolated_runs']
-            run_names = sorted([name for name in runs.keys() if name.startswith('run_')])
-            if run_names:
-                n_det = runs[run_names[-1]]['n_detections'][:]
-                coverage = (n_det > 0).sum() / len(n_det) * 100
-                stages.append(('Interpolated', coverage, len(n_det)))
-        elif 'latest' in root['preprocessing'].attrs:
-            latest = root['preprocessing'].attrs['latest']
-            n_det = root['preprocessing'][latest]['n_detections'][:]
-            coverage = (n_det > 0).sum() / len(n_det) * 100
-            stages.append(('Interpolated', coverage, len(n_det)))
+    if 'refined_runs' in root and root['refined_runs'].attrs.get('latest'):
+        latest_refined = root['refined_runs'].attrs['latest']
+        refined_group = root[f'refined_runs/{latest_refined}']
+        expected_length = len(detect_counts) if detect_counts is not None else None
+        if 'filtered' in refined_group:
+            filtered_counts = get_frame_counts_from_group(refined_group['filtered'], expected_length)
+            if filtered_counts is not None and len(filtered_counts) > 0:
+                coverage = (filtered_counts > 0).sum() / len(filtered_counts) * 100
+                stages.append(('Filtered', coverage, len(filtered_counts)))
+        if 'interpolated' in refined_group:
+            interpolated_counts = get_frame_counts_from_group(refined_group['interpolated'], expected_length)
+            if interpolated_counts is not None and len(interpolated_counts) > 0:
+                coverage = (interpolated_counts > 0).sum() / len(interpolated_counts) * 100
+                stages.append(('Interpolated', coverage, len(interpolated_counts)))
     
     if stages:
         pipeline_table = Table(title="🔧 Preprocessing Pipeline", box=box.ROUNDED)
@@ -268,7 +280,7 @@ def analyze_preprocessing_pipeline(root, console):
         
         console.print(pipeline_table)
 
-def build_enhanced_tree(group: zarr.hierarchy.Group, tree_branch: Tree, max_depth: int = 3, current_depth: int = 0):
+def build_enhanced_tree(group: zarr.Group, tree_branch: Tree, max_depth: int = 3, current_depth: int = 0):
     """Builds an enhanced tree view with better formatting and depth control."""
     if current_depth >= max_depth:
         tree_branch.add("[dim]... (more groups/arrays)[/dim]")
@@ -320,7 +332,7 @@ def build_enhanced_tree(group: zarr.hierarchy.Group, tree_branch: Tree, max_dept
         
         tree_branch.add(f"{icon} [green]{name}[/green] [dim]({shape_str}, {arr_obj.dtype}, {size_str})[/dim]")
 
-def print_summary_panel(console: Console, root, components):
+def print_summary_panel(console: Console, root, components, zarr_path: str):
     """Print a summary panel of the zarr contents."""
     summary_lines = []
     
@@ -352,19 +364,36 @@ def print_summary_panel(console: Console, root, components):
     status = "✅" if components['bout_phase_analysis'] else "❌"
     summary_lines.append(f"  {status} Training phase analysis")
     
-    # Data quality
-    if 'n_detections' in root:
-        n_det = root['n_detections'][:]
-        coverage = (n_det > 0).sum() / len(n_det) * 100
-        summary_lines.append(f"\nOriginal coverage: {coverage:.1f}%")
+    # Detection coverage from latest run
+    if 'detect_runs' in root and root['detect_runs'].attrs.get('latest'):
+        latest_detect = root['detect_runs'].attrs['latest']
+        detect_group = root[f'detect_runs/{latest_detect}']
+        if 'frame_counts' in detect_group:
+            counts = detect_group['frame_counts'][:]
+            if len(counts) > 0:
+                coverage = (counts > 0).sum() / len(counts) * 100
+                summary_lines.append(f"\nDetection coverage: {coverage:.1f}% across {len(counts)} frames")
+                total_dets = int(counts.sum())
+                summary_lines.append(f"Total detections: {total_dets:,}")
     
     # File size
     total_size = 0
-    for path, dirs, files in os.walk(root.store.path if hasattr(root.store, 'path') else str(root.store)):
-        for f in files:
-            fp = os.path.join(path, f)
-            if os.path.exists(fp):
-                total_size += os.path.getsize(fp)
+    store_path = None
+    store = root.store
+    for attr in ('path', 'directory', '_path'):
+        if hasattr(store, attr):
+            candidate = getattr(store, attr)
+            if isinstance(candidate, str):
+                store_path = candidate
+                break
+    if store_path is None:
+        store_path = os.path.abspath(zarr_path)
+    if os.path.isdir(store_path):
+        for path, _, files in os.walk(store_path):
+            for f in files:
+                fp = os.path.join(path, f)
+                if os.path.exists(fp):
+                    total_size += os.path.getsize(fp)
     summary_lines.append(f"Total size: {format_bytes(total_size)}")
     
     panel = Panel(
@@ -374,6 +403,84 @@ def print_summary_panel(console: Console, root, components):
         padding=(1, 2)
     )
     console.print(panel)
+
+
+def print_environment_info(console: Console, root) -> None:
+    """Print environment/provenance info for the most recent runs."""
+    env_rows = []
+
+    def add_entry(stage_label: str, run_name: str, group):
+        if group is None:
+            return
+        prov = group.attrs.get('provenance', {})
+        code = group.attrs.get('code_version', {})
+        git_info = prov.get('git') if isinstance(prov.get('git'), dict) else {}
+
+        git_commit = code.get('git_commit') or git_info.get('commit_hash') or git_info.get('git_commit')
+        host = code.get('hostname') or prov.get('hostname') or git_info.get('hostname')
+        created = (prov.get('created_at_utc') or
+                   group.attrs.get('detect_timestamp_utc') or
+                   group.attrs.get('crop_timestamp_utc') or
+                   group.attrs.get('refinement_timestamp') or
+                   group.attrs.get('assign_ids_timestamp_utc') or
+                   group.attrs.get('analysis_timestamp'))
+
+        command = prov.get('command') or prov.get('cmd')
+        if command and len(command) > 80:
+            command = command[:77] + "..."
+
+        env_rows.append((stage_label, run_name, created or '—', host or '—', git_commit or '—', command or '—'))
+
+    def latest_group(path: str):
+        if path not in root:
+            return None, None
+        group = root[path]
+        latest = group.attrs.get('latest')
+        if not latest or latest not in group:
+            return None, None
+        return latest, group[latest]
+
+    # Detect run
+    run_name, run_group = latest_group('detect_runs')
+    if run_group is not None:
+        add_entry('Detect', run_name, run_group)
+
+        # Quality run inside detect
+        quality_group = run_group.get('quality_reports') if 'quality_reports' in run_group else None
+        if quality_group is not None:
+            latest_quality = quality_group.attrs.get('latest')
+            if latest_quality and latest_quality in quality_group:
+                add_entry('Quality', latest_quality, quality_group[latest_quality])
+
+    # Refined run
+    run_name, run_group = latest_group('refined_runs')
+    if run_group is not None:
+        add_entry('Refine', run_name, run_group)
+
+    # Crop run
+    run_name, run_group = latest_group('crop_runs')
+    if run_group is not None:
+        add_entry('Crop', run_name, run_group)
+
+    # ID assignment run
+    run_name, run_group = latest_group('id_assignment_runs')
+    if run_group is not None:
+        add_entry('Assign IDs', run_name, run_group)
+
+    if env_rows:
+        env_table = Table(title="⚙️ Run Environment", box=box.ROUNDED)
+        env_table.add_column("Stage", style="cyan")
+        env_table.add_column("Run", style="yellow")
+        env_table.add_column("Created", style="green")
+        env_table.add_column("Host", style="magenta")
+        env_table.add_column("Git Commit", style="dim")
+        env_table.add_column("Command", style="white")
+
+        for row in env_rows:
+            env_table.add_row(*row)
+
+        console.print()
+        console.print(env_table)
 
 def inspect_zarr_archive(zarr_path: str, tree_depth: int = 3):
     """Main function to inspect a Zarr archive."""
@@ -392,8 +499,9 @@ def inspect_zarr_archive(zarr_path: str, tree_depth: int = 3):
     # Detect components
     components = detect_pipeline_components(root)
     
-    # Summary panel
-    print_summary_panel(console, root, components)
+    # Summary panel and environment info
+    print_summary_panel(console, root, components, zarr_path)
+    print_environment_info(console, root)
     
     # Archive structure tree
     console.print("\n[bold]📁 Archive Structure[/bold]")
@@ -423,6 +531,7 @@ def inspect_zarr_archive(zarr_path: str, tree_depth: int = 3):
     
     # Show latest runs for each analysis type
     analysis_groups = [
+        ('refined_runs', 'Refinement'),
         ('filtered_runs', 'Filtering'),
         ('preprocessing', 'Interpolation'),
         ('bout_analysis', 'Bout Analysis'),

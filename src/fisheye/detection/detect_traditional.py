@@ -4,13 +4,13 @@ Updated to use zarr-first parameter resolution.
 """
 
 import time
+import sys
 import numpy as np
 import zarr
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple, List, Any
 from rich.console import Console
 from rich.progress import Progress, BarColumn, TextColumn
-from tqdm import tqdm
 
 import skimage
 from skimage.morphology import disk, erosion, dilation
@@ -154,7 +154,7 @@ def detect_chunk_delayed(zarr_path: str, chunk_slice: slice, detect_params: Dict
         latest_bg_run: Name of background run to use
     
     Returns:
-        Tuple of (chunk_slice, frame_detection_counts, all_bbox_norms)
+        Tuple of (chunk_slice, frame_indices_list, bbox_norms_list)
     """
     se1 = disk(detect_params['se1_radius'])
     se4 = disk(detect_params['se4_radius'])
@@ -165,10 +165,14 @@ def detect_chunk_delayed(zarr_path: str, chunk_slice: slice, detect_params: Dict
     ds_img_shape = images_ds_chunk.shape[1:]
 
     chunk_len = images_ds_chunk.shape[0]
+    frame_start = chunk_slice.start
+    
     all_bbox_norms = []
-    frame_detection_counts = np.zeros(chunk_len, dtype='i4')
+    all_frame_indices = []
 
     for i in range(chunk_len):
+        frame_idx = frame_start + i
+        
         diff_ds = np.clip(background_ds.astype(np.int16) - images_ds_chunk[i].astype(np.int16), 0, 255).astype(np.uint8)
         if dish_mask is not None:
             diff_ds[dish_mask == 0] = 0
@@ -190,7 +194,6 @@ def detect_chunk_delayed(zarr_path: str, chunk_slice: slice, detect_params: Dict
 
         # Keep only top N fish by area
         sorted_blobs = sorted(valid_blobs, key=lambda r: r.area, reverse=True)[:detect_params.get('max_fish', 20)]
-        frame_detection_counts[i] = len(sorted_blobs)
 
         for blob in sorted_blobs:
             min_r, min_c, max_r, max_c = blob.bbox
@@ -201,8 +204,9 @@ def detect_chunk_delayed(zarr_path: str, chunk_slice: slice, detect_params: Dict
             center_norm = np.array([center_x / ds_img_shape[1], center_y / ds_img_shape[0]])
             size_norm = np.array([width / ds_img_shape[1], height / ds_img_shape[0]])
             all_bbox_norms.append([*center_norm, *size_norm])
+            all_frame_indices.append(frame_idx)
             
-    return chunk_slice, frame_detection_counts, all_bbox_norms
+    return chunk_slice, all_frame_indices, all_bbox_norms
 
 
 def detect_fish(
@@ -265,24 +269,6 @@ def detect_fish(
     
     console.print(f"Processing {num_images} frames in chunks of {chunk_size}")
     
-    # Create output arrays
-    n_detections = detect_group.create_array(
-        'n_detections', 
-        shape=(num_images,), 
-        chunks=(chunk_size * 4,), 
-        dtype='i4', 
-        overwrite=True
-    )
-    
-    # Start with small array, will resize as needed
-    bbox_norm_coords = detect_group.create_array(
-        'bbox_norm_coords', 
-        shape=(1, 4), 
-        chunks=(chunk_size * 4, 4), 
-        dtype='f8', 
-        overwrite=True
-    )
-    
     # Create dask tasks
     chunk_slices = [slice(i, min(i + chunk_size, num_images)) for i in range(0, num_images, chunk_size)]
     console.print(f"Creating [yellow]{len(chunk_slices)}[/yellow] Dask tasks for detection...")
@@ -294,29 +280,98 @@ def detect_fish(
     
     console.print("Writing detection results to Zarr...")
     
-    # Collect all bboxes first, then do single resize and write
-    all_chunk_bboxes = []
-    total_detections = 0
+    # Collect all results
+    all_frame_indices: List[int] = []
+    all_bboxes: List[List[float]] = []
     
-    for slc, counts, bboxes in tqdm(results, desc="Processing chunks"):
-        n_detections[slc] = counts
-        if bboxes:
-            all_chunk_bboxes.append(np.array(bboxes, dtype='f8'))
-            total_detections += len(bboxes)
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        console=console,
+    ) as progress:
+        aggregate_task = progress.add_task(
+            "[cyan]Aggregating detections...", total=len(results)
+        )
+        for slc, frame_idxs, bboxes in results:
+            if frame_idxs:
+                all_frame_indices.extend(frame_idxs)
+                all_bboxes.extend(bboxes)
+            progress.advance(aggregate_task)
     
+    total_detections = len(all_frame_indices)
     console.print(f"Aggregating {total_detections} total detections...")
     
-    # Now resize and write just ONCE
+    # Write core detection arrays
     if total_detections > 0:
-        bbox_norm_coords.resize((total_detections, 4))
-        final_bboxes = np.concatenate(all_chunk_bboxes, axis=0)
-        bbox_norm_coords[:] = final_bboxes
+        frame_indices_np = np.array(all_frame_indices, dtype='i4')
+        bboxes_np = np.array(all_bboxes, dtype='f8')
+        
+        detect_group.create_array(
+            'frame_indices',
+            data=frame_indices_np,
+            chunks=(min(chunk_size * 4, total_detections),),
+            overwrite=True
+        )
+        
+        detect_group.create_array(
+            'bbox_norm_coords',
+            data=bboxes_np,
+            chunks=(min(chunk_size * 4, total_detections), 4),
+            overwrite=True
+        )
+        
+        # Compute and store frame counts for visualization
+        console.print("Computing frame counts for visualization...")
+        frame_counts = np.bincount(frame_indices_np, minlength=num_images)
+        detect_group.create_array(
+            'frame_counts',
+            data=frame_counts,
+            chunks=(min(chunk_size * 4, num_images),),
+            overwrite=True
+        )
+        
     else:
-        bbox_norm_coords.resize((0, 4))
+        # No detections found
+        detect_group.create_array('frame_indices', data=np.empty((0,), dtype='i4'), overwrite=True)
+        detect_group.create_array('bbox_norm_coords', data=np.empty((0, 4), dtype='f8'), overwrite=True)
+        frame_counts_empty = np.zeros(num_images, dtype='i4')
+        chunks = (min(chunk_size * 4, num_images),) if num_images else None
+        detect_group.create_array(
+            'frame_counts',
+            data=frame_counts_empty,
+            chunks=chunks,
+            overwrite=True
+        )
 
     # Calculate statistics
-    frames_with_detections = np.sum(n_detections[:] > 0)
-    percent_detected = (frames_with_detections / num_images) * 100 if num_images > 0 else 0
+    if total_detections > 0:
+        frame_counts = detect_group['frame_counts'][:]
+        frames_with_detections = int(np.sum(frame_counts > 0))
+        percent_detected = (frames_with_detections / num_images) * 100
+        max_detections = int(np.max(frame_counts))
+        mean_detections = float(np.mean(frame_counts[frame_counts > 0]))
+        
+        # Distribution breakdown
+        distribution = {
+            'frames_with_0': int(np.sum(frame_counts == 0)),
+            'frames_with_1': int(np.sum(frame_counts == 1)),
+            'frames_with_2': int(np.sum(frame_counts == 2)),
+            'frames_with_3_to_5': int(np.sum((frame_counts >= 3) & (frame_counts <= 5))),
+            'frames_with_6_plus': int(np.sum(frame_counts >= 6)),
+        }
+    else:
+        frames_with_detections = 0
+        percent_detected = 0.0
+        max_detections = 0
+        mean_detections = 0.0
+        distribution = {
+            'frames_with_0': num_images,
+            'frames_with_1': 0,
+            'frames_with_2': 0,
+            'frames_with_3_to_5': 0,
+            'frames_with_6_plus': 0,
+        }
     
     # Store metadata
     duration = time.perf_counter() - start_time
@@ -331,9 +386,12 @@ def detect_fish(
         'dask_scheduler': scheduler,
         'summary_statistics': {
             'total_frames': num_images,
-            'frames_with_detections': int(frames_with_detections),
-            'total_detections': int(total_detections),
-            'percent_frames_with_detections': round(percent_detected, 2)
+            'frames_with_detections': frames_with_detections,
+            'total_detections': total_detections,
+            'percent_frames_with_detections': round(percent_detected, 2),
+            'max_detections_per_frame': max_detections,
+            'mean_detections_per_frame': round(mean_detections, 2),
+            'distribution': distribution
         },
         'code_version': {
             'git_commit': git_info['commit_hash'],
@@ -353,13 +411,29 @@ def detect_fish(
     console.print(f"[green]Detection completed in {duration:.2f} seconds[/green]")
     console.print(f"Found [green]{total_detections}[/green] fish in [green]{frames_with_detections}/{num_images}[/green] frames ([cyan]{percent_detected:.2f}%[/cyan])")
     
+    if total_detections > 0:
+        console.print(f"  Max detections/frame: [yellow]{max_detections}[/yellow], Mean: [yellow]{mean_detections:.1f}[/yellow]")
+        console.print(f"  Distribution: 0=[cyan]{distribution['frames_with_0']}[/cyan], "
+                     f"1=[cyan]{distribution['frames_with_1']}[/cyan], "
+                     f"2=[cyan]{distribution['frames_with_2']}[/cyan], "
+                     f"3-5=[cyan]{distribution['frames_with_3_to_5']}[/cyan], "
+                     f"6+=[cyan]{distribution['frames_with_6_plus']}[/cyan]")
+
+    detect_group.attrs['provenance'] = {
+        'command': ' '.join(sys.argv),
+        'config_path': config_path,
+        'created_at_utc': datetime.now(timezone.utc).isoformat(),
+        'git': git_info,
+        'platform': platform_info,
+    }
+    
     # Run quality analysis
     console.print("\n[bold]Running detection quality analysis...[/bold]")
     try:
         quality_report = analyze_detect_quality(
             zarr_path=zarr_path,
-            run_name=run_name,  # Use the run we just created
-            jump_threshold=100.0  # Could make this configurable
+            run_name=run_name,
+            jump_threshold=100.0
         )
         
         save_quality_report(zarr_path, quality_report, console=console)
@@ -371,7 +445,6 @@ def detect_fish(
         
     except Exception as e:
         console.print(f"[yellow]Quality analysis failed: {e}[/yellow]")
-        # Don't fail the whole detection if quality check fails
 
     return {
         'duration_seconds': duration,

@@ -28,9 +28,9 @@ from rich.table import Table
 import json
 import zarr
 
-from config_models import DetectConfig
-from training.zarr_yolo_dataset_loader import create_zarr_dataset, ZarrDatasetConfig
-from tracker import get_git_info
+from .config import DetectConfig, DatasetConfig
+from .zarr_yolo_dataset_loader import create_zarr_dataset, ZarrDatasetConfig
+from ..utils.system import get_git_info
 
 
 # Custom DataLoader to ensure compatibility with Ultralytics YOLO's expected interface
@@ -50,15 +50,15 @@ def det_collate_fn(batch):
     for i, sample in enumerate(batch):
         cls_labels = np.atleast_1d(sample['cls'])
         if cls_labels.size > 0 and cls_labels[0] is not None:
-            cls_list.append(torch.from_numpy(cls_labels))
+            cls_list.append(torch.from_numpy(cls_labels).reshape(-1, 1).float())
             bboxes_list.append(torch.from_numpy(sample['bboxes']))
-            batch_idx_list.append(torch.full((len(cls_labels),), i))
+            batch_idx_list.append(torch.full((len(cls_labels),), i, dtype=torch.long))
     
     if not batch_idx_list:
         return {
             'img': images,
             'batch_idx': torch.empty(0, dtype=torch.long),
-            'cls': torch.empty(0, dtype=torch.float32),
+            'cls': torch.empty(0, 1, dtype=torch.float32),
             'bboxes': torch.empty(0, 4, dtype=torch.float32),
             'im_file': im_files,
             'ori_shape': ori_shapes,
@@ -79,8 +79,24 @@ def det_collate_fn(batch):
 class DetValidator(DetectionValidator):
     def _prepare_batch(self, si, batch):
         pbatch = super()._prepare_batch(si, batch)
-        if 'cls' in pbatch and hasattr(pbatch['cls'], 'ndim') and pbatch['cls'].ndim == 0:
-            pbatch['cls'] = pbatch['cls'].unsqueeze(0)
+        
+        # Handle cls shape issues
+        if 'cls' in pbatch and hasattr(pbatch['cls'], 'shape'):
+            cls = pbatch['cls']
+            
+            # Convert to torch tensor if needed
+            if not isinstance(cls, torch.Tensor):
+                cls = torch.from_numpy(cls) if hasattr(cls, '__array__') else torch.tensor(cls)
+            
+            # Handle different shapes
+            if cls.ndim == 0:  # Scalar
+                pbatch['cls'] = cls.unsqueeze(0)
+            elif cls.ndim == 2 and cls.shape[1] == 1:  # (N, 1) -> squeeze to (N,)
+                pbatch['cls'] = cls.squeeze(1)
+            elif cls.shape[0] == 0:  # Empty array - this might be the issue!
+                # For empty batches, create proper empty tensor
+                pbatch['cls'] = torch.tensor([], dtype=torch.long)
+        
         return pbatch
 
 
@@ -93,7 +109,6 @@ class DetTrainer(DetectionTrainer):
             args=self.args,
             _callbacks=self.callbacks
         )
-
 
 def get_zarr_metadata(zarr_paths, console=None):
     """
@@ -265,20 +280,29 @@ def display_zarr_metadata(metadata, console):
 
 def main(args):
     console = Console()
-    console.print("[bold cyan]🚀 Starting YOLO Detection Training[/bold cyan]\n")
+    console.print("[bold cyan] Starting YOLO Detection Training[/bold cyan]\n")
 
     try:
         # Load and validate config
         full_config = DetectConfig.from_yaml(args.config_path)
-        config = ZarrDatasetConfig(**full_config.data_config.model_dump())
+        
+        # Extract dataset config fields from flat structure
+        zarr_config_dict = {
+            'datasets': full_config.datasets,
+            'task': full_config.task,
+            'random_seed': full_config.random_seed,
+            'sampling_strategy': full_config.sampling_strategy,
+            'dataset_weights': full_config.dataset_weights,
+        }
+        config = ZarrDatasetConfig(**zarr_config_dict)
         console.print(f"[bold green]✓ Loaded config:[/bold green] {args.config_path}\n")
     except Exception as e:
         console.print(f"[bold red]✗ Error loading config:[/bold red] {e}")
         return
 
     # Get comprehensive zarr metadata
-    console.print("[bold cyan]📊 Analyzing Zarr Files...[/bold cyan]\n")
-    zarr_metadata = get_zarr_metadata(config.zarr_paths, console)
+    console.print("[bold cyan] Analyzing Zarr Files...[/bold cyan]\n")
+    zarr_metadata = get_zarr_metadata(config.get_zarr_paths(), console)
     display_zarr_metadata(zarr_metadata, console)
     
     # Check for interpolated data
@@ -289,7 +313,7 @@ def main(args):
     )
     
     if has_interpolated:
-        console.print("[yellow]⚠ Warning: Some datasets include interpolated (synthetic) data[/yellow]")
+        console.print("[yellow] Warning: Some datasets include interpolated (synthetic) data[/yellow]")
         console.print("[dim]  To filter these out, add 'filter_interpolated: true' to your config[/dim]\n")
 
     # Setup dataloader
@@ -301,7 +325,7 @@ def main(args):
             batch_size=batch_size,
             shuffle=(mode == 'train'),
             collate_fn=det_collate_fn,
-            num_workers=8,
+            num_workers=16,
             pin_memory=True,
             persistent_workers=False
         )
@@ -323,21 +347,20 @@ def main(args):
     console.print()
 
     # Start training
-    console.print("[bold green]🏋️ Starting Training...[/bold green]\n")
+    console.print("[bold green] Starting Training...[/bold green]\n")
     training_start_time = time.time()
     
     results = model.train(
         trainer=DetTrainer,
         data=args.config_path,
         name=args.run_name or "multi_zarr_train",
-        project="runs/detect",
         **training_params
     )
     
     training_duration_seconds = time.time() - training_start_time
 
     # Log training metadata
-    console.print("\n[bold cyan]📝 Logging Training Report...[/bold cyan]")
+    console.print("\n[bold cyan] Logging Training Report...[/bold cyan]")
     try:
         git_info = get_git_info()
         results_df = pd.read_csv(results.save_dir / 'results.csv')
@@ -383,7 +406,7 @@ def main(args):
         console.print(f"[bold green]✓ Training report saved:[/bold green] {final_config_path}")
         
         # Display final metrics
-        metrics_table = Table(title="📈 Final Training Metrics")
+        metrics_table = Table(title=" Final Training Metrics")
         metrics_table.add_column("Metric", style="cyan")
         metrics_table.add_column("Value", style="yellow")
         

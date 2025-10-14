@@ -11,13 +11,14 @@ Evaluates the quality of detection data from detect_runs by:
 
 import numpy as np
 import zarr
+import sys
 from typing import Dict, List, Optional, Tuple, Any
 from .utils import identify_gaps, categorize_gaps, calculate_coverage_stats, Gap
 
 
 def identify_temporal_artifacts(
     bbox_coords: np.ndarray,
-    n_detections: np.ndarray,
+    frame_indices: np.ndarray,
     width: float,
     height: float,
     jump_threshold_pixels: float = 100.0,
@@ -30,20 +31,7 @@ def identify_temporal_artifacts(
     1. Jump too far from the last known valid position (jumps)
     2. Appear after long gaps in detections (blips)
     """
-    # Convert to pixel coordinates
-    centroids_px = []
-    frame_indices = []
-
-    cumulative = np.cumsum(np.insert(n_detections, 0, 0))
-    for frame_idx in range(len(n_detections)):
-        if n_detections[frame_idx] > 0:
-            idx = cumulative[frame_idx]
-            center_x = bbox_coords[idx, 0] * width
-            center_y = bbox_coords[idx, 1] * height
-            centroids_px.append([center_x, center_y])
-            frame_indices.append(frame_idx)
-
-    if len(centroids_px) < 2:
+    if bbox_coords.size == 0:
         return {
             "blips": [],
             "jumps": [],
@@ -53,8 +41,20 @@ def identify_temporal_artifacts(
             "jump_threshold": jump_threshold_pixels,
         }
 
-    centroids_px = np.array(centroids_px, dtype=np.float32)
-    frame_indices = np.array(frame_indices, dtype=np.int32)
+    centroids_px = np.column_stack(
+        (bbox_coords[:, 0] * width, bbox_coords[:, 1] * height)
+    ).astype(np.float32, copy=False)
+    frame_indices = frame_indices.astype(np.int32, copy=False)
+    
+    if len(centroids_px) < 2:
+        return {
+            "blips": [],
+            "jumps": [],
+            "total_artifacts": 0,
+            "distances": np.array([]),
+            "frame_gaps": np.array([]),
+            "jump_threshold": jump_threshold_pixels,
+        }
 
     # Calculate distances and gaps between consecutive detections
     distances = np.linalg.norm(np.diff(centroids_px, axis=0), axis=1)
@@ -102,10 +102,11 @@ def identify_temporal_artifacts(
         "distances": distances,
         "frame_gaps": frame_gaps,
         "jump_threshold": jump_threshold_pixels,
+        "blip_gap_threshold": blip_gap_threshold,
     }
 
 
-def validate_bboxes(bbox_coords: np.ndarray, n_detections: np.ndarray) -> Dict:
+def validate_bboxes(bbox_coords: np.ndarray, frame_indices: np.ndarray) -> Dict:
     """
     Validate bounding box quality.
 
@@ -116,14 +117,7 @@ def validate_bboxes(bbox_coords: np.ndarray, n_detections: np.ndarray) -> Dict:
     - Malformed boxes
     """
     # Get valid bboxes
-    valid_bboxes = []
-    cumulative = np.cumsum(np.insert(n_detections, 0, 0))
-    for frame_idx in range(len(n_detections)):
-        if n_detections[frame_idx] > 0:
-            idx = cumulative[frame_idx]
-            valid_bboxes.append(bbox_coords[idx])
-
-    if len(valid_bboxes) == 0:
+    if bbox_coords.size == 0:
         return {
             "total_bboxes": 0,
             "out_of_range": 0,
@@ -131,7 +125,9 @@ def validate_bboxes(bbox_coords: np.ndarray, n_detections: np.ndarray) -> Dict:
             "malformed": 0,
         }
 
-    valid_bboxes = np.array(valid_bboxes)
+    frame_indices = frame_indices.astype(np.int64, copy=False)
+    _, first_indices = np.unique(frame_indices, return_index=True)
+    valid_bboxes = bbox_coords[first_indices]
 
     # Check coordinate range
     out_of_range = np.sum(
@@ -274,8 +270,18 @@ def save_quality_report(
     }
 
     # Load detection data
-    n_detections = detect_group["n_detections"][:]
+    frame_indices = detect_group["frame_indices"][:].astype(np.int64, copy=False)
     n_frames = int(quality_report["coverage"]["total_frames"])
+    if "frame_counts" in detect_group:
+        frame_counts = detect_group["frame_counts"][:]
+        if len(frame_counts) < n_frames:
+            frame_counts = np.pad(
+                frame_counts,
+                (0, n_frames - len(frame_counts)),
+                mode="constant"
+            )
+    else:
+        frame_counts = np.bincount(frame_indices, minlength=n_frames)
     
     # ============================================================================
     # Create per-frame quality flags
@@ -288,7 +294,7 @@ def save_quality_report(
     quality_flags = np.zeros(n_frames, dtype="i1")
 
     # First, mark all empty frames as -1
-    no_detection_frames = np.where(n_detections == 0)[0]
+    no_detection_frames = np.where(frame_counts == 0)[0]
     quality_flags[no_detection_frames] = -1
 
     # Then mark artifacts in frames that have detections
@@ -300,7 +306,7 @@ def save_quality_report(
             quality_flags[frame_idx] = 3
 
     # Mark multi-detection frames (will be 0 if max_fish=1)
-    multi_det_frames = np.where(n_detections > 1)[0]
+    multi_det_frames = np.where(frame_counts > 1)[0]
     quality_flags[multi_det_frames] = 4
 
     # ============================================================================
@@ -308,21 +314,11 @@ def save_quality_report(
     # ============================================================================
     # This array has one label per detection, matching the indexing of bbox_coords
     # Note: Only includes detections, no entries for empty frames
-    total_detections = int(np.sum(n_detections))
-    detection_quality_labels = np.zeros(total_detections, dtype="i1")
-    
-    # Build cumulative index for mapping frames to detection indices
-    cumulative_detections = np.cumsum(np.insert(n_detections, 0, 0))
-    
-    # Assign quality labels to each detection based on its frame
-    for frame_idx in range(n_frames):
-        if n_detections[frame_idx] > 0:
-            start_idx = int(cumulative_detections[frame_idx])
-            end_idx = int(cumulative_detections[frame_idx + 1])
-            
-            # All detections in this frame get the frame's quality label
-            # Note: quality_flags[frame_idx] will be 0, 2, 3, or 4 (never -1 since n_detections > 0)
-            detection_quality_labels[start_idx:end_idx] = quality_flags[frame_idx]
+    total_detections = int(frame_indices.size)
+    if total_detections > 0:
+        detection_quality_labels = quality_flags[frame_indices].astype("i1", copy=False)
+    else:
+        detection_quality_labels = np.zeros(0, dtype="i1")
     
     # ============================================================================
     # Calculate summary statistics
@@ -346,6 +342,14 @@ def save_quality_report(
         "jump_detections": n_jump_detections,
         "multi_detections": n_multi_detections,
         "clean_percentage": float(n_clean_detections / total_detections * 100) if total_detections > 0 else 0.0,
+    }
+
+    quality_group.attrs['provenance'] = {
+        'command': ' '.join(sys.argv),
+        'created_at_utc': datetime.now().isoformat(),
+        'source_detect_run': source_run,
+        'jump_threshold': quality_report['artifacts']['jump_threshold'],
+        'blip_gap_threshold': quality_report['artifacts'].get('blip_gap_threshold'),
     }
     
     # ============================================================================
@@ -422,30 +426,43 @@ def analyze_detect_quality(
         run_name = root["detect_runs"].attrs["latest"]
 
     detect_group = root[f"detect_runs/{run_name}"]
-    n_detections = detect_group["n_detections"][:]
+    frame_indices = detect_group["frame_indices"][:]
     bbox_coords = detect_group["bbox_norm_coords"][:]
 
     # Get image dimensions
     if "raw_video" in root:
-        width = root["raw_video/images_ds"].shape[2]
-        height = root["raw_video/images_ds"].shape[1]
+        ds_images = root["raw_video/images_ds"]
+        height, width = ds_images.shape[1], ds_images.shape[2]
+        num_frames = ds_images.shape[0]
     else:
         width = 640
         height = 640
+        num_frames = int(frame_indices.max() + 1) if frame_indices.size else 0
+
+    if "frame_counts" in detect_group:
+        frame_counts = detect_group["frame_counts"][:]
+        if len(frame_counts) < num_frames:
+            pad_width = num_frames - len(frame_counts)
+            frame_counts = np.pad(frame_counts, (0, pad_width), mode="constant")
+    else:
+        frame_counts = np.bincount(
+            frame_indices.astype(np.int64, copy=False),
+            minlength=num_frames,
+        )
 
     # Coverage analysis
-    presence_mask = n_detections > 0
+    presence_mask = frame_counts > 0
     coverage_stats = calculate_coverage_stats(presence_mask)
     all_gaps = identify_gaps(presence_mask)
     gap_categories = categorize_gaps(all_gaps)
 
     # Multi-detection frames (should be 0 for single-fish)
-    multi_detection_frames = int(np.sum(n_detections > 1))
+    multi_detection_frames = int(np.sum(frame_counts > 1))
 
     # Temporal artifact detection
     artifacts = identify_temporal_artifacts(
         bbox_coords,
-        n_detections,
+        frame_indices,
         width,
         height,
         jump_threshold_pixels=jump_threshold,
@@ -453,7 +470,7 @@ def analyze_detect_quality(
     )
 
     # Bounding box validation
-    bbox_validation = validate_bboxes(bbox_coords, n_detections)
+    bbox_validation = validate_bboxes(bbox_coords, frame_indices)
 
     # Quality score
     quality_score = calculate_quality_score(

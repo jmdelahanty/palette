@@ -13,17 +13,18 @@ Workflow:
 
 import numpy as np
 import zarr
+import sys
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from rich.console import Console
-from rich.progress import track
 
 
 def filter_detections(
     bbox_coords: np.ndarray,
     scores: np.ndarray,
-    n_detections: np.ndarray,
+    frame_indices: np.ndarray,
     detection_quality_labels: np.ndarray,
+    num_frames: int,
     filters: List[str] = ['remove_jumps']
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict]:
     """
@@ -32,13 +33,14 @@ def filter_detections(
     Args:
         bbox_coords: Original bounding boxes (N, 4)
         scores: Original confidence scores (N,)
-        n_detections: Per-frame detection counts (total_frames,)
+        frame_indices: Frame index for each detection (N,)
         detection_quality_labels: Quality label per detection (N,)
+        num_frames: Total frame count for the source video
         filters: List of filters to apply
         
     Returns:
-        Tuple of (filtered_bboxes, filtered_scores, filtered_n_detections, 
-                  frame_mapping, drop_stats)
+        Tuple of (filtered_bboxes, filtered_scores, frame_counts, 
+                  frame_indices, drop_stats)
     """
     # Determine which detections to keep
     keep_mask = np.ones(len(detection_quality_labels), dtype=bool)
@@ -61,27 +63,10 @@ def filter_detections(
     # Apply filter
     filtered_bboxes = bbox_coords[keep_mask]
     filtered_scores = scores[keep_mask]
+    filtered_frame_indices = frame_indices[keep_mask].astype('i4', copy=False)
     
-    # Build frame mapping (which original frame each detection came from)
-    cumulative = np.cumsum(np.insert(n_detections, 0, 0))
-    frame_mapping = []
-    
-    for frame_idx in range(len(n_detections)):
-        if n_detections[frame_idx] > 0:
-            start_idx = int(cumulative[frame_idx])
-            end_idx = int(cumulative[frame_idx + 1])
-            
-            # Check which detections in this frame are kept
-            for det_idx in range(start_idx, end_idx):
-                if keep_mask[det_idx]:
-                    frame_mapping.append(frame_idx)
-    
-    frame_mapping = np.array(frame_mapping, dtype='i4')
-    
-    # Update n_detections per frame
-    filtered_n_detections = np.zeros_like(n_detections)
-    for frame_idx in frame_mapping:
-        filtered_n_detections[frame_idx] += 1
+    # Update per-frame detection counts
+    filtered_counts = np.bincount(filtered_frame_indices, minlength=num_frames).astype('i4', copy=False)
     
     # Stats
     drop_stats = {
@@ -91,31 +76,33 @@ def filter_detections(
         'original': len(detection_quality_labels)
     }
     
-    return filtered_bboxes, filtered_scores, filtered_n_detections, frame_mapping, drop_stats
+    return filtered_bboxes, filtered_scores, filtered_counts, filtered_frame_indices, drop_stats
 
 
 def find_gaps_to_interpolate(
-    n_detections: np.ndarray,
+    frame_indices: np.ndarray,
     max_gap: int = 20
 ) -> List[Dict]:
     """
     Find gaps between detections suitable for interpolation.
     
     Args:
-        n_detections: Per-frame detection counts
+        frame_indices: Frame index for each detection
         max_gap: Maximum gap size to interpolate
         
     Returns:
         List of gap dictionaries with start, end, size
     """
-    # Find frames with detections
-    detected_frames = np.where(n_detections > 0)[0]
+    if frame_indices.size == 0:
+        return []
     
-    if len(detected_frames) < 2:
+    detected_frames = np.unique(frame_indices.astype('i4', copy=False))
+    
+    if detected_frames.size < 2:
         return []
     
     gaps = []
-    for i in range(len(detected_frames) - 1):
+    for i in range(detected_frames.size - 1):
         gap_start = int(detected_frames[i])
         gap_end = int(detected_frames[i + 1])
         gap_size = gap_end - gap_start - 1
@@ -177,8 +164,8 @@ def interpolate_gap(
 def interpolate_detections(
     filtered_bboxes: np.ndarray,
     filtered_scores: np.ndarray,
-    filtered_n_detections: np.ndarray,
-    filtered_frame_mapping: np.ndarray,
+    filtered_frame_indices: np.ndarray,
+    num_frames: int,
     max_gap: int = 20,
     method: str = 'linear'
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict]:
@@ -188,17 +175,17 @@ def interpolate_detections(
     Args:
         filtered_bboxes: Filtered bounding boxes
         filtered_scores: Filtered scores
-        filtered_n_detections: Filtered per-frame counts
-        filtered_frame_mapping: Frame mapping for filtered data
+        filtered_frame_indices: Frame index for each filtered detection
+        num_frames: Total frame count for the source video
         max_gap: Maximum gap size to interpolate
         method: Interpolation method
         
     Returns:
-        Tuple of (interp_bboxes, interp_scores, interp_n_detections,
-                  interp_frame_mapping, detection_source, interp_stats)
+        Tuple of (interp_bboxes, interp_scores, frame_counts,
+                  frame_indices, detection_source, interp_stats)
     """
     # Find gaps
-    gaps = find_gaps_to_interpolate(filtered_n_detections, max_gap)
+    gaps = find_gaps_to_interpolate(filtered_frame_indices, max_gap)
     
     if len(gaps) == 0:
         # No gaps to fill - return filtered data with source labels
@@ -209,18 +196,21 @@ def interpolate_detections(
             'mean_gap_size': 0.0,
             'max_gap_size': 0
         }
-        return (filtered_bboxes, filtered_scores, filtered_n_detections,
-                filtered_frame_mapping, detection_source, stats)
+        filtered_counts = np.bincount(filtered_frame_indices, minlength=num_frames).astype('i4', copy=False)
+        return (filtered_bboxes, filtered_scores, filtered_counts,
+                filtered_frame_indices.astype('i4', copy=False), detection_source, stats)
     
     # Build index mapping for filtered data
     frame_to_idx = {}
-    for idx, frame in enumerate(filtered_frame_mapping):
-        frame_to_idx[frame] = idx
+    for idx, frame in enumerate(filtered_frame_indices):
+        frame = int(frame)
+        if frame not in frame_to_idx:
+            frame_to_idx[frame] = idx
     
     # Collect all interpolated detections
     all_bboxes = [filtered_bboxes]
     all_scores = [filtered_scores]
-    all_frame_mappings = [filtered_frame_mapping]
+    all_frame_indices = [filtered_frame_indices.astype('i4', copy=False)]
     all_sources = [np.zeros(len(filtered_bboxes), dtype='i1')]  # 0 = original
     
     total_interpolated = 0
@@ -250,7 +240,7 @@ def interpolate_detections(
         
         all_bboxes.append(interp_bboxes)
         all_scores.append(interp_scores)
-        all_frame_mappings.append(np.array(fill_frames, dtype='i4'))
+        all_frame_indices.append(np.array(fill_frames, dtype='i4'))
         all_sources.append(np.ones(len(fill_frames), dtype='i1'))  # 1 = interpolated
         
         total_interpolated += len(fill_frames)
@@ -259,20 +249,18 @@ def interpolate_detections(
     # Concatenate all detections
     interp_bboxes = np.concatenate(all_bboxes, axis=0)
     interp_scores = np.concatenate(all_scores)
-    interp_frame_mapping = np.concatenate(all_frame_mappings)
+    interp_frame_indices = np.concatenate(all_frame_indices)
     detection_source = np.concatenate(all_sources)
     
     # Sort by frame to maintain temporal order
-    sort_idx = np.argsort(interp_frame_mapping)
+    sort_idx = np.argsort(interp_frame_indices)
     interp_bboxes = interp_bboxes[sort_idx]
     interp_scores = interp_scores[sort_idx]
-    interp_frame_mapping = interp_frame_mapping[sort_idx]
+    interp_frame_indices = interp_frame_indices[sort_idx]
     detection_source = detection_source[sort_idx]
     
     # Update n_detections
-    interp_n_detections = np.zeros_like(filtered_n_detections)
-    for frame_idx in interp_frame_mapping:
-        interp_n_detections[frame_idx] += 1
+    interp_counts = np.bincount(interp_frame_indices, minlength=num_frames).astype('i4', copy=False)
     
     # Stats
     stats = {
@@ -283,8 +271,8 @@ def interpolate_detections(
         'min_gap_size': int(min(gap_sizes)) if gap_sizes else 0
     }
     
-    return (interp_bboxes, interp_scores, interp_n_detections,
-            interp_frame_mapping, detection_source, stats)
+    return (interp_bboxes, interp_scores, interp_counts,
+            interp_frame_indices.astype('i4', copy=False), detection_source, stats)
 
 
 def get_refinement_parameters(
@@ -406,18 +394,28 @@ def create_refined_run(
     detect_group = root[f'detect_runs/{detect_run}']
     console.print(f"Source detect run: [cyan]{detect_run}[/cyan]")
     
-    # Get quality run
-    if quality_run is None:
-        quality_run = detect_group['quality_reports'].attrs['latest']
-    
-    quality_group = detect_group[f'quality_reports/{quality_run}']
-    console.print(f"Source quality run: [cyan]{quality_run}[/cyan]")
-    
-    # Load data
+    # Load detection data
     console.print("\nLoading detection data...")
     bbox_coords = detect_group['bbox_norm_coords'][:]
-    n_detections = detect_group['n_detections'][:]
-    detection_quality_labels = quality_group['detection_quality_labels'][:]
+    frame_indices = detect_group['frame_indices'][:]
+
+    # Load quality labels if available, otherwise assume all detections are clean
+    detection_quality_labels: np.ndarray
+    if 'quality_reports' in detect_group and detect_group['quality_reports'].attrs.get('latest'):
+        if quality_run is None:
+            quality_run = detect_group['quality_reports'].attrs['latest']
+        quality_group = detect_group[f'quality_reports/{quality_run}']
+        console.print(f"Source quality run: [cyan]{quality_run}[/cyan]")
+        detection_quality_labels = quality_group['detection_quality_labels'][:]
+    else:
+        console.print("[yellow]⚠ No detection quality reports found; assuming all detections are valid.[/yellow]")
+        detection_quality_labels = np.zeros(len(bbox_coords), dtype='i1')
+    
+    num_frames = root['raw_video/images_ds'].shape[0]
+    if 'frame_counts' in detect_group:
+        frame_counts = detect_group['frame_counts'][:]
+    else:
+        frame_counts = np.bincount(frame_indices, minlength=num_frames).astype('i4')
     
     # Scores may not exist for blob detection - create placeholder if missing
     if 'scores' in detect_group:
@@ -428,15 +426,15 @@ def create_refined_run(
         console.print("  [yellow]Note: No scores array found, using placeholder values[/yellow]")
     
     console.print(f"  Total detections: {len(bbox_coords)}")
-    console.print(f"  Total frames: {len(n_detections)}")
+    console.print(f"  Total frames: {num_frames}")
     
     # Step 1: Filter
     console.print(f"\n[bold]Step 1: Filtering[/bold]")
     console.print(f"  Filters: {filters}")
     
-    (filtered_bboxes, filtered_scores, filtered_n_detections,
-     filtered_frame_mapping, drop_stats) = filter_detections(
-        bbox_coords, scores, n_detections, detection_quality_labels, filters
+    (filtered_bboxes, filtered_scores, filtered_counts,
+     filtered_frame_indices, drop_stats) = filter_detections(
+        bbox_coords, scores, frame_indices, detection_quality_labels, num_frames, filters
     )
     
     console.print(f"  Kept: {drop_stats['kept']} detections")
@@ -449,10 +447,9 @@ def create_refined_run(
     console.print(f"  Max gap: {max_gap_val} frames")
     console.print(f"  Method: {interp_method}")
     
-    (interp_bboxes, interp_scores, interp_n_detections,
-     interp_frame_mapping, detection_source, interp_stats) = interpolate_detections(
-        filtered_bboxes, filtered_scores, filtered_n_detections,
-        filtered_frame_mapping, max_gap_val, interp_method
+    (interp_bboxes, interp_scores, interp_counts,
+     interp_frame_indices, detection_source, interp_stats) = interpolate_detections(
+        filtered_bboxes, filtered_scores, filtered_frame_indices, num_frames, max_gap_val, interp_method
     )
     
     console.print(f"  Gaps filled: {interp_stats['gaps_filled']}")
@@ -462,26 +459,26 @@ def create_refined_run(
                      f"(mean: {interp_stats['mean_gap_size']:.1f}) frames")
     
     # Calculate coverage comparison
-    original_coverage = (np.sum(n_detections > 0) / len(n_detections)) * 100
-    filtered_coverage = (np.sum(filtered_n_detections > 0) / len(filtered_n_detections)) * 100
-    interpolated_coverage = (np.sum(interp_n_detections > 0) / len(interp_n_detections)) * 100
+    original_coverage = (np.sum(frame_counts > 0) / num_frames) * 100
+    filtered_coverage = (np.sum(filtered_counts > 0) / num_frames) * 100
+    interpolated_coverage = (np.sum(interp_counts > 0) / num_frames) * 100
     
     comparison_stats = {
         'original': {
             'total_detections': int(len(bbox_coords)),
-            'frames_with_detections': int(np.sum(n_detections > 0)),
+            'frames_with_detections': int(np.sum(frame_counts > 0)),
             'coverage_percent': float(original_coverage)
         },
         'filtered': {
             'total_detections': int(len(filtered_bboxes)),
-            'frames_with_detections': int(np.sum(filtered_n_detections > 0)),
+            'frames_with_detections': int(np.sum(filtered_counts > 0)),
             'coverage_percent': float(filtered_coverage),
             'detections_removed': int(drop_stats['total_dropped']),
             'coverage_loss': float(filtered_coverage - original_coverage)
         },
         'interpolated': {
             'total_detections': int(len(interp_bboxes)),
-            'frames_with_detections': int(np.sum(interp_n_detections > 0)),
+            'frames_with_detections': int(np.sum(interp_counts > 0)),
             'coverage_percent': float(interpolated_coverage),
             'detections_added': int(interp_stats['interpolated_detections']),
             'coverage_gain': float(interpolated_coverage - filtered_coverage)
@@ -508,7 +505,7 @@ def create_refined_run(
     
     # Store root metadata
     refined_group.attrs['source_detect_run'] = detect_run
-    refined_group.attrs['source_quality_run'] = quality_run
+    refined_group.attrs['source_quality_run'] = quality_run or 'N/A'
     refined_group.attrs['refinement_timestamp'] = datetime.now().isoformat()
     refined_group.attrs['processing_time_seconds'] = float(duration)
     refined_group.attrs['operations'] = ['filter', 'interpolate']
@@ -519,13 +516,24 @@ def create_refined_run(
         'parameter_source': param_source
     }
     refined_group.attrs['coverage_comparison'] = comparison_stats
+    refined_group.attrs['inputs'] = {
+        'detect_run': detect_run,
+        'quality_run': quality_run or 'N/A'
+    }
+    refined_group.attrs['provenance'] = {
+        'command': ' '.join(sys.argv),
+        'created_at_utc': datetime.now().isoformat(),
+        'quality_source': quality_run or 'N/A'
+    }
     
     # Save filtered data
     filtered_grp = refined_group.create_group('filtered')
     filtered_grp.create_array('bbox_norm_coords', data=filtered_bboxes, chunks=(1000, 4))
     filtered_grp.create_array('scores', data=filtered_scores, chunks=(1000,))
-    filtered_grp.create_array('n_detections', data=filtered_n_detections, chunks=(10000,))
-    filtered_grp.create_array('frame_mapping', data=filtered_frame_mapping, chunks=(1000,))
+    filtered_grp.create_array('frame_indices', data=filtered_frame_indices, chunks=(1000,))
+    filtered_grp.create_array('frame_counts', data=filtered_counts, chunks=(10000,))
+    filtered_grp.create_array('n_detections', data=filtered_counts, chunks=(10000,))
+    filtered_grp.create_array('frame_mapping', data=filtered_frame_indices, chunks=(1000,))
     
     filtered_grp.attrs['total_detections'] = int(len(filtered_bboxes))
     filtered_grp.attrs['dropped_detections'] = drop_stats['total_dropped']
@@ -535,8 +543,10 @@ def create_refined_run(
     interp_grp = refined_group.create_group('interpolated')
     interp_grp.create_array('bbox_norm_coords', data=interp_bboxes, chunks=(1000, 4))
     interp_grp.create_array('scores', data=interp_scores, chunks=(1000,))
-    interp_grp.create_array('n_detections', data=interp_n_detections, chunks=(10000,))
-    interp_grp.create_array('frame_mapping', data=interp_frame_mapping, chunks=(1000,))
+    interp_grp.create_array('frame_indices', data=interp_frame_indices, chunks=(1000,))
+    interp_grp.create_array('frame_counts', data=interp_counts, chunks=(10000,))
+    interp_grp.create_array('n_detections', data=interp_counts, chunks=(10000,))
+    interp_grp.create_array('frame_mapping', data=interp_frame_indices, chunks=(1000,))
     interp_grp.create_array('detection_source', data=detection_source, chunks=(1000,))
     
     interp_grp.attrs['total_detections'] = int(len(interp_bboxes))

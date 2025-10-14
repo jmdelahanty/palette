@@ -80,33 +80,42 @@ def load_quality_report(zarr_path: str,
     }
     
     # Load corresponding detection data
-    n_detections = detect_group['n_detections'][:]
+    frame_indices = detect_group['frame_indices'][:].astype(np.int64, copy=False)
     bbox_coords = detect_group['bbox_norm_coords'][:]
+    
+    # Get per-frame counts (compatibility with legacy runs)
+    num_frames = int(len(quality_flags))
+    if 'frame_counts' in detect_group:
+        frame_counts = detect_group['frame_counts'][:]
+        if len(frame_counts) < num_frames:
+            frame_counts = np.pad(frame_counts, (0, num_frames - len(frame_counts)), mode='constant')
+        else:
+            frame_counts = frame_counts[:num_frames]
+    else:
+        frame_counts = np.bincount(frame_indices, minlength=num_frames)
     
     # Get dimensions
     if 'raw_video' in root:
-        width = root['raw_video/images_ds'].shape[2]
-        height = root['raw_video/images_ds'].shape[1]
+        images_ds = root['raw_video/images_ds']
+        height, width = images_ds.shape[1], images_ds.shape[2]
     else:
         width, height = 640, 640
     
-    # Extract centroids and frame indices
-    centroids = []
-    frame_indices = []
-    cumulative = np.cumsum(np.insert(n_detections, 0, 0))
+    # Extract centroids (per detection)
+    if bbox_coords.size:
+        centroids = np.column_stack((
+            bbox_coords[:, 0] * width,
+            bbox_coords[:, 1] * height
+        )).astype(np.float32, copy=False)
+    else:
+        centroids = np.zeros((0, 2), dtype=np.float32)
     
-    for frame_idx in range(len(n_detections)):
-        if n_detections[frame_idx] > 0:
-            idx = cumulative[frame_idx]
-            center_x = bbox_coords[idx, 0] * width
-            center_y = bbox_coords[idx, 1] * height
-            centroids.append([center_x, center_y])
-            frame_indices.append(frame_idx)
+    frame_counts = frame_counts.astype(np.int32, copy=False)
     
     detection_data = {
-        'centroids': np.array(centroids),
-        'frame_indices': np.array(frame_indices),
-        'n_detections': n_detections,
+        'centroids': centroids,
+        'frame_indices': frame_indices.astype(np.int32, copy=False),
+        'frame_counts': frame_counts,
         'bbox_coords': bbox_coords,
         'width': width,
         'height': height

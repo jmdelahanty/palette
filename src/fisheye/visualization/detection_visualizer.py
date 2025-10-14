@@ -336,10 +336,10 @@ from matplotlib.widgets import Slider
 fig, ax = plt.subplots(figsize=(10, 10))
 zarr_root = None
 images_ds = None
-n_detections = None
+frame_indices = None
 bbox_coords = None
 detection_ids = None
-cumulative_detections = None
+frame_to_detection_map = None  # NEW: map frame -> detection indices
 output_dir = None
 frame_slider = None
 jump_threshold_px = 0.0
@@ -360,10 +360,10 @@ def update_frame(frame_idx):
             # We jumped - find the most recent detection before current frame
             detection_history = []
             for prev_frame in range(frame_idx - 1, max(0, frame_idx - HISTORY_WINDOW), -1):
-                if n_detections[prev_frame] > 0:
+                if prev_frame in frame_to_detection_map:
                     # Found a previous detection, add it to history
-                    start_idx = int(cumulative_detections[prev_frame])
-                    prev_bbox = bbox_coords[start_idx]
+                    det_indices = frame_to_detection_map[prev_frame]
+                    prev_bbox = bbox_coords[det_indices[0]]  # Use first detection
                     center_x_norm, center_y_norm = prev_bbox[0], prev_bbox[1]
                     img_height, img_width = images_ds[prev_frame].shape[:2]
                     center_x = float(center_x_norm) * img_width
@@ -377,14 +377,16 @@ def update_frame(frame_idx):
                     
                     detection_history.append((prev_frame, center_x, center_y, is_clean))
                     break  # Only need the most recent one
+    
     ax.clear()
 
     # Load and display the frame
     image = images_ds[frame_idx]
     ax.imshow(image, cmap='gray')
 
-    # Get number of detections in this frame
-    num_dets_in_frame = int(n_detections[frame_idx])
+    # Get detections in this frame
+    det_indices = frame_to_detection_map.get(frame_idx, [])
+    num_dets_in_frame = len(det_indices)
     
     # Build title with quality flag info
     title = f"Frame: {frame_idx} | Detections: {num_dets_in_frame}"
@@ -406,10 +408,8 @@ def update_frame(frame_idx):
         ax.set_title(title, fontsize=12, color='green', fontweight='bold')
 
     if num_dets_in_frame > 0:
-        start_idx = int(cumulative_detections[frame_idx])
-        end_idx = int(cumulative_detections[frame_idx + 1])
-        frame_bboxes = bbox_coords[start_idx:end_idx]
-        frame_ids = detection_ids[start_idx:end_idx] if detection_ids is not None else [-1] * num_dets_in_frame
+        frame_bboxes = bbox_coords[det_indices]
+        frame_ids = detection_ids[det_indices] if detection_ids is not None else [-1] * num_dets_in_frame
 
         for i, bbox in enumerate(frame_bboxes):
             assigned_id = int(frame_ids[i]) if detection_ids is not None else -1
@@ -432,7 +432,17 @@ def update_frame(frame_idx):
             ax.add_patch(rect)
 
             id_text = f"ID: {assigned_id}" if assigned_id != -1 else "Unassigned"
-            ax.text(x1, y1 - 5, id_text, color=box_color, fontsize=10, fontweight='bold')
+            # Keep label inside the frame by flipping below the box if needed
+            label_y = y1 - 5 if y1 >= 15 else y1 + box_h + 15
+            ax.text(
+                x1,
+                label_y,
+                id_text,
+                color='black',
+                fontsize=10,
+                fontweight='bold',
+                bbox=dict(facecolor=box_color, alpha=0.8, edgecolor='none', pad=2)
+            )
             
             # Draw circle for good frames with threshold
             if flag == 0 and jump_threshold_px > 0:
@@ -443,9 +453,10 @@ def update_frame(frame_idx):
                                         facecolor='none')
                 ax.add_patch(circle)
             
-            # Add current detection to history
-            is_clean = (flag == 0)
-            detection_history.append((frame_idx, center_x, center_y, is_clean))
+            # Add current detection to history (first detection only)
+            if i == 0:
+                is_clean = (flag == 0)
+                detection_history.append((frame_idx, center_x, center_y, is_clean))
     
     # Clean up old history entries outside the window
     detection_history = [(f, x, y, clean) for f, x, y, clean in detection_history 
@@ -548,7 +559,7 @@ def save_current_frame():
 
 
 def main(args):
-    global zarr_root, images_ds, n_detections, bbox_coords, cumulative_detections, output_dir, frame_slider, detection_ids
+    global zarr_root, images_ds, frame_indices, bbox_coords, frame_to_detection_map, output_dir, frame_slider, detection_ids
 
     if args.output_dir:
         output_dir = Path(args.output_dir)
@@ -562,11 +573,14 @@ def main(args):
         # Try to get the latest detection run
         if 'detect_runs' in zarr_root:
             latest_detect_run = zarr_root['detect_runs'].attrs.get('latest')
-            if latest_detect_run:  # Check it's not None
+            if latest_detect_run:
                 detect_group = zarr_root[f'detect_runs/{latest_detect_run}']
             else:
                 print("No completed detect runs found!")
                 return
+        else:
+            print("No detect_runs found!")
+            return
 
         # Load video frames - try different locations
         if 'raw_video/images_ds' in zarr_root:
@@ -578,11 +592,12 @@ def main(args):
         else:
             raise ValueError("No video data found in zarr file!")
 
-        # Load detection data
-        if 'n_detections' in detect_group:
-            n_detections = detect_group['n_detections'][:]
+        # Load detection data - NEW STRUCTURE
+        if 'frame_indices' in detect_group:
+            frame_indices = detect_group['frame_indices'][:]
+            print(f"Loaded frame_indices array with {len(frame_indices)} detections")
         else:
-            raise ValueError("No n_detections array found!")
+            raise ValueError("No frame_indices array found!")
             
         if 'bbox_norm_coords' in detect_group:
             bbox_coords = detect_group['bbox_norm_coords'][:]
@@ -590,14 +605,19 @@ def main(args):
         else:
             raise ValueError("No bbox_norm_coords array found!")
 
-        # Calculate cumulative detections for indexing
-        cumulative_detections = np.cumsum(np.insert(n_detections, 0, 0))
+        # Build frame -> detection indices mapping
+        print("Building frame to detection mapping...")
+        frame_to_detection_map = {}
+        for det_idx, frame_idx in enumerate(frame_indices):
+            if frame_idx not in frame_to_detection_map:
+                frame_to_detection_map[frame_idx] = []
+            frame_to_detection_map[frame_idx].append(det_idx)
 
         # Try to load detection IDs if available
         detection_ids = None
-        if 'id_assignment_runs' in zarr_root:  # Fixed: singular 'assignment'
+        if 'id_assignment_runs' in zarr_root:
             latest_id_run = zarr_root['id_assignment_runs'].attrs.get('latest')
-            if latest_id_run:  # Check it's not None
+            if latest_id_run:
                 id_group = zarr_root[f'id_assignment_runs/{latest_id_run}']
                 if 'detection_ids' in id_group:
                     detection_ids = id_group['detection_ids'][:]
@@ -611,6 +631,7 @@ def main(args):
         else:
             print("No ID assignment data found. Will only display bounding boxes.")
         
+        # Load quality data
         if 'detect_runs' in zarr_root:
             latest_detect_run = zarr_root['detect_runs'].attrs.get('latest')
             if latest_detect_run:
@@ -618,13 +639,14 @@ def main(args):
 
         # Print summary
         num_frames = images_ds.shape[0]
-        total_detections = np.sum(n_detections)
+        total_detections = len(frame_indices)
+        frames_with_detections = len(frame_to_detection_map)
         print(f"\n📊 Data Summary:")
         print(f"  - Frames: {num_frames}")
         print(f"  - Total detections: {total_detections}")
-        print(f"  - Average detections per frame: {total_detections/num_frames:.2f}")
-        print(f"  - Frames with detections: {np.sum(n_detections > 0)}")
-        print(f"  - Frames without detections: {np.sum(n_detections == 0)}")
+        print(f"  - Frames with detections: {frames_with_detections}")
+        print(f"  - Average detections per frame (with dets): {total_detections/frames_with_detections:.2f}")
+        print(f"  - Frames without detections: {num_frames - frames_with_detections}")
 
     except Exception as e:
         print(f"Error opening Zarr file or finding data: {e}")
@@ -741,7 +763,7 @@ if __name__ == "__main__":
     if args.pick_textual or (args.zarr_path is None):
         chosen = pick_zarr_path_textual(args.start_dir)
         if not chosen:
-            print("❌ No valid Zarr selected. Exiting.")
+            print(" No valid Zarr selected. Exiting.")
             sys.exit(1)
         args.zarr_path = chosen
 

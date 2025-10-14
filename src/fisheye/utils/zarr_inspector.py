@@ -38,7 +38,7 @@ def show_parameter_provenance(zarr_path, console):
         import zarr
         root = zarr.open(zarr_path, mode='r')
         
-        prov_table = Table(title="📋 Parameter Provenance", box=box.ROUNDED)
+        prov_table = Table(title=" Parameter Provenance", box=box.ROUNDED)
         prov_table.add_column("Stage", style="cyan")
         prov_table.add_column("Run", style="yellow")
         prov_table.add_column("Source", style="magenta")
@@ -541,7 +541,7 @@ def display_analysis_metadata(zarr_path, console):
         if 'dish_mask' in analysis_meta.attrs:
             mask_data = analysis_meta.attrs['dish_mask']
             
-            mask_table = Table(title="🎯 Dish Mask Calibration", box=box.ROUNDED)
+            mask_table = Table(title=" Dish Mask Calibration", box=box.ROUNDED)
             mask_table.add_column("Property", style="cyan")
             mask_table.add_column("Value", style="yellow")
             
@@ -612,7 +612,7 @@ def display_crop_metadata(zarr_path, console):
         if not run_names:
             return False
 
-        summary_table = Table(title="🔲 Crop Runs", box=box.ROUNDED)
+        summary_table = Table(title=" Crop Runs", box=box.ROUNDED)
         summary_table.add_column("Run", style="cyan")
         summary_table.add_column("Timestamp", style="yellow")
         summary_table.add_column("Total ROIs", style="green")
@@ -682,7 +682,7 @@ def display_keypoints_metadata(zarr_path, console):
         if not run_names:
             return False
 
-        summary_table = Table(title="👁️ Keypoints Runs", box=box.ROUNDED)
+        summary_table = Table(title=" Keypoints Runs", box=box.ROUNDED)
         summary_table.add_column("Run", style="cyan")
         summary_table.add_column("Timestamp", style="yellow")
         summary_table.add_column("Success Rate", style="green")
@@ -749,7 +749,7 @@ def display_tracking_metadata(zarr_path, console):
         if not run_names:
             return False
 
-        summary_table = Table(title="🎯 Tracking Runs", box=box.ROUNDED)
+        summary_table = Table(title=" Tracking Runs", box=box.ROUNDED)
         summary_table.add_column("Run", style="cyan")
         summary_table.add_column("Timestamp", style="yellow")
         summary_table.add_column("Method", style="magenta")
@@ -798,7 +798,7 @@ def display_id_assignment_metadata(zarr_path, console):
         if not run_names:
             return False
 
-        summary_table = Table(title="🏷️ ID Assignment Runs", box=box.ROUNDED)
+        summary_table = Table(title=" ID Assignment Runs", box=box.ROUNDED)
         summary_table.add_column("Run", style="cyan")
         summary_table.add_column("Timestamp", style="yellow")
         summary_table.add_column("Setup Type", style="magenta")

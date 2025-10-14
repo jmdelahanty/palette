@@ -71,8 +71,8 @@ STAGE_INFO = {
         'color': 'green'
     },
     'refine': {
-        'desc': 'Refine tracking results',
-        'requires': ['keypoints'],
+        'desc': 'Refine detections (filter & interpolate)',
+        'requires': ['detect'],
         'color': 'blue'
     },
     'assign_ids': {
@@ -87,11 +87,11 @@ STAGE_ORDER = [
     'downsample',
     'background',
     'detect',
+    'refine',
     'crop',
     'keypoints',
-    'track',
-    'refine',
-    'assign_ids'
+    'assign_ids',
+    'track'
 ]
 
 TUNER_INFO = {
@@ -885,7 +885,7 @@ class PipelineLauncherApp(App):
                     if self.progress_log:
                         self.progress_log.write(
                             f"[red] Error: '{crop_source}' source requires refined_runs.[/red]\n"
-                            "[yellow]Run 'refine' stage first or select 'detect' source.[/yellow]\n"
+                            "[yellow]Run the 'refine' stage first or select 'detect' source.[/yellow]\n"
                         )
                     return None
             
@@ -1278,35 +1278,35 @@ class PipelineLauncherApp(App):
                 self.progress_log.write(f"[cyan]Tuner session ended: {self.status_message}[/]\n")
             
         except Exception as e:
-            self.status_message = f"❌ Error: {e}"
+            self.status_message = f"Error: {e}"
             if self.progress_log:
-                self.progress_log.write(f"[red]❌ Error: {e}[/]\n")
+                self.progress_log.write(f"[red]Error: {e}[/]\n")
     
     def _action_run_visualizer(self) -> None:
         """Run the selected visualization tool."""
         viz_select = self.query_one("#viz_select", Select)
         
         if not self.selected_zarr:
-            self.status_message = "❌ Error: Please select a zarr file first!"
+            self.status_message = "Error: Please select a zarr file first!"
             if self.progress_log:
-                self.progress_log.write("[red]❌ Please select a zarr file first![/red]\n")
+                self.progress_log.write("[red]Error: Please select a zarr file first![/red]\n")
             return
         
         zarr_path = self.selected_zarr
         if not Path(zarr_path).exists():
-            self.status_message = f"❌ Error: Zarr path does not exist: {zarr_path}"
+            self.status_message = f"Error: Zarr path does not exist: {zarr_path}"
             if self.progress_log:
-                self.progress_log.write(f"[red]❌ Zarr path does not exist: {zarr_path}[/red]\n")
+                self.progress_log.write(f"[red]Error: Zarr path does not exist: {zarr_path}[/red]\n")
             return
         
         viz_name = str(viz_select.value)
         if viz_name == Select.BLANK:
-            self.status_message = "❌ Error: Please select a visualization tool"
+            self.status_message = "Error: Please select a visualization tool"
             return
 
         viz_info = VIZ_INFO.get(viz_name)
         if not viz_info:
-            self.status_message = f"❌ Error: Unknown visualizer: {viz_name}"
+            self.status_message = f"Error: Unknown visualizer: {viz_name}"
             return
 
         # Use the friendly description in messages
@@ -1432,7 +1432,7 @@ class PipelineLauncherApp(App):
             return
         
         # Find zarr inspector script
-        inspector_script = Path(__file__).parent.parent / "zarr_inspector.py"
+        inspector_script = Path(__file__).resolve().parent.parent.parent / "zarr_inspector.py"
         
         if not inspector_script.exists():
             self.status_message = "❌ zarr_inspector.py not found"

@@ -14,6 +14,7 @@ to avoid accumulating large results in driver memory.
 import time
 import zarr
 import os
+import sys
 from zarr.codecs import BloscCodec
 import numpy as np
 from datetime import datetime, timezone
@@ -161,6 +162,78 @@ def get_crop_parameters(
 
 # -------- Worker task: compute + WRITE directly into Zarr -------- #
 
+def save_crop_metadata(
+    crop_group: zarr.Group,
+    source_group: zarr.Group,
+    source_path: str,
+    source_type: str,
+    detection_source: Optional[np.ndarray],
+    total_detections: int,
+    num_frames: int
+) -> None:
+    """
+    Copy coordinates and metadata from source to make crops self-contained.
+    
+    Args:
+        crop_group: Target crop group
+        source_group: Source detection group
+        source_path: Path to source (for provenance)
+        source_type: 'detect', 'filtered', or 'interpolated'
+        detection_source: Array indicating real (0) vs interpolated (1), or None
+        total_detections: Total number of detections
+        num_frames: Total number of frames in video  # ADD THIS
+    """
+    # Copy bbox coordinates
+    bbox_coords = source_group['bbox_norm_coords'][:]
+    crop_group.create_array(
+        'bbox_norm_coords',
+        chunks=(min(1000, len(bbox_coords)), 4),
+        data=bbox_coords,
+        overwrite=True
+    )
+    
+    # Copy frame_indices directly
+    frame_indices = source_group['frame_indices'][:]
+    crop_group.create_array(
+        'frame_indices',
+        chunks=(min(1000, len(frame_indices)),),
+        data=frame_indices,
+        overwrite=True
+    )
+    
+    # Compute and store frame_counts for visualization
+    frame_counts = np.bincount(frame_indices, minlength=num_frames)
+    crop_group.create_array(
+        'frame_counts',
+        chunks=(min(10000, num_frames),),
+        data=frame_counts,
+        overwrite=True
+    )
+    
+    # Copy detection_source if it exists (interpolated data)
+    if detection_source is not None:
+        crop_group.create_array(
+            'detection_source',
+            chunks=(min(1000, len(detection_source)),),
+            data=detection_source,
+            overwrite=True
+        )
+        
+        n_real = int(np.sum(detection_source == 0))
+        n_interp = int(np.sum(detection_source == 1))
+        
+        crop_group.attrs['includes_interpolated'] = True
+        crop_group.attrs['n_real_detections'] = n_real
+        crop_group.attrs['n_interpolated_detections'] = n_interp
+    else:
+        crop_group.attrs['includes_interpolated'] = False
+        crop_group.attrs['n_real_detections'] = total_detections
+        crop_group.attrs['n_interpolated_detections'] = 0
+    
+    # Store provenance
+    crop_group.attrs['source_coords_path'] = source_path
+    crop_group.attrs['detection_source_type'] = source_type
+
 @delayed
 def crop_and_store_chunk_delayed(
     zarr_path: str,
@@ -199,36 +272,23 @@ def crop_and_store_chunk_delayed(
     # Load detection data from specified source
     source_group = root[source_path]
     
-    # Handle different data structures for detect vs refined
-    if 'frame_mapping' in source_group:
-        # Refined data: uses frame_mapping to connect detections to frames
-        frame_mapping = source_group['frame_mapping'][:]
-        bbox_coords = source_group['bbox_norm_coords'][:]
-        
-        # Find which detections correspond to this chunk's frames
-        chunk_frames = np.arange(chunk_slice.start, chunk_slice.stop)
-        mask = np.isin(frame_mapping, chunk_frames)
-        
-        detection_indices = np.where(mask)[0]
-        bbox_coords_chunk = bbox_coords[detection_indices]
-        frames_for_detections = frame_mapping[detection_indices]
-        
-        # Build n_per_frame for this chunk
-        n_per_frame = np.zeros(len(chunk_frames), dtype=int)
-        for i, frame in enumerate(chunk_frames):
-            n_per_frame[i] = np.sum(frames_for_detections == frame)
-        
-    else:
-        # Original detect data: uses n_detections array directly
-        n_per_frame = source_group['n_detections'][chunk_slice]
-        
-        # Compute detection index range within detect_runs for this chunk
-        start_detection_idx = int(np.sum(source_group['n_detections'][:chunk_slice.start]))
-        end_detection_idx = start_detection_idx + int(np.sum(n_per_frame))
-        bbox_coords_chunk = source_group['bbox_norm_coords'][start_detection_idx:end_detection_idx]
-        
-        # For detect runs, frame index corresponds to position in chunk
-        frames_for_detections = None  # Will use sequential indexing
+    # Load frame indices and bbox coordinates
+    # Load only the slice of frame indices/bboxes we need
+    frame_indices = source_group['frame_indices'][:]
+    bbox_coords = source_group['bbox_norm_coords'][:]
+    chunk_frames = np.arange(chunk_slice.start, chunk_slice.stop)
+    
+    # Determine which detections fall into this chunk
+    mask = np.isin(frame_indices, chunk_frames)
+    detection_indices = np.where(mask)[0]
+    
+    bbox_coords_chunk = bbox_coords[detection_indices]
+    frames_for_detections = frame_indices[detection_indices]
+    
+    # Build n_per_frame for this chunk
+    n_per_frame = np.zeros(len(chunk_frames), dtype=int)
+    for i, frame in enumerate(chunk_frames):
+        n_per_frame[i] = np.sum(frames_for_detections == frame)
 
     start_det_out, end_det_out = out_slice
     count = end_det_out - start_det_out
@@ -365,24 +425,22 @@ def crop_detections(
         'parameter_source': param_source,
         'detection_source_type': source_type,
         'detection_source_path': source_path,
-        'roi_size': roi_sz
+        'roi_size': roi_sz,
+        'total_frames': num_images,
+        'total_detections': total_detections,
+        'command': ' '.join(sys.argv)
     }
 
     # Store initial metadata
     crop_group.attrs.update(metadata_dict)
 
-    # Get detection counts
-    if 'frame_mapping' in source_group:
-        # Refined data
-        n_detections_array = source_group['n_detections'][:]
-        bbox_coords = source_group['bbox_norm_coords'][:]
-        total_detections = len(bbox_coords)
-    else:
-        # Original detect data
-        n_detections_array = source_group['n_detections'][:]
-        total_detections = int(n_detections_array.sum())
+    # Get detection info using frame_indices
+    frame_indices = source_group['frame_indices'][:]
+    bbox_coords = source_group['bbox_norm_coords'][:]
+    total_detections = len(frame_indices)
     
-    num_images = len(n_detections_array)
+    # Get number of frames from video
+    num_images = root['raw_video/images_ds'].shape[0]
 
     if total_detections == 0:
         console.print("[yellow]Warning: No detections found. Nothing to crop.[/yellow]")
@@ -425,20 +483,17 @@ def crop_detections(
         overwrite=True
     )
     
-    # If using interpolated data, save the detection source array
-    if detection_source is not None:
-        crop_group.create_array(
-            'detection_source',
-            data=detection_source,
-            chunks=(min(chunk_size * 8, len(detection_source)),),
-            dtype='i1',
-            overwrite=True
-        )
-        crop_group.attrs['includes_interpolated'] = True
-        crop_group.attrs['n_real_detections'] = int(np.sum(detection_source == 0))
-        crop_group.attrs['n_interpolated_detections'] = int(np.sum(detection_source == 1))
-    else:
-        crop_group.attrs['includes_interpolated'] = False
+    # Copy source coordinates to make crops self-contained
+    console.print("[cyan]Copying source coordinates to crop group...[/cyan]")
+    save_crop_metadata(
+        crop_group=crop_group,
+        source_group=source_group,
+        source_path=source_path,
+        source_type=source_type,
+        detection_source=detection_source,
+        total_detections=total_detections,
+        num_frames=num_images
+    )
 
     # Store path to this crop group in root for workers to find
     root.attrs['current_crop_group_path'] = crop_group.path
@@ -448,8 +503,13 @@ def crop_detections(
                     for i in range(0, num_images, chunk_size)]
     console.print(f"Creating [yellow]{len(chunk_slices)}[/yellow] Dask tasks for cropping...")
 
+    # Build detection counts per frame from frame_indices
+    n_detections_per_frame = np.zeros(num_images, dtype='i4')
+    unique_frames, counts = np.unique(frame_indices, return_counts=True)
+    n_detections_per_frame[unique_frames] = counts
+    
     # Precompute cumulative detection offsets ONCE on driver
-    cumulative_detections = np.cumsum(np.insert(n_detections_array, 0, 0))
+    cumulative_detections = np.cumsum(np.insert(n_detections_per_frame, 0, 0))
     
     # Build chunks with output slices
     chunks = []
@@ -460,7 +520,7 @@ def crop_detections(
         if end_det > start_det:  # Only add if chunk has detections
             chunks.append((chunk_slice, (start_det, end_det)))
     
-    frames_with_crops = int(np.sum(n_detections_array > 0))
+    frames_with_crops = int(np.sum(n_detections_per_frame > 0))
 
     # Create delayed tasks
     delayed_tasks = [
@@ -535,6 +595,11 @@ def crop_detections(
 
     # Environment info
     env_info = get_environment_info()
+    crop_group.attrs['provenance'] = {
+        'command': ' '.join(sys.argv),
+        'created_at_utc': datetime.now(timezone.utc).isoformat(),
+        'source_detect_run': source_path,
+    }
     crop_group.attrs.update({
         'git_commit': env_info['git'].get('commit_hash', 'unknown'),
         'git_branch': env_info['git'].get('branch', 'unknown'),
@@ -547,9 +612,9 @@ def crop_detections(
 
     # Create completion panel
     source_info = f"{source_type}"
-    if detection_source is not None:
-        n_real = int(np.sum(detection_source == 0))
-        n_interp = int(np.sum(detection_source == 1))
+    if 'includes_interpolated' in crop_group.attrs and crop_group.attrs['includes_interpolated']:
+        n_real = crop_group.attrs['n_real_detections']
+        n_interp = crop_group.attrs['n_interpolated_detections']
         source_info += f" ({n_real} real + {n_interp} interpolated)"
     
     completion_text = f"""[green]✓[/green] Cropping completed successfully
@@ -566,9 +631,12 @@ def crop_detections(
 [bold]Arrays created:[/bold]
   - crop_runs/{run_group_name}/roi_images: ({total_detections}, {roi_sz[0]}, {roi_sz[1]})
   - crop_runs/{run_group_name}/roi_coordinates_full: ({total_detections}, 2)
-  - crop_runs/{run_group_name}/roi_coordinates_ds: ({total_detections}, 2)"""
+  - crop_runs/{run_group_name}/roi_coordinates_ds: ({total_detections}, 2)
+  - crop_runs/{run_group_name}/bbox_norm_coords: ({total_detections}, 4)
+  - crop_runs/{run_group_name}/frame_indices: ({total_detections},)
+  - crop_runs/{run_group_name}/frame_counts: ({num_images},)"""
     
-    if detection_source is not None:
+    if 'detection_source' in crop_group:
         completion_text += f"\n  - crop_runs/{run_group_name}/detection_source: ({total_detections},)"
 
     console.print(Panel(

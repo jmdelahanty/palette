@@ -9,12 +9,12 @@ TODO: Add trajectory-based tracking for free-swimming fish.
 import numpy as np
 import zarr
 import time
+import sys
 from typing import Dict, Optional, Any, List
 from datetime import datetime, timezone
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
-from datetime import datetime, timezone
 
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info
@@ -255,8 +255,19 @@ def assign_ids_spatial(
     assign_group.attrs.update(metadata_dict)
     
     # Load detection data
+    frame_indices = detect_group['frame_indices'][:].astype(np.int64, copy=False)
     bbox_coords = detect_group['bbox_norm_coords'][:]
-    n_detections = detect_group['n_detections'][:]
+    if 'frame_counts' in detect_group:
+        frame_counts = detect_group['frame_counts'][:]
+        num_frames = len(frame_counts)
+    else:
+        num_frames = root['raw_video/images_ds'].shape[0]
+        frame_counts = np.bincount(frame_indices, minlength=num_frames)
+    if frame_indices.size > 0:
+        max_frame = int(frame_indices.max()) + 1
+        if max_frame > num_frames:
+            frame_counts = np.pad(frame_counts, (0, max_frame - num_frames), mode='constant')
+            num_frames = len(frame_counts)
     
     # Get image dimensions for coordinate conversion
     ds_img_shape = root['raw_video/images_ds'].shape[1:]  # (H, W)
@@ -295,28 +306,22 @@ def assign_ids_spatial(
     )
     
     # Calculate per-mask detection counts per frame
-    n_frames = len(n_detections)
     n_masks = len(subdish_masks)
-    per_mask_counts = np.zeros((n_frames, n_masks), dtype=np.int32)
+    per_mask_counts = np.zeros((num_frames, n_masks), dtype=np.int32)
+    mask_id_to_idx = {mask['id']: idx for idx, mask in enumerate(subdish_masks)}
     
-    # Use cumulative detection indices to map detections to frames
-    cumulative_detections = np.cumsum(np.insert(n_detections, 0, 0))
-    
-    for frame_idx in range(n_frames):
-        start_idx = cumulative_detections[frame_idx]
-        end_idx = cumulative_detections[frame_idx + 1]
-        
-        if end_idx > start_idx:
-            frame_ids = detection_ids[start_idx:end_idx]
-            
-            for mask_id in range(n_masks):
-                per_mask_counts[frame_idx, mask_id] = np.sum(frame_ids == mask_id)
+    if detection_ids.size > 0:
+        for mask_id, column_idx in mask_id_to_idx.items():
+            mask_hits = detection_ids == mask_id
+            if np.any(mask_hits):
+                counts = np.bincount(frame_indices[mask_hits], minlength=num_frames)
+                per_mask_counts[:, column_idx] = counts[:num_frames]
     
     # Save per-mask counts
     assign_group.create_array(
         'n_detections_per_mask',
         data=per_mask_counts,
-        chunks=(min(100, n_frames), n_masks),
+        chunks=(min(100, num_frames) if num_frames > 0 else 1, n_masks),
         overwrite=True
     )
     
@@ -332,13 +337,14 @@ def assign_ids_spatial(
     mask_stats = []
     for mask in subdish_masks:
         mask_id = mask['id']
+        column_idx = mask_id_to_idx[mask_id]
         n_in_mask = np.sum(detection_ids == mask_id)
-        frames_with_detections = np.sum(per_mask_counts[:, mask_id] > 0)
+        frames_with_detections = int(np.sum(per_mask_counts[:, column_idx] > 0))
         mask_stats.append({
             'mask_id': mask_id,
             'total_detections': int(n_in_mask),
-            'frames_with_detections': int(frames_with_detections),
-            'coverage_percent': round((frames_with_detections / n_frames * 100), 2)
+            'frames_with_detections': frames_with_detections,
+            'coverage_percent': round((frames_with_detections / num_frames * 100), 2) if num_frames > 0 else 0.0
         })
     
     duration = time.perf_counter() - start_time
@@ -350,14 +356,20 @@ def assign_ids_spatial(
         'assignment_rate_percent': round(assignment_rate, 2),
         'num_masks': n_masks,
         'per_mask_statistics': mask_stats,
-        'setup_type': setup_type
+        'setup_type': setup_type,
+        'total_frames': num_frames
     }
     
     assign_group.attrs['summary_statistics'] = summary_stats
     assign_group.attrs['duration_seconds'] = duration
     
-    # Environment info
+    # Environment info and provenance
     env_info = get_environment_info()
+    assign_group.attrs['provenance'] = {
+        'command': ' '.join(sys.argv),
+        'created_at_utc': datetime.now(timezone.utc).isoformat(),
+        'source_detect_run': latest_detect_run
+    }
     assign_group.attrs.update({
         'git_commit': env_info['git'].get('commit_hash', 'unknown'),
         'git_branch': env_info['git'].get('branch', 'unknown'),

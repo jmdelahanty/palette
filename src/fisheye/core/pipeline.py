@@ -25,6 +25,7 @@ from ..detection.detect_traditional import detect_fish
 from ..detection.detect_keypoints_traditional import detect_keypoints
 from ..tracking.crop import crop_detections
 from ..tracking.assign_ids import assign_ids_spatial
+from ..refinement.refine_detect import create_refined_run
 from ..shared.zarr.schema import validate_zarr_structure
 
 
@@ -74,11 +75,11 @@ class Pipeline:
         'downsample',
         'background', 
         'detect',
+        'refine',
         'crop',
         'keypoints',
         'assign_ids',
         'track',
-        'refine',
     ]
     
     STAGE_DEPENDENCIES = {
@@ -86,11 +87,11 @@ class Pipeline:
         'downsample': ['import'],
         'background': ['import'],
         'detect': ['background'],
+        'refine': ['detect'],
         'crop': ['detect'],
         'keypoints': ['crop', 'background'],
         'assign_ids': ['detect'],
         'track': ['keypoints'],
-        'refine': ['keypoints'],
     }
 
     ANALYSIS_STAGES = {'background', 'detect', 'track', 'refine'}
@@ -172,6 +173,11 @@ class Pipeline:
                 'roi_thresh': 25,
                 'se1_radius': 3,
                 'se2_radius': 5
+            },
+            'refine_detect': {
+                'filters': {'remove_jumps': True, 'remove_blips': False},
+                'max_gap': 20,
+                'interpolation_method': 'linear'
             }
         }
         
@@ -270,6 +276,7 @@ class Pipeline:
             'downsample',
             'background',
             'detect',
+            'refine',
             'crop',
             'keypoints',
             'assign_ids'] and self._is_stage_complete(stage):
@@ -362,8 +369,8 @@ class Pipeline:
         if self.config.crop_source in ['filtered', 'interpolated']:
             if 'refined_runs' not in self.zarr_root or self.zarr_root['refined_runs'].attrs.get('latest') is None:
                 self.console.print(
-                    f"[red]Error: Crop source '{self.config.crop_source}' requires refined_runs.[/red]\n"
-                    "[yellow]Run 'refine' stage first or use '--crop-source detect'[/yellow]"
+                    f"[red]Error: Crop source '{self.config.crop_source}' requires refined detections.[/red]\n"
+                    "[yellow]Run the 'refine' stage first or use '--crop-source detect'.[/yellow]"
                 )
                 raise ValueError(f"Refined runs not found for crop source '{self.config.crop_source}'")
         
@@ -404,8 +411,17 @@ class Pipeline:
         )
     
     def _run_refine(self) -> None:
-        """Run refinement stage."""
-        self.console.print("[yellow]Refinement stage not needed for multi-fish tracking[/yellow]")
+        """Run detection refinement stage (filter & interpolate detections)."""
+        if self.zarr_root is None:
+            self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
+        
+        run_name = create_refined_run(
+            zarr_path=self.config.zarr_path,
+            config=self.pipeline_params,
+            console=self.console
+        )
+        
+        self.console.print(f"[green]✓[/green] Detection refinement saved as [cyan]{run_name}[/cyan]")
     
     def _run_assign_ids(self) -> None:
         """

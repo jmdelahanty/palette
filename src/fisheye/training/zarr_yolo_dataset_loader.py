@@ -8,7 +8,7 @@ from typing import List, Dict, Tuple, Optional
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import yaml
 from typing import Union, Any
@@ -47,23 +47,85 @@ class SamplingStrategy(Enum):
     WEIGHTED = "weighted"
 
 @dataclass
+class SingleDatasetConfig:
+    """Configuration for a single dataset."""
+    zarr_path: str
+    source_type: str = 'filtered'  # 'detect', 'filtered', or 'interpolated'
+    split: Optional[Dict[str, float]] = None  # {'train': 0.8, 'val': 0.2}
+
+@dataclass
 class ZarrDatasetConfig:
-    """Configuration for the Zarr dataset loader."""
-    zarr_paths: List[str]
+    """Configuration for the Zarr dataset loader - supports both old and new formats."""
+    # NEW: Support for per-dataset configuration
+    datasets: Optional[Dict[str, SingleDatasetConfig]] = None
+    
+    # LEGACY: Old format (kept for backwards compatibility)
+    zarr_paths: Optional[List[str]] = None
+    
+    # Common settings
     task: str = 'detect'
     sampling_strategy: SamplingStrategy = SamplingStrategy.BALANCED
-    split_ratio: float = 0.8
+    split_ratio: float = 0.8  # Used as default if datasets don't specify splits
     random_seed: int = 42
     dataset_weights: Optional[Dict[str, float]] = None
     target_size: Optional[int] = None
     min_confidence: float = 0.0
-    filter_interpolated: bool = False  # NEW: Filter out interpolated data
+    filter_interpolated: bool = False  # DEPRECATED: Use source_type instead
+
+    def __post_init__(self):
+        """Convert enum strings and validate configuration."""
+        # Convert SamplingStrategy string to enum if needed
+        if isinstance(self.sampling_strategy, str):
+            try:
+                self.sampling_strategy = SamplingStrategy(self.sampling_strategy)
+            except ValueError:
+                logger.warning(f"Unknown sampling strategy '{self.sampling_strategy}', defaulting to 'balanced'.")
+                self.sampling_strategy = SamplingStrategy.BALANCED
+        
+        # Validate that we have either datasets or zarr_paths
+        if self.datasets is None and self.zarr_paths is None:
+            raise ValueError("Must provide either 'datasets' or 'zarr_paths'")
+        
+        # Convert old format to new format if needed
+        if self.datasets is None and self.zarr_paths is not None:
+            logger.info("Converting legacy zarr_paths format to new datasets format")
+            self.datasets = {}
+            for zarr_path in self.zarr_paths:
+                dataset_name = Path(zarr_path).stem
+                # Determine source_type based on filter_interpolated flag
+                source_type = 'detect' if self.filter_interpolated else 'filtered'
+                self.datasets[dataset_name] = SingleDatasetConfig(
+                    zarr_path=zarr_path,
+                    source_type=source_type,
+                    split=None  # Use global split_ratio
+                )
+        
+        # Convert dict datasets to SingleDatasetConfig objects if needed
+        if self.datasets is not None:
+            for name, config in self.datasets.items():
+                if isinstance(config, dict):
+                    self.datasets[name] = SingleDatasetConfig(**config)
+    
+    def get_zarr_paths(self) -> List[str]:
+        """Get list of all zarr paths from datasets."""
+        return [config.zarr_path for config in self.datasets.values()]
+    
+    def get_source_type(self, zarr_path: str) -> str:
+        """Get source_type for a specific zarr path."""
+        for config in self.datasets.values():
+            if config.zarr_path == zarr_path:
+                return config.source_type
+        return 'filtered'  # Default
 
     @classmethod
     def from_yaml(cls, path: str):
         """Loads configuration from a YAML file."""
         with open(path, 'r') as f:
             config_dict = yaml.safe_load(f)
+        
+        # Handle nested data_config if present
+        if 'data_config' in config_dict:
+            config_dict = config_dict['data_config']
         
         strategy_str = config_dict.get('sampling_strategy', 'balanced')
         try:
@@ -89,10 +151,11 @@ class DatasetMetadata:
     valid_frames: int
     column_names: List[str]
     tracking_success_rate: float = 0.0
-    crop_source_type: str = 'unknown'  # NEW
-    has_interpolated: bool = False  # NEW
-    n_real_rois: int = 0  # NEW
-    n_interpolated_rois: int = 0  # NEW
+    crop_source_type: str = 'unknown'
+    has_interpolated: bool = False
+    n_real_rois: int = 0
+    n_interpolated_rois: int = 0
+    requested_source_type: str = 'filtered'  # NEW: What user requested
 
 
 class GlobalIndexManager:
@@ -103,56 +166,77 @@ class GlobalIndexManager:
         self.global_indices = self._build_global_index()
 
     def _validate_and_get_metadata(self) -> List[DatasetMetadata]:
-        logger.info(f"Validating {len(self.config.zarr_paths)} Zarr files...")
+        zarr_paths = self.config.get_zarr_paths()
+        logger.info(f"Validating {len(zarr_paths)} Zarr files...")
         metadata_list = []
         
-        for path_str in self.config.zarr_paths:
+        for path_str in zarr_paths:
             try:
                 root = zarr.open(path_str, mode='r')
                 
-                # Check for tracking data
-                if 'tracking_runs' not in root or 'latest' not in root['tracking_runs'].attrs:
-                    raise KeyError("Could not find 'tracking_runs' with 'latest' attribute.")
+                # Get requested source type for this dataset
+                requested_source = self.config.get_source_type(path_str)
                 
-                latest_run_name = root['tracking_runs'].attrs['latest']
-                tracking_results_path = f'tracking_runs/{latest_run_name}/tracking_results'
-                if tracking_results_path not in root:
-                    raise KeyError(f"Latest tracking results not found at '{tracking_results_path}'")
+                # Check for crop_runs (required for all source types)
+                if 'crop_runs' not in root or 'latest' not in root['crop_runs'].attrs:
+                    raise KeyError(f"Could not find 'crop_runs' in {Path(path_str).name}")
                 
-                tracking_results = root[tracking_results_path]
-                column_names = tracking_results.attrs['column_names']
+                latest_crop = root['crop_runs'].attrs['latest']
+                crop_group = root[f'crop_runs/{latest_crop}']
                 
-                # Get crop metadata - NEW: Extract crop source info
-                crop_source_type = 'unknown'
-                has_interpolated = False
-                n_real_rois = 0
-                n_interpolated_rois = 0
+                # Get actual crop source info
+                actual_source_type = crop_group.attrs.get('detection_source_type', 'detect')
+                has_interpolated = crop_group.attrs.get('includes_interpolated', False)
+                n_real_rois = crop_group.attrs.get('n_real_detections', 0)
+                n_interpolated_rois = crop_group.attrs.get('n_interpolated_detections', 0)
                 
-                if 'crop_runs' in root and 'latest' in root['crop_runs'].attrs:
-                    latest_crop = root['crop_runs'].attrs['latest']
-                    crop_group = root[f'crop_runs/{latest_crop}']
+                # Validate that requested source matches what's available
+                if requested_source != actual_source_type:
+                    logger.warning(
+                        f"  ⚠ {Path(path_str).name}: Requested '{requested_source}' but crops are from '{actual_source_type}'. "
+                        f"Using available '{actual_source_type}' data."
+                    )
+                
+                # Check for tracking data (ONLY required for pose task)
+                column_names = []
+                total_frames = 0
+                
+                if self.config.task == 'pose':
+                    # Pose task requires tracking data
+                    if 'tracking_runs' not in root or 'latest' not in root['tracking_runs'].attrs:
+                        raise KeyError("Pose task requires 'tracking_runs' with 'latest' attribute.")
                     
-                    # Get crop source metadata
-                    crop_source_type = crop_group.attrs.get('detection_source_type', 'detect')
-                    has_interpolated = crop_group.attrs.get('includes_interpolated', False)
+                    latest_run_name = root['tracking_runs'].attrs['latest']
+                    tracking_results_path = f'tracking_runs/{latest_run_name}/tracking_results'
+                    if tracking_results_path not in root:
+                        raise KeyError(f"Latest tracking results not found at '{tracking_results_path}'")
                     
-                    if has_interpolated:
-                        n_real_rois = crop_group.attrs.get('n_real_detections', 0)
-                        n_interpolated_rois = crop_group.attrs.get('n_interpolated_detections', 0)
+                    tracking_results = root[tracking_results_path]
+                    column_names = tracking_results.attrs['column_names']
+                    total_frames = len(tracking_results)
+                else:
+                    # Detect task only needs crops
+                    if 'roi_images' not in crop_group:
+                        raise KeyError(f"No ROI images found in crop run {latest_crop}")
+                    
+                    total_frames = crop_group['roi_images'].shape[0]
                 
                 # Determine source coordinates
                 if 'refine_runs' in root and 'latest' in root['refine_runs'].attrs:
                     latest_refine_run = root['refine_runs'].attrs['latest']
                     source_coords = root[f'refine_runs/{latest_refine_run}/refined_bbox_norm_coords']
-                elif 'crop_runs' in root and 'latest' in root['crop_runs'].attrs:
-                    latest_crop_run = root['crop_runs'].attrs['latest']
-                    source_coords = root[f'crop_runs/{latest_crop_run}/bbox_norm_coords']
+                elif 'crop_runs' in root:
+                    source_coords = crop_group['bbox_norm_coords']
                 else:
-                    raise KeyError("No crop_runs or refine_runs found")
+                    raise KeyError("No valid coordinates found")
                 
                 valid_mask = ~np.isnan(source_coords[:, 0])
                 valid_frames = np.sum(valid_mask)
-                total_frames = len(tracking_results)
+                
+                # Calculate tracking success rate (only for pose task)
+                tracking_success_rate = 0.0
+                if self.config.task == 'pose' and total_frames > 0:
+                    tracking_success_rate = (np.sum(~np.isnan(tracking_results[:, 0])) / total_frames * 100)
 
                 metadata = DatasetMetadata(
                     path=path_str,
@@ -160,18 +244,19 @@ class GlobalIndexManager:
                     total_frames=total_frames,
                     valid_frames=valid_frames,
                     column_names=column_names,
-                    tracking_success_rate=(np.sum(~np.isnan(tracking_results[:, 0])) / total_frames * 100) if total_frames > 0 else 0,
-                    crop_source_type=crop_source_type,
+                    tracking_success_rate=tracking_success_rate,
+                    crop_source_type=actual_source_type,
                     has_interpolated=has_interpolated,
                     n_real_rois=n_real_rois,
-                    n_interpolated_rois=n_interpolated_rois
+                    n_interpolated_rois=n_interpolated_rois,
+                    requested_source_type=requested_source
                 )
                 
                 # Log crop source info
                 if has_interpolated:
-                    logger.info(f"  {Path(path_str).name}: {crop_source_type} source ({n_real_rois} real + {n_interpolated_rois} interpolated)")
+                    logger.info(f"  ✓ {Path(path_str).name}: {actual_source_type} source ({n_real_rois} real + {n_interpolated_rois} interpolated)")
                 else:
-                    logger.info(f"  {Path(path_str).name}: {crop_source_type} source (all real)")
+                    logger.info(f"  ✓ {Path(path_str).name}: {actual_source_type} source (all real)")
                 
                 metadata_list.append(metadata)
                 
@@ -191,8 +276,8 @@ class GlobalIndexManager:
                               else f"crop_runs/{root['crop_runs'].attrs['latest']}/bbox_norm_coords")
         valid_mask = ~np.isnan(root[source_coords_path][:, 0])
         
-        # NEW: Filter out interpolated data if requested
-        if self.config.filter_interpolated and metadata.has_interpolated:
+        # Filter out interpolated data if source_type is 'filtered' or 'detect'
+        if metadata.requested_source_type in ['filtered', 'detect'] and metadata.has_interpolated:
             latest_crop = root['crop_runs'].attrs['latest']
             crop_group = root[f'crop_runs/{latest_crop}']
             
@@ -223,11 +308,13 @@ class GlobalIndexManager:
         return np.where(valid_mask)[0]
 
     def _build_global_index(self) -> List[Tuple[str, int]]:
-        """Build global index, optionally filtering interpolated data."""
+        """Build global index, filtering based on source_type."""
         logger.info("Building global sample index...")
         
-        if self.config.filter_interpolated:
-            logger.info("  ⚠ filter_interpolated=True: Excluding interpolated ROIs")
+        # Check if any dataset is using filtered/detect source types
+        any_filtering = any(m.requested_source_type in ['filtered', 'detect'] for m in self.metadata_list)
+        if any_filtering:
+            logger.info("  ℹ Using only real detections (filtering interpolated data)")
         
         all_valid_indices = {m.path: self._get_valid_indices(m) for m in self.metadata_list}
         
@@ -238,15 +325,10 @@ class GlobalIndexManager:
 
         logger.info(f"Global index created with {len(global_indices)} total samples.")
         
-        # Log statistics
-        total_real = sum(m.n_real_rois for m in self.metadata_list if m.has_interpolated)
-        total_interp = sum(m.n_interpolated_rois for m in self.metadata_list if m.has_interpolated)
-        
-        if total_interp > 0:
-            if self.config.filter_interpolated:
-                logger.info(f"  Dataset composition: {len(global_indices)} real ROIs (filtered out {total_interp} interpolated)")
-            else:
-                logger.info(f"  Dataset composition: {total_real} real + {total_interp} interpolated = {len(global_indices)} total ROIs")
+        # Log statistics per dataset
+        for metadata in self.metadata_list:
+            n_samples = len(all_valid_indices[metadata.path])
+            logger.info(f"  {metadata.name}: {n_samples} samples")
         
         return global_indices
 
@@ -256,6 +338,7 @@ class GlobalIndexManager:
         )
 
 
+# Rest of the code remains the same (ZarrYOLODataset and create_zarr_dataset)
 class ZarrYOLODataset(Dataset):
     def __init__(self, config: ZarrDatasetConfig, mode: str = 'train'):
         super().__init__()
@@ -267,13 +350,28 @@ class ZarrYOLODataset(Dataset):
         self.indices = train_indices if mode == 'train' else val_indices
         
         self.metadata_map = {m.path: m for m in index_manager.metadata_list}
-        self.column_mappings = get_column_mappings(index_manager.metadata_list[0].column_names)
-        self.zarr_roots = {path: zarr.open(path, mode='r') for path in config.zarr_paths}
+        if self.config.task == 'pose':
+            self.column_mappings = get_column_mappings(index_manager.metadata_list[0].column_names)
+        else:
+            self.column_mappings = {}  # Not needed for detection task
+        self.zarr_roots = {path: zarr.open(path, mode='r') for path in config.get_zarr_paths()}
 
         self.target_size = self.config.target_size or (640 if self.config.task == 'detect' else 256)
 
         logger.info(f"Pre-caching labels for {self.mode} set ({self.config.task} task)...")
         self.labels = []
+        
+        # Cache bbox arrays per zarr file for detect task (load once per file)
+        self.bbox_cache = {}
+        if self.config.task == 'detect':
+            for zarr_path in self.zarr_roots.keys():
+                root = self.zarr_roots[zarr_path]
+                latest_crop = root['crop_runs'].attrs['latest']
+                crop_group = root[f'crop_runs/{latest_crop}']
+                self.bbox_cache[zarr_path] = crop_group['bbox_norm_coords'][:]  # Load once
+                logger.info(f"  Cached {self.bbox_cache[zarr_path].shape[0]} bboxes from {Path(zarr_path).name}")
+        
+        # Build labels using cached data
         label_fetcher = self._get_pose_data if self.config.task == 'pose' else self._get_bbox_data
         for zarr_path, frame_idx in self.indices:
             self.labels.append(label_fetcher(zarr_path, frame_idx))
@@ -284,25 +382,19 @@ class ZarrYOLODataset(Dataset):
         return len(self.indices)
 
     def _get_bbox_data(self, zarr_path: str, frame_idx: int) -> Dict:
-        root = self.zarr_roots[zarr_path]
-        latest_track_run = root['tracking_runs'].attrs['latest']
-        tracking_data = root[f'tracking_runs/{latest_track_run}/tracking_results'][frame_idx]
+        # Use cached bboxes (already loaded in __init__)
+        bbox_coords = self.bbox_cache.get(zarr_path)
         
-        if not np.isnan(tracking_data[self.column_mappings['heading']]):
-            bbox_x = tracking_data[self.column_mappings['bbox_x']]
-            bbox_y = tracking_data[self.column_mappings['bbox_y']]
-            bbox_w = tracking_data[self.column_mappings['bbox_width']]
-            bbox_h = tracking_data[self.column_mappings['bbox_height']]
+        if bbox_coords is not None and frame_idx < bbox_coords.shape[0]:
+            bbox = bbox_coords[frame_idx]
+            bbox_x, bbox_y, bbox_w, bbox_h = bbox
+            
             if not any(np.isnan([bbox_x, bbox_y, bbox_w, bbox_h])):
-                return {"cls": np.array([0]), "bboxes": np.array([[bbox_x, bbox_y, bbox_w, bbox_h]])}
-
-        source_coords_path = (f"refine_runs/{root['refine_runs'].attrs['latest']}/refined_bbox_norm_coords" 
-                              if 'refine_runs' in root else f"crop_runs/{root['crop_runs'].attrs['latest']}/bbox_norm_coords")
-        crop_coords = root[source_coords_path][frame_idx]
-        bbox_x, bbox_y = crop_coords[0], crop_coords[1]
-        if not any(np.isnan([bbox_x, bbox_y])):
-            return {"cls": np.array([0]), "bboxes": np.array([[bbox_x, bbox_y, 0.08, 0.10]])}
-
+                return {
+                    "cls": np.array([0]), 
+                    "bboxes": np.array([[bbox_x, bbox_y, bbox_w, bbox_h]])
+                }
+        
         return {"cls": np.array([]), "bboxes": np.empty((0, 4))}
 
     def _get_pose_data(self, zarr_path: str, frame_idx: int) -> Dict:
