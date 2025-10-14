@@ -2,7 +2,12 @@
 Crop ROIs from full-resolution frames based on detection results.
 Part of the FishEye tracking pipeline.
 
-This version streams work with Dask and writes directly from workers to Zarr
+This version supports multiple detection sources:
+- 'detect': Original blob/YOLO detections
+- 'filtered': Refined detections with jumps removed
+- 'interpolated': Refined detections with gaps filled
+
+Streams work with Dask and writes directly from workers to Zarr
 to avoid accumulating large results in driver memory.
 """
 
@@ -33,6 +38,77 @@ except Exception:
     HAVE_DISTRIBUTED = False
 
 from ..utils.system import get_environment_info
+
+
+def get_detection_source_info(
+    root: zarr.Group,
+    source_type: str = 'detect',
+    console: Optional[Console] = None
+) -> Tuple[str, zarr.Group, Optional[np.ndarray]]:
+    """
+    Get information about the detection source to use for cropping.
+    
+    Args:
+        root: Zarr root group
+        source_type: 'detect', 'filtered', or 'interpolated'
+        console: Optional Rich console for output
+        
+    Returns:
+        Tuple of (source_path, source_group, detection_source_array)
+        - source_path: Path string like 'detect_runs/latest' or 'refined_runs/latest/filtered'
+        - source_group: Zarr group containing the detection data
+        - detection_source_array: Array indicating real (0) vs interpolated (1), or None
+    """
+    if source_type == 'detect':
+        # Use original detections
+        if 'detect_runs' not in root:
+            raise ValueError("No detect_runs found in zarr file")
+        
+        latest = root['detect_runs'].attrs.get('latest')
+        if latest is None:
+            raise ValueError("No latest detect run found")
+        
+        source_path = f'detect_runs/{latest}'
+        source_group = root[source_path]
+        detection_source = None
+        
+        if console:
+            console.print(f"[cyan]Using original detections:[/cyan] {latest}")
+        
+    elif source_type in ['filtered', 'interpolated']:
+        # Use refined detections
+        if 'refined_runs' not in root:
+            raise ValueError("No refined_runs found. Run refinement pipeline first.")
+        
+        latest_refined = root['refined_runs'].attrs.get('latest')
+        if latest_refined is None:
+            raise ValueError("No latest refined run found")
+        
+        refined_group = root[f'refined_runs/{latest_refined}']
+        
+        if source_type not in refined_group:
+            raise ValueError(f"Stage '{source_type}' not found in refined run {latest_refined}")
+        
+        source_path = f'refined_runs/{latest_refined}/{source_type}'
+        source_group = refined_group[source_type]
+        
+        # Get detection source array for interpolated data
+        detection_source = None
+        if source_type == 'interpolated' and 'detection_source' in source_group:
+            detection_source = source_group['detection_source'][:]
+        
+        if console:
+            console.print(f"[cyan]Using refined detections ({source_type}):[/cyan] {latest_refined}")
+            if detection_source is not None:
+                n_real = np.sum(detection_source == 0)
+                n_interp = np.sum(detection_source == 1)
+                console.print(f"  Real detections: {n_real}, Interpolated: {n_interp}")
+    
+    else:
+        raise ValueError(f"Invalid source_type: {source_type}. Must be 'detect', 'filtered', or 'interpolated'")
+    
+    return source_path, source_group, detection_source
+
 
 def get_crop_parameters(
     root: zarr.Group,
@@ -91,7 +167,8 @@ def crop_and_store_chunk_delayed(
     chunk_slice: slice,
     out_slice: Tuple[int, int],
     roi_sz: Tuple[int, int],
-    scale_factor: float
+    scale_factor: float,
+    source_path: str
 ) -> Dict[str, int]:
     """
     Crops ROIs for a chunk and writes them directly into the precreated Zarr arrays.
@@ -102,27 +179,56 @@ def crop_and_store_chunk_delayed(
         out_slice: (start_det, end_det) in the flattened detection space for this chunk
         roi_sz: (H, W) of the crop
         scale_factor: ds/full scale for coordinates_ds
+        source_path: Path to detection source (e.g., 'detect_runs/latest' or 'refined_runs/latest/filtered')
 
     Returns:
         Tiny dict with counts/indices for bookkeeping.
     """
     root = zarr.open(zarr_path, mode='a')
+    
     # Find the target crop group via root attrs (set by driver before dispatch)
     crop_group_path = root.attrs.get('current_crop_group_path')
     if crop_group_path is None:
         raise RuntimeError("Root attrs missing 'current_crop_group_path' for worker writes.")
     crop_group = root[crop_group_path]
 
+    # Load full-resolution images
     images_full_chunk = root['raw_video/images_full'][chunk_slice]
     full_img_shape = images_full_chunk.shape[1:]  # (H, W)
 
-    latest = root['detect_runs'].attrs['latest']
-    n_per_frame = root[f'detect_runs/{latest}/n_detections'][chunk_slice]
-
-    # Compute detection index range within detect_runs for this chunk
-    start_detection_idx = int(np.sum(root[f'detect_runs/{latest}/n_detections'][:chunk_slice.start]))
-    end_detection_idx = start_detection_idx + int(np.sum(n_per_frame))
-    bbox_coords_chunk = root[f'detect_runs/{latest}/bbox_norm_coords'][start_detection_idx:end_detection_idx]
+    # Load detection data from specified source
+    source_group = root[source_path]
+    
+    # Handle different data structures for detect vs refined
+    if 'frame_mapping' in source_group:
+        # Refined data: uses frame_mapping to connect detections to frames
+        frame_mapping = source_group['frame_mapping'][:]
+        bbox_coords = source_group['bbox_norm_coords'][:]
+        
+        # Find which detections correspond to this chunk's frames
+        chunk_frames = np.arange(chunk_slice.start, chunk_slice.stop)
+        mask = np.isin(frame_mapping, chunk_frames)
+        
+        detection_indices = np.where(mask)[0]
+        bbox_coords_chunk = bbox_coords[detection_indices]
+        frames_for_detections = frame_mapping[detection_indices]
+        
+        # Build n_per_frame for this chunk
+        n_per_frame = np.zeros(len(chunk_frames), dtype=int)
+        for i, frame in enumerate(chunk_frames):
+            n_per_frame[i] = np.sum(frames_for_detections == frame)
+        
+    else:
+        # Original detect data: uses n_detections array directly
+        n_per_frame = source_group['n_detections'][chunk_slice]
+        
+        # Compute detection index range within detect_runs for this chunk
+        start_detection_idx = int(np.sum(source_group['n_detections'][:chunk_slice.start]))
+        end_detection_idx = start_detection_idx + int(np.sum(n_per_frame))
+        bbox_coords_chunk = source_group['bbox_norm_coords'][start_detection_idx:end_detection_idx]
+        
+        # For detect runs, frame index corresponds to position in chunk
+        frames_for_detections = None  # Will use sequential indexing
 
     start_det_out, end_det_out = out_slice
     count = end_det_out - start_det_out
@@ -144,6 +250,7 @@ def crop_and_store_chunk_delayed(
             continue
 
         img = images_full_chunk[i]
+        
         for _ in range(nd):
             center_norm = bbox_coords_chunk[cursor_in][:2]  # (cx_norm, cy_norm)
             # Note: bbox coords are normalized w.r.t (W, H), so multiply in (W, H) order
@@ -194,12 +301,24 @@ def crop_and_store_chunk_delayed(
 def crop_detections(
     zarr_path: str,
     config: Dict[str, Any],
+    source_type: str = 'detect',
     scheduler: str = None,
     num_workers: Optional[int] = None,
     console: Optional[Console] = None
 ) -> Dict[str, Any]:
     """
     Main function to crop ROIs from full-resolution frames based on detections.
+    
+    Args:
+        zarr_path: Path to zarr file
+        config: Configuration dictionary
+        source_type: Detection source - 'detect', 'filtered', or 'interpolated'
+        scheduler: Dask scheduler ('processes', 'threads', or 'distributed')
+        num_workers: Number of workers (None = auto)
+        console: Optional Rich console for output
+    
+    Returns:
+        Dictionary with cropping statistics
     """
     if console is None:
         console = Console()
@@ -208,6 +327,11 @@ def crop_detections(
     start_time = time.perf_counter()
 
     root = zarr.open_group(zarr_path, mode='a')
+
+    # Get detection source information
+    source_path, source_group, detection_source = get_detection_source_info(
+        root, source_type, console
+    )
 
     # Get crop parameters including scheduler settings
     crop_params, param_source = get_crop_parameters(root, config, console)
@@ -229,8 +353,8 @@ def crop_detections(
     console.print(f"Scheduler: {scheduler}, Workers: {num_workers or 'default'}")
 
     # Create run group
+    from ..shared.zarr.schema import get_run_group
     crop_group, run_group_name = get_run_group(root, 'crop', console)
-    latest_detect_run = root['detect_runs'].attrs['latest']
 
     # Build initial metadata dictionary
     metadata_dict = {
@@ -239,35 +363,43 @@ def crop_detections(
         'dask_num_workers': num_workers or os.cpu_count(),
         'parameters': crop_params,
         'parameter_source': param_source,
-        'source_detect_run': latest_detect_run,
+        'detection_source_type': source_type,
+        'detection_source_path': source_path,
         'roi_size': roi_sz
     }
 
     # Store initial metadata
     crop_group.attrs.update(metadata_dict)
 
-    # Detection info
-    detect_group = root[f'detect_runs/{latest_detect_run}']
-    n_detections = detect_group['n_detections'][:]
-    total_detections = int(n_detections.sum())
-    num_images = len(n_detections)
+    # Get detection counts
+    if 'frame_mapping' in source_group:
+        # Refined data
+        n_detections_array = source_group['n_detections'][:]
+        bbox_coords = source_group['bbox_norm_coords'][:]
+        total_detections = len(bbox_coords)
+    else:
+        # Original detect data
+        n_detections_array = source_group['n_detections'][:]
+        total_detections = int(n_detections_array.sum())
+    
+    num_images = len(n_detections_array)
 
     if total_detections == 0:
         console.print("[yellow]Warning: No detections found. Nothing to crop.[/yellow]")
-        crop_group.attrs['summary_statistics'] = {
-            'total_frames': num_images,
-            'frames_with_crops': 0,
-            'total_rois_cropped': 0,
-            'percent_frames_with_crops': 0.0
-        }
-        return {'total_crops': 0, 'frames_with_crops': 0}
+        return {'total_crops': 0}
 
-    console.print(f"Total detections to crop: [green]{total_detections}[/green]")
+    console.print(f"Total detections to crop: {total_detections:,}")
+    console.print(f"Total frames: {num_images:,}")
+
+    # Get video dimensions and scale factor
+    ds_img_shape = root['raw_video/images_ds'].shape[1:]
+    full_img_shape = root['raw_video/images_full'].shape[1:]
+    scale_factor = ds_img_shape[0] / full_img_shape[0]
 
     # Compressor
     compressor = BloscCodec(typesize=1, cname='lz4', clevel=1, shuffle="bitshuffle")
 
-    # Create output arrays
+    # Create output arrays in crop group
     roi_images = crop_group.create_array(
         'roi_images',
         shape=(total_detections, *roi_sz),
@@ -276,7 +408,7 @@ def crop_detections(
         overwrite=True,
         compressors=compressor
     )
-
+    
     roi_coordinates_full = crop_group.create_array(
         'roi_coordinates_full',
         shape=(total_detections, 2),
@@ -284,11 +416,7 @@ def crop_detections(
         dtype='i4',
         overwrite=True
     )
-
-    ds_img_shape = root['raw_video/images_ds'].shape[1:]
-    full_img_shape = root['raw_video/images_full'].shape[1:]
-    scale_factor = ds_img_shape[0] / full_img_shape[0]
-
+    
     roi_coordinates_ds = crop_group.create_array(
         'roi_coordinates_ds',
         shape=(total_detections, 2),
@@ -296,6 +424,24 @@ def crop_detections(
         dtype='i4',
         overwrite=True
     )
+    
+    # If using interpolated data, save the detection source array
+    if detection_source is not None:
+        crop_group.create_array(
+            'detection_source',
+            data=detection_source,
+            chunks=(min(chunk_size * 8, len(detection_source)),),
+            dtype='i1',
+            overwrite=True
+        )
+        crop_group.attrs['includes_interpolated'] = True
+        crop_group.attrs['n_real_detections'] = int(np.sum(detection_source == 0))
+        crop_group.attrs['n_interpolated_detections'] = int(np.sum(detection_source == 1))
+    else:
+        crop_group.attrs['includes_interpolated'] = False
+
+    # Store path to this crop group in root for workers to find
+    root.attrs['current_crop_group_path'] = crop_group.path
 
     # Build chunk frame slices
     chunk_slices = [slice(i, min(i + chunk_size, num_images))
@@ -303,11 +449,27 @@ def crop_detections(
     console.print(f"Creating [yellow]{len(chunk_slices)}[/yellow] Dask tasks for cropping...")
 
     # Precompute cumulative detection offsets ONCE on driver
-    cumulative_detections = np.cumsum(np.insert(n_detections, 0, 0))
+    cumulative_detections = np.cumsum(np.insert(n_detections_array, 0, 0))
+    
+    # Build chunks with output slices
+    chunks = []
+    for chunk_slice in chunk_slices:
+        start_det = int(cumulative_detections[chunk_slice.start])
+        end_det = int(cumulative_detections[chunk_slice.stop])
+        
+        if end_det > start_det:  # Only add if chunk has detections
+            chunks.append((chunk_slice, (start_det, end_det)))
+    
+    frames_with_crops = int(np.sum(n_detections_array > 0))
 
-    # Mark the crop group path so workers can reopen it
-    root.attrs['current_crop_group_path'] = crop_group.path
-
+    # Create delayed tasks
+    delayed_tasks = [
+        crop_and_store_chunk_delayed(
+            zarr_path, frame_slice, out_slice, roi_sz, scale_factor, source_path
+        )
+        for frame_slice, out_slice in chunks
+    ]
+    
     # Dask config and scheduler
     dask.config.set({
         "distributed.worker.memory.target": 0.65,
@@ -315,78 +477,42 @@ def crop_detections(
         "distributed.worker.memory.pause": 0.90,
         "distributed.worker.memory.terminate": 0.98,
     })
-
+    
     client = None
+
+    # Execute based on scheduler
     if use_distributed:
-        # Processes are best for NumPy/Zarr workloads
-        cluster = LocalCluster(
-            processes=True,
-            n_workers=num_workers or os.cpu_count(),
-            threads_per_worker=2,
-            memory_limit="10GiB",
-            local_directory=os.environ.get("DASK_DISTRIBUTED__WORKER__LOCAL_DIRECTORY", None),
-        )
-        client = Client(cluster)
-        console.print(f"Dask dashboard: {client.dashboard_link}")
+        # Distributed execution with Rich progress bar
+        client = Client()
+        console.print(f"[green]Dask distributed dashboard:[/green] {client.dashboard_link}")
         
-        # NOW update metadata with distributed config
-        crop_group.attrs['distributed_config'] = {
-            'processes': True,
-            'threads_per_worker': 2,
-            'memory_limit': '10GiB',
-            'local_directory': os.environ.get("DASK_DISTRIBUTED__WORKER__LOCAL_DIRECTORY", None),
-            'dashboard_link': client.dashboard_link,
-            'memory_target': 0.65,
-            'memory_spill': 0.75,
-            'memory_pause': 0.90,
-            'memory_terminate': 0.98
-        }
-    else:
-        # Fall back to local schedulers
-        if scheduler not in {"processes", "threads", "single-threaded"}:
-            console.print("[yellow]Unknown scheduler; using 'processes'.[/yellow]")
-            scheduler = "processes"
-        dask.config.set(scheduler=scheduler,
-                        num_workers=num_workers or os.cpu_count())
-        # For local schedulers, capture the actual number used
-        crop_group.attrs['actual_num_workers'] = dask.config.get('num_workers', os.cpu_count())
-
-    # Create delayed tasks
-    delayed_tasks = []
-    for slc in chunk_slices:
-        start_idx = int(cumulative_detections[slc.start])
-        end_idx = int(cumulative_detections[slc.stop])
-        if end_idx == start_idx:
-            continue
-        d = crop_and_store_chunk_delayed(
-            zarr_path, slc, (start_idx, end_idx), roi_sz, float(scale_factor)
-        )
-        delayed_tasks.append(d)
-
-    frames_with_crops = int(np.sum(n_detections > 0))
-    # Execute with streaming to avoid materializing all results
-    console.print("Processing chunks (streaming writes from workers)...")
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeRemainingColumn(),
-        console=console,
-        transient=True
-    ) as progress:
-        
-        if use_distributed:
-            futures = client.compute(delayed_tasks)
-            n_workers_actual = len(client.cluster.workers) if client.cluster.workers else num_workers or os.cpu_count()
-            task = progress.add_task(f"[cyan]Cropping chunks (distributed, {n_workers_actual} workers)...", total=len(futures))
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeRemainingColumn(),
+            console=console
+        ) as progress:
+            task = progress.add_task("[cyan]Cropping chunks (distributed)...", total=len(delayed_tasks))
             
-            for fut in as_completed(futures):
-                _ = fut.result()
+            futures = client.compute(delayed_tasks)
+            for future in as_completed(futures):
+                _ = future.result()
                 progress.update(task, advance=1)
-        else:
-            # Use Rich for local schedulers too
+        
+        client.close()
+    
+    else:
+        # Local execution with Rich progress bar
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeRemainingColumn(),
+            console=console
+        ) as progress:
             task = progress.add_task(f"[cyan]Cropping chunks ({scheduler})...", total=len(delayed_tasks))
             
             for d in delayed_tasks:
@@ -415,7 +541,17 @@ def crop_detections(
         'hostname': env_info['platform']['hostname']
     })
 
+    # Clean up root attrs
+    if 'current_crop_group_path' in root.attrs:
+        del root.attrs['current_crop_group_path']
+
     # Create completion panel
+    source_info = f"{source_type}"
+    if detection_source is not None:
+        n_real = int(np.sum(detection_source == 0))
+        n_interp = int(np.sum(detection_source == 1))
+        source_info += f" ({n_real} real + {n_interp} interpolated)"
+    
     completion_text = f"""[green]✓[/green] Cropping completed successfully
 
 [bold]Performance:[/bold]
@@ -425,100 +561,78 @@ def crop_detections(
 
 [bold]Output:[/bold]
   Path: {zarr_path}
+  Detection source: {source_info}
 
 [bold]Arrays created:[/bold]
   - crop_runs/{run_group_name}/roi_images: ({total_detections}, {roi_sz[0]}, {roi_sz[1]})
   - crop_runs/{run_group_name}/roi_coordinates_full: ({total_detections}, 2)
-  - crop_runs/{run_group_name}/roi_coordinates_ds: ({total_detections}, 2)
+  - crop_runs/{run_group_name}/roi_coordinates_ds: ({total_detections}, 2)"""
+    
+    if detection_source is not None:
+        completion_text += f"\n  - crop_runs/{run_group_name}/detection_source: ({total_detections},)"
 
-[bold]Statistics:[/bold]
-  Total ROIs: {total_detections:,}
-  Frames with crops: {frames_with_crops:,}/{num_images:,} ({percent_cropped:.1f}%)"""
-
-    # Add scheduler info
-    if use_distributed:
-        completion_text += f"\n  Scheduler: distributed ({num_workers or os.cpu_count()} workers)"
-    else:
-        completion_text += f"\n  Scheduler: {scheduler} ({dask.config.get('num_workers', os.cpu_count())} workers)"
-
-    panel = Panel(
-        completion_text,
-        title="[bold]Crop Complete[/bold]",
-        border_style="green",
-        padding=(1, 2)
-    )
-
-    console.print("\n")
-    console.print(panel)
-
-    # Cleanup distributed client/cluster
-    if use_distributed and client is not None:
-        client.close()
-        cluster.close()
+    console.print(Panel(
+        Align.center(completion_text),
+        title="[bold green]Cropping Complete[/bold green]",
+        border_style="green"
+    ))
 
     return {
         'total_crops': total_detections,
         'frames_with_crops': frames_with_crops,
         'percent_cropped': percent_cropped,
-        'duration': duration,
-        'run_name': run_group_name
+        'duration_seconds': duration,
+        'detection_source_type': source_type
     }
 
 
-def get_run_group(root: zarr.Group, stage_name: str, console: Console) -> Tuple[zarr.Group, str]:
-    parent_group_name = f"{stage_name}_runs"
-    parent_group = root.require_group(parent_group_name)
-    timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
-    run_group_name = f"{stage_name}_{timestamp}"
-    run_group = parent_group.create_group(run_group_name)
-    parent_group.attrs['latest'] = run_group_name
-    console.print(f"Created new run group: [cyan]{run_group.path}[/cyan]")
-    return run_group, run_group_name
-
-
-# ---- CLI ---- #
-
 def main():
-    """Command-line interface for crop stage."""
+    """CLI entry point."""
     import argparse
     import yaml
-
-    parser = argparse.ArgumentParser(description="Crop ROIs from detected fish")
-    parser.add_argument("zarr_path", help="Path to zarr archive")
-    parser.add_argument("--config", default="configs/fisheye/default.yaml",
-                       help="Configuration file")
-    parser.add_argument("--scheduler", default="processes",
-                       choices=["processes", "threads", "single-threaded", "distributed"],
-                       help="Dask scheduler to use")
-    parser.add_argument("--num-workers", type=int,
-                       help="Number of workers (default: CPU count)")
-
+    
+    parser = argparse.ArgumentParser(description="Crop ROIs from detections")
+    parser.add_argument("zarr_path", type=str, help="Path to zarr file")
+    parser.add_argument("--config", type=str, required=True, help="Path to config YAML")
+    parser.add_argument("--source-type", type=str, default='detect',
+                       choices=['detect', 'filtered', 'interpolated'],
+                       help="Detection source to use")
+    parser.add_argument("--scheduler", type=str, default=None,
+                       choices=['processes', 'threads', 'distributed'],
+                       help="Dask scheduler type")
+    parser.add_argument("--num-workers", type=int, default=None,
+                       help="Number of workers")
+    
     args = parser.parse_args()
-
+    
     # Load config
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
-
+    
     console = Console()
-
-    # Friendly hint if they asked for distributed but it's not installed
+    
+    # Warn if distributed requested but not available
     if args.scheduler == "distributed" and not HAVE_DISTRIBUTED:
-        console.print("[yellow]dask.distributed not found; falling back to 'processes'.[/yellow]")
+        console.print("[yellow]Warning: distributed scheduler not available, falling back to processes[/yellow]")
         args.scheduler = "processes"
 
     try:
         results = crop_detections(
             zarr_path=args.zarr_path,
             config=config,
+            source_type=args.source_type,
             scheduler=args.scheduler,
             num_workers=args.num_workers,
             console=console
         )
         console.print(f"\n[green]Cropping complete![/green]")
         console.print(f"Total ROIs cropped: {results['total_crops']}")
+        console.print(f"Detection source: {results['detection_source_type']}")
         return 0
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
+        import traceback
+        traceback.print_exc()
         return 1
 
 

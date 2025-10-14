@@ -41,6 +41,7 @@ class PipelineConfig:
     force_cpu: bool = False
     verbose: bool = False
     dry_run: bool = False
+    crop_source: str = "detect"
     
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "PipelineConfig":
@@ -55,7 +56,8 @@ class PipelineConfig:
             use_gpu=not getattr(args, 'no_gpu', False),
             force_cpu=getattr(args, 'force_cpu', False),
             verbose=getattr(args, 'verbose', False),
-            dry_run=getattr(args, 'dry_run', False)
+            dry_run=getattr(args, 'dry_run', False),
+            crop_source=getattr(args, 'crop_source', 'detect')
         )
 
 
@@ -356,16 +358,31 @@ class Pipeline:
         if self.zarr_root is None:
             self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
         
-        # Run cropping
+        # Validate refined source is available if requested
+        if self.config.crop_source in ['filtered', 'interpolated']:
+            if 'refined_runs' not in self.zarr_root or self.zarr_root['refined_runs'].attrs.get('latest') is None:
+                self.console.print(
+                    f"[red]Error: Crop source '{self.config.crop_source}' requires refined_runs.[/red]\n"
+                    "[yellow]Run 'refine' stage first or use '--crop-source detect'[/yellow]"
+                )
+                raise ValueError(f"Refined runs not found for crop source '{self.config.crop_source}'")
+        
+        # Run cropping with specified source
         results = crop_detections(
             zarr_path=self.config.zarr_path,
             config=self.pipeline_params,
+            source_type=self.config.crop_source,
             scheduler=self.config.scheduler,
             num_workers=self.config.num_workers,
             console=self.console
         )
         
-        self.console.print(f" Cropped {results['total_crops']} ROIs from {results['frames_with_crops']} frames")
+        # Display results with source info
+        source_info = f"from {self.config.crop_source} detections"
+        if 'detection_source_type' in results:
+            source_info = f"from {results['detection_source_type']} detections"
+        
+        self.console.print(f"[green]✓[/green] Cropped {results['total_crops']} ROIs from {results['frames_with_crops']} frames ({source_info})")
 
     def _run_keypoints(self) -> None:
         """Run keypoints stage to detect anatomical keypoints in cropped ROIs."""
@@ -479,7 +496,7 @@ class Pipeline:
                 self.console.print(f"✓ Imported {stats['total_frames']} frames")
     
     def _display_pipeline_plan(self, stages: List[str]) -> None:
-        """Display the pipeline execution plan with experiment setup info."""
+        """Display the pipeline execution plan"""
         from rich.table import Table
         from rich.panel import Panel
         
@@ -623,6 +640,37 @@ class Pipeline:
                         results_lines.append(f"[bold]Detections:[/bold] {total_detections:,} total")
                         results_lines.append(f"[bold]Detection rate:[/bold] {detection_rate:.1f}% of frames")
                 
+                # Crop results - show source type
+                if 'crop_runs' in root and root['crop_runs'].attrs.get('latest'):
+                    latest_crop = root['crop_runs'].attrs['latest']
+                    crop_group = root[f'crop_runs/{latest_crop}']
+                    
+                    # Get crop source info
+                    crop_source = crop_group.attrs.get('detection_source_type', 'detect')
+                    includes_interpolated = crop_group.attrs.get('includes_interpolated', False)
+                    
+                    if 'summary_statistics' in crop_group.attrs:
+                        stats = crop_group.attrs['summary_statistics']
+                        total_crops = stats.get('total_rois_cropped', 0)
+                        frames_with_crops = stats.get('frames_with_crops', 0)
+                        
+                        # Build crop info string
+                        crop_info = f"[bold]Crops:[/bold] {total_crops:,} ROIs from {frames_with_crops:,} frames"
+                        
+                        # Add source info
+                        source_color = "yellow" if crop_source in ['filtered', 'interpolated'] else "cyan"
+                        crop_info += f" ([{source_color}]{crop_source}[/{source_color}])"
+                        
+                        results_lines.append(crop_info)
+                        
+                        # If interpolated, show breakdown
+                        if includes_interpolated:
+                            n_real = crop_group.attrs.get('n_real_detections', 0)
+                            n_interp = crop_group.attrs.get('n_interpolated_detections', 0)
+                            results_lines.append(
+                                f"  [dim]└─ {n_real:,} real + {n_interp:,} interpolated[/dim]"
+                            )
+                
                 # ID assignment results
                 if 'id_assignment_runs' in root and root['id_assignment_runs'].attrs.get('latest'):
                     latest_assign = root['id_assignment_runs'].attrs['latest']
@@ -709,7 +757,7 @@ class Pipeline:
         
         self.console.print(Panel(
             status_text,
-            title="✨ Success",
+            title="Success",
             border_style="bold green",
             padding=(1, 2)
         ))
@@ -729,37 +777,43 @@ class Pipeline:
                 if 'background_runs' not in root:
                     return False
                 latest = root['background_runs'].attrs.get('latest')
-                return latest is not None  # ← Check value, not just key
+                return latest is not None
             
             elif stage == 'detect':
                 if 'detect_runs' not in root:
                     return False
                 latest = root['detect_runs'].attrs.get('latest')
-                return latest is not None  # ← Check value, not just key
+                return latest is not None
             
             elif stage == 'crop':
                 if 'crop_runs' not in root:
                     return False
                 latest = root['crop_runs'].attrs.get('latest')
-                return latest is not None  # ← Check value, not just key
+                return latest is not None
             
             elif stage == 'keypoints':
                 if 'keypoint_runs' not in root:
                     return False
                 latest = root['keypoint_runs'].attrs.get('latest')
-                return latest is not None  # ← Check value, not just key
+                return latest is not None
             
             elif stage == 'assign_ids':
                 if 'id_assignment_runs' not in root:
                     return False
                 latest = root['id_assignment_runs'].attrs.get('latest')
-                return latest is not None  # ← Check value, not just key
+                return latest is not None
+            
+            elif stage == 'refine':
+                if 'refined_runs' not in root:
+                    return False
+                latest = root['refined_runs'].attrs.get('latest')
+                return latest is not None
             
             elif stage == 'track':
                 if 'tracking_runs' not in root:
                     return False
                 latest = root['tracking_runs'].attrs.get('latest')
-                return latest is not None  # ← Check value, not just key
+                return latest is not None
             
             return False
             
@@ -866,6 +920,14 @@ Examples:
         ],
         default=['all'],
         help="Stages to run"
+    )
+
+    parser.add_argument(
+        "--crop-source",
+        type=str,
+        default="detect",
+        choices=["detect", "filtered", "interpolated"],
+        help="Detection source for cropping (default: detect)"
     )
     
     parser.add_argument(

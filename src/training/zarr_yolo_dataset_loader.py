@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from enum import Enum
 import yaml
 from typing import Union, Any
-from torch.utils.data import Dataset
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -58,6 +57,7 @@ class ZarrDatasetConfig:
     dataset_weights: Optional[Dict[str, float]] = None
     target_size: Optional[int] = None
     min_confidence: float = 0.0
+    filter_interpolated: bool = False  # NEW: Filter out interpolated data
 
     @classmethod
     def from_yaml(cls, path: str):
@@ -89,6 +89,11 @@ class DatasetMetadata:
     valid_frames: int
     column_names: List[str]
     tracking_success_rate: float = 0.0
+    crop_source_type: str = 'unknown'  # NEW
+    has_interpolated: bool = False  # NEW
+    n_real_rois: int = 0  # NEW
+    n_interpolated_rois: int = 0  # NEW
+
 
 class GlobalIndexManager:
     """Builds and manages a global index across all specified Zarr files."""
@@ -100,9 +105,12 @@ class GlobalIndexManager:
     def _validate_and_get_metadata(self) -> List[DatasetMetadata]:
         logger.info(f"Validating {len(self.config.zarr_paths)} Zarr files...")
         metadata_list = []
+        
         for path_str in self.config.zarr_paths:
             try:
                 root = zarr.open(path_str, mode='r')
+                
+                # Check for tracking data
                 if 'tracking_runs' not in root or 'latest' not in root['tracking_runs'].attrs:
                     raise KeyError("Could not find 'tracking_runs' with 'latest' attribute.")
                 
@@ -112,25 +120,61 @@ class GlobalIndexManager:
                     raise KeyError(f"Latest tracking results not found at '{tracking_results_path}'")
                 
                 tracking_results = root[tracking_results_path]
-                
                 column_names = tracking_results.attrs['column_names']
                 
+                # Get crop metadata - NEW: Extract crop source info
+                crop_source_type = 'unknown'
+                has_interpolated = False
+                n_real_rois = 0
+                n_interpolated_rois = 0
+                
+                if 'crop_runs' in root and 'latest' in root['crop_runs'].attrs:
+                    latest_crop = root['crop_runs'].attrs['latest']
+                    crop_group = root[f'crop_runs/{latest_crop}']
+                    
+                    # Get crop source metadata
+                    crop_source_type = crop_group.attrs.get('detection_source_type', 'detect')
+                    has_interpolated = crop_group.attrs.get('includes_interpolated', False)
+                    
+                    if has_interpolated:
+                        n_real_rois = crop_group.attrs.get('n_real_detections', 0)
+                        n_interpolated_rois = crop_group.attrs.get('n_interpolated_detections', 0)
+                
+                # Determine source coordinates
                 if 'refine_runs' in root and 'latest' in root['refine_runs'].attrs:
                     latest_refine_run = root['refine_runs'].attrs['latest']
                     source_coords = root[f'refine_runs/{latest_refine_run}/refined_bbox_norm_coords']
-                else:
+                elif 'crop_runs' in root and 'latest' in root['crop_runs'].attrs:
                     latest_crop_run = root['crop_runs'].attrs['latest']
                     source_coords = root[f'crop_runs/{latest_crop_run}/bbox_norm_coords']
+                else:
+                    raise KeyError("No crop_runs or refine_runs found")
                 
                 valid_mask = ~np.isnan(source_coords[:, 0])
                 valid_frames = np.sum(valid_mask)
                 total_frames = len(tracking_results)
 
-                metadata_list.append(DatasetMetadata(
-                    path=path_str, name=Path(path_str).stem, total_frames=total_frames,
-                    valid_frames=valid_frames, column_names=column_names,
-                    tracking_success_rate=(np.sum(~np.isnan(tracking_results[:, 0])) / total_frames * 100) if total_frames > 0 else 0
-                ))
+                metadata = DatasetMetadata(
+                    path=path_str,
+                    name=Path(path_str).stem,
+                    total_frames=total_frames,
+                    valid_frames=valid_frames,
+                    column_names=column_names,
+                    tracking_success_rate=(np.sum(~np.isnan(tracking_results[:, 0])) / total_frames * 100) if total_frames > 0 else 0,
+                    crop_source_type=crop_source_type,
+                    has_interpolated=has_interpolated,
+                    n_real_rois=n_real_rois,
+                    n_interpolated_rois=n_interpolated_rois
+                )
+                
+                # Log crop source info
+                if has_interpolated:
+                    logger.info(f"  {Path(path_str).name}: {crop_source_type} source ({n_real_rois} real + {n_interpolated_rois} interpolated)")
+                else:
+                    logger.info(f"  {Path(path_str).name}: {crop_source_type} source (all real)")
+                
+                metadata_list.append(metadata)
+                
             except Exception as e:
                 raise IOError(f"Failed to process Zarr file at '{path_str}': {e}")
         
@@ -138,13 +182,30 @@ class GlobalIndexManager:
         return metadata_list
 
     def _get_valid_indices(self, metadata: DatasetMetadata) -> np.ndarray:
+        """Get valid frame indices, optionally filtering out interpolated data."""
         root = zarr.open(metadata.path, mode='r')
         
+        # Get source coordinates
         source_coords_path = (f"refine_runs/{root['refine_runs'].attrs['latest']}/refined_bbox_norm_coords" 
                               if 'refine_runs' in root and 'latest' in root['refine_runs'].attrs 
                               else f"crop_runs/{root['crop_runs'].attrs['latest']}/bbox_norm_coords")
         valid_mask = ~np.isnan(root[source_coords_path][:, 0])
+        
+        # NEW: Filter out interpolated data if requested
+        if self.config.filter_interpolated and metadata.has_interpolated:
+            latest_crop = root['crop_runs'].attrs['latest']
+            crop_group = root[f'crop_runs/{latest_crop}']
+            
+            if 'detection_source' in crop_group:
+                detection_source = crop_group['detection_source'][:]
+                # Only keep real detections (0), filter out interpolated (1)
+                real_mask = (detection_source == 0)
+                valid_mask = valid_mask & real_mask
+                
+                n_filtered = np.sum(detection_source == 1)
+                logger.info(f"    Filtered out {n_filtered} interpolated ROIs from {metadata.name}")
 
+        # For pose task, also check keypoints validity
         if self.config.task == 'pose':
             latest_track_run = root['tracking_runs'].attrs['latest']
             tracking_data = root[f'tracking_runs/{latest_track_run}/tracking_results']
@@ -162,7 +223,12 @@ class GlobalIndexManager:
         return np.where(valid_mask)[0]
 
     def _build_global_index(self) -> List[Tuple[str, int]]:
+        """Build global index, optionally filtering interpolated data."""
         logger.info("Building global sample index...")
+        
+        if self.config.filter_interpolated:
+            logger.info("  ⚠ filter_interpolated=True: Excluding interpolated ROIs")
+        
         all_valid_indices = {m.path: self._get_valid_indices(m) for m in self.metadata_list}
         
         global_indices = [(path, index) for path, indices in all_valid_indices.items() for index in indices]
@@ -171,12 +237,24 @@ class GlobalIndexManager:
         np.random.shuffle(global_indices)
 
         logger.info(f"Global index created with {len(global_indices)} total samples.")
+        
+        # Log statistics
+        total_real = sum(m.n_real_rois for m in self.metadata_list if m.has_interpolated)
+        total_interp = sum(m.n_interpolated_rois for m in self.metadata_list if m.has_interpolated)
+        
+        if total_interp > 0:
+            if self.config.filter_interpolated:
+                logger.info(f"  Dataset composition: {len(global_indices)} real ROIs (filtered out {total_interp} interpolated)")
+            else:
+                logger.info(f"  Dataset composition: {total_real} real + {total_interp} interpolated = {len(global_indices)} total ROIs")
+        
         return global_indices
 
     def get_split_indices(self) -> Tuple[List, List]:
         return train_test_split(
             self.global_indices, train_size=self.config.split_ratio, random_state=self.config.random_seed
         )
+
 
 class ZarrYOLODataset(Dataset):
     def __init__(self, config: ZarrDatasetConfig, mode: str = 'train'):
@@ -256,7 +334,11 @@ class ZarrYOLODataset(Dataset):
             bbox_w = (max_x - min_x) + margin_x
             bbox_h = (max_y - min_y) + margin_y
 
-            kpts_with_visibility = np.array([kpts_flat[0], kpts_flat[1], 2, kpts_flat[2], kpts_flat[3], 2, kpts_flat[4], kpts_flat[5], 2]).reshape(1, -1)
+            kpts_with_visibility = np.array([
+                kpts_flat[0], kpts_flat[1], 2,
+                kpts_flat[2], kpts_flat[3], 2,
+                kpts_flat[4], kpts_flat[5], 2
+            ]).reshape(1, -1)
 
             return {
                 "cls": np.array([0]),
@@ -292,6 +374,9 @@ class ZarrYOLODataset(Dataset):
             "ratio_pad": (None, None) 
         }
 
+
 def create_zarr_dataset(config: Union[ZarrDatasetConfig, Dict], mode: str) -> ZarrYOLODataset:
-    if isinstance(config, dict): config = ZarrDatasetConfig(**config)
+    """Factory function to create a ZarrYOLODataset."""
+    if isinstance(config, dict):
+        config = ZarrDatasetConfig(**config)
     return ZarrYOLODataset(config, mode)

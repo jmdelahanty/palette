@@ -224,7 +224,7 @@ def assign_ids_spatial(
         actual_rois = len(subdish_masks)
         
         if expected_rois != actual_rois:
-            console.print(f"[yellow]⚠️  Warning: ROI count mismatch![/yellow]")
+            console.print(f"[yellow]  Warning: ROI count mismatch![/yellow]")
             console.print(f"  Expected {expected_rois} dishes, found {actual_rois} ROIs")
             console.print(f"  Proceeding with {actual_rois} ROIs...")
     

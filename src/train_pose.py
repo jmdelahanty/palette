@@ -19,7 +19,7 @@ import json
 import zarr
 
 from config_models import PoseConfig
-from zarr_yolo_dataset_loader import create_zarr_dataset, ZarrDatasetConfig
+from training.zarr_yolo_dataset_loader import create_zarr_dataset, ZarrDatasetConfig
 from tracker import get_git_info
 
 class YoloCompatibleDataLoader(DataLoader):

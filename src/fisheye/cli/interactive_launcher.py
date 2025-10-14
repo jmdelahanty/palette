@@ -232,6 +232,12 @@ class PipelineLauncherApp(App):
         border: solid yellow;
         background: $panel;
     }
+
+    .stage_option {
+        margin-left: 2;
+        margin-bottom: 1;
+        width: 90%;
+    }
     """
     
     BINDINGS = [
@@ -329,7 +335,7 @@ class PipelineLauncherApp(App):
                     stats = detect_group.attrs['summary_statistics']
                     n_detections = stats.get('total_detections', 0)
                     frames_with_detections = stats.get('frames_with_detections', 0)
-                    total_frames = stats.get('total_frames', 0)
+                    total_frames = stats.get('total_frames', 1)
                     if total_frames > 0:
                         percent = (frames_with_detections / total_frames) * 100
                         status['detect'] = f'✓ Complete ({n_detections} detections, {percent:.1f}%)'
@@ -337,7 +343,7 @@ class PipelineLauncherApp(App):
                         status['detect'] = f'✓ Complete ({n_detections} detections)'
                 else:
                     status['detect'] = '✓ Complete'
-                    
+            
             # Check crop
             if 'crop_runs' in root and len(list(root['crop_runs'].group_keys())) > 0:
                 latest = root['crop_runs'].attrs.get('latest')
@@ -346,7 +352,7 @@ class PipelineLauncherApp(App):
                     stats = crop_group.attrs['summary_statistics']
                     n_crops = stats.get('total_rois_cropped', 0)
                     frames_with_crops = stats.get('frames_with_crops', 0)
-                    total_frames = stats.get('total_frames', 0)
+                    total_frames = stats.get('total_frames', 1)
                     if total_frames > 0:
                         percent = (frames_with_crops / total_frames) * 100
                         status['crop'] = f'✓ Complete ({n_crops} ROIs, {percent:.1f}%)'
@@ -359,13 +365,16 @@ class PipelineLauncherApp(App):
             keypoint_group_name = None
             if 'keypoints_runs' in root and len(list(root['keypoints_runs'].group_keys())) > 0:
                 keypoint_group_name = 'keypoints_runs'
+            elif 'keypoint_runs' in root and len(list(root['keypoint_runs'].group_keys())) > 0:
+                keypoint_group_name = 'keypoint_runs'
             
             if keypoint_group_name:
                 latest = root[keypoint_group_name].attrs.get('latest')
                 keypoint_group = root[f'{keypoint_group_name}/{latest}'] if latest else None
                 if keypoint_group and 'summary_statistics' in keypoint_group.attrs:
-                    n_success = keypoint_group.attrs['summary_statistics'].get('successful_detections', 0)
-                    success_rate = keypoint_group.attrs['summary_statistics'].get('success_rate_percent', 0)
+                    stats = keypoint_group.attrs['summary_statistics']
+                    n_success = stats.get('successful_detections', 0)
+                    success_rate = stats.get('success_rate_percent', 0)
                     status['keypoints'] = f'✓ Complete ({n_success} successful, {success_rate:.1f}%)'
                 else:
                     status['keypoints'] = '✓ Complete'
@@ -375,42 +384,68 @@ class PipelineLauncherApp(App):
                 latest = root['tracking_runs'].attrs.get('latest')
                 status['track'] = f'✓ Complete ({latest})' if latest else '✓ Complete'
                 
-            # Check refine
-            if 'refine_runs' in root and len(list(root['refine_runs'].group_keys())) > 0:
-                latest = root['refine_runs'].attrs.get('latest')
-                status['refine'] = f'✓ Complete ({latest})' if latest else '✓ Complete'
+            # Check refine - WITH DETAILED SUB-ITEMS
+            if 'refined_runs' in root and len(list(root['refined_runs'].group_keys())) > 0:
+                latest = root['refined_runs'].attrs.get('latest')
+                refined_group = root[f'refined_runs/{latest}']
                 
+                # Build detailed status with sub-items
+                status_lines = ['✓ Complete']
+                
+                # Check filtered stage
+                if 'filtered' in refined_group:
+                    filtered_grp = refined_group['filtered']
+                    filtered_attrs = filtered_grp.attrs
+                    
+                    total_dets = filtered_attrs.get('total_detections', 0)
+                    dropped_dets = filtered_attrs.get('dropped_detections', 0)
+                    
+                    status_lines.append(f'  └─ filtered: {total_dets:,} detections ({dropped_dets} jumps removed)')
+                
+                # Check interpolated stage
+                if 'interpolated' in refined_group:
+                    interp_grp = refined_group['interpolated']
+                    interp_attrs = interp_grp.attrs
+                    
+                    total_dets = interp_attrs.get('total_detections', 0)
+                    original_dets = interp_attrs.get('original_detections', 0)
+                    interpolated_dets = interp_attrs.get('interpolated_detections', 0)
+                    gaps_filled = interp_attrs.get('gaps_filled', 0)
+                    
+                    status_lines.append(f'  └─ interpolated: {total_dets:,} detections ({interpolated_dets} added, {gaps_filled} gaps filled)')
+                
+                # Join all lines
+                status['refine'] = '\n'.join(status_lines)
+            
             # Check assign_ids
-            if 'id_assignment_runs' in root:
-                try:
-                    latest = root['id_assignment_runs'].attrs.get('latest')
-                    if latest:
-                        assign_group = root[f'id_assignment_runs/{latest}']
-                        if 'summary_statistics' in assign_group.attrs:
-                            stats = assign_group.attrs['summary_statistics']
-                            assigned = stats.get('assigned_detections', 0)
-                            total = stats.get('total_detections', 0)
-                            setup_type = stats.get('setup_type', 'unknown')
-                            if total > 0:
-                                percent = (assigned / total) * 100
-                                status['assign_ids'] = f'✓ Complete ({setup_type}, {percent:.0f}% assigned)'
-                            else:
-                                status['assign_ids'] = f'✓ Complete ({setup_type})'
-                        else:
-                            status['assign_ids'] = '✓ Complete'
-                except Exception as e:
-                    pass  # Silently fail and leave as "Not Run"
-
-
-            experiment_setup = root.attrs.get('experiment_setup', {})
-            if experiment_setup:
-                setup_type = experiment_setup.get('setup_type', 'unknown')
-                num_dishes = experiment_setup.get('num_dishes', '?')
+            if 'id_assignment_runs' in root and len(list(root['id_assignment_runs'].group_keys())) > 0:
+                latest = root['id_assignment_runs'].attrs.get('latest')
+                assign_group = root[f'id_assignment_runs/{latest}'] if latest else None
                 
+                if assign_group and 'summary_statistics' in assign_group.attrs:
+                    stats = assign_group.attrs['summary_statistics']
+                    
+                    # Check experiment setup for type
+                    experiment_setup = root.attrs.get('experiment_setup', {})
+                    setup_type = experiment_setup.get('setup_type', 'unknown')
+                    
+                    if setup_type == 'single_dish':
+                        # For single dish, just show basic stats
+                        assigned = stats.get('assigned_detections', 0)
+                        total = stats.get('total_detections', 1)
+                        percent = stats.get('assignment_rate_percent', 0)
+                        status['assign_ids'] = f'✓ Complete (single_dish, {percent:.0f}% assigned)'
+                    else:
+                        # For multi-dish, show number of ROIs
+                        num_masks = stats.get('num_masks', 0)
+                        percent = stats.get('assignment_rate_percent', 0)
+                        status['assign_ids'] = f'✓ Complete ({num_masks} ROIs, {percent:.0f}% assigned)'
+                else:
+                    status['assign_ids'] = '✓ Complete'
+        
         except Exception as e:
-            # If there's an error reading zarr, mark all as unknown
-            for stage in STAGE_ORDER:
-                status[stage] = f'? Error: {str(e)[:30]}'
+            # If there's an error, keep defaults
+            pass
         
         return status
     
@@ -433,7 +468,7 @@ class PipelineLauncherApp(App):
                 # Check if this is a valid zarr that just hasn't been configured
                 if 'raw_video' in root or 'detect_runs' in root:
                     experiment_panel.update(
-                        "[yellow]⚠ No experiment setup configured[/]\n"
+                        "[yellow] No experiment setup configured[/]\n"
                         "[dim]Press 'e' to configure[/dim]"
                     )
                 else:
@@ -545,6 +580,19 @@ class PipelineLauncherApp(App):
                         label += f" (requires: {', '.join(info['requires'])})"
                     
                     yield Checkbox(label, id=f"stage_{stage}", classes="stage_checkbox")
+
+                    if stage == 'crop':
+                        yield Label("  └─ Crop source:", classes="info_text")
+                        yield Select(
+                        [
+                            ("Original detections", "detect"),
+                            ("Filtered (jumps removed)", "filtered"),  
+                            ("Gaps filled (interpolated)", "interpolated")
+                        ],
+                        value="detect",
+                        id="crop_source_select",
+                        classes="stage_option"
+                    )
                 
                 yield Label("\n🔧 Tuning Tools", classes="section_header")
                 yield Label("Run parameter tuners:", classes="info_text")
@@ -679,6 +727,15 @@ class PipelineLauncherApp(App):
         video_exts = {'.mp4', '.avi', '.mov', '.mkv', '.mpeg', '.mpg', '.wmv', '.flv', '.webm'}
         return Path(path).suffix.lower() in video_exts
     
+    def _get_crop_source_selection(self) -> str:
+        """Get the selected crop source from dropdown."""
+        try:
+            crop_source_select = self.query_one("#crop_source_select", Select)
+            return crop_source_select.value if crop_source_select.value != Select.BLANK else "detect"
+        except Exception:
+            # Fallback if widget not found
+            return "detect"
+    
     def watch_selected_zarr(self, value: str) -> None:
         """Update zarr display when selection changes."""
         try:
@@ -789,22 +846,22 @@ class PipelineLauncherApp(App):
         config_path = self.selected_config
         
         if not zarr_path:
-            self.status_message = "❌ Error: Select a zarr file from the tree!"
+            self.status_message = " Error: Select a zarr file from the tree!"
             if self.progress_log:
-                self.progress_log.write("[red]❌ Error: Select a zarr file first![/]")
+                self.progress_log.write("[red] Error: Select a zarr file first![/]")
             return None
         
         stages = self._get_selected_stages()
         if not stages:
-            self.status_message = "❌ Error: Select at least one stage!"
+            self.status_message = " Error: Select at least one stage!"
             if self.progress_log:
-                self.progress_log.write("[red]❌ Error: Select at least one stage![/]")
+                self.progress_log.write("[red] Error: Select at least one stage![/]")
             return None
         
         if 'import' in stages and not video_path:
-            self.status_message = "❌ Error: Select a video file for import stage!"
+            self.status_message = " Error: Select a video file for import stage!"
             if self.progress_log:
-                self.progress_log.write("[red]❌ Error: Import stage requires a video file![/]")
+                self.progress_log.write("[red] Error: Import stage requires a video file![/]")
             return None
         
         cmd = [sys.executable, "-m", "fisheye", zarr_path]
@@ -816,6 +873,26 @@ class PipelineLauncherApp(App):
             cmd.extend(["--config", config_path])
         
         cmd.extend(["--stages"] + stages)
+
+        # Add crop source if crop stage is selected
+        if 'crop' in stages:
+            crop_source = self._get_crop_source_selection()
+            
+            # Check if refined source is available
+            if crop_source in ['filtered', 'interpolated']:
+                if not self._check_refined_runs_exist(zarr_path):
+                    self.status_message = f" Error: No refined_runs found for '{crop_source}' source"
+                    if self.progress_log:
+                        self.progress_log.write(
+                            f"[red] Error: '{crop_source}' source requires refined_runs.[/red]\n"
+                            "[yellow]Run 'refine' stage first or select 'detect' source.[/yellow]\n"
+                        )
+                    return None
+            
+            cmd.extend(["--crop-source", crop_source])
+            
+            if self.progress_log and not dry_run:
+                self.progress_log.write(f"[cyan]  Crop source: {crop_source}[/cyan]\n")
         
         # Add scheduler selection
         try:
@@ -829,6 +906,17 @@ class PipelineLauncherApp(App):
             cmd.append("--dry-run")
         
         return cmd
+    
+    def _check_refined_runs_exist(self, zarr_path: str) -> bool:
+        """Check if refined_runs group exists in zarr file."""
+        try:
+            if not Path(zarr_path).exists():
+                return False
+            
+            root = zarr.open(zarr_path, mode='r')
+            return 'refined_runs' in root and root['refined_runs'].attrs.get('latest') is not None
+        except Exception:
+            return False
     
     def _update_stage_status_display(self) -> None:
         """Update the stage status display panel."""
@@ -848,15 +936,37 @@ class PipelineLauncherApp(App):
         for stage in STAGE_ORDER:
             stage_status = status.get(stage, '○ Not Run')
             
-            # Color code based on status
-            if '✓' in stage_status:
-                color = 'green'
-            elif '?' in stage_status:
-                color = 'red'
+            # Check if status has newlines (multi-line status like refine)
+            if '\n' in stage_status:
+                # Split into main line and sub-items
+                lines = stage_status.split('\n')
+                main_status = lines[0]
+                sub_items = lines[1:]
+                
+                # Color code main status
+                if '✓' in main_status:
+                    color = 'green'
+                elif '?' in main_status:
+                    color = 'red'
+                else:
+                    color = 'dim'
+                
+                # Add main line
+                status_lines.append(f"[{color}]{stage}:[/{color}] {main_status}")
+                
+                # Add sub-items (already formatted with └─)
+                for sub_item in sub_items:
+                    status_lines.append(f"[dim]{sub_item}[/dim]")
             else:
-                color = 'dim'
-            
-            status_lines.append(f"[{color}]{stage}:[/{color}] {stage_status}")
+                # Single-line status (normal case)
+                if '✓' in stage_status:
+                    color = 'green'
+                elif '?' in stage_status:
+                    color = 'red'
+                else:
+                    color = 'dim'
+                
+                status_lines.append(f"[{color}]{stage}:[/{color}] {stage_status}")
         
         status_text = "\n".join(status_lines)
         status_panel.update(status_text)
