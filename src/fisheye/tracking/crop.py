@@ -26,6 +26,9 @@ from rich.table import Table
 from rich.align import Align
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn, MofNCompleteColumn
 
+# Metadata helpers
+from ..utils.metadata import has_raw_video, get_video_source_path, get_total_frames, get_detection_method
+
 # Dask imports
 import dask
 from dask import delayed
@@ -38,8 +41,513 @@ try:
 except Exception:
     HAVE_DISTRIBUTED = False
 
+try:
+    import torch
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
+
+try:
+    import decord
+    from decord import VideoReader, cpu, gpu
+    _DECORD_AVAILABLE = True
+except ImportError:
+    _DECORD_AVAILABLE = False
+
+import cv2  # For CPU fallback in gpu decoding
+
 from ..utils.system import get_environment_info
 
+
+def check_gpu_crop_available() -> Tuple[bool, str]:
+    """
+    Check if GPU-accelerated cropping is available.
+    
+    Returns:
+        Tuple of (available, reason)
+    """
+    if not _TORCH_AVAILABLE:
+        return False, "PyTorch not installed"
+    
+    if not _DECORD_AVAILABLE:
+        return False, "Decord not installed"
+    
+    if not torch.cuda.is_available():
+        return False, "CUDA not available"
+    
+    return True, "GPU cropping available"
+
+def get_video_source(root: zarr.Group, console: Console) -> Tuple[str, Optional[str]]:
+    """
+    Determine video source - zarr or external file.
+    
+    Args:
+        root: Zarr root group
+        console: Rich console for output
+    
+    Returns:
+        Tuple of (source_type, video_path)
+        - source_type: 'zarr' or 'external'
+        - video_path: Path to video file (None if zarr)
+    """
+    from ..utils.metadata import has_raw_video, get_video_source_path
+    
+    # Try zarr first (preferred for speed)
+    if has_raw_video(root):
+        console.print("[green]✓[/green] Video source: zarr (raw_video)")
+        return 'zarr', None
+    
+    # Try external video
+    video_path = get_video_source_path(root)
+    if video_path:
+        video_path = Path(video_path)
+        if video_path.exists():
+            console.print(f"[cyan]✓[/cyan] Video source: external file")
+            console.print(f"[dim]  Path: {video_path}[/dim]")
+            return 'external', str(video_path)
+        else:
+            console.print(f"[yellow]⚠[/yellow] Video path in metadata not found: {video_path}")
+    
+    # No video source found
+    raise ValueError(
+        "No video source found. Need either:\n"
+        "  1. raw_video in zarr (run import stage), OR\n"
+        "  2. source_video_path in metadata pointing to valid video file"
+    )
+
+
+def create_crop_batches(
+    frame_indices: np.ndarray,
+    max_frames_per_batch: int = 32
+) -> List[np.ndarray]:
+    """
+    Group detections into batches where frames are close together.
+    
+    Args:
+        frame_indices: Frame index for each detection
+        max_frames_per_batch: Maximum unique frames to decode at once
+    
+    Returns:
+        List of detection index arrays, one per batch
+    """
+    # Sort detections by frame
+    sorted_idx = np.argsort(frame_indices)
+    
+    batches = []
+    current_batch = []
+    unique_frames_in_batch = set()
+    
+    for det_idx in sorted_idx:
+        frame = frame_indices[det_idx]
+        
+        # Start new batch if too many unique frames
+        if len(unique_frames_in_batch) >= max_frames_per_batch:
+            batches.append(np.array(current_batch))
+            current_batch = []
+            unique_frames_in_batch = set()
+        
+        current_batch.append(det_idx)
+        unique_frames_in_batch.add(frame)
+    
+    if current_batch:
+        batches.append(np.array(current_batch))
+    
+    return batches
+
+
+def crop_batch_gpu(
+    video_reader: Any,
+    frame_indices: np.ndarray,
+    bbox_coords: np.ndarray,
+    roi_sz: Tuple[int, int],
+    video_shape: Tuple[int, int]
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Crop a batch of detections using GPU acceleration.
+    
+    Args:
+        video_reader: Decord VideoReader with GPU context
+        frame_indices: Frame index for each detection in batch
+        bbox_coords: Normalized bbox coordinates [N, 4]
+        roi_sz: (height, width) of ROI
+        video_shape: (height, width) of video
+    
+    Returns:
+        Tuple of (crops, coordinates)
+    """
+    # Get unique frames and create mapping
+    unique_frames = np.unique(frame_indices)
+    frame_to_idx = {int(f): i for i, f in enumerate(unique_frames)}
+    
+    # Decode frames on GPU
+    frames_gpu = video_reader.get_batch(unique_frames.tolist())  # [N, H, W, C]
+    
+    # Convert to grayscale on GPU
+    frames_gray = frames_gpu.to(torch.float32).mean(dim=-1).to(torch.uint8)  # [N, H, W]
+    
+    # Prepare outputs
+    num_crops = len(frame_indices)
+    roi_h, roi_w = roi_sz
+    H, W = video_shape
+    
+    crops_gpu = torch.zeros((num_crops, roi_h, roi_w), dtype=torch.uint8, device='cuda')
+    coords_cpu = np.zeros((num_crops, 2), dtype=np.int32)
+    
+    # Extract each crop
+    for i, (frame_idx, bbox) in enumerate(zip(frame_indices, bbox_coords)):
+        frame_batch_idx = frame_to_idx[int(frame_idx)]
+        frame_tensor = frames_gray[frame_batch_idx]
+        
+        # Calculate crop coordinates
+        cx_norm, cy_norm = bbox[:2]
+        cx_px = int(cx_norm * W)
+        cy_px = int(cy_norm * H)
+        
+        x1 = cx_px - roi_w // 2
+        y1 = cy_px - roi_h // 2
+        x2 = x1 + roi_w
+        y2 = y1 + roi_h
+        
+        coords_cpu[i] = (x1, y1)
+        
+        # Extract with bounds checking
+        if 0 <= x1 and x2 <= W and 0 <= y1 and y2 <= H:
+            crops_gpu[i] = frame_tensor[y1:y2, x1:x2]
+        else:
+            vy1 = max(0, y1); vy2 = min(H, y2)
+            vx1 = max(0, x1); vx2 = min(W, x2)
+            
+            if vy2 > vy1 and vx2 > vx1:
+                py1 = max(0, -y1)
+                px1 = max(0, -x1)
+                py2 = py1 + (vy2 - vy1)
+                px2 = px1 + (vx2 - vx1)
+                
+                crops_gpu[i, py1:py2, px1:px2] = frame_tensor[vy1:vy2, vx1:vx2]
+    
+    # Copy to CPU
+    crops_cpu = crops_gpu.cpu().numpy()
+    
+    # Cleanup
+    del frames_gpu, frames_gray, crops_gpu
+    torch.cuda.empty_cache()
+    
+    return crops_cpu, coords_cpu
+
+
+def crop_batch_cpu(
+    video_path: str,
+    frame_indices: np.ndarray,
+    bbox_coords: np.ndarray,
+    roi_sz: Tuple[int, int],
+    video_shape: Tuple[int, int]
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Crop a batch of detections using CPU (OpenCV).
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    
+    # Get unique frames and decode
+    unique_frames = np.unique(frame_indices)
+    frame_cache = {}
+    
+    for frame_idx in unique_frames:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
+        ret, frame = cap.read()
+        if ret:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frame_cache[int(frame_idx)] = gray
+    
+    cap.release()
+    
+    # Extract crops
+    num_crops = len(frame_indices)
+    roi_h, roi_w = roi_sz
+    H, W = video_shape
+    
+    crops = np.zeros((num_crops, roi_h, roi_w), dtype=np.uint8)
+    coords = np.zeros((num_crops, 2), dtype=np.int32)
+    
+    for i, (frame_idx, bbox) in enumerate(zip(frame_indices, bbox_coords)):
+        frame = frame_cache.get(int(frame_idx))
+        if frame is None:
+            continue
+        
+        cx_norm, cy_norm = bbox[:2]
+        cx_px = int(cx_norm * W)
+        cy_px = int(cy_norm * H)
+        
+        x1 = cx_px - roi_w // 2
+        y1 = cy_px - roi_h // 2
+        x2 = x1 + roi_w
+        y2 = y1 + roi_h
+        
+        coords[i] = (x1, y1)
+        
+        if 0 <= x1 and x2 <= W and 0 <= y1 and y2 <= H:
+            crops[i] = frame[y1:y2, x1:x2]
+        else:
+            vy1 = max(0, y1); vy2 = min(H, y2)
+            vx1 = max(0, x1); vx2 = min(W, x2)
+            
+            if vy2 > vy1 and vx2 > vx1:
+                py1 = max(0, -y1)
+                px1 = max(0, -x1)
+                py2 = py1 + (vy2 - vy1)
+                px2 = px1 + (vx2 - vx1)
+                
+                crops[i, py1:py2, px1:px2] = frame[vy1:vy2, vx1:vx2]
+    
+    return crops, coords
+
+
+def crop_from_external_video(
+    zarr_path: str,
+    video_path: str,
+    source_path: str,
+    source_group: zarr.Group,
+    detection_source: Optional[np.ndarray],
+    roi_sz: Tuple[int, int],
+    use_gpu: bool,
+    console: Console
+) -> Dict[str, Any]:
+    """
+    Crop detections from external video file (GPU or CPU).
+    """
+    start_time = time.perf_counter()
+    
+    root = zarr.open(zarr_path, mode='a')
+    
+    # Load detection data
+    frame_indices = source_group['frame_indices'][:]
+    bbox_coords = source_group['bbox_norm_coords'][:]
+    total_detections = frame_indices.shape[0]  
+    
+    if total_detections == 0:
+        console.print("[yellow]No detections to crop[/yellow]")
+        return {'total_crops': 0}
+    
+    # Get video dimensions from metadata
+    video_height = root.attrs['height']
+    video_width = root.attrs['width']
+    video_shape = (video_height, video_width)
+    num_frames = root.attrs['total_frames']
+    
+    console.print(f"Total detections: {total_detections:,}")
+    console.print(f"Video dimensions: {video_width}x{video_height}")
+    console.print(f"ROI size: {roi_sz[1]}x{roi_sz[0]}")
+    
+    # Create crop group
+    from ..shared.zarr.schema import get_run_group
+    crop_group, run_name = get_run_group(root, 'crop', console)
+    
+    # Create output arrays
+    compressor = BloscCodec(typesize=1, cname='lz4', clevel=1, shuffle="bitshuffle")
+    
+    crop_group.create_array(
+        'roi_images',
+        shape=(total_detections, *roi_sz),
+        chunks=(min(1024, total_detections), roi_sz[0], roi_sz[1]),
+        dtype='uint8',
+        overwrite=True,
+        compressors=compressor
+    )
+    
+    crop_group.create_array(
+        'roi_coordinates_full',
+        shape=(total_detections, 2),
+        chunks=(min(2048, total_detections), 2),
+        dtype='i4',
+        overwrite=True
+    )
+    
+    # Get environment info for complete metadata
+    env_info = get_environment_info(
+        include_all_packages=False,
+        disk_path=str(zarr_path),
+        collect_ip=False
+    )
+
+    # Store comprehensive metadata following unified spec
+    crop_group.attrs.update({
+        # === Core Identifiers ===
+        'created_at_utc': datetime.now(timezone.utc).isoformat(),
+        'stage': 'crop',
+        'pipeline_type': 'fisheye_tracking',
+        
+        # === Video Source ===
+        'video_source_type': 'external',
+        'video_source_path': str(video_path),
+        'source_video_path': root.attrs.get('source_video_path', str(video_path)),
+        'total_frames': num_frames,
+        'width': video_width,
+        'height': video_height,
+        
+        # === Detection Source ===
+        'detection_source_type': source_path.split('/')[-1] if '/' in source_path else 'detect',
+        'detection_source_path': source_path,
+        'detection_method': get_detection_method(source_group),
+        'total_detections': total_detections,
+        
+        # === Crop Configuration ===
+        'roi_size': list(roi_sz),
+        'parameter_source': 'config',  # External video uses config params
+        
+        # === Acceleration ===
+        'acceleration': 'gpu' if use_gpu else 'cpu',
+        'device': 'cuda:0' if use_gpu else 'cpu',
+        
+        # === Git Provenance ===
+        'git_commit_hash': env_info['git'].get('commit_hash', 'unknown'),
+        'git_short_hash': env_info['git'].get('short_hash', 'unknown'),
+        'git_branch': env_info['git'].get('branch', 'unknown'),
+        'git_is_dirty': env_info['git'].get('is_dirty', False),
+        'git_remote_url': env_info['git'].get('remote_url', 'unknown'),
+        
+        # === Platform Info ===
+        'hostname': env_info['platform']['hostname'],
+        'system_os': env_info['platform']['system'],
+        'system_machine': env_info['platform']['machine'],
+        'python_version': env_info['platform']['python_version'],
+        'cpu_cores': env_info['platform']['cpu_cores'],
+        
+        # === GPU Info ===
+        'gpu_available': env_info['gpu']['available'],
+        
+        # === Environment ===
+        'environment_type': env_info['environment']['environment_type'],
+        'environment_name': env_info['environment']['environment_name'],
+        
+        # === Execution ===
+        'command': ' '.join(sys.argv),
+    })
+
+    # Add detailed GPU info if using GPU
+    if use_gpu and env_info['gpu']['available'] and env_info['gpu'].get('devices'):
+        primary_gpu = env_info['gpu']['devices'][0]
+        crop_group.attrs.update({
+            'gpu_name': primary_gpu.get('name', 'unknown'),
+            'gpu_memory_total_mb': primary_gpu.get('memory_total_mb', 0),
+            'gpu_compute_capability': primary_gpu.get('compute_capability', 'unknown'),
+            'gpu_driver_version': env_info['gpu'].get('driver_version', 'unknown'),
+            'cuda_version': env_info['gpu'].get('cuda_version', 'unknown'),
+        })
+        
+    # Copy source metadata
+    save_crop_metadata(
+        crop_group=crop_group,
+        source_group=source_group,
+        source_path=source_path,
+        source_type=source_path.split('/')[-1] if '/' in source_path else 'detect',
+        detection_source=detection_source,
+        total_detections=total_detections,
+        num_frames=num_frames
+    )
+    
+    # Initialize video reader
+    if use_gpu:
+        console.print("[green]Initializing GPU video decoder...[/green]")
+        decord.bridge.set_bridge('torch')
+        video_reader = VideoReader(str(video_path), ctx=gpu(0))
+        console.print(f"[green]✓[/green] GPU decoder ready")
+    else:
+        console.print("[cyan]Using CPU video decoder...[/cyan]")
+        video_reader = None
+    
+    # Create batches
+    max_frames = 64 if use_gpu else 32
+    batches = create_crop_batches(frame_indices, max_frames_per_batch=max_frames)
+    
+    console.print(f"Processing {len(batches)} batches...")
+    
+    # Process batches with progress bar
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
+    
+    total_processed = 0
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TextColumn("•"),
+        TextColumn("[cyan]{task.fields[rate]:.1f} crops/s"),
+        TimeRemainingColumn(),
+        console=console
+    ) as progress:
+        task = progress.add_task(
+            "Cropping ROIs",
+            total=total_detections,
+            rate=0.0
+        )
+        
+        batch_times = []
+        
+        for batch_idx, det_indices in enumerate(batches):
+            batch_start = time.perf_counter()
+            
+            batch_frames = frame_indices[det_indices]
+            batch_bboxes = bbox_coords[det_indices]
+            
+            # Crop this batch
+            if use_gpu:
+                crops, coords = crop_batch_gpu(
+                    video_reader, batch_frames, batch_bboxes,
+                    roi_sz, video_shape
+                )
+            else:
+                crops, coords = crop_batch_cpu(
+                    video_path, batch_frames, batch_bboxes,
+                    roi_sz, video_shape
+                )
+            
+            # Write to zarr
+            crop_group['roi_images'][det_indices] = crops
+            crop_group['roi_coordinates_full'][det_indices] = coords
+            
+            batch_time = time.perf_counter() - batch_start
+            batch_times.append(batch_time)
+            
+            total_processed += len(det_indices)
+            
+            # Update progress
+            elapsed = time.perf_counter() - start_time
+            rate = total_processed / elapsed if elapsed > 0 else 0
+            progress.update(task, advance=len(det_indices), rate=rate)
+            
+            # Print diagnostic every 50 batches
+            if (batch_idx + 1) % 50 == 0:
+                avg_time = np.mean(batch_times[-50:])
+                console.print(
+                    f"[dim]Batch {batch_idx + 1}/{len(batches)}: "
+                    f"{avg_time*1000:.1f}ms, {len(det_indices)/avg_time:.1f} crops/s[/dim]"
+                )
+    
+    duration = time.perf_counter() - start_time
+    
+    # Add summary statistics
+    frames_with_crops = int(np.sum(crop_group['frame_counts'][:] > 0))
+    percent_cropped = (frames_with_crops / num_frames) * 100 if num_frames > 0 else 0
+    
+    crop_group.attrs['summary_statistics'] = {
+        'total_frames': num_frames,
+        'frames_with_crops': frames_with_crops,
+        'total_rois_cropped': total_detections,
+        'percent_frames_with_crops': round(percent_cropped, 2),
+        'roi_size': list(roi_sz)
+    }
+    crop_group.attrs['duration_seconds'] = duration
+    
+    console.print(f"[green]✓[/green] Cropping complete")
+    console.print(f"[cyan]  Time: {duration:.1f}s[/cyan]")
+    console.print(f"[cyan]  Rate: {total_detections/duration:.1f} crops/s[/cyan]")
+    
+    return {
+        'total_crops': total_detections,
+        'frames_with_crops': frames_with_crops,
+        'percent_cropped': percent_cropped,
+        'duration_seconds': duration
+    }
 
 def get_detection_source_info(
     root: zarr.Group,
@@ -126,6 +634,8 @@ def get_crop_parameters(
     # Start with config defaults
     crop_params = config.get('crop', {}).copy()
     crop_params.setdefault('roi_sz', [256, 256])
+    crop_params.setdefault('acceleration', 'auto')
+    crop_params.setdefault('gpu_min_detections', 200)
     
     param_source = 'config_default'
     
@@ -364,10 +874,17 @@ def crop_detections(
     source_type: str = 'detect',
     scheduler: str = None,
     num_workers: Optional[int] = None,
-    console: Optional[Console] = None
+    console: Optional[Console] = None,
+    acceleration: Optional[str] = None,
+    use_gpu_allowed: bool = True,
+    force_cpu: bool = False
 ) -> Dict[str, Any]:
     """
     Main function to crop ROIs from full-resolution frames based on detections.
+    
+    Supports both:
+    - Zarr video (traditional workflow)
+    - External video files (YOLO workflow with GPU/CPU acceleration)
     
     Args:
         zarr_path: Path to zarr file
@@ -376,6 +893,10 @@ def crop_detections(
         scheduler: Dask scheduler ('processes', 'threads', or 'distributed')
         num_workers: Number of workers (None = auto)
         console: Optional Rich console for output
+    
+        acceleration: 'auto', 'gpu', or 'cpu' to override external video mode selection
+        use_gpu_allowed: Whether GPU usage is permitted globally
+        force_cpu: Force CPU processing regardless of availability
     
     Returns:
         Dictionary with cropping statistics
@@ -393,8 +914,66 @@ def crop_detections(
         root, source_type, console
     )
 
-    # Get crop parameters including scheduler settings
+    # Get crop parameters
     crop_params, param_source = get_crop_parameters(root, config, console)
+    roi_sz = tuple(crop_params.get('roi_sz', [256, 256]))
+    
+    # Determine video source
+    video_source_type, video_path = get_video_source(root, console)
+    
+    # Route to appropriate implementation
+    if video_source_type == 'external':
+        total_detections = int(source_group['frame_indices'].shape[0])
+        accel_choice = (acceleration or crop_params.get('acceleration', 'auto') or 'auto').lower()
+        gpu_threshold = int(crop_params.get('gpu_min_detections', 200))
+        valid_accels = {'auto', 'gpu', 'cpu'}
+        if accel_choice not in valid_accels:
+            console.print(f"[yellow]Unknown crop acceleration '{accel_choice}', defaulting to auto[/yellow]")
+            accel_choice = 'auto'
+
+        use_gpu = False
+        decision_note = ""
+        gpu_available = False
+        gpu_reason = "GPU disabled"
+
+        if force_cpu:
+            decision_note = "forced CPU via --force-cpu"
+        elif not use_gpu_allowed and accel_choice != 'gpu':
+            decision_note = "GPU disabled via --no-gpu flag"
+        elif accel_choice == 'cpu':
+            decision_note = "crop acceleration configured as CPU"
+        else:
+            gpu_available, gpu_reason = check_gpu_crop_available()
+            if not gpu_available:
+                decision_note = f"GPU unavailable ({gpu_reason})"
+            elif not use_gpu_allowed:
+                decision_note = "GPU globally disabled"
+            elif accel_choice == 'gpu':
+                use_gpu = True
+                decision_note = "crop acceleration configured as GPU"
+            else:  # auto
+                use_gpu = total_detections >= gpu_threshold
+                if use_gpu:
+                    decision_note = f"auto mode threshold met ({total_detections:,} >= {gpu_threshold})"
+                else:
+                    decision_note = f"auto mode threshold not met ({total_detections:,} < {gpu_threshold})"
+
+        if use_gpu:
+            console.print(f"[green]✓ Using GPU-accelerated cropping[/green]")
+            console.print(f"[dim]  {decision_note}[/dim]")
+            console.print(f"[dim]  Device: {torch.cuda.get_device_name(0)}[/dim]")
+        else:
+            console.print(f"[cyan]Using CPU ({decision_note})[/cyan]")
+            if accel_choice == 'gpu' and not force_cpu and use_gpu_allowed and not gpu_available:
+                console.print(f"[yellow]Warning: GPU requested but unavailable ({gpu_reason})[/yellow]")
+        
+        # Use external video cropping
+        return crop_from_external_video(
+            zarr_path, video_path, source_path, source_group,
+            detection_source, roi_sz, use_gpu, console
+        )
+    
+    # Otherwise, use zarr-based cropping
     
     # Use config values if not explicitly provided
     if scheduler is None:
@@ -416,38 +995,103 @@ def crop_detections(
     from ..shared.zarr.schema import get_run_group
     crop_group, run_group_name = get_run_group(root, 'crop', console)
 
-    # Build initial metadata dictionary
-    metadata_dict = {
-        'crop_timestamp_utc': datetime.now(timezone.utc).isoformat(),
-        'dask_scheduler': scheduler,
-        'dask_num_workers': num_workers or os.cpu_count(),
-        'parameters': crop_params,
-        'parameter_source': param_source,
-        'detection_source_type': source_type,
-        'detection_source_path': source_path,
-        'roi_size': roi_sz,
-        'total_frames': num_images,
-        'total_detections': total_detections,
-        'command': ' '.join(sys.argv)
-    }
+    # Get total frames using helper (before using it!)
+    num_images = get_total_frames(root, source_group)
+    if num_images is None:
+        # Fallback to video shape if helper can't determine
+        if 'raw_video/images_ds' in root:
+            num_images = root['raw_video/images_ds'].shape[0]
+        else:
+            raise ValueError("Cannot determine total frames")
 
-    # Store initial metadata
-    crop_group.attrs.update(metadata_dict)
-
-    # Get detection info using frame_indices
+    # Get detection info using frame_indices (BEFORE metadata collection)
     frame_indices = source_group['frame_indices'][:]
     bbox_coords = source_group['bbox_norm_coords'][:]
     total_detections = len(frame_indices)
     
-    # Get number of frames from video
-    num_images = root['raw_video/images_ds'].shape[0]
-
     if total_detections == 0:
         console.print("[yellow]Warning: No detections found. Nothing to crop.[/yellow]")
         return {'total_crops': 0}
-
+    
     console.print(f"Total detections to crop: {total_detections:,}")
     console.print(f"Total frames: {num_images:,}")
+
+    # Get environment info
+    env_info = get_environment_info(
+        include_all_packages=False,
+        disk_path=str(zarr_path),
+        collect_ip=False
+    )
+
+    # Determine if GPU will be used (for metadata)
+    use_distributed = (scheduler == "distributed") and HAVE_DISTRIBUTED
+
+    # Build comprehensive metadata following unified spec
+    crop_group.attrs.update({
+        # === Core Identifiers ===
+        'created_at_utc': datetime.now(timezone.utc).isoformat(),
+        'stage': 'crop',
+        'pipeline_type': 'fisheye_tracking',
+        
+        # === Video Source ===
+        'video_source_type': 'zarr',
+        'video_source_path': None,
+        'source_video_path': root.attrs.get('source_video_path', 'unknown'),
+        'total_frames': num_images,
+        'width': root.attrs.get('width', 0),
+        'height': root.attrs.get('height', 0),
+        
+        # === Detection Source ===
+        'detection_source_type': source_type,
+        'detection_source_path': source_path,
+        'detection_method': get_detection_method(source_group),
+        'total_detections': total_detections,
+        
+        # === Crop Configuration ===
+        'roi_size': list(roi_sz),
+        'parameter_source': param_source,
+        'parameters': crop_params,
+        
+        # === Dask Configuration ===
+        'scheduler': scheduler,
+        'num_workers': num_workers or os.cpu_count(),
+        'use_distributed': use_distributed,
+        
+        # === Git Provenance ===
+        'git_commit_hash': env_info['git'].get('commit_hash', 'unknown'),
+        'git_short_hash': env_info['git'].get('short_hash', 'unknown'),
+        'git_branch': env_info['git'].get('branch', 'unknown'),
+        'git_is_dirty': env_info['git'].get('is_dirty', False),
+        'git_remote_url': env_info['git'].get('remote_url', 'unknown'),
+        
+        # === Platform Info ===
+        'hostname': env_info['platform']['hostname'],
+        'system_os': env_info['platform']['system'],
+        'system_machine': env_info['platform']['machine'],
+        'python_version': env_info['platform']['python_version'],
+        'cpu_cores': env_info['platform']['cpu_cores'],
+        
+        # === GPU Info (CPU workflow but still track GPU availability) ===
+        'gpu_available': env_info['gpu']['available'],
+        
+        # === Environment ===
+        'environment_type': env_info['environment']['environment_type'],
+        'environment_name': env_info['environment']['environment_name'],
+        
+        # === Execution ===
+        'command': ' '.join(sys.argv),
+    })
+
+    # Add GPU details if available (even though zarr workflow uses CPU)
+    if env_info['gpu']['available'] and env_info['gpu'].get('devices'):
+        primary_gpu = env_info['gpu']['devices'][0]
+        crop_group.attrs.update({
+            'gpu_name': primary_gpu.get('name', 'unknown'),
+            'gpu_memory_total_mb': primary_gpu.get('memory_total_mb', 0),
+            'gpu_compute_capability': primary_gpu.get('compute_capability', 'unknown'),
+            'gpu_driver_version': env_info['gpu'].get('driver_version', 'unknown'),
+            'cuda_version': env_info['gpu'].get('cuda_version', 'unknown'),
+        })
 
     # Get video dimensions and scale factor
     ds_img_shape = root['raw_video/images_ds'].shape[1:]
@@ -593,19 +1237,6 @@ def crop_detections(
     duration = time.perf_counter() - start_time
     crop_group.attrs['duration_seconds'] = duration
 
-    # Environment info
-    env_info = get_environment_info()
-    crop_group.attrs['provenance'] = {
-        'command': ' '.join(sys.argv),
-        'created_at_utc': datetime.now(timezone.utc).isoformat(),
-        'source_detect_run': source_path,
-    }
-    crop_group.attrs.update({
-        'git_commit': env_info['git'].get('commit_hash', 'unknown'),
-        'git_branch': env_info['git'].get('branch', 'unknown'),
-        'hostname': env_info['platform']['hostname']
-    })
-
     # Clean up root attrs
     if 'current_crop_group_path' in root.attrs:
         del root.attrs['current_crop_group_path']
@@ -670,6 +1301,13 @@ def main():
                        help="Dask scheduler type")
     parser.add_argument("--num-workers", type=int, default=None,
                        help="Number of workers")
+    parser.add_argument("--acceleration", type=str, default=None,
+                       choices=['auto', 'gpu', 'cpu'],
+                       help="Acceleration mode for external video cropping")
+    parser.add_argument("--no-gpu", action="store_true",
+                       help="Disable GPU acceleration")
+    parser.add_argument("--force-cpu", action="store_true",
+                       help="Force CPU processing even if GPU available")
     
     args = parser.parse_args()
     
@@ -691,7 +1329,10 @@ def main():
             source_type=args.source_type,
             scheduler=args.scheduler,
             num_workers=args.num_workers,
-            console=console
+            console=console,
+            acceleration=args.acceleration,
+            use_gpu_allowed=not args.no_gpu,
+            force_cpu=args.force_cpu
         )
         console.print(f"\n[green]Cropping complete![/green]")
         console.print(f"Total ROIs cropped: {results['total_crops']}")

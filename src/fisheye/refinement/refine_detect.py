@@ -18,6 +18,8 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from rich.console import Console
 
+from ..utils.metadata import get_total_frames, get_detection_method
+
 
 def filter_detections(
     bbox_coords: np.ndarray,
@@ -410,8 +412,22 @@ def create_refined_run(
     else:
         console.print("[yellow]⚠ No detection quality reports found; assuming all detections are valid.[/yellow]")
         detection_quality_labels = np.zeros(len(bbox_coords), dtype='i1')
+
+    # Get total frames using unified metadata helper
+    num_frames = get_total_frames(root, detect_group)
     
-    num_frames = root['raw_video/images_ds'].shape[0]
+    if num_frames is None:
+        # Infer from detections as last resort
+        num_frames = int(frame_indices.max() + 1)
+        console.print(f"[yellow]⚠ No 'total_frames' in metadata, inferred {num_frames} from detections[/yellow]")
+        
+        # Log detection method for context
+        detect_method = get_detection_method(detect_group)
+        console.print(f"[yellow]  Detection method: {detect_method}[/yellow]")
+    else:
+        console.print(f"Using {num_frames} frames from metadata")
+    
+    # Get frame counts
     if 'frame_counts' in detect_group:
         frame_counts = detect_group['frame_counts'][:]
     else:

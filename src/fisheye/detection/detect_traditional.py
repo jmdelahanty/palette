@@ -373,17 +373,29 @@ def detect_fish(
             'frames_with_6_plus': 0,
         }
     
-    # Store metadata
+    # Store metadata (following unified spec)
     duration = time.perf_counter() - start_time
     
     detect_group.attrs.update({
+        # Core detection metadata (per unified spec)
         'detect_timestamp_utc': datetime.now(timezone.utc).isoformat(),
-        'duration_seconds': duration,
-        'method': 'blob_detection',
+        'duration_seconds': float(duration),
+        'detection_method': 'blob', 
+        'detection_source': 'zarr_video',  # Blob uses imported video in zarr
+        'total_frames': num_images,
+        'has_raw_video': True,
+        
+        # Detection parameters (method-specific)
         'parameters': detect_params,
         'parameter_source': param_source,
+        
+        # Background subtraction info (method-specific)
         'source_background_run': latest_bg_run,
+        
+        # Processing info
         'dask_scheduler': scheduler,
+        
+        # Summary statistics
         'summary_statistics': {
             'total_frames': num_images,
             'frames_with_detections': frames_with_detections,
@@ -393,6 +405,8 @@ def detect_fish(
             'mean_detections_per_frame': round(mean_detections, 2),
             'distribution': distribution
         },
+        
+        # Code version
         'code_version': {
             'git_commit': git_info['commit_hash'],
             'git_short': git_info['short_hash'],

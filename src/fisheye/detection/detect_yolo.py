@@ -812,7 +812,7 @@ def detect_yolo(
     detect_group.attrs.update({
         'detect_timestamp_utc': datetime.now(timezone.utc).isoformat(),
         'detection_method': 'yolo',  # 'blob' for traditional, 'yolo' for neural net
-        'detection_source': 'video_file',  # vs 'zarr_import' for traditional
+        'detection_source': 'external_video',
         'model_type': 'yolo_object_detection',
         'model_path': str(model_path.absolute()),
         'model_name': model_path.name,

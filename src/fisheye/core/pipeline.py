@@ -43,6 +43,7 @@ class PipelineConfig:
     verbose: bool = False
     dry_run: bool = False
     crop_source: str = "detect"
+    crop_acceleration: str = "auto"
     refine_max_gap: Optional[int] = None
     refine_method: Optional[str] = None
     refine_remove_jumps: Optional[bool] = None
@@ -63,6 +64,7 @@ class PipelineConfig:
             verbose=getattr(args, 'verbose', False),
             dry_run=getattr(args, 'dry_run', False),
             crop_source=getattr(args, 'crop_source', 'detect'),
+            crop_acceleration=getattr(args, 'crop_acceleration', 'auto'),
             refine_max_gap=getattr(args, 'refine_max_gap', None),
             refine_method=getattr(args, 'refine_method', None),
             refine_remove_jumps=getattr(args, 'refine_remove_jumps', None),
@@ -269,6 +271,12 @@ class Pipeline:
             deps = self.STAGE_DEPENDENCIES.get(stage, [])
             for dep in deps:
                 if dep not in existing_stages:
+                    # Special case: refine only needs detect data, not video/background
+                    # If detect_runs exists, skip import/background/downsample dependencies
+                    if stage == 'refine' and dep in ['import', 'background', 'downsample']:
+                        if 'detect' in existing_stages:
+                            continue  # Skip video pipeline deps if detections exist
+                    
                     required_stages.add(dep)
         
         # Return in proper order
@@ -389,7 +397,10 @@ class Pipeline:
             source_type=self.config.crop_source,
             scheduler=self.config.scheduler,
             num_workers=self.config.num_workers,
-            console=self.console
+            console=self.console,
+            acceleration=self.config.crop_acceleration,
+            use_gpu_allowed=self.config.use_gpu,
+            force_cpu=self.config.force_cpu
         )
         
         # Display results with source info
@@ -998,6 +1009,13 @@ Examples:
         default="detect",
         choices=["detect", "filtered", "interpolated"],
         help="Detection source for cropping (default: detect)"
+    )
+    
+    parser.add_argument(
+        "--crop-acceleration",
+        choices=['auto', 'gpu', 'cpu'],
+        default='auto',
+        help="Acceleration strategy for cropping external videos (default: auto)"
     )
     
     parser.add_argument(
