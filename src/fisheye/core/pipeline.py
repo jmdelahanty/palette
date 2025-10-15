@@ -44,7 +44,6 @@ class PipelineConfig:
     dry_run: bool = False
     crop_source: str = "detect"
     crop_acceleration: str = "auto"
-    gpu_crop_workers: Optional[int] = None
     refine_max_gap: Optional[int] = None
     refine_method: Optional[str] = None
     refine_remove_jumps: Optional[bool] = None
@@ -66,7 +65,6 @@ class PipelineConfig:
             dry_run=getattr(args, 'dry_run', False),
             crop_source=getattr(args, 'crop_source', 'detect'),
             crop_acceleration=getattr(args, 'crop_acceleration', 'auto'),
-            gpu_crop_workers=getattr(args, 'gpu_crop_workers', None),
             refine_max_gap=getattr(args, 'refine_max_gap', None),
             refine_method=getattr(args, 'refine_method', None),
             refine_remove_jumps=getattr(args, 'refine_remove_jumps', None),
@@ -403,8 +401,7 @@ class Pipeline:
             acceleration=self.config.crop_acceleration,
             use_gpu_allowed=self.config.use_gpu,
             force_cpu=self.config.force_cpu,
-            verbose=self.config.verbose,
-            gpu_workers=self.config.gpu_crop_workers
+            verbose=self.config.verbose
         )
         
         # Display results with source info
@@ -1035,12 +1032,6 @@ Examples:
         help="Number of workers (default: CPU count)"
     )
 
-    parser.add_argument(
-        "--gpu-crop-workers",
-        type=int,
-        help="Number of parallel GPU crop workers for cropping stage"
-    )
-    
     parser.add_argument(
         "--no-gpu",
         action="store_true",

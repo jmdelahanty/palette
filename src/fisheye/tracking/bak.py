@@ -15,6 +15,7 @@ import time
 import zarr
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, Future, wait, FIRST_COMPLETED, ALL_COMPLETED
 from queue import Queue
 from zarr.codecs import BloscCodec
 import numpy as np
@@ -566,69 +567,69 @@ def crop_from_external_video(
             chunk_starts = list(range(frame_min, frame_max + 1, chunk_size))
             total_chunks = len(chunk_starts)
 
-            if verbose:
-                console.print(f"Processing {total_chunks} contiguous chunks... (use_gpu=True)")
-                iterator = enumerate(chunk_starts)
-            else:
-                from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
+            worker_count = max(1, gpu_workers or 2)
+            console.print(f"Processing {total_chunks} contiguous chunks... (use_gpu=True, workers={worker_count})")
+            progress_every = max(1, total_chunks // 20)
 
-                progress = Progress(
-                    SpinnerColumn(),
-                    TextColumn("[progress.description]{task.description}"),
-                    BarColumn(),
-                    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                    TextColumn("•"),
-                    TextColumn("[cyan]{task.fields[rate]:.1f} crops/s"),
-                    TimeRemainingColumn(),
-                    console=console
-                )
-                progress_task = progress.add_task("Cropping ROIs (GPU)", total=total_detections, rate=0.0)
-                progress.__enter__()
-                iterator = enumerate(chunk_starts)
+            executor = ThreadPoolExecutor(max_workers=worker_count)
+            pending: Dict[Future, int] = {}
 
-            try:
-                for chunk_idx, chunk_start in iterator:
-                    chunk_end = min(chunk_start + chunk_size, frame_max + 1)
-                    chunk_frames = list(range(chunk_start, chunk_end))
-                    if not any(frame in frame_to_det for frame in chunk_frames):
-                        continue
-
-                    if verbose:
-                        console.print(
-                            f"[debug] Chunk {chunk_idx + 1}/{total_chunks}: frames {chunk_frames[0]}-{chunk_frames[-1]} ({len(chunk_frames)} frames)"
-                        )
-
-                    chunk_start_time = time.perf_counter()
-                    frames_gpu = video_reader.get_batch(chunk_frames)
-                    _, det_ids, crops_cpu, coords_full_cpu, chunk_time = _process_chunk_gpu(
-                        chunk_idx,
-                        chunk_frames,
-                        frames_gpu,
-                        frame_to_det,
-                        bbox_coords,
-                        roi_sz,
-                        (video_height, video_width)
-                    )
-                    del frames_gpu
+            def flush(force: bool = False) -> None:
+                nonlocal total_processed
+                if not pending:
+                    return
+                futures = list(pending.keys())
+                if force:
+                    done, _ = wait(futures, return_when=ALL_COMPLETED)
+                else:
+                    done, _ = wait(futures, timeout=0, return_when=FIRST_COMPLETED)
+                    if not done:
+                        return
+                for fut in done:
+                    chunk_idx_done = pending.pop(fut)
+                    (_chunk_id, det_ids, crops_cpu, coords_full_cpu, chunk_time) = fut.result()
                     batch_times.append(chunk_time)
-
-                    processed = int(det_ids.size)
-                    if processed:
+                    if det_ids.size:
                         crop_group['roi_images'][det_ids] = crops_cpu
                         crop_group['roi_coordinates_full'][det_ids] = coords_full_cpu
-                        total_processed += processed
-
+                        total_processed += int(det_ids.size)
                     if verbose:
                         console.print(
-                            f"[debug] <- Chunk {chunk_idx + 1}/{total_chunks}: {processed} detections in {chunk_time*1000:.1f} ms"
+                            f"[debug] <- Chunk {chunk_idx_done + 1}/{total_chunks} processed {det_ids.size} detections in {chunk_time*1000:.1f} ms"
                         )
                     else:
-                        elapsed_total = time.perf_counter() - start_time
-                        rate = total_processed / elapsed_total if elapsed_total > 0 else 0
-                        progress.update(progress_task, advance=processed, rate=rate)
-            finally:
-                if not verbose:
-                    progress.__exit__(None, None, None)
+                        if ((chunk_idx_done + 1) % progress_every == 0) or (chunk_idx_done == total_chunks - 1):
+                            console.print(
+                                f"[cyan]Chunk {chunk_idx_done + 1}/{total_chunks}: {total_processed} detections processed[/cyan]"
+                            )
+
+            for chunk_idx, chunk_start in enumerate(chunk_starts):
+                chunk_end = min(chunk_start + chunk_size, frame_max + 1)
+                chunk_frames = list(range(chunk_start, chunk_end))
+                if not any(frame in frame_to_det for frame in chunk_frames):
+                    continue
+
+                if verbose:
+                    console.print(
+                        f"[debug] Chunk {chunk_idx + 1}/{total_chunks}: frames {chunk_frames[0]}-{chunk_frames[-1]} ({len(chunk_frames)} frames)"
+                    )
+
+                frames_gpu = video_reader.get_batch(chunk_frames)
+                future = executor.submit(
+                    _process_chunk_gpu,
+                    chunk_idx,
+                    chunk_frames,
+                    frames_gpu,
+                    frame_to_det,
+                    bbox_coords,
+                    roi_sz,
+                    (video_height, video_width)
+                )
+                pending[future] = chunk_idx
+                flush()
+
+            executor.shutdown(wait=True)
+            flush(force=True)
 
         else:
             max_frames = 32
@@ -839,6 +840,7 @@ def get_crop_parameters(
     crop_params.setdefault('roi_sz', [256, 256])
     crop_params.setdefault('acceleration', 'auto')
     crop_params.setdefault('gpu_min_detections', 200)
+    crop_params.setdefault('gpu_workers', 2)
     
     param_source = 'config_default'
     
@@ -1081,7 +1083,8 @@ def crop_detections(
     acceleration: Optional[str] = None,
     use_gpu_allowed: bool = True,
     force_cpu: bool = False,
-    verbose: bool = False
+    verbose: bool = False,
+    gpu_workers: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     Main function to crop ROIs from full-resolution frames based on detections.
@@ -1102,6 +1105,7 @@ def crop_detections(
         use_gpu_allowed: Whether GPU usage is permitted globally
         force_cpu: Force CPU processing regardless of availability
         verbose: Enable additional logging and disable progress bars
+        gpu_workers: Number of parallel GPU cropping workers (None = config/default)
     
     Returns:
         Dictionary with cropping statistics
@@ -1122,6 +1126,8 @@ def crop_detections(
     # Get crop parameters
     crop_params, param_source = get_crop_parameters(root, config, console)
     roi_sz = tuple(crop_params.get('roi_sz', [256, 256]))
+    if gpu_workers is None:
+        gpu_workers = crop_params.get('gpu_workers', None)
     
     # Determine video source
     video_source_type, video_path = get_video_source(root, console)
@@ -1176,7 +1182,8 @@ def crop_detections(
         return crop_from_external_video(
             zarr_path, video_path, source_path, source_group,
             detection_source, roi_sz, use_gpu, console,
-            verbose=verbose
+            verbose=verbose,
+            gpu_workers=gpu_workers
         )
     
     # Otherwise, use zarr-based cropping
@@ -1513,6 +1520,8 @@ def main():
                        help="Disable GPU acceleration")
     parser.add_argument("--force-cpu", action="store_true",
                        help="Force CPU processing even if GPU available")
+    parser.add_argument("--gpu-workers", type=int, default=None,
+                        help="Number of parallel GPU crop workers")
     parser.add_argument("--verbose", action="store_true",
                         help="Enable verbose logging")
     
@@ -1540,7 +1549,8 @@ def main():
             acceleration=args.acceleration,
             use_gpu_allowed=not args.no_gpu,
             force_cpu=args.force_cpu,
-            verbose=args.verbose
+            verbose=args.verbose,
+            gpu_workers=args.gpu_workers
         )
         console.print(f"\n[green]Cropping complete![/green]")
         console.print(f"Total ROIs cropped: {results['total_crops']}")
