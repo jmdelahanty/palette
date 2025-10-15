@@ -19,7 +19,7 @@ detection:
   max_det: 1                # Maximum detections per image
                             # Set to expected number of fish in arena
                             
-  batch_size: 512            # Frames to process at once
+  batch_size: 16            # Frames to process at once
                             # Larger = faster (if GPU memory allows)
                             # Try: 16, 32, 64, or 128
 video:

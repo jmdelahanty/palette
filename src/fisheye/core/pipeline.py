@@ -400,7 +400,8 @@ class Pipeline:
             console=self.console,
             acceleration=self.config.crop_acceleration,
             use_gpu_allowed=self.config.use_gpu,
-            force_cpu=self.config.force_cpu
+            force_cpu=self.config.force_cpu,
+            verbose=self.config.verbose
         )
         
         # Display results with source info
