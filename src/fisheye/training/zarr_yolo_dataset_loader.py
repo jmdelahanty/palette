@@ -341,9 +341,13 @@ class ZarrYOLODataset(Dataset):
         logger.info(f"Pre-caching labels for {self.mode} set ({self.config.task} task)...")
         self.labels = []
         
-        # Cache detection metadata per zarr file for detect task (load once per file)
+        # Cache metadata per task
         self.bbox_cache = {}
         self.frame_index_cache = {}
+        self.kp_norm_cache = {}
+        self.kp_success_cache = {}
+        self.kp_bbox_cache = {}
+        self.kp_flat_cache = {}
         if self.config.task == 'detect':
             for zarr_path in self.zarr_roots.keys():
                 root = self.zarr_roots[zarr_path]
@@ -357,6 +361,32 @@ class ZarrYOLODataset(Dataset):
                     detect_latest = root['detect_runs'].attrs['latest']
                     self.frame_index_cache[zarr_path] = root[f'detect_runs/{detect_latest}/frame_indices'][:]
                 logger.info(f"  Cached {self.bbox_cache[zarr_path].shape[0]} bboxes from {Path(zarr_path).name}")
+        else:
+            for zarr_path in self.zarr_roots.keys():
+                root = self.zarr_roots[zarr_path]
+                latest_kp = root['keypoints_runs'].attrs['latest']
+                kp_group = root[f'keypoints_runs/{latest_kp}']
+                kp_norm = kp_group['keypoints_norm'][:].astype(np.float32)
+                kp_success = kp_group['detection_success'][:].astype(bool)
+                valid_mask = kp_success & np.isfinite(kp_norm).all(axis=(1, 2))
+                self.kp_norm_cache[zarr_path] = kp_norm
+                self.kp_success_cache[zarr_path] = valid_mask
+
+                # Precompute bounding boxes for keypoints
+                kpts = kp_norm.reshape(kp_norm.shape[0], -1, 2)
+                min_xy = np.nanmin(kpts, axis=1)
+                max_xy = np.nanmax(kpts, axis=1)
+                span = max_xy - min_xy
+                margin = span * 0.5
+                center = np.clip((min_xy + max_xy) / 2.0, 0.0, 1.0)
+                bbox_wh = np.clip(span + margin, 1e-6, 1.0)
+                bboxes = np.concatenate([center, bbox_wh], axis=1).astype(np.float32)
+                self.kp_bbox_cache[zarr_path] = bboxes
+
+                visibility = np.full((kp_norm.shape[0], kp_norm.shape[1], 1), 2.0, dtype=np.float32)
+                kpts_with_vis = np.concatenate([kp_norm, visibility], axis=2).reshape(kp_norm.shape[0], -1)
+                self.kp_flat_cache[zarr_path] = kpts_with_vis
+                logger.info(f"  Cached {kp_norm.shape[0]} keypoint entries from {Path(zarr_path).name}")
         
         # Build labels using cached data
         label_fetcher = self._get_pose_data if self.config.task == 'pose' else self._get_bbox_data
