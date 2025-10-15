@@ -505,10 +505,31 @@ def detect_yolo(
     console.print(f"[green]✓[/green] Zarr structure created")
     
     # Storage for detections
-    all_frame_indices = []
-    all_bboxes = []
-    all_scores = []
     frame_counts = np.zeros(n_frames, dtype=np.int32)
+    batch_results = []
+
+    def accumulate_results(result, global_frame_idx: int) -> None:
+        """Vectorize detection accumulation for a single frame."""
+        if result.boxes is None or len(result.boxes) == 0:
+            return
+
+        boxes_xyxy = result.boxes.xyxy.detach().cpu().numpy()
+        scores_np = result.boxes.conf.detach().cpu().numpy()
+        num_detections = boxes_xyxy.shape[0]
+        if num_detections == 0:
+            return
+
+        cx = (boxes_xyxy[:, 0] + boxes_xyxy[:, 2]) * 0.5 / inference_width
+        cy = (boxes_xyxy[:, 1] + boxes_xyxy[:, 3]) * 0.5 / inference_height
+        w = (boxes_xyxy[:, 2] - boxes_xyxy[:, 0]) / inference_width
+        h = (boxes_xyxy[:, 3] - boxes_xyxy[:, 1]) / inference_height
+
+        bbox_norm = np.column_stack((cx, cy, w, h)).astype(np.float64, copy=False)
+        indices = np.full(num_detections, global_frame_idx, dtype=np.int32)
+        scores = scores_np.astype(np.float32, copy=False)
+
+        batch_results.append((indices, bbox_norm, scores))
+        frame_counts[global_frame_idx] += num_detections
     
     # Process video in batches
     frame_idx = 0
@@ -637,25 +658,7 @@ def detect_yolo(
                     inference_times.append(time.time() - inference_start)
                 
                 for batch_i, result in enumerate(results):
-                    global_frame_idx = indices[batch_i]
-                    
-                    if result.boxes is None or len(result.boxes) == 0:
-                        continue
-                    
-                    boxes = result.boxes.xyxy.cpu().numpy()
-                    scores = result.boxes.conf.cpu().numpy()
-                    
-                    for box, score in zip(boxes, scores):
-                        x1, y1, x2, y2 = box
-                        cx = (x1 + x2) / 2 / inference_width
-                        cy = (y1 + y2) / 2 / inference_height
-                        w = (x2 - x1) / inference_width
-                        h = (y2 - y1) / inference_height
-                        
-                        all_frame_indices.append(global_frame_idx)
-                        all_bboxes.append([cx, cy, w, h])
-                        all_scores.append(score)
-                        frame_counts[global_frame_idx] += 1
+                    accumulate_results(result, indices[batch_i])
                 
                 del current_batch
                 if not decord_on_gpu:
@@ -723,27 +726,7 @@ def detect_yolo(
                     
                     # Extract detections
                     for batch_i, result in enumerate(results):
-                        global_frame_idx = batch_indices[batch_i]
-                        
-                        if result.boxes is None or len(result.boxes) == 0:
-                            continue
-                        
-                        boxes = result.boxes.xyxy.cpu().numpy()
-                        scores = result.boxes.conf.cpu().numpy()
-                        
-                        # Convert to normalized center format [cx, cy, w, h]
-                        for box, score in zip(boxes, scores):
-                            x1, y1, x2, y2 = box
-                            # Normalize using inference dimensions
-                            cx = (x1 + x2) / 2 / inference_width
-                            cy = (y1 + y2) / 2 / inference_height
-                            w = (x2 - x1) / inference_width
-                            h = (y2 - y1) / inference_height
-                            
-                            all_frame_indices.append(global_frame_idx)
-                            all_bboxes.append([cx, cy, w, h])
-                            all_scores.append(score)
-                            frame_counts[global_frame_idx] += 1
+                        accumulate_results(result, batch_indices[batch_i])
                     
                     batch_size_actual = len(batch_frames)
                     
@@ -781,19 +764,35 @@ def detect_yolo(
     
     # Convert to arrays
     console.print("\n[bold]Saving detections to zarr...[/bold]")
-    frame_indices = np.array(all_frame_indices, dtype=np.int32)
-    bbox_coords = np.array(all_bboxes, dtype=np.float64)
-    scores = np.array(all_scores, dtype=np.float32)
+    if batch_results:
+        frame_indices = np.concatenate([res[0] for res in batch_results])
+        bbox_coords = np.concatenate([res[1] for res in batch_results])
+        scores = np.concatenate([res[2] for res in batch_results])
+    else:
+        frame_indices = np.empty((0,), dtype=np.int32)
+        bbox_coords = np.empty((0, 4), dtype=np.float64)
+        scores = np.empty((0,), dtype=np.float32)
+    
+    total_detections = frame_indices.size
+    
+    if total_detections > 0:
+        frame_counts = np.bincount(frame_indices, minlength=n_frames).astype(np.int32, copy=False)
+    else:
+        frame_counts = np.zeros(n_frames, dtype=np.int32)
+    
+    preferred_det_chunk = max(1024, max(1, batch_size) * 8)
+    det_chunk = max(1, min(max(1, total_detections), preferred_det_chunk, 16384))
+    preferred_count_chunk = max(1024, max(1, batch_size) * 4)
+    counts_chunk = max(1, min(n_frames, preferred_count_chunk, 16384))
     
     # Save to zarr
-    detect_group.create_array('frame_indices', data=frame_indices, chunks=(1000,))
-    detect_group.create_array('bbox_norm_coords', data=bbox_coords, chunks=(1000, 4))
-    detect_group.create_array('scores', data=scores, chunks=(1000,))
-    detect_group.create_array('n_detections', data=frame_counts, chunks=(10000,))
-    detect_group.create_array('frame_counts', data=frame_counts, chunks=(10000,))
+    detect_group.create_array('frame_indices', data=frame_indices, chunks=(det_chunk,), overwrite=True)
+    detect_group.create_array('bbox_norm_coords', data=bbox_coords, chunks=(det_chunk, 4), overwrite=True)
+    detect_group.create_array('scores', data=scores, chunks=(det_chunk,), overwrite=True)
+    detect_group.create_array('n_detections', data=frame_counts, chunks=(counts_chunk,), overwrite=True)
+    detect_group.create_array('frame_counts', data=frame_counts, chunks=(counts_chunk,), overwrite=True)
     
     # Calculate statistics
-    total_detections = len(frame_indices)
     frames_with_detections = np.sum(frame_counts > 0)
     coverage_percent = (frames_with_detections / n_frames) * 100
     
@@ -838,6 +837,10 @@ def detect_yolo(
     # Calculate storage savings
     zarr_size_mb = (total_detections * 32) / 1024 / 1024  # Rough estimate
     video_size_mb = (n_frames * width * height) / 1024 / 1024  # If we stored grayscale
+    if zarr_size_mb > 0:
+        storage_comparison_line = f"  Saved vs full import: ~{video_size_mb:.1f} MB ({video_size_mb/zarr_size_mb:.0f}× smaller)"
+    else:
+        storage_comparison_line = f"  Saved vs full import: ~{video_size_mb:.1f} MB"
     
     # Print summary
     summary_text = f"""[green]✓[/green] Inference complete!
@@ -849,7 +852,7 @@ def detect_yolo(
 
 [bold]Storage:[/bold]
   Zarr size: ~{zarr_size_mb:.1f} MB (detections only)
-  Saved vs full import: ~{video_size_mb:.1f} MB ({video_size_mb/zarr_size_mb:.0f}× smaller)
+{storage_comparison_line}
 
 [bold]Output:[/bold]
   {output_zarr}

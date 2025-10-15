@@ -327,6 +327,7 @@ configure_matplotlib(_pre_args.inline)
 
 # Now safe to import pyplot & the rest
 import zarr
+import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -352,6 +353,63 @@ refined_frame_indices = None
 refined_frame_map = None
 refined_detection_source = None
 refined_interpolated_count = 0
+
+
+class VideoFrameSource:
+    """Random-access video reader that mimics a minimal NumPy/Zarr interface."""
+
+    def __init__(self, video_path: Path):
+        self.path = Path(video_path).expanduser()
+        if not self.path.exists():
+            raise FileNotFoundError(f"Video file not found: {self.path}")
+
+        self._capture = cv2.VideoCapture(str(self.path))
+        if not self._capture.isOpened():
+            raise ValueError(f"Failed to open video: {self.path}")
+
+        frame_count = int(self._capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        width = int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if frame_count <= 0:
+            raise ValueError(f"Video has zero frames or unknown length: {self.path}")
+
+        self._frame_count = frame_count
+        self._width = width
+        self._height = height
+        self._shape = (self._frame_count, self._height, self._width, 3)
+
+    @property
+    def shape(self):
+        return self._shape
+
+    def __len__(self) -> int:
+        return self._frame_count
+
+    def __getitem__(self, idx: int) -> np.ndarray:
+        if isinstance(idx, slice):
+            raise TypeError("VideoFrameSource does not support slice access")
+        if idx < 0 or idx >= self._frame_count:
+            raise IndexError(f"Frame index out of range: {idx} (0..{self._frame_count - 1})")
+
+        # Random access: reposition capture and read the requested frame
+        if not self._capture.set(cv2.CAP_PROP_POS_FRAMES, int(idx)):
+            raise ValueError(f"Failed to seek to frame {idx}")
+
+        success, frame_bgr = self._capture.read()
+        if not success or frame_bgr is None:
+            raise ValueError(f"Failed to read frame {idx} from {self.path}")
+
+        # Convert BGR (OpenCV default) to RGB for matplotlib
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        return frame_rgb
+
+    def release(self) -> None:
+        if self._capture is not None:
+            self._capture.release()
+            self._capture = None
+
+    def __del__(self):
+        self.release()
 
 
 def update_frame(frame_idx):
@@ -631,7 +689,49 @@ def main(args):
             images_ds = zarr_root['raw_video/images_full']
             print("Using full resolution video from raw_video/images_full")
         else:
-            raise ValueError("No video data found in zarr file!")
+            # Attempt to load frames from an external video file (e.g. YOLO-only runs)
+            candidate_paths = []
+            if args.video:
+                candidate_paths.append(Path(args.video))
+
+            root_attrs = getattr(zarr_root, "attrs", {})
+            attr_path = root_attrs.get('source_video_path') or root_attrs.get('source_path')
+            if attr_path:
+                candidate_paths.append(Path(attr_path))
+
+            attr_name = root_attrs.get('source_video')
+            if attr_name:
+                candidate_paths.append(Path(attr_name))
+                candidate_paths.append(Path(args.zarr_path).resolve().parent / attr_name)
+
+            resolved_path = None
+            candidate_errors = []
+            for candidate in candidate_paths:
+                if candidate is None:
+                    continue
+                candidate = candidate.expanduser()
+                if not candidate.is_absolute():
+                    candidate = (Path(args.zarr_path).resolve().parent / candidate).resolve()
+                if not candidate.exists():
+                    candidate_errors.append(f"{candidate} (missing)")
+                    continue
+                try:
+                    images_ds = VideoFrameSource(candidate)
+                    resolved_path = candidate
+                    break
+                except Exception as exc:
+                    candidate_errors.append(f"{candidate} ({exc})")
+                    continue
+
+            if images_ds is not None:
+                print(f"Streaming frames from original video: {resolved_path}")
+            else:
+                search_summary = "; ".join(candidate_errors) if candidate_errors else "no candidates available"
+                raise ValueError(
+                    "No video data found in zarr file and unable to open source video "
+                    f"(checked: {search_summary}).\n"
+                    "Pass --video /path/to/video.mp4 if the original file is stored elsewhere."
+                )
 
         # Load detection data - NEW STRUCTURE
         if 'frame_indices' in detect_group:
@@ -878,6 +978,8 @@ if __name__ == "__main__":
                         help="Overlay detections from the latest (or specified) refined run.")
     parser.add_argument("--refined-run", type=str,
                         help="Specific refined run name to use for overlay.")
+    parser.add_argument("--video", type=str,
+                        help="Explicit path to source video when raw frames are absent in the Zarr.")
     args = parser.parse_args()
 
     # If textual picker requested or no path provided, launch TUI
