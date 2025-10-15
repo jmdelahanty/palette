@@ -56,6 +56,7 @@ crop:
   - 256
   scheduler: distributed
   num_workers: 30
+  gpu_workers: 2
 keypoints:
   scheduler: distributed  # or 'processes', 'threads'
   num_workers: 10
