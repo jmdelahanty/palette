@@ -361,32 +361,38 @@ class ZarrYOLODataset(Dataset):
         logger.info(f"Pre-caching labels for {self.mode} set ({self.config.task} task)...")
         self.labels = []
         
-        # Cache bbox arrays per zarr file for detect task (load once per file)
+        # Cache detection metadata per zarr file for detect task (load once per file)
         self.bbox_cache = {}
+        self.frame_index_cache = {}
         if self.config.task == 'detect':
             for zarr_path in self.zarr_roots.keys():
                 root = self.zarr_roots[zarr_path]
                 latest_crop = root['crop_runs'].attrs['latest']
                 crop_group = root[f'crop_runs/{latest_crop}']
                 self.bbox_cache[zarr_path] = crop_group['bbox_norm_coords'][:]  # Load once
+                if 'frame_indices' in crop_group:
+                    self.frame_index_cache[zarr_path] = crop_group['frame_indices'][:]
+                else:
+                    # Fallback to detect run
+                    detect_latest = root['detect_runs'].attrs['latest']
+                    self.frame_index_cache[zarr_path] = root[f'detect_runs/{detect_latest}/frame_indices'][:]
                 logger.info(f"  Cached {self.bbox_cache[zarr_path].shape[0]} bboxes from {Path(zarr_path).name}")
         
         # Build labels using cached data
         label_fetcher = self._get_pose_data if self.config.task == 'pose' else self._get_bbox_data
-        for zarr_path, frame_idx in self.indices:
-            self.labels.append(label_fetcher(zarr_path, frame_idx))
+        for zarr_path, idx in self.indices:
+            self.labels.append(label_fetcher(zarr_path, idx))
         
         logger.info(f"Initialized '{mode}' dataset with {len(self.indices)} samples.")
 
     def __len__(self) -> int:
         return len(self.indices)
 
-    def _get_bbox_data(self, zarr_path: str, frame_idx: int) -> Dict:
-        # Use cached bboxes (already loaded in __init__)
+    def _get_bbox_data(self, zarr_path: str, det_idx: int) -> Dict:
         bbox_coords = self.bbox_cache.get(zarr_path)
         
-        if bbox_coords is not None and frame_idx < bbox_coords.shape[0]:
-            bbox = bbox_coords[frame_idx]
+        if bbox_coords is not None and det_idx < bbox_coords.shape[0]:
+            bbox = bbox_coords[det_idx]
             bbox_x, bbox_y, bbox_w, bbox_h = bbox
             
             if not any(np.isnan([bbox_x, bbox_y, bbox_w, bbox_h])):
@@ -441,13 +447,25 @@ class ZarrYOLODataset(Dataset):
             return {"cls": np.array([]), "bboxes": np.empty((0, 4))}
     
     def __getitem__(self, index: int) -> Dict:
-        zarr_path, frame_idx = self.indices[index]
+        zarr_path, det_idx = self.indices[index]
         root = self.zarr_roots[zarr_path]
         
         image_source_path = ('raw_video/images_ds' if self.config.task == 'detect' 
                              else f"crop_runs/{root['crop_runs'].attrs['latest']}/roi_images")
         
-        image = root[image_source_path][frame_idx]
+        if self.config.task == 'detect':
+            frame_indices = self.frame_index_cache[zarr_path]
+            frame_idx = int(frame_indices[det_idx]) if det_idx < len(frame_indices) else None
+            if frame_idx is None or frame_idx >= root[image_source_path].shape[0]:
+                # fallback: skip label/image mismatch
+                frame_idx = 0
+                image = np.zeros_like(root[image_source_path][0])
+            else:
+                image = root[image_source_path][frame_idx]
+        else:
+            frame_idx = det_idx
+            image = root[image_source_path][frame_idx]
+
         image_3ch = np.stack([image] * 3, axis=-1)
         
         if image_3ch.shape[0] != self.target_size or image_3ch.shape[1] != self.target_size:

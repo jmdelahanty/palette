@@ -344,12 +344,21 @@ output_dir = None
 frame_slider = None
 jump_threshold_px = 0.0
 
+# Optional refined detections overlay
+refined_enabled = False
+refined_run_name = None
+refined_bbox_coords = None
+refined_frame_indices = None
+refined_frame_map = None
+refined_detection_source = None
+refined_interpolated_count = 0
+
 
 def update_frame(frame_idx):
     """
     Called when the slider moves. Draws a circle on 'clean' frames and dots on previous detections.
     """
-    global detection_history
+    global detection_history, refined_enabled
     
     frame_idx = int(frame_idx)
     
@@ -457,7 +466,36 @@ def update_frame(frame_idx):
             if i == 0:
                 is_clean = (flag == 0)
                 detection_history.append((frame_idx, center_x, center_y, is_clean))
-    
+
+    # Overlay refined detections if available
+    if refined_enabled and refined_frame_map is not None:
+        refined_indices = refined_frame_map.get(frame_idx, [])
+        if refined_indices:
+            refined_bboxes = refined_bbox_coords[refined_indices]
+            refined_sources = refined_detection_source[refined_indices] if refined_detection_source is not None else None
+
+            for i, bbox in enumerate(refined_bboxes):
+                center_x_norm, center_y_norm, width_norm, height_norm = bbox
+                img_height, img_width = image.shape[:2]
+                center_x = float(center_x_norm) * img_width
+                center_y = float(center_y_norm) * img_height
+                box_w = float(width_norm) * img_width
+                box_h = float(height_norm) * img_height
+
+                x1 = center_x - (box_w / 2)
+                y1 = center_y - (box_h / 2)
+
+                is_interpolated = refined_sources[i] == 1 if refined_sources is not None else False
+                color = 'orange' if is_interpolated else 'cyan'
+                label = "Interpolated" if is_interpolated else "Refined"
+
+                rect = patches.Rectangle((x1, y1), box_w, box_h, linewidth=1.5,
+                                         edgecolor=color, facecolor='none', linestyle='--')
+                ax.add_patch(rect)
+                label_y = y1 + box_h + 15
+                ax.text(x1, label_y, label, color='black', fontsize=9,
+                        bbox=dict(facecolor=color, alpha=0.7, edgecolor='none', pad=2))
+
     # Clean up old history entries outside the window
     detection_history = [(f, x, y, clean) for f, x, y, clean in detection_history 
                         if frame_idx - f < HISTORY_WINDOW]
@@ -559,7 +597,10 @@ def save_current_frame():
 
 
 def main(args):
-    global zarr_root, images_ds, frame_indices, bbox_coords, frame_to_detection_map, output_dir, frame_slider, detection_ids
+    global zarr_root, images_ds, frame_indices, bbox_coords, frame_to_detection_map
+    global output_dir, frame_slider, detection_ids
+    global refined_enabled, refined_run_name, refined_bbox_coords, refined_frame_indices
+    global refined_frame_map, refined_detection_source, refined_interpolated_count
 
     if args.output_dir:
         output_dir = Path(args.output_dir)
@@ -626,10 +667,78 @@ def main(args):
                     # Print ID distribution
                     unique_ids, counts = np.unique(detection_ids, return_counts=True)
                     print(f"  ID distribution: {dict(zip(unique_ids, counts))}")
+
+                    # Verify provenance matches
+                    id_source_run = id_group.attrs.get('source_detect_run')
+                    if id_source_run and id_source_run != latest_detect_run:
+                        print(f"  ⚠️ ID assignment was generated from detect run '{id_source_run}',")
+                        print(f"     but visualizer is using '{latest_detect_run}'. IDs will be hidden.")
+                        detection_ids = None
+                    elif detection_ids.size != bbox_coords.shape[0]:
+                        print("  ⚠️ detection_ids length does not match number of detections.")
+                        print(f"     IDs length: {len(detection_ids)}, detections: {len(bbox_coords)}")
+                        detection_ids = None
+                    elif args.debug_ids:
+                        print("\n🔍 DEBUG: ID Alignment")
+                        print(f"  bbox_coords length:    {len(bbox_coords)}")
+                        print(f"  frame_indices length:  {len(frame_indices)}")
+                        print(f"  detection_ids length:  {len(detection_ids)}")
+
+                        sample_frame = args.start_frame
+                        if sample_frame in frame_to_detection_map:
+                            det_indices = frame_to_detection_map[sample_frame]
+                            print(f"\n  Frame {sample_frame}:")
+                            print(f"    Detection indices: {det_indices}")
+                            print(f"    Assigned IDs:      {detection_ids[det_indices]}")
+                        else:
+                            print(f"\n  Frame {sample_frame} has no detections")
             else:
                 print("No completed ID assignment runs found")
         else:
             print("No ID assignment data found. Will only display bounding boxes.")
+
+        # Load refined detections if requested
+        refined_enabled = False
+        refined_run_name = None
+        refined_bbox_coords = np.empty((0, 4), dtype=np.float64)
+        refined_frame_indices = np.empty(0, dtype=np.int64)
+        refined_frame_map = {}
+        refined_detection_source = None
+        refined_interpolated_count = 0
+
+        if args.show_refined:
+            if 'refined_runs' not in zarr_root:
+                print("No refined runs found; cannot overlay interpolated detections.")
+            else:
+                candidate_run = args.refined_run or zarr_root['refined_runs'].attrs.get('latest')
+                if not candidate_run or candidate_run not in zarr_root['refined_runs']:
+                    print(f"Refined run '{candidate_run}' not found.")
+                else:
+                    refined_group_root = zarr_root['refined_runs'][candidate_run]
+                    source_detect = refined_group_root.attrs.get('source_detect_run')
+                    if source_detect != latest_detect_run:
+                        print(f"⚠️ Refined run '{candidate_run}' was generated from detect run '{source_detect}',")
+                        print(f"   but current visualization uses '{latest_detect_run}'. Skipping refined overlay.")
+                    elif 'interpolated' not in refined_group_root:
+                        print(f"Refined run '{candidate_run}' does not contain an 'interpolated' stage.")
+                    else:
+                        interp_group = refined_group_root['interpolated']
+                        refined_bbox_coords = interp_group['bbox_norm_coords'][:]
+                        refined_frame_indices = interp_group['frame_indices'][:]
+                        if 'detection_source' in interp_group:
+                            refined_detection_source = interp_group['detection_source'][:]
+                        else:
+                            refined_detection_source = None
+
+                        refined_frame_map = {}
+                        for det_idx, frame_idx in enumerate(refined_frame_indices):
+                            refined_frame_map.setdefault(int(frame_idx), []).append(det_idx)
+
+                        refined_enabled = True
+                        refined_run_name = candidate_run
+                        total_refined = refined_bbox_coords.shape[0]
+                        refined_interpolated_count = int(np.sum(refined_detection_source == 1)) if refined_detection_source is not None else total_refined
+                        print(f"Refined detections loaded from {candidate_run} (total={total_refined}, interpolated={refined_interpolated_count}).")
         
         # Load quality data
         if 'detect_runs' in zarr_root:
@@ -643,10 +752,13 @@ def main(args):
         frames_with_detections = len(frame_to_detection_map)
         print(f"\n📊 Data Summary:")
         print(f"  - Frames: {num_frames}")
+        avg_per_frame = (total_detections/frames_with_detections) if frames_with_detections else 0.0
         print(f"  - Total detections: {total_detections}")
         print(f"  - Frames with detections: {frames_with_detections}")
-        print(f"  - Average detections per frame (with dets): {total_detections/frames_with_detections:.2f}")
+        print(f"  - Average detections per frame (with dets): {avg_per_frame:.2f}")
         print(f"  - Frames without detections: {num_frames - frames_with_detections}")
+        if refined_enabled:
+            print(f"  - Refined overlay: {refined_run_name} (interpolated: {refined_interpolated_count})")
 
     except Exception as e:
         print(f"Error opening Zarr file or finding data: {e}")
@@ -730,7 +842,10 @@ if __name__ == "__main__":
                     zarr_path=sel,
                     start_frame=0,
                     output_dir="detection_snapshots",
-                    inline=_pre_args.inline
+                    inline=_pre_args.inline,
+                    debug_ids=False,
+                    show_refined=False,
+                    refined_run=None
                 )
                 main(ns)
 
@@ -757,6 +872,12 @@ if __name__ == "__main__":
                         help="Frame to start on.")
     parser.add_argument("--output-dir", type=str, default="detection_snapshots",
                         help="Directory to save snapshot images.")
+    parser.add_argument("--debug-ids", action="store_true",
+                        help="Print detailed ID alignment diagnostics.")
+    parser.add_argument("--show-refined", action="store_true",
+                        help="Overlay detections from the latest (or specified) refined run.")
+    parser.add_argument("--refined-run", type=str,
+                        help="Specific refined run name to use for overlay.")
     args = parser.parse_args()
 
     # If textual picker requested or no path provided, launch TUI

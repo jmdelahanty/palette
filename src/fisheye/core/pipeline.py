@@ -43,6 +43,10 @@ class PipelineConfig:
     verbose: bool = False
     dry_run: bool = False
     crop_source: str = "detect"
+    refine_max_gap: Optional[int] = None
+    refine_method: Optional[str] = None
+    refine_remove_jumps: Optional[bool] = None
+    refine_remove_blips: Optional[bool] = None
     
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "PipelineConfig":
@@ -58,7 +62,11 @@ class PipelineConfig:
             force_cpu=getattr(args, 'force_cpu', False),
             verbose=getattr(args, 'verbose', False),
             dry_run=getattr(args, 'dry_run', False),
-            crop_source=getattr(args, 'crop_source', 'detect')
+            crop_source=getattr(args, 'crop_source', 'detect'),
+            refine_max_gap=getattr(args, 'refine_max_gap', None),
+            refine_method=getattr(args, 'refine_method', None),
+            refine_remove_jumps=getattr(args, 'refine_remove_jumps', None),
+            refine_remove_blips=getattr(args, 'refine_remove_blips', None)
         )
 
 
@@ -159,7 +167,7 @@ class Pipeline:
             'crop': {
                 'roi_sz': [256, 256]
             },
-            'keypoints': {  # ← Added
+            'keypoints': {
                 'roi_thresh': 50,
                 'se1_radius': 1,
                 'se2_radius': 2,
@@ -418,6 +426,10 @@ class Pipeline:
         run_name = create_refined_run(
             zarr_path=self.config.zarr_path,
             config=self.pipeline_params,
+            max_gap=self.config.refine_max_gap,
+            interpolation_method=self.config.refine_method,
+            remove_jumps=self.config.refine_remove_jumps,
+            remove_blips=self.config.refine_remove_blips,
             console=self.console
         )
         
@@ -918,6 +930,48 @@ Examples:
         type=str,
         default="configs/fisheye/default.yaml",
         help="Path to pipeline configuration YAML"
+    )
+
+    parser.add_argument(
+        "--refine-max-gap",
+        type=int,
+        help="Override maximum gap (in frames) for refinement"
+    )
+
+    parser.add_argument(
+        "--refine-method",
+        type=str,
+        choices=['linear'],
+        help="Interpolation method for refinement"
+    )
+
+    parser.set_defaults(refine_remove_jumps=None, refine_remove_blips=None)
+    refine_jump_group = parser.add_mutually_exclusive_group()
+    refine_jump_group.add_argument(
+        "--refine-remove-jumps",
+        dest="refine_remove_jumps",
+        action="store_true",
+        help="Force refinement to drop jump detections"
+    )
+    refine_jump_group.add_argument(
+        "--refine-keep-jumps",
+        dest="refine_remove_jumps",
+        action="store_false",
+        help="Keep jump detections during refinement"
+    )
+
+    refine_blip_group = parser.add_mutually_exclusive_group()
+    refine_blip_group.add_argument(
+        "--refine-remove-blips",
+        dest="refine_remove_blips",
+        action="store_true",
+        help="Remove blip detections during refinement"
+    )
+    refine_blip_group.add_argument(
+        "--refine-keep-blips",
+        dest="refine_remove_blips",
+        action="store_false",
+        help="Keep blip detections during refinement"
     )
     
     parser.add_argument(

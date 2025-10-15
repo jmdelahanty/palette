@@ -75,4 +75,4 @@ refine_detect:
     remove_blips: false  # Usually keep blips, they're just after gaps
   
   max_gap: 50
-  interpolation_method: linear # currently just linear available...
+  interpolation_method: linear

@@ -22,8 +22,13 @@ from typing import Dict, Optional, Tuple
 def load_refined_stage(group, stage_name: str, fps: float) -> Dict:
     """Load data from a refinement stage (filtered or interpolated)."""
     bbox_coords = group['bbox_norm_coords'][:]
-    n_detections = group['n_detections'][:]
-    frame_mapping = group['frame_mapping'][:]
+    frame_indices = group['frame_indices'][:]
+    if 'frame_counts' in group:
+        frame_counts = group['frame_counts'][:]
+    else:
+        frame_counts = np.bincount(frame_indices.astype(np.int64, copy=False))
+    total_frames = len(frame_counts)
+    frames = frame_indices
     
     # Get detection source if available (only for interpolated)
     detection_source = None
@@ -33,19 +38,17 @@ def load_refined_stage(group, stage_name: str, fps: float) -> Dict:
     # Calculate centroids (bboxes are normalized [cx, cy, w, h])
     centroids = bbox_coords[:, :2]  # Just center positions
     
-    # Map to temporal positions
-    frames = frame_mapping
     time_seconds = frames / fps
     
     return {
         'bbox_coords': bbox_coords,
-        'n_detections': n_detections,
-        'frame_mapping': frame_mapping,
+        'frame_counts': frame_counts,
+        'frame_indices': frame_indices,
         'centroids': centroids,
         'frames': frames,
         'time_seconds': time_seconds,
         'detection_source': detection_source,
-        'coverage': float(np.sum(n_detections > 0) / len(n_detections)),
+        'coverage': float(np.sum(frame_counts > 0) / total_frames) if total_frames else 0.0,
         'total_detections': len(bbox_coords),
         'stage': stage_name
     }
@@ -54,33 +57,30 @@ def load_refined_stage(group, stage_name: str, fps: float) -> Dict:
 def load_original_detections(detect_group, quality_group, fps: float) -> Dict:
     """Load original detection data."""
     bbox_coords = detect_group['bbox_norm_coords'][:]
-    n_detections = detect_group['n_detections'][:]
+    frame_indices = detect_group['frame_indices'][:]
+    if 'frame_counts' in detect_group:
+        frame_counts = detect_group['frame_counts'][:]
+    else:
+        frame_counts = np.bincount(frame_indices.astype(np.int64, copy=False))
+    total_frames = len(frame_counts)
+
     detection_quality_labels = quality_group['detection_quality_labels'][:]
-    
-    # Build frame mapping for original data
-    cumulative = np.cumsum(np.insert(n_detections, 0, 0))
-    frame_mapping = []
-    for frame_idx in range(len(n_detections)):
-        if n_detections[frame_idx] > 0:
-            start_idx = int(cumulative[frame_idx])
-            end_idx = int(cumulative[frame_idx + 1])
-            for _ in range(start_idx, end_idx):
-                frame_mapping.append(frame_idx)
-    frame_mapping = np.array(frame_mapping)
-    
+    if detection_quality_labels.size != frame_indices.size:
+        detection_quality_labels = detection_quality_labels[:frame_indices.size]
+
     centroids = bbox_coords[:, :2]
-    frames = frame_mapping
+    frames = frame_indices
     time_seconds = frames / fps
     
     return {
         'bbox_coords': bbox_coords,
-        'n_detections': n_detections,
-        'frame_mapping': frame_mapping,
+        'frame_counts': frame_counts,
+        'frame_indices': frame_indices,
         'detection_quality_labels': detection_quality_labels,
         'centroids': centroids,
         'frames': frames,
         'time_seconds': time_seconds,
-        'coverage': float(np.sum(n_detections > 0) / len(n_detections)),
+        'coverage': float(np.sum(frame_counts > 0) / total_frames) if total_frames else 0.0,
         'total_detections': len(bbox_coords),
         'stage': 'original'
     }
@@ -216,8 +216,9 @@ def visualize_refinement_pipeline(zarr_path: str,
         
         # Title with stats
         cov_info = coverage_comparison[stage]
+        total_frames_stage = max(len(datasets[stage]['frame_counts']), 1)
         title = f"{stage_names[stage]}\n"
-        title += f"Coverage: {cov_info['frames_with_detections']}/{coverage_comparison['original']['total_detections']} "
+        title += f"Coverage: {cov_info['frames_with_detections']}/{total_frames_stage} "
         title += f"frames ({cov_info['coverage_percent']:.2f}%)"
         
         if stage == 'filtered':
@@ -238,13 +239,22 @@ def visualize_refinement_pipeline(zarr_path: str,
     for idx, (stage, data) in enumerate(datasets.items()):
         ax = fig.add_subplot(gs[1, idx])
         
-        detection_mask = data['n_detections'] > 0
-        time_seconds = np.arange(len(detection_mask)) / fps
+        frame_counts = data['frame_counts']
+        if frame_counts.size == 0:
+            ax.text(0.5, 0.5, 'No frames', ha='center', va='center', transform=ax.transAxes,
+                    fontsize=12, color='gray')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            continue
+
+        detection_mask = frame_counts > 0
+        time_seconds = np.arange(len(detection_mask)) / max(fps, 1e-6)
         
         barcode_data = detection_mask.reshape(1, -1)
+        extent_end = time_seconds[-1] if time_seconds.size else 0
         ax.imshow(barcode_data, aspect='auto', cmap='RdYlGn',
                  vmin=0, vmax=1, interpolation='nearest',
-                 extent=[0, time_seconds[-1], 0, 1])
+                 extent=[0, extent_end, 0, 1])
         
         # Mark large gaps
         gaps = []
@@ -272,13 +282,14 @@ def visualize_refinement_pipeline(zarr_path: str,
                        ha='center', va='bottom', fontsize=8,
                        arrowprops=dict(arrowstyle='->', color='red', lw=1))
         
-        ax.set_xlim([0, time_seconds[-1]])
+        ax.set_xlim([0, extent_end])
         ax.set_ylim([0, 2 if gaps else 1])
         ax.set_xlabel('Time (seconds)')
         ax.set_yticks([])
         ax.set_title('Detection Presence', fontsize=10)
         
-        coverage_pct = cov_info['coverage_percent'] if stage in coverage_comparison else 0
+        cov_info_stage = coverage_comparison.get(stage, {})
+        coverage_pct = cov_info_stage.get('coverage_percent', 0.0)
         ax.text(0.02, 0.5, f'{coverage_pct:.1f}%', transform=ax.transAxes,
                fontsize=10, va='center', weight='bold',
                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
@@ -288,9 +299,17 @@ def visualize_refinement_pipeline(zarr_path: str,
     for idx, (stage, data) in enumerate(datasets.items()):
         ax = fig.add_subplot(gs[2, idx])
         
-        detection_mask = data['n_detections'] > 0
+        frame_counts = data['frame_counts']
+        if frame_counts.size == 0:
+            ax.text(0.5, 0.5, 'No frames', ha='center', va='center', transform=ax.transAxes,
+                    fontsize=12, color='gray')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            continue
+
+        detection_mask = frame_counts > 0
         rolling_coverage = np.convolve(detection_mask, np.ones(window)/window, mode='same') * 100
-        time_seconds = np.arange(len(detection_mask)) / fps
+        time_seconds = np.arange(len(detection_mask)) / max(fps, 1e-6)
         
         ax.fill_between(time_seconds, 0, rolling_coverage,
                        color=colors[stage], alpha=0.3)
@@ -325,7 +344,15 @@ def visualize_refinement_pipeline(zarr_path: str,
     for idx, (stage, data) in enumerate(datasets.items()):
         ax = fig.add_subplot(gs[3, idx])
         
-        detection_mask = data['n_detections'] > 0
+        frame_counts = data['frame_counts']
+        if frame_counts.size == 0:
+            ax.text(0.5, 0.5, 'No frames', ha='center', va='center', transform=ax.transAxes,
+                    fontsize=12, color='gray')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            continue
+
+        detection_mask = frame_counts > 0
         gap_sizes = []
         in_gap = False
         gap_start = None

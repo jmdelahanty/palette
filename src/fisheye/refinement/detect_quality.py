@@ -21,7 +21,7 @@ def identify_temporal_artifacts(
     frame_indices: np.ndarray,
     width: float,
     height: float,
-    jump_threshold_pixels: float = 100.0,
+    jump_threshold_pixels: float = 50.0,
     blip_gap_threshold: int = 10,
 ) -> Dict:
     """

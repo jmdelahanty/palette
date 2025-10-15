@@ -1,0 +1,27 @@
+# YOLO Detection Configuration (Minimal - Only Implemented Features)
+# Save this as: src/fisheye/yolo_detect_config.yaml
+
+# Model configuration
+model:
+  path: ~/gitrepos/palette/runs/detect/arena4_filtered_test14/weights/best.pt
+  device: auto  # 'auto' = use GPU if available, 'cpu' = force CPU, 'cuda:0' = specific GPU
+
+# Detection parameters (these are all implemented and working)
+detection:
+  conf_threshold: 0.80      # Confidence threshold (0.0-1.0)
+                            # Typical range: 0.2-0.5
+                            # Lower = more detections (but more false positives)
+                            
+  iou_threshold: 0.80       # IoU threshold for Non-Maximum Suppression
+                            # Typical range: 0.3-0.6
+                            # Lower = more aggressive duplicate removal
+                            
+  max_det: 1                # Maximum detections per image
+                            # Set to expected number of fish in arena
+                            
+  batch_size: 512            # Frames to process at once
+                            # Larger = faster (if GPU memory allows)
+                            # Try: 16, 32, 64, or 128
+video:
+  resize: [640, 640]        # Resize frames before inference [width, height]
+                            # null = use original size

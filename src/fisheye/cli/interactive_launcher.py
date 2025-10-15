@@ -16,7 +16,7 @@ import subprocess
 import sys
 import zarr
 import time
-from typing import Set
+from typing import Set, Dict, Any
 
 try:
     from textual.app import App, ComposeResult
@@ -593,6 +593,36 @@ class PipelineLauncherApp(App):
                         id="crop_source_select",
                         classes="stage_option"
                     )
+                    if stage == 'refine':
+                        yield Label("  └─ Refinement parameters:", classes="info_text")
+                        yield Label("      Max gap (frames):", classes="info_text")
+                        yield Input(
+                            placeholder="e.g. 50",
+                            value="50",
+                            id="refine_max_gap_input",
+                            classes="stage_option"
+                        )
+                        yield Label("      Interpolation method:", classes="info_text")
+                        yield Select(
+                            [
+                                ("Linear", "linear"),
+                            ],
+                            value="linear",
+                            id="refine_method_select",
+                            classes="stage_option"
+                        )
+                        yield Checkbox(
+                            "      Remove jumps",
+                            value=True,
+                            id="refine_remove_jumps_checkbox",
+                            classes="stage_option"
+                        )
+                        yield Checkbox(
+                            "      Remove blips",
+                            value=False,
+                            id="refine_remove_blips_checkbox",
+                            classes="stage_option"
+                        )
                 
                 yield Label("\n🔧 Tuning Tools", classes="section_header")
                 yield Label("Run parameter tuners:", classes="info_text")
@@ -736,6 +766,36 @@ class PipelineLauncherApp(App):
             # Fallback if widget not found
             return "detect"
     
+    def _get_refine_options(self) -> Dict[str, Optional[Any]]:
+        """Read refinement parameter overrides from the UI."""
+        options: Dict[str, Optional[Any]] = {
+            "max_gap": None,
+            "method": None,
+            "remove_jumps": None,
+            "remove_blips": None,
+        }
+        try:
+            max_gap_input = self.query_one("#refine_max_gap_input", Input)
+            max_gap_str = max_gap_input.value.strip()
+            if max_gap_str:
+                try:
+                    options["max_gap"] = max(0, int(max_gap_str))
+                except ValueError:
+                    self.status_message = "⚠️ Refinement max gap must be an integer."
+                    if self.progress_log:
+                        self.progress_log.write("[yellow]⚠️ Refinement max gap must be an integer.[/yellow]\n")
+            method_select = self.query_one("#refine_method_select", Select)
+            if method_select.value and method_select.value != Select.BLANK:
+                options["method"] = method_select.value
+            jumps_checkbox = self.query_one("#refine_remove_jumps_checkbox", Checkbox)
+            options["remove_jumps"] = bool(jumps_checkbox.value)
+            blips_checkbox = self.query_one("#refine_remove_blips_checkbox", Checkbox)
+            options["remove_blips"] = bool(blips_checkbox.value)
+        except Exception:
+            # If widgets not present, keep defaults
+            pass
+        return options
+
     def watch_selected_zarr(self, value: str) -> None:
         """Update zarr display when selection changes."""
         try:
@@ -893,6 +953,31 @@ class PipelineLauncherApp(App):
             
             if self.progress_log and not dry_run:
                 self.progress_log.write(f"[cyan]  Crop source: {crop_source}[/cyan]\n")
+        
+        if 'refine' in stages:
+            refine_opts = self._get_refine_options()
+            if refine_opts['max_gap'] is not None:
+                cmd.extend(["--refine-max-gap", str(refine_opts['max_gap'])])
+            if refine_opts['method']:
+                cmd.extend(["--refine-method", refine_opts['method']])
+            if refine_opts['remove_jumps'] is not None:
+                cmd.append("--refine-remove-jumps" if refine_opts['remove_jumps'] else "--refine-keep-jumps")
+            if refine_opts['remove_blips'] is not None:
+                cmd.append("--refine-remove-blips" if refine_opts['remove_blips'] else "--refine-keep-blips")
+
+            if self.progress_log and not dry_run:
+                msg = "[cyan]  Refinement overrides:";
+                parts = []
+                if refine_opts['max_gap'] is not None:
+                    parts.append(f"max_gap={refine_opts['max_gap']}")
+                if refine_opts['method']:
+                    parts.append(f"method={refine_opts['method']}")
+                if refine_opts['remove_jumps'] is not None:
+                    parts.append("remove_jumps=" + ("true" if refine_opts['remove_jumps'] else "false"))
+                if refine_opts['remove_blips'] is not None:
+                    parts.append("remove_blips=" + ("true" if refine_opts['remove_blips'] else "false"))
+                msg += " " + (", ".join(parts) if parts else "(defaults)")
+                self.progress_log.write(msg + "\n")
         
         # Add scheduler selection
         try:
