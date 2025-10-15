@@ -545,8 +545,16 @@ def main(zarr_path, start_frame=1):
     # Get latest runs
     latest_crop = zarr_root['crop_runs'].attrs['latest']
     latest_bg = zarr_root['background_runs'].attrs['latest']
-    latest_detect = zarr_root[f'crop_runs/{latest_crop}'].attrs.get('source_detect_run')
-    
+
+    # Get detect run - should be from detect_runs, not crop_runs
+    if 'detect_runs' not in zarr_root:
+        print("Error: No detect_runs found in zarr")
+        return
+    latest_detect = zarr_root['detect_runs'].attrs.get('latest')
+    if not latest_detect:
+        print("Error: No latest detect_run found")
+        return
+        
     print(f"Using crop: {latest_crop}")
     print(f"Using background: {latest_bg}")
     
@@ -561,9 +569,16 @@ def main(zarr_path, start_frame=1):
     # Load data
     roi_images = zarr_root[f'crop_runs/{latest_crop}/roi_images']
     roi_coords = zarr_root[f'crop_runs/{latest_crop}/roi_coordinates_full']
-    n_detections = zarr_root[f'detect_runs/{latest_detect}/n_detections'][:]
+    # Load per-frame detection counts (n_detections or frame_counts)
+    if 'n_detections' in zarr_root[f'detect_runs/{latest_detect}']:
+        n_detections = zarr_root[f'detect_runs/{latest_detect}/n_detections'][:]
+    elif 'frame_counts' in zarr_root[f'detect_runs/{latest_detect}']:
+        n_detections = zarr_root[f'detect_runs/{latest_detect}/frame_counts'][:]
+    else:
+        print("Error: Neither 'n_detections' nor 'frame_counts' found in detect run")
+        return
     
-    total_rois = roi_images.shape[0]  # Use .shape[0] instead of len() for Zarr arrays
+    total_rois = roi_images.shape[0]
     num_frames = len(n_detections)
     max_dets = int(n_detections.max()) if n_detections.max() > 0 else 1
     

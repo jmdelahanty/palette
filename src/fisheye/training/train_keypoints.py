@@ -205,35 +205,17 @@ def get_zarr_metadata(zarr_paths, console=None):
                     'n_interpolated_detections': crop_group.attrs.get('n_interpolated_detections', 0)
                 }
             
-            # Get tracking info (CRITICAL for pose task)
-            if 'tracking_runs' in root and 'latest' in root['tracking_runs'].attrs:
-                latest_track = root['tracking_runs'].attrs['latest']
-                track_group = root[f'tracking_runs/{latest_track}']
-                
-                if 'tracking_results' in track_group:
-                    tracking_data = track_group['tracking_results']
-                    n_frames = len(tracking_data)
-                    
-                    # Calculate tracking success rate (non-NaN keypoints)
-                    column_names = tracking_data.attrs.get('column_names', [])
-                    if 'bladder_x_roi_norm' in column_names:
-                        bladder_x_idx = column_names.index('bladder_x_roi_norm')
-                        n_valid = np.sum(~np.isnan(tracking_data[:, bladder_x_idx]))
-                        success_rate = (n_valid / n_frames * 100) if n_frames > 0 else 0
-                    else:
-                        success_rate = 0
-                    
-                    zarr_meta['tracking_info'] = {
-                        'run_name': latest_track,
-                        'n_frames': n_frames,
-                        'n_valid_keypoints': int(n_valid) if 'n_valid' in locals() else 0,
-                        'tracking_success_rate': round(success_rate, 2),
-                        'keypoint_columns': column_names[:6] if len(column_names) >= 6 else column_names
-                    }
-                else:
-                    zarr_meta['tracking_info'] = {'error': 'tracking_results not found'}
+            # Get keypoint detection info if available
+            if 'keypoints_runs' in root and 'latest' in root['keypoints_runs'].attrs:
+                latest_kp = root['keypoints_runs'].attrs['latest']
+                kp_group = root[f'keypoints_runs/{latest_kp}']
+                zarr_meta['tracking_info'] = {
+                    'run_name': latest_kp,
+                    'keypoints_processed': int(kp_group.attrs.get('keypoints_processed', 0)),
+                    'success_rate': float(kp_group.attrs.get('success_rate', 0.0))
+                }
             else:
-                zarr_meta['tracking_info'] = {'error': 'tracking_runs not found or no latest run'}
+                zarr_meta['tracking_info'] = {'warning': 'keypoints_runs not found; proceeding without precomputed keypoints metadata'}
             
             metadata[path_name] = zarr_meta
             
@@ -254,7 +236,35 @@ def main(args):
     global config
     try:
         full_config = PoseConfig.from_yaml(args.config_path)
-        config = ZarrDatasetConfig(**full_config.model_dump())
+
+        datasets_dict = {}
+        for name, ds_cfg in full_config.datasets.items():
+            split_dict = None
+            if ds_cfg.split is not None:
+                split_dict = {
+                    'train': ds_cfg.split.train,
+                    'val': ds_cfg.split.val
+                }
+            datasets_dict[name] = {
+                'zarr_path': str(ds_cfg.zarr_path),
+                'source_type': ds_cfg.source_type.value if hasattr(ds_cfg.source_type, 'value') else ds_cfg.source_type,
+                'split': split_dict
+            }
+
+        default_split = 0.8
+        if full_config.datasets:
+            first_ds = next(iter(full_config.datasets.values()))
+            if first_ds.split is not None:
+                default_split = first_ds.split.train
+
+        config = ZarrDatasetConfig(
+            datasets=datasets_dict,
+            task=full_config.task,
+            sampling_strategy=full_config.sampling_strategy.value if hasattr(full_config.sampling_strategy, 'value') else full_config.sampling_strategy,
+            random_seed=full_config.random_seed,
+            dataset_weights=full_config.dataset_weights,
+            split_ratio=default_split
+        )
         console.print(f"[bold green]✓ Loaded configuration:[/bold green] {args.config_path}\n")
     except Exception as e:
         console.print(f"[bold red]✗ Error loading config:[/bold red] {e}")
@@ -285,25 +295,23 @@ def main(args):
                          f"Interpolated: {crop_info.get('n_interpolated_detections', 0)}")
         
         track_info = meta.get('tracking_info', {})
-        if 'error' not in track_info:
-            console.print(f"    • Tracking: {track_info.get('n_valid_keypoints', 0)}/{track_info.get('n_frames', 0)} valid "
-                         f"({track_info.get('tracking_success_rate', 0):.1f}%)")
+        if 'warning' in track_info:
+            console.print(f"    • Keypoints: {track_info['warning']}")
         else:
-            console.print(f"    [red]• Tracking: {track_info['error']}[/red]")
+            console.print(f"    • Keypoints: {track_info.get('run_name', 'N/A')} "
+                         f"(processed={track_info.get('keypoints_processed', 0)}, "
+                         f"success={track_info.get('success_rate', 0.0):.2f})")
     
     console.print()
     
     # Verify all datasets have tracking data
     missing_tracking = [name for name, meta in zarr_metadata.items() 
-                       if 'error' in meta.get('tracking_info', {})]
+                       if 'warning' in meta.get('tracking_info', {})]
     if missing_tracking:
-        console.print(f"[bold red]✗ ERROR: The following datasets are missing tracking data:[/bold red]")
+        console.print(f"[bold yellow]⚠ The following datasets are missing precomputed keypoint metadata:[/bold yellow]")
         for name in missing_tracking:
             console.print(f"  - {name}")
-        console.print("\n[yellow]Run keypoint detection first:[/yellow]")
-        console.print("  python -m fisheye.detection.detect_keypoints_traditional <zarr_path>")
-        return
-    
+   
     # Get training params
     training_params = full_config.training_params.model_dump()
     model_name = training_params.get('model', 'yolov8n-pose.pt')

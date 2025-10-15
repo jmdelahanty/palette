@@ -18,27 +18,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-# Utility Functions
-
-def get_column_mappings(column_names: List[str]) -> Dict:
-    """Gets a dictionary mapping coordinate names to their column index for the multi-scale format."""
-    col_map = {name: i for i, name in enumerate(column_names)}
-    return {
-        'heading': col_map['heading_degrees'],
-        'bbox_x': col_map['bbox_x_norm_ds'],
-        'bbox_y': col_map['bbox_y_norm_ds'],
-        'bbox_width': col_map['bbox_width_norm_ds'],
-        'bbox_height': col_map['bbox_height_norm_ds'],
-        'bladder_x': col_map.get('bladder_x_roi_norm'),
-        'bladder_y': col_map.get('bladder_y_roi_norm'),
-        'eye_l_x': col_map.get('eye_l_x_roi_norm'),
-        'eye_l_y': col_map.get('eye_l_y_roi_norm'),
-        'eye_r_x': col_map.get('eye_r_x_roi_norm'),
-        'eye_r_y': col_map.get('eye_r_y_roi_norm'),
-        'confidence': col_map.get('confidence_score')
-    }
-
-
 # Configuration
 class SamplingStrategy(Enum):
     """Sampling strategies for combining multiple datasets."""
@@ -149,13 +128,14 @@ class DatasetMetadata:
     name: str
     total_frames: int
     valid_frames: int
-    column_names: List[str]
+    column_names: List[str] = field(default_factory=list)
     tracking_success_rate: float = 0.0
     crop_source_type: str = 'unknown'
     has_interpolated: bool = False
     n_real_rois: int = 0
     n_interpolated_rois: int = 0
     requested_source_type: str = 'filtered'  # NEW: What user requested
+    roi_shape: Tuple[int, int] = (0, 0)
 
 
 class GlobalIndexManager:
@@ -198,22 +178,24 @@ class GlobalIndexManager:
                     )
                 
                 # Check for tracking data (ONLY required for pose task)
-                column_names = []
+                column_names: List[str] = []
                 total_frames = 0
+                tracking_success_rate = 0.0
                 
                 if self.config.task == 'pose':
-                    # Pose task requires tracking data
-                    if 'tracking_runs' not in root or 'latest' not in root['tracking_runs'].attrs:
-                        raise KeyError("Pose task requires 'tracking_runs' with 'latest' attribute.")
-                    
-                    latest_run_name = root['tracking_runs'].attrs['latest']
-                    tracking_results_path = f'tracking_runs/{latest_run_name}/tracking_results'
-                    if tracking_results_path not in root:
-                        raise KeyError(f"Latest tracking results not found at '{tracking_results_path}'")
-                    
-                    tracking_results = root[tracking_results_path]
-                    column_names = tracking_results.attrs['column_names']
-                    total_frames = len(tracking_results)
+                    if 'keypoints_runs' not in root or 'latest' not in root['keypoints_runs'].attrs:
+                        raise KeyError("Pose task requires 'keypoints_runs' with 'latest' attribute.")
+
+                    latest_run_name = root['keypoints_runs'].attrs['latest']
+                    kp_group = root[f'keypoints_runs/{latest_run_name}']
+                    if 'keypoints_roi' not in kp_group:
+                        raise KeyError(f"Keypoint run '{latest_run_name}' missing 'keypoints_roi' array.")
+
+                    total_frames = kp_group['keypoints_roi'].shape[0]
+                    column_names = list(kp_group.attrs.get('keypoint_labels', ['bladder', 'eye_left', 'eye_right']))
+                    success_arr = kp_group['detection_success'][:]
+                    if total_frames > 0:
+                        tracking_success_rate = float(np.mean(success_arr) * 100.0)
                 else:
                     # Detect task only needs crops
                     if 'roi_images' not in crop_group:
@@ -231,12 +213,13 @@ class GlobalIndexManager:
                     raise KeyError("No valid coordinates found")
                 
                 valid_mask = ~np.isnan(source_coords[:, 0])
-                valid_frames = np.sum(valid_mask)
-                
-                # Calculate tracking success rate (only for pose task)
-                tracking_success_rate = 0.0
-                if self.config.task == 'pose' and total_frames > 0:
-                    tracking_success_rate = (np.sum(~np.isnan(tracking_results[:, 0])) / total_frames * 100)
+                if requested_source in ['filtered', 'detect'] and has_interpolated:
+                    if 'detection_source' in crop_group:
+                        real_mask = (crop_group['detection_source'][:] == 0)
+                        valid_mask = valid_mask & real_mask
+                if self.config.task == 'pose':
+                    valid_mask = valid_mask & success_arr
+                valid_frames = int(np.sum(valid_mask))
 
                 metadata = DatasetMetadata(
                     path=path_str,
@@ -249,7 +232,8 @@ class GlobalIndexManager:
                     has_interpolated=has_interpolated,
                     n_real_rois=n_real_rois,
                     n_interpolated_rois=n_interpolated_rois,
-                    requested_source_type=requested_source
+                    requested_source_type=requested_source,
+                    roi_shape=crop_group['roi_images'].shape[1:3] if 'roi_images' in crop_group else (0, 0)
                 )
                 
                 # Log crop source info
@@ -292,18 +276,12 @@ class GlobalIndexManager:
 
         # For pose task, also check keypoints validity
         if self.config.task == 'pose':
-            latest_track_run = root['tracking_runs'].attrs['latest']
-            tracking_data = root[f'tracking_runs/{latest_track_run}/tracking_results']
-            col_map = {name: i for i, name in enumerate(metadata.column_names)}
-            
-            kpt_indices = [
-                col_map.get('bladder_x_roi_norm'), col_map.get('bladder_y_roi_norm'),
-                col_map.get('eye_l_x_roi_norm'), col_map.get('eye_l_y_roi_norm'),
-                col_map.get('eye_r_x_roi_norm'), col_map.get('eye_r_y_roi_norm')
-            ]
-
-            if all(idx is not None for idx in kpt_indices):
-                valid_mask &= ~np.any(np.isnan(tracking_data.oindex[:, kpt_indices]), axis=1)
+            latest_kp_run = root['keypoints_runs'].attrs['latest']
+            kp_group = root[f'keypoints_runs/{latest_kp_run}']
+            if 'detection_success' not in kp_group:
+                raise KeyError(f"Keypoint run '{latest_kp_run}' missing 'detection_success' array.")
+            success_mask = kp_group['detection_success'][:]
+            valid_mask &= success_mask
         
         return np.where(valid_mask)[0]
 
@@ -351,9 +329,11 @@ class ZarrYOLODataset(Dataset):
         
         self.metadata_map = {m.path: m for m in index_manager.metadata_list}
         if self.config.task == 'pose':
-            self.column_mappings = get_column_mappings(index_manager.metadata_list[0].column_names)
+            first_metadata = index_manager.metadata_list[0] if index_manager.metadata_list else None
+            labels = first_metadata.column_names if first_metadata and first_metadata.column_names else ['bladder', 'eye_left', 'eye_right']
+            self.keypoint_labels = labels
         else:
-            self.column_mappings = {}  # Not needed for detection task
+            self.keypoint_labels = []
         self.zarr_roots = {path: zarr.open(path, mode='r') for path in config.get_zarr_paths()}
 
         self.target_size = self.config.target_size or (640 if self.config.task == 'detect' else 256)
@@ -403,44 +383,51 @@ class ZarrYOLODataset(Dataset):
         
         return {"cls": np.array([]), "bboxes": np.empty((0, 4))}
 
-    def _get_pose_data(self, zarr_path: str, frame_idx: int) -> Dict:
+    def _get_pose_data(self, zarr_path: str, det_idx: int) -> Dict:
         try:
             root = self.zarr_roots[zarr_path]
-            latest_track_run = root['tracking_runs'].attrs['latest']
-            tracking_data = root[f'tracking_runs/{latest_track_run}/tracking_results'][frame_idx]
+            latest_kp_run = root['keypoints_runs'].attrs['latest']
+            kp_group = root[f'keypoints_runs/{latest_kp_run}']
 
-            kpts_flat = np.array([
-                tracking_data[self.column_mappings['bladder_x']], tracking_data[self.column_mappings['bladder_y']],
-                tracking_data[self.column_mappings['eye_l_x']], tracking_data[self.column_mappings['eye_l_y']],
-                tracking_data[self.column_mappings['eye_r_x']], tracking_data[self.column_mappings['eye_r_y']],
-            ], dtype=np.float32)
-
-            if np.isnan(kpts_flat).any():
+            if 'keypoints_norm' not in kp_group or 'detection_success' not in kp_group:
+                return {"cls": np.array([]), "bboxes": np.empty((0, 4))}
+            
+            if det_idx >= kp_group['keypoints_norm'].shape[0]:
+                return {"cls": np.array([]), "bboxes": np.empty((0, 4))}
+            
+            if not bool(kp_group['detection_success'][det_idx]):
                 return {"cls": np.array([]), "bboxes": np.empty((0, 4))}
 
+            kpts_norm = kp_group['keypoints_norm'][det_idx].astype(np.float32)
+            if np.isnan(kpts_norm).any():
+                return {"cls": np.array([]), "bboxes": np.empty((0, 4))}
+
+            kpts_flat = kpts_norm.reshape(-1)
             keypoints_x = kpts_flat[0::2]
             keypoints_y = kpts_flat[1::2]
             
             min_x, max_x = np.min(keypoints_x), np.max(keypoints_x)
             min_y, max_y = np.min(keypoints_y), np.max(keypoints_y)
 
-            margin_x = (max_x - min_x) * 0.5
-            margin_y = (max_y - min_y) * 0.5
+            span_x = max_x - min_x
+            span_y = max_y - min_y
+            margin_x = span_x * 0.5
+            margin_y = span_y * 0.5
 
-            bbox_x = (min_x + max_x) / 2.0
-            bbox_y = (min_y + max_y) / 2.0
-            bbox_w = (max_x - min_x) + margin_x
-            bbox_h = (max_y - min_y) + margin_y
+            bbox_x = float(np.clip((min_x + max_x) / 2.0, 0.0, 1.0))
+            bbox_y = float(np.clip((min_y + max_y) / 2.0, 0.0, 1.0))
+            bbox_w = float(np.clip(span_x + margin_x, 1e-6, 1.0))
+            bbox_h = float(np.clip(span_y + margin_y, 1e-6, 1.0))
 
             kpts_with_visibility = np.array([
                 kpts_flat[0], kpts_flat[1], 2,
                 kpts_flat[2], kpts_flat[3], 2,
                 kpts_flat[4], kpts_flat[5], 2
-            ]).reshape(1, -1)
+            ], dtype=np.float32).reshape(1, -1)
 
             return {
                 "cls": np.array([0]),
-                "bboxes": np.array([[bbox_x, bbox_y, bbox_w, bbox_h]]),
+                "bboxes": np.array([[bbox_x, bbox_y, bbox_w, bbox_h]], dtype=np.float32),
                 "keypoints": kpts_with_visibility
             }
         except (KeyError, IndexError):
@@ -453,6 +440,7 @@ class ZarrYOLODataset(Dataset):
         image_source_path = ('raw_video/images_ds' if self.config.task == 'detect' 
                              else f"crop_runs/{root['crop_runs'].attrs['latest']}/roi_images")
         
+        frame_idx = None
         if self.config.task == 'detect':
             frame_indices = self.frame_index_cache[zarr_path]
             frame_idx = int(frame_indices[det_idx]) if det_idx < len(frame_indices) else None
@@ -463,8 +451,12 @@ class ZarrYOLODataset(Dataset):
             else:
                 image = root[image_source_path][frame_idx]
         else:
-            frame_idx = det_idx
-            image = root[image_source_path][frame_idx]
+            roi_idx = det_idx
+            if roi_idx >= root[image_source_path].shape[0]:
+                image = np.zeros_like(root[image_source_path][0])
+                roi_idx = 0
+            else:
+                image = root[image_source_path][roi_idx]
 
         image_3ch = np.stack([image] * 3, axis=-1)
         
@@ -474,12 +466,16 @@ class ZarrYOLODataset(Dataset):
             
         label_info = self.labels[index]
         
+        im_identifier = (f"{Path(zarr_path).stem}_frame_{frame_idx}"
+                         if self.config.task == 'detect'
+                         else f"{Path(zarr_path).stem}_roi_{det_idx}")
+
         return {
             "img": image_3ch.transpose(2, 0, 1),
             "cls": label_info.get('cls', np.array([])),
             "bboxes": label_info.get('bboxes', np.empty((0, 4))),
             "keypoints": label_info.get('keypoints', np.empty((0, 9))),
-            "im_file": f"{Path(zarr_path).stem}_frame_{frame_idx}",
+            "im_file": im_identifier,
             "ori_shape": (self.target_size, self.target_size),
             "ratio_pad": (None, None) 
         }

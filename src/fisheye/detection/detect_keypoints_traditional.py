@@ -221,7 +221,7 @@ def process_keypoint_chunk_delayed(
     zarr_path: str,
     roi_indices: np.ndarray,
     detection_params: Dict[str, Any]
-) -> Tuple[np.ndarray, int, int]:
+) -> Tuple[int, int]:
     """
     Process a chunk of ROIs for keypoint detection and write results directly to zarr.
     
@@ -254,13 +254,15 @@ def process_keypoint_chunk_delayed(
     full_img_shape = root['raw_video/images_full'].shape[1:]  # (H, W)
     roi_shape = roi_images.shape[1:]  # (H, W) of each ROI
     
-    # Result buffer: 21 columns per ROI
-    # [bladder_x_roi, bladder_y_roi, eye_l_x_roi, eye_l_y_roi, eye_r_x_roi, eye_r_y_roi,
-    #  bladder_x_img, bladder_y_img, eye_l_x_img, eye_l_y_img, eye_r_x_img, eye_r_y_img,
-    #  bladder_x_norm, bladder_y_norm, eye_l_x_norm, eye_l_y_norm, eye_r_x_norm, eye_r_y_norm,
-    #  heading, confidence, effective_threshold]
-    results = np.full((len(roi_indices), 21), np.nan, dtype='f8')
-    
+    chunk_len = len(roi_indices)
+    keypoints_roi = np.full((chunk_len, 3, 2), np.nan, dtype='f8')
+    keypoints_img = np.full((chunk_len, 3, 2), np.nan, dtype='f8')
+    keypoints_norm = np.full((chunk_len, 3, 2), np.nan, dtype='f8')
+    heading = np.full(chunk_len, np.nan, dtype='f8')
+    confidence = np.full(chunk_len, np.nan, dtype='f8')
+    thresholds = np.full(chunk_len, np.nan, dtype='f8')
+    success_mask = np.zeros(chunk_len, dtype='bool')
+
     num_successful = 0
     num_failed = 0
     
@@ -296,39 +298,46 @@ def process_keypoint_chunk_delayed(
         if keypoints is None:
             num_failed += 1
             continue
+
+        success_mask[i] = True
         
-        # Pack results: ROI coordinates
-        results[i, 0:2] = keypoints['bladder']
-        results[i, 2:4] = keypoints['eye_left']
-        results[i, 4:6] = keypoints['eye_right']
+        # ROI coordinates
+        keypoints_roi[i] = np.array([
+            keypoints['bladder'],
+            keypoints['eye_left'],
+            keypoints['eye_right']
+        ])
         
         # Image coordinates (pixel space)
         bladder_img = np.array(roi_coord) + keypoints['bladder']
         eye_l_img = np.array(roi_coord) + keypoints['eye_left']
         eye_r_img = np.array(roi_coord) + keypoints['eye_right']
         
-        results[i, 6:8] = bladder_img
-        results[i, 8:10] = eye_l_img
-        results[i, 10:12] = eye_r_img
+        keypoints_img[i] = np.array([bladder_img, eye_l_img, eye_r_img])
         
         # Normalized coordinates (0-1 relative to full image)
-        results[i, 12:14] = bladder_img / np.array(full_img_shape[::-1])
-        results[i, 14:16] = eye_l_img / np.array(full_img_shape[::-1])
-        results[i, 16:18] = eye_r_img / np.array(full_img_shape[::-1])
+        norm_factor = np.array(full_img_shape[::-1], dtype='f8')
+        keypoints_norm[i] = keypoints_img[i] / norm_factor
         
         # Metadata
-        results[i, 18] = keypoints['heading']
-        results[i, 19] = keypoints['confidence']
-        results[i, 20] = keypoints['effective_threshold']
+        heading[i] = keypoints['heading']
+        confidence[i] = keypoints['confidence']
+        thresholds[i] = keypoints['effective_threshold']
         
         num_successful += 1
     
     # Write results to zarr
     start_idx = int(roi_indices[0])
     end_idx = int(roi_indices[-1]) + 1
-    keypoint_group['keypoint_results'][start_idx:end_idx] = results
+    keypoint_group['keypoints_roi'][start_idx:end_idx] = keypoints_roi
+    keypoint_group['keypoints_img'][start_idx:end_idx] = keypoints_img
+    keypoint_group['keypoints_norm'][start_idx:end_idx] = keypoints_norm
+    keypoint_group['heading'][start_idx:end_idx] = heading
+    keypoint_group['confidence'][start_idx:end_idx] = confidence
+    keypoint_group['effective_threshold'][start_idx:end_idx] = thresholds
+    keypoint_group['detection_success'][start_idx:end_idx] = success_mask
     
-    return results, num_successful, num_failed
+    return num_successful, num_failed
 
 
 def get_keypoint_parameters(root: zarr.Group, config: Dict[str, Any], console: Optional[Console] = None) -> Tuple[Dict[str, Any], str]:
@@ -452,33 +461,106 @@ def detect_keypoints(
     
     if total_rois == 0:
         console.print("[yellow]No ROIs found. Nothing to process.[/yellow]")
-        return {'total_rois': 0, 'successful': 0}
+        return {
+            'total_rois': 0,
+            'successful_detections': 0,
+            'failed_detections': 0,
+            'success_rate_percent': 0.0
+        }
     
     console.print(f"Total ROIs to process: [green]{total_rois}[/green]")
     
-    # Create output array
-    keypoint_results = keypoint_group.create_array(
-        'keypoint_results',
-        shape=(total_rois, 21),
-        chunks=(min(chunk_size * 4, total_rois), 21),
+    # Precompute frame indices and counts (align with detection outputs)
+    frame_indices = crop_group['frame_indices'][:].astype('i4', copy=False)
+    frame_chunks = (min(chunk_size * 4, total_rois),) if total_rois > 0 else None
+    keypoint_group.create_array(
+        'frame_indices',
+        data=frame_indices,
+        chunks=frame_chunks,
+        overwrite=True
+    )
+    
+    frame_counts_total = (
+        np.bincount(frame_indices, minlength=root['raw_video/images_full'].shape[0]).astype('i4', copy=False)
+        if total_rois > 0 else np.zeros(root['raw_video/images_full'].shape[0], dtype='i4')
+    )
+    count_chunks = (min(chunk_size * 4, len(frame_counts_total)),) if len(frame_counts_total) > 0 else None
+    keypoint_group.create_array(
+        'n_rois',
+        data=frame_counts_total,
+        chunks=count_chunks,
+        overwrite=True
+    )
+    keypoint_group.create_array(
+        'frame_counts',
+        data=frame_counts_total,
+        chunks=count_chunks,
+        overwrite=True
+    )
+    
+    # Create output arrays matching detection-style layout
+    chunk_len = max(1, min(chunk_size * 4, total_rois if total_rois > 0 else 1))
+    data_chunk = (chunk_len, 3, 2)
+    scalar_chunk = (chunk_len,)
+    
+    keypoint_group.create_array(
+        'keypoints_roi',
+        shape=(total_rois, 3, 2),
+        chunks=data_chunk,
         dtype='f8',
         fill_value=np.nan,
         overwrite=True
     )
+    keypoint_group.create_array(
+        'keypoints_img',
+        shape=(total_rois, 3, 2),
+        chunks=data_chunk,
+        dtype='f8',
+        fill_value=np.nan,
+        overwrite=True
+    )
+    keypoint_group.create_array(
+        'keypoints_norm',
+        shape=(total_rois, 3, 2),
+        chunks=data_chunk,
+        dtype='f8',
+        fill_value=np.nan,
+        overwrite=True
+    )
+    keypoint_group.create_array(
+        'heading',
+        shape=(total_rois,),
+        chunks=scalar_chunk,
+        dtype='f8',
+        fill_value=np.nan,
+        overwrite=True
+    )
+    keypoint_group.create_array(
+        'confidence',
+        shape=(total_rois,),
+        chunks=scalar_chunk,
+        dtype='f8',
+        fill_value=np.nan,
+        overwrite=True
+    )
+    keypoint_group.create_array(
+        'effective_threshold',
+        shape=(total_rois,),
+        chunks=scalar_chunk,
+        dtype='f8',
+        fill_value=np.nan,
+        overwrite=True
+    )
+    keypoint_group.create_array(
+        'detection_success',
+        shape=(total_rois,),
+        chunks=scalar_chunk,
+        dtype='bool',
+        fill_value=False,
+        overwrite=True
+    )
     
-    # Column documentation
-    keypoint_results.attrs['columns'] = [
-        'bladder_x_roi', 'bladder_y_roi',
-        'eye_left_x_roi', 'eye_left_y_roi',
-        'eye_right_x_roi', 'eye_right_y_roi',
-        'bladder_x_img', 'bladder_y_img',
-        'eye_left_x_img', 'eye_left_y_img',
-        'eye_right_x_img', 'eye_right_y_img',
-        'bladder_x_norm', 'bladder_y_norm',
-        'eye_left_x_norm', 'eye_left_y_norm',
-        'eye_right_x_norm', 'eye_right_y_norm',
-        'heading', 'confidence', 'effective_threshold'
-    ]
+    keypoint_group.attrs['keypoint_labels'] = ['bladder', 'eye_left', 'eye_right']
     
     # Mark group path for workers
     root.attrs['current_keypoint_group_path'] = keypoint_group.path
@@ -529,20 +611,20 @@ def detect_keypoints(
         ) as progress:
             task = progress.add_task(f"[cyan]Detecting keypoints ({scheduler})...", total=len(delayed_tasks))
             
-            results = []
+            chunk_stats = []
             
             if use_distributed:
                 # Use distributed client
                 futures = client.compute(delayed_tasks)
                 for future in futures:
                     result = future.result()
-                    results.append(result)
+                    chunk_stats.append(result)
                     progress.update(task, advance=1)
             else:
                 # Use local scheduler
                 for dt in delayed_tasks:
                     result = dt.compute()
-                    results.append(result)
+                    chunk_stats.append(result)
                     progress.update(task, advance=1)
     
     finally:
@@ -553,9 +635,24 @@ def detect_keypoints(
                 cluster.close()
     
     # Aggregate statistics
-    total_successful = sum(r[1] for r in results)
-    total_failed = sum(r[2] for r in results)
+    total_successful = sum(r[0] for r in chunk_stats)
+    total_failed = sum(r[1] for r in chunk_stats)
     success_rate = (total_successful / total_rois * 100) if total_rois > 0 else 0
+
+    # Store per-frame success counts
+    detection_success = keypoint_group['detection_success'][:]
+    if total_rois > 0 and np.any(detection_success):
+        success_counts = np.bincount(frame_indices[detection_success],
+                                     minlength=len(frame_counts_total)).astype('i4', copy=False)
+    else:
+        success_counts = np.zeros_like(frame_counts_total, dtype='i4')
+    keypoint_group.create_array(
+        'n_keypoints',
+        data=success_counts,
+        chunks=count_chunks,
+        overwrite=True
+    )
+    frames_with_success = int(np.sum(success_counts > 0))
     
     # Store summary
     duration = time.perf_counter() - start_time
@@ -564,11 +661,16 @@ def detect_keypoints(
         'total_rois': int(total_rois),
         'successful_detections': int(total_successful),
         'failed_detections': int(total_failed),
-        'success_rate_percent': round(success_rate, 2)
+        'success_rate_percent': round(success_rate, 2),
+        'successful_keypoint_detections': int(total_successful),
+        'failed_keypoint_detections': int(total_failed),
+        'frames_with_keypoints': frames_with_success
     }
     
     keypoint_group.attrs['summary_statistics'] = summary_stats
     keypoint_group.attrs['duration_seconds'] = duration
+    keypoint_group.attrs['keypoints_processed'] = int(total_rois)
+    keypoint_group.attrs['success_rate'] = round(success_rate, 2)
     
     # Environment info
     env_info = get_environment_info()
@@ -586,13 +688,15 @@ def detect_keypoints(
   ROIs/sec: {total_rois/duration:.1f}
 
 [bold]Results:[/bold]
-  Successful: {total_successful}/{total_rois} ({success_rate:.1f}%)
-  Failed: {total_failed}
+  Successful ROIs: {total_successful}/{total_rois} ({success_rate:.1f}%)
+  Failed ROIs: {total_failed}
+  Frames with keypoints: {frames_with_success}
 
 [bold]Output:[/bold]
   Path: {zarr_path}
-  Array: keypoint_runs/{run_group_name}/keypoint_results
-  Shape: ({total_rois}, 21)"""
+  Arrays:
+    • keypoints_runs/{run_group_name}/keypoints_roi ({total_rois}, 3, 2)
+    • keypoints_runs/{run_group_name}/n_keypoints ({len(frame_counts_total)})"""
     
     panel = Panel(
         completion_text,
