@@ -26,6 +26,7 @@ from ..detection.detect_keypoints_traditional import detect_keypoints
 from ..tracking.crop import crop_detections
 from ..tracking.assign_ids import assign_ids_spatial
 from ..refinement.refine_detect import create_refined_run
+from ..refinement.refine_keypoints import create_refined_keypoint_run
 from ..shared.zarr.schema import validate_zarr_structure
 
 
@@ -88,6 +89,7 @@ class Pipeline:
         'refine',
         'crop',
         'keypoints',
+        'keypoints_refine',
         'assign_ids',
         'track',
     ]
@@ -100,11 +102,12 @@ class Pipeline:
         'refine': ['detect'],
         'crop': ['detect'],
         'keypoints': ['crop', 'background'],
+        'keypoints_refine': ['keypoints'],
         'assign_ids': ['detect'],
         'track': ['keypoints'],
     }
 
-    ANALYSIS_STAGES = {'background', 'detect', 'track', 'refine'}
+    ANALYSIS_STAGES = {'background', 'detect', 'track', 'refine', 'keypoints_refine'}
     DATA_STAGES = {'import', 'downsample'}
     
     def __init__(
@@ -188,6 +191,12 @@ class Pipeline:
                 'filters': {'remove_jumps': True, 'remove_blips': False},
                 'max_gap': 20,
                 'interpolation_method': 'linear'
+            },
+            'refine_keypoints': {
+                'chunk_size': 4096,
+                'scheduler': 'processes',
+                'num_workers': None,
+                'memory_limit': None
             }
         }
         
@@ -295,6 +304,7 @@ class Pipeline:
             'refine',
             'crop',
             'keypoints',
+            'keypoints_refine',
             'assign_ids'] and self._is_stage_complete(stage):
             self.console.print(f"[green]✓ Stage '{stage}' already complete, skipping[/green]")
             return
@@ -312,6 +322,8 @@ class Pipeline:
                 self._run_crop()
             elif stage == 'keypoints':
                 self._run_keypoints()
+            elif stage == 'keypoints_refine':
+                self._run_keypoints_refine()
             elif stage == 'track':
                 self._run_track()
             elif stage == 'refine':
@@ -429,6 +441,19 @@ class Pipeline:
             f"✓ Detected keypoints in {results['successful_detections']}/{results['total_rois']} "
             f"ROIs ({results['success_rate_percent']:.1f}% success rate)"
         )
+
+    def _run_keypoints_refine(self) -> None:
+        """Run keypoint refinement stage."""
+        if self.zarr_root is None:
+            self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
+
+        run_name = create_refined_keypoint_run(
+            zarr_path=self.config.zarr_path,
+            config=self.pipeline_params,
+            console=self.console
+        )
+
+        self.console.print(f"[green]✓[/green] Keypoint refinement saved as [cyan]{run_name}[/cyan]")
     
     def _run_refine(self) -> None:
         """Run detection refinement stage (filter & interpolate detections)."""
@@ -806,6 +831,10 @@ class Pipeline:
         """Check if a stage has already been completed."""
         if not Path(self.config.zarr_path).exists():
             return False
+
+        # Refinement stages are designed to be repeatable; always allow rerun.
+        if stage in {'refine', 'keypoints_refine'}:
+            return False
         
         try:
             root = zarr.open(self.config.zarr_path, mode='r')
@@ -832,9 +861,15 @@ class Pipeline:
                 return latest is not None
             
             elif stage == 'keypoints':
-                if 'keypoint_runs' not in root:
+                if 'keypoints_runs' not in root:
                     return False
-                latest = root['keypoint_runs'].attrs.get('latest')
+                latest = root['keypoints_runs'].attrs.get('latest')
+                return latest is not None
+
+            elif stage == 'keypoints_refine':
+                if 'keypoints_refined_runs' not in root:
+                    return False
+                latest = root['keypoints_refined_runs'].attrs.get('latest')
                 return latest is not None
             
             elif stage == 'assign_ids':
@@ -995,6 +1030,7 @@ Examples:
                  'detect',
                  'crop',
                  'keypoints',
+                 'keypoints_refine',
                  'track',
                  'refine',
                  'assign_ids',

@@ -11,6 +11,7 @@ Enhanced with slider to scroll through all frames.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
@@ -19,6 +20,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 from matplotlib.widgets import Slider, Button
+from matplotlib.transforms import Affine2D
 
 
 @dataclass
@@ -56,6 +58,118 @@ def get_latest_run(root: zarr.Group, group_name: str, explicit: Optional[str]) -
         raise RuntimeError(f"No runs recorded under '{runs_group_name}'.")
     return latest
 
+
+class ChunkedFrameCache:
+    """Lightweight LRU cache that keeps a few decompressed frame chunks in memory."""
+
+    def __init__(self, array: zarr.Array, max_chunks: int = 2) -> None:
+        self._array = array
+        chunks = getattr(array, "chunks", None)
+        self._chunk_len = int(chunks[0]) if chunks and chunks[0] else 1
+        self._max_chunks = max(1, max_chunks)
+        self._cache: dict[int, np.ndarray] = {}
+        self._lru = deque()
+
+    @property
+    def chunk_len(self) -> int:
+        return self._chunk_len
+
+    def get(self, frame_idx: int) -> np.ndarray:
+        if frame_idx < 0 or frame_idx >= self._array.shape[0]:
+            raise IndexError(f"Frame index {frame_idx} out of bounds for array of length {self._array.shape[0]}")
+
+        chunk_idx = frame_idx // self._chunk_len
+        chunk = self._cache.get(chunk_idx)
+        if chunk is None:
+            start = chunk_idx * self._chunk_len
+            stop = min(start + self._chunk_len, self._array.shape[0])
+            chunk = np.asarray(self._array[start:stop])
+            self._cache[chunk_idx] = chunk
+            self._lru.append(chunk_idx)
+            if len(self._lru) > self._max_chunks:
+                stale = self._lru.popleft()
+                self._cache.pop(stale, None)
+        else:
+            # Refresh LRU order
+            self._lru.remove(chunk_idx)
+            self._lru.append(chunk_idx)
+
+        local_idx = frame_idx - chunk_idx * self._chunk_len
+        return chunk[local_idx]
+
+def rotate_and_mask_roi(roi_img: np.ndarray, heading_deg: float) -> np.ndarray:
+    """
+    Rotate ROI image to stabilize fish orientation and apply circular mask.
+    
+    Args:
+        roi_img: Grayscale ROI image
+        heading_deg: Fish heading in degrees (0° = right, CCW positive)
+    
+    Returns:
+        Rotated and masked ROI image
+    """
+    h, w = roi_img.shape
+    center = (w / 2.0, h / 2.0)
+    
+    # Create circular mask first
+    Y, X = np.ogrid[:h, :w]
+    dist_sq = (X - center[0]) ** 2 + (Y - center[1]) ** 2
+    radius = min(center[0], center[1])
+    mask = dist_sq <= radius ** 2
+    
+    # Apply mask to original image
+    masked_img = np.zeros_like(roi_img, dtype=np.float32)
+    masked_img[mask] = roi_img[mask].astype(np.float32)
+    
+    # Rotate the masked image
+    # CV2 rotates CLOCKWISE for positive angles, but our heading is CCW positive
+    # So we need to negate the heading to make fish point right (0°)
+    import cv2
+    rotation_matrix = cv2.getRotationMatrix2D(center, -heading_deg, 1.0)
+    rotated = cv2.warpAffine(
+        masked_img,
+        rotation_matrix,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0
+    )
+    
+    return rotated.astype(roi_img.dtype)
+
+def rotate_keypoints(keypoints_dict: dict, center: tuple, heading_deg: float) -> dict:
+    """
+    Rotate keypoint coordinates around a center point.
+    
+    Args:
+        keypoints_dict: Dict of label -> (x, y) coordinates
+        center: (center_x, center_y) rotation center
+        heading_deg: Rotation angle in degrees
+    
+    Returns:
+        Dict of label -> rotated (x, y) coordinates
+    """
+    center_x, center_y = center
+    theta = np.deg2rad(heading_deg)
+    
+    # Rotation matrix (clockwise rotation for positive angle to match CV2)
+    cos_theta = np.cos(theta)
+    sin_theta = np.sin(theta)
+    
+    rotated_kp = {}
+    for label, (x, y) in keypoints_dict.items():
+        # Translate to origin
+        dx = x - center_x
+        dy = y - center_y
+        
+        # Rotate
+        x_rot = dx * cos_theta - dy * sin_theta
+        y_rot = dx * sin_theta + dy * cos_theta
+        
+        # Translate back
+        rotated_kp[label] = (x_rot + center_x, y_rot + center_y)
+    
+    return rotated_kp
 
 def get_record_for_frame(
     root: zarr.Group,
@@ -179,6 +293,7 @@ def plot_record_interactive(
     
     # Get total number of frames
     full_frames = root["raw_video/images_full"]
+    frame_cache = ChunkedFrameCache(full_frames)
     n_frames = full_frames.shape[0]
     
     # Pre-build frame-to-ROI mapping for fast lookups
@@ -215,7 +330,10 @@ def plot_record_interactive(
     roi_coords_full = crop_group["roi_coordinates_full"]
     full_h, full_w = full_frames.shape[1], full_frames.shape[2]
     
-    print(f"Ready! {len(frame_to_roi_map)} frames with detections out of {n_frames} total.")
+    print(
+        f"Ready! {len(frame_to_roi_map)} frames with detections out of {n_frames} total. "
+        f"(frame chunk size ≈ {frame_cache.chunk_len})"
+    )
     
     colors = {
         "bladder": "#ffcc00",
@@ -224,8 +342,9 @@ def plot_record_interactive(
     }
     cmap = "gray"
     
-    # Create figure with two subplots
-    fig, (ax_roi, ax_full) = plt.subplots(1, 2, figsize=(14, 6))
+    # Create figure with three subplots (ROI, Rotated ROI, Full frame)
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    ax_roi, ax_rot, ax_full = axes
     plt.subplots_adjust(bottom=0.2)
     
     # Current frame state
@@ -240,13 +359,16 @@ def plot_record_interactive(
         roi_indices = frame_to_roi_map.get(frame_idx, [])
         
         # Load full frame (single zarr access)
-        full_img = full_frames[frame_idx]
+        full_img = frame_cache.get(frame_idx)
         
         # Clear axes
         ax_roi.clear()
+        ax_rot.clear()
         ax_full.clear()
         
         # --- LEFT PANEL: ROI with keypoints ---
+        kp_roi = None
+        heading = None
         if len(roi_indices) > 0:
             # Use first ROI for this frame
             roi_idx = roi_indices[0]
@@ -277,7 +399,7 @@ def plot_record_interactive(
                         ax_roi.legend(loc="lower right", fontsize=8)
                         
                         # Get metadata
-                        heading = float(keypoint_data['heading'][roi_idx])
+                        heading_raw = float(keypoint_data['heading'][roi_idx])
                         confidence = float(keypoint_data['confidence'][roi_idx])
                         thresh = float(keypoint_data['effective_threshold'][roi_idx])
                         
@@ -285,9 +407,10 @@ def plot_record_interactive(
                         title_color = "green"
                         title = (
                             f"ROI {roi_idx} — Frame {frame_idx} [{status}]\n"
-                            f"heading={heading:.1f}° | conf={confidence:.2f} | thresh={thresh:.0f}"
+                            f"heading={heading_raw:.1f}° | conf={confidence:.2f} | thresh={thresh:.0f}"
                         )
                         has_keypoints = True
+                        heading = heading_raw if np.isfinite(heading_raw) else None
                         
                         # Store for full frame overlay
                         kp_full_clamped = {}
@@ -318,6 +441,67 @@ def plot_record_interactive(
         
         ax_roi.set_title(title, color=title_color, fontweight='bold')
         ax_roi.set_axis_off()
+
+        # --- MIDDLE PANEL: Rotated ROI ---
+        if len(roi_indices) > 0 and roi_img is not None and has_keypoints and heading is not None and kp_roi is not None:
+            # Rotate and mask the ROI image
+            rotated_img = rotate_and_mask_roi(roi_img, heading)
+            
+            ax_rot.imshow(rotated_img, cmap=cmap)
+            ax_rot.set_title(f"Stabilized ROI (H={heading:.1f}°)")
+            ax_rot.set_axis_off()
+            
+            # Rotate keypoints to match
+            h, w = roi_img.shape
+            center = (w / 2.0, h / 2.0)
+            rotated_kp = rotate_keypoints(kp_roi, center, heading)
+            
+            # Draw rotated keypoints
+            for label, (x, y) in rotated_kp.items():
+                ax_rot.scatter(
+                    x, y,
+                    s=60,
+                    c=colors[label],
+                    edgecolors="black",
+                    linewidths=1.0,
+                )
+                ax_rot.text(
+                    x + 3, y - 3,
+                    label,
+                    color=colors[label],
+                    fontsize=8,
+                    weight="bold",
+                    bbox=dict(facecolor="black", alpha=0.5, pad=2),
+                )
+            
+            # Draw heading arrow (should point to the right after rotation)
+            arrow_length = min(w, h) * 0.15  # 15% of image size
+            arrow_start = center
+            # After rotation, heading should be horizontal (pointing right)
+            arrow_end = (center[0] + arrow_length, center[1])
+            ax_rot.annotate(
+                '',
+                xy=arrow_end,
+                xytext=arrow_start,
+                arrowprops=dict(
+                    arrowstyle='->',
+                    lw=2,
+                    color='magenta'
+                )
+            )
+            
+        else:
+            # No keypoints or no ROI - show black screen
+            black_img = np.zeros((100, 100), dtype=np.uint8)
+            ax_rot.imshow(black_img, cmap=cmap, vmin=0, vmax=255)
+            ax_rot.set_axis_off()
+            
+            if len(roi_indices) > 0 and roi_img is not None:
+                # Have ROI but no keypoints
+                ax_rot.set_title("Stabilized ROI (no keypoints)", color="orange")
+            else:
+                # No ROI at all
+                ax_rot.set_title("Stabilized ROI (no data)", color="red")
         
         # --- RIGHT PANEL: Full frame with overlay ---
         ax_full.imshow(full_img, cmap=cmap)
