@@ -45,7 +45,7 @@ def detect_keypoints_traditional(
     se2_radius: int = 2,
     min_area: int = 5,
     adaptive_steps: int = 5,
-    thresh_decrement: int = 5,
+    se2_decrement: int = 1,
     min_valid_angle: float = 10.0,
     min_triangle_area: float = 100.0
 ) -> Optional[Dict[str, Any]]:
@@ -60,7 +60,7 @@ def detect_keypoints_traditional(
         se2_radius: Radius for second morphological structuring element
         min_area: Minimum area for valid blobs
         adaptive_steps: Number of adaptive threshold steps to try
-        thresh_decrement: Amount to decrease threshold each adaptive step
+        se2_decrement: Amount to decrease SE2 radius each adaptive step
         min_valid_angle: Minimum angle in degrees for valid triangle
         min_triangle_area: Minimum triangle area in pixels^2
     
@@ -71,19 +71,20 @@ def detect_keypoints_traditional(
         return None
     
     se1 = disk(se1_radius)
-    se2 = disk(se2_radius)
     
     diff_roi = np.clip(
-        background_roi.astype(np.int16) - roi.astype(np.int16), 
+        background_roi.astype(np.int16) - roi.astype(np.int16),
         0, 255
     ).astype(np.uint8)
     
-    current_thresh = roi_thresh
+    current_se2 = se2_radius
     keypoint_stats = []
+    effective_se2 = se2_radius
     
     for _ in range(adaptive_steps):
+        se2 = disk(max(1, int(round(current_se2))))
         im_roi = erosion(dilation(erosion(
-            diff_roi >= current_thresh, se1), se2), se1
+            diff_roi >= roi_thresh, se1), se2), se1
         )
         
         roi_stat = [r for r in regionprops(label(im_roi)) if r.area > min_area]
@@ -99,9 +100,10 @@ def detect_keypoints_traditional(
             # Check if angles form a valid triangle AND triangle is large enough
             if np.all(angles >= np.deg2rad(min_valid_angle)) and tri_area >= min_triangle_area:
                 keypoint_stats = candidate_stats
+                effective_se2 = max(1, int(round(current_se2)))
                 break
-            
-        current_thresh -= thresh_decrement
+
+        current_se2 = max(1, current_se2 - se2_decrement)
     
     if len(keypoint_stats) != 3:
         return None
@@ -111,7 +113,9 @@ def detect_keypoints_traditional(
         return None
     
     keypoints['confidence'] = calculate_confidence(keypoint_stats)
-    keypoints['effective_threshold'] = current_thresh
+    keypoints['effective_threshold'] = roi_thresh
+    keypoints['effective_se2_radius'] = effective_se2
+    keypoints['effective_se2_radius'] = effective_se2
     keypoints['num_blobs_found'] = len(keypoint_stats)
     
     return keypoints
@@ -261,6 +265,7 @@ def process_keypoint_chunk_delayed(
     heading = np.full(chunk_len, np.nan, dtype='f8')
     confidence = np.full(chunk_len, np.nan, dtype='f8')
     thresholds = np.full(chunk_len, np.nan, dtype='f8')
+    se2_radii = np.full(chunk_len, np.nan, dtype='f8')
     success_mask = np.zeros(chunk_len, dtype='bool')
 
     num_successful = 0
@@ -290,7 +295,7 @@ def process_keypoint_chunk_delayed(
             se2_radius=detection_params.get('se2_radius', 2),
             min_area=detection_params.get('min_area', 5),
             adaptive_steps=detection_params.get('adaptive_steps', 5),
-            thresh_decrement=detection_params.get('thresh_decrement', 5),
+            se2_decrement=detection_params.get('se2_decrement', 1),
             min_valid_angle=detection_params.get('min_valid_angle', 10.0),
             min_triangle_area=detection_params.get('min_triangle_area', 100.0)
         )
@@ -323,6 +328,7 @@ def process_keypoint_chunk_delayed(
         heading[i] = keypoints['heading']
         confidence[i] = keypoints['confidence']
         thresholds[i] = keypoints['effective_threshold']
+        se2_radii[i] = keypoints['effective_se2_radius']
         
         num_successful += 1
     
@@ -335,6 +341,7 @@ def process_keypoint_chunk_delayed(
     keypoint_group['heading'][start_idx:end_idx] = heading
     keypoint_group['confidence'][start_idx:end_idx] = confidence
     keypoint_group['effective_threshold'][start_idx:end_idx] = thresholds
+    keypoint_group['effective_se2_radius'][start_idx:end_idx] = se2_radii
     keypoint_group['detection_success'][start_idx:end_idx] = success_mask
     
     return num_successful, num_failed
@@ -353,7 +360,7 @@ def get_keypoint_parameters(root: zarr.Group, config: Dict[str, Any], console: O
     keypoint_params.setdefault('se2_radius', 2)
     keypoint_params.setdefault('min_area', 5)
     keypoint_params.setdefault('adaptive_steps', 5)
-    keypoint_params.setdefault('thresh_decrement', 5)
+    keypoint_params.setdefault('se2_decrement', 1)
     keypoint_params.setdefault('min_valid_angle', 10.0)
     keypoint_params.setdefault('min_triangle_area', 100.0)
     
@@ -545,6 +552,14 @@ def detect_keypoints(
     )
     keypoint_group.create_array(
         'effective_threshold',
+        shape=(total_rois,),
+        chunks=scalar_chunk,
+        dtype='f8',
+        fill_value=np.nan,
+        overwrite=True
+    )
+    keypoint_group.create_array(
+        'effective_se2_radius',
         shape=(total_rois,),
         chunks=scalar_chunk,
         dtype='f8',
