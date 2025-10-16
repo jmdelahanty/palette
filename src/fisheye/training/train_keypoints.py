@@ -112,11 +112,51 @@ class ZarrPoseValidator(PoseValidator):
     
     def _prepare_batch(self, si, batch):
         """Prepare batch for validation, handling shape issues."""
-        pbatch = super()._prepare_batch(si, batch)
+        # Deep copy to avoid modifying original
+        import copy
+        batch = copy.copy(batch)
         
-        # Handle cls shape issues (same as detection validator)
-        if 'cls' in pbatch and hasattr(pbatch['cls'], 'ndim') and pbatch['cls'].ndim == 0:
-            pbatch['cls'] = pbatch['cls'].unsqueeze(0)
+        # Fix cls BEFORE calling super() to prevent shape errors in parent
+        if 'cls' in batch:
+            cls = batch['cls']
+            
+            # Handle various input types
+            if cls is None:
+                batch['cls'] = torch.empty(0, dtype=torch.float32)
+            elif not isinstance(cls, torch.Tensor):
+                # Convert to tensor
+                if hasattr(cls, '__array__'):
+                    cls = torch.from_numpy(np.asarray(cls))
+                elif isinstance(cls, (list, tuple)):
+                    cls = torch.tensor(cls)
+                else:
+                    cls = torch.tensor([cls])
+                batch['cls'] = cls
+            
+            cls = batch['cls']
+            
+            # Now fix shape issues
+            if isinstance(cls, torch.Tensor):
+                if cls.ndim == 0:  # Scalar
+                    batch['cls'] = cls.unsqueeze(0).float()
+                elif cls.numel() == 0:  # Empty
+                    batch['cls'] = torch.empty(0, dtype=torch.float32)
+                elif cls.ndim == 1:  # Already correct shape
+                    batch['cls'] = cls.float()
+                elif cls.ndim == 2 and cls.shape[1] == 1:  # (N, 1) needs squeeze
+                    batch['cls'] = cls.squeeze(1).float()
+                else:
+                    batch['cls'] = cls.float()
+        
+        # Now call parent with fixed batch
+        try:
+            pbatch = super()._prepare_batch(si, batch)
+        except Exception as e:
+            # If parent still fails, create minimal valid batch
+            print(f"Warning: _prepare_batch failed with {e}, creating minimal batch")
+            pbatch = batch
+            if 'cls' not in pbatch or pbatch['cls'] is None:
+                pbatch['cls'] = torch.empty(0, dtype=torch.float32)
         
         return pbatch
 

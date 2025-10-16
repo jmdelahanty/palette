@@ -344,10 +344,11 @@ class ZarrYOLODataset(Dataset):
         # Cache metadata per task
         self.bbox_cache = {}
         self.frame_index_cache = {}
-        self.kp_norm_cache = {}
+        self.kp_roi_norm_cache = {}
         self.kp_success_cache = {}
         self.kp_bbox_cache = {}
         self.kp_flat_cache = {}
+        self.roi_size_cache = {}
         if self.config.task == 'detect':
             for zarr_path in self.zarr_roots.keys():
                 root = self.zarr_roots[zarr_path]
@@ -364,16 +365,33 @@ class ZarrYOLODataset(Dataset):
         else:
             for zarr_path in self.zarr_roots.keys():
                 root = self.zarr_roots[zarr_path]
+                latest_crop = root['crop_runs'].attrs['latest']
+                crop_group = root[f'crop_runs/{latest_crop}']
+                roi_shape = crop_group['roi_images'].shape[1:3]
+                roi_h, roi_w = roi_shape
+                self.roi_size_cache[zarr_path] = (roi_h, roi_w)
+
                 latest_kp = root['keypoints_runs'].attrs['latest']
                 kp_group = root[f'keypoints_runs/{latest_kp}']
-                kp_norm = kp_group['keypoints_norm'][:].astype(np.float32)
+                kp_roi = kp_group['keypoints_roi'][:].astype(np.float32)
                 kp_success = kp_group['detection_success'][:].astype(bool)
-                valid_mask = kp_success & np.isfinite(kp_norm).all(axis=(1, 2))
-                self.kp_norm_cache[zarr_path] = kp_norm
+
+                finite_mask = np.isfinite(kp_roi).all(axis=(1, 2))
+                valid_mask = kp_success & finite_mask
+                self.kp_roi_norm_cache[zarr_path] = np.zeros_like(kp_roi, dtype=np.float32)
+
+                if roi_w > 0 and roi_h > 0:
+                    kp_roi_norm = kp_roi.copy()
+                    kp_roi_norm[..., 0] /= float(roi_w)
+                    kp_roi_norm[..., 1] /= float(roi_h)
+                else:
+                    kp_roi_norm = kp_roi
+
+                kp_roi_norm = np.clip(kp_roi_norm, 0.0, 1.0)
+                self.kp_roi_norm_cache[zarr_path] = kp_roi_norm
                 self.kp_success_cache[zarr_path] = valid_mask
 
-                # Precompute bounding boxes for keypoints
-                kpts = kp_norm.reshape(kp_norm.shape[0], -1, 2)
+                kpts = kp_roi_norm.reshape(kp_roi_norm.shape[0], -1, 2)
                 min_xy = np.nanmin(kpts, axis=1)
                 max_xy = np.nanmax(kpts, axis=1)
                 span = max_xy - min_xy
@@ -383,10 +401,10 @@ class ZarrYOLODataset(Dataset):
                 bboxes = np.concatenate([center, bbox_wh], axis=1).astype(np.float32)
                 self.kp_bbox_cache[zarr_path] = bboxes
 
-                visibility = np.full((kp_norm.shape[0], kp_norm.shape[1], 1), 2.0, dtype=np.float32)
-                kpts_with_vis = np.concatenate([kp_norm, visibility], axis=2).reshape(kp_norm.shape[0], -1)
+                visibility = np.full((kp_roi_norm.shape[0], kp_roi_norm.shape[1], 1), 2.0, dtype=np.float32)
+                kpts_with_vis = np.concatenate([kp_roi_norm, visibility], axis=2).reshape(kp_roi_norm.shape[0], -1)
                 self.kp_flat_cache[zarr_path] = kpts_with_vis
-                logger.info(f"  Cached {kp_norm.shape[0]} keypoint entries from {Path(zarr_path).name}")
+                logger.info(f"  Cached {kp_roi_norm.shape[0]} keypoint entries from {Path(zarr_path).name}")
         
         # Build labels using cached data
         label_fetcher = self._get_pose_data if self.config.task == 'pose' else self._get_bbox_data
@@ -411,57 +429,37 @@ class ZarrYOLODataset(Dataset):
                     "bboxes": np.array([[bbox_x, bbox_y, bbox_w, bbox_h]])
                 }
         
-        return {"cls": np.array([]), "bboxes": np.empty((0, 4))}
+        return {"cls": np.zeros((0,), dtype=np.float32), "bboxes": np.zeros((0, 4), dtype=np.float32)}
 
     def _get_pose_data(self, zarr_path: str, det_idx: int) -> Dict:
+        """Get pose data using pre-cached keypoints."""
         try:
-            root = self.zarr_roots[zarr_path]
-            latest_kp_run = root['keypoints_runs'].attrs['latest']
-            kp_group = root[f'keypoints_runs/{latest_kp_run}']
-
-            if 'keypoints_norm' not in kp_group or 'detection_success' not in kp_group:
-                return {"cls": np.array([]), "bboxes": np.empty((0, 4))}
+            # Use cached data instead of recalculating
+            if zarr_path not in self.kp_success_cache:
+                return {"cls": np.zeros((0,), dtype=np.float32), "bboxes": np.zeros((0, 4), dtype=np.float32)}
             
-            if det_idx >= kp_group['keypoints_norm'].shape[0]:
-                return {"cls": np.array([]), "bboxes": np.empty((0, 4))}
+            # Check if this detection has valid keypoints
+            if det_idx >= len(self.kp_success_cache[zarr_path]):
+                return {"cls": np.zeros((0,), dtype=np.float32), "bboxes": np.zeros((0, 4), dtype=np.float32)}
             
-            if not bool(kp_group['detection_success'][det_idx]):
-                return {"cls": np.array([]), "bboxes": np.empty((0, 4))}
-
-            kpts_norm = kp_group['keypoints_norm'][det_idx].astype(np.float32)
-            if np.isnan(kpts_norm).any():
-                return {"cls": np.array([]), "bboxes": np.empty((0, 4))}
-
-            kpts_flat = kpts_norm.reshape(-1)
-            keypoints_x = kpts_flat[0::2]
-            keypoints_y = kpts_flat[1::2]
+            if not self.kp_success_cache[zarr_path][det_idx]:
+                return {"cls": np.zeros((0,), dtype=np.float32), "bboxes": np.zeros((0, 4), dtype=np.float32)}
             
-            min_x, max_x = np.min(keypoints_x), np.max(keypoints_x)
-            min_y, max_y = np.min(keypoints_y), np.max(keypoints_y)
-
-            span_x = max_x - min_x
-            span_y = max_y - min_y
-            margin_x = span_x * 0.5
-            margin_y = span_y * 0.5
-
-            bbox_x = float(np.clip((min_x + max_x) / 2.0, 0.0, 1.0))
-            bbox_y = float(np.clip((min_y + max_y) / 2.0, 0.0, 1.0))
-            bbox_w = float(np.clip(span_x + margin_x, 1e-6, 1.0))
-            bbox_h = float(np.clip(span_y + margin_y, 1e-6, 1.0))
-
-            kpts_with_visibility = np.array([
-                kpts_flat[0], kpts_flat[1], 2,
-                kpts_flat[2], kpts_flat[3], 2,
-                kpts_flat[4], kpts_flat[5], 2
-            ], dtype=np.float32).reshape(1, -1)
-
+            # Get cached bbox and keypoints
+            bbox = self.kp_bbox_cache[zarr_path][det_idx]
+            kpts_flat = self.kp_flat_cache[zarr_path][det_idx]
+            
+            # Verify data is valid
+            if np.isnan(bbox).any() or np.isnan(kpts_flat).any():
+                return {"cls": np.zeros((0,), dtype=np.float32), "bboxes": np.zeros((0, 4), dtype=np.float32)}
+            
             return {
                 "cls": np.array([0]),
-                "bboxes": np.array([[bbox_x, bbox_y, bbox_w, bbox_h]], dtype=np.float32),
-                "keypoints": kpts_with_visibility
+                "bboxes": bbox.reshape(1, 4).astype(np.float32),
+                "keypoints": kpts_flat.astype(np.float32)  # Already shape (9,)
             }
-        except (KeyError, IndexError):
-            return {"cls": np.array([]), "bboxes": np.empty((0, 4))}
+        except (KeyError, IndexError) as e:
+            return {"cls": np.zeros((0,), dtype=np.float32), "bboxes": np.zeros((0, 4), dtype=np.float32)}
     
     def __getitem__(self, index: int) -> Dict:
         zarr_path, det_idx = self.indices[index]
@@ -502,12 +500,13 @@ class ZarrYOLODataset(Dataset):
 
         return {
             "img": image_3ch.transpose(2, 0, 1),
-            "cls": label_info.get('cls', np.array([])),
-            "bboxes": label_info.get('bboxes', np.empty((0, 4))),
-            "keypoints": label_info.get('keypoints', np.empty((0, 9))),
+            "cls": label_info.get('cls', np.zeros((0,), dtype=np.float32)).astype(np.float32),
+            "bboxes": label_info.get('bboxes', np.zeros((0, 4), dtype=np.float32)).astype(np.float32),
+            "keypoints": label_info.get('keypoints', np.zeros((0, 9), dtype=np.float32)).astype(np.float32),
             "im_file": im_identifier,
             "ori_shape": (self.target_size, self.target_size),
-            "ratio_pad": (None, None) 
+            "ratio_pad": (None, None),
+            "segments": np.zeros((0, 0), dtype=np.float32)
         }
 
 
