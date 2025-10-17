@@ -102,3 +102,61 @@ class DetectConfig(BaseModel):
 class PoseConfig(DetectConfig):
     """Configuration for pose estimation task"""
     kpt_shape: Tuple[int, int]
+
+
+class EyeMaskDatasetConfig(BaseModel):
+    """Configuration for an eye-mask segmentation dataset sourced from a Zarr store."""
+    zarr_path: Path
+    crop_run: Optional[str] = None
+    mask_run: Optional[str] = None
+    split: Optional[DatasetSplit] = None
+    min_positive_area: int = Field(0, ge=0)
+    include_empty: bool = True
+    require_both_eyes: bool = False
+    include_background_negatives: bool = False
+    background_negative_ratio: float = Field(1.0, gt=0.0)
+    background_run: Optional[str] = None
+    background_from_downsampled: bool = False
+
+    @field_validator('zarr_path')
+    @classmethod
+    def check_zarr_path(cls, v: Path) -> Path:
+        v = Path(v)
+        if not v.is_dir():
+            raise ValueError(f"Path '{v}' is not a valid directory")
+        if not (v / 'zarr.json').exists() and not (v / '.zgroup').exists():
+            raise ValueError(f"Path '{v}' is not a valid Zarr directory")
+        return v
+
+
+class EyeMaskTrainingConfig(BaseModel):
+    """Configuration for training eye-mask segmentation models."""
+    datasets: Dict[str, EyeMaskDatasetConfig]
+    names: List[str] = Field(default_factory=lambda: ["eye"])
+    nc: int = Field(1, gt=0)
+    random_seed: int = 42
+    target_size: int = Field(160, gt=0)
+    default_split: DatasetSplit = DatasetSplit()
+    training_params: TrainingParams
+    num_workers: int = Field(8, ge=0)
+
+    @field_validator('datasets')
+    @classmethod
+    def validate_datasets(cls, v: Dict[str, EyeMaskDatasetConfig]) -> Dict[str, EyeMaskDatasetConfig]:
+        if not v:
+            raise ValueError("'datasets' cannot be empty")
+        return v
+
+    @field_validator('names')
+    @classmethod
+    def validate_names(cls, v: List[str], info) -> List[str]:
+        nc = info.data.get('nc', 1)
+        if len(v) != nc:
+            raise ValueError(f"Length of 'names' ({len(v)}) must match 'nc' ({nc})")
+        return v
+
+    @classmethod
+    def from_yaml(cls, path: Path) -> "EyeMaskTrainingConfig":
+        with open(path, 'r') as f:
+            config_dict = yaml.safe_load(f)
+        return cls(**config_dict)

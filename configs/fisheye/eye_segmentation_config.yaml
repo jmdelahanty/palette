@@ -1,0 +1,95 @@
+# ================================================================================
+# Eye Mask Segmentation Training Configuration
+# ================================================================================
+# This file configures YOLO segmentation training using ROI crops and masks
+# stored directly inside Palette Zarr archives.
+#
+# Usage:
+#   python -m fisheye.training.train_eye_masks configs/fisheye/eye_segmentation_config.yaml
+#
+# Replace the example dataset path below with your own Zarr archive (or add
+# additional datasets under `datasets:`). All paths may be absolute or relative.
+# ================================================================================
+
+# --- Minimal placeholders required by Ultralytics ---
+# These are ignored by our custom dataloader but must exist for validation.
+train: ./dummy_train.txt
+val: ./dummy_val.txt
+nc: 1
+names: ['eye']
+
+# ================================================================================
+# DATASETS
+# ================================================================================
+# Each entry corresponds to a Palette Zarr file. Training pulls ROI crops from
+# the specified crop run and uses the matching eye-mask run for labels.
+# ------------------------------------------------------------------------------
+# Options per dataset:
+#   zarr_path                 Path to the Zarr archive.
+#   crop_run                  (Optional) Specific crop run. Defaults to latest.
+#   mask_run                  (Optional) Specific eye mask run. Defaults to latest.
+#   split                     Train/val split override (defaults to global split).
+#   min_positive_area         Minimum pixel area for an eye mask to count as positive.
+#   require_both_eyes         If true, only ROIs where both eyes exceed min area are kept.
+#   include_empty             If false, ROIs without valid masks are dropped.
+#   include_background_negatives
+#                             When true, sample negatives from the background run.
+#   background_negative_ratio Ratio of background negatives per positive ROI.
+#   background_run            (Optional) Background run name. Defaults to latest.
+#   background_from_downsampled
+#                             Use downsampled background instead of full-res.
+# ================================================================================
+
+datasets:
+  arena4_example:
+    zarr_path: /nvme1/sesh3/2025-09-23T22-11-11Z_arena_4_chaser_arena4.zarr
+    crop_run: null                     # Use latest crop run
+    mask_run: null                     # Use latest eye mask run (traditional or YOLO)
+    split:
+      train: 0.8
+      val: 0.2
+    min_positive_area: 25              # Ignore masks smaller than 25 pixels
+    require_both_eyes: true            # Only keep ROIs where both eyes are present
+    include_empty: false               # Drop ROIs with missing/failed masks
+    include_background_negatives: true # Add background crops as true negatives
+    background_negative_ratio: 1.0     # One negative per positive (adjust as needed)
+    background_run: null               # Use latest computed background
+    background_from_downsampled: false # Use full-resolution background
+
+# ================================================================================
+# GLOBAL SETTINGS
+# ================================================================================
+random_seed: 42
+target_size: 256               # ROI resize dimension for training
+default_split:
+  train: 0.8
+  val: 0.2
+num_workers: 8                 # DataLoader workers per process
+
+# ================================================================================
+# TRAINING PARAMETERS
+# ================================================================================
+# Adjust these to match your compute budget and backbone choice.
+# `model` can be any Ultralytics segmentation checkpoint (e.g. yolov8n-seg.pt).
+# ================================================================================
+training_params:
+  model: yolov8n-seg.pt
+  epochs: 50
+  batch: 256
+  imgsz: 256
+  lr0: 0.0005
+  momentum: 0.9
+  weight_decay: 0.0005
+  patience: 20
+  device: '0'                # CUDA device id or 'cpu'
+  project: runs/eye_masks     # Directory under runs/ for training outputs
+
+# ================================================================================
+# Notes
+# ================================================================================
+# - Ensure the referenced Zarr has completed crop, eye mask, and background runs.
+# - To train from multiple archives, add more entries under `datasets`.
+# - Background negatives will extract ROI-aligned patches from the background model,
+#   providing clean “no-eye” examples without risking mislabeled positives.
+# - Modify `min_positive_area` and `background_negative_ratio` to balance the dataset.
+# ================================================================================
