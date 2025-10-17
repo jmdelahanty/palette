@@ -4,7 +4,7 @@ nc: 1
 names: ['fish']
 task: pose
 
-kpt_shape: [3, 2]
+kpt_shape: [3, 3]
 
 datasets:
   arena4:
@@ -23,5 +23,12 @@ training_params:
   momentum: 0.9
   weight_decay: 0.0005
   patience: 10
+
+  # Loss weights - prioritize keypoints
+  pose: 18.0
+  kobj: 3.0
+  box: 6.0
+  cls: 0.5
+  
   device: '0'
   project: runs/pose

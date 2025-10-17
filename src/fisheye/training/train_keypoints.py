@@ -58,7 +58,8 @@ def pose_collate_fn(batch):
     images = torch.from_numpy(np.stack([s['img'] for s in batch]))
     im_files = [s.get('im_file', f'image_{i}.jpg') for i, s in enumerate(batch)]
     ori_shapes = [s.get('ori_shape', (images.shape[2], images.shape[3])) for s in batch]
-    ratio_pads = [s.get('ratio_pad', (None, None)) for s in batch]
+    # Provide safe default ratio_pad if missing: ((h_ratio, w_ratio), (pad_w, pad_h))
+    ratio_pads = [s.get('ratio_pad', ((1.0, 1.0), (0.0, 0.0))) for s in batch]
     
     cls_list, bboxes_list, keypoints_list, batch_idx_list = [], [], [], []
     
@@ -66,7 +67,8 @@ def pose_collate_fn(batch):
         cls_labels = np.atleast_1d(sample['cls'])
         if cls_labels.size > 0 and cls_labels[0] is not None:
             num_instances = len(cls_labels)
-            cls_list.append(torch.from_numpy(cls_labels))
+            # Ensure 2D (N,1) to satisfy Ultralytics validator which does .squeeze(-1)
+            cls_list.append(torch.from_numpy(cls_labels).reshape(-1, 1))
             bboxes_list.append(torch.from_numpy(sample['bboxes']))
             
             # Handle keypoints - reshape to (num_instances, num_keypoints, 3)
@@ -80,14 +82,15 @@ def pose_collate_fn(batch):
                 num_kpts = 3  # Default: bladder, eye_l, eye_r
                 keypoints_list.append(torch.zeros((num_instances, num_kpts, 3)))
 
-            batch_idx_list.append(torch.full((num_instances,), i))
+            # Use long dtype for batch indices (required for indexing)
+            batch_idx_list.append(torch.full((num_instances,), i, dtype=torch.long))
 
     # Handle empty batch (all samples had no valid labels)
     if not batch_idx_list:
         return {
             'img': images, 
             'batch_idx': torch.empty(0, dtype=torch.long), 
-            'cls': torch.empty(0, dtype=torch.float32), 
+            'cls': torch.empty(0, 1, dtype=torch.float32), 
             'bboxes': torch.empty(0, 4, dtype=torch.float32),
             'keypoints': torch.empty(0, 3, 3, dtype=torch.float32),  # (0, 3 keypoints, 3 coords)
             'im_file': im_files, 
@@ -110,6 +113,60 @@ def pose_collate_fn(batch):
 class ZarrPoseValidator(PoseValidator):
     """Custom validator that handles edge cases in pose data."""
     
+    def _debug_batch_shapes(self, batch):
+        try:
+            def shape(x):
+                import torch as _t
+                return tuple(x.shape) if isinstance(x, _t.Tensor) else None
+            imgs = batch.get('img', None)
+            cls = batch.get('cls', None)
+            bxs = batch.get('bboxes', None)
+            kpts = batch.get('keypoints', None)
+            bidx = batch.get('batch_idx', None)
+            rp_list = batch.get('ratio_pad', None)
+            rp0 = None
+            if isinstance(rp_list, (list, tuple)) and len(rp_list) > 0:
+                rp0 = rp_list[0]
+            # Try to read kpt_shape from validator's data if present
+            kpt_shape_cfg = None
+            try:
+                if hasattr(self, 'data'):
+                    if isinstance(self.data, dict):
+                        kpt_shape_cfg = self.data.get('kpt_shape', None)
+                    else:
+                        kpt_shape_cfg = getattr(self.data, 'kpt_shape', None)
+            except Exception:
+                pass
+            msg1 = "[DEBUG] batch shapes img={} cls={} bboxes={} keypoints={} batch_idx={}\n".format(
+                shape(imgs), shape(cls), shape(bxs), shape(kpts), shape(bidx))
+            msg2 = f"[DEBUG] ratio_pad[0]={rp0} kpt_shape_cfg={kpt_shape_cfg}\n"
+
+            # Prefer writing to validator save_dir to avoid console flood
+            log_path = None
+            try:
+                from pathlib import Path as _P
+                sd = getattr(self, 'save_dir', None)
+                if sd is not None:
+                    log_path = _P(sd) / 'prepare_batch_debug.log'
+            except Exception:
+                log_path = None
+
+            if log_path is not None:
+                try:
+                    with open(log_path, 'a') as f:
+                        f.write(msg1)
+                        f.write(msg2)
+                except Exception:
+                    # Fallback to printing
+                    print(msg1, end='')
+                    print(msg2, end='')
+            else:
+                print(msg1, end='')
+                print(msg2, end='')
+        except Exception:
+            # Swallow any debug errors to avoid masking real failure
+            pass
+
     def _prepare_batch(self, si, batch):
         """Prepare batch for validation, handling shape issues."""
         # Deep copy to avoid modifying original
@@ -135,18 +192,19 @@ class ZarrPoseValidator(PoseValidator):
             
             cls = batch['cls']
             
-            # Now fix shape issues
+            # Now fix shape issues: ensure 2D (N,1) because parent does .squeeze(-1)
             if isinstance(cls, torch.Tensor):
-                if cls.ndim == 0:  # Scalar
-                    batch['cls'] = cls.unsqueeze(0).float()
-                elif cls.numel() == 0:  # Empty
-                    batch['cls'] = torch.empty(0, dtype=torch.float32)
-                elif cls.ndim == 1:  # Already correct shape
-                    batch['cls'] = cls.float()
-                elif cls.ndim == 2 and cls.shape[1] == 1:  # (N, 1) needs squeeze
-                    batch['cls'] = cls.squeeze(1).float()
-                else:
-                    batch['cls'] = cls.float()
+                if cls.numel() == 0:
+                    batch['cls'] = torch.empty(0, 1, dtype=torch.float32)
+                elif cls.ndim == 0:  # scalar -> (1,1)
+                    batch['cls'] = cls.view(1, 1).float()
+                elif cls.ndim == 1:  # (N,) -> (N,1)
+                    batch['cls'] = cls.unsqueeze(1).float()
+                elif cls.ndim >= 2:  # keep at least last dim as singleton
+                    if cls.shape[-1] != 1:
+                        batch['cls'] = cls.view(-1, 1).float()
+                    else:
+                        batch['cls'] = cls.float()
         
         # Now call parent with fixed batch
         try:
@@ -154,6 +212,35 @@ class ZarrPoseValidator(PoseValidator):
         except Exception as e:
             # If parent still fails, create minimal valid batch
             print(f"Warning: _prepare_batch failed with {e}, creating minimal batch")
+            # Optional debug logging gated by env var to avoid noisy output
+            import os as _os
+            if _os.getenv('FISHEYE_PREP_DEBUG', '0') == '1':
+                if not hasattr(self, '_prep_debugged'):
+                    self._prep_debugged = False
+                if not self._prep_debugged:
+                    # Write traceback to the same debug log for clarity
+                    import traceback as _tb
+                    try:
+                        self._debug_batch_shapes(batch)
+                        # Append the traceback
+                        log_path = None
+                        try:
+                            from pathlib import Path as _P
+                            sd = getattr(self, 'save_dir', None)
+                            if sd is not None:
+                                log_path = _P(sd) / 'prepare_batch_debug.log'
+                        except Exception:
+                            log_path = None
+                        tb_str = ''.join(_tb.format_exception(type(e), e, e.__traceback__))
+                        if log_path is not None:
+                            with open(log_path, 'a') as f:
+                                f.write("[DEBUG] exception traceback follows\n")
+                                f.write(tb_str)
+                        else:
+                            print(tb_str)
+                    except Exception:
+                        pass
+                    self._prep_debugged = True
             pbatch = batch
             if 'cls' not in pbatch or pbatch['cls'] is None:
                 pbatch['cls'] = torch.empty(0, dtype=torch.float32)
@@ -500,8 +587,8 @@ Examples:
   # With custom run name
   python -m fisheye.training.train_keypoints configs/pose_config.yaml --run-name fish_pose_v1
   
-  # After training, use the model
-  python -m fisheye.inference.predict_pose runs/pose/fish_pose_v1/weights/best.pt video.zarr
+  # After training, run pose inference
+  python -m fisheye.inference.predict_pose --model runs/pose/fish_pose_v1/weights/best.pt --zarr video.zarr
         """
     )
     parser.add_argument(

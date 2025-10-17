@@ -391,14 +391,20 @@ class ZarrYOLODataset(Dataset):
                 self.kp_roi_norm_cache[zarr_path] = kp_roi_norm
                 self.kp_success_cache[zarr_path] = valid_mask
 
+                # Compute bboxes only for valid rows to avoid all-NaN warnings
                 kpts = kp_roi_norm.reshape(kp_roi_norm.shape[0], -1, 2)
-                min_xy = np.nanmin(kpts, axis=1)
-                max_xy = np.nanmax(kpts, axis=1)
-                span = max_xy - min_xy
-                margin = span * 0.5
-                center = np.clip((min_xy + max_xy) / 2.0, 0.0, 1.0)
-                bbox_wh = np.clip(span + margin, 1e-6, 1.0)
-                bboxes = np.concatenate([center, bbox_wh], axis=1).astype(np.float32)
+                bboxes = np.zeros((kpts.shape[0], 4), dtype=np.float32)
+                valid_idx = np.where(valid_mask)[0]
+                if valid_idx.size > 0:
+                    kpts_valid = kpts[valid_idx]
+                    min_xy = np.nanmin(kpts_valid, axis=1)
+                    max_xy = np.nanmax(kpts_valid, axis=1)
+                    span = max_xy - min_xy
+                    margin = span * 0.5
+                    center = np.clip((min_xy + max_xy) / 2.0, 0.0, 1.0)
+                    bbox_wh = np.clip(span + margin, 1e-6, 1.0)
+                    bboxes_valid = np.concatenate([center, bbox_wh], axis=1).astype(np.float32)
+                    bboxes[valid_idx] = bboxes_valid
                 self.kp_bbox_cache[zarr_path] = bboxes
 
                 visibility = np.full((kp_roi_norm.shape[0], kp_roi_norm.shape[1], 1), 2.0, dtype=np.float32)
@@ -505,7 +511,9 @@ class ZarrYOLODataset(Dataset):
             "keypoints": label_info.get('keypoints', np.zeros((0, 9), dtype=np.float32)).astype(np.float32),
             "im_file": im_identifier,
             "ori_shape": (self.target_size, self.target_size),
-            "ratio_pad": (None, None),
+            # Identity letterbox metadata: no resize (ratios 1.0), no pad (0.0)
+            # Ultralytics validators may unpack this as ((h_ratio, w_ratio), (pad_w, pad_h))
+            "ratio_pad": ((1.0, 1.0), (0.0, 0.0)),
             "segments": np.zeros((0, 0), dtype=np.float32)
         }
 

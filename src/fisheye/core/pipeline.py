@@ -89,6 +89,7 @@ class Pipeline:
         'refine',
         'crop',
         'keypoints',
+        'eye_masks',
         'keypoints_refine',
         'assign_ids',
         'track',
@@ -103,6 +104,7 @@ class Pipeline:
         'crop': ['detect'],
         'keypoints': ['crop', 'background'],
         'keypoints_refine': ['keypoints'],
+        'eye_masks': ['keypoints'],
         'assign_ids': ['detect'],
         'track': ['keypoints'],
     }
@@ -181,6 +183,17 @@ class Pipeline:
                 'thresh_decrement': 5,
                 'scheduler': 'processes',
                 'num_workers': None
+            },
+            'eye_masks': {
+                'roi_padding': 12,
+                'threshold_block_size': 21,
+                'threshold_offset': -10.0,
+                'pre_threshold': None,
+                'min_area': 15,
+                'max_area': None,
+                'closing_radius': 3,
+                'opening_radius': 1,
+                'contour_min_points': 5
             },
             'track': {
                 'roi_thresh': 25,
@@ -304,6 +317,7 @@ class Pipeline:
             'refine',
             'crop',
             'keypoints',
+            'eye_masks',
             'keypoints_refine',
             'assign_ids'] and self._is_stage_complete(stage):
             self.console.print(f"[green]✓ Stage '{stage}' already complete, skipping[/green]")
@@ -322,6 +336,8 @@ class Pipeline:
                 self._run_crop()
             elif stage == 'keypoints':
                 self._run_keypoints()
+            elif stage == 'eye_masks':
+                self._run_eye_masks()
             elif stage == 'keypoints_refine':
                 self._run_keypoints_refine()
             elif stage == 'track':
@@ -427,7 +443,7 @@ class Pipeline:
         """Run keypoints stage to detect anatomical keypoints in cropped ROIs."""
         if self.zarr_root is None:
             self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
-        
+
         # Run keypoint detection
         results = detect_keypoints(
             zarr_path=self.config.zarr_path,
@@ -436,10 +452,24 @@ class Pipeline:
             num_workers=self.config.num_workers,
             console=self.console
         )
-        
+
         self.console.print(
             f"✓ Detected keypoints in {results['successful_detections']}/{results['total_rois']} "
             f"ROIs ({results['success_rate_percent']:.1f}% success rate)"
+        )
+
+    def _run_eye_masks(self) -> None:
+        """Run traditional eye segmentation to produce masks and contours."""
+        if self.zarr_root is None:
+            self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
+
+        params = self.pipeline_params.get('eye_masks', {})
+        from ..segmentation.eye_segmentation import segment_eye_masks
+
+        segment_eye_masks(
+            zarr_path=self.config.zarr_path,
+            config_dict=params,
+            console=self.console,
         )
 
     def _run_keypoints_refine(self) -> None:
@@ -864,6 +894,11 @@ class Pipeline:
                 if 'keypoints_runs' not in root:
                     return False
                 latest = root['keypoints_runs'].attrs.get('latest')
+                return latest is not None
+            elif stage == 'eye_masks':
+                if 'eye_masks_runs' not in root:
+                    return False
+                latest = root['eye_masks_runs'].attrs.get('latest')
                 return latest is not None
 
             elif stage == 'keypoints_refine':

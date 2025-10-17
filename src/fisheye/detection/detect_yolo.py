@@ -2,8 +2,9 @@
 """
 Direct video inference with YOLO - no import required.
 
-For when you have a trained model and just want detections,
-not training data or full video storage.
+The preferred CLI entry point is :mod:`fisheye.inference.predict_detections`,
+which wraps this module and keeps inference scripts in one namespace. This
+module still provides the core implementation and legacy CLI.
 """
 
 import os
