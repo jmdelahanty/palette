@@ -1,0 +1,19 @@
+{
+  "name": "traditional_v1",
+  "description": "3-point fish pose (swim bladder + left/right eye).",
+  "nodes": [
+    {"id": 0, "name": "bladder"},
+    {"id": 1, "name": "eye_left"},
+    {"id": 2, "name": "eye_right"}
+  ],
+  "edges": [
+    [0, 1],
+    [0, 2]
+  ],
+  "metadata": {
+    "units": "pixels",
+    "coordinate_system": "roi",
+    "version": 1,
+    "notes": "Ordered as swim_bladder, eye_left, eye_right to match keypoints_roi layout."
+  }
+}

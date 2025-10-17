@@ -24,6 +24,7 @@ from dask import delayed
 from dask.diagnostics import ProgressBar
 
 from ..shared.zarr.schema import get_run_group
+from ..pose.schema import schema_from_package
 
 # Optional distributed
 try:
@@ -33,6 +34,9 @@ except:
     HAVE_DISTRIBUTED = False
 
 from ..utils.system import get_environment_info
+
+
+TRADITIONAL_POSE_SCHEMA = schema_from_package("traditional_v1")
 
 
 # ========== Core Detection Functions ==========
@@ -694,6 +698,13 @@ def detect_keypoints(
         'git_branch': env_info['git'].get('branch', 'unknown'),
         'hostname': env_info['platform']['hostname']
     })
+    keypoint_group.attrs['pose_schema'] = {
+        'name': TRADITIONAL_POSE_SCHEMA.name,
+        'nodes': TRADITIONAL_POSE_SCHEMA.node_names,
+        'edges': TRADITIONAL_POSE_SCHEMA.edges,
+        'metadata': TRADITIONAL_POSE_SCHEMA.metadata,
+        'source': 'configs/fisheye/pose_schemas/traditional_v1.json'
+    }
     
     # Completion panel
     completion_text = f"""[green]✓[/green] Keypoint detection completed

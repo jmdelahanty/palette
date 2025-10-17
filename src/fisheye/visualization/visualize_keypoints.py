@@ -14,13 +14,16 @@ import argparse
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Dict, Any, List
 
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 import numpy as np
 import zarr
 from matplotlib.widgets import Slider, Button
 from matplotlib.transforms import Affine2D
+
+from ..pose.schema import PoseSchema, schema_from_metadata, schema_from_package
 
 
 @dataclass
@@ -287,6 +290,8 @@ def plot_record_interactive(
     keypoint_run: str,
     crop_run: str,
     labels: Sequence[str],
+    pose_schema: Optional[PoseSchema],
+    eye_mask_data: Optional[Dict[str, Any]],
     start_frame: int = 0,
 ) -> None:
     """Interactive viewer with slider to scroll through frames."""
@@ -335,11 +340,12 @@ def plot_record_interactive(
         f"(frame chunk size ≈ {frame_cache.chunk_len})"
     )
     
-    colors = {
-        "bladder": "#ffcc00",
-        "eye_left": "#00ff88",
-        "eye_right": "#ff557f",
-    }
+    cmap_palette = plt.cm.get_cmap("tab10", max(len(labels), 3))
+    colors = {label: mcolors.to_hex(cmap_palette(i)) for i, label in enumerate(labels)}
+    left_label = next((lab for lab in labels if "left" in lab.lower()), labels[1] if len(labels) > 1 else labels[0])
+    right_label = next((lab for lab in labels if "right" in lab.lower()), labels[-1])
+    left_color = colors.get(left_label, "#1a66f3")
+    right_color = colors.get(right_label, "#f85151")
     cmap = "gray"
     
     # Create figure with three subplots (ROI, Rotated ROI, Full frame)
@@ -357,6 +363,7 @@ def plot_record_interactive(
         
         # Fast lookup: check if this frame has any ROIs
         roi_indices = frame_to_roi_map.get(frame_idx, [])
+        roi_idx = roi_indices[0] if roi_indices else -1
         
         # Load full frame (single zarr access)
         full_img = frame_cache.get(frame_idx)
@@ -370,9 +377,6 @@ def plot_record_interactive(
         kp_roi = None
         heading = None
         if len(roi_indices) > 0:
-            # Use first ROI for this frame
-            roi_idx = roi_indices[0]
-            
             # Load crop data (single zarr accesses)
             roi_img = roi_images[roi_idx]
             roi_origin = roi_coords_full[roi_idx]
@@ -439,7 +443,54 @@ def plot_record_interactive(
             roi_origin = None
             kp_full_clamped = None
         
-        ax_roi.set_title(title, color=title_color, fontweight='bold')
+        feret_segments_full: List[tuple] = []
+        feret_summary = ""
+        if eye_mask_data and roi_img is not None and roi_idx >= 0 and roi_idx < eye_mask_data.get("total", 0):
+            feret_major = eye_mask_data.get("feret_axes_major")
+            feret_minor = eye_mask_data.get("feret_axes_minor")
+            feret_round = eye_mask_data.get("feret_roundness")
+            if (
+                feret_major is not None
+                and feret_minor is not None
+                and feret_major.shape[0] > roi_idx
+                and feret_minor.shape[0] > roi_idx
+            ):
+                for side_idx, side in enumerate(("left", "right")):
+                    major_seg = feret_major[roi_idx, side_idx]
+                    minor_seg = feret_minor[roi_idx, side_idx]
+                    color_seg = left_color if side == "left" else right_color
+                    if np.all(np.isfinite(major_seg)):
+                        ax_roi.plot(
+                            [major_seg[0], major_seg[2]],
+                            [major_seg[1], major_seg[3]],
+                            color=color_seg,
+                            linewidth=1.8,
+                        )
+                    if np.all(np.isfinite(minor_seg)):
+                        ax_roi.plot(
+                            [minor_seg[0], minor_seg[2]],
+                            [minor_seg[1], minor_seg[3]],
+                            color=color_seg,
+                            linewidth=1.2,
+                            linestyle="--",
+                        )
+                    if roi_origin is not None:
+                        if np.all(np.isfinite(major_seg)):
+                            feret_segments_full.append(("solid", color_seg, major_seg, roi_origin))
+                        if np.all(np.isfinite(minor_seg)):
+                            feret_segments_full.append(("dashed", color_seg, minor_seg, roi_origin))
+                if feret_round is not None:
+                    round_left = feret_round[roi_idx, 0]
+                    round_right = feret_round[roi_idx, 1]
+                    text_parts = []
+                    if np.isfinite(round_left):
+                        text_parts.append(f"L round={round_left:.2f}")
+                    if np.isfinite(round_right):
+                        text_parts.append(f"R round={round_right:.2f}")
+                    feret_summary = " | ".join(text_parts)
+
+        full_title = title if not feret_summary else f"{title}\n{feret_summary}"
+        ax_roi.set_title(full_title, color=title_color, fontweight='bold')
         ax_roi.set_axis_off()
 
         # --- MIDDLE PANEL: Rotated ROI ---
@@ -515,6 +566,17 @@ def plot_record_interactive(
             rect_x = [origin_x, origin_x + roi_w, origin_x + roi_w, origin_x, origin_x]
             rect_y = [origin_y, origin_y, origin_y + roi_h, origin_y + roi_h, origin_y]
             ax_full.plot(rect_x, rect_y, color="cyan", linewidth=1.5, linestyle="--")
+
+        for style, color_seg, seg, origin in feret_segments_full:
+            linewidth = 1.5 if style == "solid" else 1.0
+            linestyle = "-" if style == "solid" else "--"
+            ax_full.plot(
+                [seg[0] + origin[0], seg[2] + origin[0]],
+                [seg[1] + origin[1], seg[3] + origin[1]],
+                color=color_seg,
+                linewidth=linewidth,
+                linestyle=linestyle,
+            )
         
         # Draw keypoints on full frame if available
         if has_keypoints and kp_full_clamped is not None:
@@ -605,6 +667,10 @@ def main() -> None:
         default=0,
         help="Frame to start viewing from (default: 0).",
     )
+    parser.add_argument(
+        "--eye-run",
+        help="Optional eye mask run to overlay Feret axes (defaults to latest if present).",
+    )
 
     args = parser.parse_args()
 
@@ -627,14 +693,53 @@ def main() -> None:
     # Get keypoint labels if available
     if keypoint_run:
         keypoint_group = root[f"keypoints_runs/{keypoint_run}"]
-        labels = keypoint_group.attrs.get("keypoint_labels", ["bladder", "eye_left", "eye_right"])
+        pose_schema = None
+        schema_meta = keypoint_group.attrs.get("pose_schema")
+        if isinstance(schema_meta, dict):
+            try:
+                pose_schema = schema_from_metadata(schema_meta)
+            except Exception:
+                schema_name = schema_meta.get("name")
+                if schema_name:
+                    try:
+                        pose_schema = schema_from_package(schema_name)
+                    except FileNotFoundError:
+                        pose_schema = None
+        else:
+            pose_schema = None
+
+        default_labels = ["bladder", "eye_left", "eye_right"]
+        if pose_schema:
+            labels = pose_schema.node_names
+        else:
+            labels = keypoint_group.attrs.get("keypoint_labels", default_labels)
     else:
+        pose_schema = None
         labels = ["bladder", "eye_left", "eye_right"]
+
+    eye_mask_data: Optional[Dict[str, Any]] = None
+    eye_run = None
+    try:
+        eye_run = get_latest_run(root, "eye_masks", args.eye_run)
+        eye_group = root[f"eye_masks_runs/{eye_run}"]
+        if "feret_axes_major" in eye_group and "feret_axes_minor" in eye_group:
+            eye_mask_data = {
+                "feret_axes_major": eye_group["feret_axes_major"],
+                "feret_axes_minor": eye_group["feret_axes_minor"],
+                "feret_roundness": eye_group.get("feret_roundness"),
+                "total": int(eye_group["masks_roi"].shape[0]),
+            }
+    except RuntimeError:
+        eye_run = None
     
     print(f"\nKeypoint Visualizer")
     print(f"  Zarr: {args.zarr_path}")
     print(f"  Keypoint run: {keypoint_run or 'None (will show crops only)'}")
     print(f"  Crop run: {crop_run}")
+    if pose_schema:
+        print(f"  Pose schema: {pose_schema.name} ({pose_schema.num_keypoints} keypoints)")
+    if eye_run:
+        print(f"  Eye mask run: {eye_run}")
     print(f"\nControls:")
     print(f"  - Slider: Navigate to specific frame")
     print(f"  - Buttons: Prev/Next (±1), Prev 10/Next 10 (±10)")
@@ -647,6 +752,8 @@ def main() -> None:
         keypoint_run=keypoint_run or "",  # Empty string will trigger error handling
         crop_run=crop_run,
         labels=labels,
+        pose_schema=pose_schema,
+        eye_mask_data=eye_mask_data,
         start_frame=args.start_frame,
     )
 

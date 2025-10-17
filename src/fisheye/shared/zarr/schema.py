@@ -362,7 +362,12 @@ def get_run_group(
     
     if create_new:
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
-        run_group_name = f'{stage_name}_{timestamp}'
+        base_name = f'{stage_name}_{timestamp}'
+        run_group_name = base_name
+        suffix = 1
+        while run_group_name in parent_group:
+            run_group_name = f"{base_name}_{suffix:03d}"
+            suffix += 1
         run_group = parent_group.create_group(run_group_name)
         parent_group.attrs['latest'] = run_group_name
         

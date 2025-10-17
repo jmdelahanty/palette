@@ -4,6 +4,7 @@ Manages the execution of video processing stages in sequence.
 """
 
 import sys
+import math
 import yaml
 import time
 import argparse
@@ -470,6 +471,8 @@ class Pipeline:
             zarr_path=self.config.zarr_path,
             config_dict=params,
             console=self.console,
+            scheduler=self.config.scheduler,
+            num_workers=self.config.num_workers,
         )
 
     def _run_keypoints_refine(self) -> None:
@@ -815,6 +818,42 @@ class Pipeline:
                         
                         results_lines.append(f"[bold]Keypoints:[/bold] {successful:,}/{total_rois:,} ({success_rate:.1f}%)")
                 
+                # Eye mask results
+                if 'eye_masks_runs' in root and root['eye_masks_runs'].attrs.get('latest'):
+                    latest_eye = root['eye_masks_runs'].attrs['latest']
+                    eye_group = root[f'eye_masks_runs/{latest_eye}']
+                    total_rois_attr = eye_group.attrs.get('total_rois')
+                    total_rois_eye = int(total_rois_attr) if total_rois_attr is not None else 0
+                    successful_pairs_attr = eye_group.attrs.get('successful_roi_pairs')
+                    successful_pairs = int(successful_pairs_attr) if successful_pairs_attr is not None else 0
+                    pair_rate = eye_group.attrs.get('successful_roi_pair_rate')
+                    pair_rate_pct: Optional[float]
+                    if pair_rate is None or (isinstance(pair_rate, float) and math.isnan(pair_rate)):
+                        pair_rate_pct = None
+                    else:
+                        pair_rate_pct = float(pair_rate) * 100.0
+                    successful_eyes_attr = eye_group.attrs.get('successful_eyes')
+                    successful_eyes = int(successful_eyes_attr) if successful_eyes_attr is not None else 0
+                    pair_rate_str = f" ({pair_rate_pct:.1f}%)" if pair_rate_pct is not None else ""
+                    results_lines.append(
+                        f"[bold]Eye masks:[/bold] {successful_pairs:,}/{total_rois_eye:,} ROI pairs{pair_rate_str}"
+                    )
+                    results_lines.append(
+                        f"  [dim]└─ Successful eyes: {successful_eyes:,}[/dim]"
+                    )
+                    overlap_attr = eye_group.attrs.get('rejected_overlap')
+                    proximity_attr = eye_group.attrs.get('rejected_too_close')
+                    distance_attr = eye_group.attrs.get('rejected_too_far')
+                    overlap_rejects = int(overlap_attr) if overlap_attr is not None else 0
+                    proximity_rejects = int(proximity_attr) if proximity_attr is not None else 0
+                    distance_rejects = int(distance_attr) if distance_attr is not None else 0
+                    total_rejects = overlap_rejects + proximity_rejects + distance_rejects
+                    if total_rejects > 0:
+                        results_lines.append(
+                            "  [dim]└─ Rejects – overlap: "
+                            f"{overlap_rejects:,}, too-close: {proximity_rejects:,}, too-far: {distance_rejects:,}[/dim]"
+                        )
+                
                 # Display results panel
                 if results_lines:
                     results_text = "\n".join(results_lines)
@@ -863,7 +902,7 @@ class Pipeline:
             return False
 
         # Refinement stages are designed to be repeatable; always allow rerun.
-        if stage in {'refine', 'keypoints_refine'}:
+        if stage in {'refine', 'keypoints_refine', 'eye_masks'}:
             return False
         
         try:
@@ -1059,17 +1098,19 @@ Examples:
     parser.add_argument(
         "--stages",
         nargs='+',
-        choices=['import',
-                 'downsample',
-                 'background',
-                 'detect',
-                 'crop',
-                 'keypoints',
-                 'keypoints_refine',
-                 'track',
-                 'refine',
-                 'assign_ids',
-                 'all'
+        choices=[
+            'import',
+            'downsample',
+            'background',
+            'detect',
+            'crop',
+            'keypoints',
+            'eye_masks',
+            'keypoints_refine',
+            'track',
+            'refine',
+            'assign_ids',
+            'all'
         ],
         default=['all'],
         help="Stages to run"
@@ -1173,8 +1214,9 @@ Examples:
         return 1
     except Exception as e:
         console.print(f"\n[red]Pipeline failed: {e}[/red]")
+        import traceback
+        console.print_exception()
         if args.verbose:
-            import traceback
             console.print(traceback.format_exc())
         return 1
     
