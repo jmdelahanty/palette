@@ -104,6 +104,11 @@ class PoseConfig(DetectConfig):
     kpt_shape: Tuple[int, int]
 
 
+class CacheBackend(str, Enum):
+    THREAD = "thread"
+    PROCESS = "process"
+
+
 class EyeMaskDatasetConfig(BaseModel):
     """Configuration for an eye-mask segmentation dataset sourced from a Zarr store."""
     zarr_path: Path
@@ -129,6 +134,28 @@ class EyeMaskDatasetConfig(BaseModel):
         return v
 
 
+class EyeMaskCacheConfig(BaseModel):
+    """Optional cache settings for eye-mask training data."""
+
+    enabled: bool = False
+    directory: Path = Path("runs/cache/eye_masks")
+    reuse_existing: bool = True
+    workers: int = Field(4, ge=1)
+    backend: CacheBackend = CacheBackend.THREAD
+
+    @field_validator("directory")
+    @classmethod
+    def ensure_directory(cls, v: Path, info) -> Path:
+        v = Path(v)
+        enabled = info.data.get("enabled", False)
+        if enabled:
+            if not v.exists():
+                v.mkdir(parents=True, exist_ok=True)
+            if not v.is_dir():
+                raise ValueError(f"Cache directory '{v}' is not a directory")
+        return v
+
+
 class EyeMaskTrainingConfig(BaseModel):
     """Configuration for training eye-mask segmentation models."""
     datasets: Dict[str, EyeMaskDatasetConfig]
@@ -139,6 +166,7 @@ class EyeMaskTrainingConfig(BaseModel):
     default_split: DatasetSplit = DatasetSplit()
     training_params: TrainingParams
     num_workers: int = Field(8, ge=0)
+    cache: EyeMaskCacheConfig = EyeMaskCacheConfig()
 
     @field_validator('datasets')
     @classmethod

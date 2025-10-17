@@ -52,7 +52,7 @@ datasets:
     require_both_eyes: true            # Only keep ROIs where both eyes are present
     include_empty: false               # Drop ROIs with missing/failed masks
     include_background_negatives: true # Add background crops as true negatives
-    background_negative_ratio: 1.0     # One negative per positive (adjust as needed)
+    background_negative_ratio: 0.4
     background_run: null               # Use latest computed background
     background_from_downsampled: false # Use full-resolution background
 
@@ -65,6 +65,12 @@ default_split:
   train: 0.8
   val: 0.2
 num_workers: 8                 # DataLoader workers per process
+cache:
+  enabled: true               # Materialize ROI crops/masks to disk for faster training
+  directory: runs/cache/eye_masks
+  reuse_existing: true
+  workers: 24
+  backend: process
 
 # ================================================================================
 # TRAINING PARAMETERS
@@ -73,9 +79,9 @@ num_workers: 8                 # DataLoader workers per process
 # `model` can be any Ultralytics segmentation checkpoint (e.g. yolov8n-seg.pt).
 # ================================================================================
 training_params:
-  model: yolov8n-seg.pt
+  model: yolo11n-seg.pt
   epochs: 50
-  batch: 256
+  batch: 128
   imgsz: 256
   lr0: 0.0005
   momentum: 0.9
@@ -84,12 +90,3 @@ training_params:
   device: '0'                # CUDA device id or 'cpu'
   project: runs/eye_masks     # Directory under runs/ for training outputs
 
-# ================================================================================
-# Notes
-# ================================================================================
-# - Ensure the referenced Zarr has completed crop, eye mask, and background runs.
-# - To train from multiple archives, add more entries under `datasets`.
-# - Background negatives will extract ROI-aligned patches from the background model,
-#   providing clean “no-eye” examples without risking mislabeled positives.
-# - Modify `min_positive_area` and `background_negative_ratio` to balance the dataset.
-# ================================================================================

@@ -103,14 +103,22 @@ class ZarrSegmentationTrainer(SegmentationTrainer):
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):  # noqa: D401 - signature defined upstream
         dataset = self.dataset_bundle.train_dataset if mode == "train" else self.dataset_bundle.val_dataset
         shuffle = mode == "train"
+        loader_kwargs = {
+            "batch_size": self.batch_size_override,
+            "shuffle": shuffle,
+            "num_workers": self.num_workers_override,
+            "collate_fn": seg_collate_fn,
+            "pin_memory": True,
+        }
+        if self.num_workers_override > 0:
+            loader_kwargs["persistent_workers"] = True
+            loader_kwargs["prefetch_factor"] = 2
+        else:
+            loader_kwargs["persistent_workers"] = False
+
         return YoloSegDataLoader(
             dataset,
-            batch_size=self.batch_size_override,
-            shuffle=shuffle,
-            num_workers=self.num_workers_override,
-            collate_fn=seg_collate_fn,
-            pin_memory=True,
-            persistent_workers=True,
+            **loader_kwargs,
         )
 
 
@@ -239,6 +247,7 @@ def main(args: argparse.Namespace) -> None:
             patience=config.training_params.patience,
             device=config.training_params.device,
             project=config.training_params.project,
+            overlap_mask=False,
         )
     except Exception as exc:
         console.print(f"[bold red]✗ Training failed:[/bold red] {exc}")

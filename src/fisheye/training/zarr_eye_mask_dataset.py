@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
+import json
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -12,9 +16,22 @@ import cv2
 import numpy as np
 import zarr
 from rich.console import Console
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    TimeRemainingColumn,
+)
 from torch.utils.data import Dataset
 
-from .config import EyeMaskTrainingConfig, EyeMaskDatasetConfig, DatasetSplit
+from .config import (
+    EyeMaskTrainingConfig,
+    EyeMaskDatasetConfig,
+    DatasetSplit,
+    EyeMaskCacheConfig,
+    CacheBackend,
+)
 
 
 @dataclass
@@ -45,6 +62,123 @@ class EyeMaskDatasetStats:
     background_negatives: int
 
 
+@dataclass
+class DatasetCacheInfo:
+    dataset_name: str
+    zarr_path: str
+    crop_run: str
+    mask_run: str
+    include_background: bool
+    background_run: Optional[str]
+    background_array: Optional[str]
+
+    def to_dict(self) -> Dict[str, Optional[str]]:
+        return {
+            "dataset_name": self.dataset_name,
+            "zarr_path": self.zarr_path,
+            "crop_run": self.crop_run,
+            "mask_run": self.mask_run,
+            "include_background": self.include_background,
+            "background_run": self.background_run,
+            "background_array": self.background_array,
+        }
+
+
+_CACHE_PROCESS_IMAGES: Optional[np.memmap] = None
+_CACHE_PROCESS_MASKS: Optional[np.memmap] = None
+_CACHE_TARGET_SIZE: int = 0
+_CACHE_CONTEXTS: Dict[str, Dict[str, zarr.Array]] = {}
+
+
+def _cache_resize_image(image: np.ndarray, target_size: int) -> np.ndarray:
+    if target_size and (image.shape[0] != target_size or image.shape[1] != target_size):
+        return cv2.resize(image, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
+    return image
+
+
+def _cache_resize_mask(mask: np.ndarray, target_size: int) -> np.ndarray:
+    if target_size and (mask.shape[0] != target_size or mask.shape[1] != target_size):
+        resized = cv2.resize(mask.astype(np.uint8), (target_size, target_size), interpolation=cv2.INTER_NEAREST)
+        return (resized > 0).astype(np.uint8)
+    return mask
+
+
+def _cache_process_initializer(
+    images_path: str,
+    masks_path: str,
+    length: int,
+    target_size: int,
+    context_map: Dict[str, Dict[str, Optional[str]]],
+) -> None:
+    global _CACHE_PROCESS_IMAGES, _CACHE_PROCESS_MASKS, _CACHE_TARGET_SIZE, _CACHE_CONTEXTS
+    _CACHE_TARGET_SIZE = target_size
+    _CACHE_PROCESS_IMAGES = np.memmap(
+        images_path,
+        dtype=np.uint8,
+        mode="r+",
+        shape=(length, target_size, target_size),
+    )
+    _CACHE_PROCESS_MASKS = np.memmap(
+        masks_path,
+        dtype=np.uint8,
+        mode="r+",
+        shape=(length, target_size, target_size),
+    )
+    _CACHE_CONTEXTS = {}
+    for name, ctx in context_map.items():
+        root = zarr.open(ctx["zarr_path"], mode="r")
+        cache_entry = {
+            "roi_images": root[f"crop_runs/{ctx['crop_run']}/roi_images"],
+            "masks": root[f"eye_masks_runs/{ctx['mask_run']}/masks_roi"],
+            "roi_coords": root[f"crop_runs/{ctx['crop_run']}/roi_coordinates_full"],
+            "background": None,
+        }
+        if ctx.get("include_background") and ctx.get("background_run") and ctx.get("background_array"):
+            cache_entry["background"] = root[
+                f"background_runs/{ctx['background_run']}/{ctx['background_array']}"
+            ]
+        _CACHE_CONTEXTS[name] = cache_entry
+
+
+def _cache_process_worker(task: Dict[str, object]) -> int:
+    idx = int(task["index"])
+    dataset_name = str(task["dataset_name"])
+    entry_type = str(task["entry_type"])
+    roi_index = int(task["roi_index"])
+    roi_shape_raw = task["roi_shape"]
+    roi_shape = tuple(int(v) for v in roi_shape_raw)  # type: ignore[arg-type]
+
+    context = _CACHE_CONTEXTS[dataset_name]
+
+    if entry_type == "background":
+        roi_coords = context["roi_coords"][roi_index]
+        x1, y1 = map(int, roi_coords)
+        roi_h, roi_w = roi_shape
+        x2, y2 = x1 + roi_w, y1 + roi_h
+        background_arr = context["background"]
+        if background_arr is None:
+            raise ValueError("Background array missing for background cache entry")
+        background_roi = np.asarray(background_arr[y1:y2, x1:x2])
+        if background_roi.shape != roi_shape:
+            background_roi = cv2.resize(
+                background_roi,
+                (roi_w, roi_h),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        image_source = background_roi
+        combined_mask = np.zeros(roi_shape, dtype=np.uint8)
+    else:
+        roi_img = np.asarray(context["roi_images"][roi_index])
+        roi_mask_lr = np.asarray(context["masks"][roi_index])
+        combined_mask = np.logical_or(roi_mask_lr[0] > 0, roi_mask_lr[1] > 0).astype(np.uint8)
+        image_source = roi_img
+
+    image_resized = _cache_resize_image(image_source, _CACHE_TARGET_SIZE)
+    mask_resized = _cache_resize_mask(combined_mask, _CACHE_TARGET_SIZE)
+
+    _CACHE_PROCESS_IMAGES[idx, :, :] = image_resized  # type: ignore[index]
+    _CACHE_PROCESS_MASKS[idx, :, :] = mask_resized  # type: ignore[index]
+    return idx
 class EyeMaskYOLODataset(Dataset):
     """PyTorch dataset that yields samples compatible with Ultralytics segmentation trainer."""
 
@@ -52,9 +186,21 @@ class EyeMaskYOLODataset(Dataset):
         self,
         entries: Sequence[_EyeMaskEntry],
         target_size: int,
+        cache_config: Optional[EyeMaskCacheConfig] = None,
+        split_name: str = "train",
+        console: Optional[Console] = None,
+        dataset_cache_info: Optional[Dict[str, DatasetCacheInfo]] = None,
     ) -> None:
         self.entries = list(entries)
         self.target_size = target_size
+        self.cache_config = cache_config
+        self.split_name = split_name
+        self.console = console
+        self.dataset_cache_info = dataset_cache_info or {}
+        self.cached_images: Optional[np.memmap] = None
+        self.cached_masks: Optional[np.memmap] = None
+        if self.cache_config and self.cache_config.enabled:
+            self._prepare_cache()
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -100,9 +246,178 @@ class EyeMaskYOLODataset(Dataset):
             segments.append(flattened)
         return segments
 
-    def __getitem__(self, idx: int) -> Dict[str, object]:
-        entry = self.entries[idx]
+    def _compute_cache_signature(self) -> str:
+        h = hashlib.sha1()
+        h.update(str(self.target_size).encode())
+        h.update(str(len(self.entries)).encode())
+        for entry in self.entries:
+            h.update(entry.dataset_name.encode())
+            h.update(entry.zarr_path.encode())
+            h.update(entry.crop_run.encode())
+            if entry.mask_run:
+                h.update(entry.mask_run.encode())
+            h.update(str(entry.roi_index).encode())
+            h.update(entry.entry_type.encode())
+            h.update(str(int(entry.has_positive)).encode())
+        return h.hexdigest()
 
+    def _prepare_cache(self) -> None:
+        if self.console:
+            self.console.log(f"[green]EyeMask caching enabled[/green] • [yellow]{self.split_name}[/yellow] samples: {len(self.entries):,}")
+        signature = self._compute_cache_signature()
+        cache_root = self.cache_config.directory / self.split_name
+        cache_root.mkdir(parents=True, exist_ok=True)
+        stem = f"{signature[:12]}_{len(self.entries)}_{self.target_size}"
+        meta_path = cache_root / f"{stem}.json"
+        images_path = cache_root / f"{stem}_images.dat"
+        masks_path = cache_root / f"{stem}_masks.dat"
+
+        metadata_matches = False
+        if self.cache_config.reuse_existing and meta_path.exists() and images_path.exists() and masks_path.exists():
+            try:
+                with open(meta_path, "r") as f:
+                    meta = json.load(f)
+                metadata_matches = (
+                    meta.get("signature") == signature
+                    and meta.get("length") == len(self.entries)
+                    and meta.get("target_size") == self.target_size
+                )
+            except (json.JSONDecodeError, OSError):
+                metadata_matches = False
+
+        if not metadata_matches:
+            if self.console:
+                self.console.log(
+                    f"[yellow]Building cache[/yellow] • [yellow]{self.split_name}[/yellow] ({len(self.entries):,} samples)"
+                )
+            if images_path.exists():
+                images_path.unlink()
+            if masks_path.exists():
+                masks_path.unlink()
+            image_map = np.memmap(
+                images_path,
+                dtype=np.uint8,
+                mode="w+",
+                shape=(len(self.entries), self.target_size, self.target_size),
+            )
+            mask_map = np.memmap(
+                masks_path,
+                dtype=np.uint8,
+                mode="w+",
+                shape=(len(self.entries), self.target_size, self.target_size),
+            )
+            total_entries = len(self.entries)
+            backend = CacheBackend.THREAD
+            worker_count = 1
+            if self.cache_config:
+                backend = self.cache_config.backend
+                worker_count = max(1, min(self.cache_config.workers, total_entries))
+
+            progress_ctx = nullcontext()
+            progress = None
+            task_id = None
+            if self.console and total_entries > 0:
+                progress = Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TimeRemainingColumn(),
+                    console=self.console,
+                    transient=True,
+                )
+                progress_ctx = progress
+
+            with progress_ctx:
+                if progress:
+                    task_id = progress.add_task(
+                        f"[cyan]Caching {self.split_name}[/cyan]", total=total_entries
+                    )
+
+                if backend == CacheBackend.PROCESS and worker_count > 1 and total_entries > 0:
+                    context_map = {
+                        name: info.to_dict() for name, info in self.dataset_cache_info.items()
+                    }
+                    tasks = [
+                        {
+                            "index": idx,
+                            "dataset_name": entry.dataset_name,
+                            "entry_type": entry.entry_type,
+                            "roi_index": entry.roi_index,
+                            "roi_shape": entry.roi_shape,
+                        }
+                        for idx, entry in enumerate(self.entries)
+                    ]
+                    initargs = (
+                        str(images_path),
+                        str(masks_path),
+                        total_entries,
+                        self.target_size,
+                        context_map,
+                    )
+                    with ProcessPoolExecutor(
+                        max_workers=worker_count,
+                        initializer=_cache_process_initializer,
+                        initargs=initargs,
+                    ) as executor:
+                        for _ in executor.map(_cache_process_worker, tasks, chunksize=32):
+                            if progress and task_id is not None:
+                                progress.update(task_id, advance=1)
+                else:
+                    def process_entry(item: Tuple[int, _EyeMaskEntry]) -> Tuple[int, np.ndarray, np.ndarray]:
+                        idx, entry = item
+                        image_resized, mask_resized = self._load_resized_arrays(entry)
+                        return idx, image_resized, mask_resized
+
+                    if worker_count > 1 and total_entries > 0:
+                        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                            for idx, image_resized, mask_resized in executor.map(
+                                process_entry, enumerate(self.entries), chunksize=32
+                            ):
+                                image_map[idx, :, :] = image_resized
+                                mask_map[idx, :, :] = mask_resized
+                                if progress and task_id is not None:
+                                    progress.update(task_id, advance=1)
+                    else:
+                        for idx, entry in enumerate(self.entries):
+                            image_resized, mask_resized = self._load_resized_arrays(entry)
+                            image_map[idx, :, :] = image_resized
+                            mask_map[idx, :, :] = mask_resized
+                            if progress and task_id is not None:
+                                progress.update(task_id, advance=1)
+            image_map.flush()
+            mask_map.flush()
+            del image_map
+            del mask_map
+            metadata = {
+                "signature": signature,
+                "length": len(self.entries),
+                "target_size": self.target_size,
+                "images_path": str(images_path),
+                "masks_path": str(masks_path),
+            }
+            with open(meta_path, "w") as f:
+                json.dump(metadata, f, indent=2)
+            if self.console:
+                self.console.log(f"[green]Cache built[/green] • [yellow]{self.split_name}[/yellow]")
+        else:
+            if self.console:
+                self.console.log(
+                    f"[green]Reusing cache[/green] • [yellow]{self.split_name}[/yellow] ({stem})"
+                )
+        self.cached_images = np.memmap(
+            images_path,
+            dtype=np.uint8,
+            mode="r",
+            shape=(len(self.entries), self.target_size, self.target_size),
+        )
+        self.cached_masks = np.memmap(
+            masks_path,
+            dtype=np.uint8,
+            mode="r",
+            shape=(len(self.entries), self.target_size, self.target_size),
+        )
+
+    def _load_resized_arrays(self, entry: _EyeMaskEntry) -> Tuple[np.ndarray, np.ndarray]:
         if entry.entry_type == "background":
             if entry.background_full is None or entry.roi_coordinates_full is None:
                 raise ValueError("Background entry missing background data")
@@ -111,7 +426,6 @@ class EyeMaskYOLODataset(Dataset):
             x2, y2 = x1 + roi_w, y1 + roi_h
             background_roi = entry.background_full[y1:y2, x1:x2]
             if background_roi.shape != entry.roi_shape:
-                # Fallback: resize to expected ROI shape
                 background_roi = cv2.resize(
                     background_roi,
                     (roi_w, roi_h),
@@ -129,6 +443,15 @@ class EyeMaskYOLODataset(Dataset):
 
         image_resized = self._resize_image(image_source)
         mask_resized = self._resize_mask(combined_mask)
+        return image_resized, mask_resized
+
+    def __getitem__(self, idx: int) -> Dict[str, object]:
+        entry = self.entries[idx]
+        if self.cached_images is not None and self.cached_masks is not None:
+            image_resized = np.asarray(self.cached_images[idx])
+            mask_resized = np.asarray(self.cached_masks[idx])
+        else:
+            image_resized, mask_resized = self._load_resized_arrays(entry)
 
         image_rgb = np.stack([image_resized] * 3, axis=0).astype(np.float32)
 
@@ -164,6 +487,7 @@ class EyeMaskDatasetBundle:
     train_dataset: EyeMaskYOLODataset
     val_dataset: EyeMaskYOLODataset
     stats: Dict[str, EyeMaskDatasetStats]
+    cache_info: Dict[str, DatasetCacheInfo]
 
 
 def _resolve_runs(root: zarr.Group, cfg: EyeMaskDatasetConfig) -> Tuple[str, str]:
@@ -190,7 +514,7 @@ def _build_entries_for_dataset(
     default_split: DatasetSplit,
     rng: np.random.Generator,
     console: Optional[Console] = None,
-) -> Tuple[List[_EyeMaskEntry], List[_EyeMaskEntry], EyeMaskDatasetStats]:
+) -> Tuple[List[_EyeMaskEntry], List[_EyeMaskEntry], EyeMaskDatasetStats, DatasetCacheInfo]:
     root = zarr.open(str(cfg.zarr_path), mode="r")
     crop_run, mask_run = _resolve_runs(root, cfg)
 
@@ -209,6 +533,8 @@ def _build_entries_for_dataset(
         )
 
     background_full: Optional[np.ndarray] = None
+    bg_run_name: Optional[str] = None
+    array_name: Optional[str] = None
     if cfg.include_background_negatives:
         bg_parent = root.get("background_runs")
         if bg_parent is None or "latest" not in bg_parent.attrs:
@@ -384,7 +710,17 @@ def _build_entries_for_dataset(
         console.log(
             f"[yellow]{dataset_name}[/yellow] • train_samples={len(train_entries):,} • val_samples={len(val_entries):,}"
         )
-    return train_entries, val_entries, stats
+    cache_info = DatasetCacheInfo(
+        dataset_name=dataset_name,
+        zarr_path=str(cfg.zarr_path),
+        crop_run=crop_run,
+        mask_run=mask_run,
+        include_background=cfg.include_background_negatives,
+        background_run=bg_run_name if cfg.include_background_negatives else None,
+        background_array=array_name if cfg.include_background_negatives else None,
+    )
+
+    return train_entries, val_entries, stats, cache_info
 
 
 def build_eye_mask_datasets(
@@ -397,9 +733,10 @@ def build_eye_mask_datasets(
     all_train_entries: List[_EyeMaskEntry] = []
     all_val_entries: List[_EyeMaskEntry] = []
     stats: Dict[str, EyeMaskDatasetStats] = {}
+    cache_info_map: Dict[str, DatasetCacheInfo] = {}
 
     for dataset_name, dataset_cfg in config.datasets.items():
-        train_entries, val_entries, dataset_stats = _build_entries_for_dataset(
+        train_entries, val_entries, dataset_stats, cache_info = _build_entries_for_dataset(
             dataset_name=dataset_name,
             cfg=dataset_cfg,
             default_split=config.default_split,
@@ -413,8 +750,24 @@ def build_eye_mask_datasets(
         all_train_entries.extend(train_entries)
         all_val_entries.extend(val_entries)
         stats[dataset_name] = dataset_stats
+        cache_info_map[dataset_name] = cache_info
 
-    train_dataset = EyeMaskYOLODataset(all_train_entries, target_size=config.target_size)
-    val_dataset = EyeMaskYOLODataset(all_val_entries, target_size=config.target_size)
+    cache_cfg = config.cache
+    train_dataset = EyeMaskYOLODataset(
+        all_train_entries,
+        target_size=config.target_size,
+        cache_config=cache_cfg,
+        split_name="train",
+        console=console,
+        dataset_cache_info=cache_info_map,
+    )
+    val_dataset = EyeMaskYOLODataset(
+        all_val_entries,
+        target_size=config.target_size,
+        cache_config=cache_cfg,
+        split_name="val",
+        console=console,
+        dataset_cache_info=cache_info_map,
+    )
 
-    return EyeMaskDatasetBundle(train_dataset=train_dataset, val_dataset=val_dataset, stats=stats)
+    return EyeMaskDatasetBundle(train_dataset=train_dataset, val_dataset=val_dataset, stats=stats, cache_info=cache_info_map)
