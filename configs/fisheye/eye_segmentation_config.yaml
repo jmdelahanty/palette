@@ -60,9 +60,9 @@ datasets:
 # ================================================================================
 random_seed: 42
 target_size: 256               # ROI resize dimension for training
-mask_smoothing_kernel: 0       # Optional morphological smoothing (odd size, set 0 to disable)
-edge_enhancement: sobel        # Optional edge channel ('sobel', 'laplacian', 'canny', or null)
-binarization_threshold: 70    # Optional fixed threshold (0-255) for an extra binary channel
+mask_smoothing_kernel: 3       # Optional morphological smoothing (odd size, set 0 to disable)
+edge_enhancement: null         # Optional edge channel ('sobel', 'laplacian', 'canny', or null)
+binarization_threshold: null   # Optional fixed threshold (0-255) for an extra binary channel
 default_split:
   train: 0.8
   val: 0.2
@@ -81,8 +81,8 @@ cache:
 # `model` can be any Ultralytics segmentation checkpoint (e.g. yolov8n-seg.pt).
 # ================================================================================
 training_params:
-  model: yolo11m-seg.pt
-  epochs: 10
+  model: yolo11n-seg.pt
+  epochs: 50
   batch: 128
   imgsz: 256
   lr0: 0.0005
@@ -92,6 +92,8 @@ training_params:
   device: '0'                # CUDA device id or 'cpu'
   project: runs/eye_masks     # Directory under runs/ for training outputs
   conf: 0.8                   # Confidence threshold for validation detections
+  seg_loss: bce_dice              # Optional custom mask loss ('bce_dice', etc.)
+  bce_weight: 0.5            # Optional BCE weight when using BCE+Dice (0-1)
 
   # ============================================================================
   # LOSS WEIGHTS
@@ -99,10 +101,17 @@ training_params:
   # Increase seg weight to prioritize mask boundary precision
   # Default YOLOv8 weights: box=7.5, cls=0.5, dfl=1.5, seg=5.0
   # ============================================================================
-  box: 7.5                   # Bounding box loss weight (default)
+  box: 5.0                   # Bounding box loss weight (default)
   cls: 0.5                   # Classification loss weight (default)
   dfl: 1.5                   # Distribution focal loss weight (default)
-  seg: 10.0                  # Segmentation loss weight (INCREASED from 5.0)
+  seg: 12.0                  # Segmentation loss weight (INCREASED from 5.0)
 
   # Max detections per image (set to expected number of fish in arena)
-  max_det: 1
+  max_det: 2
+  mosaic: 0.0
+  copy_paste: 0.0
+  degrees: 5.0
+  scale: 0.1
+  translate: 0.05
+  shear: 0.0
+  perspective: 0.0

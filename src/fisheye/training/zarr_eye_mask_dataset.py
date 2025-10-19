@@ -87,6 +87,7 @@ class DatasetCacheInfo:
 _CACHE_PROCESS_IMAGES: Optional[np.memmap] = None
 _CACHE_PROCESS_MASKS: Optional[np.memmap] = None
 _CACHE_TARGET_SIZE: int = 0
+_CACHE_MASK_CHANNELS: int = 1
 _CACHE_CONTEXTS: Dict[str, Dict[str, zarr.Array]] = {}
 
 
@@ -103,15 +104,35 @@ def _cache_resize_mask(mask: np.ndarray, target_size: int) -> np.ndarray:
     return mask
 
 
+def _cache_resize_mask_stack(mask_stack: np.ndarray) -> np.ndarray:
+    """Resize a stack of binary masks (C, H, W) to the cache target size."""
+    channels, height, width = mask_stack.shape
+    if _CACHE_TARGET_SIZE and (height != _CACHE_TARGET_SIZE or width != _CACHE_TARGET_SIZE):
+        resized = np.zeros((channels, _CACHE_TARGET_SIZE, _CACHE_TARGET_SIZE), dtype=np.uint8)
+        for ch in range(channels):
+            resized[ch] = (
+                cv2.resize(
+                    mask_stack[ch].astype(np.uint8),
+                    (_CACHE_TARGET_SIZE, _CACHE_TARGET_SIZE),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+                > 0
+            ).astype(np.uint8)
+        return resized
+    return mask_stack
+
+
 def _cache_process_initializer(
     images_path: str,
     masks_path: str,
     length: int,
     target_size: int,
+    mask_channels: int,
     context_map: Dict[str, Dict[str, Optional[str]]],
 ) -> None:
-    global _CACHE_PROCESS_IMAGES, _CACHE_PROCESS_MASKS, _CACHE_TARGET_SIZE, _CACHE_CONTEXTS
+    global _CACHE_PROCESS_IMAGES, _CACHE_PROCESS_MASKS, _CACHE_TARGET_SIZE, _CACHE_MASK_CHANNELS, _CACHE_CONTEXTS
     _CACHE_TARGET_SIZE = target_size
+    _CACHE_MASK_CHANNELS = max(1, int(mask_channels))
     _CACHE_PROCESS_IMAGES = np.memmap(
         images_path,
         dtype=np.uint8,
@@ -122,7 +143,7 @@ def _cache_process_initializer(
         masks_path,
         dtype=np.uint8,
         mode="r+",
-        shape=(length, target_size, target_size),
+        shape=(length, _CACHE_MASK_CHANNELS, target_size, target_size),
     )
     _CACHE_CONTEXTS = {}
     for name, ctx in context_map.items():
@@ -166,18 +187,23 @@ def _cache_process_worker(task: Dict[str, object]) -> int:
                 interpolation=cv2.INTER_LINEAR,
             )
         image_source = background_roi
-        combined_mask = np.zeros(roi_shape, dtype=np.uint8)
+        mask_stack = np.zeros((_CACHE_MASK_CHANNELS, roi_h, roi_w), dtype=np.uint8)
     else:
         roi_img = np.asarray(context["roi_images"][roi_index])
-        roi_mask_lr = np.asarray(context["masks"][roi_index])
-        combined_mask = np.logical_or(roi_mask_lr[0] > 0, roi_mask_lr[1] > 0).astype(np.uint8)
+        raw_masks = np.asarray(context["masks"][roi_index]).astype(np.uint8)
+        if raw_masks.ndim == 2:
+            raw_masks = raw_masks[None, ...]
+        channels = min(_CACHE_MASK_CHANNELS, raw_masks.shape[0])
+        mask_stack = np.zeros((_CACHE_MASK_CHANNELS, raw_masks.shape[1], raw_masks.shape[2]), dtype=np.uint8)
+        if channels > 0:
+            mask_stack[:channels] = raw_masks[:channels]
         image_source = roi_img
 
     image_resized = _cache_resize_image(image_source, _CACHE_TARGET_SIZE)
-    mask_resized = _cache_resize_mask(combined_mask, _CACHE_TARGET_SIZE)
+    mask_resized_stack = _cache_resize_mask_stack(mask_stack)
 
     _CACHE_PROCESS_IMAGES[idx, :, :] = image_resized  # type: ignore[index]
-    _CACHE_PROCESS_MASKS[idx, :, :] = mask_resized  # type: ignore[index]
+    _CACHE_PROCESS_MASKS[idx, :, :, :] = mask_resized_stack  # type: ignore[index]
     return idx
 class EyeMaskYOLODataset(Dataset):
     """PyTorch dataset that yields samples compatible with Ultralytics segmentation trainer."""
@@ -202,6 +228,7 @@ class EyeMaskYOLODataset(Dataset):
         self.dataset_cache_info = dataset_cache_info or {}
         self.cached_images: Optional[np.memmap] = None
         self.cached_masks: Optional[np.memmap] = None
+        self.cached_mask_channels: Optional[int] = None
         kernel = int(mask_smoothing_kernel or 0)
         if kernel < 0:
             kernel = 0
@@ -212,6 +239,7 @@ class EyeMaskYOLODataset(Dataset):
         if binarization_threshold is not None and not (0 <= int(binarization_threshold) <= 255):
             raise ValueError("binarization_threshold must be between 0 and 255")
         self.binarization_threshold = None if binarization_threshold is None else int(binarization_threshold)
+        self.mask_channels = max(1, self._infer_mask_channels())
         if self.cache_config and self.cache_config.enabled:
             self._prepare_cache()
 
@@ -331,6 +359,15 @@ class EyeMaskYOLODataset(Dataset):
             h.update(str(int(entry.has_positive)).encode())
         return h.hexdigest()
 
+    def _infer_mask_channels(self) -> int:
+        for entry in self.entries:
+            if entry.entry_type == "roi" and entry.masks is not None:
+                mask = np.asarray(entry.masks[entry.roi_index])
+                if mask.ndim == 2:
+                    return 1
+                return int(mask.shape[0])
+        return 1
+
     def _prepare_cache(self) -> None:
         if self.console:
             self.console.log(f"[green]EyeMask caching enabled[/green] • [yellow]{self.split_name}[/yellow] samples: {len(self.entries):,}")
@@ -342,15 +379,19 @@ class EyeMaskYOLODataset(Dataset):
         images_path = cache_root / f"{stem}_images.dat"
         masks_path = cache_root / f"{stem}_masks.dat"
 
+        expected_mask_channels = max(1, self.mask_channels)
         metadata_matches = False
+        cached_mask_channels = None
         if self.cache_config.reuse_existing and meta_path.exists() and images_path.exists() and masks_path.exists():
             try:
                 with open(meta_path, "r") as f:
                     meta = json.load(f)
+                cached_mask_channels = meta.get("mask_channels")
                 metadata_matches = (
                     meta.get("signature") == signature
                     and meta.get("length") == len(self.entries)
                     and meta.get("target_size") == self.target_size
+                    and cached_mask_channels == expected_mask_channels
                 )
             except (json.JSONDecodeError, OSError):
                 metadata_matches = False
@@ -374,7 +415,7 @@ class EyeMaskYOLODataset(Dataset):
                 masks_path,
                 dtype=np.uint8,
                 mode="w+",
-                shape=(len(self.entries), self.target_size, self.target_size),
+                shape=(len(self.entries), expected_mask_channels, self.target_size, self.target_size),
             )
             total_entries = len(self.entries)
             backend = CacheBackend.THREAD
@@ -422,6 +463,7 @@ class EyeMaskYOLODataset(Dataset):
                         str(masks_path),
                         total_entries,
                         self.target_size,
+                        expected_mask_channels,
                         context_map,
                     )
                     with ProcessPoolExecutor(
@@ -435,23 +477,33 @@ class EyeMaskYOLODataset(Dataset):
                 else:
                     def process_entry(item: Tuple[int, _EyeMaskEntry]) -> Tuple[int, np.ndarray, np.ndarray]:
                         idx, entry = item
-                        image_resized, mask_resized = self._load_resized_arrays(entry)
-                        return idx, image_resized, mask_resized
+                        image_resized, _ = self._load_resized_arrays(entry)
+                        mask_stack = self._load_mask_channels_from_source(
+                            entry,
+                            mask_channels=expected_mask_channels,
+                            apply_resize=True,
+                        )
+                        return idx, image_resized, mask_stack
 
                     if worker_count > 1 and total_entries > 0:
                         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                            for idx, image_resized, mask_resized in executor.map(
+                            for idx, image_resized, mask_stack in executor.map(
                                 process_entry, enumerate(self.entries), chunksize=32
                             ):
                                 image_map[idx, :, :] = image_resized
-                                mask_map[idx, :, :] = mask_resized
+                                mask_map[idx, :, :, :] = mask_stack
                                 if progress and task_id is not None:
                                     progress.update(task_id, advance=1)
                     else:
                         for idx, entry in enumerate(self.entries):
-                            image_resized, mask_resized = self._load_resized_arrays(entry)
+                            image_resized, _ = self._load_resized_arrays(entry)
+                            mask_stack = self._load_mask_channels_from_source(
+                                entry,
+                                mask_channels=expected_mask_channels,
+                                apply_resize=True,
+                            )
                             image_map[idx, :, :] = image_resized
-                            mask_map[idx, :, :] = mask_resized
+                            mask_map[idx, :, :, :] = mask_stack
                             if progress and task_id is not None:
                                 progress.update(task_id, advance=1)
             image_map.flush()
@@ -464,12 +516,14 @@ class EyeMaskYOLODataset(Dataset):
                 "target_size": self.target_size,
                 "images_path": str(images_path),
                 "masks_path": str(masks_path),
+                "mask_channels": expected_mask_channels,
             }
             with open(meta_path, "w") as f:
                 json.dump(metadata, f, indent=2)
             if self.console:
                 self.console.log(f"[green]Cache built[/green] • [yellow]{self.split_name}[/yellow]")
         else:
+            expected_mask_channels = int(cached_mask_channels)
             if self.console:
                 self.console.log(
                     f"[green]Reusing cache[/green] • [yellow]{self.split_name}[/yellow] ({stem})"
@@ -484,8 +538,11 @@ class EyeMaskYOLODataset(Dataset):
             masks_path,
             dtype=np.uint8,
             mode="r",
-            shape=(len(self.entries), self.target_size, self.target_size),
+            shape=(len(self.entries), expected_mask_channels, self.target_size, self.target_size),
         )
+        self.cached_mask_channels = expected_mask_channels
+        self.mask_channels = expected_mask_channels
+        self.cached_mask_channels = expected_mask_channels
 
     def _load_resized_arrays(self, entry: _EyeMaskEntry) -> Tuple[np.ndarray, np.ndarray]:
         if entry.entry_type == "background":
@@ -516,26 +573,92 @@ class EyeMaskYOLODataset(Dataset):
         mask_resized = self._smooth_mask(mask_resized)
         return image_resized, mask_resized
 
+    def _load_mask_channels_from_source(
+        self,
+        entry: _EyeMaskEntry,
+        mask_channels: Optional[int] = None,
+        apply_resize: bool = True,
+    ) -> np.ndarray:
+        """Load per-eye mask channels for an entry, optionally resized to target size."""
+        target_channels = max(1, int(mask_channels or self.mask_channels))
+        if entry.entry_type != "roi" or entry.masks is None:
+            height = self.target_size if apply_resize and self.target_size else entry.roi_shape[0]
+            width = self.target_size if apply_resize and self.target_size else entry.roi_shape[1]
+            return np.zeros((target_channels, height, width), dtype=np.uint8)
+
+        mask_lr = np.asarray(entry.masks[entry.roi_index]).astype(np.uint8)
+        if mask_lr.ndim == 2:
+            mask_lr = mask_lr[None, ...]
+
+        if apply_resize and self.target_size and (
+            mask_lr.shape[1] != self.target_size or mask_lr.shape[2] != self.target_size
+        ):
+            resized = np.zeros((mask_lr.shape[0], self.target_size, self.target_size), dtype=np.uint8)
+            for ch in range(mask_lr.shape[0]):
+                resized[ch] = self._resize_mask(mask_lr[ch])
+            mask_lr = resized
+
+        channels = min(target_channels, mask_lr.shape[0])
+        result = np.zeros((target_channels, mask_lr.shape[1], mask_lr.shape[2]), dtype=np.uint8)
+        if channels > 0:
+            result[:channels] = mask_lr[:channels]
+        return result
+
+    def _apply_mask_smoothing(self, mask_stack: np.ndarray) -> np.ndarray:
+        if self.mask_smoothing_kernel <= 0:
+            return mask_stack.astype(np.uint8, copy=False)
+        smoothed = np.zeros_like(mask_stack, dtype=np.uint8)
+        for idx, mask_ch in enumerate(mask_stack):
+            smoothed[idx] = self._smooth_mask(mask_ch).astype(np.uint8)
+        return smoothed
+
     def __getitem__(self, idx: int) -> Dict[str, object]:
         entry = self.entries[idx]
         if self.cached_images is not None and self.cached_masks is not None:
             image_resized = np.asarray(self.cached_images[idx])
-            mask_resized = np.asarray(self.cached_masks[idx])
+            mask_stack_raw = np.asarray(self.cached_masks[idx])
+            mask_resized = (mask_stack_raw > 0).any(axis=0).astype(np.uint8)
         else:
             image_resized, mask_resized = self._load_resized_arrays(entry)
+            mask_stack_raw = self._load_mask_channels_from_source(entry, mask_channels=self.mask_channels, apply_resize=True)
 
         image_tensor = self._compose_image_tensor(image_resized)
 
-        if entry.has_positive and mask_resized.sum() > 0:
-            cls = np.array([0.0], dtype=np.float32)
-            bboxes = self._mask_to_bbox(mask_resized)
-            mask_tensor = mask_resized[None, ...].astype(np.float32)
-            segments = self._mask_to_segments(mask_resized)
+        bboxes_list: List[np.ndarray] = []
+        mask_list: List[np.ndarray] = []
+        segments: List[np.ndarray] = []
+        label_indices: List[int] = []
+
+        if entry.entry_type == "roi":
+            mask_stack = self._apply_mask_smoothing(mask_stack_raw)
+            for ch_idx, mask_ch in enumerate(mask_stack):
+                mask_bool = mask_ch > 0
+                if mask_bool.sum() == 0:
+                    continue
+                bbox = self._mask_to_bbox(mask_bool)
+                if bbox.size == 0:
+                    continue
+                bboxes_list.append(bbox[0])
+                mask_list.append(mask_bool.astype(np.float32))
+                label_indices.append(ch_idx)
+                seg_candidates = self._mask_to_segments(mask_bool)
+                if seg_candidates:
+                    best_seg = max(seg_candidates, key=lambda arr: arr.shape[0])
+                    segments.append(best_seg)
+                else:
+                    segments.append(np.zeros((0, 2), dtype=np.float32))
+
+        if mask_list:
+            mask_tensor = np.stack(mask_list, axis=0).astype(np.float32)
+            bboxes = np.asarray(bboxes_list, dtype=np.float32)
+            cls = np.zeros((mask_tensor.shape[0],), dtype=np.float32)
         else:
-            cls = np.zeros((0,), dtype=np.float32)
+            height, width = mask_resized.shape
+            mask_tensor = np.zeros((0, height, width), dtype=np.float32)
             bboxes = np.zeros((0, 4), dtype=np.float32)
-            mask_tensor = np.zeros((0, mask_resized.shape[0], mask_resized.shape[1]), dtype=np.float32)
+            cls = np.zeros((0,), dtype=np.float32)
             segments = []
+            label_indices = []
 
         suffix = "background" if entry.entry_type == "background" else "roi"
         im_file = f"{Path(entry.zarr_path).stem}_{suffix}_{entry.roi_index}"
@@ -549,6 +672,7 @@ class EyeMaskYOLODataset(Dataset):
             "im_file": im_file,
             "ori_shape": (mask_resized.shape[0], mask_resized.shape[1]),
             "ratio_pad": ((1.0, 1.0), (0.0, 0.0)),
+            "mask_labels": np.asarray(label_indices, dtype=np.int32),
         }
         return sample
 

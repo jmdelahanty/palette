@@ -117,9 +117,18 @@ def _plot_sample(
     channels, height, width = image.shape
     channel_labels = _build_channel_labels(cfg, channels)
 
+    mask_tensor = sample.get("masks")
+    mask_array = None
+    mask_labels = sample.get("mask_labels")
+    if include_mask and mask_tensor is not None:
+        mask_array = np.asarray(mask_tensor)
+        if mask_array.ndim == 2:
+            mask_array = mask_array[None, ...]
+    mask_count = mask_array.shape[0] if mask_array is not None else 0
+
     extra_cols = 0
     if include_mask:
-        extra_cols = 2  # mask-only and overlay panels
+        extra_cols = mask_count + 1 if mask_count > 0 else 2
     n_cols = channels + extra_cols
     fig, axes = plt.subplots(1, n_cols, figsize=(4 * n_cols, 4))
     if n_cols == 1:
@@ -140,35 +149,46 @@ def _plot_sample(
         suptitle += f" | has_positive={entry.has_positive}"
     fig.suptitle(suptitle, fontsize=12)
 
-    mask_img = None
     if include_mask:
-        ax_mask = axes[-2]
-        mask_tensor = sample["masks"]
-        if isinstance(mask_tensor, np.ndarray):
-            mask_array = mask_tensor
+        overlay_colors = [
+            (1.0, 0.2, 0.2),  # red-ish
+            (0.2, 0.6, 1.0),  # blue-ish
+            (0.4, 1.0, 0.4),  # green-ish
+            (1.0, 0.6, 0.2),  # orange-ish
+        ]
+        overlay_base = np.stack([image[0], image[0], image[0]], axis=-1).astype(np.float32)
+        denom = float(overlay_base.max() - overlay_base.min()) or 1.0
+        overlay_rgb = (overlay_base - overlay_base.min()) / denom
+
+        if mask_array is not None and mask_count > 0:
+            offset = channels
+            for mask_idx in range(mask_count):
+                mask_slice = mask_array[mask_idx]
+                ax_mask = axes[offset]
+                label_val = None
+                if mask_labels is not None and mask_idx < len(mask_labels):
+                    label_val = int(mask_labels[mask_idx])
+                title_suffix = f"mask_{label_val}" if label_val is not None else f"mask_{mask_idx}"
+                ax_mask.imshow(mask_slice, cmap="gray")
+                ax_mask.set_title(title_suffix)
+                ax_mask.axis("off")
+                color = overlay_colors[mask_idx % len(overlay_colors)]
+                mask_bool = mask_slice > 0.5
+                overlay_rgb[mask_bool, 0] = color[0]
+                overlay_rgb[mask_bool, 1] = color[1]
+                overlay_rgb[mask_bool, 2] = color[2]
+                offset += 1
         else:
-            mask_array = np.asarray(mask_tensor)
-        if mask_array.size > 0:
-            mask_img = mask_array[0]
-        else:
-            mask_img = np.zeros((height, width), dtype=np.float32)
-        ax_mask.imshow(mask_img, cmap="gray")
-        ax_mask.set_title("mask")
-        ax_mask.axis("off")
+            offset = channels
+            ax_empty = axes[offset]
+            ax_empty.imshow(np.zeros((height, width), dtype=np.float32), cmap="gray")
+            ax_empty.set_title("mask_none")
+            ax_empty.axis("off")
+            offset += 1
 
         ax_overlay = axes[-1]
-        raw_channel = image[0]
-        base = raw_channel.astype(np.float32)
-        denom = float(base.max() - base.min()) or 1.0
-        base_norm = (base - base.min()) / denom
-        overlay = np.stack([base_norm, base_norm, base_norm], axis=-1)
-        if mask_img is not None:
-            mask_bool = mask_img > 0.5
-            overlay[mask_bool, 0] = 1.0
-            overlay[mask_bool, 1] = 0.2
-            overlay[mask_bool, 2] = 0.2
-        ax_overlay.imshow(overlay)
-        ax_overlay.set_title("raw + mask")
+        ax_overlay.imshow(overlay_rgb)
+        ax_overlay.set_title("raw + masks")
         ax_overlay.axis("off")
 
     plt.tight_layout()
@@ -203,6 +223,11 @@ def main() -> None:
             save_dir=save_dir,
             dpi=args.dpi,
         )
+
+        if save_dir is None:
+            response = input("Press Enter for next sample, or 'q' to quit: ").strip().lower()
+            if response == "q":
+                break
 
     if save_dir is not None:
         print(f"Saved {len(indices)} figure(s) to {save_dir.resolve()}")

@@ -59,6 +59,16 @@ class TrainingParams(BaseModel):
     project: Optional[str] = None
     max_det: Optional[int] = Field(None, ge=1)
     conf: Optional[float] = Field(None, ge=0.0, le=1.0)
+    seg_loss: Optional[str] = Field(
+        default=None,
+        description="Optional segmentation loss override (e.g., 'bce_dice').",
+    )
+    bce_weight: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Blend weight for BCE term when using BCE+Dice loss.",
+    )
 
 class DetectConfig(BaseModel):
     """Flat configuration for detection training"""

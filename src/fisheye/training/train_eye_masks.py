@@ -21,6 +21,7 @@ from ultralytics.models.yolo.segment import SegmentationTrainer
 from .config import EyeMaskTrainingConfig
 from .zarr_eye_mask_dataset import build_eye_mask_datasets, EyeMaskDatasetBundle
 from ..utils.system import get_git_info
+from .losses import BCEDiceCriterion
 
 
 class YoloSegDataLoader(DataLoader):
@@ -90,15 +91,65 @@ def seg_collate_fn(batch: List[Dict[str, object]]) -> Dict[str, object]:
     }
 
 
+class _WrappedSegCriterion(torch.nn.Module):
+    """Adapter that swaps mask loss with BCE+Dice while delegating other terms."""
+
+    def __init__(self, base_criterion: torch.nn.Module, bce_weight: float = 0.5):
+        super().__init__()
+        self.base = base_criterion
+        self.bce_dice = BCEDiceCriterion(bce_weight=bce_weight)
+
+    def __getattr__(self, item):
+        try:
+            return super().__getattr__(item)
+        except AttributeError:
+            return getattr(self.base, item)
+
+    def forward(self, preds, batch):
+        return self.__call__(preds, batch)
+
+    def __call__(self, preds, batch):
+        losses = self.base(preds, batch)
+        pred_masks = getattr(self.base, "fm", None)
+        target_masks = getattr(self.base, "tm", None)
+        if pred_masks is not None and target_masks is not None:
+            seg_loss = self.bce_dice(pred_masks, target_masks)
+            losses["seg"] = seg_loss
+            hyp = getattr(self.base, "hyp", None)
+            if hyp is not None:
+                losses["total"] = (
+                    losses["box"] * hyp.box
+                    + losses["cls"] * hyp.cls
+                    + losses["dfl"] * hyp.dfl
+                    + losses["seg"] * hyp.seg
+                )
+        return losses
+
+
 class ZarrSegmentationTrainer(SegmentationTrainer):
     """Custom trainer that reads segmentation batches from Zarr datasets."""
 
     dataset_bundle: EyeMaskDatasetBundle
     batch_size_override: int = 16
     num_workers_override: int = 8
+    seg_loss_override: str | None = None
+    bce_weight_override: float | None = None
 
     def plot_training_labels(self):  # noqa: D401 - disable Ultralytics plotting step that expects cached labels
         return None
+
+    def get_criterion(self):
+        seg_loss_name = getattr(self.args, "seg_loss", None)
+        if not seg_loss_name:
+            seg_loss_name = getattr(self, "seg_loss_override", None)
+        base = super().get_criterion()
+        if seg_loss_name and str(seg_loss_name).lower() == "bce_dice":
+            bce_weight = getattr(self.args, "bce_weight", None)
+            if bce_weight is None:
+                bce_weight = getattr(self, "bce_weight_override", None)
+            weight = 0.5 if bce_weight is None else float(bce_weight)
+            return _WrappedSegCriterion(base, bce_weight=weight)
+        return base
 
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):  # noqa: D401 - signature defined upstream
         dataset = self.dataset_bundle.train_dataset if mode == "train" else self.dataset_bundle.val_dataset
@@ -225,6 +276,13 @@ def main(args: argparse.Namespace) -> None:
     ZarrSegmentationTrainer.dataset_bundle = bundle
     ZarrSegmentationTrainer.batch_size_override = config.training_params.batch
     ZarrSegmentationTrainer.num_workers_override = config.num_workers
+    ZarrSegmentationTrainer.seg_loss_override = config.training_params.seg_loss
+    ZarrSegmentationTrainer.bce_weight_override = config.training_params.bce_weight
+
+    if config.training_params.seg_loss and str(config.training_params.seg_loss).lower() == "bce_dice":
+        bw = config.training_params.bce_weight
+        bw_val = 0.5 if bw is None else float(bw)
+        console.print(f"[cyan]Using BCE+Dice mask loss (bce_weight={bw_val:.2f})[/cyan]")
 
     training_start = time.time()
     console.print("[bold green]⚡ Starting Training...[/bold green]\n")
