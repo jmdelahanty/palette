@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+import yaml
 import zarr
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
@@ -27,6 +29,7 @@ class EyeSegmentationConfig:
     roi_padding: int = 12
     threshold_block_size: int = 21
     threshold_offset: float = -10.0
+    sobel_strength: float = 0.0
     pre_threshold: Optional[int] = None
     min_area: int = 15
     max_area: Optional[int] = None
@@ -34,10 +37,10 @@ class EyeSegmentationConfig:
     opening_radius: int = 1
     contour_min_points: int = 5
     use_feret_ellipse: bool = False
+    compute_feret_axes: bool = False
     feret_min_roundness: float = 0.0
     min_eye_separation: float = 4.0
     max_eye_separation: float = 80.0
-    min_eye_separation: float = 4.0
     keypoint_run: Optional[str] = None
     crop_run: Optional[str] = None
 
@@ -53,6 +56,8 @@ def _set_config_value(cfg: EyeSegmentationConfig, key: str, value: Any) -> None:
         setattr(cfg, key, int(value))
     elif key in {"threshold_offset"}:
         setattr(cfg, key, float(value))
+    elif key == "sobel_strength":
+        setattr(cfg, key, float(np.clip(value, 0.0, 1.0)))
     elif key in {"feret_min_roundness"}:
         setattr(cfg, key, float(np.clip(value, 0.0, 1.0)))
     elif key in {"min_eye_separation", "max_eye_separation"}:
@@ -60,9 +65,9 @@ def _set_config_value(cfg: EyeSegmentationConfig, key: str, value: Any) -> None:
             setattr(cfg, key, None)
         else:
             setattr(cfg, key, float(max(0.0, value)))
-    elif key == "min_eye_separation":
-        setattr(cfg, key, float(max(0.0, value)))
     elif key == "use_feret_ellipse":
+        setattr(cfg, key, bool(value))
+    elif key == "compute_feret_axes":
         setattr(cfg, key, bool(value))
     else:
         setattr(cfg, key, value)
@@ -116,11 +121,28 @@ def _prepare_run_group(root: zarr.Group, console: Console) -> Tuple[zarr.Group, 
     return group, name
 
 
+def _apply_sobel_filter(patch: np.ndarray, strength: float) -> np.ndarray:
+    if strength <= 0.0:
+        return patch
+
+    patch_float = patch.astype(np.float32) / 255.0
+    sobel_response = filters.sobel(patch_float)
+    max_resp = float(np.max(sobel_response))
+    if max_resp > 0.0:
+        sobel_norm = sobel_response / max_resp
+    else:
+        sobel_norm = np.zeros_like(sobel_response)
+
+    filtered = np.clip(patch_float - strength * sobel_norm, 0.0, 1.0)
+    return (filtered * 255.0).astype(patch.dtype, copy=False)
+
+
 def _local_threshold(patch: np.ndarray, config: EyeSegmentationConfig) -> np.ndarray:
+    filtered_patch = _apply_sobel_filter(patch, config.sobel_strength)
     block_size = int(config.threshold_block_size)
     block = max(3, block_size | 1)
-    thresh = filters.threshold_local(patch, block_size=block, offset=config.threshold_offset)
-    binary = patch < thresh
+    thresh = filters.threshold_local(filtered_patch, block_size=block, offset=config.threshold_offset)
+    binary = filtered_patch < thresh
     return binary
 
 
@@ -160,12 +182,19 @@ def _select_region(
 
     region_mask = labeled == best.label
 
-    if config.use_feret_ellipse:
-        feret_mask, info = _feret_mask_from_region(region_mask, config.feret_min_roundness)
-        if feret_mask is not None:
-            return feret_mask, info
+    feret_info: Optional[Dict[str, Any]] = None
+    if config.use_feret_ellipse or getattr(config, "compute_feret_axes", False):
+        feret_info = _feret_info_from_region(region_mask, config.contour_min_points)
+        if feret_info is not None:
+            min_round = config.feret_min_roundness if config.feret_min_roundness is not None else 0.0
+            if float(feret_info.get("roundness", 0.0)) < min_round:
+                feret_info = None
+        if config.use_feret_ellipse and feret_info is not None:
+            feret_mask = _render_feret_mask(feret_info, region_mask.shape)
+            if feret_mask is not None:
+                return feret_mask, feret_info
 
-    return region_mask, None
+    return region_mask, feret_info
 
 
 def _extract_contour(mask: np.ndarray, min_points: int) -> Optional[np.ndarray]:
@@ -191,12 +220,10 @@ def _calculate_max_feret(contour: np.ndarray) -> Tuple[Optional[np.ndarray], Opt
     return p1, p2, max_dist
 
 
-def _create_feret_ellipse_mask(
-    contour: np.ndarray, shape: Tuple[int, int]
-) -> Tuple[Optional[np.ndarray], float, Optional[np.ndarray], Optional[np.ndarray]]:
+def _compute_feret_geometry(contour: np.ndarray) -> Optional[Dict[str, Any]]:
     p1, p2, max_dist = _calculate_max_feret(contour)
     if p1 is None or p2 is None or max_dist <= 0:
-        return None, 0.0, None, None
+        return None
 
     center = (p1 + p2) / 2.0
     cx, cy = center  # contour already in (x, y)
@@ -204,74 +231,92 @@ def _create_feret_ellipse_mask(
     feret_vec = p2 - p1
     feret_len = np.linalg.norm(feret_vec)
     if feret_len == 0:
-        return None, 0.0, None, None
+        return None
     orientation = np.arctan2(feret_vec[1], feret_vec[0])
     major_len = feret_len
 
     feret_vec_norm = feret_vec / feret_len
     perp_vec = np.array([-feret_vec_norm[1], feret_vec_norm[0]])
     projections = np.dot(contour - center, perp_vec)
-    minor_len = np.max(projections) - np.min(projections)
+    minor_len = float(np.max(projections) - np.min(projections))
+    minor_len = float(max(minor_len, 0.0))
+    major_len = float(major_len)
     roundness = float(np.clip(minor_len / major_len if major_len > 0 else 0.0, 0.0, 1.0))
 
     major_pts = np.array([p1, p2], dtype=np.float32)
     midpoint = (p1 + p2) / 2.0
     if minor_len > 0:
-        perp_unit = perp_vec / np.linalg.norm(perp_vec)
+        perp_norm = perp_vec / np.linalg.norm(perp_vec)
         half_minor = minor_len / 2.0
         minor_pts = np.array(
             [
-                midpoint + perp_unit * half_minor,
-                midpoint - perp_unit * half_minor,
+                midpoint + perp_norm * half_minor,
+                midpoint - perp_norm * half_minor,
             ],
             dtype=np.float32,
         )
     else:
-        minor_pts = np.array(
-            [
-                midpoint,
-                midpoint,
-            ],
-            dtype=np.float32,
-        )
+        minor_pts = np.array([midpoint, midpoint], dtype=np.float32)
+
+    return {
+        "roundness": roundness,
+        "major_pts": major_pts.astype(np.float32),
+        "minor_pts": minor_pts.astype(np.float32),
+        "center": (float(cx), float(cy)),
+        "orientation": float(orientation),
+        "major_length": major_len,
+        "minor_length": minor_len,
+    }
+
+
+def _render_feret_mask(info: Dict[str, Any], shape: Tuple[int, int]) -> Optional[np.ndarray]:
+    cx, cy = info.get("center", (None, None))
+    orientation = float(info.get("orientation", 0.0))
+    major_len = float(info.get("major_length", 0.0))
+    minor_len = float(info.get("minor_length", 0.0))
+
+    if cx is None or cy is None or major_len <= 0.0:
+        return None
 
     mask = np.zeros(shape, dtype=bool)
+    major_radius = max(major_len / 2.0, 0.0)
+    minor_radius = max(minor_len / 2.0, 0.0)
+
     try:
         rr, cc = ellipse(
             cy,
             cx,
-            minor_len / 2.0,
-            major_len / 2.0,
+            minor_radius,
+            major_radius,
             shape=shape,
             rotation=-orientation,
         )
         mask[rr, cc] = True
     except Exception:
-        return None, roundness, None, None
+        return None
 
-    return mask, roundness, major_pts, minor_pts
+    return mask
+
+
+def _feret_info_from_region(region_mask: np.ndarray, min_points: int) -> Optional[Dict[str, Any]]:
+    contour = _extract_contour(region_mask, min_points)
+    if contour is None:
+        return None
+    return _compute_feret_geometry(contour)
 
 
 def _feret_mask_from_region(
-    region_mask: np.ndarray, min_roundness: float
+    region_mask: np.ndarray, min_roundness: float, min_points: int = 5
 ) -> Tuple[Optional[np.ndarray], Optional[Dict[str, Any]]]:
-    contours = measure.find_contours(region_mask.astype(float), 0.5)
-    if not contours:
+    info = _feret_info_from_region(region_mask, min_points)
+    if info is None:
         return None, None
-    best_contour = max(contours, key=lambda c: c.shape[0])
-    if best_contour.shape[0] < 5:
-        return None, None
-    contour_xy = best_contour[:, ::-1]
-    feret_mask, roundness, major_pts, minor_pts = _create_feret_ellipse_mask(contour_xy, region_mask.shape)
-    if feret_mask is None:
-        return None, None
+    roundness = float(info.get("roundness", 0.0))
     if roundness < min_roundness:
         return None, None
-    info = {
-        "roundness": roundness,
-        "major_pts": major_pts,
-        "minor_pts": minor_pts,
-    }
+    feret_mask = _render_feret_mask(info, region_mask.shape)
+    if feret_mask is None:
+        return None, None
     return feret_mask, info
 
 
@@ -797,4 +842,105 @@ def segment_eye_masks(
     return run_name
 
 
-__all__ = ["EyeSegmentationConfig", "segment_eye_masks"]
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Command-line entry point for running traditional eye segmentation."""
+    parser = argparse.ArgumentParser(
+        description="Run traditional eye segmentation on ROI crops stored in a Palette Zarr archive.",
+    )
+    parser.add_argument(
+        "zarr_path",
+        type=Path,
+        help="Path to the Palette Zarr archive.",
+    )
+    parser.add_argument(
+        "--config",
+        "-c",
+        type=Path,
+        help="Optional YAML file with eye mask parameters. Uses the 'eye_masks' section if present.",
+    )
+    parser.add_argument(
+        "--scheduler",
+        choices=["threads", "processes", "distributed", "single-threaded"],
+        default="threads",
+        help="Dask scheduler to use for ROI processing (default: threads).",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="Override the number of workers for parallel processing.",
+    )
+    parser.add_argument(
+        "--crop-run",
+        help="Specify a crop run name instead of using the latest available.",
+    )
+    parser.add_argument(
+        "--keypoint-run",
+        help="Specify a keypoint run name instead of using the latest available.",
+    )
+    parser.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Override configuration values (may be repeated). Values use YAML parsing.",
+    )
+
+    args = parser.parse_args(argv)
+    console = Console()
+
+    config_dict: Dict[str, Any] = {}
+    if args.config:
+        if not args.config.exists():
+            parser.error(f"Config file not found: {args.config}")
+        try:
+            with args.config.open("r", encoding="utf-8") as handle:
+                loaded = yaml.safe_load(handle) or {}
+        except yaml.YAMLError as exc:
+            parser.error(f"Failed to parse config file {args.config}: {exc}")
+        if not isinstance(loaded, dict):
+            parser.error("Config file must contain a mapping/object at the top level.")
+        config_section = loaded.get("eye_masks") if "eye_masks" in loaded else loaded
+        if config_section is None:
+            config_dict = {}
+        elif not isinstance(config_section, dict):
+            parser.error("eye_masks section in config must be a mapping/object.")
+        else:
+            config_dict = dict(config_section)
+
+    if args.crop_run:
+        config_dict["crop_run"] = args.crop_run
+    if args.keypoint_run:
+        config_dict["keypoint_run"] = args.keypoint_run
+
+    for item in args.overrides:
+        if "=" not in item:
+            parser.error(f"Invalid override '{item}'. Expected format KEY=VALUE.")
+        key, value_text = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            parser.error(f"Invalid override '{item}'. Key cannot be empty.")
+        try:
+            value = yaml.safe_load(value_text)
+        except yaml.YAMLError as exc:
+            parser.error(f"Failed to parse override '{item}': {exc}")
+        config_dict[key] = value
+
+    run_name = segment_eye_masks(
+        zarr_path=str(args.zarr_path),
+        config_dict=config_dict or None,
+        console=console,
+        scheduler=args.scheduler,
+        num_workers=args.num_workers,
+    )
+
+    console.print(f"[green]Eye mask run:[/green] [cyan]eye_masks_runs/{run_name}[/cyan]")
+    return 0
+
+
+__all__ = ["EyeSegmentationConfig", "segment_eye_masks", "main"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

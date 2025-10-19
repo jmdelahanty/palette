@@ -454,7 +454,8 @@ def detect_keypoints(
         'parameters': keypoints_params,
         'parameter_source': param_source,
         'source_crop_run': latest_crop,
-        'source_background_run': latest_background
+        'source_background_run': latest_background,
+        'method': 'traditional_pose',
     }
     
     # Add distributed-specific metadata if using distributed

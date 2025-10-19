@@ -10,13 +10,14 @@ datasets:
   arena4:
     zarr_path: /nvme1/sesh3/2025-09-23T22-11-11Z_arena_4_chaser_arena4.zarr
     source_type: filtered
+    keypoint_run: latest_traditional              # Optional override (e.g. specific traditional run)
     split:
       train: 0.8
       val: 0.2
 
 training_params:
   model: yolov8n-pose.pt
-  epochs: 1
+  epochs: 10
   batch: 256
   imgsz: 256
   lr0: 0.001
@@ -29,6 +30,8 @@ training_params:
   kobj: 3.0
   box: 6.0
   cls: 0.5
+
+  num_workers: 24
   
   device: '0'
   project: runs/pose

@@ -57,6 +57,8 @@ class TrainingParams(BaseModel):
     patience: int
     device: str
     project: Optional[str] = None
+    max_det: Optional[int] = Field(None, ge=1)
+    conf: Optional[float] = Field(None, ge=0.0, le=1.0)
 
 class DetectConfig(BaseModel):
     """Flat configuration for detection training"""
@@ -167,6 +169,17 @@ class EyeMaskTrainingConfig(BaseModel):
     training_params: TrainingParams
     num_workers: int = Field(8, ge=0)
     cache: EyeMaskCacheConfig = EyeMaskCacheConfig()
+    mask_smoothing_kernel: int = Field(0, ge=0, description="Morphological kernel size (odd) for optional mask smoothing")
+    edge_enhancement: Optional[str] = Field(
+        default=None,
+        description="Optional edge map added as an extra channel ('sobel', 'laplacian', 'canny')",
+    )
+    binarization_threshold: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=255,
+        description="Optional fixed intensity threshold (0-255) for an additional binarized input channel",
+    )
 
     @field_validator('datasets')
     @classmethod

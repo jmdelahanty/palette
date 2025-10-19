@@ -190,6 +190,9 @@ class EyeMaskYOLODataset(Dataset):
         split_name: str = "train",
         console: Optional[Console] = None,
         dataset_cache_info: Optional[Dict[str, DatasetCacheInfo]] = None,
+        mask_smoothing_kernel: int = 0,
+        edge_enhancement: Optional[str] = None,
+        binarization_threshold: Optional[int] = None,
     ) -> None:
         self.entries = list(entries)
         self.target_size = target_size
@@ -199,6 +202,16 @@ class EyeMaskYOLODataset(Dataset):
         self.dataset_cache_info = dataset_cache_info or {}
         self.cached_images: Optional[np.memmap] = None
         self.cached_masks: Optional[np.memmap] = None
+        kernel = int(mask_smoothing_kernel or 0)
+        if kernel < 0:
+            kernel = 0
+        if kernel > 0 and kernel % 2 == 0:
+            kernel += 1  # ensure odd for morphological ops
+        self.mask_smoothing_kernel = kernel
+        self.edge_enhancement = (edge_enhancement or "").strip().lower() or None
+        if binarization_threshold is not None and not (0 <= int(binarization_threshold) <= 255):
+            raise ValueError("binarization_threshold must be between 0 and 255")
+        self.binarization_threshold = None if binarization_threshold is None else int(binarization_threshold)
         if self.cache_config and self.cache_config.enabled:
             self._prepare_cache()
 
@@ -215,6 +228,60 @@ class EyeMaskYOLODataset(Dataset):
             resized = cv2.resize(mask.astype(np.uint8), (self.target_size, self.target_size), interpolation=cv2.INTER_NEAREST)
             return (resized > 0).astype(np.uint8)
         return mask
+
+    def _smooth_mask(self, mask: np.ndarray) -> np.ndarray:
+        if self.mask_smoothing_kernel <= 0:
+            return mask
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.mask_smoothing_kernel, self.mask_smoothing_kernel))
+        mask_uint8 = (mask > 0).astype(np.uint8) * 255
+        closed = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, kernel)
+        opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel)
+        return (opened > 0).astype(np.uint8)
+
+    def _edge_channel(self, image: np.ndarray) -> np.ndarray:
+        if not self.edge_enhancement:
+            return image
+
+        method = self.edge_enhancement
+        image_float = image.astype(np.float32)
+
+        if method == "sobel":
+            grad_x = cv2.Sobel(image_float, cv2.CV_32F, 1, 0, ksize=3)
+            grad_y = cv2.Sobel(image_float, cv2.CV_32F, 0, 1, ksize=3)
+            magnitude = cv2.magnitude(grad_x, grad_y)
+        elif method == "laplacian":
+            magnitude = cv2.Laplacian(image_float, cv2.CV_32F, ksize=3)
+            magnitude = np.abs(magnitude)
+        elif method == "canny":
+            magnitude = cv2.Canny(image.astype(np.uint8), 50, 150).astype(np.float32)
+        else:
+            return image
+
+        max_val = float(magnitude.max())
+        if max_val <= 0:
+            return np.zeros_like(image, dtype=np.uint8)
+        normalized = (magnitude / max_val) * 255.0
+        return normalized.astype(np.uint8)
+
+    def _compose_image_tensor(self, grayscale: np.ndarray) -> np.ndarray:
+        channels: List[np.ndarray] = []
+
+        base_image = grayscale
+        channels.append(base_image)
+
+        if self.binarization_threshold is not None:
+            binary = (base_image > self.binarization_threshold).astype(np.uint8) * 255
+            channels.append(binary)
+
+        if self.edge_enhancement:
+            edge_channel = self._edge_channel(base_image)
+            channels.append(edge_channel)
+
+        while len(channels) < 3:
+            channels.append(base_image)
+
+        stacked = np.stack(channels[:3], axis=0)
+        return stacked.astype(np.float32)
 
     def _mask_to_bbox(self, mask: np.ndarray) -> np.ndarray:
         ys, xs = np.where(mask > 0)
@@ -250,6 +317,9 @@ class EyeMaskYOLODataset(Dataset):
         h = hashlib.sha1()
         h.update(str(self.target_size).encode())
         h.update(str(len(self.entries)).encode())
+        h.update(str(self.mask_smoothing_kernel).encode())
+        h.update((self.edge_enhancement or "none").encode())
+        h.update(str(self.binarization_threshold if self.binarization_threshold is not None else "none").encode())
         for entry in self.entries:
             h.update(entry.dataset_name.encode())
             h.update(entry.zarr_path.encode())
@@ -443,6 +513,7 @@ class EyeMaskYOLODataset(Dataset):
 
         image_resized = self._resize_image(image_source)
         mask_resized = self._resize_mask(combined_mask)
+        mask_resized = self._smooth_mask(mask_resized)
         return image_resized, mask_resized
 
     def __getitem__(self, idx: int) -> Dict[str, object]:
@@ -453,7 +524,7 @@ class EyeMaskYOLODataset(Dataset):
         else:
             image_resized, mask_resized = self._load_resized_arrays(entry)
 
-        image_rgb = np.stack([image_resized] * 3, axis=0).astype(np.float32)
+        image_tensor = self._compose_image_tensor(image_resized)
 
         if entry.has_positive and mask_resized.sum() > 0:
             cls = np.array([0.0], dtype=np.float32)
@@ -470,7 +541,7 @@ class EyeMaskYOLODataset(Dataset):
         im_file = f"{Path(entry.zarr_path).stem}_{suffix}_{entry.roi_index}"
 
         sample = {
-            "img": image_rgb,
+            "img": image_tensor,
             "cls": cls,
             "bboxes": bboxes,
             "masks": mask_tensor,
@@ -760,6 +831,9 @@ def build_eye_mask_datasets(
         split_name="train",
         console=console,
         dataset_cache_info=cache_info_map,
+        mask_smoothing_kernel=config.mask_smoothing_kernel,
+        edge_enhancement=config.edge_enhancement,
+        binarization_threshold=config.binarization_threshold,
     )
     val_dataset = EyeMaskYOLODataset(
         all_val_entries,
@@ -768,6 +842,9 @@ def build_eye_mask_datasets(
         split_name="val",
         console=console,
         dataset_cache_info=cache_info_map,
+        mask_smoothing_kernel=config.mask_smoothing_kernel,
+        edge_enhancement=config.edge_enhancement,
+        binarization_threshold=config.binarization_threshold,
     )
 
     return EyeMaskDatasetBundle(train_dataset=train_dataset, val_dataset=val_dataset, stats=stats, cache_info=cache_info_map)

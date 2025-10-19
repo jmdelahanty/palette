@@ -57,8 +57,9 @@ crop:
   scheduler: distributed
   num_workers: 30
 keypoints:
+  method: traditional         # 'traditional' or 'yolo'
   scheduler: distributed  # or 'processes', 'threads'
-  num_workers: 10
+  num_workers: 20
   threads_per_worker: 2
   memory_limit: '50GB'
   roi_thresh: 50

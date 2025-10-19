@@ -48,7 +48,6 @@ datasets:
     split:
       train: 0.8
       val: 0.2
-    min_positive_area: 25              # Ignore masks smaller than 25 pixels
     require_both_eyes: true            # Only keep ROIs where both eyes are present
     include_empty: false               # Drop ROIs with missing/failed masks
     include_background_negatives: true # Add background crops as true negatives
@@ -61,10 +60,13 @@ datasets:
 # ================================================================================
 random_seed: 42
 target_size: 256               # ROI resize dimension for training
+mask_smoothing_kernel: 0       # Optional morphological smoothing (odd size, set 0 to disable)
+edge_enhancement: sobel        # Optional edge channel ('sobel', 'laplacian', 'canny', or null)
+binarization_threshold: 70    # Optional fixed threshold (0-255) for an extra binary channel
 default_split:
   train: 0.8
   val: 0.2
-num_workers: 8                 # DataLoader workers per process
+num_workers: 16                 # DataLoader workers per process
 cache:
   enabled: true               # Materialize ROI crops/masks to disk for faster training
   directory: runs/cache/eye_masks
@@ -79,8 +81,8 @@ cache:
 # `model` can be any Ultralytics segmentation checkpoint (e.g. yolov8n-seg.pt).
 # ================================================================================
 training_params:
-  model: yolo11n-seg.pt
-  epochs: 50
+  model: yolo11m-seg.pt
+  epochs: 10
   batch: 128
   imgsz: 256
   lr0: 0.0005
@@ -89,4 +91,18 @@ training_params:
   patience: 20
   device: '0'                # CUDA device id or 'cpu'
   project: runs/eye_masks     # Directory under runs/ for training outputs
+  conf: 0.8                   # Confidence threshold for validation detections
 
+  # ============================================================================
+  # LOSS WEIGHTS
+  # ============================================================================
+  # Increase seg weight to prioritize mask boundary precision
+  # Default YOLOv8 weights: box=7.5, cls=0.5, dfl=1.5, seg=5.0
+  # ============================================================================
+  box: 7.5                   # Bounding box loss weight (default)
+  cls: 0.5                   # Classification loss weight (default)
+  dfl: 1.5                   # Distribution focal loss weight (default)
+  seg: 10.0                  # Segmentation loss weight (INCREASED from 5.0)
+
+  # Max detections per image (set to expected number of fish in arena)
+  max_det: 1

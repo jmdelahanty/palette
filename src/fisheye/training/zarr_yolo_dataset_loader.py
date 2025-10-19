@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import yaml
 from typing import Union, Any
+from datetime import datetime
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -31,6 +32,7 @@ class SingleDatasetConfig:
     zarr_path: str
     source_type: str = 'filtered'  # 'detect', 'filtered', or 'interpolated'
     split: Optional[Dict[str, float]] = None  # {'train': 0.8, 'val': 0.2}
+    keypoint_run: Optional[str] = None  # Optional specific keypoints run
 
 @dataclass
 class ZarrDatasetConfig:
@@ -96,6 +98,13 @@ class ZarrDatasetConfig:
                 return config.source_type
         return 'filtered'  # Default
 
+    def get_keypoint_run(self, zarr_path: str) -> Optional[str]:
+        """Get configured keypoint run for a specific zarr path, if provided."""
+        for config in self.datasets.values():
+            if config.zarr_path == zarr_path:
+                return config.keypoint_run
+        return None
+
     @classmethod
     def from_yaml(cls, path: str):
         """Loads configuration from a YAML file."""
@@ -136,6 +145,8 @@ class DatasetMetadata:
     n_interpolated_rois: int = 0
     requested_source_type: str = 'filtered'  # NEW: What user requested
     roi_shape: Tuple[int, int] = (0, 0)
+    keypoint_run: Optional[str] = None
+    requested_keypoint_run: Optional[str] = None
 
 
 class GlobalIndexManager:
@@ -144,6 +155,38 @@ class GlobalIndexManager:
         self.config = config
         self.metadata_list = self._validate_and_get_metadata()
         self.global_indices = self._build_global_index()
+
+    @staticmethod
+    def _resolve_latest_by_method(parent: zarr.Group, method: Optional[str]) -> Optional[str]:
+        candidates: List[Tuple[datetime, str]] = []
+        for run_name in parent.group_keys():
+            run_group = parent[run_name]
+            run_method = run_group.attrs.get('method')
+            if method and run_method != method:
+                continue
+            ts_raw = run_group.attrs.get('keypoints_timestamp_utc') or run_group.attrs.get('timestamp_utc')
+            try:
+                ts = datetime.fromisoformat(ts_raw) if ts_raw else datetime.min
+            except Exception:
+                ts = datetime.min
+            candidates.append((ts, run_name))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    @staticmethod
+    def _normalize_requested_keypoint_run(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        val = value.strip().lower()
+        if val in {"", "latest"}:
+            return None
+        if val in {"latest_traditional", "latest:traditional", "traditional"}:
+            return "latest_traditional"
+        if val in {"latest_yolo", "latest:yolo", "yolo"}:
+            return "latest_yolo"
+        return value
 
     def _validate_and_get_metadata(self) -> List[DatasetMetadata]:
         zarr_paths = self.config.get_zarr_paths()
@@ -182,14 +225,46 @@ class GlobalIndexManager:
                 total_frames = 0
                 tracking_success_rate = 0.0
                 
-                if self.config.task == 'pose':
-                    if 'keypoints_runs' not in root or 'latest' not in root['keypoints_runs'].attrs:
-                        raise KeyError("Pose task requires 'keypoints_runs' with 'latest' attribute.")
+                requested_kp_run_raw = self.config.get_keypoint_run(path_str)
+                requested_kp_run = self._normalize_requested_keypoint_run(requested_kp_run_raw)
+                keypoint_run_name: Optional[str] = None
 
-                    latest_run_name = root['keypoints_runs'].attrs['latest']
-                    kp_group = root[f'keypoints_runs/{latest_run_name}']
+                if self.config.task == 'pose':
+                    if 'keypoints_runs' not in root:
+                        raise KeyError("Pose task requires 'keypoints_runs'.")
+
+                    kp_parent = root['keypoints_runs']
+                    if requested_kp_run in (None, 'latest'):
+                        latest_attr = kp_parent.attrs.get('latest')
+                        if not latest_attr:
+                            raise KeyError(
+                                "Keypoints run group missing 'latest' attribute; specify 'keypoint_run' in config."
+                            )
+                        keypoint_run_name = latest_attr
+                    elif requested_kp_run == 'latest_traditional':
+                        keypoint_run_name = self._resolve_latest_by_method(kp_parent, 'traditional_pose')
+                        if keypoint_run_name is None:
+                            raise KeyError(
+                                f"No keypoint run with method 'traditional_pose' found in {Path(path_str).name}."
+                            )
+                    elif requested_kp_run == 'latest_yolo':
+                        keypoint_run_name = self._resolve_latest_by_method(kp_parent, 'yolo_pose')
+                        if keypoint_run_name is None:
+                            raise KeyError(
+                                f"No keypoint run with method 'yolo_pose' found in {Path(path_str).name}."
+                            )
+                    else:
+                        if requested_kp_run not in kp_parent:
+                            available = ', '.join(list(kp_parent.keys()))
+                            raise KeyError(
+                                f"Keypoint run '{requested_kp_run}' not found in {Path(path_str).name}. "
+                                f"Available runs: {available}"
+                            )
+                        keypoint_run_name = requested_kp_run
+
+                    kp_group = kp_parent[f'{keypoint_run_name}']
                     if 'keypoints_roi' not in kp_group:
-                        raise KeyError(f"Keypoint run '{latest_run_name}' missing 'keypoints_roi' array.")
+                        raise KeyError(f"Keypoint run '{keypoint_run_name}' missing 'keypoints_roi' array.")
 
                     total_frames = kp_group['keypoints_roi'].shape[0]
                     column_names = list(kp_group.attrs.get('keypoint_labels', ['bladder', 'eye_left', 'eye_right']))
@@ -233,7 +308,9 @@ class GlobalIndexManager:
                     n_real_rois=n_real_rois,
                     n_interpolated_rois=n_interpolated_rois,
                     requested_source_type=requested_source,
-                    roi_shape=crop_group['roi_images'].shape[1:3] if 'roi_images' in crop_group else (0, 0)
+                    roi_shape=crop_group['roi_images'].shape[1:3] if 'roi_images' in crop_group else (0, 0),
+                    keypoint_run=keypoint_run_name,
+                    requested_keypoint_run=requested_kp_run,
                 )
                 
                 # Log crop source info
@@ -276,10 +353,12 @@ class GlobalIndexManager:
 
         # For pose task, also check keypoints validity
         if self.config.task == 'pose':
-            latest_kp_run = root['keypoints_runs'].attrs['latest']
-            kp_group = root[f'keypoints_runs/{latest_kp_run}']
+            kp_run = metadata.keypoint_run or root['keypoints_runs'].attrs.get('latest')
+            if kp_run is None:
+                raise KeyError("Unable to determine keypoint run for pose dataset.")
+            kp_group = root[f'keypoints_runs/{kp_run}']
             if 'detection_success' not in kp_group:
-                raise KeyError(f"Keypoint run '{latest_kp_run}' missing 'detection_success' array.")
+                raise KeyError(f"Keypoint run '{kp_run}' missing 'detection_success' array.")
             success_mask = kp_group['detection_success'][:]
             valid_mask &= success_mask
         
@@ -371,8 +450,16 @@ class ZarrYOLODataset(Dataset):
                 roi_h, roi_w = roi_shape
                 self.roi_size_cache[zarr_path] = (roi_h, roi_w)
 
-                latest_kp = root['keypoints_runs'].attrs['latest']
-                kp_group = root[f'keypoints_runs/{latest_kp}']
+                metadata = self.metadata_map.get(zarr_path)
+                kp_run_name = None
+                if metadata is not None:
+                    kp_run_name = metadata.keypoint_run
+                if kp_run_name is None:
+                    kp_run_name = root['keypoints_runs'].attrs.get('latest')
+                if kp_run_name is None:
+                    raise KeyError(f"No keypoint run available for {Path(zarr_path).name}; specify 'keypoint_run' in config.")
+
+                kp_group = root[f'keypoints_runs/{kp_run_name}']
                 kp_roi = kp_group['keypoints_roi'][:].astype(np.float32)
                 kp_success = kp_group['detection_success'][:].astype(bool)
 
@@ -410,7 +497,9 @@ class ZarrYOLODataset(Dataset):
                 visibility = np.full((kp_roi_norm.shape[0], kp_roi_norm.shape[1], 1), 2.0, dtype=np.float32)
                 kpts_with_vis = np.concatenate([kp_roi_norm, visibility], axis=2).reshape(kp_roi_norm.shape[0], -1)
                 self.kp_flat_cache[zarr_path] = kpts_with_vis
-                logger.info(f"  Cached {kp_roi_norm.shape[0]} keypoint entries from {Path(zarr_path).name}")
+                logger.info(
+                    f"  Cached {kp_roi_norm.shape[0]} keypoint entries from {Path(zarr_path).name} (run {kp_run_name})"
+                )
         
         # Build labels using cached data
         label_fetcher = self._get_pose_data if self.config.task == 'pose' else self._get_bbox_data

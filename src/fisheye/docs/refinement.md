@@ -1,6 +1,18 @@
 Refined Runs Implementation Specification
 Overview
 The refined_runs/ group stores filtered and interpolated detection data, providing clean datasets for downstream analysis while maintaining full traceability to the original detections.
+
+## Eye Mask Refinement (new)
+
+Eye segmentation runs can now be post-processed with `python -m fisheye.refinement.refine_eye_masks`. The tool:
+
+- Reads an existing `eye_masks_runs/<source>` entry plus its paired keypoint run
+- Reassigns pixels to anatomical left/right using keypoint geometry (with heading-based fallback)
+- Emits a new `eye_masks_runs/<run_name>` containing the same arrays as the traditional segmenter (`masks_roi`, ellipse metrics, Feret axes, contour tables, etc.)
+- Records provenance in the run attributes (`method="refine_eye_masks"`, `source_*_run`, `source_eye_masks_method`, `eye_labels`, summary stats)
+
+This keeps the original masks untouched for provenance while providing a refined alternative that matches keypoint labels.
+
 Directory Structure
 /refined_runs/
   @latest = "refined_2025-10-03_21-00-00"

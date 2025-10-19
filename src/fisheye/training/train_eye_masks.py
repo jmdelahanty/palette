@@ -109,12 +109,8 @@ class ZarrSegmentationTrainer(SegmentationTrainer):
             "num_workers": self.num_workers_override,
             "collate_fn": seg_collate_fn,
             "pin_memory": True,
+            "persistent_workers": False,
         }
-        if self.num_workers_override > 0:
-            loader_kwargs["persistent_workers"] = True
-            loader_kwargs["prefetch_factor"] = 2
-        else:
-            loader_kwargs["persistent_workers"] = False
 
         return YoloSegDataLoader(
             dataset,
@@ -233,6 +229,12 @@ def main(args: argparse.Namespace) -> None:
     training_start = time.time()
     console.print("[bold green]⚡ Starting Training...[/bold green]\n")
 
+    train_kwargs = {}
+    if config.training_params.max_det is not None:
+        train_kwargs["max_det"] = config.training_params.max_det
+    if config.training_params.conf is not None:
+        train_kwargs["conf"] = config.training_params.conf
+
     try:
         results = model.train(
             trainer=ZarrSegmentationTrainer,
@@ -248,6 +250,7 @@ def main(args: argparse.Namespace) -> None:
             device=config.training_params.device,
             project=config.training_params.project,
             overlap_mask=False,
+            **train_kwargs,
         )
     except Exception as exc:
         console.print(f"[bold red]✗ Training failed:[/bold red] {exc}")

@@ -308,6 +308,18 @@ def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[st
     btn_prev.on_clicked(lambda _: step(-1))
     btn_next.on_clicked(lambda _: step(1))
 
+    def on_key(event) -> None:
+        if event.key in {"left", "j"}:
+            step(-1)
+        elif event.key in {"right", "l"}:
+            step(1)
+        elif event.key in {"down"}:
+            step(-5)
+        elif event.key in {"up"}:
+            step(5)
+
+    fig.canvas.mpl_connect("key_press_event", on_key)
+
     fig.canvas.manager.set_window_title(
         f"Eye Mask Viewer | eye_run={eye_run}, crop_run={crop_run}, keypoint_run={keypoint_run}"
     )

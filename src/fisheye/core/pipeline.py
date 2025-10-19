@@ -23,7 +23,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRe
 from ..capture.import_video import import_video, get_import_stats
 from ..preprocessing.background import compute_background
 from ..detection.detect_traditional import detect_fish
-from ..detection.detect_keypoints_traditional import detect_keypoints
+from ..detection.detect_keypoints_traditional import detect_keypoints as detect_keypoints_traditional
 from ..tracking.crop import crop_detections
 from ..tracking.assign_ids import assign_ids_spatial
 from ..refinement.refine_detect import create_refined_run
@@ -186,6 +186,7 @@ class Pipeline:
                 'num_workers': None
             },
             'eye_masks': {
+                'method': 'traditional',
                 'roi_padding': 12,
                 'threshold_block_size': 21,
                 'threshold_offset': -10.0,
@@ -445,19 +446,50 @@ class Pipeline:
         if self.zarr_root is None:
             self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
 
-        # Run keypoint detection
-        results = detect_keypoints(
-            zarr_path=self.config.zarr_path,
-            config=self.pipeline_params,
-            scheduler=self.config.scheduler,
-            num_workers=self.config.num_workers,
-            console=self.console
-        )
+        params = self.pipeline_params.get('keypoints', {}) or {}
+        method = str(params.get('method', 'traditional')).lower()
 
-        self.console.print(
-            f"✓ Detected keypoints in {results['successful_detections']}/{results['total_rois']} "
-            f"ROIs ({results['success_rate_percent']:.1f}% success rate)"
-        )
+        if method in {'traditional', 'trad', 'traditional_pose'}:
+            results = detect_keypoints_traditional(
+                zarr_path=self.config.zarr_path,
+                config=self.pipeline_params,
+                scheduler=self.config.scheduler,
+                num_workers=self.config.num_workers,
+                console=self.console,
+            )
+
+            self.console.print(
+                f"✓ Detected keypoints in {results['successful_detections']}/{results['total_rois']} "
+                f"ROIs ({results['success_rate_percent']:.1f}% success rate)"
+            )
+        elif method in {'yolo', 'yolo_pose'}:
+            model_path = params.get('model') or params.get('model_path')
+            if not model_path:
+                raise ValueError("YOLO keypoint detection requires 'model' (or 'model_path') in keypoints config.")
+
+            from ..detection.detect_keypoints_yolo import detect_keypoints_yolo
+
+            run_name = detect_keypoints_yolo(
+                zarr_path=self.config.zarr_path,
+                model_path=model_path,
+                run_name=params.get('run_name'),
+                crop_run=params.get('crop_run'),
+                batch_size=params.get('batch_size', 256),
+                device=params.get('device'),
+                imgsz=params.get('imgsz'),
+                conf=params.get('conf', 0.25),
+                iou=params.get('iou', 0.5),
+                max_det=params.get('max_det', 1),
+                mask_threshold=params.get('mask_threshold', 0.5),
+                verbose=params.get('verbose', False),
+                console=self.console,
+            )
+
+            self.console.print(
+                f"✓ YOLO pose inference saved as keypoints_runs/{run_name}"
+            )
+        else:
+            raise ValueError(f"Unknown keypoint method '{method}'. Expected 'traditional' or 'yolo'.")
 
     def _run_eye_masks(self) -> None:
         """Run traditional eye segmentation to produce masks and contours."""
@@ -465,15 +497,63 @@ class Pipeline:
             self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
 
         params = self.pipeline_params.get('eye_masks', {})
-        from ..segmentation.eye_segmentation import segment_eye_masks
+        method = str(params.get('method', 'traditional')).lower()
 
-        segment_eye_masks(
-            zarr_path=self.config.zarr_path,
-            config_dict=params,
-            console=self.console,
-            scheduler=self.config.scheduler,
-            num_workers=self.config.num_workers,
-        )
+        if method in {'yolo', 'yolo_segmentation', 'yolo-eye', 'yolo_eye_segmentation'}:
+            model_path = params.get('model_path') or params.get('model')
+            if not model_path:
+                raise ValueError(
+                    "YOLO eye segmentation requires 'model_path' (or 'model') under pipeline eye_masks params."
+                )
+
+            from ..segmentation.eye_segmentation_yolo import segment_eye_masks_yolo
+
+            segment_eye_masks_yolo(
+                zarr_path=self.config.zarr_path,
+                model_path=model_path,
+                run_name=params.get('run_name'),
+                crop_run=params.get('crop_run'),
+                batch_size=params.get('batch_size', 128),
+                device=params.get('device'),
+                imgsz=params.get('imgsz'),
+                conf=params.get('conf', 0.25),
+                iou=params.get('iou', 0.5),
+                max_det=params.get('max_det', 4),
+                mask_threshold=params.get('mask_threshold', 0.5),
+                verbose=params.get('verbose', False),
+                console=self.console,
+            )
+        else:
+            from ..segmentation.eye_segmentation import segment_eye_masks
+
+            traditional_params = {
+                k: v
+                for k, v in params.items()
+                if k
+                not in {
+                    'method',
+                    'model_path',
+                    'model',
+                    'run_name',
+                    'crop_run',
+                    'batch_size',
+                    'device',
+                    'imgsz',
+                    'conf',
+                    'iou',
+                    'max_det',
+                    'mask_threshold',
+                    'verbose',
+                }
+            }
+
+            segment_eye_masks(
+                zarr_path=self.config.zarr_path,
+                config_dict=traditional_params,
+                console=self.console,
+                scheduler=self.config.scheduler,
+                num_workers=self.config.num_workers,
+            )
 
     def _run_keypoints_refine(self) -> None:
         """Run keypoint refinement stage."""

@@ -15,6 +15,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence, Dict, Any, List
+from datetime import datetime
 
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
@@ -49,13 +50,73 @@ def open_zarr(zarr_path: Path) -> zarr.Group:
     return zarr.open_group(str(zarr_path), mode="r")
 
 
+def _resolve_latest_by_method(group: zarr.Group, method: str) -> Optional[str]:
+    candidates: List[tuple[datetime, str]] = []
+    for run_name in group.keys():
+        run_group = group[run_name]
+        if run_group.attrs.get("method") != method:
+            continue
+        ts_raw = (
+            run_group.attrs.get("keypoints_timestamp_utc")
+            or run_group.attrs.get("eye_masks_timestamp_utc")
+            or run_group.attrs.get("timestamp_utc")
+        )
+        try:
+            ts = datetime.fromisoformat(ts_raw) if isinstance(ts_raw, str) else datetime.min
+        except Exception:
+            ts = datetime.min
+        candidates.append((ts, run_name))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
 def get_latest_run(root: zarr.Group, group_name: str, explicit: Optional[str]) -> str:
-    if explicit:
-        return explicit
     runs_group_name = f"{group_name}_runs"
     if runs_group_name not in root:
         raise RuntimeError(f"No '{runs_group_name}' group found in Zarr store.")
     runs_group = root[runs_group_name]
+    if not runs_group:
+        raise RuntimeError(f"No runs recorded under '{runs_group_name}'.")
+
+    special_map = {
+        "keypoints": {
+            "latest_traditional": "traditional_pose",
+            "traditional": "traditional_pose",
+            "latest_yolo": "yolo_pose",
+            "yolo": "yolo_pose",
+        },
+        "eye_masks": {
+            "latest_traditional": "traditional_eye_segmentation",
+            "traditional": "traditional_eye_segmentation",
+            "latest_yolo": "yolo_eye_segmentation",
+            "yolo": "yolo_eye_segmentation",
+            "latest_refine": "refine_eye_masks",
+            "refine": "refine_eye_masks",
+        },
+    }
+
+    if explicit:
+        requested = explicit.strip()
+        if requested and requested.lower() not in {"latest"}:
+            norm = requested.lower()
+            method_map = special_map.get(group_name, {})
+            method = method_map.get(norm)
+            if method:
+                resolved = _resolve_latest_by_method(runs_group, method)
+                if resolved:
+                    return resolved
+                raise RuntimeError(
+                    f"No run with method '{method}' found under '{runs_group_name}'."
+                )
+            if requested in runs_group:
+                return requested
+            raise RuntimeError(
+                f"Run '{requested}' not found under '{runs_group_name}'. "
+                f"Available: {', '.join(list(runs_group.keys()))}"
+            )
+
     latest = runs_group.attrs.get("latest")
     if not latest:
         raise RuntimeError(f"No runs recorded under '{runs_group_name}'.")
@@ -293,6 +354,7 @@ def plot_record_interactive(
     pose_schema: Optional[PoseSchema],
     eye_mask_data: Optional[Dict[str, Any]],
     start_frame: int = 0,
+    keypoint_method: str = "unknown",
 ) -> None:
     """Interactive viewer with slider to scroll through frames."""
     
@@ -650,7 +712,12 @@ def plot_record_interactive(
     
     fig.canvas.mpl_connect('key_press_event', on_key)
     
-    plt.suptitle(f'Keypoint Viewer: {keypoint_run}', fontsize=12, fontweight='bold')
+    if keypoint_run:
+        title_suffix = f" ({keypoint_method})" if keypoint_method else ""
+        title_text = f"Keypoint Viewer: {keypoint_run}{title_suffix}"
+    else:
+        title_text = "Keypoint Viewer"
+    plt.suptitle(title_text, fontsize=12, fontweight='bold')
     plt.show()
 
 
@@ -659,8 +726,13 @@ def main() -> None:
         description="Visualize traditional keypoint detections with interactive slider."
     )
     parser.add_argument("zarr_path", type=Path, help="Path to Palette Zarr directory.")
-    parser.add_argument("--keypoint-run", help="Specific keypoint run to inspect (defaults to latest).")
-    parser.add_argument("--crop-run", help="Specific crop run to use alongside keypoints.")
+    parser.add_argument(
+        "--keypoint-run",
+        help="Keypoint run name or shortcut (latest, latest_traditional, latest_yolo). Defaults to latest.")
+    parser.add_argument(
+        "--crop-run",
+        help="Specific crop run to use alongside keypoints (defaults to latest)."
+    )
     parser.add_argument(
         "--start-frame",
         type=int,
@@ -669,7 +741,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--eye-run",
-        help="Optional eye mask run to overlay Feret axes (defaults to latest if present).",
+        help="Eye mask run name or shortcut (latest, latest_traditional, latest_yolo, latest_refine).",
     )
 
     args = parser.parse_args()
@@ -691,6 +763,7 @@ def main() -> None:
     crop_run = get_latest_run(root, "crop", args.crop_run)
     
     # Get keypoint labels if available
+    keypoint_method = "unknown"
     if keypoint_run:
         keypoint_group = root[f"keypoints_runs/{keypoint_run}"]
         pose_schema = None
@@ -713,6 +786,7 @@ def main() -> None:
             labels = pose_schema.node_names
         else:
             labels = keypoint_group.attrs.get("keypoint_labels", default_labels)
+        keypoint_method = keypoint_group.attrs.get("method", "unknown")
     else:
         pose_schema = None
         labels = ["bladder", "eye_left", "eye_right"]
@@ -735,6 +809,8 @@ def main() -> None:
     print(f"\nKeypoint Visualizer")
     print(f"  Zarr: {args.zarr_path}")
     print(f"  Keypoint run: {keypoint_run or 'None (will show crops only)'}")
+    if keypoint_run:
+        print(f"  Keypoint method: {keypoint_method}")
     print(f"  Crop run: {crop_run}")
     if pose_schema:
         print(f"  Pose schema: {pose_schema.name} ({pose_schema.num_keypoints} keypoints)")
@@ -755,6 +831,7 @@ def main() -> None:
         pose_schema=pose_schema,
         eye_mask_data=eye_mask_data,
         start_frame=args.start_frame,
+        keypoint_method=keypoint_method,
     )
 
 

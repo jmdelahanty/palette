@@ -36,7 +36,7 @@ from .keypoint_quality import KeypointGeometryMetrics, compute_geometry_metrics
 class KeypointRefinementParams:
     """Configuration values controlling keypoint refinement."""
 
-    chunk_size: int = 4096
+    chunk_size: int = 1024
     scheduler: str = "processes"
     num_workers: Optional[int] = None
     memory_limit: Optional[str] = None

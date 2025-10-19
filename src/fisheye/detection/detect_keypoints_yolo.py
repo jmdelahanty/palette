@@ -10,8 +10,10 @@ keypoints.
 from __future__ import annotations
 
 import math
+import argparse
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Sequence
+from datetime import datetime, timezone
 
 import numpy as np
 import torch
@@ -345,6 +347,7 @@ def detect_keypoints_yolo(
 
     run_group.attrs.update({
         "method": "yolo_pose",
+        "keypoints_timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "model_path": str(model_path_resolved),
         "model_name": model_path.name,
         "ultralytics_version": ultralytics_version,
@@ -389,4 +392,44 @@ def detect_keypoints_yolo(
     return resolved_run_name
 
 
-__all__ = ["detect_keypoints_yolo"]
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="YOLO-based keypoint inference on Palette Zarr crops")
+    parser.add_argument("zarr_path", type=str, help="Path to the Palette Zarr archive")
+    parser.add_argument("--model", required=True, help="Path to the trained YOLO pose weights (.pt)")
+    parser.add_argument("--run-name", help="Optional custom run name for keypoints_runs")
+    parser.add_argument("--crop-run", help="Optional crop run override (defaults to latest)")
+    parser.add_argument("--batch-size", type=int, default=256, help="Batch size for inference")
+    parser.add_argument("--imgsz", type=int, default=None, help="Image size for YOLO inference")
+    parser.add_argument("--device", default=None, help="Torch device string (e.g. '0' or 'cuda:0')")
+    parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
+    parser.add_argument("--iou", type=float, default=0.5, help="IoU threshold for NMS")
+    parser.add_argument("--max-det", type=int, default=1, help="Maximum detections per ROI")
+    parser.add_argument("--mask-threshold", type=float, default=0.5, help="Mask binarization threshold")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output")
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+
+    detect_keypoints_yolo(
+        zarr_path=args.zarr_path,
+        model_path=args.model,
+        run_name=args.run_name,
+        crop_run=args.crop_run,
+        batch_size=args.batch_size,
+        device=args.device,
+        imgsz=args.imgsz,
+        conf=args.conf,
+        iou=args.iou,
+        max_det=args.max_det,
+        verbose=args.verbose,
+    )
+
+
+__all__ = ["detect_keypoints_yolo", "main"]
+
+
+if __name__ == "__main__":
+    main()

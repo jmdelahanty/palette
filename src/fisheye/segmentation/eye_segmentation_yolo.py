@@ -14,7 +14,6 @@ import zarr
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from skimage import measure
-from ultralytics import YOLO, __version__ as ultralytics_version
 
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
@@ -134,6 +133,8 @@ def segment_eye_masks_yolo(
     console: Optional[Console] = None,
 ) -> str:
     """Run a YOLO segmentation model to generate binary eye masks."""
+
+    from ultralytics import YOLO, __version__ as ultralytics_version
 
     console = console or Console()
     console.rule("[bold cyan]YOLO Eye Segmentation[/bold cyan]")
