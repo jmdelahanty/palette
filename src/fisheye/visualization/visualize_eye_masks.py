@@ -59,6 +59,7 @@ class EyeMaskViewer:
 
         self.roi_images = crop_group["roi_images"]
         self.masks = eye_group["masks_roi"]
+        self.mask_probs = eye_group["mask_probs_roi"] if "mask_probs_roi" in eye_group else None
         self.ellipse_params = eye_group["ellipse_params"]
         self.ellipse_success = eye_group["ellipse_success"][:]
         self.success_flags = kp_group["detection_success"][:]
@@ -126,6 +127,7 @@ class EyeMaskViewer:
         np.ndarray,
         str,
         dict[str, dict[str, tuple[tuple[float, float], tuple[float, float]]]],
+        Optional[List[np.ndarray]],
     ]:
         roi = np.asarray(self.roi_images[idx])
         mask_left = np.asarray(self.masks[idx, 0])
@@ -206,7 +208,12 @@ class EyeMaskViewer:
             + (f" round={right_round:.2f}" if right_round is not None and np.isfinite(right_round) else ""),
         ]
         summary = "\n".join(summary_lines)
-        return overlay, summary, axes_data
+        prob_maps: Optional[List[np.ndarray]] = None
+        if self.mask_probs is not None:
+            prob_left = np.asarray(self.mask_probs[idx, 0], dtype=np.float32)
+            prob_right = np.asarray(self.mask_probs[idx, 1], dtype=np.float32)
+            prob_maps = [prob_left, prob_right]
+        return overlay, summary, axes_data, prob_maps
 
 
 def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[str], keypoint_run: Optional[str]) -> None:
@@ -221,7 +228,7 @@ def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[st
     plt.subplots_adjust(bottom=0.22)
     ax.set_axis_off()
 
-    overlay, summary, axes = viewer.make_overlay(0)
+    overlay, summary, axes, probs = viewer.make_overlay(0)
     image_artist = ax.imshow(overlay, interpolation="nearest")
     info_text = ax.text(
         0.02,
@@ -270,10 +277,26 @@ def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[st
         valfmt="%0.0f",
     )
 
+    prob_fig = None
+    prob_axes = []
+    prob_images = []
+    if probs is not None:
+        prob_fig, prob_axes = plt.subplots(1, 2, figsize=(7, 3))
+        titles = ["Left Probability", "Right Probability"]
+        for ax_prob, prob_map, title in zip(prob_axes, probs, titles):
+            im = ax_prob.imshow(prob_map, cmap="magma", vmin=0.0, vmax=1.0, interpolation="nearest")
+            ax_prob.set_title(title)
+            ax_prob.set_axis_off()
+            prob_images.append(im)
+        prob_fig.colorbar(prob_images[0], ax=prob_axes, fraction=0.046, pad=0.04)
+        prob_fig.canvas.manager.set_window_title(
+            f"Mask Probabilities | eye_run={eye_run}, crop_run={crop_run}, keypoint_run={keypoint_run}"
+        )
+
     def update_from_slider(val: float) -> None:
         idx = int(round(val))
         idx = max(0, min(viewer.total - 1, idx))
-        overlay, info, axes = viewer.make_overlay(idx)
+        overlay, info, axes, prob_maps = viewer.make_overlay(idx)
         image_artist.set_data(overlay)
         info_text.set_text(info)
         for side in ("left", "right"):
@@ -291,6 +314,13 @@ def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[st
                 [minor_pts[0][0], minor_pts[1][0]],
                 [minor_pts[0][1], minor_pts[1][1]],
             )
+        if prob_images:
+            if prob_maps is None:
+                prob_maps = [np.zeros_like(prob_images[0].get_array()), np.zeros_like(prob_images[1].get_array())]
+            for im, prob_map in zip(prob_images, prob_maps):
+                im.set_data(prob_map)
+            if prob_fig:
+                prob_fig.canvas.draw_idle()
         fig.canvas.draw_idle()
 
     slider.on_changed(update_from_slider)

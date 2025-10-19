@@ -22,6 +22,7 @@ from ..utils.system import get_environment_info, get_git_info
 @dataclass
 class EyeCandidate:
     mask: np.ndarray
+    prob_mask: Optional[np.ndarray]
     centroid_xy: Tuple[float, float]
     ellipse_row: np.ndarray
     contour_xy: Optional[np.ndarray]
@@ -50,7 +51,7 @@ def _repeat_to_rgb(batch: np.ndarray) -> List[np.ndarray]:
     return [np.repeat(img[..., None], 3, axis=2) for img in batch]
 
 
-def _candidate_from_mask(mask: np.ndarray) -> Optional[EyeCandidate]:
+def _candidate_from_mask(mask: np.ndarray, prob_mask: Optional[np.ndarray] = None) -> Optional[EyeCandidate]:
     if mask.sum() <= 0:
         return None
     props = measure.regionprops(mask.astype(np.uint8))
@@ -75,6 +76,7 @@ def _candidate_from_mask(mask: np.ndarray) -> Optional[EyeCandidate]:
         contour_xy = best[:, ::-1].astype(np.float32)
     return EyeCandidate(
         mask=mask,
+        prob_mask=prob_mask,
         centroid_xy=centroid,
         ellipse_row=ellipse_row,
         contour_xy=contour_xy,
@@ -96,7 +98,7 @@ def _extract_candidates(
     for mask in data:
         resized = cv2.resize(mask, (roi_shape[1], roi_shape[0]), interpolation=cv2.INTER_LINEAR)
         binary = resized >= mask_threshold
-        candidate = _candidate_from_mask(binary.astype(np.uint8))
+        candidate = _candidate_from_mask(binary.astype(np.uint8), resized.astype(np.float32))
         if candidate is not None:
             candidate_list.append(candidate)
 
@@ -176,6 +178,7 @@ def segment_eye_masks_yolo(
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
 
     masks = np.zeros((total_rois, 2, roi_h, roi_w), dtype=np.uint8)
+    mask_probs = np.zeros((total_rois, 2, roi_h, roi_w), dtype=np.float16)
     ellipse_params = np.full((total_rois, 2, 5), np.nan, dtype=np.float32)
     ellipse_success = np.zeros((total_rois, 2), dtype=bool)
     feret_axes_major = np.full((total_rois, 2, 4), np.nan, dtype=np.float32)
@@ -202,6 +205,8 @@ def segment_eye_masks_yolo(
         console=console,
     )
 
+    printed_prob_stats = False
+
     with timer:
         task_id = timer.add_task("[cyan]Running YOLO segmentation...[/cyan]", total=total_rois)
         for start in range(0, total_rois, batch_size):
@@ -221,6 +226,17 @@ def segment_eye_masks_yolo(
 
             for idx, result in enumerate(results):
                 global_idx = start + idx
+                if verbose and not printed_prob_stats:
+                    mask_data = getattr(result, "masks", None)
+                    if mask_data is not None and mask_data.data is not None and mask_data.data.numel() > 0:
+                        tensor = mask_data.data
+                        min_val = float(tensor.min().item())
+                        max_val = float(tensor.max().item())
+                        dtype = tensor.dtype
+                        console.print(
+                            f"[cyan]mask tensor stats[/cyan]: dtype={dtype} min={min_val:.6f} max={max_val:.6f}"
+                        )
+                        printed_prob_stats = True
                 candidates = _extract_candidates(result, (roi_h, roi_w), mask_threshold)
                 left_right = _assign_left_right(candidates)
 
@@ -231,6 +247,8 @@ def segment_eye_masks_yolo(
                         continue
                     bin_mask = candidate.mask.astype(np.uint8)
                     masks[global_idx, eye_idx] = bin_mask
+                    if candidate.prob_mask is not None:
+                        mask_probs[global_idx, eye_idx] = candidate.prob_mask.astype(np.float16, copy=False)
                     ellipse_params[global_idx, eye_idx] = candidate.ellipse_row
                     ellipse_success[global_idx, eye_idx] = True
                     centroids[eye_idx] = candidate.centroid_xy
@@ -269,6 +287,12 @@ def segment_eye_masks_yolo(
     run_group.create_array(
         "masks_roi",
         data=masks,
+        chunks=(chunk_rois, 2, roi_h, roi_w),
+        overwrite=True,
+    )
+    run_group.create_array(
+        "mask_probs_roi",
+        data=mask_probs,
         chunks=(chunk_rois, 2, roi_h, roi_w),
         overwrite=True,
     )
