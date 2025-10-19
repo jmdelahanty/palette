@@ -519,7 +519,10 @@ class Pipeline:
                 conf=params.get('conf', 0.25),
                 iou=params.get('iou', 0.5),
                 max_det=params.get('max_det', 4),
-                mask_threshold=params.get('mask_threshold', 0.5),
+                mask_threshold=params.get('mask_threshold', 0.3),
+                use_retina_masks=params.get('use_retina_masks', True),
+                proto_upsample_factor=params.get('proto_upsample_factor', 1),
+                legacy_masks=params.get('legacy_masks', False),
                 verbose=params.get('verbose', False),
                 console=self.console,
             )
@@ -543,6 +546,9 @@ class Pipeline:
                     'iou',
                     'max_det',
                     'mask_threshold',
+                    'use_retina_masks',
+                    'proto_upsample_factor',
+                    'legacy_masks',
                     'verbose',
                 }
             }

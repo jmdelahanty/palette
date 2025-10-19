@@ -17,8 +17,8 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from skimage import measure
 
-from ..shared.zarr.schema import get_run_group
-from ..utils.system import get_environment_info, get_git_info
+from .shared.zarr.schema import get_run_group
+from .utils.system import get_environment_info, get_git_info
 
 
 @dataclass
@@ -51,7 +51,6 @@ _MASK_PROB_CACHE: Deque[torch.Tensor] = deque()
 _PROCESS_MASK_PATCHED = False
 _ORIGINAL_PROCESS_MASK_NATIVE = None
 _PROTO_UPSAMPLE_FACTOR = 1
-_DEFAULT_LEGACY_MASKS = False
 
 
 def _shape_to_hw(shape) -> Tuple[int, int]:
@@ -156,9 +155,6 @@ def _ensure_process_mask_patch() -> None:
         return
 
     def _wrapped_process_mask_native(protos, coeffs, boxes, shape, *args, **kwargs):
-        if _DEFAULT_LEGACY_MASKS:
-            return _ORIGINAL_PROCESS_MASK_NATIVE(protos, coeffs, boxes, shape, *args, **kwargs)
-
         proto_tensor = _prepare_proto_tensor(protos, _PROTO_UPSAMPLE_FACTOR)
         try:
             upsample = kwargs.get("upsample", True)
@@ -177,7 +173,7 @@ def _ensure_process_mask_patch() -> None:
     _PROCESS_MASK_PATCHED = True
 
 
-def _pop_cached_prob_masks_any(roi_shape: Tuple[int, int]) -> Optional[np.ndarray]:
+def _pop_cached_prob_masks(expected_count: int, roi_shape: Tuple[int, int]) -> Optional[np.ndarray]:
     if not _MASK_PROB_CACHE:
         return None
     tensor = _MASK_PROB_CACHE.popleft()
@@ -186,16 +182,14 @@ def _pop_cached_prob_masks_any(roi_shape: Tuple[int, int]) -> Optional[np.ndarra
     try:
         if tensor.ndim == 2:
             tensor = tensor.unsqueeze(0)
-        prob = tensor.float().cpu().numpy().astype(np.float32, copy=False)
+        prob = tensor.float().numpy()
     except Exception:
         return None
-    h, w = roi_shape
-    if prob.shape[-2:] != (h, w):
-        resized = [
-            cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32, copy=False)
-            for mask in prob
-        ]
-        prob = np.stack(resized, axis=0) if resized else np.empty((0, h, w), dtype=np.float32)
+    if prob.shape[0] != expected_count:
+        return None
+    prob = prob.astype(np.float32, copy=False)
+    if roi_shape and prob.shape[-2:] != tuple(roi_shape):
+        prob = _resize_prob_masks(prob, roi_shape)
     return np.clip(prob, 0.0, 1.0)
 
 
@@ -294,69 +288,39 @@ def _resolve_soft_masks(
     *,
     expect_soft: bool,
     allow_fallback: bool,
-) -> Tuple[np.ndarray, float, str, bool, bool, int, int, int, int]:
-    h, w = roi_shape
+) -> Tuple[np.ndarray, Optional[float], bool, bool]:
     masks_obj = getattr(result, "masks", None)
     if masks_obj is None or masks_obj.data is None:
-        return np.empty((0, h, w), dtype=np.float32), 0.0, "none", False, False, 0, 0, 0, 0
+        h, w = roi_shape
+        return np.empty((0, h, w), dtype=np.float32), None, False, False
 
     tensor = masks_obj.data
+    mid_fraction = _compute_mid_fraction(tensor)
     np_masks = tensor.detach().float().cpu().numpy()
-    data_masks = _resize_prob_masks(np_masks, roi_shape)
-    n_det_raw = int(data_masks.shape[0])
+    prob_masks = _resize_prob_masks(np_masks, roi_shape)
 
-    boxes_obj = getattr(result, "boxes", None)
-    n_boxes = 0
-    if boxes_obj is not None:
-        xyxy = getattr(boxes_obj, "xyxy", None)
-        if xyxy is not None:
-            n_boxes = int(xyxy.shape[0])
-        else:
-            boxes_data = getattr(boxes_obj, "data", None)
-            if boxes_data is not None:
-                n_boxes = int(boxes_data.shape[0])
-
-    queue_len = len(_MASK_PROB_CACHE)
-    hook_masks = _pop_cached_prob_masks_any(roi_shape) if queue_len else None
-    n_cached = int(hook_masks.shape[0]) if hook_masks is not None and hook_masks.size else 0
-
-    prob_masks: Optional[np.ndarray] = None
-    source = "none"
-    used_cache = False
-    used_reconstruct = False
-
-    reconstructed = _reconstruct_masks_from_protos(result, roi_shape)
-    if reconstructed is not None and reconstructed.size:
-        prob_masks = reconstructed
-        source = "reconstruct"
-        used_reconstruct = True
-    elif hook_masks is not None and hook_masks.size:
-        prob_masks = hook_masks
-        source = "cache"
-        used_cache = True
-    elif n_det_raw > 0:
-        prob_masks = data_masks
-        source = "masks_data"
-    else:
-        prob_masks = np.empty((0, h, w), dtype=np.float32)
-
-    prob_masks = np.clip(prob_masks, 0.0, 1.0)
-    mid_fraction = float(((prob_masks > 1e-6) & (prob_masks < 1 - 1e-6)).mean()) if prob_masks.size else 0.0
-
-    if (
-        source == "masks_data"
-        and allow_fallback
-        and expect_soft
-        and mid_fraction <= 1e-6
-        and hook_masks is not None
-        and hook_masks.size
-    ):
-        prob_masks = np.clip(hook_masks, 0.0, 1.0)
-        source = "cache"
-        used_cache = True
+    cache_used = False
+    cached = _pop_cached_prob_masks(prob_masks.shape[0], roi_shape)
+    if cached is not None and cached.shape[0] == prob_masks.shape[0]:
+        prob_masks = cached
+        cache_used = True
         mid_fraction = float(((prob_masks > 1e-6) & (prob_masks < 1 - 1e-6)).mean()) if prob_masks.size else 0.0
 
-    return prob_masks, mid_fraction, source, used_cache, used_reconstruct, n_det_raw, n_cached, queue_len, n_boxes
+    fallback_needed = allow_fallback and (
+        mid_fraction is None or (expect_soft and (mid_fraction <= 1e-6)) or (not expect_soft)
+    )
+    used_fallback = False
+    if fallback_needed and not cache_used:
+        rebuilt = _reconstruct_masks_from_protos(result, roi_shape)
+        if rebuilt is not None:
+            prob_masks = rebuilt
+            used_fallback = True
+            mid_fraction = float(((prob_masks > 1e-6) & (prob_masks < 1 - 1e-6)).mean()) if prob_masks.size else 0.0
+
+    if mid_fraction is None and prob_masks.size:
+        mid_fraction = float(((prob_masks > 1e-6) & (prob_masks < 1 - 1e-6)).mean())
+
+    return np.clip(prob_masks, 0.0, 1.0), mid_fraction, used_fallback, cache_used
 
 
 def _candidate_from_mask(mask: np.ndarray, prob_mask: Optional[np.ndarray] = None) -> Optional[EyeCandidate]:
@@ -392,36 +356,6 @@ def _candidate_from_mask(mask: np.ndarray, prob_mask: Optional[np.ndarray] = Non
     )
 
 
-def _binarize_adaptive(prob_mask: np.ndarray, base_threshold: float) -> np.ndarray:
-    pmax = float(prob_mask.max())
-    if pmax <= 1e-6:
-        return np.zeros_like(prob_mask, dtype=np.uint8)
-
-    adaptive = max(0.02, min(0.6, 0.6 * pmax))
-    threshold = max(base_threshold, adaptive)
-    binary = (prob_mask >= threshold).astype(np.uint8)
-
-    if not binary.any():
-        return binary
-
-    num_labels, labels = cv2.connectedComponents(binary, connectivity=8)
-    if num_labels > 2:
-        counts = np.bincount(labels.ravel())
-        keep_label = int(np.argmax(counts[1:])) + 1
-        binary = (labels == keep_label).astype(np.uint8)
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-
-    inv = (1 - binary).astype(np.uint8)
-    num_holes, hole_labels = cv2.connectedComponents(inv, connectivity=8)
-    for label_id in range(1, num_holes):
-        if np.sum(hole_labels == label_id) <= 10:
-            binary[hole_labels == label_id] = 1
-
-    return binary
-
-
 def _extract_candidates(
     prob_masks: np.ndarray,
     mask_threshold: float,
@@ -431,8 +365,8 @@ def _extract_candidates(
 
     candidate_list: List[EyeCandidate] = []
     for mask in prob_masks:
-        bin_mask = _binarize_adaptive(mask.astype(np.float32, copy=False), mask_threshold)
-        candidate = _candidate_from_mask(bin_mask, mask.astype(np.float32, copy=False))
+        binary = mask >= mask_threshold
+        candidate = _candidate_from_mask(binary.astype(np.uint8), mask.astype(np.float32, copy=False))
         if candidate is not None:
             candidate_list.append(candidate)
 
@@ -464,10 +398,9 @@ def segment_eye_masks_yolo(
     conf: float = 0.25,
     iou: float = 0.5,
     max_det: int = 4,
-    mask_threshold: float = 0.3,
+    mask_threshold: float = 0.5,
     use_retina_masks: bool = True,
     proto_upsample_factor: int = 1,
-    legacy_masks: bool = False,
     verbose: bool = False,
     console: Optional[Console] = None,
 ) -> str:
@@ -505,10 +438,9 @@ def segment_eye_masks_yolo(
     crop_group = root[f"crop_runs/{crop_run_name}"]
     roi_images = crop_group["roi_images"]
 
-    global _PROTO_UPSAMPLE_FACTOR, _DEFAULT_LEGACY_MASKS
+    global _PROTO_UPSAMPLE_FACTOR
     proto_factor = max(1, int(proto_upsample_factor))
     _PROTO_UPSAMPLE_FACTOR = proto_factor
-    _DEFAULT_LEGACY_MASKS = bool(legacy_masks)
 
     total_rois = int(roi_images.shape[0])
     if total_rois == 0:
@@ -567,7 +499,7 @@ def segment_eye_masks_yolo(
         "device": device,
         "verbose": verbose,
     }
-    if not legacy_masks and use_retina_masks is not None:
+    if use_retina_masks is not None:
         model_kwargs["retina_masks"] = use_retina_masks
     retina_flag_supported = True
 
@@ -593,83 +525,27 @@ def segment_eye_masks_yolo(
                 else:
                     raise
 
-            retina_active = bool(model_kwargs.get("retina_masks", False)) and retina_flag_supported and not _DEFAULT_LEGACY_MASKS
+            retina_active = bool(model_kwargs.get("retina_masks", False)) and retina_flag_supported
 
             for idx, result in enumerate(results):
                 global_idx = start + idx
-                if _DEFAULT_LEGACY_MASKS:
-                    (
-                        prob_masks,
-                        mid_fraction,
-                        source_kind,
-                        used_cache,
-                        used_reconstruct,
-                        n_det_raw,
-                        n_cached,
-                        cache_qlen,
-                        n_boxes,
-                    ) = _resolve_soft_masks(
-                        result,
-                        (roi_h, roi_w),
-                        expect_soft=False,
-                        allow_fallback=False,
-                    )
-                else:
-                    (
-                        prob_masks,
-                        mid_fraction,
-                        source_kind,
-                        used_cache,
-                        used_reconstruct,
-                        n_det_raw,
-                        n_cached,
-                        cache_qlen,
-                        n_boxes,
-                    ) = _resolve_soft_masks(
-                        result,
-                        (roi_h, roi_w),
-                        expect_soft=retina_active,
-                        allow_fallback=True,
-                    )
-                n_det = int(prob_masks.shape[0]) if prob_masks.ndim >= 1 else 0
+                prob_masks, mid_fraction, used_fallback, used_cache = _resolve_soft_masks(
+                    result,
+                    (roi_h, roi_w),
+                    expect_soft=retina_active,
+                    allow_fallback=True,
+                )
                 if verbose and not printed_prob_stats and prob_masks.size > 0:
-                    per_max = [float(pm.max()) for pm in prob_masks]
-                    per_mean = [float(pm.mean()) for pm in prob_masks]
-                    mid = float(((prob_masks > 1e-6) & (prob_masks < 1 - 1e-6)).mean())
-                    nz_mid: List[float] = []
-                    for pm in prob_masks:
-                        nz = pm[pm > 0]
-                        nz_mid.append(
-                            float(((nz > 1e-6) & (nz < 1 - 1e-6)).mean()) if nz.size else 0.0
-                        )
+                    min_val = float(prob_masks.min())
+                    max_val = float(prob_masks.max())
                     console.print(
                         "[cyan]mask probability stats[/cyan]: "
-                        f"mid_fraction(all)={mid:.6f} | "
-                        f"per_inst_max={[round(x, 4) for x in per_max[:6]]} | "
-                        f"per_inst_mean={[round(x, 5) for x in per_mean[:6]]} | "
-                        f"nz_mid={[round(x, 3) for x in nz_mid[:6]]}"
-                    )
-                    console.print(
-                        f"[cyan]path[/cyan]: retina_active={retina_active}, source={source_kind}, used_cache={used_cache}, "
-                        f"used_reconstruct={used_reconstruct}, cache_qlen={cache_qlen}, n_boxes={n_boxes}, "
-                        f"n_det={n_det_raw}, n_cached={n_cached}, n_final={n_det}"
+                        f"dtype=float32 min={min_val:.6f} max={max_val:.6f} mid_fraction={mid_fraction or 0.0:.6f}"
                     )
                     printed_prob_stats = True
-                if (
-                    not used_cache
-                    and not used_reconstruct
-                    and not _DEFAULT_LEGACY_MASKS
-                    and mid_fraction <= 1e-6
-                ):
-                    rebuilt = _reconstruct_masks_from_protos(result, (roi_h, roi_w))
-                    if rebuilt is not None and rebuilt.size:
-                        prob_masks = rebuilt
-                        used_reconstruct = True
-                        source_kind = "reconstruct"
-                        mid_fraction = float(((prob_masks > 1e-6) & (prob_masks < 1 - 1e-6)).mean()) if prob_masks.size else 0.0
-                if used_reconstruct:
+                if used_fallback:
                     prototype_fallback_used = True
-                if verbose and used_reconstruct and not prototype_fallback_logged:
+                if verbose and used_fallback and not prototype_fallback_logged:
                     console.print("[yellow]Prototype-based mask reconstruction enabled to recover soft probabilities[/yellow]")
                     prototype_fallback_logged = True
                 if used_cache:
@@ -679,8 +555,9 @@ def segment_eye_masks_yolo(
                     native_cache_logged = True
                 if (
                     verbose
-                    and not used_reconstruct
+                    and not used_fallback
                     and not used_cache
+                    and mid_fraction is not None
                     and mid_fraction <= 1e-6
                     and not fallback_failure_logged
                 ):
@@ -827,7 +704,6 @@ def segment_eye_masks_yolo(
                 "max_det": max_det,
                 "mask_threshold": mask_threshold,
                 "use_retina_masks": use_retina_masks,
-                "legacy_masks": bool(legacy_masks),
                 "retina_masks_supported": retina_flag_supported,
                 "prototype_fallback_used": prototype_fallback_used,
                 "native_mask_hook_used": native_cache_used,
@@ -854,7 +730,6 @@ def segment_eye_masks_yolo(
     )
 
     _PROTO_UPSAMPLE_FACTOR = 1
-    _DEFAULT_LEGACY_MASKS = False
 
     return resolved_run_name
 

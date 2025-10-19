@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -123,11 +123,16 @@ class EyeMaskViewer:
         p2 = segment[2:]
         return float(np.linalg.norm(p1 - p2))
 
-    def make_overlay(self, idx: int) -> tuple[
+    def make_overlay(
+        self,
+        idx: int,
+    ) -> tuple[
         np.ndarray,
         str,
         dict[str, dict[str, tuple[tuple[float, float], tuple[float, float]]]],
         Optional[List[np.ndarray]],
+        np.ndarray,
+        List[np.ndarray],
     ]:
         roi = np.asarray(self.roi_images[idx])
         mask_left = np.asarray(self.masks[idx, 0])
@@ -213,7 +218,7 @@ class EyeMaskViewer:
             prob_left = np.asarray(self.mask_probs[idx, 0], dtype=np.float32)
             prob_right = np.asarray(self.mask_probs[idx, 1], dtype=np.float32)
             prob_maps = [prob_left, prob_right]
-        return overlay, summary, axes_data, prob_maps
+        return overlay, summary, axes_data, prob_maps, base, [mask_left, mask_right]
 
 
 def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[str], keypoint_run: Optional[str]) -> None:
@@ -224,22 +229,34 @@ def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[st
 
     viewer = EyeMaskViewer(root, eye_run, crop_run, keypoint_run)
 
-    fig, ax = plt.subplots(figsize=(5, 5))
-    plt.subplots_adjust(bottom=0.22)
-    ax.set_axis_off()
+    fig = plt.figure(figsize=(12, 6))
+    gs = fig.add_gridspec(2, 3, height_ratios=[1, 0.15], width_ratios=[1, 1, 1])
 
-    overlay, summary, axes, probs = viewer.make_overlay(0)
-    image_artist = ax.imshow(overlay, interpolation="nearest")
-    info_text = ax.text(
+    ax_overlay = fig.add_subplot(gs[0, 0])
+    ax_overlay.set_axis_off()
+
+    ax_raw = fig.add_subplot(gs[0, 1])
+    ax_raw.set_title("Raw ROI")
+    ax_raw.set_axis_off()
+
+    prob_panel = gs[0, 2]
+
+    slider_ax = fig.add_subplot(gs[1, :])
+
+    overlay, summary, axes, probs, base_roi, bin_masks = viewer.make_overlay(0)
+    image_artist = ax_overlay.imshow(overlay, interpolation="nearest")
+    info_text = ax_overlay.text(
         0.02,
         0.02,
         summary,
         color="white",
         fontsize=9,
-        transform=ax.transAxes,
+        transform=ax_overlay.transAxes,
         verticalalignment="bottom",
         bbox=dict(facecolor="black", alpha=0.4, pad=4),
     )
+
+    raw_artist = ax_raw.imshow(base_roi, cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
 
     colors = {"left": "#1a66f3", "right": "#f85151"}
     line_major = {}
@@ -251,13 +268,13 @@ def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[st
         else:
             major_pts = ((np.nan, np.nan), (np.nan, np.nan))
             minor_pts = ((np.nan, np.nan), (np.nan, np.nan))
-        (major_line,) = ax.plot(
+        (major_line,) = ax_overlay.plot(
             [major_pts[0][0], major_pts[1][0]],
             [major_pts[0][1], major_pts[1][1]],
             color=colors[side],
             linewidth=1.8,
         )
-        (minor_line,) = ax.plot(
+        (minor_line,) = ax_overlay.plot(
             [minor_pts[0][0], minor_pts[1][0]],
             [minor_pts[0][1], minor_pts[1][1]],
             color=colors[side],
@@ -267,7 +284,6 @@ def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[st
         line_major[side] = major_line
         line_minor[side] = minor_line
 
-    slider_ax = fig.add_axes([0.2, 0.08, 0.65, 0.04])
     slider = Slider(
         ax=slider_ax,
         label="ROI Index",
@@ -277,28 +293,38 @@ def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[st
         valfmt="%0.0f",
     )
 
-    prob_fig = None
-    prob_axes = []
-    prob_images = []
-    if probs is not None:
-        prob_fig, prob_axes = plt.subplots(1, 2, figsize=(7, 3))
-        titles = ["Left Probability", "Right Probability"]
-        for ax_prob, prob_map, title in zip(prob_axes, probs, titles):
-            im = ax_prob.imshow(prob_map, cmap="magma", vmin=0.0, vmax=1.0, interpolation="nearest")
-            ax_prob.set_title(title)
-            ax_prob.set_axis_off()
-            prob_images.append(im)
-        prob_fig.colorbar(prob_images[0], ax=prob_axes, fraction=0.046, pad=0.04)
-        prob_fig.canvas.manager.set_window_title(
-            f"Mask Probabilities | eye_run={eye_run}, crop_run={crop_run}, keypoint_run={keypoint_run}"
-        )
+    prob_images: List = []
+    bin_images: List = []
+    prob_axes_list = []
+    prob_titles = ["Left Probability", "Right Probability"]
+    bin_titles = ["Left Binary Mask", "Right Binary Mask"]
+
+    sub_gs = prob_panel.subgridspec(2, 2, hspace=0.25, wspace=0.2)
+    prob_maps_init = probs if probs is not None else [np.zeros_like(base_roi)] * 2
+    for col, (title, prob_map) in enumerate(zip(prob_titles, prob_maps_init)):
+        ax_prob = fig.add_subplot(sub_gs[0, col])
+        ax_prob.set_title(title, fontsize=9)
+        ax_prob.set_axis_off()
+        im = ax_prob.imshow(prob_map, cmap="magma", vmin=0.0, vmax=1.0, interpolation="nearest")
+        prob_images.append(im)
+        prob_axes_list.append(ax_prob)
+    if prob_axes_list:
+        fig.colorbar(prob_images[0], ax=prob_axes_list, fraction=0.046, pad=0.04)
+
+    for col, (title, bin_map) in enumerate(zip(bin_titles, bin_masks)):
+        ax_bin = fig.add_subplot(sub_gs[1, col])
+        ax_bin.set_title(title, fontsize=9)
+        ax_bin.set_axis_off()
+        im = ax_bin.imshow(bin_map, cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
+        bin_images.append(im)
 
     def update_from_slider(val: float) -> None:
         idx = int(round(val))
         idx = max(0, min(viewer.total - 1, idx))
-        overlay, info, axes, prob_maps = viewer.make_overlay(idx)
+        overlay, info, axes, prob_maps, base_img, mask_pair = viewer.make_overlay(idx)
         image_artist.set_data(overlay)
         info_text.set_text(info)
+        raw_artist.set_data(base_img)
         for side in ("left", "right"):
             if axes[side]:
                 major_pts = axes[side].get("major", ((np.nan, np.nan), (np.nan, np.nan)))
@@ -319,8 +345,8 @@ def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[st
                 prob_maps = [np.zeros_like(prob_images[0].get_array()), np.zeros_like(prob_images[1].get_array())]
             for im, prob_map in zip(prob_images, prob_maps):
                 im.set_data(prob_map)
-            if prob_fig:
-                prob_fig.canvas.draw_idle()
+        for im, mask_map in zip(bin_images, mask_pair):
+            im.set_data(mask_map)
         fig.canvas.draw_idle()
 
     slider.on_changed(update_from_slider)
