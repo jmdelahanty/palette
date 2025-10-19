@@ -13,6 +13,10 @@ Eye segmentation runs can now be post-processed with `python -m fisheye.refineme
 
 This keeps the original masks untouched for provenance while providing a refined alternative that matches keypoint labels.
 
+> ℹ️ **Probability masks are optional.**  
+> YOLO-based segmentation writes an additional `mask_probs_roi` dataset with float16 probabilities.  
+> Traditional and refined eye-mask runs may omit this dataset, so downstream consumers should treat it as optional and guard on `if "mask_probs_roi" in run_group`.
+
 Directory Structure
 /refined_runs/
   @latest = "refined_2025-10-03_21-00-00"
