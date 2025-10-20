@@ -3,9 +3,9 @@
 
 This post-processes an existing ``eye_masks_runs`` entry (typically produced by
 YOLO segmentation) and rewrites left/right mask channels so they align with the
-keypoint pipeline's anatomical labels. The output mirrors the traditional
-segmentation stage – same arrays, same dtypes – but is written as a new run to
-preserve provenance.
+keypoint pipeline's anatomical labels. The refined result is stored under
+``refined_eye_masks_runs`` – mirroring the traditional schema but avoiding any
+mutation of the original segmentation output.
 
 Usage::
 
@@ -20,19 +20,17 @@ import argparse
 import math
 import time
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Tuple
 
+import dask
 import numpy as np
 import zarr
+from dask import delayed
+from dask.diagnostics import ProgressBar
 from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeRemainingColumn,
-)
-from skimage import measure
+from scipy.ndimage import distance_transform_edt, gaussian_filter, median_filter
+from skimage import measure, morphology
 
 from ..segmentation.eye_segmentation import (
     _extract_contour,
@@ -40,6 +38,197 @@ from ..segmentation.eye_segmentation import (
 )
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
+
+
+REFINED_STAGE_NAME = "refined_eye_masks"
+
+# Refinement knobs: keep public API stable while letting us tune connectivity.
+_SMOOTHING_MODE = "median"  # {"off","median","sdf","morph"}
+_MEDIAN_K = 3
+_SDF_SIGMA = 1.0
+_MORPH_CLOSING_RADIUS = 1
+_MORPH_OPENING_RADIUS = 0
+_MIN_OBJECT_AREA = 12
+_PROBABILITY_THRESHOLD = 0.45
+
+_ZARR_GROUP_CACHE: Dict[str, zarr.Group] = {}
+_ZARR_ARRAY_CACHE: Dict[Tuple[str, str], zarr.Array] = {}
+
+
+def _get_zarr_array(zarr_path: str, array_path: str) -> zarr.Array:
+    """Fetch (and memoize per process) a Zarr array for repeated chunk reads."""
+    key = (zarr_path, array_path)
+    cached = _ZARR_ARRAY_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    group = _ZARR_GROUP_CACHE.get(zarr_path)
+    if group is None:
+        group = zarr.open(zarr_path, mode="r")
+        _ZARR_GROUP_CACHE[zarr_path] = group
+
+    arr = group[array_path]
+    _ZARR_ARRAY_CACHE[key] = arr
+    return arr
+
+def _largest_component(mask: np.ndarray) -> np.ndarray:
+    """Return the largest 8-connected component of a boolean mask."""
+    labeled = measure.label(mask.astype(bool), connectivity=2)
+    num_components = int(labeled.max())
+    if num_components <= 1:
+        return mask.astype(bool, copy=False)
+
+    counts = np.bincount(labeled.ravel())
+    if counts.size <= 1:
+        return np.zeros_like(mask, dtype=bool)
+
+    counts[0] = 0
+    label = int(np.argmax(counts))
+    return labeled == label
+
+
+def _remove_small(mask: np.ndarray) -> np.ndarray:
+    """Remove crumbs below the configured minimum area."""
+    cleaned = morphology.remove_small_objects(
+        mask.astype(bool),
+        min_size=_MIN_OBJECT_AREA,
+        connectivity=2,
+    )
+    return cleaned.astype(bool, copy=False)
+
+
+def _mask_centroid(mask: np.ndarray) -> Optional[np.ndarray]:
+    """Return the (x, y) centroid of a binary mask, or ``None`` if empty."""
+    mask_bool = mask.astype(bool, copy=False)
+    if not mask_bool.any():
+        return None
+    ys, xs = np.nonzero(mask_bool)
+    if ys.size == 0:
+        return None
+    return np.array([float(xs.mean()), float(ys.mean())], dtype=np.float32)
+
+
+def _smooth_binary_mask(mask: np.ndarray) -> Tuple[np.ndarray, bool]:
+    """Apply topology-friendly smoothing while preserving mask connectivity."""
+    mask_bool = mask.astype(bool, copy=False)
+    if mask_bool.sum() == 0:
+        return mask_bool, False
+
+    mode = (_SMOOTHING_MODE or "").lower()
+    if mode == "off":
+        return mask_bool, False
+
+    smoothed = mask_bool
+    if mode == "median":
+        k = max(1, int(_MEDIAN_K))
+        if k % 2 == 0:
+            k += 1  # median filter requires odd kernel; bump minimally to avoid bias
+        smoothed = median_filter(smoothed.astype(np.uint8), size=k) > 0
+    elif mode == "sdf":
+        inside = distance_transform_edt(smoothed)
+        outside = distance_transform_edt(~smoothed)
+        sdf = inside - outside
+        sigma = float(_SDF_SIGMA)
+        if sigma > 0.0:
+            sdf = gaussian_filter(sdf, sigma=sigma)
+        smoothed = sdf >= 0.0
+    elif mode == "morph":
+        if _MORPH_CLOSING_RADIUS > 0:
+            struct = morphology.disk(int(_MORPH_CLOSING_RADIUS))
+            smoothed = morphology.binary_closing(smoothed, struct)
+        if _MORPH_OPENING_RADIUS > 0:
+            struct = morphology.disk(int(_MORPH_OPENING_RADIUS))
+            smoothed = morphology.binary_opening(smoothed, struct)
+    else:
+        return mask_bool, False
+
+    smoothed = smoothed.astype(bool, copy=False)
+    smoothed = _largest_component(smoothed)
+    smoothed = _remove_small(smoothed)
+    changed = not np.array_equal(smoothed, mask_bool)
+    return smoothed, changed
+
+
+def _select_component_near_keypoint(mask: np.ndarray, keypoint: np.ndarray) -> Tuple[np.ndarray, np.ndarray, bool]:
+    """Keep the connected component closest to the given keypoint."""
+    labeled = measure.label(mask.astype(bool), connectivity=2)
+    num_components = int(labeled.max())
+    if num_components <= 1:
+        return mask.astype(bool, copy=False), np.zeros_like(mask, dtype=bool), False
+
+    keypoint = np.asarray(keypoint, dtype=np.float32)
+    best_label = None
+    best_distance = float("inf")
+
+    props = measure.regionprops(labeled)
+    for prop in props:
+        cy, cx = prop.centroid  # row, col
+        dist = float(math.hypot(cx - keypoint[0], cy - keypoint[1]))
+        if dist < best_distance:
+            best_distance = dist
+            best_label = prop.label
+
+    selected = labeled == best_label if best_label is not None else np.zeros_like(mask, dtype=bool)
+    removed = mask & ~selected
+    return selected, removed, True
+
+
+def _enforce_single_component(
+    left_mask: np.ndarray,
+    right_mask: np.ndarray,
+    eye_left: np.ndarray,
+    eye_right: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """Ensure each eye mask has a single contiguous component."""
+
+    left_in = left_mask.astype(bool, copy=False)
+    right_in = right_mask.astype(bool, copy=False)
+
+    left_pre = _remove_small(left_in)
+    right_pre = _remove_small(right_in)
+    left_pre_changed = not np.array_equal(left_pre, left_in)
+    right_pre_changed = not np.array_equal(right_pre, right_in)
+
+    left_selected, left_removed, left_changed = _select_component_near_keypoint(left_pre, eye_left)
+    right_selected, right_removed, right_changed = _select_component_near_keypoint(right_pre, eye_right)
+
+    # Reassign removed pixels to the opposite mask to preserve union coverage.
+    if left_removed.any():
+        right_selected = right_selected | left_removed
+    if right_removed.any():
+        left_selected = left_selected | right_removed
+
+    # Final pass to guarantee single component after reassignment.
+    left_final, left_removed_final, left_changed_final = _select_component_near_keypoint(left_selected, eye_left)
+    right_final, right_removed_final, right_changed_final = _select_component_near_keypoint(right_selected, eye_right)
+
+    left_out = _remove_small(left_final)
+    right_out = _remove_small(right_final)
+    left_post_changed = not np.array_equal(left_out, left_final)
+    right_post_changed = not np.array_equal(right_out, right_final)
+
+    reassigned_pixels = int(left_removed.sum() + right_removed.sum())
+    reassigned_pixels += int(left_removed_final.sum() + right_removed_final.sum())
+
+    changed_flags = np.array(
+        [
+            left_pre_changed
+            or left_changed
+            or left_changed_final
+            or left_post_changed
+            or bool(left_removed.sum())
+            or bool(left_removed_final.sum()),
+            right_pre_changed
+            or right_changed
+            or right_changed_final
+            or right_post_changed
+            or bool(right_removed.sum())
+            or bool(right_removed_final.sum()),
+        ],
+        dtype=bool,
+    )
+
+    return left_out, right_out, changed_flags, reassigned_pixels
 
 
 @dataclass
@@ -55,20 +244,23 @@ class ROIOutput:
     centroids: np.ndarray  # (2, 2) float32 (x, y) or nan
     contours: Tuple[Optional[np.ndarray], Optional[np.ndarray]]
     eye_separation: float
-    used_original_order: bool
     reason: Optional[str]
+    smoothing_changed: np.ndarray  # (2,) bool
+    reassigned_pixels: int
+    used_probabilities: bool = False
 
 
 def _prepare_run_group(root: zarr.Group, run_name: Optional[str], console: Console) -> Tuple[zarr.Group, str]:
-    parent = root.require_group("eye_masks_runs")
+    parent_name = f"{REFINED_STAGE_NAME}_runs"
+    parent = root.require_group(parent_name)
     if run_name:
         if run_name in parent:
-            raise ValueError(f"eye_masks_runs/{run_name} already exists")
+            raise ValueError(f"{parent_name}/{run_name} already exists")
         run_group = parent.create_group(run_name)
         parent.attrs["latest"] = run_name
-        console.print(f"Created run group: [cyan]eye_masks_runs/{run_name}[/cyan]")
+        console.print(f"Created run group: [cyan]{parent_name}/{run_name}[/cyan]")
         return run_group, run_name
-    return get_run_group(root, "eye_masks", console=console, create_new=True)
+    return get_run_group(root, REFINED_STAGE_NAME, console=console, create_new=True)
 
 
 def _split_mask_by_keypoints(
@@ -200,9 +392,11 @@ def _refine_roi(
     keypoints_roi: np.ndarray,
     heading_deg: float,
     success_flag: bool,
+    mask_probs: Optional[np.ndarray] = None
 ) -> ROIOutput:
     """Refine a single ROI's mask assignment."""
 
+    source_masks = np.asarray(source_masks)
     roi_h, roi_w = source_masks.shape[1:]
     masks_out = np.zeros((2, roi_h, roi_w), dtype=np.uint8)
     ellipse_params = np.full((2, 5), np.nan, dtype=np.float32)
@@ -212,10 +406,16 @@ def _refine_roi(
     feret_roundness = np.full(2, np.nan, dtype=np.float32)
     centroids = np.full((2, 2), np.nan, dtype=np.float32)
 
+    def _append_reason(reason_val: Optional[str], tag: str) -> str:
+        return tag if not reason_val else f"{reason_val}|{tag}"
+
     def _copy_original(reason: str) -> ROIOutput:
         contours: Tuple[Optional[np.ndarray], Optional[np.ndarray]] = (None, None)
+        smoothing_flags = np.zeros(2, dtype=bool)
         for eye_idx, mask_raw in enumerate(source_masks):
             mask_bool = mask_raw > 0
+            mask_bool, changed = _smooth_binary_mask(mask_bool)
+            smoothing_flags[eye_idx] = changed
             masks_out[eye_idx] = mask_bool.astype(np.uint8)
             (
                 success,
@@ -258,43 +458,109 @@ def _refine_roi(
             centroids,
             contours,
             separation,
-            True,
             reason,
+            smoothing_flags,
+            0,
+            False,
+            None,
         )
 
     if not success_flag:
         return _copy_original("keypoint_fail")
 
-    union_mask = (source_masks[0] > 0) | (source_masks[1] > 0)
-    if union_mask.sum() == 0:
-        return _copy_original("empty_union")
-
+    reason: Optional[str] = None
     eye_left = keypoints_roi[1]
     eye_right = keypoints_roi[2]
 
-    left_mask, right_mask = _split_mask_by_keypoints(union_mask, eye_left, eye_right)
-    used_original_order = False
-    reason = None
+    def _valid_keypoint(point: np.ndarray) -> bool:
+        arr = np.asarray(point)
+        return arr.size >= 2 and np.all(np.isfinite(arr))
 
-    if left_mask.sum() == 0 or right_mask.sum() == 0:
-        # Try heading-based split around midpoint of keypoints.
-        midpoint = np.array([(eye_left[0] + eye_right[0]) / 2.0, (eye_left[1] + eye_right[1]) / 2.0], dtype=np.float32)
-        fallback_left, fallback_right = _split_mask_by_heading(union_mask, heading_deg, midpoint)
-        if fallback_left.sum() > 0 and fallback_right.sum() > 0:
-            left_mask, right_mask = fallback_left, fallback_right
-            reason = "heading_split"
-        else:
-            # Give up and retain original ordering.
-            left_mask = source_masks[0] > 0
-            right_mask = source_masks[1] > 0
-            used_original_order = True
-            reason = "original_order"
+    instance_masks = [
+        source_masks[0] > 0,
+        source_masks[1] > 0,
+    ]
 
-    masks_out[0] = left_mask.astype(np.uint8)
-    masks_out[1] = right_mask.astype(np.uint8)
+    left_instance_idx = 0
+    right_instance_idx = 1
+    keypoints_valid = _valid_keypoint(eye_left) and _valid_keypoint(eye_right) and not np.allclose(
+        eye_left,
+        eye_right,
+        atol=1e-3,
+    )
+    if keypoints_valid and instance_masks[0].any() and instance_masks[1].any():
+        centroid_0 = _mask_centroid(instance_masks[0])
+        centroid_1 = _mask_centroid(instance_masks[1])
+        if centroid_0 is not None and centroid_1 is not None:
+            cost_direct = math.hypot(
+                float(centroid_0[0] - eye_left[0]),
+                float(centroid_0[1] - eye_left[1]),
+            ) + math.hypot(
+                float(centroid_1[0] - eye_right[0]),
+                float(centroid_1[1] - eye_right[1]),
+            )
+            cost_reversed = math.hypot(
+                float(centroid_0[0] - eye_right[0]),
+                float(centroid_0[1] - eye_right[1]),
+            ) + math.hypot(
+                float(centroid_1[0] - eye_left[0]),
+                float(centroid_1[1] - eye_left[1]),
+            )
+            if cost_reversed + 1e-3 < cost_direct:
+                left_instance_idx = 1
+                right_instance_idx = 0
+                reason = _append_reason(reason, "assigned_by_keypoint")
+
+    left_mask = instance_masks[left_instance_idx].copy()
+    right_mask = instance_masks[right_instance_idx].copy()
+
+    used_probabilities = False
+    if mask_probs is not None:
+        probs = np.asarray(mask_probs, dtype=np.float32)
+        if probs.shape[0] >= 2:
+            prob_left = np.clip(
+                np.nan_to_num(probs[left_instance_idx], nan=0.0, posinf=1.0, neginf=0.0),
+                0.0,
+                1.0,
+            )
+            prob_right = np.clip(
+                np.nan_to_num(probs[right_instance_idx], nan=0.0, posinf=1.0, neginf=0.0),
+                0.0,
+                1.0,
+            )
+            left_mask = left_mask | (prob_left >= _PROBABILITY_THRESHOLD)
+            right_mask = right_mask | (prob_right >= _PROBABILITY_THRESHOLD)
+            used_probabilities = True
+
+    if left_mask.sum() == 0 and right_mask.sum() == 0:
+        return _copy_original("empty_union")
+    if left_mask.sum() == 0:
+        left_mask = instance_masks[left_instance_idx].copy()
+        reason = _append_reason(reason, "left_empty")
+    if right_mask.sum() == 0:
+        right_mask = instance_masks[right_instance_idx].copy()
+        reason = _append_reason(reason, "right_empty")
+
+    left_mask_sm, left_changed = _smooth_binary_mask(left_mask)
+    right_mask_sm, right_changed = _smooth_binary_mask(right_mask)
+
+    left_mask_connected, right_mask_connected, component_flags, reassigned_pixels = _enforce_single_component(
+        left_mask_sm,
+        right_mask_sm,
+        eye_left,
+        eye_right,
+    )
+
+    def _ncc(mask: np.ndarray) -> int:
+        return int(measure.label(mask.astype(bool), connectivity=2).max())
+
+    smoothing_flags = np.array([left_changed, right_changed], dtype=bool) | component_flags
+
+    masks_out[0] = left_mask_connected.astype(np.uint8)
+    masks_out[1] = right_mask_connected.astype(np.uint8)
 
     contours: List[Optional[np.ndarray]] = [None, None]
-    for eye_idx, mask in enumerate((left_mask, right_mask)):
+    for eye_idx, mask in enumerate((left_mask_connected, right_mask_connected)):
         (
             success,
             ellipse,
@@ -333,9 +599,57 @@ def _refine_roi(
         centroids,
         (contours[0], contours[1]),
         eye_separation,
-        used_original_order,
         reason,
+        smoothing_flags,
+        int(reassigned_pixels),
+        used_probabilities,
     )
+
+
+def _process_refine_chunk(
+    zarr_path: str,
+    masks_path: str,
+    keypoints_path: str,
+    heading_path: str,
+    success_path: str,
+    mask_probs_path: Optional[str],
+    start: int,
+    stop: int,
+) -> List[Tuple[int, ROIOutput]]:
+    """Process a batch of ROI indices and return their refinement outputs."""
+    slice_obj = slice(start, stop)
+
+    masks_np = np.asarray(_get_zarr_array(zarr_path, masks_path)[slice_obj])
+    keypoints_np = np.asarray(_get_zarr_array(zarr_path, keypoints_path)[slice_obj])
+    heading_np = np.asarray(_get_zarr_array(zarr_path, heading_path)[slice_obj])
+    success_np = np.asarray(_get_zarr_array(zarr_path, success_path)[slice_obj])
+    mask_probs_np = (
+        np.asarray(_get_zarr_array(zarr_path, mask_probs_path)[slice_obj])
+        if mask_probs_path
+        else None
+    )
+
+    results: List[Tuple[int, ROIOutput]] = []
+    for local_idx in range(masks_np.shape[0]):
+        global_idx = start + local_idx
+        source_masks = masks_np[local_idx]
+        keypoints_roi = keypoints_np[local_idx]
+        heading = float(heading_np[local_idx])
+        success_flag = bool(success_np[local_idx])
+        mask_probs_roi = mask_probs_np[local_idx] if mask_probs_np is not None else None
+        results.append(
+            (
+                global_idx,
+                _refine_roi(
+                    source_masks,
+                    keypoints_roi,
+                    heading,
+                    success_flag,
+                    mask_probs=mask_probs_roi,
+                ),
+            )
+        )
+    return results
 
 
 def refine_eye_masks(
@@ -345,12 +659,16 @@ def refine_eye_masks(
     *,
     keypoint_run: Optional[str] = None,
     chunk_size: int = 1024,
+    scheduler: str = "processes",
+    num_workers: Optional[int] = None,
     console: Optional[Console] = None,
 ) -> str:
     """Refine an eye-mask run and return the name of the new run."""
 
     console = console or Console()
     stage_start = time.perf_counter()
+
+    zarr_path = str(Path(zarr_path))
 
     root = zarr.open(zarr_path, mode="a")
 
@@ -384,12 +702,14 @@ def refine_eye_masks(
         if arr not in kp_group:
             raise ValueError(f"Keypoint run '{keypoint_run_name}' missing '{arr}'.")
 
-    masks_src = src_run["masks_roi"]
-    total_rois, _, roi_h, roi_w = masks_src.shape
-
-    kp_roi = kp_group["keypoints_roi"]
-    headings = kp_group["heading"]
-    success_flags = kp_group["detection_success"]
+    masks_ds = src_run["masks_roi"]
+    total_rois, _, roi_h, roi_w = masks_ds.shape
+    masks_path = f"eye_masks_runs/{src_run_name}/masks_roi"
+    keypoints_path = f"keypoints_runs/{keypoint_run_name}/keypoints_roi"
+    heading_path = f"keypoints_runs/{keypoint_run_name}/heading"
+    success_path = f"keypoints_runs/{keypoint_run_name}/detection_success"
+    has_mask_probs = "mask_probs_roi" in src_run
+    mask_probs_path = f"eye_masks_runs/{src_run_name}/mask_probs_roi" if has_mask_probs else None
 
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
 
@@ -418,74 +738,100 @@ def refine_eye_masks(
         "copied_original": 0,
         "keypoint_fail": 0,
         "empty_union": 0,
-        "original_order": 0,
+        "smoothed_rois": 0,
+        "smoothed_channels": 0,
+        "components_reassigned": 0,
+        "chunk_size": chunk_size,
+        "probability_split": 0,
+        "assigned_by_keypoint": 0,
     }
 
-    progress = Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TimeRemainingColumn(),
-        console=console,
-    )
+    scheduler_key = (scheduler or "processes").lower()
+    if scheduler_key not in {"threads", "processes"}:
+        console.print(f"[yellow]Unknown scheduler '{scheduler_key}', defaulting to 'threads'.[/yellow]")
+        scheduler_key = "threads"
 
-    with progress:
-        task = progress.add_task("[cyan]Refining eye masks[/cyan]", total=total_rois)
-        for start in range(0, total_rois, max(1, chunk_size)):
-            end = min(total_rois, start + max(1, chunk_size))
-            masks_chunk = masks_src[start:end]
-            kp_chunk = kp_roi[start:end]
-            heading_chunk = headings[start:end]
-            success_chunk = success_flags[start:end]
+    compute_kwargs: Dict[str, object] = {"scheduler": scheduler_key}
+    if num_workers is not None:
+        compute_kwargs["num_workers"] = int(num_workers)
 
-            for local_idx, global_idx in enumerate(range(start, end)):
-                result = _refine_roi(
-                    np.asarray(masks_chunk[local_idx]),
-                    np.asarray(kp_chunk[local_idx]),
-                    float(heading_chunk[local_idx]),
-                    bool(success_chunk[local_idx]),
+    chunk_size = max(1, chunk_size)
+    tasks: List[object] = []
+    if total_rois > 0:
+        for start in range(0, total_rois, chunk_size):
+            stop = min(start + chunk_size, total_rois)
+            tasks.append(
+                delayed(_process_refine_chunk)(
+                    zarr_path,
+                    masks_path,
+                    keypoints_path,
+                    heading_path,
+                    success_path,
+                    mask_probs_path,
+                    start,
+                    stop,
                 )
+            )
 
-                masks_out[global_idx] = result.masks
-                ellipse_params[global_idx] = result.ellipse_params
-                ellipse_success[global_idx] = result.ellipse_success
-                feret_major[global_idx] = result.feret_major
-                feret_minor[global_idx] = result.feret_minor
-                feret_roundness[global_idx] = result.feret_roundness
-                eye_separation[global_idx] = result.eye_separation
+    chunk_results: List[List[Tuple[int, ROIOutput]]] = []
+    if tasks:
+        console.print(f"[cyan]Submitting {len(tasks)} chunk(s) to Dask ({scheduler_key})[/cyan]")
+        with ProgressBar():
+            chunk_results = list(dask.compute(*tasks, **compute_kwargs))
 
-                if result.contours[0] is not None:
-                    contour = result.contours[0]
-                    contour_len = contour.shape[0]
-                    left_ptr[global_idx] = left_total
-                    left_len[global_idx] = contour_len
-                    left_points.append(contour)
-                    left_total += contour_len
-                if result.contours[1] is not None:
-                    contour = result.contours[1]
-                    contour_len = contour.shape[0]
-                    right_ptr[global_idx] = right_total
-                    right_len[global_idx] = contour_len
-                    right_points.append(contour)
-                    right_total += contour_len
+    gathered_results: List[Tuple[int, ROIOutput]] = []
+    for chunk in chunk_results:
+        gathered_results.extend(chunk)
 
-                reason = result.reason or "refined"
-                if reason == "heading_split":
-                    stats["fallback_heading"] += 1
-                    stats["refined"] += 1
-                elif reason == "original_order":
-                    stats["original_order"] += 1
-                    stats["copied_original"] += 1
-                elif reason == "keypoint_fail":
-                    stats["keypoint_fail"] += 1
-                    stats["copied_original"] += 1
-                elif reason == "empty_union":
-                    stats["empty_union"] += 1
-                    stats["copied_original"] += 1
-                else:
-                    stats["refined"] += 1
+    gathered_results.sort(key=lambda item: item[0])
 
-            progress.update(task, advance=end - start)
+    for global_idx, result in gathered_results:
+        masks_out[global_idx] = result.masks
+        ellipse_params[global_idx] = result.ellipse_params
+        ellipse_success[global_idx] = result.ellipse_success
+        feret_major[global_idx] = result.feret_major
+        feret_minor[global_idx] = result.feret_minor
+        feret_roundness[global_idx] = result.feret_roundness
+        eye_separation[global_idx] = result.eye_separation
+        if result.smoothing_changed.any():
+            stats["smoothed_rois"] += 1
+            stats["smoothed_channels"] += int(result.smoothing_changed.sum())
+
+        if result.reassigned_pixels:
+            stats["components_reassigned"] += int(result.reassigned_pixels)
+        if result.used_probabilities:
+            stats["probability_split"] += 1
+
+        if result.contours[0] is not None:
+            contour = result.contours[0]
+            contour_len = contour.shape[0]
+            left_ptr[global_idx] = left_total
+            left_len[global_idx] = contour_len
+            left_points.append(contour)
+            left_total += contour_len
+        if result.contours[1] is not None:
+            contour = result.contours[1]
+            contour_len = contour.shape[0]
+            right_ptr[global_idx] = right_total
+            right_len[global_idx] = contour_len
+            right_points.append(contour)
+            right_total += contour_len
+
+        reason = result.reason or "refined"
+        reason_tags = set(reason.split("|")) if reason else set()
+        if "assigned_by_keypoint" in reason_tags:
+            stats["assigned_by_keypoint"] += 1
+        if reason == "heading_split":
+            stats["fallback_heading"] += 1
+            stats["refined"] += 1
+        elif reason == "keypoint_fail":
+            stats["keypoint_fail"] += 1
+            stats["copied_original"] += 1
+        elif reason == "empty_union":
+            stats["empty_union"] += 1
+            stats["copied_original"] += 1
+        else:
+            stats["refined"] += 1
 
     left_concat = np.concatenate(left_points, axis=0).astype(np.float32) if left_points else np.zeros((0, 2), dtype=np.float32)
     right_concat = np.concatenate(right_points, axis=0).astype(np.float32) if right_points else np.zeros((0, 2), dtype=np.float32)
@@ -575,7 +921,8 @@ def refine_eye_masks(
     )
 
     source_method = src_run.attrs.get("method", "unknown")
-    eye_labels = src_run.attrs.get("eye_labels", ["eye_left", "eye_right"])
+    source_eye_labels = list(src_run.attrs.get("eye_labels", ["eye_0", "eye_1"]))
+    eye_labels = ["eye_left", "eye_right"]
 
     total_eyes = int(ellipse_success.sum())
     successful_pairs = int(np.sum(ellipse_success.all(axis=1)))
@@ -584,6 +931,24 @@ def refine_eye_masks(
     git_info = get_git_info()
     env_info = get_environment_info()
     duration = time.perf_counter() - stage_start
+
+    smoothing_info = {
+        "mode": _SMOOTHING_MODE,
+        "enabled": (_SMOOTHING_MODE or "").lower() != "off",
+        "median_k": int(_MEDIAN_K),
+        "sdf_sigma": float(_SDF_SIGMA),
+        "morph_closing_radius": int(_MORPH_CLOSING_RADIUS),
+        "morph_opening_radius": int(_MORPH_OPENING_RADIUS),
+        "closing_radius": int(_MORPH_CLOSING_RADIUS),
+        "opening_radius": int(_MORPH_OPENING_RADIUS),
+        "min_object_area": int(_MIN_OBJECT_AREA),
+        "rois_modified": int(stats["smoothed_rois"]),
+        "channels_modified": int(stats["smoothed_channels"]),
+        "components_reassigned": int(stats["components_reassigned"]),
+        "probabilities_available": bool(has_mask_probs),
+        "probability_threshold": float(_PROBABILITY_THRESHOLD),
+        "probability_splits": int(stats["probability_split"]),
+    }
 
     run_group.attrs.update(
         {
@@ -598,7 +963,15 @@ def refine_eye_masks(
             "successful_roi_pair_rate": pair_rate,
             "refine_stats": stats,
             "duration_seconds": duration,
+            "source_eye_labels": source_eye_labels,
             "eye_labels": eye_labels,
+            "smoothing": smoothing_info,
+            "mask_probabilities_available": bool(has_mask_probs),
+            "mask_probability_threshold": float(_PROBABILITY_THRESHOLD) if has_mask_probs else None,
+            "dask_scheduler": scheduler_key,
+            "dask_num_workers": int(num_workers) if num_workers is not None else None,
+            "dask_chunk_size": chunk_size,
+            "dask_version": getattr(dask, "__version__", "unknown"),
             "git_commit": git_info.get("commit_hash", "unknown"),
             "git_branch": git_info.get("branch", "unknown"),
             "hostname": env_info["platform"].get("hostname", "unknown"),
@@ -606,7 +979,7 @@ def refine_eye_masks(
     )
 
     console.print(
-        f"[green]✓[/green] Refined eye masks saved to [cyan]eye_masks_runs/{resolved_run_name}[/cyan] "
+        f"[green]✓[/green] Refined eye masks saved to [cyan]{REFINED_STAGE_NAME}_runs/{resolved_run_name}[/cyan] "
         f"({successful_pairs}/{total_rois} ROI pairs refined)"
     )
     return resolved_run_name
@@ -633,6 +1006,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=1024,
         help="Number of ROIs to refine per chunk (default: 1024).",
     )
+    parser.add_argument(
+        "--scheduler",
+        choices=["threads", "processes"],
+        default="processes",
+        help="Dask scheduler to use for refinement (default: processes).",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="Number of worker threads/processes for the Dask scheduler.",
+    )
     return parser
 
 
@@ -648,6 +1033,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             run_name=args.run_name,
             keypoint_run=args.keypoint_run,
             chunk_size=args.chunk_size,
+            scheduler=args.scheduler,
+            num_workers=args.num_workers,
             console=console,
         )
     except Exception as exc:
