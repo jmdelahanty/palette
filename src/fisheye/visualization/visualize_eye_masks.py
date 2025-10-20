@@ -1,7 +1,8 @@
 """Interactive visualizer for eye mask segmentation runs.
 
-Displays ROI crops with left/right eye masks overlaid, using the masks produced
-by the `eye_masks` pipeline stage. Useful for spot-checking segmentation quality.
+Displays ROI crops with eye masks overlaid, using the masks produced
+by the `eye_masks` pipeline stage. Handles both traditional left/right masks and
+YOLO index-ordered masks, highlighting when refinement has not yet been applied.
 """
 
 from __future__ import annotations
@@ -79,6 +80,73 @@ class EyeMaskViewer:
                 f"Mask count ({self.masks.shape[0]}) does not match ROI count ({self.total})"
             )
 
+        self.channel_count = int(self.masks.shape[1])
+        raw_labels = eye_group.attrs.get("eye_labels")
+        if isinstance(raw_labels, (list, tuple)) and len(raw_labels) >= self.channel_count:
+            self.eye_labels = [str(raw_labels[i]) for i in range(self.channel_count)]
+        else:
+            default_labels = ["eye_left", "eye_right"]
+            self.eye_labels = [
+                default_labels[i] if i < len(default_labels) else f"eye_{i}"
+                for i in range(self.channel_count)
+            ]
+
+        normalized = [label.lower() for label in self.eye_labels]
+        refined_template = ["eye_left", "eye_right"]
+        self.is_refined = (
+            self.channel_count == 2 and normalized == refined_template[: self.channel_count]
+        )
+
+        self.display_names = [
+            self._friendly_label(label, idx) for idx, label in enumerate(self.eye_labels)
+        ]
+
+        if self.is_refined:
+            base_rgb = [
+                np.array([0.1, 0.4, 0.95], dtype=np.float32),
+                np.array([0.95, 0.2, 0.2], dtype=np.float32),
+            ]
+            base_hex = ["#1a66f3", "#f85151"]
+        else:
+            base_rgb = [
+                np.array([0.2, 0.75, 0.45], dtype=np.float32),
+                np.array([0.85, 0.6, 0.15], dtype=np.float32),
+            ]
+            base_hex = ["#2fcc72", "#d89d1a"]
+        self.channel_colors = [base_rgb[i % len(base_rgb)] for i in range(self.channel_count)]
+        self.channel_hex = [base_hex[i % len(base_hex)] for i in range(self.channel_count)]
+        self.overlay_alpha = 0.45
+        self._unrefined_note = (
+            None
+            if self.is_refined
+            else (
+                "Channels reflect YOLO index order "
+                f"(eye_labels={', '.join(self.eye_labels)}); run refinement to align left/right."
+            )
+        )
+
+    @staticmethod
+    def _friendly_label(label: Optional[str], idx: int) -> str:
+        if label is None:
+            return f"Eye {idx}"
+        lower = str(label).lower()
+        if lower in {"eye_left", "left", "left_eye"}:
+            return "Left"
+        if lower in {"eye_right", "right", "right_eye"}:
+            return "Right"
+        if lower.startswith("eye_"):
+            suffix = lower[4:]
+            if suffix.isdigit():
+                return f"Eye {int(suffix)}"
+            return suffix.replace("_", " ").title()
+        return str(label).title()
+
+    @staticmethod
+    def _format_measure(value: Optional[float], precision: int = 1) -> str:
+        if value is None or not np.isfinite(value):
+            return "--"
+        return f"{value:.{precision}f}"
+
     def _axis_endpoints(
         self, cx: float, cy: float, major: float, minor: float, orientation_deg: float
     ) -> dict[str, tuple[tuple[float, float], tuple[float, float]]]:
@@ -129,96 +197,103 @@ class EyeMaskViewer:
     ) -> tuple[
         np.ndarray,
         str,
-        dict[str, dict[str, tuple[tuple[float, float], tuple[float, float]]]],
+        List[dict[str, tuple[tuple[float, float], tuple[float, float]]]],
         Optional[List[np.ndarray]],
         np.ndarray,
         List[np.ndarray],
     ]:
         roi = np.asarray(self.roi_images[idx])
-        mask_left = np.asarray(self.masks[idx, 0])
-        mask_right = np.asarray(self.masks[idx, 1])
-        success_left = bool(self.ellipse_success[idx, 0])
-        success_right = bool(self.ellipse_success[idx, 1])
-
         base = normalize_roi(roi)
         overlay = np.dstack([base, base, base])
 
-        alpha = 0.45
-        blue = np.array([0.1, 0.4, 0.95], dtype=np.float32)
-        red = np.array([0.95, 0.2, 0.2], dtype=np.float32)
+        success_flag = bool(self.success_flags[idx])
+        summary_lines = [
+            f"ROI {idx + 1}/{self.total} | keypoints: {'ok' if success_flag else 'fail'}"
+        ]
 
-        left_mask = mask_left > 0
-        right_mask = mask_right > 0
+        mask_list: List[np.ndarray] = []
+        axes_data: List[dict[str, tuple[tuple[float, float], tuple[float, float]]]] = []
 
-        overlay[left_mask] = (1 - alpha) * overlay[left_mask] + alpha * blue
-        overlay[right_mask] = (1 - alpha) * overlay[right_mask] + alpha * red
+        ellipse_info = np.asarray(self.ellipse_params[idx])
 
-        left_area = int(mask_left.sum())
-        right_area = int(mask_right.sum())
+        for ch_idx in range(self.channel_count):
+            mask = np.asarray(self.masks[idx, ch_idx])
+            mask_list.append(mask)
+            mask_bool = mask > 0
+            color = self.channel_colors[ch_idx]
+            overlay[mask_bool] = (1 - self.overlay_alpha) * overlay[mask_bool] + self.overlay_alpha * color
 
-        ellipse_info = self.ellipse_params[idx]
-        left_major, left_minor = ellipse_info[0, 2:4]
-        right_major, right_minor = ellipse_info[1, 2:4]
-        left_cx, left_cy, left_theta = ellipse_info[0, 0], ellipse_info[0, 1], ellipse_info[0, 4]
-        right_cx, right_cy, right_theta = ellipse_info[1, 0], ellipse_info[1, 1], ellipse_info[1, 4]
+            area = int(mask.sum())
 
-        axes_data: dict[str, dict[str, tuple[tuple[float, float], tuple[float, float]]]] = {
-            "left": {},
-            "right": {},
-        }
+            success = (
+                bool(self.ellipse_success[idx, ch_idx])
+                if ch_idx < self.ellipse_success.shape[1]
+                else False
+            )
+            ellipse_row = (
+                ellipse_info[ch_idx]
+                if ch_idx < ellipse_info.shape[0]
+                else np.full(5, np.nan, dtype=np.float32)
+            )
+            cx, cy, major_len_raw, minor_len_raw, theta = (
+                float(ellipse_row[0]),
+                float(ellipse_row[1]),
+                float(ellipse_row[2]),
+                float(ellipse_row[3]),
+                float(ellipse_row[4]),
+            )
 
-        feret_lengths = {"left": None, "right": None}
-        feret_minor_lengths = {"left": None, "right": None}
-        feret_roundness = {"left": None, "right": None}
+            channel_axes: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {}
+            feret_len = None
+            feret_minor_len = None
+            feret_round_val = None
 
-        for side_idx, side in enumerate(("left", "right")):
-            axes_data[side] = {}
-            if self.feret_major is not None:
-                major_seg = self.feret_major[idx, side_idx]
+            if self.feret_major is not None and ch_idx < self.feret_major.shape[1]:
+                major_seg = self.feret_major[idx, ch_idx]
                 if np.all(np.isfinite(major_seg)):
-                    axes_data[side]["major"] = (
+                    channel_axes["major"] = (
                         (major_seg[0], major_seg[1]),
                         (major_seg[2], major_seg[3]),
                     )
-                    feret_lengths[side] = self._length_from_segment(major_seg)
-            if self.feret_minor is not None:
-                minor_seg = self.feret_minor[idx, side_idx]
+                    feret_len = self._length_from_segment(major_seg)
+            if self.feret_minor is not None and ch_idx < self.feret_minor.shape[1]:
+                minor_seg = self.feret_minor[idx, ch_idx]
                 if np.all(np.isfinite(minor_seg)):
-                    axes_data[side]["minor"] = (
+                    channel_axes["minor"] = (
                         (minor_seg[0], minor_seg[1]),
                         (minor_seg[2], minor_seg[3]),
                     )
-                    feret_minor_lengths[side] = self._length_from_segment(minor_seg)
-            if self.feret_roundness is not None:
-                feret_roundness[side] = float(self.feret_roundness[idx, side_idx])
+                    feret_minor_len = self._length_from_segment(minor_seg)
+            if self.feret_roundness is not None and ch_idx < self.feret_roundness.shape[1]:
+                feret_round_val = float(self.feret_roundness[idx, ch_idx])
 
-        if success_left and "major" not in axes_data["left"]:
-            axes_data["left"] = self._axis_endpoints(left_cx, left_cy, left_major, left_minor, left_theta)
-        if success_right and "major" not in axes_data["right"]:
-            axes_data["right"] = self._axis_endpoints(right_cx, right_cy, right_major, right_minor, right_theta)
+            if success and "major" not in channel_axes:
+                channel_axes = self._axis_endpoints(cx, cy, major_len_raw, minor_len_raw, theta)
 
-        success_flag = bool(self.success_flags[idx])
-        left_major_len = feret_lengths["left"] or left_major
-        left_minor_len = feret_minor_lengths["left"] or left_minor
-        right_major_len = feret_lengths["right"] or right_major
-        right_minor_len = feret_minor_lengths["right"] or right_minor
-        left_round = feret_roundness["left"]
-        right_round = feret_roundness["right"]
+            axes_data.append(channel_axes)
 
-        summary_lines = [
-            f"ROI {idx + 1}/{self.total} | keypoints: {'ok' if success_flag else 'fail'}",
-            f"Left: area={left_area} success={success_left} major={left_major_len:.1f} minor={left_minor_len:.1f}"
-            + (f" round={left_round:.2f}" if left_round is not None and np.isfinite(left_round) else ""),
-            f"Right: area={right_area} success={success_right} major={right_major_len:.1f} minor={right_minor_len:.1f}"
-            + (f" round={right_round:.2f}" if right_round is not None and np.isfinite(right_round) else ""),
-        ]
+            display_name = self.display_names[ch_idx]
+            major_len = feret_len if feret_len is not None else major_len_raw
+            minor_len = feret_minor_len if feret_minor_len is not None else minor_len_raw
+            summary_line = (
+                f"{display_name}: area={area} success={success} "
+                f"major={self._format_measure(major_len)} minor={self._format_measure(minor_len)}"
+            )
+            if feret_round_val is not None and np.isfinite(feret_round_val):
+                summary_line += f" round={feret_round_val:.2f}"
+            summary_lines.append(summary_line)
+
+        if self._unrefined_note:
+            summary_lines.append(self._unrefined_note)
+
         summary = "\n".join(summary_lines)
         prob_maps: Optional[List[np.ndarray]] = None
         if self.mask_probs is not None:
-            prob_left = np.asarray(self.mask_probs[idx, 0], dtype=np.float32)
-            prob_right = np.asarray(self.mask_probs[idx, 1], dtype=np.float32)
-            prob_maps = [prob_left, prob_right]
-        return overlay, summary, axes_data, prob_maps, base, [mask_left, mask_right]
+            prob_maps = [
+                np.asarray(self.mask_probs[idx, ch_idx], dtype=np.float32)
+                for ch_idx in range(self.channel_count)
+            ]
+        return overlay, summary, axes_data, prob_maps, base, mask_list
 
 
 def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[str], keypoint_run: Optional[str]) -> None:
@@ -258,31 +333,28 @@ def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[st
 
     raw_artist = ax_raw.imshow(base_roi, cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
 
-    colors = {"left": "#1a66f3", "right": "#f85151"}
-    line_major = {}
-    line_minor = {}
-    for side in ("left", "right"):
-        if axes[side]:
-            major_pts = axes[side].get("major", ((np.nan, np.nan), (np.nan, np.nan)))
-            minor_pts = axes[side].get("minor", ((np.nan, np.nan), (np.nan, np.nan)))
-        else:
-            major_pts = ((np.nan, np.nan), (np.nan, np.nan))
-            minor_pts = ((np.nan, np.nan), (np.nan, np.nan))
+    line_major: List = []
+    line_minor: List = []
+    for ch_idx in range(viewer.channel_count):
+        color = viewer.channel_hex[ch_idx % len(viewer.channel_hex)]
+        axis_entry = axes[ch_idx] if ch_idx < len(axes) else {}
+        major_pts = axis_entry.get("major", ((np.nan, np.nan), (np.nan, np.nan)))
+        minor_pts = axis_entry.get("minor", ((np.nan, np.nan), (np.nan, np.nan)))
         (major_line,) = ax_overlay.plot(
             [major_pts[0][0], major_pts[1][0]],
             [major_pts[0][1], major_pts[1][1]],
-            color=colors[side],
+            color=color,
             linewidth=1.8,
         )
         (minor_line,) = ax_overlay.plot(
             [minor_pts[0][0], minor_pts[1][0]],
             [minor_pts[0][1], minor_pts[1][1]],
-            color=colors[side],
+            color=color,
             linewidth=1.2,
             linestyle="--",
         )
-        line_major[side] = major_line
-        line_minor[side] = minor_line
+        line_major.append(major_line)
+        line_minor.append(minor_line)
 
     slider = Slider(
         ax=slider_ax,
@@ -296,12 +368,17 @@ def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[st
     prob_images: List = []
     bin_images: List = []
     prob_axes_list = []
-    prob_titles = ["Left Probability", "Right Probability"]
-    bin_titles = ["Left Binary Mask", "Right Binary Mask"]
+    prob_titles = [f"{name} Probability" for name in viewer.display_names]
+    bin_titles = [f"{name} Binary Mask" for name in viewer.display_names]
 
-    sub_gs = prob_panel.subgridspec(2, 2, hspace=0.25, wspace=0.2)
-    prob_maps_init = probs if probs is not None else [np.zeros_like(base_roi)] * 2
-    for col, (title, prob_map) in enumerate(zip(prob_titles, prob_maps_init)):
+    sub_gs = prob_panel.subgridspec(2, max(1, viewer.channel_count), hspace=0.25, wspace=0.2)
+    if probs is None:
+        prob_maps_init = [np.zeros_like(base_roi, dtype=np.float32) for _ in range(viewer.channel_count)]
+    else:
+        prob_maps_init = probs
+
+    for col, title in enumerate(prob_titles):
+        prob_map = prob_maps_init[col] if col < len(prob_maps_init) else np.zeros_like(base_roi, dtype=np.float32)
         ax_prob = fig.add_subplot(sub_gs[0, col])
         ax_prob.set_title(title, fontsize=9)
         ax_prob.set_axis_off()
@@ -311,7 +388,8 @@ def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[st
     if prob_axes_list:
         fig.colorbar(prob_images[0], ax=prob_axes_list, fraction=0.046, pad=0.04)
 
-    for col, (title, bin_map) in enumerate(zip(bin_titles, bin_masks)):
+    for col, title in enumerate(bin_titles):
+        bin_map = bin_masks[col] if col < len(bin_masks) else np.zeros_like(base_roi)
         ax_bin = fig.add_subplot(sub_gs[1, col])
         ax_bin.set_title(title, fontsize=9)
         ax_bin.set_axis_off()
@@ -325,27 +403,33 @@ def create_viewer(zarr_path: Path, eye_run: Optional[str], crop_run: Optional[st
         image_artist.set_data(overlay)
         info_text.set_text(info)
         raw_artist.set_data(base_img)
-        for side in ("left", "right"):
-            if axes[side]:
-                major_pts = axes[side].get("major", ((np.nan, np.nan), (np.nan, np.nan)))
-                minor_pts = axes[side].get("minor", ((np.nan, np.nan), (np.nan, np.nan)))
-            else:
-                major_pts = ((np.nan, np.nan), (np.nan, np.nan))
-                minor_pts = ((np.nan, np.nan), (np.nan, np.nan))
-            line_major[side].set_data(
+        for ch_idx in range(len(line_major)):
+            axis_entry = axes[ch_idx] if ch_idx < len(axes) else {}
+            major_pts = axis_entry.get("major", ((np.nan, np.nan), (np.nan, np.nan)))
+            minor_pts = axis_entry.get("minor", ((np.nan, np.nan), (np.nan, np.nan)))
+            line_major[ch_idx].set_data(
                 [major_pts[0][0], major_pts[1][0]],
                 [major_pts[0][1], major_pts[1][1]],
             )
-            line_minor[side].set_data(
+            line_minor[ch_idx].set_data(
                 [minor_pts[0][0], minor_pts[1][0]],
                 [minor_pts[0][1], minor_pts[1][1]],
             )
         if prob_images:
             if prob_maps is None:
-                prob_maps = [np.zeros_like(prob_images[0].get_array()), np.zeros_like(prob_images[1].get_array())]
-            for im, prob_map in zip(prob_images, prob_maps):
+                prob_seq = [np.zeros_like(im.get_array()) for im in prob_images]
+            else:
+                prob_seq = [
+                    prob_maps[i] if i < len(prob_maps) else np.zeros_like(prob_images[i].get_array())
+                    for i in range(len(prob_images))
+                ]
+            for im, prob_map in zip(prob_images, prob_seq):
                 im.set_data(prob_map)
-        for im, mask_map in zip(bin_images, mask_pair):
+        for idx_img, im in enumerate(bin_images):
+            if idx_img < len(mask_pair):
+                mask_map = mask_pair[idx_img]
+            else:
+                mask_map = np.zeros_like(bin_images[0].get_array()) if bin_images else np.zeros_like(base_img)
             im.set_data(mask_map)
         fig.canvas.draw_idle()
 

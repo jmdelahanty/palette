@@ -564,16 +564,15 @@ def _extract_candidates(
     return candidate_list[:2]
 
 
-def _assign_left_right(candidates: Sequence[EyeCandidate]) -> List[Optional[EyeCandidate]]:
-    if not candidates:
-        return [None, None]
-    ordered = sorted(candidates, key=lambda c: c.centroid_xy[0])
-    result: List[Optional[EyeCandidate]] = [None, None]
-    if ordered:
-        result[0] = ordered[0]
-    if len(ordered) > 1:
-        result[1] = ordered[1]
-    return result
+def _select_eye_candidates(candidates: Sequence[EyeCandidate], max_eyes: int = 2) -> List[Optional[EyeCandidate]]:
+    """Return up to ``max_eyes`` candidates, padding with ``None`` if needed."""
+    if max_eyes <= 0:
+        return []
+    ordered = list(candidates)
+    selected: List[Optional[EyeCandidate]] = ordered[:max_eyes]
+    while len(selected) < max_eyes:
+        selected.append(None)
+    return selected
 
 
 def segment_eye_masks_yolo(
@@ -664,14 +663,10 @@ def segment_eye_masks_yolo(
     ellipse_success = np.zeros((total_rois, 2), dtype=bool)
     eye_separation = np.full((total_rois,), np.nan, dtype=np.float32)
 
-    left_ptr = np.full((total_rois,), -1, dtype=np.int64)
-    right_ptr = np.full((total_rois,), -1, dtype=np.int64)
-    left_len = np.zeros((total_rois,), dtype=np.int32)
-    right_len = np.zeros((total_rois,), dtype=np.int32)
-    left_points: List[np.ndarray] = []
-    right_points: List[np.ndarray] = []
-    left_total = 0
-    right_total = 0
+    contour_ptr = np.full((total_rois, 2), -1, dtype=np.int64)
+    contour_len = np.zeros((total_rois, 2), dtype=np.int32)
+    contour_points: List[List[np.ndarray]] = [[], []]
+    contour_totals = [0, 0]
 
     successful_pairs = 0
 
@@ -740,7 +735,6 @@ def segment_eye_masks_yolo(
                 retina_active = bool(model_kwargs.get("retina_masks", False)) and retina_flag_supported and not _DEFAULT_LEGACY_MASKS
 
                 for idx, result in enumerate(results):
-                    # _MASK_PROB_CACHE.clear()
                     global_idx = start + idx
                     if _DEFAULT_LEGACY_MASKS:
                         (
@@ -850,11 +844,11 @@ def segment_eye_masks_yolo(
                         adaptive_scale,
                         adaptive_cap,
                     )
-                    left_right = _assign_left_right(candidates)
+                    candidate_slots = _select_eye_candidates(candidates)
 
                     centroids: List[Optional[Tuple[float, float]]] = [None, None]
 
-                    for eye_idx, candidate in enumerate(left_right):
+                    for eye_idx, candidate in enumerate(candidate_slots):
                         if candidate is None:
                             continue
                         bin_mask = candidate.mask.astype(np.uint8)
@@ -870,16 +864,10 @@ def segment_eye_masks_yolo(
                         centroids[eye_idx] = candidate.centroid_xy
                         if candidate.contour_xy is not None:
                             contour = candidate.contour_xy
-                            if eye_idx == 0:
-                                left_ptr[global_idx] = left_total
-                                left_len[global_idx] = contour.shape[0]
-                                left_points.append(contour)
-                                left_total += contour.shape[0]
-                            else:
-                                right_ptr[global_idx] = right_total
-                                right_len[global_idx] = contour.shape[0]
-                                right_points.append(contour)
-                                right_total += contour.shape[0]
+                            contour_ptr[global_idx, eye_idx] = contour_totals[eye_idx]
+                            contour_len[global_idx, eye_idx] = contour.shape[0]
+                            contour_points[eye_idx].append(contour)
+                            contour_totals[eye_idx] += contour.shape[0]
 
                     if all(point is not None for point in centroids):
                         left_pt = centroids[0]
@@ -900,14 +888,18 @@ def segment_eye_masks_yolo(
     pmax_p95 = float(np.percentile(pmax_arr, 95)) if pmax_arr.size else float("nan")
     mid_frac_mean = float(mid_arr.mean()) if mid_arr.size else float("nan")
 
-    left_concat = (
-        np.concatenate(left_points, axis=0).astype(np.float32) if left_points else np.zeros((0, 2), dtype=np.float32)
-    )
-    right_concat = (
-        np.concatenate(right_points, axis=0).astype(np.float32) if right_points else np.zeros((0, 2), dtype=np.float32)
-    )
-    left_store = left_concat if left_concat.size > 0 else np.zeros((1, 2), dtype=np.float32)
-    right_store = right_concat if right_concat.size > 0 else np.zeros((1, 2), dtype=np.float32)
+    contour_concat = [
+        (
+            np.concatenate(contour_points[eye_idx], axis=0).astype(np.float32)
+            if contour_points[eye_idx]
+            else np.zeros((0, 2), dtype=np.float32)
+        )
+        for eye_idx in range(2)
+    ]
+    contour_store = [
+        concat if concat.size > 0 else np.zeros((1, 2), dtype=np.float32)
+        for concat in contour_concat
+    ]
 
     chunk_rois = min(512, total_rois) if total_rois > 0 else 1
     run_group.create_array(
@@ -947,20 +939,28 @@ def segment_eye_masks_yolo(
         chunks=(min(1024, total_rois),),
         overwrite=True,
     )
-    run_group.create_array("contour_left_ptr", data=left_ptr, overwrite=True)
-    run_group.create_array("contour_left_len", data=left_len, overwrite=True)
-    run_group.create_array("contour_right_ptr", data=right_ptr, overwrite=True)
-    run_group.create_array("contour_right_len", data=right_len, overwrite=True)
     run_group.create_array(
-        "contours_left",
-        data=left_store,
-        chunks=(max(1, min(4096, left_store.shape[0])), 2),
+        "contour_ptr",
+        data=contour_ptr,
+        chunks=(min(1024, total_rois), 2),
         overwrite=True,
     )
     run_group.create_array(
-        "contours_right",
-        data=right_store,
-        chunks=(max(1, min(4096, right_store.shape[0])), 2),
+        "contour_len",
+        data=contour_len,
+        chunks=(min(1024, total_rois), 2),
+        overwrite=True,
+    )
+    run_group.create_array(
+        "contours_eye0",
+        data=contour_store[0],
+        chunks=(max(1, min(4096, contour_store[0].shape[0])), 2),
+        overwrite=True,
+    )
+    run_group.create_array(
+        "contours_eye1",
+        data=contour_store[1],
+        chunks=(max(1, min(4096, contour_store[1].shape[0])), 2),
         overwrite=True,
     )
 
@@ -996,7 +996,7 @@ def segment_eye_masks_yolo(
             "successful_eyes": total_successful_eyes,
             "successful_roi_pairs": int(successful_pairs),
             "successful_roi_pair_rate": pair_rate,
-            "eye_labels": ["eye_left", "eye_right"],
+            "eye_labels": ["eye_0", "eye_1"],
             "git_commit": git_info.get("commit_hash", "unknown"),
             "git_branch": git_info.get("branch", "unknown"),
             "hostname": env_info["platform"].get("hostname", "unknown"),
