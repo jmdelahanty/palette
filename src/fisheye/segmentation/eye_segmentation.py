@@ -821,6 +821,8 @@ def segment_eye_masks(
             "git_commit": git_info.get("commit_hash", "unknown"),
             "git_branch": git_info.get("branch", "unknown"),
             "hostname": env_info["platform"].get("hostname", "unknown"),
+            "ellipse_angle_units": "degrees",
+            "ellipse_angle_ref": "skimage major-axis orientation, deg CCW from +x",
         }
     )
     run_group.attrs["rejected_overlap"] = int(overlap_rejects)

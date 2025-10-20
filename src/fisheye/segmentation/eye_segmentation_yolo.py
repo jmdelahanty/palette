@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Deque, Dict, List, Optional, Sequence, Tuple
@@ -175,6 +177,46 @@ def _ensure_process_mask_patch() -> None:
 
     _ops.process_mask_native = _wrapped_process_mask_native
     _PROCESS_MASK_PATCHED = True
+
+
+def _restore_process_mask_patch() -> None:
+    global _PROCESS_MASK_PATCHED, _ORIGINAL_PROCESS_MASK_NATIVE
+    if not _PROCESS_MASK_PATCHED:
+        return
+    try:
+        from ultralytics.utils import ops as _ops
+    except Exception:
+        _PROCESS_MASK_PATCHED = False
+        _ORIGINAL_PROCESS_MASK_NATIVE = None
+        return
+
+    if _ORIGINAL_PROCESS_MASK_NATIVE is not None:
+        _ops.process_mask_native = _ORIGINAL_PROCESS_MASK_NATIVE
+
+    _PROCESS_MASK_PATCHED = False
+    _ORIGINAL_PROCESS_MASK_NATIVE = None
+
+
+@contextmanager
+def _process_mask_patch(proto_factor: int, legacy: bool):
+    global _PROTO_UPSAMPLE_FACTOR, _DEFAULT_LEGACY_MASKS
+
+    prev_factor = _PROTO_UPSAMPLE_FACTOR
+    prev_legacy = _DEFAULT_LEGACY_MASKS
+    pre_existing_patch = _PROCESS_MASK_PATCHED
+
+    try:
+        _PROTO_UPSAMPLE_FACTOR = proto_factor
+        _DEFAULT_LEGACY_MASKS = legacy
+        if not pre_existing_patch:
+            _ensure_process_mask_patch()
+        yield _PROCESS_MASK_PATCHED
+    finally:
+        if not pre_existing_patch:
+            _restore_process_mask_patch()
+        _PROTO_UPSAMPLE_FACTOR = prev_factor
+        _DEFAULT_LEGACY_MASKS = prev_legacy
+        _MASK_PROB_CACHE.clear()
 
 
 def _pop_cached_prob_masks_any(roi_shape: Tuple[int, int]) -> Optional[np.ndarray]:
@@ -392,13 +434,74 @@ def _candidate_from_mask(mask: np.ndarray, prob_mask: Optional[np.ndarray] = Non
     )
 
 
-def _binarize_adaptive(prob_mask: np.ndarray, base_threshold: float) -> np.ndarray:
+def _soft_ellipse_from_prob(prob_mask: Optional[np.ndarray], component_mask: np.ndarray) -> Optional[np.ndarray]:
+    if prob_mask is None:
+        return None
+    if prob_mask.shape != component_mask.shape:
+        return None
+
+    weights = prob_mask.astype(np.float32, copy=False) * component_mask.astype(np.float32, copy=False)
+    weight_sum = float(weights.sum())
+    if weight_sum <= 1e-6 or not math.isfinite(weight_sum):
+        return None
+
+    yy, xx = np.indices(weights.shape, dtype=np.float32)
+    x_mean = float((weights * xx).sum() / weight_sum)
+    y_mean = float((weights * yy).sum() / weight_sum)
+
+    x_diff = xx - x_mean
+    y_diff = yy - y_mean
+
+    xx_moment = float((weights * x_diff * x_diff).sum() / weight_sum)
+    yy_moment = float((weights * y_diff * y_diff).sum() / weight_sum)
+    xy_moment = float((weights * x_diff * y_diff).sum() / weight_sum)
+
+    cov = np.array([[xx_moment, xy_moment], [xy_moment, yy_moment]], dtype=np.float32)
+    try:
+        eigvals, eigvecs = np.linalg.eigh(cov)
+    except np.linalg.LinAlgError:
+        return None
+
+    eigvals = np.clip(eigvals, 0.0, None)
+    order = np.argsort(eigvals)[::-1]
+    eigvals = eigvals[order]
+    eigvecs = eigvecs[:, order]
+
+    eps = 1e-12
+    if not np.isfinite(eigvals[0]) or not np.isfinite(eigvals[1]) or eigvals[0] < eps:
+        return None
+
+    major_length = float(4.0 * math.sqrt(eigvals[0]))
+    minor_length = float(4.0 * math.sqrt(max(eps, eigvals[1])))
+
+    orient_rad = math.atan2(float(eigvecs[1, 0]), float(eigvecs[0, 0]))
+    orient_deg = float(math.degrees(orient_rad))
+    if orient_deg < -90.0:
+        orient_deg += 180.0
+    elif orient_deg > 90.0:
+        orient_deg -= 180.0
+
+    return np.array([x_mean, y_mean, major_length, minor_length, orient_deg], dtype=np.float32)
+
+
+def _binarize_adaptive(
+    prob_mask: np.ndarray,
+    global_floor: float,
+    adaptive_scale: float,
+    adaptive_cap: float,
+) -> np.ndarray:
     pmax = float(prob_mask.max())
     if pmax <= 1e-6:
         return np.zeros_like(prob_mask, dtype=np.uint8)
 
-    adaptive = max(0.02, min(0.6, 0.6 * pmax))
-    threshold = max(base_threshold, adaptive)
+    floor = max(0.0, float(global_floor))
+    scale = max(0.0, float(adaptive_scale))
+    cap = max(0.0, min(1.0, float(adaptive_cap)))
+
+    adaptive = scale * pmax
+    if cap > 0.0:
+        adaptive = min(cap, adaptive)
+    threshold = max(floor, adaptive)
     binary = (prob_mask >= threshold).astype(np.uint8)
 
     if not binary.any():
@@ -413,11 +516,25 @@ def _binarize_adaptive(prob_mask: np.ndarray, base_threshold: float) -> np.ndarr
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
+    coords = np.argwhere(binary)
+    bounding_mask: Optional[np.ndarray] = None
+    if coords.size:
+        min_r, min_c = coords.min(axis=0)
+        max_r, max_c = coords.max(axis=0)
+        bounding_mask = np.zeros_like(binary, dtype=bool)
+        bounding_mask[min_r : max_r + 1, min_c : max_c + 1] = True
+
     inv = (1 - binary).astype(np.uint8)
+    if bounding_mask is not None:
+        inv[~bounding_mask] = 0
     num_holes, hole_labels = cv2.connectedComponents(inv, connectivity=8)
     for label_id in range(1, num_holes):
-        if np.sum(hole_labels == label_id) <= 10:
-            binary[hole_labels == label_id] = 1
+        hole_mask = hole_labels == label_id
+        if bounding_mask is not None and not np.any(hole_mask):
+            continue
+        hole_area = int(np.sum(hole_mask))
+        if hole_area <= 10:
+            binary[hole_mask] = 1
 
     return binary
 
@@ -425,13 +542,20 @@ def _binarize_adaptive(prob_mask: np.ndarray, base_threshold: float) -> np.ndarr
 def _extract_candidates(
     prob_masks: np.ndarray,
     mask_threshold: float,
+    adaptive_scale: float,
+    adaptive_cap: float,
 ) -> List[EyeCandidate]:
     if prob_masks.size == 0:
         return []
 
     candidate_list: List[EyeCandidate] = []
     for mask in prob_masks:
-        bin_mask = _binarize_adaptive(mask.astype(np.float32, copy=False), mask_threshold)
+        bin_mask = _binarize_adaptive(
+            mask.astype(np.float32, copy=False),
+            mask_threshold,
+            adaptive_scale,
+            adaptive_cap,
+        )
         candidate = _candidate_from_mask(bin_mask, mask.astype(np.float32, copy=False))
         if candidate is not None:
             candidate_list.append(candidate)
@@ -461,17 +585,23 @@ def segment_eye_masks_yolo(
     batch_size: int = 128,
     device: Optional[str] = None,
     imgsz: Optional[int] = None,
-    conf: float = 0.25,
+    conf: float = 0.05,
     iou: float = 0.5,
-    max_det: int = 4,
-    mask_threshold: float = 0.3,
+    max_det: int = 2,
+    mask_threshold: float = 0.05,
+    adaptive_scale: float = 0.6,
+    adaptive_cap: float = 0.6,
     use_retina_masks: bool = True,
-    proto_upsample_factor: int = 1,
+    proto_upsample_factor: int = 2,
     legacy_masks: bool = False,
     verbose: bool = False,
     console: Optional[Console] = None,
 ) -> str:
-    """Run a YOLO segmentation model to generate binary and probability eye masks."""
+    """Run a YOLO segmentation model to generate binary and probability eye masks.
+
+    The `mask_threshold` argument acts as the global floor for adaptive binarization; the
+    effective threshold per instance is `max(mask_threshold, min(adaptive_cap, adaptive_scale * pmax))`.
+    """
 
     from ultralytics import YOLO, __version__ as ultralytics_version
 
@@ -507,8 +637,7 @@ def segment_eye_masks_yolo(
 
     global _PROTO_UPSAMPLE_FACTOR, _DEFAULT_LEGACY_MASKS
     proto_factor = max(1, int(proto_upsample_factor))
-    _PROTO_UPSAMPLE_FACTOR = proto_factor
-    _DEFAULT_LEGACY_MASKS = bool(legacy_masks)
+    legacy_flag = bool(legacy_masks)
 
     total_rois = int(roi_images.shape[0])
     if total_rois == 0:
@@ -517,16 +646,22 @@ def segment_eye_masks_yolo(
         return ""
 
     roi_h, roi_w = int(roi_images.shape[1]), int(roi_images.shape[2])
+    if imgsz is None:
+        imgsz_resolved = int(max(roi_h, roi_w))
+        if verbose:
+            console.print(
+                f"[dim]imgsz not provided; using ROI max dimension {imgsz_resolved}[/dim]"
+            )
+    else:
+        imgsz_resolved = int(imgsz)
 
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
 
     masks = np.zeros((total_rois, 2, roi_h, roi_w), dtype=np.uint8)
     mask_probs = np.zeros((total_rois, 2, roi_h, roi_w), dtype=np.float16)
     ellipse_params = np.full((total_rois, 2, 5), np.nan, dtype=np.float32)
+    ellipse_params_soft = np.full((total_rois, 2, 5), np.nan, dtype=np.float32)
     ellipse_success = np.zeros((total_rois, 2), dtype=bool)
-    feret_axes_major = np.full((total_rois, 2, 4), np.nan, dtype=np.float32)
-    feret_axes_minor = np.full((total_rois, 2, 4), np.nan, dtype=np.float32)
-    feret_roundness = np.full((total_rois, 2), np.nan, dtype=np.float32)
     eye_separation = np.full((total_rois,), np.nan, dtype=np.float32)
 
     left_ptr = np.full((total_rois,), -1, dtype=np.int64)
@@ -540,198 +675,230 @@ def segment_eye_masks_yolo(
 
     successful_pairs = 0
 
-    _ensure_process_mask_patch()
+    stage_start = time.perf_counter()
     _MASK_PROB_CACHE.clear()
 
-    timer = Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TimeRemainingColumn(),
-        console=console,
-    )
+    with _process_mask_patch(proto_factor, legacy_flag) as patch_active:
+        if not patch_active and not legacy_flag and verbose:
+            console.print(
+                "[yellow]Soft mask hook unavailable; probability masks may remain Ultralytics defaults[/yellow]"
+            )
 
-    printed_prob_stats = False
-    prototype_fallback_logged = False
-    prototype_fallback_used = False
-    native_cache_logged = False
-    native_cache_used = False
-    fallback_failure_logged = False
-    retina_warning_logged = False
+        timer = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        )
 
-    model_kwargs: Dict[str, object] = {
-        "imgsz": imgsz,
-        "conf": conf,
-        "iou": iou,
-        "max_det": max_det,
-        "device": device,
-        "verbose": verbose,
-    }
-    if not legacy_masks and use_retina_masks is not None:
-        model_kwargs["retina_masks"] = use_retina_masks
-    retina_flag_supported = True
+        printed_prob_stats = False
+        prototype_fallback_logged = False
+        prototype_fallback_used = False
+        native_cache_logged = False
+        native_cache_used = False
+        fallback_failure_logged = False
+        retina_warning_logged = False
+        soft_rows_written = 0
+        pmax_samples: List[float] = []
+        mid_fraction_samples: List[float] = []
 
-    with timer:
-        task_id = timer.add_task("[cyan]Running YOLO segmentation...[/cyan]", total=total_rois)
-        for start in range(0, total_rois, batch_size):
-            end = min(start + batch_size, total_rois)
-            batch = np.asarray(roi_images[start:end])
-            rgb_batch = _repeat_to_rgb(batch)
+        model_kwargs: Dict[str, object] = {
+            "imgsz": imgsz_resolved,
+            "conf": conf,
+            "iou": iou,
+            "max_det": max_det,
+            "device": device,
+            "verbose": verbose,
+        }
+        if not legacy_flag and use_retina_masks is not None:
+            model_kwargs["retina_masks"] = use_retina_masks
+        retina_flag_supported = True
 
-            try:
-                results = model(rgb_batch, **model_kwargs)
-            except TypeError as exc:
-                if "retina_masks" in str(exc) and retina_flag_supported and "retina_masks" in model_kwargs:
-                    retina_flag_supported = False
-                    model_kwargs.pop("retina_masks", None)
-                    if not retina_warning_logged:
-                        console.print(
-                            "[yellow]Retina mask flag not supported by this Ultralytics build; falling back to default masks[/yellow]"
-                        )
-                        retina_warning_logged = True
+        with timer:
+            task_id = timer.add_task("[cyan]Running YOLO segmentation...[/cyan]", total=total_rois)
+            for start in range(0, total_rois, batch_size):
+                end = min(start + batch_size, total_rois)
+                batch = np.asarray(roi_images[start:end])
+                rgb_batch = _repeat_to_rgb(batch)
+
+                try:
                     results = model(rgb_batch, **model_kwargs)
-                else:
-                    raise
+                except TypeError as exc:
+                    if "retina_masks" in str(exc) and retina_flag_supported and "retina_masks" in model_kwargs:
+                        retina_flag_supported = False
+                        model_kwargs.pop("retina_masks", None)
+                        if not retina_warning_logged:
+                            console.print(
+                                "[yellow]Retina mask flag not supported by this Ultralytics build; falling back to default masks[/yellow]"
+                            )
+                            retina_warning_logged = True
+                        results = model(rgb_batch, **model_kwargs)
+                    else:
+                        raise
 
-            retina_active = bool(model_kwargs.get("retina_masks", False)) and retina_flag_supported and not _DEFAULT_LEGACY_MASKS
+                retina_active = bool(model_kwargs.get("retina_masks", False)) and retina_flag_supported and not _DEFAULT_LEGACY_MASKS
 
-            for idx, result in enumerate(results):
-                global_idx = start + idx
-                if _DEFAULT_LEGACY_MASKS:
-                    (
-                        prob_masks,
-                        mid_fraction,
-                        source_kind,
-                        used_cache,
-                        used_reconstruct,
-                        n_det_raw,
-                        n_cached,
-                        cache_qlen,
-                        n_boxes,
-                    ) = _resolve_soft_masks(
-                        result,
-                        (roi_h, roi_w),
-                        expect_soft=False,
-                        allow_fallback=False,
-                    )
-                else:
-                    (
-                        prob_masks,
-                        mid_fraction,
-                        source_kind,
-                        used_cache,
-                        used_reconstruct,
-                        n_det_raw,
-                        n_cached,
-                        cache_qlen,
-                        n_boxes,
-                    ) = _resolve_soft_masks(
-                        result,
-                        (roi_h, roi_w),
-                        expect_soft=retina_active,
-                        allow_fallback=True,
-                    )
-                n_det = int(prob_masks.shape[0]) if prob_masks.ndim >= 1 else 0
-                if verbose and not printed_prob_stats and prob_masks.size > 0:
-                    per_max = [float(pm.max()) for pm in prob_masks]
-                    per_mean = [float(pm.mean()) for pm in prob_masks]
-                    mid = float(((prob_masks > 1e-6) & (prob_masks < 1 - 1e-6)).mean())
-                    nz_mid: List[float] = []
-                    for pm in prob_masks:
-                        nz = pm[pm > 0]
-                        nz_mid.append(
-                            float(((nz > 1e-6) & (nz < 1 - 1e-6)).mean()) if nz.size else 0.0
-                        )
-                    console.print(
-                        "[cyan]mask probability stats[/cyan]: "
-                        f"mid_fraction(all)={mid:.6f} | "
-                        f"per_inst_max={[round(x, 4) for x in per_max[:6]]} | "
-                        f"per_inst_mean={[round(x, 5) for x in per_mean[:6]]} | "
-                        f"nz_mid={[round(x, 3) for x in nz_mid[:6]]}"
-                    )
-                    console.print(
-                        f"[cyan]path[/cyan]: retina_active={retina_active}, source={source_kind}, used_cache={used_cache}, "
-                        f"used_reconstruct={used_reconstruct}, cache_qlen={cache_qlen}, n_boxes={n_boxes}, "
-                        f"n_det={n_det_raw}, n_cached={n_cached}, n_final={n_det}"
-                    )
-                    printed_prob_stats = True
-                if (
-                    not used_cache
-                    and not used_reconstruct
-                    and not _DEFAULT_LEGACY_MASKS
-                    and mid_fraction <= 1e-6
-                ):
-                    rebuilt = _reconstruct_masks_from_protos(result, (roi_h, roi_w))
-                    if rebuilt is not None and rebuilt.size:
-                        prob_masks = rebuilt
-                        used_reconstruct = True
-                        source_kind = "reconstruct"
-                        mid_fraction = float(((prob_masks > 1e-6) & (prob_masks < 1 - 1e-6)).mean()) if prob_masks.size else 0.0
-                if used_reconstruct:
-                    prototype_fallback_used = True
-                if verbose and used_reconstruct and not prototype_fallback_logged:
-                    console.print("[yellow]Prototype-based mask reconstruction enabled to recover soft probabilities[/yellow]")
-                    prototype_fallback_logged = True
-                if used_cache:
-                    native_cache_used = True
-                if verbose and used_cache and not native_cache_logged:
-                    console.print("[cyan]Captured soft masks directly from Ultralytics process_mask_native hook[/cyan]")
-                    native_cache_logged = True
-                if (
-                    verbose
-                    and not used_reconstruct
-                    and not used_cache
-                    and mid_fraction <= 1e-6
-                    and not fallback_failure_logged
-                ):
-                    if retina_active:
-                        console.print(
-                            "[yellow]Retina masks appear binary and prototype reconstruction was unavailable; saved masks may be binary[/yellow]"
+                for idx, result in enumerate(results):
+                    # _MASK_PROB_CACHE.clear()
+                    global_idx = start + idx
+                    if _DEFAULT_LEGACY_MASKS:
+                        (
+                            prob_masks,
+                            mid_fraction,
+                            source_kind,
+                            used_cache,
+                            used_reconstruct,
+                            n_det_raw,
+                            n_cached,
+                            cache_qlen,
+                            n_boxes,
+                        ) = _resolve_soft_masks(
+                            result,
+                            (roi_h, roi_w),
+                            expect_soft=False,
+                            allow_fallback=False,
                         )
                     else:
-                        console.print(
-                            "[yellow]Prototype reconstruction could not be applied; saved probability masks may remain binary[/yellow]"
+                        (
+                            prob_masks,
+                            mid_fraction,
+                            source_kind,
+                            used_cache,
+                            used_reconstruct,
+                            n_det_raw,
+                            n_cached,
+                            cache_qlen,
+                            n_boxes,
+                        ) = _resolve_soft_masks(
+                            result,
+                            (roi_h, roi_w),
+                            expect_soft=retina_active,
+                            allow_fallback=True,
                         )
-                    fallback_failure_logged = True
-
-                candidates = _extract_candidates(prob_masks, mask_threshold)
-                left_right = _assign_left_right(candidates)
-
-                centroids: List[Optional[Tuple[float, float]]] = [None, None]
-
-                for eye_idx, candidate in enumerate(left_right):
-                    if candidate is None:
-                        continue
-                    bin_mask = candidate.mask.astype(np.uint8)
-                    masks[global_idx, eye_idx] = bin_mask
-                    if candidate.prob_mask is not None:
-                        mask_probs[global_idx, eye_idx] = candidate.prob_mask.astype(np.float16, copy=False)
-                    ellipse_params[global_idx, eye_idx] = candidate.ellipse_row
-                    ellipse_success[global_idx, eye_idx] = True
-                    centroids[eye_idx] = candidate.centroid_xy
-                    if candidate.contour_xy is not None:
-                        contour = candidate.contour_xy
-                        if eye_idx == 0:
-                            left_ptr[global_idx] = left_total
-                            left_len[global_idx] = contour.shape[0]
-                            left_points.append(contour)
-                            left_total += contour.shape[0]
+                    n_det = int(prob_masks.shape[0]) if prob_masks.ndim >= 1 else 0
+                    if prob_masks.size:
+                        pmax_samples.append(float(prob_masks.max()))
+                    else:
+                        pmax_samples.append(0.0)
+                    mid_fraction_samples.append(float(mid_fraction))
+                    if verbose and not printed_prob_stats and prob_masks.size > 0:
+                        per_max = [float(pm.max()) for pm in prob_masks]
+                        per_mean = [float(pm.mean()) for pm in prob_masks]
+                        mid = float(((prob_masks > 1e-6) & (prob_masks < 1 - 1e-6)).mean())
+                        nz_mid: List[float] = []
+                        for pm in prob_masks:
+                            nz = pm[pm > 0]
+                            nz_mid.append(
+                                float(((nz > 1e-6) & (nz < 1 - 1e-6)).mean()) if nz.size else 0.0
+                            )
+                        console.print(
+                            "[cyan]mask probability stats[/cyan]: "
+                            f"mid_fraction(all)={mid:.6f} | "
+                            f"per_inst_max={[round(x, 4) for x in per_max[:6]]} | "
+                            f"per_inst_mean={[round(x, 5) for x in per_mean[:6]]} | "
+                            f"nz_mid={[round(x, 3) for x in nz_mid[:6]]}"
+                        )
+                        console.print(
+                            f"[cyan]path[/cyan]: retina_active={retina_active}, source={source_kind}, used_cache={used_cache}, "
+                            f"used_reconstruct={used_reconstruct}, cache_qlen={cache_qlen}, n_boxes={n_boxes}, "
+                            f"n_det={n_det_raw}, n_cached={n_cached}, n_final={n_det}"
+                        )
+                        printed_prob_stats = True
+                    if (
+                        not used_cache
+                        and not used_reconstruct
+                        and not _DEFAULT_LEGACY_MASKS
+                        and mid_fraction <= 1e-6
+                    ):
+                        rebuilt = _reconstruct_masks_from_protos(result, (roi_h, roi_w))
+                        if rebuilt is not None and rebuilt.size:
+                            prob_masks = rebuilt
+                            used_reconstruct = True
+                            source_kind = "reconstruct"
+                            mid_fraction = float(((prob_masks > 1e-6) & (prob_masks < 1 - 1e-6)).mean()) if prob_masks.size else 0.0
+                    if used_reconstruct:
+                        prototype_fallback_used = True
+                    if verbose and used_reconstruct and not prototype_fallback_logged:
+                        console.print("[yellow]Prototype-based mask reconstruction enabled to recover soft probabilities[/yellow]")
+                        prototype_fallback_logged = True
+                    if used_cache:
+                        native_cache_used = True
+                    if verbose and used_cache and not native_cache_logged:
+                        console.print("[cyan]Captured soft masks directly from Ultralytics process_mask_native hook[/cyan]")
+                        native_cache_logged = True
+                    if (
+                        verbose
+                        and not used_reconstruct
+                        and not used_cache
+                        and mid_fraction <= 1e-6
+                        and not fallback_failure_logged
+                    ):
+                        if retina_active:
+                            console.print(
+                                "[yellow]Retina masks appear binary and prototype reconstruction was unavailable; saved masks may be binary[/yellow]"
+                            )
                         else:
-                            right_ptr[global_idx] = right_total
-                            right_len[global_idx] = contour.shape[0]
-                            right_points.append(contour)
-                            right_total += contour.shape[0]
+                            console.print(
+                                "[yellow]Prototype reconstruction could not be applied; saved probability masks may remain binary[/yellow]"
+                            )
+                        fallback_failure_logged = True
 
-                if all(point is not None for point in centroids):
-                    left_pt = centroids[0]
-                    right_pt = centroids[1]
-                    separation = math.hypot(left_pt[0] - right_pt[0], left_pt[1] - right_pt[1])
-                    eye_separation[global_idx] = float(separation)
-                    successful_pairs += 1
+                    candidates = _extract_candidates(
+                        prob_masks,
+                        mask_threshold,
+                        adaptive_scale,
+                        adaptive_cap,
+                    )
+                    left_right = _assign_left_right(candidates)
 
-            timer.update(task_id, advance=end - start)
+                    centroids: List[Optional[Tuple[float, float]]] = [None, None]
+
+                    for eye_idx, candidate in enumerate(left_right):
+                        if candidate is None:
+                            continue
+                        bin_mask = candidate.mask.astype(np.uint8)
+                        masks[global_idx, eye_idx] = bin_mask
+                        if candidate.prob_mask is not None:
+                            mask_probs[global_idx, eye_idx] = candidate.prob_mask.astype(np.float16, copy=False)
+                        ellipse_params[global_idx, eye_idx] = candidate.ellipse_row
+                        ellipse_success[global_idx, eye_idx] = True
+                        soft_row = _soft_ellipse_from_prob(candidate.prob_mask, bin_mask)
+                        if soft_row is not None:
+                            ellipse_params_soft[global_idx, eye_idx] = soft_row
+                            soft_rows_written += 1
+                        centroids[eye_idx] = candidate.centroid_xy
+                        if candidate.contour_xy is not None:
+                            contour = candidate.contour_xy
+                            if eye_idx == 0:
+                                left_ptr[global_idx] = left_total
+                                left_len[global_idx] = contour.shape[0]
+                                left_points.append(contour)
+                                left_total += contour.shape[0]
+                            else:
+                                right_ptr[global_idx] = right_total
+                                right_len[global_idx] = contour.shape[0]
+                                right_points.append(contour)
+                                right_total += contour.shape[0]
+
+                    if all(point is not None for point in centroids):
+                        left_pt = centroids[0]
+                        right_pt = centroids[1]
+                        separation = math.hypot(left_pt[0] - right_pt[0], left_pt[1] - right_pt[1])
+                        eye_separation[global_idx] = float(separation)
+                        successful_pairs += 1
+
+                timer.update(task_id, advance=end - start)
 
     _MASK_PROB_CACHE.clear()
+
+    duration = time.perf_counter() - stage_start
+
+    pmax_arr = np.asarray(pmax_samples, dtype=np.float32) if pmax_samples else np.array([], dtype=np.float32)
+    mid_arr = np.asarray(mid_fraction_samples, dtype=np.float32) if mid_fraction_samples else np.array([], dtype=np.float32)
+    pmax_mean = float(pmax_arr.mean()) if pmax_arr.size else float("nan")
+    pmax_p95 = float(np.percentile(pmax_arr, 95)) if pmax_arr.size else float("nan")
+    mid_frac_mean = float(mid_arr.mean()) if mid_arr.size else float("nan")
 
     left_concat = (
         np.concatenate(left_points, axis=0).astype(np.float32) if left_points else np.zeros((0, 2), dtype=np.float32)
@@ -761,27 +928,16 @@ def segment_eye_masks_yolo(
         chunks=(min(1024, total_rois), 2, 5),
         overwrite=True,
     )
+    if soft_rows_written > 0:
+        run_group.create_array(
+            "ellipse_params_soft",
+            data=ellipse_params_soft,
+            chunks=(min(1024, total_rois), 2, 5),
+            overwrite=True,
+        )
     run_group.create_array(
         "ellipse_success",
         data=ellipse_success,
-        chunks=(min(1024, total_rois), 2),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "feret_axes_major",
-        data=feret_axes_major,
-        chunks=(min(1024, total_rois), 2, 4),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "feret_axes_minor",
-        data=feret_axes_minor,
-        chunks=(min(1024, total_rois), 2, 4),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "feret_roundness",
-        data=feret_roundness,
         chunks=(min(1024, total_rois), 2),
         overwrite=True,
     )
@@ -821,11 +977,13 @@ def segment_eye_masks_yolo(
             "ultralytics_version": ultralytics_version,
             "config": {
                 "batch_size": batch_size,
-                "imgsz": imgsz,
+                "imgsz": imgsz_resolved,
                 "conf": conf,
                 "iou": iou,
                 "max_det": max_det,
                 "mask_threshold": mask_threshold,
+                "adaptive_scale": adaptive_scale,
+                "adaptive_cap": adaptive_cap,
                 "use_retina_masks": use_retina_masks,
                 "legacy_masks": bool(legacy_masks),
                 "retina_masks_supported": retina_flag_supported,
@@ -842,6 +1000,19 @@ def segment_eye_masks_yolo(
             "git_commit": git_info.get("commit_hash", "unknown"),
             "git_branch": git_info.get("branch", "unknown"),
             "hostname": env_info["platform"].get("hostname", "unknown"),
+            "ellipse_soft_available": bool(soft_rows_written > 0),
+            "ellipse_soft_convention": {
+                "lengths": "4*sqrt(eigvals) from prob-weighted covariance",
+                "angle_ref": "deg CCW from +x, normalized to [-90, 90]",
+            },
+            "probability_stats": {
+                "pmax_mean": pmax_mean,
+                "pmax_p95": pmax_p95,
+                "mid_fraction_mean": mid_frac_mean,
+            },
+            "duration_seconds": float(duration),
+            "ellipse_angle_units": "degrees",
+            "ellipse_angle_ref": "skimage major-axis orientation, deg CCW from +x",
         }
     )
     run_group.attrs["rejected_overlap"] = 0
@@ -850,7 +1021,7 @@ def segment_eye_masks_yolo(
 
     console.print(
         f"[green]✓[/green] Eye masks saved as [cyan]eye_masks_runs/{resolved_run_name}[/cyan] "
-        f"({total_successful_eyes} successful eyes, {successful_pairs}/{total_rois} ROI pairs)"
+        f"({total_successful_eyes} successful eyes, {successful_pairs}/{total_rois} ROI pairs) in {duration:.1f}s"
     )
 
     _PROTO_UPSAMPLE_FACTOR = 1

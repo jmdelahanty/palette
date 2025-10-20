@@ -27,14 +27,31 @@ Examples:
     parser.add_argument("--batch-size", type=int, default=128, help="Batch size for inference")
     parser.add_argument("--device", default=None, help="Torch device string (e.g. cuda:0, cpu)")
     parser.add_argument("--imgsz", type=int, default=None, help="Override inference image size")
-    parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
+    parser.add_argument("--conf", type=float, default=0.05, help="Confidence threshold")
     parser.add_argument("--iou", type=float, default=0.5, help="IoU threshold for NMS")
-    parser.add_argument("--max-det", type=int, default=4, help="Max detections per ROI")
-    parser.add_argument("--mask-threshold", type=float, default=0.3, help="Minimum probability floor for binarization")
+    parser.add_argument("--max-det", type=int, default=2, help="Max detections per ROI")
+    parser.add_argument(
+        "--mask-threshold",
+        type=float,
+        default=0.05,
+        help="Global floor for adaptive binarization (final threshold = max(floor, min(adaptive_cap, adaptive_scale * pmax)))",
+    )
+    parser.add_argument(
+        "--adaptive-scale",
+        type=float,
+        default=0.6,
+        help="Multiplier applied to each ROI's peak probability for adaptive thresholding",
+    )
+    parser.add_argument(
+        "--adaptive-cap",
+        type=float,
+        default=0.6,
+        help="Upper cap applied to the adaptive threshold (set <=1.0)",
+    )
     parser.add_argument(
         "--proto-upsample-factor",
         type=int,
-        default=1,
+        default=2,
         help="Optional upsampling factor applied to YOLO mask prototypes prior to reconstruction",
     )
     parser.add_argument(
@@ -70,6 +87,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         iou=args.iou,
         max_det=args.max_det,
         mask_threshold=args.mask_threshold,
+        adaptive_scale=args.adaptive_scale,
+        adaptive_cap=args.adaptive_cap,
         use_retina_masks=args.use_retina_masks if not args.legacy_masks else False,
         proto_upsample_factor=args.proto_upsample_factor,
         legacy_masks=args.legacy_masks,

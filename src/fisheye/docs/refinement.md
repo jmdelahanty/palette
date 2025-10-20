@@ -13,9 +13,11 @@ Eye segmentation runs can now be post-processed with `python -m fisheye.refineme
 
 This keeps the original masks untouched for provenance while providing a refined alternative that matches keypoint labels.
 
-> ℹ️ **Probability masks are optional.**  
-> YOLO-based segmentation writes an additional `mask_probs_roi` dataset with float16 probabilities.  
-> Traditional and refined eye-mask runs may omit this dataset, so downstream consumers should treat it as optional and guard on `if "mask_probs_roi" in run_group`.
+> ℹ️ **Optional datasets.**  
+> - YOLO-based segmentation writes an additional `mask_probs_roi` dataset with float16 probabilities.  
+> - Soft-ellipse moments from YOLO runs are stored in `ellipse_params_soft` (float32) when available; check the run attribute `ellipse_soft_available`.  
+> - Feret geometry (`feret_axes_*`, `feret_roundness`) is computed by the traditional segmenter and by refinement; raw YOLO runs omit these arrays.  
+> Downstream consumers should treat these datasets as optional and guard on their presence (e.g., `if "mask_probs_roi" in run_group`).
 
 Directory Structure
 /refined_runs/
