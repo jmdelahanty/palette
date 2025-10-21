@@ -130,7 +130,7 @@ After detection you will typically see the following folders appear alongside `d
 | Group                  | Produced by                            | Purpose |
 | ---------------------- | -------------------------------------- | ------- |
 | `detect_quality_runs/` | `python -m fisheye.refinement.detect_quality` | Stores per-frame and per-detection quality labels. |
-| `refined_runs/`        | `python -m fisheye.refinement.refine_detect` | Clean/interpolated detection datasets with provenance. |
+| `refined_detect_runs/` | `python -m fisheye.refinement.refine_detect` | Clean/interpolated detection datasets with provenance. |
 | `tracking_runs/`       | `python -m fisheye.tracking.assign_ids` | Trajectories with fish IDs (if multi-animal tracking is enabled). |
 
 Each of these records the source detection run in their attributes (e.g. `source_detect_run`) so the lineage always points back to one of the `detect_runs/<run>` entries described above.

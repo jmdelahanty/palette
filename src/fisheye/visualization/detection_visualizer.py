@@ -10,6 +10,9 @@ all_artifact_frames = []
 detection_history = []
 HISTORY_WINDOW = 10
 
+REFINED_DETECT_GROUP = "refined_detect_runs"
+LEGACY_REFINED_DETECT_GROUP = "refined_runs"
+
 def load_quality_data(zarr_root, detect_run_name):
     """Load quality report data and the jump threshold used for analysis."""
 
@@ -807,14 +810,21 @@ def main(args):
         refined_interpolated_count = 0
 
         if args.show_refined:
-            if 'refined_runs' not in zarr_root:
+            if REFINED_DETECT_GROUP in zarr_root:
+                refined_root = zarr_root[REFINED_DETECT_GROUP]
+            elif LEGACY_REFINED_DETECT_GROUP in zarr_root:
+                refined_root = zarr_root[LEGACY_REFINED_DETECT_GROUP]
+            else:
+                refined_root = None
+
+            if refined_root is None:
                 print("No refined runs found; cannot overlay interpolated detections.")
             else:
-                candidate_run = args.refined_run or zarr_root['refined_runs'].attrs.get('latest')
-                if not candidate_run or candidate_run not in zarr_root['refined_runs']:
+                candidate_run = args.refined_run or refined_root.attrs.get('latest')
+                if not candidate_run or candidate_run not in refined_root:
                     print(f"Refined run '{candidate_run}' not found.")
                 else:
-                    refined_group_root = zarr_root['refined_runs'][candidate_run]
+                    refined_group_root = refined_root[candidate_run]
                     source_detect = refined_group_root.attrs.get('source_detect_run')
                     if source_detect != latest_detect_run:
                         print(f"⚠️ Refined run '{candidate_run}' was generated from detect run '{source_detect}',")

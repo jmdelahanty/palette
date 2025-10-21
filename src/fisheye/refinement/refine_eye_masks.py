@@ -18,24 +18,30 @@ from __future__ import annotations
 
 import argparse
 import math
+import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import dask
+import dask.array as da
 import numpy as np
 import zarr
+from zarr.core.dtype import VariableLengthUTF8
 from dask import delayed
 from dask.diagnostics import ProgressBar
 from rich.console import Console
 from scipy.ndimage import distance_transform_edt, gaussian_filter, median_filter
 from skimage import measure, morphology
+from collections import Counter
 
 from ..segmentation.eye_segmentation import (
     _extract_contour,
     _feret_mask_from_region,
 )
+from ..shared.mask_source import load_mask_bundle
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
 
@@ -50,6 +56,8 @@ _MORPH_CLOSING_RADIUS = 1
 _MORPH_OPENING_RADIUS = 0
 _MIN_OBJECT_AREA = 12
 _PROBABILITY_THRESHOLD = 0.45
+_AREA_FILTER_Z_DEFAULT = 2.0
+_AREA_FILTER_MODE_DEFAULT = "either"
 
 _ZARR_GROUP_CACHE: Dict[str, zarr.Group] = {}
 _ZARR_ARRAY_CACHE: Dict[Tuple[str, str], zarr.Array] = {}
@@ -70,6 +78,41 @@ def _get_zarr_array(zarr_path: str, array_path: str) -> zarr.Array:
     arr = group[array_path]
     _ZARR_ARRAY_CACHE[key] = arr
     return arr
+
+
+def _compression_kwargs(array: zarr.Array) -> Dict[str, object]:
+    """Return compression-related kwargs compatible with Zarr v2/v3 arrays."""
+    kwargs: Dict[str, object] = {}
+    compressors = getattr(array, "compressors", None)
+    if compressors:
+        kwargs["compressors"] = compressors
+    else:
+        try:
+            compressor = array.compressors
+        except (TypeError, AttributeError):
+            compressor = None
+        if compressor is not None:
+            kwargs["compressor"] = compressor
+
+    chunk_codecs = getattr(array, "chunk_codecs", None)
+    if chunk_codecs:
+        kwargs.setdefault("chunk_codecs", chunk_codecs)
+
+    filters = getattr(array, "filters", None)
+    if filters:
+        kwargs.setdefault("filters", filters)
+
+    return kwargs
+
+
+def _append_reason_tag(reason: Optional[str], tag: str) -> str:
+    """Append a tag to a pipe-delimited reason string without duplicates."""
+    if not reason:
+        return tag
+    parts = set(reason.split("|"))
+    if tag in parts:
+        return reason
+    return f"{reason}|{tag}"
 
 def _largest_component(mask: np.ndarray) -> np.ndarray:
     """Return the largest 8-connected component of a boolean mask."""
@@ -248,6 +291,21 @@ class ROIOutput:
     smoothing_changed: np.ndarray  # (2,) bool
     reassigned_pixels: int
     used_probabilities: bool = False
+    probabilities: Optional[np.ndarray] = None  # (2, H, W) float32
+    refined_areas: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=np.float32))
+    source_areas: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=np.float32))
+    source_union_area: float = float("nan")
+    refined_union_area: float = float("nan")
+    centroid_errors: np.ndarray = field(default_factory=lambda: np.full(2, np.nan, dtype=np.float32))
+    symmetry_offsets: np.ndarray = field(default_factory=lambda: np.full(2, np.nan, dtype=np.float32))
+    keypoint_separation: float = float("nan")
+    separation_delta: float = float("nan")
+    axis_ratio: np.ndarray = field(default_factory=lambda: np.full(2, np.nan, dtype=np.float32))
+    circularity: np.ndarray = field(default_factory=lambda: np.full(2, np.nan, dtype=np.float32))
+    probability_mean: Optional[np.ndarray] = None  # (2,) float32
+    probability_max: Optional[np.ndarray] = None  # (2,) float32
+    probability_var: Optional[np.ndarray] = None  # (2,) float32
+    probability_high_fraction: Optional[np.ndarray] = None  # (2,) float32
 
 
 def _prepare_run_group(root: zarr.Group, run_name: Optional[str], console: Console) -> Tuple[zarr.Group, str]:
@@ -387,6 +445,118 @@ def _measure_mask(mask: np.ndarray, min_contour_points: int = 5) -> Tuple[bool, 
     return True, ellipse, feret_major, feret_minor, feret_roundness, centroid, contour
 
 
+def _compute_roi_metrics(
+    left_mask: np.ndarray,
+    right_mask: np.ndarray,
+    source_left: np.ndarray,
+    source_right: np.ndarray,
+    source_union: np.ndarray,
+    centroids: np.ndarray,
+    eye_left: np.ndarray,
+    eye_right: np.ndarray,
+    keypoints_valid: bool,
+    refined_separation: float,
+    ellipse_params: np.ndarray,
+    contours: Tuple[Optional[np.ndarray], Optional[np.ndarray]],
+    probs_out: Optional[np.ndarray],
+) -> Dict[str, object]:
+    refined_left = left_mask.astype(bool, copy=False)
+    refined_right = right_mask.astype(bool, copy=False)
+    source_left = source_left.astype(bool, copy=False)
+    source_right = source_right.astype(bool, copy=False)
+    source_union = source_union.astype(bool, copy=False)
+
+    refined_areas = np.array(
+        [refined_left.sum(), refined_right.sum()],
+        dtype=np.float32,
+    )
+    source_areas = np.array(
+        [source_left.sum(), source_right.sum()],
+        dtype=np.float32,
+    )
+    union_refined_area = float(refined_areas.sum())
+    union_source_area = float(source_union.sum())
+
+    centroid_errors = np.full(2, np.nan, dtype=np.float32)
+    keypoint_coords = (np.asarray(eye_left, dtype=np.float32), np.asarray(eye_right, dtype=np.float32))
+    for idx in range(2):
+        centroid = centroids[idx]
+        kp = keypoint_coords[idx]
+        if np.all(np.isfinite(centroid)) and np.all(np.isfinite(kp)):
+            centroid_errors[idx] = float(np.linalg.norm(centroid - kp))
+
+    keypoint_separation = float(np.linalg.norm(keypoint_coords[0] - keypoint_coords[1])) if np.all(np.isfinite(keypoint_coords[0])) and np.all(np.isfinite(keypoint_coords[1])) else float("nan")
+    if not np.isfinite(refined_separation) or not np.isfinite(keypoint_separation):
+        separation_delta = float("nan")
+    else:
+        separation_delta = float(refined_separation - keypoint_separation)
+
+    axis_ratio = np.full(2, np.nan, dtype=np.float32)
+    for idx in range(2):
+        major = float(ellipse_params[idx, 2]) if np.isfinite(ellipse_params[idx, 2]) else float("nan")
+        minor = float(ellipse_params[idx, 3]) if np.isfinite(ellipse_params[idx, 3]) else float("nan")
+        if major > 0 and minor > 0:
+            axis_ratio[idx] = float(minor / major)
+
+    circularity = np.full(2, np.nan, dtype=np.float32)
+    for idx, mask in enumerate((refined_left, refined_right)):
+        area = refined_areas[idx]
+        if area <= 0:
+            continue
+        if contours[idx] is not None and len(contours[idx]) >= 2:
+            contour = contours[idx]
+            diffs = np.diff(contour, axis=0, append=contour[0:1])
+            perimeter = float(np.linalg.norm(diffs, axis=1).sum())
+        else:
+            perimeter = float(measure.perimeter(mask.astype(np.uint8), neighbourhood=8))
+        if perimeter > 0:
+            circularity[idx] = float((4.0 * math.pi * area) / (perimeter ** 2 + 1e-12))
+
+    symmetry_offsets = np.full(2, np.nan, dtype=np.float32)
+    if keypoints_valid:
+        direction = keypoint_coords[1] - keypoint_coords[0]
+        norm_dir = float(np.linalg.norm(direction))
+        if norm_dir > 0:
+            axis = direction / norm_dir
+            perp = np.array([-axis[1], axis[0]], dtype=np.float32)
+            midpoint = (keypoint_coords[0] + keypoint_coords[1]) / 2.0
+            for idx in range(2):
+                centroid = centroids[idx]
+                if np.all(np.isfinite(centroid)):
+                    symmetry_offsets[idx] = float(np.dot(centroid - midpoint, perp))
+
+    prob_mean = prob_max = prob_var = prob_high = None
+    if probs_out is not None:
+        prob_mean = np.full(2, np.nan, dtype=np.float32)
+        prob_max = np.full(2, np.nan, dtype=np.float32)
+        prob_var = np.full(2, np.nan, dtype=np.float32)
+        prob_high = np.full(2, np.nan, dtype=np.float32)
+        for idx, mask in enumerate((refined_left, refined_right)):
+            mask_vals = probs_out[idx][mask]
+            if mask_vals.size == 0:
+                continue
+            prob_mean[idx] = float(mask_vals.mean())
+            prob_max[idx] = float(mask_vals.max())
+            prob_var[idx] = float(mask_vals.var()) if mask_vals.size > 1 else 0.0
+            prob_high[idx] = float(np.count_nonzero(mask_vals >= _PROBABILITY_THRESHOLD) / mask_vals.size)
+
+    return {
+        "refined_areas": refined_areas.astype(np.float32),
+        "source_areas": source_areas.astype(np.float32),
+        "source_union_area": float(union_source_area),
+        "refined_union_area": float(union_refined_area),
+        "centroid_errors": centroid_errors,
+        "symmetry_offsets": symmetry_offsets,
+        "keypoint_separation": float(keypoint_separation),
+        "separation_delta": float(separation_delta),
+        "axis_ratio": axis_ratio,
+        "circularity": circularity,
+        "probability_mean": prob_mean,
+        "probability_max": prob_max,
+        "probability_var": prob_var,
+        "probability_high_fraction": prob_high,
+    }
+
 def _refine_roi(
     source_masks: np.ndarray,
     keypoints_roi: np.ndarray,
@@ -397,7 +567,29 @@ def _refine_roi(
     """Refine a single ROI's mask assignment."""
 
     source_masks = np.asarray(source_masks)
-    roi_h, roi_w = source_masks.shape[1:]
+    if source_masks.ndim == 2:
+        source_masks = source_masks[None, ...]
+    elif source_masks.ndim != 3:
+        raise ValueError(f"Unexpected source mask shape {source_masks.shape}")
+
+    channel_count = int(source_masks.shape[0])
+    if channel_count <= 0:
+        raise ValueError("Source masks contain no channels.")
+    if channel_count > 2:
+        raise ValueError(
+            f"Source masks provide {channel_count} channels; expected 1 (union) or 2 (left/right)."
+        )
+
+    union_source = channel_count == 1
+    roi_h = int(source_masks.shape[-2])
+    roi_w = int(source_masks.shape[-1])
+    base_mask = source_masks[0] > 0
+    initial_masks = [
+        base_mask.copy(),
+        (source_masks[1] > 0) if channel_count > 1 else base_mask.copy(),
+    ]
+    source_union_mask = (initial_masks[0] | initial_masks[1]).astype(bool, copy=False)
+
     masks_out = np.zeros((2, roi_h, roi_w), dtype=np.uint8)
     ellipse_params = np.full((2, 5), np.nan, dtype=np.float32)
     ellipse_success = np.zeros(2, dtype=bool)
@@ -412,8 +604,8 @@ def _refine_roi(
     def _copy_original(reason: str) -> ROIOutput:
         contours: Tuple[Optional[np.ndarray], Optional[np.ndarray]] = (None, None)
         smoothing_flags = np.zeros(2, dtype=bool)
-        for eye_idx, mask_raw in enumerate(source_masks):
-            mask_bool = mask_raw > 0
+        for eye_idx, mask_bool in enumerate(initial_masks):
+            mask_bool = np.array(mask_bool, dtype=bool, copy=False)
             mask_bool, changed = _smooth_binary_mask(mask_bool)
             smoothing_flags[eye_idx] = changed
             masks_out[eye_idx] = mask_bool.astype(np.uint8)
@@ -448,6 +640,38 @@ def _refine_roi(
         else:
             separation = float("nan")
 
+        eye_left_local = keypoints_roi[1]
+        eye_right_local = keypoints_roi[2]
+        keypoints_valid_local = (
+            eye_left_local.size >= 2
+            and eye_right_local.size >= 2
+            and np.all(np.isfinite(eye_left_local))
+            and np.all(np.isfinite(eye_right_local))
+            and not np.allclose(eye_left_local, eye_right_local, atol=1e-3)
+        )
+
+        metrics = _compute_roi_metrics(
+            masks_out[0].astype(bool, copy=False),
+            masks_out[1].astype(bool, copy=False),
+            initial_masks[0].astype(bool, copy=False),
+            initial_masks[1].astype(bool, copy=False),
+            source_union_mask,
+            centroids,
+            eye_left_local,
+            eye_right_local,
+            keypoints_valid_local,
+            separation,
+            ellipse_params,
+            contours,
+            None,
+        )
+
+        final_reason = reason
+        if union_source:
+            existing = set((final_reason or "").split("|")) if final_reason else set()
+            if "union_source" not in existing:
+                final_reason = _append_reason(final_reason, "union_source")
+
         return ROIOutput(
             masks_out,
             ellipse_params,
@@ -458,28 +682,29 @@ def _refine_roi(
             centroids,
             contours,
             separation,
-            reason,
+            final_reason,
             smoothing_flags,
             0,
             False,
             None,
+            **metrics,
         )
 
     if not success_flag:
-        return _copy_original("keypoint_fail")
+        base_reason = "keypoint_fail"
+        if union_source:
+            base_reason = _append_reason(base_reason, "union_source")
+        return _copy_original(base_reason)
 
     reason: Optional[str] = None
+    if union_source:
+        reason = _append_reason(reason, "union_source")
     eye_left = keypoints_roi[1]
     eye_right = keypoints_roi[2]
 
     def _valid_keypoint(point: np.ndarray) -> bool:
         arr = np.asarray(point)
         return arr.size >= 2 and np.all(np.isfinite(arr))
-
-    instance_masks = [
-        source_masks[0] > 0,
-        source_masks[1] > 0,
-    ]
 
     left_instance_idx = 0
     right_instance_idx = 1
@@ -488,57 +713,96 @@ def _refine_roi(
         eye_right,
         atol=1e-3,
     )
-    if keypoints_valid and instance_masks[0].any() and instance_masks[1].any():
-        centroid_0 = _mask_centroid(instance_masks[0])
-        centroid_1 = _mask_centroid(instance_masks[1])
-        if centroid_0 is not None and centroid_1 is not None:
-            cost_direct = math.hypot(
-                float(centroid_0[0] - eye_left[0]),
-                float(centroid_0[1] - eye_left[1]),
-            ) + math.hypot(
-                float(centroid_1[0] - eye_right[0]),
-                float(centroid_1[1] - eye_right[1]),
-            )
-            cost_reversed = math.hypot(
-                float(centroid_0[0] - eye_right[0]),
-                float(centroid_0[1] - eye_right[1]),
-            ) + math.hypot(
-                float(centroid_1[0] - eye_left[0]),
-                float(centroid_1[1] - eye_left[1]),
-            )
-            if cost_reversed + 1e-3 < cost_direct:
-                left_instance_idx = 1
-                right_instance_idx = 0
-                reason = _append_reason(reason, "assigned_by_keypoint")
 
-    left_mask = instance_masks[left_instance_idx].copy()
-    right_mask = instance_masks[right_instance_idx].copy()
+    if union_source:
+        union_mask = base_mask.astype(bool, copy=False)
+        fallback_left_source = union_mask
+        fallback_right_source = union_mask
 
-    used_probabilities = False
+        if keypoints_valid and union_mask.any():
+            split_left, split_right = _split_mask_by_keypoints(union_mask, eye_left, eye_right)
+            if split_left.sum() > 0 and split_right.sum() > 0:
+                left_mask = split_left
+                right_mask = split_right
+                reason = _append_reason(reason, "split_by_keypoint")
+            else:
+                left_mask = union_mask.copy()
+                right_mask = union_mask.copy()
+        else:
+            left_mask = union_mask.copy()
+            right_mask = union_mask.copy()
+
+        if (left_mask.sum() == 0 or right_mask.sum() == 0) and np.isfinite(heading_deg):
+            midpoint = np.array(
+                [
+                    float(eye_left[0] + eye_right[0]) / 2.0,
+                    float(eye_left[1] + eye_right[1]) / 2.0,
+                ],
+                dtype=np.float32,
+            )
+            split_left, split_right = _split_mask_by_heading(union_mask, heading_deg, midpoint)
+            if split_left.sum() > 0 and split_right.sum() > 0:
+                left_mask = split_left
+                right_mask = split_right
+                reason = _append_reason(reason, "heading_split")
+    else:
+        instance_masks = [
+            source_masks[0] > 0,
+            source_masks[1] > 0,
+        ]
+        if keypoints_valid and instance_masks[0].any() and instance_masks[1].any():
+            centroid_0 = _mask_centroid(instance_masks[0])
+            centroid_1 = _mask_centroid(instance_masks[1])
+            if centroid_0 is not None and centroid_1 is not None:
+                cost_direct = math.hypot(
+                    float(centroid_0[0] - eye_left[0]),
+                    float(centroid_0[1] - eye_left[1]),
+                ) + math.hypot(
+                    float(centroid_1[0] - eye_right[0]),
+                    float(centroid_1[1] - eye_right[1]),
+                )
+                cost_reversed = math.hypot(
+                    float(centroid_0[0] - eye_right[0]),
+                    float(centroid_0[1] - eye_right[1]),
+                ) + math.hypot(
+                    float(centroid_1[0] - eye_left[0]),
+                    float(centroid_1[1] - eye_left[1]),
+                )
+                if cost_reversed + 1e-3 < cost_direct:
+                    left_instance_idx = 1
+                    right_instance_idx = 0
+                    reason = _append_reason(reason, "assigned_by_keypoint")
+        fallback_left_source = instance_masks[left_instance_idx]
+        fallback_right_source = instance_masks[right_instance_idx]
+        left_mask = fallback_left_source.copy()
+        right_mask = fallback_right_source.copy()
+
+    if union_source:
+        fallback_left_source = base_mask
+        fallback_right_source = base_mask
+
+    used_probabilities = mask_probs is not None
+    probs_arr: Optional[np.ndarray] = None
     if mask_probs is not None:
-        probs = np.asarray(mask_probs, dtype=np.float32)
-        if probs.shape[0] >= 2:
-            prob_left = np.clip(
-                np.nan_to_num(probs[left_instance_idx], nan=0.0, posinf=1.0, neginf=0.0),
-                0.0,
-                1.0,
-            )
-            prob_right = np.clip(
-                np.nan_to_num(probs[right_instance_idx], nan=0.0, posinf=1.0, neginf=0.0),
-                0.0,
-                1.0,
-            )
-            left_mask = left_mask | (prob_left >= _PROBABILITY_THRESHOLD)
-            right_mask = right_mask | (prob_right >= _PROBABILITY_THRESHOLD)
+        probs_arr = np.asarray(mask_probs, dtype=np.float32)
+        probs_arr = np.nan_to_num(probs_arr, nan=0.0, posinf=1.0, neginf=0.0)
+        probs_arr = np.clip(probs_arr, 0.0, 1.0)
+        if probs_arr.ndim == 2:
+            probs_arr = probs_arr[None, ...]
+        if probs_arr.shape[0] >= 2:
+            left_prob = probs_arr[left_instance_idx]
+            right_prob = probs_arr[right_instance_idx]
+            left_mask = left_mask | (left_prob >= _PROBABILITY_THRESHOLD)
+            right_mask = right_mask | (right_prob >= _PROBABILITY_THRESHOLD)
             used_probabilities = True
 
     if left_mask.sum() == 0 and right_mask.sum() == 0:
         return _copy_original("empty_union")
     if left_mask.sum() == 0:
-        left_mask = instance_masks[left_instance_idx].copy()
+        left_mask = fallback_left_source.copy()
         reason = _append_reason(reason, "left_empty")
     if right_mask.sum() == 0:
-        right_mask = instance_masks[right_instance_idx].copy()
+        right_mask = fallback_right_source.copy()
         reason = _append_reason(reason, "right_empty")
 
     left_mask_sm, left_changed = _smooth_binary_mask(left_mask)
@@ -589,6 +853,35 @@ def _refine_roi(
     else:
         eye_separation = float("nan")
 
+    probs_out: Optional[np.ndarray] = None
+    if probs_arr is not None:
+        if probs_arr.shape[0] >= 2:
+            left_prob = probs_arr[left_instance_idx]
+            right_prob = probs_arr[right_instance_idx]
+        else:
+            left_prob = right_prob = probs_arr[0]
+
+        union_prob = np.maximum(left_prob, right_prob)
+        probs_out = np.zeros((2, left_mask_connected.shape[0], left_mask_connected.shape[1]), dtype=np.float32)
+        probs_out[0] = np.where(left_mask_connected, union_prob, 0.0)
+        probs_out[1] = np.where(right_mask_connected, union_prob, 0.0)
+
+    metrics = _compute_roi_metrics(
+        left_mask_connected,
+        right_mask_connected,
+        fallback_left_source.astype(bool, copy=False),
+        fallback_right_source.astype(bool, copy=False),
+        source_union_mask,
+        centroids,
+        eye_left,
+        eye_right,
+        keypoints_valid,
+        eye_separation,
+        ellipse_params,
+        (contours[0], contours[1]),
+        probs_out,
+    )
+
     return ROIOutput(
         masks_out,
         ellipse_params,
@@ -603,31 +896,30 @@ def _refine_roi(
         smoothing_flags,
         int(reassigned_pixels),
         used_probabilities,
+        probs_out,
+        **metrics,
     )
 
 
 def _process_refine_chunk(
+    binary_chunk: np.ndarray,
+    probs_chunk: Optional[np.ndarray],
     zarr_path: str,
-    masks_path: str,
     keypoints_path: str,
     heading_path: str,
     success_path: str,
-    mask_probs_path: Optional[str],
     start: int,
     stop: int,
 ) -> List[Tuple[int, ROIOutput]]:
     """Process a batch of ROI indices and return their refinement outputs."""
     slice_obj = slice(start, stop)
 
-    masks_np = np.asarray(_get_zarr_array(zarr_path, masks_path)[slice_obj])
+    masks_np = np.array(binary_chunk, dtype=np.uint8, copy=False)
+    mask_probs_np = np.array(probs_chunk, dtype=np.float32, copy=False) if probs_chunk is not None else None
+
     keypoints_np = np.asarray(_get_zarr_array(zarr_path, keypoints_path)[slice_obj])
     heading_np = np.asarray(_get_zarr_array(zarr_path, heading_path)[slice_obj])
     success_np = np.asarray(_get_zarr_array(zarr_path, success_path)[slice_obj])
-    mask_probs_np = (
-        np.asarray(_get_zarr_array(zarr_path, mask_probs_path)[slice_obj])
-        if mask_probs_path
-        else None
-    )
 
     results: List[Tuple[int, ROIOutput]] = []
     for local_idx in range(masks_np.shape[0]):
@@ -652,23 +944,106 @@ def _process_refine_chunk(
     return results
 
 
+def _process_and_write_chunk(
+    binary_chunk: np.ndarray,
+    probs_chunk: Optional[np.ndarray],
+    zarr_path: str,
+    run_group_path: str,
+    keypoints_path: str,
+    heading_path: str,
+    success_path: str,
+    start: int,
+    stop: int,
+    *,
+    write_probabilities: bool,
+) -> List[Tuple[int, ROIOutput]]:
+    """Process a chunk, write outputs into Zarr arrays, and return ROI results."""
+    results = _process_refine_chunk(
+        binary_chunk,
+        probs_chunk,
+        zarr_path,
+        keypoints_path,
+        heading_path,
+        success_path,
+        start,
+        stop,
+    )
+    if not results:
+        return results
+
+    _, first_output = results[0]
+    _, roi_h, roi_w = first_output.masks.shape
+    chunk_len = stop - start
+
+    masks_chunk = np.stack([roi_output.masks for _, roi_output in results], axis=0).astype(np.uint8, copy=False)
+    ellipse_params_chunk = np.stack([roi_output.ellipse_params for _, roi_output in results], axis=0)
+    ellipse_success_chunk = np.stack([roi_output.ellipse_success for _, roi_output in results], axis=0)
+    feret_major_chunk = np.stack([roi_output.feret_major for _, roi_output in results], axis=0)
+    feret_minor_chunk = np.stack([roi_output.feret_minor for _, roi_output in results], axis=0)
+    feret_roundness_chunk = np.stack([roi_output.feret_roundness for _, roi_output in results], axis=0)
+    eye_separation_chunk = np.array([roi_output.eye_separation for _, roi_output in results], dtype=np.float32)
+
+    if write_probabilities:
+        probs_chunk_out = np.zeros((chunk_len, 2, roi_h, roi_w), dtype=np.float32)
+        for idx, (_, roi_output) in enumerate(results):
+            if roi_output.probabilities is not None:
+                probs_chunk_out[idx] = roi_output.probabilities
+    else:
+        probs_chunk_out = None
+
+    root = zarr.open(zarr_path, mode="a")
+    run_group = root[run_group_path]
+
+    run_group["masks_roi"][start:stop] = masks_chunk
+    run_group["ellipse_params"][start:stop] = ellipse_params_chunk.astype(np.float32, copy=False)
+    run_group["ellipse_success"][start:stop] = ellipse_success_chunk.astype(bool, copy=False)
+    run_group["feret_axes_major"][start:stop] = feret_major_chunk.astype(np.float32, copy=False)
+    run_group["feret_axes_minor"][start:stop] = feret_minor_chunk.astype(np.float32, copy=False)
+    run_group["feret_roundness"][start:stop] = feret_roundness_chunk.astype(np.float32, copy=False)
+    run_group["eye_separation"][start:stop] = eye_separation_chunk
+
+    if write_probabilities and probs_chunk_out is not None:
+        run_group["mask_probs_roi_refined"][start:stop] = probs_chunk_out.astype(np.float16)
+
+    return results
+
+
 def refine_eye_masks(
     zarr_path: str,
     source_run: Optional[str] = None,
     run_name: Optional[str] = None,
     *,
     keypoint_run: Optional[str] = None,
-    chunk_size: int = 1024,
+    chunk_size: int = 512,
     scheduler: str = "processes",
     num_workers: Optional[int] = None,
     console: Optional[Console] = None,
+    command: Optional[str] = None,
+    created_at_utc: Optional[str] = None,
+    area_filter_z: Optional[float] = _AREA_FILTER_Z_DEFAULT,
+    area_filter_mode: str = _AREA_FILTER_MODE_DEFAULT,
 ) -> str:
     """Refine an eye-mask run and return the name of the new run."""
 
     console = console or Console()
     stage_start = time.perf_counter()
 
+    area_filter_mode = (area_filter_mode or _AREA_FILTER_MODE_DEFAULT).lower()
+    if area_filter_mode not in {"either", "both"}:
+        area_filter_mode = _AREA_FILTER_MODE_DEFAULT
+    if area_filter_z is not None:
+        try:
+            area_filter_z = float(area_filter_z)
+        except (TypeError, ValueError):
+            area_filter_z = None
+        else:
+            if area_filter_z <= 0:
+                area_filter_z = None
+
+    chunk_size = max(1, int(chunk_size))
+
     zarr_path = str(Path(zarr_path))
+    console.print(f"Opening Zarr archive: [cyan]{zarr_path}[/cyan]")
 
     root = zarr.open(zarr_path, mode="a")
 
@@ -679,9 +1054,10 @@ def refine_eye_masks(
     if src_run_name is None or src_run_name not in eye_parent:
         raise ValueError("Source eye mask run not found.")
     src_run = eye_parent[src_run_name]
-
-    if "masks_roi" not in src_run:
-        raise ValueError(f"eye_masks_runs/{src_run_name} lacks 'masks_roi'.")
+    console.print(
+        f"Refining eye masks from [cyan]eye_masks_runs/{src_run_name}[/cyan] "
+        f"(method={src_run.attrs.get('method', 'unknown')})"
+    )
 
     crop_run_name = src_run.attrs.get("source_crop_run") or root.get("crop_runs", {}).attrs.get("latest")
     if crop_run_name is None:
@@ -701,25 +1077,103 @@ def refine_eye_masks(
     for arr in required_kp:
         if arr not in kp_group:
             raise ValueError(f"Keypoint run '{keypoint_run_name}' missing '{arr}'.")
+    kp_paths = ", ".join(f"keypoints_runs/{keypoint_run_name}/{name}" for name in required_kp)
+    console.print(f"Using keypoint datasets: [cyan]{kp_paths}[/cyan]")
 
-    masks_ds = src_run["masks_roi"]
-    total_rois, _, roi_h, roi_w = masks_ds.shape
-    masks_path = f"eye_masks_runs/{src_run_name}/masks_roi"
+    console.print(
+        "Loading mask bundle (prefer_probs=True, threshold="
+        f"{_PROBABILITY_THRESHOLD})..."
+    )
+    load_start = time.perf_counter()
+    bundle = load_mask_bundle(
+        src_run,
+        threshold=_PROBABILITY_THRESHOLD,
+        prefer_probs=True,
+        materialize=False,
+        lazy=True,
+    )
+    load_duration = time.perf_counter() - load_start
+    binary_data = bundle.binary
+    probs_data = bundle.probs
+
+    provenance_sources = bundle.provenance.get("source", [])
+    dataset_paths: List[str] = []
+    for name in provenance_sources:
+        if name in {"masks_roi", "mask_probs_roi", "mask_probs_roi_refined"}:
+            dataset_paths.append(f"eye_masks_runs/{src_run_name}/{name}")
+        else:
+            dataset_paths.append(str(name))
+    if not dataset_paths:
+        dataset_paths.append("<unknown>")
+    console.print(
+        "Loaded mask bundle "
+        f"(binary_identity={bundle.binary_identity}, probs_identity={bundle.probs_identity or 'none'}) "
+        f"from: [cyan]{', '.join(dataset_paths)}[/cyan] "
+        f"[dim](took {load_duration:.2f}s)[/dim]"
+    )
+
+    total_rois, source_channels, roi_h, roi_w = binary_data.shape
+    total_rois = int(total_rois)
+    source_channels = int(source_channels)
+    roi_h = int(roi_h)
+    roi_w = int(roi_w)
+
+    mask_bundle_provenance = dict(bundle.provenance)
+    mask_binary_source = None
+    for name in provenance_sources:
+        if name in {"masks_roi", "synth_binary_from_probs"}:
+            mask_binary_source = name
+            break
+    if mask_binary_source is None and provenance_sources:
+        mask_binary_source = provenance_sources[0]
+
+    if isinstance(binary_data, np.ndarray):
+        binary_data = da.from_array(
+            binary_data,
+            chunks=(chunk_size, source_channels, roi_h, roi_w),
+        )
+    else:
+        binary_data = binary_data.rechunk({0: chunk_size})
+
+    if probs_data is not None:
+        if isinstance(probs_data, np.ndarray):
+            probs_data = da.from_array(
+                probs_data,
+                chunks=(chunk_size, probs_data.shape[1], roi_h, roi_w),
+            )
+        else:
+            probs_data = probs_data.rechunk({0: chunk_size})
+
+    provenance_sources = bundle.provenance.get("source", [])
+    if "mask_probs_roi_refined" in provenance_sources:
+        mask_prob_dataset = "mask_probs_roi_refined"
+    elif "mask_probs_roi" in provenance_sources:
+        mask_prob_dataset = "mask_probs_roi"
+    else:
+        mask_prob_dataset = None
+
+    if "masks_roi" in provenance_sources:
+        binary_reference = src_run["masks_roi"]
+    elif mask_prob_dataset:
+        binary_reference = src_run[mask_prob_dataset]
+    else:
+        binary_reference = src_run["masks_roi"] if "masks_roi" in src_run else None
+
+    if mask_prob_dataset:
+        console.print(
+            f"Probability source: [cyan]eye_masks_runs/{src_run_name}/{mask_prob_dataset}[/cyan] "
+            f"(threshold={_PROBABILITY_THRESHOLD})"
+        )
+    else:
+        console.print("Probability source: [yellow]none[/yellow]; using binary masks only.")
+
     keypoints_path = f"keypoints_runs/{keypoint_run_name}/keypoints_roi"
     heading_path = f"keypoints_runs/{keypoint_run_name}/heading"
     success_path = f"keypoints_runs/{keypoint_run_name}/detection_success"
-    has_mask_probs = "mask_probs_roi" in src_run
-    mask_probs_path = f"eye_masks_runs/{src_run_name}/mask_probs_roi" if has_mask_probs else None
+
+    has_mask_probs = probs_data is not None
 
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
-
-    masks_out = np.zeros((total_rois, 2, roi_h, roi_w), dtype=np.uint8)
-    ellipse_params = np.full((total_rois, 2, 5), np.nan, dtype=np.float32)
-    ellipse_success = np.zeros((total_rois, 2), dtype=bool)
-    feret_major = np.full((total_rois, 2, 4), np.nan, dtype=np.float32)
-    feret_minor = np.full((total_rois, 2, 4), np.nan, dtype=np.float32)
-    feret_roundness = np.full((total_rois, 2), np.nan, dtype=np.float32)
-    eye_separation = np.full((total_rois,), np.nan, dtype=np.float32)
 
     left_ptr = np.full((total_rois,), -1, dtype=np.int64)
     left_len = np.zeros((total_rois,), dtype=np.int32)
@@ -744,7 +1198,111 @@ def refine_eye_masks(
         "chunk_size": chunk_size,
         "probability_split": 0,
         "assigned_by_keypoint": 0,
+        "mask_sources": list(provenance_sources),
+        "probability_source": mask_prob_dataset or "none",
+        "filtered_rois": 0,
+        "filtered_left": 0,
+        "filtered_right": 0,
     }
+
+    chunk_rois = min(512, total_rois) if total_rois > 0 else 1
+
+    def _prepare_dataset(
+        name: str,
+        *,
+        shape: Tuple[int, ...],
+        chunks: Tuple[int, ...],
+        dtype: np.dtype,
+        fill_value: float | int | bool = 0,
+        **kwargs: object,
+    ) -> zarr.Array:
+        if name in run_group:
+            del run_group[name]
+        return run_group.create_array(
+            name,
+            shape=shape,
+            chunks=chunks,
+            dtype=dtype,
+            fill_value=fill_value,
+            overwrite=True,
+            **kwargs,
+        )
+
+    _prepare_dataset(
+        "masks_roi",
+        shape=(total_rois, 2, roi_h, roi_w),
+        chunks=(chunk_rois, 2, roi_h, roi_w),
+        dtype=np.dtype(np.uint8),
+    )
+    _prepare_dataset(
+        "ellipse_params",
+        shape=(total_rois, 2, 5),
+        chunks=(chunk_rois, 2, 5),
+        dtype=np.dtype(np.float32),
+        fill_value=np.float32(np.nan),
+    )
+    _prepare_dataset(
+        "ellipse_success",
+        shape=(total_rois, 2),
+        chunks=(chunk_rois, 2),
+        dtype=np.dtype(bool),
+        fill_value=False,
+    )
+    _prepare_dataset(
+        "feret_axes_major",
+        shape=(total_rois, 2, 4),
+        chunks=(chunk_rois, 2, 4),
+        dtype=np.dtype(np.float32),
+        fill_value=np.float32(np.nan),
+    )
+    _prepare_dataset(
+        "feret_axes_minor",
+        shape=(total_rois, 2, 4),
+        chunks=(chunk_rois, 2, 4),
+        dtype=np.dtype(np.float32),
+        fill_value=np.float32(np.nan),
+    )
+    _prepare_dataset(
+        "feret_roundness",
+        shape=(total_rois, 2),
+        chunks=(chunk_rois, 2),
+        dtype=np.dtype(np.float32),
+        fill_value=np.float32(np.nan),
+    )
+    _prepare_dataset(
+        "eye_separation",
+        shape=(total_rois,),
+        chunks=(chunk_rois,),
+        dtype=np.dtype(np.float32),
+        fill_value=np.float32(np.nan),
+    )
+
+    run_group_path = f"{REFINED_STAGE_NAME}_runs/{resolved_run_name}"
+
+    if has_mask_probs:
+        compression_kwargs = (
+            _compression_kwargs(binary_reference) if binary_reference is not None else {}
+        )
+        chunk_spec = getattr(binary_reference, "chunks", None) if binary_reference is not None else None
+        if not chunk_spec:
+            chunk_spec = (chunk_rois, 2, roi_h, roi_w)
+        compression_source = None
+        if binary_reference is not None:
+            compression_source = getattr(binary_reference, "path", None)
+            if not compression_source:
+                compression_source = f"eye_masks_runs/{src_run_name}/{mask_prob_dataset or 'masks_roi'}"
+        console.print(
+            "Prepared refined probability dataset "
+            f"(compression source: [cyan]{compression_source or 'default'}[/cyan])"
+        )
+        _prepare_dataset(
+            "mask_probs_roi_refined",
+            shape=(total_rois, 2, roi_h, roi_w),
+            chunks=chunk_spec,
+            dtype=np.dtype(np.float16),
+            fill_value=np.float16(0.0),
+            **compression_kwargs,
+        )
 
     scheduler_key = (scheduler or "processes").lower()
     if scheduler_key not in {"threads", "processes"}:
@@ -755,23 +1313,44 @@ def refine_eye_masks(
     if num_workers is not None:
         compute_kwargs["num_workers"] = int(num_workers)
 
-    chunk_size = max(1, chunk_size)
+    if isinstance(binary_data, da.Array):
+        binary_data = binary_data.rechunk({0: chunk_size, 1: -1, 2: -1, 3: -1})
+    if isinstance(probs_data, da.Array):
+        probs_data = probs_data.rechunk({0: chunk_size, 1: -1, 2: -1, 3: -1})
+
     tasks: List[object] = []
     if total_rois > 0:
-        for start in range(0, total_rois, chunk_size):
-            stop = min(start + chunk_size, total_rois)
+        binary_chunks = binary_data.to_delayed().reshape((-1,)).tolist()
+        if has_mask_probs and probs_data is not None:
+            probs_chunks = probs_data.to_delayed().reshape((-1,)).tolist()
+        else:
+            probs_chunks = [None] * len(binary_chunks)
+
+        chunk_offsets = list(binary_data.chunks[0])
+        if len(chunk_offsets) != len(binary_chunks):
+            raise RuntimeError(
+                f"Unexpected chunk alignment (offsets={len(chunk_offsets)}, chunks={len(binary_chunks)})"
+            )
+        cumulative = 0
+        for idx, (binary_chunk, probs_chunk) in enumerate(zip(binary_chunks, probs_chunks)):
+            chunk_len = int(chunk_offsets[idx])
+            start = cumulative
+            stop = start + chunk_len
             tasks.append(
-                delayed(_process_refine_chunk)(
+                delayed(_process_and_write_chunk)(
+                    binary_chunk,
+                    probs_chunk,
                     zarr_path,
-                    masks_path,
+                    run_group_path,
                     keypoints_path,
                     heading_path,
                     success_path,
-                    mask_probs_path,
                     start,
                     stop,
+                    write_probabilities=has_mask_probs,
                 )
             )
+            cumulative = stop
 
     chunk_results: List[List[Tuple[int, ROIOutput]]] = []
     if tasks:
@@ -779,20 +1358,47 @@ def refine_eye_masks(
         with ProgressBar():
             chunk_results = list(dask.compute(*tasks, **compute_kwargs))
 
+    del binary_data
+    if probs_data is not None:
+        del probs_data
+
     gathered_results: List[Tuple[int, ROIOutput]] = []
     for chunk in chunk_results:
         gathered_results.extend(chunk)
 
     gathered_results.sort(key=lambda item: item[0])
 
+    wrote_any_probs = False
+    total_successful_eyes = 0
+    successful_pair_count = 0
+
+    refined_area_metrics = np.zeros((total_rois, 2), dtype=np.float32)
+    source_area_metrics = np.zeros((total_rois, 2), dtype=np.float32)
+    union_refined_metrics = np.zeros(total_rois, dtype=np.float32)
+    union_source_metrics = np.zeros(total_rois, dtype=np.float32)
+    centroid_error_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
+    symmetry_offset_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
+    separation_refined_metrics = np.full(total_rois, np.nan, dtype=np.float32)
+    separation_keypoint_metrics = np.full(total_rois, np.nan, dtype=np.float32)
+    separation_delta_metrics = np.full(total_rois, np.nan, dtype=np.float32)
+    axis_ratio_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
+    circularity_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
+    prob_mean_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
+    prob_max_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
+    prob_var_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
+    prob_high_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
+    connectivity_flags_metrics = np.zeros(total_rois, dtype=np.uint8)
+    smoothing_flags_metrics = np.zeros((total_rois, 2), dtype=np.uint8)
+    pixels_reassigned_metrics = np.zeros(total_rois, dtype=np.int32)
+    probabilities_used_metrics = np.zeros(total_rois, dtype=bool)
+    reason_strings: List[str] = [""] * total_rois
+
     for global_idx, result in gathered_results:
-        masks_out[global_idx] = result.masks
-        ellipse_params[global_idx] = result.ellipse_params
-        ellipse_success[global_idx] = result.ellipse_success
-        feret_major[global_idx] = result.feret_major
-        feret_minor[global_idx] = result.feret_minor
-        feret_roundness[global_idx] = result.feret_roundness
-        eye_separation[global_idx] = result.eye_separation
+        if result.probabilities is not None:
+            wrote_any_probs = True
+        total_successful_eyes += int(result.ellipse_success.sum())
+        if result.ellipse_success.all():
+            successful_pair_count += 1
         if result.smoothing_changed.any():
             stats["smoothed_rois"] += 1
             stats["smoothed_channels"] += int(result.smoothing_changed.sum())
@@ -801,6 +1407,36 @@ def refine_eye_masks(
             stats["components_reassigned"] += int(result.reassigned_pixels)
         if result.used_probabilities:
             stats["probability_split"] += 1
+
+        refined_area_metrics[global_idx] = result.refined_areas
+        source_area_metrics[global_idx] = result.source_areas
+        union_refined_metrics[global_idx] = result.refined_union_area
+        union_source_metrics[global_idx] = result.source_union_area
+        centroid_error_metrics[global_idx] = result.centroid_errors
+        symmetry_offset_metrics[global_idx] = result.symmetry_offsets
+        separation_refined_metrics[global_idx] = result.eye_separation
+        separation_keypoint_metrics[global_idx] = result.keypoint_separation
+        separation_delta_metrics[global_idx] = result.separation_delta
+        axis_ratio_metrics[global_idx] = result.axis_ratio
+        circularity_metrics[global_idx] = result.circularity
+        if result.probability_mean is not None:
+            prob_mean_metrics[global_idx] = result.probability_mean
+            prob_max_metrics[global_idx] = result.probability_max
+            prob_var_metrics[global_idx] = result.probability_var
+            prob_high_metrics[global_idx] = result.probability_high_fraction
+        connectivity_flag = 0
+        if result.smoothing_changed[0]:
+            connectivity_flag |= 1
+        if result.smoothing_changed[1]:
+            connectivity_flag |= 2
+        if result.reassigned_pixels:
+            connectivity_flag |= 4
+        if result.used_probabilities:
+            connectivity_flag |= 8
+        connectivity_flags_metrics[global_idx] = connectivity_flag
+        smoothing_flags_metrics[global_idx] = result.smoothing_changed.astype(np.uint8)
+        pixels_reassigned_metrics[global_idx] = int(result.reassigned_pixels)
+        probabilities_used_metrics[global_idx] = bool(result.used_probabilities)
 
         if result.contours[0] is not None:
             contour = result.contours[0]
@@ -818,20 +1454,271 @@ def refine_eye_masks(
             right_total += contour_len
 
         reason = result.reason or "refined"
+        reason_strings[global_idx] = reason
         reason_tags = set(reason.split("|")) if reason else set()
         if "assigned_by_keypoint" in reason_tags:
             stats["assigned_by_keypoint"] += 1
-        if reason == "heading_split":
+        if "heading_split" in reason_tags:
             stats["fallback_heading"] += 1
             stats["refined"] += 1
-        elif reason == "keypoint_fail":
+        elif "keypoint_fail" in reason_tags:
             stats["keypoint_fail"] += 1
             stats["copied_original"] += 1
-        elif reason == "empty_union":
+        elif "empty_union" in reason_tags:
             stats["empty_union"] += 1
             stats["copied_original"] += 1
         else:
             stats["refined"] += 1
+
+    area_ratio_lr = np.divide(
+        refined_area_metrics[:, 0],
+        np.maximum(refined_area_metrics[:, 1], 1e-6),
+        dtype=np.float32,
+    )
+    area_diff_lr = refined_area_metrics[:, 0] - refined_area_metrics[:, 1]
+    area_delta_vs_source = refined_area_metrics - source_area_metrics
+    area_ratio_vs_source = refined_area_metrics / np.maximum(source_area_metrics, 1e-6)
+    union_delta = union_refined_metrics - union_source_metrics
+    union_ratio = union_refined_metrics / np.maximum(union_source_metrics, 1e-6)
+
+    area_mean = np.full(2, np.nan, dtype=np.float32)
+    area_std = np.full(2, np.nan, dtype=np.float32)
+    area_zscores = np.full_like(refined_area_metrics, np.nan)
+    for ch in range(2):
+        vals = refined_area_metrics[:, ch]
+        valid = vals > 0
+        if np.any(valid):
+            mean_val = float(vals[valid].mean())
+            std_val = float(vals[valid].std())
+            area_mean[ch] = mean_val
+            area_std[ch] = std_val
+            if std_val > 1e-6:
+                area_zscores[:, ch] = (vals - mean_val) / std_val
+
+    filter_flags = np.zeros((total_rois, 2), dtype=bool)
+    pair_filter_flags = np.zeros(total_rois, dtype=bool)
+    if area_filter_z is not None and area_filter_z > 0 and total_rois > 0:
+        threshold = float(area_filter_z)
+        filter_flags = np.abs(area_zscores) > threshold
+        if area_filter_mode == "both":
+            pair_filter_flags = np.all(filter_flags, axis=1)
+        else:
+            pair_filter_flags = np.any(filter_flags, axis=1)
+
+        filtered_left_indices = np.nonzero(filter_flags[:, 0])[0]
+        filtered_right_indices = np.nonzero(filter_flags[:, 1])[0]
+        for idx in filtered_left_indices:
+            reason_strings[idx] = _append_reason_tag(reason_strings[idx], "filtered_left")
+        for idx in filtered_right_indices:
+            reason_strings[idx] = _append_reason_tag(reason_strings[idx], "filtered_right")
+        for idx in np.nonzero(pair_filter_flags)[0]:
+            reason_strings[idx] = _append_reason_tag(reason_strings[idx], "filtered_pair")
+
+        stats["filtered_left"] = int(filter_flags[:, 0].sum())
+        stats["filtered_right"] = int(filter_flags[:, 1].sum())
+        stats["filtered_rois"] = int(pair_filter_flags.sum())
+    else:
+        stats["filtered_left"] = 0
+        stats["filtered_right"] = 0
+        stats["filtered_rois"] = 0
+
+    reason_array = np.array(reason_strings, dtype=object)
+    reason_counts = dict(Counter(reason_strings))
+
+    symmetry_sum_metrics = np.full(total_rois, np.nan, dtype=np.float32)
+    symmetry_abs_diff_metrics = np.full(total_rois, np.nan, dtype=np.float32)
+    symmetry_mask = np.all(np.isfinite(symmetry_offset_metrics), axis=1)
+    symmetry_sum_metrics[symmetry_mask] = symmetry_offset_metrics[symmetry_mask].sum(axis=1)
+    symmetry_abs_diff_metrics[symmetry_mask] = np.abs(
+        np.abs(symmetry_offset_metrics[symmetry_mask, 0]) - np.abs(symmetry_offset_metrics[symmetry_mask, 1])
+    )
+
+    if "metrics" in run_group:
+        del run_group["metrics"]
+    metrics_group = run_group.create_group("metrics")
+
+    metrics_group.create_array(
+        "area_refined",
+        data=refined_area_metrics.astype(np.float32),
+        chunks=(chunk_rois, 2),
+    )
+    metrics_group.create_array(
+        "area_source",
+        data=source_area_metrics.astype(np.float32),
+        chunks=(chunk_rois, 2),
+    )
+    metrics_group.create_array(
+        "area_union_refined",
+        data=union_refined_metrics.astype(np.float32),
+        chunks=(chunk_rois,),
+    )
+    metrics_group.create_array(
+        "area_union_source",
+        data=union_source_metrics.astype(np.float32),
+        chunks=(chunk_rois,),
+    )
+    metrics_group.create_array(
+        "area_zscore",
+        data=area_zscores.astype(np.float32),
+        chunks=(chunk_rois, 2),
+    )
+    metrics_group.create_array(
+        "area_ratio_left_right",
+        data=area_ratio_lr.astype(np.float32),
+        chunks=(chunk_rois,),
+    )
+    metrics_group.create_array(
+        "area_diff_left_right",
+        data=area_diff_lr.astype(np.float32),
+        chunks=(chunk_rois,),
+    )
+    metrics_group.create_array(
+        "area_delta_vs_source",
+        data=area_delta_vs_source.astype(np.float32),
+        chunks=(chunk_rois, 2),
+    )
+    metrics_group.create_array(
+        "area_ratio_vs_source",
+        data=area_ratio_vs_source.astype(np.float32),
+        chunks=(chunk_rois, 2),
+    )
+    metrics_group.create_array(
+        "area_union_delta",
+        data=union_delta.astype(np.float32),
+        chunks=(chunk_rois,),
+    )
+    metrics_group.create_array(
+        "area_union_ratio",
+        data=union_ratio.astype(np.float32),
+        chunks=(chunk_rois,),
+    )
+    metrics_group.create_array(
+        "centroid_error",
+        data=centroid_error_metrics.astype(np.float32),
+        chunks=(chunk_rois, 2),
+    )
+    metrics_group.create_array(
+        "symmetry_offsets",
+        data=symmetry_offset_metrics.astype(np.float32),
+        chunks=(chunk_rois, 2),
+    )
+    metrics_group.create_array(
+        "symmetry_sum",
+        data=symmetry_sum_metrics.astype(np.float32),
+        chunks=(chunk_rois,),
+    )
+    metrics_group.create_array(
+        "symmetry_abs_diff",
+        data=symmetry_abs_diff_metrics.astype(np.float32),
+        chunks=(chunk_rois,),
+    )
+    metrics_group.create_array(
+        "separation_refined",
+        data=separation_refined_metrics.astype(np.float32),
+        chunks=(chunk_rois,),
+    )
+    metrics_group.create_array(
+        "separation_keypoint",
+        data=separation_keypoint_metrics.astype(np.float32),
+        chunks=(chunk_rois,),
+    )
+    metrics_group.create_array(
+        "separation_delta",
+        data=separation_delta_metrics.astype(np.float32),
+        chunks=(chunk_rois,),
+    )
+    metrics_group.create_array(
+        "axis_ratio",
+        data=axis_ratio_metrics.astype(np.float32),
+        chunks=(chunk_rois, 2),
+    )
+    metrics_group.create_array(
+        "circularity",
+        data=circularity_metrics.astype(np.float32),
+        chunks=(chunk_rois, 2),
+    )
+    metrics_group.create_array(
+        "connectivity_flags",
+        data=connectivity_flags_metrics.astype(np.uint8, copy=False),
+        chunks=(chunk_rois,),
+    )
+    metrics_group.create_array(
+        "smoothing_flags",
+        data=smoothing_flags_metrics.astype(np.uint8, copy=False),
+        chunks=(chunk_rois, 2),
+    )
+    metrics_group.create_array(
+        "pixels_reassigned",
+        data=pixels_reassigned_metrics.astype(np.int32),
+        chunks=(chunk_rois,),
+    )
+    metrics_group.create_array(
+        "probabilities_used",
+        data=probabilities_used_metrics.astype(bool, copy=False),
+        chunks=(chunk_rois,),
+    )
+    metrics_group.create_array(
+        "filter_flags",
+        data=filter_flags.astype(bool, copy=False),
+        chunks=(chunk_rois, 2),
+    )
+    metrics_group.create_array(
+        "probability_mean",
+        data=prob_mean_metrics.astype(np.float32),
+        chunks=(chunk_rois, 2),
+    )
+    metrics_group.create_array(
+        "probability_max",
+        data=prob_max_metrics.astype(np.float32),
+        chunks=(chunk_rois, 2),
+    )
+    metrics_group.create_array(
+        "probability_var",
+        data=prob_var_metrics.astype(np.float32),
+        chunks=(chunk_rois, 2),
+    )
+    metrics_group.create_array(
+        "probability_high_fraction",
+        data=prob_high_metrics.astype(np.float32),
+        chunks=(chunk_rois, 2),
+    )
+    reason_ds = metrics_group.create_array(
+        "reason",
+        shape=(total_rois,),
+        chunks=(chunk_rois,),
+        dtype=VariableLengthUTF8(),
+        fill_value="",
+    )
+    reason_ds[:] = reason_array
+
+    centroid_mean = np.nanmean(centroid_error_metrics, axis=0) if np.isfinite(centroid_error_metrics).any() else np.full(2, np.nan, dtype=np.float32)
+    symmetry_sum_mean = float(np.nanmean(symmetry_sum_metrics)) if np.isfinite(symmetry_sum_metrics).any() else float("nan")
+    separation_delta_mean = float(np.nanmean(separation_delta_metrics)) if np.isfinite(separation_delta_metrics).any() else float("nan")
+    prob_mean_mean = (
+        np.nanmean(prob_mean_metrics, axis=0)
+        if np.isfinite(prob_mean_metrics).any()
+        else np.full(2, np.nan, dtype=np.float32)
+    )
+
+    metrics_summary = {
+        "num_rois": total_rois,
+        "area_refined_mean": area_mean.tolist(),
+        "area_refined_std": area_std.tolist(),
+        "area_union_mean": float(np.nanmean(union_refined_metrics)) if total_rois else float("nan"),
+        "area_union_std": float(np.nanstd(union_refined_metrics)) if total_rois else float("nan"),
+        "centroid_error_mean": centroid_mean.tolist(),
+        "symmetry_sum_mean": symmetry_sum_mean,
+        "separation_delta_mean": separation_delta_mean,
+        "probability_mean_mean": prob_mean_mean.tolist(),
+        "probability_threshold": float(_PROBABILITY_THRESHOLD),
+        "reason_counts": reason_counts,
+        "probability_usage_rate": float(np.count_nonzero(probabilities_used_metrics) / total_rois) if total_rois else 0.0,
+        "filtered_left": stats["filtered_left"],
+        "filtered_right": stats["filtered_right"],
+        "filtered_roi_pairs": stats["filtered_rois"],
+        "area_filter_threshold": float(area_filter_z) if area_filter_z is not None and area_filter_z > 0 else None,
+        "area_filter_mode": area_filter_mode,
+    }
 
     left_concat = np.concatenate(left_points, axis=0).astype(np.float32) if left_points else np.zeros((0, 2), dtype=np.float32)
     right_concat = np.concatenate(right_points, axis=0).astype(np.float32) if right_points else np.zeros((0, 2), dtype=np.float32)
@@ -839,50 +1726,6 @@ def refine_eye_masks(
     left_store = left_concat if left_concat.size > 0 else np.zeros((1, 2), dtype=np.float32)
     right_store = right_concat if right_concat.size > 0 else np.zeros((1, 2), dtype=np.float32)
 
-    chunk_rois = min(512, total_rois) if total_rois > 0 else 1
-
-    run_group.create_array(
-        "masks_roi",
-        data=masks_out,
-        chunks=(chunk_rois, 2, roi_h, roi_w),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "ellipse_params",
-        data=ellipse_params,
-        chunks=(chunk_rois, 2, 5),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "ellipse_success",
-        data=ellipse_success,
-        chunks=(chunk_rois, 2),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "feret_axes_major",
-        data=feret_major,
-        chunks=(chunk_rois, 2, 4),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "feret_axes_minor",
-        data=feret_minor,
-        chunks=(chunk_rois, 2, 4),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "feret_roundness",
-        data=feret_roundness,
-        chunks=(chunk_rois, 2),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "eye_separation",
-        data=eye_separation,
-        chunks=(chunk_rois,),
-        overwrite=True,
-    )
     run_group.create_array(
         "contour_left_ptr",
         data=left_ptr,
@@ -924,13 +1767,15 @@ def refine_eye_masks(
     source_eye_labels = list(src_run.attrs.get("eye_labels", ["eye_0", "eye_1"]))
     eye_labels = ["eye_left", "eye_right"]
 
-    total_eyes = int(ellipse_success.sum())
-    successful_pairs = int(np.sum(ellipse_success.all(axis=1)))
+    total_eyes = int(total_successful_eyes)
+    successful_pairs = int(successful_pair_count)
     pair_rate = float(successful_pairs / total_rois) if total_rois else float("nan")
 
     git_info = get_git_info()
     env_info = get_environment_info()
     duration = time.perf_counter() - stage_start
+
+    probabilities_available = bool(has_mask_probs) or wrote_any_probs
 
     smoothing_info = {
         "mode": _SMOOTHING_MODE,
@@ -945,38 +1790,126 @@ def refine_eye_masks(
         "rois_modified": int(stats["smoothed_rois"]),
         "channels_modified": int(stats["smoothed_channels"]),
         "components_reassigned": int(stats["components_reassigned"]),
-        "probabilities_available": bool(has_mask_probs),
-        "probability_threshold": float(_PROBABILITY_THRESHOLD),
+        "probabilities_available": probabilities_available,
+        "probability_threshold": float(_PROBABILITY_THRESHOLD) if probabilities_available else None,
         "probability_splits": int(stats["probability_split"]),
+        "probability_source": mask_prob_dataset or "none",
     }
 
-    run_group.attrs.update(
-        {
-            "method": "refine_eye_masks",
-            "source_eye_masks_run": src_run_name,
-            "source_eye_masks_method": source_method,
-            "source_keypoints_run": keypoint_run_name,
-            "source_crop_run": crop_run_name,
-            "total_rois": total_rois,
-            "successful_eyes": total_eyes,
-            "successful_roi_pairs": successful_pairs,
-            "successful_roi_pair_rate": pair_rate,
-            "refine_stats": stats,
-            "duration_seconds": duration,
-            "source_eye_labels": source_eye_labels,
-            "eye_labels": eye_labels,
-            "smoothing": smoothing_info,
-            "mask_probabilities_available": bool(has_mask_probs),
-            "mask_probability_threshold": float(_PROBABILITY_THRESHOLD) if has_mask_probs else None,
-            "dask_scheduler": scheduler_key,
-            "dask_num_workers": int(num_workers) if num_workers is not None else None,
-            "dask_chunk_size": chunk_size,
-            "dask_version": getattr(dask, "__version__", "unknown"),
-            "git_commit": git_info.get("commit_hash", "unknown"),
-            "git_branch": git_info.get("branch", "unknown"),
-            "hostname": env_info["platform"].get("hostname", "unknown"),
-        }
-    )
+    scheduler_info: Optional[Dict[str, object]] = None
+    if scheduler_key:
+        scheduler_info = {"type": scheduler_key}
+        if num_workers is not None:
+            scheduler_info["num_workers"] = int(num_workers)
+
+    environment_info = {
+        "hostname": env_info["platform"].get("hostname", "unknown"),
+        "python_version": env_info["platform"].get("python_version", "unknown"),
+        "system": env_info["platform"].get("system", "unknown"),
+        "release": env_info["platform"].get("release", "unknown"),
+    }
+
+    area_filter_info = {
+        "enabled": bool(area_filter_z and area_filter_z > 0),
+        "z_threshold": float(area_filter_z) if area_filter_z is not None and area_filter_z > 0 else None,
+        "mode": area_filter_mode,
+        "filtered_left": stats["filtered_left"],
+        "filtered_right": stats["filtered_right"],
+        "filtered_roi_pairs": stats["filtered_rois"],
+    }
+
+    mask_parameters = {
+        "chunk_size": chunk_size,
+        "probability_threshold": float(_PROBABILITY_THRESHOLD),
+        "probabilities_available": probabilities_available,
+        "mask_probability_source": mask_prob_dataset or ("refined" if wrote_any_probs else "none"),
+        "mask_binary_source": mask_binary_source or "unknown",
+        "mask_bundle": mask_bundle_provenance,
+        "smoothing": smoothing_info,
+        "components_reassigned": int(stats["components_reassigned"]),
+        "probability_split": int(stats["probability_split"]),
+        "metrics_version": 1,
+        "area_filter": area_filter_info,
+    }
+
+    artifact_keys = [
+        "segmenter",
+        "segmenter_method",
+        "segmenter_label_mode",
+        "source_checkpoint",
+        "source_checkpoint_best_val_dice",
+        "dataset_meta",
+        "inference_device",
+        "inference_batch_size",
+        "inference_duration_seconds",
+        "model_path",
+        "model_name",
+    ]
+    artifact_info = {key: src_run.attrs[key] for key in artifact_keys if key in src_run.attrs}
+
+    provenance_record = {
+        "stage": "refine_eye_masks",
+        "command": command or "unknown",
+        "created_at_utc": created_at_utc or datetime.now(timezone.utc).isoformat(),
+        "version": git_info.get("short_hash") or git_info.get("commit_hash"),
+        "git": {
+            "commit": git_info.get("commit_hash"),
+            "short": git_info.get("short_hash"),
+            "branch": git_info.get("branch"),
+            "is_dirty": git_info.get("is_dirty"),
+            "remote": git_info.get("remote_url"),
+        },
+        "environment": environment_info,
+        "scheduler": scheduler_info,
+        "parameters": mask_parameters,
+        "inputs": {
+            "eye_masks_run": src_run_name,
+            "keypoints_run": keypoint_run_name,
+            "crop_run": crop_run_name,
+        },
+        "artifacts": artifact_info,
+    }
+    provenance_record = {k: v for k, v in provenance_record.items() if v is not None}
+
+    attrs_payload: Dict[str, object] = {
+        "method": "refine_eye_masks",
+        "source_eye_masks_run": src_run_name,
+        "source_eye_masks_method": source_method,
+        "source_keypoints_run": keypoint_run_name,
+        "source_crop_run": crop_run_name,
+        "total_rois": total_rois,
+        "successful_eyes": total_eyes,
+        "successful_roi_pairs": successful_pairs,
+        "successful_roi_pair_rate": pair_rate,
+        "refine_stats": stats,
+        "duration_seconds": duration,
+        "source_eye_labels": source_eye_labels,
+        "eye_labels": eye_labels,
+        "smoothing": smoothing_info,
+        "mask_probabilities_available": probabilities_available,
+        "mask_probability_threshold": float(_PROBABILITY_THRESHOLD) if probabilities_available else None,
+        "mask_probability_source": mask_prob_dataset or ("refined" if wrote_any_probs else "none"),
+        "mask_probability_policy": "union_prob",
+        "mask_binary_source": mask_binary_source or "unknown",
+        "mask_binary_identity": bundle.binary_identity,
+        "mask_probability_identity": bundle.probs_identity or "none",
+        "mask_bundle_provenance": mask_bundle_provenance,
+        "dask_scheduler": scheduler_key,
+        "dask_num_workers": int(num_workers) if num_workers is not None else None,
+        "dask_chunk_size": chunk_size,
+        "dask_version": getattr(dask, "__version__", "unknown"),
+        "git_commit": git_info.get("commit_hash", "unknown"),
+        "git_branch": git_info.get("branch", "unknown"),
+        "hostname": env_info["platform"].get("hostname", "unknown"),
+        "provenance": provenance_record,
+        "metrics_summary": metrics_summary,
+    }
+
+    source_provenance = src_run.attrs.get("provenance")
+    if source_provenance is not None:
+        attrs_payload["source_eye_masks_provenance"] = source_provenance
+
+    run_group.attrs.update(attrs_payload)
 
     console.print(
         f"[green]✓[/green] Refined eye masks saved to [cyan]{REFINED_STAGE_NAME}_runs/{resolved_run_name}[/cyan] "
@@ -1003,8 +1936,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=1024,
-        help="Number of ROIs to refine per chunk (default: 1024).",
+        default=512,
+        help="Number of ROIs to refine per chunk (default: 512).",
     )
     parser.add_argument(
         "--scheduler",
@@ -1018,12 +1951,30 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Number of worker threads/processes for the Dask scheduler.",
     )
+    parser.add_argument(
+        "--area-filter-z",
+        type=float,
+        default=_AREA_FILTER_Z_DEFAULT,
+        help="Z-score threshold for per-eye area filtering (set to 2.0 by default; set <=0 to disable).",
+    )
+    parser.add_argument(
+        "--area-filter-mode",
+        choices=["either", "both"],
+        default=_AREA_FILTER_MODE_DEFAULT,
+        help="Require either eye or both eyes to exceed the threshold before flagging a pair.",
+    )
     return parser
 
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
+
+    arg_list = list(argv) if argv is not None else sys.argv[1:]
+    command_str = "python -m fisheye.refinement.refine_eye_masks"
+    if arg_list:
+        command_str = f"{command_str} " + " ".join(str(val) for val in arg_list)
+    created_at = datetime.now(timezone.utc).isoformat()
 
     console = Console()
     try:
@@ -1036,6 +1987,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             scheduler=args.scheduler,
             num_workers=args.num_workers,
             console=console,
+            command=command_str,
+            created_at_utc=created_at,
+            area_filter_z=args.area_filter_z,
+            area_filter_mode=args.area_filter_mode,
         )
     except Exception as exc:
         console.print(f"[red]✗[/red] Failed to refine eye masks: {exc}")

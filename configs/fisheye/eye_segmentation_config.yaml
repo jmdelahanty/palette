@@ -45,6 +45,7 @@ datasets:
     zarr_path: /nvme1/sesh3/2025-09-23T22-11-11Z_arena_4_chaser_arena4.zarr
     crop_run: null                     # Use latest crop run
     mask_run: null                     # Use latest eye mask run (traditional or YOLO)
+    mask_preference: raw_probs         # Prefer YOLO probability grids; falls back to refined/binary if missing
     split:
       train: 0.8
       val: 0.2
@@ -81,9 +82,9 @@ cache:
 # `model` can be any Ultralytics segmentation checkpoint (e.g. yolov8n-seg.pt).
 # ================================================================================
 training_params:
-  model: yolo11n-seg.pt
+  model: unet-small            # Recorded for provenance; U-Net trainer ignores external checkpoints
   epochs: 100
-  batch: 128
+  batch: 256
   imgsz: 256
   lr0: 0.0005
   momentum: 0.9
@@ -94,6 +95,10 @@ training_params:
   conf: 0.8                   # Confidence threshold for validation detections
   seg_loss: bce_dice              # Optional custom mask loss ('bce_dice', etc.)
   bce_weight: 0.5                 # Optional BCE weight when using BCE+Dice (0-1)
+  label_source: yolo              # "yolo" pulls masks/probs from eye_masks_runs; set "manual" for legacy labels
+  label_mode: union               # "union" => 1-channel target; use "lr" for separate L/R channels
+  eye_masks_run: null             # Override to lock to a specific eye_masks_runs/<run>
+  eye_masks_method: yolo_eye_segmentation             # Optional filter: choose latest run whose attrs.method matches this value
 
   # ============================================================================
   # LOSS WEIGHTS

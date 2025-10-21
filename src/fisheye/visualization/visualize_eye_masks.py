@@ -21,6 +21,8 @@ import zarr
 from matplotlib.patches import Patch
 from matplotlib.widgets import Button, Slider
 
+from ..shared.mask_source import load_mask_bundle
+
 
 def open_zarr(zarr_path: Path) -> zarr.Group:
     if not zarr_path.exists():
@@ -95,6 +97,41 @@ def _friendly_eye_label(label: Optional[str], idx: int) -> str:
     return str(label).title()
 
 
+def _format_attr_value(key: str, value: object, max_items: int = 4) -> Optional[str]:
+    if isinstance(value, dict):
+        if not value:
+            return f"{key}: {{}}"
+        if key == "provenance":
+            parts = []
+            for sub_key in ("command", "created_at_utc"):
+                if sub_key in value:
+                    parts.append(f"{sub_key}={value[sub_key]}")
+            if not parts:
+                parts.append(f"keys={list(value.keys())[:max_items]}")
+            return f"{key}: " + ", ".join(parts)
+        items = []
+        for idx, (sub_key, sub_val) in enumerate(value.items()):
+            if idx >= max_items:
+                items.append("…")
+                break
+            if isinstance(sub_val, (dict, list, tuple)):
+                items.append(f"{sub_key}=…")
+            else:
+                items.append(f"{sub_key}={sub_val}")
+        return f"{key}: " + ", ".join(items)
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return f"{key}: []"
+        if len(value) <= max_items and all(
+            isinstance(elem, (str, int, float, bool)) for elem in value
+        ):
+            return f"{key}: {value}"
+        return f"{key}: len={len(value)}"
+    if isinstance(value, (np.generic,)):
+        value = value.item()
+    return f"{key}: {value}"
+
+
 def _build_variant_summary(group: zarr.Group) -> List[str]:
     summary: List[str] = []
     method = group.attrs.get("method")
@@ -124,6 +161,35 @@ def _build_variant_summary(group: zarr.Group) -> List[str]:
                     splits=int(splits) if splits is not None else 0,
                 )
             )
+    skip_keys = {
+        "method",
+        "source_eye_masks_run",
+        "source_keypoints_run",
+        "source_crop_run",
+        "smoothing",
+        "refine_stats",
+        "mask_probabilities_available",
+        "mask_probability_threshold",
+        "mask_probability_source",
+        "mask_probability_policy",
+        "dask_scheduler",
+        "dask_num_workers",
+        "dask_chunk_size",
+        "dask_version",
+        "git_commit",
+        "git_branch",
+        "hostname",
+    }
+    for key in sorted(group.attrs.keys()):
+        value = group.attrs[key]
+        if key in skip_keys or key.startswith("_"):
+            continue
+        if key == "source_eye_masks_method" and isinstance(value, str):
+            summary.append(f"Source method: {value}")
+            continue
+        formatted = _format_attr_value(key, value)
+        if formatted:
+            summary.append(formatted)
     return summary
 
 
@@ -131,13 +197,13 @@ def _build_variant_summary(group: zarr.Group) -> List[str]:
 class MaskVariant:
     name: str
     group_path: str
-    masks: np.ndarray
-    mask_probs: Optional[np.ndarray]
-    ellipse_params: np.ndarray
-    ellipse_success: np.ndarray
-    feret_major: Optional[np.ndarray]
-    feret_minor: Optional[np.ndarray]
-    feret_roundness: Optional[np.ndarray]
+    masks: object  # zarr.Array | dask.Array | np.ndarray
+    mask_probs: Optional[object]
+    ellipse_params: Optional[object]
+    ellipse_success: Optional[object]
+    feret_major: Optional[object]
+    feret_minor: Optional[object]
+    feret_roundness: Optional[object]
     eye_labels: List[str]
     display_names: List[str]
     channel_colors: List[np.ndarray]
@@ -153,10 +219,26 @@ class MaskVariant:
 
 def build_mask_variant(root: zarr.Group, group_path: str, name: str) -> MaskVariant:
     group = root[group_path]
-    masks = group["masks_roi"]
-    mask_probs = group["mask_probs_roi"] if "mask_probs_roi" in group else None
-    ellipse_params = group["ellipse_params"]
-    ellipse_success = group["ellipse_success"]
+    threshold_attr = group.attrs.get("mask_probability_threshold", 0.5)
+    try:
+        threshold = float(threshold_attr)
+    except (TypeError, ValueError):
+        threshold = 0.5
+
+    bundle = load_mask_bundle(
+        group,
+        threshold=threshold,
+        prefer_probs=True,
+        materialize=False,
+        lazy=True,
+    )
+    masks = bundle.binary
+    mask_probs = bundle.probs
+
+    channel_count = int(masks.shape[1])
+
+    ellipse_params = group["ellipse_params"] if "ellipse_params" in group else None
+    ellipse_success = group["ellipse_success"] if "ellipse_success" in group else None
     feret_major = group["feret_axes_major"] if "feret_axes_major" in group else None
     feret_minor = group["feret_axes_minor"] if "feret_axes_minor" in group else None
     feret_roundness = group["feret_roundness"] if "feret_roundness" in group else None
@@ -167,8 +249,9 @@ def build_mask_variant(root: zarr.Group, group_path: str, name: str) -> MaskVari
     else:
         eye_labels = ["eye_left", "eye_right"]
 
-    channel_count = int(masks.shape[1])
-    if len(eye_labels) < channel_count:
+    if channel_count == 1:
+        eye_labels = ["union"]
+    elif len(eye_labels) < channel_count:
         eye_labels = [
             eye_labels[i] if i < len(eye_labels) else f"eye_{i}"
             for i in range(channel_count)
@@ -358,7 +441,10 @@ class EyeMaskViewer:
 
         mask_list: List[np.ndarray] = []
         axes_data: List[dict[str, tuple[tuple[float, float], tuple[float, float]]]] = []
-        ellipse_info = np.asarray(variant.ellipse_params[idx])
+        if variant.ellipse_params is not None:
+            ellipse_info = np.asarray(variant.ellipse_params[idx])
+        else:
+            ellipse_info = np.full((variant.channel_count, 5), np.nan, dtype=np.float32)
 
         for ch_idx in range(variant.channel_count):
             mask = np.asarray(variant.masks[idx, ch_idx])
@@ -369,11 +455,14 @@ class EyeMaskViewer:
 
             area = int(mask.sum())
 
-            success = (
-                bool(np.asarray(variant.ellipse_success[idx, ch_idx]))
-                if ch_idx < variant.ellipse_success.shape[1]
-                else False
-            )
+            if (
+                variant.ellipse_success is not None
+                and variant.ellipse_success.shape[0] > idx
+                and variant.ellipse_success.shape[1] > ch_idx
+            ):
+                success = bool(np.asarray(variant.ellipse_success[idx, ch_idx]))
+            else:
+                success = False
             ellipse_row = (
                 np.asarray(ellipse_info[ch_idx])
                 if ch_idx < ellipse_info.shape[0]
@@ -392,7 +481,11 @@ class EyeMaskViewer:
             feret_minor_len = None
             feret_round_val = None
 
-            if variant.feret_major is not None and ch_idx < variant.feret_major.shape[1]:
+            if (
+                variant.feret_major is not None
+                and variant.feret_major.shape[0] > idx
+                and variant.feret_major.shape[1] > ch_idx
+            ):
                 major_seg = np.asarray(variant.feret_major[idx, ch_idx])
                 if np.all(np.isfinite(major_seg)):
                     channel_axes["major"] = (
@@ -400,7 +493,11 @@ class EyeMaskViewer:
                         (major_seg[2], major_seg[3]),
                     )
                     feret_len = self._length_from_segment(major_seg)
-            if variant.feret_minor is not None and ch_idx < variant.feret_minor.shape[1]:
+            if (
+                variant.feret_minor is not None
+                and variant.feret_minor.shape[0] > idx
+                and variant.feret_minor.shape[1] > ch_idx
+            ):
                 minor_seg = np.asarray(variant.feret_minor[idx, ch_idx])
                 if np.all(np.isfinite(minor_seg)):
                     channel_axes["minor"] = (
@@ -408,7 +505,11 @@ class EyeMaskViewer:
                         (minor_seg[2], minor_seg[3]),
                     )
                     feret_minor_len = self._length_from_segment(minor_seg)
-            if variant.feret_roundness is not None and ch_idx < variant.feret_roundness.shape[1]:
+            if (
+                variant.feret_roundness is not None
+                and variant.feret_roundness.shape[0] > idx
+                and variant.feret_roundness.shape[1] > ch_idx
+            ):
                 feret_round_val = float(np.asarray(variant.feret_roundness[idx, ch_idx]))
 
             if success and "major" not in channel_axes:
@@ -471,10 +572,16 @@ def create_viewer(
                     raise ValueError(f"Refined eye-mask run '{name}' not found.")
                 refined_names.append(name)
         else:
-            for name in refined_parent.keys():
-                group = refined_parent[name]
+            latest = refined_parent.attrs.get("latest")
+            if latest and latest in refined_parent:
+                group = refined_parent[latest]
                 if isinstance(group, zarr.Group) and group.attrs.get("source_eye_masks_run") == eye_run:
-                    refined_names.append(name)
+                    refined_names.append(latest)
+            if not refined_names:
+                for name in refined_parent.keys():
+                    group = refined_parent[name]
+                    if isinstance(group, zarr.Group) and group.attrs.get("source_eye_masks_run") == eye_run:
+                        refined_names.append(name)
 
     for name in refined_names:
         group_path = f"refined_eye_masks_runs/{name}"
@@ -483,7 +590,7 @@ def create_viewer(
     viewer = EyeMaskViewer(root, variants, roi_images, success_flags, keypoints, keypoint_labels)
 
     fig = plt.figure(figsize=(12, 6))
-    gs = fig.add_gridspec(2, 3, height_ratios=[1, 0.18], width_ratios=[1, 1, 1])
+    gs = fig.add_gridspec(3, 3, height_ratios=[1, 0.35, 0.12], width_ratios=[1, 1, 1])
 
     ax_overlay = fig.add_subplot(gs[0, 0])
     ax_overlay.set_axis_off()
@@ -493,19 +600,23 @@ def create_viewer(
     ax_raw.set_axis_off()
 
     prob_panel = gs[0, 2]
-    slider_ax = fig.add_subplot(gs[1, :])
+    info_ax = fig.add_subplot(gs[1, :])
+    info_ax.set_axis_off()
+    info_ax.set_facecolor("#f5f5f5")
+    info_ax.set_xlim(0, 1)
+    info_ax.set_ylim(0, 1)
+    slider_ax = fig.add_subplot(gs[2, :])
 
     overlay, summary, axes, probs, base_roi, bin_masks, variant, kp_coords, kp_valid = viewer.make_overlay(0, viewer.variant_index)
     image_artist = ax_overlay.imshow(overlay, interpolation="nearest")
-    info_text = ax_overlay.text(
-        0.02,
-        0.02,
+    metadata_artist = info_ax.text(
+        0.01,
+        0.99,
         summary,
-        color="white",
+        color="black",
         fontsize=9,
-        transform=ax_overlay.transAxes,
-        verticalalignment="bottom",
-        bbox=dict(facecolor="black", alpha=0.4, pad=4),
+        verticalalignment="top",
+        transform=info_ax.transAxes,
     )
     variant_text = fig.text(
         0.02,
@@ -670,7 +781,7 @@ def create_viewer(
             kp_valid_mask,
         ) = viewer.make_overlay(idx, variant_idx)
         image_artist.set_data(overlay)
-        info_text.set_text(info)
+        metadata_artist.set_text(info)
         raw_artist.set_data(base_img)
         variant_text.set_text(
             f"Variant {variant_idx + 1}/{len(viewer.variants)}: {variant_local.name}"

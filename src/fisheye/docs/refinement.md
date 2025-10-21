@@ -1,6 +1,6 @@
 Refined Runs Implementation Specification
 Overview
-The refined_runs/ group stores filtered and interpolated detection data, providing clean datasets for downstream analysis while maintaining full traceability to the original detections.
+The refined_detect_runs/ group stores filtered and interpolated detection data, providing clean datasets for downstream analysis while maintaining full traceability to the original detections.
 
 ## Eye Mask Refinement (new)
 
@@ -20,10 +20,10 @@ This keeps the original masks untouched for provenance while providing a refined
 > Downstream consumers should treat these datasets as optional and guard on their presence (e.g., `if "mask_probs_roi" in run_group`).
 
 Directory Structure
-/refined_runs/
-  @latest = "refined_2025-10-03_21-00-00"
+/refined_detect_runs/
+  @latest = "refined_detect_2025-10-03_21-00-00"
   
-  /refined_2025-10-03_21-00-00/
+  /refined_detect_2025-10-03_21-00-00/
     # Root-level metadata
     @source_detect_run = "detect_2025-10-03_20-28-11"
     @source_quality_run = "detect_quality_2025-10-03_20-30-45"
@@ -172,8 +172,8 @@ pythonimport zarr
 import numpy as np
 
 root = zarr.open('data.zarr', mode='r')
-refined_run = root['refined_runs'].attrs['latest']
-filtered_group = root[f'refined_runs/{refined_run}/filtered']
+refined_run = root['refined_detect_runs'].attrs['latest']
+filtered_group = root[f'refined_detect_runs/{refined_run}/filtered']
 
 # Load clean detections
 bboxes = filtered_group['bbox_norm_coords'][:]
@@ -183,7 +183,7 @@ frame_mapping = filtered_group['frame_mapping'][:]
 print(f"Loaded {len(bboxes)} clean detections")
 print(f"Coverage: {np.sum(filtered_group['n_detections'][:] > 0)} frames")
 Loading Interpolated Data
-pythoninterp_group = root[f'refined_runs/{refined_run}/interpolated']
+pythoninterp_group = root[f'refined_detect_runs/{refined_run}/interpolated']
 
 # Load all detections (real + interpolated)
 bboxes = interp_group['bbox_norm_coords'][:]

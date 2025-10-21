@@ -1,0 +1,445 @@
+"""Run a trained U-Net segmenter to produce eye-mask probability maps."""
+
+from __future__ import annotations
+
+import argparse
+import time
+from contextlib import nullcontext
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import torch
+import zarr
+from rich.console import Console
+from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
+
+from ..shared.zarr.schema import get_run_group
+from ..utils.system import get_environment_info, get_git_info
+from .unet import UNetSmall
+
+
+def _compression_kwargs(array: zarr.Array) -> Dict[str, object]:
+    """Return compression kwargs compatible with both Zarr v2 and v3."""
+    kwargs: Dict[str, object] = {}
+
+    compressors = getattr(array, "compressors", None)
+    if compressors:
+        kwargs["compressors"] = compressors
+    else:
+        try:
+            compressor = array.compressor  # Zarr v2 API
+        except (TypeError, AttributeError):
+            compressor = None
+        if compressor is not None:
+            kwargs["compressor"] = compressor
+
+    chunk_codecs = getattr(array, "chunk_codecs", None)
+    if chunk_codecs:
+        kwargs.setdefault("chunk_codecs", chunk_codecs)
+
+    filters = getattr(array, "filters", None)
+    if filters:
+        kwargs.setdefault("filters", filters)
+
+    return kwargs
+
+
+def _prepare_run_group(
+    root: zarr.Group,
+    run_name: Optional[str],
+    console: Console,
+) -> Tuple[zarr.Group, str]:
+    parent = root.require_group("eye_masks_runs")
+    if run_name:
+        if run_name in parent:
+            raise ValueError(f"eye_masks_runs/{run_name} already exists")
+        run_group = parent.create_group(run_name)
+        parent.attrs["latest"] = run_name
+        console.print(f"Created run group: [cyan]eye_masks_runs/{run_name}[/cyan]")
+        return run_group, run_name
+    return get_run_group(root, "eye_masks", console=console, create_new=True)
+
+
+def _resolve_device(device_str: Optional[str]) -> torch.device:
+    if device_str is None:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device_str = str(device_str)
+    if device_str.lower() == "cpu":
+        return torch.device("cpu")
+    if device_str.isdigit():
+        return torch.device(f"cuda:{device_str}")
+    return torch.device(device_str)
+
+
+def _normalise_roi_batch(batch: np.ndarray) -> np.ndarray:
+    if batch.ndim == 3:
+        batch = batch[:, None, :, :]
+    if batch.ndim != 4:
+        raise ValueError(f"Unexpected ROI batch shape {batch.shape}")
+    if batch.shape[1] not in (1, 3):
+        raise ValueError(f"Unsupported ROI channel count: {batch.shape[1]}")
+    if np.issubdtype(batch.dtype, np.integer):
+        info = np.iinfo(batch.dtype)
+        max_value = float(info.max)
+        batch = batch.astype(np.float32, copy=False)
+        if max_value > 0:
+            batch /= max_value
+    else:
+        batch = batch.astype(np.float32, copy=False)
+        max_val = float(np.nanmax(batch)) if batch.size else 0.0
+        if max_val > 1.0:
+            batch /= max_val
+    batch = np.nan_to_num(batch, nan=0.0, posinf=1.0, neginf=0.0)
+    batch = np.clip(batch, 0.0, 1.0)
+    return batch
+
+
+def _json_ready_meta(meta: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    result: List[Dict[str, object]] = []
+    for item in meta:
+        converted: Dict[str, object] = {}
+        for key, value in item.items():
+            if isinstance(value, (np.integer, np.floating)):
+                converted[key] = value.item()
+            elif isinstance(value, tuple):
+                converted[key] = list(value)
+            else:
+                converted[key] = value
+        result.append(converted)
+    return result
+
+
+def _load_checkpoint(path: Path, device: torch.device) -> Tuple[UNetSmall, Dict[str, object]]:
+    checkpoint = torch.load(path, map_location=device)
+    model_cfg = checkpoint.get("model_config")
+    if not model_cfg:
+        raise ValueError("Checkpoint missing 'model_config'; retrain with updated trainer.")
+    model = UNetSmall(**model_cfg)
+    state_dict = checkpoint.get("model_state")
+    if state_dict is None:
+        raise ValueError("Checkpoint missing 'model_state'.")
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+    return model, checkpoint
+
+def _write_mask_probs(
+    run_group: zarr.Group,
+    model: UNetSmall,
+    roi_array: zarr.Array,
+    batch_size: int,
+    device: torch.device,
+    label_mode: str,
+    console: Console,
+    write_binary: bool,
+) -> Tuple[int, bool]:
+    total_rois = int(roi_array.shape[0])
+    height = int(roi_array.shape[-2])
+    width = int(roi_array.shape[-1])
+    prob_channels = 1 if label_mode == "union" else 2
+
+    chunk_size = getattr(roi_array, "chunks", None)
+    chunk_rois = (
+        max(1, min(512, chunk_size[0]))
+        if (chunk_size and len(chunk_size) == roi_array.ndim)
+        else min(512, max(1, total_rois))
+    )
+    compression_kwargs = _compression_kwargs(roi_array)
+
+    expected_shape = (total_rois, prob_channels, height, width)
+
+    mask_probs = run_group.create_array(
+        "mask_probs_roi",
+        shape=expected_shape,
+        chunks=(chunk_rois, prob_channels, height, width),
+        dtype="float16",
+        **compression_kwargs,
+        overwrite=True,
+    )
+
+    masks_roi: Optional[zarr.Array] = None
+    if write_binary:
+        if "masks_roi" in run_group:
+            existing = run_group["masks_roi"]
+            if existing.shape == expected_shape and existing.dtype == np.uint8:
+                masks_roi = existing
+            else:
+                del run_group["masks_roi"]
+        if masks_roi is None:
+            masks_roi = run_group.create_array(
+                "masks_roi",
+                shape=expected_shape,
+                chunks=(chunk_rois, prob_channels, height, width),
+                dtype="uint8",
+                **compression_kwargs,
+                overwrite=True,
+            )
+
+    progress = Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    )
+    task = progress.add_task("[cyan]Running inference[/cyan]", total=total_rois)
+
+    with progress, torch.no_grad():
+        for start in range(0, total_rois, batch_size):
+            stop = min(start + batch_size, total_rois)
+            roi_np = np.asarray(roi_array[start:stop])
+            roi_np = _normalise_roi_batch(roi_np)
+            imgs = torch.from_numpy(roi_np).to(device, non_blocking=True)
+            if device.type == "cuda":
+                imgs = imgs.contiguous(memory_format=torch.channels_last)
+
+            amp_module = getattr(torch, "amp", None)
+            if device.type == "cuda" and amp_module is not None and hasattr(amp_module, "autocast"):
+                autocast_cm = amp_module.autocast("cuda")
+            elif device.type == "cuda" and hasattr(torch.cuda, "amp"):
+                autocast_cm = torch.cuda.amp.autocast()
+            else:
+                autocast_cm = nullcontext()
+
+            with autocast_cm:
+                logits = model(imgs)
+
+            probs = torch.sigmoid(logits).float().cpu().numpy()
+
+            if probs.ndim == 3:
+                probs = probs[:, None, :, :]
+
+            channels = probs.shape[1]
+            if label_mode == "union":
+                if channels == 1:
+                    pass
+                elif channels == 2:
+                    probs = np.max(probs, axis=1, keepdims=True)
+                else:
+                    raise ValueError(
+                        f"Union model produced {channels} channels; expected 1 or 2."
+                    )
+            else:  # label_mode == "lr"
+                if channels == 1:
+                    raise ValueError(
+                        "LR model produced a single probability channel; retrain or specify --label-mode=union."
+                    )
+                elif channels != 2:
+                    raise ValueError(
+                        f"LR model produced {channels} channels; expected 2."
+                    )
+
+            probs = np.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0)
+            probs = np.clip(probs, 0.0, 1.0).astype(np.float16, copy=False)
+
+            mask_probs[start:stop] = probs
+            if masks_roi is not None:
+                masks_roi[start:stop] = (probs >= 0.5).astype(np.uint8, copy=False)
+            progress.advance(task, stop - start)
+    return prob_channels, masks_roi is not None
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Infer eye-mask probabilities using a trained U-Net segmenter."
+    )
+    parser.add_argument("zarr_path", help="Path to Palette Zarr archive.")
+    parser.add_argument("checkpoint", help="Path to trained U-Net checkpoint (.pt).")
+    parser.add_argument(
+        "--eye-mask-run",
+        help="Existing eye mask run to clone metadata from (optional).",
+    )
+    parser.add_argument(
+        "--use-crop",
+        action="store_true",
+        default=True,
+        help="When no source eye mask run is provided, prefer the latest crop run (default: true).",
+    )
+    parser.add_argument(
+        "--crop-run",
+        help="Explicit crop run providing ROI images (overrides --use-crop).",
+    )
+    parser.add_argument(
+        "--run-name",
+        help="Optional name for the output run (defaults to timestamped name).",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=64,
+        help="Batch size used during inference (default: 64).",
+    )
+    parser.add_argument(
+        "--device",
+        help="Torch device to use (e.g. 'cuda:0', 'cpu'). Defaults to checkpoint device or auto.",
+    )
+    parser.add_argument(
+        "--label-mode",
+        choices=["union", "lr"],
+        help="Override checkpoint label_mode (default: value stored in checkpoint).",
+    )
+    parser.add_argument(
+        "--write-binary-masks",
+        action="store_true",
+        help="Also threshold and store uint8 masks alongside probabilities.",
+    )
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+
+    console = Console()
+    console.print("[bold cyan]Running U-Net eye-mask inference[/bold cyan]\n")
+
+    checkpoint_path = Path(args.checkpoint).expanduser().resolve()
+    device = _resolve_device(args.device)
+    model, checkpoint = _load_checkpoint(checkpoint_path, device)
+    label_mode = args.label_mode or checkpoint.get("label_mode", "union")
+
+    zarr_path = Path(args.zarr_path).expanduser().resolve()
+    root = zarr.open(str(zarr_path), mode="a")
+
+    eye_parent = root.require_group("eye_masks_runs")
+    source_run_name = args.eye_mask_run
+    src_run = None
+    if source_run_name:
+        if source_run_name not in eye_parent:
+            raise ValueError(f"Source eye mask run '{source_run_name}' not found.")
+        src_run = eye_parent[source_run_name]
+    else:
+        latest = eye_parent.attrs.get("latest")
+        if latest and latest in eye_parent and not args.crop_run:
+            source_run_name = latest
+            src_run = eye_parent[latest]
+
+    crop_parent = root.get("crop_runs")
+    crop_run = args.crop_run
+    crop_resolved_from = "cli_arg" if crop_run else "unset"
+    if src_run is not None:
+        crop_run = crop_run or src_run.attrs.get("source_crop_run")
+        if crop_run:
+            crop_resolved_from = "source_run_attr"
+    elif args.use_crop:
+        if crop_parent is not None:
+            crop_run = crop_run or crop_parent.attrs.get("latest")
+            if crop_run:
+                crop_resolved_from = "crop_latest_attr"
+            if not crop_run:
+                try:
+                    crop_keys = sorted(
+                        key for key in getattr(crop_parent, "group_keys", lambda: [])()  # type: ignore[attr-defined]
+                    )
+                except Exception:
+                    crop_keys = []
+                if crop_keys:
+                    crop_run = crop_keys[-1]
+                    crop_resolved_from = "crop_group_latest"
+    if not crop_run and crop_parent is not None:
+        try:
+            crop_keys = sorted(
+                key for key in getattr(crop_parent, "group_keys", lambda: [])()  # type: ignore[attr-defined]
+            )
+        except Exception:
+            crop_keys = []
+        if crop_keys:
+            crop_run = crop_keys[-1]
+            crop_resolved_from = "crop_group_latest"
+    if not crop_run or crop_parent is None or crop_run not in crop_parent:
+        available = []
+        if crop_parent is not None:
+            try:
+                available = sorted(
+                    key for key in getattr(crop_parent, "group_keys", lambda: [])()  # type: ignore[attr-defined]
+                )
+            except Exception:
+                available = []
+        raise ValueError(
+            "Unable to resolve crop run for ROI images (use --crop-run or provide --eye-mask-run). "
+            f"Available crop runs: {', '.join(available) if available else 'none'}."
+        )
+
+    roi_path = f"crop_runs/{crop_run}/roi_images"
+    if roi_path not in root:
+        raise ValueError(f"ROI images array '{roi_path}' missing from Zarr store.")
+
+    console.print(
+        f"[dim]Resolved crop run: {crop_run} "
+        f"(source={crop_resolved_from})[/dim]"
+    )
+
+    roi_array = root[roi_path]
+    total_rois = int(roi_array.shape[0])
+    if total_rois == 0:
+        raise ValueError("ROI image array is empty; nothing to segment.")
+
+    run_group, resolved_run_name = _prepare_run_group(root, args.run_name, console)
+
+    start_time = time.perf_counter()
+    stored_channels, wrote_binary = _write_mask_probs(
+        run_group,
+        model,
+        roi_array,
+        int(args.batch_size),
+        device,
+        label_mode,
+        console,
+        write_binary=bool(args.write_binary_masks),
+    )
+    duration = time.perf_counter() - start_time
+
+    git_info = get_git_info()
+    env_info = get_environment_info()
+
+    dataset_meta = checkpoint.get("dataset_meta", [])
+    dataset_meta = _json_ready_meta(dataset_meta) if dataset_meta else []
+
+    src_attrs = dict(src_run.attrs) if src_run is not None else {}
+    for key in list(src_attrs):
+        if "refine" in key:
+            src_attrs.pop(key)
+    run_group.attrs.update(src_attrs)
+    run_group.attrs.update(
+        {
+            "method": "unet_eye_mask_segmenter",
+            "segmenter": "unet",
+            "segmenter_label_mode": label_mode,
+            "source_eye_masks_run": source_run_name,
+            "source_keypoints_run": src_attrs.get("source_keypoints_run") if src_attrs else None,
+            "source_crop_run": crop_run,
+            "source_checkpoint": str(checkpoint_path),
+            "source_checkpoint_best_val_dice": float(checkpoint.get("best_val_dice", float("nan"))),
+            "total_rois": int(total_rois),
+            "probabilities_dtype": "float16",
+            "probabilities_channels": int(stored_channels),
+            "probabilities_source": "mask_probs_roi",
+            "mask_probability_threshold": 0.5,
+            "inference_device": str(device),
+            "inference_batch_size": int(args.batch_size),
+            "inference_duration_seconds": float(duration),
+            "dataset_meta": dataset_meta,
+            "git_commit": git_info.get("commit_hash", "unknown"),
+            "git_branch": git_info.get("branch", "unknown"),
+            "hostname": env_info["platform"].get("hostname", "unknown"),
+        }
+    )
+
+    if wrote_binary:
+        run_group.attrs["masks_from"] = "threshold(mask_probs_roi, thr=0.5)"
+    elif "masks_from" in run_group.attrs:
+        del run_group.attrs["masks_from"]
+
+    if not run_group.attrs.get("eye_labels"):
+        run_group.attrs["eye_labels"] = ["eye_left", "eye_right"]
+
+    output_desc = "probabilities + binary masks" if wrote_binary else "probabilities"
+    console.print(
+        f"\n[green]✓[/green] U-Net {output_desc} written to "
+        f"[cyan]eye_masks_runs/{resolved_run_name}/mask_probs_roi[/cyan] "
+        f"({total_rois:,} ROIs processed in {duration:.1f}s)."
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    main()

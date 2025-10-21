@@ -10,7 +10,7 @@ from pathlib import Path
 import hashlib
 import json
 import time
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import cv2
 import numpy as np
@@ -84,11 +84,141 @@ class DatasetCacheInfo:
         }
 
 
+@dataclass
+class YOLOTargetStore:
+    roi_array: zarr.Array
+    mask_probs_array: Optional[zarr.Array]
+    masks_array: Optional[zarr.Array]
+    use_probs: bool
+    meta: Dict[str, object]
+
+
 _CACHE_PROCESS_IMAGES: Optional[np.memmap] = None
 _CACHE_PROCESS_MASKS: Optional[np.memmap] = None
 _CACHE_TARGET_SIZE: int = 0
 _CACHE_MASK_CHANNELS: int = 1
 _CACHE_CONTEXTS: Dict[str, Dict[str, zarr.Array]] = {}
+
+
+def load_yolo_targets(
+    zarr_path: Union[str, Path],
+    eye_masks_run: Optional[str],
+    label_mode: str,
+    eye_masks_method: Optional[str] = None,
+    mask_preference: str = "auto",
+) -> YOLOTargetStore:
+    """Resolve ROI and mask arrays for U-Net training without materializing them."""
+
+    zarr_path_str = str(zarr_path)
+    root = zarr.open(zarr_path_str, mode="r")
+
+    if "eye_masks_runs" not in root:
+        raise ValueError(f"'eye_masks_runs' group not found in Zarr store: {zarr_path}")
+    eye_parent = root["eye_masks_runs"]
+
+    run_name: Optional[str] = eye_masks_run or eye_parent.attrs.get("latest")
+    if (not run_name or run_name not in eye_parent) and eye_masks_method:
+        candidates: List[str] = []
+        for name in eye_parent.group_keys():
+            grp = eye_parent[name]
+            if getattr(grp, "attrs", None) and grp.attrs.get("method") == eye_masks_method:
+                candidates.append(name)
+        if candidates:
+            candidates.sort()
+            run_name = candidates[-1]
+    if run_name is None:
+        run_name = eye_parent.attrs.get("latest")
+    if not run_name:
+        raise ValueError("YOLO eye mask run not found (no run specified and no 'latest' attr)")
+    if run_name not in eye_parent:
+        raise ValueError(f"YOLO eye mask run '{run_name}' not present in Zarr store")
+    run_grp = eye_parent[run_name]
+
+    preference = str(mask_preference or "auto").strip().lower()
+    if preference == "refined_probs":
+        source_priority = ["mask_probs_roi_refined"]
+    elif preference == "raw_probs":
+        source_priority = ["mask_probs_roi", "mask_probs_roi_refined", "masks_roi"]
+    elif preference == "binary":
+        source_priority = ["masks_roi"]
+    else:
+        source_priority = ["mask_probs_roi_refined", "mask_probs_roi", "masks_roi"]
+
+    mask_probs_arr: Optional[zarr.Array] = None
+    masks_arr: Optional[zarr.Array] = None
+    target_source: Optional[str] = None
+    for candidate in source_priority:
+        if candidate in run_grp:
+            if candidate in {"mask_probs_roi", "mask_probs_roi_refined"}:
+                mask_probs_arr = run_grp[candidate]
+                masks_arr = None
+                target_source = candidate
+                break
+            if candidate == "masks_roi":
+                masks_arr = run_grp[candidate]
+                mask_probs_arr = None
+                target_source = candidate
+                break
+
+    if target_source is None:
+        raise ValueError(
+            f"YOLO eye mask run '{run_name}' does not provide requested mask data (mask_preference='{preference}')"
+        )
+
+    valid_modes = {"union", "lr"}
+    if label_mode not in valid_modes:
+        raise ValueError(f"label_mode='{label_mode}' not in {valid_modes}")
+
+    use_probs = mask_probs_arr is not None
+
+    crop_run = run_grp.attrs.get("source_crop_run")
+    if not crop_run:
+        crop_parent = root.get("crop_runs", None)
+        if crop_parent is not None:
+            crop_run = crop_parent.attrs.get("latest")
+    if not crop_run:
+        raise ValueError(
+            f"Missing 'source_crop_run' attribute for eye mask run '{run_name}' and no latest crop run recorded"
+        )
+
+    roi_path = f"crop_runs/{crop_run}/roi_images"
+    if roi_path not in root:
+        raise ValueError(f"ROI images array '{roi_path}' not found in Zarr store")
+
+    roi_arr = root[roi_path]
+    if roi_arr.ndim not in (3, 4):
+        raise ValueError(f"Unexpected ROI images shape: {roi_arr.shape}")
+    if roi_arr.ndim == 4 and roi_arr.shape[1] not in (1, 3):
+        raise ValueError(f"Unexpected channel dimension in ROI images: {roi_arr.shape}")
+
+    total_rois = int(roi_arr.shape[0])
+    meta = {
+        "eye_masks_run": run_name,
+        "eye_masks_method": run_grp.attrs.get("method"),
+        "crop_run": crop_run,
+        "use_probs": use_probs,
+        "targets_source": target_source,
+        "length": total_rois,
+        "roi_shape": tuple(int(s) for s in roi_arr.shape[1:]),
+        "target_channels": 1 if label_mode == "union" else 2,
+    }
+    eye_labels_attr = run_grp.attrs.get("eye_labels")
+    if isinstance(eye_labels_attr, (list, tuple)):
+        meta["eye_labels"] = [str(label) for label in eye_labels_attr]
+    elif isinstance(eye_labels_attr, str):
+        meta["eye_labels"] = [eye_labels_attr]
+    if use_probs and mask_probs_arr is not None:
+        meta["mask_probs_dtype"] = str(mask_probs_arr.dtype)
+    if not use_probs and masks_arr is not None:
+        meta["masks_dtype"] = str(masks_arr.dtype)
+
+    return YOLOTargetStore(
+        roi_array=roi_arr,
+        mask_probs_array=mask_probs_arr,
+        masks_array=masks_arr,
+        use_probs=use_probs,
+        meta=meta,
+    )
 
 
 def _cache_resize_image(image: np.ndarray, target_size: int) -> np.ndarray:

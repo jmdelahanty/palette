@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -30,6 +30,10 @@ except ImportError:
     HAVE_DISTRIBUTED = False
 
 from .keypoint_quality import KeypointGeometryMetrics, compute_geometry_metrics
+from ..utils.system import get_environment_info, get_git_info
+
+REFINED_KEYPOINT_GROUP = "refined_keypoints_runs"
+LEGACY_KEYPOINT_GROUP = "keypoints_refined_runs"
 
 
 @dataclass
@@ -66,7 +70,9 @@ class KeypointRefinementParams:
 
 
 def _ensure_group(root: zarr.Group, name: str) -> zarr.Group:
-    return root[name] if name in root else root.create_group(name)
+    if name in root:
+        return root[name]
+    return root.create_group(name)
 
 
 def _copy_array(src: zarr.Array, dst_group: zarr.Group, name: str) -> None:
@@ -242,6 +248,9 @@ def create_refined_keypoint_run(
     keypoint_run: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
     console: Optional[Console] = None,
+    *,
+    command: Optional[str] = None,
+    created_at_utc: Optional[str] = None,
 ) -> str:
     """
     Create a refined keypoint run with geometry-based validation.
@@ -279,11 +288,13 @@ def create_refined_keypoint_run(
         raise RuntimeError("Keypoint run contains zero ROIs; nothing to refine.")
 
     # Prepare destination group
-    kp_refined_root = _ensure_group(root, "keypoints_refined_runs")
+    kp_refined_root = _ensure_group(root, REFINED_KEYPOINT_GROUP)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_name = f"keypoints_refined_{timestamp}"
+    run_name = f"refined_keypoints_{timestamp}"
     kp_refined = kp_refined_root.create_group(run_name)
     kp_refined_root.attrs["latest"] = run_name
+
+    created_timestamp = created_at_utc or datetime.now(timezone.utc).isoformat()
 
     kp_refined.attrs.update(
         {
@@ -293,7 +304,7 @@ def create_refined_keypoint_run(
             "num_workers": params.num_workers,
             "memory_limit": params.memory_limit,
             "refinement_role": "left_right_eye_check",
-            "created_utc": datetime.utcnow().isoformat() + "Z",
+            "created_utc": created_timestamp,
         }
     )
 
@@ -527,6 +538,65 @@ def create_refined_keypoint_run(
         "pass_rate_percent": pass_rate,
         "duration_seconds": duration,
     }
+
+    git_info = get_git_info()
+    env_info = get_environment_info()
+
+    scheduler_info: Optional[Dict[str, object]] = None
+    if params.scheduler:
+        scheduler_info = {"type": params.scheduler}
+        if params.num_workers is not None:
+            scheduler_info["num_workers"] = int(params.num_workers)
+        if params.memory_limit is not None:
+            scheduler_info["memory_limit"] = params.memory_limit
+
+    environment_info = {
+        "hostname": env_info["platform"].get("hostname", "unknown"),
+        "python_version": env_info["platform"].get("python_version", "unknown"),
+        "system": env_info["platform"].get("system", "unknown"),
+        "release": env_info["platform"].get("release", "unknown"),
+    }
+
+    parameters_info = {
+        "chunk_size": params.chunk_size,
+        "scheduler": params.scheduler,
+        "num_workers": params.num_workers,
+        "memory_limit": params.memory_limit,
+        "parameter_source": param_source,
+    }
+
+    artifact_keys = [
+        "model_checkpoint",
+        "model_name",
+        "model_version",
+        "source_checkpoint",
+        "inference_device",
+        "inference_batch_size",
+        "dataset_meta",
+    ]
+    artifact_info = {key: kp_source.attrs[key] for key in artifact_keys if key in kp_source.attrs}
+
+    provenance_record = {
+        "stage": "refine_keypoints",
+        "command": command or "unknown",
+        "created_at_utc": created_timestamp,
+        "version": git_info.get("short_hash") or git_info.get("commit_hash"),
+        "git": {
+            "commit": git_info.get("commit_hash"),
+            "short": git_info.get("short_hash"),
+            "branch": git_info.get("branch"),
+            "is_dirty": git_info.get("is_dirty"),
+            "remote": git_info.get("remote_url"),
+        },
+        "environment": environment_info,
+        "scheduler": scheduler_info,
+        "parameters": parameters_info,
+        "inputs": {"keypoints_run": keypoint_run},
+        "artifacts": artifact_info,
+    }
+    provenance_record = {k: v for k, v in provenance_record.items() if v is not None}
+
+    kp_refined.attrs["provenance"] = provenance_record
 
     report_lines = [
         "[bold]Results[/bold]",

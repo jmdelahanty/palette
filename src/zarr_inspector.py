@@ -58,7 +58,8 @@ def detect_pipeline_components(root):
         components['detection'] = True
     
     # Check for preprocessing (refinement, cropping, filtering)
-    if any(group in root for group in ['refined_runs', 'filtered_runs', 'preprocessing', 'crop_runs']):
+    detection_groups = [REFINED_DETECT_GROUP, LEGACY_REFINED_DETECT_GROUP, 'filtered_runs', 'preprocessing', 'crop_runs']
+    if any(group in root for group in detection_groups):
         components['preprocessing'] = True
     
     # Check for calibration
@@ -241,9 +242,14 @@ def analyze_preprocessing_pipeline(root, console):
             coverage = (detect_counts > 0).sum() / len(detect_counts) * 100
             stages.append(('Detected', coverage, len(detect_counts)))
     
-    if 'refined_runs' in root and root['refined_runs'].attrs.get('latest'):
-        latest_refined = root['refined_runs'].attrs['latest']
-        refined_group = root[f'refined_runs/{latest_refined}']
+    refined_root = None
+    if REFINED_DETECT_GROUP in root and root[REFINED_DETECT_GROUP].attrs.get('latest'):
+        refined_root = root[REFINED_DETECT_GROUP]
+    elif LEGACY_REFINED_DETECT_GROUP in root and root[LEGACY_REFINED_DETECT_GROUP].attrs.get('latest'):
+        refined_root = root[LEGACY_REFINED_DETECT_GROUP]
+    if refined_root is not None:
+        latest_refined = refined_root.attrs['latest']
+        refined_group = refined_root[latest_refined]
         expected_length = len(detect_counts) if detect_counts is not None else None
         if 'filtered' in refined_group:
             filtered_counts = get_frame_counts_from_group(refined_group['filtered'], expected_length)
@@ -431,14 +437,16 @@ def print_environment_info(console: Console, root) -> None:
 
         env_rows.append((stage_label, run_name, created or '—', host or '—', git_commit or '—', command or '—'))
 
-    def latest_group(path: str):
-        if path not in root:
-            return None, None
-        group = root[path]
-        latest = group.attrs.get('latest')
-        if not latest or latest not in group:
-            return None, None
-        return latest, group[latest]
+    def latest_group(*paths: str):
+        for path in paths:
+            if path not in root:
+                continue
+            group = root[path]
+            latest = group.attrs.get('latest')
+            if not latest or latest not in group:
+                continue
+            return latest, group[latest]
+        return None, None
 
     # Detect run
     run_name, run_group = latest_group('detect_runs')
@@ -453,7 +461,7 @@ def print_environment_info(console: Console, root) -> None:
                 add_entry('Quality', latest_quality, quality_group[latest_quality])
 
     # Refined run
-    run_name, run_group = latest_group('refined_runs')
+    run_name, run_group = latest_group(REFINED_DETECT_GROUP, LEGACY_REFINED_DETECT_GROUP)
     if run_group is not None:
         add_entry('Refine', run_name, run_group)
 
@@ -531,16 +539,22 @@ def inspect_zarr_archive(zarr_path: str, tree_depth: int = 3):
     
     # Show latest runs for each analysis type
     analysis_groups = [
-        ('refined_runs', 'Refinement'),
-        ('filtered_runs', 'Filtering'),
-        ('preprocessing', 'Interpolation'),
-        ('bout_analysis', 'Bout Analysis'),
-        ('bout_phase_analysis', 'Phase Analysis')
+        ([REFINED_DETECT_GROUP, LEGACY_REFINED_DETECT_GROUP], 'Refinement'),
+        (['filtered_runs'], 'Filtering'),
+        (['preprocessing'], 'Interpolation'),
+        (['bout_analysis'], 'Bout Analysis'),
+        (['bout_phase_analysis'], 'Phase Analysis')
     ]
     
-    for group_name, display_name in analysis_groups:
-        if group_name in root:
-            group = root[group_name]
+    for group_names, display_name in analysis_groups:
+        group = None
+        active_name = None
+        for group_name in group_names:
+            if group_name in root:
+                group = root[group_name]
+                active_name = group_name
+                break
+        if group is not None:
             if 'latest' in group.attrs:
                 latest = group.attrs['latest']
                 console.print(f"\n[cyan]{display_name}:[/cyan]")

@@ -28,6 +28,9 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRe
 # Metadata helpers
 from ..utils.metadata import has_raw_video, get_video_source_path, get_total_frames, get_detection_method
 
+REFINED_DETECT_GROUP = "refined_detect_runs"
+LEGACY_REFINED_DETECT_GROUP = "refined_runs"
+
 # Dask imports
 import dask
 from dask import delayed
@@ -767,7 +770,7 @@ def get_detection_source_info(
         
     Returns:
         Tuple of (source_path, source_group, detection_source_array)
-        - source_path: Path string like 'detect_runs/latest' or 'refined_runs/latest/filtered'
+        - source_path: Path string like 'detect_runs/latest' or 'refined_detect_runs/latest/filtered'
         - source_group: Zarr group containing the detection data
         - detection_source_array: Array indicating real (0) vs interpolated (1), or None
     """
@@ -789,20 +792,24 @@ def get_detection_source_info(
         
     elif source_type in ['filtered', 'interpolated']:
         # Use refined detections
-        if 'refined_runs' not in root:
-            raise ValueError("No refined_runs found. Run refinement pipeline first.")
-        
-        latest_refined = root['refined_runs'].attrs.get('latest')
+        if REFINED_DETECT_GROUP in root:
+            refined_root = root[REFINED_DETECT_GROUP]
+        elif LEGACY_REFINED_DETECT_GROUP in root:
+            refined_root = root[LEGACY_REFINED_DETECT_GROUP]
+        else:
+            raise ValueError("No refined detection runs found. Run refinement pipeline first.")
+
+        latest_refined = refined_root.attrs.get('latest')
         if latest_refined is None:
-            raise ValueError("No latest refined run found")
-        
-        refined_group = root[f'refined_runs/{latest_refined}']
-        
+            raise ValueError("No latest refined detection run found")
+
+        refined_group = refined_root[latest_refined]
+
         if source_type not in refined_group:
-            raise ValueError(f"Stage '{source_type}' not found in refined run {latest_refined}")
-        
-        source_path = f'refined_runs/{latest_refined}/{source_type}'
+            raise ValueError(f"Stage '{source_type}' not found in refined detection run {latest_refined}")
+
         source_group = refined_group[source_type]
+        source_path = f"{refined_root.path}/{latest_refined}/{source_type}"
         
         # Get detection source array for interpolated data
         detection_source = None
@@ -965,7 +972,7 @@ def crop_and_store_chunk_delayed(
         out_slice: (start_det, end_det) in the flattened detection space for this chunk
         roi_sz: (H, W) of the crop
         scale_factor: ds/full scale for coordinates_ds
-        source_path: Path to detection source (e.g., 'detect_runs/latest' or 'refined_runs/latest/filtered')
+        source_path: Path to detection source (e.g., 'detect_runs/latest' or 'refined_detect_runs/latest/filtered')
 
     Returns:
         Tiny dict with counts/indices for bookkeeping.

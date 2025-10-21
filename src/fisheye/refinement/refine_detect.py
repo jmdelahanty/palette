@@ -14,11 +14,15 @@ Workflow:
 import numpy as np
 import zarr
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, Any
 from rich.console import Console
 
 from ..utils.metadata import get_total_frames, get_detection_method
+from ..utils.system import get_environment_info, get_git_info
+
+REFINED_DETECT_GROUP = "refined_detect_runs"
+LEGACY_REFINED_DETECT_GROUP = "refined_runs"
 
 
 def filter_detections(
@@ -314,7 +318,10 @@ def create_refined_run(
     interpolation_method: Optional[str] = None,
     remove_jumps: Optional[bool] = None,
     remove_blips: Optional[bool] = None,
-    console: Optional[Console] = None
+    console: Optional[Console] = None,
+    *,
+    command: Optional[str] = None,
+    created_at_utc: Optional[str] = None,
 ) -> str:
     """
     Create a refined detection run with filtered and interpolated data.
@@ -403,6 +410,7 @@ def create_refined_run(
 
     # Load quality labels if available, otherwise assume all detections are clean
     detection_quality_labels: np.ndarray
+    quality_group = None
     if 'quality_reports' in detect_group and detect_group['quality_reports'].attrs.get('latest'):
         if quality_run is None:
             quality_run = detect_group['quality_reports'].attrs['latest']
@@ -507,40 +515,87 @@ def create_refined_run(
     # Calculate processing time
     duration = time.perf_counter() - start_time
     
-    # Create refined_runs group
-    if 'refined_runs' not in root:
-        root.create_group('refined_runs')
-    
-    refined_runs = root['refined_runs']
+    # Create refined detect group
+    if REFINED_DETECT_GROUP not in root:
+        root.create_group(REFINED_DETECT_GROUP)
+    refined_runs = root[REFINED_DETECT_GROUP]
     
     # Create timestamped run
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    run_name = f"refined_{timestamp}"
+    run_name = f"refined_detect_{timestamp}"
     refined_group = refined_runs.create_group(run_name)
     refined_runs.attrs['latest'] = run_name
     
     # Store root metadata
-    refined_group.attrs['source_detect_run'] = detect_run
-    refined_group.attrs['source_quality_run'] = quality_run or 'N/A'
-    refined_group.attrs['refinement_timestamp'] = datetime.now().isoformat()
-    refined_group.attrs['processing_time_seconds'] = float(duration)
-    refined_group.attrs['operations'] = ['filter', 'interpolate']
-    refined_group.attrs['parameters'] = {
+    created_timestamp = created_at_utc or datetime.now(timezone.utc).isoformat()
+
+    parameters_payload = {
         'max_gap': max_gap_val,
         'interpolation_method': interp_method,
         'filters_applied': filters,
         'parameter_source': param_source
     }
+
+    refined_group.attrs['source_detect_run'] = detect_run
+    refined_group.attrs['source_quality_run'] = quality_run or 'N/A'
+    refined_group.attrs['refinement_timestamp'] = created_timestamp
+    refined_group.attrs['processing_time_seconds'] = float(duration)
+    refined_group.attrs['operations'] = ['filter', 'interpolate']
+    refined_group.attrs['parameters'] = parameters_payload
     refined_group.attrs['coverage_comparison'] = comparison_stats
     refined_group.attrs['inputs'] = {
         'detect_run': detect_run,
         'quality_run': quality_run or 'N/A'
     }
-    refined_group.attrs['provenance'] = {
-        'command': ' '.join(sys.argv),
-        'created_at_utc': datetime.now().isoformat(),
-        'quality_source': quality_run or 'N/A'
+
+    git_info = get_git_info()
+    env_info = get_environment_info()
+    environment_info = {
+        "hostname": env_info["platform"].get("hostname", "unknown"),
+        "python_version": env_info["platform"].get("python_version", "unknown"),
+        "system": env_info["platform"].get("system", "unknown"),
+        "release": env_info["platform"].get("release", "unknown"),
     }
+
+    scheduler_info = None
+
+    artifact_keys = [
+        'model_path',
+        'model_name',
+        'model_version',
+        'detection_method',
+        'pipeline_type',
+        'training_run',
+        'checkpoint_path',
+        'quality_source',
+    ]
+    artifact_info = {key: detect_group.attrs[key] for key in artifact_keys if key in detect_group.attrs}
+    if quality_group is not None and 'artifact_detection_params' in quality_group.attrs:
+        artifact_info['quality_detection_params'] = quality_group.attrs['artifact_detection_params']
+
+    provenance_record = {
+        'stage': 'refine_detect',
+        'command': command or ' '.join(sys.argv),
+        'created_at_utc': created_timestamp,
+        'version': git_info.get('short_hash') or git_info.get('commit_hash'),
+        'git': {
+            'commit': git_info.get('commit_hash'),
+            'short': git_info.get('short_hash'),
+            'branch': git_info.get('branch'),
+            'is_dirty': git_info.get('is_dirty'),
+            'remote': git_info.get('remote_url'),
+        },
+        'environment': environment_info,
+        'scheduler': scheduler_info,
+        'parameters': parameters_payload,
+        'inputs': {
+            'detect_run': detect_run,
+            'quality_run': quality_run or 'N/A',
+        },
+        'artifacts': artifact_info,
+    }
+    provenance_record = {k: v for k, v in provenance_record.items() if v is not None}
+    refined_group.attrs['provenance'] = provenance_record
     
     # Save filtered data
     filtered_grp = refined_group.create_group('filtered')
@@ -656,7 +711,9 @@ Examples:
             max_gap=args.max_gap,
             interpolation_method=args.method,
             remove_jumps=args.remove_jumps,
-            remove_blips=args.remove_blips
+            remove_blips=args.remove_blips,
+            command=' '.join(sys.argv),
+            created_at_utc=datetime.now(timezone.utc).isoformat(),
         )
         
         print(f"\n✓ Created refined run: {run_name}")

@@ -16,6 +16,11 @@ from rich import box
 from rich.columns import Columns
 from rich.syntax import Syntax
 
+REFINED_DETECT_GROUP = "refined_detect_runs"
+LEGACY_REFINED_DETECT_GROUP = "refined_runs"
+REFINED_KEYPOINT_GROUP = "refined_keypoints_runs"
+LEGACY_REFINED_KEYPOINT_GROUP = "keypoints_refined_runs"
+
 def format_bytes(size_bytes):
     """Convert bytes to human readable format."""
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:

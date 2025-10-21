@@ -18,6 +18,9 @@ import argparse
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+REFINED_DETECT_GROUP = "refined_detect_runs"
+LEGACY_REFINED_DETECT_GROUP = "refined_runs"
+
 
 def load_refined_stage(group, stage_name: str, fps: float) -> Dict:
     """Load data from a refinement stage (filtered or interpolated)."""
@@ -106,14 +109,24 @@ def visualize_refinement_pipeline(zarr_path: str,
     fps = root.attrs.get('fps', 60.0)
     
     # Get refined run
+    refined_root = None
+    if REFINED_DETECT_GROUP in root:
+        refined_root = root[REFINED_DETECT_GROUP]
+    elif LEGACY_REFINED_DETECT_GROUP in root:
+        refined_root = root[LEGACY_REFINED_DETECT_GROUP]
+
     if refined_run is None:
-        if 'refined_runs' not in root or 'latest' not in root['refined_runs'].attrs:
+        if refined_root is None or 'latest' not in refined_root.attrs:
             print("\nError: No refined runs found!")
             print("Run: python -m fisheye.refinement.refine_detect <zarr_path>")
             return
-        refined_run = root['refined_runs'].attrs['latest']
-    
-    refined_group = root[f'refined_runs/{refined_run}']
+        refined_run = refined_root.attrs['latest']
+
+    if refined_root is None or refined_run not in refined_root:
+        print(f"\nError: Refined run '{refined_run}' not found!")
+        return
+
+    refined_group = refined_root[refined_run]
     
     # Get source runs
     source_detect = refined_group.attrs['source_detect_run']

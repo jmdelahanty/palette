@@ -33,6 +33,9 @@ except ImportError:
 
 
 # Pipeline stage information
+REFINED_DETECT_GROUP = "refined_detect_runs"
+LEGACY_REFINED_DETECT_GROUP = "refined_runs"
+
 STAGE_INFO = {
     'import': {
         'desc': 'Import video into zarr format',
@@ -385,9 +388,15 @@ class PipelineLauncherApp(App):
                 status['track'] = f'✓ Complete ({latest})' if latest else '✓ Complete'
                 
             # Check refine - WITH DETAILED SUB-ITEMS
-            if 'refined_runs' in root and len(list(root['refined_runs'].group_keys())) > 0:
-                latest = root['refined_runs'].attrs.get('latest')
-                refined_group = root[f'refined_runs/{latest}']
+            refined_root = None
+            if REFINED_DETECT_GROUP in root:
+                refined_root = root[REFINED_DETECT_GROUP]
+            elif LEGACY_REFINED_DETECT_GROUP in root:
+                refined_root = root[LEGACY_REFINED_DETECT_GROUP]
+            if refined_root and len(list(refined_root.group_keys())) > 0:
+                latest = refined_root.attrs.get('latest')
+                if latest and latest in refined_root:
+                    refined_group = refined_root[latest]
                 
                 # Build detailed status with sub-items
                 status_lines = ['✓ Complete']
@@ -941,10 +950,10 @@ class PipelineLauncherApp(App):
             # Check if refined source is available
             if crop_source in ['filtered', 'interpolated']:
                 if not self._check_refined_runs_exist(zarr_path):
-                    self.status_message = f" Error: No refined_runs found for '{crop_source}' source"
+                    self.status_message = f" Error: No refined detection runs found for '{crop_source}' source"
                     if self.progress_log:
                         self.progress_log.write(
-                            f"[red] Error: '{crop_source}' source requires refined_runs.[/red]\n"
+                            f"[red] Error: '{crop_source}' source requires refined detections.[/red]\n"
                             "[yellow]Run the 'refine' stage first or select 'detect' source.[/yellow]\n"
                         )
                     return None
@@ -993,13 +1002,17 @@ class PipelineLauncherApp(App):
         return cmd
     
     def _check_refined_runs_exist(self, zarr_path: str) -> bool:
-        """Check if refined_runs group exists in zarr file."""
+        """Check if refined detection runs exist in zarr file."""
         try:
             if not Path(zarr_path).exists():
                 return False
             
             root = zarr.open(zarr_path, mode='r')
-            return 'refined_runs' in root and root['refined_runs'].attrs.get('latest') is not None
+            if REFINED_DETECT_GROUP in root:
+                return root[REFINED_DETECT_GROUP].attrs.get('latest') is not None
+            if LEGACY_REFINED_DETECT_GROUP in root:
+                return root[LEGACY_REFINED_DETECT_GROUP].attrs.get('latest') is not None
+            return False
         except Exception:
             return False
     

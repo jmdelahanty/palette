@@ -30,6 +30,19 @@ from ..refinement.refine_detect import create_refined_run
 from ..refinement.refine_keypoints import create_refined_keypoint_run
 from ..shared.zarr.schema import validate_zarr_structure
 
+REFINED_DETECT_GROUP = "refined_detect_runs"
+LEGACY_REFINED_DETECT_GROUP = "refined_runs"
+REFINED_KEYPOINT_GROUP = "refined_keypoints_runs"
+LEGACY_REFINED_KEYPOINT_GROUP = "keypoints_refined_runs"
+
+
+def _get_group_with_fallback(root: zarr.Group, primary: str, legacy: str) -> Optional[zarr.Group]:
+    if primary in root:
+        return root[primary]
+    if legacy in root:
+        return root[legacy]
+    return None
+
 
 @dataclass
 class PipelineConfig:
@@ -413,7 +426,12 @@ class Pipeline:
         
         # Validate refined source is available if requested
         if self.config.crop_source in ['filtered', 'interpolated']:
-            if 'refined_runs' not in self.zarr_root or self.zarr_root['refined_runs'].attrs.get('latest') is None:
+            refined_root = _get_group_with_fallback(
+                self.zarr_root,
+                REFINED_DETECT_GROUP,
+                LEGACY_REFINED_DETECT_GROUP,
+            )
+            if refined_root is None or refined_root.attrs.get('latest') is None:
                 self.console.print(
                     f"[red]Error: Crop source '{self.config.crop_source}' requires refined detections.[/red]\n"
                     "[yellow]Run the 'refine' stage first or use '--crop-source detect'.[/yellow]"
@@ -573,7 +591,9 @@ class Pipeline:
         run_name = create_refined_keypoint_run(
             zarr_path=self.config.zarr_path,
             config=self.pipeline_params,
-            console=self.console
+            console=self.console,
+            command="pipeline:keypoints_refine",
+            created_at_utc=datetime.now(timezone.utc).isoformat(),
         )
 
         self.console.print(f"[green]✓[/green] Keypoint refinement saved as [cyan]{run_name}[/cyan]")
@@ -590,7 +610,9 @@ class Pipeline:
             interpolation_method=self.config.refine_method,
             remove_jumps=self.config.refine_remove_jumps,
             remove_blips=self.config.refine_remove_blips,
-            console=self.console
+            console=self.console,
+            command="pipeline:refine_detect",
+            created_at_utc=datetime.now(timezone.utc).isoformat(),
         )
         
         self.console.print(f"[green]✓[/green] Detection refinement saved as [cyan]{run_name}[/cyan]")
@@ -1031,10 +1053,12 @@ class Pipeline:
                 return latest is not None
 
             elif stage == 'keypoints_refine':
-                if 'keypoints_refined_runs' not in root:
-                    return False
-                latest = root['keypoints_refined_runs'].attrs.get('latest')
-                return latest is not None
+                group = _get_group_with_fallback(
+                    root,
+                    REFINED_KEYPOINT_GROUP,
+                    LEGACY_REFINED_KEYPOINT_GROUP,
+                )
+                return group is not None and group.attrs.get('latest') is not None
             
             elif stage == 'assign_ids':
                 if 'id_assignment_runs' not in root:
@@ -1043,10 +1067,12 @@ class Pipeline:
                 return latest is not None
             
             elif stage == 'refine':
-                if 'refined_runs' not in root:
-                    return False
-                latest = root['refined_runs'].attrs.get('latest')
-                return latest is not None
+                group = _get_group_with_fallback(
+                    root,
+                    REFINED_DETECT_GROUP,
+                    LEGACY_REFINED_DETECT_GROUP,
+                )
+                return group is not None and group.attrs.get('latest') is not None
             
             elif stage == 'track':
                 if 'tracking_runs' not in root:

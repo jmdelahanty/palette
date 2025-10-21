@@ -1,6 +1,6 @@
 # src/fisheye/training/config.py
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Literal
 from enum import Enum
 from pathlib import Path
 import yaml
@@ -70,6 +70,16 @@ class TrainingParams(BaseModel):
         description="Blend weight for BCE term when using BCE+Dice loss.",
     )
 
+
+class EyeMaskTrainingParams(TrainingParams):
+    """Training parameters for eye-mask segmentation pipelines."""
+
+    label_source: Literal["yolo", "manual"] = "yolo"
+    label_mode: Literal["union", "lr"] = "union"
+    eye_masks_run: Optional[str] = None
+    eye_masks_method: Optional[str] = None
+
+
 class DetectConfig(BaseModel):
     """Flat configuration for detection training"""
     # Dummy YOLO fields
@@ -126,6 +136,7 @@ class EyeMaskDatasetConfig(BaseModel):
     zarr_path: Path
     crop_run: Optional[str] = None
     mask_run: Optional[str] = None
+    mask_preference: Literal["auto", "refined_probs", "raw_probs", "binary"] = "auto"
     split: Optional[DatasetSplit] = None
     min_positive_area: int = Field(0, ge=0)
     include_empty: bool = True
@@ -176,7 +187,7 @@ class EyeMaskTrainingConfig(BaseModel):
     random_seed: int = 42
     target_size: int = Field(160, gt=0)
     default_split: DatasetSplit = DatasetSplit()
-    training_params: TrainingParams
+    training_params: EyeMaskTrainingParams
     num_workers: int = Field(8, ge=0)
     cache: EyeMaskCacheConfig = EyeMaskCacheConfig()
     mask_smoothing_kernel: int = Field(0, ge=0, description="Morphological kernel size (odd) for optional mask smoothing")

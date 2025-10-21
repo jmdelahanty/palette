@@ -32,6 +32,9 @@ from .config import DetectConfig, DatasetConfig
 from .zarr_yolo_dataset_loader import create_zarr_dataset, ZarrDatasetConfig
 from ..utils.system import get_git_info
 
+REFINED_DETECT_GROUP = "refined_detect_runs"
+LEGACY_REFINED_DETECT_GROUP = "refined_runs"
+
 
 # Custom DataLoader to ensure compatibility with Ultralytics YOLO's expected interface
 class YoloCompatibleDataLoader(DataLoader):
@@ -189,10 +192,15 @@ def get_zarr_metadata(zarr_paths, console=None):
                         zarr_meta['crop_info']['n_interpolated'] = crop_group.attrs.get('n_interpolated_detections', 0)
             
             # Get refinement info if available
-            if 'refined_runs' in root:
-                latest_refined = root['refined_runs'].attrs.get('latest')
-                if latest_refined:
-                    refined_group = root[f'refined_runs/{latest_refined}']
+            refined_root = None
+            if REFINED_DETECT_GROUP in root:
+                refined_root = root[REFINED_DETECT_GROUP]
+            elif LEGACY_REFINED_DETECT_GROUP in root:
+                refined_root = root[LEGACY_REFINED_DETECT_GROUP]
+            if refined_root is not None:
+                latest_refined = refined_root.attrs.get('latest')
+                if latest_refined and latest_refined in refined_root:
+                    refined_group = refined_root[latest_refined]
                     
                     zarr_meta['data_quality']['has_refinement'] = True
                     zarr_meta['data_quality']['refined_run'] = latest_refined
