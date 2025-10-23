@@ -202,8 +202,6 @@ class EnhancedBoutAnalyzer:
     def _load_calibration(self) -> Optional[CalibrationData]:
         """Load calibration data from zarr."""
         if 'calibration' not in self.root:
-            if self.verbose:
-                print("No calibration found - measurements will be in pixels only")
             return None
         
         calib_group = self.root['calibration']

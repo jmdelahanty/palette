@@ -11,11 +11,14 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import zarr
 from rich.console import Console
+import argparse
+import yaml
 
 import dask
 from dask import delayed
@@ -613,3 +616,92 @@ def create_refined_keypoint_run(
     console.print(f"[green]✓[/green] Saved refined keypoints run: [cyan]{run_name}[/cyan]")
 
     return run_name
+
+
+def main(argv: Optional[Iterable[str]] = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Refine keypoint detections to correct eye swaps and produce diagnostics."
+    )
+    parser.add_argument("zarr_path", help="Path to the Palette Zarr archive.")
+    parser.add_argument(
+        "--keypoint-run",
+        help="Keypoint run to refine (defaults to latest in keypoints_runs).",
+    )
+    parser.add_argument(
+        "--config",
+        default="configs/fisheye/default.yaml",
+        help="Pipeline configuration file (default: configs/fisheye/default.yaml).",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        help="Override refinement chunk size.",
+    )
+    parser.add_argument(
+        "--scheduler",
+        choices={"processes", "threads", "distributed"},
+        help="Override Dask scheduler.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        help="Override number of workers.",
+    )
+    parser.add_argument(
+        "--memory-limit",
+        help="Override Dask worker memory limit (e.g. '32GB').",
+    )
+
+    args = parser.parse_args(argv)
+    console = Console()
+
+    config: Dict[str, Any] = {}
+    overrides_applied = False
+
+    cfg_path = Path(args.config) if args.config else None
+    if cfg_path and cfg_path.exists():
+        with cfg_path.open("r") as f:
+            loaded = yaml.safe_load(f) or {}
+            if isinstance(loaded, dict):
+                config = loaded
+            else:
+                console.print(
+                    f"[yellow]Warning:[/yellow] Config file '{cfg_path}' did not contain a mapping; ignoring."
+                )
+    elif cfg_path:
+        console.print(
+            f"[yellow]Warning:[/yellow] Config file '{cfg_path}' not found; using defaults."
+        )
+
+    refine_cfg = config.setdefault("refine_keypoints", {})
+
+    if args.chunk_size is not None:
+        refine_cfg["chunk_size"] = args.chunk_size
+        overrides_applied = True
+    if args.scheduler is not None:
+        refine_cfg["scheduler"] = args.scheduler
+        overrides_applied = True
+    if args.num_workers is not None:
+        refine_cfg["num_workers"] = args.num_workers
+        overrides_applied = True
+    if args.memory_limit is not None:
+        refine_cfg["memory_limit"] = args.memory_limit
+        overrides_applied = True
+
+    config_to_use = config if (config or overrides_applied) else None
+
+    run_name = create_refined_keypoint_run(
+        zarr_path=args.zarr_path,
+        keypoint_run=args.keypoint_run,
+        config=config_to_use,
+        console=console,
+    )
+
+    console.print(
+        f"[green]✓[/green] Refined keypoints written to "
+        f"[bold]refined_keypoints_runs/{run_name}[/bold]"
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

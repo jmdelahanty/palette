@@ -55,6 +55,7 @@ crop:
   - 256
   - 256
   scheduler: distributed
+  source_type: interpolated
   num_workers: 30
 keypoints:
   method: traditional         # 'traditional' or 'yolo'

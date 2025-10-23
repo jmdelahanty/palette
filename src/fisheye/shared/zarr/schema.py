@@ -528,7 +528,10 @@ def add_processing_run(
     source_runs: Optional[Dict[str, str]] = None,
     summary_stats: Optional[Dict[str, Any]] = None,
     duration_seconds: Optional[float] = None,
-    extra_attrs: Optional[Dict[str, Any]] = None
+    extra_attrs: Optional[Dict[str, Any]] = None,
+    env_info: Optional[Dict[str, Any]] = None,
+    console: Optional[Console] = None,
+    run_name: Optional[str] = None,
 ) -> zarr.Group:
     """
     Add a new processing run with full metadata.
@@ -545,12 +548,28 @@ def add_processing_run(
     Returns:
         The created run group
     """
-    run_group = get_run_group(root, stage, create_new=True)
+    if env_info is None:
+        env_info = get_environment_info()
+
+    parent_group_name = f"{stage}_runs"
+    parent_group = root.require_group(parent_group_name)
+
+    if run_name:
+        if run_name in parent_group:
+            raise ValueError(f"{parent_group_name}/{run_name} already exists")
+        run_group = parent_group.create_group(run_name)
+        parent_group.attrs["latest"] = run_name
+        if console:
+            console.print(f"Created run group: [cyan]{parent_group_name}/{run_name}[/cyan]")
+    else:
+        run_group, run_name = get_run_group(root, stage, create_new=True, console=console)
     
     # Add standard metadata
     run_group.attrs.update({
         f'{stage}_timestamp_utc': datetime.now(timezone.utc).isoformat(),
         'parameters': parameters,
+        'run_name': run_name,
+        'run_stage': stage,
     })
     
     # Add source run references
@@ -571,16 +590,25 @@ def add_processing_run(
         run_group.attrs.update(extra_attrs)
     
     # Add system info at time of processing
-    run_group.attrs['processing_host'] = platform.node()
-    
-    # Check if GPU was used
-    gpu_info = get_gpu_info()
-    if gpu_info and gpu_info.get('available'):
-        run_group.attrs['gpu_used'] = True
-        run_group.attrs['gpu_device'] = gpu_info['devices'][0].get('name', 'Unknown')
+    platform_info = env_info.get('platform', {}) if isinstance(env_info, dict) else {}
+    run_group.attrs['processing_host'] = platform_info.get('hostname', platform.node())
+    run_group.attrs['processing_platform'] = platform_info
+
+    git_info = env_info.get('git', {}) if isinstance(env_info, dict) else {}
+    run_group.attrs['git_commit'] = git_info.get('commit_hash', 'unknown')
+    run_group.attrs['git_branch'] = git_info.get('branch', 'unknown')
+
+    gpu_info = env_info.get('gpu', {}) if isinstance(env_info, dict) else {}
+    run_group.attrs['gpu_used'] = bool(gpu_info.get('available'))
+    if gpu_info.get('devices'):
+        primary_gpu = gpu_info['devices'][0]
+        run_group.attrs['gpu_device'] = primary_gpu.get('name', 'Unknown')
+        run_group.attrs['gpu_compute_capability'] = primary_gpu.get('compute_capability')
+        run_group.attrs['gpu_total_memory_gb'] = primary_gpu.get('total_memory_gb')
     else:
-        run_group.attrs['gpu_used'] = False
-    
+        run_group.attrs['gpu_device'] = 'None'
+    run_group.attrs['environment'] = env_info.get('environment', {})
+
     return run_group
 
 

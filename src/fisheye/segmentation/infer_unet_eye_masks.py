@@ -14,7 +14,7 @@ import zarr
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
-from ..shared.zarr.schema import get_run_group
+from ..shared.zarr.schema import add_processing_run
 from ..utils.system import get_environment_info, get_git_info
 from .unet import UNetSmall
 
@@ -49,16 +49,24 @@ def _prepare_run_group(
     root: zarr.Group,
     run_name: Optional[str],
     console: Console,
+    parameters: Dict[str, object],
+    source_runs: Optional[Dict[str, str]],
+    env_info: Dict[str, object],
+    extra_attrs: Optional[Dict[str, object]] = None,
 ) -> Tuple[zarr.Group, str]:
-    parent = root.require_group("eye_masks_runs")
-    if run_name:
-        if run_name in parent:
-            raise ValueError(f"eye_masks_runs/{run_name} already exists")
-        run_group = parent.create_group(run_name)
-        parent.attrs["latest"] = run_name
-        console.print(f"Created run group: [cyan]eye_masks_runs/{run_name}[/cyan]")
-        return run_group, run_name
-    return get_run_group(root, "eye_masks", console=console, create_new=True)
+    run_group = add_processing_run(
+        root,
+        "eye_masks",
+        parameters=parameters,
+        source_runs=source_runs,
+        duration_seconds=None,
+        extra_attrs=extra_attrs,
+        env_info=env_info,
+        console=console,
+        run_name=run_name,
+    )
+    resolved_name = run_group.name.rsplit("/", 1)[-1]
+    return run_group, resolved_name
 
 
 def _resolve_device(device_str: Optional[str]) -> torch.device:
@@ -286,6 +294,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _sorted_group_keys(group: Optional[zarr.Group]) -> List[str]:
+    """Return sorted child group keys, handling Zarr API differences."""
+    if group is None:
+        return []
+    keys_fn = getattr(group, "group_keys", None)
+    try:
+        keys = list(keys_fn()) if callable(keys_fn) else []
+    except Exception:
+        keys = []
+    # Filter to strings to avoid edge cases with older stores returning bytes.
+    return sorted(key for key in keys if isinstance(key, str))
+
+
 def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
@@ -317,6 +338,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     crop_parent = root.get("crop_runs")
     crop_run = args.crop_run
     crop_resolved_from = "cli_arg" if crop_run else "unset"
+    available_crop_runs = _sorted_group_keys(crop_parent)
+
     if src_run is not None:
         crop_run = crop_run or src_run.attrs.get("source_crop_run")
         if crop_run:
@@ -326,38 +349,30 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             crop_run = crop_run or crop_parent.attrs.get("latest")
             if crop_run:
                 crop_resolved_from = "crop_latest_attr"
-            if not crop_run:
-                try:
-                    crop_keys = sorted(
-                        key for key in getattr(crop_parent, "group_keys", lambda: [])()  # type: ignore[attr-defined]
-                    )
-                except Exception:
-                    crop_keys = []
-                if crop_keys:
-                    crop_run = crop_keys[-1]
-                    crop_resolved_from = "crop_group_latest"
-    if not crop_run and crop_parent is not None:
-        try:
-            crop_keys = sorted(
-                key for key in getattr(crop_parent, "group_keys", lambda: [])()  # type: ignore[attr-defined]
-            )
-        except Exception:
-            crop_keys = []
-        if crop_keys:
-            crop_run = crop_keys[-1]
-            crop_resolved_from = "crop_group_latest"
+    if (
+        crop_run
+        and crop_parent is not None
+        and crop_run not in crop_parent
+        and crop_resolved_from == "cli_arg"
+    ):
+        raise ValueError(
+            f"Crop run '{crop_run}' not found. "
+            f"Available crop runs: {', '.join(available_crop_runs) if available_crop_runs else 'none'}."
+        )
+    if (
+        crop_run
+        and crop_parent is not None
+        and crop_run not in crop_parent
+        and crop_resolved_from != "cli_arg"
+    ):
+        crop_run = None
+    if not crop_run and available_crop_runs:
+        crop_run = available_crop_runs[-1]
+        crop_resolved_from = "crop_group_latest"
     if not crop_run or crop_parent is None or crop_run not in crop_parent:
-        available = []
-        if crop_parent is not None:
-            try:
-                available = sorted(
-                    key for key in getattr(crop_parent, "group_keys", lambda: [])()  # type: ignore[attr-defined]
-                )
-            except Exception:
-                available = []
         raise ValueError(
             "Unable to resolve crop run for ROI images (use --crop-run or provide --eye-mask-run). "
-            f"Available crop runs: {', '.join(available) if available else 'none'}."
+            f"Available crop runs: {', '.join(available_crop_runs) if available_crop_runs else 'none'}."
         )
 
     roi_path = f"crop_runs/{crop_run}/roi_images"
@@ -374,7 +389,33 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if total_rois == 0:
         raise ValueError("ROI image array is empty; nothing to segment.")
 
-    run_group, resolved_run_name = _prepare_run_group(root, args.run_name, console)
+    env_info = get_environment_info()
+    parameters: Dict[str, object] = {
+        "checkpoint": str(checkpoint_path),
+        "batch_size": int(args.batch_size),
+        "label_mode": label_mode,
+        "write_binary_masks": bool(args.write_binary_masks),
+        "device": str(device),
+        "use_crop": bool(args.use_crop),
+    }
+    source_runs: Dict[str, str] = {}
+    if crop_run:
+        source_runs["crop"] = crop_run
+    if source_run_name:
+        source_runs["eye_masks"] = source_run_name
+
+    run_group, resolved_run_name = _prepare_run_group(
+        root,
+        args.run_name,
+        console,
+        parameters=parameters,
+        source_runs=source_runs or None,
+        env_info=env_info,
+        extra_attrs={
+            "segmenter": "unet",
+            "segmenter_label_mode": label_mode,
+        },
+    )
 
     start_time = time.perf_counter()
     stored_channels, wrote_binary = _write_mask_probs(
@@ -390,7 +431,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     duration = time.perf_counter() - start_time
 
     git_info = get_git_info()
-    env_info = get_environment_info()
 
     dataset_meta = checkpoint.get("dataset_meta", [])
     dataset_meta = _json_ready_meta(dataset_meta) if dataset_meta else []
@@ -399,6 +439,24 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     for key in list(src_attrs):
         if "refine" in key:
             src_attrs.pop(key)
+    preserved_keys = {
+        "parameters",
+        "run_name",
+        "run_stage",
+        "processing_host",
+        "processing_platform",
+        "git_commit",
+        "git_branch",
+        "gpu_used",
+        "gpu_device",
+        "gpu_compute_capability",
+        "gpu_total_memory_gb",
+        "environment",
+    }
+    for key in list(src_attrs):
+        if key in preserved_keys:
+            src_attrs.pop(key)
+
     run_group.attrs.update(src_attrs)
     run_group.attrs.update(
         {
@@ -418,6 +476,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "inference_device": str(device),
             "inference_batch_size": int(args.batch_size),
             "inference_duration_seconds": float(duration),
+            "duration_seconds": float(duration),
             "dataset_meta": dataset_meta,
             "git_commit": git_info.get("commit_hash", "unknown"),
             "git_branch": git_info.get("branch", "unknown"),

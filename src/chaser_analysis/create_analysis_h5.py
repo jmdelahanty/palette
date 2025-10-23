@@ -113,9 +113,9 @@ class AnalysisH5Creator:
                 timestamp=datetime.now().isoformat()
             )
             
-            self.log(f"  📈 Frame range: {sorted_ids[0]} to {sorted_ids[-1]}")
-            self.log(f"  ✅ Original frames: {stats.original_frames}")
-            self.log(f"  ⚠️  Missing frames: {stats.missing_frames}")
+            self.log(f" Frame range: {sorted_ids[0]} to {sorted_ids[-1]}")
+            self.log(f" Original frames: {stats.original_frames}")
+            self.log(f" Missing frames: {stats.missing_frames}")
             if gap_ranges:
                 self.log(f"  🔍 Number of gaps: {len(gap_ranges)}")
                 self.log(f"  📏 Largest gap: {stats.largest_gap} frames")
@@ -154,7 +154,7 @@ class AnalysisH5Creator:
         
         # Determine stimulus frames per camera frame (usually 2 for 120Hz/60Hz)
         stim_per_camera = np.mean([len(stims) for stims in camera_to_stim.values()])
-        self.log(f"  📊 Stimulus frames per camera frame: {stim_per_camera:.2f}")
+        self.log(f" Stimulus frames per camera frame: {stim_per_camera:.2f}")
         
         # Get missing frames
         camera_ids = sorted(camera_to_stim.keys())
@@ -162,7 +162,7 @@ class AnalysisH5Creator:
         missing_frames = [f for f in full_range if f not in camera_to_stim]
         
         if not missing_frames:
-            self.log("  ✅ No missing frames to interpolate")
+            self.log(" No missing frames to interpolate")
             return self.original_metadata
         
         # Interpolate each missing frame
@@ -174,7 +174,7 @@ class AnalysisH5Creator:
             next_frame = min([f for f in camera_ids if f > missing_frame], default=None)
             
             if prev_frame is None or next_frame is None:
-                self.log(f"  ⚠️  Cannot interpolate frame {missing_frame} (boundary)")
+                self.log(f" Cannot interpolate frame {missing_frame} (boundary)")
                 continue
             
             # Calculate interpolation weights
@@ -208,7 +208,7 @@ class AnalysisH5Creator:
                 
                 interpolated_records.append(record[0])
         
-        self.log(f"  ✅ Created {len(interpolated_records)} interpolated records")
+        self.log(f" Created {len(interpolated_records)} interpolated records")
         self.log(f"     for {len(missing_frames)} missing camera frames")
         
         # Update stats
@@ -253,7 +253,7 @@ class AnalysisH5Creator:
             copy_protocol: Copy protocol snapshot
             copy_tracking: Copy tracking data (bounding boxes, chaser states)
         """
-        self.log(f"\n💾 Creating analysis H5: {self.output_path}")
+        self.log(f"\n Creating analysis H5: {self.output_path}")
         
         # Analyze and interpolate if needed
         self.interpolation_stats = self.analyze_frame_gaps()
@@ -269,7 +269,7 @@ class AnalysisH5Creator:
             with h5py.File(self.output_path, 'w') as dst:
                 
                 # Copy root attributes
-                self.log("\n📋 Copying root attributes...")
+                self.log("\n Copying root attributes...")
                 for attr_name, attr_value in src.attrs.items():
                     dst.attrs[attr_name] = attr_value
                 

@@ -5,6 +5,16 @@ import json
 import argparse
 import numpy as np
 import polars as pl
+import yaml
+
+# Custom YAML constructor for OpenCV matrices
+def opencv_matrix_constructor(loader, node):
+    """Custom constructor for OpenCV matrix YAML format."""
+    mapping = loader.construct_mapping(node, deep=True)
+    return mapping
+
+# Register the custom constructor for the opencv-matrix tag
+yaml.SafeLoader.add_constructor('tag:yaml.org,2002:opencv-matrix', opencv_matrix_constructor)
 
 # --- Enum Mappings (from C++ headers) ---
 # Source: src/core/stimulus_globals.h
@@ -190,9 +200,51 @@ def read_calibration_snapshot(hf, output_dir):
         homography_ds = get_h5_object(cam_item, 'homography_matrix_yml')
         if homography_ds:
             print("\nHomography Matrix (YML format):")
-            print(homography_ds[()].decode('utf-8'))
+            homography_text = homography_ds[()].decode('utf-8')
+            print(homography_text)
+            try:
+                # Preprocess the YAML to remove OpenCV-specific directives
+                # Remove lines starting with % (YAML directives)
+                cleaned_lines = []
+                for line in homography_text.splitlines():
+                    stripped = line.lstrip()
+                    # Skip YAML version directives and document separators at start
+                    if stripped.startswith('%YAML') or (stripped == '---' and not cleaned_lines):
+                        continue
+                    cleaned_lines.append(line)
+                
+                cleaned_text = '\n'.join(cleaned_lines)
+                
+                yml_data = yaml.safe_load(cleaned_text)
+                if yml_data:
+                    print("\nParsed YAML data:")
+                    print(f"  Calibration timestamp: {yml_data.get('calibration_timestamp_utc', 'N/A')}")
+                    
+                    matrix_meta = yml_data.get("homography_matrix")
+                    if isinstance(matrix_meta, dict):
+                        rows = int(matrix_meta.get("rows", 0))
+                        cols = int(matrix_meta.get("cols", 0))
+                        data = matrix_meta.get("data")
+                        dt = matrix_meta.get("dt", "unknown")
+                        
+                        print(f"  Matrix dimensions: {rows}x{cols}")
+                        print(f"  Data type: {dt}")
+                        
+                        if rows > 0 and cols > 0 and isinstance(data, (list, tuple)):
+                            try:
+                                homography = np.array(data, dtype=float).reshape(rows, cols)
+                                print(f"\nHomography matrix ({rows}x{cols}):")
+                                print(homography)
+                            except Exception as reshape_err:
+                                print(f"  Could not reshape homography data: {reshape_err}")
+                        else:
+                            print("  Homography metadata missing rows/cols/data entries.")
+                    else:
+                        print("  Unexpected YAML structure for homography matrix.")
+            except Exception as parse_err:
+                print(f"  Could not parse homography YAML: {parse_err}")
 
-        # CORRECTED: Look for the correct image buffer dataset names
+        # Extract image buffers
         image_types_to_extract = {
             "homography_image": "homography_image_png_buffer",
             "scale_image": "scale_image_png_buffer"
@@ -258,7 +310,7 @@ def main():
     parser.add_argument("--frames", action="store_true", help="Inspect the video frame metadata.")
     parser.add_argument("--protocol", action="store_true", help="Inspect the protocol snapshot.")
     parser.add_argument("--calib", action="store_true", help="Inspect the calibration snapshot.")
-    parser.add_argument("--coords", action="store_true", help="Inspect the stimulus coordinate info.")  # NEW
+    parser.add_argument("--coords", action="store_true", help="Inspect the stimulus coordinate info.")
     parser.add_argument("--output_dir", default=".", help="Directory to save extracted files (like calibration images).")
 
     args = parser.parse_args()
@@ -289,7 +341,7 @@ def main():
             read_protocol_snapshot(hf)
         if args.calib or args.all:
             read_calibration_snapshot(hf, args.output_dir)
-        if args.coords or args.all:  # NEW
+        if args.coords or args.all:
             read_stimulus_coordinates(hf)
 
     print("\n--- Inspection Complete ---")

@@ -12,8 +12,9 @@ from __future__ import annotations
 import math
 import argparse
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Sequence
+from typing import Any, Dict, List, Optional, Tuple, Sequence
 from datetime import datetime, timezone
+import time
 
 import numpy as np
 import torch
@@ -117,6 +118,74 @@ def _create_output_arrays(group: zarr.Group, total_rois: int, chunk_hint: int) -
     return arrays
 
 
+def _prepare_refined_roi_overrides(
+    root: zarr.Group,
+    crop_group: zarr.Group,
+    total_rois: int,
+    roi_shape: Tuple[int, int],
+    console: Console,
+) -> Optional[Dict[str, Any]]:
+    path = crop_group.attrs.get("refined_roi_path")
+    if not path:
+        return None
+    if path not in root:
+        console.print(
+            f"[yellow]Refined ROI group '{path}' not found; continuing with original crops.[/yellow]"
+        )
+        return None
+    group = root[path]
+    required = {"detection_indices", "roi_images", "roi_coordinates_full"}
+    if not required.issubset(set(group.keys())):
+        console.print(
+            f"[yellow]Refined ROI group '{path}' missing {required - set(group.keys())}; skipping overrides.[/yellow]"
+        )
+        return None
+
+    detection_indices = group["detection_indices"][:].astype(np.int64, copy=False)
+    if detection_indices.size == 0:
+        return None
+    if detection_indices.min(initial=0) < 0 or detection_indices.max(initial=0) >= total_rois:
+        raise ValueError("Refined ROI detection indices out of range for current crop run.")
+
+    refined_rois = group["roi_images"][:]
+    if refined_rois.shape[1:3] != roi_shape:
+        raise ValueError(
+            f"Refined ROI shape {refined_rois.shape[1:3]} does not match crop ROI shape {roi_shape}."
+        )
+    refined_coords = group["roi_coordinates_full"][:]
+
+    override_map = np.full(total_rois, -1, dtype=np.int64)
+    override_map[detection_indices] = np.arange(detection_indices.size, dtype=np.int64)
+
+    frame_indices_override = (
+        group["frame_indices"][:].astype(np.int64, copy=False)
+        if "frame_indices" in group
+        else None
+    )
+
+    decoder = (
+        group.attrs.get("video_device")
+        or group.attrs.get("refined_roi_decoder")
+        or crop_group.attrs.get("refined_roi_decoder")
+    )
+    duration = (
+        group.attrs.get("duration_seconds")
+        or crop_group.attrs.get("refined_roi_generation_duration_seconds")
+    )
+
+    return {
+        "path": path,
+        "count": detection_indices.size,
+        "indices": detection_indices,
+        "map": override_map,
+        "rois": refined_rois,
+        "coords": refined_coords,
+        "frame_indices": frame_indices_override,
+        "decoder": decoder,
+        "duration": duration,
+    }
+
+
 def _compute_heading(bladder: np.ndarray, eye_left: np.ndarray, eye_right: np.ndarray) -> float:
     eye_mean = (eye_left + eye_right) / 2.0
     head_vec = eye_mean - bladder
@@ -202,6 +271,23 @@ def detect_keypoints_yolo(
         return ""
 
     roi_h, roi_w = roi_images.shape[1:3]
+    override_data = _prepare_refined_roi_overrides(
+        root, crop_group, total_rois, (roi_h, roi_w), console
+    )
+    override_map: Optional[np.ndarray] = None
+    override_rois: Optional[np.ndarray] = None
+    if override_data is not None:
+        indices = override_data["indices"]
+        roi_coords[indices] = override_data["coords"]
+        frame_override = override_data["frame_indices"]
+        if frame_override is not None:
+            frame_indices[indices] = frame_override.astype(frame_indices.dtype, copy=False)
+        override_map = override_data["map"]
+        override_rois = override_data["rois"]
+        console.print(
+            f"[cyan]Applying refined ROI overrides:[/cyan] {override_data['count']} detections"
+        )
+
     imgsz = imgsz or max(roi_h, roi_w)
 
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
@@ -218,13 +304,48 @@ def detect_keypoints_yolo(
         overwrite=True,
     )
 
-    full_img_shape = root["raw_video/images_full"].shape[1:]
-    norm_factor = np.array(full_img_shape[::-1], dtype="f8")
+    total_frames_attr = (
+        root.attrs.get("total_frames")
+        or root.attrs.get("n_frames")
+        or crop_group.attrs.get("total_frames")
+    )
+    total_frames: Optional[int] = int(total_frames_attr) if total_frames_attr is not None else None
+
+    try:
+        images_full = root["raw_video/images_full"]
+        frame_dim, img_h, img_w = images_full.shape
+        full_img_shape = (img_h, img_w)
+        if total_frames is None:
+            total_frames = int(frame_dim)
+    except KeyError:
+        img_w = (
+            root.attrs.get("video_width")
+            or root.attrs.get("palette_video_width")
+            or root.attrs.get("source_full_width")
+            or root.attrs.get("source_video_width")
+        )
+        img_h = (
+            root.attrs.get("video_height")
+            or root.attrs.get("palette_video_height")
+            or root.attrs.get("source_full_height")
+            or root.attrs.get("source_video_height")
+        )
+        if img_w is None or img_h is None:
+            raise ValueError(
+                "Unable to determine full-resolution image dimensions. "
+                "Expected raw_video/images_full dataset or root attrs 'video_width'/'video_height'."
+            )
+        full_img_shape = (int(img_h), int(img_w))
+
+    norm_factor = np.array([full_img_shape[1], full_img_shape[0]], dtype="f8")
+
+    if total_frames is None:
+        total_frames = int(frame_indices.max() + 1) if frame_indices.size > 0 else 0
 
     frame_counts_total = (
-        np.bincount(frame_indices, minlength=full_img_shape[0]).astype("i4", copy=False)
+        np.bincount(frame_indices, minlength=total_frames).astype("i4", copy=False)
         if frame_indices.size > 0
-        else np.zeros(full_img_shape[0], dtype="i4")
+        else np.zeros(total_frames, dtype="i4")
     )
     count_chunks = (min(len(frame_counts_total), batch_size * 4),) if frame_counts_total.size > 0 else None
     run_group.create_array(
@@ -251,14 +372,21 @@ def detect_keypoints_yolo(
         console=console,
     )
 
+    start_time = time.time()
+
     with progress:
         task = progress.add_task("[cyan]Predicting keypoints...", total=total_rois)
         for start in range(0, total_rois, batch_size):
             end = min(start + batch_size, total_rois)
-            batch_roi = roi_images[start:end]
             batch_coords = roi_coords[start:end]
+            batch_roi_np = np.asarray(roi_images[start:end])
+            if override_map is not None and override_rois is not None:
+                local_map = override_map[start:end]
+                valid = local_map >= 0
+                if np.any(valid):
+                    batch_roi_np[valid] = override_rois[local_map[valid]]
 
-            rgb_inputs = _repeat_to_rgb(np.asarray(batch_roi))
+            rgb_inputs = _repeat_to_rgb(batch_roi_np)
             results = model.predict(
                 rgb_inputs,
                 imgsz=imgsz,
@@ -325,10 +453,18 @@ def detect_keypoints_yolo(
 
             progress.update(task, advance=end - start)
 
+    total_time = time.time() - start_time
+    inference_rate = success_total / total_time if total_time > 0 else 0.0
+
     success_rate = (success_total / total_rois * 100.0) if total_rois > 0 else 0.0
     failure_total = total_rois - success_total
 
-    full_frame_count = root["raw_video/images_full"].shape[0]
+    if total_frames is not None:
+        full_frame_count = int(total_frames)
+    elif frame_indices.size > 0:
+        full_frame_count = int(frame_indices.max() + 1)
+    else:
+        full_frame_count = 0
     if success_total > 0:
         success_mask = arrays["detection_success"][:]
         success_counts = np.bincount(frame_indices[success_mask], minlength=full_frame_count).astype("i4", copy=False)
@@ -374,15 +510,33 @@ def detect_keypoints_yolo(
         "git_commit": git_info.get("commit_hash", "unknown"),
         "git_branch": git_info.get("branch", "unknown"),
         "hostname": env_info["platform"].get("hostname", "unknown"),
+        "inference_duration_seconds": float(total_time),
+        "inference_poses_per_second": float(inference_rate),
     })
+    if override_data is not None:
+        run_group.attrs["refined_roi_overrides"] = int(override_data["count"])
+        run_group.attrs["refined_roi_source"] = override_data["path"]
+        if override_data["decoder"]:
+            run_group.attrs["refined_roi_decoder"] = override_data["decoder"]
+        if override_data["duration"] is not None:
+            run_group.attrs["refined_roi_generation_duration_seconds"] = float(override_data["duration"])
 
+    summary_lines = [
+        "[green]✓[/green] Pose inference complete",
+        "",
+        f"[bold]Run:[/bold] keypoints_runs/{resolved_run_name}",
+        f"[bold]Total ROIs:[/bold] {total_rois}",
+        f"[bold]Successful:[/bold] {success_total} ({success_rate:.2f}%)",
+        f"[bold]Failed:[/bold] {failure_total}",
+        f"[bold]Model:[/bold] {model_path_resolved}",
+        f"[bold]Duration:[/bold] {total_time:.1f}s ({inference_rate:.1f} poses/s)",
+    ]
+    if override_data is not None:
+        summary_lines.append(
+            f"[dim]Refined ROI overrides: {override_data['count']} from {override_data['path']}[/dim]"
+        )
     completion = Panel(
-        f"[green]✓[/green] Pose inference complete\n\n"
-        f"[bold]Run:[/bold] keypoints_runs/{resolved_run_name}\n"
-        f"[bold]Total ROIs:[/bold] {total_rois}\n"
-        f"[bold]Successful:[/bold] {success_total} ({success_rate:.2f}%)\n"
-        f"[bold]Failed:[/bold] {failure_total}\n"
-        f"[bold]Model:[/bold] {model_path_resolved}\n",
+        "\n".join(summary_lines),
         title="YOLO Pose Inference",
         border_style="green",
     )

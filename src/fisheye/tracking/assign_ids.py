@@ -10,7 +10,7 @@ import numpy as np
 import zarr
 import time
 import sys
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List, Tuple, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from rich.console import Console
@@ -18,6 +18,104 @@ from rich.panel import Panel
 
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info
+
+
+def _infer_num_frames(
+    root: zarr.Group, detection_group: zarr.Group, frame_indices: np.ndarray
+) -> int:
+    """Infer total frame count without requiring raw video arrays."""
+    candidates: List[int] = []
+
+    for key in ("n_frames", "total_frames", "source_total_frames"):
+        value = detection_group.attrs.get(key)
+        if isinstance(value, (int, np.integer)) and value > 0:
+            candidates.append(int(value))
+
+    params = detection_group.attrs.get("parameters")
+    if isinstance(params, dict):
+        for key in ("n_frames", "total_frames"):
+            value = params.get(key)
+            if isinstance(value, (int, np.integer)) and value > 0:
+                candidates.append(int(value))
+
+    for key in ("palette_total_frames", "total_frames", "n_frames"):
+        value = root.attrs.get(key)
+        if isinstance(value, (int, np.integer)) and value > 0:
+            candidates.append(int(value))
+
+    if "raw_video" in root and "images_ds" in root["raw_video"]:
+        candidates.append(int(root["raw_video/images_ds"].shape[0]))
+
+    if candidates:
+        return max(candidates)
+
+    if frame_indices.size:
+        return int(frame_indices.max()) + 1
+
+    raise ValueError(
+        "Unable to infer total frame count; detection metadata missing 'frame_counts' and video attributes."
+    )
+
+
+def _resolve_frame_shape(root: zarr.Group, detection_group: zarr.Group) -> Tuple[int, int]:
+    """Return (height, width) using detection metadata or fallbacks."""
+
+    def _from_resolution(value: Optional[Any]) -> Tuple[Optional[int], Optional[int]]:
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            try:
+                h = int(value[0])
+                w = int(value[1])
+                if h > 0 and w > 0:
+                    return h, w
+            except (TypeError, ValueError):
+                return None, None
+        return None, None
+
+    attrs = detection_group.attrs
+    height = attrs.get("inference_height") or attrs.get("source_video_height") or attrs.get("source_full_height")
+    width = attrs.get("inference_width") or attrs.get("source_video_width") or attrs.get("source_full_width")
+
+    if not height or not width:
+        for key in (
+            "palette_downsampled_resolution",
+            "palette_original_resolution",
+            "inference_resolution",
+            "source_full_resolution",
+        ):
+            res_h, res_w = _from_resolution(attrs.get(key))
+            height = height or res_h
+            width = width or res_w
+            if height and width:
+                break
+
+    if not height or not width:
+        root_attrs = root.attrs
+        height = height or root_attrs.get("inference_height") or root_attrs.get("palette_video_height") or root_attrs.get("video_height")
+        width = width or root_attrs.get("inference_width") or root_attrs.get("palette_video_width") or root_attrs.get("video_width")
+
+        if not height or not width:
+            for key in (
+                "palette_downsampled_resolution",
+                "palette_original_resolution",
+                "inference_resolution",
+                "source_video_resolution",
+                "source_full_resolution",
+            ):
+                res_h, res_w = _from_resolution(root_attrs.get(key))
+                height = height or res_h
+                width = width or res_w
+                if height and width:
+                    break
+
+    if not height or not width:
+        if "raw_video" in root and "images_ds" in root["raw_video"]:
+            _, h, w = root["raw_video/images_ds"].shape
+            return int(h), int(w)
+        raise ValueError(
+            "Unable to determine frame dimensions; detection run missing inference/source resolution metadata."
+        )
+
+    return int(height), int(width)
 
 
 def get_single_dish_roi_from_mask(root: zarr.Group, console: Console) -> Optional[List[Dict]]:
@@ -233,9 +331,45 @@ def assign_ids_spatial(
     # Create run group
     assign_group, run_group_name = get_run_group(root, 'id_assignment', console)
     
-    # Get latest detection run
-    latest_detect_run = root['detect_runs'].attrs['latest']
-    detect_group = root[f'detect_runs/{latest_detect_run}']
+    # Select detection data, preferring refined detections when available
+    refined_parent = root.get('refined_detect_runs')
+    refined_run_name = None
+    detection_group = None
+    source_detect_run = None
+    assignment_source = 'detect_raw'
+    
+    if refined_parent is not None:
+        candidate_run = refined_parent.attrs.get('latest')
+        if candidate_run and candidate_run in refined_parent:
+            candidate_group = refined_parent[candidate_run]
+            if 'interpolated' in candidate_group:
+                refined_run_name = candidate_run
+                detection_group = candidate_group['interpolated']
+                source_detect_run = candidate_group.attrs.get('source_detect_run')
+                assignment_source = 'refined_interpolated'
+                console.print(f"[cyan]Using refined detections:[/cyan] refined_detect_runs/{refined_run_name} (interpolated)")
+                if source_detect_run:
+                    console.print(f"  Source detect run: {source_detect_run}")
+            else:
+                console.print(f"[yellow]Refined run '{candidate_run}' missing 'interpolated' subgroup; falling back to raw detections.[/yellow]")
+    
+    if detection_group is None:
+        if 'detect_runs' not in root:
+            raise ValueError("Detection stage not run. Run detect before assign_ids.")
+        detect_parent = root['detect_runs']
+        latest_detect_run = detect_parent.attrs.get('latest')
+        if not latest_detect_run or latest_detect_run not in detect_parent:
+            raise ValueError("No valid detection runs found for ID assignment.")
+        detection_group = detect_parent[latest_detect_run]
+        source_detect_run = latest_detect_run
+        assignment_source = 'detect_raw'
+        console.print(f"[cyan]Using raw detections:[/cyan] detect_runs/{source_detect_run}")
+    else:
+        if not source_detect_run:
+            if 'detect_runs' in root and root['detect_runs'].attrs.get('latest'):
+                source_detect_run = root['detect_runs'].attrs['latest']
+            else:
+                raise ValueError("Unable to determine source detect run for refined detections.")
     
     # Store metadata
     metadata_dict = {
@@ -247,21 +381,24 @@ def assign_ids_spatial(
             'experiment_setup': experiment_setup
         },
         'parameter_source': param_source,
-        'source_detect_run': latest_detect_run,
+        'source_detect_run': source_detect_run,
         'assignment_method': 'spatial',
+        'assignment_source': assignment_source,
         'num_masks': len(subdish_masks)
     }
+    if refined_run_name:
+        metadata_dict['source_refined_run'] = refined_run_name
     
     assign_group.attrs.update(metadata_dict)
     
     # Load detection data
-    frame_indices = detect_group['frame_indices'][:].astype(np.int64, copy=False)
-    bbox_coords = detect_group['bbox_norm_coords'][:]
-    if 'frame_counts' in detect_group:
-        frame_counts = detect_group['frame_counts'][:]
+    frame_indices = detection_group['frame_indices'][:].astype(np.int64, copy=False)
+    bbox_coords = detection_group['bbox_norm_coords'][:]
+    if 'frame_counts' in detection_group:
+        frame_counts = detection_group['frame_counts'][:]
         num_frames = len(frame_counts)
     else:
-        num_frames = root['raw_video/images_ds'].shape[0]
+        num_frames = _infer_num_frames(root, detection_group, frame_indices)
         frame_counts = np.bincount(frame_indices, minlength=num_frames)
     if frame_indices.size > 0:
         max_frame = int(frame_indices.max()) + 1
@@ -270,7 +407,8 @@ def assign_ids_spatial(
             num_frames = len(frame_counts)
     
     # Get image dimensions for coordinate conversion
-    ds_img_shape = root['raw_video/images_ds'].shape[1:]  # (H, W)
+    height_px, width_px = _resolve_frame_shape(root, detection_group)
+    ds_img_shape = (height_px, width_px)
     
     console.print(f"Processing [green]{len(bbox_coords)}[/green] detections...")
     
@@ -365,11 +503,15 @@ def assign_ids_spatial(
     
     # Environment info and provenance
     env_info = get_environment_info()
-    assign_group.attrs['provenance'] = {
+    provenance_record = {
         'command': ' '.join(sys.argv),
         'created_at_utc': datetime.now(timezone.utc).isoformat(),
-        'source_detect_run': latest_detect_run
+        'source_detect_run': source_detect_run,
+        'assignment_source': assignment_source
     }
+    if refined_run_name:
+        provenance_record['source_refined_run'] = refined_run_name
+    assign_group.attrs['provenance'] = provenance_record
     assign_group.attrs.update({
         'git_commit': env_info['git'].get('commit_hash', 'unknown'),
         'git_branch': env_info['git'].get('branch', 'unknown'),
@@ -392,11 +534,23 @@ def assign_ids_spatial(
         expected_fish = experiment_setup.get('total_expected_fish', 0)
         validation_text = f"\n[bold]Validation:[/bold]\n  Expected: {expected_fish} fish\n  Found: {n_masks} ROI(s)"
     
+    assignment_label = "refined/interpolated" if assignment_source == 'refined_interpolated' else 'raw detections'
+    source_lines = [
+        f"  Assignment source: {assignment_label}",
+        f"  Detect run: detect_runs/{source_detect_run}"
+    ]
+    if refined_run_name:
+        source_lines.append(f"  Refined run: refined_detect_runs/{refined_run_name}")
+    source_block = "\n".join(source_lines)
+    
     completion_text = f"""[green]✓[/green] ID assignment completed
-
+    
 [bold]Setup:[/bold]
   Mode: {setup_type}
-  Source: {param_source}
+  ROI source: {param_source}
+
+[bold]Data Source:[/bold]
+{source_block}
 
 [bold]Performance:[/bold]
   Time: {duration:.1f}s

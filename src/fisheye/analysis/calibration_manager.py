@@ -17,6 +17,16 @@ from datetime import datetime
 from typing import Dict, Optional, Any
 
 
+# Custom YAML constructor for OpenCV matrices
+def opencv_matrix_constructor(loader, node):
+    """Custom constructor for OpenCV matrix YAML format."""
+    mapping = loader.construct_mapping(node, deep=True)
+    return mapping
+
+# Register the custom constructor for the opencv-matrix tag
+yaml.SafeLoader.add_constructor('tag:yaml.org,2002:opencv-matrix', opencv_matrix_constructor)
+
+
 class CalibrationManager:
     """Manage calibration data for fish tracking experiments."""
     
@@ -112,40 +122,47 @@ class CalibrationManager:
                     # Check if this is a camera ID (just numbers)
                     if item_name.isdigit():
                         cam_group = calib_group[item_name]
-                        
+
                         # Extract homography matrix if available
                         if 'homography_matrix_yml' in cam_group:
                             yml_str = cam_group['homography_matrix_yml'][()].decode('utf-8')
                             try:
-                                # Parse YAML to get homography matrix
-                                # The YAML format might vary, so we'll be flexible
-                                lines = yml_str.strip().split('\n')
-                                matrix_data = []
-                                reading_data = False
-                                
-                                for line in lines:
-                                    if 'data:' in line:
-                                        # Start reading data after this line
-                                        data_str = line.split('data:')[1].strip()
-                                        if data_str.startswith('['):
-                                            # Data is inline
-                                            data_str = data_str.strip('[]')
-                                            matrix_data = [float(x.strip()) for x in data_str.split(',')]
-                                        else:
-                                            reading_data = True
-                                    elif reading_data and line.strip():
-                                        # Parse data lines
-                                        values = line.strip().strip('[]').split(',')
-                                        matrix_data.extend([float(x.strip()) for x in values if x.strip()])
-                                
-                                if len(matrix_data) == 9:
-                                    calibration_data['homography_matrix'] = np.array(matrix_data).reshape(3, 3).tolist()
+                                cleaned_lines = []
+                                for line in yml_str.splitlines():
+                                    stripped = line.lstrip()
+                                    if stripped.startswith('%YAML') or (stripped == '---' and not cleaned_lines):
+                                        continue
+                                    cleaned_lines.append(line)
+
+                                cleaned_text = '\n'.join(cleaned_lines)
+                                yaml_data = yaml.safe_load(cleaned_text) or {}
+
+                                matrix_meta = yaml_data.get('homography_matrix')
+                                if isinstance(matrix_meta, dict):
+                                    rows = int(matrix_meta.get('rows', 0))
+                                    cols = int(matrix_meta.get('cols', 0))
+                                    data = matrix_meta.get('data')
+                                    if rows > 0 and cols > 0 and isinstance(data, (list, tuple)):
+                                        matrix = np.array(data, dtype=float).reshape(rows, cols)
+                                        calibration_data['homography_matrix'] = matrix.tolist()
+                                        calibration_data['homography_metadata'] = {
+                                            'rows': rows,
+                                            'cols': cols,
+                                            'dt': matrix_meta.get('dt'),
+                                            'calibration_timestamp_utc': yaml_data.get('calibration_timestamp_utc')
+                                        }
+                                        if self.verbose:
+                                            print("  ✓ Parsed homography matrix")
+                                    else:
+                                        if self.verbose:
+                                            print("  Homography YAML missing matrix data")
+                                else:
                                     if self.verbose:
-                                        print(f"  Found homography matrix")
+                                        print("  Unexpected homography YAML structure")
                             except Exception as e:
                                 if self.verbose:
                                     print(f"  Could not parse homography matrix: {e}")
-                        
+
                         break  # Use first camera found
             
             # Extract session metadata from root attributes
@@ -178,124 +195,119 @@ class CalibrationManager:
                         'name': protocol_data.get('protocol_name', 'unknown'),
                         'steps': len(protocol_data.get('steps', []))
                     }
-                    
-                    # Extract chaser parameters if this is a chaser protocol
-                    if protocol_data.get('steps'):
-                        for step in protocol_data['steps']:
-                            if step.get('stimulus_mode_str') == 'CHASER':
-                                params = step.get('parameters', {})
-                                calibration_data['chaser_params'] = {
-                                    'chaser_radius_px': params.get('chasers', [{}])[0].get('radius_px'),
-                                    'chaser_speed_pps': params.get('chasers', [{}])[0].get('speed_pps'),
-                                    'chase_duration_s': params.get('chase_duration_s')
-                                }
-                                break
             
-            # Extract video metadata for actual FPS calculation
-            if '/video_metadata' in hf:
-                video_meta = hf['/video_metadata']
-                if 'frame_metadata' in video_meta:
-                    frame_data = video_meta['frame_metadata']
-                    if len(frame_data) > 100:
-                        # Calculate actual frame rate from timestamps
-                        timestamps = frame_data['timestamp_ns']
-                        # Use middle section for stable estimate
-                        mid_start = len(timestamps) // 4
-                        mid_end = 3 * len(timestamps) // 4
-                        time_diff = timestamps[mid_end] - timestamps[mid_start]
-                        frame_diff = mid_end - mid_start
-                        actual_fps = frame_diff / (time_diff / 1e9)
-                        calibration_data['measured_fps'] = actual_fps
-                        
-                        if self.verbose:
-                            print(f"  Calculated FPS from timestamps: {actual_fps:.1f}")
+            # Extract subject metadata
+            if '/subject_metadata' in hf:
+                subject_group = hf['/subject_metadata']
+                calibration_data['subject_metadata'] = dict(subject_group.attrs)
+                for key, value in calibration_data['subject_metadata'].items():
+                    if isinstance(value, bytes):
+                        calibration_data['subject_metadata'][key] = value.decode('utf-8')
+            
+            # Estimate FPS from frame metadata if available
+            if '/video_metadata/frame_metadata' in hf:
+                frame_ds = hf['/video_metadata/frame_metadata']
+                if len(frame_ds) > 1:
+                    timestamps = frame_ds['timestamp_ns']
+                    # Calculate average FPS from timestamp differences
+                    time_diffs = np.diff(timestamps)
+                    avg_time_diff_ns = np.mean(time_diffs)
+                    avg_fps = 1e9 / avg_time_diff_ns
+                    calibration_data['measured_fps'] = float(avg_fps)
+                    
+                    if self.verbose:
+                        print(f"  Calculated FPS from timestamps: {avg_fps:.1f}")
         
         return calibration_data
     
     def add_manual_calibration(self, 
-                               pixel_to_mm: Optional[float] = None,
-                               arena_diameter_mm: Optional[float] = None,
-                               water_depth_mm: Optional[float] = None,
-                               camera_model: Optional[str] = None,
-                               rig_id: Optional[str] = None) -> Dict:
+                              pixel_to_mm: Optional[float] = None,
+                              arena_diameter_mm: Optional[float] = None,
+                              water_depth_mm: Optional[float] = None,
+                              camera_model: Optional[str] = None,
+                              rig_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Add manual calibration values.
         
         Args:
-            pixel_to_mm: Conversion factor from pixels to millimeters
-            arena_diameter_mm: Physical arena diameter
-            water_depth_mm: Water depth in arena
+            pixel_to_mm: Conversion factor from pixels to mm
+            arena_diameter_mm: Arena diameter in mm
+            water_depth_mm: Water depth in mm
             camera_model: Camera model string
             rig_id: Rig identifier
             
         Returns:
-            Dictionary of added calibration data
+            Dictionary with manual calibration values
         """
-        calibration_data = {}
+        manual_data = {}
         
         if pixel_to_mm is not None:
-            calibration_data['pixel_to_mm'] = pixel_to_mm
+            manual_data['pixel_to_mm'] = pixel_to_mm
+            manual_data['pixels_per_mm'] = 1.0 / pixel_to_mm
             
         if arena_diameter_mm is not None:
-            calibration_data['arena'] = calibration_data.get('arena', {})
-            calibration_data['arena']['diameter_mm'] = arena_diameter_mm
+            if 'arena' not in manual_data:
+                manual_data['arena'] = {}
+            manual_data['arena']['diameter_mm'] = arena_diameter_mm
             
         if water_depth_mm is not None:
-            calibration_data['water_depth_mm'] = water_depth_mm
+            manual_data['water_depth_mm'] = water_depth_mm
             
         if camera_model is not None:
-            calibration_data['camera_model'] = camera_model
+            manual_data['camera_model'] = camera_model
             
         if rig_id is not None:
-            calibration_data['rig_info'] = calibration_data.get('rig_info', {})
-            calibration_data['rig_info']['rig_id'] = rig_id
+            if 'rig_info' not in manual_data:
+                manual_data['rig_info'] = {}
+            manual_data['rig_info']['rig_id'] = rig_id
         
-        return calibration_data
+        return manual_data
     
-    def save_calibration(self, calibration_data: Dict, overwrite: bool = False) -> bool:
+    def save_calibration(self, calibration_data: Dict[str, Any], overwrite: bool = False) -> bool:
         """
-        Save calibration data to zarr file.
+        Save calibration data to zarr.
         
         Args:
-            calibration_data: Dictionary with calibration information
+            calibration_data: Dictionary with calibration data
             overwrite: Whether to overwrite existing calibration
             
         Returns:
-            Success status
+            True if successful
         """
+        if 'calibration' in self.root:
+            if not overwrite:
+                print("Calibration already exists. Use --overwrite to replace.")
+                return False
+            del self.root['calibration']
+        
         if self.verbose:
             print("\nSaving calibration to zarr...")
         
-        # Check if calibration exists
-        if 'calibration' in self.root and not overwrite:
-            print("Error: Calibration already exists. Use --overwrite to replace.")
-            return False
-        
-        # Create or overwrite calibration group
-        if 'calibration' in self.root:
-            del self.root['calibration']
-        
         calib_group = self.root.create_group('calibration')
         
-        # Add timestamp
-        calib_group.attrs['created_at'] = datetime.now().isoformat()
-        
-        # Save pixel to mm conversion (most important!)
+        # Save the most critical value
         if 'pixel_to_mm' in calibration_data:
-            calib_group.attrs['pixel_to_mm'] = float(calibration_data['pixel_to_mm'])
+            calib_group.attrs['pixel_to_mm'] = calibration_data['pixel_to_mm']
             if self.verbose:
                 print(f"  ✓ pixel_to_mm: {calibration_data['pixel_to_mm']:.6f}")
         
-        # Save arena information
-        if 'arena' in calibration_data:
-            arena_group = calib_group.create_group('arena')
-            for key, value in calibration_data['arena'].items():
-                if value is not None:
-                    arena_group.attrs[key] = value
-            if self.verbose:
-                print(f"  ✓ Arena data saved")
+        # Save pixels_per_mm for convenience
+        if 'pixels_per_mm' in calibration_data:
+            calib_group.attrs['pixels_per_mm'] = calibration_data['pixels_per_mm']
         
-        # Save rig information
+        # Save arena info
+        if 'swimmable_area' in calibration_data or 'arena_diameter_mm' in calibration_data:
+            arena_group = calib_group.create_group('arena')
+            
+            if 'swimmable_area' in calibration_data:
+                for key, value in calibration_data['swimmable_area'].items():
+                    if value is not None:
+                        arena_group.attrs[key] = value
+            
+            if 'arena_diameter_mm' in calibration_data:
+                arena_group.attrs['diameter_mm'] = calibration_data['arena_diameter_mm']
+        
+        # Save rig info
         if 'rig_info' in calibration_data:
             rig_group = calib_group.create_group('rig_info')
             for key, value in calibration_data['rig_info'].items():
@@ -306,7 +318,7 @@ class CalibrationManager:
         
         # Save homography matrix if available
         if 'homography_matrix' in calibration_data:
-            calib_group.create_dataset('homography_matrix', 
+            calib_group.create_array('homography_matrix', 
                                       data=np.array(calibration_data['homography_matrix']))
             if self.verbose:
                 print(f"  ✓ Homography matrix saved")

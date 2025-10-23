@@ -48,6 +48,107 @@ def _decord_available() -> bool:
     return decord is not None and VideoReader is not None and cpu is not None
 
 
+def _collect_zarr_metadata(zarr_path: Path, console: Optional[Console] = None) -> Dict[str, Any]:
+    """
+    Return palette metadata (width, height, fps, etc.) from an existing Zarr archive.
+
+    The lookup is best-effort: we consult root attributes, then raw_video attrs,
+    and finally dataset shapes. Missing entries are omitted from the result.
+    """
+    metadata: Dict[str, Any] = {}
+    try:
+        root = zarr.open(str(zarr_path), mode="r")
+    except Exception as exc:  # pragma: no cover - best-effort metadata lookup
+        if console:
+            console.print(f"[yellow]Warning:[/yellow] Unable to open source Zarr '{zarr_path}': {escape(str(exc))}")
+        return metadata
+
+    def _as_int(value: Any) -> Optional[int]:
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _get_attr(source, *names) -> Optional[Any]:
+        for name in names:
+            if name in source:
+                return source.get(name)
+        return None
+
+    # Root-level metadata
+    width_attr = _as_int(_get_attr(root.attrs, "width", "video_width"))
+    height_attr = _as_int(_get_attr(root.attrs, "height", "video_height"))
+    fps = _get_attr(root.attrs, "fps", "video_fps")
+    total_frames = _get_attr(root.attrs, "total_frames", "n_frames")
+    duration_seconds = _get_attr(root.attrs, "duration_seconds", "video_duration_seconds")
+    video_codec = _get_attr(root.attrs, "video_codec")
+    video_pix_fmt = _get_attr(root.attrs, "video_pix_fmt")
+
+    # raw_video group metadata provides additional detail
+    raw_group = root.get("raw_video")
+    if raw_group is not None:
+        raw_attrs = raw_group.attrs
+        width_attr = width_attr or _as_int(_get_attr(raw_attrs, "video_width"))
+        height_attr = height_attr or _as_int(_get_attr(raw_attrs, "video_height"))
+        fps = fps or raw_attrs.get("fps")
+        total_frames = total_frames or raw_attrs.get("total_frames")
+        duration_seconds = duration_seconds or raw_attrs.get("video_duration_seconds")
+        video_codec = video_codec or raw_attrs.get("video_codec")
+        video_pix_fmt = video_pix_fmt or raw_attrs.get("video_pix_fmt")
+
+        original_resolution = raw_attrs.get("original_resolution")
+        if original_resolution and len(original_resolution) == 2:
+            metadata["original_resolution"] = [int(original_resolution[0]), int(original_resolution[1])]
+
+        if "has_full_resolution" in raw_attrs:
+            metadata["has_full_resolution"] = bool(raw_attrs.get("has_full_resolution"))
+        else:
+            metadata["has_full_resolution"] = "images_full" in raw_group
+
+        if "has_downsampled" in raw_attrs:
+            metadata["has_downsampled"] = bool(raw_attrs.get("has_downsampled"))
+        else:
+            metadata["has_downsampled"] = "images_ds" in raw_group
+
+        downsampled_resolution = raw_attrs.get("downsampled_resolution")
+        if downsampled_resolution and len(downsampled_resolution) == 2:
+            metadata["downsampled_resolution"] = [int(downsampled_resolution[0]), int(downsampled_resolution[1])]
+
+        downsample_method = raw_attrs.get("downsample_method")
+        if downsample_method:
+            metadata["downsample_method"] = downsample_method
+
+        for key in ("images_full", "images", "images_ds"):
+            if key in raw_group:
+                shape = raw_group[key].shape
+                if shape and len(shape) >= 3:
+                    height = int(shape[-2])
+                    width = int(shape[-1])
+                    if key == "images_full":
+                        width_attr = width_attr or width
+                        height_attr = height_attr or height
+                        metadata.setdefault("original_resolution", [height, width])
+                    if key == "images_ds":
+                        metadata.setdefault("downsampled_resolution", [height, width])
+
+    if width_attr is not None:
+        metadata["full_width"] = int(width_attr)
+    if height_attr is not None:
+        metadata["full_height"] = int(height_attr)
+    if fps is not None:
+        metadata["fps"] = float(fps)
+    if total_frames is not None:
+        metadata["total_frames"] = int(total_frames)
+    if duration_seconds is not None:
+        metadata["duration_seconds"] = float(duration_seconds)
+    if video_codec:
+        metadata["video_codec"] = video_codec
+    if video_pix_fmt:
+        metadata["video_pix_fmt"] = video_pix_fmt
+
+    return metadata
+
+
 def _init_decord_reader(video_path: Path, prefer_gpu: bool, console: Console) -> Optional[Dict[str, Any]]:
     """Initialise a Decord VideoReader with GPU preference and graceful fallback."""
     if not _decord_available():
@@ -241,6 +342,23 @@ def detect_yolo(
     # Get video processing parameters
     video_config = config.get('video', {})
     resize_dims = video_config.get('resize', None)  # e.g., [640, 640] or None
+
+    source_zarr_config = (
+        video_config.get('source_zarr')
+        or video_config.get('source_zarr_path')
+        or video_config.get('zarr_path')
+        or video_config.get('palette_zarr')
+    )
+    source_zarr_path: Optional[Path] = None
+    source_zarr_meta: Dict[str, Any] = {}
+    if source_zarr_config:
+        source_zarr_path = Path(source_zarr_config).expanduser()
+        if source_zarr_path.exists():
+            source_zarr_meta = _collect_zarr_metadata(source_zarr_path, console)
+        else:
+            console.print(
+                f"[yellow]Warning:[/yellow] source Zarr path '{source_zarr_path}' not found; continuing without full-resolution metadata."
+            )
     
     # GPU/device configuration
     device_config = config.get('model', {}).get('device', 'auto')
@@ -255,9 +373,6 @@ def detect_yolo(
         raise FileNotFoundError(f"Video not found: {video_path}")
     if not model_path.exists():
         raise FileNotFoundError(f"Model not found: {model_path}")
-    if output_zarr.exists():
-        console.print(f"[yellow]Warning: {output_zarr} already exists, will overwrite[/yellow]")
-    
     console.print(f"Video: [cyan]{video_path}[/cyan]")
     console.print(f"Model: [cyan]{model_path}[/cyan]")
     console.print(f"Output: [cyan]{output_zarr}[/cyan]")
@@ -338,10 +453,21 @@ def detect_yolo(
         inference_width, inference_height = width, height
         console.print(f"[green]✓[/green] Video: {n_frames} frames, {fps:.1f} fps, {width}×{height}")
     
-    # Create minimal zarr structure (NO raw_video!)
-    console.print("\n[bold]Creating zarr structure...[/bold]")
-    root = zarr.open_group(str(output_zarr), mode='w')
-    
+    console.print("\n[bold]Preparing output Zarr...[/bold]")
+    if output_zarr.exists():
+        root = zarr.open_group(str(output_zarr), mode='r+')
+        created_new_root = False
+        console.print(f"[cyan]Appending detect run to existing archive:[/cyan] {output_zarr}")
+    else:
+        root = zarr.open_group(str(output_zarr), mode='w')
+        created_new_root = True
+        console.print(f"[cyan]Created new detection archive:[/cyan] {output_zarr}")
+
+    source_video_width = int(width)
+    source_video_height = int(height)
+    source_full_width = int(source_zarr_meta.get("full_width", source_video_width))
+    source_full_height = int(source_zarr_meta.get("full_height", source_video_height))
+
     # Get comprehensive video metadata
     vid_meta = get_video_metadata(video_path, cap, width, height, n_frames, fps)
     
@@ -355,155 +481,195 @@ def detect_yolo(
         collect_ip=False
     )
     
-    # Store basic video metadata (matching import_video structure)
+    # Always keep core video metadata on the root so downstream consumers (and diagnostics) can read it.
     root.attrs.update({
-        # Video source info
         'source_video': vid_meta['source_video'],
         'source_video_path': vid_meta['source_path'],
-        'source_path': vid_meta['source_path'],  # Alias for compatibility
-        
-        # Video properties
-        'video_width': width,
-        'video_height': height,
-        'width': width,  # Alias
-        'height': height,  # Alias
-        'fps': fps,
-        'n_frames': n_frames,
-        'total_frames': n_frames,  # Alias
-        'duration_seconds': vid_meta['duration_seconds'],
-        
-        # Codec info
-        'video_codec': vid_meta.get('codec', 'unknown'),
-        'video_pix_fmt': vid_meta.get('pix_fmt', 'unknown'),
-        
-        # Pipeline info - CLEAR DISTINCTION
-        'created_at_utc': datetime.now(timezone.utc).isoformat(),
-        'pipeline_type': 'yolo_inference',  # Changed from 'inference_only'
-        'has_raw_video': False,  # Flag that we don't store video
-        'detection_method': 'yolo',  # Will be 'blob' for traditional
-        
-        # Model info
-        'model_path': str(model_path.absolute()),
-        'model_name': model_path.name,
-        
-        # Processing info
-        'inference_width': inference_width,
-        'inference_height': inference_height,
-        'resized_for_inference': resize_dims is not None,
-        
-        # Git provenance (matching import_video)
-        'git_commit_hash': git_info.get('commit_hash', 'unknown'),
-        'git_short_hash': git_info.get('short_hash', 'unknown'),
-        'git_branch': git_info.get('branch', 'unknown'),
-        'git_is_dirty': git_info.get('is_dirty', False),
-        'git_remote_url': git_info.get('remote_url', 'unknown'),
-        
-        # System provenance (matching import_video)
-        'system_hostname': env_info['platform']['hostname'],
-        'system_fqdn': env_info['platform']['fqdn'],
-        'system_os': env_info['platform']['system'],
-        'system_os_release': env_info['platform']['release'],
-        'system_machine': env_info['platform']['machine'],
-        'system_python_version': env_info['platform']['python_version'],
-        'system_username': env_info['platform']['username'],
-        'system_cpu_cores': env_info['platform']['cpu_cores'],
+        'source_path': vid_meta['source_path'],
+        'video_width': int(width),
+        'video_height': int(height),
+        'width': int(width),
+        'height': int(height),
+        'fps': float(fps) if fps and fps > 0 else fps,
+        'n_frames': int(n_frames),
+        'total_frames': int(n_frames),
+        'duration_seconds': float(vid_meta['duration_seconds']),
+        'video_codec': vid_meta.get('codec', root.attrs.get('video_codec', 'unknown')),
+        'video_pix_fmt': vid_meta.get('pix_fmt', root.attrs.get('video_pix_fmt', 'unknown')),
     })
-    
-    # Add optional metadata if available
-    if 'imageio_metadata' in vid_meta:
-        root.attrs['imageio_metadata'] = vid_meta['imageio_metadata']
-    
-    # Add CPU details if available
-    if 'cpu_details' in env_info['platform']:
-        cpu = env_info['platform']['cpu_details']
+
+    if created_new_root:
         root.attrs.update({
-            'cpu_model': cpu.get('model', 'unknown'),
-            'cpu_arch': cpu.get('arch', 'unknown'),
+            # Video source info
+            'source_video': vid_meta['source_video'],
+            'source_video_path': vid_meta['source_path'],
+            'source_path': vid_meta['source_path'],  # Alias for compatibility
+            
+            # Video properties
+            'video_width': width,
+            'video_height': height,
+            'width': width,  # Alias
+            'height': height,  # Alias
+            'fps': fps,
+            'n_frames': n_frames,
+            'total_frames': n_frames,  # Alias
+            'duration_seconds': vid_meta['duration_seconds'],
+            
+            # Codec info
+            'video_codec': vid_meta.get('codec', 'unknown'),
+            'video_pix_fmt': vid_meta.get('pix_fmt', 'unknown'),
+            
+            # Pipeline info
+            'created_at_utc': datetime.now(timezone.utc).isoformat(),
+            'pipeline_type': 'yolo_inference',
+            'has_raw_video': False,
+            'detection_method': 'yolo',
+            
+            # Model info
+            'model_path': str(model_path.absolute()),
+            'model_name': model_path.name,
+            
+            # Processing info
+            'inference_width': inference_width,
+            'inference_height': inference_height,
+            'resized_for_inference': resize_dims is not None,
+            
+            # Git provenance
+            'git_commit_hash': git_info.get('commit_hash', 'unknown'),
+            'git_short_hash': git_info.get('short_hash', 'unknown'),
+            'git_branch': git_info.get('branch', 'unknown'),
+            'git_is_dirty': git_info.get('is_dirty', False),
+            'git_remote_url': git_info.get('remote_url', 'unknown'),
+            
+            # System provenance
+            'system_hostname': env_info['platform']['hostname'],
+            'system_fqdn': env_info['platform']['fqdn'],
+            'system_os': env_info['platform']['system'],
+            'system_os_release': env_info['platform']['release'],
+            'system_machine': env_info['platform']['machine'],
+            'system_python_version': env_info['platform']['python_version'],
+            'system_username': env_info['platform']['username'],
+            'system_cpu_cores': env_info['platform']['cpu_cores'],
         })
-    
-    # Add memory info if available
-    if 'memory' in env_info['platform']:
-        mem = env_info['platform']['memory']
-        root.attrs.update({
-            'memory_total_gb': mem.get('total_gb', 0),
-            'memory_available_gb': mem.get('available_gb', 0),
-            'memory_percent_used': mem.get('percent_used', 0),
-        })
-    
-    # Add disk info if available
-    if 'disk' in env_info['platform']:
-        disk = env_info['platform']['disk']
-        root.attrs.update({
-            'disk_path': disk.get('path', str(output_zarr)),
-            'disk_total_gb': disk.get('total_gb', 0),
-            'disk_available_gb': disk.get('available_gb', 0),
-            'disk_percent_used': disk.get('percent_used', 0),
-        })
-    
-    # Add HPC scheduler info if present (matching import_video)
-    if 'lsf' in env_info['platform']:
-        lsf = env_info['platform']['lsf']
-        root.attrs.update({
-            'hpc_scheduler': 'LSF',
-            'lsf_job_id': lsf.get('job_id', 'unknown'),
-            'lsf_job_name': lsf.get('job_name', 'unknown'),
-            'lsf_queue': lsf.get('queue', 'unknown'),
-            'lsf_hosts': lsf.get('hosts', 'unknown'),
-        })
-    elif 'slurm' in env_info['platform']:
-        slurm = env_info['platform']['slurm']
-        root.attrs.update({
-            'hpc_scheduler': 'SLURM',
-            'slurm_job_id': slurm.get('job_id', 'unknown'),
-            'slurm_job_name': slurm.get('job_name', 'unknown'),
-            'slurm_node_list': slurm.get('node_list', 'unknown'),
-        })
-    
-    # Add GPU info if available
-    if env_info.get('gpu', {}).get('available'):
-        gpu_info = env_info['gpu']
-        root.attrs.update({
-            'gpu_available': True,
-            'gpu_backend': gpu_info.get('backend', 'unknown'),
-            'gpu_count': len(gpu_info.get('devices', [])),
-        })
-        
-        if 'cuda_version' in gpu_info:
-            root.attrs['cuda_version'] = gpu_info['cuda_version']
-        
-        if gpu_info.get('devices'):
-            primary_gpu = gpu_info['devices'][0]
+
+        if 'imageio_metadata' in vid_meta:
+            root.attrs['imageio_metadata'] = vid_meta['imageio_metadata']
+
+        if 'cpu_details' in env_info['platform']:
+            cpu = env_info['platform']['cpu_details']
             root.attrs.update({
-                'gpu_name': primary_gpu.get('name', 'unknown'),
-                'gpu_compute_capability': primary_gpu.get('compute_capability', 'unknown'),
-                'gpu_memory_total_gb': primary_gpu.get('total_memory_gb', 0),
+                'cpu_model': cpu.get('model', 'unknown'),
+                'cpu_arch': cpu.get('arch', 'unknown'),
             })
+
+        if 'memory' in env_info['platform']:
+            mem = env_info['platform']['memory']
+            root.attrs.update({
+                'memory_total_gb': mem.get('total_gb', 0),
+                'memory_available_gb': mem.get('available_gb', 0),
+                'memory_percent_used': mem.get('percent_used', 0),
+            })
+
+        if 'disk' in env_info['platform']:
+            disk = env_info['platform']['disk']
+            root.attrs.update({
+                'disk_path': disk.get('path', str(output_zarr)),
+                'disk_total_gb': disk.get('total_gb', 0),
+                'disk_available_gb': disk.get('available_gb', 0),
+                'disk_percent_used': disk.get('percent_used', 0),
+            })
+
+        if 'lsf' in env_info['platform']:
+            lsf = env_info['platform']['lsf']
+            root.attrs.update({
+                'hpc_scheduler': 'LSF',
+                'lsf_job_id': lsf.get('job_id', 'unknown'),
+                'lsf_job_name': lsf.get('job_name', 'unknown'),
+                'lsf_queue': lsf.get('queue', 'unknown'),
+                'lsf_hosts': lsf.get('hosts', 'unknown'),
+            })
+        elif 'slurm' in env_info['platform']:
+            slurm = env_info['platform']['slurm']
+            root.attrs.update({
+                'hpc_scheduler': 'SLURM',
+                'slurm_job_id': slurm.get('job_id', 'unknown'),
+                'slurm_job_name': slurm.get('job_name', 'unknown'),
+                'slurm_node_list': slurm.get('node_list', 'unknown'),
+            })
+
+        if env_info.get('gpu', {}).get('available'):
+            gpu_info = env_info['gpu']
+            root.attrs.update({
+                'gpu_available': True,
+                'gpu_backend': gpu_info.get('backend', 'unknown'),
+                'gpu_count': len(gpu_info.get('devices', [])),
+            })
+            if 'cuda_version' in gpu_info:
+                root.attrs['cuda_version'] = gpu_info['cuda_version']
+            if gpu_info.get('devices'):
+                primary_gpu = gpu_info['devices'][0]
+                root.attrs.update({
+                    'gpu_name': primary_gpu.get('name', 'unknown'),
+                    'gpu_compute_capability': primary_gpu.get('compute_capability', 'unknown'),
+                    'gpu_memory_total_gb': primary_gpu.get('total_memory_gb', 0),
+                })
+
+        env_summary = env_info.get('environment', {})
+        if env_summary:
+            root.attrs.update({
+                'environment_type': env_summary.get('environment_type', 'unknown'),
+                'environment_name': env_summary.get('environment_name', 'unknown'),
+                'total_packages': env_summary.get('total_packages', 0),
+            })
+            if 'deep_learning_framework' in env_summary:
+                root.attrs['deep_learning_framework'] = env_summary['deep_learning_framework']
+            if 'key_packages' in env_summary:
+                import json
+                root.attrs['key_packages_json'] = json.dumps(env_summary['key_packages'])
+
+        import json
+        root.attrs['_full_environment_info'] = json.dumps(env_info, default=str)
+
+    if source_zarr_meta:
+        palette_attr_map = {
+            "fps": "palette_fps",
+            "total_frames": "palette_total_frames",
+            "duration_seconds": "palette_duration_seconds",
+            "video_codec": "palette_video_codec",
+            "video_pix_fmt": "palette_video_pix_fmt",
+            "downsampled_resolution": "palette_downsampled_resolution",
+            "downsample_method": "palette_downsample_method",
+            "has_full_resolution": "palette_has_full_resolution",
+            "has_downsampled": "palette_has_downsampled",
+            "original_resolution": "palette_original_resolution",
+        }
+        for key, attr_name in palette_attr_map.items():
+            value = source_zarr_meta.get(key)
+            if value is None:
+                continue
+            if isinstance(value, tuple):
+                value = list(value)
+            root.attrs[attr_name] = value
+        if source_zarr_meta.get("full_width") is not None:
+            root.attrs["palette_video_width"] = int(source_zarr_meta["full_width"])
+        if source_zarr_meta.get("full_height") is not None:
+            root.attrs["palette_video_height"] = int(source_zarr_meta["full_height"])
+
+    root.attrs['source_video_width'] = source_video_width
+    root.attrs['source_video_height'] = source_video_height
+    root.attrs['source_video_resolution'] = [source_video_width, source_video_height]
+    root.attrs['source_full_width'] = source_full_width
+    root.attrs['source_full_height'] = source_full_height
+    root.attrs['source_full_resolution'] = [source_full_width, source_full_height]
+    root.attrs['inference_resolution'] = [int(inference_width), int(inference_height)]
+    root.attrs['inference_width'] = int(inference_width)
+    root.attrs['inference_height'] = int(inference_height)
+    root.attrs['resized_for_inference'] = resize_dims is not None
+    if source_zarr_path is not None:
+        root.attrs['source_zarr_path'] = str(source_zarr_path)
     
-    # Add environment summary (matching import_video)
-    env_summary = env_info.get('environment', {})
-    if env_summary:
-        root.attrs.update({
-            'environment_type': env_summary.get('environment_type', 'unknown'),
-            'environment_name': env_summary.get('environment_name', 'unknown'),
-            'total_packages': env_summary.get('total_packages', 0),
-        })
-        
-        if 'deep_learning_framework' in env_summary:
-            root.attrs['deep_learning_framework'] = env_summary['deep_learning_framework']
-        
-        if 'key_packages' in env_summary:
-            import json
-            root.attrs['key_packages_json'] = json.dumps(env_summary['key_packages'])
-    
-    # Store complete environment info for full reproducibility (matching import_video)
-    import json
-    root.attrs['_full_environment_info'] = json.dumps(env_info, default=str)
-    
-    # Create detect_runs group
-    root.create_group('detect_runs')
     detect_group, run_name = get_run_group(root, 'detect', console, create_new=True)
-    
-    console.print(f"[green]✓[/green] Zarr structure created")
+    console.print(f"[green]✓[/green] Writing detections to detect_runs/{run_name}")
     
     # Storage for detections
     frame_counts = np.zeros(n_frames, dtype=np.int32)
@@ -762,6 +928,8 @@ def detect_yolo(
         avg_inference = np.mean(inference_times)
         console.print(f"[cyan]  Avg inference time per batch: {avg_inference*1000:.1f}ms[/cyan]")
         console.print(f"[cyan]  Avg read time per batch: {np.mean(read_times)*1000:.1f}ms[/cyan]")
+    else:
+        avg_inference = 0.0
     
     # Convert to arrays
     console.print("\n[bold]Saving detections to zarr...[/bold]")
@@ -817,6 +985,12 @@ def detect_yolo(
         'model_type': 'yolo_object_detection',
         'model_path': str(model_path.absolute()),
         'model_name': model_path.name,
+        'source_video_width': source_video_width,
+        'source_video_height': source_video_height,
+        'source_full_width': source_full_width,
+        'source_full_height': source_full_height,
+        'inference_width': int(inference_width),
+        'inference_height': int(inference_height),
         'parameters': {
             'conf_threshold': conf_threshold,
             'iou_threshold': iou_threshold,
@@ -829,6 +1003,21 @@ def detect_yolo(
         'git_branch': git_info.get('branch', 'unknown'),
         'hostname': env_info['platform']['hostname']
     })
+    if source_zarr_meta:
+        if source_zarr_meta.get("downsampled_resolution") is not None:
+            detect_group.attrs['palette_downsampled_resolution'] = list(source_zarr_meta["downsampled_resolution"])
+        if source_zarr_meta.get("has_downsampled") is not None:
+            detect_group.attrs['palette_has_downsampled'] = bool(source_zarr_meta["has_downsampled"])
+        if source_zarr_meta.get("has_full_resolution") is not None:
+            detect_group.attrs['palette_has_full_resolution'] = bool(source_zarr_meta["has_full_resolution"])
+        if source_zarr_meta.get("original_resolution") is not None:
+            detect_group.attrs['palette_original_resolution'] = list(source_zarr_meta["original_resolution"])
+    if source_zarr_path is not None:
+        detect_group.attrs['source_zarr_path'] = str(source_zarr_path)
+    detect_group.attrs['inference_duration_seconds'] = float(total_time)
+    detect_group.attrs['inference_average_fps'] = float(n_frames / total_time) if total_time > 0 else 0.0
+    detect_group.attrs['inference_avg_batch_ms'] = float(avg_inference * 1000.0) if inference_times else 0.0
+    detect_group.attrs['inference_avg_read_ms'] = float(np.mean(read_times) * 1000.0) if read_times else 0.0
     
     # Mark as latest
     root['detect_runs'].attrs['latest'] = run_name

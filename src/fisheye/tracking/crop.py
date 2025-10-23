@@ -24,6 +24,7 @@ from typing import Dict, Any, Optional, Tuple, List
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn, MofNCompleteColumn
+from rich.align import Align
 
 # Metadata helpers
 from ..utils.metadata import has_raw_video, get_video_source_path, get_total_frames, get_detection_method

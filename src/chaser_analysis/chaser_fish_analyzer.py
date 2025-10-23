@@ -37,6 +37,11 @@ from matplotlib.patches import Circle, Rectangle
 import seaborn as sns
 import warnings
 
+try:
+    from scipy.ndimage import gaussian_filter
+except ImportError:  # pragma: no cover - scipy optional
+    gaussian_filter = None
+
 # Set style for better-looking plots
 plt.style.use('seaborn-v0_8-darkgrid')
 sns.set_palette("husl")
@@ -124,6 +129,10 @@ class ChaserFishDistanceAnalyzer:
         self.logger.info(f"  H5: {h5_path}")
         
         self.zarr_root = zarr.open(str(zarr_path), mode='r+')
+
+        # Heatmap/period state
+        self.training_periods: Dict[str, Dict[str, int]] = {}
+        self.heatmap_bin_size = 80  # pixels per bin for spatial heatmaps
         
         # Determine interpolation run
         if interpolation_run is None:
@@ -142,6 +151,9 @@ class ChaserFishDistanceAnalyzer:
         self.texture_to_camera_scale_y = None
         self.camera_to_stimulus = {}
         self.stimulus_to_camera = {}
+        self.camera_to_zarr = {}
+        self.stimulus_to_zarr = {}
+        self.min_camera_frame = None
         self.chaser_states = None
         self.chaser_by_stimulus = {}
         self.zarr_to_stimulus = None
@@ -159,6 +171,8 @@ class ChaserFishDistanceAnalyzer:
         self._create_frame_alignment()
         # Load smoothed fish speed if available
         self.smoothed_speed_px_s, self.speed_window = self._load_smoothed_speed()
+        # Identify training segments for heatmap visualization
+        self._identify_training_periods()
 
     
     def _setup_logging(self):
@@ -345,25 +359,144 @@ class ChaserFishDistanceAnalyzer:
         
         self.logger.info(f"  Camera frame range in H5: {min_camera_frame} to {max_camera_frame}")
         
-        # Build alignment array
+        # Build alignment array and lookup tables
+        self.min_camera_frame = min_camera_frame
+        self.max_camera_frame = max_camera_frame
         self.zarr_to_stimulus = np.full(n_frames, -1, dtype=np.int32)
+        self.stimulus_to_zarr = {}
+        self.camera_to_zarr = {}
         aligned_count = 0
         
         for zarr_idx in range(n_frames):
-            # Map zarr index to camera frame ID
             camera_frame_id = zarr_idx + min_camera_frame
-            
             if camera_frame_id in self.camera_to_stimulus:
                 stimulus_frames = self.camera_to_stimulus[camera_frame_id]
-                # Choose middle stimulus frame for best temporal alignment
+                if not stimulus_frames:
+                    continue
                 middle_idx = len(stimulus_frames) // 2
-                self.zarr_to_stimulus[zarr_idx] = stimulus_frames[middle_idx]
+                stim_for_alignment = stimulus_frames[middle_idx]
+                self.zarr_to_stimulus[zarr_idx] = stim_for_alignment
+                self.camera_to_zarr.setdefault(camera_frame_id, zarr_idx)
+                for stim in stimulus_frames:
+                    self.stimulus_to_zarr.setdefault(int(stim), zarr_idx)
                 aligned_count += 1
         
         self.logger.info(f"  ✅ Aligned {aligned_count}/{n_frames} frames")
         
         if aligned_count == 0:
             self.logger.warning("  ⚠️ No frames could be aligned - check frame numbering!")
+    
+    def _map_event_to_frame(self, stim_frame: Optional[int], camera_frame: Optional[int]) -> Optional[int]:
+        """
+        Map an event that references either stimulus or camera frames onto a zarr frame index.
+        """
+        if stim_frame is not None and stim_frame >= 0:
+            if stim_frame in self.stimulus_to_zarr:
+                return self.stimulus_to_zarr[stim_frame]
+        if camera_frame is not None and camera_frame >= 0:
+            if camera_frame in self.camera_to_zarr:
+                return self.camera_to_zarr[camera_frame]
+            if self.min_camera_frame is not None:
+                idx = camera_frame - self.min_camera_frame
+                if 0 <= idx < len(self.zarr_to_stimulus):
+                    return idx
+        return None
+
+    def _identify_training_periods(self) -> None:
+        """
+        Determine pre-training, training, and post-training frame windows based on events.
+        """
+        self.training_periods = {}
+        if self.events is None or self.zarr_to_stimulus is None:
+            return
+
+        total_frames = len(self.zarr_to_stimulus)
+        frames_by_type: Dict[int, List[int]] = {}
+
+        for event in self.events:
+            if 'event_type_id' not in event.dtype.names:
+                continue
+            event_type = int(event['event_type_id'])
+            if event_type not in (0, 4, 24, 25, 26):
+                continue
+
+            stim_frame = None
+            camera_frame = None
+            if 'stimulus_frame_num' in event.dtype.names:
+                stim_val = int(event['stimulus_frame_num'])
+                stim_frame = stim_val if stim_val >= 0 else None
+            if 'camera_frame_id' in event.dtype.names:
+                cam_val = int(event['camera_frame_id'])
+                camera_frame = cam_val if cam_val >= 0 else None
+
+            zarr_idx = self._map_event_to_frame(stim_frame, camera_frame)
+            if zarr_idx is None:
+                continue
+            frames_by_type.setdefault(event_type, []).append(zarr_idx)
+
+        if not frames_by_type:
+            self.logger.warning("  ⚠️ Training period markers not found in events; skipping heatmap segmentation.")
+            return
+
+        pre_candidates = frames_by_type.get(24) if 24 in frames_by_type else None
+        if pre_candidates:
+            protocol_start = min(pre_candidates)
+        else:
+            protocol_start = min(frames_by_type.get(0, [0]))
+        training_start = min(frames_by_type.get(25, [])) if 25 in frames_by_type else None
+        post_start = min(frames_by_type.get(26, [])) if 26 in frames_by_type else None
+        protocol_finish = max(frames_by_type.get(4, [])) if 4 in frames_by_type else total_frames - 1
+
+        protocol_start = max(0, min(protocol_start, total_frames - 1))
+        protocol_finish = max(0, min(protocol_finish, total_frames - 1))
+
+        periods: Dict[str, Dict[str, int]] = {}
+
+        # Pre-training
+        if training_start is not None:
+            pre_end = max(protocol_start, min(training_start - 1, protocol_finish))
+        elif post_start is not None:
+            pre_end = max(protocol_start, min(post_start - 1, protocol_finish))
+        else:
+            pre_end = protocol_finish
+
+        if pre_end >= protocol_start:
+            periods['pre_training'] = {
+                'start_frame': protocol_start,
+                'end_frame': pre_end,
+            }
+
+        # Training
+        if training_start is not None:
+            train_start = max(protocol_start, min(training_start, protocol_finish))
+            if post_start is not None:
+                train_end = max(train_start, min(post_start - 1, protocol_finish))
+            else:
+                train_end = protocol_finish
+            if train_end >= train_start:
+                periods['training'] = {
+                    'start_frame': train_start,
+                    'end_frame': train_end,
+                }
+
+        # Post-training
+        if post_start is not None:
+            post_start_frame = max(protocol_start, min(post_start, protocol_finish))
+            if protocol_finish >= post_start_frame:
+                periods['post_training'] = {
+                    'start_frame': post_start_frame,
+                    'end_frame': protocol_finish,
+                }
+
+        if periods:
+            self.training_periods = periods
+            self.logger.info("  Identified training periods:")
+            for name, info in self.training_periods.items():
+                self.logger.info(
+                    f"    {name}: frames {info['start_frame']}–{info['end_frame']}"
+                )
+        else:
+            self.logger.warning("  ⚠️ Unable to derive training windows from events; heatmap column will be empty.")
     
     def _load_smoothed_speed(self, preferred_window=(10, 20, 30)):
         """Return (smoothed_speed_px_s, chosen_window) or (None, None) if absent."""
@@ -397,6 +530,73 @@ class ChaserFishDistanceAnalyzer:
 
         self.logger.info("  No smoothed speed arrays present.")
         return None, None
+    
+    def _create_heatmap(self, positions: np.ndarray) -> np.ndarray:
+        """
+        Generate a normalized occupancy map in camera coordinates.
+        """
+        bin_size = max(1, int(self.heatmap_bin_size))
+        x_bins = np.arange(0, self.video_width + bin_size, bin_size)
+        y_bins = np.arange(0, self.video_height + bin_size, bin_size)
+
+        if positions.size == 0:
+            heatmap = np.zeros((x_bins.size - 1, y_bins.size - 1), dtype=np.float32)
+        else:
+            heatmap, _, _ = np.histogram2d(
+                positions[:, 0],
+                positions[:, 1],
+                bins=[x_bins, y_bins],
+            )
+            if gaussian_filter is not None and np.any(heatmap):
+                heatmap = gaussian_filter(heatmap, sigma=1.2)
+        max_val = np.nanmax(heatmap) if heatmap.size else 0.0
+        if max_val > 0:
+            heatmap = heatmap / max_val
+        return heatmap.astype(np.float32).T  # transpose to align with imshow extent
+
+    def _build_period_heatmaps(
+        self,
+        fish_positions: np.ndarray,
+        interpolation_mask: Optional[np.ndarray] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Build spatial heatmaps for each identified training period.
+        """
+        results: Dict[str, Dict[str, Any]] = {}
+        if not self.training_periods:
+            return results
+
+        total_frames = fish_positions.shape[0]
+        for name in ("pre_training", "training", "post_training"):
+            if name not in self.training_periods:
+                continue
+            period = self.training_periods[name]
+            start = max(0, min(period['start_frame'], total_frames - 1))
+            end = max(0, min(period['end_frame'], total_frames - 1))
+            if end < start:
+                continue
+
+            slice_positions = fish_positions[start : end + 1]
+            valid_mask = ~np.isnan(slice_positions[:, 0])
+            valid_positions = slice_positions[valid_mask]
+            frame_count = end - start + 1
+            coverage = valid_positions.shape[0] / frame_count if frame_count else 0.0
+
+            heatmap = self._create_heatmap(valid_positions) if valid_positions.size else None
+            entry: Dict[str, Any] = {
+                "heatmap": heatmap,
+                "frames": frame_count,
+                "valid_frames": int(valid_positions.shape[0]),
+                "coverage": coverage,
+                "start_frame": start,
+                "end_frame": end,
+            }
+            if interpolation_mask is not None:
+                interp_slice = interpolation_mask[start : end + 1]
+                entry["interp_frames"] = int(np.count_nonzero(interp_slice))
+            results[name] = entry
+
+        return results
     
     def _detect_escapes(self, dist_px, rel_vel_px_s, speed_px_s, fps):
         """
@@ -665,9 +865,9 @@ class ChaserFishDistanceAnalyzer:
                 self.fps_video
             )
 
-        # Create figure with subplots
-        fig = plt.figure(figsize=(20, 12))
-        gs = gridspec.GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
+        # Create figure with subplots (extra column reserved for heatmaps)
+        fig = plt.figure(figsize=(22, 12))
+        gs = gridspec.GridSpec(3, 4, figure=fig, hspace=0.3, wspace=0.25)
         
         # Get data
         distances = metrics['fish_chaser_distance_pixels']
@@ -681,8 +881,16 @@ class ChaserFishDistanceAnalyzer:
         # Time axis (convert frames to seconds)
         time_seconds = np.arange(len(distances)) / self.fps_video
         
+        # Precompute spatial heatmaps (if training markers available)
+        heatmap_info = self._build_period_heatmaps(fish_pos, interpolated)
+        pretty_names = {
+            "pre_training": "Pre-Training",
+            "training": "During Training",
+            "post_training": "Post-Training",
+        }
+
         # 1. Distance over time
-        ax1 = fig.add_subplot(gs[0, :])
+        ax1 = fig.add_subplot(gs[0, :3])
         ax1.plot(time_seconds[valid_frames], distances[valid_frames], 
                 'b-', linewidth=1, alpha=0.7, label='Measured')
         ax1.plot(time_seconds[interpolated], distances[interpolated], 
@@ -736,7 +944,7 @@ class ChaserFishDistanceAnalyzer:
         ax1.legend(loc='upper right')
         
         # 2. Velocity over time
-        ax2 = fig.add_subplot(gs[1, :])
+        ax2 = fig.add_subplot(gs[1, :3])
         valid_vel = ~np.isnan(velocities)
         ax2.plot(time_seconds[valid_vel], velocities[valid_vel], 
                 'g-', linewidth=1, alpha=0.7)
@@ -806,6 +1014,72 @@ class ChaserFishDistanceAnalyzer:
         
         # Add colorbar for time
         cbar = plt.colorbar(ax5.collections[0], ax=ax5, label='Time (s)')
+
+        # 6-8. Spatial heatmaps by period (right-hand column)
+        for row, period_key in enumerate(("pre_training", "training", "post_training")):
+            ax_hm = fig.add_subplot(gs[row, 3])
+            period_data = heatmap_info.get(period_key)
+
+            if not period_data or period_data.get("heatmap") is None:
+                title = pretty_names.get(period_key, period_key.replace("_", " ").title())
+                ax_hm.set_facecolor("0.95")
+                ax_hm.set_xticks([])
+                ax_hm.set_yticks([])
+                ax_hm.set_xlim(0, 1)
+                ax_hm.set_ylim(0, 1)
+                ax_hm.set_title(title, fontsize=12)
+                ax_hm.text(
+                    0.5,
+                    0.5,
+                    "No data",
+                    transform=ax_hm.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize=11,
+                    color="0.3",
+                )
+                continue
+
+            heatmap = period_data["heatmap"]
+            im = ax_hm.imshow(
+                heatmap,
+                cmap='inferno',
+                aspect='equal',
+                extent=[0, self.video_width, self.video_height, 0],
+                vmin=0.0,
+                vmax=1.0,
+            )
+            ax_hm.set_title(pretty_names.get(period_key, period_key.title()), fontsize=12, fontweight='bold')
+            if row == 2:
+                ax_hm.set_xlabel('X (pixels)', fontsize=11)
+            else:
+                ax_hm.set_xlabel('')
+                ax_hm.tick_params(labelbottom=False)
+            if row == 1:
+                ax_hm.set_ylabel('Y (pixels)', fontsize=11)
+            else:
+                ax_hm.set_ylabel('')
+                ax_hm.tick_params(labelleft=False)
+            ax_hm.set_xlim(0, self.video_width)
+            ax_hm.set_ylim(self.video_height, 0)
+            cbar_hm = fig.colorbar(im, ax=ax_hm, fraction=0.046, pad=0.04)
+            cbar_hm.set_label('Normalized occupancy')
+
+            summary_text = (
+                f"Frames: {period_data['frames']}\n"
+                f"Coverage: {period_data['coverage']*100:.1f}%"
+            )
+            if 'interp_frames' in period_data:
+                summary_text += f"\nInterpolated: {period_data['interp_frames']}"
+            ax_hm.text(
+                0.02,
+                0.98,
+                summary_text,
+                transform=ax_hm.transAxes,
+                verticalalignment='top',
+                fontsize=9,
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.75),
+            )
         
         # Overall title
         fig.suptitle(f'Chaser-Fish Distance Analysis\n{self.h5_path.name}', 
@@ -826,7 +1100,7 @@ class ChaserFishDistanceAnalyzer:
         fig.text(0.02, 0.02, stats_text, fontsize=10, verticalalignment='bottom',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
-        plt.tight_layout()
+        plt.tight_layout(rect=[0, 0, 0.98, 0.95])
         
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
