@@ -24,7 +24,7 @@ from ..capture.import_video import import_video, get_import_stats
 from ..preprocessing.background import compute_background
 from ..detection.detect_traditional import detect_fish
 from ..detection.detect_keypoints_traditional import detect_keypoints as detect_keypoints_traditional
-from ..tracking.crop import crop_detections
+from ..tracking.crop import crop_detections, infer_detection_source_type
 from ..tracking.assign_ids import assign_ids_spatial
 from ..refinement.refine_detect import create_refined_run
 from ..refinement.refine_keypoints import create_refined_keypoint_run
@@ -57,7 +57,8 @@ class PipelineConfig:
     force_cpu: bool = False
     verbose: bool = False
     dry_run: bool = False
-    crop_source: str = "detect"
+    crop_source: Optional[str] = None
+    crop_source_path: Optional[str] = None
     crop_acceleration: str = "auto"
     refine_max_gap: Optional[int] = None
     refine_method: Optional[str] = None
@@ -78,7 +79,8 @@ class PipelineConfig:
             force_cpu=getattr(args, 'force_cpu', False),
             verbose=getattr(args, 'verbose', False),
             dry_run=getattr(args, 'dry_run', False),
-            crop_source=getattr(args, 'crop_source', 'detect'),
+            crop_source=getattr(args, 'crop_source', None),
+            crop_source_path=getattr(args, 'crop_source_path', None),
             crop_acceleration=getattr(args, 'crop_acceleration', 'auto'),
             refine_max_gap=getattr(args, 'refine_max_gap', None),
             refine_method=getattr(args, 'refine_method', None),
@@ -423,26 +425,29 @@ class Pipeline:
         """Run cropping stage to extract ROIs from detections."""
         if self.zarr_root is None:
             self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
+
+        crop_params = self.pipeline_params.get('crop', {}) or {}
+        config_source_type = crop_params.get('source_type')
+        config_source_path = crop_params.get('source_path')
         
-        # Validate refined source is available if requested
-        if self.config.crop_source in ['filtered', 'interpolated']:
-            refined_root = _get_group_with_fallback(
-                self.zarr_root,
-                REFINED_DETECT_GROUP,
-                LEGACY_REFINED_DETECT_GROUP,
-            )
-            if refined_root is None or refined_root.attrs.get('latest') is None:
-                self.console.print(
-                    f"[red]Error: Crop source '{self.config.crop_source}' requires refined detections.[/red]\n"
-                    "[yellow]Run the 'refine' stage first or use '--crop-source detect'.[/yellow]"
-                )
-                raise ValueError(f"Refined runs not found for crop source '{self.config.crop_source}'")
+        cli_source_type = self.config.crop_source
+        cli_source_path = self.config.crop_source_path
+
+        source_path = cli_source_path or config_source_path
+        if source_path:
+            source_path = str(source_path).strip().strip('/')
+            if not source_path:
+                source_path = None
+
+        raw_source_type = cli_source_type or config_source_type
+        source_type = infer_detection_source_type(source_path, raw_source_type)
         
         # Run cropping with specified source
         results = crop_detections(
             zarr_path=self.config.zarr_path,
             config=self.pipeline_params,
-            source_type=self.config.crop_source,
+            source_type=source_type,
+            source_path=source_path,
             scheduler=self.config.scheduler,
             num_workers=self.config.num_workers,
             console=self.console,
@@ -453,9 +458,12 @@ class Pipeline:
         )
         
         # Display results with source info
-        source_info = f"from {self.config.crop_source} detections"
-        if 'detection_source_type' in results:
-            source_info = f"from {results['detection_source_type']} detections"
+        source_label = results.get('detection_source_type', source_type)
+        source_path_display = results.get('detection_source_path')
+        if source_path_display:
+            source_info = f"from {source_label} detections ({source_path_display})"
+        else:
+            source_info = f"from {source_label} detections"
         
         self.console.print(f"[green]✓[/green] Cropped {results['total_crops']} ROIs from {results['frames_with_crops']} frames ({source_info})")
 
@@ -870,6 +878,9 @@ class Pipeline:
                         # Add source info
                         source_color = "yellow" if crop_source in ['filtered', 'interpolated'] else "cyan"
                         crop_info += f" ([{source_color}]{crop_source}[/{source_color}])"
+                        source_path = crop_group.attrs.get('detection_source_path')
+                        if source_path:
+                            crop_info += f" [dim]{source_path}[/dim]"
                         
                         results_lines.append(crop_info)
                         
@@ -1235,9 +1246,16 @@ Examples:
     parser.add_argument(
         "--crop-source",
         type=str,
-        default="detect",
+        default=None,
         choices=["detect", "filtered", "interpolated"],
-        help="Detection source for cropping (default: detect)"
+        help="Detection source stage for cropping (default: config value)"
+    )
+
+    parser.add_argument(
+        "--crop-source-path",
+        type=str,
+        default=None,
+        help="Explicit detection source path inside the zarr (e.g. detect_runs/<run> or refined_detect_runs/<run>/interpolated)"
     )
     
     parser.add_argument(

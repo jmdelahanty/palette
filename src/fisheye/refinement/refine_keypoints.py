@@ -299,6 +299,9 @@ def create_refined_keypoint_run(
 
     created_timestamp = created_at_utc or datetime.now(timezone.utc).isoformat()
 
+    source_crop_run = kp_source.attrs.get("source_crop_run")
+    source_detect_run = kp_source.attrs.get("source_detect_run")
+
     kp_refined.attrs.update(
         {
             "source_keypoints_run": keypoint_run,
@@ -310,12 +313,16 @@ def create_refined_keypoint_run(
             "created_utc": created_timestamp,
         }
     )
+    if source_crop_run:
+        kp_refined.attrs["source_crop_run"] = source_crop_run
+    if source_detect_run:
+        kp_refined.attrs["source_detect_run"] = source_detect_run
 
     if "keypoint_labels" in kp_source.attrs:
         kp_refined.attrs["keypoint_labels"] = kp_source.attrs["keypoint_labels"]
 
     # Copy metadata arrays (frame indices, counts, etc.)
-    for meta_name in ("frame_indices", "n_rois", "frame_counts"):
+    for meta_name in ("frame_indices", "n_rois", "frame_counts", "detection_indices"):
         if meta_name in kp_source:
             _copy_array(kp_source[meta_name], kp_refined, meta_name)
 

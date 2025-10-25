@@ -55,7 +55,8 @@ crop:
   - 256
   - 256
   scheduler: distributed
-  source_type: interpolated
+  source_type: interpolated        # detect | filtered | interpolated
+  source_path: null                # set to detect_runs/<run> or refined_detect_runs/<run>/interpolated to pin a run
   num_workers: 30
 keypoints:
   method: traditional         # 'traditional' or 'yolo'

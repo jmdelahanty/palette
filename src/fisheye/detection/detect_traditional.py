@@ -3,6 +3,7 @@ Fish detection module using blob detection on background-subtracted frames.
 Updated to use zarr-first parameter resolution.
 """
 
+import argparse
 import time
 import sys
 import numpy as np
@@ -320,12 +321,24 @@ def detect_fish(
             chunks=(min(chunk_size * 4, total_detections), 4),
             overwrite=True
         )
+        detect_group.create_array(
+            'scores',
+            data=np.ones(total_detections, dtype=np.float32),
+            chunks=(min(chunk_size * 4, total_detections),),
+            overwrite=True
+        )
         
         # Compute and store frame counts for visualization
         console.print("Computing frame counts for visualization...")
         frame_counts = np.bincount(frame_indices_np, minlength=num_images)
         detect_group.create_array(
             'frame_counts',
+            data=frame_counts,
+            chunks=(min(chunk_size * 4, num_images),),
+            overwrite=True
+        )
+        detect_group.create_array(
+            'n_detections',
             data=frame_counts,
             chunks=(min(chunk_size * 4, num_images),),
             overwrite=True
@@ -380,7 +393,8 @@ def detect_fish(
         # Core detection metadata (per unified spec)
         'detect_timestamp_utc': datetime.now(timezone.utc).isoformat(),
         'duration_seconds': float(duration),
-        'detection_method': 'blob', 
+        'method': 'blob',
+        'detection_method': 'blob',
         'detection_source': 'zarr_video',  # Blob uses imported video in zarr
         'total_frames': num_images,
         'has_raw_video': True,
@@ -467,3 +481,63 @@ def detect_fish(
         'run_name': run_name,
         'parameter_source': param_source
     }
+
+
+# ---------------- CLI ---------------- #
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run traditional blob-based detection on a Palette Zarr archive."
+    )
+    parser.add_argument(
+        "--zarr-path",
+        required=True,
+        help="Path to the Palette Zarr archive.",
+    )
+    parser.add_argument(
+        "--config",
+        default="pipeline_config.yaml",
+        help="Optional pipeline configuration YAML (default: pipeline_config.yaml).",
+    )
+    parser.add_argument(
+        "--scheduler",
+        default="processes",
+        choices=["threads", "processes", "single-threaded"],
+        help="Dask scheduler to use (default: processes).",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        help="Optional worker count hint for multi-processing schedulers.",
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    console = Console()
+    try:
+        result = detect_fish(
+            zarr_path=args.zarr_path,
+            config_path=args.config,
+            scheduler=args.scheduler,
+            num_workers=args.num_workers,
+            console=console,
+        )
+    except Exception as exc:
+        console.print(f"[bold red]Detection failed:[/bold red] {exc}")
+        return 1
+
+    console.print(
+        f"[green]Done.[/green] Run '{result['run_name']}' "
+        f"with {result['total_detections']} detections "
+        f"({result['frames_with_detections']} frames)."
+    )
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

@@ -5,12 +5,15 @@ Uses process isolation to avoid segmentation faults during cleanup.
 """
 
 import os
+import argparse
+import shutil
 from os import fork, waitpid, WIFEXITED, WEXITSTATUS, _exit
 os.environ.setdefault("BLOSC_NTHREADS", "4")
 # Force kvikIO to use GDS mode, not compatibility mode
 os.environ["KVIKIO_COMPAT_MODE"] = "OFF"
 
 import json
+import copy
 import zarr
 import torch
 import decord
@@ -20,6 +23,8 @@ import cupy as cp
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
+import yaml
+from zarr.storage import LocalStore
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
@@ -43,6 +48,70 @@ from ..shared.zarr.schema import create_palette_zarr, update_import_duration
 
 
 # ---------------- GDS support helpers ---------------- #
+
+def _default_import_config() -> Dict[str, Any]:
+    """Baseline configuration used when no YAML file is supplied."""
+    return {
+        "import": {
+            "resolutions": "both",
+            "chunk_size": 64,
+            "batch_size": 32,
+            "gpu_fp16": True,
+            "use_kvikio_zarr": True,
+            "use_sharding": False,
+            "chunks_per_shard": 8,
+            "include_system_info": True,
+            "full": {},
+            "downsampled": {
+                "size": [640, 640],
+                "method": "area",
+            },
+        }
+    }
+
+
+def _merge_import_config(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge user overrides into the import section while preserving defaults."""
+    merged = dict(base)
+    for key, value in override.items():
+        if key in {"downsampled", "full"} and isinstance(value, dict):
+            nested = dict(base.get(key, {}))
+            nested.update(value)
+            merged[key] = nested
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_import_config(config_path: Optional[Path], console: Console) -> Dict[str, Any]:
+    """Load configuration from YAML, falling back to defaults."""
+    base = _default_import_config()
+    config = copy.deepcopy(base)
+
+    if config_path is None:
+        return config
+
+    path = Path(config_path).expanduser()
+    if not path.exists():
+        console.print(f"[yellow]Config file not found: {path}. Using defaults.[/yellow]")
+        return config
+
+    with path.open("r") as fh:
+        try:
+            data = yaml.safe_load(fh) or {}
+        except yaml.YAMLError as exc:
+            raise ValueError(f"Failed to parse config file '{path}': {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Config file '{path}' must contain a mapping at the top level.")
+
+    for key, value in data.items():
+        if key == "import" and isinstance(value, dict):
+            config["import"] = _merge_import_config(base["import"], value)
+        else:
+            config[key] = value
+    return config
+
 
 def _probe_gds(console: Console) -> Tuple[bool, Optional[str]]:
     """Check if GDS is available"""
@@ -225,6 +294,73 @@ def _process_video_gpu_kvikio(
     return write_times
 
 
+def _finalize_kvikio_zarr_metadata(
+    zarr_path: Path,
+    *,
+    n_frames: int,
+    full_shape: Optional[Tuple[int, int]],
+    down_shape: Optional[Tuple[int, int]],
+    create_full: bool,
+    create_down: bool,
+    chunk_size: int,
+    io_batch_size: int,
+    down_chunk_size: int,
+    down_io_batch_size: int,
+    use_sharding: bool,
+) -> None:
+    """
+    Ensure that kvikIO-written archives include the Zarr v3 manifest files.
+
+    kvikIO's GDSStore skips emitting metadata, so we patch it in afterwards
+    using the LocalStore view of the archive.
+    """
+    store = LocalStore(str(zarr_path))
+    root = zarr.open_group(store=store, mode='r+')
+    raw = root.require_group("raw_video")
+
+    if create_full and full_shape:
+        full_h, full_w = full_shape
+        array_kwargs = {
+            "shape": (n_frames, full_h, full_w),
+            "dtype": "uint8",
+            "fill_value": 0,
+            "compressors": [],
+        }
+        if use_sharding:
+            array_kwargs.update({
+                "chunks": (chunk_size, full_h, full_w),
+                "shards": (io_batch_size, full_h, full_w),
+            })
+        else:
+            array_kwargs["chunks"] = (io_batch_size, full_h, full_w)
+        raw.require_array("images_full", **array_kwargs)
+
+    if create_down and down_shape:
+        down_h, down_w = down_shape
+        array_kwargs = {
+            "shape": (n_frames, down_h, down_w),
+            "dtype": "uint8",
+            "fill_value": 0,
+            "compressors": [],
+        }
+        if use_sharding:
+            array_kwargs.update({
+                "chunks": (down_chunk_size, down_h, down_w),
+                "shards": (down_io_batch_size, down_h, down_w),
+            })
+        else:
+            array_kwargs["chunks"] = (down_chunk_size, down_h, down_w)
+        raw.require_array("images_ds", **array_kwargs)
+
+    raw.require_array(
+        "timestamps",
+        shape=(n_frames,),
+        chunks=(min(1000, n_frames),),
+        dtype="float64",
+        fill_value=float("nan"),
+        compressors=[],
+    )
+
 def _setup_video_reader(video_path: Path, use_gpu: bool, force_cpu: bool, console: Console) -> Tuple[str, decord.VideoReader]:
     if force_cpu:
         decord.bridge.set_bridge("numpy")
@@ -368,6 +504,14 @@ def import_video(
             else:
                 io_batch_size = chunk_size
 
+            down_target = down_config.get("size", [640, 640])
+            down_h, down_w = int(down_target[0]), int(down_target[1])
+            down_chunk_size = int(down_config.get("chunk_size", chunk_size))
+            if use_sharding:
+                down_io_batch = down_chunk_size * chunks_per_shard
+            else:
+                down_io_batch = down_chunk_size
+
             # Check if we should use kvikIO Zarr
             kvikio_available = False
             if use_kvikio_zarr and device == "cuda:0":
@@ -440,12 +584,7 @@ def import_video(
                         )
                 
                 if create_down:
-                    target_size = down_config.get("size", [640, 640])
-                    down_h, down_w = target_size
-                    down_chunk_size = down_config.get("chunk_size", chunk_size)
-                    
                     if use_sharding:
-                        down_io_batch = down_chunk_size * chunks_per_shard
                         arrays['downsampled'] = raw.create_array(
                             name='images_ds',
                             shape=(n_frames, down_h, down_w),
@@ -489,7 +628,7 @@ def import_video(
                 
                 if create_down:
                     metadata["has_downsampled"] = True
-                    metadata["downsampled_resolution"] = list(target_size)
+                    metadata["downsampled_resolution"] = list(down_target)
                     metadata["downsample_method"] = down_config.get("method", "area")
                 
                 if use_sharding:
@@ -564,6 +703,19 @@ def import_video(
                 _process_video_gpu_kvikio(
                     vr, n_frames, io_batch_size, batch_size,
                     gpu_fp16, arrays, config, console
+                )
+                _finalize_kvikio_zarr_metadata(
+                    Path(zarr_path),
+                    n_frames=n_frames,
+                    full_shape=(full_h, full_w) if create_full else None,
+                    down_shape=(down_h, down_w) if create_down else None,
+                    create_full=create_full,
+                    create_down=create_down,
+                    chunk_size=chunk_size,
+                    io_batch_size=io_batch_size,
+                    down_chunk_size=down_chunk_size,
+                    down_io_batch_size=down_io_batch,
+                    use_sharding=use_sharding,
                 )
             else:
                 # TODO: Add CPU processing path 
@@ -890,3 +1042,96 @@ def get_import_stats(zarr_path: str) -> Dict[str, Any]:
     ) / (1024 ** 3)
 
     return stats
+
+
+# ---------------- CLI entrypoint ---------------- #
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Import a video into a Palette Zarr archive.")
+    parser.add_argument("video_path", type=Path, help="Path to the source video file.")
+    parser.add_argument(
+        "--zarr-path",
+        type=Path,
+        help="Destination Zarr path (default: <video_stem>.zarr next to the video).",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="Optional YAML configuration with pipeline parameters.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Remove an existing Zarr path before importing.",
+    )
+    parser.add_argument(
+        "--cpu-only",
+        action="store_true",
+        help="Disable GPU decoding and force CPU mode.",
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    console = Console()
+
+    video_path = Path(args.video_path).expanduser()
+    if not video_path.exists():
+        console.print(f"[bold red]Video file not found:[/bold red] {video_path}")
+        return 1
+
+    if args.zarr_path:
+        zarr_path = Path(args.zarr_path).expanduser()
+    else:
+        zarr_path = video_path.with_suffix(".zarr")
+
+    if zarr_path.exists():
+        if not args.overwrite:
+            console.print(
+                f"[bold red]Destination already exists:[/bold red] {zarr_path}\n"
+                "Use --overwrite to remove it or specify a different --zarr-path."
+            )
+            return 1
+        console.print(f"[yellow]Overwriting existing Zarr directory: {zarr_path}[/yellow]")
+        try:
+            if zarr_path.is_file():
+                zarr_path.unlink()
+            else:
+                shutil.rmtree(zarr_path)
+        except OSError as exc:
+            console.print(f"[bold red]Failed to remove existing path:[/bold red] {exc}")
+            return 1
+
+    config = _load_import_config(args.config, console)
+
+    cli_args = {
+        "video_path": str(video_path),
+        "zarr_path": str(zarr_path),
+        "config_path": str(args.config) if args.config else None,
+        "cpu_only": bool(args.cpu_only),
+        "overwrite": bool(args.overwrite),
+    }
+
+    try:
+        import_video(
+            video_path=str(video_path),
+            zarr_path=str(zarr_path),
+            config=config,
+            cli_args=cli_args,
+            console=console,
+            use_gpu=not args.cpu_only,
+            force_cpu=bool(args.cpu_only),
+        )
+    except Exception as exc:
+        console.print(f"[bold red]Import failed:[/bold red] {exc}")
+        return 1
+
+    console.print(f"[green]Import complete.[/green] Zarr saved to {zarr_path}")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

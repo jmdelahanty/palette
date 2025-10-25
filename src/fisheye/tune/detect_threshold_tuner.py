@@ -80,7 +80,8 @@ def save_detection_params(zarr_path, params):
                 'se1_radius': params['se1_radius'],
                 'se4_radius': params['se4_radius'],
                 'min_area': params['min_area'],
-                'max_area': params['max_area']
+                'max_area': params['max_area'],
+                'max_fish': params['max_fish']
             },
             'tuned_on_frame': params.get('frame_index', None)
         }
@@ -95,6 +96,7 @@ def save_detection_params(zarr_path, params):
         print(f"   se4_radius: {params['se4_radius']}")
         print(f"   min_area: {params['min_area']}")
         print(f"   max_area: {params['max_area']}")
+        print(f"   max_fish: {params['max_fish']}")
         print(f"   Tuned on frame: {params.get('frame_index', 'N/A')}")
         
         return True, "Parameters saved to zarr"
@@ -170,7 +172,7 @@ def create_tuner_dashboard(frame_idx, zarr_root, dish_mask):
     return dashboard
 
 def main(zarr_path, start_frame=1, config_path="pipeline_config.yaml"):
-    global current_frame, ds_thresh, ds_se1_radius, ds_se4_radius, min_area, max_area
+    global current_frame, ds_thresh, ds_se1_radius, ds_se4_radius, min_area, max_area, max_fish
     current_frame = start_frame
     
     config_path = Path(config_path)
@@ -186,6 +188,7 @@ def main(zarr_path, start_frame=1, config_path="pipeline_config.yaml"):
             ds_se4_radius = detect_params.get('se4_radius', ds_se4_radius)
             min_area = detect_params.get('min_area', min_area)
             max_area = detect_params.get('max_area', max_area)
+            max_fish = detect_params.get('max_fish', max_fish)
             print(f"Loaded initial parameters from {config_path}")
     except FileNotFoundError:
         print(f"Config file not found at {config_path}. Using default parameters.")
@@ -205,6 +208,23 @@ def main(zarr_path, start_frame=1, config_path="pipeline_config.yaml"):
             
         num_frames = images_array.shape[0]
         ds_img_shape = images_array.shape[1:]
+
+        # Load previously tuned detection parameters if they exist in Zarr
+        if 'analysis_metadata' in zarr_root:
+            analysis_attrs = dict(zarr_root['analysis_metadata'].attrs)
+            det_tuning = analysis_attrs.get('detection_tuning')
+            if det_tuning:
+                tuned_params = det_tuning.get('tuned_parameters', {})
+                ds_thresh = tuned_params.get('ds_thresh', ds_thresh)
+                ds_se1_radius = tuned_params.get('se1_radius', ds_se1_radius)
+                ds_se4_radius = tuned_params.get('se4_radius', ds_se4_radius)
+                min_area = tuned_params.get('min_area', min_area)
+                max_area = tuned_params.get('max_area', max_area)
+                max_fish = tuned_params.get('max_fish', max_fish)
+                tuned_frame = det_tuning.get('tuned_on_frame')
+                if tuned_frame is not None:
+                    current_frame = int(np.clip(tuned_frame, 0, num_frames - 1))
+                print(" Loaded detection tuning from analysis_metadata")
         
         # Load dish mask from analysis_metadata if it exists
         dish_mask = None

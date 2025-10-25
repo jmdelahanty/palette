@@ -41,6 +41,41 @@ class CalibrationManager:
         self.zarr_path = Path(zarr_path)
         self.root = zarr.open(str(self.zarr_path), mode='r+')
         self.verbose = verbose
+    
+    def find_default_h5(self) -> Optional[Path]:
+        """
+        Locate an experiment H5 file in the parent directory of the zarr.
+        
+        Preference order:
+            1. Exact stem match to the zarr folder name (sans .zarr).
+            2. Single file whose name contains the zarr stem.
+            3. Most recently modified *.h5 file.
+        """
+        parent_dir = self.zarr_path.parent
+        if not parent_dir.exists():
+            return None
+        
+        zarr_stem = self.zarr_path.name
+        if zarr_stem.endswith(".zarr"):
+            zarr_stem = zarr_stem[:-5]
+        
+        candidates = sorted(parent_dir.glob("*.h5"))
+        if not candidates:
+            return None
+        
+        exact = [p for p in candidates if p.stem == zarr_stem]
+        if exact:
+            return exact[0]
+        
+        contains = [p for p in candidates if zarr_stem in p.stem]
+        if len(contains) == 1:
+            return contains[0]
+        
+        # Fallback to most recently modified file
+        try:
+            return max(candidates, key=lambda p: p.stat().st_mtime)
+        except Exception:
+            return candidates[0]
         
     def extract_from_h5(self, h5_path: str) -> Dict[str, Any]:
         """
@@ -466,9 +501,20 @@ Examples:
     
     calibration_data = {}
     
-    # Extract from H5 if provided
-    if args.h5_path:
-        calibration_data = manager.extract_from_h5(args.h5_path)
+    # Resolve H5 source (CLI overrides auto-discovery)
+    h5_path = args.h5_path
+    if not h5_path:
+        auto_h5 = manager.find_default_h5()
+        if auto_h5:
+            h5_path = str(auto_h5)
+            if manager.verbose:
+                print(f"Auto-detected calibration H5: {auto_h5}")
+        else:
+            if manager.verbose:
+                print("No H5 file found alongside the zarr; use --from-h5 to specify one.")
+    
+    if h5_path:
+        calibration_data = manager.extract_from_h5(h5_path)
     
     # Add/override with manual values
     manual_data = manager.add_manual_calibration(

@@ -268,6 +268,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Explicit crop run providing ROI images (overrides --use-crop).",
     )
     parser.add_argument(
+        "--keypoints-run",
+        help="Keypoint run that produced ROI geometry (default: inferred).",
+    )
+    parser.add_argument(
         "--run-name",
         help="Optional name for the output run (defaults to timestamped name).",
     )
@@ -375,6 +379,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             f"Available crop runs: {', '.join(available_crop_runs) if available_crop_runs else 'none'}."
         )
 
+    crop_group = root[f"crop_runs/{crop_run}"]
     roi_path = f"crop_runs/{crop_run}/roi_images"
     if roi_path not in root:
         raise ValueError(f"ROI images array '{roi_path}' missing from Zarr store.")
@@ -417,6 +422,34 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         },
     )
 
+    def _copy_metadata_array(array_name: str) -> None:
+        if array_name not in crop_group:
+            console.print(f"[yellow]Crop run missing '{array_name}'; new eye-mask run will skip it.[/yellow]")
+            return
+        src = crop_group[array_name]
+        data = src[:]
+        chunks = getattr(src, "chunks", None)
+        if not chunks:
+            chunks = tuple(max(1, min(dim, 1024)) for dim in data.shape)
+        else:
+            chunk_list = []
+            for axis, dim in enumerate(data.shape):
+                chunk_val = chunks[axis] if axis < len(chunks) else chunks[-1]
+                chunk_list.append(int(max(1, min(dim, chunk_val))))
+            chunks = tuple(chunk_list)
+        if array_name in run_group:
+            del run_group[array_name]
+        run_group.create_array(
+            array_name,
+            data=data,
+            chunks=chunks,
+            overwrite=True,
+        )
+
+    _copy_metadata_array("frame_indices")
+    _copy_metadata_array("detection_indices")
+    _copy_metadata_array("frame_counts")
+
     start_time = time.perf_counter()
     stored_channels, wrote_binary = _write_mask_probs(
         run_group,
@@ -457,6 +490,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if key in preserved_keys:
             src_attrs.pop(key)
 
+    keypoints_parent = root.get("keypoints_runs")
+    latest_keypoints = None
+    if keypoints_parent is not None:
+        latest_keypoints = keypoints_parent.attrs.get("latest")
+    resolved_keypoints_run = args.keypoints_run
+    if resolved_keypoints_run is None and src_attrs:
+        resolved_keypoints_run = src_attrs.get("source_keypoints_run")
+    if resolved_keypoints_run is None:
+        resolved_keypoints_run = latest_keypoints
+
     run_group.attrs.update(src_attrs)
     run_group.attrs.update(
         {
@@ -464,7 +507,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "segmenter": "unet",
             "segmenter_label_mode": label_mode,
             "source_eye_masks_run": source_run_name,
-            "source_keypoints_run": src_attrs.get("source_keypoints_run") if src_attrs else None,
+            "source_keypoints_run": resolved_keypoints_run,
             "source_crop_run": crop_run,
             "source_checkpoint": str(checkpoint_path),
             "source_checkpoint_best_val_dice": float(checkpoint.get("best_val_dice", float("nan"))),

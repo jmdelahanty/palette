@@ -80,6 +80,81 @@ def check_gpu_crop_available() -> Tuple[bool, str]:
     
     return True, "GPU cropping available"
 
+
+def infer_detection_source_type(
+    source_path: Optional[str],
+    fallback: Optional[str] = None
+) -> str:
+    """
+    Infer the detection source type ('detect', 'filtered', 'interpolated') from a path.
+    
+    Args:
+        source_path: Path like 'detect_runs/<run>' or 'refined_detect_runs/<run>/interpolated'
+        fallback: Optional fallback type if the path does not encode it
+    
+    Returns:
+        Normalized detection source type
+    """
+    valid = {'detect', 'filtered', 'interpolated'}
+    fallback_type = fallback if fallback in valid else None
+    
+    if not source_path:
+        return fallback_type or 'detect'
+    
+    canonical = str(source_path).strip().strip('/')
+    if not canonical:
+        return fallback_type or 'detect'
+    
+    last_token = canonical.split('/')[-1]
+    if last_token in {'filtered', 'interpolated'}:
+        return last_token
+    
+    if canonical.startswith('detect_runs/'):
+        return 'detect'
+    
+    if canonical.startswith(REFINED_DETECT_GROUP) or canonical.startswith(LEGACY_REFINED_DETECT_GROUP):
+        # Assume refined detections default to filtered if stage missing
+        return fallback_type or 'filtered'
+    
+    return fallback_type or 'detect'
+
+
+def resolve_source_run_info(
+    root: zarr.Group,
+    source_path: Optional[str]
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Determine the originating detect run, background run, and refined run (if any).
+    
+    Returns:
+        Tuple of (detect_run, background_run, refined_run)
+    """
+    detect_run = None
+    background_run = None
+    refined_run = None
+    
+    normalized = str(source_path).strip().strip('/') if source_path else None
+    if not normalized:
+        return detect_run, background_run, refined_run
+    
+    parts = normalized.split('/')
+    if len(parts) >= 2 and parts[0] == 'detect_runs':
+        detect_run = parts[1]
+        detect_group = root.get(f"detect_runs/{detect_run}")
+        if isinstance(detect_group, zarr.Group):
+            background_run = detect_group.attrs.get('source_background_run')
+    elif len(parts) >= 2 and parts[0] in {REFINED_DETECT_GROUP, LEGACY_REFINED_DETECT_GROUP}:
+        refined_run = parts[1]
+        refined_parent = root.get(parts[0])
+        refined_group = refined_parent.get(refined_run) if isinstance(refined_parent, zarr.Group) else None
+        if isinstance(refined_group, zarr.Group):
+            detect_run = refined_group.attrs.get('source_detect_run')
+        if detect_run:
+            detect_group = root.get(f"detect_runs/{detect_run}")
+            if isinstance(detect_group, zarr.Group):
+                background_run = detect_group.attrs.get('source_background_run')
+    return detect_run, background_run, refined_run
+
 def get_video_source(root: zarr.Group, console: Console) -> Tuple[str, Optional[str]]:
     """
     Determine video source - zarr or external file.
@@ -388,6 +463,7 @@ def crop_from_external_video(
     source_path: str,
     source_group: zarr.Group,
     detection_source: Optional[np.ndarray],
+    source_type: str,
     roi_sz: Tuple[int, int],
     use_gpu: bool,
     console: Console,
@@ -459,8 +535,9 @@ def crop_from_external_video(
             collect_ip=False
         )
 
+        detect_run_name, background_run_name, refined_run_name = resolve_source_run_info(root, source_path)
+
         # Store comprehensive metadata following unified spec
-        src_type_label = source_path.split('/')[-1] if '/' in source_path else 'detect'
 
         crop_group.attrs.update({
             # === Core Identifiers ===
@@ -479,7 +556,7 @@ def crop_from_external_video(
             'height': video_height,
             
             # === Detection Source ===
-            'detection_source_type': src_type_label,
+            'detection_source_type': source_type,
             'detection_source_path': source_path,
             'detection_method': get_detection_method(source_group),
             'total_detections': total_detections,
@@ -517,6 +594,13 @@ def crop_from_external_video(
             'command': ' '.join(sys.argv),
         })
 
+        if detect_run_name:
+            crop_group.attrs['source_detect_run'] = detect_run_name
+        if background_run_name:
+            crop_group.attrs['source_background_run'] = background_run_name
+        if refined_run_name:
+            crop_group.attrs['source_refined_run'] = refined_run_name
+
         # Add detailed GPU info if using GPU
         if actual_use_gpu and env_info['gpu']['available'] and env_info['gpu'].get('devices'):
             primary_gpu = env_info['gpu']['devices'][0]
@@ -533,7 +617,7 @@ def crop_from_external_video(
             crop_group=crop_group,
             source_group=source_group,
             source_path=source_path,
-            source_type=src_type_label,
+            source_type=source_type,
             detection_source=detection_source,
             total_detections=total_detections,
             num_frames=num_frames
@@ -716,7 +800,8 @@ def crop_from_external_video(
             'frames_with_crops': frames_with_crops,
             'percent_cropped': percent_cropped,
             'duration_seconds': duration,
-            'detection_source_type': src_type_label
+            'detection_source_type': source_type,
+            'detection_source_path': source_path
         }
     except KeyboardInterrupt:
         error_message = "Interrupted by user"
@@ -759,22 +844,44 @@ def crop_from_external_video(
 def get_detection_source_info(
     root: zarr.Group,
     source_type: str = 'detect',
+    source_path_override: Optional[str] = None,
     console: Optional[Console] = None
-) -> Tuple[str, zarr.Group, Optional[np.ndarray]]:
+) -> Tuple[str, zarr.Group, Optional[np.ndarray], str]:
     """
     Get information about the detection source to use for cropping.
     
     Args:
         root: Zarr root group
-        source_type: 'detect', 'filtered', or 'interpolated'
+        source_type: 'detect', 'filtered', or 'interpolated' (hint)
+        source_path_override: Explicit path like 'detect_runs/<run>' or 'refined_detect_runs/<run>/interpolated'
         console: Optional Rich console for output
         
     Returns:
-        Tuple of (source_path, source_group, detection_source_array)
+        Tuple of (source_path, source_group, detection_source_array, resolved_source_type)
         - source_path: Path string like 'detect_runs/latest' or 'refined_detect_runs/latest/filtered'
         - source_group: Zarr group containing the detection data
         - detection_source_array: Array indicating real (0) vs interpolated (1), or None
+        - resolved_source_type: Normalized detection source label
     """
+    if source_path_override:
+        normalized_path = str(source_path_override).strip().strip('/')
+        if not normalized_path:
+            raise ValueError("Empty detection source path provided for cropping.")
+        if normalized_path not in root:
+            raise ValueError(f"Detection source '{normalized_path}' not found in zarr file.")
+        source_group = root[normalized_path]
+        resolved_type = infer_detection_source_type(normalized_path, source_type)
+        is_refined = normalized_path.startswith(REFINED_DETECT_GROUP) or normalized_path.startswith(LEGACY_REFINED_DETECT_GROUP)
+        detection_source = None
+        if resolved_type == 'interpolated' and 'detection_source' in source_group:
+            detection_source = source_group['detection_source'][:]
+        elif resolved_type == 'filtered' and is_refined:
+            total = int(source_group['frame_indices'].shape[0])
+            detection_source = np.zeros(total, dtype='i1')
+        if console:
+            console.print(f"[cyan]Using detections:[/cyan] {normalized_path}")
+        return normalized_path, source_group, detection_source, resolved_type
+
     if source_type == 'detect':
         # Use original detections
         if 'detect_runs' not in root:
@@ -790,6 +897,7 @@ def get_detection_source_info(
         
         if console:
             console.print(f"[cyan]Using original detections:[/cyan] {latest}")
+        return source_path, source_group, detection_source, 'detect'
         
     elif source_type in ['filtered', 'interpolated']:
         # Use refined detections
@@ -812,9 +920,12 @@ def get_detection_source_info(
         source_group = refined_group[source_type]
         source_path = f"{refined_root.path}/{latest_refined}/{source_type}"
         
-        # Get detection source array for interpolated data
+        # Get detection source array for refined data
         detection_source = None
-        if source_type == 'interpolated' and 'detection_source' in source_group:
+        if source_type == 'filtered':
+            total = int(source_group['frame_indices'].shape[0])
+            detection_source = np.zeros(total, dtype='i1')
+        elif source_type == 'interpolated' and 'detection_source' in source_group:
             detection_source = source_group['detection_source'][:]
         
         if console:
@@ -824,10 +935,10 @@ def get_detection_source_info(
                 n_interp = np.sum(detection_source == 1)
                 console.print(f"  Real detections: {n_real}, Interpolated: {n_interp}")
     
+        return source_path, source_group, detection_source, source_type
+    
     else:
         raise ValueError(f"Invalid source_type: {source_type}. Must be 'detect', 'filtered', or 'interpolated'")
-    
-    return source_path, source_group, detection_source
 
 
 def get_crop_parameters(
@@ -930,9 +1041,23 @@ def save_crop_metadata(
         data=frame_counts,
         overwrite=True
     )
+
+    # Create detection_indices mapping (identity w.r.t source detections)
+    detection_indices = np.arange(total_detections, dtype='i4')
+    crop_group.create_array(
+        'detection_indices',
+        chunks=(min(1000, total_detections),),
+        data=detection_indices,
+        overwrite=True
+    )
     
-    # Copy detection_source if it exists (interpolated data)
+    # Copy detection_source if provided (refined metadata)
     if detection_source is not None:
+        detection_source = np.asarray(detection_source, dtype='i1')
+        if detection_source.shape[0] != total_detections:
+            raise ValueError(
+                f"detection_source length {detection_source.shape[0]} does not match total detections {total_detections}"
+            )
         crop_group.create_array(
             'detection_source',
             chunks=(min(1000, len(detection_source)),),
@@ -943,7 +1068,7 @@ def save_crop_metadata(
         n_real = int(np.sum(detection_source == 0))
         n_interp = int(np.sum(detection_source == 1))
         
-        crop_group.attrs['includes_interpolated'] = True
+        crop_group.attrs['includes_interpolated'] = n_interp > 0
         crop_group.attrs['n_real_detections'] = n_real
         crop_group.attrs['n_interpolated_detections'] = n_interp
     else:
@@ -1083,6 +1208,7 @@ def crop_detections(
     zarr_path: str,
     config: Dict[str, Any],
     source_type: str = 'detect',
+    source_path: Optional[str] = None,
     scheduler: str = None,
     num_workers: Optional[int] = None,
     console: Optional[Console] = None,
@@ -1102,6 +1228,7 @@ def crop_detections(
         zarr_path: Path to zarr file
         config: Configuration dictionary
         source_type: Detection source - 'detect', 'filtered', or 'interpolated'
+        source_path: Explicit detection source path override (optional)
         scheduler: Dask scheduler ('processes', 'threads', or 'distributed')
         num_workers: Number of workers (None = auto)
         console: Optional Rich console for output
@@ -1123,9 +1250,13 @@ def crop_detections(
     root = zarr.open_group(zarr_path, mode='a')
 
     # Get detection source information
-    source_path, source_group, detection_source = get_detection_source_info(
-        root, source_type, console
+    source_path, source_group, detection_source, resolved_source_type = get_detection_source_info(
+        root=root,
+        source_type=source_type,
+        source_path_override=source_path,
+        console=console
     )
+    source_type = resolved_source_type
 
     # Get crop parameters
     crop_params, param_source = get_crop_parameters(root, config, console)
@@ -1182,8 +1313,15 @@ def crop_detections(
         
         # Use external video cropping
         return crop_from_external_video(
-            zarr_path, video_path, source_path, source_group,
-            detection_source, roi_sz, use_gpu, console,
+            zarr_path=zarr_path,
+            video_path=video_path,
+            source_path=source_path,
+            source_group=source_group,
+            detection_source=detection_source,
+            source_type=source_type,
+            roi_sz=roi_sz,
+            use_gpu=use_gpu,
+            console=console,
             verbose=verbose
         )
     
@@ -1238,6 +1376,8 @@ def crop_detections(
 
     # Determine if GPU will be used
     use_distributed = (scheduler == "distributed") and HAVE_DISTRIBUTED
+
+    detect_run_name, background_run_name, refined_run_name = resolve_source_run_info(root, source_path)
 
     # Build comprehensive metadata following unified spec
     crop_group.attrs.update({
@@ -1294,6 +1434,13 @@ def crop_detections(
         # === Execution ===
         'command': ' '.join(sys.argv),
     })
+
+    if detect_run_name:
+        crop_group.attrs['source_detect_run'] = detect_run_name
+    if background_run_name:
+        crop_group.attrs['source_background_run'] = background_run_name
+    if refined_run_name:
+        crop_group.attrs['source_refined_run'] = refined_run_name
 
     # Add GPU details if available (even though zarr workflow uses CPU)
     if env_info['gpu']['available'] and env_info['gpu'].get('devices'):
@@ -1456,6 +1603,9 @@ def crop_detections(
 
     # Create completion panel
     source_info = f"{source_type}"
+    source_path_display = crop_group.attrs.get('detection_source_path')
+    if source_path_display:
+        source_info += f" [{source_path_display}]"
     if 'includes_interpolated' in crop_group.attrs and crop_group.attrs['includes_interpolated']:
         n_real = crop_group.attrs['n_real_detections']
         n_interp = crop_group.attrs['n_interpolated_detections']
@@ -1494,7 +1644,8 @@ def crop_detections(
         'frames_with_crops': frames_with_crops,
         'percent_cropped': percent_cropped,
         'duration_seconds': duration,
-        'detection_source_type': source_type
+        'detection_source_type': source_type,
+        'detection_source_path': source_path
     }
 
 
@@ -1506,9 +1657,11 @@ def main():
     parser = argparse.ArgumentParser(description="Crop ROIs from detections")
     parser.add_argument("zarr_path", type=str, help="Path to zarr file")
     parser.add_argument("--config", type=str, required=True, help="Path to config YAML")
-    parser.add_argument("--source-type", type=str, default='detect',
+    parser.add_argument("--source-type", type=str, default=None,
                        choices=['detect', 'filtered', 'interpolated'],
-                       help="Detection source to use")
+                       help="Detection source to use (defaults to config)")
+    parser.add_argument("--source-path", type=str, default=None,
+                       help="Explicit detection source path (e.g. detect_runs/<run> or refined_detect_runs/<run>/interpolated)")
     parser.add_argument("--scheduler", type=str, default=None,
                        choices=['processes', 'threads', 'distributed'],
                        help="Dask scheduler type")
@@ -1537,11 +1690,28 @@ def main():
         console.print("[yellow]Warning: distributed scheduler not available, falling back to processes[/yellow]")
         args.scheduler = "processes"
 
+    crop_params = config.get('crop', {}) or {}
+    config_source_type = crop_params.get('source_type')
+    config_source_path = crop_params.get('source_path')
+
+    cli_source_type = args.source_type
+    cli_source_path = args.source_path
+
+    source_path = cli_source_path or config_source_path
+    if source_path:
+        source_path = str(source_path).strip().strip('/')
+        if not source_path:
+            source_path = None
+
+    raw_source_type = cli_source_type or config_source_type
+    resolved_source_type = infer_detection_source_type(source_path, raw_source_type)
+
     try:
         results = crop_detections(
             zarr_path=args.zarr_path,
             config=config,
-            source_type=args.source_type,
+            source_type=resolved_source_type,
+            source_path=source_path,
             scheduler=args.scheduler,
             num_workers=args.num_workers,
             console=console,
@@ -1553,6 +1723,8 @@ def main():
         console.print(f"\n[green]Cropping complete![/green]")
         console.print(f"Total ROIs cropped: {results['total_crops']}")
         console.print(f"Detection source: {results['detection_source_type']}")
+        if results.get('detection_source_path'):
+            console.print(f"Source path: {results['detection_source_path']}")
         return 0
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")

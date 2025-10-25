@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import math
 import time
 from collections import deque
@@ -581,6 +582,7 @@ def segment_eye_masks_yolo(
     *,
     run_name: Optional[str] = None,
     crop_run: Optional[str] = None,
+    keypoints_run: Optional[str] = None,
     batch_size: int = 128,
     device: Optional[str] = None,
     imgsz: Optional[int] = None,
@@ -655,6 +657,34 @@ def segment_eye_masks_yolo(
         imgsz_resolved = int(imgsz)
 
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
+
+    def _copy_metadata_array(array_name: str) -> None:
+        if array_name not in crop_group:
+            console.print(f"[yellow]Crop run missing '{array_name}'; new eye mask run will skip it.[/yellow]")
+            return
+        source = crop_group[array_name]
+        data = source[:]
+        source_chunks = getattr(source, "chunks", None)
+        if not source_chunks:
+            source_chunks = tuple(max(1, min(dim, 1024)) for dim in data.shape)
+        else:
+            chunk_list: List[int] = []
+            for axis, dim in enumerate(data.shape):
+                chunk_val = source_chunks[axis] if axis < len(source_chunks) else source_chunks[-1]
+                chunk_list.append(int(max(1, min(dim, chunk_val))))
+            source_chunks = tuple(chunk_list)
+        if array_name in run_group:
+            del run_group[array_name]
+        run_group.create_array(
+            array_name,
+            data=data,
+            chunks=source_chunks,
+            overwrite=True,
+        )
+
+    _copy_metadata_array("frame_indices")
+    _copy_metadata_array("detection_indices")
+    _copy_metadata_array("frame_counts")
 
     masks = np.zeros((total_rois, 2, roi_h, roi_w), dtype=np.uint8)
     mask_probs = np.zeros((total_rois, 2, roi_h, roi_w), dtype=np.float16)
@@ -969,6 +999,16 @@ def segment_eye_masks_yolo(
     total_successful_eyes = int(ellipse_success.sum())
     pair_rate = float(successful_pairs / total_rois) if total_rois > 0 else float("nan")
 
+    keypoints_parent = root.get("keypoints_runs")
+    latest_keypoints = None
+    if keypoints_parent is not None:
+        latest_keypoints = keypoints_parent.attrs.get("latest")
+    resolved_keypoints_run = (
+        keypoints_run
+        or crop_group.attrs.get("source_keypoints_run")
+        or latest_keypoints
+    )
+
     run_group.attrs.update(
         {
             "method": "yolo_eye_segmentation",
@@ -992,6 +1032,7 @@ def segment_eye_masks_yolo(
                 "proto_upsample_factor": proto_factor,
             },
             "source_crop_run": crop_run_name,
+            "source_keypoints_run": resolved_keypoints_run,
             "total_rois": total_rois,
             "successful_eyes": total_successful_eyes,
             "successful_roi_pairs": int(successful_pairs),
@@ -1028,6 +1069,63 @@ def segment_eye_masks_yolo(
     _DEFAULT_LEGACY_MASKS = False
 
     return resolved_run_name
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run YOLO-based eye segmentation on Palette ROI crops."
+    )
+    parser.add_argument("zarr_path", help="Path to the Palette Zarr archive.")
+    parser.add_argument("model_path", help="Path to the YOLO segmentation weights (.pt).")
+    parser.add_argument("--run-name", help="Optional name for the output run.")
+    parser.add_argument("--crop-run", help="Crop run providing ROI images (default: latest).")
+    parser.add_argument("--keypoints-run", help="Keypoint run that produced the ROIs (default: inferred).")
+    parser.add_argument("--batch-size", type=int, default=128, help="Inference batch size (default: 128).")
+    parser.add_argument("--device", help="Torch device to run on (e.g. cuda:0, cpu).")
+    parser.add_argument("--imgsz", type=int, help="Override inference image size (defaults to ROI size).")
+    parser.add_argument("--conf", type=float, default=0.05, help="YOLO confidence threshold.")
+    parser.add_argument("--iou", type=float, default=0.5, help="YOLO IoU threshold for NMS.")
+    parser.add_argument("--max-det", type=int, default=2, help="Maximum detections per ROI (default: 2).")
+    parser.add_argument("--mask-threshold", type=float, default=0.05, help="Minimum probability when binarizing masks.")
+    parser.add_argument("--adaptive-scale", type=float, default=0.6, help="Scale factor for adaptive thresholding.")
+    parser.add_argument("--adaptive-cap", type=float, default=0.6, help="Cap for adaptive thresholding.")
+    parser.add_argument("--proto-upsample-factor", type=int, default=2, help="Prototype upsample factor for soft masks.")
+    parser.add_argument("--no-retina", action="store_true", help="Disable Ultralytics retina masks.")
+    parser.add_argument("--legacy-masks", action="store_true", help="Force legacy mask extraction mode.")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging.")
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+
+    console = Console()
+    segment_eye_masks_yolo(
+        zarr_path=args.zarr_path,
+        model_path=args.model_path,
+        run_name=args.run_name,
+        crop_run=args.crop_run,
+        keypoints_run=args.keypoints_run,
+        batch_size=args.batch_size,
+        device=args.device,
+        imgsz=args.imgsz,
+        conf=args.conf,
+        iou=args.iou,
+        max_det=args.max_det,
+        mask_threshold=args.mask_threshold,
+        adaptive_scale=args.adaptive_scale,
+        adaptive_cap=args.adaptive_cap,
+        use_retina_masks=not args.no_retina,
+        proto_upsample_factor=args.proto_upsample_factor,
+        legacy_masks=args.legacy_masks,
+        verbose=args.verbose,
+        console=console,
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    main()
 
 
 __all__ = ["segment_eye_masks_yolo"]

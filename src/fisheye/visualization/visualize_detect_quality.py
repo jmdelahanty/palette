@@ -13,6 +13,8 @@ from matplotlib.patches import Rectangle, Circle
 import argparse
 from pathlib import Path
 from typing import Dict, Optional, Tuple
+from io import BytesIO
+import matplotlib
 
 
 def load_quality_report(zarr_path: str, 
@@ -125,10 +127,9 @@ def load_quality_report(zarr_path: str,
 
 
 def create_quality_visualization(quality_data: Dict,
-                                 detection_data: Dict,
-                                 save_path: Optional[str] = None):
+                                 detection_data: Dict) -> plt.Figure:
     """
-    Create comprehensive quality visualization.
+    Create comprehensive quality visualization and return the Matplotlib figure.
     """
     fig = plt.figure(figsize=(18, 12))
     fig.suptitle('Detection Quality Analysis', fontsize=16, fontweight='bold')
@@ -303,12 +304,32 @@ Size Stats:
     ax5.set_xticklabels([str(i) for i in tick_positions])
     
     plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Visualization saved to: {save_path}")
-    
-    plt.show()
+    return fig
+
+
+def render_quality_png(zarr_path: str,
+                       detect_run: Optional[str] = None,
+                       quality_run: Optional[str] = None,
+                       *,
+                       dpi: int = 150,
+                       show: bool = False) -> Tuple[bytes, Dict]:
+    """
+    Render the quality visualization to a PNG byte string.
+    Returns (png_bytes, quality_metadata).
+    """
+    quality_data, detection_data = load_quality_report(
+        zarr_path,
+        detect_run=detect_run,
+        quality_run=quality_run,
+    )
+    fig = create_quality_visualization(quality_data, detection_data)
+    if show:
+        plt.show()
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue(), quality_data
 
 
 def main():
@@ -345,8 +366,14 @@ def main():
         print(f"Blips: {det_summary['blip_detections']}")
         print(f"Jumps: {det_summary['jump_detections']}")
         
-        # Create visualization
-        create_quality_visualization(quality_data, detection_data, args.output)
+        fig = create_quality_visualization(quality_data, detection_data)
+        if args.output:
+            fig.savefig(args.output, dpi=150, bbox_inches='tight')
+            print(f"Visualization saved to: {args.output}")
+            plt.close(fig)
+        else:
+            plt.show()
+            plt.close(fig)
         
     except Exception as e:
         print(f"\nError: {e}")

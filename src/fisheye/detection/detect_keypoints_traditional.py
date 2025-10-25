@@ -12,6 +12,8 @@ import os
 from typing import Dict, Optional, Tuple, List, Any
 from datetime import datetime, timezone
 from pathlib import Path
+import yaml
+import argparse
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
@@ -30,7 +32,7 @@ from ..pose.schema import schema_from_package
 try:
     from dask.distributed import Client, LocalCluster
     HAVE_DISTRIBUTED = True  # Enable distributed
-except:
+except Exception:  # pragma: no cover - optional dependency
     HAVE_DISTRIBUTED = False
 
 from ..utils.system import get_environment_info
@@ -445,8 +447,10 @@ def detect_keypoints(
     # Store metadata
     latest_crop = root['crop_runs'].attrs['latest']
     latest_background = root['background_runs'].attrs['latest']
-    
-    # Build metadata dictionary
+    crop_group = root[f'crop_runs/{latest_crop}']
+    source_detect_run = crop_group.attrs.get('source_detect_run')
+    source_refined_run = crop_group.attrs.get('source_refined_run')
+
     metadata_dict = {
         'keypoints_timestamp_utc': datetime.now(timezone.utc).isoformat(),
         'dask_scheduler': scheduler,
@@ -455,8 +459,11 @@ def detect_keypoints(
         'parameter_source': param_source,
         'source_crop_run': latest_crop,
         'source_background_run': latest_background,
+        'source_detect_run': source_detect_run or 'unknown',
         'method': 'traditional_pose',
     }
+    if source_refined_run:
+        metadata_dict['source_refined_run'] = source_refined_run
     
     # Add distributed-specific metadata if using distributed
     use_distributed = (scheduler == 'distributed') and HAVE_DISTRIBUTED
@@ -468,7 +475,6 @@ def detect_keypoints(
     keypoint_group.attrs.update(metadata_dict)
     
     # Get ROI count
-    crop_group = root[f'crop_runs/{latest_crop}']
     total_rois = crop_group['roi_images'].shape[0]
     
     if total_rois == 0:
@@ -509,6 +515,18 @@ def detect_keypoints(
         chunks=count_chunks,
         overwrite=True
     )
+
+    if 'detection_indices' in crop_group:
+        detection_indices = crop_group['detection_indices'][:].astype('i4', copy=False)
+        det_chunks = (min(chunk_size * 4, detection_indices.shape[0]),) if detection_indices.size > 0 else None
+        keypoint_group.create_array(
+            'detection_indices',
+            data=detection_indices,
+            chunks=det_chunks,
+            overwrite=True
+        )
+    else:
+        console.print("[yellow]Crop run missing 'detection_indices'; keypoint run will omit them.[/yellow]")
     
     # Create output arrays matching detection-style layout
     chunk_len = max(1, min(chunk_size * 4, total_rois if total_rois > 0 else 1))
@@ -736,3 +754,62 @@ def detect_keypoints(
     console.print(panel)
     
     return summary_stats
+
+
+def _load_config(config_path: Optional[str], console: Console) -> Dict[str, Any]:
+    """Load YAML config if available; return empty dict otherwise."""
+    if not config_path:
+        return {}
+    cfg_path = Path(config_path)
+    if not cfg_path.exists():
+        console.print(f"[yellow]Config file not found at {cfg_path}. Using defaults.[/yellow]")
+        return {}
+    try:
+        with cfg_path.open() as fh:
+            data = yaml.safe_load(fh) or {}
+        console.print(f"[dim]Loaded config from {cfg_path}[/dim]")
+        return data
+    except Exception as exc:  # pragma: no cover - defensive
+        console.print(f"[red]Failed to parse config {cfg_path}: {exc}[/red]")
+        return {}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Run traditional keypoint detection on a Palette Zarr archive."
+    )
+    parser.add_argument("zarr_path", type=str, help="Path to the Zarr archive.")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="pipeline_config.yaml",
+        help="Path to pipeline config file (default: pipeline_config.yaml).",
+    )
+    parser.add_argument(
+        "--scheduler",
+        type=str,
+        default=None,
+        help="Dask scheduler to use (overrides config).",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="Number of Dask workers (overrides config).",
+    )
+    args = parser.parse_args()
+
+    console = Console()
+    config = _load_config(args.config, console)
+
+    detect_keypoints(
+        zarr_path=args.zarr_path,
+        config=config,
+        scheduler=args.scheduler,
+        num_workers=args.num_workers,
+        console=console,
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    main()

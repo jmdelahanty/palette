@@ -271,6 +271,8 @@ def detect_keypoints_yolo(
         return ""
 
     roi_h, roi_w = roi_images.shape[1:3]
+    source_detect_run = crop_group.attrs.get("source_detect_run")
+    source_refined_run = crop_group.attrs.get("source_refined_run")
     override_data = _prepare_refined_roi_overrides(
         root, crop_group, total_rois, (roi_h, roi_w), console
     )
@@ -303,6 +305,18 @@ def detect_keypoints_yolo(
         chunks=frame_chunks,
         overwrite=True,
     )
+
+    if "detection_indices" in crop_group:
+        det_idx = crop_group["detection_indices"][:].astype("i4", copy=False)
+        det_chunks = (min(batch_size * 4, det_idx.shape[0]),) if det_idx.size > 0 else None
+        run_group.create_array(
+            "detection_indices",
+            data=det_idx,
+            chunks=det_chunks,
+            overwrite=True,
+        )
+    else:
+        console.print("[yellow]Crop run missing 'detection_indices'; YOLO keypoint run will omit them.[/yellow]")
 
     total_frames_attr = (
         root.attrs.get("total_frames")
@@ -489,6 +503,7 @@ def detect_keypoints_yolo(
         "ultralytics_version": ultralytics_version,
         "device": model_device,
         "source_crop_run": latest_crop,
+        "source_detect_run": source_detect_run or "unknown",
         "keypoints_processed": total_rois,
         "success_rate": round(success_rate, 2),
         "parameters": {
@@ -513,6 +528,8 @@ def detect_keypoints_yolo(
         "inference_duration_seconds": float(total_time),
         "inference_poses_per_second": float(inference_rate),
     })
+    if source_refined_run:
+        run_group.attrs["source_refined_run"] = source_refined_run
     if override_data is not None:
         run_group.attrs["refined_roi_overrides"] = int(override_data["count"])
         run_group.attrs["refined_roi_source"] = override_data["path"]

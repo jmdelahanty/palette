@@ -1,10 +1,10 @@
+import argparse
+from datetime import datetime
+from pathlib import Path
+
 import cv2
 import numpy as np
-import zarr
-import argparse
 import yaml
-from pathlib import Path
-from datetime import datetime
 
 # Global variables to store trackbar values
 hough_param1 = 50
@@ -15,6 +15,8 @@ max_frames = 0
 
 # Global variables to store detected circle
 detected_circle = None
+
+from fisheye.utils.zarr_io import open_zarr_root
 
 def update_param1(val):
     global hough_param1
@@ -35,7 +37,7 @@ def update_frame(val):
 def save_mask_to_zarr(zarr_path, detected_circle, params, array_name, frame_index):
     """Save mask parameters to Zarr metadata ONLY."""
     try:
-        zarr_root = zarr.open(zarr_path, mode='r+')
+        zarr_root = open_zarr_root(zarr_path, mode='r+')
         
         if 'analysis_metadata' not in zarr_root:
             meta = zarr_root.create_group('analysis_metadata')
@@ -81,7 +83,7 @@ def save_mask_to_zarr(zarr_path, detected_circle, params, array_name, frame_inde
 def load_from_zarr(zarr_path):
     """Load previously tuned mask parameters from Zarr if they exist"""
     try:
-        zarr_root = zarr.open(zarr_path, mode='r')
+        zarr_root = open_zarr_root(zarr_path, mode='r')
         
         # Check new location first
         if 'analysis_metadata' in zarr_root:
@@ -121,7 +123,10 @@ def main(zarr_path, use_full_res=False, frame_idx=None, config_path=None):
         print(f"   Loaded parameters: param1={hough_param1}, param2={hough_param2}, radius_adj={radius_adjustment}")
     
     try:
-        zarr_root = zarr.open(zarr_path, mode='r')
+        zarr_root = open_zarr_root(zarr_path, mode='r')
+        if 'raw_video' not in zarr_root:
+            available = ", ".join(sorted(zarr_root.keys()))
+            raise KeyError(f"'raw_video' group not found. Children: {available or 'none'}")
         raw_video = zarr_root['raw_video']
         
         # Check what's available

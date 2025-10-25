@@ -1,224 +1,293 @@
-# Palette Zarr Layout
+# Palette Zarr Layout (v3)
 
-This note gives agents a fast reference for what lives inside a Palette `.zarr`
-archive and how we name the major run artifacts.  The goal is to make it easy to
-read data without grepping through the pipeline code.
+This reference summarizes the structure produced by the modern Palette
+pipeline.  It should match what `fisheye.shared.zarr.schema` and the
+stage implementations currently write.
+
+---
 
 ## Root Group
 
-* **Attributes**
-  * `schema_version`, `zarr_format` – versioning from `fisheye.shared.zarr.schema`
-  * `created_at`, `command_line_args`, `git_info`, `platform_info`
-  * `source_video_metadata` – width, height, fps, frame count, etc.
-  * `processing_history` – ordered list of stage names (optional)
-* **Children (top level)**
-  * `raw_video/` – original frames or downsampled versions (optional)
-  * `crop_runs/`
-  * `detection_runs/`
-  * `keypoints_runs/`
-  * `eye_masks_runs/`
-  * `refined_eye_masks_runs/`
-  * `refined_keypoints_runs/` (created by the keypoint refinement stage)
-  * `refined_detect_runs/` (if the detection refinement stage is used)
-  * `analysis/` – optional downstream exports
-  * `metadata/` – experiment configuration, ROI definitions, stimulus events
+**Attributes**
 
-All `*_runs` groups follow the same pattern:
+- `schema_version`, `zarr_format`
+- `created_at`, `pipeline_version`, `command_line_args`
+- `git_info`, `platform_info`
+- `source_video_metadata` (width, height, fps, frames, codec, path)
+- `processing_history` *(optional ordered list)*
 
-* An attribute `latest` pointing at the most recent run name.
-* Each child run (`<stage>_<YYYY-MM-DD_hh-mm-ss>`) stores stage-specific arrays.
-* Run attributes capture provenance: `method`, `command`, upstream run names,
-  `duration_seconds`, and a rich `provenance` dict (git hash, environment info,
-  parameter snapshot).
+**Immediate children**
 
-## Key Stage Groups
+- `raw_video/`
+- `background_runs/`
+- `detect_runs/`
+- `crop_runs/`
+- `keypoints_runs/`
+- `eye_masks_runs/`
+- `refined_detect_runs/`
+- `refined_keypoints_runs/`
+- `refined_eye_masks_runs/`
+- `id_assignment_runs/`
+- `analysis/`
+- `analysis_metadata/`
 
-### `crop_runs/`
+Every `*_runs` group carries:
 
-Per run arrays:
+- `attrs["latest"]` → most recent run name.
+- Child run groups named `<stage>_<YYYY-MM-DD_hh-mm-ss>` (possibly with a
+  `_NNN` suffix if repeated inside the same second).
+- Run attributes capturing provenance (`provenance` dict with command,
+  timestamps, git/environment snapshots), upstream run references
+  (`source_detect_run`, `source_crop_run`, etc.), configuration snapshots,
+  and `duration_seconds`.
 
-| Array | Shape | DType | Notes |
-| ----- | ----- | ----- | ----- |
-| `crops` | `(n_frames, h, w)` | `uint8` | Optional raw crops |
-| `bbox` | `(n_frames, 4)` | `float32` | XYWH in source coordinates |
+---
 
-Attributes record the detector that generated the crop boxes.
+## `raw_video/`
 
-### `detection_runs/`
-
-| Array | Shape | DType | Notes |
-| ----- | ----- | ----- | ----- |
-| `n_detections` | `(n_frames,)` | `int32` | Count per frame |
-| `bboxes` | `(n_total, 4)` | `float32` | Normalized `[x, y, w, h]` |
-| `scores` | `(n_total,)` | `float32` | Confidence |
-| `class_ids` | `(n_total,)` | `int32` | Optional class labels |
-
-Latest YOLO runs will set `attrs["method"] = "yolo_detect"` and record model
-names, checkpoints, thresholds, etc.
-
-### `keypoints_runs/`
+Arrays written during import (kvikIO or standard path):
 
 | Array | Shape | DType | Notes |
 | ----- | ----- | ----- | ----- |
-| `keypoints_roi` | `(n_rois, n_keypoints, 2)` | `float32` | ROI (crop) coordinates |
-| `keypoints_world` | `(n_rois, n_keypoints, 2)` | `float32` | Optional global coords |
-| `heading` | `(n_rois,)` | `float32` | Heading in degrees |
-| `detection_success` | `(n_rois,)` | `bool` | Keypoint pipeline success flag |
-| `keypoint_scores` | `(n_rois, n_keypoints)` | `float32` | Confidence per landmark |
+| `images_full` | `(n_frames, H, W)` | `uint8` | Full-resolution frames (optional) |
+| `images_ds` | `(n_frames, H_ds, W_ds)` | `uint8` | Downsampled frames (optional) |
+| `timestamps` | `(n_frames,)` | `float64` | Seconds since start (optional) |
 
-Attributes include `skeleton`, `source_detection_run`, training checkpoint info,
-and thresholds.
+Attributes include import method, device, chunk/shard sizes, duration,
+throughput, and source video metadata.
 
-### `eye_masks_runs/`
+---
 
-Runs produced by the segmentation stage (`infer_unet_eye_masks.py` or YOLO mask
-variants).
+## `background_runs/`
 
-| Array | Shape | DType | Notes |
-| ----- | ----- | ----- | ----- |
-| `masks_roi` | `(n_rois, 2, H, W)` | `uint8` | Left/right channels (0/1 mask) |
-| `mask_probs_roi` | `(n_rois, 2, H, W)` | `float16/float32` | Probabilities |
-| `mask_probs_roi_refined` | optional | | Post-processed probabilities |
-
-Attributes specify `method`, model checkpoint, crop/keypoint sources, and per-run
-configuration (thresholds, smoothing).
-
-### `refined_eye_masks_runs/`
-
-Created by `fisheye.refinement.refine_eye_masks`.  In addition to the refined
-masks the run stores extensive QA metrics so downstream tooling can triage bad
-eyes.
-
-**Primary arrays**
+Run arrays vary by method; common layout:
 
 | Array | Shape | DType | Notes |
 | ----- | ----- | ----- | ----- |
-| `masks_roi` | `(n_rois, 2, H, W)` | `uint8` | Refined left/right masks |
-| `mask_probs_roi_refined` | `(n_rois, 2, H, W)` | `float16` | Optional union probs |
+| `background_full` | `(H, W)` | `uint8` | Full-resolution background |
+| `background_ds` | `(H_ds, W_ds)` | `uint8` | Downsampled background |
+| `frame_indices` | `(n_samples,)` | `int32` | Frames sampled for background |
+
+Attributes: `method`, `parameters`, `num_samples`, `duration_seconds`,
+provenance, GPU/system info.
+
+---
+
+## `detect_runs/`
+
+Outputs from blob/YOLO detection stages.
+
+| Array | Shape | DType | Notes |
+| ----- | ----- | ----- | ----- |
+| `frame_indices` | `(n_detections,)` | `int32` | Corresponding frame per detection |
+| `frame_counts` | `(n_frames,)` | `int32` | Number of detections per frame |
+| `n_detections` | `(n_frames,)` | `int32` | Alias of `frame_counts` (kept for legacy consumers) |
+| `bbox_norm_coords` | `(n_detections, 4)` | `float32` | Normalized `[x, y, w, h]` |
+| `scores` | `(n_detections,)` | `float32` | Confidence scores |
+| `class_ids` *(optional)* | `(n_detections,)` | `int32` | Detector class labels |
+| `centers_px` *(optional)* | `(n_detections, 2)` | `float32` | Pixel centers (blob) |
+
+Attributes store detector `method`, model identifiers, thresholds, duration,
+and upstream background information. Standard values:
+
+| Method | When used |
+| ------ | --------- |
+| `blob` | Traditional background-subtraction detector |
+| `yolo_detect` | YOLO object detector |
+| `yolo_pose` | YOLO pose detector |
+
+---
+
+## `crop_runs/`
+
+Each run stores the cropped ROI tensors and the bookkeeping needed to map
+ROIs back to frames.
+
+| Array | Shape | DType | Notes |
+| ----- | ----- | ----- | ----- |
+| `roi_images` | `(n_rois, h, w)` | `uint8` | Cropped grayscale patches |
+| `roi_coordinates_full` | `(n_rois, 2)` | `int32` | Top-left (x, y) in full-res pixels |
+| `roi_coordinates_ds` | `(n_rois, 2)` | `int32` | Same offsets in downsampled space |
+| `bbox_norm_coords` | `(n_rois, 4)` | `float32` | Normalized ROI bounding boxes |
+| `frame_indices` | `(n_rois,)` | `int32` | Frame index per ROI |
+| `frame_counts` | `(n_frames,)` | `int32` | Count of ROIs per frame |
+| `detection_source` *(optional)* | `(n_rois,)` | `int8` | 0 = real detection, 1 = interpolated (copied from refined runs) |
+| `detection_indices` *(optional)* | `(n_rois,)` | `int32` | Index into source detect run |
+
+Attributes:
+
+- `source_detect_run`, `source_background_run`, `detection_source_type`,
+  `detection_source_path`, `includes_interpolated`, `n_real_detections`,
+  `n_interpolated_detections`, ROI size, scaling factors.
+- `summary_statistics` (frames with crops, total ROIs, percentage coverage).
+- GPU/environment provenance.
+
+Cropping resolves the ROI source via `crop.source_type` (`detect`, `filtered`,
+`interpolated`) or an explicit `crop.source_path` override such as
+`detect_runs/<run>` or `refined_detect_runs/<run>/interpolated`, and the chosen
+path is recorded in `detection_source_path`.
+
+---
+
+## `keypoints_runs/`
+
+Produced by the keypoint detection stage (traditional or YOLO-based).
+
+| Array | Shape | DType | Notes |
+| ----- | ----- | ----- | ----- |
+| `frame_indices` | `(n_rois,)` | `int32` | Inherit from corresponding crops |
+| `frame_counts` | `(n_frames,)` | `int32` | ROIs per frame (mirrors `n_rois`) |
+| `n_rois` | `(n_frames,)` | `int32` | Alias maintained for legacy callers |
+| `keypoints_roi` | `(n_rois, n_keypoints, 2)` | `float64` | Coordinates in ROI pixels |
+| `keypoints_img` | `(n_rois, n_keypoints, 2)` | `float64` | Full-image pixels |
+| `keypoints_norm` | `(n_rois, n_keypoints, 2)` | `float64` | Normalized [0,1] |
+| `heading` | `(n_rois,)` | `float64` | Degrees, NaN when unavailable |
+| `confidence` | `(n_rois,)` | `float64` | Overall score |
+| `effective_threshold` | `(n_rois,)` | `float64` | Per-ROI threshold used |
+| `effective_se2_radius` | `(n_rois,)` | `float64` | Search radius actually applied |
+| `detection_success` | `(n_rois,)` | `bool` | True if keypoints converged |
+
+Attributes: `source_crop_run`, `source_detect_run`, `method`, `parameter_source`,
+`keypoint_labels`, scheduler configuration, timing, QA summaries.
+
+---
+
+## `eye_masks_runs/`
+
+Generated by segmentation inference (`infer_unet_eye_masks.py`,
+`eye_segmentation_yolo.py`, etc.).
+
+| Array | Shape | DType | Notes |
+| ----- | ----- | ----- | ----- |
+| `frame_indices` | `(n_rois,)` | `int32` | ROI frame mapping (copied from crop run) |
+| `frame_counts` | `(n_frames,)` | `int32` | Count of ROIs per frame (matches source crop run) |
+| `detection_indices` | `(n_rois,)` | `int32` | Index into `crop_runs/<run>/roi_images` |
+| `masks_roi` | `(n_rois, 2, H, W)` | `uint8` | Binary masks (left/right) |
+| `mask_probs_roi` | `(n_rois, 2, H, W)` | `float16/float32` | Raw probabilities |
+| `mask_scores` *(optional)* | `(n_rois,)` | `float32` | Confidence per ROI |
+
+Attributes: `source_crop_run`, `source_keypoint_run`, `method`, model info,
+thresholds, smoothing parameters, aggregate metrics.
+
+---
+
+## `refined_detect_runs/`
+
+Created by `fisheye.refinement.refine_detect`.  Inherits the detection arrays
+from its source run and adds QA channels.
+
+| Array | Shape | Notes |
+| ----- | ----- | ----- |
+| `bbox_norm_coords` | `(n_detections, 4)` | Updated boxes |
+| `scores` | `(n_detections,)` | Updated confidences |
+| `reason` | `(n_detections,)` | UTF-8 labels (e.g. `refined`, `copied`, `filtered`) |
+| `qa_metrics/*` | Various | Stage-specific floats/ints for diagnostics |
+
+Attributes summarize counts by `reason`, thresholds, and references to the
+source detect and crop runs. Optional visual artifacts may be stored under
+`visualizations/` (e.g., `visualizations/detect_quality_overview_png` containing a
+PNG summary of the detection-quality analysis with attrs `mime='image/png'`,
+`source_detect_run`, and `source_quality_run`).
+
+---
+
+## `refined_keypoints_runs/`
+
+Outputs from `fisheye.refinement.refine_keypoints`.
+
+- Copies `keypoints_roi`, `keypoints_img`, `heading`, etc. from the source
+  run (after refinement).
+- Adds `reason` (string tag per ROI), boolean masks for validity, and QA
+  metrics like `heading_std`, `drift_px`, `blend_weight`.
+- Attributes include source keypoint + crop runs, smoothing parameters,
+  per-reason statistics, derivative filters applied.
+
+---
+
+## `refined_eye_masks_runs/`
+
+See `fisheye.refinement.refine_eye_masks`.  Key arrays:
+
+| Array | Shape | DType | Notes |
+| ----- | ----- | ----- | ----- |
+| `masks_roi` | `(n_rois, 2, H, W)` | `uint8` | Refined masks |
+| `mask_probs_roi_refined` | `(n_rois, 2, H, W)` | `float16` | Probabilities after refinement |
 | `ellipse_params` | `(n_rois, 2, 5)` | `float32` | `[cx, cy, major, minor, angle]` |
-| `ellipse_success` | `(n_rois, 2)` | `bool` | Fit success flags |
-| `feret_axes_major` / `_minor` | `(n_rois, 2, 4)` | `float32` | Flattened endpoints |
-| `feret_roundness` | `(n_rois, 2)` | `float32` | Major/minor ratio measure |
-| `eye_separation` | `(n_rois,)` | `float32` | Distance between fitted centroids |
-| `reason` | `(n_rois,)` | `string` | Pipe-delimited tags (`refined`, `keypoint_fail`, `filtered_left`, …) |
+| `ellipse_success` | `(n_rois, 2)` | `bool` | Fit success per eye |
+| `feret_axes_major/minor` | `(n_rois, 2, 4)` | `float32` | Endpoints for Feret diameters |
+| `feret_roundness` | `(n_rois, 2)` | `float32` | Major/minor ratio |
+| `eye_separation` | `(n_rois,)` | `float32` | Centroid distance |
+| `reason` | `(n_rois,)` | `string` | Classification tags (`refined`, `copied`, `filtered_*`) |
 
-**Metrics subgroup**
+`metrics/` subgroup:
 
-`metrics/` contains per-ROI QA arrays (all `float32` unless noted):
+- Scalar QA arrays such as `area_refined`, `area_delta_vs_source`,
+  `centroid_error`, `symmetry_offsets`, `separation_delta`, `axis_ratio`,
+  `circularity`, `probability_*`, `filter_flags`, `connectivity_flags`,
+  `smoothing_flags`, `pixels_reassigned`.
 
-* `area_refined`, `area_source`, `area_delta_vs_source`, `area_zscore`
-* `centroid_error`, `symmetry_offsets`, `symmetry_sum`, `symmetry_abs_diff`
-* `separation_refined`, `separation_keypoint`, `separation_delta`
-* `axis_ratio`, `circularity`
-* `connectivity_flags` (`uint8` bitmask: smoothing used, components reassigned, probabilities used)
-* `smoothing_flags` (`uint8`, per eye)
-* `pixels_reassigned` (`int32`)
-* `probabilities_used` (`bool`)
-* `probability_mean`, `_max`, `_var`, `_high_fraction`
-* `filter_flags` (`bool`, shape `(n_rois, 2)`): per-eye area outlier status
+Attributes expose `metrics_summary`, configuration snapshots,
+per-eye filter thresholds, and links to source runs.
 
-Run attributes expose a summary in `metrics_summary` (means, std-dev, filter
-counts) and the configuration used (`mask_parameters["area_filter"]` contains the
-z-score threshold and mode).
+---
 
-### `refined_keypoints_runs/` & `refined_detect_runs/`
+## `id_assignment_runs/`
 
-Follow the same pattern: copies of the source arrays plus stage-specific QA
-metrics and `reason` labels. Always check the run attributes (`refine_stats`,
-`metrics_summary`, upstream run references) before consuming arrays.
+Generated by `fisheye.tracking.assign_ids` and friends.
 
-## Analysis Runs
+Common arrays:
 
-### `analysis/movement_runs/`
+| Array | Shape | DType | Notes |
+| ----- | ----- | ----- | ----- |
+| `identities` | `(n_detections,)` | `int32` | Assigned fish/ROI IDs |
+| `confidence` | `(n_detections,)` | `float32` | Assignment score |
+| `frame_indices` | `(n_detections,)` | `int32` | Optional copy of frame map |
 
-Each movement run stores tracks grouped by ID:
+Attributes describe the assignment strategy, ROI definitions used,
+expected counts, and QA tallies (`assigned`, `unassigned`).
 
-* `tracks/id_<track_id>/` arrays contain frame indices, timestamps, positions
-  (px/mm), headings, instantaneous & smoothed speeds, accelerations, per-frame
-  distances, and per-second aggregates.
-* `track_manifest` (run attribute) summarises speed/distance/heading metrics.
-* Run attributes document inputs, smoothing parameters, calibration info, and
-  global totals.
+---
 
-### `analysis/stimulus_runs/`
+## `analysis/`
 
-Created by `fisheye.analysis.import_stimulus_to_zarr`. This replaces the legacy
-`analysis.h5` workflow by importing the stimulus metadata directly into the
-archive.
+Organized by analyzer:
 
-```
-analysis/
-  stimulus_runs/
-    attrs:
-      latest -> <run_name>
-    <run_name>/
-      attrs:
-        created_at_utc
-        source_h5 (path to original stimulus file)
-        import_version
-        arena_config_json (raw calibration snapshot)
-        coordinate_transform (JSON with texture/camera dims, scale)
-        protocol_json (optional)
-        interpolation statistics (original/interpolated frames, gap info)
-      video_metadata/
-        frame_metadata/<field>  # one array per structured-field (numbers or UTF-8 strings)
-      interpolation_mask        # bool array marking original vs interpolated rows
-      frame_alignment/
-        camera_frame_offset (attribute)
-        camera_to_metadata_index
-        camera_interpolation_mask
-      tracking_data/
-        chaser_states/<field>
-        bounding_boxes/<field>
-      events/<field>
-```
+- `movement_runs/`: per-fish tracks (`tracks/id_<id>/positions_px`,
+  `speed_mm_s`, `heading_deg`, etc.), summary attributes (`track_manifest`,
+  distance totals, smoothing config).
+- `stimulus_runs/`: imports stimulus metadata (see docstring in
+  `fisheye.analysis.import_stimulus_to_zarr`).  Stores source H5 metadata,
+  frame alignment arrays, variable-length UTF-8 fields, interpolation masks.
+- `eye_angle_runs/`: per-ROI and per-frame eye-angle metrics, QA masks,
+  `reason_codes`.
+- Additional analyzers (e.g., heatmaps, swim-bout stats) follow the same
+  `<analysis>_runs/<run_name>/` pattern with analyzer-specific arrays and
+  provenance attributes.
 
-Notes:
+---
 
-* Structured stimulus datasets (metadata, chaser states, bounding boxes,
-  events) are expanded into subgroups with one array per field to avoid
-  unsupported structured dtypes in Zarr v3. String fields use
-  `VariableLengthUTF8()` so they round-trip as Python strings.
-* `interpolation_mask` flags which metadata rows came from the original H5
-  (`True`) vs. synthesized during interpolation (`False`).
-* The frame-alignment datasets let tooling map between camera frames (detection
-  timeline) and stimulus frames without recomputing the lookup.
+## `analysis_metadata/`
 
-Downstream analyzers (movement, training heatmaps, chaser plots) can now depend
-entirely on the Zarr archive—no separate analysis H5 is required.
+Lightweight store for metadata generated during tuning or diagnostics.
+Examples:
 
-## Metadata and Provenance Conventions
+- `attrs["dish_mask"]` – saved circle parameters from the mask tuner
+  (center, radius, Hough params).
+- `attrs["subdish_mask_tuning"]` – multi-dish ROI definitions.
+- Other agents may add read-only metadata blocks here.
 
-* Every stage writes a `provenance` dict with:
-  * `stage`, `command`, `created_at_utc`
-  * `git` (`commit`, `branch`, `is_dirty`)
-  * `environment` (host, python, GPU availability)
-  * `scheduler` (for Dask jobs)
-  * `inputs` (names of upstream runs)
-* Long-running stages also store:
-  * `metrics_summary` – high-level QA aggregates
-  * `refine_stats` – raw counters (refined vs. copied, filtered counts, etc.)
+---
 
-When reading a run, always inspect its attributes first for context and to find
-linked datasets.  The `reason` array plus the metrics group flag the cases that
-were copied, filtered, or otherwise atypical.
+## Provenance & Access Tips
 
-## Access Tips for Agents
+- Always inspect run attributes first — they encode the upstream run names,
+  configuration, quality summaries, and time spent.
+- Array chunking follows the detection/ROI axis for efficient sequential
+  reads.  Use `zarr.open_group(path, mode="r")` and slice natively.
+- `fisheye.shared.zarr.schema.get_run_group(root, stage)` resolves the run
+  path respecting `attrs["latest"]`.
+- QA-sensitive tooling should filter using the stage-specific `reason` or
+  metrics arrays instead of assuming all records are valid.
 
-* Use `zarr.open(<path>, mode="r")` and index with native slices—the archive is
-  chunked along ROIs or time for efficient sequential access.
-* `fisheye.shared.zarr.schema.get_run_group(root, stage_name)` returns the run
-  group and the selected run name (respecting `attrs["latest"]`).
-* Inspect run attributes first to understand provenance, configuration, and QA
-  summaries before consuming arrays.
-* For QA-sensitive work: filter using stage-specific flags (`reason`, metrics
-  masks) before aggregating results.
-* When stimulus data is needed, access `analysis/stimulus_runs/<run>/...` rather
-  than maintaining a separate `analysis.h5`.
-    `empty_union`.
-* New analysis scripts should read from the refined groups whenever possible;
-  the raw `_runs` groups remain immutable inputs from earlier pipeline stages.
-
-This document should be kept in sync with the pipeline when new stages or
-metrics are added.  When introducing a new dataset, add a short entry here so
-future agents know exactly where to look.
+This document should remain in sync with the schema module and the stage
+implementations.  When a new run group or array is added, update both places.

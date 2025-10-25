@@ -2,6 +2,28 @@ Refined Runs Implementation Specification
 Overview
 The refined_detect_runs/ group stores filtered and interpolated detection data, providing clean datasets for downstream analysis while maintaining full traceability to the original detections.
 
+### Verifying that crops reference refined detections
+
+After creating a refined detect run, confirm that subsequent crop runs pulled from the interpolated coordinates with:
+
+```bash
+python -m fisheye.diagnostics.check_crop_sources path/to/session.zarr
+# limit to a specific run
+python -m fisheye.diagnostics.check_crop_sources path/to/session.zarr --crop-run crop_2025-10-25_19-25-05
+```
+
+The diagnostic reports the recorded `detection_source_path`, whether that path exists (and matches the latest `refined_detect_runs/<latest>/interpolated` group), whether the copied `frame_indices` match the source detections, and if the `detection_source` array is present (with a real vs. interpolated breakdown). This makes it easy to catch situations where the crop stage accidentally pointed back at the original detect run.
+
+Before launching a new crop run you can also preview what the stage would consume via:
+
+```bash
+python -m fisheye.diagnostics.crop_dry_run path/to/session.zarr --config configs/fisheye/default.yaml
+# override the source the same way as the pipeline CLI
+python -m fisheye.diagnostics.crop_dry_run path/to/session.zarr --crop-source interpolated
+```
+
+`crop_dry_run` resolves the detection source using the same precedence rules as the pipeline (CLI overrides → config values), then prints total detections, frame counts, coverage, and whether interpolated metadata would be available.
+
 ## Eye Mask Refinement (new)
 
 Eye segmentation runs can now be post-processed with `python -m fisheye.refinement.refine_eye_masks`. The tool:

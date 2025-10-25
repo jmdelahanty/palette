@@ -322,6 +322,9 @@ def create_refined_run(
     *,
     command: Optional[str] = None,
     created_at_utc: Optional[str] = None,
+    save_visuals: bool = False,
+    show_visuals: bool = False,
+    visuals_dpi: int = 150,
 ) -> str:
     """
     Create a refined detection run with filtered and interpolated data.
@@ -410,10 +413,12 @@ def create_refined_run(
 
     # Load quality labels if available, otherwise assume all detections are clean
     detection_quality_labels: np.ndarray
+    resolved_quality_run: Optional[str] = None
     quality_group = None
     if 'quality_reports' in detect_group and detect_group['quality_reports'].attrs.get('latest'):
         if quality_run is None:
             quality_run = detect_group['quality_reports'].attrs['latest']
+        resolved_quality_run = quality_run
         quality_group = detect_group[f'quality_reports/{quality_run}']
         console.print(f"Source quality run: [cyan]{quality_run}[/cyan]")
         detection_quality_labels = quality_group['detection_quality_labels'][:]
@@ -537,7 +542,7 @@ def create_refined_run(
     }
 
     refined_group.attrs['source_detect_run'] = detect_run
-    refined_group.attrs['source_quality_run'] = quality_run or 'N/A'
+    refined_group.attrs['source_quality_run'] = resolved_quality_run or 'N/A'
     refined_group.attrs['refinement_timestamp'] = created_timestamp
     refined_group.attrs['processing_time_seconds'] = float(duration)
     refined_group.attrs['operations'] = ['filter', 'interpolate']
@@ -641,6 +646,50 @@ def create_refined_run(
     console.print(f"  Interpolated: {len(interp_bboxes)} detections")
     console.print(f"    - Real: {len(filtered_bboxes)}")
     console.print(f"    - Synthetic: {interp_stats['interpolated_detections']}")
+
+    if save_visuals or show_visuals:
+        if quality_group is None:
+            console.print("[yellow]Visualizations requested, but no quality report is available; skipping.[/yellow]")
+        else:
+            try:
+                from ..visualization.visualize_detect_quality import render_quality_png
+
+                png_bytes, quality_meta = render_quality_png(
+                    zarr_path,
+                    detect_run=detect_run,
+                    quality_run=resolved_quality_run,
+                    dpi=visuals_dpi,
+                    show=show_visuals,
+                )
+                if save_visuals:
+                    vis_group = refined_group.require_group('visualizations')
+                    array_name = 'detect_quality_overview_png'
+                    if array_name in vis_group:
+                        del vis_group[array_name]
+                    data = np.frombuffer(png_bytes, dtype=np.uint8)
+                    chunk = max(1, min(len(data), 1_048_576))
+                    ds = vis_group.create_array(
+                        array_name,
+                        data=data,
+                        chunks=(chunk,),
+                        overwrite=True,
+                    )
+                    ds.attrs.update({
+                        'mime': 'image/png',
+                        'description': 'Detection quality overview visualization',
+                        'source_detect_run': detect_run,
+                        'source_quality_run': resolved_quality_run,
+                        'quality_grade': quality_meta['quality_score'].get('grade'),
+                    })
+                    manifest = dict(refined_group.attrs.get('visualizations', {}))
+                    manifest['detect_quality_overview_png'] = {
+                        'path': 'visualizations/detect_quality_overview_png',
+                        'description': 'Detection quality overview PNG',
+                    }
+                    refined_group.attrs['visualizations'] = manifest
+                    console.print("[green]✓[/green] Detection quality visualization stored in refined run.")
+            except Exception as exc:
+                console.print(f"[yellow]Warning:[/yellow] Failed to render detection visualization: {exc}")
     
     return run_name
 
@@ -689,6 +738,12 @@ Examples:
                        help='Keep blip artifacts (overrides config)')
     parser.add_argument('--config', default='pipeline_config.yaml',
                        help='Path to config file (default: pipeline_config.yaml)')
+    parser.add_argument('--save-visuals', action='store_true',
+                       help='Store detection quality visualization inside the refined run.')
+    parser.add_argument('--show-visuals', action='store_true',
+                       help='Display detection quality visualization interactively after refinement.')
+    parser.add_argument('--visuals-dpi', type=int, default=150,
+                       help='DPI to use when rendering saved visualizations (default: 150).')
     
     args = parser.parse_args()
     
@@ -714,6 +769,9 @@ Examples:
             remove_blips=args.remove_blips,
             command=' '.join(sys.argv),
             created_at_utc=datetime.now(timezone.utc).isoformat(),
+            save_visuals=args.save_visuals,
+            show_visuals=args.show_visuals,
+            visuals_dpi=args.visuals_dpi,
         )
         
         print(f"\n✓ Created refined run: {run_name}")

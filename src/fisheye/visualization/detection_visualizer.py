@@ -330,11 +330,19 @@ configure_matplotlib(_pre_args.inline)
 
 # Now safe to import pyplot & the rest
 import zarr
-import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.widgets import Slider
+
+try:
+    from decord import VideoReader, cpu, gpu
+    _HAVE_DECORD = True
+except Exception as decord_exc:  # pragma: no cover - import guard
+    VideoReader = None
+    cpu = gpu = None
+    _HAVE_DECORD = False
+    _DECORD_ERROR = decord_exc
 
 # Global variables
 fig, ax = plt.subplots(figsize=(10, 10))
@@ -366,20 +374,61 @@ class VideoFrameSource:
         if not self.path.exists():
             raise FileNotFoundError(f"Video file not found: {self.path}")
 
-        self._capture = cv2.VideoCapture(str(self.path))
-        if not self._capture.isOpened():
-            raise ValueError(f"Failed to open video: {self.path}")
+        if not _HAVE_DECORD:
+            raise RuntimeError(
+                f"Decord is required for video playback but could not be imported ({_DECORD_ERROR}). "
+                "Install with `pip install decord` or ensure it is available in your environment."
+            )
 
-        frame_count = int(self._capture.get(cv2.CAP_PROP_FRAME_COUNT))
-        width = int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        if frame_count <= 0:
+        self._cached_first_frame = None
+        self._reader = self._init_reader(str(self.path))
+        if self._reader is None:
+            raise ValueError(f"Failed to open video with decord: {self.path}")
+
+        # Prime metadata from the first frame
+        try:
+            raw_first = self._reader[0]
+            first_frame = raw_first.asnumpy()
+        except Exception as exc:
+            raise ValueError(f"Unable to read first frame with decord: {exc}") from exc
+
+        first_frame = np.array(first_frame, copy=True)
+        if first_frame.ndim != 3 or first_frame.shape[2] not in (1, 3):
+            raise ValueError(f"Unexpected frame shape from decord: {first_frame.shape}")
+
+        self._frame_count = len(self._reader)
+        if self._frame_count <= 0:
             raise ValueError(f"Video has zero frames or unknown length: {self.path}")
 
-        self._frame_count = frame_count
-        self._width = width
-        self._height = height
+        self._height, self._width = first_frame.shape[:2]
+        # Ensure frames are RGB; decord returns RGB by default.
+        if first_frame.shape[2] == 1:
+            first_frame = np.repeat(first_frame, 3, axis=2)
+
+        self._cached_first_frame = first_frame
         self._shape = (self._frame_count, self._height, self._width, 3)
+
+    @staticmethod
+    def _init_reader(path: str):
+        ctx_candidates = []
+        if gpu is not None:
+            try:
+                ctx_candidates.append(gpu(0))
+            except Exception:
+                pass
+        if cpu is not None:
+            ctx_candidates.append(cpu(0))
+
+        last_error = None
+        for ctx in ctx_candidates:
+            try:
+                return VideoReader(path, ctx=ctx)
+            except Exception as exc:
+                last_error = exc
+                continue
+        if last_error is not None:
+            raise RuntimeError(f"Decord failed to open video: {last_error}") from last_error
+        return None
 
     @property
     def shape(self):
@@ -391,25 +440,28 @@ class VideoFrameSource:
     def __getitem__(self, idx: int) -> np.ndarray:
         if isinstance(idx, slice):
             raise TypeError("VideoFrameSource does not support slice access")
+        idx = int(idx)
         if idx < 0 or idx >= self._frame_count:
             raise IndexError(f"Frame index out of range: {idx} (0..{self._frame_count - 1})")
 
-        # Random access: reposition capture and read the requested frame
-        if not self._capture.set(cv2.CAP_PROP_POS_FRAMES, int(idx)):
-            raise ValueError(f"Failed to seek to frame {idx}")
+        if idx == 0 and self._cached_first_frame is not None:
+            return self._cached_first_frame.copy()
 
-        success, frame_bgr = self._capture.read()
-        if not success or frame_bgr is None:
-            raise ValueError(f"Failed to read frame {idx} from {self.path}")
+        try:
+            frame = self._reader[idx]
+        except Exception as exc:
+            raise ValueError(f"Failed to read frame {idx} from {self.path} via decord: {exc}") from exc
 
-        # Convert BGR (OpenCV default) to RGB for matplotlib
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        return frame_rgb
+        frame_np = frame.asnumpy()
+        if frame_np.ndim == 2:
+            frame_np = np.expand_dims(frame_np, axis=-1)
+        if frame_np.shape[-1] == 1:
+            frame_np = np.repeat(frame_np, 3, axis=2)
+        return frame_np
 
     def release(self) -> None:
-        if self._capture is not None:
-            self._capture.release()
-            self._capture = None
+        self._reader = None
+        self._cached_first_frame = None
 
     def __del__(self):
         self.release()

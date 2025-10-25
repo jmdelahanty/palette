@@ -22,8 +22,8 @@ names: ['fish']
 
 datasets:
   # Dataset 1
-  arena4_sesh3:
-    zarr_path: /nvme1/sesh3/2025-09-23T22-11-11Z_arena_4_chaser_arena4.zarr
+  arena4:
+    zarr_path: /nvme1/2025_10_23_11_40_55/2025-10-23T15-41-09Z_arena_4_chaser_arena4.zarr
     source_type: filtered  # Use real detections with jumps removed (recommended)
     
     # Optional: Custom split ratios per dataset (defaults to global split below)

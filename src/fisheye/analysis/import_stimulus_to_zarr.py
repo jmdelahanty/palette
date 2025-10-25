@@ -25,6 +25,8 @@ import zarr
 from zarr.core.dtype import VariableLengthUTF8
 from rich.console import Console
 
+from .calibration_manager import CalibrationManager
+
 
 @dataclass
 class InterpolationStats:
@@ -332,7 +334,7 @@ def _copy_h5_dataset(
 
 
 def import_stimulus_to_zarr(
-    stimulus_h5: Path,
+    stimulus_h5: Optional[Path],
     zarr_path: Path,
     *,
     run_name: Optional[str],
@@ -340,11 +342,35 @@ def import_stimulus_to_zarr(
     verbose: bool,
 ) -> str:
     """Main import routine."""
-
-    if not stimulus_h5.exists():
-        raise FileNotFoundError(f"Stimulus H5 not found: {stimulus_h5}")
-
     console = Console() if verbose else None
+
+    calib_manager = CalibrationManager(str(zarr_path), verbose=verbose)
+
+    resolved_h5: Optional[Path] = stimulus_h5
+    if resolved_h5 is None:
+        auto_h5 = calib_manager.find_default_h5()
+        if auto_h5:
+            resolved_h5 = auto_h5
+            _log(console, f"[dim]Auto-detected stimulus H5: {auto_h5}[/dim]")
+    if resolved_h5 is None or not resolved_h5.exists():
+        raise FileNotFoundError(
+            "Stimulus H5 not specified and no .h5 file found alongside the zarr. "
+            "Provide one explicitly."
+        )
+
+    # Ensure calibration metadata is populated before ingesting stimulus data
+    try:
+        existing_calib = calib_manager.get_calibration()
+        if existing_calib:
+            _log(console, "[dim]Calibration already present in zarr; skipping auto-import.[/dim]")
+        else:
+            calib_data = calib_manager.extract_from_h5(str(resolved_h5))
+            if calib_data:
+                saved = calib_manager.save_calibration(calib_data, overwrite=False)
+                if saved:
+                    _log(console, "[green]✓ Imported calibration metadata from stimulus H5[/green]")
+    except Exception as exc:
+        _log(console, f"[yellow]Warning:[/yellow] Unable to import calibration automatically ({exc})")
 
     root = zarr.open(zarr_path, mode="a")
     analysis = root.require_group("analysis")
@@ -362,7 +388,7 @@ def import_stimulus_to_zarr(
         del runs_parent[run_name]
 
     run_group = runs_parent.create_group(run_name)
-    with h5py.File(stimulus_h5, "r") as h5:
+    with h5py.File(resolved_h5, "r") as h5:
         if "/video_metadata/frame_metadata" not in h5:
             raise ValueError("Stimulus H5 missing /video_metadata/frame_metadata dataset.")
 
@@ -465,7 +491,7 @@ def import_stimulus_to_zarr(
     run_group.attrs.update(
         {
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
-            "source_h5": str(stimulus_h5),
+            "source_h5": str(resolved_h5),
             "import_version": "1.0.0",
         }
     )
@@ -479,7 +505,12 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Import stimulus H5 contents into a Palette detection Zarr archive.",
     )
-    parser.add_argument("stimulus_h5", type=Path, help="Path to the raw stimulus H5 file.")
+    parser.add_argument(
+        "stimulus_h5",
+        type=Path,
+        nargs="?",
+        help="Path to the raw stimulus H5 file. If omitted, the tool will search alongside the zarr.",
+    )
     parser.add_argument("zarr_path", type=Path, help="Path to the Palette Zarr archive to update.")
     parser.add_argument("--run-name", help="Optional run name inside analysis/stimulus_runs/.")
     parser.add_argument(
