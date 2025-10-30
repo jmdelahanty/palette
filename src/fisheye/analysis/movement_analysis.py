@@ -30,6 +30,7 @@ from .compute_speed import (  # re-exported for compatibility
     load_detection_ids,
     resolve_dimensions,
 )
+from .chaser_metrics_loader import load_chaser_metrics
 
 
 @dataclass
@@ -271,21 +272,40 @@ def resolve_calibration(root: zarr.Group) -> Tuple[Optional[float], Dict[str, Op
     }
 
 
-def ensure_movement_run_group(root: zarr.Group, run_name: Optional[str]) -> Tuple[str, zarr.Group]:
-    """Create /analysis/movement_runs/<run_name> (auto timestamp if needed)."""
+def ensure_movement_run_group(
+    root: zarr.Group,
+    run_name: Optional[str],
+    *,
+    run_type: str = "online",
+    overwrite: bool = False,
+) -> Tuple[str, zarr.Group]:
+    """Create /analysis/movement_runs/<type>/<run_name> (auto timestamp if needed)."""
+
+    if run_type not in {"online", "offline"}:
+        raise ValueError("run_type must be 'online' or 'offline'")
 
     analysis = root.require_group("analysis")
     movement_parent = analysis.require_group("movement_runs")
+    type_parent = movement_parent.require_group(run_type)
 
     if run_name:
-        if run_name in movement_parent:
-            raise ValueError(f"Movement run '{run_name}' already exists.")
+        if run_name in type_parent:
+            if not overwrite:
+                raise ValueError(f"Movement run '{run_name}' already exists under {run_type}.")
+            del type_parent[run_name]
     else:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        run_name = f"movement_{timestamp}"
+        prefix = "movement" if run_type == "online" else "movement_offline"
+        run_name = f"{prefix}_{timestamp}"
 
-    run_group = movement_parent.create_group(run_name)
-    movement_parent.attrs["latest"] = run_name
+    run_group = type_parent.create_group(run_name)
+
+    # Update convenience attributes
+    movement_parent.attrs["latest"] = f"{run_type}/{run_name}"
+    attr_key = "latest_online" if run_type == "online" else "latest_offline"
+    type_parent.attrs["latest"] = run_name
+    movement_parent.attrs[attr_key] = run_name
+
     return run_name, run_group
 
 
@@ -699,6 +719,30 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument("--skip-unassigned", action="store_true", help="Ignore detections with ID < 0.")
     parser.add_argument("--fps", type=float, default=None, help="Override frames-per-second value.")
     parser.add_argument("--no-write", action="store_true", help="Do not write results back to the Zarr archive.")
+    parser.add_argument(
+        "--offline-only",
+        action="store_true",
+        help="Skip detection-based movement run; only compute offline metrics run.",
+    )
+    parser.add_argument(
+        "--online-only",
+        action="store_true",
+        help="Only compute detection-based movement run, skipping offline metrics.",
+    )
+    parser.add_argument(
+        "--metrics-run",
+        help="Specific analysis/chaser_fish_metrics/<run> to use for offline movement analysis (default: latest).",
+    )
+    parser.add_argument(
+        "--chaser-index",
+        type=int,
+        default=0,
+        help="Chaser index for offline metrics (default: 0).",
+    )
+    parser.add_argument(
+        "--offline-run-name",
+        help="Optional name for the offline movement run (auto-generated if omitted).",
+    )
 
     args = parser.parse_args(argv)
 
@@ -706,160 +750,266 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     mode = "r" if args.no_write else "a"
     root = zarr.open(args.zarr_path, mode=mode)
 
-    keypoints = resolve_keypoint_group(root, args.keypoint_run, console)
-    kp_parent_name = "refined_keypoints_runs" if keypoints.is_refined else "keypoints_runs"
-    kp_parent = root.get(kp_parent_name)
-    latest_kp = kp_parent.attrs.get("latest") if kp_parent is not None else None
-    console.print(
-        f"[blue]Keypoint source:[/blue] {kp_parent_name}/{keypoints.run_name}"
-        + (" [dim](latest)[/dim]" if latest_kp == keypoints.run_name else "")
-    )
-    if latest_kp and latest_kp != keypoints.run_name:
-        console.print(f"[yellow]  Note:[/yellow] Latest {kp_parent_name} = {latest_kp}")
-
-    crop_group = root[f"crop_runs/{keypoints.crop_run}"]
-    detection_path = crop_group.attrs.get("source_coords_path")
-    if not detection_path:
-        raise ValueError(
-            f"Crop run '{keypoints.crop_run}' missing 'source_coords_path'; cannot determine detection source."
-        )
-
-    detection = resolve_detection_from_path(root, detection_path)
-    preferred_detection = prefer_refined_detection(root, detection, console)
-    detection = preferred_detection
-    detection_parent = root.get(detection.parent_path) if detection.parent_path in root else None
-    latest_detection = detection_parent.attrs.get("latest") if detection_parent is not None else None
-    console.print(
-        f"[blue]Detection source:[/blue] {detection.path}"
-        + (" [dim](latest)[/dim]" if latest_detection == detection.run_name else "")
-    )
-    if latest_detection and latest_detection != detection.run_name:
-        console.print(f"[yellow]  Note:[/yellow] Latest {detection.parent_path} = {latest_detection}")
-
-    detection_group = detection.group
-    bbox_norm = detection_group["bbox_norm_coords"][:]
-    frame_indices = detection_group["frame_indices"][:].astype(np.int64, copy=False)
-    console.print(
-        f"[blue]Detection rows:[/blue] {bbox_norm.shape[0]} | frame_indices len: {frame_indices.size}"
-    )
-
-    detection_source_arr = (
-        detection_group["detection_source"][:].astype(np.int8, copy=False)
-        if "detection_source" in detection_group
-        else None
-    )
-
-    heading = keypoints.group["heading"][:]
-    if heading.shape[0] != bbox_norm.shape[0]:
-        raise ValueError(
-            "Heading array length does not match detection count. Ensure keypoints run and detection source align."
-        )
-    console.print(f"[blue]Heading rows:[/blue] {heading.shape[0]}")
-
-    keypoint_success = (
-        keypoints.group["detection_success"][:]
-        if "detection_success" in keypoints.group
-        else np.ones_like(heading, dtype=bool)
-    )
-
-    if keypoint_success.shape[0] != heading.shape[0]:
-        raise ValueError("Keypoint success array length mismatch with heading array.")
-    console.print(f"[blue]Keypoint success rows:[/blue] {keypoint_success.shape[0]}")
+    render_online = not args.offline_only
+    render_offline = not args.online_only
+    if args.offline_only and args.online_only:
+        render_online = render_offline = True
+    if not render_online and not render_offline:
+        render_online = render_offline = True
 
     fps = float(args.fps) if args.fps else find_fps(root, console)
     if fps <= 0:
         raise ValueError("FPS must be positive.")
 
-    width, height = resolve_dimensions(root)
-    positions_px = np.empty((bbox_norm.shape[0], 2), dtype=np.float64)
-    positions_px[:, 0] = bbox_norm[:, 0] * width
-    positions_px[:, 1] = bbox_norm[:, 1] * height
-
     pixel_to_mm, calibration_info = resolve_calibration(root)
 
-    detection_ids, id_metadata = load_detection_ids(
-        root,
-        detect_length=bbox_norm.shape[0],
-        console=console,
-        expected_detect_run=detection.source_detect_run,
-        expected_refined_run=detection.run_name if detection.is_refined else None,
-        return_metadata=True,
-    )
-    console.print(
-        f"[blue]ID assignment rows:[/blue] {detection_ids.shape[0]} "
-        f"(assign run: {id_metadata.get('assign_run')})"
-    )
+    if render_online:
+        keypoints = resolve_keypoint_group(root, args.keypoint_run, console)
+        kp_parent_name = "refined_keypoints_runs" if keypoints.is_refined else "keypoints_runs"
+        kp_parent = root.get(kp_parent_name)
+        latest_kp = kp_parent.attrs.get("latest") if kp_parent is not None else None
+        console.print(
+            f"[blue]Keypoint source:[/blue] {kp_parent_name}/{keypoints.run_name}"
+            + (" [dim](latest)[/dim]" if latest_kp == keypoints.run_name else "")
+        )
+        if latest_kp and latest_kp != keypoints.run_name:
+            console.print(f"[yellow]  Note:[/yellow] Latest {kp_parent_name} = {latest_kp}")
 
-    if args.skip_unassigned:
-        valid_mask = detection_ids >= 0
-        detection_ids = detection_ids[valid_mask]
-        frame_indices = frame_indices[valid_mask]
-        positions_px = positions_px[valid_mask]
-        heading = heading[valid_mask]
-        keypoint_success = keypoint_success[valid_mask]
-        if detection_source_arr is not None:
-            detection_source_arr = detection_source_arr[valid_mask]
+        crop_group = root[f"crop_runs/{keypoints.crop_run}"]
+        detection_path = crop_group.attrs.get("source_coords_path")
+        if not detection_path:
+            raise ValueError(
+                f"Crop run '{keypoints.crop_run}' missing 'source_coords_path'; cannot determine detection source."
+            )
 
-    if detection_ids.size == 0:
-        raise ValueError("No valid detection IDs found after filtering.")
+        detection = resolve_detection_from_path(root, detection_path)
+        preferred_detection = prefer_refined_detection(root, detection, console)
+        detection = preferred_detection
+        detection_parent = root.get(detection.parent_path) if detection.parent_path in root else None
+        latest_detection = detection_parent.attrs.get("latest") if detection_parent is not None else None
+        console.print(
+            f"[blue]Detection source:[/blue] {detection.path}"
+            + (" [dim](latest)[/dim]" if latest_detection == detection.run_name else "")
+        )
+        if latest_detection and latest_detection != detection.run_name:
+            console.print(f"[yellow]  Note:[/yellow] Latest {detection.parent_path} = {latest_detection}")
 
-    tracks, summaries = build_track_datasets(
-        detection_ids=detection_ids,
-        frames=frame_indices,
-        positions_px=positions_px,
-        headings_deg=heading,
-        keypoint_success=keypoint_success,
-        detection_source=detection_source_arr,
-        fps=fps,
-        smooth_seconds=args.smooth_seconds,
-        pixel_to_mm=pixel_to_mm,
-    )
+        detection_group = detection.group
+        bbox_norm = detection_group["bbox_norm_coords"][:]
+        frame_indices = detection_group["frame_indices"][:].astype(np.int64, copy=False)
+        console.print(
+            f"[blue]Detection rows:[/blue] {bbox_norm.shape[0]} | frame_indices len: {frame_indices.size}"
+        )
 
-    if not summaries:
-        raise ValueError("No tracks generated; check detection IDs and inputs.")
+        detection_source_arr = (
+            detection_group["detection_source"][:].astype(np.int8, copy=False)
+            if "detection_source" in detection_group
+            else None
+        )
 
-    total_px, total_mm = summarize_to_table(summaries, pixel_to_mm, console)
+        heading = keypoints.group["heading"][:]
+        if heading.shape[0] != bbox_norm.shape[0]:
+            raise ValueError(
+                "Heading array length does not match detection count. Ensure keypoints run and detection source align."
+            )
+        console.print(f"[blue]Heading rows:[/blue] {heading.shape[0]}")
 
-    if args.no_write:
-        console.print("[green]Skipping write (--no-write).[/green]")
-        return
+        keypoint_success = (
+            keypoints.group["detection_success"][:]
+            if "detection_success" in keypoints.group
+            else np.ones_like(heading, dtype=bool)
+        )
 
-    run_name, run_group = ensure_movement_run_group(root, args.run_name)
-    ordered_track_ids = save_movement_tracks(run_group, tracks, summaries)
+        if keypoint_success.shape[0] != heading.shape[0]:
+            raise ValueError("Keypoint success array length mismatch with heading array.")
+        console.print(f"[blue]Keypoint success rows:[/blue] {keypoint_success.shape[0]}")
 
-    created_at = datetime.now(timezone.utc).isoformat()
+        width, height = resolve_dimensions(root)
+        positions_px = np.empty((bbox_norm.shape[0], 2), dtype=np.float64)
+        positions_px[:, 0] = bbox_norm[:, 0] * width
+        positions_px[:, 1] = bbox_norm[:, 1] * height
 
-    inputs = {
-        "detection_path": detection.path,
-        "detection_run": detection.run_name,
-        "detection_variant": detection.variant,
-        "source_detect_run": detection.source_detect_run,
-        "keypoint_run": keypoints.run_name,
-        "keypoint_variant": "refined" if keypoints.is_refined else "raw",
-        "base_keypoint_run": keypoints.base_run_name,
-        "crop_run": keypoints.crop_run,
-        "id_assignment_run": id_metadata.get("assign_run"),
-    }
+        detection_ids, id_metadata = load_detection_ids(
+            root,
+            detect_length=bbox_norm.shape[0],
+            console=console,
+            expected_detect_run=detection.source_detect_run,
+            expected_refined_run=detection.run_name if detection.is_refined else None,
+            return_metadata=True,
+        )
+        console.print(
+            f"[blue]ID assignment rows:[/blue] {detection_ids.shape[0]} "
+            f"(assign run: {id_metadata.get('assign_run')})"
+        )
 
-    run_group.attrs.update(
-        {
-            "method": "movement_analysis",
-            "created_at_utc": created_at,
-            "fps": fps,
-            "smoothing_seconds": args.smooth_seconds,
-            "pixel_to_mm": pixel_to_mm,
-            "calibration": calibration_info,
-            "inputs": inputs,
-            "summary": summaries,
-            "num_tracks": len(ordered_track_ids),
-            "total_distance_px": total_px,
-            "total_distance_mm": total_mm if pixel_to_mm is not None else float("nan"),
-        }
-    )
+        if args.skip_unassigned:
+            valid_mask = detection_ids >= 0
+            detection_ids = detection_ids[valid_mask]
+            frame_indices = frame_indices[valid_mask]
+            positions_px = positions_px[valid_mask]
+            heading = heading[valid_mask]
+            keypoint_success = keypoint_success[valid_mask]
+            if detection_source_arr is not None:
+                detection_source_arr = detection_source_arr[valid_mask]
 
-    console.print(
-        f"[green]✓[/green] Saved movement run to [bold]analysis/movement_runs/{run_name}[/bold]"
-    )
+        if detection_ids.size == 0:
+            raise ValueError("No valid detection IDs found after filtering.")
+
+        tracks, summaries = build_track_datasets(
+            detection_ids=detection_ids,
+            frames=frame_indices,
+            positions_px=positions_px,
+            headings_deg=heading,
+            keypoint_success=keypoint_success,
+            detection_source=detection_source_arr,
+            fps=fps,
+            smooth_seconds=args.smooth_seconds,
+            pixel_to_mm=pixel_to_mm,
+        )
+
+        if not summaries:
+            raise ValueError("No tracks generated; check detection IDs and inputs.")
+
+        total_px, total_mm = summarize_to_table(summaries, pixel_to_mm, console)
+
+        if args.no_write:
+            console.print("[green]Skipping write (--no-write).[/green]")
+        else:
+            run_name, run_group = ensure_movement_run_group(root, args.run_name, run_type="online")
+            ordered_track_ids = save_movement_tracks(run_group, tracks, summaries)
+
+            created_at = datetime.now(timezone.utc).isoformat()
+
+            inputs = {
+                "detection_path": detection.path,
+                "detection_run": detection.run_name,
+                "detection_variant": detection.variant,
+                "source_detect_run": detection.source_detect_run,
+                "keypoint_run": keypoints.run_name,
+                "keypoint_variant": "refined" if keypoints.is_refined else "raw",
+                "base_keypoint_run": keypoints.base_run_name,
+                "crop_run": keypoints.crop_run,
+                "id_assignment_run": id_metadata.get("assign_run"),
+            }
+
+            run_group.attrs.update(
+                {
+                    "method": "movement_analysis",
+                    "created_at_utc": created_at,
+                    "fps": fps,
+                    "smoothing_seconds": args.smooth_seconds,
+                    "pixel_to_mm": pixel_to_mm,
+                    "calibration": calibration_info,
+                    "inputs": inputs,
+                    "summary": summaries,
+                    "num_tracks": len(ordered_track_ids),
+                    "total_distance_px": total_px,
+                    "total_distance_mm": total_mm if pixel_to_mm is not None else float("nan"),
+                }
+            )
+
+            console.print(
+                f"[green]✓[/green] Saved movement run to [bold]analysis/movement_runs/online/{run_name}[/bold]"
+            )
+
+    if render_offline:
+        try:
+            bundle = load_chaser_metrics(
+                args.zarr_path,
+                stimulus_run=None,
+                metrics_run=args.metrics_run,
+                chaser_index=args.chaser_index,
+            )
+        except Exception as exc:
+            console.print(f"[yellow]Warning:[/yellow] Unable to load offline metrics ({exc}).")
+        else:
+            frames_all = np.asarray(bundle.camera_frame_ids, dtype=np.int64)
+            has_offline = np.asarray(bundle.offline.get("has_offline"), dtype=bool)
+            fish_positions = np.asarray(bundle.offline.get("fish_centroid_px"), dtype=np.float64)
+            heading_offline = bundle.offline.get("heading_deg")
+            heading_offline = (
+                np.asarray(heading_offline, dtype=np.float64)
+                if heading_offline is not None
+                else np.full(has_offline.shape, np.nan, dtype=np.float64)
+            )
+
+            finite_pos = np.all(np.isfinite(fish_positions), axis=1)
+            valid_mask = has_offline & finite_pos
+
+            frames_offline = frames_all[valid_mask]
+            if frames_offline.size == 0:
+                console.print("[yellow]Warning:[/yellow] Offline metrics contain no valid positions; skipping.")
+            else:
+                positions_offline = fish_positions[valid_mask]
+                heading_values = heading_offline[valid_mask]
+                detection_ids_offline = np.zeros(frames_offline.shape[0], dtype=np.int64)
+                keypoint_success_offline = np.ones(frames_offline.shape[0], dtype=bool)
+
+                tracks_offline, summaries_offline = build_track_datasets(
+                    detection_ids=detection_ids_offline,
+                    frames=frames_offline,
+                    positions_px=positions_offline,
+                    headings_deg=heading_values,
+                    keypoint_success=keypoint_success_offline,
+                    detection_source=None,
+                    fps=fps,
+                    smooth_seconds=args.smooth_seconds,
+                    pixel_to_mm=pixel_to_mm,
+                )
+
+                if not summaries_offline:
+                    console.print("[yellow]Warning:[/yellow] Offline metrics produced no tracks.")
+                else:
+                    total_px_offline, total_mm_offline = summarize_to_table(
+                        summaries_offline, pixel_to_mm, console
+                    )
+
+                    if args.no_write:
+                        console.print("[green]Skipping offline write (--no-write).[/green]")
+                    else:
+                        offline_run_name = args.offline_run_name
+                        if not offline_run_name:
+                            metrics_run_name = bundle.provenance.get("metrics_run")
+                            if metrics_run_name:
+                                offline_run_name = f"{metrics_run_name}_movement"
+
+                        offline_run_name, offline_group = ensure_movement_run_group(
+                            root,
+                            offline_run_name,
+                            run_type="offline",
+                            overwrite=True,
+                        )
+                        ordered_ids_offline = save_movement_tracks(
+                            offline_group, tracks_offline, summaries_offline
+                        )
+
+                        created_at = datetime.now(timezone.utc).isoformat()
+                        offline_inputs = {
+                            "metrics_run": bundle.provenance.get("metrics_run"),
+                            "stimulus_run": bundle.provenance.get("stimulus_run"),
+                            "source_keypoints_run": bundle.provenance.get("source_keypoints_run"),
+                            "chaser_index": int(bundle.provenance.get("chaser_index", args.chaser_index)),
+                        }
+
+                        offline_group.attrs.update(
+                            {
+                                "method": "movement_analysis_offline",
+                                "created_at_utc": created_at,
+                                "fps": fps,
+                                "smoothing_seconds": args.smooth_seconds,
+                                "pixel_to_mm": pixel_to_mm,
+                                "calibration": calibration_info,
+                                "inputs": offline_inputs,
+                                "summary": summaries_offline,
+                                "num_tracks": len(ordered_ids_offline),
+                                "total_distance_px": total_px_offline,
+                                "total_distance_mm": total_mm_offline if pixel_to_mm is not None else float("nan"),
+                            }
+                        )
+
+                        console.print(
+                            f"[green]✓[/green] Saved offline movement run to [bold]analysis/movement_runs/offline/{offline_run_name}[/bold]"
+                        )
 
 
 __all__ = [

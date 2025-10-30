@@ -27,12 +27,18 @@ from matplotlib.patches import Circle
 from scipy.ndimage import gaussian_filter
 from scipy.stats import gaussian_kde
 
+from fisheye.analysis.chaser_metrics_loader import load_chaser_metrics
+
 try:
     from PIL import Image, PngImagePlugin
 except ImportError:  # pragma: no cover
     Image = None
     PngImagePlugin = None
 
+from fisheye.analysis.chaser_metrics_loader import (
+    ChaserMetricsBundle,
+    load_chaser_metrics,
+)
 from fisheye.utils.system import get_git_info
 
 
@@ -613,6 +619,77 @@ class ChaserPhaseAnalyzer:
             )
 
 
+def _build_offline_aligned_data(
+    analyzer: ChaserPhaseAnalyzer,
+    bundle: ChaserMetricsBundle,
+) -> ChaserAlignedData:
+    total_frames = analyzer.total_frames
+    fps = analyzer.fps if analyzer.fps else 60.0
+
+    frame_numbers = np.arange(total_frames, dtype=np.int32)
+    fish_x = np.full(total_frames, np.nan, dtype=float)
+    fish_y = np.full(total_frames, np.nan, dtype=float)
+    chaser_x = np.full(total_frames, np.nan, dtype=float)
+    chaser_y = np.full(total_frames, np.nan, dtype=float)
+    distances = np.full(total_frames, np.nan, dtype=float)
+    fish_interpolated = np.ones(total_frames, dtype=bool)
+    timestamps = np.full(total_frames, np.nan, dtype=float)
+
+    camera_frames = np.asarray(bundle.camera_frame_ids, dtype=np.int64)
+    timestamp_ns = np.asarray(bundle.timestamp_ns, dtype=np.int64)
+    has_offline = np.asarray(bundle.offline.get("has_offline"), dtype=bool)
+    fish_positions = np.asarray(bundle.offline.get("fish_centroid_px"), dtype=np.float64)
+    chaser_positions = np.asarray(bundle.offline.get("chaser_position_px"), dtype=np.float64)
+    distances_offline = np.asarray(bundle.offline.get("distance_px"), dtype=np.float64)
+
+    for idx, cam_frame in enumerate(camera_frames):
+        if cam_frame < 0 or cam_frame >= total_frames:
+            continue
+        if idx < timestamp_ns.shape[0] and timestamp_ns[idx] >= 0:
+            timestamps[cam_frame] = timestamp_ns[idx] / 1e9
+        if idx < has_offline.shape[0] and has_offline[idx]:
+            fish_interpolated[cam_frame] = False
+        if idx < fish_positions.shape[0]:
+            fish_pt = fish_positions[idx]
+            if np.all(np.isfinite(fish_pt)):
+                fish_x[cam_frame] = float(fish_pt[0])
+                fish_y[cam_frame] = float(fish_pt[1])
+        if idx < chaser_positions.shape[0]:
+            chaser_pt = chaser_positions[idx]
+            if np.all(np.isfinite(chaser_pt)):
+                chaser_x[cam_frame] = float(chaser_pt[0])
+                chaser_y[cam_frame] = float(chaser_pt[1])
+        if idx < distances_offline.shape[0]:
+            distances[cam_frame] = float(distances_offline[idx])
+
+    missing_timestamps = np.isnan(timestamps)
+    if np.any(missing_timestamps):
+        timestamps[missing_timestamps] = frame_numbers[missing_timestamps] / fps
+
+    metadata = {
+        "alignment": "offline_metrics",
+        "stimulus_run": bundle.provenance.get("stimulus_run"),
+        "metrics_run": bundle.provenance.get("metrics_run"),
+        "source_keypoints_run": bundle.provenance.get("source_keypoints_run"),
+        "chaser_index": bundle.provenance.get("chaser_index"),
+        "fps": analyzer.fps,
+        "total_frames": total_frames,
+    }
+
+    return ChaserAlignedData(
+        frame_numbers=frame_numbers,
+        timestamps=timestamps,
+        fish_x=fish_x,
+        fish_y=fish_y,
+        chaser_x=chaser_x,
+        chaser_y=chaser_y,
+        distances=distances,
+        fish_interpolated=fish_interpolated,
+        chase_events=analyzer.chase_events,
+        metadata=metadata,
+    )
+
+
 def identify_experimental_phases(analyzer: ChaserPhaseAnalyzer) -> Dict[str, Dict]:
     """Return frame ranges for pre-training, training, and post-training phases."""
     fps = analyzer.aligned_data.metadata["fps"]
@@ -898,6 +975,7 @@ def plot_phase_analysis(
     bins: int = 50,
     save_path: Optional[Path] = None,
     show: bool = True,
+    title_suffix: str = "",
 ) -> Dict[str, Dict[str, float]]:
     """Create the phase comparison visualization."""
     fig = plt.figure(figsize=(20, 16))
@@ -1115,8 +1193,9 @@ def plot_phase_analysis(
         for col_idx in range(1, 4):
             table[(row_idx, col_idx)].set_facecolor(phase_colors[col_idx - 1])
 
+    suffix = f" {title_suffix}" if title_suffix else ""
     fig.suptitle(
-        "Phase-Based Chaser-Fish Analysis: Pre-Training vs Training vs Post-Training",
+        f"Phase-Based Chaser-Fish Analysis{suffix}: Pre-Training vs Training vs Post-Training",
         fontsize=16,
         fontweight="bold",
     )
@@ -1180,6 +1259,27 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Reduce console logging.",
     )
+    parser.add_argument(
+        "--offline-only",
+        action="store_true",
+        help="Render only the offline metrics visualization (skip online analysis).",
+    )
+    parser.add_argument(
+        "--online-only",
+        action="store_true",
+        help="Render only the online analysis (skip offline metrics).",
+    )
+    parser.add_argument(
+        "--chaser-index",
+        type=int,
+        default=0,
+        help="Chaser index to use when loading offline metrics (default: 0).",
+    )
+    parser.add_argument(
+        "--metrics-run",
+        type=str,
+        help="Specific analysis/chaser_fish_metrics/<run> to use for offline metrics (default: latest).",
+    )
     return parser.parse_args()
 
 
@@ -1203,27 +1303,87 @@ def main() -> int:
             f"({duration_s:.1f} seconds)"
         )
 
-    metrics = plot_phase_analysis(
-        analyzer,
-        phases,
-        bins=args.bins,
-        save_path=args.output,
-        show=not args.no_show,
-    )
+    render_online = not args.offline_only
+    render_offline = True
+    if args.online_only:
+        render_online = True
+        render_offline = False
+    if args.offline_only and args.online_only:
+        render_offline = True
 
-    print("\n" + "=" * 60)
-    print("PHASE COMPARISON SUMMARY")
-    print("=" * 60)
+    output_path = args.output
+    metrics_online: Optional[Dict[str, Dict[str, float]]] = None
 
-    print("\nMean Distance (pixels):")
-    for phase in ["pre_training", "training", "post_training"]:
-        value = format_metric(metrics[phase].get("mean_distance"))
-        print(f"  {phase}: {value}")
+    if render_online:
+        metrics_online = plot_phase_analysis(
+            analyzer,
+            phases,
+            bins=args.bins,
+            save_path=output_path,
+            show=not args.no_show,
+            title_suffix="(Online Chaser States)",
+        )
 
-    print("\nTime Spent Close (<500 pixels):")
-    for phase in ["pre_training", "training", "post_training"]:
-        value = format_metric(metrics[phase].get("time_close_pct"), "%")
-        print(f"  {phase}: {value}")
+    def _print_summary(label: str, summary_metrics: Dict[str, Dict[str, float]]) -> None:
+        print("\n" + "=" * 60)
+        print(f"PHASE COMPARISON SUMMARY {label}")
+        print("=" * 60)
+        print("\nMean Distance (pixels):")
+        for phase in ["pre_training", "training", "post_training"]:
+            value = format_metric(summary_metrics[phase].get("mean_distance"))
+            print(f"  {phase}: {value}")
+
+        print("\nTime Spent Close (<500 pixels):")
+        for phase in ["pre_training", "training", "post_training"]:
+            value = format_metric(summary_metrics[phase].get("time_close_pct"), "%")
+            print(f"  {phase}: {value}")
+
+    if metrics_online is not None:
+        _print_summary("(Online)", metrics_online)
+
+    if render_offline:
+        try:
+            bundle = load_chaser_metrics(
+                args.zarr_path,
+                stimulus_run=analyzer.stimulus_run,
+                metrics_run=args.metrics_run,
+                chaser_index=args.chaser_index,
+            )
+        except Exception as exc:  # pragma: no cover - CLI feedback
+            print(f"\nWarning: unable to load offline metrics ({exc}). Skipping offline visualization.")
+            return 0
+
+        offline_aligned = _build_offline_aligned_data(analyzer, bundle)
+        if np.all(np.isnan(offline_aligned.distances)):
+            print("\nWarning: offline metrics contain no valid distances; skipping offline visualization.")
+            return 0
+
+        offline_output = None
+        if output_path:
+            offline_output = output_path.with_name(
+                f"{output_path.stem}_offline{output_path.suffix}"
+            )
+
+        original_data = analyzer.aligned_data
+        original_detect_path = getattr(analyzer, "detect_path", None)
+
+        analyzer.aligned_data = offline_aligned
+        analyzer.detect_path = f"offline_metrics/{bundle.provenance.get('metrics_run', 'latest')}"
+
+        offline_metrics = plot_phase_analysis(
+            analyzer,
+            phases,
+            bins=args.bins,
+            save_path=offline_output,
+            show=not args.no_show,
+            title_suffix="(Offline Metrics)",
+        )
+
+        _print_summary("(Offline)", offline_metrics)
+
+        analyzer.aligned_data = original_data
+        analyzer.detect_path = original_detect_path
+        _print_summary("(Offline)", offline_metrics)
 
     return 0
 

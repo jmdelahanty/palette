@@ -1,8 +1,10 @@
-import h5py
-import sys
-import os
-import json
 import argparse
+import json
+import os
+import sys
+from typing import Dict
+
+import h5py
 import numpy as np
 import polars as pl
 import yaml
@@ -35,6 +37,52 @@ STIMULUS_MODE_TYPE = {
     6: "CONCENTRIC_GRATING", 7: "LOOMING_DOT", 8: "STATIC_IMAGE", 9: "CALIBRATION_GRID",
     10: "ARENA_DEFINITION_SQUARE", 11: "SPOTLIGHT", 12: "CHASER", 99: "NONE"
 }
+
+EVENTS_ENUM: Dict[int, str] = dict(EXPERIMENT_EVENT_TYPE)
+STIMULUS_MODES_ENUM: Dict[int, str] = dict(STIMULUS_MODE_TYPE)
+
+
+def _decode_enum_value(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "ignore").rstrip("\x00")
+    return str(value).rstrip("\x00")
+
+
+def _lookup_enum(mapping: Dict[int, str], value: object) -> str:
+    try:
+        key = int(value)
+    except (TypeError, ValueError):
+        return "UNKNOWN"
+    return mapping.get(key, f"UNKNOWN_{key}")
+
+
+def load_enum_tables(hf: h5py.File) -> Dict[str, Dict[int, str]]:
+    """Read all id/name datasets from /enums into dictionaries."""
+    enums_group = hf.get("enums")
+    if enums_group is None:
+        return {}
+
+    tables: Dict[str, Dict[int, str]] = {}
+    for name, dataset in enums_group.items():
+        if not isinstance(dataset, h5py.Dataset):
+            continue
+        if dataset.size == 0 or dataset.dtype.names is None:
+            continue
+        if "id" not in dataset.dtype.names or "name" not in dataset.dtype.names:
+            continue
+
+        table: Dict[int, str] = {}
+        try:
+            data = dataset[:]
+            for entry in data:
+                table[int(entry["id"])] = _decode_enum_value(entry["name"])
+        except Exception as exc:  # Defensive: don't let one bad dataset break the inspector.
+            print(f"Warning: Could not read /enums/{name}: {exc}")
+            continue
+
+        tables[name] = table
+    return tables
+
 
 def get_h5_object(hf, path):
     """Safely gets an object from the HDF5 file."""
@@ -96,8 +144,8 @@ def read_events(hf):
     })
 
     df = df.with_columns([
-        pl.col("event_type_id").map_elements(lambda x: EXPERIMENT_EVENT_TYPE.get(x, "UNKNOWN"), return_dtype=pl.String).alias("event_type_str"),
-        pl.col("stimulus_mode_id").map_elements(lambda x: STIMULUS_MODE_TYPE.get(x, "UNKNOWN"), return_dtype=pl.String).alias("stimulus_mode_str"),
+        pl.col("event_type_id").map_elements(lambda x: _lookup_enum(EVENTS_ENUM, x), return_dtype=pl.String).alias("event_type_str"),
+        pl.col("stimulus_mode_id").map_elements(lambda x: _lookup_enum(STIMULUS_MODES_ENUM, x), return_dtype=pl.String).alias("stimulus_mode_str"),
         pl.from_epoch("timestamp_ns_epoch", time_unit="ns").alias("timestamp")
     ])
 
@@ -325,6 +373,18 @@ def main():
         os.makedirs(args.output_dir)
 
     with h5py.File(args.filepath, 'r') as hf:
+        enum_tables = load_enum_tables(hf)
+        events_enum = {**EXPERIMENT_EVENT_TYPE, **enum_tables.get("events", {})}
+        stimulus_modes_enum = {**STIMULUS_MODE_TYPE, **enum_tables.get("stimulus_modes", {})}
+
+        global EVENTS_ENUM, STIMULUS_MODES_ENUM
+        EVENTS_ENUM = events_enum
+        STIMULUS_MODES_ENUM = stimulus_modes_enum
+
+        if enum_tables:
+            loaded_summary = ", ".join(f"{name} ({len(values)})" for name, values in enum_tables.items())
+            print(f"Loaded enum tables from /enums: {loaded_summary}")
+
         if args.info or args.all:
             read_session_info(hf)
         if args.subject or args.all:

@@ -17,6 +17,33 @@ import numpy as np
 import zarr
 from rich.console import Console
 from rich.table import Table
+import json
+
+
+def _resolve_enums_group(root: zarr.Group) -> Optional[zarr.Group]:
+    analysis = root.get("analysis")
+    if analysis is not None:
+        enums = analysis.get("enums")
+        if enums is not None:
+            events_enums = enums.get("events")
+            if events_enums is not None:
+                return events_enums
+    return root.get("enums")
+
+
+def _load_enum_mapping(root: zarr.Group, name: str) -> dict[int, str]:
+    enums_group = _resolve_enums_group(root)
+    if enums_group is None or name not in enums_group:
+        return {}
+    data = enums_group[name][:]
+    mapping = {}
+    for record in data:
+        enum_id = int(record["id"])
+        enum_name = record["name"]
+        if isinstance(enum_name, bytes):
+            enum_name = enum_name.decode("utf-8", errors="ignore").rstrip("\x00")
+        mapping[enum_id] = enum_name
+    return mapping
 
 
 def list_stimulus_runs(root: zarr.Group) -> list[str]:
@@ -74,11 +101,17 @@ def load_events(root: zarr.Group, run_name: str) -> tuple[np.ndarray, dict]:
     return events_array, events_attrs
 
 
-def inspect_events(zarr_path: Path, run_name: Optional[str], limit: Optional[int]) -> None:
+def inspect_events(
+    zarr_path: Path,
+    run_name: Optional[str],
+    limit: Optional[int],
+    to_json: bool,
+) -> None:
     console = Console()
     console.print(f"[bold]Inspecting events in:[/bold] {zarr_path}")
 
     root = zarr.open(str(zarr_path), mode="r")
+    mode_mapping = _load_enum_mapping(root, "stimulus_modes")
     available_runs = list_stimulus_runs(root)
     if not available_runs:
         raise ValueError("No stimulus runs found under analysis/stimulus_runs.")
@@ -96,12 +129,35 @@ def inspect_events(zarr_path: Path, run_name: Optional[str], limit: Optional[int
     if attrs:
         console.print(f"[dim]Event dataset attrs:[/dim] {attrs}")
 
-    table = Table("Index", "Fields", show_lines=False, expand=True)
     max_rows = limit if limit is not None else events.shape[0]
+    records_to_show = []
     for idx in range(min(events.shape[0], max_rows)):
         record = events[idx]
-        fields = ", ".join(f"{name}={record[name]}" for name in record.dtype.names or ())
-        table.add_row(str(idx), fields or str(record))
+        entry = {}
+        if record.dtype.names:
+            for name in record.dtype.names:
+                value = record[name]
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8", errors="ignore").rstrip("\x00")
+                entry[name] = value
+        else:
+            entry = {"value": record}
+        if mode_mapping and "stimulus_mode_id" in entry:
+            entry["stimulus_mode_name"] = mode_mapping.get(
+                int(entry["stimulus_mode_id"]), "UNKNOWN"
+            )
+        entry["index"] = idx
+        records_to_show.append(entry)
+
+    if to_json:
+        print(json.dumps(records_to_show, indent=2, default=lambda o: o.tolist() if hasattr(o, "tolist") else o))
+        return
+
+    table = Table("Index", "Fields", show_lines=False, expand=True)
+    for entry in records_to_show:
+        idx = entry.pop("index")
+        fields = ", ".join(f"{k}={v}" for k, v in entry.items())
+        table.add_row(str(idx), fields)
 
     console.print(table)
     if events.shape[0] > max_rows:
@@ -124,12 +180,17 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         type=int,
         help="Maximum number of events to display (default: all).",
     )
+    parser.add_argument(
+        "--to-json",
+        action="store_true",
+        help="Print the selected events as JSON instead of a table.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
     args = parse_args(argv)
-    inspect_events(args.zarr_path, args.run_name, args.limit)
+    inspect_events(args.zarr_path, args.run_name, args.limit, args.to_json)
 
 
 if __name__ == "__main__":  # pragma: no cover

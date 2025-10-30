@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple, List
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -16,23 +16,100 @@ import zarr
 from rich.console import Console
 
 
-def resolve_movement_run(root: zarr.Group, requested: Optional[str], console: Console) -> tuple[str, zarr.Group]:
+def resolve_movement_runs(
+    root: zarr.Group,
+    requested: Optional[str],
+    console: Console,
+    *,
+    include_online: bool,
+    include_offline: bool,
+) -> List[Tuple[str, zarr.Group]]:
     if "analysis" not in root or "movement_runs" not in root["analysis"]:
         raise ValueError("No movement_runs group found under analysis/.")
 
     parent = root["analysis/movement_runs"]
-    if requested:
-        if requested not in parent:
-            raise ValueError(f"Movement run '{requested}' not found.")
-        return requested, parent[requested]
+    online_parent = parent.get("online")
+    offline_parent = parent.get("offline")
 
-    run_name = parent.attrs.get("latest")
-    if not run_name:
-        raise ValueError("movement_runs does not have a 'latest' attribute; specify --movement-run.")
-    if run_name not in parent:
-        raise ValueError(f"Movement run '{run_name}' referenced by 'latest' is missing.")
-    console.print(f"Using movement run: [cyan]{run_name}[/cyan]")
-    return run_name, parent[run_name]
+    def get_run(group: Optional[zarr.Group], name: str) -> Optional[zarr.Group]:
+        if group is None:
+            return None
+        return group.get(name)
+
+    def iter_runs() -> Iterable[Tuple[str, str, zarr.Group]]:
+        if include_online and online_parent is not None:
+            for name in online_parent.group_keys():
+                yield ("online", name, online_parent[name])
+        if include_offline and offline_parent is not None:
+            for name in offline_parent.group_keys():
+                yield ("offline", name, offline_parent[name])
+
+    def resolve_requested(name: str) -> Optional[Tuple[str, str, zarr.Group]]:
+        if "/" in name:
+            prefix, run = name.split("/", 1)
+            if prefix == "online":
+                group = get_run(online_parent, run)
+                if group is not None:
+                    return ("online", run, group)
+            elif prefix == "offline":
+                group = get_run(offline_parent, run)
+                if group is not None:
+                    return ("offline", run, group)
+            return None
+        # Search both parents for bare run names
+        if include_online:
+            group = get_run(online_parent, name)
+            if group is not None:
+                return ("online", name, group)
+        if include_offline:
+            group = get_run(offline_parent, name)
+            if group is not None:
+                return ("offline", name, group)
+        return None
+
+    runs: List[Tuple[str, zarr.Group]] = []
+
+    if requested:
+        resolved = resolve_requested(requested)
+        if resolved is None:
+            raise ValueError(f"Movement run '{requested}' not found.")
+        run_type, name, group = resolved
+        console.print(f"Using movement run: [cyan]{run_type}/{name}[/cyan]")
+        runs.append((f"{run_type}/{name}", group))
+        return runs
+
+    preferred: List[Tuple[str, str, zarr.Group]] = []
+    if include_online and online_parent is not None:
+        latest_online = online_parent.attrs.get("latest")
+        if latest_online and latest_online in online_parent:
+            preferred.append(("online", latest_online, online_parent[latest_online]))
+    if include_offline and offline_parent is not None:
+        latest_offline = offline_parent.attrs.get("latest")
+        if latest_offline and latest_offline in offline_parent:
+            preferred.append(("offline", latest_offline, offline_parent[latest_offline]))
+
+    # legacy attribute storing path like 'online/run'
+    legacy_latest = parent.attrs.get("latest")
+    if legacy_latest and isinstance(legacy_latest, str):
+        resolved = resolve_requested(legacy_latest)
+        if resolved and resolved not in preferred:
+            preferred.append(resolved)
+
+    seen = set()
+    for run_type, name, group in preferred:
+        key = (run_type, name)
+        if key in seen:
+            continue
+        seen.add(key)
+        console.print(f"Using movement run: [cyan]{run_type}/{name}[/cyan]")
+        runs.append((f"{run_type}/{name}", group))
+
+    if not runs:
+        console.print("[yellow]No movement runs resolved via 'latest'; scanning available runs.[/yellow]")
+        for run_type, name, group in iter_runs():
+            runs.append((f"{run_type}/{name}", group))
+
+    return runs
 
 
 def resolve_track(group: zarr.Group, track_id: Optional[int], console: Console) -> tuple[int, zarr.Group]:
@@ -144,17 +221,47 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument("--track-id", type=int, help="Track ID to visualize.")
     parser.add_argument("--bins", type=int, default=200, help="Histogram bins for position heatmap (default: 200).")
     parser.add_argument("--save", help="Path to save the figure instead of showing interactively.")
+    parser.add_argument(
+        "--offline-only",
+        action="store_true",
+        help="Only plot movement runs derived from offline metrics.",
+    )
+    parser.add_argument(
+        "--online-only",
+        action="store_true",
+        help="Only plot detection-based movement runs.",
+    )
 
     args = parser.parse_args(argv)
 
     console = Console()
     root = zarr.open(args.zarr_path, mode="r")
 
-    run_name, run_group = resolve_movement_run(root, args.movement_run, console)
-    track_id, track_group = resolve_track(run_group, args.track_id, console)
+    include_online = not args.offline_only
+    include_offline = not args.online_only
+    if args.offline_only and args.online_only:
+        include_online = include_offline = True
+    if not include_online and not include_offline:
+        include_online = include_offline = True
+
+    runs = resolve_movement_runs(root, args.movement_run, console, include_online=include_online, include_offline=include_offline)
+    if not runs:
+        console.print("[yellow]No movement runs matched the requested filters.[/yellow]")
+        return
 
     save_path = Path(args.save) if args.save else None
-    plot_track(run_group, track_group, track_id, save_path, args.bins, console)
+
+    for run_name, run_group in runs:
+        console.print(f"\n[bold]Plotting movement run:[/bold] {run_name}")
+        try:
+            track_id, track_group = resolve_track(run_group, args.track_id, console)
+        except ValueError as exc:
+            console.print(f"[yellow]Warning:[/yellow] {exc}")
+            continue
+        dest = save_path
+        if dest:
+            dest = dest.with_name(f"{dest.stem}_{run_name}{dest.suffix}")
+        plot_track(run_group, track_group, track_id, dest, args.bins, console)
 
 
 if __name__ == "__main__":  # pragma: no cover

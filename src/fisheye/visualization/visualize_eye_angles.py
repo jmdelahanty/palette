@@ -624,6 +624,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Which angle series to treat as primary (default: ellipse).",
     )
     parser.add_argument(
+        "--all-variants",
+        action="store_true",
+        help="Render dashboards for every angle variant (ellipse, minor, feret_major, feret_minor).",
+    )
+    parser.add_argument(
         "--title",
         type=str,
         help="Override figure title.",
@@ -649,44 +654,67 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not args.quiet:
         print(f"Loaded eye angle run '{attrs['run_name']}' from {args.zarr_path}")
 
-    angle_source = args.angle_source
-    try:
-        angle_variant, variant_label = _select_angle_variant(data["roi_angles"], angle_source)
-    except ValueError as exc:
-        if angle_source != "ellipse":
-            if not args.quiet:
-                print(f"Warning: {exc} Falling back to 'ellipse'.")
-            angle_source = "ellipse"
+    requested_sources = (
+        ["ellipse", "minor", "feret_major", "feret_minor"]
+        if args.all_variants
+        else [args.angle_source]
+    )
+
+    figs: List[plt.Figure] = []
+
+    for angle_source in requested_sources:
+        try:
             angle_variant, variant_label = _select_angle_variant(data["roi_angles"], angle_source)
-        else:
+        except ValueError as exc:
+            if angle_source != "ellipse":
+                if not args.quiet:
+                    print(f"Warning: {exc} Skipping variant '{angle_source}'.")
+                continue
             raise
 
-    fig = _plot_eye_angle_dashboard(attrs, data, args.title, angle_variant, variant_label)
+        fig = _plot_eye_angle_dashboard(attrs, data, args.title, angle_variant, variant_label)
+        figs.append(fig)
 
-    provenance = attrs.get("provenance", {})
-    metadata = {
-        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "source_zarr": str(args.zarr_path),
-        "run_name": attrs.get("run_name"),
-        "provenance": provenance,
-        "angle_source": angle_source,
-        "angle_source_label": variant_label,
-    }
+        provenance = attrs.get("provenance", {})
+        metadata = {
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "source_zarr": str(args.zarr_path),
+            "run_name": attrs.get("run_name"),
+            "provenance": provenance,
+            "angle_source": angle_source,
+            "angle_source_label": variant_label,
+        }
 
-    if args.output:
-        output_path = args.output
-    else:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        output_path = DEFAULT_OUTPUT_DIR / f"eye_angle_dashboard_{attrs.get('run_name', 'latest')}_{timestamp}.png"
+        if args.output:
+            output_path = Path(args.output)
+            if args.all_variants:
+                base = output_path.stem
+                output_path = output_path.with_name(f"{base}_{angle_source}{output_path.suffix}")
+        else:
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            output_path = (
+                DEFAULT_OUTPUT_DIR
+                / f"eye_angle_dashboard_{attrs.get('run_name', 'latest')}_{angle_source}_{timestamp}.png"
+            )
 
-    _save_with_metadata(fig, output_path, metadata)
-    if not args.quiet:
-        print(f"Saved dashboard to {output_path}")
+        _save_with_metadata(fig, output_path, metadata)
+        if not args.quiet:
+            print(f"Saved dashboard ({angle_source}) to {output_path}")
+
+        if args.no_show:
+            plt.close(fig)
+
+    if not figs:
+        if not args.quiet:
+            print("No figures generated.")
+        return 1
 
     if not args.no_show:
         plt.show()
     else:
-        plt.close(fig)
+        for fig in figs:
+            plt.close(fig)
+
     return 0
 
 

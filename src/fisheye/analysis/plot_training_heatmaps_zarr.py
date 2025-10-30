@@ -14,13 +14,15 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 from rich.console import Console
 from scipy.ndimage import gaussian_filter
+
+from fisheye.analysis.chaser_metrics_loader import load_chaser_metrics
 
 # Event type mappings from the stimulus program
 EXPERIMENT_EVENT_TYPE = {
@@ -81,12 +83,17 @@ def _to_python(value):
     return value
 
 
-def _load_structured_group(group: zarr.Group) -> Dict[str, np.ndarray]:
-    field_names = group.attrs.get("field_names")
-    if not field_names:
-        field_names = list(group.array_keys())
-    data = {name: group[name][:] for name in field_names}
-    return data
+def _load_structured_group(node: Union[zarr.Group, zarr.Array]) -> Dict[str, np.ndarray]:
+    if hasattr(node, "array_keys"):
+        field_names = node.attrs.get("field_names")
+        if not field_names:
+            field_names = list(node.array_keys())
+        return {name: node[name][:] for name in field_names}
+
+    array = node[:]
+    if array.dtype.names:
+        return {name: array[name] for name in array.dtype.names}
+    raise ValueError("Expected a structured array with named fields for events dataset")
 
 
 def _load_events(stim_run: zarr.Group) -> List[Dict[str, object]]:
@@ -259,6 +266,164 @@ def _collect_positions(movement_run: zarr.Group) -> Tuple[np.ndarray, np.ndarray
     return frames, positions
 
 
+def _compute_period_heatmaps(
+    *,
+    frames: np.ndarray,
+    positions: np.ndarray,
+    period_specs: Sequence[Tuple[str, int, int, Optional[int], Optional[int]]],
+    width: int,
+    height: int,
+    bin_size: int,
+    smooth_sigma: float,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, Tuple[int, int, float]]]:
+    heatmaps: Dict[str, np.ndarray] = {}
+    coverage_info: Dict[str, Tuple[int, int, float]] = {}
+
+    for label, start, end, _, _ in period_specs:
+        mask = (frames >= start) & (frames <= end)
+        frames_period = frames[mask]
+        positions_period = positions[mask]
+
+        if positions_period.ndim != 2 or positions_period.shape[1] != 2:
+            positions_period = positions_period.reshape((-1, 2)) if positions_period.size else positions_period
+
+        valid = np.isfinite(positions_period).all(axis=1) if positions_period.size else np.array([], dtype=bool)
+        positions_valid = positions_period[valid]
+        frames_valid = frames_period[valid]
+
+        heatmaps[label] = _create_heatmap(positions_valid, width, height, bin_size, smooth_sigma)
+
+        unique_frames = np.unique(frames_valid)
+        total_span = max(end - start + 1, 1)
+        coverage_ratio = unique_frames.size / total_span if total_span else 0.0
+        coverage_info[label] = (positions_valid.shape[0], unique_frames.size, coverage_ratio)
+
+    return heatmaps, coverage_info
+
+
+def _render_heatmap_grid(
+    *,
+    heatmaps: Dict[str, np.ndarray],
+    coverage_info: Dict[str, Tuple[int, int, float]],
+    period_specs: Sequence[Tuple[str, int, int, Optional[int], Optional[int]]],
+    width: int,
+    height: int,
+    title: str,
+) -> plt.Figure:
+    labels = [label for label, _, _, _, _ in period_specs if label in heatmaps]
+    if not labels:
+        raise ValueError("No periods available for plotting heatmaps.")
+
+    n_periods = len(labels)
+    fig, axes = plt.subplots(2, n_periods, figsize=(6 * n_periods, 10))
+    if n_periods == 1:
+        axes = np.array([[axes[0]], [axes[1]]])
+
+    cmap_main = "inferno"
+    base_label = labels[0]
+    base_heatmap = heatmaps[base_label]
+    spec_lookup = {
+        label: (start, end, start_ns, end_ns)
+        for label, start, end, start_ns, end_ns in period_specs
+    }
+
+    for idx, label in enumerate(labels):
+        heatmap = heatmaps[label]
+        ax_main = axes[0, idx]
+        im = ax_main.imshow(
+            heatmap,
+            cmap=cmap_main,
+            origin="lower",
+            extent=[0, width, 0, height],
+            vmin=0.0,
+            vmax=1.0,
+        )
+        ax_main.set_title(label.replace("_", " ").title())
+        ax_main.set_xlabel("X (px)")
+        ax_main.set_ylabel("Y (px)")
+        fig.colorbar(im, ax=ax_main, fraction=0.046, pad=0.04, label="Normalized occupancy")
+
+        detections, covered_frames, coverage_ratio = coverage_info.get(label, (0, 0, 0.0))
+        _, _, start_ns, end_ns = spec_lookup[label]
+        duration_text = _format_duration(start_ns, end_ns)
+        ax_main.text(
+            0.02,
+            0.98,
+            f"detections: {detections}\n"
+            f"covered frames: {covered_frames}\n"
+            f"coverage: {coverage_ratio*100:.1f}%\n"
+            f"duration: {duration_text}",
+            transform=ax_main.transAxes,
+            ha="left",
+            va="top",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.75),
+            fontsize=9,
+        )
+
+        ax_diff = axes[1, idx]
+        if label == base_label:
+            diff = heatmap
+            im_diff = ax_diff.imshow(
+                diff,
+                cmap=cmap_main,
+                origin="lower",
+                extent=[0, width, 0, height],
+                vmin=0.0,
+                vmax=1.0,
+            )
+            ax_diff.set_title("Baseline occupancy")
+            fig.colorbar(im_diff, ax=ax_diff, fraction=0.046, pad=0.04, label="Normalized occupancy")
+        else:
+            diff = heatmap - base_heatmap
+            vmax = np.max(np.abs(diff)) if np.any(diff) else 1.0
+            im_diff = ax_diff.imshow(
+                diff,
+                cmap="RdBu_r",
+                origin="lower",
+                extent=[0, width, 0, height],
+                vmin=-vmax,
+                vmax=vmax,
+            )
+            ax_diff.set_title("Change from pre-training")
+            fig.colorbar(im_diff, ax=ax_diff, fraction=0.046, pad=0.04, label="Δ occupancy")
+        ax_diff.set_xlabel("X (px)")
+        ax_diff.set_ylabel("Y (px)")
+
+    fig.suptitle(title, fontsize=14)
+    fig.tight_layout()
+    return fig
+
+
+def _save_or_show(
+    fig: plt.Figure,
+    base_path: Optional[Path],
+    *,
+    suffix: str,
+    show: bool,
+    console: Optional[Console] = None,
+) -> None:
+    if base_path:
+        if suffix:
+            target = base_path.with_name(f"{base_path.stem}{suffix}{base_path.suffix}")
+        else:
+            target = base_path
+        fig.savefig(target, dpi=150, bbox_inches="tight")
+        if console is not None:
+            console.log(f"[green]Saved figure to {target}[/green]")
+    if show and not base_path:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def _stack_online_positions(online_fields: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
+    pos_x = online_fields.get("chaser_pos_x")
+    pos_y = online_fields.get("chaser_pos_y")
+    if pos_x is None or pos_y is None:
+        return None
+    return np.column_stack([pos_x, pos_y])
+
+
 def _create_heatmap(
     positions: np.ndarray,
     width: int,
@@ -288,16 +453,97 @@ def _create_heatmap(
 
 
 def _resolve_latest(parent: zarr.Group, run_name: Optional[str], label: str, console: Console) -> Tuple[zarr.Group, str]:
+    if label == "movement_run":
+        return _resolve_movement_run(parent, run_name, console)
+
     if run_name:
         if run_name not in parent:
             raise ValueError(f"{label} '{run_name}' not found.")
         console.log(f"[cyan]Using {label}:[/cyan] {run_name}")
         return parent[run_name], run_name
+
     latest = parent.attrs.get("latest")
     if not latest:
         raise ValueError(f"{label} has no 'latest' attribute; specify --{label.replace('_', '-')}.")
+    if latest not in parent:
+        raise ValueError(f"{label} '{latest}' referenced by 'latest' is missing.")
     console.log(f"[cyan]Using {label}:[/cyan] {latest} (latest)")
     return parent[latest], latest
+
+
+def _resolve_movement_run(parent: zarr.Group, run_name: Optional[str], console: Console) -> Tuple[zarr.Group, str]:
+    online_parent = parent.get("online")
+    offline_parent = parent.get("offline")
+
+    def lookup(sub_parent: Optional[zarr.Group], name: str) -> Optional[zarr.Group]:
+        if sub_parent is None:
+            return None
+        return sub_parent.get(name)
+
+    def resolve_name(name: str) -> Optional[Tuple[zarr.Group, str]]:
+        if "/" in name:
+            prefix, rest = name.split("/", 1)
+            if prefix == "online":
+                group = lookup(online_parent, rest)
+                if group is not None:
+                    return group, f"online/{rest}"
+            elif prefix == "offline":
+                group = lookup(offline_parent, rest)
+                if group is not None:
+                    return group, f"offline/{rest}"
+            return None
+        group = lookup(online_parent, name)
+        if group is not None:
+            return group, f"online/{name}"
+        group = lookup(offline_parent, name)
+        if group is not None:
+            return group, f"offline/{name}"
+        return None
+
+    if run_name:
+        resolved = resolve_name(run_name)
+        if resolved is None:
+            raise ValueError(f"movement_run '{run_name}' not found.")
+        group, label = resolved
+        console.log(f"[cyan]Using movement_run:[/cyan] {label}")
+        return group, label
+
+    candidates: list[Tuple[zarr.Group, str]] = []
+
+    if online_parent is not None:
+        latest_online = online_parent.attrs.get("latest")
+        if isinstance(latest_online, str):
+            resolved = resolve_name(f"online/{latest_online}")
+            if resolved is not None:
+                candidates.append(resolved)
+
+    if offline_parent is not None:
+        latest_offline = offline_parent.attrs.get("latest")
+        if isinstance(latest_offline, str):
+            resolved = resolve_name(f"offline/{latest_offline}")
+            if resolved is not None:
+                candidates.append(resolved)
+
+    legacy_latest = parent.attrs.get("latest")
+    if isinstance(legacy_latest, str):
+        resolved = resolve_name(legacy_latest)
+        if resolved is not None and resolved not in candidates:
+            candidates.append(resolved)
+
+    if not candidates:
+        console.log("[yellow]No movement runs referenced by 'latest'; scanning available runs.[/yellow]")
+        for subgroup, prefix in ((online_parent, "online"), (offline_parent, "offline")):
+            if subgroup is None:
+                continue
+            for name in subgroup.group_keys():
+                candidates.append((subgroup[name], f"{prefix}/{name}"))
+
+    if not candidates:
+        raise ValueError("No movement runs found under analysis/movement_runs.")
+
+    group, label = candidates[0]
+    console.log(f"[cyan]Using movement_run:[/cyan] {label}")
+    return group, label
 
 
 def _format_duration(start_ns: Optional[int], end_ns: Optional[int]) -> str:
@@ -315,6 +561,8 @@ def plot_training_heatmaps(
     smooth_sigma: float,
     save_path: Optional[Path],
     show: bool,
+    include_chaser: bool,
+    chaser_index: int,
 ) -> None:
     console = Console()
     console.log(f"[bold]Opening Zarr archive:[/bold] {zarr_path}")
@@ -362,108 +610,85 @@ def plot_training_heatmaps(
         ("post_training", periods.post_start, periods.post_end, periods.post_start_ns, periods.post_end_ns),
     ]
 
-    heatmaps: Dict[str, np.ndarray] = {}
-    coverage_info: Dict[str, Tuple[int, int, float]] = {}
-    for label, start, end, start_ns, end_ns in period_specs:
-        mask = (frames >= start) & (frames <= end)
-        period_positions = positions[mask]
-        heatmaps[label] = _create_heatmap(period_positions, width, height, bin_size, smooth_sigma)
-        unique_frames = np.unique(frames[mask])
-        total_frame_span = max(end - start + 1, 1)
-        coverage = unique_frames.size / total_frame_span if total_frame_span else 0.0
-        coverage_info[label] = (period_positions.shape[0], unique_frames.size, coverage)
-        console.log(
-            f"[blue]{label}:[/blue] frames {start}-{end}, detections={period_positions.shape[0]}, "
-            f"covered_frames={unique_frames.size}, coverage={coverage*100:.1f}%"
-        )
-
-    available_labels = [label for label, _, _, _, _ in period_specs if heatmaps[label] is not None]
-    n_periods = len(available_labels)
-    if n_periods == 0:
-        raise ValueError("No training periods identified with available data.")
-
-    fig, axes = plt.subplots(2, n_periods, figsize=(6 * n_periods, 10))
-    if n_periods == 1:
-        axes = np.array([[axes[0]], [axes[1]]])
-
-    cmap_main = "inferno"
-    base_heatmap = heatmaps["pre_training"]
-
-    for idx, label in enumerate(available_labels):
-        heatmap = heatmaps[label]
-        ax_main = axes[0, idx]
-        im = ax_main.imshow(
-            heatmap,
-            cmap=cmap_main,
-            origin="lower",
-            extent=[0, width, 0, height],
-            vmin=0.0,
-            vmax=1.0,
-        )
-        ax_main.set_title(label.replace("_", " ").title())
-        ax_main.set_xlabel("X (px)")
-        ax_main.set_ylabel("Y (px)")
-        fig.colorbar(im, ax=ax_main, fraction=0.046, pad=0.04, label="Normalized occupancy")
-
-        detections, covered_frames, coverage = coverage_info[label]
-        duration_text = _format_duration(period_specs[idx][3], period_specs[idx][4])
-        ax_main.text(
-            0.02,
-            0.98,
-            f"detections: {detections}\n"
-            f"covered frames: {covered_frames}\n"
-            f"coverage: {coverage*100:.1f}%\n"
-            f"duration: {duration_text}",
-            transform=ax_main.transAxes,
-            ha="left",
-            va="top",
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.75),
-            fontsize=9,
-        )
-
-        ax_diff = axes[1, idx]
-        if label == "pre_training":
-            diff = heatmap
-            im_diff = ax_diff.imshow(
-                diff,
-                cmap=cmap_main,
-                origin="lower",
-                extent=[0, width, 0, height],
-                vmin=0.0,
-                vmax=1.0,
-            )
-            ax_diff.set_title("Baseline occupancy")
-            fig.colorbar(im_diff, ax=ax_diff, fraction=0.046, pad=0.04, label="Normalized occupancy")
-        else:
-            diff = heatmap - base_heatmap
-            vmax = np.max(np.abs(diff))
-            im_diff = ax_diff.imshow(
-                diff,
-                cmap="RdBu_r",
-                origin="lower",
-                extent=[0, width, 0, height],
-                vmin=-vmax,
-                vmax=vmax,
-            )
-            ax_diff.set_title("Change from pre-training")
-            fig.colorbar(im_diff, ax=ax_diff, fraction=0.046, pad=0.04, label="Δ occupancy")
-        ax_diff.set_xlabel("X (px)")
-        ax_diff.set_ylabel("Y (px)")
-
-    fig.suptitle(
-        f"Training Heatmaps – movement run {movement_run_name}, stimulus run {stimulus_run_name}\n"
-        f"bin size {bin_size}px, smoothing σ={smooth_sigma}",
-        fontsize=14,
+    heatmaps, coverage_info = _compute_period_heatmaps(
+        frames=frames,
+        positions=positions,
+        period_specs=period_specs,
+        width=width,
+        height=height,
+        bin_size=bin_size,
+        smooth_sigma=smooth_sigma,
     )
-    fig.tight_layout()
+    spec_lookup = {label: (start, end, start_ns, end_ns) for label, start, end, start_ns, end_ns in period_specs}
+    for label, metrics in coverage_info.items():
+        detections, covered_frames, coverage_ratio = metrics
+        start, end, _, _ = spec_lookup[label]
+        console.log(
+            f"[blue]{label}:[/blue] frames {start}-{end}, detections={detections}, "
+            f"covered_frames={covered_frames}, coverage={coverage_ratio*100:.1f}%"
+        )
+    fig = _render_heatmap_grid(
+        heatmaps=heatmaps,
+        coverage_info=coverage_info,
+        period_specs=period_specs,
+        width=width,
+        height=height,
+        title=(
+            f"Training Heatmaps – movement run {movement_run_name}, stimulus run {stimulus_run_name}\n"
+            f"bin size {bin_size}px, smoothing σ={smooth_sigma}"
+        ),
+    )
+    _save_or_show(fig, save_path, suffix="", show=show, console=console)
 
-    if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        console.log(f"[green]Saved figure to {save_path}[/green]")
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
+    if include_chaser:
+        console.log("[bold]Loading chaser metrics bundle...[/bold]")
+        bundle = load_chaser_metrics(
+            zarr_path,
+            stimulus_run=stimulus_run_name,
+            chaser_index=chaser_index,
+        )
+        chaser_frames = bundle.camera_frame_ids
+        online_positions = _stack_online_positions(bundle.online)
+        offline_positions = bundle.offline.get("chaser_position_px")
+
+        dataset_specs = [
+            ("online", online_positions, "Online chaser telemetry"),
+            ("offline", offline_positions, "Offline chaser metrics"),
+        ]
+        for suffix_name, positions_dataset, description in dataset_specs:
+            if positions_dataset is None:
+                console.log(f"[yellow]Skipping {suffix_name} chaser heatmaps – positions unavailable.[/yellow]")
+                continue
+            heatmaps_ds, coverage_ds = _compute_period_heatmaps(
+                frames=chaser_frames,
+                positions=positions_dataset,
+                period_specs=period_specs,
+                width=width,
+                height=height,
+                bin_size=bin_size,
+                smooth_sigma=smooth_sigma,
+            )
+            for label, metrics in coverage_ds.items():
+                detections, covered_frames, coverage_ratio = metrics
+                start, end, _, _ = spec_lookup[label]
+                console.log(
+                    f"[blue]{label} ({suffix_name}):[/blue] frames {start}-{end}, "
+                    f"detections={detections}, covered_frames={covered_frames}, "
+                    f"coverage={coverage_ratio*100:.1f}%"
+                )
+            fig_ds = _render_heatmap_grid(
+                heatmaps=heatmaps_ds,
+                coverage_info=coverage_ds,
+                period_specs=period_specs,
+                width=width,
+                height=height,
+                title=(
+                    f"Chaser Heatmaps ({description}) – stimulus run {stimulus_run_name}, chaser index {chaser_index}\n"
+                    f"bin size {bin_size}px, smoothing σ={smooth_sigma}"
+                ),
+            )
+            suffix_path = f"_chaser_{suffix_name}"
+            _save_or_show(fig_ds, save_path, suffix=suffix_path, show=show, console=console)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -480,6 +705,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--save", type=Path, help="Path to save the figure instead of showing interactively.")
     parser.add_argument("--no-show", action="store_true", help="Do not display the plot interactively.")
+    parser.add_argument(
+        "--include-chaser",
+        action="store_true",
+        help="Generate additional heatmaps for chaser positions using online/offline metrics.",
+    )
+    parser.add_argument(
+        "--chaser-index",
+        type=int,
+        default=0,
+        help="Chaser index to visualize when plotting chaser heatmaps (default: 0).",
+    )
     return parser.parse_args(argv)
 
 
@@ -493,6 +729,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         smooth_sigma=args.smooth_sigma,
         save_path=args.save,
         show=not args.no_show and args.save is None,
+        include_chaser=args.include_chaser,
+        chaser_index=args.chaser_index,
     )
 
 
