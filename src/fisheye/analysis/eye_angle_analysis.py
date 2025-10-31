@@ -44,6 +44,7 @@ REASON_CODE_MAP = {
 
 ELLIPSE_CIRCULARITY_THRESHOLD = 0.95  # reject nearly circular fits that lack a stable major axis
 DERIVATIVE_MAX_DT = 0.25  # seconds; ignore large gaps when computing discrete derivatives
+ANGLE_SMOOTHING_WINDOW = 7  # frames; moving-average window for smoothed angle outputs
 
 
 @dataclass
@@ -89,6 +90,36 @@ def _unit(v: np.ndarray) -> np.ndarray:
     norm = np.linalg.norm(v, axis=-1, keepdims=True)
     norm = np.where(norm == 0.0, 1.0, norm)
     return v / norm
+
+
+def _resolve_smoothing_window(length: int, desired: int) -> int:
+    """Return an odd window length that fits within the sequence, else 0 for no smoothing."""
+    if length <= 0:
+        return 0
+    window = min(desired, length)
+    if window < 3:
+        return 0
+    if window % 2 == 0:
+        window -= 1
+    if window < 3:
+        return 0
+    return window
+
+
+def _smooth_signal(values: np.ndarray, window: int) -> np.ndarray:
+    """Apply a NaN-aware moving average to 1D data."""
+    if window <= 2:
+        return np.array(values, copy=True)
+    kernel = np.ones(window, dtype=np.float32)
+    finite_mask = np.isfinite(values)
+    if not np.any(finite_mask):
+        return np.full_like(values, np.nan)
+    sums = np.convolve(np.nan_to_num(values, nan=0.0), kernel, mode="same")
+    counts = np.convolve(finite_mask.astype(np.float32), kernel, mode="same")
+    smoothed = np.full_like(values, np.nan)
+    valid = counts > 0
+    smoothed[valid] = sums[valid] / counts[valid]
+    return smoothed
 
 
 def _compute_heading_fallback(bladder: np.ndarray, eye_left: np.ndarray, eye_right: np.ndarray) -> np.ndarray:
@@ -509,6 +540,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Suppress progress output.",
     )
+    parser.add_argument(
+        "--smoothing-window",
+        type=int,
+        default=None,
+        help=f"Override the moving-average window for angle smoothing (default: {ANGLE_SMOOTHING_WINDOW}).",
+    )
     return parser
 
 
@@ -645,6 +682,8 @@ def run(args: argparse.Namespace) -> None:
     if fps is None or fps <= 0:
         fps = None
     time_seconds = np.full(total_detections, np.nan, dtype=np.float32)
+    smoothing_window_param = args.smoothing_window
+
     if fps:
         time_seconds = frame_indices.astype(np.float64) / float(fps)
         time_seconds = time_seconds.astype(np.float32, copy=False)
@@ -701,6 +740,49 @@ def run(args: argparse.Namespace) -> None:
         else np.full_like(version, np.nan)
     )
 
+    window_setting = smoothing_window_param if smoothing_window_param is not None else ANGLE_SMOOTHING_WINDOW
+    detection_smooth_window = _resolve_smoothing_window(total_detections, window_setting)
+    if detection_smooth_window:
+        left_smoothed = _smooth_signal(left_angles, detection_smooth_window).astype(np.float32, copy=False)
+        right_smoothed = _smooth_signal(right_angles, detection_smooth_window).astype(np.float32, copy=False)
+        vergence_smoothed = _smooth_signal(vergence, detection_smooth_window).astype(np.float32, copy=False)
+        left_signed_smoothed = _smooth_signal(left_signed, detection_smooth_window).astype(np.float32, copy=False)
+        right_signed_smoothed = _smooth_signal(right_signed, detection_smooth_window).astype(np.float32, copy=False)
+        vergence_signed_smoothed = _smooth_signal(vergence_signed, detection_smooth_window).astype(np.float32, copy=False)
+        version_smoothed = _smooth_signal(version, detection_smooth_window).astype(np.float32, copy=False)
+        left_minor_signed_smoothed = _smooth_signal(left_minor_signed, detection_smooth_window).astype(np.float32, copy=False)
+        right_minor_signed_smoothed = _smooth_signal(right_minor_signed, detection_smooth_window).astype(np.float32, copy=False)
+        vergence_minor_signed_smoothed = _smooth_signal(vergence_minor_signed, detection_smooth_window).astype(np.float32, copy=False)
+        version_minor_smoothed = _smooth_signal(version_minor, detection_smooth_window).astype(np.float32, copy=False)
+        left_feret_major_smoothed = _smooth_signal(left_feret_major, detection_smooth_window).astype(np.float32, copy=False)
+        right_feret_major_smoothed = _smooth_signal(right_feret_major, detection_smooth_window).astype(np.float32, copy=False)
+        vergence_feret_major_smoothed = _smooth_signal(vergence_feret_major, detection_smooth_window).astype(np.float32, copy=False)
+        version_feret_major_smoothed = _smooth_signal(version_feret_major, detection_smooth_window).astype(np.float32, copy=False)
+        left_feret_minor_smoothed = _smooth_signal(left_feret_minor, detection_smooth_window).astype(np.float32, copy=False)
+        right_feret_minor_smoothed = _smooth_signal(right_feret_minor, detection_smooth_window).astype(np.float32, copy=False)
+        vergence_feret_minor_smoothed = _smooth_signal(vergence_feret_minor, detection_smooth_window).astype(np.float32, copy=False)
+        version_feret_minor_smoothed = _smooth_signal(version_feret_minor, detection_smooth_window).astype(np.float32, copy=False)
+    else:
+        left_smoothed = np.array(left_angles, copy=True)
+        right_smoothed = np.array(right_angles, copy=True)
+        vergence_smoothed = np.array(vergence, copy=True)
+        left_signed_smoothed = np.array(left_signed, copy=True)
+        right_signed_smoothed = np.array(right_signed, copy=True)
+        vergence_signed_smoothed = np.array(vergence_signed, copy=True)
+        version_smoothed = np.array(version, copy=True)
+        left_minor_signed_smoothed = np.array(left_minor_signed, copy=True)
+        right_minor_signed_smoothed = np.array(right_minor_signed, copy=True)
+        vergence_minor_signed_smoothed = np.array(vergence_minor_signed, copy=True)
+        version_minor_smoothed = np.array(version_minor, copy=True)
+        left_feret_major_smoothed = np.array(left_feret_major, copy=True)
+        right_feret_major_smoothed = np.array(right_feret_major, copy=True)
+        vergence_feret_major_smoothed = np.array(vergence_feret_major, copy=True)
+        version_feret_major_smoothed = np.array(version_feret_major, copy=True)
+        left_feret_minor_smoothed = np.array(left_feret_minor, copy=True)
+        right_feret_minor_smoothed = np.array(right_feret_minor, copy=True)
+        vergence_feret_minor_smoothed = np.array(vergence_feret_minor, copy=True)
+        version_feret_minor_smoothed = np.array(version_feret_minor, copy=True)
+
     num_frames = int(frame_indices.max() + 1) if frame_indices.size else 0
     frame_left = np.full(num_frames, np.nan, dtype=np.float32)
     frame_right = np.full(num_frames, np.nan, dtype=np.float32)
@@ -740,6 +822,32 @@ def run(args: argparse.Namespace) -> None:
             frame_valid[frame] = valid_frame[idx]
             frame_reason[frame] |= reason_codes[idx]
 
+    frame_smooth_window = _resolve_smoothing_window(num_frames, window_setting)
+    if frame_smooth_window:
+        frame_left_smoothed = _smooth_signal(frame_left, frame_smooth_window).astype(np.float32, copy=False)
+        frame_right_smoothed = _smooth_signal(frame_right, frame_smooth_window).astype(np.float32, copy=False)
+        frame_vergence_smoothed = _smooth_signal(frame_vergence, frame_smooth_window).astype(np.float32, copy=False)
+        frame_vergence_signed_smoothed = _smooth_signal(frame_vergence_signed, frame_smooth_window).astype(np.float32, copy=False)
+        frame_version_smoothed = _smooth_signal(frame_version, frame_smooth_window).astype(np.float32, copy=False)
+        frame_vergence_minor_signed_smoothed = _smooth_signal(frame_vergence_signed_minor, frame_smooth_window).astype(np.float32, copy=False)
+        frame_vergence_feret_major_smoothed = _smooth_signal(frame_vergence_feret_major, frame_smooth_window).astype(np.float32, copy=False)
+        frame_vergence_feret_minor_smoothed = _smooth_signal(frame_vergence_feret_minor, frame_smooth_window).astype(np.float32, copy=False)
+        frame_version_minor_smoothed = _smooth_signal(frame_version_minor, frame_smooth_window).astype(np.float32, copy=False)
+        frame_version_feret_major_smoothed = _smooth_signal(frame_version_feret_major, frame_smooth_window).astype(np.float32, copy=False)
+        frame_version_feret_minor_smoothed = _smooth_signal(frame_version_feret_minor, frame_smooth_window).astype(np.float32, copy=False)
+    else:
+        frame_left_smoothed = np.array(frame_left, copy=True)
+        frame_right_smoothed = np.array(frame_right, copy=True)
+        frame_vergence_smoothed = np.array(frame_vergence, copy=True)
+        frame_vergence_signed_smoothed = np.array(frame_vergence_signed, copy=True)
+        frame_version_smoothed = np.array(frame_version, copy=True)
+        frame_vergence_minor_signed_smoothed = np.array(frame_vergence_signed_minor, copy=True)
+        frame_vergence_feret_major_smoothed = np.array(frame_vergence_feret_major, copy=True)
+        frame_vergence_feret_minor_smoothed = np.array(frame_vergence_feret_minor, copy=True)
+        frame_version_minor_smoothed = np.array(frame_version_minor, copy=True)
+        frame_version_feret_major_smoothed = np.array(frame_version_feret_major, copy=True)
+        frame_version_feret_minor_smoothed = np.array(frame_version_feret_minor, copy=True)
+
     if args.run_name:
         resolved_run_name = args.run_name
     else:
@@ -764,24 +872,43 @@ def run(args: argparse.Namespace) -> None:
         roi_group,
         [
             ("left_deg", (total_detections,), (chunk_len,), "f4"),
+            ("left_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("right_deg", (total_detections,), (chunk_len,), "f4"),
+            ("right_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("vergence_deg", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("left_signed_deg", (total_detections,), (chunk_len,), "f4"),
+            ("left_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("right_signed_deg", (total_detections,), (chunk_len,), "f4"),
+            ("right_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("vergence_signed_deg", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("version_deg", (total_detections,), (chunk_len,), "f4"),
+            ("version_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("left_minor_signed_deg", (total_detections,), (chunk_len,), "f4"),
+            ("left_minor_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("right_minor_signed_deg", (total_detections,), (chunk_len,), "f4"),
+            ("right_minor_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("vergence_minor_signed_deg", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_minor_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("version_minor_deg", (total_detections,), (chunk_len,), "f4"),
+            ("version_minor_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("left_feret_major_signed_deg", (total_detections,), (chunk_len,), "f4"),
+            ("left_feret_major_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("right_feret_major_signed_deg", (total_detections,), (chunk_len,), "f4"),
+            ("right_feret_major_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("vergence_feret_major_signed_deg", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_feret_major_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("version_feret_major_deg", (total_detections,), (chunk_len,), "f4"),
+            ("version_feret_major_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("left_feret_minor_signed_deg", (total_detections,), (chunk_len,), "f4"),
+            ("left_feret_minor_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("right_feret_minor_signed_deg", (total_detections,), (chunk_len,), "f4"),
+            ("right_feret_minor_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("vergence_feret_minor_signed_deg", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_feret_minor_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("version_feret_minor_deg", (total_detections,), (chunk_len,), "f4"),
+            ("version_feret_minor_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("left_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
             ("right_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
             ("vergence_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
@@ -796,24 +923,43 @@ def run(args: argparse.Namespace) -> None:
         ],
     )
     roi_group["left_deg"][:] = left_angles
+    roi_group["left_deg_smoothed"][:] = left_smoothed
     roi_group["right_deg"][:] = right_angles
+    roi_group["right_deg_smoothed"][:] = right_smoothed
     roi_group["vergence_deg"][:] = vergence
+    roi_group["vergence_deg_smoothed"][:] = vergence_smoothed
     roi_group["left_signed_deg"][:] = left_signed
+    roi_group["left_signed_deg_smoothed"][:] = left_signed_smoothed
     roi_group["right_signed_deg"][:] = right_signed
+    roi_group["right_signed_deg_smoothed"][:] = right_signed_smoothed
     roi_group["vergence_signed_deg"][:] = vergence_signed
+    roi_group["vergence_signed_deg_smoothed"][:] = vergence_signed_smoothed
     roi_group["version_deg"][:] = version
+    roi_group["version_deg_smoothed"][:] = version_smoothed
     roi_group["left_minor_signed_deg"][:] = left_minor_signed
+    roi_group["left_minor_signed_deg_smoothed"][:] = left_minor_signed_smoothed
     roi_group["right_minor_signed_deg"][:] = right_minor_signed
+    roi_group["right_minor_signed_deg_smoothed"][:] = right_minor_signed_smoothed
     roi_group["vergence_minor_signed_deg"][:] = vergence_minor_signed
+    roi_group["vergence_minor_signed_deg_smoothed"][:] = vergence_minor_signed_smoothed
     roi_group["version_minor_deg"][:] = version_minor
+    roi_group["version_minor_deg_smoothed"][:] = version_minor_smoothed
     roi_group["left_feret_major_signed_deg"][:] = left_feret_major
+    roi_group["left_feret_major_signed_deg_smoothed"][:] = left_feret_major_smoothed
     roi_group["right_feret_major_signed_deg"][:] = right_feret_major
+    roi_group["right_feret_major_signed_deg_smoothed"][:] = right_feret_major_smoothed
     roi_group["vergence_feret_major_signed_deg"][:] = vergence_feret_major
+    roi_group["vergence_feret_major_signed_deg_smoothed"][:] = vergence_feret_major_smoothed
     roi_group["version_feret_major_deg"][:] = version_feret_major
+    roi_group["version_feret_major_deg_smoothed"][:] = version_feret_major_smoothed
     roi_group["left_feret_minor_signed_deg"][:] = left_feret_minor
+    roi_group["left_feret_minor_signed_deg_smoothed"][:] = left_feret_minor_smoothed
     roi_group["right_feret_minor_signed_deg"][:] = right_feret_minor
+    roi_group["right_feret_minor_signed_deg_smoothed"][:] = right_feret_minor_smoothed
     roi_group["vergence_feret_minor_signed_deg"][:] = vergence_feret_minor
+    roi_group["vergence_feret_minor_signed_deg_smoothed"][:] = vergence_feret_minor_smoothed
     roi_group["version_feret_minor_deg"][:] = version_feret_minor
+    roi_group["version_feret_minor_deg_smoothed"][:] = version_feret_minor_smoothed
     roi_group["left_speed_deg_s"][:] = left_speed
     roi_group["right_speed_deg_s"][:] = right_speed
     roi_group["vergence_speed_deg_s"][:] = vergence_speed
@@ -830,30 +976,52 @@ def run(args: argparse.Namespace) -> None:
         frame_group,
         [
             ("left_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("left_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("right_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("right_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("vergence_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("vergence_signed_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_signed_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("vergence_minor_signed_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_minor_signed_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("vergence_feret_major_signed_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_feret_major_signed_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("vergence_feret_minor_signed_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_feret_minor_signed_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("version_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("version_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("version_minor_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("version_minor_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("version_feret_major_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("version_feret_major_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("version_feret_minor_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("version_feret_minor_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
         ],
     )
     if num_frames > 0:
         frame_group["left_deg"][:] = frame_left
+        frame_group["left_deg_smoothed"][:] = frame_left_smoothed
         frame_group["right_deg"][:] = frame_right
+        frame_group["right_deg_smoothed"][:] = frame_right_smoothed
         frame_group["vergence_deg"][:] = frame_vergence
+        frame_group["vergence_deg_smoothed"][:] = frame_vergence_smoothed
         frame_group["vergence_signed_deg"][:] = frame_vergence_signed
+        frame_group["vergence_signed_deg_smoothed"][:] = frame_vergence_signed_smoothed
         frame_group["vergence_minor_signed_deg"][:] = frame_vergence_signed_minor
+        frame_group["vergence_minor_signed_deg_smoothed"][:] = frame_vergence_minor_signed_smoothed
         frame_group["vergence_feret_major_signed_deg"][:] = frame_vergence_feret_major
+        frame_group["vergence_feret_major_signed_deg_smoothed"][:] = frame_vergence_feret_major_smoothed
         frame_group["vergence_feret_minor_signed_deg"][:] = frame_vergence_feret_minor
+        frame_group["vergence_feret_minor_signed_deg_smoothed"][:] = frame_vergence_feret_minor_smoothed
         frame_group["version_deg"][:] = frame_version
+        frame_group["version_deg_smoothed"][:] = frame_version_smoothed
         frame_group["version_minor_deg"][:] = frame_version_minor
+        frame_group["version_minor_deg_smoothed"][:] = frame_version_minor_smoothed
         frame_group["version_feret_major_deg"][:] = frame_version_feret_major
+        frame_group["version_feret_major_deg_smoothed"][:] = frame_version_feret_major_smoothed
         frame_group["version_feret_minor_deg"][:] = frame_version_feret_minor
+        frame_group["version_feret_minor_deg_smoothed"][:] = frame_version_feret_minor_smoothed
 
     qa_group = run_group.require_group("qa")
     qa_roi = qa_group.require_group("roi")
@@ -914,7 +1082,7 @@ def run(args: argparse.Namespace) -> None:
 
     run_group.attrs.update(
         {
-            "report_version": "1.3",
+            "report_version": "1.4",
             "reason_code_map": REASON_CODE_MAP,
             "source_refined_eye_run": refined_run_name,
             "source_keypoint_run": keypoint_run_name,
@@ -930,6 +1098,10 @@ def run(args: argparse.Namespace) -> None:
             "minor_signed_angles": True,
             "minor_vergence_definition": "left_minor_signed_deg + right_minor_signed_deg",
             "minor_version_definition": "0.5*(left_minor_signed_deg - right_minor_signed_deg)",
+            "angle_smoothing_method": "moving_average",
+            "angle_smoothing_window_detections": int(detection_smooth_window) if detection_smooth_window else None,
+            "angle_smoothing_window_frames": int(frame_smooth_window) if frame_smooth_window else None,
+            "angle_smoothing_window_requested": int(smoothing_window_param) if smoothing_window_param else None,
         }
     )
 
@@ -944,12 +1116,20 @@ def run(args: argparse.Namespace) -> None:
             "run_name": args.run_name,
             "chunk_size": chunk_size,
             "fps_override": args.fps,
+            "smoothing_window": smoothing_window_param,
         },
         "outputs": {
             "left_signed_deg": True,
             "right_signed_deg": True,
             "vergence_signed_deg": True,
             "version_deg": True,
+            "left_deg_smoothed": True,
+            "right_deg_smoothed": True,
+            "vergence_deg_smoothed": True,
+            "left_signed_deg_smoothed": True,
+            "right_signed_deg_smoothed": True,
+            "vergence_signed_deg_smoothed": True,
+            "version_deg_smoothed": True,
             "vergence_signed_speed_deg_s": bool(fps),
             "version_speed_deg_s": bool(fps),
             "vergence_signed_accel_deg_s2": bool(fps),
@@ -961,6 +1141,43 @@ def run(args: argparse.Namespace) -> None:
             "right_minor_signed_deg": True,
             "vergence_minor_signed_deg": True,
             "version_minor_deg": True,
+            "left_minor_signed_deg_smoothed": True,
+            "right_minor_signed_deg_smoothed": True,
+            "vergence_minor_signed_deg_smoothed": True,
+            "version_minor_deg_smoothed": True,
+            "left_feret_major_signed_deg": True,
+            "right_feret_major_signed_deg": True,
+            "vergence_feret_major_signed_deg": True,
+            "version_feret_major_deg": True,
+            "left_feret_major_signed_deg_smoothed": True,
+            "right_feret_major_signed_deg_smoothed": True,
+            "vergence_feret_major_signed_deg_smoothed": True,
+            "version_feret_major_deg_smoothed": True,
+            "left_feret_minor_signed_deg": True,
+            "right_feret_minor_signed_deg": True,
+            "vergence_feret_minor_signed_deg": True,
+            "version_feret_minor_deg": True,
+            "left_feret_minor_signed_deg_smoothed": True,
+            "right_feret_minor_signed_deg_smoothed": True,
+            "vergence_feret_minor_signed_deg_smoothed": True,
+            "version_feret_minor_deg_smoothed": True,
+            "frame_left_deg_smoothed": True,
+            "frame_right_deg_smoothed": True,
+            "frame_vergence_deg_smoothed": True,
+            "frame_vergence_signed_deg_smoothed": True,
+            "frame_version_deg_smoothed": True,
+            "frame_vergence_minor_signed_deg": True,
+            "frame_vergence_minor_signed_deg_smoothed": True,
+            "frame_vergence_feret_major_signed_deg": True,
+            "frame_vergence_feret_major_signed_deg_smoothed": True,
+            "frame_vergence_feret_minor_signed_deg": True,
+            "frame_vergence_feret_minor_signed_deg_smoothed": True,
+            "frame_version_minor_deg": True,
+            "frame_version_minor_deg_smoothed": True,
+            "frame_version_feret_major_deg": True,
+            "frame_version_feret_major_deg_smoothed": True,
+            "frame_version_feret_minor_deg": True,
+            "frame_version_feret_minor_deg_smoothed": True,
         },
         "valid_reason_counts": _count_reason_bits(reason_codes),
         "frame_reason_counts": _count_reason_bits(frame_reason) if num_frames else {},
