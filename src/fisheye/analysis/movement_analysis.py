@@ -33,6 +33,7 @@ from .compute_speed import (  # re-exported for compatibility
 )
 from .chaser_metrics_loader import load_chaser_metrics
 from fisheye.utils.system import get_git_info, get_environment_info
+from fisheye.utils.calibration import load_run_calibration
 from .chaser_state_interpolator import load_structured_dataset
 
 
@@ -58,6 +59,17 @@ class DetectionResolution:
     variant: str
     source_detect_run: Optional[str]
     parent_path: str
+
+
+@dataclass
+class MetricsOfflineResult:
+    tracks: Dict[int, Dict[str, np.ndarray]]
+    summaries: List[Dict[str, float]]
+    frames: np.ndarray
+    distance_px: Optional[np.ndarray]
+    distance_mm: Optional[np.ndarray]
+    chaser_pos_px: Optional[np.ndarray]
+    pixel_to_mm: Optional[float]
 
 
 def resolve_keypoint_group(
@@ -255,6 +267,350 @@ def prefer_refined_detection(
     )
 
     return resolve_detection_from_path(root, refined_path)
+
+
+def build_offline_tracks_from_metrics(
+    bundle,
+    fps: float,
+    smooth_seconds: float,
+    console: Console,
+    fallback_pixel_to_mm: Optional[float],
+) -> Optional[MetricsOfflineResult]:
+    offline = bundle.offline
+    has_offline = offline.get("has_offline")
+    if has_offline is None:
+        console.print(
+            "[yellow]Warning:[/yellow] Offline chaser metrics missing has_offline mask; cannot build movement run from metrics."
+        )
+        return None
+
+    mask = np.asarray(has_offline, dtype=bool)
+    if not np.any(mask):
+        console.print(
+            "[yellow]Warning:[/yellow] Offline chaser metrics contain no valid frames; cannot build movement run from metrics."
+        )
+        return None
+
+    camera_frames = np.asarray(bundle.camera_frame_ids, dtype=np.int64)
+    frames = camera_frames[mask]
+    if frames.size == 0:
+        console.print(
+            "[yellow]Warning:[/yellow] Offline chaser metrics produced zero frames; cannot build movement run from metrics."
+        )
+        return None
+
+    fish_centroid = offline.get("fish_centroid_px")
+    if fish_centroid is None:
+        console.print(
+            "[yellow]Warning:[/yellow] Offline chaser metrics missing fish_centroid_px; cannot build movement run from metrics."
+        )
+        return None
+    fish_centroid = np.asarray(fish_centroid, dtype=np.float64)[mask]
+
+    heading = offline.get("heading_deg")
+    if heading is not None:
+        heading = np.asarray(heading, dtype=np.float64)[mask]
+    else:
+        heading = np.full(frames.shape, np.nan, dtype=np.float64)
+
+    keypoint_success = np.all(np.isfinite(fish_centroid), axis=1)
+
+    distance_px = None
+    distance_mm = None
+    pixel_to_mm = None
+
+    dist_px_raw = offline.get("distance_px")
+    dist_mm_raw = offline.get("distance_mm")
+    if dist_px_raw is not None and dist_mm_raw is not None:
+        distance_px = np.asarray(dist_px_raw, dtype=np.float64)[mask]
+        distance_mm = np.asarray(dist_mm_raw, dtype=np.float64)[mask]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = distance_mm / distance_px
+        finite_ratio = ratio[np.isfinite(ratio) & (ratio > 0)]
+        if finite_ratio.size:
+            pixel_to_mm = float(np.median(finite_ratio))
+
+    if pixel_to_mm is None and fallback_pixel_to_mm is not None:
+        pixel_to_mm = float(fallback_pixel_to_mm)
+
+    chaser_pos = offline.get("chaser_position_px")
+    chaser_pos_px = np.asarray(chaser_pos, dtype=np.float64)[mask] if chaser_pos is not None else None
+
+    detection_ids = np.zeros(frames.shape[0], dtype=np.int64)
+
+    tracks, summaries = build_track_datasets(
+        detection_ids=detection_ids,
+        frames=frames,
+        positions_px=fish_centroid,
+        headings_deg=heading,
+        keypoint_success=keypoint_success,
+        detection_source=None,
+        fps=fps,
+        smooth_seconds=smooth_seconds,
+        pixel_to_mm=pixel_to_mm,
+    )
+
+    if not summaries:
+        console.print("[yellow]Warning:[/yellow] Offline chaser metrics produced no movement summaries.")
+        return None
+
+    return MetricsOfflineResult(
+        tracks=tracks,
+        summaries=summaries,
+        frames=frames,
+        distance_px=distance_px,
+        distance_mm=distance_mm,
+        chaser_pos_px=chaser_pos_px,
+        pixel_to_mm=pixel_to_mm,
+    )
+
+
+def run_offline_from_detections(
+    root: zarr.Group,
+    args: argparse.Namespace,
+    fps: float,
+    pixel_to_mm: Optional[float],
+    calibration_info: Dict[str, Any],
+    console: Console,
+) -> None:
+    console.print("[blue]Building offline movement run from keypoint detections...[/blue]")
+
+    keypoints_offline = resolve_keypoint_group(root, args.keypoint_run, console)
+    kp_parent_name = "refined_keypoints_runs" if keypoints_offline.is_refined else "keypoints_runs"
+
+    crop_group_offline = root[f"crop_runs/{keypoints_offline.crop_run}"]
+    detection_path_offline = crop_group_offline.attrs.get("source_coords_path")
+    if not detection_path_offline:
+        raise ValueError(
+            f"Crop run '{keypoints_offline.crop_run}' missing 'source_coords_path'; cannot determine detection source."
+        )
+
+    detection_offline = resolve_detection_from_path(root, detection_path_offline)
+    preferred_detection_offline = prefer_refined_detection(root, detection_offline, console)
+    detection_offline = preferred_detection_offline
+
+    detection_group_offline = detection_offline.group
+    bbox_norm_offline = detection_group_offline["bbox_norm_coords"][:]
+    frame_indices_offline = detection_group_offline["frame_indices"][:].astype(np.int64, copy=False)
+    detection_source_offline = (
+        detection_group_offline["detection_source"][:]
+        if "detection_source" in detection_group_offline
+        else None
+    )
+
+    heading_offline = keypoints_offline.group["heading"][:]
+    if heading_offline.shape[0] != bbox_norm_offline.shape[0]:
+        raise ValueError(
+            "Keypoint heading count does not match detection bounding boxes; cannot align offline movement data."
+        )
+
+    keypoint_success_offline = (
+        keypoints_offline.group["detection_success"][:]
+        if "detection_success" in keypoints_offline.group
+        else np.ones_like(heading_offline, dtype=bool)
+    )
+
+    width_offline, height_offline = resolve_dimensions(root)
+    positions_offline = np.empty((bbox_norm_offline.shape[0], 2), dtype=np.float64)
+    positions_offline[:, 0] = bbox_norm_offline[:, 0] * width_offline
+    positions_offline[:, 1] = bbox_norm_offline[:, 1] * height_offline
+
+    detection_ids_offline: Optional[np.ndarray]
+    detection_ids_offline_metadata: Dict[str, Optional[str]] = {}
+    expected_detect_run = (
+        detection_offline.source_detect_run if detection_offline.source_detect_run else detection_offline.run_name
+    )
+
+    if detection_offline.is_refined:
+        detection_ids_offline, detection_ids_offline_metadata = load_detection_ids(
+            root,
+            frame_indices_offline.shape[0],
+            console,
+            expected_detect_run=expected_detect_run,
+            expected_refined_run=detection_offline.run_name,
+            return_metadata=True,
+        )
+
+        assignments_match_refined = (
+            detection_ids_offline is not None
+            and detection_ids_offline_metadata.get("assignment_source") == "refined_interpolated"
+            and detection_ids_offline_metadata.get("source_refined_run") == detection_offline.run_name
+        )
+
+        if not assignments_match_refined:
+            if detection_ids_offline is not None:
+                console.print(
+                    "[yellow]ID assignment metadata does not match refined detections; remapping from raw detections.[/yellow]"
+                )
+            refined_parent_group = root[detection_offline.parent_path]
+            detection_ids_offline = map_refined_detection_ids(
+                refined_parent_group,
+                frame_indices_offline,
+                bbox_norm_offline,
+                detection_source_offline,
+                root,
+                console,
+            )
+    else:
+        detection_ids_offline, detection_ids_offline_metadata = load_detection_ids(
+            root,
+            frame_indices_offline.shape[0],
+            console,
+            expected_detect_run=expected_detect_run,
+            return_metadata=True,
+        )
+
+    if detection_ids_offline is None:
+        console.print(
+            "[yellow]Warning:[/yellow] No ID assignments found; treating offline detections as a single track."
+        )
+        detection_ids_offline = np.zeros(frame_indices_offline.shape[0], dtype=np.int64)
+    else:
+        detection_ids_offline = detection_ids_offline.astype(np.int64, copy=False)
+
+    console.print(f"[blue]Offline frames:[/blue] {frame_indices_offline.shape[0]} (all keypoint detections)")
+
+    if frame_indices_offline.size == 0:
+        console.print("[yellow]Warning:[/yellow] No offline frames available; skipping.")
+        return
+
+    proceed_offline = True
+    if args.skip_unassigned:
+        valid_mask = detection_ids_offline >= 0
+        if not np.any(valid_mask):
+            console.print(
+                "[yellow]Warning:[/yellow] All detections unassigned after filtering; skipping offline movement run."
+            )
+            proceed_offline = False
+        else:
+            bbox_norm_offline = bbox_norm_offline[valid_mask]
+            frame_indices_offline = frame_indices_offline[valid_mask]
+            heading_offline = heading_offline[valid_mask]
+            keypoint_success_offline = keypoint_success_offline[valid_mask]
+            detection_ids_offline = detection_ids_offline[valid_mask]
+            positions_offline = positions_offline[valid_mask]
+            if detection_source_offline is not None:
+                detection_source_offline = detection_source_offline[valid_mask]
+
+    if not proceed_offline or frame_indices_offline.size == 0:
+        console.print("[yellow]Warning:[/yellow] No offline detections remaining after filtering; skipping.")
+        return
+
+    tracks_offline, summaries_offline = build_track_datasets(
+        detection_ids=detection_ids_offline,
+        frames=frame_indices_offline,
+        positions_px=positions_offline,
+        headings_deg=heading_offline,
+        keypoint_success=keypoint_success_offline,
+        detection_source=detection_source_offline,
+        fps=fps,
+        smooth_seconds=args.smooth_seconds,
+        pixel_to_mm=pixel_to_mm,
+    )
+
+    if not summaries_offline:
+        console.print("[yellow]Warning:[/yellow] Offline metrics produced no tracks.")
+        return
+
+    total_px_offline, total_mm_offline = summarize_to_table(
+        summaries_offline, pixel_to_mm, console
+    )
+
+    if args.no_write:
+        console.print("[green]Skipping offline write (--no-write).[/green]")
+        return
+
+    offline_run_name = args.offline_run_name
+    if not offline_run_name:
+        offline_run_name = f"{keypoints_offline.run_name}_movement"
+
+    offline_run_name, offline_group = ensure_movement_run_group(
+        root,
+        offline_run_name,
+        run_type="offline",
+        overwrite=True,
+    )
+    ordered_ids_offline = save_movement_tracks(
+        offline_group, tracks_offline, summaries_offline
+    )
+
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    git_info = get_git_info()
+    env_info = get_environment_info()
+
+    offline_inputs = {
+        "detection_path": detection_offline.path,
+        "detection_run": detection_offline.run_name,
+        "detection_variant": detection_offline.variant,
+        "source_detect_run": detection_offline.source_detect_run,
+        "keypoint_run": keypoints_offline.run_name,
+        "keypoint_variant": "refined" if keypoints_offline.is_refined else "raw",
+        "base_keypoint_run": keypoints_offline.base_run_name,
+        "crop_run": keypoints_offline.crop_run,
+    }
+    if detection_ids_offline_metadata:
+        offline_inputs["id_assignment_metadata"] = detection_ids_offline_metadata
+
+    offline_provenance = {
+        "stage": "movement_analysis",
+        "method": "movement_analysis_offline",
+        "command": " ".join(sys.argv),
+        "created_at_utc": created_at,
+        "git": {
+            "commit": git_info.get("commit_hash"),
+            "short": git_info.get("short_hash"),
+            "branch": git_info.get("branch"),
+            "is_dirty": git_info.get("is_dirty"),
+            "remote": git_info.get("remote_url"),
+        },
+        "environment": {
+            "hostname": env_info["platform"].get("hostname"),
+            "python_version": env_info["platform"].get("python_version"),
+            "system": env_info["platform"].get("system"),
+            "release": env_info["platform"].get("release"),
+        },
+        "parameters": {
+            "fps": fps,
+            "smoothing_seconds": args.smooth_seconds,
+            "coordinate_space": "camera",
+            "calibration_used": pixel_to_mm,
+        },
+        "inputs": offline_inputs,
+    }
+
+    offline_group.attrs.update(
+        {
+            "method": "movement_analysis_offline",
+            "created_at_utc": created_at,
+            "fps": fps,
+            "smoothing_seconds": args.smooth_seconds,
+            "pixel_to_mm": pixel_to_mm,
+            "calibration": calibration_info,
+            "inputs": offline_inputs,
+            "summary": summaries_offline,
+            "num_tracks": len(ordered_ids_offline),
+            "total_distance_px": total_px_offline,
+            "total_distance_mm": total_mm_offline if pixel_to_mm is not None else float("nan"),
+            "provenance": offline_provenance,
+        }
+    )
+
+    console.print(
+        f"[green]✓[/green] Saved offline movement run to [bold]analysis/movement_runs/offline/{offline_run_name}[/bold]"
+    )
+
+
+def _mm_per_pixel(pixels_per_mm: Optional[float]) -> Optional[float]:
+    if pixels_per_mm is None:
+        return None
+    try:
+        value = float(pixels_per_mm)
+    except Exception:
+        return None
+    if value == 0.0:
+        return None
+    return 1.0 / value
 
 
 def load_stimulus_run_frames(root: zarr.Group, stimulus_run: Optional[str] = None) -> Optional[np.ndarray]:
@@ -859,153 +1215,170 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
     if render_online:
         # Online movement: prefer refined positions, fall back to raw if unavailable
-        # Try to use refined online positions by default
+        bundle = None
+        bundle_error: Optional[Exception] = None
         use_refined_online = False
-        refined_run_name = None
+        refined_run_name: Optional[str] = None
+        positions_online: Optional[np.ndarray] = None
+        frames_all: Optional[np.ndarray] = None
+        heading_online: Optional[np.ndarray] = None
+        pixel_to_mm_online: Optional[float] = None
+        coordinate_space = "camera"
+        texture_to_camera_scale = 1.0
+        valid_mask_refined: Optional[np.ndarray] = None
+        resolved_stimulus_run: Optional[str] = args.stimulus_run
+        metrics_run_used: Optional[str] = None
+
+        try:
+            bundle = load_chaser_metrics(
+                args.zarr_path,
+                stimulus_run=args.stimulus_run,
+                metrics_run=args.metrics_run,
+                chaser_index=args.chaser_index,
+            )
+            stim_value = bundle.provenance.get("stimulus_run")
+            if isinstance(stim_value, (bytes, bytearray)):
+                try:
+                    stim_value = stim_value.decode("utf-8", "ignore")
+                except Exception:
+                    stim_value = None
+            if isinstance(stim_value, str) and stim_value:
+                resolved_stimulus_run = stim_value
+            metrics_candidate = bundle.provenance.get("metrics_run")
+            if isinstance(metrics_candidate, (bytes, bytearray)):
+                try:
+                    metrics_candidate = metrics_candidate.decode("utf-8", "ignore")
+                except Exception:
+                    metrics_candidate = None
+            if isinstance(metrics_candidate, str) and metrics_candidate:
+                metrics_run_used = metrics_candidate
+        except Exception as exc:
+            bundle_error = exc
 
         # Check for refined online data (use by default if available)
         if "refined_online_runs" in root:
             refined_runs = root["refined_online_runs"]
-
-            # Use specified run, or latest if not specified
-            if args.refined_online_run is not None:
-                refined_run_name = args.refined_online_run
-            else:
-                refined_run_name = refined_runs.attrs.get("latest")
-
-            if refined_run_name and refined_run_name in refined_runs:
+            candidate = args.refined_online_run if args.refined_online_run is not None else refined_runs.attrs.get("latest")
+            if candidate and candidate in refined_runs:
+                refined_run_name = candidate
                 console.print("[blue]Building online movement run from refined_online_runs (refined positions)...[/blue]")
 
                 refined_group = refined_runs[refined_run_name]
                 console.print(f"[cyan]Using refined online run:[/cyan] {refined_run_name}")
 
-                # Load refined positions from interpolated group (final refined data)
                 interp_grp = refined_group["interpolated"]
-                frames_all = refined_group["camera_frame_ids"][:]
-                positions_refined = interp_grp["positions_px"][:]
-                valid_mask_refined = interp_grp["valid_mask"][:]
-
-                # Get source stimulus run for provenance
-                stimulus_run_name = refined_group.attrs.get("source_stimulus_run")
-                texture_to_camera_scale = refined_group.attrs.get("texture_to_camera_scale", 1.0)
-
-                # Get coordinate space and calibration
-                coordinate_space = refined_group.attrs.get("coordinate_space", "camera")
-                pixels_per_mm_projector = refined_group.attrs.get("pixels_per_mm_projector")
-
-                # Use projector calibration for texture-space positions
-                # (online positions are in texture space, so we need texture-space calibration)
-                pixel_to_mm_online = None
-                if pixels_per_mm_projector is not None and coordinate_space == "texture":
-                    pixel_to_mm_online = float(pixels_per_mm_projector)
-                    console.print(f"[cyan]Using projector calibration:[/cyan] {pixel_to_mm_online:.6f} pixels/mm (texture space)")
-                else:
-                    # Fall back to camera calibration if projector calibration not available
-                    pixel_to_mm_online = pixel_to_mm
-                    console.print(f"[yellow]Warning:[/yellow] Using camera calibration for online data (projector calibration not found)")
-
-                # Use refined positions (in texture space for accurate distance calculations)
-                positions_online = positions_refined
+                frames_all = np.asarray(refined_group["camera_frame_ids"][:], dtype=np.int64)
+                positions_online = np.asarray(interp_grp["positions_px"][:], dtype=np.float64)
+                valid_mask_refined = np.asarray(interp_grp["valid_mask"][:], dtype=bool)
                 use_refined_online = True
 
-                console.print(f"  Source stimulus run: {stimulus_run_name}")
+                stim_attr = refined_group.attrs.get("source_stimulus_run")
+                if isinstance(stim_attr, str) and stim_attr:
+                    resolved_stimulus_run = stim_attr
+
+                calibration = load_run_calibration(root, resolved_stimulus_run)
+                texture_to_camera_scale = float(
+                    refined_group.attrs.get("texture_to_camera_scale", calibration.texture_to_camera_scale or 1.0)
+                )
+                coordinate_space = str(refined_group.attrs.get("coordinate_space", "texture"))
+
+                pixel_to_mm_online = None
+                if coordinate_space == "texture":
+                    ppm_projector = calibration.pixels_per_mm_projector
+                    if ppm_projector is None:
+                        ppm_projector = refined_group.attrs.get("pixels_per_mm_projector")
+                    mm_per_px = _mm_per_pixel(ppm_projector)
+                    if mm_per_px is not None:
+                        pixel_to_mm_online = mm_per_px
+                        console.print(
+                            f"[cyan]Using projector calibration:[/cyan] {mm_per_px:.6f} mm/px (texture space)"
+                        )
+                if pixel_to_mm_online is None:
+                    fallback_ppm = calibration.pixels_per_mm_camera or pixel_to_mm
+                    if fallback_ppm is not None:
+                        if calibration.pixels_per_mm_camera is not None:
+                            pixel_to_mm_online = _mm_per_pixel(calibration.pixels_per_mm_camera)
+                        else:
+                            pixel_to_mm_online = float(fallback_ppm)
+                        console.print(
+                            "[yellow]Warning:[/yellow] Projector calibration unavailable; using camera calibration for online distance."
+                        )
+                    else:
+                        console.print(
+                            "[yellow]Warning:[/yellow] No calibration information available for online distances; results remain in pixels."
+                        )
+
+                heading_online = np.full(frames_all.shape, np.nan, dtype=np.float64)
+
+                console.print(f"  Source stimulus run: {resolved_stimulus_run}")
                 console.print(f"  Coordinate space: {coordinate_space}")
-                console.print(f"  Refined frames: {len(frames_all)}")
-                console.print(f"  Valid frames: {valid_mask_refined.sum()} ({valid_mask_refined.sum()/len(frames_all)*100:.1f}%)")
-            else:
-                console.print(f"[yellow]Note:[/yellow] Refined run '{refined_run_name}' not found; using raw online data.")
+                if valid_mask_refined is not None:
+                    valid_count = int(valid_mask_refined.sum())
+                    total_count = int(frames_all.shape[0])
+                    pct = (valid_count / total_count * 100.0) if total_count else 0.0
+                    console.print(f"  Refined frames: {total_count}")
+                    console.print(f"  Valid frames: {valid_count} ({pct:.1f}%)")
+            elif candidate:
+                console.print(f"[yellow]Note:[/yellow] Refined run '{candidate}' not found; using raw online data.")
         else:
             console.print("[yellow]Note:[/yellow] No refined_online_runs found; using raw online data.")
 
         if not use_refined_online:
-            console.print("[blue]Building online movement run from stimulus_runs (H5-imported data)...[/blue]")
-
-            # For raw online data, use camera calibration (positions will be transformed to camera space)
-            pixel_to_mm_online = pixel_to_mm
-
-            try:
-                bundle = load_chaser_metrics(
-                    args.zarr_path,
-                    stimulus_run=args.stimulus_run,
-                    metrics_run=None,  # Online uses chaser positions from stimulus_runs, not metrics
-                    chaser_index=args.chaser_index,
-                )
-            except Exception as exc:
-                console.print(f"[yellow]Warning:[/yellow] Unable to load stimulus run data ({exc}).")
+            if bundle is None:
+                if bundle_error is not None:
+                    console.print(f"[yellow]Warning:[/yellow] Unable to load stimulus run data ({bundle_error}).")
+                else:
+                    console.print("[yellow]Warning:[/yellow] Unable to load stimulus run data.")
                 console.print("[yellow]Skipping online movement run.[/yellow]")
                 render_online = False
-
-        if render_online and not use_refined_online:
-            frames_all = np.asarray(bundle.camera_frame_ids, dtype=np.int64)
-
-            # Use online target positions (fish/target from H5) for movement tracking
-            # These are logged for ALL trial states: PRE, TRAINING, and POST
-            target_positions_x = bundle.online.get("target_pos_x")
-            target_positions_y = bundle.online.get("target_pos_y")
-
-            if target_positions_x is None or target_positions_y is None:
-                console.print("[yellow]Warning:[/yellow] No target position data in stimulus run; skipping online movement.")
-                render_online = False
             else:
-                target_pos_x = np.asarray(target_positions_x, dtype=np.float64)
-                target_pos_y = np.asarray(target_positions_y, dtype=np.float64)
+                console.print("[blue]Building online movement run from stimulus_runs (online chaser metrics)...[/blue]")
+                frames_all = np.asarray(bundle.camera_frame_ids, dtype=np.int64)
+                target_positions_x = bundle.online.get("target_pos_x")
+                target_positions_y = bundle.online.get("target_pos_y")
 
-                # Transform online positions from texture space to camera space
-                # Online target positions are in texture/arena space (358x358) but need to be
-                # in camera space (4512x4512) to match offline positions and get correct distances
-                texture_to_camera_scale = 1.0  # default: no transformation
-                stimulus_run_name = bundle.provenance.get("stimulus_run")
-                if stimulus_run_name:
-                    try:
-                        import json
-                        analysis_group = root.require_group("analysis")
-                        stimulus_parent = analysis_group.require_group("stimulus_runs")
-                        if stimulus_run_name in stimulus_parent:
-                            stim_group = stimulus_parent[stimulus_run_name]
-                            coord_transform_raw = stim_group.attrs.get("coordinate_transform")
-
-                            # Parse JSON string to dict if needed
-                            coord_transform = None
-                            if isinstance(coord_transform_raw, str):
-                                try:
-                                    coord_transform = json.loads(coord_transform_raw)
-                                except json.JSONDecodeError:
-                                    console.print("[yellow]Warning:[/yellow] coordinate_transform is not valid JSON.")
-                            elif isinstance(coord_transform_raw, dict):
-                                coord_transform = coord_transform_raw
-
-                            if coord_transform and "texture_to_camera_scale" in coord_transform:
-                                texture_to_camera_scale = float(coord_transform["texture_to_camera_scale"])
-                                console.print(f"[cyan]Applying coordinate transformation:[/cyan] texture_to_camera_scale = {texture_to_camera_scale:.6f}")
-                            else:
-                                console.print("[yellow]Warning:[/yellow] No coordinate_transform/texture_to_camera_scale found in stimulus run; using raw positions.")
-                    except Exception as exc:
-                        console.print(f"[yellow]Warning:[/yellow] Failed to load coordinate transformation: {exc}")
-
-                # Apply transformation
-                target_pos_x = target_pos_x * texture_to_camera_scale
-                target_pos_y = target_pos_y * texture_to_camera_scale
-
-                # Create position array - includes PRE, TRAINING, and POST periods
-                positions_online = np.column_stack([target_pos_x, target_pos_y])
-
-        if render_online:
-            # Get heading from online fields if available, otherwise NaN
-            if use_refined_online:
-                # Refined data doesn't have heading, use NaN
-                heading_online = np.full(frames_all.shape, np.nan, dtype=np.float64)
-            else:
-                heading_online = bundle.online.get("visual_angle_deg")
-                if heading_online is not None:
-                    heading_online = np.asarray(heading_online, dtype=np.float64)
+                if target_positions_x is None or target_positions_y is None:
+                    console.print("[yellow]Warning:[/yellow] No target position data in stimulus run; skipping online movement.")
+                    render_online = False
                 else:
-                    heading_online = np.full(frames_all.shape, np.nan, dtype=np.float64)
+                    target_pos_x = np.asarray(target_positions_x, dtype=np.float64)
+                    target_pos_y = np.asarray(target_positions_y, dtype=np.float64)
 
-            # Use ALL frames from stimulus run (PRE + TRAINING + POST periods)
-            # No filtering needed since chaser positions are logged for all trial states
+                    calibration = load_run_calibration(root, resolved_stimulus_run)
+                    texture_to_camera_scale = float(calibration.texture_to_camera_scale or 1.0)
+                    if not np.isclose(texture_to_camera_scale, 1.0):
+                        console.print(
+                            f"[cyan]Applying coordinate transformation:[/cyan] texture_to_camera_scale = {texture_to_camera_scale:.6f}"
+                        )
+
+                    positions_online = np.column_stack([target_pos_x, target_pos_y]) * texture_to_camera_scale
+                    coordinate_space = "camera"
+
+                    camera_mm_per_px = _mm_per_pixel(calibration.pixels_per_mm_camera)
+                    if camera_mm_per_px is not None:
+                        pixel_to_mm_online = camera_mm_per_px
+                    elif pixel_to_mm is not None:
+                        pixel_to_mm_online = float(pixel_to_mm)
+                        console.print(
+                            "[yellow]Warning:[/yellow] Camera calibration missing for stimulus run; using global calibration."
+                        )
+                    else:
+                        pixel_to_mm_online = None
+                        console.print(
+                            "[yellow]Warning:[/yellow] Unable to determine camera calibration; distances remain in pixels."
+                        )
+
+                    heading_src = bundle.online.get("visual_angle_deg")
+                    if heading_src is not None:
+                        heading_online = np.asarray(heading_src, dtype=np.float64)
+                    else:
+                        heading_online = np.full(frames_all.shape, np.nan, dtype=np.float64)
+
+        if render_online and positions_online is not None and frames_all is not None:
+            if heading_online is None:
+                heading_online = np.full(frames_all.shape, np.nan, dtype=np.float64)
+
             frames_online = frames_all
-
-            # Single track ID for online (chaser)
             detection_ids_online = np.zeros(frames_online.shape[0], dtype=np.int64)
             keypoint_success_online = np.ones(frames_online.shape[0], dtype=bool)
 
@@ -1036,31 +1409,33 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
                     created_at = datetime.now(timezone.utc).isoformat()
 
-                    # Gather git and environment info for provenance
                     git_info = get_git_info()
                     env_info = get_environment_info()
 
                     if use_refined_online:
-                        inputs = {
+                        inputs: Dict[str, object] = {
                             "refined_online_run": refined_run_name,
-                            "stimulus_run": stimulus_run_name,
+                            "stimulus_run": resolved_stimulus_run,
                             "chaser_index": args.chaser_index,
                         }
                         method = "movement_analysis_online_refined"
-                        # For refined online data, save the coordinate space and calibration used
-                        saved_coordinate_space = coordinate_space
-                        saved_pixel_to_mm = pixel_to_mm_online
                     else:
                         inputs = {
-                            "stimulus_run": bundle.provenance.get("stimulus_run"),
-                            "chaser_index": int(bundle.provenance.get("chaser_index", args.chaser_index)),
+                            "stimulus_run": resolved_stimulus_run,
+                            "chaser_index": args.chaser_index,
                         }
+                        if bundle is not None:
+                            chaser_idx = bundle.provenance.get("chaser_index")
+                            if chaser_idx is not None:
+                                inputs["chaser_index"] = int(chaser_idx)
                         method = "movement_analysis_online"
-                        # For raw online data, positions are transformed to camera space
-                        saved_coordinate_space = "camera" if texture_to_camera_scale != 1.0 else "texture"
-                        saved_pixel_to_mm = pixel_to_mm
 
-                    # Build comprehensive provenance record
+                    if metrics_run_used:
+                        inputs["source_metrics_run"] = metrics_run_used
+
+                    saved_coordinate_space = coordinate_space
+                    saved_pixel_to_mm = pixel_to_mm_online
+
                     provenance = {
                         "stage": "movement_analysis",
                         "method": method,
@@ -1108,240 +1483,181 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         }
                     )
 
+                    if metrics_run_used:
+                        run_group.attrs["source_metrics_run"] = metrics_run_used
+
                     console.print(
                         f"[green]✓[/green] Saved movement run to [bold]analysis/movement_runs/online/{run_name}[/bold]"
                     )
+        else:
+            render_online = False
 
     if render_offline:
-        # Offline movement now uses ALL keypoint frames (entire video recording)
-        # This provides a comprehensive movement profile from video start to end
-        console.print("[blue]Building offline movement run from all keypoint frames...[/blue]")
-
-        keypoints_offline = resolve_keypoint_group(root, args.keypoint_run, console)
-        kp_parent_name = "refined_keypoints_runs" if keypoints_offline.is_refined else "keypoints_runs"
-
-        crop_group_offline = root[f"crop_runs/{keypoints_offline.crop_run}"]
-        detection_path_offline = crop_group_offline.attrs.get("source_coords_path")
-        if not detection_path_offline:
-            raise ValueError(
-                f"Crop run '{keypoints_offline.crop_run}' missing 'source_coords_path'; cannot determine detection source."
+        offline_bundle = None
+        offline_metrics_result: Optional[MetricsOfflineResult] = None
+        offline_metrics_error: Optional[Exception] = None
+        try:
+            offline_bundle = load_chaser_metrics(
+                args.zarr_path,
+                stimulus_run=args.stimulus_run,
+                metrics_run=args.metrics_run,
+                chaser_index=args.chaser_index,
             )
-
-        detection_offline = resolve_detection_from_path(root, detection_path_offline)
-        preferred_detection_offline = prefer_refined_detection(root, detection_offline, console)
-        detection_offline = preferred_detection_offline
-
-        detection_group_offline = detection_offline.group
-        bbox_norm_offline = detection_group_offline["bbox_norm_coords"][:]
-        frame_indices_offline = detection_group_offline["frame_indices"][:].astype(np.int64, copy=False)
-        detection_source_offline = (
-            detection_group_offline["detection_source"][:]
-            if "detection_source" in detection_group_offline
-            else None
-        )
-
-        heading_offline = keypoints_offline.group["heading"][:]
-        if heading_offline.shape[0] != bbox_norm_offline.shape[0]:
-            raise ValueError(
-                "Offline: Heading array length does not match detection count."
-            )
-
-        keypoint_success_offline = (
-            keypoints_offline.group["detection_success"][:]
-            if "detection_success" in keypoints_offline.group
-            else np.ones_like(heading_offline, dtype=bool)
-        )
-
-        width_offline, height_offline = resolve_dimensions(root)
-        positions_offline = np.empty((bbox_norm_offline.shape[0], 2), dtype=np.float64)
-        positions_offline[:, 0] = bbox_norm_offline[:, 0] * width_offline
-        positions_offline[:, 1] = bbox_norm_offline[:, 1] * height_offline
-
-        # For offline, use a single track ID (0) for all frames
-        detection_ids_offline: Optional[np.ndarray]
-        detection_ids_offline_metadata: Dict[str, Optional[str]] = {}
-
-        expected_detect_run = (
-            detection_offline.source_detect_run if detection_offline.source_detect_run else detection_offline.run_name
-        )
-
-        if detection_offline.is_refined:
-            detection_ids_offline, detection_ids_offline_metadata = load_detection_ids(
-                root,
-                frame_indices_offline.shape[0],
+            offline_metrics_result = build_offline_tracks_from_metrics(
+                offline_bundle,
+                fps,
+                args.smooth_seconds,
                 console,
-                expected_detect_run=expected_detect_run,
-                expected_refined_run=detection_offline.run_name,
-                return_metadata=True,
+                pixel_to_mm,
             )
+        except Exception as exc:
+            offline_metrics_error = exc
 
-            assignments_match_refined = (
-                detection_ids_offline is not None
-                and detection_ids_offline_metadata.get("assignment_source") == "refined_interpolated"
-                and detection_ids_offline_metadata.get("source_refined_run") == detection_offline.run_name
-            )
+        if offline_metrics_result is not None and offline_bundle is not None:
+            console.print("[blue]Building offline movement run from chaser_fish_metrics...[/blue]")
 
-            if not assignments_match_refined:
-                if detection_ids_offline is not None:
-                    console.print(
-                        "[yellow]ID assignment metadata does not match refined detections; remapping from raw detections.[/yellow]"
-                    )
-                refined_parent_group = root[detection_offline.parent_path]
-                detection_ids_offline = map_refined_detection_ids(
-                    refined_parent_group,
-                    frame_indices_offline,
-                    bbox_norm_offline,
-                    detection_source_offline,
-                    root,
-                    console,
-                )
-        else:
-            detection_ids_offline, detection_ids_offline_metadata = load_detection_ids(
-                root,
-                frame_indices_offline.shape[0],
-                console,
-                expected_detect_run=expected_detect_run,
-                return_metadata=True,
-            )
-
-        if detection_ids_offline is None:
-            console.print(
-                "[yellow]Warning:[/yellow] No ID assignments found; treating offline detections as a single track."
-            )
-            detection_ids_offline = np.zeros(frame_indices_offline.shape[0], dtype=np.int64)
-        else:
-            detection_ids_offline = detection_ids_offline.astype(np.int64, copy=False)
-
-        console.print(f"[blue]Offline frames:[/blue] {frame_indices_offline.shape[0]} (all keypoint detections)")
-
-        if frame_indices_offline.size == 0:
-            console.print("[yellow]Warning:[/yellow] No offline frames available; skipping.")
-        else:
-            proceed_offline = True
-            if args.skip_unassigned:
-                valid_mask = detection_ids_offline >= 0
-                if not np.any(valid_mask):
-                    console.print(
-                        "[yellow]Warning:[/yellow] All detections unassigned after filtering; skipping offline movement run."
-                    )
-                    proceed_offline = False
+            metrics_run_used = offline_bundle.provenance.get("metrics_run")
+            offline_run_name = args.offline_run_name
+            if not offline_run_name:
+                if isinstance(metrics_run_used, str) and metrics_run_used:
+                    offline_run_name = f"{metrics_run_used}_movement"
                 else:
-                    bbox_norm_offline = bbox_norm_offline[valid_mask]
-                    frame_indices_offline = frame_indices_offline[valid_mask]
-                    heading_offline = heading_offline[valid_mask]
-                    keypoint_success_offline = keypoint_success_offline[valid_mask]
-                    detection_ids_offline = detection_ids_offline[valid_mask]
-                    positions_offline = positions_offline[valid_mask]
-                    if detection_source_offline is not None:
-                        detection_source_offline = detection_source_offline[valid_mask]
+                    offline_run_name = "movement_offline_metrics"
+            offline_run_name = offline_run_name.replace("/", "_")
 
-            if not proceed_offline or frame_indices_offline.size == 0:
-                console.print("[yellow]Warning:[/yellow] No offline detections remaining after filtering; skipping.")
+            total_px_offline, total_mm_offline = summarize_to_table(
+                offline_metrics_result.summaries,
+                offline_metrics_result.pixel_to_mm,
+                console,
+            )
+
+            if args.no_write:
+                console.print("[green]Skipping offline write (--no-write).[/green]")
             else:
-                tracks_offline, summaries_offline = build_track_datasets(
-                    detection_ids=detection_ids_offline,
-                    frames=frame_indices_offline,
-                    positions_px=positions_offline,
-                    headings_deg=heading_offline,
-                    keypoint_success=keypoint_success_offline,
-                    detection_source=detection_source_offline,
-                    fps=fps,
-                    smooth_seconds=args.smooth_seconds,
-                    pixel_to_mm=pixel_to_mm,
+                pixel_to_mm_used = (
+                    offline_metrics_result.pixel_to_mm
+                    if offline_metrics_result.pixel_to_mm is not None
+                    else pixel_to_mm
                 )
 
-                if not summaries_offline:
-                    console.print("[yellow]Warning:[/yellow] Offline metrics produced no tracks.")
-                else:
-                    total_px_offline, total_mm_offline = summarize_to_table(
-                        summaries_offline, pixel_to_mm, console
+                offline_run_name, offline_group = ensure_movement_run_group(
+                    root,
+                    offline_run_name,
+                    run_type="offline",
+                    overwrite=True,
+                )
+                ordered_ids_offline = save_movement_tracks(
+                    offline_group,
+                    offline_metrics_result.tracks,
+                    offline_metrics_result.summaries,
+                )
+
+                sample_count = offline_metrics_result.frames.size
+                frame_chunks = (min(1024, sample_count),) if sample_count else (1,)
+                offline_group.create_array(
+                    "camera_frame_ids",
+                    data=offline_metrics_result.frames.astype(np.int64),
+                    chunks=frame_chunks,
+                    overwrite=True,
+                )
+                if offline_metrics_result.distance_px is not None:
+                    offline_group.create_array(
+                        "distance_to_target_px",
+                        data=offline_metrics_result.distance_px.astype(np.float32),
+                        chunks=frame_chunks,
+                        overwrite=True,
+                    )
+                if offline_metrics_result.distance_mm is not None:
+                    offline_group.create_array(
+                        "distance_to_target_mm",
+                        data=offline_metrics_result.distance_mm.astype(np.float32),
+                        chunks=frame_chunks,
+                        overwrite=True,
+                    )
+                if offline_metrics_result.chaser_pos_px is not None:
+                    rows, cols = offline_metrics_result.chaser_pos_px.shape
+                    pos_chunks = (min(1024, rows) if rows else 1, cols)
+                    offline_group.create_array(
+                        "chaser_positions_px",
+                        data=offline_metrics_result.chaser_pos_px.astype(np.float32),
+                        chunks=pos_chunks,
+                        overwrite=True,
                     )
 
-                    if args.no_write:
-                        console.print("[green]Skipping offline write (--no-write).[/green]")
-                    else:
-                        offline_run_name = args.offline_run_name
-                        if not offline_run_name:
-                            # Use keypoint run name as basis for offline run name
-                            offline_run_name = f"{keypoints_offline.run_name}_movement"
+                created_at = datetime.now(timezone.utc).isoformat()
+                git_info = get_git_info()
+                env_info = get_environment_info()
 
-                        offline_run_name, offline_group = ensure_movement_run_group(
-                            root,
-                            offline_run_name,
-                            run_type="offline",
-                            overwrite=True,
-                        )
-                        ordered_ids_offline = save_movement_tracks(
-                            offline_group, tracks_offline, summaries_offline
-                        )
+                provenance_inputs = {
+                    key: value
+                    for key, value in offline_bundle.provenance.items()
+                    if key in {"metrics_run", "stimulus_run", "source_keypoints_run", "source_stimulus_run", "chaser_index"}
+                    and value is not None
+                }
 
-                        created_at = datetime.now(timezone.utc).isoformat()
+                offline_provenance = {
+                    "stage": "movement_analysis",
+                    "method": "movement_analysis_offline_metrics",
+                    "command": " ".join(sys.argv),
+                    "created_at_utc": created_at,
+                    "git": {
+                        "commit": git_info.get("commit_hash"),
+                        "short": git_info.get("short_hash"),
+                        "branch": git_info.get("branch"),
+                        "is_dirty": git_info.get("is_dirty"),
+                        "remote": git_info.get("remote_url"),
+                    },
+                    "environment": {
+                        "hostname": env_info["platform"].get("hostname"),
+                        "python_version": env_info["platform"].get("python_version"),
+                        "system": env_info["platform"].get("system"),
+                        "release": env_info["platform"].get("release"),
+                    },
+                    "parameters": {
+                        "fps": fps,
+                        "smoothing_seconds": args.smooth_seconds,
+                        "coordinate_space": "camera",
+                        "calibration_used": pixel_to_mm_used,
+                    },
+                    "inputs": provenance_inputs,
+                }
 
-                        # Gather git and environment info for provenance
-                        git_info = get_git_info()
-                        env_info = get_environment_info()
+                attrs_update = {
+                    "method": "movement_analysis_offline_metrics",
+                    "created_at_utc": created_at,
+                    "fps": fps,
+                    "smoothing_seconds": args.smooth_seconds,
+                    "pixel_to_mm": pixel_to_mm_used,
+                    "calibration": calibration_info,
+                    "inputs": provenance_inputs,
+                    "summary": offline_metrics_result.summaries,
+                    "num_tracks": len(ordered_ids_offline),
+                    "total_distance_px": total_px_offline,
+                    "total_distance_mm": total_mm_offline
+                    if pixel_to_mm_used is not None
+                    else math.nan,
+                    "provenance": offline_provenance,
+                }
+                if isinstance(metrics_run_used, str) and metrics_run_used:
+                    attrs_update["source_metrics_run"] = metrics_run_used
 
-                        offline_inputs = {
-                            "detection_path": detection_offline.path,
-                            "detection_run": detection_offline.run_name,
-                            "detection_variant": detection_offline.variant,
-                            "source_detect_run": detection_offline.source_detect_run,
-                            "keypoint_run": keypoints_offline.run_name,
-                            "keypoint_variant": "refined" if keypoints_offline.is_refined else "raw",
-                            "base_keypoint_run": keypoints_offline.base_run_name,
-                            "crop_run": keypoints_offline.crop_run,
-                        }
-                        if detection_ids_offline_metadata:
-                            offline_inputs["id_assignment_metadata"] = detection_ids_offline_metadata
+                offline_group.attrs.update(attrs_update)
 
-                        # Build comprehensive provenance record
-                        offline_provenance = {
-                            "stage": "movement_analysis",
-                            "method": "movement_analysis_offline",
-                            "command": " ".join(sys.argv),
-                            "created_at_utc": created_at,
-                            "git": {
-                                "commit": git_info.get("commit_hash"),
-                                "short": git_info.get("short_hash"),
-                                "branch": git_info.get("branch"),
-                                "is_dirty": git_info.get("is_dirty"),
-                                "remote": git_info.get("remote_url"),
-                            },
-                            "environment": {
-                                "hostname": env_info["platform"].get("hostname"),
-                                "python_version": env_info["platform"].get("python_version"),
-                                "system": env_info["platform"].get("system"),
-                                "release": env_info["platform"].get("release"),
-                            },
-                            "parameters": {
-                                "fps": fps,
-                                "smoothing_seconds": args.smooth_seconds,
-                                "coordinate_space": "camera",
-                                "calibration_used": pixel_to_mm,
-                            },
-                            "inputs": offline_inputs,
-                        }
+                console.print(
+                    f"[green]✓[/green] Saved offline movement run to [bold]analysis/movement_runs/offline/{offline_run_name}[/bold]"
+                )
+        else:
+            if offline_metrics_error is not None:
+                console.print(
+                    f"[yellow]Warning:[/yellow] Unable to build offline movement run from chaser_fish_metrics ({offline_metrics_error}). "
+                    "Falling back to detection-based assembly."
+                )
+            else:
+                console.print(
+                    "[yellow]Warning:[/yellow] Offline chaser metrics unavailable or empty; falling back to detection-based assembly."
+                )
 
-                        offline_group.attrs.update(
-                            {
-                                "method": "movement_analysis_offline",
-                                "created_at_utc": created_at,
-                                "fps": fps,
-                                "smoothing_seconds": args.smooth_seconds,
-                                "pixel_to_mm": pixel_to_mm,
-                                "calibration": calibration_info,
-                                "inputs": offline_inputs,
-                                "summary": summaries_offline,
-                                "num_tracks": len(ordered_ids_offline),
-                                "total_distance_px": total_px_offline,
-                                "total_distance_mm": total_mm_offline if pixel_to_mm is not None else float("nan"),
-                                "provenance": offline_provenance,
-                            }
-                        )
-
-                        console.print(
-                            f"[green]✓[/green] Saved offline movement run to [bold]analysis/movement_runs/offline/{offline_run_name}[/bold]"
-                        )
+            run_offline_from_detections(root, args, fps, pixel_to_mm, calibration_info, console)
 
 
 __all__ = [

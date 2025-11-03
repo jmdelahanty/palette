@@ -242,6 +242,9 @@ def compute_metrics(
         )
     chaser_states, _ = load_structured_dataset(tracking_group, "chaser_states")
     texture_scale, texture_width = _resolve_texture_scale(zarr_root, stim_group, stimulus_run)
+    console.print(
+        f"[dim]texture_to_camera_scale={texture_scale:.4f}, texture_width_px={texture_width}[/dim]"
+    )
     chaser_dict = _structured_to_dict(chaser_states)
     frame_numbers_arr = _get_field(chaser_dict, "frame_number", "stimulus_frame_num")
     try:
@@ -270,8 +273,37 @@ def compute_metrics(
     ).astype(np.float64)
     if texture_scale != 1.0:
         chaser_pos *= texture_scale
+
     pixels_per_mm = chaser_dict.get("pixels_per_mm")
-    ppm_values = pixels_per_mm[chaser_rows].astype(np.float64) if pixels_per_mm is not None else None
+    ppm_values = None
+    if pixels_per_mm is not None:
+        ppm_values = pixels_per_mm[chaser_rows].astype(np.float64)
+        finite_ppm = ppm_values[np.isfinite(ppm_values) & (ppm_values > 0)]
+        if finite_ppm.size and np.nanmedian(finite_ppm) < 1.0:
+            console.print(
+                "[yellow]Warning:[/yellow] chaser_states/pixels_per_mm appears to be stored as mm per pixel; "
+                "inverting to obtain pixels-per-mm."
+            )
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ppm_values = np.where(ppm_values > 0, 1.0 / ppm_values, ppm_values)
+        finite_ppm = ppm_values[np.isfinite(ppm_values) & (ppm_values > 0)]
+        if finite_ppm.size:
+            console.print(
+                f"[dim]pixels_per_mm stats:[/dim] min={finite_ppm.min():.4f}, "
+                f"max={finite_ppm.max():.4f}, median={np.median(finite_ppm):.4f}"
+            )
+        else:
+            console.print("[yellow]Warning:[/yellow] pixels_per_mm available but contains no positive finite values.")
+
+    if ppm_values is not None and texture_scale != 1.0:
+        ppm_values = ppm_values * texture_scale
+        finite_ppm = ppm_values[np.isfinite(ppm_values) & (ppm_values > 0)]
+        if finite_ppm.size:
+            console.print(
+                f"[dim]pixels_per_mm after texture_scale ({texture_scale:.4f}×):[/dim] "
+                f"min={finite_ppm.min():.4f}, max={finite_ppm.max():.4f}, "
+                f"median={np.median(finite_ppm):.4f}"
+            )
 
     chaser_by_frame: Dict[int, Tuple[np.ndarray, Optional[float]]] = {}
     for idx, cam_frame in enumerate(camera_frames):
@@ -356,6 +388,22 @@ def compute_metrics(
         angle_signed[idx] = signed_deg
 
     valid_count = int(metrics_mask.sum())
+    conversion_ratio = None
+    if np.isfinite(distance_px).any() and np.isfinite(distance_mm).any():
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = distance_mm / distance_px
+        finite_ratio = ratio[np.isfinite(ratio) & (ratio > 0)]
+        if finite_ratio.size:
+            conversion_ratio = np.median(finite_ratio)
+            console.print(
+                f"[dim]Derived mm_per_px (distance_mm/distance_px): "
+                f"min={finite_ratio.min():.4f}, max={finite_ratio.max():.4f}, "
+                f"median={conversion_ratio:.4f}[/dim]"
+            )
+        else:
+            console.print(
+                "[yellow]Warning:[/yellow] Unable to derive mm-per-pixel ratio from distance metrics."
+            )
     total_frames = len(chaser_by_frame)
 
     console.print(
