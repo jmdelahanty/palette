@@ -7,13 +7,16 @@ selected track within an analysis/movement_runs entry.
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
-from typing import Iterable, Optional, Tuple, List
+from typing import Iterable, Optional, Tuple, List, Dict, Any
 
 import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 from rich.console import Console
+
+from .chaser_state_interpolator import load_structured_dataset
 
 
 def resolve_movement_runs(
@@ -196,6 +199,270 @@ def resolve_swim_bout_spans(
     return spans, run_name
 
 
+def resolve_stimulus_run(root: zarr.Group, run_group: zarr.Group) -> Optional[str]:
+    inputs = run_group.attrs.get("inputs")
+    if isinstance(inputs, dict):
+        for key in ("stimulus_run", "source_stimulus_run"):
+            value = inputs.get(key)
+            if isinstance(value, str) and value:
+                return value
+    alt = run_group.attrs.get("stimulus_run")
+    if isinstance(alt, str) and alt:
+        return alt
+    stim_parent = root.get("analysis/stimulus_runs")
+    if stim_parent is not None:
+        latest = stim_parent.attrs.get("latest")
+        if isinstance(latest, str) and latest:
+            return latest
+    return None
+
+
+def _parse_coordinate_transform(attr: Any) -> Dict[str, Any]:
+    if isinstance(attr, dict):
+        return attr
+    if isinstance(attr, (bytes, bytearray)):
+        try:
+            attr = attr.decode("utf-8")
+        except Exception:
+            return {}
+    if isinstance(attr, str):
+        try:
+            return json.loads(attr)
+        except Exception:
+            return {}
+    return {}
+
+
+def compute_texture_to_camera_transform(
+    root: zarr.Group, stim_run: str
+) -> Tuple[float, float, float]:
+    stim_group = root[f"analysis/stimulus_runs/{stim_run}"]
+    coord_attr = stim_group.attrs.get("coordinate_transform")
+    coord_info = _parse_coordinate_transform(coord_attr)
+
+    texture_dims = coord_info.get("texture_dimensions")
+    camera_dims = coord_info.get("camera_dimensions")
+    scale = coord_info.get("texture_to_camera_scale")
+    if scale is None:
+        try:
+            if isinstance(camera_dims, (list, tuple)) and isinstance(texture_dims, (list, tuple)):
+                if camera_dims and texture_dims and texture_dims[0]:
+                    scale = float(camera_dims[0]) / float(texture_dims[0])
+        except Exception:
+            scale = None
+    if scale is None:
+        scale = 1.0
+
+    offset_x = offset_y = 0.0
+    calib = root.get("calibration")
+    if calib is not None:
+        offset_x = float(calib.attrs.get("stimulus_offset_x", 0.0) or 0.0)
+        offset_y = float(calib.attrs.get("stimulus_offset_y", 0.0) or 0.0)
+        primary_cam = calib.attrs.get("primary_camera_id")
+        if isinstance(primary_cam, (bytes, bytearray)):
+            primary_cam = primary_cam.decode("utf-8", "ignore")
+        if (
+            isinstance(primary_cam, str)
+            and "cameras" in calib
+            and primary_cam in calib["cameras"]
+        ):
+            cam_attrs = calib["cameras"][primary_cam].attrs
+            offset_x = float(cam_attrs.get("stimulus_offset_x", offset_x) or offset_x)
+            offset_y = float(cam_attrs.get("stimulus_offset_y", offset_y) or offset_y)
+    return float(scale), float(offset_x), float(offset_y)
+
+def load_chaser_states(
+    root: zarr.Group,
+    stim_run: str,
+    console: Console,
+) -> Optional[np.ndarray]:
+    path = f"analysis/stimulus_runs/{stim_run}/tracking_data"
+    if path not in root or "chaser_states" not in root[path]:
+        console.print(
+            f"[yellow]Warning:[/yellow] Stimulus run '{stim_run}' lacks tracking_data/chaser_states."
+        )
+        return None
+    try:
+        chaser_arr, _ = load_structured_dataset(root[path], "chaser_states")
+        return chaser_arr
+    except Exception as exc:  # pragma: no cover - defensive
+        console.print(
+            f"[yellow]Warning:[/yellow] Unable to load stimulus chaser states ({exc})."
+        )
+        return None
+
+
+def compute_online_chaser_distance(
+    root: zarr.Group,
+    stim_run: str,
+    console: Console,
+) -> Optional[Tuple[np.ndarray, np.ndarray, str]]:
+    chaser_arr = load_chaser_states(root, stim_run, console)
+    if chaser_arr is None or chaser_arr.size == 0:
+        return None
+
+    names = chaser_arr.dtype.names or ()
+    if "distance_to_target_mm" in names:
+        distances = np.asarray(chaser_arr["distance_to_target_mm"], dtype=np.float64)
+        unit = "mm"
+    elif "distance_to_target_px" in names:
+        distances = np.asarray(chaser_arr["distance_to_target_px"], dtype=np.float64)
+        unit = "px"
+    else:
+        console.print(
+            "[yellow]Warning:[/yellow] Stimulus chaser_states lacks distance columns; skipping distance plot."
+        )
+        return None
+
+    if "timestamp_ns_session" in names:
+        times = np.asarray(chaser_arr["timestamp_ns_session"], dtype=np.float64) / 1e9
+    elif "stimulus_frame_num" in names:
+        stim_group = root[f"analysis/stimulus_runs/{stim_run}"]
+        fps = stim_group.attrs.get("fps")
+        if fps and np.isfinite(fps) and fps > 0:
+            times = np.asarray(chaser_arr["stimulus_frame_num"], dtype=np.float64) / float(fps)
+        else:
+            times = np.arange(distances.shape[0], dtype=np.float64)
+    else:
+        times = np.arange(distances.shape[0], dtype=np.float64)
+
+    if times.size:
+        times = times - times[0]
+
+    valid = np.isfinite(times) & np.isfinite(distances)
+    if not np.any(valid):
+        return None
+
+    return times[valid], distances[valid], unit
+
+
+def compute_offline_chaser_distance(
+    root: zarr.Group,
+    run_group: zarr.Group,
+    track_group: zarr.Group,
+    track_id: int,
+    console: Console,
+) -> Optional[Tuple[np.ndarray, np.ndarray, str]]:
+    stim_run = resolve_stimulus_run(root, run_group)
+    if not stim_run:
+        console.print(
+            "[yellow]Warning:[/yellow] Unable to resolve stimulus run for offline distance plot."
+        )
+        return None
+
+    chaser_arr = load_chaser_states(root, stim_run, console)
+    if chaser_arr is None or chaser_arr.size == 0:
+        return None
+
+    names = chaser_arr.dtype.names or ()
+    if "stimulus_frame_num" not in names:
+        console.print(
+            "[yellow]Warning:[/yellow] Stimulus chaser_states lacks 'stimulus_frame_num'; skipping distance plot."
+        )
+        return None
+
+    mask = np.ones(chaser_arr.shape[0], dtype=bool)
+    if "chaser_index" in names:
+        chaser_indices = chaser_arr["chaser_index"]
+        if track_id in np.unique(chaser_indices):
+            mask = chaser_indices == track_id
+        else:
+            mask = chaser_indices == chaser_indices[0]
+    chaser_filtered = chaser_arr[mask]
+    if chaser_filtered.size == 0:
+        console.print(
+            "[yellow]Warning:[/yellow] No chaser states matched track id; skipping distance plot."
+        )
+        return None
+
+    try:
+        scale, offset_x, offset_y = compute_texture_to_camera_transform(root, stim_run)
+    except Exception as exc:
+        console.print(
+            f"[yellow]Warning:[/yellow] Unable to derive texture→camera transform ({exc}); skipping distance plot."
+        )
+        return None
+
+    stim_group = root[f"analysis/stimulus_runs/{stim_run}"]
+    try:
+        frame_meta, _ = load_structured_dataset(stim_group["video_metadata"], "frame_metadata")
+    except Exception as exc:
+        console.print(
+            f"[yellow]Warning:[/yellow] Unable to load frame_metadata for {stim_run} ({exc}); skipping distance plot."
+        )
+        return None
+
+    meta_names = frame_meta.dtype.names or ()
+    if "triggering_camera_frame_id" not in meta_names or "stimulus_frame_num" not in meta_names:
+        console.print(
+            f"[yellow]Warning:[/yellow] frame_metadata lacks required fields; skipping distance plot."
+        )
+        return None
+
+    cam_frames = frame_meta["triggering_camera_frame_id"].astype(np.int64, copy=False)
+    stim_frames = frame_meta["stimulus_frame_num"].astype(np.int64, copy=False)
+    cam_to_stim: Dict[int, int] = {int(cam): int(stim) for cam, stim in zip(cam_frames, stim_frames)}
+
+    stim_frames_chaser = chaser_filtered["stimulus_frame_num"].astype(np.int64, copy=False)
+    chaser_x_tex = np.asarray(chaser_filtered["chaser_pos_x"], dtype=np.float64)
+    chaser_y_tex = np.asarray(chaser_filtered["chaser_pos_y"], dtype=np.float64)
+    chaser_cam_x = chaser_x_tex * scale + offset_x
+    chaser_cam_y = chaser_y_tex * scale + offset_y
+
+    stim_to_pos: Dict[int, Tuple[float, float]] = {
+        int(stim): (float(x_cam), float(y_cam))
+        for stim, x_cam, y_cam in zip(stim_frames_chaser, chaser_cam_x, chaser_cam_y)
+    }
+
+    frame_indices = track_group["frame_indices"][:].astype(np.int64, copy=False)
+    positions_px = track_group["positions_px"][:]
+    if positions_px.shape[0] != frame_indices.shape[0]:
+        console.print(
+            "[yellow]Warning:[/yellow] Position array length mismatch; skipping distance plot."
+        )
+        return None
+
+    chaser_camera = np.full_like(positions_px, np.nan, dtype=np.float64)
+    for idx, cam_frame in enumerate(frame_indices):
+        stim_frame = cam_to_stim.get(int(cam_frame))
+        if stim_frame is None:
+            continue
+        pos = stim_to_pos.get(stim_frame)
+        if pos is None:
+            continue
+        chaser_camera[idx, 0] = pos[0]
+        chaser_camera[idx, 1] = pos[1]
+
+    valid = np.isfinite(chaser_camera).all(axis=1) & np.isfinite(positions_px).all(axis=1)
+    if not np.any(valid):
+        console.print(
+            "[yellow]Warning:[/yellow] No overlapping frames between detections and chaser states; skipping distance plot."
+        )
+        return None
+
+    delta = positions_px[valid] - chaser_camera[valid]
+    distance_px = np.hypot(delta[:, 0], delta[:, 1])
+
+    time_seconds = track_group["time_seconds"][:]
+    if time_seconds.shape[0] != frame_indices.shape[0]:
+        fps = run_group.attrs.get("fps")
+        if fps and np.isfinite(fps) and fps > 0:
+            time_seconds = frame_indices.astype(np.float64) / float(fps)
+        else:
+            time_seconds = np.arange(frame_indices.shape[0], dtype=np.float64)
+
+    time_valid = time_seconds[valid]
+
+    pixel_to_mm = run_group.attrs.get("pixel_to_mm")
+    if pixel_to_mm and np.isfinite(pixel_to_mm):
+        distance_vals = distance_px * float(pixel_to_mm)
+        distance_unit = "mm"
+    else:
+        distance_vals = distance_px
+        distance_unit = "px"
+
+    return time_valid, distance_vals, distance_unit
+
 def plot_track(
     run_group: zarr.Group,
     track_group: zarr.Group,
@@ -206,6 +473,7 @@ def plot_track(
     run_name: Optional[str] = None,
     swim_bouts: Optional[List[Tuple[float, float]]] = None,
     swim_bout_label: Optional[str] = None,
+    distance_series: Optional[Tuple[np.ndarray, np.ndarray, str]] = None,
 ) -> None:
     time_seconds = track_group["time_seconds"][:]
     smoothed_speed_px = track_group["smoothed_speed_px"][:]
@@ -227,21 +495,27 @@ def plot_track(
     )
     accel_label = f"Acceleration ({unit_label}/s^2)" if unit_label in {"mm", "px"} else "Acceleration"
 
-    fig, axes = plt.subplots(5, 1, figsize=(10, 16))
+    num_rows = 5 + (1 if distance_series is not None else 0)
+    fig, axes = plt.subplots(num_rows, 1, figsize=(10, 3.2 * num_rows))
+    if num_rows == 1:
+        axes = [axes]
+    ax_idx = 0
 
     # Plot both raw and smoothed speed
-    axes[0].plot(time_seconds, speed_raw, color="tab:gray", linewidth=0.8, alpha=0.5, label="Instantaneous")
-    axes[0].plot(time_seconds, speed_smoothed, color="tab:blue", linewidth=1.2, label="Smoothed")
-    axes[0].set_xlabel("Time (s)")
-    axes[0].set_ylabel(speed_label)
-    axes[0].set_title(f"Track {track_id}: Speed over time")
-    axes[0].grid(alpha=0.3)
+    speed_ax = axes[ax_idx]
+    ax_idx += 1
+    speed_ax.plot(time_seconds, speed_raw, color="tab:gray", linewidth=0.8, alpha=0.5, label="Instantaneous")
+    speed_ax.plot(time_seconds, speed_smoothed, color="tab:blue", linewidth=1.2, label="Smoothed")
+    speed_ax.set_xlabel("Time (s)")
+    speed_ax.set_ylabel(speed_label)
+    speed_ax.set_title(f"Track {track_id}: Speed over time")
+    speed_ax.grid(alpha=0.3)
     if swim_bouts:
         label_added = False
         for start, stop in swim_bouts:
             if not np.isfinite(start) or not np.isfinite(stop):
                 continue
-            axes[0].axvspan(
+            speed_ax.axvspan(
                 start,
                 stop,
                 color="tab:orange",
@@ -251,20 +525,35 @@ def plot_track(
             )
             label_added = True
         if label_added and swim_bout_label:
-            axes[0].set_title(f"Track {track_id}: Speed over time (swim bouts: {swim_bout_label})")
-    axes[0].legend(loc="upper right")
+            speed_ax.set_title(f"Track {track_id}: Speed over time (swim bouts: {swim_bout_label})")
+    speed_ax.legend(loc="upper right")
 
-    axes[1].plot(time_seconds, accel, color="tab:red", linewidth=1.0)
-    axes[1].set_xlabel("Time (s)")
-    axes[1].set_ylabel(accel_label)
-    axes[1].set_title("Smoothed acceleration over time")
-    axes[1].grid(alpha=0.3)
+    accel_ax = axes[ax_idx]
+    ax_idx += 1
+    accel_ax.plot(time_seconds, accel, color="tab:red", linewidth=1.0)
+    accel_ax.set_xlabel("Time (s)")
+    accel_ax.set_ylabel(accel_label)
+    accel_ax.set_title("Smoothed acceleration over time")
+    accel_ax.grid(alpha=0.3)
 
-    axes[2].plot(time_seconds, smoothed_heading_deg, color="tab:orange", linewidth=1.0)
-    axes[2].set_xlabel("Time (s)")
-    axes[2].set_ylabel("Heading (deg)")
-    axes[2].set_title("Heading over time (smoothed)")
-    axes[2].grid(alpha=0.3)
+    if distance_series is not None:
+        dist_time, dist_values, dist_unit = distance_series
+        distance_ax = axes[ax_idx]
+        ax_idx += 1
+        distance_ax.plot(dist_time, dist_values, color="tab:purple", linewidth=1.0)
+        distance_ax.set_xlabel("Time (s)")
+        distance_ax.set_ylabel(f"Distance to target ({dist_unit})")
+        distance_ax.set_title("Chaser → target distance")
+        distance_ax.grid(alpha=0.3)
+        distance_ax.set_xlim(speed_ax.get_xlim())
+
+    heading_ax = axes[ax_idx]
+    ax_idx += 1
+    heading_ax.plot(time_seconds, smoothed_heading_deg, color="tab:orange", linewidth=1.0)
+    heading_ax.set_xlabel("Time (s)")
+    heading_ax.set_ylabel("Heading (deg)")
+    heading_ax.set_title("Heading over time (smoothed)")
+    heading_ax.grid(alpha=0.3)
 
     cumulative = track_group["cumulative_distance_mm"][:]
     if not (np.isfinite(cumulative).any() and unit_label == "mm"):
@@ -272,26 +561,30 @@ def plot_track(
         cumulative_label = "Cumulative distance (px)"
     else:
         cumulative_label = "Cumulative distance (mm)"
-    axes[3].plot(time_seconds, cumulative, color="tab:green", linewidth=1.2)
-    axes[3].set_xlabel("Time (s)")
-    axes[3].set_ylabel(cumulative_label)
-    axes[3].set_title("Cumulative distance over time")
-    axes[3].grid(alpha=0.3)
+    cumulative_ax = axes[ax_idx]
+    ax_idx += 1
+    cumulative_ax.plot(time_seconds, cumulative, color="tab:green", linewidth=1.2)
+    cumulative_ax.set_xlabel("Time (s)")
+    cumulative_ax.set_ylabel(cumulative_label)
+    cumulative_ax.set_title("Cumulative distance over time")
+    cumulative_ax.grid(alpha=0.3)
 
     # Filter out NaN positions for histogram
     valid_pos = np.isfinite(pos_x) & np.isfinite(pos_y)
     if np.any(valid_pos):
-        heat = axes[4].hist2d(pos_x[valid_pos], pos_y[valid_pos], bins=bins, cmap="inferno")
-        axes[4].set_xlabel(f"X ({unit_label})")
-        axes[4].set_ylabel(f"Y ({unit_label})")
-        axes[4].set_title(f"Position density ({valid_pos.sum()}/{len(pos_x)} valid)")
-        cbar = fig.colorbar(heat[3], ax=axes[4])
+        heatmap_ax = axes[ax_idx]
+        heat = heatmap_ax.hist2d(pos_x[valid_pos], pos_y[valid_pos], bins=bins, cmap="inferno")
+        heatmap_ax.set_xlabel(f"X ({unit_label})")
+        heatmap_ax.set_ylabel(f"Y ({unit_label})")
+        heatmap_ax.set_title(f"Position density ({valid_pos.sum()}/{len(pos_x)} valid)")
+        cbar = fig.colorbar(heat[3], ax=heatmap_ax)
         cbar.set_label("Counts")
     else:
-        axes[4].text(0.5, 0.5, "No valid positions", ha="center", va="center", transform=axes[4].transAxes)
-        axes[4].set_xlabel(f"X ({unit_label})")
-        axes[4].set_ylabel(f"Y ({unit_label})")
-        axes[4].set_title("Position density (no valid data)")
+        heatmap_ax = axes[ax_idx]
+        heatmap_ax.text(0.5, 0.5, "No valid positions", ha="center", va="center", transform=heatmap_ax.transAxes)
+        heatmap_ax.set_xlabel(f"X ({unit_label})")
+        heatmap_ax.set_ylabel(f"Y ({unit_label})")
+        heatmap_ax.set_title("Position density (no valid data)")
 
     # Build title with run type (online/offline) if available
     title = f"Movement summary – track {track_id}"
@@ -386,6 +679,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             # Replace slashes in run_name to avoid invalid filenames
             safe_run_name = run_name.replace("/", "_")
             dest = dest.with_name(f"{dest.stem}_{safe_run_name}{dest.suffix}")
+
+        distance_series = None
+        stim_run_name = resolve_stimulus_run(root, run_group)
+        if run_name.startswith('online/') and stim_run_name:
+            distance_series = compute_online_chaser_distance(root, stim_run_name, console)
+        elif run_name.startswith('offline/') and stim_run_name:
+            distance_series = compute_offline_chaser_distance(root, run_group, track_group, track_id, console)
+
         plot_track(
             run_group,
             track_group,
@@ -396,6 +697,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             run_name,
             swim_bouts=swim_spans,
             swim_bout_label=swim_label,
+            distance_series=distance_series,
         )
 
 
