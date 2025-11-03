@@ -439,6 +439,8 @@ Box Data:
 - y_min (float): Top edge
 - width (float): Box width
 - height (float): Box height
+- centroid_x (float): Horizontal center in camera pixels (computed during import)
+- centroid_y (float): Vertical center in camera pixels (computed during import)
 - class_id (uint16): Detection class
 - confidence (float): Detection confidence
 ```

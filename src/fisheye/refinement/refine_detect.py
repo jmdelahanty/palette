@@ -24,15 +24,15 @@ from ..utils.system import get_environment_info, get_git_info
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
 
-
 def filter_detections(
     bbox_coords: np.ndarray,
     scores: np.ndarray,
     frame_indices: np.ndarray,
+    class_ids: np.ndarray,
     detection_quality_labels: np.ndarray,
     num_frames: int,
     filters: List[str] = ['remove_jumps']
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict]:
     """
     Filter detections based on quality labels.
     
@@ -45,8 +45,8 @@ def filter_detections(
         filters: List of filters to apply
         
     Returns:
-        Tuple of (filtered_bboxes, filtered_scores, frame_counts, 
-                  frame_indices, drop_stats)
+        Tuple of (filtered_bboxes, filtered_scores, frame_counts,
+                  frame_indices, class_ids, drop_stats)
     """
     # Determine which detections to keep
     keep_mask = np.ones(len(detection_quality_labels), dtype=bool)
@@ -70,6 +70,7 @@ def filter_detections(
     filtered_bboxes = bbox_coords[keep_mask]
     filtered_scores = scores[keep_mask]
     filtered_frame_indices = frame_indices[keep_mask].astype('i4', copy=False)
+    filtered_class_ids = class_ids[keep_mask].astype('i4', copy=False)
     
     # Update per-frame detection counts
     filtered_counts = np.bincount(filtered_frame_indices, minlength=num_frames).astype('i4', copy=False)
@@ -82,7 +83,14 @@ def filter_detections(
         'original': len(detection_quality_labels)
     }
     
-    return filtered_bboxes, filtered_scores, filtered_counts, filtered_frame_indices, drop_stats
+    return (
+        filtered_bboxes,
+        filtered_scores,
+        filtered_counts,
+        filtered_frame_indices,
+        filtered_class_ids,
+        drop_stats,
+    )
 
 
 def find_gaps_to_interpolate(
@@ -171,10 +179,11 @@ def interpolate_detections(
     filtered_bboxes: np.ndarray,
     filtered_scores: np.ndarray,
     filtered_frame_indices: np.ndarray,
+    filtered_class_ids: np.ndarray,
     num_frames: int,
     max_gap: int = 20,
     method: str = 'linear'
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict]:
     """
     Interpolate gaps in filtered detections.
     
@@ -188,7 +197,7 @@ def interpolate_detections(
         
     Returns:
         Tuple of (interp_bboxes, interp_scores, frame_counts,
-                  frame_indices, detection_source, interp_stats)
+                  frame_indices, class_ids, detection_source, interp_stats)
     """
     # Find gaps
     gaps = find_gaps_to_interpolate(filtered_frame_indices, max_gap)
@@ -203,8 +212,15 @@ def interpolate_detections(
             'max_gap_size': 0
         }
         filtered_counts = np.bincount(filtered_frame_indices, minlength=num_frames).astype('i4', copy=False)
-        return (filtered_bboxes, filtered_scores, filtered_counts,
-                filtered_frame_indices.astype('i4', copy=False), detection_source, stats)
+        return (
+            filtered_bboxes,
+            filtered_scores,
+            filtered_counts,
+            filtered_frame_indices.astype('i4', copy=False),
+            filtered_class_ids.astype('i4', copy=False),
+            detection_source,
+            stats,
+        )
     
     # Build index mapping for filtered data
     frame_to_idx = {}
@@ -217,6 +233,7 @@ def interpolate_detections(
     all_bboxes = [filtered_bboxes]
     all_scores = [filtered_scores]
     all_frame_indices = [filtered_frame_indices.astype('i4', copy=False)]
+    all_class_ids = [filtered_class_ids.astype('i4', copy=False)]
     all_sources = [np.zeros(len(filtered_bboxes), dtype='i1')]  # 0 = original
     
     total_interpolated = 0
@@ -243,10 +260,18 @@ def interpolate_detections(
             fill_frames,
             method=method
         )
+
+        start_class = int(filtered_class_ids[start_idx])
+        end_class = int(filtered_class_ids[end_idx])
+        if start_class == end_class:
+            gap_class_ids = np.full(len(fill_frames), start_class, dtype='i4')
+        else:
+            gap_class_ids = np.full(len(fill_frames), start_class, dtype='i4')
         
         all_bboxes.append(interp_bboxes)
         all_scores.append(interp_scores)
         all_frame_indices.append(np.array(fill_frames, dtype='i4'))
+        all_class_ids.append(gap_class_ids)
         all_sources.append(np.ones(len(fill_frames), dtype='i1'))  # 1 = interpolated
         
         total_interpolated += len(fill_frames)
@@ -256,6 +281,7 @@ def interpolate_detections(
     interp_bboxes = np.concatenate(all_bboxes, axis=0)
     interp_scores = np.concatenate(all_scores)
     interp_frame_indices = np.concatenate(all_frame_indices)
+    interp_class_ids = np.concatenate(all_class_ids)
     detection_source = np.concatenate(all_sources)
     
     # Sort by frame to maintain temporal order
@@ -263,6 +289,7 @@ def interpolate_detections(
     interp_bboxes = interp_bboxes[sort_idx]
     interp_scores = interp_scores[sort_idx]
     interp_frame_indices = interp_frame_indices[sort_idx]
+    interp_class_ids = interp_class_ids[sort_idx]
     detection_source = detection_source[sort_idx]
     
     # Update n_detections
@@ -277,8 +304,15 @@ def interpolate_detections(
         'min_gap_size': int(min(gap_sizes)) if gap_sizes else 0
     }
     
-    return (interp_bboxes, interp_scores, interp_counts,
-            interp_frame_indices.astype('i4', copy=False), detection_source, stats)
+    return (
+        interp_bboxes,
+        interp_scores,
+        interp_counts,
+        interp_frame_indices.astype('i4', copy=False),
+        interp_class_ids.astype('i4', copy=False),
+        detection_source,
+        stats,
+    )
 
 
 def get_refinement_parameters(
@@ -453,6 +487,12 @@ def create_refined_run(
         # Create placeholder scores (all 1.0 for blob detections)
         scores = np.ones(len(bbox_coords), dtype='f4')
         console.print("  [yellow]Note: No scores array found, using placeholder values[/yellow]")
+
+    if 'class_ids' in detect_group:
+        class_ids = detect_group['class_ids'][:].astype('i4', copy=False)
+    else:
+        class_ids = np.zeros(len(bbox_coords), dtype='i4')
+        console.print("  [yellow]Note: No class_ids array found, defaulting to 0[/yellow]")
     
     console.print(f"  Total detections: {len(bbox_coords)}")
     console.print(f"  Total frames: {num_frames}")
@@ -462,8 +502,14 @@ def create_refined_run(
     console.print(f"  Filters: {filters}")
     
     (filtered_bboxes, filtered_scores, filtered_counts,
-     filtered_frame_indices, drop_stats) = filter_detections(
-        bbox_coords, scores, frame_indices, detection_quality_labels, num_frames, filters
+     filtered_frame_indices, filtered_class_ids, drop_stats) = filter_detections(
+        bbox_coords,
+        scores,
+        frame_indices,
+        class_ids,
+        detection_quality_labels,
+        num_frames,
+        filters,
     )
     
     console.print(f"  Kept: {drop_stats['kept']} detections")
@@ -477,8 +523,14 @@ def create_refined_run(
     console.print(f"  Method: {interp_method}")
     
     (interp_bboxes, interp_scores, interp_counts,
-     interp_frame_indices, detection_source, interp_stats) = interpolate_detections(
-        filtered_bboxes, filtered_scores, filtered_frame_indices, num_frames, max_gap_val, interp_method
+     interp_frame_indices, interp_class_ids, detection_source, interp_stats) = interpolate_detections(
+        filtered_bboxes,
+        filtered_scores,
+        filtered_frame_indices,
+        filtered_class_ids,
+        num_frames,
+        max_gap_val,
+        interp_method,
     )
     
     console.print(f"  Gaps filled: {interp_stats['gaps_filled']}")
@@ -607,9 +659,14 @@ def create_refined_run(
     filtered_grp.create_array('bbox_norm_coords', data=filtered_bboxes, chunks=(1000, 4))
     filtered_grp.create_array('scores', data=filtered_scores, chunks=(1000,))
     filtered_grp.create_array('frame_indices', data=filtered_frame_indices, chunks=(1000,))
+    filtered_grp.create_array('class_ids', data=filtered_class_ids, chunks=(1000,))
     filtered_grp.create_array('frame_counts', data=filtered_counts, chunks=(10000,))
     filtered_grp.create_array('n_detections', data=filtered_counts, chunks=(10000,))
     filtered_grp.create_array('frame_mapping', data=filtered_frame_indices, chunks=(1000,))
+    filtered_column_fields = ['frame_indices', 'bbox_norm_coords', 'scores', 'class_ids']
+    filtered_grp.attrs['storage_layout'] = 'columnar'
+    filtered_grp.attrs['column_fields'] = filtered_column_fields
+    filtered_grp.attrs['field_names'] = filtered_column_fields
     
     filtered_grp.attrs['total_detections'] = int(len(filtered_bboxes))
     filtered_grp.attrs['dropped_detections'] = drop_stats['total_dropped']
@@ -620,10 +677,15 @@ def create_refined_run(
     interp_grp.create_array('bbox_norm_coords', data=interp_bboxes, chunks=(1000, 4))
     interp_grp.create_array('scores', data=interp_scores, chunks=(1000,))
     interp_grp.create_array('frame_indices', data=interp_frame_indices, chunks=(1000,))
+    interp_grp.create_array('class_ids', data=interp_class_ids, chunks=(1000,))
     interp_grp.create_array('frame_counts', data=interp_counts, chunks=(10000,))
     interp_grp.create_array('n_detections', data=interp_counts, chunks=(10000,))
     interp_grp.create_array('frame_mapping', data=interp_frame_indices, chunks=(1000,))
     interp_grp.create_array('detection_source', data=detection_source, chunks=(1000,))
+    interpolated_column_fields = ['frame_indices', 'bbox_norm_coords', 'scores', 'class_ids', 'detection_source']
+    interp_grp.attrs['storage_layout'] = 'columnar'
+    interp_grp.attrs['column_fields'] = interpolated_column_fields
+    interp_grp.attrs['field_names'] = interpolated_column_fields
     
     interp_grp.attrs['total_detections'] = int(len(interp_bboxes))
     interp_grp.attrs['original_detections'] = int(len(filtered_bboxes))

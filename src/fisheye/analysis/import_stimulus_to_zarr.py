@@ -21,6 +21,7 @@ from typing import Dict, Iterable, Optional, Tuple
 
 import h5py
 import numpy as np
+from numpy.lib import recfunctions as rfn
 import zarr
 from rich.console import Console
 
@@ -103,6 +104,21 @@ def _copy_h5_dataset(
     if name not in h5_group:
         return
     data = h5_group[name][:]
+    if (
+        name == "bounding_boxes"
+        and data.dtype.names is not None
+        and "centroid_x" not in data.dtype.names
+    ):
+        required_fields = {"x_min", "y_min", "width", "height"}
+        if required_fields.issubset(data.dtype.names):
+            centroid_x = np.asarray(data["x_min"] + (data["width"] * 0.5), dtype=np.float32)
+            centroid_y = np.asarray(data["y_min"] + (data["height"] * 0.5), dtype=np.float32)
+            data = rfn.append_fields(
+                data,
+                ("centroid_x", "centroid_y"),
+                (centroid_x, centroid_y),
+                usemask=False,
+            )
     attrs = {attr_name: attr_value for attr_name, attr_value in h5_group[name].attrs.items()}
     if name in COLUMNAR_DATASETS and data.dtype.names:
         write_columnar_dataset(zarr_group, name, data, attrs)

@@ -695,7 +695,13 @@ def detect_yolo(
         indices = np.full(num_detections, global_frame_idx, dtype=np.int32)
         scores = scores_np.astype(np.float32, copy=False)
 
-        batch_results.append((indices, bbox_norm, scores))
+        cls_tensor = result.boxes.cls
+        if cls_tensor is None:
+            class_ids = np.zeros(num_detections, dtype=np.int32)
+        else:
+            class_ids = cls_tensor.detach().cpu().numpy().astype(np.int32, copy=False)
+
+        batch_results.append((indices, bbox_norm, scores, class_ids))
         frame_counts[global_frame_idx] += num_detections
     
     # Process video in batches
@@ -937,10 +943,12 @@ def detect_yolo(
         frame_indices = np.concatenate([res[0] for res in batch_results])
         bbox_coords = np.concatenate([res[1] for res in batch_results])
         scores = np.concatenate([res[2] for res in batch_results])
+        class_ids = np.concatenate([res[3] for res in batch_results]).astype(np.int32, copy=False)
     else:
         frame_indices = np.empty((0,), dtype=np.int32)
         bbox_coords = np.empty((0, 4), dtype=np.float64)
         scores = np.empty((0,), dtype=np.float32)
+        class_ids = np.empty((0,), dtype=np.int32)
     
     total_detections = frame_indices.size
     
@@ -958,6 +966,7 @@ def detect_yolo(
     detect_group.create_array('frame_indices', data=frame_indices, chunks=(det_chunk,), overwrite=True)
     detect_group.create_array('bbox_norm_coords', data=bbox_coords, chunks=(det_chunk, 4), overwrite=True)
     detect_group.create_array('scores', data=scores, chunks=(det_chunk,), overwrite=True)
+    detect_group.create_array('class_ids', data=class_ids, chunks=(det_chunk,), overwrite=True)
     detect_group.create_array('n_detections', data=frame_counts, chunks=(counts_chunk,), overwrite=True)
     detect_group.create_array('frame_counts', data=frame_counts, chunks=(counts_chunk,), overwrite=True)
     

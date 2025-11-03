@@ -308,23 +308,31 @@ def detect_fish(
         frame_indices_np = np.array(all_frame_indices, dtype='i4')
         bboxes_np = np.array(all_bboxes, dtype='f8')
         
+        det_chunk = min(chunk_size * 4, total_detections)
+
         detect_group.create_array(
             'frame_indices',
             data=frame_indices_np,
-            chunks=(min(chunk_size * 4, total_detections),),
+            chunks=(det_chunk,),
             overwrite=True
         )
         
         detect_group.create_array(
             'bbox_norm_coords',
             data=bboxes_np,
-            chunks=(min(chunk_size * 4, total_detections), 4),
+            chunks=(det_chunk, 4),
             overwrite=True
         )
         detect_group.create_array(
             'scores',
             data=np.ones(total_detections, dtype=np.float32),
-            chunks=(min(chunk_size * 4, total_detections),),
+            chunks=(det_chunk,),
+            overwrite=True
+        )
+        detect_group.create_array(
+            'class_ids',
+            data=np.zeros(total_detections, dtype=np.int32),
+            chunks=(det_chunk,),
             overwrite=True
         )
         
@@ -348,6 +356,8 @@ def detect_fish(
         # No detections found
         detect_group.create_array('frame_indices', data=np.empty((0,), dtype='i4'), overwrite=True)
         detect_group.create_array('bbox_norm_coords', data=np.empty((0, 4), dtype='f8'), overwrite=True)
+        detect_group.create_array('scores', data=np.empty((0,), dtype=np.float32), overwrite=True)
+        detect_group.create_array('class_ids', data=np.empty((0,), dtype=np.int32), overwrite=True)
         frame_counts_empty = np.zeros(num_images, dtype='i4')
         chunks = (min(chunk_size * 4, num_images),) if num_images else None
         detect_group.create_array(

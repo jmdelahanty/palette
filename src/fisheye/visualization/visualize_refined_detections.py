@@ -18,11 +18,16 @@ from typing import Dict, Optional, Tuple, List
 
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
+from matplotlib.colors import BoundaryNorm, ListedColormap
+from matplotlib.patches import Patch
 import numpy as np
 import zarr
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
+
+INTERPOLATED_BARCODE_CMAP = ListedColormap(["#8b0000", "#228b22", "#8a2be2"])
+INTERPOLATED_BARCODE_NORM = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], INTERPOLATED_BARCODE_CMAP.N)
 
 
 def _clip_frame_range(frame_counts: np.ndarray,
@@ -402,11 +407,50 @@ def visualize_refinement_pipeline(zarr_path: str,
         detection_mask = frame_counts > 0
         time_seconds = np.arange(len(detection_mask)) / max(fps, 1e-6)
 
-        barcode_data = detection_mask.reshape(1, -1)
         extent_end = time_seconds[-1] if time_seconds.size else 0
-        ax.imshow(barcode_data, aspect='auto', cmap='RdYlGn',
-                  vmin=0, vmax=1, interpolation='nearest',
-                  extent=[0, extent_end, 0, 1])
+        imshow_kwargs = dict(
+            aspect='auto',
+            interpolation='nearest',
+            extent=[0, extent_end, 0, 1],
+        )
+
+        if stage == 'interpolated' and data.get('detection_source') is not None:
+            status = np.zeros_like(frame_counts, dtype=np.int8)
+            status[detection_mask] = 1
+
+            rel_frames = (data['frame_indices'] - data['start_offset']).astype(np.int64, copy=False)
+            valid = (rel_frames >= 0) & (rel_frames < status.size)
+            if np.any(valid):
+                det_source = data['detection_source']
+                interp_idx = rel_frames[valid & (det_source == 1)]
+                if interp_idx.size:
+                    status[interp_idx] = 2
+                real_idx = rel_frames[valid & (det_source == 0)]
+                if real_idx.size:
+                    status[real_idx] = np.maximum(status[real_idx], 1)
+
+            barcode_data = status.reshape(1, -1)
+            ax.imshow(
+                barcode_data,
+                cmap=INTERPOLATED_BARCODE_CMAP,
+                norm=INTERPOLATED_BARCODE_NORM,
+                **imshow_kwargs,
+            )
+            legend_handles = [
+                Patch(facecolor=INTERPOLATED_BARCODE_CMAP.colors[0], label='No detection'),
+                Patch(facecolor=INTERPOLATED_BARCODE_CMAP.colors[1], label='Real detection'),
+                Patch(facecolor=INTERPOLATED_BARCODE_CMAP.colors[2], label='Interpolated'),
+            ]
+            ax.legend(handles=legend_handles, loc='upper right', fontsize=7, framealpha=0.9)
+        else:
+            barcode_data = detection_mask.reshape(1, -1).astype(float)
+            ax.imshow(
+                barcode_data,
+                cmap='RdYlGn',
+                vmin=0,
+                vmax=1,
+                **imshow_kwargs,
+            )
 
         gaps = []
         in_gap = False

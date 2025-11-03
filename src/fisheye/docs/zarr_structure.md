@@ -352,6 +352,14 @@ Stimulus run data imported from Citrus H5 files. Each run contains:
 - `triggering_camera_frame_id`: Corresponding camera frame ID (uint64)
 - `timestamp_relative_ns`: Time since session start (int64)
 
+**Bounding Box Fields** (`tracking_data/bounding_boxes`):
+- Stored column-wise. Geometry columns (`x_min`, `y_min`, `width`, `height`) come directly from the tracker.
+- `centroid_x`, `centroid_y`: Computed during import as the midpoint of each bounding box in camera pixels.
+- `payload_timestamp_ns_epoch`, `received_timestamp_ns_epoch`: Tracker timing fields (int64)
+- `payload_frame_id`, `payload_camera_id`: Tracker identifiers for frame/camera (uint64/uint16)
+- `box_index_in_payload`: Index of the detection in the tracker payload (uint8)
+- `class_id`, `confidence`: Detector metadata (uint16/float32)
+
 **Chaser States Fields** (`tracking_data/chaser_states`):
 All fields stored as separate columnar arrays. Key fields include:
 - `frame_number`: Stimulus frame counter (uint64)
