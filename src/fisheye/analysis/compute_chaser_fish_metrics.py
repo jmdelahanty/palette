@@ -18,7 +18,6 @@ Outputs:
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -28,6 +27,7 @@ import zarr
 from rich.console import Console
 
 from .chaser_state_interpolator import load_structured_dataset
+from ..utils.calibration import load_run_calibration
 
 
 DEFAULT_FISH_LABEL_PRIORITY = ("bladder", "body", "center", "midpoint", "spine", "spine_base")
@@ -68,66 +68,35 @@ def _get_field(data: Dict[str, np.ndarray], *names: str, required: bool = True) 
     return None
 
 
-def _resolve_texture_scale(zarr_root: zarr.Group, stim_group: zarr.Group) -> Tuple[float, Optional[float]]:
-    attr = stim_group.attrs.get("coordinate_transform")
-    parsed: Optional[Dict[str, object]] = None
-    if isinstance(attr, (bytes, bytearray)):
+def _resolve_texture_scale(
+    zarr_root: zarr.Group,
+    stim_group: zarr.Group,
+    stimulus_run: str,
+) -> Tuple[float, Optional[float]]:
+    calibration = load_run_calibration(zarr_root, stimulus_run)
+    scale = calibration.texture_to_camera_scale or 1.0
+    texture_width = calibration.texture_width_px
+
+    if (scale == 1.0 or not np.isfinite(scale)) and calibration.camera_width_px and texture_width:
         try:
-            attr = attr.decode("utf-8")
-        except Exception:
-            attr = None
-    if isinstance(attr, str):
+            scale = float(calibration.camera_width_px) / float(texture_width)
+        except (TypeError, ValueError, ZeroDivisionError):
+            scale = 1.0
+
+    if texture_width is None:
+        texture_width = _load_texture_width_from_h5(stim_group)
+
+    if texture_width is None:
+        width = zarr_root.attrs.get("width")
+        if width is None:
+            meta = zarr_root.attrs.get("source_video_metadata", {})
+            width = meta.get("width") or meta.get("full_width")
         try:
-            parsed = json.loads(attr)
-        except json.JSONDecodeError:
-            parsed = None
-    elif isinstance(attr, dict):
-        parsed = attr
+            texture_width = float(width)
+        except (TypeError, ValueError):
+            texture_width = None
 
-    texture_width: Optional[float] = None
-    if isinstance(parsed, dict):
-        value = parsed.get("texture_to_camera_scale")
-        if value is not None:
-            try:
-                scale = float(value)
-            except (TypeError, ValueError):
-                scale = None
-            else:
-                dims = parsed.get("texture_dimensions")
-                if isinstance(dims, (list, tuple)) and len(dims) >= 1:
-                    try:
-                        texture_width = float(dims[0])
-                    except (TypeError, ValueError):
-                        texture_width = None
-                return scale, texture_width
-
-        dims = parsed.get("texture_dimensions")
-        if isinstance(dims, (list, tuple)) and len(dims) >= 1:
-            try:
-                texture_width = float(dims[0])
-            except (TypeError, ValueError):
-                texture_width = None
-
-    width = zarr_root.attrs.get("width")
-    if width is None:
-        meta = zarr_root.attrs.get("source_video_metadata", {})
-        width = meta.get("width") or meta.get("full_width")
-    try:
-        width_val = float(width)
-    except (TypeError, ValueError):
-        width_val = None
-
-    h5_texture_width = _load_texture_width_from_h5(stim_group)
-    if h5_texture_width:
-        texture_width = h5_texture_width
-
-    if width_val and width_val > 0 and texture_width and texture_width > 0:
-        return width_val / texture_width, texture_width
-
-    if width_val and width_val > 0:
-        return width_val / 358.0, 358.0
-
-    return 1.0, texture_width
+    return scale, texture_width
 
 
 def _load_texture_width_from_h5(stim_group: zarr.Group) -> Optional[float]:
@@ -272,7 +241,7 @@ def compute_metrics(
             f"Run analysis/stimulus_runs/{stimulus_run} does not contain tracking_data/chaser_states."
         )
     chaser_states, _ = load_structured_dataset(tracking_group, "chaser_states")
-    texture_scale, texture_width = _resolve_texture_scale(zarr_root, stim_group)
+    texture_scale, texture_width = _resolve_texture_scale(zarr_root, stim_group, stimulus_run)
     chaser_dict = _structured_to_dict(chaser_states)
     frame_numbers_arr = _get_field(chaser_dict, "frame_number", "stimulus_frame_num")
     try:

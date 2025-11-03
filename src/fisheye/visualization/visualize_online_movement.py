@@ -8,7 +8,6 @@ data to help identify tracking artifacts, gaps, and movement patterns.
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +17,7 @@ import zarr
 from rich.console import Console
 
 from fisheye.analysis.chaser_metrics_loader import load_chaser_metrics
+from fisheye.utils.calibration import load_run_calibration
 
 
 def load_coordinate_transform(root: zarr.Group, stimulus_run: str, console: Console) -> float:
@@ -32,37 +32,21 @@ def load_coordinate_transform(root: zarr.Group, stimulus_run: str, console: Cons
         Scale factor for transforming texture coordinates to camera coordinates
     """
     try:
-        analysis_group = root.require_group("analysis")
-        stimulus_parent = analysis_group.require_group("stimulus_runs")
-
-        if stimulus_run not in stimulus_parent:
-            console.print(f"[yellow]Warning:[/yellow] Stimulus run '{stimulus_run}' not found")
-            return 1.0
-
-        stim_group = stimulus_parent[stimulus_run]
-        coord_transform_raw = stim_group.attrs.get("coordinate_transform")
-
-        # Parse JSON string to dict if needed
-        coord_transform = None
-        if isinstance(coord_transform_raw, str):
-            try:
-                coord_transform = json.loads(coord_transform_raw)
-            except json.JSONDecodeError:
-                console.print("[yellow]Warning:[/yellow] coordinate_transform is not valid JSON")
-                return 1.0
-        elif isinstance(coord_transform_raw, dict):
-            coord_transform = coord_transform_raw
-
-        if coord_transform and "texture_to_camera_scale" in coord_transform:
-            scale = float(coord_transform["texture_to_camera_scale"])
-            console.print(f"[cyan]Loaded coordinate transform:[/cyan] texture_to_camera_scale = {scale:.6f}")
-            return scale
+        calibration = load_run_calibration(root, stimulus_run)
+        scale = calibration.texture_to_camera_scale
+        if calibration.source.startswith("calibration/"):
+            console.print(
+                f"[cyan]Loaded calibration ({calibration.source}): texture_to_camera_scale = {scale:.6f}"
+            )
+        elif calibration.source == "coordinate_transform":
+            console.print(
+                f"[cyan]Loaded coordinate transform attribute: texture_to_camera_scale = {scale:.6f}"
+            )
         else:
-            console.print("[yellow]Warning:[/yellow] No texture_to_camera_scale found; using raw positions")
-            return 1.0
-
+            console.print("[yellow]Warning:[/yellow] Using default texture_to_camera_scale = 1.0")
+        return float(scale)
     except Exception as exc:
-        console.print(f"[yellow]Warning:[/yellow] Failed to load coordinate transform: {exc}")
+        console.print(f"[yellow]Warning:[/yellow] Failed to load calibration: {exc}")
         return 1.0
 
 

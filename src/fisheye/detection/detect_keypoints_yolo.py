@@ -98,6 +98,14 @@ def _create_output_arrays(group: zarr.Group, total_rois: int, chunk_hint: int) -
             fill_value=False,
             overwrite=True,
         ),
+        "heading_valid": group.create_array(
+            "heading_valid",
+            shape=(total_rois,),
+            chunks=scalar_chunk,
+            dtype="bool",
+            fill_value=False,
+            overwrite=True,
+        ),
         "effective_threshold": group.create_array(
             "effective_threshold",
             shape=(total_rois,),
@@ -375,6 +383,21 @@ def detect_keypoints_yolo(
         overwrite=True,
     )
 
+    crop_detection_source = crop_group.get("detection_source")
+    if crop_detection_source is not None and crop_detection_source.shape[0] != total_rois:
+        raise ValueError(
+            f"Crop run detection_source length {crop_detection_source.shape[0]} does not match ROI count {total_rois}"
+        )
+    scalar_chunk = arrays["heading"].chunks
+    detection_source_dst = run_group.create_array(
+        "detection_source",
+        shape=(total_rois,),
+        chunks=scalar_chunk,
+        dtype="i1",
+        fill_value=0,
+        overwrite=True,
+    )
+
     success_total = 0
     confidence_accum: List[float] = []
 
@@ -464,6 +487,13 @@ def detect_keypoints_yolo(
             arrays["detection_success"][start:end] = batch_success
             arrays["effective_threshold"][start:end] = np.nan
             arrays["effective_se2_radius"][start:end] = np.nan
+
+            if crop_detection_source is not None:
+                source_chunk = crop_detection_source[start:end].astype("i1", copy=False)
+            else:
+                source_chunk = np.zeros(end - start, dtype="i1")
+            detection_source_dst[start:end] = source_chunk
+            arrays["heading_valid"][start:end] = np.logical_and(batch_success, source_chunk == 0)
 
             progress.update(task, advance=end - start)
 

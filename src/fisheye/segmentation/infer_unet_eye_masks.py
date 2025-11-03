@@ -450,6 +450,27 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     _copy_metadata_array("detection_indices")
     _copy_metadata_array("frame_counts")
 
+    crop_detection_source = crop_group.get("detection_source")
+    if crop_detection_source is not None and crop_detection_source.shape[0] != total_rois:
+        raise ValueError(
+            f"Crop run detection_source length {crop_detection_source.shape[0]} does not match ROI count {total_rois}"
+        )
+    detection_source = (
+        crop_detection_source[:].astype(np.int8, copy=False)
+        if crop_detection_source is not None
+        else np.zeros(total_rois, dtype=np.int8)
+    )
+    run_group.create_array(
+        "detection_source",
+        data=detection_source,
+        chunks=(min(1024, total_rois),),
+        overwrite=True,
+    )
+    if crop_detection_source is not None:
+        console.print("[dim]Copied detection_source from crop run[/dim]")
+    else:
+        console.print("[yellow]Crop run missing detection_source; defaulting to zeros.[/yellow]")
+
     start_time = time.perf_counter()
     stored_channels, wrote_binary = _write_mask_probs(
         run_group,
@@ -496,7 +517,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         latest_keypoints = keypoints_parent.attrs.get("latest")
     resolved_keypoints_run = args.keypoints_run
     if resolved_keypoints_run is None and src_attrs:
-        resolved_keypoints_run = src_attrs.get("source_keypoints_run")
+        resolved_keypoints_run = src_attrs.get("source_keypoint_run") or src_attrs.get("source_keypoints_run")
     if resolved_keypoints_run is None:
         resolved_keypoints_run = latest_keypoints
 
@@ -507,8 +528,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "segmenter": "unet",
             "segmenter_label_mode": label_mode,
             "source_eye_masks_run": source_run_name,
-            "source_keypoints_run": resolved_keypoints_run,
+            "source_detect_run": crop_group.attrs.get("source_detect_run", "unknown"),
+            "source_keypoint_run": resolved_keypoints_run,
             "source_crop_run": crop_run,
+            "detection_source_path": crop_group.attrs.get("detection_source_path"),
             "source_checkpoint": str(checkpoint_path),
             "source_checkpoint_best_val_dice": float(checkpoint.get("best_val_dice", float("nan"))),
             "total_rois": int(total_rois),
@@ -526,6 +549,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "hostname": env_info["platform"].get("hostname", "unknown"),
         }
     )
+    if "source_keypoints_run" in run_group.attrs:
+        del run_group.attrs["source_keypoints_run"]
 
     if wrote_binary:
         run_group.attrs["masks_from"] = "threshold(mask_probs_roi, thr=0.5)"

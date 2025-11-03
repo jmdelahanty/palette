@@ -1175,6 +1175,23 @@ def refine_eye_masks(
 
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
 
+    if "detection_source" in src_run:
+        src_detection_source = src_run["detection_source"][:].astype(np.int8, copy=False)
+        if src_detection_source.shape[0] != total_rois:
+            raise ValueError(
+                f"Refined source detection_source length {src_detection_source.shape[0]} does not match ROI count {total_rois}"
+            )
+        console.print("[dim]Copied detection_source from source run[/dim]")
+    else:
+        src_detection_source = np.zeros(total_rois, dtype=np.int8)
+        console.print("[yellow]Source run missing detection_source; defaulting to zeros.[/yellow]")
+    run_group.create_array(
+        "detection_source",
+        data=src_detection_source,
+        chunks=(min(1024, total_rois),),
+        overwrite=True,
+    )
+
     left_ptr = np.full((total_rois,), -1, dtype=np.int64)
     left_len = np.zeros((total_rois,), dtype=np.int32)
     right_ptr = np.full((total_rois,), -1, dtype=np.int64)

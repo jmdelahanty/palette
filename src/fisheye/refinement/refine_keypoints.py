@@ -326,6 +326,24 @@ def create_refined_keypoint_run(
         if meta_name in kp_source:
             _copy_array(kp_source[meta_name], kp_refined, meta_name)
 
+    heading_chunks = kp_source["heading"].chunks or (min(1024, total_rois),)
+    if "detection_source" in kp_source:
+        source_detection_array = kp_source["detection_source"]
+        detection_source_values = source_detection_array[:].astype("i1", copy=False)
+        det_chunks = source_detection_array.chunks or heading_chunks
+    else:
+        detection_source_values = np.zeros(total_rois, dtype="i1")
+        det_chunks = heading_chunks
+    detection_source_dst = kp_refined.create_array(
+        "detection_source",
+        shape=(total_rois,),
+        chunks=det_chunks,
+        dtype="i1",
+        fill_value=0,
+        overwrite=True,
+    )
+    detection_source_dst[:] = detection_source_values
+
     # Prepare output arrays
     kp_roi_dst = kp_refined.create_array(
         "keypoints_roi",
@@ -447,6 +465,14 @@ def create_refined_keypoint_run(
         "flip_corrected",
         shape=(total_rois,),
         chunks=kp_source["heading"].chunks,
+        dtype="bool",
+        fill_value=False,
+        overwrite=True,
+    )
+    heading_valid_dst = kp_refined.create_array(
+        "heading_valid",
+        shape=(total_rois,),
+        chunks=heading_chunks,
         dtype="bool",
         fill_value=False,
         overwrite=True,
@@ -607,6 +633,12 @@ def create_refined_keypoint_run(
     provenance_record = {k: v for k, v in provenance_record.items() if v is not None}
 
     kp_refined.attrs["provenance"] = provenance_record
+
+    refined_success_values = refined_success_dst[:]
+    heading_valid_values = refined_success_values.astype(bool)
+    if detection_source_values.size:
+        heading_valid_values &= (detection_source_values == 0)
+    heading_valid_dst[:] = heading_valid_values
 
     report_lines = [
         "[bold]Results[/bold]",

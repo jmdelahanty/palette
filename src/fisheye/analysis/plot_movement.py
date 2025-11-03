@@ -7,16 +7,15 @@ selected track within an analysis/movement_runs entry.
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
-from typing import Iterable, Optional, Tuple, List, Dict, Any
+from typing import Iterable, Optional, Tuple, List
 
 import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 from rich.console import Console
 
-from .chaser_state_interpolator import load_structured_dataset
+from .chaser_metrics_loader import load_chaser_metrics
 
 
 def resolve_movement_runs(
@@ -217,251 +216,207 @@ def resolve_stimulus_run(root: zarr.Group, run_group: zarr.Group) -> Optional[st
     return None
 
 
-def _parse_coordinate_transform(attr: Any) -> Dict[str, Any]:
-    if isinstance(attr, dict):
-        return attr
-    if isinstance(attr, (bytes, bytearray)):
-        try:
-            attr = attr.decode("utf-8")
-        except Exception:
-            return {}
-    if isinstance(attr, str):
-        try:
-            return json.loads(attr)
-        except Exception:
-            return {}
-    return {}
+def _resolve_metrics_run(run_group: zarr.Group) -> Optional[str]:
+    direct = run_group.attrs.get("source_metrics_run")
+    if isinstance(direct, str) and direct:
+        return direct
+
+    inputs = run_group.attrs.get("inputs")
+    if isinstance(inputs, dict):
+        for key in ("source_metrics_run", "metrics_run"):
+            value = inputs.get(key)
+            if isinstance(value, str) and value:
+                return value
+
+    provenance = run_group.attrs.get("provenance")
+    if isinstance(provenance, dict):
+        provenance_inputs = provenance.get("inputs")
+        if isinstance(provenance_inputs, dict):
+            for key in ("source_metrics_run", "metrics_run"):
+                value = provenance_inputs.get(key)
+                if isinstance(value, str) and value:
+                    return value
+        parameters = provenance.get("parameters")
+        if isinstance(parameters, dict):
+            for key in ("source_metrics_run", "metrics_run"):
+                value = parameters.get(key)
+                if isinstance(value, str) and value:
+                    return value
+    return None
 
 
-def compute_texture_to_camera_transform(
-    root: zarr.Group, stim_run: str
-) -> Tuple[float, float, float]:
-    stim_group = root[f"analysis/stimulus_runs/{stim_run}"]
-    coord_attr = stim_group.attrs.get("coordinate_transform")
-    coord_info = _parse_coordinate_transform(coord_attr)
+def _resolve_track_times(
+    run_group: zarr.Group,
+    track_group: zarr.Group,
+    frame_indices: np.ndarray,
+) -> np.ndarray:
+    time_seconds = np.asarray(track_group["time_seconds"][:], dtype=np.float64)
+    if time_seconds.shape[0] == frame_indices.shape[0]:
+        return time_seconds
 
-    texture_dims = coord_info.get("texture_dimensions")
-    camera_dims = coord_info.get("camera_dimensions")
-    scale = coord_info.get("texture_to_camera_scale")
-    if scale is None:
-        try:
-            if isinstance(camera_dims, (list, tuple)) and isinstance(texture_dims, (list, tuple)):
-                if camera_dims and texture_dims and texture_dims[0]:
-                    scale = float(camera_dims[0]) / float(texture_dims[0])
-        except Exception:
-            scale = None
-    if scale is None:
-        scale = 1.0
+    fps = run_group.attrs.get("fps")
+    if fps and np.isfinite(fps) and fps > 0:
+        return frame_indices.astype(np.float64) / float(fps)
 
-    offset_x = offset_y = 0.0
-    calib = root.get("calibration")
-    if calib is not None:
-        offset_x = float(calib.attrs.get("stimulus_offset_x", 0.0) or 0.0)
-        offset_y = float(calib.attrs.get("stimulus_offset_y", 0.0) or 0.0)
-        primary_cam = calib.attrs.get("primary_camera_id")
-        if isinstance(primary_cam, (bytes, bytearray)):
-            primary_cam = primary_cam.decode("utf-8", "ignore")
-        if (
-            isinstance(primary_cam, str)
-            and "cameras" in calib
-            and primary_cam in calib["cameras"]
-        ):
-            cam_attrs = calib["cameras"][primary_cam].attrs
-            offset_x = float(cam_attrs.get("stimulus_offset_x", offset_x) or offset_x)
-            offset_y = float(cam_attrs.get("stimulus_offset_y", offset_y) or offset_y)
-    return float(scale), float(offset_x), float(offset_y)
+    return np.arange(frame_indices.shape[0], dtype=np.float64)
 
-def load_chaser_states(
-    root: zarr.Group,
-    stim_run: str,
-    console: Console,
-) -> Optional[np.ndarray]:
-    path = f"analysis/stimulus_runs/{stim_run}/tracking_data"
-    if path not in root or "chaser_states" not in root[path]:
-        console.print(
-            f"[yellow]Warning:[/yellow] Stimulus run '{stim_run}' lacks tracking_data/chaser_states."
-        )
-        return None
-    try:
-        chaser_arr, _ = load_structured_dataset(root[path], "chaser_states")
-        return chaser_arr
-    except Exception as exc:  # pragma: no cover - defensive
-        console.print(
-            f"[yellow]Warning:[/yellow] Unable to load stimulus chaser states ({exc})."
-        )
-        return None
+
+def _map_distance_to_track(
+    bundle,
+    run_group: zarr.Group,
+    track_group: zarr.Group,
+    distance_values: np.ndarray,
+    availability: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    frame_indices = track_group["frame_indices"][:].astype(np.int64, copy=False)
+    if frame_indices.size == 0:
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+
+    time_seconds = _resolve_track_times(run_group, track_group, frame_indices)
+    frame_to_idx = {int(frame): idx for idx, frame in enumerate(bundle.camera_frame_ids)}
+
+    times: List[float] = []
+    distances: List[float] = []
+    for frame, timestamp in zip(frame_indices, time_seconds):
+        idx = frame_to_idx.get(int(frame))
+        if idx is None:
+            continue
+        if availability is not None:
+            if idx >= availability.shape[0] or not availability[idx]:
+                continue
+        value = distance_values[idx]
+        if not np.isfinite(value):
+            continue
+        times.append(float(timestamp))
+        distances.append(float(value))
+
+    return np.asarray(times, dtype=np.float64), np.asarray(distances, dtype=np.float64)
 
 
 def compute_online_chaser_distance(
-    root: zarr.Group,
+    zarr_path: Path,
     stim_run: str,
-    console: Console,
-) -> Optional[Tuple[np.ndarray, np.ndarray, str]]:
-    chaser_arr = load_chaser_states(root, stim_run, console)
-    if chaser_arr is None or chaser_arr.size == 0:
-        return None
-
-    names = chaser_arr.dtype.names or ()
-    if "distance_to_target_mm" in names:
-        distances = np.asarray(chaser_arr["distance_to_target_mm"], dtype=np.float64)
-        unit = "mm"
-    elif "distance_to_target_px" in names:
-        distances = np.asarray(chaser_arr["distance_to_target_px"], dtype=np.float64)
-        unit = "px"
-    else:
-        console.print(
-            "[yellow]Warning:[/yellow] Stimulus chaser_states lacks distance columns; skipping distance plot."
-        )
-        return None
-
-    if "timestamp_ns_session" in names:
-        times = np.asarray(chaser_arr["timestamp_ns_session"], dtype=np.float64) / 1e9
-    elif "stimulus_frame_num" in names:
-        stim_group = root[f"analysis/stimulus_runs/{stim_run}"]
-        fps = stim_group.attrs.get("fps")
-        if fps and np.isfinite(fps) and fps > 0:
-            times = np.asarray(chaser_arr["stimulus_frame_num"], dtype=np.float64) / float(fps)
-        else:
-            times = np.arange(distances.shape[0], dtype=np.float64)
-    else:
-        times = np.arange(distances.shape[0], dtype=np.float64)
-
-    if times.size:
-        times = times - times[0]
-
-    valid = np.isfinite(times) & np.isfinite(distances)
-    if not np.any(valid):
-        return None
-
-    return times[valid], distances[valid], unit
-
-
-def compute_offline_chaser_distance(
-    root: zarr.Group,
     run_group: zarr.Group,
     track_group: zarr.Group,
     track_id: int,
     console: Console,
 ) -> Optional[Tuple[np.ndarray, np.ndarray, str]]:
-    stim_run = resolve_stimulus_run(root, run_group)
-    if not stim_run:
-        console.print(
-            "[yellow]Warning:[/yellow] Unable to resolve stimulus run for offline distance plot."
-        )
-        return None
-
-    chaser_arr = load_chaser_states(root, stim_run, console)
-    if chaser_arr is None or chaser_arr.size == 0:
-        return None
-
-    names = chaser_arr.dtype.names or ()
-    if "stimulus_frame_num" not in names:
-        console.print(
-            "[yellow]Warning:[/yellow] Stimulus chaser_states lacks 'stimulus_frame_num'; skipping distance plot."
-        )
-        return None
-
-    mask = np.ones(chaser_arr.shape[0], dtype=bool)
-    if "chaser_index" in names:
-        chaser_indices = chaser_arr["chaser_index"]
-        if track_id in np.unique(chaser_indices):
-            mask = chaser_indices == track_id
-        else:
-            mask = chaser_indices == chaser_indices[0]
-    chaser_filtered = chaser_arr[mask]
-    if chaser_filtered.size == 0:
-        console.print(
-            "[yellow]Warning:[/yellow] No chaser states matched track id; skipping distance plot."
-        )
-        return None
-
+    metrics_run = _resolve_metrics_run(run_group)
     try:
-        scale, offset_x, offset_y = compute_texture_to_camera_transform(root, stim_run)
-    except Exception as exc:
+        bundle = load_chaser_metrics(
+            zarr_path,
+            stimulus_run=stim_run,
+            metrics_run=metrics_run,
+            chaser_index=track_id,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
         console.print(
-            f"[yellow]Warning:[/yellow] Unable to derive texture→camera transform ({exc}); skipping distance plot."
+            f"[yellow]Warning:[/yellow] Unable to load chaser metrics ({exc}); skipping distance plot."
         )
         return None
 
-    stim_group = root[f"analysis/stimulus_runs/{stim_run}"]
+    online = bundle.online
+    distance_mm = online.get("distance_to_target_mm")
+    distance_px = online.get("distance_to_target_px")
+
+    unit: Optional[str] = None
+    distances: Optional[np.ndarray] = None
+    if distance_mm is not None:
+        candidate = np.asarray(distance_mm, dtype=np.float64)
+        if np.isfinite(candidate).any():
+            unit = "mm"
+            distances = candidate
+    if distances is None and distance_px is not None:
+        candidate = np.asarray(distance_px, dtype=np.float64)
+        if np.isfinite(candidate).any():
+            unit = "px"
+            distances = candidate
+
+    if distances is None or unit is None:
+        console.print("[yellow]Warning:[/yellow] Online distance metrics unavailable; skipping distance plot.")
+        return None
+
+    times, values = _map_distance_to_track(bundle, run_group, track_group, distances)
+    if times.size == 0:
+        console.print("[yellow]Warning:[/yellow] No overlapping online metrics for this track.")
+        return None
+
+    return times, values, unit
+
+
+def compute_offline_chaser_distance(
+    zarr_path: Path,
+    stim_run: str,
+    run_group: zarr.Group,
+    track_group: zarr.Group,
+    track_id: int,
+    console: Console,
+) -> Optional[Tuple[np.ndarray, np.ndarray, str]]:
+    metrics_run = _resolve_metrics_run(run_group)
     try:
-        frame_meta, _ = load_structured_dataset(stim_group["video_metadata"], "frame_metadata")
-    except Exception as exc:
+        bundle = load_chaser_metrics(
+            zarr_path,
+            stimulus_run=stim_run,
+            metrics_run=metrics_run,
+            chaser_index=track_id,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
         console.print(
-            f"[yellow]Warning:[/yellow] Unable to load frame_metadata for {stim_run} ({exc}); skipping distance plot."
+            f"[yellow]Warning:[/yellow] Unable to load chaser metrics ({exc}); skipping distance plot."
         )
         return None
 
-    meta_names = frame_meta.dtype.names or ()
-    if "triggering_camera_frame_id" not in meta_names or "stimulus_frame_num" not in meta_names:
+    offline = bundle.offline
+    has_offline_raw = offline.get("has_offline")
+    if has_offline_raw is None:
         console.print(
-            f"[yellow]Warning:[/yellow] frame_metadata lacks required fields; skipping distance plot."
+            "[yellow]Warning:[/yellow] Offline chaser metrics not available. Run compute_chaser_fish_metrics to enable distance plotting."
         )
         return None
 
-    cam_frames = frame_meta["triggering_camera_frame_id"].astype(np.int64, copy=False)
-    stim_frames = frame_meta["stimulus_frame_num"].astype(np.int64, copy=False)
-    cam_to_stim: Dict[int, int] = {int(cam): int(stim) for cam, stim in zip(cam_frames, stim_frames)}
-
-    stim_frames_chaser = chaser_filtered["stimulus_frame_num"].astype(np.int64, copy=False)
-    chaser_x_tex = np.asarray(chaser_filtered["chaser_pos_x"], dtype=np.float64)
-    chaser_y_tex = np.asarray(chaser_filtered["chaser_pos_y"], dtype=np.float64)
-    chaser_cam_x = chaser_x_tex * scale + offset_x
-    chaser_cam_y = chaser_y_tex * scale + offset_y
-
-    stim_to_pos: Dict[int, Tuple[float, float]] = {
-        int(stim): (float(x_cam), float(y_cam))
-        for stim, x_cam, y_cam in zip(stim_frames_chaser, chaser_cam_x, chaser_cam_y)
-    }
-
-    frame_indices = track_group["frame_indices"][:].astype(np.int64, copy=False)
-    positions_px = track_group["positions_px"][:]
-    if positions_px.shape[0] != frame_indices.shape[0]:
+    has_offline = np.asarray(has_offline_raw, dtype=bool)
+    if not has_offline.any():
         console.print(
-            "[yellow]Warning:[/yellow] Position array length mismatch; skipping distance plot."
+            "[yellow]Warning:[/yellow] Offline chaser metrics missing for this run. Run compute_chaser_fish_metrics to enable distance plotting."
         )
         return None
 
-    chaser_camera = np.full_like(positions_px, np.nan, dtype=np.float64)
-    for idx, cam_frame in enumerate(frame_indices):
-        stim_frame = cam_to_stim.get(int(cam_frame))
-        if stim_frame is None:
-            continue
-        pos = stim_to_pos.get(stim_frame)
-        if pos is None:
-            continue
-        chaser_camera[idx, 0] = pos[0]
-        chaser_camera[idx, 1] = pos[1]
+    distance_mm = offline.get("distance_mm")
+    distance_px = offline.get("distance_px")
 
-    valid = np.isfinite(chaser_camera).all(axis=1) & np.isfinite(positions_px).all(axis=1)
-    if not np.any(valid):
-        console.print(
-            "[yellow]Warning:[/yellow] No overlapping frames between detections and chaser states; skipping distance plot."
-        )
+    unit: Optional[str] = None
+    distances: Optional[np.ndarray] = None
+    if distance_mm is not None:
+        candidate = np.asarray(distance_mm, dtype=np.float64)
+        if np.isfinite(candidate).any():
+            unit = "mm"
+            distances = candidate
+    if distances is None and distance_px is not None:
+        candidate = np.asarray(distance_px, dtype=np.float64)
+        if np.isfinite(candidate).any():
+            unit = "px"
+            distances = candidate
+
+    if distances is None or unit is None:
+        console.print("[yellow]Warning:[/yellow] Offline distance metrics unavailable; skipping distance plot.")
         return None
 
-    delta = positions_px[valid] - chaser_camera[valid]
-    distance_px = np.hypot(delta[:, 0], delta[:, 1])
+    times, values = _map_distance_to_track(
+        bundle,
+        run_group,
+        track_group,
+        distances,
+        availability=has_offline,
+    )
+    if times.size == 0:
+        console.print("[yellow]Warning:[/yellow] No overlapping offline metrics for this track.")
+        return None
 
-    time_seconds = track_group["time_seconds"][:]
-    if time_seconds.shape[0] != frame_indices.shape[0]:
-        fps = run_group.attrs.get("fps")
-        if fps and np.isfinite(fps) and fps > 0:
-            time_seconds = frame_indices.astype(np.float64) / float(fps)
-        else:
-            time_seconds = np.arange(frame_indices.shape[0], dtype=np.float64)
+    metrics_label = bundle.provenance.get("metrics_run")
+    if isinstance(metrics_label, str) and metrics_label:
+        console.print(f"[dim]Using offline metrics run: {metrics_label}[/dim]")
 
-    time_valid = time_seconds[valid]
-
-    pixel_to_mm = run_group.attrs.get("pixel_to_mm")
-    if pixel_to_mm and np.isfinite(pixel_to_mm):
-        distance_vals = distance_px * float(pixel_to_mm)
-        distance_unit = "mm"
-    else:
-        distance_vals = distance_px
-        distance_unit = "px"
-
-    return time_valid, distance_vals, distance_unit
+    return times, values, unit
 
 def plot_track(
     run_group: zarr.Group,
@@ -634,7 +589,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     args = parser.parse_args(argv)
 
     console = Console()
-    root = zarr.open(args.zarr_path, mode="r")
+    zarr_path = Path(args.zarr_path)
+    root = zarr.open(str(zarr_path), mode="r")
 
     include_online = not args.offline_only
     include_offline = not args.online_only
@@ -682,10 +638,29 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
         distance_series = None
         stim_run_name = resolve_stimulus_run(root, run_group)
-        if run_name.startswith('online/') and stim_run_name:
-            distance_series = compute_online_chaser_distance(root, stim_run_name, console)
-        elif run_name.startswith('offline/') and stim_run_name:
-            distance_series = compute_offline_chaser_distance(root, run_group, track_group, track_id, console)
+        if stim_run_name:
+            if run_name.startswith("online/"):
+                distance_series = compute_online_chaser_distance(
+                    zarr_path,
+                    stim_run_name,
+                    run_group,
+                    track_group,
+                    track_id,
+                    console,
+                )
+            elif run_name.startswith("offline/"):
+                distance_series = compute_offline_chaser_distance(
+                    zarr_path,
+                    stim_run_name,
+                    run_group,
+                    track_group,
+                    track_id,
+                    console,
+                )
+        else:
+            console.print(
+                "[yellow]Warning:[/yellow] Unable to resolve stimulus run for distance overlay."
+            )
 
         plot_track(
             run_group,

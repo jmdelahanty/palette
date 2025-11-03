@@ -18,7 +18,6 @@ This creates a new refined_online_runs group similar to refined_detect_runs.
 
 from __future__ import annotations
 
-import json
 import sys
 import time
 from datetime import datetime, timezone
@@ -31,6 +30,7 @@ from rich.console import Console
 from scipy.signal import savgol_filter
 
 from ..analysis.chaser_metrics_loader import load_chaser_metrics
+from ..utils.calibration import load_run_calibration
 from ..utils.system import get_environment_info, get_git_info
 
 REFINED_ONLINE_GROUP = "refined_online_runs"
@@ -79,42 +79,21 @@ def load_online_positions(
     root = zarr.open(str(zarr_path), mode="r")
     stimulus_run_name = bundle.provenance.get("stimulus_run")
 
-    texture_to_camera_scale = 1.0
-    pixels_per_mm_projector = None
-
     if stimulus_run_name:
         try:
-            analysis_group = root.require_group("analysis")
-            stimulus_parent = analysis_group.require_group("stimulus_runs")
-            if stimulus_run_name in stimulus_parent:
-                stim_group = stimulus_parent[stimulus_run_name]
-                coord_transform_raw = stim_group.attrs.get("coordinate_transform")
-
-                coord_transform = None
-                if isinstance(coord_transform_raw, str):
-                    try:
-                        coord_transform = json.loads(coord_transform_raw)
-                    except json.JSONDecodeError:
-                        console.print("[yellow]Warning:[/yellow] coordinate_transform is not valid JSON")
-                elif isinstance(coord_transform_raw, dict):
-                    coord_transform = coord_transform_raw
-
-                if coord_transform and "texture_to_camera_scale" in coord_transform:
-                    texture_to_camera_scale = float(coord_transform["texture_to_camera_scale"])
-                    console.print(f"[cyan]Loaded coordinate transform:[/cyan] scale = {texture_to_camera_scale:.6f}")
+            calibration = load_run_calibration(root, stimulus_run_name)
+            texture_to_camera_scale = float(calibration.texture_to_camera_scale)
+            pixels_per_mm_projector = calibration.pixels_per_mm_projector
+            console.print(
+                f"[cyan]Loaded calibration ({calibration.source}): texture_to_camera_scale = {texture_to_camera_scale:.6f}"
+            )
         except Exception as exc:
-            console.print(f"[yellow]Warning:[/yellow] Failed to load coordinate transform: {exc}")
-
-    # Load projector-space calibration (for texture-space distance conversion)
-    try:
-        if "calibration" in root:
-            calibration_group = root["calibration"]
-            pixels_per_mm_projector = calibration_group.attrs.get("pixels_per_mm_projector")
-            if pixels_per_mm_projector is not None:
-                pixels_per_mm_projector = float(pixels_per_mm_projector)
-                console.print(f"[cyan]Loaded projector calibration:[/cyan] {pixels_per_mm_projector:.6f} pixels/mm")
-    except Exception as exc:
-        console.print(f"[yellow]Warning:[/yellow] Failed to load projector calibration: {exc}")
+            console.print(f"[yellow]Warning:[/yellow] Failed to load calibration: {exc}")
+            texture_to_camera_scale = 1.0
+            pixels_per_mm_projector = None
+    else:
+        texture_to_camera_scale = 1.0
+        pixels_per_mm_projector = None
 
     # Keep positions in TEXTURE SPACE (do not transform to camera space)
     # This ensures accurate distance calculations using the projector calibration

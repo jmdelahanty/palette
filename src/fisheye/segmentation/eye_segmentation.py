@@ -556,6 +556,16 @@ def segment_eye_masks(
     right_total = 0
 
     run_group, run_name = _prepare_run_group(root, console)
+    crop_detection_source = crop_group.get("detection_source")
+    if crop_detection_source is not None and crop_detection_source.shape[0] != total_rois:
+        raise ValueError(
+            f"Crop run detection_source length {crop_detection_source.shape[0]} does not match ROI count {total_rois}"
+        )
+    detection_source = (
+        crop_detection_source[:].astype(np.int8, copy=False)
+        if crop_detection_source is not None
+        else np.zeros(total_rois, dtype=np.int8)
+    )
 
     roi_results: List[Dict[str, Any]] = []
     cfg_dict = asdict(cfg)
@@ -770,6 +780,16 @@ def segment_eye_masks(
         chunks=(min(1024, total_rois),),
         overwrite=True,
     )
+    run_group.create_array(
+        "detection_source",
+        data=detection_source,
+        chunks=(min(1024, total_rois),),
+        overwrite=True,
+    )
+    if crop_detection_source is not None:
+        console.print("[dim]Copied detection_source from crop run[/dim]")
+    else:
+        console.print("[yellow]Crop run missing detection_source; defaulting to zeros.[/yellow]")
     run_group.create_array("contour_left_ptr", data=left_ptr, overwrite=True)
     run_group.create_array("contour_left_len", data=left_len, overwrite=True)
     run_group.create_array("contour_right_ptr", data=right_ptr, overwrite=True)

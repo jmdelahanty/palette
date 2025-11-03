@@ -597,6 +597,29 @@ def detect_keypoints(
         fill_value=False,
         overwrite=True
     )
+
+    if 'detection_source' in crop_group:
+        detection_source_values = crop_group['detection_source'][:].astype('i1', copy=False)
+        if detection_source_values.shape[0] != total_rois:
+            raise ValueError(
+                f"Crop run detection_source length {detection_source_values.shape[0]} does not match ROI count {total_rois}"
+            )
+    else:
+        detection_source_values = np.zeros(total_rois, dtype='i1')
+    keypoint_group.create_array(
+        'detection_source',
+        data=detection_source_values,
+        chunks=scalar_chunk,
+        overwrite=True
+    )
+    keypoint_group.create_array(
+        'heading_valid',
+        shape=(total_rois,),
+        chunks=scalar_chunk,
+        dtype='bool',
+        fill_value=False,
+        overwrite=True
+    )
     
     keypoint_group.attrs['keypoint_labels'] = ['bladder', 'eye_left', 'eye_right']
     
@@ -690,6 +713,9 @@ def detect_keypoints(
         chunks=count_chunks,
         overwrite=True
     )
+
+    heading_valid = np.logical_and(detection_success, detection_source_values == 0)
+    keypoint_group['heading_valid'][:] = heading_valid
     frames_with_success = int(np.sum(success_counts > 0))
     
     # Store summary

@@ -367,6 +367,47 @@ def import_stimulus_to_zarr(
                 pass
             run_group.attrs["coordinate_transform"] = json.dumps(coord_info)
 
+        if "/calibration_snapshot" in h5:
+            calib_src = h5["/calibration_snapshot"]
+            calib_dst = run_group.require_group("calibration")
+
+            existing = set(getattr(calib_dst, "group_keys", lambda: [])())
+            source_cameras = {
+                key for key in calib_src.keys() if key != "arena_config_json"
+            }
+            for leftover in existing - source_cameras:
+                del calib_dst[leftover]
+
+            for cam_id in source_cameras:
+                cam_src = calib_src[cam_id]
+                if not isinstance(cam_src, h5py.Group):
+                    continue
+                cam_dst = calib_dst.require_group(cam_id)
+
+                for attr_name, attr_value in cam_src.attrs.items():
+                    if isinstance(attr_value, bytes):
+                        attr_value = attr_value.decode("utf-8", "ignore")
+                    elif isinstance(attr_value, np.generic):
+                        attr_value = attr_value.item()
+                    cam_dst.attrs[attr_name] = attr_value
+
+                for dset_name, dset in cam_src.items():
+                    data = dset[()]
+                    if isinstance(data, bytes):
+                        cam_dst.attrs[dset_name] = data.decode("utf-8", "ignore")
+                    elif np.isscalar(data) or (isinstance(data, np.ndarray) and data.ndim == 0):
+                        cam_dst.attrs[dset_name] = data.item() if hasattr(data, "item") else data
+                    else:
+                        arr = np.asarray(data)
+                        if dset_name in cam_dst:
+                            del cam_dst[dset_name]
+                        cam_dst.create_array(
+                            dset_name,
+                            data=arr,
+                            chunks=arr.shape,
+                            overwrite=True,
+                        )
+
         if stats:
             run_group.attrs.update(asdict(stats))
 

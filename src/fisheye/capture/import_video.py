@@ -20,6 +20,7 @@ import decord
 import imageio.v3 as iio
 import time
 import cupy as cp
+import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
@@ -48,6 +49,25 @@ from ..shared.zarr.schema import create_palette_zarr, update_import_duration
 
 
 # ---------------- GDS support helpers ---------------- #
+
+def _compute_frame_indices(total_frames: int, frame_step: Optional[int]) -> list[int]:
+    """
+    Compute which frame indices to import based on sampling strategy.
+
+    Args:
+        total_frames: Total number of frames in the video
+        frame_step: If provided, sample every Nth frame. If None, import all frames.
+
+    Returns:
+        List of frame indices to import
+    """
+    if frame_step is None or frame_step == 1:
+        # Import all frames
+        return list(range(total_frames))
+    else:
+        # Uniform sampling: [0, step, 2*step, ...]
+        return list(range(0, total_frames, frame_step))
+
 
 def _default_import_config() -> Dict[str, Any]:
     """Baseline configuration used when no YAML file is supplied."""
@@ -139,25 +159,33 @@ def _process_video_gpu_kvikio(
     use_fp16: bool,
     arrays: Dict[str, Any],
     config: Dict[str, Any],
-    console: Console
+    console: Console,
+    frame_indices: Optional[list[int]] = None
 ):
     import torch.nn.functional as F
-    
+
+    # If frame_indices not provided, import all frames sequentially
+    if frame_indices is None:
+        frame_indices = list(range(n_frames))
+
+    # Number of frames we're actually importing
+    n_import_frames = len(frame_indices)
+
     # Clear cache before allocating
     torch.cuda.empty_cache()
     if _HAVE_CUPY:
         mempool = cp.get_default_memory_pool()
         mempool.free_all_blocks()
-    
+
     # Get shapes and configs for each resolution
     shapes = {}
     buffers = {}
     frames_per_write = io_batch_size  # Default
-    
+
     for key, arr in arrays.items():
         h, w = arr.shape[1], arr.shape[2]
         shapes[key] = (h, w)
-        
+
         # Check sharding for write size
         if hasattr(arr, 'shards') and arr.shards:
             frames_per_write = max(frames_per_write, arr.shards[0])
@@ -184,10 +212,10 @@ def _process_video_gpu_kvikio(
     
     write_times = []
     torch.cuda.synchronize()
-    
-    # Calculate total writes
-    total_writes = (n_frames + frames_per_write - 1) // frames_per_write
-    
+
+    # Calculate total writes based on actual frames to import
+    total_writes = (n_import_frames + frames_per_write - 1) // frames_per_write
+
     with torch.no_grad():
         with Progress(
             TextColumn("[bold blue]GPU → Zarr GDS"),
@@ -203,7 +231,7 @@ def _process_video_gpu_kvikio(
             console=console,
             refresh_per_second=10
         ) as progress:
-            
+
             task = progress.add_task(
                 f"Processing ({', '.join(arrays.keys())})",
                 total=total_writes,
@@ -211,59 +239,65 @@ def _process_video_gpu_kvikio(
                 speed=0.0,
                 avg_speed=0.0
             )
-            
-            for write_idx in range(0, n_frames, frames_per_write):
-                write_end = min(write_idx + frames_per_write, n_frames)
-                actual_write_size = write_end - write_idx
+
+            # Iterate over frame_indices in chunks
+            for write_idx_start in range(0, n_import_frames, frames_per_write):
+                write_idx_end = min(write_idx_start + frames_per_write, n_import_frames)
+                actual_write_size = write_idx_end - write_idx_start
                 buffer_position = 0
-                
+
                 # Fill buffers with frames (single decode pass)
-                for batch_start in range(write_idx, write_end, batch_size):
-                    batch_end = min(batch_start + batch_size, write_end)
-                    batch_size_actual = batch_end - batch_start
-                    
+                for batch_idx_start in range(write_idx_start, write_idx_end, batch_size):
+                    batch_idx_end = min(batch_idx_start + batch_size, write_idx_end)
+                    batch_size_actual = batch_idx_end - batch_idx_start
+
+                    # Get the actual video frame indices for this batch
+                    batch_frame_indices = frame_indices[batch_idx_start:batch_idx_end]
+
                     # Decode frames once
-                    frames = vr.get_batch(list(range(batch_start, batch_end)))
+                    frames = vr.get_batch(batch_frame_indices)
                     x = frames.half() if use_fp16 else frames.float()
                     gray = (x * weights).sum(dim=-1)
                     gray_uint8 = gray.to(torch.uint8)
-                    
+
                     # Store full resolution if needed
                     if 'full' in buffers:
                         buffers['full'][buffer_position:buffer_position+batch_size_actual] = gray_uint8
-                    
+
                     # Generate and store downsampled if needed
                     if 'downsampled' in buffers:
                         down_h, down_w = shapes['downsampled']
                         # Add batch and channel dims for interpolation
                         gray_for_interp = gray_uint8.unsqueeze(1).float()  # [B, 1, H, W]
-                        
+
                         gray_down = F.interpolate(
                             gray_for_interp,
                             size=(down_h, down_w),
                             mode=down_method,
                             align_corners=False if down_method in ['bilinear', 'bicubic'] else None
                         ).squeeze(1).to(torch.uint8)  # Remove channel dim
-                        
+
                         buffers['downsampled'][buffer_position:buffer_position+batch_size_actual] = gray_down
                         del gray_down, gray_for_interp
-                    
+
                     buffer_position += batch_size_actual
                     del frames, x, gray, gray_uint8
                 
                 # Write all buffers to their arrays
                 t0 = time.perf_counter()
-                
+
                 total_bytes_written = 0
                 for key, buffer in buffers.items():
                     # Convert PyTorch to CuPy (zero-copy)
                     cupy_data = cp.from_dlpack(
                         buffer[:actual_write_size].contiguous()
                     )
-                    
+
                     # Direct CuPy write (triggers GDS)
-                    arrays[key][write_idx:write_end] = cupy_data
-                    
+                    # Write to sequential indices in zarr (0, 1, 2, ...)
+                    # even though we may have read sparse frames from video
+                    arrays[key][write_idx_start:write_idx_end] = cupy_data
+
                     # Track data size
                     h, w = shapes[key]
                     total_bytes_written += actual_write_size * h * w
@@ -496,7 +530,23 @@ def import_video(
             first = vr[0]
             full_h, full_w = int(first.shape[0]), int(first.shape[1])
 
-            
+            # ---- Frame sampling configuration ----------------------------------------
+            # Check if this is a training data import with frame sampling
+            training_data_mode = cli_args.get('training_data', False) if cli_args else False
+            frame_step = cli_args.get('frame_step', None) if cli_args else None
+
+            if training_data_mode and frame_step:
+                # Compute frame indices for sampled import
+                frame_indices_to_import = _compute_frame_indices(n_frames, frame_step)
+                n_import_frames = len(frame_indices_to_import)
+                console.print(f"[yellow]Training data mode:[/yellow] Importing every {frame_step}th frame")
+                console.print(f"[yellow]Frames:[/yellow] {n_import_frames} of {n_frames} ({100*n_import_frames/n_frames:.1f}%)")
+            else:
+                # Standard full import
+                frame_indices_to_import = None
+                n_import_frames = n_frames
+
+
             # Determine io_batch_size based on sharding
             if use_sharding:
                 chunks_per_shard = int(ip.get("chunks_per_shard", 10))
@@ -564,7 +614,7 @@ def import_video(
                     if use_sharding:
                         arrays['full'] = raw.create_array(
                             name='images_full',
-                            shape=(n_frames, full_h, full_w),
+                            shape=(n_import_frames, full_h, full_w),
                             chunks=(chunk_size, full_h, full_w),
                             shards=(io_batch_size, full_h, full_w),
                             dtype="uint8",
@@ -575,19 +625,19 @@ def import_video(
                     else:
                         arrays['full'] = raw.create_array(
                             name='images_full',
-                            shape=(n_frames, full_h, full_w),
+                            shape=(n_import_frames, full_h, full_w),
                             chunks=(io_batch_size, full_h, full_w),
                             dtype="uint8",
                             fill_value=0,
                             compressors=None,
                             overwrite=True
                         )
-                
+
                 if create_down:
                     if use_sharding:
                         arrays['downsampled'] = raw.create_array(
                             name='images_ds',
-                            shape=(n_frames, down_h, down_w),
+                            shape=(n_import_frames, down_h, down_w),
                             chunks=(down_chunk_size, down_h, down_w),
                             shards=(down_io_batch, down_h, down_w),
                             dtype="uint8",
@@ -598,7 +648,7 @@ def import_video(
                     else:
                         arrays['downsampled'] = raw.create_array(
                             name='images_ds',
-                            shape=(n_frames, down_h, down_w),
+                            shape=(n_import_frames, down_h, down_w),
                             chunks=(down_chunk_size, down_h, down_w),
                             dtype="uint8",
                             fill_value=0,
@@ -617,11 +667,21 @@ def import_video(
                     "import_stage": "complete",
                     "original_resolution": [full_h, full_w],
                     "fps": vid_meta.get("fps", 30),
-                    "total_frames": n_frames,
+                    "total_frames": n_import_frames,
                     "source_video": str(video_path.name),
                     "source_path": str(video_path.absolute()),
                     "import_timestamp": datetime.now(timezone.utc).isoformat(),
                 }
+
+                # Add training data mode metadata if applicable
+                if training_data_mode and frame_step:
+                    metadata["import_mode"] = "sampled"
+                    metadata["frame_step"] = frame_step
+                    metadata["original_video_length"] = n_frames
+                    metadata["imported_frame_count"] = n_import_frames
+                    metadata["import_purpose"] = "training_data"
+                else:
+                    metadata["import_mode"] = "full"
                 
                 if create_full:
                     metadata["has_full_resolution"] = True
@@ -685,9 +745,13 @@ def import_video(
                 target_size = down_config.get("size", [640, 640])
                 res_info.append(f"Downsampled: {target_size[0]}×{target_size[1]}")
 
+            frames_info = f"{n_import_frames}"
+            if training_data_mode and frame_step:
+                frames_info += f" (sampled from {n_frames}, every {frame_step}th)"
+
             console.print(Panel.fit(
                 f"[cyan]Video:[/cyan] {video_path.name}\n"
-                f"[cyan]Frames:[/cyan] {n_frames}\n"
+                f"[cyan]Frames:[/cyan] {frames_info}\n"
                 f"[cyan]Resolutions:[/cyan] {', '.join(res_info)}\n"
                 f"[cyan]Device:[/cyan] {device}\n"
                 f"[cyan]Chunk size:[/cyan] {chunk_size} frames\n"
@@ -702,11 +766,12 @@ def import_video(
                 console.print("[green]Using kvikIO direct GPU --> Zarr writes[/green]")
                 _process_video_gpu_kvikio(
                     vr, n_frames, io_batch_size, batch_size,
-                    gpu_fp16, arrays, config, console
+                    gpu_fp16, arrays, config, console,
+                    frame_indices=frame_indices_to_import
                 )
                 _finalize_kvikio_zarr_metadata(
                     Path(zarr_path),
-                    n_frames=n_frames,
+                    n_frames=n_import_frames,
                     full_shape=(full_h, full_w) if create_full else None,
                     down_shape=(down_h, down_w) if create_down else None,
                     create_full=create_full,
@@ -717,25 +782,41 @@ def import_video(
                     down_io_batch_size=down_io_batch,
                     use_sharding=use_sharding,
                 )
+
+                # Store original frame indices if sampled import
+                if training_data_mode and frame_step and frame_indices_to_import:
+                    console.print("[cyan]Creating original_frame_indices array...[/cyan]")
+                    # Reopen with LocalStore to write the frame indices array
+                    store_local = LocalStore(str(zarr_path))
+                    root_local = zarr.open_group(store=store_local, mode='r+')
+                    raw_local = root_local['raw_video']
+                    raw_local.create_array(
+                        'original_frame_indices',
+                        data=np.array(frame_indices_to_import, dtype=np.int32),
+                        chunks=(min(1000, n_import_frames),),
+                        dtype='int32',
+                        overwrite=True
+                    )
+                    console.print(f"[green]✓ Stored mapping of {n_import_frames} imported frames to original video indices[/green]")
             else:
-                # TODO: Add CPU processing path 
+                # TODO: Add CPU processing path
                 console.print("[red]CPU processing not implemented in this example[/red]")
                 raise NotImplementedError("CPU processing path not shown")
 
             # ---- Final statistics and metadata ---------------------------------------
             duration = time.perf_counter() - start_time
             update_import_duration(root, duration)
-            
+
             total_gb = 0
             if 'full' in arrays:
-                total_gb += (n_frames * full_h * full_w) / (1024**3)
+                total_gb += (n_import_frames * full_h * full_w) / (1024**3)
             if 'downsampled' in arrays:
                 down_h, down_w = down_config.get("size", [640, 640])
-                total_gb += (n_frames * down_h * down_w) / (1024**3)
+                total_gb += (n_import_frames * down_h * down_w) / (1024**3)
 
             throughput_gbps = total_gb / max(duration, 1e-9)
 
-            fps = n_frames / max(duration, 1e-9)
+            fps = n_import_frames / max(duration, 1e-9)
 
             # Store performance metadata
             performance_metadata = {
@@ -920,10 +1001,12 @@ def import_video(
             # ---- Display completion info ---------------------------------------------
             output_arrays = []
             if 'full' in arrays:
-                output_arrays.append(f"  - raw_video/images_full: ({n_frames}, {full_h}, {full_w})")
+                output_arrays.append(f"  - raw_video/images_full: ({n_import_frames}, {full_h}, {full_w})")
             if 'downsampled' in arrays:
                 down_h, down_w = down_config.get("size", [640, 640])
-                output_arrays.append(f"  - raw_video/images_ds: ({n_frames}, {down_h}, {down_w})")
+                output_arrays.append(f"  - raw_video/images_ds: ({n_import_frames}, {down_h}, {down_w})")
+            if training_data_mode and frame_step:
+                output_arrays.append(f"  - raw_video/original_frame_indices: ({n_import_frames},)")
 
             console.print(Panel(
                 f"[green]✓ Import completed successfully[/green]\n\n"
@@ -1069,6 +1152,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable GPU decoding and force CPU mode.",
     )
+    parser.add_argument(
+        "--training-data",
+        action="store_true",
+        help="Enable sampled import mode for training data collection (requires --frame-step).",
+    )
+    parser.add_argument(
+        "--frame-step",
+        type=int,
+        metavar="N",
+        help="Import every Nth frame (requires --training-data flag). Example: --frame-step 100 imports frames 0, 100, 200, ...",
+    )
     return parser
 
 
@@ -1077,6 +1171,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     console = Console()
+
+    # Validate training data arguments
+    if args.frame_step is not None and not args.training_data:
+        console.print("[bold red]Error:[/bold red] --frame-step requires --training-data flag")
+        return 1
+
+    if args.training_data and args.frame_step is None:
+        console.print("[bold red]Error:[/bold red] --training-data requires --frame-step N")
+        return 1
+
+    if args.frame_step is not None and args.frame_step < 1:
+        console.print(f"[bold red]Error:[/bold red] --frame-step must be >= 1, got {args.frame_step}")
+        return 1
 
     video_path = Path(args.video_path).expanduser()
     if not video_path.exists():
@@ -1113,6 +1220,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "config_path": str(args.config) if args.config else None,
         "cpu_only": bool(args.cpu_only),
         "overwrite": bool(args.overwrite),
+        "training_data": bool(args.training_data),
+        "frame_step": int(args.frame_step) if args.frame_step else None,
     }
 
     try:
