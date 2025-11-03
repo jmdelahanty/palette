@@ -91,8 +91,23 @@ EVENT_NAME_TO_ID = {v: k for k, v in EXPERIMENT_EVENT_TYPE.items()}
 
 def _normalize_column(values: np.ndarray) -> np.ndarray:
     """Decode byte arrays to unicode for DataFrame reconstruction."""
+    if values.ndim > 1:
+        if values.dtype == np.uint8:
+            decoded: List[str] = []
+            for row in values:
+                if row.ndim != 1:
+                    decoded.append("")
+                    continue
+                decoded.append(bytes(row).rstrip(b"\x00").decode("utf-8", errors="ignore"))
+            return np.array(decoded, dtype=object)
+        # For other dtypes, flatten the trailing dimensions so each entry becomes a tuple/list
+        flattened = values.reshape(values.shape[0], -1)
+        flattened_objects = [tuple(row.tolist()) for row in flattened]
+        return np.array(flattened_objects, dtype=object)
     if values.dtype.kind == "S":
         return np.char.decode(values, "utf-8")
+    if values.dtype.kind == "U":
+        return np.asarray(values, dtype=object)
     if values.dtype.kind == "O":
         decoded = [
             item.decode("utf-8", errors="ignore") if isinstance(item, (bytes, bytearray)) else item
@@ -978,8 +993,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--min-bout-duration",
         type=float,
-        default=0.05,
-        help="Minimum bout duration in seconds (default: 0.05).",
+        default=0.1,
+        help="Minimum bout duration in seconds (default: 0.1).",
     )
     parser.add_argument(
         "--min-gap-duration",

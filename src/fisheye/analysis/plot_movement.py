@@ -138,6 +138,64 @@ def pick_units(run_group: zarr.Group, track_group: zarr.Group) -> tuple[str, np.
     return "px", positions_px[:, 0], positions_px[:, 1]
 
 
+def resolve_swim_bout_spans(
+    root: zarr.Group,
+    requested: Optional[str],
+    console: Console,
+) -> Tuple[List[Tuple[float, float]], Optional[str]]:
+    swim_parent = root.get("analysis/swim_bout_runs")
+    if swim_parent is None:
+        raise ValueError("No swim_bout_runs group found under analysis/.")
+
+    run_name = requested
+    if not run_name or run_name.lower() == "latest":
+        run_name = swim_parent.attrs.get("latest")
+    if not run_name:
+        raise ValueError("No swim_bout_runs entries available.")
+    if run_name not in swim_parent:
+        raise ValueError(f"Swim bout run '{run_name}' not found.")
+
+    run_group = swim_parent[run_name]
+    if "bouts" not in run_group:
+        raise ValueError(f"Swim bout run '{run_name}' lacks 'bouts' dataset.")
+
+    bout_array = run_group["bouts"][:]
+    spans: List[Tuple[float, float]] = []
+    if bout_array.size == 0:
+        return spans, run_name
+
+    names = bout_array.dtype.names or ()
+    if "start_time_s" in names and "end_time_s" in names:
+        starts = bout_array["start_time_s"]
+        ends = bout_array["end_time_s"]
+    elif "start_frame" in names and "end_frame" in names:
+        fps: Optional[float] = None
+        provenance = run_group.attrs.get("provenance")
+        if isinstance(provenance, dict):
+            params = provenance.get("parameters") or {}
+            if isinstance(params, dict):
+                fps_val = params.get("fps")
+                if fps_val is not None:
+                    fps = float(fps_val)
+        if not fps:
+            raise ValueError(
+                f"Swim bout run '{run_name}' lacks time fields and FPS information required to convert frames."
+            )
+        starts = bout_array["start_frame"] / float(fps)
+        ends = bout_array["end_frame"] / float(fps)
+    else:
+        raise ValueError(f"Swim bout run '{run_name}' lacks usable start/end fields for plotting.")
+
+    for start, stop in zip(starts, ends):
+        if not (np.isfinite(start) and np.isfinite(stop)):
+            continue
+        if stop < start:
+            continue
+        spans.append((float(start), float(stop)))
+
+    return spans, run_name
+
+
 def plot_track(
     run_group: zarr.Group,
     track_group: zarr.Group,
@@ -145,16 +203,22 @@ def plot_track(
     save_path: Optional[Path],
     bins: int,
     console: Console,
+    run_name: Optional[str] = None,
+    swim_bouts: Optional[List[Tuple[float, float]]] = None,
+    swim_bout_label: Optional[str] = None,
 ) -> None:
     time_seconds = track_group["time_seconds"][:]
     smoothed_speed_px = track_group["smoothed_speed_px"][:]
     smoothed_speed_mm = track_group["smoothed_speed_mm"][:]
+    instantaneous_speed_px = track_group["instantaneous_speed_px"][:]
+    instantaneous_speed_mm = track_group["instantaneous_speed_mm"][:]
     smoothed_heading_deg = track_group["smoothed_heading_degrees"][:]
     smoothed_accel_px = track_group["smoothed_acceleration_px"][:]
     smoothed_accel_mm = track_group["smoothed_acceleration_mm"][:]
 
     unit_label, pos_x, pos_y = pick_units(run_group, track_group)
-    speed = smoothed_speed_mm if unit_label == "mm" and np.isfinite(smoothed_speed_mm).any() else smoothed_speed_px
+    speed_smoothed = smoothed_speed_mm if unit_label == "mm" and np.isfinite(smoothed_speed_mm).any() else smoothed_speed_px
+    speed_raw = instantaneous_speed_mm if unit_label == "mm" and np.isfinite(instantaneous_speed_mm).any() else instantaneous_speed_px
     speed_label = f"Speed ({unit_label}/s)" if unit_label in {"mm", "px"} else "Speed"
     accel = (
         smoothed_accel_mm
@@ -165,11 +229,30 @@ def plot_track(
 
     fig, axes = plt.subplots(5, 1, figsize=(10, 16))
 
-    axes[0].plot(time_seconds, speed, color="tab:blue", linewidth=1.2)
+    # Plot both raw and smoothed speed
+    axes[0].plot(time_seconds, speed_raw, color="tab:gray", linewidth=0.8, alpha=0.5, label="Instantaneous")
+    axes[0].plot(time_seconds, speed_smoothed, color="tab:blue", linewidth=1.2, label="Smoothed")
     axes[0].set_xlabel("Time (s)")
     axes[0].set_ylabel(speed_label)
     axes[0].set_title(f"Track {track_id}: Speed over time")
     axes[0].grid(alpha=0.3)
+    if swim_bouts:
+        label_added = False
+        for start, stop in swim_bouts:
+            if not np.isfinite(start) or not np.isfinite(stop):
+                continue
+            axes[0].axvspan(
+                start,
+                stop,
+                color="tab:orange",
+                alpha=0.18,
+                linewidth=0,
+                label="Swim bout" if not label_added else None,
+            )
+            label_added = True
+        if label_added and swim_bout_label:
+            axes[0].set_title(f"Track {track_id}: Speed over time (swim bouts: {swim_bout_label})")
+    axes[0].legend(loc="upper right")
 
     axes[1].plot(time_seconds, accel, color="tab:red", linewidth=1.0)
     axes[1].set_xlabel("Time (s)")
@@ -195,14 +278,33 @@ def plot_track(
     axes[3].set_title("Cumulative distance over time")
     axes[3].grid(alpha=0.3)
 
-    heat = axes[4].hist2d(pos_x, pos_y, bins=bins, cmap="inferno")
-    axes[4].set_xlabel(f"X ({unit_label})")
-    axes[4].set_ylabel(f"Y ({unit_label})")
-    axes[4].set_title("Position density")
-    cbar = fig.colorbar(heat[3], ax=axes[4])
-    cbar.set_label("Counts")
+    # Filter out NaN positions for histogram
+    valid_pos = np.isfinite(pos_x) & np.isfinite(pos_y)
+    if np.any(valid_pos):
+        heat = axes[4].hist2d(pos_x[valid_pos], pos_y[valid_pos], bins=bins, cmap="inferno")
+        axes[4].set_xlabel(f"X ({unit_label})")
+        axes[4].set_ylabel(f"Y ({unit_label})")
+        axes[4].set_title(f"Position density ({valid_pos.sum()}/{len(pos_x)} valid)")
+        cbar = fig.colorbar(heat[3], ax=axes[4])
+        cbar.set_label("Counts")
+    else:
+        axes[4].text(0.5, 0.5, "No valid positions", ha="center", va="center", transform=axes[4].transAxes)
+        axes[4].set_xlabel(f"X ({unit_label})")
+        axes[4].set_ylabel(f"Y ({unit_label})")
+        axes[4].set_title("Position density (no valid data)")
 
-    fig.suptitle(f"Movement summary – track {track_id}")
+    # Build title with run type (online/offline) if available
+    title = f"Movement summary – track {track_id}"
+    if run_name:
+        # Extract online/offline prefix if present
+        if run_name.startswith("online/"):
+            title = f"Movement summary (online) – track {track_id}"
+        elif run_name.startswith("offline/"):
+            title = f"Movement summary (offline) – track {track_id}"
+        else:
+            title = f"Movement summary ({run_name}) – track {track_id}"
+
+    fig.suptitle(title)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
 
     if save_path:
@@ -231,6 +333,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         action="store_true",
         help="Only plot detection-based movement runs.",
     )
+    parser.add_argument(
+        "--swim-bout-run",
+        help="Swim-bout run under analysis/swim_bout_runs to overlay (use 'latest' for the most recent run).",
+    )
 
     args = parser.parse_args(argv)
 
@@ -250,6 +356,23 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         return
 
     save_path = Path(args.save) if args.save else None
+    swim_spans: Optional[List[Tuple[float, float]]] = None
+    swim_label: Optional[str] = None
+    if args.swim_bout_run is not None:
+        try:
+            swim_spans, swim_label = resolve_swim_bout_spans(root, args.swim_bout_run, console)
+            if swim_spans:
+                console.print(
+                    f"[dim]Overlaying {len(swim_spans)} swim bouts from swim_bout_runs/{swim_label}.[/dim]"
+                )
+            else:
+                console.print(
+                    f"[yellow]Swim bout run '{swim_label}' contains no bouts to overlay.[/yellow]"
+                )
+        except ValueError as exc:
+            console.print(f"[yellow]Warning:[/yellow] {exc}")
+            swim_spans = None
+            swim_label = None
 
     for run_name, run_group in runs:
         console.print(f"\n[bold]Plotting movement run:[/bold] {run_name}")
@@ -260,8 +383,20 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             continue
         dest = save_path
         if dest:
-            dest = dest.with_name(f"{dest.stem}_{run_name}{dest.suffix}")
-        plot_track(run_group, track_group, track_id, dest, args.bins, console)
+            # Replace slashes in run_name to avoid invalid filenames
+            safe_run_name = run_name.replace("/", "_")
+            dest = dest.with_name(f"{dest.stem}_{safe_run_name}{dest.suffix}")
+        plot_track(
+            run_group,
+            track_group,
+            track_id,
+            dest,
+            args.bins,
+            console,
+            run_name,
+            swim_bouts=swim_spans,
+            swim_bout_label=swim_label,
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

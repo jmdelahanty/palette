@@ -27,6 +27,8 @@ import numpy as np
 import zarr
 from rich.console import Console
 
+from .chaser_state_interpolator import load_structured_dataset
+
 
 DEFAULT_FISH_LABEL_PRIORITY = ("bladder", "body", "center", "midpoint", "spine", "spine_base")
 
@@ -169,7 +171,7 @@ def _resolve_struct_field(array: np.ndarray, *candidates: str) -> str:
 
 def _build_stimulus_to_camera_map(stim_group: zarr.Group) -> Dict[int, int]:
     meta_group = _require_group(stim_group, "video_metadata")
-    frame_metadata = meta_group["frame_metadata"][:]
+    frame_metadata, _ = load_structured_dataset(meta_group, "frame_metadata")
     stim_field = _resolve_struct_field(frame_metadata, "stimulus_frame_num", "frame_number", "stim_frame_num")
     camera_field = _resolve_struct_field(
         frame_metadata,
@@ -269,7 +271,7 @@ def compute_metrics(
         raise ValueError(
             f"Run analysis/stimulus_runs/{stimulus_run} does not contain tracking_data/chaser_states."
         )
-    chaser_states = tracking_group["chaser_states"][:]
+    chaser_states, _ = load_structured_dataset(tracking_group, "chaser_states")
     texture_scale, texture_width = _resolve_texture_scale(zarr_root, stim_group)
     chaser_dict = _structured_to_dict(chaser_states)
     frame_numbers_arr = _get_field(chaser_dict, "frame_number", "stimulus_frame_num")
@@ -350,19 +352,25 @@ def compute_metrics(
         if not np.all(np.isfinite(bbox_centers[idx])):
             skipped_no_detection += 1
             continue
+
+        # Always store fish centroid and heading when detection is valid
         fish_point = bbox_centers[idx]
         frame = int(kp_frame_indices[idx])
+        metrics_mask[idx] = True
+        fish_centroids[idx] = fish_point.astype(np.float32)
+
+        # Check for chaser data
         chaser_entry = chaser_by_frame.get(frame)
         if chaser_entry is None:
             skipped_no_chaser += 1
+            # Leave chaser-specific metrics (distance, angle, chaser_position) as NaN
             continue
 
+        # Compute chaser-specific metrics when chaser is present
         chaser_point, ppm = chaser_entry
         displacement = chaser_point - fish_point
         dist_px = float(np.linalg.norm(displacement))
 
-        metrics_mask[idx] = True
-        fish_centroids[idx] = fish_point.astype(np.float32)
         chaser_positions[idx] = chaser_point.astype(np.float32)
         distance_px[idx] = dist_px
         if ppm is not None and np.isfinite(ppm) and ppm > 0:
@@ -371,6 +379,7 @@ def compute_metrics(
         heading_vec = _heading_vector(float(kp_heading[idx])) if np.isfinite(kp_heading[idx]) else None
         if heading_vec is None:
             missing_heading += 1
+            # Leave angles as NaN when heading is missing
             continue
 
         unsigned_deg, signed_deg = _signed_angle_deg(heading_vec, displacement)
@@ -381,9 +390,16 @@ def compute_metrics(
     total_frames = len(chaser_by_frame)
 
     console.print(
-        f"[bold green]✓ Computed metrics for {valid_count} / {n_rois} ROIs "
-        f"({skipped_no_chaser} missing chaser, {skipped_no_detection} invalid detection centroid, "
-        f"{missing_heading} missing heading)[/bold green]"
+        f"[bold green]✓ Processed {valid_count} / {n_rois} ROIs with valid detections[/bold green]"
+    )
+    console.print(
+        f"  {skipped_no_detection} frames skipped (invalid detection centroid)"
+    )
+    console.print(
+        f"  {skipped_no_chaser} frames missing chaser data (chaser metrics = NaN)"
+    )
+    console.print(
+        f"  {missing_heading} frames missing heading data (angle metrics = NaN)"
     )
 
     out_group = _prepare_output_group(analysis_root, output_run, overwrite=overwrite)

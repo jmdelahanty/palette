@@ -138,6 +138,47 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         "version_speed": _maybe("version_speed_deg_s"),
     }
 
+    roi_deltas = {
+        "left": _maybe("left_delta_deg"),
+        "left_smoothed": _maybe("left_delta_deg_smoothed"),
+        "right": _maybe("right_delta_deg"),
+        "right_smoothed": _maybe("right_delta_deg_smoothed"),
+        "vergence": _maybe("vergence_delta_deg"),
+        "vergence_smoothed": _maybe("vergence_delta_deg_smoothed"),
+        "left_signed": _maybe("left_signed_delta_deg"),
+        "left_signed_smoothed": _maybe("left_signed_delta_deg_smoothed"),
+        "right_signed": _maybe("right_signed_delta_deg"),
+        "right_signed_smoothed": _maybe("right_signed_delta_deg_smoothed"),
+        "vergence_signed": _maybe("vergence_signed_delta_deg"),
+        "vergence_signed_smoothed": _maybe("vergence_signed_delta_deg_smoothed"),
+        "version": _maybe("version_delta_deg"),
+        "version_smoothed": _maybe("version_delta_deg_smoothed"),
+        "left_minor_signed": _maybe("left_minor_signed_delta_deg"),
+        "left_minor_signed_smoothed": _maybe("left_minor_signed_delta_deg_smoothed"),
+        "right_minor_signed": _maybe("right_minor_signed_delta_deg"),
+        "right_minor_signed_smoothed": _maybe("right_minor_signed_delta_deg_smoothed"),
+        "vergence_minor_signed": _maybe("vergence_minor_signed_delta_deg"),
+        "vergence_minor_signed_smoothed": _maybe("vergence_minor_signed_delta_deg_smoothed"),
+        "version_minor": _maybe("version_minor_delta_deg"),
+        "version_minor_smoothed": _maybe("version_minor_delta_deg_smoothed"),
+        "left_feret_major_signed": _maybe("left_feret_major_signed_delta_deg"),
+        "left_feret_major_signed_smoothed": _maybe("left_feret_major_signed_delta_deg_smoothed"),
+        "right_feret_major_signed": _maybe("right_feret_major_signed_delta_deg"),
+        "right_feret_major_signed_smoothed": _maybe("right_feret_major_signed_delta_deg_smoothed"),
+        "vergence_feret_major_signed": _maybe("vergence_feret_major_signed_delta_deg"),
+        "vergence_feret_major_signed_smoothed": _maybe("vergence_feret_major_signed_delta_deg_smoothed"),
+        "version_feret_major": _maybe("version_feret_major_delta_deg"),
+        "version_feret_major_smoothed": _maybe("version_feret_major_delta_deg_smoothed"),
+        "left_feret_minor_signed": _maybe("left_feret_minor_signed_delta_deg"),
+        "left_feret_minor_signed_smoothed": _maybe("left_feret_minor_signed_delta_deg_smoothed"),
+        "right_feret_minor_signed": _maybe("right_feret_minor_signed_delta_deg"),
+        "right_feret_minor_signed_smoothed": _maybe("right_feret_minor_signed_delta_deg_smoothed"),
+        "vergence_feret_minor_signed": _maybe("vergence_feret_minor_signed_delta_deg"),
+        "vergence_feret_minor_signed_smoothed": _maybe("vergence_feret_minor_signed_delta_deg_smoothed"),
+        "version_feret_minor": _maybe("version_feret_minor_delta_deg"),
+        "version_feret_minor_smoothed": _maybe("version_feret_minor_delta_deg_smoothed"),
+    }
+
     qa_roi = {
         "valid_left": qa["roi"]["valid_left"][:],
         "valid_right": qa["roi"]["valid_right"][:],
@@ -145,7 +186,8 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         "reason_codes": qa["roi"]["reason_codes"][:],
     }
 
-    frame_data = {}
+    frame_data: Dict[str, Optional[np.ndarray]] = {}
+    frame_deltas: Dict[str, Optional[np.ndarray]] = {}
     if "frame" in angles:
         frame_group = angles["frame"]
         def _frame_maybe(name: str) -> Optional[np.ndarray]:
@@ -172,6 +214,28 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         frame_data["version_feret_major_smoothed"] = _frame_maybe("version_feret_major_deg_smoothed")
         frame_data["version_feret_minor"] = _frame_maybe("version_feret_minor_deg")
         frame_data["version_feret_minor_smoothed"] = _frame_maybe("version_feret_minor_deg_smoothed")
+        frame_deltas["left"] = _frame_maybe("left_delta_deg")
+        frame_deltas["left_smoothed"] = _frame_maybe("left_delta_deg_smoothed")
+        frame_deltas["right"] = _frame_maybe("right_delta_deg")
+        frame_deltas["right_smoothed"] = _frame_maybe("right_delta_deg_smoothed")
+        frame_deltas["vergence"] = _frame_maybe("vergence_delta_deg")
+        frame_deltas["vergence_smoothed"] = _frame_maybe("vergence_delta_deg_smoothed")
+        frame_deltas["vergence_signed"] = _frame_maybe("vergence_signed_delta_deg")
+        frame_deltas["vergence_signed_smoothed"] = _frame_maybe("vergence_signed_delta_deg_smoothed")
+        frame_deltas["vergence_minor_signed"] = _frame_maybe("vergence_minor_signed_delta_deg")
+        frame_deltas["vergence_minor_signed_smoothed"] = _frame_maybe("vergence_minor_signed_delta_deg_smoothed")
+        frame_deltas["vergence_feret_major_signed"] = _frame_maybe("vergence_feret_major_signed_delta_deg")
+        frame_deltas["vergence_feret_major_signed_smoothed"] = _frame_maybe("vergence_feret_major_signed_delta_deg_smoothed")
+        frame_deltas["vergence_feret_minor_signed"] = _frame_maybe("vergence_feret_minor_signed_delta_deg")
+        frame_deltas["vergence_feret_minor_signed_smoothed"] = _frame_maybe("vergence_feret_minor_signed_delta_deg_smoothed")
+        frame_deltas["version"] = _frame_maybe("version_delta_deg")
+        frame_deltas["version_smoothed"] = _frame_maybe("version_delta_deg_smoothed")
+        frame_deltas["version_minor"] = _frame_maybe("version_minor_delta_deg")
+        frame_deltas["version_minor_smoothed"] = _frame_maybe("version_minor_delta_deg_smoothed")
+        frame_deltas["version_feret_major"] = _frame_maybe("version_feret_major_delta_deg")
+        frame_deltas["version_feret_major_smoothed"] = _frame_maybe("version_feret_major_delta_deg_smoothed")
+        frame_deltas["version_feret_minor"] = _frame_maybe("version_feret_minor_delta_deg")
+        frame_deltas["version_feret_minor_smoothed"] = _frame_maybe("version_feret_minor_delta_deg_smoothed")
     if "frame" in qa:
         frame_data["frame_valid"] = qa["frame"]["valid_frame"][:]
         frame_data["frame_reason"] = qa["frame"]["reason_codes"][:]
@@ -196,8 +260,10 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
 
     data = {
         "roi_angles": roi_angles,
+        "roi_deltas": roi_deltas,
         "qa": qa_roi,
         "frame": frame_data,
+        "frame_deltas": frame_deltas,
         "support": support_data,
     }
     return attrs, data
@@ -267,20 +333,42 @@ def _reason_counts(reason_codes: np.ndarray, mapping: Dict[str, str]) -> Dict[st
 
 def _select_angle_variant(
     roi_angles: Dict[str, Optional[np.ndarray]],
+    roi_deltas: Dict[str, Optional[np.ndarray]],
     source: str,
-) -> Tuple[Dict[str, Optional[np.ndarray]], str]:
+) -> Tuple[Dict[str, Optional[np.ndarray]], str, Dict[str, Dict[str, object]]]:
     """Return the angle series to visualize along with a human-friendly label."""
 
+    deltas: Dict[str, Optional[np.ndarray]] = {}
+    smoothed_flags: Dict[str, bool] = {}
+    series_lookup: Dict[str, str] = {}
     used_smoothed: set[str] = set()
+
+    def _delta_for(name: str, use_smoothed: bool) -> Optional[np.ndarray]:
+        key = f"{name}_smoothed" if use_smoothed else name
+        arr = roi_deltas.get(key)
+        if isinstance(arr, np.ndarray):
+            return arr
+        fallback_key = name if use_smoothed else f"{name}_smoothed"
+        arr_fallback = roi_deltas.get(fallback_key)
+        if isinstance(arr_fallback, np.ndarray):
+            return arr_fallback
+        return None
 
     def _pick(name: str, *, required: bool = True) -> Optional[np.ndarray]:
         smoothed = roi_angles.get(f"{name}_smoothed")
         if isinstance(smoothed, np.ndarray):
             used_smoothed.add(name)
+            smoothed_flags[name] = True
+            deltas[name] = _delta_for(name, True)
             return smoothed
         arr = roi_angles.get(name)
         if required and not isinstance(arr, np.ndarray):
             raise ValueError(f"Dataset '{name}' required for angle source '{source}' is missing.")
+        smoothed_flags[name] = False
+        if isinstance(arr, np.ndarray):
+            deltas[name] = _delta_for(name, False)
+        else:
+            deltas[name] = None
         return arr  # may be None if not required
 
     source = source.lower()
@@ -294,6 +382,17 @@ def _select_angle_variant(
             "vergence_signed": _pick("vergence_signed", required=False),
             "version": _pick("version", required=False),
         }
+        series_lookup.update(
+            {
+                "left": "left",
+                "right": "right",
+                "vergence": "vergence",
+                "left_signed": "left_signed",
+                "right_signed": "right_signed",
+                "vergence_signed": "vergence_signed",
+                "version": "version",
+            }
+        )
         label = "Ellipse major axis"
     elif source == "minor":
         left_signed = _pick("left_minor_signed")
@@ -308,6 +407,17 @@ def _select_angle_variant(
             "vergence_signed": vergence_signed,
             "version": _pick("version_minor", required=False),
         }
+        series_lookup.update(
+            {
+                "left": "left_minor_signed",
+                "right": "right_minor_signed",
+                "vergence": "vergence_minor_signed",
+                "left_signed": "left_minor_signed",
+                "right_signed": "right_minor_signed",
+                "vergence_signed": "vergence_minor_signed",
+                "version": "version_minor",
+            }
+        )
         label = "Ellipse minor axis"
     elif source == "feret_major":
         left_signed = _pick("left_feret_major_signed")
@@ -322,6 +432,17 @@ def _select_angle_variant(
             "vergence_signed": vergence_signed,
             "version": _pick("version_feret_major", required=False),
         }
+        series_lookup.update(
+            {
+                "left": "left_feret_major_signed",
+                "right": "right_feret_major_signed",
+                "vergence": "vergence_feret_major_signed",
+                "left_signed": "left_feret_major_signed",
+                "right_signed": "right_feret_major_signed",
+                "vergence_signed": "vergence_feret_major_signed",
+                "version": "version_feret_major",
+            }
+        )
         label = "Feret major axis"
     elif source == "feret_minor":
         left_signed = _pick("left_feret_minor_signed")
@@ -336,6 +457,17 @@ def _select_angle_variant(
             "vergence_signed": vergence_signed,
             "version": _pick("version_feret_minor", required=False),
         }
+        series_lookup.update(
+            {
+                "left": "left_feret_minor_signed",
+                "right": "right_feret_minor_signed",
+                "vergence": "vergence_feret_minor_signed",
+                "left_signed": "left_feret_minor_signed",
+                "right_signed": "right_feret_minor_signed",
+                "vergence_signed": "vergence_feret_minor_signed",
+                "version": "version_feret_minor",
+            }
+        )
         label = "Feret minor axis"
     else:
         raise ValueError(f"Unknown angle source '{source}'.")
@@ -343,7 +475,13 @@ def _select_angle_variant(
     if used_smoothed:
         label = f"{label} (smoothed)"
 
-    return variant, label
+    variant_meta: Dict[str, Dict[str, object]] = {
+        "deltas": deltas,
+        "smoothed": smoothed_flags,
+        "series_lookup": series_lookup,
+    }
+
+    return variant, label, variant_meta
 
 
 def _format_summary_lines(attrs: Dict[str, object], counts: Dict[str, int], roi_valid: np.ndarray, frame_valid: Optional[np.ndarray]) -> str:
@@ -385,16 +523,24 @@ def _plot_eye_angle_dashboard(
     title: Optional[str],
     angle_variant: Dict[str, Optional[np.ndarray]],
     variant_label: str,
+    variant_meta: Dict[str, Dict[str, object]],
 ) -> plt.Figure:
     roi = data["roi_angles"]
     qa = data["qa"]
     support = data["support"]
     frame = data["frame"]
+    frame_deltas = data.get("frame_deltas", {})
+
+    delta_meta = variant_meta.get("deltas", {})
+    smoothed_flags = variant_meta.get("smoothed", {})
+    series_lookup = variant_meta.get("series_lookup", {})
 
     fps = attrs.get("fps")
     time_axis_raw = support.get("time_seconds")
     frame_indices = support.get("frame_indices")
     time_axis, time_label = _prepare_timeline_data(time_axis_raw, frame_indices, fps)
+    frame_time_axis_raw = support.get("frame_time_seconds")
+    frame_time_axis, frame_time_label = _prepare_timeline_data(frame_time_axis_raw, frame_indices, fps)
 
     left = angle_variant["left"]
     right = angle_variant["right"]
@@ -419,6 +565,7 @@ def _plot_eye_angle_dashboard(
     frame_valid = frame.get("frame_valid")
 
     time_ds = _downsample(time_axis, MAX_TIMELINE_POINTS) if time_axis.size else time_axis
+    frame_time_ds = _downsample(frame_time_axis, MAX_TIMELINE_POINTS) if frame_time_axis.size else frame_time_axis
     left_ds = _downsample(left, MAX_TIMELINE_POINTS)
     right_ds = _downsample(right, MAX_TIMELINE_POINTS)
     vergence_plot = vergence_signed if isinstance(vergence_signed, np.ndarray) else vergence
@@ -429,12 +576,12 @@ def _plot_eye_angle_dashboard(
 
     threshold = _find_bimodal_valley(vergence_signed_valid) if vergence_signed_valid.size else np.nan
 
-    fig = plt.figure(figsize=(18, 13))
+    fig = plt.figure(figsize=(18, 15))
     gs = gridspec.GridSpec(
-        4,
+        5,
         3,
         figure=fig,
-        height_ratios=[1.1, 1.0, 0.8, 1.1],
+        height_ratios=[1.1, 0.6, 1.0, 0.8, 1.1],
         hspace=0.35,
         wspace=0.3,
     )
@@ -447,7 +594,7 @@ def _plot_eye_angle_dashboard(
     ax_left.set_title("Left Eye Over Time")
     ax_left.set_xlabel(time_label)
     ax_left.set_ylabel("Angle (deg)")
-    ax_left.set_ylim(-5, 95)
+    ax_left.set_ylim(-5, 185)
     ax_left.grid(alpha=0.2)
 
     ax_right = fig.add_subplot(gs[0, 1])
@@ -458,7 +605,7 @@ def _plot_eye_angle_dashboard(
     ax_right.set_title("Right Eye Over Time")
     ax_right.set_xlabel(time_label)
     ax_right.set_ylabel("Angle (deg)")
-    ax_right.set_ylim(-5, 95)
+    ax_right.set_ylim(-5, 185)
     ax_right.grid(alpha=0.2)
 
     ax_vergence = fig.add_subplot(gs[0, 2])
@@ -474,7 +621,7 @@ def _plot_eye_angle_dashboard(
     ax_vergence.set_title("Vergence (signed) Over Time")
     ax_vergence.set_xlabel(time_label)
     ax_vergence.set_ylabel("Angle (deg)")
-    ax_vergence.set_ylim(-5, 95)
+    ax_vergence.set_ylim(-5, 185)
     if np.isfinite(threshold):
         ax_vergence.axhline(threshold, color="#d62728", linestyle="--", linewidth=1.0, label=f"threshold ≈ {threshold:.1f}°")
         plotted_series = True
@@ -482,7 +629,105 @@ def _plot_eye_angle_dashboard(
         ax_vergence.legend(loc="upper right")
     ax_vergence.grid(alpha=0.2)
 
-    ax_scatter = fig.add_subplot(gs[1, 0])
+    ax_delta_det = fig.add_subplot(gs[1, :2])
+    ax_delta_frame = fig.add_subplot(gs[1, 2])
+
+    detection_delta_series: List[Tuple[str, np.ndarray, str]] = []
+    detection_delta_stats: Dict[str, np.ndarray] = {}
+    frame_delta_series: List[Tuple[str, np.ndarray, str]] = []
+    frame_delta_stats: Dict[str, np.ndarray] = {}
+
+    def _maybe_add_detection_delta(label: str, variant_key: str, color: str) -> None:
+        dataset_key = series_lookup.get(variant_key)
+        if not dataset_key:
+            return
+        arr = delta_meta.get(dataset_key)
+        if not isinstance(arr, np.ndarray) or arr.size == 0:
+            return
+        detection_delta_series.append((label, arr, color))
+        finite = arr[np.isfinite(arr)]
+        if finite.size:
+            detection_delta_stats[label] = finite
+
+    def _get_frame_delta(dataset_key: Optional[str]) -> Optional[np.ndarray]:
+        if not dataset_key:
+            return None
+        use_smoothed = bool(smoothed_flags.get(dataset_key))
+        keys_to_try = []
+        if use_smoothed:
+            keys_to_try.append(f"{dataset_key}_smoothed")
+        keys_to_try.append(dataset_key)
+        if not use_smoothed:
+            keys_to_try.append(f"{dataset_key}_smoothed")
+        for key in keys_to_try:
+            arr = frame_deltas.get(key)
+            if isinstance(arr, np.ndarray) and arr.size:
+                return arr
+        return None
+
+    def _maybe_add_frame_delta(label: str, variant_key: str, color: str) -> None:
+        dataset_key = series_lookup.get(variant_key)
+        arr = _get_frame_delta(dataset_key)
+        if not isinstance(arr, np.ndarray) or arr.size == 0:
+            return
+        frame_delta_series.append((label, arr, color))
+        finite = arr[np.isfinite(arr)]
+        if finite.size:
+            frame_delta_stats[label] = finite
+
+    _maybe_add_detection_delta("Left Δ", "left", "#1f77b4")
+    _maybe_add_detection_delta("Right Δ", "right", "#ff7f0e")
+    vergence_label = "Vergence (signed) Δ" if isinstance(vergence_signed, np.ndarray) else "Vergence Δ"
+    vergence_key = "vergence_signed" if isinstance(vergence_signed, np.ndarray) else "vergence"
+    _maybe_add_detection_delta(vergence_label, vergence_key, "#2ca02c")
+
+    _maybe_add_frame_delta("Left Δ", "left", "#1f77b4")
+    _maybe_add_frame_delta("Right Δ", "right", "#ff7f0e")
+    _maybe_add_frame_delta(vergence_label, vergence_key, "#2ca02c")
+
+    if detection_delta_series:
+        for label, series, color in detection_delta_series:
+            series_ds = _downsample(series, MAX_TIMELINE_POINTS)
+            if time_ds.size:
+                x = time_ds
+                if x.size != series_ds.size:
+                    count = min(x.size, series_ds.size)
+                    ax_delta_det.plot(x[:count], series_ds[:count], label=label, color=color, linewidth=0.8)
+                else:
+                    ax_delta_det.plot(x, series_ds, label=label, color=color, linewidth=0.8)
+            else:
+                x = np.arange(series_ds.size)
+                ax_delta_det.plot(x, series_ds, label=label, color=color, linewidth=0.8)
+        ax_delta_det.legend(loc="upper right")
+    else:
+        ax_delta_det.text(0.5, 0.5, "Delta data unavailable", ha="center", va="center")
+    ax_delta_det.set_title("Detection Δ Angles")
+    ax_delta_det.set_xlabel(time_label if time_ds.size else "Detection Index")
+    ax_delta_det.set_ylabel("Δ Angle (deg)")
+    ax_delta_det.grid(alpha=0.2)
+
+    if frame_delta_series:
+        for label, series, color in frame_delta_series:
+            series_ds = _downsample(series, MAX_TIMELINE_POINTS)
+            if frame_time_ds.size:
+                x = frame_time_ds
+                if x.size != series_ds.size:
+                    count = min(x.size, series_ds.size)
+                    ax_delta_frame.plot(x[:count], series_ds[:count], label=label, color=color, linewidth=0.8)
+                else:
+                    ax_delta_frame.plot(x, series_ds, label=label, color=color, linewidth=0.8)
+            else:
+                x = np.arange(series_ds.size)
+                ax_delta_frame.plot(x, series_ds, label=label, color=color, linewidth=0.8)
+        ax_delta_frame.legend(loc="upper right")
+    else:
+        ax_delta_frame.text(0.5, 0.5, "Frame delta data unavailable", ha="center", va="center")
+    ax_delta_frame.set_title("Frame Δ Angles")
+    ax_delta_frame.set_xlabel(frame_time_label if frame_time_ds.size else "Frame Index")
+    ax_delta_frame.set_ylabel("Δ Angle (deg)")
+    ax_delta_frame.grid(alpha=0.2)
+
+    ax_scatter = fig.add_subplot(gs[2, 0])
     if isinstance(left_signed, np.ndarray) and isinstance(right_signed, np.ndarray):
         scatter_mask = np.isfinite(left_signed) & np.isfinite(right_signed)
         if scatter_mask.any():
@@ -497,7 +742,7 @@ def _plot_eye_angle_dashboard(
                 color="#9467bd",
                 edgecolors="none",
             )
-            ax_scatter.plot([0, 90], [0, 90], "k--", linewidth=0.8)
+            ax_scatter.plot([-180, 180], [-180, 180], "k--", linewidth=0.8)
         else:
             ax_scatter.text(0.5, 0.5, "No data", ha="center", va="center")
     else:
@@ -505,11 +750,11 @@ def _plot_eye_angle_dashboard(
     ax_scatter.set_title("Left vs Right (signed)")
     ax_scatter.set_xlabel("Left (deg)")
     ax_scatter.set_ylabel("Right (deg)")
-    ax_scatter.set_xlim(-5, 95)
-    ax_scatter.set_ylim(-5, 95)
+    ax_scatter.set_xlim(-185, 185)
+    ax_scatter.set_ylim(-185, 185)
     ax_scatter.grid(alpha=0.2)
 
-    ax_hist_lr = fig.add_subplot(gs[1, 1])
+    ax_hist_lr = fig.add_subplot(gs[2, 1])
     if left_valid.size:
         ax_hist_lr.hist(left_valid, bins=60, alpha=0.6, label="Left", color="#1f77b4")
     if right_valid.size:
@@ -518,7 +763,7 @@ def _plot_eye_angle_dashboard(
     ax_hist_lr.set_xlabel("Angle (deg)")
     ax_hist_lr.set_ylabel("Count")
 
-    ax_hist_v = fig.add_subplot(gs[1, 2])
+    ax_hist_v = fig.add_subplot(gs[2, 2])
     if vergence_valid.size:
         ax_hist_v.hist(vergence_valid, bins=60, color="#2ca02c", alpha=0.5, label="Unsigned")
     if vergence_signed_valid.size:
@@ -540,7 +785,7 @@ def _plot_eye_angle_dashboard(
         ax_hist_v.legend(loc="upper right")
     ax_hist_v.grid(alpha=0.2)
 
-    ax_version = fig.add_subplot(gs[2, 0])
+    ax_version = fig.add_subplot(gs[3, 0])
     if version_valid.size:
         ax_version.hist(version_valid, bins=60, color="#8c564b", alpha=0.8)
     ax_version.set_title("Version Distribution")
@@ -548,7 +793,7 @@ def _plot_eye_angle_dashboard(
     ax_version.set_ylabel("Count")
     ax_version.grid(alpha=0.2)
 
-    ax_reasons = fig.add_subplot(gs[2, 1])
+    ax_reasons = fig.add_subplot(gs[3, 1])
     if reason_counts:
         labels = list(reason_counts.keys())
         counts = [reason_counts[label] for label in labels]
@@ -562,7 +807,7 @@ def _plot_eye_angle_dashboard(
     ax_reasons.set_title("Invalid Reason Counts")
     ax_reasons.grid(axis="y", alpha=0.2)
 
-    ax_summary = fig.add_subplot(gs[2, 2])
+    ax_summary = fig.add_subplot(gs[3, 2])
     ax_summary.axis("off")
     summary_text = _format_summary_lines(attrs, reason_counts, valid_detection, frame_valid)
     extra_lines: List[str] = [f"Angle source: {variant_label}"]
@@ -572,29 +817,46 @@ def _plot_eye_angle_dashboard(
         extra_lines.append(
             f"Ellipse ratio mean±std: {float(np.mean(ellipse_ratio_valid)):.2f} ± {float(np.std(ellipse_ratio_valid)):.2f}"
         )
+    def _format_delta_summary(stats: Dict[str, np.ndarray]) -> Optional[str]:
+        if not stats:
+            return None
+        parts: List[str] = []
+        for name, values in stats.items():
+            mean_val = float(np.mean(values))
+            max_val = float(np.max(values))
+            clean_name = name.replace(" Δ", "")
+            parts.append(f"{clean_name}: μ={mean_val:.2f}°, max={max_val:.2f}°")
+        return "; ".join(parts)
+
+    detection_summary = _format_delta_summary(detection_delta_stats)
+    if detection_summary:
+        extra_lines.append(f"Detection Δ mean/max: {detection_summary}")
+    frame_summary = _format_delta_summary(frame_delta_stats)
+    if frame_summary:
+        extra_lines.append(f"Frame Δ mean/max: {frame_summary}")
     if extra_lines:
         summary_text = summary_text + "\n" + "\n".join(extra_lines)
     ax_summary.text(0.0, 0.95, summary_text, ha="left", va="top", fontsize=10, family="monospace")
 
-    ax_hex = fig.add_subplot(gs[3, :])
+    ax_hex = fig.add_subplot(gs[4, :])
     if vergence_signed_valid.size and version_valid.size and (np.isfinite(vergence_signed_valid) & np.isfinite(version_valid)).any():
         mask_hex = np.isfinite(vergence_signed) & np.isfinite(version)
         verg_valid = vergence_signed[mask_hex]
         vers_valid = version[mask_hex]
         if verg_valid.size:
-            verg_clamped = np.clip(verg_valid, -90.0, 90.0)
-            vers_clamped = np.clip(vers_valid, -90.0, 90.0)
+            verg_clamped = np.clip(verg_valid, -180.0, 180.0)
+            vers_clamped = np.clip(vers_valid, -180.0, 180.0)
             hb = ax_hex.hexbin(
                 verg_clamped,
                 vers_clamped,
                 gridsize=80,
-                extent=[-90, 90, -90, 90],
+                extent=[-180, 180, -180, 180],
                 cmap="viridis",
                 mincnt=1,
             )
             fig.colorbar(hb, ax=ax_hex, label="Count", fraction=0.046, pad=0.04)
-            ax_hex.set_xlim(-90, 90)
-            ax_hex.set_ylim(-90, 90)
+            ax_hex.set_xlim(-180, 180)
+            ax_hex.set_ylim(-180, 180)
             ax_hex.axhline(0.0, color="white", linestyle="--", linewidth=1.0, alpha=0.8)
             if np.isfinite(threshold):
                 ax_hex.axvline(threshold, color="#d62728", linestyle="--", linewidth=1.2, alpha=0.9)
@@ -630,8 +892,8 @@ def _plot_eye_angle_dashboard(
             )
     else:
         ax_hex.text(0.5, 0.5, "Vergence/version data unavailable", ha="center", va="center")
-        ax_hex.set_xlim(-90, 90)
-        ax_hex.set_ylim(-90, 90)
+        ax_hex.set_xlim(-180, 180)
+        ax_hex.set_ylim(-180, 180)
     ax_hex.set_title("Vergence × Version")
     ax_hex.set_xlabel("Vergence (signed, deg)")
     ax_hex.set_ylabel("Version (deg)")
@@ -655,7 +917,10 @@ def _plot_eye_angle_dashboard(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Visualize eye angle runs stored in analysis/eye_angle_runs.")
+    parser = argparse.ArgumentParser(
+        description="Visualize eye angle runs stored in analysis/eye_angle_runs, including per-step delta timelines when available.",
+        epilog="Delta plots automatically follow the selected smoothed/raw variant; legacy runs without *_delta datasets skip the panels.",
+    )
     parser.add_argument("zarr_path", type=Path, help="Path to Palette Zarr archive.")
     parser.add_argument(
         "--run",
@@ -714,7 +979,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     for angle_source in requested_sources:
         try:
-            angle_variant, variant_label = _select_angle_variant(data["roi_angles"], angle_source)
+            angle_variant, variant_label, variant_meta = _select_angle_variant(
+                data["roi_angles"],
+                data.get("roi_deltas", {}),
+                angle_source,
+            )
         except ValueError as exc:
             if angle_source != "ellipse":
                 if not args.quiet:
@@ -722,7 +991,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 continue
             raise
 
-        fig = _plot_eye_angle_dashboard(attrs, data, args.title, angle_variant, variant_label)
+        fig = _plot_eye_angle_dashboard(attrs, data, args.title, angle_variant, variant_label, variant_meta)
         figs.append(fig)
 
         provenance = attrs.get("provenance", {})

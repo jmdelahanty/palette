@@ -31,6 +31,7 @@ from .chaser_state_interpolator import (
     interpolate_run,
     pick_chunks,
     store_array,
+    write_columnar_dataset,
 )
 
 
@@ -90,6 +91,9 @@ def _ensure_utf8_column(values: np.ndarray) -> np.ndarray:
     return values
 
 
+COLUMNAR_DATASETS = {"chaser_states", "bounding_boxes"}
+
+
 def _copy_h5_dataset(
     h5_group: h5py.Group,
     zarr_group: zarr.Group,
@@ -100,30 +104,78 @@ def _copy_h5_dataset(
         return
     data = h5_group[name][:]
     attrs = {attr_name: attr_value for attr_name, attr_value in h5_group[name].attrs.items()}
-    store_array(zarr_group, name, data, attrs)
+    if name in COLUMNAR_DATASETS and data.dtype.names:
+        write_columnar_dataset(zarr_group, name, data, attrs)
+    else:
+        store_array(zarr_group, name, data, attrs)
 
 
 def _copy_enums(h5: h5py.File, analysis_group: zarr.Group, console: Optional[Console]) -> None:
-    """Copy /enums datasets from H5 into analysis/enums/events."""
+    """Copy /enums datasets from H5 into analysis/enums, converting to columnar format.
+
+    Converts structured arrays [('id', 'i4'), ('name', 'S128')] into separate columnar arrays:
+    - enums/{name}/id: int32 array
+    - enums/{name}/name: variable-length UTF-8 string array
+
+    This matches the storage pattern used for events and provides better TensorStore compatibility.
+    """
     if "/enums" not in h5:
         _log(console, "[dim]/enums group not found in H5; skipping enum import.[/dim]")
         return
 
     enums_src = h5["/enums"]
-    enums_dst = analysis_group.require_group("enums").require_group("events")
+    enums_dst = analysis_group.require_group("enums")
 
     copied = 0
-    existing = set(enums_dst.array_keys())
+    existing = set(enums_dst.group_keys())
+
+    # Clean up stale enum groups
     for leftover in existing - set(enums_src.keys()):
         del enums_dst[leftover]
+
     for name in enums_src.keys():
-        data = enums_src[name][:]
-        attrs = {attr_name: attr_value for attr_name, attr_value in enums_src[name].attrs.items()}
-        store_array(enums_dst, name, data, attrs)
+        data = enums_src[name][:]  # Load structured array from H5
+
+        # Validate structure
+        if not data.dtype.names or 'id' not in data.dtype.names or 'name' not in data.dtype.names:
+            _log(console, f"[yellow]⚠ Skipping malformed enum table '{name}': missing 'id' or 'name' fields[/yellow]")
+            continue
+
+        # Extract fields from structured array
+        ids = np.asarray(data['id'], dtype=np.int32)  # Ensure int32
+
+        # Convert byte strings to UTF-8, handling various encodings
+        name_values = []
+        for raw_name in data['name']:
+            if isinstance(raw_name, bytes):
+                decoded = raw_name.decode('utf-8', errors='ignore').rstrip('\x00')
+            elif raw_name is None:
+                decoded = ""
+            else:
+                decoded = str(raw_name).rstrip('\x00')
+            name_values.append(decoded)
+        names = np.asarray(name_values, dtype=str)  # Variable-length UTF-8
+
+        # Create group for this enum table (columnar format)
+        enum_group = enums_dst.require_group(name)
+
+        # Store original H5 attributes on the group
+        src_attrs = {attr_name: attr_value for attr_name, attr_value in enums_src[name].attrs.items()}
+        if src_attrs:
+            enum_group.attrs.update(src_attrs)
+
+        # Mark as columnar format for compatibility
+        enum_group.attrs['storage_layout'] = 'columnar'
+        enum_group.attrs['field_names'] = ['id', 'name']
+
+        # Store as separate arrays (columnar)
+        store_array(enum_group, 'id', ids, {})
+        store_array(enum_group, 'name', names, {})
+
         copied += 1
 
     if copied:
-        _log(console, f"[green]✓ Imported {copied} enum tables into analysis/enums/events[/green]")
+        _log(console, f"[green]✓ Imported {copied} enum tables into analysis/enums (columnar format)[/green]")
 
 def import_stimulus_to_zarr(
     stimulus_h5: Optional[Path],
@@ -198,7 +250,7 @@ def import_stimulus_to_zarr(
         meta_attrs["interpolated"] = bool(stats.missing_frames > 0 if stats else False)
         meta_attrs["original_records"] = int(frame_metadata.shape[0])
         meta_attrs["total_records"] = int(combined_metadata.shape[0])
-        store_array(
+        write_columnar_dataset(
             meta_group,
             "frame_metadata",
             combined_metadata,

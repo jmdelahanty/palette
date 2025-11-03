@@ -153,10 +153,12 @@ class CalibrationManager:
                             print(f"  Calculated arena diameter: {radius_mm * 2:.1f} mm")
                 
                 # Get camera-specific data (homography, etc.)
+                cameras_store = calibration_data.setdefault('cameras', {})
                 for item_name in calib_group.keys():
                     # Check if this is a camera ID (just numbers)
                     if item_name.isdigit():
                         cam_group = calib_group[item_name]
+                        camera_entry = cameras_store.setdefault(item_name, {})
 
                         # Extract homography matrix if available
                         if 'homography_matrix_yml' in cam_group:
@@ -179,13 +181,19 @@ class CalibrationManager:
                                     data = matrix_meta.get('data')
                                     if rows > 0 and cols > 0 and isinstance(data, (list, tuple)):
                                         matrix = np.array(data, dtype=float).reshape(rows, cols)
-                                        calibration_data['homography_matrix'] = matrix.tolist()
-                                        calibration_data['homography_metadata'] = {
+                                        # Store per-camera homography
+                                        camera_entry['homography_matrix'] = matrix.tolist()
+                                        camera_entry['homography_metadata'] = {
                                             'rows': rows,
                                             'cols': cols,
                                             'dt': matrix_meta.get('dt'),
                                             'calibration_timestamp_utc': yaml_data.get('calibration_timestamp_utc')
                                         }
+                                        # Record primary camera data for backward compatibility
+                                        if 'primary_camera_id' not in calibration_data:
+                                            calibration_data['primary_camera_id'] = item_name
+                                            calibration_data['homography_matrix'] = matrix.tolist()
+                                            calibration_data['homography_metadata'] = camera_entry['homography_metadata']
                                         if self.verbose:
                                             print("  ✓ Parsed homography matrix")
                                     else:
@@ -194,11 +202,30 @@ class CalibrationManager:
                                 else:
                                     if self.verbose:
                                         print("  Unexpected homography YAML structure")
+                                
+                                # Extract stimulus offsets from YAML if present
+                                offset_x = yaml_data.get('stimulus_offset_x')
+                                offset_y = yaml_data.get('stimulus_offset_y')
+                                try:
+                                    offset_x_val = float(offset_x) if offset_x is not None else None
+                                except (TypeError, ValueError):
+                                    offset_x_val = None
+                                try:
+                                    offset_y_val = float(offset_y) if offset_y is not None else None
+                                except (TypeError, ValueError):
+                                    offset_y_val = None
+
+                                if offset_x_val is not None:
+                                    camera_entry['stimulus_offset_x'] = offset_x_val
+                                    if 'stimulus_offset_x' not in calibration_data:
+                                        calibration_data['stimulus_offset_x'] = offset_x_val
+                                if offset_y_val is not None:
+                                    camera_entry['stimulus_offset_y'] = offset_y_val
+                                    if 'stimulus_offset_y' not in calibration_data:
+                                        calibration_data['stimulus_offset_y'] = offset_y_val
                             except Exception as e:
                                 if self.verbose:
                                     print(f"  Could not parse homography matrix: {e}")
-
-                        break  # Use first camera found
             
             # Extract session metadata from root attributes
             root_attrs = dict(hf.attrs)
@@ -325,7 +352,7 @@ class CalibrationManager:
             calib_group.attrs['pixel_to_mm'] = calibration_data['pixel_to_mm']
             if self.verbose:
                 print(f"  ✓ pixel_to_mm: {calibration_data['pixel_to_mm']:.6f}")
-        
+
         # Save pixels_per_mm for convenience
         if 'pixels_per_mm' in calibration_data:
             calib_group.attrs['pixels_per_mm'] = calibration_data['pixels_per_mm']
@@ -357,7 +384,49 @@ class CalibrationManager:
                                       data=np.array(calibration_data['homography_matrix']))
             if self.verbose:
                 print(f"  ✓ Homography matrix saved")
-        
+
+        # Save primary camera identifier if available
+        if 'primary_camera_id' in calibration_data:
+            calib_group.attrs['primary_camera_id'] = str(calibration_data['primary_camera_id'])
+
+        # Save stimulus offsets at top-level (camera-agnostic shortcuts)
+        for offset_key in ('stimulus_offset_x', 'stimulus_offset_y'):
+            if offset_key in calibration_data and calibration_data[offset_key] is not None:
+                calib_group.attrs[offset_key] = float(calibration_data[offset_key])
+                if self.verbose:
+                    print(f"  ✓ {offset_key}: {calibration_data[offset_key]}")
+
+        # Save per-camera calibration details if provided
+        cameras_data = calibration_data.get('cameras')
+        if isinstance(cameras_data, list):
+            cameras_iterable = {str(idx): cam for idx, cam in enumerate(cameras_data)}
+        else:
+            cameras_iterable = cameras_data
+
+        if isinstance(cameras_iterable, dict) and cameras_iterable:
+            cameras_group = calib_group.create_group('cameras')
+            for cam_id, cam_info in cameras_iterable.items():
+                cam_info = cam_info or {}
+                cam_group = cameras_group.create_group(str(cam_id))
+                if self.verbose:
+                    print(f"  ✓ Camera {cam_id} calibration saved")
+
+                # Persist per-camera attributes
+                for attr_key in ('stimulus_offset_x', 'stimulus_offset_y'):
+                    value = cam_info.get(attr_key)
+                    if value is not None:
+                        cam_group.attrs[attr_key] = float(value)
+
+                metadata = cam_info.get('homography_metadata')
+                if metadata:
+                    cam_group.attrs['homography_metadata'] = metadata
+
+                if 'homography_matrix' in cam_info and cam_info['homography_matrix'] is not None:
+                    cam_group.create_array(
+                        'homography_matrix',
+                        data=np.array(cam_info['homography_matrix'])
+                    )
+
         # Save other calibration data
         for key in ['water_depth_mm', 'camera_model', 'measured_fps', 'camera_id']:
             if key in calibration_data:
@@ -399,11 +468,37 @@ class CalibrationManager:
         for group_name in ['arena', 'rig_info', 'subject_metadata', 'protocol_info']:
             if group_name in calib_group:
                 calibration_data[group_name] = dict(calib_group[group_name].attrs)
-        
+
+        # Load per-camera calibration data if present
+        if 'cameras' in calib_group:
+            cameras_data = {}
+            cameras_group = calib_group['cameras']
+            if hasattr(cameras_group, "group_keys"):
+                camera_ids = list(cameras_group.group_keys())
+            else:
+                camera_ids = list(cameras_group.keys())
+
+            for cam_id in camera_ids:
+                cam_group = cameras_group[cam_id]
+                cam_attrs = {}
+                for attr_key, attr_val in cam_group.attrs.items():
+                    if isinstance(attr_val, bytes):
+                        cam_attrs[attr_key] = attr_val.decode('utf-8', 'ignore')
+                    elif isinstance(attr_val, np.generic):
+                        cam_attrs[attr_key] = attr_val.item()
+                    else:
+                        cam_attrs[attr_key] = attr_val
+
+                if 'homography_matrix' in cam_group:
+                    cam_attrs['homography_matrix'] = cam_group['homography_matrix'][:]
+
+                cameras_data[str(cam_id)] = cam_attrs
+            calibration_data['cameras'] = cameras_data
+
         # Load homography matrix if present
         if 'homography_matrix' in calib_group:
             calibration_data['homography_matrix'] = calib_group['homography_matrix'][:]
-        
+
         return calibration_data
     
     def print_calibration(self):
@@ -423,7 +518,21 @@ class CalibrationManager:
             print(f"\n📏 Pixel to mm conversion: {calibration['pixel_to_mm']:.6f}")
             print(f"   (1 pixel = {calibration['pixel_to_mm']:.4f} mm)")
             print(f"   (1 mm = {1/calibration['pixel_to_mm']:.2f} pixels)")
-        
+
+        # Stimulus offsets
+        stim_offset_x = calibration.get('stimulus_offset_x')
+        stim_offset_y = calibration.get('stimulus_offset_y')
+        if stim_offset_x is not None or stim_offset_y is not None:
+            print(f"\n🎯 Stimulus offsets (texture → camera):")
+            if stim_offset_x is not None:
+                print(f"   stimulus_offset_x: {stim_offset_x:.3f} px")
+            if stim_offset_y is not None:
+                print(f"   stimulus_offset_y: {stim_offset_y:.3f} px")
+
+        # Primary camera reference
+        if 'primary_camera_id' in calibration and calibration['primary_camera_id'] is not None:
+            print(f"\n📹 Primary camera: {calibration['primary_camera_id']}")
+
         # Arena info
         if 'arena' in calibration:
             print(f"\n🎯 Arena:")
@@ -435,12 +544,53 @@ class CalibrationManager:
             print(f"\n🔬 Rig:")
             for key, value in calibration['rig_info'].items():
                 print(f"   {key}: {value}")
-        
+
+        # Per-camera details
+        cameras = calibration.get('cameras')
+        if isinstance(cameras, dict) and cameras:
+            print(f"\n📷 Cameras:")
+            for cam_id in sorted(cameras.keys(), key=str):
+                cam_info = cameras[cam_id] or {}
+                print(f"   Camera {cam_id}:")
+                cam_offset_x = cam_info.get('stimulus_offset_x')
+                cam_offset_y = cam_info.get('stimulus_offset_y')
+                if cam_offset_x is not None or cam_offset_y is not None:
+                    ox = f"{cam_offset_x:.3f}" if cam_offset_x is not None else "n/a"
+                    oy = f"{cam_offset_y:.3f}" if cam_offset_y is not None else "n/a"
+                    print(f"      Stimulus offset: ({ox}, {oy}) px")
+
+                homography = cam_info.get('homography_matrix')
+                if homography is not None:
+                    try:
+                        matrix = np.asarray(homography, dtype=float)
+                        shape = matrix.shape
+                        matrix_str = np.array2string(matrix, formatter={"float_kind": lambda v: f"{v: .5f}"})
+                    except Exception:
+                        shape = None
+                        matrix_str = "unavailable"
+                    meta = cam_info.get('homography_metadata', {})
+                    shape_str = f"{shape}" if shape else "available"
+                    timestamp = meta.get('calibration_timestamp_utc')
+                    print(f"      Homography ({shape_str}):")
+                    print(f"        {matrix_str}")
+                    if timestamp:
+                        print(f"        timestamp: {timestamp}")
+
+        # Top-level homography (legacy storage)
+        if 'homography_matrix' in calibration and calibration['homography_matrix'] is not None:
+            try:
+                matrix = np.asarray(calibration['homography_matrix'], dtype=float)
+                matrix_str = np.array2string(matrix, formatter={"float_kind": lambda v: f"{v: .5f}"})
+            except Exception:
+                matrix_str = "unavailable"
+            print(f"\n🧮 Homography matrix (legacy):")
+            print(f"{matrix_str}")
+
         # Other measurements
         for key in ['water_depth_mm', 'camera_model', 'measured_fps', 'camera_id']:
             if key in calibration:
                 print(f"\n{key}: {calibration[key]}")
-        
+
         print("\n" + "="*60)
 
 

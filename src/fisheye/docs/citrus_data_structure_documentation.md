@@ -371,6 +371,9 @@ Fields:
 
 Logged at every frame during CHASER stimulus mode.
 
+> **Zarr note**: In Palette Zarr archives this dataset is persisted in **columnar** form
+> (`tracking_data/chaser_states/<field>`). Each field listed below becomes its own array.
+
 ```
 Fields:
 - relative_timestamp_ns (int64): Time since session start
@@ -444,6 +447,9 @@ Box Data:
 **Dataset**: `/frame_metadata`
 
 Logs frame timing information.
+
+> **Zarr note**: Stored column-wise inside Palette Zarr files under
+> `analysis/stimulus_runs/<run>/video_metadata/frame_metadata/<field>`.
 
 ```
 Fields:

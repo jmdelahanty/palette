@@ -13,6 +13,7 @@ import numpy as np
 import zarr
 from rich.console import Console
 from zarr.core.dtype import VariableLengthUTF8
+from zarr import Array as ZarrArray, Group as ZarrGroup
 
 
 DEFAULT_TIMESTAMP_DELTA_NS = 8_333_333  # ~8.33ms for 120 Hz stimulus rendering
@@ -131,18 +132,29 @@ def store_array(
 
     if data.dtype.kind in ("S", "O", "U"):
         values = _to_string_list(data)
-        shape = (len(values),)
-        chunks = _pick_chunks(shape)
+
+        # Encode strings as 2D uint8 array for TensorStore compatibility
+        # Determine max length needed (with reasonable upper bound)
+        if values:
+            max_len = min(max(len(str(v).encode('utf-8')) for v in values), 512)
+            # Round up to next power of 2 for efficiency
+            max_len = 2 ** (max_len - 1).bit_length()
+        else:
+            max_len = 128
+
+        # Create 2D uint8 array (num_strings, max_len)
+        encoded = np.zeros((len(values), max_len), dtype=np.uint8)
+        for i, v in enumerate(values):
+            byte_data = str(v).encode('utf-8')[:max_len]
+            encoded[i, :len(byte_data)] = np.frombuffer(byte_data, dtype=np.uint8)
+
+        # Store as 2D uint8 array - TensorStore can read this directly
         arr = parent.create_array(
             name,
-            shape=shape,
-            chunks=chunks,
-            dtype=VariableLengthUTF8(),
-            fill_value="",
+            data=encoded,
+            chunks=_pick_chunks(encoded.shape),
             overwrite=True,
         )
-        if values:
-            arr[:] = values
     else:
         chunks = _pick_chunks(data.shape)
         arr = parent.create_array(
@@ -157,6 +169,65 @@ def store_array(
             arr.attrs[attr_name] = attr_value
 
     return arr
+
+
+def write_columnar_dataset(
+    parent: zarr.Group,
+    name: str,
+    data: np.ndarray,
+    attrs: Optional[Dict[str, object]] = None,
+) -> zarr.Group:
+    """Store a structured array as a columnar Zarr group."""
+    if data.dtype.names is None:
+        raise ValueError("write_columnar_dataset requires a structured dtype.")
+
+    if name in parent:
+        del parent[name]
+
+    group = parent.create_group(name)
+    field_names = list(data.dtype.names)
+    group.attrs["storage_layout"] = "columnar"
+    group.attrs["field_names"] = field_names
+    if attrs:
+        for attr_name, attr_value in attrs.items():
+            group.attrs[attr_name] = attr_value
+
+    for field in field_names:
+        field_data = np.asarray(data[field])
+        store_array(group, field, field_data, None)
+
+    return group
+
+
+def read_columnar_dataset(group: zarr.Group) -> np.ndarray:
+    """Load a columnar Zarr group into a structured numpy array."""
+    if not isinstance(group, ZarrGroup):
+        raise TypeError("Expected a Zarr group for columnar dataset.")
+    field_names = list(group.attrs.get("field_names", []))
+    if not field_names:
+        raise ValueError("Columnar group missing 'field_names' attribute.")
+    arrays = []
+    dtype = []
+    for field in field_names:
+        arr = group[field][:]
+        arrays.append(arr)
+        dtype.append((field, arr.dtype))
+    structured = np.empty(arrays[0].shape, dtype=dtype)
+    for field, arr in zip(field_names, arrays):
+        structured[field] = arr
+    return structured
+
+
+def load_structured_dataset(parent: zarr.Group, name: str) -> Tuple[np.ndarray, Dict[str, object]]:
+    """Load a dataset that may be stored as columnar group or structured array."""
+    node = parent.get(name)
+    if node is None:
+        raise KeyError(f"Dataset '{name}' not found in group '{parent.path}'.")
+    if isinstance(node, ZarrArray):
+        return node[:], dict(node.attrs)
+    if isinstance(node, ZarrGroup):
+        return read_columnar_dataset(node), dict(node.attrs)
+    raise TypeError(f"Unsupported node type for '{name}': {type(node)}")
 
 
 def analyze_frame_gaps(
@@ -535,8 +606,7 @@ def _interpolate_run(
             f"Run '{run_name}' is missing the video_metadata group (expected analysis/stimulus_runs/{run_name}/video_metadata)"
         )
     meta_group = run_group["video_metadata"]
-    metadata_arr = meta_group["frame_metadata"][:]
-    metadata_attrs = dict(meta_group["frame_metadata"].attrs)
+    metadata_arr, metadata_attrs = load_structured_dataset(meta_group, "frame_metadata")
     metadata_mask = run_group["interpolation_mask"][:] if "interpolation_mask" in run_group else None
 
     stats: Optional[InterpolationStats] = None
@@ -555,7 +625,7 @@ def _interpolate_run(
             metadata_attrs["interpolated"] = bool(stats.missing_frames > 0 if stats else False)
             metadata_attrs["original_records"] = int(metadata_arr.shape[0])
             metadata_attrs["total_records"] = int(combined_metadata.shape[0])
-            store_array(meta_group, "frame_metadata", combined_metadata, metadata_attrs)
+            write_columnar_dataset(meta_group, "frame_metadata", combined_metadata, metadata_attrs)
             if combined_metadata_mask is not None:
                 mask_chunks = _pick_chunks(combined_metadata_mask.shape)
                 arr = run_group.create_array(
@@ -575,8 +645,7 @@ def _interpolate_run(
     if "chaser_states" not in tracking_group:
         raise KeyError(f"Run '{run_name}' lacks tracking_data/chaser_states")
 
-    chaser_arr = tracking_group["chaser_states"][:]
-    chaser_attrs = dict(tracking_group["chaser_states"].attrs)
+    chaser_arr, chaser_attrs = load_structured_dataset(tracking_group, "chaser_states")
     chaser_mask = (
         tracking_group["chaser_interpolation_mask"][:]
         if "chaser_interpolation_mask" in tracking_group
@@ -599,7 +668,7 @@ def _interpolate_run(
             chaser_attrs["interpolated"] = bool(len(reports) and any(r.interpolated_frames for r in reports))
             chaser_attrs["original_records"] = int(chaser_arr.shape[0])
             chaser_attrs["total_records"] = int(combined_chaser.shape[0])
-            store_array(tracking_group, "chaser_states", combined_chaser, chaser_attrs)
+            write_columnar_dataset(tracking_group, "chaser_states", combined_chaser, chaser_attrs)
             if combined_chaser_mask is not None:
                 mask_chunks = _pick_chunks(combined_chaser_mask.shape)
                 arr = tracking_group.create_array(

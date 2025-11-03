@@ -21,29 +21,71 @@ import json
 
 
 def _resolve_enums_group(root: zarr.Group) -> Optional[zarr.Group]:
+    """Find the enums group, checking both new (analysis/enums) and legacy locations."""
     analysis = root.get("analysis")
     if analysis is not None:
         enums = analysis.get("enums")
         if enums is not None:
-            events_enums = enums.get("events")
-            if events_enums is not None:
-                return events_enums
+            return enums
     return root.get("enums")
 
 
 def _load_enum_mapping(root: zarr.Group, name: str) -> dict[int, str]:
+    """Load enum mapping, handling both columnar and legacy structured array formats.
+
+    Supports:
+    - New columnar format: enums/{name}/id and enums/{name}/name as separate arrays
+    - Legacy structured format: enums/events/{name} as structured array [('id', 'i4'), ('name', 'S128')]
+    """
     enums_group = _resolve_enums_group(root)
-    if enums_group is None or name not in enums_group:
+    if enums_group is None:
         return {}
-    data = enums_group[name][:]
-    mapping = {}
-    for record in data:
-        enum_id = int(record["id"])
-        enum_name = record["name"]
-        if isinstance(enum_name, bytes):
-            enum_name = enum_name.decode("utf-8", errors="ignore").rstrip("\x00")
-        mapping[enum_id] = enum_name
-    return mapping
+
+    # Check for new columnar format: enums/{name}/ is a group
+    if name in enums_group:
+        node = enums_group[name]
+        if isinstance(node, zarr.Group):
+            # Columnar format: separate id and name arrays
+            if 'id' in node and 'name' in node:
+                ids = node['id'][:]
+                names = node['name'][:]
+                mapping = {}
+                for enum_id, enum_name in zip(ids, names):
+                    # Handle various string types
+                    if isinstance(enum_name, bytes):
+                        enum_name = enum_name.decode("utf-8", errors="ignore").rstrip("\x00")
+                    elif not isinstance(enum_name, str):
+                        enum_name = str(enum_name).rstrip("\x00")
+                    mapping[int(enum_id)] = enum_name
+                return mapping
+        elif isinstance(node, zarr.Array):
+            # Legacy structured array format
+            data = node[:]
+            mapping = {}
+            for record in data:
+                enum_id = int(record["id"])
+                enum_name = record["name"]
+                if isinstance(enum_name, bytes):
+                    enum_name = enum_name.decode("utf-8", errors="ignore").rstrip("\x00")
+                mapping[enum_id] = enum_name
+            return mapping
+
+    # Check legacy location: enums/events/{name}
+    events_enums = enums_group.get("events")
+    if events_enums is not None and name in events_enums:
+        node = events_enums[name]
+        if isinstance(node, zarr.Array):
+            data = node[:]
+            mapping = {}
+            for record in data:
+                enum_id = int(record["id"])
+                enum_name = record["name"]
+                if isinstance(enum_name, bytes):
+                    enum_name = enum_name.decode("utf-8", errors="ignore").rstrip("\x00")
+                mapping[enum_id] = enum_name
+            return mapping
+
+    return {}
 
 
 def list_stimulus_runs(root: zarr.Group) -> list[str]:

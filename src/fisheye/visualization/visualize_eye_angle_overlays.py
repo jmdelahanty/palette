@@ -95,6 +95,7 @@ class AngleRecord:
     right: float
     left_signed: float
     right_signed: float
+    heading_deg: float
     vergence: float
     vergence_signed: float
     version: float
@@ -119,6 +120,7 @@ class AngleRecord:
     version_feret_minor: float = float("nan")
     reason_names: List[str] = field(default_factory=list)
     summary_text: str = ""
+    using_smoothed: bool = False
 
 
 class EyeAngleOverlayViewer:
@@ -127,16 +129,20 @@ class EyeAngleOverlayViewer:
         roi_images: zarr.Array,
         masks: zarr.Array,
         angles: Sequence[AngleRecord],
+        keypoints_roi: Optional[zarr.Array],
         ellipse_params: Optional[zarr.Array],
         feret_major_axes: Optional[zarr.Array],
         feret_minor_axes: Optional[zarr.Array],
+        vergence_threshold: float,
     ) -> None:
         self._roi_images = roi_images
         self._masks = masks
         self._angles = list(angles)
+        self._keypoints = keypoints_roi
         self._ellipse_params = ellipse_params
         self._feret_major = feret_major_axes
         self._feret_minor = feret_minor_axes
+        self._vergence_threshold = float(vergence_threshold)
         self.total = int(roi_images.shape[0])
         self.channel_count = int(masks.shape[1]) if masks.ndim >= 4 else 0
 
@@ -229,13 +235,24 @@ class EyeAngleOverlayViewer:
                 return "–"
             return "–"
 
+        def _fmt_pair(signed_val: float, unsigned_val: float) -> str:
+            return f"{_fmt(signed_val)}° / {_fmt(unsigned_val)}°"
+
+        def _fmt_abs_pair(signed_val: float) -> str:
+            return f"{_fmt(signed_val)}° / {_fmt(np.abs(signed_val))}°"
+
         lines = [
             f"ROI {idx + 1}/{self.total}",
-            f"Left signed (maj/min): {_fmt(record.left_signed)}° / {_fmt(record.left_minor_signed)}°",
-            f"Right signed (maj/min): {_fmt(record.right_signed)}° / {_fmt(record.right_minor_signed)}°",
-            f"Vergence signed (maj/min): {_fmt(record.vergence_signed)}° / {_fmt(record.vergence_minor_signed)}°",
-            f"Version (maj/min): {_fmt(record.version)}° / {_fmt(record.version_minor)}°",
+            f"Left major (signed/unsigned): {_fmt_pair(record.left_signed, record.left)}",
+            f"Left minor (signed/unsigned): {_fmt_abs_pair(record.left_minor_signed)}",
+            f"Right major (signed/unsigned): {_fmt_pair(record.right_signed, record.right)}",
+            f"Right minor (signed/unsigned): {_fmt_abs_pair(record.right_minor_signed)}",
+            f"Vergence (signed/unsigned): {_fmt_pair(record.vergence_signed, record.vergence)}",
+            f"Vergence minor (signed/unsigned): {_fmt_abs_pair(record.vergence_minor_signed)}",
+            f"Version (signed/unsigned): {_fmt_pair(record.version, np.abs(record.version))}",
+            f"Version minor (signed/unsigned): {_fmt_pair(record.version_minor, np.abs(record.version_minor))}",
             f"Valid (L/R/frame): {int(record.valid_left)}/{int(record.valid_right)}/{int(record.valid_frame)}",
+            f"Heading: {_fmt(record.heading_deg)}°",
         ]
         if record.ellipse_major is not None and np.isfinite(record.ellipse_major):
             lines.append(
@@ -244,6 +261,8 @@ class EyeAngleOverlayViewer:
         if record.reason_code and record.reason_names:
             lines.append("Reasons: " + ", ".join(record.reason_names))
         lines.append(f"Active axis: {self.angle_mode.capitalize()} (press 'm' to toggle)")
+        if self._vergence_threshold > 0:
+            lines.append(f"'v' jumps to next vergence ≥ {self._vergence_threshold:.1f}°")
         return "\n".join(lines)
 
     def _update_display(self) -> None:
@@ -291,11 +310,88 @@ class EyeAngleOverlayViewer:
             self._step(1)
         elif event.key in {"m", "M"}:
             self._toggle_mode()
+        elif event.key in {"v", "V"}:
+            self._jump_to_vergence()
+
+    def _jump_to_vergence(self) -> None:
+        if not self._angles:
+            return
+        start = self.index
+        threshold = self._vergence_threshold
+        if threshold <= 0:
+            print("Vergence threshold ≤ 0; shortcut ignored.")
+            return
+        total = self.total
+        idx = (start + 1) % total
+        while idx != start:
+            record = self._angles[idx]
+            value = float(record.vergence) if np.isfinite(record.vergence) else float("nan")
+            if np.isfinite(value) and value >= threshold:
+                self.slider.set_val(idx)
+                return
+            idx = (idx + 1) % total
+        print(f"No vergence ≥ {threshold:.1f}° found after ROI {start + 1}.")
+
+    def _draw_heading(self, idx: int) -> None:
+        if self._keypoints is None:
+            return
+        try:
+            kp = np.asarray(self._keypoints[idx])
+        except Exception:
+            return
+        if kp.ndim < 2 or kp.shape[0] < 3 or kp.shape[1] < 2:
+            return
+        bladder = kp[0, :2].astype(np.float32)
+        eye_left = kp[1, :2].astype(np.float32)
+        eye_right = kp[2, :2].astype(np.float32)
+        if not (np.all(np.isfinite(bladder)) and np.all(np.isfinite(eye_left)) and np.all(np.isfinite(eye_right))):
+            return
+        center = 0.5 * (eye_left + eye_right)
+        vec = center - bladder
+        norm = float(np.linalg.norm(vec))
+        if not np.isfinite(norm) or norm == 0.0:
+            return
+        color = (0.98, 0.82, 0.15)
+        line = self.ax.plot(
+            [bladder[0], center[0]],
+            [bladder[1], center[1]],
+            color=color,
+            linewidth=2.0,
+            alpha=0.9,
+            linestyle="-",
+        )[0]
+        marker = self.ax.scatter(
+            [center[0]],
+            [center[1]],
+            color=color,
+            s=30,
+            edgecolors="black",
+            linewidths=0.6,
+            zorder=7,
+        )
+        artists = [line, marker]
+        heading_val = self._angles[idx].heading_deg if idx < len(self._angles) else float("nan")
+        if np.isfinite(heading_val):
+            text = self.ax.text(
+                center[0],
+                center[1],
+                f"{heading_val:.1f}°",
+                color="black",
+                fontsize=8,
+                ha="left",
+                va="bottom",
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.6),
+                zorder=8,
+            )
+            artists.append(text)
+        self.line_artists.extend(artists)
 
     def _draw_vectors(self, idx: int) -> None:
         for artist in self.line_artists:
             artist.remove()
         self.line_artists.clear()
+
+        self._draw_heading(idx)
 
         mode = self.angle_mode
         record = self._angles[idx]
@@ -392,6 +488,11 @@ def _load_roi_images(root: zarr.Group, keypoint_run: str) -> zarr.Array:
     )
 
 
+def _load_keypoints(root: zarr.Group, keypoint_run: str) -> Optional[zarr.Array]:
+    kp_group = root[f"keypoints_runs/{keypoint_run}"]
+    return kp_group["keypoints_roi"] if "keypoints_roi" in kp_group else None
+
+
 def _load_masks(root: zarr.Group, refined_run: str) -> tuple[zarr.Array, Optional[zarr.Array], Optional[zarr.Array], Optional[zarr.Array]]:
     group_path = f"refined_eye_masks_runs/{refined_run}"
     if group_path not in root:
@@ -405,7 +506,7 @@ def _load_masks(root: zarr.Group, refined_run: str) -> tuple[zarr.Array, Optiona
     return group["masks_roi"], ellipse, feret_major, feret_minor
 
 
-def _load_angles(run_group: zarr.Group) -> tuple[List[AngleRecord], Dict[int, str]]:
+def _load_angles(run_group: zarr.Group, prefer_smoothed: bool) -> tuple[List[AngleRecord], Dict[int, str]]:
     angles_grp = run_group["angles"]["roi"]
     qa_grp = run_group["qa"]["roi"]
     support = run_group.get("support")
@@ -413,89 +514,101 @@ def _load_angles(run_group: zarr.Group) -> tuple[List[AngleRecord], Dict[int, st
     reason_map_raw = run_group.attrs.get("reason_code_map", {}) or {}
     reason_mapping = {int(k): str(v) for k, v in reason_map_raw.items()}
 
-    left = np.asarray(angles_grp["left_deg"][:], dtype=np.float32)
-    right = np.asarray(angles_grp["right_deg"][:], dtype=np.float32)
-    vergence = np.asarray(angles_grp["vergence_deg"][:], dtype=np.float32)
+    def _pick_series(name: str, fallback: Optional[np.ndarray] = None) -> tuple[np.ndarray, bool]:
+        raw = (
+            np.asarray(angles_grp[name][:], dtype=np.float32)
+            if name in angles_grp
+            else (
+                np.asarray(fallback, dtype=np.float32)
+                if fallback is not None
+                else None
+            )
+        )
+        if raw is None:
+            raise KeyError(f"Required dataset '{name}' missing in eye angle run.")
+        smoothed_name = f"{name}_smoothed"
+        smoothed = (
+            np.asarray(angles_grp[smoothed_name][:], dtype=np.float32)
+            if prefer_smoothed and smoothed_name in angles_grp
+            else None
+        )
+        if smoothed is not None:
+            return smoothed, True
+        return raw, False
 
-    left_signed = (
-        np.asarray(angles_grp["left_signed_deg"][:], dtype=np.float32)
-        if "left_signed_deg" in angles_grp
-        else left
+    left, left_used_smoothed = _pick_series("left_deg")
+    right, right_used_smoothed = _pick_series("right_deg")
+    vergence, vergence_used_smoothed = _pick_series("vergence_deg")
+
+    left_signed, left_signed_smoothed = _pick_series("left_signed_deg", fallback=left)
+    right_signed, right_signed_smoothed = _pick_series("right_signed_deg", fallback=right)
+    vergence_signed, vergence_signed_smoothed = _pick_series("vergence_signed_deg", fallback=vergence)
+    version, version_smoothed = _pick_series("version_deg", fallback=np.full_like(left, np.nan, dtype=np.float32))
+    left_minor_signed, left_minor_smoothed = _pick_series(
+        "left_minor_signed_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
     )
-    right_signed = (
-        np.asarray(angles_grp["right_signed_deg"][:], dtype=np.float32)
-        if "right_signed_deg" in angles_grp
-        else right
+    right_minor_signed, right_minor_smoothed = _pick_series(
+        "right_minor_signed_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
     )
-    vergence_signed = (
-        np.asarray(angles_grp["vergence_signed_deg"][:], dtype=np.float32)
-        if "vergence_signed_deg" in angles_grp
-        else vergence
+    vergence_minor_signed, vergence_minor_smoothed = _pick_series(
+        "vergence_minor_signed_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
     )
-    version = (
-        np.asarray(angles_grp["version_deg"][:], dtype=np.float32)
-        if "version_deg" in angles_grp
+    version_minor, version_minor_smoothed = _pick_series(
+        "version_minor_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
+    )
+    left_feret_major_signed, left_feret_major_smoothed = _pick_series(
+        "left_feret_major_signed_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
+    )
+    right_feret_major_signed, right_feret_major_smoothed = _pick_series(
+        "right_feret_major_signed_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
+    )
+    vergence_feret_major_signed, vergence_feret_major_smoothed = _pick_series(
+        "vergence_feret_major_signed_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
+    )
+    version_feret_major, version_feret_major_smoothed = _pick_series(
+        "version_feret_major_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
+    )
+    left_feret_minor_signed, left_feret_minor_smoothed = _pick_series(
+        "left_feret_minor_signed_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
+    )
+    right_feret_minor_signed, right_feret_minor_smoothed = _pick_series(
+        "right_feret_minor_signed_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
+    )
+    vergence_feret_minor_signed, vergence_feret_minor_smoothed = _pick_series(
+        "vergence_feret_minor_signed_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
+    )
+    version_feret_minor, version_feret_minor_smoothed = _pick_series(
+        "version_feret_minor_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
+    )
+
+    heading = (
+        np.asarray(angles_grp["heading_deg"][:], dtype=np.float32)
+        if "heading_deg" in angles_grp
         else np.full_like(left, np.nan, dtype=np.float32)
     )
-    left_minor_signed = (
-        np.asarray(angles_grp["left_minor_signed_deg"][:], dtype=np.float32)
-        if "left_minor_signed_deg" in angles_grp
-        else np.full_like(left, np.nan, dtype=np.float32)
-    )
-    right_minor_signed = (
-        np.asarray(angles_grp["right_minor_signed_deg"][:], dtype=np.float32)
-        if "right_minor_signed_deg" in angles_grp
-        else np.full_like(left, np.nan, dtype=np.float32)
-    )
-    vergence_minor_signed = (
-        np.asarray(angles_grp["vergence_minor_signed_deg"][:], dtype=np.float32)
-        if "vergence_minor_signed_deg" in angles_grp
-        else np.full_like(left, np.nan, dtype=np.float32)
-    )
-    version_minor = (
-        np.asarray(angles_grp["version_minor_deg"][:], dtype=np.float32)
-        if "version_minor_deg" in angles_grp
-        else np.full_like(left, np.nan, dtype=np.float32)
-    )
-    left_feret_major_signed = (
-        np.asarray(angles_grp["left_feret_major_signed_deg"][:], dtype=np.float32)
-        if "left_feret_major_signed_deg" in angles_grp
-        else np.full_like(left, np.nan, dtype=np.float32)
-    )
-    right_feret_major_signed = (
-        np.asarray(angles_grp["right_feret_major_signed_deg"][:], dtype=np.float32)
-        if "right_feret_major_signed_deg" in angles_grp
-        else np.full_like(left, np.nan, dtype=np.float32)
-    )
-    vergence_feret_major_signed = (
-        np.asarray(angles_grp["vergence_feret_major_signed_deg"][:], dtype=np.float32)
-        if "vergence_feret_major_signed_deg" in angles_grp
-        else np.full_like(left, np.nan, dtype=np.float32)
-    )
-    version_feret_major = (
-        np.asarray(angles_grp["version_feret_major_deg"][:], dtype=np.float32)
-        if "version_feret_major_deg" in angles_grp
-        else np.full_like(left, np.nan, dtype=np.float32)
-    )
-    left_feret_minor_signed = (
-        np.asarray(angles_grp["left_feret_minor_signed_deg"][:], dtype=np.float32)
-        if "left_feret_minor_signed_deg" in angles_grp
-        else np.full_like(left, np.nan, dtype=np.float32)
-    )
-    right_feret_minor_signed = (
-        np.asarray(angles_grp["right_feret_minor_signed_deg"][:], dtype=np.float32)
-        if "right_feret_minor_signed_deg" in angles_grp
-        else np.full_like(left, np.nan, dtype=np.float32)
-    )
-    vergence_feret_minor_signed = (
-        np.asarray(angles_grp["vergence_feret_minor_signed_deg"][:], dtype=np.float32)
-        if "vergence_feret_minor_signed_deg" in angles_grp
-        else np.full_like(left, np.nan, dtype=np.float32)
-    )
-    version_feret_minor = (
-        np.asarray(angles_grp["version_feret_minor_deg"][:], dtype=np.float32)
-        if "version_feret_minor_deg" in angles_grp
-        else np.full_like(left, np.nan, dtype=np.float32)
+
+    any_smoothed_available = any(
+        [
+            left_used_smoothed,
+            right_used_smoothed,
+            vergence_used_smoothed,
+            left_signed_smoothed,
+            right_signed_smoothed,
+            vergence_signed_smoothed,
+            version_smoothed,
+            left_minor_smoothed,
+            right_minor_smoothed,
+            vergence_minor_smoothed,
+            version_minor_smoothed,
+            left_feret_major_smoothed,
+            right_feret_major_smoothed,
+            vergence_feret_major_smoothed,
+            version_feret_major_smoothed,
+            left_feret_minor_smoothed,
+            right_feret_minor_smoothed,
+            vergence_feret_minor_smoothed,
+            version_feret_minor_smoothed,
+        ]
     )
 
     valid_left = np.asarray(qa_grp["valid_left"][:], dtype=bool)
@@ -526,13 +639,17 @@ def _load_angles(run_group: zarr.Group) -> tuple[List[AngleRecord], Dict[int, st
         def _fmt(val: float) -> str:
             return f"{val:.1f}" if np.isfinite(val) else "–"
 
+        header = f"ROI {idx + 1}/{total}"
+        if any_smoothed_available:
+            header += " [smoothed]"
         lines = [
-            f"ROI {idx + 1}/{total}",
+            header,
             f"Left signed (maj/min): {_fmt(left_signed[idx])}° / {_fmt(left_minor_signed[idx])}°",
             f"Right signed (maj/min): {_fmt(right_signed[idx])}° / {_fmt(right_minor_signed[idx])}°",
             f"Vergence signed (maj/min): {_fmt(vergence_signed[idx])}° / {_fmt(vergence_minor_signed[idx])}°",
             f"Version (maj/min): {_fmt(version[idx])}° / {_fmt(version_minor[idx])}°",
             f"Valid (L/R/frame): {int(valid_left[idx])}/{int(valid_right[idx])}/{int(valid_frame[idx])}",
+            f"Heading: {_fmt(heading[idx])}°",
         ]
         if np.isfinite(left_feret_major_signed[idx]) or np.isfinite(right_feret_major_signed[idx]):
             lines.append(
@@ -555,6 +672,7 @@ def _load_angles(run_group: zarr.Group) -> tuple[List[AngleRecord], Dict[int, st
             right=float(right[idx]),
             left_signed=float(left_signed[idx]),
             right_signed=float(right_signed[idx]),
+            heading_deg=float(heading[idx]),
             left_minor_signed=float(left_minor_signed[idx]),
             right_minor_signed=float(right_minor_signed[idx]),
             vergence=float(vergence[idx]),
@@ -579,6 +697,7 @@ def _load_angles(run_group: zarr.Group) -> tuple[List[AngleRecord], Dict[int, st
             ellipse_ratio=None if ellipse_ratio is None else float(ellipse_ratio[idx]),
             reason_names=reason_list,
             summary_text="\n".join(clean_lines),
+            using_smoothed=any_smoothed_available,
         )
         records.append(record)
     return records, reason_mapping
@@ -591,6 +710,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--refined-eye-run", dest="refined_run", help="Specific refined_eye_masks_runs/<run> to use.")
     parser.add_argument("--keypoint-run", dest="keypoint_run", help="Specific keypoints_runs/<run> providing ROI images.")
     parser.add_argument("--alpha", type=float, default=0.55, help="Mask overlay alpha (default 0.55).")
+    parser.add_argument(
+        "--angle-series",
+        choices=["raw", "smoothed"],
+        default="raw",
+        help="Which eye-angle series to prioritise when smoothed data is available (default: raw).",
+    )
+    parser.add_argument(
+        "--vergence-threshold",
+        type=float,
+        default=40.0,
+        help="If >0, pressing 'v' jumps to the next ROI whose unsigned vergence meets/exceeds this threshold (default 40°).",
+    )
     parser.add_argument("--no-show", action="store_true", help="Generate figure without displaying (useful for tests).")
     parser.add_argument("--save", type=Path, help="Optional path to save the current ROI overlay as PNG.")
     return parser
@@ -618,20 +749,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     keypoint_run = _get_latest(root, "keypoints", keypoint_run) if keypoint_run == "latest" else keypoint_run
 
     roi_images = _load_roi_images(root, keypoint_run)
+    keypoints_roi = _load_keypoints(root, keypoint_run)
     masks, ellipse_params, feret_major_axes, feret_minor_axes = _load_masks(root, refined_run)
 
     if roi_images.shape[0] != masks.shape[0]:
         raise ValueError(
             f"ROI image count ({roi_images.shape[0]}) does not match masks count ({masks.shape[0]})."
         )
+    if keypoints_roi is not None and keypoints_roi.shape[0] != roi_images.shape[0]:
+        raise ValueError(
+            f"Keypoint count ({keypoints_roi.shape[0]}) does not match ROI image count ({roi_images.shape[0]})."
+        )
 
-    angle_records, _ = _load_angles(run_group)
+    prefer_smoothed = args.angle_series == "smoothed"
+
+    angle_records, _ = _load_angles(run_group, prefer_smoothed)
     if len(angle_records) != roi_images.shape[0]:
         raise ValueError(
             f"Angle record count ({len(angle_records)}) does not match ROI count ({roi_images.shape[0]})."
         )
 
-    viewer = EyeAngleOverlayViewer(roi_images, masks, angle_records, ellipse_params, feret_major_axes, feret_minor_axes)
+    viewer = EyeAngleOverlayViewer(
+        roi_images,
+        masks,
+        angle_records,
+        keypoints_roi,
+        ellipse_params,
+        feret_major_axes,
+        feret_minor_axes,
+        args.vergence_threshold,
+    )
     viewer.alpha = float(np.clip(args.alpha, 0.05, 0.95))
     viewer._update_display()
 

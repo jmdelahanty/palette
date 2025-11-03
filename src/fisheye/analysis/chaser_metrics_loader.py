@@ -9,6 +9,8 @@ from typing import Dict, Optional, Sequence, Tuple, Union
 import numpy as np
 import zarr
 
+from .chaser_state_interpolator import load_structured_dataset
+
 
 PathLike = Union[str, Path]
 
@@ -163,7 +165,7 @@ def _build_camera_metadata_map(
     meta_group = stim_group.require_group("video_metadata")
     if "frame_metadata" not in meta_group:
         raise ValueError("Stimulus run missing video_metadata/frame_metadata dataset.")
-    frame_metadata = meta_group["frame_metadata"][:]
+    frame_metadata, _ = load_structured_dataset(meta_group, "frame_metadata")
     stim_field = _resolve_struct_field(
         frame_metadata,
         "stimulus_frame_num",
@@ -224,7 +226,7 @@ def _extract_online_fields(
             "Stimulus run tracking_data group lacks chaser_states dataset."
         )
 
-    chaser_states = tracking_group["chaser_states"][:]
+    chaser_states, _ = load_structured_dataset(tracking_group, "chaser_states")
     dtype_names = chaser_states.dtype.names or ()
 
     frame_field = _resolve_optional_field(chaser_states, "frame_number", "stimulus_frame_num")

@@ -286,10 +286,27 @@ def compute_track_speed(
         delta_frames = np.diff(frames)
         delta_seconds = delta_frames / fps
         displacement = np.linalg.norm(np.diff(positions, axis=0), axis=1)
-        valid = (delta_seconds > 0) & np.isfinite(displacement)
+
+        # Only consider valid consecutive frames (no gaps) for distance calculation
+        # Also filter out extremely large displacements that likely indicate teleportation
+        # or data artifacts (e.g., trial state changes, coordinate system glitches)
+        consecutive_frames = delta_frames == 1
+
+        # Flag displacements > 500px as suspicious (likely teleportation/reset)
+        # At 60fps, a fish moving at 200mm/s (~8in/s, quite fast) would be ~3.3mm/frame
+        # In camera pixels at ~51px/mm calibration, that's ~168px/frame maximum realistic
+        # Setting threshold at 500px to be conservative
+        reasonable_displacement = displacement < 500.0
+
+        valid = (delta_seconds > 0) & np.isfinite(displacement) & consecutive_frames & reasonable_displacement
 
         instantaneous[1:][valid] = displacement[valid] / delta_seconds[valid]
-        distance_per_frame[1:] = displacement
+
+        # Store displacement only for consecutive, reasonable frames, zero otherwise
+        # This prevents counting "teleportation" across frame gaps or coordinate resets as real distance
+        displacement_filtered = np.where(consecutive_frames & reasonable_displacement & np.isfinite(displacement),
+                                        displacement, 0.0)
+        distance_per_frame[1:] = displacement_filtered
 
     window = max(1, int(round(fps * smooth_seconds)))
     if window <= 1:
@@ -304,6 +321,7 @@ def compute_track_speed(
         valid = count_values > 0
         smoothed[valid] = sum_values[valid] / count_values[valid]
 
+    # Cumulative sum with NaN values already replaced with 0 in distance_per_frame
     cumulative_distance = np.cumsum(distance_per_frame)
 
     delta_seconds_full = np.zeros(frames.shape[0], dtype=np.float64)
