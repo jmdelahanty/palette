@@ -26,6 +26,10 @@ from ultralytics import YOLO, __version__ as ultralytics_version
 
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
+from ..pose.schema import schema_from_package
+
+# Load the traditional 3-point pose schema (bladder + left/right eyes)
+TRADITIONAL_POSE_SCHEMA = schema_from_package("traditional_v1")
 
 
 def _prepare_run_group(
@@ -302,6 +306,13 @@ def detect_keypoints_yolo(
 
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
     run_group.attrs["keypoint_labels"] = ["bladder", "eye_left", "eye_right"]
+    run_group.attrs["pose_schema"] = {
+        "name": TRADITIONAL_POSE_SCHEMA.name,
+        "nodes": TRADITIONAL_POSE_SCHEMA.node_names,
+        "edges": TRADITIONAL_POSE_SCHEMA.edges,
+        "metadata": TRADITIONAL_POSE_SCHEMA.metadata,
+        "source": "configs/fisheye/pose_schemas/traditional_v1.json"
+    }
     root.attrs["current_keypoint_group_path"] = run_group.path
 
     arrays = _create_output_arrays(run_group, total_rois, chunk_hint=batch_size * 4)

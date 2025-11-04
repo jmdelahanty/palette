@@ -737,6 +737,72 @@ def save_movement_tracks(
     return ordered_ids
 
 
+def _write_run_array(group: zarr.Group, name: str, data: np.ndarray) -> None:
+    """Create or overwrite an array under the movement run group."""
+
+    array = np.asarray(data)
+    if array.ndim == 0:
+        chunks = None
+    else:
+        first_dim = array.shape[0] if array.shape[0] > 0 else 1
+        chunk_first = max(1, min(4096, first_dim))
+        chunks = (chunk_first,) + array.shape[1:]
+
+    group.create_array(name, data=array, chunks=chunks, overwrite=True)
+
+
+def _persist_chaser_metrics_to_run(
+    run_group: zarr.Group,
+    bundle: "ChaserMetricsBundle",
+) -> Dict[str, object]:
+    """Write shared chaser metric arrays to the movement run root."""
+
+    metadata: Dict[str, object] = {
+        "metrics_run": bundle.provenance.get("metrics_run"),
+        "stimulus_run": bundle.provenance.get("stimulus_run"),
+        "chaser_index": int(bundle.provenance.get("chaser_index", 0)),
+    }
+
+    shared_arrays: Dict[str, np.ndarray] = {
+        "camera_frame_ids": np.asarray(bundle.camera_frame_ids, dtype=np.int64),
+        "stimulus_frame_nums": np.asarray(bundle.stimulus_frame_nums, dtype=np.int64),
+        "timestamp_ns": np.asarray(bundle.timestamp_ns, dtype=np.int64),
+        "trial_state": np.asarray(bundle.trial_state, dtype=np.int16),
+    }
+    if bundle.metadata_mask is not None:
+        shared_arrays["metadata_mask"] = np.asarray(bundle.metadata_mask, dtype=bool)
+
+    offline = bundle.offline
+    if offline:
+        if "distance_px" in offline:
+            distance_px = np.asarray(offline["distance_px"], dtype=np.float32)
+            shared_arrays["distance_to_target_px"] = distance_px
+        if "distance_mm" in offline:
+            distance_mm = np.asarray(offline["distance_mm"], dtype=np.float32)
+            shared_arrays["distance_to_target_mm"] = distance_mm
+        if "angle_unsigned_deg" in offline:
+            shared_arrays["angle_unsigned_deg"] = np.asarray(offline["angle_unsigned_deg"], dtype=np.float32)
+        if "angle_signed_deg" in offline:
+            shared_arrays["angle_signed_deg"] = np.asarray(offline["angle_signed_deg"], dtype=np.float32)
+        if "heading_deg" in offline:
+            shared_arrays["heading_deg"] = np.asarray(offline["heading_deg"], dtype=np.float32)
+        if "fish_centroid_px" in offline:
+            fish_centroids = np.asarray(offline["fish_centroid_px"], dtype=np.float32)
+            shared_arrays["fish_centroid_px"] = fish_centroids
+            shared_arrays.setdefault("fish_centroids_px", fish_centroids)
+        if "chaser_position_px" in offline:
+            chaser_positions = np.asarray(offline["chaser_position_px"], dtype=np.float32)
+            shared_arrays["chaser_position_px"] = chaser_positions
+            shared_arrays["chaser_positions_px"] = chaser_positions
+        if "has_offline" in offline:
+            shared_arrays["has_offline"] = np.asarray(offline["has_offline"], dtype=bool)
+
+    for name, array in shared_arrays.items():
+        _write_run_array(run_group, name, array)
+
+    return metadata
+
+
 def summarize_to_table(
     summaries: List[Dict[str, float]],
     pixel_to_mm: Optional[float],
@@ -1275,6 +1341,36 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             offline_group, tracks_offline, summaries_offline
                         )
 
+                        metrics_metadata: Optional[Dict[str, object]] = None
+                        try:
+                            chaser_bundle = load_chaser_metrics(
+                                args.zarr_path,
+                                stimulus_run=args.stimulus_run,
+                                metrics_run=args.metrics_run,
+                                chaser_index=args.chaser_index,
+                            )
+                        except Exception as exc:
+                            console.print(
+                                f"[yellow]Warning:[/yellow] Failed to load chaser metrics for offline run: {exc}"
+                            )
+                            chaser_bundle = None
+
+                        if chaser_bundle is not None:
+                            has_offline = chaser_bundle.offline.get("has_offline")
+                            has_values = bool(has_offline is not None and np.any(has_offline))
+                            if has_values:
+                                metrics_metadata = _persist_chaser_metrics_to_run(offline_group, chaser_bundle)
+                                run_id = metrics_metadata.get("metrics_run") or "latest"
+                                console.print(
+                                    f"[cyan]Stored chaser metrics arrays[/cyan] "
+                                    f"(analysis/chaser_fish_metrics/{run_id})."
+                                )
+                            else:
+                                console.print(
+                                    "[yellow]Warning:[/yellow] Chaser metrics bundle contains no valid offline data; "
+                                    "skipping shared metrics write."
+                                )
+
                         created_at = datetime.now(timezone.utc).isoformat()
 
                         # Gather git and environment info for provenance
@@ -1293,6 +1389,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         }
                         if detection_ids_offline_metadata:
                             offline_inputs["id_assignment_metadata"] = detection_ids_offline_metadata
+                        if metrics_metadata:
+                            offline_inputs["chaser_metrics"] = metrics_metadata
 
                         # Build comprehensive provenance record
                         offline_provenance = {

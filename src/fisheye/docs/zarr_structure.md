@@ -456,24 +456,34 @@ Movement analysis results organized by type:
 - `inputs`: Source data references
   - Online refined: `refined_online_run`, `stimulus_run`, `chaser_index`
   - Online raw: `stimulus_run`, `chaser_index`
-  - Offline: `detection_run`, `keypoint_run`, etc.
+  - Offline: `detection_run`, `keypoint_run`, optional `chaser_metrics` dict (metrics run, stimulus run, chaser index)
 - `summary`: Per-track summary statistics
 - `total_distance_px`, `total_distance_mm`: Aggregate distances
 
-**Per-Track Data** (`tracks/<track_id>/`):
-Each track contains arrays for movement metrics:
-- `frames`: Frame indices (int64)
-- `time_seconds`: Time in seconds (float64)
-- `positions_px`: Position coordinates (N, 2) in pixels (float32)
-- `positions_mm`: Position coordinates (N, 2) in millimeters (float32)
-- `instantaneous_speed_px`, `instantaneous_speed_mm`: Frame-to-frame speed (float32)
-- `smoothed_speed_px`, `smoothed_speed_mm`: Temporally smoothed speed (float32)
-- `heading_degrees`: Movement direction (float32)
-- `smoothed_heading_degrees`: Smoothed heading (float32)
-- `acceleration_px`, `acceleration_mm`: Acceleration (float32)
-- `smoothed_acceleration_px`, `smoothed_acceleration_mm`: Smoothed acceleration (float32)
-- `distance_px`, `distance_mm`: Per-frame displacement (float32)
-- `cumulative_distance_px`, `cumulative_distance_mm`: Running total distance (float32)
+**Shared Root Arrays (offline runs only)**:
+- `camera_frame_ids` (`int64`): Master frame index aligned to all chaser metrics.
+- `stimulus_frame_nums` (`int64`), `timestamp_ns` (`int64`), `trial_state` (`int16`): Optional context per frame.
+- `metadata_mask` (`bool`, optional): Propagated interpolation/original mask when available.
+- `has_offline` (`bool`): Indicates frames with valid chaser metrics.
+- `distance_to_target_px`, `distance_to_target_mm` (`float32`): Chaser→target separation per frame.
+- `chaser_position_px`, `chaser_positions_px` (`float32`, `[N, 2]`): Chaser centroid in camera pixels (duplicate naming retained for compatibility).
+- `fish_centroid_px`, `fish_centroids_px` (`float32`, `[N, 2]`): Target centroid in camera pixels.
+- `angle_signed_deg`, `angle_unsigned_deg`, `heading_deg` (`float32`): Per-frame angular metrics from `compute_chaser_fish_metrics`.
+
+Consumers map from track-level `frame_indices` into these arrays using `camera_frame_ids` and the `has_offline` mask.
+
+**Per-Track Data** (`tracks/id_<track>/`):
+Each track stores the ordered samples for that ID:
+- `frame_indices` (`int64`), `time_seconds` (`float32`), `detection_indices` (`int64`)
+- `positions_px`, `positions_mm` (`float32`, `[N, 2]`)
+- `instantaneous_speed_px`, `instantaneous_speed_mm`, `smoothed_speed_px`, `smoothed_speed_mm`
+- `heading_degrees`, `heading_radians`, `smoothed_heading_degrees`, `smoothed_heading_radians`
+- `acceleration_px`, `acceleration_mm`, `smoothed_acceleration_px`, `smoothed_acceleration_mm`
+- `distance_per_frame_px`, `distance_per_frame_mm`, `cumulative_distance_px`, `cumulative_distance_mm`
+- `second_indices`, `speed_per_second_px`, `speed_per_second_mm`, `heading_per_second_degrees`, `heading_per_second_resultant`
+- `keypoint_success`, `detection_source`, plus per-track manifest metadata in subgroup attributes
+
+Track-level arrays remain unchanged between online and offline runs; only the root-level chaser metrics are added for offline runs.
 
 ### `analysis/refined_online_runs/`
 

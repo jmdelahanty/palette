@@ -321,6 +321,10 @@ def create_refined_keypoint_run(
     if "keypoint_labels" in kp_source.attrs:
         kp_refined.attrs["keypoint_labels"] = kp_source.attrs["keypoint_labels"]
 
+    # Copy pose schema if present in source run
+    if "pose_schema" in kp_source.attrs:
+        kp_refined.attrs["pose_schema"] = kp_source.attrs["pose_schema"]
+
     # Copy metadata arrays (frame indices, counts, etc.)
     for meta_name in ("frame_indices", "n_rois", "frame_counts", "detection_indices"):
         if meta_name in kp_source:

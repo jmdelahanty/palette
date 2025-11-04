@@ -7,6 +7,7 @@ selected track within an analysis/movement_runs entry.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional, Tuple, List
 
@@ -16,6 +17,12 @@ import zarr
 from rich.console import Console
 
 from .chaser_metrics_loader import load_chaser_metrics
+
+
+@dataclass
+class _PersistedMetricsBundle:
+    camera_frame_ids: np.ndarray
+    has_offline: np.ndarray
 
 
 def resolve_movement_runs(
@@ -352,6 +359,48 @@ def compute_offline_chaser_distance(
     track_id: int,
     console: Console,
 ) -> Optional[Tuple[np.ndarray, np.ndarray, str]]:
+    distance_px = run_group.get("distance_to_target_px")
+    distance_mm = run_group.get("distance_to_target_mm")
+    camera_frames = run_group.get("camera_frame_ids")
+    availability = run_group.get("has_offline")
+
+    if distance_px is not None or distance_mm is not None:
+        if camera_frames is None or availability is None:
+            console.print(
+                "[yellow]Warning:[/yellow] Offline movement run is missing camera_frame_ids/has_offline; falling back to metrics load."
+            )
+        else:
+            unit: Optional[str] = None
+            distances: Optional[np.ndarray] = None
+            if distance_mm is not None:
+                candidate = np.asarray(distance_mm, dtype=np.float64)
+                if np.isfinite(candidate).any():
+                    unit = "mm"
+                    distances = candidate
+            if distances is None and distance_px is not None:
+                candidate = np.asarray(distance_px, dtype=np.float64)
+                if np.isfinite(candidate).any():
+                    unit = "px"
+                    distances = candidate
+
+            if distances is not None and unit is not None:
+                bundle_like = _PersistedMetricsBundle(
+                    camera_frame_ids=np.asarray(camera_frames, dtype=np.int64),
+                    has_offline=np.asarray(availability, dtype=bool),
+                )
+                times, values = _map_distance_to_track(
+                    bundle_like,
+                    run_group,
+                    track_group,
+                    distances,
+                    availability=bundle_like.has_offline,
+                )
+                if times.size == 0:
+                    console.print("[yellow]Warning:[/yellow] No overlapping offline metrics for this track.")
+                    return None
+                console.print("[dim]Using offline metrics embedded in movement run.[/dim]")
+                return times, values, unit
+
     metrics_run = _resolve_metrics_run(run_group)
     try:
         bundle = load_chaser_metrics(
