@@ -187,6 +187,17 @@ def _signed_angle_deg(vec_a: np.ndarray, vec_b: np.ndarray) -> Tuple[float, floa
     return unsigned, signed
 
 
+def _ppm_summary(values: np.ndarray) -> Optional[str]:
+    mask = np.isfinite(values) & (values != 0)
+    if not np.any(mask):
+        return None
+    finite = values[mask]
+    return (
+        f"count={finite.size}, min={finite.min():.3f}, median={np.median(finite):.3f}, "
+        f"max={finite.max():.3f}"
+    )
+
+
 def _resolve_fish_position(
     keypoints: np.ndarray,
     labels: Sequence[str],
@@ -271,7 +282,33 @@ def compute_metrics(
     if texture_scale != 1.0:
         chaser_pos *= texture_scale
     pixels_per_mm = chaser_dict.get("pixels_per_mm")
-    ppm_values = pixels_per_mm[chaser_rows].astype(np.float64) if pixels_per_mm is not None else None
+    ppm_values: Optional[np.ndarray] = None
+    if pixels_per_mm is not None:
+        ppm_raw = pixels_per_mm[chaser_rows].astype(np.float64)
+        ppm_values = ppm_raw.copy()
+        raw_summary = _ppm_summary(ppm_raw)
+
+        convert_mask = np.isfinite(ppm_values) & (ppm_values != 0)
+        if np.any(convert_mask):
+            median_ppm = float(np.median(ppm_values[convert_mask]))
+            if median_ppm < 1.0:
+                ppm_values[convert_mask] = 1.0 / ppm_values[convert_mask]
+
+        if ppm_values is not None and texture_scale != 1.0:
+            ppm_values = ppm_values * texture_scale
+
+        adjusted_summary = _ppm_summary(ppm_values) if ppm_values is not None else None
+        if raw_summary:
+            console.log(f"pixels_per_mm raw stats: {raw_summary}")
+        else:
+            console.log("pixels_per_mm raw stats: no finite values")
+        if adjusted_summary:
+            console.log(
+                f"pixels_per_mm adjusted stats "
+                f"(texture_scale={texture_scale:.3f}): {adjusted_summary}"
+            )
+        else:
+            console.log("pixels_per_mm adjusted stats: no finite values")
 
     chaser_by_frame: Dict[int, Tuple[np.ndarray, Optional[float]]] = {}
     for idx, cam_frame in enumerate(camera_frames):
