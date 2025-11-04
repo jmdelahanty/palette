@@ -51,16 +51,17 @@ def _compute_camera_alignment(
     camera_ids = metadata["triggering_camera_frame_id"].astype(np.int64)
     min_camera = int(camera_ids.min())
     max_camera = int(camera_ids.max())
-    span = max_camera - min_camera + 1
+    size = max_camera + 1
 
-    camera_to_index = np.full(span, -1, dtype=np.int64)
-    camera_mask = np.ones(span, dtype=bool)
+    camera_to_index = np.full(size, -1, dtype=np.int64)
+    camera_mask = np.zeros(size, dtype=bool)
 
     for idx, cam in enumerate(camera_ids):
-        offset = cam - min_camera
-        if camera_to_index[offset] == -1:
-            camera_to_index[offset] = idx
-        camera_mask[offset] &= metadata_mask[idx]
+        if camera_to_index[cam] == -1:
+            camera_to_index[cam] = idx
+            camera_mask[cam] = bool(metadata_mask[idx])
+        else:
+            camera_mask[cam] &= bool(metadata_mask[idx])
 
     return {
         "camera_frame_offset": int(min_camera),

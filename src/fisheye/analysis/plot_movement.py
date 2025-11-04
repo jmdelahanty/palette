@@ -25,6 +25,39 @@ class _PersistedMetricsBundle:
     has_offline: np.ndarray
 
 
+def _extract_smoothed_series(
+    run_group: zarr.Group,
+    unit: str,
+    indices: np.ndarray,
+) -> Optional[np.ndarray]:
+    if indices.size == 0:
+        return None
+
+    if unit == "mm":
+        candidates = (
+            "distance_to_target_smoothed_mm",
+            "distance_to_target_interpolated_mm",
+        )
+    else:
+        candidates = (
+            "distance_to_target_smoothed_px",
+            "distance_to_target_interpolated_px",
+        )
+
+    max_idx = int(indices.max()) if indices.size else -1
+    for name in candidates:
+        if name not in run_group:
+            continue
+        series = np.asarray(run_group[name], dtype=np.float32)
+        if series.ndim == 0 or series.shape[0] <= max_idx:
+            continue
+        values = series[indices]
+        if values.size == 0:
+            continue
+        return values.astype(np.float64)
+    return None
+
+
 def resolve_movement_runs(
     root: zarr.Group,
     requested: Optional[str],
@@ -274,7 +307,7 @@ def _map_distance_to_track(
     track_group: zarr.Group,
     distance_values: np.ndarray,
     availability: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     frame_indices = track_group["frame_indices"][:].astype(np.int64, copy=False)
     if frame_indices.size == 0:
         return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
@@ -284,6 +317,7 @@ def _map_distance_to_track(
 
     times: List[float] = []
     distances: List[float] = []
+    indices: List[int] = []
     for frame, timestamp in zip(frame_indices, time_seconds):
         idx = frame_to_idx.get(int(frame))
         if idx is None:
@@ -296,8 +330,13 @@ def _map_distance_to_track(
             continue
         times.append(float(timestamp))
         distances.append(float(value))
+        indices.append(int(idx))
 
-    return np.asarray(times, dtype=np.float64), np.asarray(distances, dtype=np.float64)
+    return (
+        np.asarray(times, dtype=np.float64),
+        np.asarray(distances, dtype=np.float64),
+        np.asarray(indices, dtype=np.int64),
+    )
 
 
 def compute_online_chaser_distance(
@@ -307,7 +346,7 @@ def compute_online_chaser_distance(
     track_group: zarr.Group,
     track_id: int,
     console: Console,
-) -> Optional[Tuple[np.ndarray, np.ndarray, str]]:
+) -> Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], str]]:
     metrics_run = _resolve_metrics_run(run_group)
     try:
         bundle = load_chaser_metrics(
@@ -343,12 +382,12 @@ def compute_online_chaser_distance(
         console.print("[yellow]Warning:[/yellow] Online distance metrics unavailable; skipping distance plot.")
         return None
 
-    times, values = _map_distance_to_track(bundle, run_group, track_group, distances)
+    times, values, _ = _map_distance_to_track(bundle, run_group, track_group, distances)
     if times.size == 0:
         console.print("[yellow]Warning:[/yellow] No overlapping online metrics for this track.")
         return None
 
-    return times, values, unit
+    return times, values, None, unit
 
 
 def compute_offline_chaser_distance(
@@ -358,7 +397,7 @@ def compute_offline_chaser_distance(
     track_group: zarr.Group,
     track_id: int,
     console: Console,
-) -> Optional[Tuple[np.ndarray, np.ndarray, str]]:
+) -> Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], str]]:
     distance_px = run_group.get("distance_to_target_px")
     distance_mm = run_group.get("distance_to_target_mm")
     camera_frames = run_group.get("camera_frame_ids")
@@ -388,7 +427,7 @@ def compute_offline_chaser_distance(
                     camera_frame_ids=np.asarray(camera_frames, dtype=np.int64),
                     has_offline=np.asarray(availability, dtype=bool),
                 )
-                times, values = _map_distance_to_track(
+                times, values, indices = _map_distance_to_track(
                     bundle_like,
                     run_group,
                     track_group,
@@ -398,8 +437,10 @@ def compute_offline_chaser_distance(
                 if times.size == 0:
                     console.print("[yellow]Warning:[/yellow] No overlapping offline metrics for this track.")
                     return None
+
+                smoothed = _extract_smoothed_series(run_group, unit, indices)
                 console.print("[dim]Using offline metrics embedded in movement run.[/dim]")
-                return times, values, unit
+                return times, values, smoothed, unit
 
     metrics_run = _resolve_metrics_run(run_group)
     try:
@@ -450,7 +491,7 @@ def compute_offline_chaser_distance(
         console.print("[yellow]Warning:[/yellow] Offline distance metrics unavailable; skipping distance plot.")
         return None
 
-    times, values = _map_distance_to_track(
+    times, values, indices = _map_distance_to_track(
         bundle,
         run_group,
         track_group,
@@ -465,7 +506,9 @@ def compute_offline_chaser_distance(
     if isinstance(metrics_label, str) and metrics_label:
         console.print(f"[dim]Using offline metrics run: {metrics_label}[/dim]")
 
-    return times, values, unit
+    smoothed = _extract_smoothed_series(run_group, unit, indices)
+
+    return times, values, smoothed, unit
 
 def plot_track(
     run_group: zarr.Group,
@@ -477,7 +520,7 @@ def plot_track(
     run_name: Optional[str] = None,
     swim_bouts: Optional[List[Tuple[float, float]]] = None,
     swim_bout_label: Optional[str] = None,
-    distance_series: Optional[Tuple[np.ndarray, np.ndarray, str]] = None,
+    distance_series: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], str]] = None,
 ) -> None:
     time_seconds = track_group["time_seconds"][:]
     smoothed_speed_px = track_group["smoothed_speed_px"][:]
@@ -541,15 +584,32 @@ def plot_track(
     accel_ax.grid(alpha=0.3)
 
     if distance_series is not None:
-        dist_time, dist_values, dist_unit = distance_series
+        dist_time, dist_values, dist_smoothed, dist_unit = distance_series
         distance_ax = axes[ax_idx]
         ax_idx += 1
-        distance_ax.plot(dist_time, dist_values, color="tab:purple", linewidth=1.0)
+        distance_ax.plot(
+            dist_time,
+            dist_values,
+            color="tab:purple",
+            linewidth=1.0,
+            alpha=0.6,
+            label="Raw",
+        )
+        if dist_smoothed is not None and dist_smoothed.size == dist_time.size:
+            distance_ax.plot(
+                dist_time,
+                dist_smoothed,
+                color="tab:pink",
+                linewidth=1.2,
+                label="Smoothed",
+            )
         distance_ax.set_xlabel("Time (s)")
         distance_ax.set_ylabel(f"Distance to target ({dist_unit})")
         distance_ax.set_title("Chaser → target distance")
         distance_ax.grid(alpha=0.3)
         distance_ax.set_xlim(speed_ax.get_xlim())
+        if (dist_smoothed is not None and dist_smoothed.size == dist_time.size) or dist_values.size:
+            distance_ax.legend(loc="upper right")
 
     heading_ax = axes[ax_idx]
     ax_idx += 1

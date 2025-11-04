@@ -751,9 +751,85 @@ def _write_run_array(group: zarr.Group, name: str, data: np.ndarray) -> None:
     group.create_array(name, data=array, chunks=chunks, overwrite=True)
 
 
+def _smooth_series(values: np.ndarray, window: int) -> np.ndarray:
+    """Apply a centered moving average that ignores NaNs."""
+
+    if window <= 1:
+        return values.astype(np.float32, copy=True)
+
+    series = np.asarray(values, dtype=np.float32)
+    if series.size == 0:
+        return series
+
+    valid = np.isfinite(series)
+    if not np.any(valid):
+        return np.full(series.shape, np.nan, dtype=np.float32)
+
+    kernel = np.ones(window, dtype=np.float32)
+    filled = np.nan_to_num(series, nan=0.0, copy=False)
+    counts = valid.astype(np.float32)
+    sum_values = np.convolve(filled, kernel, mode="same")
+    count_values = np.convolve(counts, kernel, mode="same")
+
+    smoothed = np.full(series.shape, np.nan, dtype=np.float32)
+    nonzero = count_values > 0
+    smoothed[nonzero] = sum_values[nonzero] / count_values[nonzero]
+    return smoothed
+
+
+def _interpolate_gaps(values: np.ndarray, max_gap: int) -> np.ndarray:
+    """Linearly interpolate NaN runs shorter than or equal to max_gap frames."""
+
+    series = np.asarray(values, dtype=np.float32)
+    if series.size == 0:
+        return series
+    if max_gap <= 0:
+        return series.copy()
+
+    result = series.copy()
+    isnan = np.isnan(result)
+    if not np.any(isnan):
+        return result
+
+    idx = 0
+    length = result.shape[0]
+    while idx < length:
+        if not isnan[idx]:
+            idx += 1
+            continue
+        start = idx
+        while idx < length and isnan[idx]:
+            idx += 1
+        end = idx  # first finite after gap or len
+        gap_size = end - start
+
+        if gap_size == 0 or gap_size > max_gap:
+            continue
+
+        left_idx = start - 1
+        right_idx = end
+        if left_idx < 0 or right_idx >= length:
+            continue
+
+        left_val = result[left_idx]
+        right_val = result[right_idx]
+        if not np.isfinite(left_val) or not np.isfinite(right_val):
+            continue
+
+        step = (right_val - left_val) / (gap_size + 1)
+        for offset in range(1, gap_size + 1):
+            result[start + offset - 1] = left_val + step * offset
+
+    return result
+
+
 def _persist_chaser_metrics_to_run(
     run_group: zarr.Group,
     bundle: "ChaserMetricsBundle",
+    *,
+    fps: float,
+    smooth_seconds: float,
+    distance_interp_seconds: float,
 ) -> Dict[str, object]:
     """Write shared chaser metric arrays to the movement run root."""
 
@@ -773,6 +849,7 @@ def _persist_chaser_metrics_to_run(
         shared_arrays["metadata_mask"] = np.asarray(bundle.metadata_mask, dtype=bool)
 
     offline = bundle.offline
+    interpolated_arrays: Dict[str, np.ndarray] = {}
     if offline:
         if "distance_px" in offline:
             distance_px = np.asarray(offline["distance_px"], dtype=np.float32)
@@ -797,10 +874,143 @@ def _persist_chaser_metrics_to_run(
         if "has_offline" in offline:
             shared_arrays["has_offline"] = np.asarray(offline["has_offline"], dtype=bool)
 
+    # Persist raw arrays first; collect smoothed variants when applicable
     for name, array in shared_arrays.items():
         _write_run_array(run_group, name, array)
 
+    window = 1
+    max_gap = 0
+    interp_seconds_val = 0.0
+    try:
+        fps_val = float(fps)
+        smooth_val = float(smooth_seconds)
+        if np.isfinite(fps_val) and fps_val > 0 and np.isfinite(smooth_val) and smooth_val > 0:
+            window = max(1, int(round(fps_val * smooth_val)))
+        interp_seconds = float(distance_interp_seconds)
+        if np.isfinite(fps_val) and fps_val > 0 and np.isfinite(interp_seconds) and interp_seconds > 0:
+            interp_seconds_val = interp_seconds
+            max_gap = max(0, int(round(fps_val * interp_seconds)))
+    except Exception:
+        window = 1
+        max_gap = 0
+        interp_seconds_val = 0.0
+
+    if max_gap > 0:
+        if "distance_to_target_px" in shared_arrays:
+            interpolated_px = _interpolate_gaps(shared_arrays["distance_to_target_px"], max_gap)
+            interpolated_arrays["distance_to_target_interpolated_px"] = interpolated_px
+        if "distance_to_target_mm" in shared_arrays:
+            interpolated_mm = _interpolate_gaps(shared_arrays["distance_to_target_mm"], max_gap)
+            interpolated_arrays["distance_to_target_interpolated_mm"] = interpolated_mm
+
+    for name, array in interpolated_arrays.items():
+        _write_run_array(run_group, name, array)
+
+    if window > 1:
+        source_px = interpolated_arrays.get("distance_to_target_interpolated_px")
+        if source_px is None:
+            source_px = shared_arrays.get("distance_to_target_px")
+        source_mm = interpolated_arrays.get("distance_to_target_interpolated_mm")
+        if source_mm is None:
+            source_mm = shared_arrays.get("distance_to_target_mm")
+        if source_px is not None:
+            smoothed_px = _smooth_series(source_px, window)
+            _write_run_array(run_group, "distance_to_target_smoothed_px", smoothed_px)
+        if source_mm is not None:
+            smoothed_mm = _smooth_series(source_mm, window)
+            _write_run_array(run_group, "distance_to_target_smoothed_mm", smoothed_mm)
+
+    metadata["distance_interpolation_seconds"] = float(interp_seconds_val)
     return metadata
+
+
+def _columnar_bout_data(bouts: np.ndarray) -> Dict[str, np.ndarray]:
+    """Convert structured bout array to columnar float32/int32 arrays."""
+
+    columns: Dict[str, np.ndarray] = {}
+    if bouts.size == 0 or bouts.dtype.names is None:
+        return columns
+
+    for name in bouts.dtype.names:
+        data = bouts[name]
+        kind = data.dtype.kind
+        if kind in {"f", "c"}:  # floats (complex not expected but guard)
+            columns[name] = np.asarray(data, dtype=np.float32)
+        elif kind in {"i", "u"}:
+            columns[name] = np.asarray(data, dtype=np.int32)
+        else:
+            # skip unsupported fields (e.g. strings)
+            continue
+    return columns
+
+
+def _mirror_swim_bouts_to_tracks(
+    root: zarr.Group,
+    run_group: zarr.Group,
+    track_ids: Iterable[int],
+    swim_bout_run: Optional[str],
+    console: Console,
+) -> Optional[str]:
+    analysis = root.get("analysis")
+    if analysis is None or "swim_bout_runs" not in analysis:
+        return None
+
+    bouts_parent = analysis["swim_bout_runs"]
+    run_name = swim_bout_run
+    if not run_name or run_name.lower() == "latest":
+        candidate = bouts_parent.attrs.get("latest")
+        if isinstance(candidate, str) and candidate:
+            run_name = candidate
+    if not run_name:
+        console.print(
+            "[yellow]Warning:[/yellow] Unable to mirror swim bouts (no swim_bout_runs/latest attribute)."
+        )
+        return None
+    if run_name not in bouts_parent:
+        console.print(
+            f"[yellow]Warning:[/yellow] Swim bout run '{run_name}' not found; skipping mirror."
+        )
+        return None
+
+    bout_group = bouts_parent[run_name]
+    if "bouts" not in bout_group:
+        console.print(
+            f"[yellow]Warning:[/yellow] Swim bout run '{run_name}' lacks a 'bouts' dataset."
+        )
+        return None
+
+    bouts_struct = np.asarray(bout_group["bouts"])
+    columns = _columnar_bout_data(bouts_struct)
+    if not columns:
+        console.print(
+            f"[yellow]Warning:[/yellow] Swim bout run '{run_name}' contains no numeric bout fields to mirror."
+        )
+        return None
+
+    tracks_parent = run_group["tracks"]
+    for track_id in track_ids:
+        subgroup = tracks_parent[f"id_{track_id}"].require_group("swim_bouts")
+        # Clear existing arrays
+        for name in list(subgroup.array_keys()):
+            del subgroup[name]
+        for name, array in columns.items():
+            subgroup.create_array(
+                name,
+                data=array,
+                chunks=(max(1, min(4096, array.shape[0])),),
+                overwrite=True,
+            )
+        subgroup.attrs.update(
+            {
+                "source_swim_bout_run": run_name,
+                "mirrored_fields": list(columns.keys()),
+            }
+        )
+
+    console.print(
+        f"[dim]Mirrored swim bouts from swim_bout_runs/{run_name} into movement tracks.[/dim]"
+    )
+    return run_name
 
 
 def summarize_to_table(
@@ -868,6 +1078,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     )
     parser.add_argument("--run-name", help="Optional name for the output movement run.")
     parser.add_argument("--smooth-seconds", type=float, default=1.0, help="Smoothing window in seconds (default: 1.0).")
+    parser.add_argument(
+        "--distance-interpolation-seconds",
+        type=float,
+        default=0.0,
+        help="Maximum gap duration (seconds) to fill via linear interpolation for chaser distances (default: 0).",
+    )
     parser.add_argument("--skip-unassigned", action="store_true", help="Ignore detections with ID < 0.")
     parser.add_argument("--fps", type=float, default=None, help="Override frames-per-second value.")
     parser.add_argument("--no-write", action="store_true", help="Do not write results back to the Zarr archive.")
@@ -884,6 +1100,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument(
         "--metrics-run",
         help="Specific analysis/chaser_fish_metrics/<run> to use for offline movement analysis (default: latest).",
+    )
+    parser.add_argument(
+        "--swim-bout-run",
+        help="analysis/swim_bout_runs/<run> to mirror into the offline movement run (default: latest).",
     )
     parser.add_argument(
         "--chaser-index",
@@ -1342,6 +1562,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         )
 
                         metrics_metadata: Optional[Dict[str, object]] = None
+                        swim_bout_mirror: Optional[str] = None
                         try:
                             chaser_bundle = load_chaser_metrics(
                                 args.zarr_path,
@@ -1359,7 +1580,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             has_offline = chaser_bundle.offline.get("has_offline")
                             has_values = bool(has_offline is not None and np.any(has_offline))
                             if has_values:
-                                metrics_metadata = _persist_chaser_metrics_to_run(offline_group, chaser_bundle)
+                                metrics_metadata = _persist_chaser_metrics_to_run(
+                                    offline_group,
+                                    chaser_bundle,
+                                    fps=fps,
+                                    smooth_seconds=args.smooth_seconds,
+                                    distance_interp_seconds=args.distance_interpolation_seconds,
+                                )
                                 run_id = metrics_metadata.get("metrics_run") or "latest"
                                 console.print(
                                     f"[cyan]Stored chaser metrics arrays[/cyan] "
@@ -1370,6 +1597,19 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                     "[yellow]Warning:[/yellow] Chaser metrics bundle contains no valid offline data; "
                                     "skipping shared metrics write."
                                 )
+
+                        try:
+                            swim_bout_mirror = _mirror_swim_bouts_to_tracks(
+                                root,
+                                offline_group,
+                                ordered_ids_offline,
+                                args.swim_bout_run,
+                                console,
+                            )
+                        except Exception as exc:
+                            console.print(
+                                f"[yellow]Warning:[/yellow] Failed to mirror swim bouts: {exc}"
+                            )
 
                         created_at = datetime.now(timezone.utc).isoformat()
 
@@ -1391,6 +1631,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             offline_inputs["id_assignment_metadata"] = detection_ids_offline_metadata
                         if metrics_metadata:
                             offline_inputs["chaser_metrics"] = metrics_metadata
+                        if swim_bout_mirror:
+                            offline_inputs["swim_bout_run"] = swim_bout_mirror
 
                         # Build comprehensive provenance record
                         offline_provenance = {
@@ -1414,6 +1656,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "parameters": {
                                 "fps": fps,
                                 "smoothing_seconds": args.smooth_seconds,
+                                "distance_interpolation_seconds": args.distance_interpolation_seconds,
                                 "coordinate_space": "camera",
                                 "calibration_used": pixel_to_mm,
                             },
@@ -1426,6 +1669,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                 "created_at_utc": created_at,
                                 "fps": fps,
                                 "smoothing_seconds": args.smooth_seconds,
+                                "distance_interpolation_seconds": args.distance_interpolation_seconds,
                                 "pixel_to_mm": pixel_to_mm,
                                 "calibration": calibration_info,
                                 "inputs": offline_inputs,

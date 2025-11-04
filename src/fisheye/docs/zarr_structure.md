@@ -339,9 +339,9 @@ Stimulus run data imported from Citrus H5 files. Each run contains:
 |-------------|-------------|
 | `video_metadata/frame_metadata` | Columnar table with frame timing and IDs (see below) |
 | `interpolation_mask` | Boolean mask indicating interpolated frames |
-| `frame_alignment/camera_to_metadata_index` | Map camera frame IDs to metadata indices |
-| `frame_alignment/camera_interpolation_mask` | Interpolation mask aligned to camera frames |
-| `frame_alignment` attrs | `camera_frame_offset`: Offset to first camera frame |
+| `frame_alignment/camera_to_metadata_index` | Absolute camera frame → metadata index map. Length = max camera frame + 1. Slots with no stimulus data are `-1`. |
+| `frame_alignment/camera_interpolation_mask` | Boolean mask for the above indices (`True` only when every metadata row for that camera frame was recorded, not interpolated). Frames with `-1` entries are `False`. |
+| `frame_alignment` attrs | `camera_frame_offset` *(legacy)*: original minimum triggering frame retained for backward compatibility. |
 | `tracking_data/chaser_states` | Per-frame chaser position/state data (columnar) |
 | `tracking_data/bounding_boxes` | Detection bounding boxes from tracking system (columnar) |
 | `events/` | Experimental events (columnar storage, see below) |
@@ -466,6 +466,8 @@ Movement analysis results organized by type:
 - `metadata_mask` (`bool`, optional): Propagated interpolation/original mask when available.
 - `has_offline` (`bool`): Indicates frames with valid chaser metrics.
 - `distance_to_target_px`, `distance_to_target_mm` (`float32`): Chaser→target separation per frame.
+- `distance_to_target_interpolated_px`, `distance_to_target_interpolated_mm` (`float32`, optional): Raw distances with short NaN gaps (duration ≤ `distance_interpolation_seconds` × FPS) filled via linear interpolation.
+- `distance_to_target_smoothed_px`, `distance_to_target_smoothed_mm` (`float32`, optional): Moving-average smoothing applied to the interpolated series using the movement run's `fps` and `smoothing_seconds`.
 - `chaser_position_px`, `chaser_positions_px` (`float32`, `[N, 2]`): Chaser centroid in camera pixels (duplicate naming retained for compatibility).
 - `fish_centroid_px`, `fish_centroids_px` (`float32`, `[N, 2]`): Target centroid in camera pixels.
 - `angle_signed_deg`, `angle_unsigned_deg`, `heading_deg` (`float32`): Per-frame angular metrics from `compute_chaser_fish_metrics`.
@@ -482,6 +484,7 @@ Each track stores the ordered samples for that ID:
 - `distance_per_frame_px`, `distance_per_frame_mm`, `cumulative_distance_px`, `cumulative_distance_mm`
 - `second_indices`, `speed_per_second_px`, `speed_per_second_mm`, `heading_per_second_degrees`, `heading_per_second_resultant`
 - `keypoint_success`, `detection_source`, plus per-track manifest metadata in subgroup attributes
+- `swim_bouts/`: columnar arrays mirroring `analysis/swim_bout_runs/<run>/bouts` (e.g., `bout_id`, `start_time_s`, `end_time_s`, `start_frame`, `end_frame`, `duration_s`, `distance_px`, `distance_mm`, `mean_speed_mm_s`, `peak_speed_mm_s`, `start_x_px`, `end_x_px`, …) with subgroup attrs recording the source swim-bout run.
 
 Track-level arrays remain unchanged between online and offline runs; only the root-level chaser metrics are added for offline runs.
 
