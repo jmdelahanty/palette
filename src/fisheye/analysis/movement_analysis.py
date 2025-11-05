@@ -459,8 +459,10 @@ def build_track_datasets(
         speeds = compute_track_speed(track_frames.copy(), coords_px.copy(), fps=fps, smooth_seconds=smooth_seconds)
 
         instantaneous_px = speeds.instantaneous
+        instantaneous_filtered_px = speeds.instantaneous_filtered
         smoothed_px = speeds.smoothed
-        distance_px = speeds.distance
+        distance_px = speeds.distance_smoothed
+        distance_raw_px = speeds.distance_raw
         cumulative_px = speeds.cumulative_distance
         seconds = speeds.seconds
         speed_per_second_px = speeds.speed_per_second
@@ -468,15 +470,19 @@ def build_track_datasets(
         if pixel_to_mm_val is not None:
             coords_mm = coords_px * pixel_to_mm_val
             instantaneous_mm = instantaneous_px * pixel_to_mm_val
+            instantaneous_filtered_mm = instantaneous_filtered_px * pixel_to_mm_val
             smoothed_mm = smoothed_px * pixel_to_mm_val
             distance_mm = distance_px * pixel_to_mm_val
+            distance_raw_mm = distance_raw_px * pixel_to_mm_val
             cumulative_mm = cumulative_px * pixel_to_mm_val
             speed_per_second_mm = speed_per_second_px * pixel_to_mm_val
         else:
             coords_mm = _nan_array(coords_px.shape)
             instantaneous_mm = _nan_array(instantaneous_px.shape)
+            instantaneous_filtered_mm = _nan_array(instantaneous_filtered_px.shape)
             smoothed_mm = _nan_array(smoothed_px.shape)
             distance_mm = _nan_array(distance_px.shape)
+            distance_raw_mm = _nan_array(distance_raw_px.shape)
             cumulative_mm = _nan_array(cumulative_px.shape)
             speed_per_second_mm = _nan_array(speed_per_second_px.shape)
 
@@ -569,6 +575,8 @@ def build_track_datasets(
         "detection_source": det_source_track.astype(np.int8),
         "instantaneous_speed_px": _float32(instantaneous_px),
         "instantaneous_speed_mm": _float32(instantaneous_mm),
+        "instantaneous_speed_filtered_px": _float32(instantaneous_filtered_px),
+        "instantaneous_speed_filtered_mm": _float32(instantaneous_filtered_mm),
         "smoothed_speed_px": _float32(smoothed_px),
         "smoothed_speed_mm": _float32(smoothed_mm),
         "acceleration_px": _float32(acceleration_px),
@@ -577,6 +585,8 @@ def build_track_datasets(
         "smoothed_acceleration_mm": _float32(smoothed_accel_mm),
         "distance_per_frame_px": _float32(distance_px),
         "distance_per_frame_mm": _float32(distance_mm),
+        "distance_per_frame_raw_px": _float32(distance_raw_px),
+        "distance_per_frame_raw_mm": _float32(distance_raw_mm),
         "cumulative_distance_px": _float32(cumulative_px),
         "cumulative_distance_mm": _float32(cumulative_mm),
         "second_indices": seconds_per_frame,
@@ -690,6 +700,8 @@ def save_movement_tracks(
         subgroup.create_array("detection_source", data=data["detection_source"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("instantaneous_speed_px", data=data["instantaneous_speed_px"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("instantaneous_speed_mm", data=data["instantaneous_speed_mm"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("instantaneous_speed_filtered_px", data=data["instantaneous_speed_filtered_px"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("instantaneous_speed_filtered_mm", data=data["instantaneous_speed_filtered_mm"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("smoothed_speed_px", data=data["smoothed_speed_px"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("smoothed_speed_mm", data=data["smoothed_speed_mm"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("acceleration_px", data=data["acceleration_px"], chunks=base_chunk, overwrite=True)
@@ -698,6 +710,8 @@ def save_movement_tracks(
         subgroup.create_array("smoothed_acceleration_mm", data=data["smoothed_acceleration_mm"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("distance_per_frame_px", data=data["distance_per_frame_px"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("distance_per_frame_mm", data=data["distance_per_frame_mm"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("distance_per_frame_raw_px", data=data["distance_per_frame_raw_px"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("distance_per_frame_raw_mm", data=data["distance_per_frame_raw_mm"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("cumulative_distance_px", data=data["cumulative_distance_px"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("cumulative_distance_mm", data=data["cumulative_distance_mm"], chunks=base_chunk, overwrite=True)
 

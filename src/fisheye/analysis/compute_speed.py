@@ -29,8 +29,10 @@ from rich.table import Table
 class TrackSpeeds:
     frames: np.ndarray
     instantaneous: np.ndarray
+    instantaneous_filtered: np.ndarray
     smoothed: np.ndarray
-    distance: np.ndarray
+    distance_raw: np.ndarray
+    distance_smoothed: np.ndarray
     cumulative_distance: np.ndarray
     seconds: np.ndarray
     speed_per_second: np.ndarray
@@ -268,19 +270,28 @@ def compute_track_speed(
     positions: np.ndarray,
     fps: float,
     smooth_seconds: float,
+    distance_smooth_seconds: Optional[float] = None,
 ) -> TrackSpeeds:
     """Compute instantaneous and smoothed speeds for a single track."""
     if frames.size == 0:
         empty = np.array([], dtype=np.float32)
         empty_int64 = np.array([], dtype=np.int64)
-        return TrackSpeeds(frames, empty, empty, empty, empty, empty_int64, empty)
+        return TrackSpeeds(frames, empty, empty, empty, empty, empty, empty, empty_int64, empty)
 
     order = np.argsort(frames)
     frames = frames[order].astype(np.int64, copy=False)
     positions = positions[order].astype(np.float64, copy=False)
 
     instantaneous = np.full(frames.shape[0], np.nan, dtype=np.float64)
+    instantaneous_filtered = np.full(frames.shape[0], np.nan, dtype=np.float64)
     distance_per_frame = np.zeros(frames.shape[0], dtype=np.float64)
+    distance_raw = np.zeros(frames.shape[0], dtype=np.float64)
+
+    distance_window_seconds = (
+        distance_smooth_seconds if distance_smooth_seconds is not None else smooth_seconds
+    )
+    distance_window = max(1, int(round(fps * distance_window_seconds)))
+    speed_window = max(1, int(round(fps * smooth_seconds)))
 
     if frames.size >= 2:
         delta_frames = np.diff(frames)
@@ -300,24 +311,45 @@ def compute_track_speed(
 
         valid = (delta_seconds > 0) & np.isfinite(displacement) & consecutive_frames & reasonable_displacement
 
-        instantaneous[1:][valid] = displacement[valid] / delta_seconds[valid]
+        # Retain only reasonable, consecutive displacements; others are treated as 0 to avoid
+        # adding artificial distance or leaking into the smoothing window.
+        displacement_filtered = np.zeros_like(displacement)
+        displacement_filtered[valid] = displacement[valid]
 
-        # Store displacement only for consecutive, reasonable frames, zero otherwise
-        # This prevents counting "teleportation" across frame gaps or coordinate resets as real distance
-        displacement_filtered = np.where(consecutive_frames & reasonable_displacement & np.isfinite(displacement),
-                                        displacement, 0.0)
-        distance_per_frame[1:] = displacement_filtered
+        if distance_window > 1 and displacement_filtered.size > 0:
+            kernel = np.ones(distance_window, dtype=np.float64)
+            # Average only over windows that contain at least one valid displacement sample.
+            sum_values = np.convolve(displacement_filtered, kernel, mode="same")
+            count_values = np.convolve(valid.astype(np.float64), kernel, mode="same")
 
-    window = max(1, int(round(fps * smooth_seconds)))
-    if window <= 1:
-        smoothed = instantaneous.copy()
+            smoothed_displacement = np.zeros_like(displacement_filtered)
+            nonzero = count_values > 0
+            smoothed_displacement[nonzero] = sum_values[nonzero] / count_values[nonzero]
+        else:
+            smoothed_displacement = displacement_filtered
+
+        # Prevent gaps or invalid transitions from inheriting averaged motion.
+        smoothed_displacement[~valid] = 0.0
+
+        raw_slice = instantaneous[1:]
+        raw_slice[valid] = displacement[valid] / delta_seconds[valid]
+        instantaneous[1:] = raw_slice
+
+        filtered_slice = instantaneous_filtered[1:]
+        filtered_slice[valid] = smoothed_displacement[valid] / delta_seconds[valid]
+        instantaneous_filtered[1:] = filtered_slice
+        distance_raw[1:] = displacement_filtered
+        distance_per_frame[1:] = smoothed_displacement
+
+    if speed_window <= 1:
+        smoothed = instantaneous_filtered.copy()
     else:
-        values = np.nan_to_num(instantaneous, nan=0.0, copy=False)
-        counts = np.isfinite(instantaneous).astype(np.float32)
-        kernel = np.ones(window, dtype=np.float32)
+        values = np.nan_to_num(instantaneous_filtered, nan=0.0, copy=False)
+        counts = np.isfinite(instantaneous_filtered).astype(np.float32)
+        kernel = np.ones(speed_window, dtype=np.float32)
         sum_values = np.convolve(values, kernel, mode="same")
         count_values = np.convolve(counts, kernel, mode="same")
-        smoothed = np.full_like(instantaneous, np.nan)
+        smoothed = np.full_like(instantaneous_filtered, np.nan)
         valid = count_values > 0
         smoothed[valid] = sum_values[valid] / count_values[valid]
 
@@ -344,8 +376,10 @@ def compute_track_speed(
     return TrackSpeeds(
         frames=frames,
         instantaneous=instantaneous.astype(np.float32),
+        instantaneous_filtered=instantaneous_filtered.astype(np.float32),
         smoothed=smoothed.astype(np.float32),
-        distance=distance_per_frame.astype(np.float32),
+        distance_raw=distance_raw.astype(np.float32),
+        distance_smoothed=distance_per_frame.astype(np.float32),
         cumulative_distance=cumulative_distance.astype(np.float32),
         seconds=unique_seconds.astype(np.int64),
         speed_per_second=speed_per_second.astype(np.float32),
@@ -427,8 +461,15 @@ def save_tracks(
         chunks = (min(1024, data.frames.size),)
         sub.create_array("frame_indices", data=data.frames, chunks=chunks, overwrite=True)
         sub.create_array("instantaneous_speed", data=data.instantaneous, chunks=chunks, overwrite=True)
+        sub.create_array(
+            "instantaneous_speed_filtered",
+            data=data.instantaneous_filtered,
+            chunks=chunks,
+            overwrite=True,
+        )
         sub.create_array("smoothed_speed", data=data.smoothed, chunks=chunks, overwrite=True)
-        sub.create_array("distance_per_frame", data=data.distance, chunks=chunks, overwrite=True)
+        sub.create_array("distance_per_frame", data=data.distance_smoothed, chunks=chunks, overwrite=True)
+        sub.create_array("distance_per_frame_raw", data=data.distance_raw, chunks=chunks, overwrite=True)
         sub.create_array(
             "cumulative_distance", data=data.cumulative_distance, chunks=chunks, overwrite=True
         )
@@ -490,7 +531,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Compute per-ID speeds from detections in a Palette Zarr archive.")
     parser.add_argument("zarr_path", help="Path to the Palette Zarr archive.")
     parser.add_argument("--detection-run", help="Detection run to use (defaults to latest, preferring refined runs).")
-    parser.add_argument("--smooth-seconds", type=float, default=1.0, help="Smoothing window in seconds (default: 1.0).")
+    parser.add_argument("--smooth-seconds", type=float, default=1.0, help="Speed smoothing window in seconds (moving average, default: 1.0).")
+    parser.add_argument(
+        "--distance-smooth-seconds",
+        type=float,
+        default=None,
+        help="Displacement smoothing window in seconds before computing instantaneous speed (defaults to --smooth-seconds).",
+    )
     parser.add_argument("--skip-unassigned", action="store_true", help="Ignore detections with ID < 0.")
     parser.add_argument("--run-name", help="Optional name for the output speed run.")
     parser.add_argument("--no-write", action="store_true", help="Do not write results back to the Zarr archive.")
@@ -574,13 +621,23 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     positions = np.stack([x, y], axis=1)
 
     tracks: Dict[int, TrackSpeeds] = {}
+    distance_smooth_seconds = (
+        float(args.distance_smooth_seconds) if args.distance_smooth_seconds is not None else args.smooth_seconds
+    )
+
     for det_id in unique_ids:
         mask = detection_ids == det_id
         if not mask.any():
             continue
         frames = frame_indices[mask]
         coords = positions[mask]
-        speeds = compute_track_speed(frames, coords, fps=fps, smooth_seconds=args.smooth_seconds)
+        speeds = compute_track_speed(
+            frames,
+            coords,
+            fps=fps,
+            smooth_seconds=args.smooth_seconds,
+            distance_smooth_seconds=distance_smooth_seconds,
+        )
         tracks[int(det_id)] = speeds
 
     summaries = summarize_tracks(tracks)
@@ -622,6 +679,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "source_detect_run": source_detect_run if is_refined else detect_run_name,
             "fps": fps,
             "smoothing_seconds": args.smooth_seconds,
+            "distance_smoothing_seconds": distance_smooth_seconds,
             "video_width": width,
             "video_height": height,
             "skip_unassigned": bool(args.skip_unassigned),
