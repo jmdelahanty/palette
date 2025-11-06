@@ -15,7 +15,7 @@ current_frame = 1
 ds_se1_radius = 1
 ds_se4_radius = 4
 min_area = 25
-max_area = 700
+max_area = 5000
 
 def update_max_fish(val):
     global max_fish
@@ -107,7 +107,7 @@ def save_detection_params(zarr_path, params):
 def create_tuner_dashboard(frame_idx, zarr_root, dish_mask):
     """
     Creates the visual dashboard for a given frame, applying current threshold values
-    and displaying all detected fish.
+    and displaying all detected fish, along with a background preview panel.
     """
     global ds_thresh, ds_se1_radius, ds_se4_radius, min_area, max_area
     
@@ -134,6 +134,7 @@ def create_tuner_dashboard(frame_idx, zarr_root, dish_mask):
     background_ds = background_ds_array[:]
     
     panel1 = cv2.cvtColor(image_ds, cv2.COLOR_GRAY2BGR)
+    panel_background = cv2.cvtColor(background_ds, cv2.COLOR_GRAY2BGR)
     
     diff_ds = np.clip(background_ds.astype(np.int16) - image_ds.astype(np.int16), 0, 255).astype(np.uint8)
     if dish_mask is not None:
@@ -159,6 +160,7 @@ def create_tuner_dashboard(frame_idx, zarr_root, dish_mask):
     display_size = (480, 480)
     
     cv2.putText(panel1, "Original DS Image", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    cv2.putText(panel_background, "Background Sample", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     cv2.putText(panel2, "Background Difference", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     cv2.putText(panel3, f"Mask (thresh={ds_thresh}, se1={ds_se1_radius}, se4={ds_se4_radius})", 
                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
@@ -169,7 +171,7 @@ def create_tuner_dashboard(frame_idx, zarr_root, dish_mask):
     bottom_row = np.hstack((cv2.resize(panel3, display_size), cv2.resize(panel4, display_size)))
     dashboard = np.vstack((top_row, bottom_row))
     
-    return dashboard
+    return dashboard, cv2.resize(panel_background, display_size)
 
 def main(zarr_path, start_frame=1, config_path="pipeline_config.yaml"):
     global current_frame, ds_thresh, ds_se1_radius, ds_se4_radius, min_area, max_area, max_fish
@@ -232,15 +234,27 @@ def main(zarr_path, start_frame=1, config_path="pipeline_config.yaml"):
         
         # Priority 1: Check analysis_metadata for mask tuning
         if 'analysis_metadata' in zarr_root and 'dish_mask' in zarr_root['analysis_metadata'].attrs:
-            mask_data = zarr_root['analysis_metadata'].attrs['dish_mask']
-            if 'detected_circle' in mask_data:
+            mask_attr = zarr_root['analysis_metadata'].attrs['dish_mask']
+            mask_data = dict(mask_attr)
+            shape = mask_data.get('shape')
+            if not shape:
+                if 'detected_circle' in mask_data:
+                    shape = 'circle'
+                elif 'rectangle' in mask_data:
+                    shape = 'rectangle'
+            if shape == 'rectangle' and 'rectangle' in mask_data:
+                roi = mask_data['rectangle'].get('roi')
+                if roi:
+                    mask_params = {'shape': 'rectangle', 'roi': [int(v) for v in roi]}
+                    print(f" Loaded rectangular mask from analysis_metadata")
+            elif shape == 'circle' and 'detected_circle' in mask_data:
                 circle = mask_data['detected_circle']
                 mask_params = {
                     'shape': 'circle',
                     'center': circle.get('center'),
                     'radius': circle.get('radius')
                 }
-                print(f" Loaded mask from analysis_metadata")
+                print(f" Loaded circular mask from analysis_metadata")
         
         # Priority 2: Load from config file
         if not mask_params and config:
@@ -272,7 +286,9 @@ def main(zarr_path, start_frame=1, config_path="pipeline_config.yaml"):
         return
 
     window_name = "Detection Parameter Tuner"
+    background_window_name = "Background Sample"
     cv2.namedWindow(window_name)
+    cv2.namedWindow(background_window_name)
     
     cv2.createTrackbar("max_fish", window_name, max_fish, 30, update_max_fish)
     cv2.createTrackbar("Frame", window_name, current_frame, num_frames - 1, update_frame)
@@ -280,7 +296,8 @@ def main(zarr_path, start_frame=1, config_path="pipeline_config.yaml"):
     cv2.createTrackbar("ds_erode(se1)", window_name, ds_se1_radius, 10, update_ds_se1)
     cv2.createTrackbar("ds_dilate(se4)", window_name, ds_se4_radius, 10, update_ds_se4)
     cv2.createTrackbar("min_area", window_name, min_area, 1000, update_min_area)
-    cv2.createTrackbar("max_area", window_name, max_area, 1000, update_max_area)
+    max_area_cap = max(1, int(max_area))
+    cv2.createTrackbar("max_area", window_name, max_area, max_area_cap, update_max_area)
 
     print("\n Starting Detection Parameter Tuner...")
     print("Controls:")
@@ -290,11 +307,13 @@ def main(zarr_path, start_frame=1, config_path="pipeline_config.yaml"):
     print("  - Press 'q' or Esc to quit without saving")
 
     while True:
-        dashboard = create_tuner_dashboard(current_frame, zarr_root, dish_mask)
-        if dashboard is None:
+        result = create_tuner_dashboard(current_frame, zarr_root, dish_mask)
+        if result is None:
             break
+        dashboard, background_panel = result
         
         cv2.imshow(window_name, dashboard)
+        cv2.imshow(background_window_name, background_panel)
         cv2.setTrackbarPos("Frame", window_name, current_frame)
         
         key = cv2.waitKey(30) & 0xFF

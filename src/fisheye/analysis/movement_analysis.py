@@ -423,8 +423,17 @@ def build_track_datasets(
     fps: float,
     smooth_seconds: float,
     pixel_to_mm: Optional[float],
+    hysteresis_high_px: Optional[float] = None,
+    hysteresis_low_px: Optional[float] = None,
+    hysteresis_min_frames: Optional[int] = None,
+    smoothing_method: str = "moving_average",
+    savgol_polyorder: int = 3,
 ) -> Tuple[Dict[int, Dict[str, np.ndarray]], List[Dict[str, float]]]:
-    """Assemble per-track data arrays and summary statistics."""
+    """Assemble per-track data arrays and summary statistics.
+
+    Optionally applies hysteresis filtering to remove micro-jitter during speed computation.
+    Optionally applies Savitzky-Golay smoothing for shape-preserving filtering.
+    """
 
     unique_ids = np.unique(detection_ids)
     tracks: Dict[int, Dict[str, np.ndarray]] = {}
@@ -456,33 +465,49 @@ def build_track_datasets(
         det_source_track = det_source_track[order]
         detection_indices_sorted = detection_index[order]
 
-        speeds = compute_track_speed(track_frames.copy(), coords_px.copy(), fps=fps, smooth_seconds=smooth_seconds)
+        speeds = compute_track_speed(
+            track_frames.copy(),
+            coords_px.copy(),
+            fps=fps,
+            smooth_seconds=smooth_seconds,
+            hysteresis_high_px=hysteresis_high_px,
+            hysteresis_low_px=hysteresis_low_px,
+            hysteresis_min_frames=hysteresis_min_frames,
+            smoothing_method=smoothing_method,
+            savgol_polyorder=savgol_polyorder,
+        )
 
-        instantaneous_px = speeds.instantaneous
-        instantaneous_filtered_px = speeds.instantaneous_filtered
-        smoothed_px = speeds.smoothed
-        distance_px = speeds.distance_smoothed
-        distance_raw_px = speeds.distance_raw
+        speed_raw_px = speeds.speed_raw
+        speed_filtered_px = speeds.speed_filtered
+        speed_smoothed_px = speeds.speed_smoothed
+        speed_averaged_px = speeds.speed_averaged
+        displacement_raw_px = speeds.displacement_raw
+        displacement_filtered_px = speeds.displacement_filtered
+        displacement_smoothed_px = speeds.displacement_smoothed
         cumulative_px = speeds.cumulative_distance
         seconds = speeds.seconds
         speed_per_second_px = speeds.speed_per_second
 
         if pixel_to_mm_val is not None:
             coords_mm = coords_px * pixel_to_mm_val
-            instantaneous_mm = instantaneous_px * pixel_to_mm_val
-            instantaneous_filtered_mm = instantaneous_filtered_px * pixel_to_mm_val
-            smoothed_mm = smoothed_px * pixel_to_mm_val
-            distance_mm = distance_px * pixel_to_mm_val
-            distance_raw_mm = distance_raw_px * pixel_to_mm_val
+            speed_raw_mm = speed_raw_px * pixel_to_mm_val
+            speed_filtered_mm = speed_filtered_px * pixel_to_mm_val
+            speed_smoothed_mm = speed_smoothed_px * pixel_to_mm_val
+            speed_averaged_mm = speed_averaged_px * pixel_to_mm_val
+            displacement_raw_mm = displacement_raw_px * pixel_to_mm_val
+            displacement_filtered_mm = displacement_filtered_px * pixel_to_mm_val
+            displacement_smoothed_mm = displacement_smoothed_px * pixel_to_mm_val
             cumulative_mm = cumulative_px * pixel_to_mm_val
             speed_per_second_mm = speed_per_second_px * pixel_to_mm_val
         else:
             coords_mm = _nan_array(coords_px.shape)
-            instantaneous_mm = _nan_array(instantaneous_px.shape)
-            instantaneous_filtered_mm = _nan_array(instantaneous_filtered_px.shape)
-            smoothed_mm = _nan_array(smoothed_px.shape)
-            distance_mm = _nan_array(distance_px.shape)
-            distance_raw_mm = _nan_array(distance_raw_px.shape)
+            speed_raw_mm = _nan_array(speed_raw_px.shape)
+            speed_filtered_mm = _nan_array(speed_filtered_px.shape)
+            speed_smoothed_mm = _nan_array(speed_smoothed_px.shape)
+            speed_averaged_mm = _nan_array(speed_averaged_px.shape)
+            displacement_raw_mm = _nan_array(displacement_raw_px.shape)
+            displacement_filtered_mm = _nan_array(displacement_filtered_px.shape)
+            displacement_smoothed_mm = _nan_array(displacement_smoothed_px.shape)
             cumulative_mm = _nan_array(cumulative_px.shape)
             speed_per_second_mm = _nan_array(speed_per_second_px.shape)
 
@@ -496,11 +521,11 @@ def build_track_datasets(
             delta_seconds_full[1:] = np.diff(track_frames) / fps
 
         # Acceleration from smoothed speed profile
-        acceleration_px = np.full(smoothed_px.shape, np.nan, dtype=np.float64)
-        acceleration_mm = np.full(smoothed_px.shape, np.nan, dtype=np.float64)
+        acceleration_px = np.full(speed_smoothed_px.shape, np.nan, dtype=np.float64)
+        acceleration_mm = np.full(speed_smoothed_px.shape, np.nan, dtype=np.float64)
 
-        if smoothed_px.size >= 2:
-            delta_speed_px = smoothed_px[1:] - smoothed_px[:-1]
+        if speed_smoothed_px.size >= 2:
+            delta_speed_px = speed_smoothed_px[1:] - speed_smoothed_px[:-1]
             delta_t = delta_seconds_full[1:]
             valid = (delta_t > 0) & np.isfinite(delta_speed_px)
             accel_vals = np.full(delta_speed_px.shape, np.nan, dtype=np.float64)
@@ -573,20 +598,24 @@ def build_track_datasets(
         "smoothed_heading_radians": _float32(smoothed_heading_rad),
         "keypoint_success": _boolean(kp_success_track),
         "detection_source": det_source_track.astype(np.int8),
-        "instantaneous_speed_px": _float32(instantaneous_px),
-        "instantaneous_speed_mm": _float32(instantaneous_mm),
-        "instantaneous_speed_filtered_px": _float32(instantaneous_filtered_px),
-        "instantaneous_speed_filtered_mm": _float32(instantaneous_filtered_mm),
-        "smoothed_speed_px": _float32(smoothed_px),
-        "smoothed_speed_mm": _float32(smoothed_mm),
+        "speed_raw_px": _float32(speed_raw_px),
+        "speed_raw_mm": _float32(speed_raw_mm),
+        "speed_filtered_px": _float32(speed_filtered_px),
+        "speed_filtered_mm": _float32(speed_filtered_mm),
+        "speed_smoothed_px": _float32(speed_smoothed_px),
+        "speed_smoothed_mm": _float32(speed_smoothed_mm),
+        "speed_averaged_px": _float32(speed_averaged_px),
+        "speed_averaged_mm": _float32(speed_averaged_mm),
         "acceleration_px": _float32(acceleration_px),
         "acceleration_mm": _float32(accel_mm),
         "smoothed_acceleration_px": _float32(smoothed_accel_px),
         "smoothed_acceleration_mm": _float32(smoothed_accel_mm),
-        "distance_per_frame_px": _float32(distance_px),
-        "distance_per_frame_mm": _float32(distance_mm),
-        "distance_per_frame_raw_px": _float32(distance_raw_px),
-        "distance_per_frame_raw_mm": _float32(distance_raw_mm),
+        "displacement_raw_px": _float32(displacement_raw_px),
+        "displacement_raw_mm": _float32(displacement_raw_mm),
+        "displacement_filtered_px": _float32(displacement_filtered_px),
+        "displacement_filtered_mm": _float32(displacement_filtered_mm),
+        "displacement_smoothed_px": _float32(displacement_smoothed_px),
+        "displacement_smoothed_mm": _float32(displacement_smoothed_mm),
         "cumulative_distance_px": _float32(cumulative_px),
         "cumulative_distance_mm": _float32(cumulative_mm),
         "second_indices": seconds_per_frame,
@@ -596,23 +625,58 @@ def build_track_datasets(
         "heading_per_second_resultant": heading_per_second_resultant.astype(np.float32),
     }
 
-    finite = instantaneous_px[np.isfinite(instantaneous_px)]
-    mean_speed_px = float(np.mean(finite)) if finite.size else float("nan")
-    median_speed_px = float(np.median(finite)) if finite.size else float("nan")
-    max_speed_px = float(np.max(finite)) if finite.size else float("nan")
+    # Speed metrics for all processing levels
+    # Raw speed (validity filtering only)
+    finite_raw = speed_raw_px[np.isfinite(speed_raw_px)]
+    mean_speed_raw_px = float(np.mean(finite_raw)) if finite_raw.size else float("nan")
+    median_speed_raw_px = float(np.median(finite_raw)) if finite_raw.size else float("nan")
+    max_speed_raw_px = float(np.max(finite_raw)) if finite_raw.size else float("nan")
+    mean_speed_raw_mm = mean_speed_raw_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(mean_speed_raw_px) else float("nan")
+    median_speed_raw_mm = median_speed_raw_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(median_speed_raw_px) else float("nan")
+    max_speed_raw_mm = max_speed_raw_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(max_speed_raw_px) else float("nan")
 
+    # Filtered speed (hysteresis applied)
+    finite_filtered = speed_filtered_px[np.isfinite(speed_filtered_px)]
+    mean_speed_filtered_px = float(np.mean(finite_filtered)) if finite_filtered.size else float("nan")
+    median_speed_filtered_px = float(np.median(finite_filtered)) if finite_filtered.size else float("nan")
+    max_speed_filtered_px = float(np.max(finite_filtered)) if finite_filtered.size else float("nan")
+    mean_speed_filtered_mm = mean_speed_filtered_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(mean_speed_filtered_px) else float("nan")
+    median_speed_filtered_mm = median_speed_filtered_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(median_speed_filtered_px) else float("nan")
+    max_speed_filtered_mm = max_speed_filtered_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(max_speed_filtered_px) else float("nan")
+
+    # Smoothed speed (temporal smoothing applied)
+    finite_smoothed = speed_smoothed_px[np.isfinite(speed_smoothed_px)]
+    mean_speed_smoothed_px = float(np.mean(finite_smoothed)) if finite_smoothed.size else float("nan")
+    median_speed_smoothed_px = float(np.median(finite_smoothed)) if finite_smoothed.size else float("nan")
+    max_speed_smoothed_px = float(np.max(finite_smoothed)) if finite_smoothed.size else float("nan")
+    mean_speed_smoothed_mm = mean_speed_smoothed_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(mean_speed_smoothed_px) else float("nan")
+    median_speed_smoothed_mm = median_speed_smoothed_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(median_speed_smoothed_px) else float("nan")
+    max_speed_smoothed_mm = max_speed_smoothed_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(max_speed_smoothed_px) else float("nan")
+
+    # Averaged speed (further temporal averaging)
+    finite_averaged = speed_averaged_px[np.isfinite(speed_averaged_px)]
+    mean_speed_averaged_px = float(np.mean(finite_averaged)) if finite_averaged.size else float("nan")
+    median_speed_averaged_px = float(np.median(finite_averaged)) if finite_averaged.size else float("nan")
+    max_speed_averaged_px = float(np.max(finite_averaged)) if finite_averaged.size else float("nan")
+    mean_speed_averaged_mm = mean_speed_averaged_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(mean_speed_averaged_px) else float("nan")
+    median_speed_averaged_mm = median_speed_averaged_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(median_speed_averaged_px) else float("nan")
+    max_speed_averaged_mm = max_speed_averaged_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(max_speed_averaged_px) else float("nan")
+
+    # Displacement totals for each processing level
+    total_displacement_raw_px = float(np.sum(displacement_raw_px)) if displacement_raw_px.size else 0.0
+    total_displacement_raw_mm = total_displacement_raw_px * pixel_to_mm_val if pixel_to_mm_val is not None else float("nan")
+
+    total_displacement_filtered_px = float(np.sum(displacement_filtered_px)) if displacement_filtered_px.size else 0.0
+    total_displacement_filtered_mm = total_displacement_filtered_px * pixel_to_mm_val if pixel_to_mm_val is not None else float("nan")
+
+    total_displacement_smoothed_px = float(np.sum(displacement_smoothed_px)) if displacement_smoothed_px.size else 0.0
+    total_displacement_smoothed_mm = total_displacement_smoothed_px * pixel_to_mm_val if pixel_to_mm_val is not None else float("nan")
+
+    # Cumulative distance (from smoothed displacement)
     total_distance_px = float(cumulative_px[-1]) if cumulative_px.size else 0.0
     total_distance_mm = (
         float(cumulative_mm[-1]) if cumulative_mm.size and pixel_to_mm_val is not None else float("nan")
     )
-
-    mean_speed_mm = mean_speed_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(mean_speed_px) else float("nan")
-    median_speed_mm = (
-        median_speed_px * pixel_to_mm_val
-        if pixel_to_mm_val is not None and np.isfinite(median_speed_px)
-        else float("nan")
-    )
-    max_speed_mm = max_speed_px * pixel_to_mm_val if pixel_to_mm_val is not None and np.isfinite(max_speed_px) else float("nan")
 
     mean_speed_per_second_px = float(np.nanmean(speed_per_second_px)) if speed_per_second_px.size else float("nan")
     mean_speed_per_second_mm = (
@@ -639,22 +703,56 @@ def build_track_datasets(
     summary = {
         "track_id": float(track_id),
         "samples": int(track_frames.size),
-        "mean_speed_px": mean_speed_px,
-        "median_speed_px": median_speed_px,
-        "max_speed_px": max_speed_px,
-        "mean_speed_mm": mean_speed_mm,
-        "median_speed_mm": median_speed_mm,
-        "max_speed_mm": max_speed_mm,
+        # Raw speed metrics (validity filtering only)
+        "mean_speed_raw_px": mean_speed_raw_px,
+        "median_speed_raw_px": median_speed_raw_px,
+        "max_speed_raw_px": max_speed_raw_px,
+        "mean_speed_raw_mm": mean_speed_raw_mm,
+        "median_speed_raw_mm": median_speed_raw_mm,
+        "max_speed_raw_mm": max_speed_raw_mm,
+        # Filtered speed metrics (hysteresis applied)
+        "mean_speed_filtered_px": mean_speed_filtered_px,
+        "median_speed_filtered_px": median_speed_filtered_px,
+        "max_speed_filtered_px": max_speed_filtered_px,
+        "mean_speed_filtered_mm": mean_speed_filtered_mm,
+        "median_speed_filtered_mm": median_speed_filtered_mm,
+        "max_speed_filtered_mm": max_speed_filtered_mm,
+        # Smoothed speed metrics (temporal smoothing applied)
+        "mean_speed_smoothed_px": mean_speed_smoothed_px,
+        "median_speed_smoothed_px": median_speed_smoothed_px,
+        "max_speed_smoothed_px": max_speed_smoothed_px,
+        "mean_speed_smoothed_mm": mean_speed_smoothed_mm,
+        "median_speed_smoothed_mm": median_speed_smoothed_mm,
+        "max_speed_smoothed_mm": max_speed_smoothed_mm,
+        # Averaged speed metrics (further temporal averaging)
+        "mean_speed_averaged_px": mean_speed_averaged_px,
+        "median_speed_averaged_px": median_speed_averaged_px,
+        "max_speed_averaged_px": max_speed_averaged_px,
+        "mean_speed_averaged_mm": mean_speed_averaged_mm,
+        "median_speed_averaged_mm": median_speed_averaged_mm,
+        "max_speed_averaged_mm": max_speed_averaged_mm,
+        # Speed per second
         "mean_speed_per_second_px": mean_speed_per_second_px,
         "mean_speed_per_second_mm": mean_speed_per_second_mm,
+        # Displacement totals
+        "total_displacement_raw_px": total_displacement_raw_px,
+        "total_displacement_raw_mm": total_displacement_raw_mm,
+        "total_displacement_filtered_px": total_displacement_filtered_px,
+        "total_displacement_filtered_mm": total_displacement_filtered_mm,
+        "total_displacement_smoothed_px": total_displacement_smoothed_px,
+        "total_displacement_smoothed_mm": total_displacement_smoothed_mm,
+        # Cumulative distance
         "total_distance_px": total_distance_px,
         "total_distance_mm": total_distance_mm,
+        # Heading
         "heading_mean_deg": heading_mean_deg,
         "heading_resultant": heading_consistency,
+        # Acceleration
         "mean_acceleration_px": mean_accel_px,
         "mean_acceleration_mm": mean_accel_mm,
         "acceleration_std_px": accel_std_px,
         "acceleration_std_mm": accel_std_mm,
+        # Other
         "keypoint_success_rate": float(np.mean(kp_success_track)) if kp_success_track.size else float("nan"),
         "duration_seconds": float(time_seconds[-1] - time_seconds[0]) if time_seconds.size > 1 else 0.0,
     }
@@ -698,20 +796,24 @@ def save_movement_tracks(
         subgroup.create_array("smoothed_heading_radians", data=data["smoothed_heading_radians"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("keypoint_success", data=data["keypoint_success"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("detection_source", data=data["detection_source"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("instantaneous_speed_px", data=data["instantaneous_speed_px"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("instantaneous_speed_mm", data=data["instantaneous_speed_mm"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("instantaneous_speed_filtered_px", data=data["instantaneous_speed_filtered_px"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("instantaneous_speed_filtered_mm", data=data["instantaneous_speed_filtered_mm"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("smoothed_speed_px", data=data["smoothed_speed_px"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("smoothed_speed_mm", data=data["smoothed_speed_mm"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("speed_raw_px", data=data["speed_raw_px"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("speed_raw_mm", data=data["speed_raw_mm"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("speed_filtered_px", data=data["speed_filtered_px"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("speed_filtered_mm", data=data["speed_filtered_mm"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("speed_smoothed_px", data=data["speed_smoothed_px"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("speed_smoothed_mm", data=data["speed_smoothed_mm"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("speed_averaged_px", data=data["speed_averaged_px"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("speed_averaged_mm", data=data["speed_averaged_mm"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("acceleration_px", data=data["acceleration_px"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("acceleration_mm", data=data["acceleration_mm"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("smoothed_acceleration_px", data=data["smoothed_acceleration_px"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("smoothed_acceleration_mm", data=data["smoothed_acceleration_mm"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("distance_per_frame_px", data=data["distance_per_frame_px"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("distance_per_frame_mm", data=data["distance_per_frame_mm"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("distance_per_frame_raw_px", data=data["distance_per_frame_raw_px"], chunks=base_chunk, overwrite=True)
-        subgroup.create_array("distance_per_frame_raw_mm", data=data["distance_per_frame_raw_mm"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("displacement_raw_px", data=data["displacement_raw_px"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("displacement_raw_mm", data=data["displacement_raw_mm"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("displacement_filtered_px", data=data["displacement_filtered_px"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("displacement_filtered_mm", data=data["displacement_filtered_mm"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("displacement_smoothed_px", data=data["displacement_smoothed_px"], chunks=base_chunk, overwrite=True)
+        subgroup.create_array("displacement_smoothed_mm", data=data["displacement_smoothed_mm"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("cumulative_distance_px", data=data["cumulative_distance_px"], chunks=base_chunk, overwrite=True)
         subgroup.create_array("cumulative_distance_mm", data=data["cumulative_distance_mm"], chunks=base_chunk, overwrite=True)
 
@@ -736,8 +838,6 @@ def save_movement_tracks(
                 "track_id": int(track_id),
                 "group": f"tracks/id_{track_id}",
                 "samples": sample_count,
-                "mean_speed_px": float(summary.get("mean_speed_px", float("nan"))),
-                "mean_speed_mm": float(summary.get("mean_speed_mm", float("nan"))),
                 "total_distance_px": float(summary.get("total_distance_px", float("nan"))),
                 "total_distance_mm": float(summary.get("total_distance_mm", float("nan"))),
                 "heading_mean_deg": float(summary.get("heading_mean_deg", float("nan"))),
@@ -987,44 +1087,110 @@ def _mirror_swim_bouts_to_tracks(
         return None
 
     bout_group = bouts_parent[run_name]
-    if "bouts" not in bout_group:
-        console.print(
-            f"[yellow]Warning:[/yellow] Swim bout run '{run_name}' lacks a 'bouts' dataset."
-        )
-        return None
 
-    bouts_struct = np.asarray(bout_group["bouts"])
-    columns = _columnar_bout_data(bouts_struct)
-    if not columns:
-        console.print(
-            f"[yellow]Warning:[/yellow] Swim bout run '{run_name}' contains no numeric bout fields to mirror."
-        )
-        return None
+    # Detect hierarchical structure (multi-level bouts)
+    speed_levels = ['speed_raw', 'speed_filtered', 'speed_smoothed', 'speed_averaged']
+    is_hierarchical = all(level in bout_group for level in speed_levels)
 
-    tracks_parent = run_group["tracks"]
-    for track_id in track_ids:
-        subgroup = tracks_parent[f"id_{track_id}"].require_group("swim_bouts")
-        # Clear existing arrays
-        for name in list(subgroup.array_keys()):
-            del subgroup[name]
-        for name, array in columns.items():
-            subgroup.create_array(
-                name,
-                data=array,
-                chunks=(max(1, min(4096, array.shape[0])),),
-                overwrite=True,
-            )
-        subgroup.attrs.update(
-            {
+    if is_hierarchical:
+        # Mirror all 4 speed levels to separate subgroups
+        tracks_parent = run_group["tracks"]
+        default_level = bout_group.attrs.get('default_level', 'speed_smoothed')
+
+        for track_id in track_ids:
+            track_subgroup = tracks_parent[f"id_{track_id}"].require_group("swim_bouts")
+
+            # Store metadata at track's swim_bouts level
+            track_subgroup.attrs.update({
                 "source_swim_bout_run": run_name,
-                "mirrored_fields": list(columns.keys()),
-            }
-        )
+                "default_level": default_level,
+                "is_hierarchical": True,
+            })
 
-    console.print(
-        f"[dim]Mirrored swim bouts from swim_bout_runs/{run_name} into movement tracks.[/dim]"
-    )
-    return run_name
+            # Mirror each speed level
+            for level in speed_levels:
+                level_group = bout_group[level]
+
+                if "bouts" not in level_group:
+                    console.print(
+                        f"[yellow]Warning:[/yellow] Speed level '{level}' in run '{run_name}' lacks 'bouts' dataset."
+                    )
+                    continue
+
+                bouts_struct = np.asarray(level_group["bouts"])
+                columns = _columnar_bout_data(bouts_struct)
+
+                if not columns:
+                    continue
+
+                # Create subgroup for this speed level
+                level_subgroup = track_subgroup.require_group(level)
+
+                # Clear existing arrays in this level
+                for name in list(level_subgroup.array_keys()):
+                    del level_subgroup[name]
+
+                # Write bout data
+                for name, array in columns.items():
+                    level_subgroup.create_array(
+                        name,
+                        data=array,
+                        chunks=(max(1, min(4096, array.shape[0])),),
+                        overwrite=True,
+                    )
+
+                level_subgroup.attrs.update({
+                    "speed_level": level,
+                    "n_bouts": len(bouts_struct),
+                    "mirrored_fields": list(columns.keys()),
+                })
+
+        console.print(
+            f"[dim]Mirrored hierarchical swim bouts (4 levels) from swim_bout_runs/{run_name} into movement tracks.[/dim]"
+        )
+        return run_name
+
+    else:
+        # Legacy flat structure - mirror as before
+        if "bouts" not in bout_group:
+            console.print(
+                f"[yellow]Warning:[/yellow] Swim bout run '{run_name}' lacks a 'bouts' dataset."
+            )
+            return None
+
+        bouts_struct = np.asarray(bout_group["bouts"])
+        columns = _columnar_bout_data(bouts_struct)
+        if not columns:
+            console.print(
+                f"[yellow]Warning:[/yellow] Swim bout run '{run_name}' contains no numeric bout fields to mirror."
+            )
+            return None
+
+        tracks_parent = run_group["tracks"]
+        for track_id in track_ids:
+            subgroup = tracks_parent[f"id_{track_id}"].require_group("swim_bouts")
+            # Clear existing arrays
+            for name in list(subgroup.array_keys()):
+                del subgroup[name]
+            for name, array in columns.items():
+                subgroup.create_array(
+                    name,
+                    data=array,
+                    chunks=(max(1, min(4096, array.shape[0])),),
+                    overwrite=True,
+                )
+            subgroup.attrs.update(
+                {
+                    "source_swim_bout_run": run_name,
+                    "mirrored_fields": list(columns.keys()),
+                    "is_hierarchical": False,
+                }
+            )
+
+        console.print(
+            f"[dim]Mirrored swim bouts from swim_bout_runs/{run_name} into movement tracks.[/dim]"
+        )
+        return run_name
 
 
 def summarize_to_table(
@@ -1037,47 +1203,70 @@ def summarize_to_table(
     table = Table(title="Movement summary", show_lines=False)
     table.add_column("Track ID", justify="right")
     table.add_column("Samples", justify="right")
-    table.add_column("Mean px/s", justify="right")
-    table.add_column("Mean mm/s", justify="right")
-    table.add_column("Median px/s", justify="right")
-    table.add_column("Max px/s", justify="right")
-    table.add_column("Distance px", justify="right")
-    table.add_column("Heading mean (deg)", justify="right")
-    table.add_column("Heading resultant", justify="right")
-    table.add_column("Mean accel (px/s²)", justify="right")
-    table.add_column("Mean accel (mm/s²)", justify="right")
-    table.add_column("Distance mm", justify="right")
+    # Speed metrics for all processing levels (mm/s)
+    table.add_column("Mean raw mm/s", justify="right")
+    table.add_column("Mean filt mm/s", justify="right")
+    table.add_column("Mean smooth mm/s", justify="right")
+    table.add_column("Mean avg mm/s", justify="right")
+    # Displacement totals (mm)
+    table.add_column("Disp raw mm", justify="right")
+    table.add_column("Disp filt mm", justify="right")
+    table.add_column("Disp smooth mm", justify="right")
+    table.add_column("Cumul dist mm", justify="right")
+    # Other metrics
+    table.add_column("Heading (deg)", justify="right")
+    table.add_column("Head result", justify="right")
+    table.add_column("Accel mm/s²", justify="right")
 
     total_px = 0.0
     total_mm = 0.0
+    total_disp_raw_mm = 0.0
+    total_disp_filt_mm = 0.0
+    total_disp_smooth_mm = 0.0
 
     for row in summaries:
         total_px += float(row.get("total_distance_px", 0.0))
         dist_mm = row.get("total_distance_mm", float("nan"))
         if not math.isnan(dist_mm):
             total_mm += float(dist_mm)
+
+        # Track displacement totals
+        for key, var in [("total_displacement_raw_mm", "total_disp_raw_mm"),
+                         ("total_displacement_filtered_mm", "total_disp_filt_mm"),
+                         ("total_displacement_smoothed_mm", "total_disp_smooth_mm")]:
+            val = row.get(key, float("nan"))
+            if not math.isnan(val):
+                if var == "total_disp_raw_mm":
+                    total_disp_raw_mm += float(val)
+                elif var == "total_disp_filt_mm":
+                    total_disp_filt_mm += float(val)
+                elif var == "total_disp_smooth_mm":
+                    total_disp_smooth_mm += float(val)
+
         table.add_row(
             str(int(row["track_id"])),
             str(int(row["samples"])),
-            f"{row['mean_speed_px']:.2f}" if np.isfinite(row["mean_speed_px"]) else "nan",
-            f"{row['mean_speed_mm']:.2f}" if np.isfinite(row["mean_speed_mm"]) else "nan",
-            f"{row['median_speed_px']:.2f}" if np.isfinite(row["median_speed_px"]) else "nan",
-            f"{row['max_speed_px']:.2f}" if np.isfinite(row["max_speed_px"]) else "nan",
-            f"{row['total_distance_px']:.2f}",
+            f"{row['mean_speed_raw_mm']:.2f}" if np.isfinite(row["mean_speed_raw_mm"]) else "nan",
+            f"{row['mean_speed_filtered_mm']:.2f}" if np.isfinite(row["mean_speed_filtered_mm"]) else "nan",
+            f"{row['mean_speed_smoothed_mm']:.2f}" if np.isfinite(row["mean_speed_smoothed_mm"]) else "nan",
+            f"{row['mean_speed_averaged_mm']:.2f}" if np.isfinite(row["mean_speed_averaged_mm"]) else "nan",
+            f"{row['total_displacement_raw_mm']:.2f}" if np.isfinite(row["total_displacement_raw_mm"]) else "nan",
+            f"{row['total_displacement_filtered_mm']:.2f}" if np.isfinite(row["total_displacement_filtered_mm"]) else "nan",
+            f"{row['total_displacement_smoothed_mm']:.2f}" if np.isfinite(row["total_displacement_smoothed_mm"]) else "nan",
+            f"{row['total_distance_mm']:.2f}" if np.isfinite(row["total_distance_mm"]) else "nan",
             f"{row['heading_mean_deg']:.2f}" if np.isfinite(row["heading_mean_deg"]) else "nan",
             f"{row['heading_resultant']:.2f}" if np.isfinite(row["heading_resultant"]) else "nan",
-            f"{row['mean_acceleration_px']:.2f}" if np.isfinite(row["mean_acceleration_px"]) else "nan",
             f"{row['mean_acceleration_mm']:.2f}" if np.isfinite(row["mean_acceleration_mm"]) else "nan",
-            f"{row['total_distance_mm']:.2f}" if np.isfinite(row["total_distance_mm"]) else "nan",
         )
 
     console.print(table)
     if pixel_to_mm is not None:
-        console.print(
-            f"Total distance: {total_px:.2f} px ({total_mm:.2f} mm)"
-        )
+        console.print(f"Total cumulative distance: {total_px:.2f} px ({total_mm:.2f} mm)")
+        console.print(f"Total displacement (raw): {total_disp_raw_mm:.2f} mm")
+        console.print(f"Total displacement (filtered): {total_disp_filt_mm:.2f} mm")
+        console.print(f"Total displacement (smoothed): {total_disp_smooth_mm:.2f} mm")
     else:
-        console.print(f"Total distance: {total_px:.2f} px")
+        console.print(f"Total cumulative distance: {total_px:.2f} px")
     return total_px, total_mm if pixel_to_mm is not None else float("nan")
 
 
@@ -1136,6 +1325,42 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument(
         "--refined-online-run",
         help="Use refined online positions from refined_online_runs/<run> instead of raw online data (default: None).",
+    )
+    parser.add_argument(
+        "--hysteresis-high-px",
+        type=float,
+        default=2.0,
+        help="High threshold in pixels for hysteresis filter in offline analysis (enter 'moving' state, default: 2.0).",
+    )
+    parser.add_argument(
+        "--hysteresis-low-px",
+        type=float,
+        default=1.0,
+        help="Low threshold in pixels for hysteresis filter in offline analysis (exit 'moving' state, default: 1.0).",
+    )
+    parser.add_argument(
+        "--hysteresis-min-frames",
+        type=int,
+        default=3,
+        help="Minimum consecutive frames below low threshold to exit 'moving' state in offline analysis (default: 3).",
+    )
+    parser.add_argument(
+        "--no-hysteresis",
+        action="store_true",
+        help="Disable hysteresis filter in offline analysis (allow all sub-pixel displacements).",
+    )
+    parser.add_argument(
+        "--smoothing-method",
+        type=str,
+        choices=["moving_average", "savitzky_golay"],
+        default="moving_average",
+        help="Smoothing method for displacement in offline analysis: 'moving_average' (simple averaging) or 'savitzky_golay' (shape-preserving polynomial fit, better for derivatives) (default: moving_average)",
+    )
+    parser.add_argument(
+        "--savgol-polyorder",
+        type=int,
+        default=3,
+        help="Polynomial order for Savitzky-Golay filter in offline analysis (default: 3, typical for biomechanics). Auto-adjusted if window too small.",
     )
 
     args = parser.parse_args(argv)
@@ -1321,6 +1546,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 fps=fps,
                 smooth_seconds=args.smooth_seconds,
                 pixel_to_mm=pixel_to_mm_online,
+                smoothing_method=args.smoothing_method,
+                savgol_polyorder=args.savgol_polyorder,
             )
 
             if not summaries_online:
@@ -1382,6 +1609,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                         "parameters": {
                             "fps": fps,
                             "smoothing_seconds": args.smooth_seconds,
+                            "smoothing_method": args.smoothing_method,
+                            "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
                             "coordinate_space": saved_coordinate_space,
                             "calibration_used": saved_pixel_to_mm,
                             "texture_to_camera_scale": texture_to_camera_scale,
@@ -1395,6 +1624,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "created_at_utc": created_at,
                             "fps": fps,
                             "smoothing_seconds": args.smooth_seconds,
+                            "smoothing_method": args.smoothing_method,
+                            "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
                             "pixel_to_mm": saved_pixel_to_mm,
                             "calibration": calibration_info,
                             "inputs": inputs,
@@ -1538,6 +1769,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             if not proceed_offline or frame_indices_offline.size == 0:
                 console.print("[yellow]Warning:[/yellow] No offline detections remaining after filtering; skipping.")
             else:
+                # Prepare hysteresis parameters for offline analysis
+                hysteresis_high = None if args.no_hysteresis else args.hysteresis_high_px
+                hysteresis_low = None if args.no_hysteresis else args.hysteresis_low_px
+                hysteresis_min = None if args.no_hysteresis else args.hysteresis_min_frames
+
                 tracks_offline, summaries_offline = build_track_datasets(
                     detection_ids=detection_ids_offline,
                     frames=frame_indices_offline,
@@ -1548,6 +1784,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     fps=fps,
                     smooth_seconds=args.smooth_seconds,
                     pixel_to_mm=pixel_to_mm,
+                    hysteresis_high_px=hysteresis_high,
+                    hysteresis_low_px=hysteresis_low,
+                    hysteresis_min_frames=hysteresis_min,
+                    smoothing_method=args.smoothing_method,
+                    savgol_polyorder=args.savgol_polyorder,
                 )
 
                 if not summaries_offline:
@@ -1670,9 +1911,15 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                             "parameters": {
                                 "fps": fps,
                                 "smoothing_seconds": args.smooth_seconds,
+                                "smoothing_method": args.smoothing_method,
+                                "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
                                 "distance_interpolation_seconds": args.distance_interpolation_seconds,
                                 "coordinate_space": "camera",
                                 "calibration_used": pixel_to_mm,
+                                "hysteresis_enabled": not args.no_hysteresis,
+                                "hysteresis_high_px": float(args.hysteresis_high_px) if not args.no_hysteresis else None,
+                                "hysteresis_low_px": float(args.hysteresis_low_px) if not args.no_hysteresis else None,
+                                "hysteresis_min_frames": int(args.hysteresis_min_frames) if not args.no_hysteresis else None,
                             },
                             "inputs": offline_inputs,
                         }
@@ -1683,9 +1930,15 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                                 "created_at_utc": created_at,
                                 "fps": fps,
                                 "smoothing_seconds": args.smooth_seconds,
+                                "smoothing_method": args.smoothing_method,
+                                "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
                                 "distance_interpolation_seconds": args.distance_interpolation_seconds,
                                 "pixel_to_mm": pixel_to_mm,
                                 "calibration": calibration_info,
+                                "hysteresis_enabled": not args.no_hysteresis,
+                                "hysteresis_high_px": float(args.hysteresis_high_px) if not args.no_hysteresis else None,
+                                "hysteresis_low_px": float(args.hysteresis_low_px) if not args.no_hysteresis else None,
+                                "hysteresis_min_frames": int(args.hysteresis_min_frames) if not args.no_hysteresis else None,
                                 "inputs": offline_inputs,
                                 "summary": summaries_offline,
                                 "num_tracks": len(ordered_ids_offline),

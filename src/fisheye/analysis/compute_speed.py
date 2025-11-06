@@ -9,6 +9,21 @@ The script reads detections (optionally with assigned IDs), converts bounding-bo
 centres to pixel coordinates, and computes instantaneous and smoothed speeds for
 each individual. Results are written to ``analysis/speed_runs/<run_name>`` unless
 ``--no-write`` is supplied.
+
+Hysteresis Filtering
+--------------------
+By default, a hysteresis filter removes sub-pixel micro-jitter (detection noise) while
+preserving real swims. The filter uses a two-level threshold:
+
+- High threshold (default 2.0 px): displacement must exceed this to enter "moving" state
+- Low threshold (default 1.0 px): displacement must stay below this for N consecutive
+  frames to exit "moving" state
+- Min frames (default 3): consecutive frames below low threshold required to exit
+
+When not in "moving" state, displacements are zeroed and do not contribute to distance
+or speed metrics. This prevents noise accumulation without clipping real swims.
+
+To disable the filter, use ``--no-hysteresis``.
 """
 
 from __future__ import annotations
@@ -23,16 +38,19 @@ import numpy as np
 import zarr
 from rich.console import Console
 from rich.table import Table
+from scipy.signal import savgol_filter
 
 
 @dataclass
 class TrackSpeeds:
     frames: np.ndarray
-    instantaneous: np.ndarray
-    instantaneous_filtered: np.ndarray
-    smoothed: np.ndarray
-    distance_raw: np.ndarray
-    distance_smoothed: np.ndarray
+    speed_raw: np.ndarray  # Instantaneous speed from raw displacement
+    speed_filtered: np.ndarray  # Instantaneous speed from hysteresis-filtered displacement
+    speed_smoothed: np.ndarray  # Instantaneous speed from temporally smoothed displacement
+    speed_averaged: np.ndarray  # Further temporal averaging of speed
+    displacement_raw: np.ndarray  # Frame-to-frame displacement: validity filtering only
+    displacement_filtered: np.ndarray  # Frame-to-frame displacement: hysteresis applied
+    displacement_smoothed: np.ndarray  # Frame-to-frame displacement: temporal smoothing applied
     cumulative_distance: np.ndarray
     seconds: np.ndarray
     speed_per_second: np.ndarray
@@ -271,21 +289,43 @@ def compute_track_speed(
     fps: float,
     smooth_seconds: float,
     distance_smooth_seconds: Optional[float] = None,
+    hysteresis_high_px: Optional[float] = None,
+    hysteresis_low_px: Optional[float] = None,
+    hysteresis_min_frames: Optional[int] = None,
+    smoothing_method: str = "moving_average",
+    savgol_polyorder: int = 3,
 ) -> TrackSpeeds:
-    """Compute instantaneous and smoothed speeds for a single track."""
+    """Compute instantaneous and smoothed speeds for a single track.
+
+    Optionally applies hysteresis filtering to remove micro-jitter (sub-pixel noise)
+    while preserving real movement. When enabled, displacement must exceed
+    hysteresis_high_px to enter "moving" state, and must remain below hysteresis_low_px
+    for hysteresis_min_frames consecutive frames to exit "moving" state.
+
+    Displacement smoothing can use either moving average (simple) or Savitzky-Golay
+    (shape-preserving polynomial fit). Savitzky-Golay is better for preserving peak
+    shapes and derivatives (e.g., acceleration) but is slightly more computationally
+    expensive.
+
+    Args:
+        smoothing_method: "moving_average" (default) or "savitzky_golay"
+        savgol_polyorder: Polynomial order for Savitzky-Golay (default: 3)
+    """
     if frames.size == 0:
         empty = np.array([], dtype=np.float32)
         empty_int64 = np.array([], dtype=np.int64)
-        return TrackSpeeds(frames, empty, empty, empty, empty, empty, empty, empty_int64, empty)
+        return TrackSpeeds(frames, empty, empty, empty, empty, empty, empty, empty, empty, empty_int64, empty)
 
     order = np.argsort(frames)
     frames = frames[order].astype(np.int64, copy=False)
     positions = positions[order].astype(np.float64, copy=False)
 
-    instantaneous = np.full(frames.shape[0], np.nan, dtype=np.float64)
-    instantaneous_filtered = np.full(frames.shape[0], np.nan, dtype=np.float64)
-    distance_per_frame = np.zeros(frames.shape[0], dtype=np.float64)
-    distance_raw = np.zeros(frames.shape[0], dtype=np.float64)
+    speed_raw = np.full(frames.shape[0], np.nan, dtype=np.float64)
+    speed_filtered = np.full(frames.shape[0], np.nan, dtype=np.float64)
+    speed_smoothed = np.full(frames.shape[0], np.nan, dtype=np.float64)
+    displacement_raw = np.zeros(frames.shape[0], dtype=np.float64)
+    displacement_filtered_data = np.zeros(frames.shape[0], dtype=np.float64)
+    displacement_smoothed = np.zeros(frames.shape[0], dtype=np.float64)
 
     distance_window_seconds = (
         distance_smooth_seconds if distance_smooth_seconds is not None else smooth_seconds
@@ -313,48 +353,118 @@ def compute_track_speed(
 
         # Retain only reasonable, consecutive displacements; others are treated as 0 to avoid
         # adding artificial distance or leaking into the smoothing window.
-        displacement_filtered = np.zeros_like(displacement)
-        displacement_filtered[valid] = displacement[valid]
+        displacement_pre_hysteresis = np.zeros_like(displacement)
+        displacement_pre_hysteresis[valid] = displacement[valid]
 
-        if distance_window > 1 and displacement_filtered.size > 0:
-            kernel = np.ones(distance_window, dtype=np.float64)
-            # Average only over windows that contain at least one valid displacement sample.
-            sum_values = np.convolve(displacement_filtered, kernel, mode="same")
-            count_values = np.convolve(valid.astype(np.float64), kernel, mode="same")
+        # Save pre-hysteresis displacement as displacement_raw
+        displacement_post_hysteresis = displacement_pre_hysteresis.copy()
 
-            smoothed_displacement = np.zeros_like(displacement_filtered)
-            nonzero = count_values > 0
-            smoothed_displacement[nonzero] = sum_values[nonzero] / count_values[nonzero]
+        # Apply hysteresis filter to remove micro-jitter (sub-pixel noise) while preserving real movement.
+        # The state machine prevents toggling on every noisy sample by requiring sustained low displacement
+        # to exit "moving" state, and any high displacement to enter it.
+        if hysteresis_high_px is not None and hysteresis_low_px is not None:
+            min_frames = hysteresis_min_frames if hysteresis_min_frames is not None else 3
+            is_moving = False
+            low_count = 0
+
+            for i in range(displacement_post_hysteresis.size):
+                if not valid[i]:
+                    # Invalid frames don't affect state
+                    continue
+
+                current_displacement = displacement_post_hysteresis[i]
+
+                # State transitions
+                if current_displacement > hysteresis_high_px:
+                    # Enter or maintain "moving" state
+                    is_moving = True
+                    low_count = 0
+                elif current_displacement < hysteresis_low_px:
+                    # Increment counter for potential exit from "moving" state
+                    low_count += 1
+                    if low_count >= min_frames:
+                        is_moving = False
+                else:
+                    # Between low and high: maintain current state, reset counter
+                    low_count = 0
+
+                # Zero displacement when not moving
+                if not is_moving:
+                    displacement_post_hysteresis[i] = 0.0
+
+        if distance_window > 1 and displacement_post_hysteresis.size > 0:
+            if smoothing_method == "savitzky_golay":
+                # Savitzky-Golay filter for shape-preserving smoothing
+                # Ensure window length is odd
+                window_length = distance_window if distance_window % 2 == 1 else distance_window + 1
+                # Ensure polynomial order is less than window length
+                polyorder = min(savgol_polyorder, window_length - 1)
+
+                if window_length >= polyorder + 2:  # Minimum requirement for savgol_filter
+                    displacement_post_smoothing = savgol_filter(
+                        displacement_post_hysteresis,
+                        window_length=window_length,
+                        polyorder=polyorder,
+                        mode='nearest'  # Handle edges by extending nearest value
+                    )
+                else:
+                    # Window too small for Savitzky-Golay, fall back to moving average
+                    kernel = np.ones(distance_window, dtype=np.float64)
+                    sum_values = np.convolve(displacement_post_hysteresis, kernel, mode="same")
+                    count_values = np.convolve(valid.astype(np.float64), kernel, mode="same")
+                    displacement_post_smoothing = np.zeros_like(displacement_post_hysteresis)
+                    nonzero = count_values > 0
+                    displacement_post_smoothing[nonzero] = sum_values[nonzero] / count_values[nonzero]
+            else:
+                # Moving average (default method)
+                kernel = np.ones(distance_window, dtype=np.float64)
+                # Average only over windows that contain at least one valid displacement sample.
+                sum_values = np.convolve(displacement_post_hysteresis, kernel, mode="same")
+                count_values = np.convolve(valid.astype(np.float64), kernel, mode="same")
+
+                displacement_post_smoothing = np.zeros_like(displacement_post_hysteresis)
+                nonzero = count_values > 0
+                displacement_post_smoothing[nonzero] = sum_values[nonzero] / count_values[nonzero]
         else:
-            smoothed_displacement = displacement_filtered
+            displacement_post_smoothing = displacement_post_hysteresis
 
         # Prevent gaps or invalid transitions from inheriting averaged motion.
-        smoothed_displacement[~valid] = 0.0
+        displacement_post_smoothing[~valid] = 0.0
 
-        raw_slice = instantaneous[1:]
-        raw_slice[valid] = displacement[valid] / delta_seconds[valid]
-        instantaneous[1:] = raw_slice
+        # Calculate speed_raw from raw displacement (validity filtered only)
+        raw_slice = speed_raw[1:]
+        raw_slice[valid] = displacement_pre_hysteresis[valid] / delta_seconds[valid]
+        speed_raw[1:] = raw_slice
 
-        filtered_slice = instantaneous_filtered[1:]
-        filtered_slice[valid] = smoothed_displacement[valid] / delta_seconds[valid]
-        instantaneous_filtered[1:] = filtered_slice
-        distance_raw[1:] = displacement_filtered
-        distance_per_frame[1:] = smoothed_displacement
+        # Calculate speed_filtered from hysteresis-filtered displacement
+        filtered_slice = speed_filtered[1:]
+        filtered_slice[valid] = displacement_post_hysteresis[valid] / delta_seconds[valid]
+        speed_filtered[1:] = filtered_slice
+
+        # Calculate speed_smoothed from temporally smoothed displacement
+        smoothed_slice = speed_smoothed[1:]
+        smoothed_slice[valid] = displacement_post_smoothing[valid] / delta_seconds[valid]
+        speed_smoothed[1:] = smoothed_slice
+
+        # Store displacement arrays
+        displacement_raw[1:] = displacement_pre_hysteresis
+        displacement_filtered_data[1:] = displacement_post_hysteresis
+        displacement_smoothed[1:] = displacement_post_smoothing
 
     if speed_window <= 1:
-        smoothed = instantaneous_filtered.copy()
+        speed_averaged = speed_smoothed.copy()
     else:
-        values = np.nan_to_num(instantaneous_filtered, nan=0.0, copy=False)
-        counts = np.isfinite(instantaneous_filtered).astype(np.float32)
+        values = np.nan_to_num(speed_smoothed, nan=0.0, copy=False)
+        counts = np.isfinite(speed_smoothed).astype(np.float32)
         kernel = np.ones(speed_window, dtype=np.float32)
         sum_values = np.convolve(values, kernel, mode="same")
         count_values = np.convolve(counts, kernel, mode="same")
-        smoothed = np.full_like(instantaneous_filtered, np.nan)
-        valid = count_values > 0
-        smoothed[valid] = sum_values[valid] / count_values[valid]
+        speed_averaged = np.full_like(speed_smoothed, np.nan)
+        valid_avg = count_values > 0
+        speed_averaged[valid_avg] = sum_values[valid_avg] / count_values[valid_avg]
 
-    # Cumulative sum with NaN values already replaced with 0 in distance_per_frame
-    cumulative_distance = np.cumsum(distance_per_frame)
+    # Cumulative sum with NaN values already replaced with 0 in displacement_smoothed
+    cumulative_distance = np.cumsum(displacement_smoothed)
 
     delta_seconds_full = np.zeros(frames.shape[0], dtype=np.float64)
     if frames.size >= 2:
@@ -367,7 +477,7 @@ def compute_track_speed(
     for idx, second_value in enumerate(unique_seconds):
         mask = seconds == second_value
         time_sum = delta_seconds_full[mask].sum()
-        distance_sum = distance_per_frame[mask].sum()
+        distance_sum = displacement_smoothed[mask].sum()
         if time_sum > 0:
             speed_per_second[idx] = distance_sum / time_sum
         else:
@@ -375,11 +485,13 @@ def compute_track_speed(
 
     return TrackSpeeds(
         frames=frames,
-        instantaneous=instantaneous.astype(np.float32),
-        instantaneous_filtered=instantaneous_filtered.astype(np.float32),
-        smoothed=smoothed.astype(np.float32),
-        distance_raw=distance_raw.astype(np.float32),
-        distance_smoothed=distance_per_frame.astype(np.float32),
+        speed_raw=speed_raw.astype(np.float32),
+        speed_filtered=speed_filtered.astype(np.float32),
+        speed_smoothed=speed_smoothed.astype(np.float32),
+        speed_averaged=speed_averaged.astype(np.float32),
+        displacement_raw=displacement_raw.astype(np.float32),
+        displacement_filtered=displacement_filtered_data.astype(np.float32),
+        displacement_smoothed=displacement_smoothed.astype(np.float32),
         cumulative_distance=cumulative_distance.astype(np.float32),
         seconds=unique_seconds.astype(np.int64),
         speed_per_second=speed_per_second.astype(np.float32),
@@ -390,7 +502,7 @@ def summarize_tracks(tracks: Dict[int, TrackSpeeds]) -> List[Dict[str, float]]:
     """Return per-track summary metrics."""
     summaries: List[Dict[str, float]] = []
     for track_id, data in tracks.items():
-        inst = data.instantaneous
+        inst = data.speed_raw
         finite = inst[np.isfinite(inst)]
         total_distance = float(data.cumulative_distance[-1]) if data.cumulative_distance.size else 0.0
         per_second = data.speed_per_second
@@ -460,16 +572,13 @@ def save_tracks(
         sub = tracks_parent.create_group(f"id_{track_id}")
         chunks = (min(1024, data.frames.size),)
         sub.create_array("frame_indices", data=data.frames, chunks=chunks, overwrite=True)
-        sub.create_array("instantaneous_speed", data=data.instantaneous, chunks=chunks, overwrite=True)
-        sub.create_array(
-            "instantaneous_speed_filtered",
-            data=data.instantaneous_filtered,
-            chunks=chunks,
-            overwrite=True,
-        )
-        sub.create_array("smoothed_speed", data=data.smoothed, chunks=chunks, overwrite=True)
-        sub.create_array("distance_per_frame", data=data.distance_smoothed, chunks=chunks, overwrite=True)
-        sub.create_array("distance_per_frame_raw", data=data.distance_raw, chunks=chunks, overwrite=True)
+        sub.create_array("speed_raw", data=data.speed_raw, chunks=chunks, overwrite=True)
+        sub.create_array("speed_filtered", data=data.speed_filtered, chunks=chunks, overwrite=True)
+        sub.create_array("speed_smoothed", data=data.speed_smoothed, chunks=chunks, overwrite=True)
+        sub.create_array("speed_averaged", data=data.speed_averaged, chunks=chunks, overwrite=True)
+        sub.create_array("displacement_raw", data=data.displacement_raw, chunks=chunks, overwrite=True)
+        sub.create_array("displacement_filtered", data=data.displacement_filtered, chunks=chunks, overwrite=True)
+        sub.create_array("displacement_smoothed", data=data.displacement_smoothed, chunks=chunks, overwrite=True)
         sub.create_array(
             "cumulative_distance", data=data.cumulative_distance, chunks=chunks, overwrite=True
         )
@@ -488,7 +597,7 @@ def save_tracks(
 
         summary = summary_by_id.get(track_id)
         if summary is None:
-            finite = data.instantaneous[np.isfinite(data.instantaneous)]
+            finite = data.speed_raw[np.isfinite(data.speed_raw)]
             summary = {
                 "track_id": track_id,
                 "samples": int(data.frames.size),
@@ -542,6 +651,42 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument("--run-name", help="Optional name for the output speed run.")
     parser.add_argument("--no-write", action="store_true", help="Do not write results back to the Zarr archive.")
     parser.add_argument("--fps", type=float, default=None, help="Override frames-per-second value.")
+    parser.add_argument(
+        "--hysteresis-high-px",
+        type=float,
+        default=2.0,
+        help="High threshold in pixels for hysteresis filter (enter 'moving' state, default: 2.0).",
+    )
+    parser.add_argument(
+        "--hysteresis-low-px",
+        type=float,
+        default=1.0,
+        help="Low threshold in pixels for hysteresis filter (exit 'moving' state, default: 1.0).",
+    )
+    parser.add_argument(
+        "--hysteresis-min-frames",
+        type=int,
+        default=3,
+        help="Minimum consecutive frames below low threshold to exit 'moving' state (default: 3).",
+    )
+    parser.add_argument(
+        "--no-hysteresis",
+        action="store_true",
+        help="Disable hysteresis filter (allow all sub-pixel displacements).",
+    )
+    parser.add_argument(
+        "--smoothing-method",
+        type=str,
+        choices=["moving_average", "savitzky_golay"],
+        default="moving_average",
+        help="Smoothing method for displacement: 'moving_average' (simple averaging) or 'savitzky_golay' (shape-preserving polynomial fit, better for derivatives) (default: moving_average)",
+    )
+    parser.add_argument(
+        "--savgol-polyorder",
+        type=int,
+        default=3,
+        help="Polynomial order for Savitzky-Golay filter (default: 3, typical for biomechanics). Auto-adjusted if window too small.",
+    )
     args = parser.parse_args(argv)
 
     console = Console()
@@ -625,6 +770,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         float(args.distance_smooth_seconds) if args.distance_smooth_seconds is not None else args.smooth_seconds
     )
 
+    # Prepare hysteresis parameters (None if disabled)
+    hysteresis_high = None if args.no_hysteresis else args.hysteresis_high_px
+    hysteresis_low = None if args.no_hysteresis else args.hysteresis_low_px
+    hysteresis_min = None if args.no_hysteresis else args.hysteresis_min_frames
+
     for det_id in unique_ids:
         mask = detection_ids == det_id
         if not mask.any():
@@ -637,6 +787,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             fps=fps,
             smooth_seconds=args.smooth_seconds,
             distance_smooth_seconds=distance_smooth_seconds,
+            hysteresis_high_px=hysteresis_high,
+            hysteresis_low_px=hysteresis_low,
+            hysteresis_min_frames=hysteresis_min,
+            smoothing_method=args.smoothing_method,
+            savgol_polyorder=args.savgol_polyorder,
         )
         tracks[int(det_id)] = speeds
 
@@ -683,6 +838,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "video_width": width,
             "video_height": height,
             "skip_unassigned": bool(args.skip_unassigned),
+            "hysteresis_enabled": not args.no_hysteresis,
+            "hysteresis_high_px": float(args.hysteresis_high_px) if not args.no_hysteresis else None,
+            "hysteresis_low_px": float(args.hysteresis_low_px) if not args.no_hysteresis else None,
+            "hysteresis_min_frames": int(args.hysteresis_min_frames) if not args.no_hysteresis else None,
+            "smoothing_method": args.smoothing_method,
+            "savgol_polyorder": int(args.savgol_polyorder) if args.smoothing_method == "savitzky_golay" else None,
             "command": " ".join(sys.argv),
             "summary": summaries,
             "total_distance_all_tracks": total_distance_all,

@@ -137,9 +137,28 @@ def get_single_dish_roi_from_mask(root: zarr.Group, console: Console) -> Optiona
     
     # Check for tuned dish mask
     if 'dish_mask' in analysis_meta.attrs:
-        mask_data = analysis_meta.attrs['dish_mask']
+        mask_attr = analysis_meta.attrs['dish_mask']
+        mask_data = dict(mask_attr)
+        shape = mask_data.get('shape')
+        if not shape:
+            if 'detected_circle' in mask_data:
+                shape = 'circle'
+            elif 'rectangle' in mask_data:
+                shape = 'rectangle'
         
-        if 'detected_circle' in mask_data:
+        if shape == 'rectangle' and 'rectangle' in mask_data:
+            roi = mask_data['rectangle'].get('roi')
+            if roi:
+                x, y, w, h = [int(v) for v in roi]
+                console.print(f"[green]✓ Using dish mask rectangle as single ROI[/green]")
+                console.print(f"  Bounding box: x={x}, y={y}, w={w}, h={h}")
+                return [{
+                    'id': 0,
+                    'roi_pixels': [x, y, w, h],
+                    'source': 'dish_mask_rectangle'
+                }]
+        
+        if shape == 'circle' and 'detected_circle' in mask_data:
             circle = mask_data['detected_circle']
             center = circle.get('center', [0, 0])
             radius = circle.get('radius', 0)

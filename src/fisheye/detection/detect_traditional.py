@@ -79,18 +79,34 @@ def get_detection_parameters(
         
         # Check for mask tuning
         if 'dish_mask' in analysis_meta.attrs:
-            mask_data = analysis_meta.attrs['dish_mask']
-            if 'detected_circle' in mask_data:
-                # Override config mask with tuned mask
-                if 'dish_mask' not in detect_params:
-                    detect_params['dish_mask'] = {}
+            mask_attr = analysis_meta.attrs['dish_mask']
+            mask_data = dict(mask_attr)
+            shape = mask_data.get('shape')
+            if not shape:
+                if 'detected_circle' in mask_data:
+                    shape = 'circle'
+                elif 'rectangle' in mask_data:
+                    shape = 'rectangle'
+            if 'dish_mask' not in detect_params:
+                detect_params['dish_mask'] = {}
+            if shape == 'rectangle' and 'rectangle' in mask_data:
+                roi = mask_data['rectangle'].get('roi')
+                if roi:
+                    detect_params['dish_mask'].update({
+                        'shape': 'rectangle',
+                        'roi': [int(v) for v in roi],
+                    })
+                    if console:
+                        console.print(f"[green]✓ Using rectangular dish mask from zarr[/green]")
+            elif shape == 'circle' and 'detected_circle' in mask_data:
+                circle = mask_data['detected_circle']
                 detect_params['dish_mask'].update({
                     'shape': 'circle',
-                    'center': mask_data['detected_circle']['center'],
-                    'radius': mask_data['detected_circle']['radius']
+                    'center': circle['center'],
+                    'radius': circle['radius']
                 })
                 if console:
-                    console.print(f"[green]✓ Using tuned dish mask from zarr[/green]")
+                    console.print(f"[green]✓ Using circular dish mask from zarr[/green]")
     
     # No tuned parameters found - using config
     if console:

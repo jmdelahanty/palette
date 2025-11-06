@@ -184,6 +184,7 @@ def resolve_swim_bout_spans(
     root: zarr.Group,
     requested: Optional[str],
     console: Console,
+    speed_level: str = "smoothed",
 ) -> Tuple[List[Tuple[float, float]], Optional[str]]:
     swim_parent = root.get("analysis/swim_bout_runs")
     if swim_parent is None:
@@ -198,13 +199,52 @@ def resolve_swim_bout_spans(
         raise ValueError(f"Swim bout run '{run_name}' not found.")
 
     run_group = swim_parent[run_name]
-    if "bouts" not in run_group:
-        raise ValueError(f"Swim bout run '{run_name}' lacks 'bouts' dataset.")
 
-    bout_array = run_group["bouts"][:]
+    # Detect hierarchical structure
+    speed_levels = ['speed_raw', 'speed_filtered', 'speed_smoothed', 'speed_averaged']
+    is_hierarchical = all(level in run_group for level in speed_levels)
+
+    if is_hierarchical:
+        # Map user-friendly names to internal names
+        level_map = {
+            'raw': 'speed_raw',
+            'filtered': 'speed_filtered',
+            'smoothed': 'speed_smoothed',
+            'averaged': 'speed_averaged',
+        }
+        level_key = level_map.get(speed_level, f"speed_{speed_level}")
+
+        if level_key not in run_group:
+            # Fall back to default level
+            default_level = run_group.attrs.get('default_level', 'speed_smoothed')
+            console.print(
+                f"[yellow]Warning:[/yellow] Speed level '{level_key}' not found, using default '{default_level}'"
+            )
+            level_key = default_level
+
+        level_group = run_group[level_key]
+        if "bouts" not in level_group:
+            raise ValueError(f"Speed level '{level_key}' in run '{run_name}' lacks 'bouts' dataset.")
+
+        # Load bouts using load_structured_dataset to handle both columnar and legacy formats
+        from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
+        bout_array, _ = load_structured_dataset(level_group, 'bouts')
+        label_suffix = f" ({level_key})"
+    else:
+        # Legacy flat structure
+        if "bouts" not in run_group:
+            raise ValueError(f"Swim bout run '{run_name}' lacks 'bouts' dataset.")
+        from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
+        bout_array, _ = load_structured_dataset(run_group, 'bouts')
+        label_suffix = ""
+
+    # Extract detection method for label
+    method = run_group.attrs.get('detection_method', 'unknown')
+    full_label = f"{run_name}{label_suffix} ({method})"
+
     spans: List[Tuple[float, float]] = []
     if bout_array.size == 0:
-        return spans, run_name
+        return spans, full_label
 
     names = bout_array.dtype.names or ()
     if "start_time_s" in names and "end_time_s" in names:
@@ -219,6 +259,9 @@ def resolve_swim_bout_spans(
                 fps_val = params.get("fps")
                 if fps_val is not None:
                     fps = float(fps_val)
+        if not fps:
+            # Try to get FPS from run-level attrs
+            fps = run_group.attrs.get('fps')
         if not fps:
             raise ValueError(
                 f"Swim bout run '{run_name}' lacks time fields and FPS information required to convert frames."
@@ -235,7 +278,7 @@ def resolve_swim_bout_spans(
             continue
         spans.append((float(start), float(stop)))
 
-    return spans, run_name
+    return spans, full_label
 
 
 def resolve_stimulus_run(root: zarr.Group, run_group: zarr.Group) -> Optional[str]:
@@ -510,6 +553,70 @@ def compute_offline_chaser_distance(
 
     return times, values, smoothed, unit
 
+
+def _format_processing_metadata(run_group: zarr.Group) -> str:
+    """Extract and format processing metadata from run_group attributes."""
+    attrs = run_group.attrs
+
+    # Try to get parameters from provenance first, then fall back to top-level attrs
+    provenance = attrs.get("provenance", {})
+    params = provenance.get("parameters", {}) if isinstance(provenance, dict) else {}
+
+    # Extract key parameters
+    fps = params.get("fps") or attrs.get("fps")
+    smoothing_seconds = params.get("smoothing_seconds") or attrs.get("smoothing_seconds")
+    smoothing_method = params.get("smoothing_method") or attrs.get("smoothing_method", "moving_average")
+    savgol_polyorder = params.get("savgol_polyorder") or attrs.get("savgol_polyorder")
+
+    # Hysteresis parameters
+    hysteresis_enabled = params.get("hysteresis_enabled")
+    if hysteresis_enabled is None:
+        hysteresis_enabled = attrs.get("hysteresis_enabled", False)
+
+    hysteresis_high = params.get("hysteresis_high_px") or attrs.get("hysteresis_high_px")
+    hysteresis_low = params.get("hysteresis_low_px") or attrs.get("hysteresis_low_px")
+    hysteresis_min = params.get("hysteresis_min_frames") or attrs.get("hysteresis_min_frames")
+
+    # Coordinate space
+    coord_space = params.get("coordinate_space") or attrs.get("coordinate_space", "unknown")
+
+    # Build metadata text
+    lines = []
+
+    if fps is not None:
+        lines.append(f"FPS: {fps:.1f}")
+
+    if smoothing_seconds is not None:
+        lines.append(f"Smoothing window: {smoothing_seconds:.3f}s")
+
+    if smoothing_method:
+        if smoothing_method == "savitzky_golay" and savgol_polyorder is not None:
+            lines.append(f"Smoothing: Savitzky-Golay (order {savgol_polyorder})")
+        elif smoothing_method == "savitzky_golay":
+            lines.append(f"Smoothing: Savitzky-Golay")
+        else:
+            lines.append(f"Smoothing: Moving average")
+
+    if hysteresis_enabled:
+        hyst_parts = []
+        if hysteresis_high is not None:
+            hyst_parts.append(f"high={hysteresis_high:.1f}px")
+        if hysteresis_low is not None:
+            hyst_parts.append(f"low={hysteresis_low:.1f}px")
+        if hysteresis_min is not None:
+            hyst_parts.append(f"min={hysteresis_min} frames")
+        if hyst_parts:
+            lines.append(f"Hysteresis: {', '.join(hyst_parts)}")
+        else:
+            lines.append("Hysteresis: enabled")
+    else:
+        lines.append("Hysteresis: disabled")
+
+    lines.append(f"Coordinate space: {coord_space}")
+
+    return " | ".join(lines)
+
+
 def plot_track(
     run_group: zarr.Group,
     track_group: zarr.Group,
@@ -523,17 +630,46 @@ def plot_track(
     distance_series: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], str]] = None,
 ) -> None:
     time_seconds = track_group["time_seconds"][:]
-    smoothed_speed_px = track_group["smoothed_speed_px"][:]
-    smoothed_speed_mm = track_group["smoothed_speed_mm"][:]
-    instantaneous_speed_px = track_group["instantaneous_speed_px"][:]
-    instantaneous_speed_mm = track_group["instantaneous_speed_mm"][:]
+
+    # Load all speed levels (use new field names if available, fallback to old names for backward compatibility)
+    if "speed_raw_px" in track_group:
+        speed_raw_px = track_group["speed_raw_px"][:]
+        speed_raw_mm = track_group["speed_raw_mm"][:]
+        speed_filtered_px = track_group["speed_filtered_px"][:]
+        speed_filtered_mm = track_group["speed_filtered_mm"][:]
+        speed_smoothed_px = track_group["speed_smoothed_px"][:]
+        speed_smoothed_mm = track_group["speed_smoothed_mm"][:]
+        speed_averaged_px = track_group["speed_averaged_px"][:]
+        speed_averaged_mm = track_group["speed_averaged_mm"][:]
+    else:
+        # Fallback to old field names for backward compatibility
+        speed_raw_px = track_group["instantaneous_speed_px"][:]
+        speed_raw_mm = track_group["instantaneous_speed_mm"][:]
+        speed_smoothed_px = track_group["smoothed_speed_px"][:]
+        speed_smoothed_mm = track_group["smoothed_speed_mm"][:]
+        # Old archives don't have filtered/averaged
+        speed_filtered_px = None
+        speed_filtered_mm = None
+        speed_averaged_px = None
+        speed_averaged_mm = None
+
     smoothed_heading_deg = track_group["smoothed_heading_degrees"][:]
     smoothed_accel_px = track_group["smoothed_acceleration_px"][:]
     smoothed_accel_mm = track_group["smoothed_acceleration_mm"][:]
 
     unit_label, pos_x, pos_y = pick_units(run_group, track_group)
-    speed_smoothed = smoothed_speed_mm if unit_label == "mm" and np.isfinite(smoothed_speed_mm).any() else smoothed_speed_px
-    speed_raw = instantaneous_speed_mm if unit_label == "mm" and np.isfinite(instantaneous_speed_mm).any() else instantaneous_speed_px
+    speed_smoothed = speed_smoothed_mm if unit_label == "mm" and np.isfinite(speed_smoothed_mm).any() else speed_smoothed_px
+    speed_raw = speed_raw_mm if unit_label == "mm" and np.isfinite(speed_raw_mm).any() else speed_raw_px
+
+    # Select filtered and averaged speeds if available
+    if speed_filtered_px is not None:
+        speed_filtered = speed_filtered_mm if unit_label == "mm" and np.isfinite(speed_filtered_mm).any() else speed_filtered_px
+    else:
+        speed_filtered = None
+    if speed_averaged_px is not None:
+        speed_averaged = speed_averaged_mm if unit_label == "mm" and np.isfinite(speed_averaged_mm).any() else speed_averaged_px
+    else:
+        speed_averaged = None
     speed_label = f"Speed ({unit_label}/s)" if unit_label in {"mm", "px"} else "Speed"
     accel = (
         smoothed_accel_mm
@@ -548,11 +684,15 @@ def plot_track(
         axes = [axes]
     ax_idx = 0
 
-    # Plot both raw and smoothed speed
+    # Plot all available speed levels
     speed_ax = axes[ax_idx]
     ax_idx += 1
-    speed_ax.plot(time_seconds, speed_raw, color="tab:gray", linewidth=0.8, alpha=0.5, label="Instantaneous")
+    speed_ax.plot(time_seconds, speed_raw, color="tab:gray", linewidth=0.8, alpha=0.4, label="Raw")
+    if speed_filtered is not None:
+        speed_ax.plot(time_seconds, speed_filtered, color="tab:green", linewidth=0.9, alpha=0.6, label="Filtered (hysteresis)")
     speed_ax.plot(time_seconds, speed_smoothed, color="tab:blue", linewidth=1.2, label="Smoothed")
+    if speed_averaged is not None:
+        speed_ax.plot(time_seconds, speed_averaged, color="tab:purple", linewidth=1.3, alpha=0.8, label="Averaged")
     speed_ax.set_xlabel("Time (s)")
     speed_ax.set_ylabel(speed_label)
     speed_ax.set_title(f"Track {track_id}: Speed over time")
@@ -662,7 +802,22 @@ def plot_track(
             title = f"Movement summary ({run_name}) – track {track_id}"
 
     fig.suptitle(title)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+
+    # Add processing metadata at the bottom
+    metadata_text = _format_processing_metadata(run_group)
+    fig.text(
+        0.5, 0.01,
+        metadata_text,
+        ha='center',
+        va='bottom',
+        fontsize=8,
+        style='italic',
+        color='gray',
+        wrap=True
+    )
+
+    # Adjust layout to make room for metadata text at bottom and title at top
+    fig.tight_layout(rect=[0, 0.025, 1, 0.97])
 
     if save_path:
         fig.savefig(save_path)
@@ -692,7 +847,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     )
     parser.add_argument(
         "--swim-bout-run",
-        help="Swim-bout run under analysis/swim_bout_runs to overlay (use 'latest' for the most recent run).",
+        default="latest",
+        help="Swim-bout run under analysis/swim_bout_runs to overlay (default: 'latest'). Use empty string or 'none' to disable.",
+    )
+    parser.add_argument(
+        "--speed-level",
+        choices=["raw", "filtered", "smoothed", "averaged"],
+        default="smoothed",
+        help="Speed level to use for swim bout overlay in hierarchical runs (default: smoothed).",
     )
 
     args = parser.parse_args(argv)
@@ -716,9 +878,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     save_path = Path(args.save) if args.save else None
     swim_spans: Optional[List[Tuple[float, float]]] = None
     swim_label: Optional[str] = None
-    if args.swim_bout_run is not None:
+    # Allow disabling swim bout overlay with empty string or 'none'
+    if args.swim_bout_run and args.swim_bout_run.lower() not in ("", "none"):
         try:
-            swim_spans, swim_label = resolve_swim_bout_spans(root, args.swim_bout_run, console)
+            swim_spans, swim_label = resolve_swim_bout_spans(root, args.swim_bout_run, console, speed_level=args.speed_level)
             if swim_spans:
                 console.print(
                     f"[dim]Overlaying {len(swim_spans)} swim bouts from swim_bout_runs/{swim_label}.[/dim]"
@@ -728,7 +891,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     f"[yellow]Swim bout run '{swim_label}' contains no bouts to overlay.[/yellow]"
                 )
         except ValueError as exc:
-            console.print(f"[yellow]Warning:[/yellow] {exc}")
+            # Gracefully skip if swim bouts are not available
+            console.print(f"[dim]Skipping swim bout overlay: {exc}[/dim]")
             swim_spans = None
             swim_label = None
 

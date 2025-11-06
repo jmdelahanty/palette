@@ -551,8 +551,8 @@ analyzer-specific arrays and provenance attributes.
 Lightweight store for metadata generated during tuning or diagnostics.
 Examples:
 
-- `attrs["dish_mask"]` – saved circle parameters from the mask tuner
-  (center, radius, Hough params).
+- `attrs["dish_mask"]` – saved dish mask parameters from the tuner
+  (circle center/radius with Hough params or rectangle ROI).
 - `attrs["subdish_mask_tuning"]` – multi-dish ROI definitions.
 - Other agents may add read-only metadata blocks here.
 

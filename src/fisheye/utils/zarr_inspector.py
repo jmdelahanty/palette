@@ -544,29 +544,40 @@ def display_analysis_metadata(zarr_path, console):
         
         # Check for dish mask tuning
         if 'dish_mask' in analysis_meta.attrs:
-            mask_data = analysis_meta.attrs['dish_mask']
-            
+            mask_attr = analysis_meta.attrs['dish_mask']
+            mask_data = dict(mask_attr)
+            shape = mask_data.get('shape')
+            if not shape:
+                if 'detected_circle' in mask_data:
+                    shape = 'circle'
+                elif 'rectangle' in mask_data:
+                    shape = 'rectangle'
             mask_table = Table(title=" Dish Mask Calibration", box=box.ROUNDED)
             mask_table.add_column("Property", style="cyan")
             mask_table.add_column("Value", style="yellow")
             
-            # Basic mask info
-            circle = mask_data.get('detected_circle', {})
-            mask_table.add_row("Center", f"({circle.get('center', [0,0])[0]}, {circle.get('center', [0,0])[1]})")
-            mask_table.add_row("Radius", f"{circle.get('radius', 0)} pixels")
-            
-            # Tuning details
-            mask_table.add_row("Tuned on array", mask_data.get('tuned_on_array', 'Unknown'))
-            mask_table.add_row("Tuned on frame", str(mask_data.get('tuned_on_frame', 0)))
-            
-            # Hough parameters
-            mask_table.add_row("Hough param1", str(circle.get('hough_param1', 0)))
-            mask_table.add_row("Hough param2", str(circle.get('hough_param2', 0)))
-            mask_table.add_row("Radius adjustment", str(circle.get('radius_adjustment', 0)))
-            
-            # Metadata
+            mask_table.add_row("Shape", shape or "unknown")
             if 'tuned_timestamp' in mask_data:
                 mask_table.add_row("Tuned at", format_timestamp(mask_data['tuned_timestamp']))
+            source_info = mask_data.get('source', {})
+            if source_info:
+                mask_table.add_row("Source array", str(source_info.get('array', 'unknown')))
+                if 'frame' in source_info:
+                    mask_table.add_row("Source frame", str(source_info['frame']))
+            
+            if shape == 'circle' and 'detected_circle' in mask_data:
+                circle = mask_data['detected_circle']
+                center = circle.get('center', [0, 0])
+                mask_table.add_row("Center", f"({center[0]}, {center[1]})")
+                mask_table.add_row("Radius", f"{circle.get('radius', 0)} px")
+                hough = mask_data.get('hough_params', {})
+                if hough:
+                    mask_table.add_row("Hough param1", str(hough.get('param1', '')))
+                    mask_table.add_row("Hough param2", str(hough.get('param2', '')))
+                    mask_table.add_row("Radius adjustment", str(hough.get('radius_adjustment', 0)))
+            elif shape == 'rectangle' and 'rectangle' in mask_data:
+                roi = mask_data['rectangle'].get('roi', [0, 0, 0, 0])
+                mask_table.add_row("ROI", f"x={roi[0]}, y={roi[1]}, w={roi[2]}, h={roi[3]}")
             
             console.print(mask_table)
             tables_shown = True

@@ -188,6 +188,13 @@ def write_columnar_dataset(
     field_names = list(data.dtype.names)
     group.attrs["storage_layout"] = "columnar"
     group.attrs["field_names"] = field_names
+
+    # Store the original dtype string for each field to preserve exact type information
+    field_dtypes = {}
+    for field in field_names:
+        field_dtypes[field] = str(data.dtype.fields[field][0])
+    group.attrs["field_dtypes"] = field_dtypes
+
     if attrs:
         for attr_name, attr_value in attrs.items():
             group.attrs[attr_name] = attr_value
@@ -206,13 +213,38 @@ def read_columnar_dataset(group: zarr.Group) -> np.ndarray:
     field_names = list(group.attrs.get("field_names", []))
     if not field_names:
         raise ValueError("Columnar group missing 'field_names' attribute.")
+
+    # Get stored field dtypes if available
+    field_dtypes = group.attrs.get("field_dtypes", {})
+
     arrays = []
     dtype = []
     for field in field_names:
         arr = group[field][:]
-        arrays.append(arr)
-        dtype.append((field, arr.dtype))
-    structured = np.empty(arrays[0].shape, dtype=dtype)
+
+        # Use stored dtype if available, otherwise infer from loaded array
+        if field in field_dtypes:
+            field_dtype = np.dtype(field_dtypes[field])
+            dtype.append((field, field_dtype))
+
+            # Special handling for fixed-length byte strings stored as 2D uint8
+            if field_dtype.kind == 'S' and arr.ndim == 2 and arr.dtype == np.uint8:
+                # Decode 2D uint8 array back to fixed-length byte strings
+                # Each row is a string encoded as uint8 bytes
+                n_strings = arr.shape[0]
+                decoded = np.empty(n_strings, dtype=field_dtype)
+                for i in range(n_strings):
+                    # Convert uint8 row to bytes, strip null bytes
+                    byte_string = arr[i].tobytes().rstrip(b'\x00')
+                    decoded[i] = byte_string
+                arrays.append(decoded)
+            else:
+                arrays.append(arr)
+        else:
+            dtype.append((field, arr.dtype))
+            arrays.append(arr)
+
+    structured = np.empty(len(arrays[0]), dtype=dtype)
     for field, arr in zip(field_names, arrays):
         structured[field] = arr
     return structured
