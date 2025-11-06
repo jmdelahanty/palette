@@ -678,10 +678,28 @@ def plot_track(
     )
     accel_label = f"Acceleration ({unit_label}/s^2)" if unit_label in {"mm", "px"} else "Acceleration"
 
-    num_rows = 5 + (1 if distance_series is not None else 0)
-    fig, axes = plt.subplots(num_rows, 1, figsize=(10, 3.2 * num_rows))
-    if num_rows == 1:
-        axes = [axes]
+    # Create figure with shared x-axes for time-series plots, but not for position heatmap
+    num_timeseries = 4 + (1 if distance_series is not None else 0)  # speed, accel, [distance], heading, cumulative
+    num_rows = num_timeseries + 1  # +1 for position heatmap
+
+    fig = plt.figure(figsize=(10, 3.2 * num_rows))
+
+    # Create time-series subplots with shared x-axis
+    timeseries_axes = []
+    for i in range(num_timeseries):
+        if i == 0:
+            # First subplot - this will be the shared x-axis reference
+            ax = fig.add_subplot(num_rows, 1, i + 1)
+        else:
+            # Subsequent time-series subplots share x-axis with the first
+            ax = fig.add_subplot(num_rows, 1, i + 1, sharex=timeseries_axes[0])
+        timeseries_axes.append(ax)
+
+    # Create position heatmap without shared x-axis (uses spatial coordinates, not time)
+    heatmap_ax = fig.add_subplot(num_rows, 1, num_rows)
+
+    # Combine all axes for indexing
+    axes = timeseries_axes + [heatmap_ax]
     ax_idx = 0
 
     # Plot all available speed levels
@@ -747,7 +765,7 @@ def plot_track(
         distance_ax.set_ylabel(f"Distance to target ({dist_unit})")
         distance_ax.set_title("Chaser → target distance")
         distance_ax.grid(alpha=0.3)
-        distance_ax.set_xlim(speed_ax.get_xlim())
+        # X-axis is automatically shared with other time-series plots
         if (dist_smoothed is not None and dist_smoothed.size == dist_time.size) or dist_values.size:
             distance_ax.legend(loc="upper right")
 

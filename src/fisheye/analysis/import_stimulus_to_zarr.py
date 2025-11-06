@@ -41,6 +41,22 @@ def _log(console: Optional[Console], message: str) -> None:
         console.log(message)
 
 
+def _normalize_attr_value(value):
+    """Convert HDF5 attribute values into JSON-serializable Python types."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "ignore")
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return value
+
+
+def _collect_attrs(h5_obj: h5py.Group | h5py.Dataset) -> Dict[str, object]:
+    """Collect and normalize attributes from an HDF5 object."""
+    return {name: _normalize_attr_value(val) for name, val in h5_obj.attrs.items()}
+
+
 def _compute_camera_alignment(
     metadata: np.ndarray,
     metadata_mask: np.ndarray,
@@ -120,7 +136,7 @@ def _copy_h5_dataset(
                 (centroid_x, centroid_y),
                 usemask=False,
             )
-    attrs = {attr_name: attr_value for attr_name, attr_value in h5_group[name].attrs.items()}
+    attrs = _collect_attrs(h5_group[name])
     if name in COLUMNAR_DATASETS and data.dtype.names:
         write_columnar_dataset(zarr_group, name, data, attrs)
     else:
@@ -177,7 +193,7 @@ def _copy_enums(h5: h5py.File, analysis_group: zarr.Group, console: Optional[Con
         enum_group = enums_dst.require_group(name)
 
         # Store original H5 attributes on the group
-        src_attrs = {attr_name: attr_value for attr_name, attr_value in enums_src[name].attrs.items()}
+        src_attrs = _collect_attrs(enums_src[name])
         if src_attrs:
             enum_group.attrs.update(src_attrs)
 
@@ -263,7 +279,7 @@ def import_stimulus_to_zarr(
         meta_group = run_group.create_group("video_metadata")
         meta_attrs = {}
         if "/video_metadata/frame_metadata" in h5:
-            meta_attrs.update({attr_name: attr_value for attr_name, attr_value in h5["/video_metadata/frame_metadata"].attrs.items()})
+            meta_attrs.update(_collect_attrs(h5["/video_metadata/frame_metadata"]))
         meta_attrs["interpolated"] = bool(stats.missing_frames > 0 if stats else False)
         meta_attrs["original_records"] = int(frame_metadata.shape[0])
         meta_attrs["total_records"] = int(combined_metadata.shape[0])
@@ -306,7 +322,7 @@ def import_stimulus_to_zarr(
         # Events
         if "/events" in h5:
             events_data = h5["/events"][:]
-            events_attrs = {attr: val for attr, val in h5["/events"].attrs.items()}
+            events_attrs = _collect_attrs(h5["/events"])
 
             if "events" in run_group:
                 del run_group["events"]
