@@ -57,6 +57,36 @@ def _collect_attrs(h5_obj: h5py.Group | h5py.Dataset) -> Dict[str, object]:
     return {name: _normalize_attr_value(val) for name, val in h5_obj.attrs.items()}
 
 
+def _resolve_struct_field(array: np.ndarray, *candidates: str) -> str:
+    names = array.dtype.names or ()
+    for candidate in candidates:
+        if candidate in names:
+            return candidate
+    raise ValueError(f"Structured array missing expected field (tried {', '.join(candidates)})")
+
+
+def _build_camera_aligned_metadata(
+    metadata: np.ndarray,
+    *,
+    camera_field: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Collapse metadata so each camera frame keeps only its latest stimulus entry.
+
+    Returns a tuple of (camera_aligned_metadata, source_indices).
+    """
+    camera_ids = np.asarray(metadata[camera_field], dtype=np.int64)
+    last_index: Dict[int, int] = {}
+    for idx, cam in enumerate(camera_ids):
+        last_index[int(cam)] = idx  # overwrite so we keep the most recent occurrence
+
+    if not last_index:
+        return metadata[:0]
+
+    sorted_cameras = sorted(last_index.keys())
+    indices = np.fromiter((last_index[cam] for cam in sorted_cameras), dtype=np.int64)
+    return metadata[indices], indices
+
+
 def _compute_camera_alignment(
     metadata: np.ndarray,
     metadata_mask: np.ndarray,
@@ -290,6 +320,32 @@ def import_stimulus_to_zarr(
             meta_attrs,
         )
 
+        # Build a camera-aligned view that keeps the latest stimulus entry per camera frame.
+        camera_field = _resolve_struct_field(
+            combined_metadata,
+            "triggering_camera_frame_id",
+            "camera_frame_id",
+        )
+        camera_aligned_metadata, camera_aligned_indices = _build_camera_aligned_metadata(
+            combined_metadata,
+            camera_field=camera_field,
+        )
+        camera_aligned_mask = None
+        if interpolation_mask is not None and interpolation_mask.shape[0] == combined_metadata.shape[0]:
+            camera_aligned_mask = interpolation_mask[camera_aligned_indices]
+        camera_aligned_attrs = {
+            "alignment": "latest_per_camera_frame",
+            "source_dataset": "frame_metadata",
+            "unique_camera_frames": int(camera_aligned_metadata.shape[0]),
+            "notes": "Derived from frame_metadata; keeps the final stimulus entry for each camera frame.",
+        }
+        write_columnar_dataset(
+            meta_group,
+            "camera_aligned_frame_metadata",
+            camera_aligned_metadata,
+            camera_aligned_attrs,
+        )
+
         mask_chunks = pick_chunks(interpolation_mask.shape)
         run_group.create_array(
             "interpolation_mask",
@@ -297,6 +353,14 @@ def import_stimulus_to_zarr(
             chunks=mask_chunks,
             overwrite=True,
         )
+        if camera_aligned_mask is not None:
+            aligned_mask_chunks = pick_chunks(camera_aligned_mask.shape)
+            run_group.create_array(
+                "camera_aligned_interpolation_mask",
+                data=camera_aligned_mask,
+                chunks=aligned_mask_chunks,
+                overwrite=True,
+            )
 
         # Alignment helpers
         align_group = run_group.create_group("frame_alignment")

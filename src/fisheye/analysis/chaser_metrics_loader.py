@@ -151,11 +151,12 @@ def _resolve_latest(group: zarr.Group) -> Optional[str]:
 
 
 def _load_metadata_mask(stim_group: zarr.Group, length: int) -> Optional[np.ndarray]:
-    if "interpolation_mask" not in stim_group:
-        return None
-    mask = np.asarray(stim_group["interpolation_mask"], dtype=bool)
-    if mask.shape[0] == length:
-        return mask
+    for mask_name in ("camera_aligned_interpolation_mask", "interpolation_mask"):
+        if mask_name not in stim_group:
+            continue
+        mask = np.asarray(stim_group[mask_name], dtype=bool)
+        if mask.shape[0] == length:
+            return mask
     return None
 
 
@@ -163,22 +164,36 @@ def _build_camera_metadata_map(
     stim_group: zarr.Group,
 ) -> Tuple[Dict[int, np.void], str, Optional[str], Dict[int, int]]:
     meta_group = stim_group.require_group("video_metadata")
-    if "frame_metadata" not in meta_group:
+    base_dataset_name = "frame_metadata"
+    if base_dataset_name in meta_group:
+        base_metadata, _ = load_structured_dataset(meta_group, base_dataset_name)
+    else:
+        base_metadata = None
+
+    aligned_dataset_name = "camera_aligned_frame_metadata"
+    if aligned_dataset_name in meta_group:
+        aligned_metadata, _ = load_structured_dataset(meta_group, aligned_dataset_name)
+    else:
+        aligned_metadata = base_metadata
+
+    if aligned_metadata is None:
         raise ValueError("Stimulus run missing video_metadata/frame_metadata dataset.")
-    frame_metadata, _ = load_structured_dataset(meta_group, "frame_metadata")
-    stim_field = _resolve_struct_field(
-        frame_metadata,
+    if base_metadata is None:
+        base_metadata = aligned_metadata
+
+    aligned_stim_field = _resolve_struct_field(
+        aligned_metadata,
         "stimulus_frame_num",
         "frame_number",
         "stim_frame_num",
     )
-    camera_field = _resolve_struct_field(
-        frame_metadata,
+    aligned_camera_field = _resolve_struct_field(
+        aligned_metadata,
         "triggering_camera_frame_id",
         "camera_frame_id",
     )
     timestamp_field = _maybe_resolve_struct_field(
-        frame_metadata,
+        aligned_metadata,
         "timestamp_ns",
         "timestamp_ns_session",
         "relative_timestamp_ns",
@@ -186,13 +201,29 @@ def _build_camera_metadata_map(
 
     camera_to_record: Dict[int, np.void] = {}
     stim_to_camera: Dict[int, int] = {}
-    for record in frame_metadata:
-        camera_id = int(record[camera_field])
-        stimulus_id = int(record[stim_field])
-        if camera_id not in camera_to_record:
-            camera_to_record[camera_id] = record
-        stim_to_camera[stimulus_id] = camera_id
-    return camera_to_record, stim_field, timestamp_field, stim_to_camera
+    for record in aligned_metadata:
+        camera_id = int(record[aligned_camera_field])
+        stimulation_id = int(record[aligned_stim_field])
+        camera_to_record[camera_id] = record
+        stim_to_camera[stimulation_id] = camera_id
+
+    base_stim_field = _resolve_struct_field(
+        base_metadata,
+        "stimulus_frame_num",
+        "frame_number",
+        "stim_frame_num",
+    )
+    base_camera_field = _resolve_struct_field(
+        base_metadata,
+        "triggering_camera_frame_id",
+        "camera_frame_id",
+    )
+    for record in base_metadata:
+        stimulus_id = int(record[base_stim_field])
+        if stimulus_id not in stim_to_camera:
+            stim_to_camera[stimulus_id] = int(record[base_camera_field])
+
+    return camera_to_record, base_stim_field, timestamp_field, stim_to_camera
 
 
 def _resolve_struct_field(array: np.ndarray, *candidates: str) -> str:
