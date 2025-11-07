@@ -739,7 +739,79 @@ def interpolate_run(
     dry_run: bool = False,
     console: Optional[Console] = None,
 ) -> InterpolationOutcome:
-    """High-level helper to repair a stimulus run inside a Palette Zarr archive."""
+    """
+    High-level helper to repair a stimulus run inside a Palette Zarr archive.
+
+    This function fills gaps in stimulus metadata and chaser tracking states by
+    generating interpolated rows, creating **clean, contiguous datasets** suitable
+    for downstream analysis tools that expect frame-by-frame data.
+
+    Design Philosophy
+    -----------------
+    The goal is to transform raw experimental data (which may contain gaps due to
+    dropped frames, logging issues, or sensor failures) into a **working dataset**
+    where every stimulus frame has corresponding metadata and chaser positions.
+
+    **What Gets Overwritten:**
+        - ``video_metadata/frame_metadata`` - Replaced with original + interpolated rows
+        - ``tracking_data/chaser_states`` - Replaced with original + interpolated rows
+
+    **What Gets Preserved:**
+        - Boolean masks identifying original vs synthetic data:
+            - ``interpolation_mask`` (metadata level)
+            - ``chaser_interpolation_mask`` (chaser_states level)
+        - Attributes recording the interpolation:
+            - ``interpolated`` (bool) - Whether interpolation occurred
+            - ``original_records`` (int) - Count before interpolation
+            - ``total_records`` (int) - Count after interpolation
+
+    **Filtering Back to Original Data:**
+        Downstream tools can filter to ground-truth measurements only:
+
+        .. code-block:: python
+
+            chaser_states = run["tracking_data"]["chaser_states"]
+            mask = run["tracking_data"]["chaser_interpolation_mask"][:]
+            original_only = chaser_states[mask]  # True = original H5 data
+
+    **Re-run Safety:**
+        This function is designed to be called during initial import from H5 to Zarr.
+        If called on already-interpolated data, it will attempt to preserve the
+        existing mask and avoid re-interpolating original rows, but this is an
+        advanced use case. The typical workflow is:
+
+        1. ``import_stimulus_to_zarr`` creates a new timestamped run from H5
+        2. ``interpolate_run`` is called automatically if gaps are detected
+        3. Each run is independent; no risk of compounding interpolation errors
+
+    Parameters
+    ----------
+    zarr_path : Path
+        Path to the Palette Zarr archive.
+    run_name : str
+        Name of the stimulus run under ``analysis/stimulus_runs/`` to repair.
+    update_metadata : bool, default=True
+        If True, interpolate stimulus metadata (frame_metadata).
+    update_chaser : bool, default=True
+        If True, interpolate chaser tracking states (chaser_states).
+    verbose : bool, default=True
+        If True, print progress and summary statistics.
+    dry_run : bool, default=False
+        If True, analyze and report gaps without writing changes.
+    console : Optional[Console], default=None
+        Rich console for logging. If None, creates one if verbose=True.
+
+    Returns
+    -------
+    InterpolationOutcome
+        Summary of what was interpolated (record counts, reports per chaser).
+
+    See Also
+    --------
+    interpolate_metadata : Low-level metadata interpolation
+    interpolate_chaser_states : Low-level chaser state interpolation
+    import_stimulus_to_zarr : High-level import that calls this function automatically
+    """
 
     local_console = console if console is not None else (Console() if verbose else None)
     outcome = _interpolate_run(

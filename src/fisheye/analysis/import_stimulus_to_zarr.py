@@ -8,6 +8,71 @@ output directly inside the Zarr hierarchy under ``analysis/stimulus_runs``.
 It copies frame metadata (with interpolation), chaser states, events, protocol
 snapshots, and calibration information so downstream tooling no longer relies on
 a separate analysis H5.
+
+Data Architecture & Design Philosophy
+--------------------------------------
+
+**H5 File = Immutable Source of Truth**
+    The source H5 file is NEVER modified. It is opened read-only and serves as the
+    permanent record of raw experimental data, including:
+    - Raw stimulus frame metadata (may contain gaps/duplicates)
+    - Raw chaser tracking states (may have missing frames)
+    - Events, protocol snapshots, calibration data
+
+**Zarr Archive = Clean Working Copy**
+    Each import creates a new timestamped run under ``analysis/stimulus_runs/``:
+
+    .. code-block::
+
+        analysis/stimulus_runs/
+            └── stimulus_20251107_160756/
+                ├── video_metadata/
+                │   └── frame_metadata/          # Interpolated, contiguous
+                ├── tracking_data/
+                │   ├── chaser_states/           # Interpolated, contiguous
+                │   └── chaser_interpolation_mask/  # Boolean: True=original, False=interpolated
+                ├── frame_alignment/
+                └── ...
+
+**Interpolation Strategy**
+    Gaps in stimulus metadata and chaser states are automatically filled via
+    linear/nearest-neighbor interpolation to create **clean, contiguous datasets**
+    for downstream analysis. This means:
+
+    - Downstream tools can iterate frame-by-frame without gap handling
+    - Camera frames align 1:1 with metadata indices
+    - Chaser positions exist for every stimulus frame
+
+    **Original data is preserved** via boolean masks:
+    - ``interpolation_mask`` (metadata level)
+    - ``chaser_interpolation_mask`` (chaser_states level)
+
+    These masks are ``True`` for original H5 rows and ``False`` for synthesized rows.
+
+**The "Happy Path"**
+    Most analysis tools should use the interpolated data directly. Filtering back to
+    original-only data is the exception, not the rule. The masks exist for:
+    - Debugging alignment issues
+    - Quality assessment (how much data was interpolated?)
+    - Specialized analyses requiring ground-truth measurements only
+
+**Re-import Safety**
+    Each ``import_stimulus_to_zarr`` run creates an **independent, timestamped group**.
+    There is no risk of re-interpolating already-interpolated data because each run
+    starts fresh from the immutable H5 source. Previous runs remain untouched.
+
+    The ``latest`` attribute on ``analysis/stimulus_runs`` points to the most recent
+    import for convenience.
+
+**Workflow**
+    Typical usage pattern:
+
+    1. Create Zarr archive with detections/tracking (``palette detect``, etc.)
+    2. Import stimulus data: ``python -m fisheye.analysis.import_stimulus_to_zarr <zarr_path>``
+    3. Analysis tools read from ``analysis/stimulus_runs/latest/`` or specific run
+
+    All existing Zarr groups (``detect_runs``, ``keypoints_runs``, etc.) are preserved.
+    The import is purely additive.
 """
 
 from __future__ import annotations
