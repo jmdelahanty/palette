@@ -3,8 +3,8 @@
 Plot chaser X/Y positions against different timeline alignments:
 
 1. Raw stimulus frame timeline (`stimulus_frame_num` or timestamp)
-2. Camera frames using the legacy `camera_to_metadata_index`
-3. Corrected timeline using `camera_to_metadata_index_corrected`
+2. Camera frame alignment using `camera_to_metadata_index`
+3. Interpolated chaser coverage
 """
 
 from __future__ import annotations
@@ -68,35 +68,11 @@ def plot_chaser_alignment(zarr_path: Path, run_name: Optional[str], limit: Optio
 
     align_group = run_group["frame_alignment"]
     cam_to_meta_raw = align_group["camera_to_metadata_index"][:]
-    cam_to_meta_corrected = align_group.get("camera_to_metadata_index_corrected")
-    cam_to_meta_corrected = cam_to_meta_corrected[:] if cam_to_meta_corrected is not None else None
 
     stim_to_cam = dict(zip(stim_frames, camera_frames))
     cam_for_chaser = np.array([stim_to_cam.get(frame, np.nan) for frame in stim_chaser], dtype=np.float64)
 
-    def lookup_times(cam_ids: np.ndarray, mapping: np.ndarray | None) -> np.ndarray:
-        if mapping is None:
-            return np.full(cam_ids.shape, np.nan, dtype=np.float64)
-        times = np.full(cam_ids.shape, np.nan, dtype=np.float64)
-        valid = np.isfinite(cam_ids)
-        cams = cam_ids[valid].astype(np.int64, copy=False)
-        in_bounds = (cams >= 0) & (cams < mapping.shape[0])
-        valid_idx = np.where(valid)[0][in_bounds]
-        cams = cams[in_bounds]
-        meta_idx = mapping[cams]
-        good = meta_idx >= 0
-        good_idx = valid_idx[good]
-        times[good_idx] = timestamps[meta_idx[good]]
-        return times
-
-    corrected_times = lookup_times(cam_for_chaser, cam_to_meta_corrected)
-    corrected_time_lookup = (
-        lookup_times(np.arange(cam_to_meta_corrected.shape[0], dtype=np.float64), cam_to_meta_corrected)
-        if cam_to_meta_corrected is not None
-        else None
-    )
-
-    fig, axes = plt.subplots(5, 1, figsize=(12, 14), sharex=False)
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=False)
     fig.suptitle(f"Chaser positions for {run_id}")
 
     axes[0].plot(time_raw, pos_x, label="X", color="tab:blue")
@@ -145,9 +121,9 @@ def plot_chaser_alignment(zarr_path: Path, run_name: Optional[str], limit: Optio
         else:
             gap_info = f"Coverage: 100% ({total_camera_frames:,} frames)"
 
-    axes[1].set_xlabel("Camera frame (via raw mapping)")
+    axes[1].set_xlabel("Camera frame")
     axes[1].set_ylabel("Position (px)")
-    axes[1].set_title("Chaser vs camera frames (legacy mapping)")
+    axes[1].set_title("Camera frame alignment")
     axes[1].legend(loc="upper left")
 
     # Add statistics text box
@@ -157,60 +133,22 @@ def plot_chaser_alignment(zarr_path: Path, run_name: Optional[str], limit: Optio
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
                     fontsize=8, family='monospace')
 
-    if np.isfinite(corrected_times).any():
-        valid_corr = np.isfinite(corrected_times)
-        axes[2].plot(corrected_times[valid_corr], pos_x[valid_corr], label="X", color="tab:blue")
-        axes[2].plot(corrected_times[valid_corr], pos_y[valid_corr], label="Y", color="tab:orange")
-        # Identify missing camera frames in corrected timeline
-        unique_corr_cams = np.unique(cam_for_chaser[valid_cam].astype(int)) if np.any(valid_cam) else np.array([])
-        if unique_corr_cams.size:
-            all_corr = np.arange(int(unique_corr_cams.min()), int(unique_corr_cams.max()) + 1)
-            missing_corr = np.setdiff1d(all_corr, unique_corr_cams)
-            if missing_corr.size and corrected_time_lookup is not None:
-                missing_times = corrected_time_lookup[np.clip(missing_corr, 0, corrected_time_lookup.shape[0] - 1)]
-                axes[2].scatter(missing_times, np.zeros_like(missing_times), color="red", s=10, label="No chaser sample")
-        axes[2].set_xlabel("Corrected time (s)")
-        axes[2].set_ylabel("Position (px)")
-        axes[2].set_title("Chaser vs corrected timeline")
-        axes[2].legend()
-    else:
-        axes[2].text(0.5, 0.5, "No corrected mapping available", ha="center", va="center", transform=axes[2].transAxes)
-        axes[2].set_axis_off()
-
-    if cam_to_meta_corrected is not None:
-        valid_corr_cam = np.isfinite(cam_for_chaser)
-        axes[3].plot(cam_for_chaser[valid_corr_cam], pos_x[valid_corr_cam], label="X", color="tab:blue")
-        axes[3].plot(cam_for_chaser[valid_corr_cam], pos_y[valid_corr_cam], label="Y", color="tab:orange")
-        if np.any(valid_corr_cam):
-            unique_corr = np.unique(cam_for_chaser[valid_corr_cam].astype(int))
-            all_corr = np.arange(int(unique_corr.min()), int(unique_corr.max()) + 1)
-            missing_corr = np.setdiff1d(all_corr, unique_corr)
-            if missing_corr.size:
-                axes[3].scatter(missing_corr, np.zeros_like(missing_corr), color="red", s=10, label="No chaser sample")
-        axes[3].set_xlabel("Camera frame (corrected mapping)")
-        axes[3].set_ylabel("Position (px)")
-        axes[3].set_title("Chaser vs camera frames (corrected mapping)")
-        axes[3].legend()
-    else:
-        axes[3].text(0.5, 0.5, "No corrected mapping available", ha="center", va="center", transform=axes[3].transAxes)
-        axes[3].set_axis_off()
-
     tracking_group = run_group["tracking_data"]
     if "chaser_states_interpolated" in tracking_group:
         interpolated = tracking_group["chaser_states_interpolated"]["stimulus_frame_num"][:]
         interp_cam = np.array([stim_to_cam.get(stim, np.nan) for stim in interpolated], dtype=np.float64)
         valid_interp = np.isfinite(interp_cam)
-        axes[4].plot(interp_cam[valid_interp], annotate_positions := np.zeros_like(interp_cam[valid_interp]), '.', color="green", label="Interpolated sample")
+        axes[2].plot(interp_cam[valid_interp], annotate_positions := np.zeros_like(interp_cam[valid_interp]), '.', color="green", label="Interpolated sample")
         missing_interp = np.isnan(interp_cam)
         if np.any(missing_interp):
-            axes[4].scatter(np.where(missing_interp)[0], np.zeros(np.sum(missing_interp)), color="red", s=10, label="Missing even after interpolation")
-        axes[4].set_xlabel("Camera frame (interpolated dataset)")
-        axes[4].set_ylabel("Indicator")
-        axes[4].set_title("Interpolated chaser coverage")
-        axes[4].legend()
+            axes[2].scatter(np.where(missing_interp)[0], np.zeros(np.sum(missing_interp)), color="red", s=10, label="Missing even after interpolation")
+        axes[2].set_xlabel("Camera frame (interpolated dataset)")
+        axes[2].set_ylabel("Indicator")
+        axes[2].set_title("Interpolated chaser coverage")
+        axes[2].legend()
     else:
-        axes[4].text(0.5, 0.5, "No interpolated chaser dataset", ha="center", va="center", transform=axes[4].transAxes)
-        axes[4].set_axis_off()
+        axes[2].text(0.5, 0.5, "No interpolated chaser dataset", ha="center", va="center", transform=axes[2].transAxes)
+        axes[2].set_axis_off()
 
     plt.tight_layout()
     plt.show()

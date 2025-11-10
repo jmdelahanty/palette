@@ -71,13 +71,11 @@ original_only = chaser_states[mask]  # True = original H5 data
 **Location**: `src/fisheye/diagnostics/check_stimulus_alignment.py`
 
 **Purpose**: Analyzes camera→stimulus frame alignment and reports:
-- Camera to stimulus frame ratios (typically ~2:1 for 60fps camera, 30fps stimulus)
+- Camera to stimulus frame ratios (typically ~2:1 for 120fps stimulus, 60fps camera)
 - Preview of frame mappings
 - Gap statistics
 
-**Current Status**: ✅ Fully functional, analyzes legacy alignment arrays
-
-**Note**: Does not check for "corrected" alignment arrays (those are not implemented)
+**Current Status**: ✅ Fully functional
 
 ---
 
@@ -90,7 +88,6 @@ original_only = chaser_states[mask]  # True = original H5 data
 - Drift analysis using anchor points
 
 **Current Status**: ✅ Fully functional
-- Gracefully handles missing "corrected" arrays by falling back to legacy
 - Uses interpolation masks to filter when available
 
 ---
@@ -112,14 +109,12 @@ original_only = chaser_states[mask]  # True = original H5 data
 
 **Purpose**: Visual diagnostic showing:
 1. Raw stimulus timeline
-2. Camera frames with legacy mapping (red dots = missing samples)
-3. Corrected timeline (if available - currently shows placeholder)
-4. Corrected camera mapping (if available - currently shows placeholder)
-5. Interpolated coverage (green dots = data from interpolated dataset)
+2. Camera frame alignment (red dots = missing samples)
+3. Interpolated coverage (green dots = data from interpolated dataset)
 
 **Current Status**: ✅ Fully functional
-- Plots work with current legacy alignment arrays
-- Gracefully handles missing "corrected" arrays with placeholder messages
+- Shows gap statistics for camera frame coverage
+- Visualizes data before and after interpolation
 
 ---
 
@@ -130,21 +125,7 @@ original_only = chaser_states[mask]  # True = original H5 data
 - Reports drift statistics
 - Analyzes camera to stimulus ratios
 
-**Current Status**: ⚠️ Written to use "corrected" arrays that don't exist
-- Will show errors or empty results until corrected arrays are implemented
-
-## What Is NOT Implemented
-
-The following "corrected" alignment arrays were **planned but not implemented**:
-- ❌ `frame_alignment/camera_to_metadata_index_corrected`
-- ❌ `frame_alignment/camera_interpolation_mask_corrected`
-- ❌ `video_metadata/frame_metadata/stimulus_frame_num_corrected`
-- ❌ `frame_alignment/camera_to_stimulus_frame_corrected`
-- ❌ `frame_alignment/camera_stimulus_frame_interpolated`
-
-These were intended to provide a "sequential, gap-free" alternative to the legacy arrays, but the generation code was never written in the import pipeline.
-
-**Impact**: Minimal - the existing interpolation creates clean, contiguous datasets that serve the same purpose. The diagnostic scripts handle missing corrected arrays gracefully.
+**Current Status**: ⚠️ May need updates for current alignment format
 
 ## The "Happy Path" for Downstream Tools
 
@@ -338,11 +319,9 @@ For 120fps stimulus with 60fps camera:
 - ✅ Masks allow filtering back to original data
 - ✅ All diagnostic scripts are functional
 - ✅ Each import is independent (no re-interpolation risk)
-- ✅ Frame numbering fix available for legacy datasets
-
-**What was planned but not implemented:**
-- ❌ "Corrected" alignment arrays (sequential frame numbers)
-- ❌ Separate `chaser_states_interpolated` dataset (currently overwrites with mixed data)
+- ✅ Frame numbering fix available to correct double-incrementing bug
 
 **Design philosophy:**
 The current implementation prioritizes **simplicity for downstream consumers** - use the interpolated data directly, filter to original when needed via masks. This approach has proven sufficient for production workflows.
+
+Once the frame numbering bug is fixed at the H5 source level (using `fix_h5_chaser_frame_numbers.py`), the standard alignment arrays provide accurate, sequential frame mappings with ~100% camera→chaser mapping success.

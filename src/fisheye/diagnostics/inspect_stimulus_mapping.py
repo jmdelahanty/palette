@@ -4,9 +4,9 @@ Inspect camera→stimulus mapping arrays to verify alignment.
 
 This script reports:
   * First/last real mappings and observed ratio
-  * Drift from expected ratio (anchored at first non-interpolated frame)
+  * Drift from expected ratio
   * Distribution of per-camera stimulus deltas
-  * Whether the corrected mapping matches actual `stimulus_frame_num`
+  * Consistency between camera frames and stimulus frame numbers
 """
 
 from __future__ import annotations
@@ -37,10 +37,22 @@ def _resolve_run(root: zarr.Group, name: Optional[str]) -> tuple[zarr.Group, str
     return runs[keys[-1]], keys[-1]
 
 
-def _first_last(mapping: np.ndarray, mask: Optional[np.ndarray]) -> tuple[int, float, int, float]:
+def _build_camera_to_stimulus_map(
+    camera_frames: np.ndarray,
+    stimulus_frames: np.ndarray,
+) -> np.ndarray:
+    """Build a direct camera frame → stimulus frame mapping array."""
+    max_cam = int(camera_frames.max()) if len(camera_frames) > 0 else 0
+    cam_to_stim = np.full(max_cam + 1, -1, dtype=np.int64)
+    for cam, stim in zip(camera_frames, stimulus_frames):
+        if 0 <= cam <= max_cam:
+            cam_to_stim[cam] = stim
+    return cam_to_stim
+
+
+def _first_last(mapping: np.ndarray) -> tuple[int, float, int, float]:
+    """Find first and last valid mappings."""
     valid = mapping >= 0
-    if mask is not None and mask.shape == mapping.shape:
-        valid &= ~mask.astype(bool)
     indices = np.nonzero(valid)[0]
     if indices.size == 0:
         raise ValueError("No valid mappings found.")
@@ -50,25 +62,21 @@ def _first_last(mapping: np.ndarray, mask: Optional[np.ndarray]) -> tuple[int, f
 
 
 def _ratio(first_cam: float, first_stim: float, last_cam: float, last_stim: float) -> float:
+    """Calculate observed stimulus:camera frame ratio."""
     span = max(1.0, last_cam - first_cam)
     return (last_stim - first_stim) / span
 
 
-def _drift_report(mapping: np.ndarray, mask: Optional[np.ndarray], expected_ratio: float) -> None:
+def _drift_report(mapping: np.ndarray, expected_ratio: float) -> None:
+    """Report drift statistics from expected ratio."""
     valid = mapping >= 0
     valid_idx = np.nonzero(valid)[0]
     if valid_idx.size < 2:
         print("  Not enough valid frames for drift analysis.")
         return
 
-    if mask is not None and mask.shape == mapping.shape:
-        anchor_candidates = np.nonzero(valid & (~mask.astype(bool)))[0]
-        anchor_indices = anchor_candidates if anchor_candidates.size >= 2 else valid_idx
-    else:
-        anchor_indices = valid_idx
-
-    first_cam = float(anchor_indices[0])
-    first_stim = mapping[anchor_indices[0]]
+    first_cam = float(valid_idx[0])
+    first_stim = mapping[valid_idx[0]]
     expected = first_stim + (valid_idx - first_cam) * expected_ratio
     drift = mapping[valid_idx] - expected
     abs_drift = np.abs(drift)
@@ -84,49 +92,46 @@ def _inspect(zarr_path: Path, run_name: Optional[str], ratio: float) -> None:
 
     meta_group = run["video_metadata"]["frame_metadata"]
     stim = meta_group["stimulus_frame_num"][:].astype(np.int64, copy=False)
-    stim_corr = meta_group.get("stimulus_frame_num_corrected")
-    stim_corr = stim_corr[:] if stim_corr is not None else None
+    camera = meta_group["triggering_camera_frame_id"][:].astype(np.int64, copy=False)
 
-    alignment = run["frame_alignment"]
-    cam_to_meta_corr = alignment.get("camera_to_metadata_index_corrected")
-    cam_to_meta_corr = cam_to_meta_corr[:] if cam_to_meta_corr is not None else None
-    cam_to_stim_corr = alignment.get("camera_to_stimulus_frame_corrected")
-    cam_to_stim_corr = cam_to_stim_corr[:] if cam_to_stim_corr is not None else None
-    cam_interp = alignment.get("camera_stimulus_frame_interpolated")
-    cam_interp = cam_interp[:] if cam_interp is not None else None
-
-    if cam_to_stim_corr is None:
-        raise KeyError("camera_to_stimulus_frame_corrected missing.")
+    # Build camera → stimulus mapping from metadata
+    cam_to_stim = _build_camera_to_stimulus_map(camera, stim)
 
     try:
-        first_cam, first_stim, last_cam, last_stim = _first_last(cam_to_stim_corr, cam_interp)
+        first_cam, first_stim, last_cam, last_stim = _first_last(cam_to_stim)
     except ValueError:
-        raise RuntimeError("No valid entries in camera_to_stimulus_frame_corrected.")
+        raise RuntimeError("No valid camera→stimulus mappings found.")
 
     obs_ratio = _ratio(first_cam, first_stim, last_cam, last_stim)
-    print(f"  First real mapping: camera {first_cam} → stimulus {first_stim:.0f}")
-    print(f"  Last real mapping:  camera {last_cam} → stimulus {last_stim:.0f}")
+    print(f"  First mapping: camera {first_cam} → stimulus {first_stim:.0f}")
+    print(f"  Last mapping:  camera {last_cam} → stimulus {last_stim:.0f}")
     print(f"  Observed avg ratio: {obs_ratio:.4f} (expected {ratio:.4f})")
 
-    _drift_report(cam_to_stim_corr.astype(np.float64, copy=False), cam_interp, ratio)
+    _drift_report(cam_to_stim.astype(np.float64, copy=False), ratio)
 
-    if cam_to_meta_corr is not None:
-        valid_meta = (cam_to_meta_corr >= 0) & (cam_to_meta_corr < stim.shape[0])
-        subset = cam_to_meta_corr[valid_meta]
-        mismatch = stim[subset] - cam_to_stim_corr[valid_meta]
-        if stim_corr is not None:
-            mismatch_corr = stim_corr[subset] - cam_to_stim_corr[valid_meta]
-        else:
-            mismatch_corr = None
+    # Report on metadata consistency
+    alignment = run["frame_alignment"]
+    cam_to_meta = alignment["camera_to_metadata_index"][:]
 
-        print("\n  Metadata vs corrected mapping:")
-        print(
-            f"    Using original stimulus_frame_num: median {np.median(mismatch):+.1f}, max {mismatch.max():+.1f}, min {mismatch.min():+.1f}"
-        )
-        if mismatch_corr is not None:
-            print(
-                f"    Using stimulus_frame_num_corrected: median {np.median(mismatch_corr):+.1f}, max {mismatch_corr.max():+.1f}, min {mismatch_corr.min():+.1f}"
-            )
+    valid_cam_indices = np.nonzero(cam_to_stim >= 0)[0]
+    lookup_matches = 0
+    lookup_mismatches = 0
+
+    for cam_idx in valid_cam_indices[:1000]:  # Sample first 1000 for speed
+        if cam_idx < len(cam_to_meta):
+            meta_idx = cam_to_meta[cam_idx]
+            if 0 <= meta_idx < len(stim):
+                if stim[meta_idx] == cam_to_stim[cam_idx]:
+                    lookup_matches += 1
+                else:
+                    lookup_mismatches += 1
+
+    total_checked = lookup_matches + lookup_mismatches
+    if total_checked > 0:
+        print(f"\n  Metadata consistency check (sample of {total_checked}):")
+        print(f"    Matches: {lookup_matches} ({100*lookup_matches/total_checked:.1f}%)")
+        if lookup_mismatches > 0:
+            print(f"    Mismatches: {lookup_mismatches} ({100*lookup_mismatches/total_checked:.1f}%)")
 
 
 def parse_args() -> argparse.Namespace:

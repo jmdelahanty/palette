@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check chaser position alignment against raw and corrected stimulus mappings."""
+"""Check chaser position alignment against stimulus mappings."""
 
 from __future__ import annotations
 
@@ -77,39 +77,44 @@ def _stats(label: str, camera_ids: np.ndarray, mapping: np.ndarray, values: np.n
         )
 
 
+def _build_camera_to_stimulus_map(
+    camera_frames: np.ndarray,
+    stimulus_frames: np.ndarray,
+) -> np.ndarray:
+    """Build a direct camera frame → stimulus frame mapping array."""
+    max_cam = int(camera_frames.max()) if len(camera_frames) > 0 else 0
+    cam_to_stim = np.full(max_cam + 1, -1, dtype=np.int64)
+    for cam, stim in zip(camera_frames, stimulus_frames):
+        if 0 <= cam <= max_cam:
+            cam_to_stim[cam] = stim
+    return cam_to_stim
+
+
 def _analyze_drift(
-    camera_to_stimulus: Optional[np.ndarray],
-    interpolated_mask: Optional[np.ndarray],
+    camera_frames: np.ndarray,
+    stimulus_frames: np.ndarray,
     *,
     ratio: float,
     threshold: float,
 ) -> None:
-    if camera_to_stimulus is None:
-        print("\n[Stimulus drift]\n  camera_to_stimulus_frame_corrected not available.")
-        return
-
+    """Analyze drift between camera and stimulus frame numbering."""
     if ratio <= 0:
         print("\n[Stimulus drift]\n  Ratio must be > 0; skipping drift analysis.")
         return
 
+    camera_to_stimulus = _build_camera_to_stimulus_map(camera_frames, stimulus_frames)
     mapping = camera_to_stimulus.astype(np.float64, copy=False)
     valid = mapping >= 0
     cam_indices = np.nonzero(valid)[0]
+
     if cam_indices.size < 2:
         print("\n[Stimulus drift]\n  Not enough valid camera frames to evaluate drift.")
         return
 
-    anchor = cam_indices
-    if interpolated_mask is not None and interpolated_mask.shape == mapping.shape:
-        usable = valid & (~interpolated_mask.astype(bool))
-        anchor_candidates = np.nonzero(usable)[0]
-        if anchor_candidates.size >= 2:
-            anchor = anchor_candidates
-
-    first_cam = float(anchor[0])
-    first_stim = mapping[anchor[0]]
-    last_cam = float(anchor[-1])
-    last_stim = mapping[anchor[-1]]
+    first_cam = float(cam_indices[0])
+    first_stim = mapping[cam_indices[0]]
+    last_cam = float(cam_indices[-1])
+    last_stim = mapping[cam_indices[-1]]
     observed_ratio = (last_stim - first_stim) / max(1.0, (last_cam - first_cam))
     expected = first_stim + (cam_indices - first_cam) * ratio
     drift = mapping[cam_indices] - expected
@@ -154,7 +159,6 @@ def analyze_chaser_alignment(
 
     meta_group = run["video_metadata"]["frame_metadata"]
     stim_frames = _safe_column(meta_group, "stimulus_frame_num").astype(np.int64, copy=False)
-    stim_frames_corr = meta_group["stimulus_frame_num_corrected"][:].astype(np.int64, copy=False) if "stimulus_frame_num_corrected" in meta_group else None
     camera_frames = _safe_column(meta_group, "triggering_camera_frame_id").astype(np.int64, copy=False)
     timestamps = _safe_column(meta_group, "timestamp_ns").astype(np.float64, copy=False) / 1e9
 
@@ -164,31 +168,17 @@ def analyze_chaser_alignment(
     cam_for_chaser = np.array([frame_to_cam.get(frame, np.nan) for frame in stim_chaser], dtype=np.float64)
 
     alignment = run["frame_alignment"]
-    cam_to_meta_raw = alignment["camera_to_metadata_index"][:]
-    cam_to_meta_corrected = alignment.get("camera_to_metadata_index_corrected")
-    cam_to_meta_corrected = cam_to_meta_corrected[:] if cam_to_meta_corrected is not None else None
-    cam_to_stimulus = alignment.get("camera_to_stimulus_frame_corrected")
-    cam_to_stimulus = cam_to_stimulus[:] if cam_to_stimulus is not None else None
-    stim_interp_mask = alignment.get("camera_stimulus_frame_interpolated")
-    stim_interp_mask = stim_interp_mask[:] if stim_interp_mask is not None else None
+    cam_to_meta = alignment["camera_to_metadata_index"][:]
 
-    _stats("Raw mapping (timestamp)", cam_for_chaser, cam_to_meta_raw, timestamps, "time (s)")
-    if cam_to_meta_corrected is not None:
-        if stim_frames_corr is not None:
-            corr_values = stim_frames_corr.astype(np.float64, copy=False) / 120.0
-            _stats("Corrected mapping (stim frames)", cam_for_chaser, cam_to_meta_corrected, corr_values, "stimulus seconds")
-        _stats("Corrected mapping (timestamp)", cam_for_chaser, cam_to_meta_corrected, timestamps, "time (s)")
-    else:
-        print("\n[Corrected mapping]\n  Not available in this run.")
-
-    _analyze_drift(cam_to_stimulus, stim_interp_mask, ratio=ratio, threshold=drift_threshold)
+    _stats("Frame alignment (timestamp)", cam_for_chaser, cam_to_meta, timestamps, "time (s)")
+    _analyze_drift(camera_frames, stim_frames, ratio=ratio, threshold=drift_threshold)
 
     duplicates = len(stim_chaser) - np.unique(stim_chaser).size
     print(f"\nChaser stimulus frames: total {len(stim_chaser)}, unique {np.unique(stim_chaser).size}, duplicates {duplicates}")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Check chaser alignment under raw vs corrected mappings.")
+    parser = argparse.ArgumentParser(description="Check chaser alignment and stimulus frame drift.")
     parser.add_argument("zarr_path", type=Path, help="Path to Palette Zarr archive.")
     parser.add_argument("--stimulus-run", type=str, help="Stimulus run name (defaults to latest).")
     parser.add_argument(
