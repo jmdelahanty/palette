@@ -341,7 +341,7 @@ def main(args):
     DetTrainer.get_dataloader = get_zarr_dataloader
 
     # Get training params
-    training_params = full_config.training_params.model_dump()
+    training_params = full_config.training_params.model_dump(exclude_none=True)
     model_name = training_params.get('model', 'yolov8n.pt')
     model = YOLO(model_name)
 

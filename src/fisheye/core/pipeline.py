@@ -64,7 +64,9 @@ class PipelineConfig:
     refine_method: Optional[str] = None
     refine_remove_jumps: Optional[bool] = None
     refine_remove_blips: Optional[bool] = None
-    
+    training_data: bool = False
+    frame_step: Optional[int] = None
+
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "PipelineConfig":
         """Create config from command line arguments."""
@@ -85,7 +87,9 @@ class PipelineConfig:
             refine_max_gap=getattr(args, 'refine_max_gap', None),
             refine_method=getattr(args, 'refine_method', None),
             refine_remove_jumps=getattr(args, 'refine_remove_jumps', None),
-            refine_remove_blips=getattr(args, 'refine_remove_blips', None)
+            refine_remove_blips=getattr(args, 'refine_remove_blips', None),
+            training_data=getattr(args, 'training_data', False),
+            frame_step=getattr(args, 'frame_step', None)
         )
 
 
@@ -203,8 +207,6 @@ class Pipeline:
             'eye_masks': {
                 'method': 'traditional',
                 'roi_padding': 12,
-                'threshold_block_size': 21,
-                'threshold_offset': -10.0,
                 'pre_threshold': None,
                 'min_area': 15,
                 'max_area': None,
@@ -372,11 +374,20 @@ class Pipeline:
         """Run video import stage."""
         if not self.config.video_path:
             raise ValueError("Video path required for import stage")
-        
+
+        # Build cli_args dict for import_video
+        cli_args = {
+            'video_path': self.config.video_path,
+            'zarr_path': self.config.zarr_path,
+            'training_data': self.config.training_data,
+            'frame_step': self.config.frame_step,
+        }
+
         self.zarr_root = import_video(
             video_path=self.config.video_path,
             zarr_path=self.config.zarr_path,
             config=self.pipeline_params,
+            cli_args=cli_args,
             console=self.console,
             use_gpu=self.config.use_gpu,
             force_cpu=self.config.force_cpu
@@ -1178,6 +1189,19 @@ Examples:
         type=str,
         default="configs/fisheye/default.yaml",
         help="Path to pipeline configuration YAML"
+    )
+
+    parser.add_argument(
+        "--training-data",
+        action="store_true",
+        help="Enable sampled import mode for training data collection (requires --frame-step)"
+    )
+
+    parser.add_argument(
+        "--frame-step",
+        type=int,
+        metavar="N",
+        help="Import every Nth frame (e.g., 100 = frames 0, 100, 200, ...). Requires --training-data flag."
     )
 
     parser.add_argument(

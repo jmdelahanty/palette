@@ -20,7 +20,8 @@ from fisheye.utils.system import (
     get_platform_info,
     get_gpu_info,
     get_software_versions,
-    get_environment_summary
+    get_environment_summary,
+    get_environment_info
 )
 
 ZARR_SCHEMA_VERSION = "3.0.0"

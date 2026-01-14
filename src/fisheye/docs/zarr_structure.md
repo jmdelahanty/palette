@@ -216,8 +216,6 @@ See `fisheye.refinement.refine_eye_masks`.  Key arrays:
 | `mask_probs_roi_refined` | `(n_rois, 2, H, W)` | `float16` | Probabilities after refinement |
 | `ellipse_params` | `(n_rois, 2, 5)` | `float32` | `[cx, cy, major, minor, angle]` |
 | `ellipse_success` | `(n_rois, 2)` | `bool` | Fit success per eye |
-| `feret_axes_major/minor` | `(n_rois, 2, 4)` | `float32` | Endpoints for Feret diameters |
-| `feret_roundness` | `(n_rois, 2)` | `float32` | Major/minor ratio |
 | `eye_separation` | `(n_rois,)` | `float32` | Centroid distance |
 | `reason` | `(n_rois,)` | `string` | Classification tags (`refined`, `copied`, `filtered_*`) |
 

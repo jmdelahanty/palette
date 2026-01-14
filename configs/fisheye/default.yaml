@@ -6,12 +6,13 @@ import:
   batch_size: 32
   gpu_fp16: true
   use_kvikio_zarr: true
-  full: null
+  full: true
   downsampled:
     size:
     - 640
     - 640
     method: bilinear
+    formats: [gray]
     chunk_size: 128
     preserve_aspect: false
   post_compress:
@@ -33,7 +34,7 @@ detect:
   se1_radius: 2
   se4_radius: 10
   min_area: 85
-  max_area: 500
+  max_area: 5000
   max_fish: 1
   dish_mask: &id001
     shape: circle

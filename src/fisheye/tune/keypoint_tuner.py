@@ -108,7 +108,7 @@ def process_roi_for_keypoints(roi_image, background_roi, params):
     Returns processed image, all regions, and identified keypoints.
     """
     if roi_image is None or roi_image.size == 0:
-        return None, [], None
+        return None, [], None, 0
     
     # Use difference image
     if params['use_diff'] and background_roi is not None:
@@ -126,6 +126,7 @@ def process_roi_for_keypoints(roi_image, background_roi, params):
     current_se2_radius = params['se2_radius']
     se2_step = params.get('se2_decrement', 1)
     keypoint_stats = []
+    last_roi_stats = []
     effective_se2_radius = current_se2_radius
     min_angle_threshold = params.get('min_valid_angle', 10.0)
     min_triangle_area = params.get('min_triangle_area', 100.0)  # NEW
@@ -141,6 +142,7 @@ def process_roi_for_keypoints(roi_image, background_roi, params):
         # Find regions
         roi_stat = [r for r in regionprops(label(im_roi)) 
                     if r.area > params['min_area']]
+        last_roi_stats = roi_stat
         
         if len(roi_stat) >= 3:
             # Take top 3 by area
@@ -174,7 +176,7 @@ def process_roi_for_keypoints(roi_image, background_roi, params):
         diff_roi >= base_thresh, se1), final_se2), se1
     )
     
-    return final_processed, keypoint_stats, keypoint_id
+    return final_processed, keypoint_stats, keypoint_id, len(last_roi_stats)
 
 # Add this function after process_roi_for_keypoints():
 
@@ -395,12 +397,32 @@ def identify_keypoints_by_geometry(keypoint_stats):
     bladder_idx = np.argmin(angles)
     eye_indices = [i for i in range(3) if i != bladder_idx]
     
-    # Determine left/right eye based on x-coordinate
-    eye_x = [centroids[i][1] for i in eye_indices]
-    if eye_x[0] < eye_x[1]:
-        left_eye_idx, right_eye_idx = eye_indices[0], eye_indices[1]
-    else:
-        left_eye_idx, right_eye_idx = eye_indices[1], eye_indices[0]
+    bladder = centroids[bladder_idx]
+    eyes = centroids[eye_indices]
+    eye_mid = eyes.mean(axis=0)
+    dy = float(eye_mid[0] - bladder[0])
+    dx = float(eye_mid[1] - bladder[1])
+
+    heading_deg = float(np.degrees(np.arctan2(dy, dx))) if (dx or dy) else float("nan")
+
+    left_eye_idx = None
+    right_eye_idx = None
+    if dx or dy:
+        # Determine left/right relative to heading so rotated view is stable.
+        left_vec = np.array([-dx, dy], dtype=np.float64)  # (y, x) vector for "left" side
+        eye_vecs = eyes - bladder
+        dots = eye_vecs @ left_vec
+        if dots[0] != dots[1]:
+            left_eye_idx = eye_indices[int(np.argmax(dots))]
+            right_eye_idx = eye_indices[int(np.argmin(dots))]
+
+    if left_eye_idx is None or right_eye_idx is None:
+        # Fallback to image-space x ordering
+        eye_x = [centroids[i][1] for i in eye_indices]
+        if eye_x[0] < eye_x[1]:
+            left_eye_idx, right_eye_idx = eye_indices[0], eye_indices[1]
+        else:
+            left_eye_idx, right_eye_idx = eye_indices[1], eye_indices[0]
     
     return {
         'bladder': keypoint_stats[bladder_idx],
@@ -409,7 +431,8 @@ def identify_keypoints_by_geometry(keypoint_stats):
         'bladder_idx': bladder_idx,
         'left_eye_idx': left_eye_idx,
         'right_eye_idx': right_eye_idx,
-        'angles': angles
+        'angles': angles,
+        'heading': heading_deg
     }
 
 
@@ -427,7 +450,7 @@ def create_keypoint_dashboard(roi_image, background_roi, params, frame_num, det_
         return blank
     
     # Process the ROI
-    processed, keypoint_stats, keypoint_id = process_roi_for_keypoints(
+    processed, keypoint_stats, keypoint_id, raw_blob_count = process_roi_for_keypoints(
         roi_image, background_roi, params
     )
     
@@ -515,6 +538,12 @@ def create_keypoint_dashboard(roi_image, background_roi, params, frame_num, det_
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=0,
             )
+            # Apply a circular window to avoid showing rotating edges.
+            circle_mask = np.zeros_like(rotated_roi, dtype=np.uint8)
+            center_pt = (rotated_roi.shape[1] // 2, rotated_roi.shape[0] // 2)
+            radius = min(center_pt)
+            cv2.circle(circle_mask, center_pt, radius, 255, -1)
+            rotated_roi = np.where(circle_mask > 0, rotated_roi, 0)
             panel5 = cv2.cvtColor(rotated_roi.astype(np.uint8), cv2.COLOR_GRAY2BGR)
 
             def rotate_point(stat):
@@ -544,7 +573,7 @@ def create_keypoint_dashboard(roi_image, background_roi, params, frame_num, det_
             cv2.circle(panel4, (x, y), 5, (128, 128, 128), -1)
         
         effective_se2 = params['se2_radius']
-        status = f"Found {len(keypoint_stats)} blobs (need 3)"
+        status = f"Found {raw_blob_count} blobs (need 3)"
         status_color = (0, 165, 255)
         cv2.putText(panel5, "Rotated ROI (unavailable)", (10, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
@@ -621,17 +650,13 @@ def main(zarr_path, start_frame=1):
     latest_crop = zarr_root['crop_runs'].attrs['latest']
     latest_bg = zarr_root['background_runs'].attrs['latest']
 
-    # Get detect run - should be from detect_runs, not crop_runs
-    if 'detect_runs' not in zarr_root:
-        print("Error: No detect_runs found in zarr")
-        return
-    latest_detect = zarr_root['detect_runs'].attrs.get('latest')
-    if not latest_detect:
-        print("Error: No latest detect_run found")
-        return
-        
+    crop_group = zarr_root[f'crop_runs/{latest_crop}']
+    crop_source_path = crop_group.attrs.get('detection_source_path', 'unknown')
+    crop_source_type = crop_group.attrs.get('detection_source_type', 'unknown')
+
     print(f"Using crop: {latest_crop}")
     print(f"Using background: {latest_bg}")
+    print(f"Crop detection source: {crop_source_type} ({crop_source_path})")
     
     # Load background
     bg_group = zarr_root[f'background_runs/{latest_bg}']
@@ -642,16 +667,43 @@ def main(zarr_path, start_frame=1):
         background = None
     
     # Load data
-    roi_images = zarr_root[f'crop_runs/{latest_crop}/roi_images']
-    roi_coords = zarr_root[f'crop_runs/{latest_crop}/roi_coordinates_full']
-    # Load per-frame detection counts (n_detections or frame_counts)
-    if 'n_detections' in zarr_root[f'detect_runs/{latest_detect}']:
-        n_detections = zarr_root[f'detect_runs/{latest_detect}/n_detections'][:]
-    elif 'frame_counts' in zarr_root[f'detect_runs/{latest_detect}']:
-        n_detections = zarr_root[f'detect_runs/{latest_detect}/frame_counts'][:]
-    else:
-        print("Error: Neither 'n_detections' nor 'frame_counts' found in detect run")
-        return
+    roi_images = crop_group['roi_images']
+    roi_coords = crop_group['roi_coordinates_full']
+
+    # Load per-frame detection counts (prefer crop-derived counts so refined runs are honored)
+    n_detections = None
+    if 'frame_counts' in crop_group:
+        n_detections = crop_group['frame_counts'][:]
+        print("Using crop frame_counts for detection availability")
+    elif 'frame_indices' in crop_group:
+        frame_indices = crop_group['frame_indices'][:]
+        num_frames = crop_group.attrs.get('total_frames')
+        if num_frames is None:
+            if 'raw_video' in zarr_root and 'images_ds' in zarr_root['raw_video']:
+                num_frames = zarr_root['raw_video/images_ds'].shape[0]
+            elif 'raw_video' in zarr_root and 'images_full' in zarr_root['raw_video']:
+                num_frames = zarr_root['raw_video/images_full'].shape[0]
+        if num_frames is not None:
+            n_detections = np.bincount(frame_indices, minlength=int(num_frames))
+            print("Using crop frame_indices for detection availability")
+
+    # Fallback to detect run counts if crop counts are missing
+    if n_detections is None:
+        if 'detect_runs' not in zarr_root:
+            print("Error: No detect_runs found in zarr (needed for detection counts)")
+            return
+        latest_detect = zarr_root['detect_runs'].attrs.get('latest')
+        if not latest_detect:
+            print("Error: No latest detect_run found")
+            return
+        if 'n_detections' in zarr_root[f'detect_runs/{latest_detect}']:
+            n_detections = zarr_root[f'detect_runs/{latest_detect}/n_detections'][:]
+        elif 'frame_counts' in zarr_root[f'detect_runs/{latest_detect}']:
+            n_detections = zarr_root[f'detect_runs/{latest_detect}/frame_counts'][:]
+        else:
+            print("Error: Neither 'n_detections' nor 'frame_counts' found in detect run")
+            return
+        print(f"Using detect run counts from {latest_detect}")
     
     total_rois = roi_images.shape[0]
     num_frames = len(n_detections)

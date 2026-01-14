@@ -7,19 +7,24 @@ Supports individual and batch processing with various visualization options.
 CORRECTED: Fixed coordinate system transformations for accurate positioning.
 """
 
-import zarr
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from matplotlib.colors import PowerNorm, LogNorm
-from scipy.ndimage import gaussian_filter
-import seaborn as sns
-from pathlib import Path
 import argparse
 from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+import zarr
+from matplotlib.colors import LogNorm, PowerNorm
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
-from typing import Optional, Dict, Tuple, List
+from rich.progress import (BarColumn, Progress, SpinnerColumn, TaskProgressColumn,
+                           TextColumn)
+from scipy.ndimage import gaussian_filter
+
+from fisheye.utils.zarr_metadata import get_downsample_shape
+
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -41,8 +46,12 @@ class ROIHeatmapGenerator:
         self.fps = self.root.attrs.get('fps', 60.0)
         
         # Downsampled dimensions (for detections)
-        self.ds_width = 640
-        self.ds_height = 640
+        ds_shape = get_downsample_shape(self.root, format_hint="gray")
+        if ds_shape is None:
+            self.ds_height, self.ds_width = 640, 640
+        else:
+            self.ds_height = int(ds_shape[0])
+            self.ds_width = int(ds_shape[1])
         
         # Set working dimensions based on mode
         if use_downsampled:
@@ -103,9 +112,10 @@ class ROIHeatmapGenerator:
                         # Convert to full resolution
                         centroid_x_ds = center_x_norm * self.ds_width
                         centroid_y_ds = center_y_norm * self.ds_height
-                        scale_factor = self.img_width / self.ds_width
-                        centroid_x = centroid_x_ds * scale_factor
-                        centroid_y = centroid_y_ds * scale_factor
+                        scale_x = self.img_width / self.ds_width
+                        scale_y = self.img_height / self.ds_height
+                        centroid_x = centroid_x_ds * scale_x
+                        centroid_y = centroid_y_ds * scale_y
                     
                     positions[frame_idx] = np.array([centroid_x, centroid_y])
             
@@ -137,9 +147,10 @@ class ROIHeatmapGenerator:
                         else:
                             centroid_x_ds = center_x_norm * self.ds_width
                             centroid_y_ds = center_y_norm * self.ds_height
-                            scale_factor = self.img_width / self.ds_width
-                            centroid_x = centroid_x_ds * scale_factor
-                            centroid_y = centroid_y_ds * scale_factor
+                            scale_x = self.img_width / self.ds_width
+                            scale_y = self.img_height / self.ds_height
+                            centroid_x = centroid_x_ds * scale_x
+                            centroid_y = centroid_y_ds * scale_y
                         
                         positions[frame_idx] = np.array([centroid_x, centroid_y])
         
@@ -164,13 +175,14 @@ class ROIHeatmapGenerator:
         
         # Scale bin size if using downsampled
         if self.use_downsampled:
-            effective_bin_size = bin_size * (self.ds_width / self.img_width)
+            bin_size_x = max(bin_size * (self.ds_width / self.img_width), 1)
+            bin_size_y = max(bin_size * (self.ds_height / self.img_height), 1)
         else:
-            effective_bin_size = bin_size
+            bin_size_x = bin_size_y = bin_size
         
         # Calculate number of bins
-        n_bins_x = int(np.ceil(self.working_width / effective_bin_size))
-        n_bins_y = int(np.ceil(self.working_height / effective_bin_size))
+        n_bins_x = max(1, int(np.ceil(self.working_width / bin_size_x)))
+        n_bins_y = max(1, int(np.ceil(self.working_height / bin_size_y)))
         
         # Create 2D histogram
         x_coords = [pos[0] for pos in positions.values()]

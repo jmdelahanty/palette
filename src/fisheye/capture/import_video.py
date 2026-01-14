@@ -23,7 +23,7 @@ import cupy as cp
 import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import yaml
 from zarr.storage import LocalStore
 from rich.console import Console
@@ -103,6 +103,38 @@ def _merge_import_config(base: Dict[str, Any], override: Dict[str, Any]) -> Dict
     return merged
 
 
+def _normalize_downsample_formats(raw_formats: Optional[Any]) -> List[str]:
+    """
+    Normalize the requested downsampled formats.
+
+    Always returns at least ['gray'] so downstream stages (detection, background)
+    can rely on a luminance channel being present.
+    """
+    if raw_formats is None:
+        return ["gray"]
+
+    if isinstance(raw_formats, str):
+        candidates = [raw_formats]
+    else:
+        candidates = list(raw_formats)
+
+    normalized: List[str] = []
+    for item in candidates:
+        val = str(item).strip().lower()
+        if val in {"gray", "grey", "grayscale"}:
+            val = "gray"
+        elif val in {"rgb", "color", "colour", "colors"}:
+            val = "rgb"
+        else:
+            continue
+        if val not in normalized:
+            normalized.append(val)
+
+    if "gray" not in normalized:
+        normalized.insert(0, "gray")
+    return normalized
+
+
 def _load_import_config(config_path: Optional[Path], console: Console) -> Dict[str, Any]:
     """Load configuration from YAML, falling back to defaults."""
     base = _default_import_config()
@@ -178,13 +210,13 @@ def _process_video_gpu_kvikio(
         mempool.free_all_blocks()
 
     # Get shapes and configs for each resolution
-    shapes = {}
-    buffers = {}
+    shapes: Dict[str, Tuple[int, ...]] = {}
+    buffers: Dict[str, torch.Tensor] = {}
     frames_per_write = io_batch_size  # Default
 
     for key, arr in arrays.items():
-        h, w = arr.shape[1], arr.shape[2]
-        shapes[key] = (h, w)
+        spatial_shape = tuple(int(dim) for dim in arr.shape[1:])
+        shapes[key] = spatial_shape
 
         # Check sharding for write size
         if hasattr(arr, 'shards') and arr.shards:
@@ -192,16 +224,22 @@ def _process_video_gpu_kvikio(
     
     # Allocate buffers for each resolution
     if 'full' in arrays:
-        full_h, full_w = shapes['full']
+        full_h, full_w = shapes['full'][:2]
         buffers['full'] = torch.empty((frames_per_write, full_h, full_w), 
                                       device='cuda', dtype=torch.uint8)
         console.print(f"[cyan]Full resolution buffer: {frames_per_write}×{full_h}×{full_w}[/cyan]")
     
-    if 'downsampled' in arrays:
-        down_h, down_w = shapes['downsampled']
-        buffers['downsampled'] = torch.empty((frames_per_write, down_h, down_w),
-                                            device='cuda', dtype=torch.uint8)
-        console.print(f"[cyan]Downsampled buffer: {frames_per_write}×{down_h}×{down_w}[/cyan]")
+    if 'downsampled_gray' in arrays:
+        down_h, down_w = shapes['downsampled_gray'][:2]
+        buffers['downsampled_gray'] = torch.empty((frames_per_write, down_h, down_w),
+                                                  device='cuda', dtype=torch.uint8)
+        console.print(f"[cyan]Downsampled (gray) buffer: {frames_per_write}×{down_h}×{down_w}[/cyan]")
+    
+    if 'downsampled_rgb' in arrays:
+        down_h, down_w, _ = shapes['downsampled_rgb']
+        buffers['downsampled_rgb'] = torch.empty((frames_per_write, down_h, down_w, 3),
+                                                 device='cuda', dtype=torch.uint8)
+        console.print(f"[cyan]Downsampled (RGB) buffer: {frames_per_write}×{down_h}×{down_w}×3[/cyan]")
     
     # Grayscale conversion weights
     weights = torch.tensor([0.2989, 0.5870, 0.1140], device='cuda',
@@ -209,6 +247,7 @@ def _process_video_gpu_kvikio(
     
     # Get downsample method if needed
     down_method = config['import'].get('downsampled', {}).get('method', 'area')
+    align_corners = False if down_method in ['bilinear', 'bicubic'] else None
     
     write_times = []
     torch.cuda.synchronize()
@@ -256,17 +295,18 @@ def _process_video_gpu_kvikio(
 
                     # Decode frames once
                     frames = vr.get_batch(batch_frame_indices)
-                    x = frames.half() if use_fp16 else frames.float()
-                    gray = (x * weights).sum(dim=-1)
-                    gray_uint8 = gray.to(torch.uint8)
+                    frames_f32 = frames.float()
+                    work_tensor = frames_f32.half() if use_fp16 else frames_f32
+                    gray = (work_tensor * weights).sum(dim=-1)
+                    gray_uint8 = gray.clamp(0, 255).to(torch.uint8)
 
                     # Store full resolution if needed
                     if 'full' in buffers:
                         buffers['full'][buffer_position:buffer_position+batch_size_actual] = gray_uint8
 
                     # Generate and store downsampled if needed
-                    if 'downsampled' in buffers:
-                        down_h, down_w = shapes['downsampled']
+                    if 'downsampled_gray' in buffers:
+                        down_h, down_w = shapes['downsampled_gray'][:2]
                         # Add batch and channel dims for interpolation
                         gray_for_interp = gray_uint8.unsqueeze(1).float()  # [B, 1, H, W]
 
@@ -274,14 +314,26 @@ def _process_video_gpu_kvikio(
                             gray_for_interp,
                             size=(down_h, down_w),
                             mode=down_method,
-                            align_corners=False if down_method in ['bilinear', 'bicubic'] else None
+                            align_corners=align_corners
                         ).squeeze(1).to(torch.uint8)  # Remove channel dim
 
-                        buffers['downsampled'][buffer_position:buffer_position+batch_size_actual] = gray_down
+                        buffers['downsampled_gray'][buffer_position:buffer_position+batch_size_actual] = gray_down
                         del gray_down, gray_for_interp
 
+                    if 'downsampled_rgb' in buffers:
+                        down_h, down_w, _ = shapes['downsampled_rgb']
+                        rgb_for_interp = frames_f32.permute(0, 3, 1, 2)  # [B, 3, H, W]
+                        rgb_down = F.interpolate(
+                            rgb_for_interp,
+                            size=(down_h, down_w),
+                            mode=down_method,
+                            align_corners=align_corners
+                        ).permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)
+                        buffers['downsampled_rgb'][buffer_position:buffer_position+batch_size_actual] = rgb_down
+                        del rgb_down, rgb_for_interp
+
                     buffer_position += batch_size_actual
-                    del frames, x, gray, gray_uint8
+                    del frames, frames_f32, work_tensor, gray, gray_uint8
                 
                 # Write all buffers to their arrays
                 t0 = time.perf_counter()
@@ -299,8 +351,8 @@ def _process_video_gpu_kvikio(
                     arrays[key][write_idx_start:write_idx_end] = cupy_data
 
                     # Track data size
-                    h, w = shapes[key]
-                    total_bytes_written += actual_write_size * h * w
+                    elem_per_frame = int(np.prod(shapes[key]))
+                    total_bytes_written += actual_write_size * elem_per_frame
                 
                 cp.cuda.Stream.null.synchronize()
                 dt = time.perf_counter() - t0
@@ -321,7 +373,8 @@ def _process_video_gpu_kvikio(
                     avg_speed=avg_speed
                 )
                 
-                if write_idx % (frames_per_write * 20) == 0:
+                # Periodically free CUDA/CPU caches every 20 chunk writes
+                if write_idx_start > 0 and write_idx_start % (frames_per_write * 20) == 0:
                     torch.cuda.empty_cache()
                     import gc; gc.collect()
     
@@ -333,9 +386,8 @@ def _finalize_kvikio_zarr_metadata(
     *,
     n_frames: int,
     full_shape: Optional[Tuple[int, int]],
-    down_shape: Optional[Tuple[int, int]],
+    downsample_specs: Dict[str, Tuple[int, ...]],
     create_full: bool,
-    create_down: bool,
     chunk_size: int,
     io_batch_size: int,
     down_chunk_size: int,
@@ -369,22 +421,22 @@ def _finalize_kvikio_zarr_metadata(
             array_kwargs["chunks"] = (io_batch_size, full_h, full_w)
         raw.require_array("images_full", **array_kwargs)
 
-    if create_down and down_shape:
-        down_h, down_w = down_shape
+    for name, spatial_shape in downsample_specs.items():
         array_kwargs = {
-            "shape": (n_frames, down_h, down_w),
+            "shape": (n_frames, *spatial_shape),
             "dtype": "uint8",
             "fill_value": 0,
             "compressors": [],
         }
+        chunk_shape = (down_chunk_size, *spatial_shape)
         if use_sharding:
             array_kwargs.update({
-                "chunks": (down_chunk_size, down_h, down_w),
-                "shards": (down_io_batch_size, down_h, down_w),
+                "chunks": chunk_shape,
+                "shards": (down_io_batch_size, *spatial_shape),
             })
         else:
-            array_kwargs["chunks"] = (down_chunk_size, down_h, down_w)
-        raw.require_array("images_ds", **array_kwargs)
+            array_kwargs["chunks"] = chunk_shape
+        raw.require_array(name, **array_kwargs)
 
     raw.require_array(
         "timestamps",
@@ -507,6 +559,9 @@ def import_video(
             resolutions_mode = ip.get("resolutions", "full")
             full_config = ip.get("full", {})
             down_config = ip.get("downsampled", {})
+            down_formats = _normalize_downsample_formats(down_config.get("formats"))
+            store_gray = "gray" in down_formats
+            store_rgb = "rgb" in down_formats
             
             create_full = resolutions_mode in ["full", "both"]
             create_down = resolutions_mode in ["downsampled", "both"]
@@ -561,6 +616,12 @@ def import_video(
                 down_io_batch = down_chunk_size * chunks_per_shard
             else:
                 down_io_batch = down_chunk_size
+
+            downsample_specs: Dict[str, Tuple[int, ...]] = {}
+            if create_down and store_gray:
+                downsample_specs["images_ds"] = (down_h, down_w)
+            if create_down and store_rgb:
+                downsample_specs["images_ds_rgb"] = (down_h, down_w, 3)
 
             # Check if we should use kvikIO Zarr
             kvikio_available = False
@@ -633,9 +694,9 @@ def import_video(
                             overwrite=True
                         )
 
-                if create_down:
+                if create_down and store_gray:
                     if use_sharding:
-                        arrays['downsampled'] = raw.create_array(
+                        arrays['downsampled_gray'] = raw.create_array(
                             name='images_ds',
                             shape=(n_import_frames, down_h, down_w),
                             chunks=(down_chunk_size, down_h, down_w),
@@ -646,7 +707,7 @@ def import_video(
                             overwrite=True
                         )
                     else:
-                        arrays['downsampled'] = raw.create_array(
+                        arrays['downsampled_gray'] = raw.create_array(
                             name='images_ds',
                             shape=(n_import_frames, down_h, down_w),
                             chunks=(down_chunk_size, down_h, down_w),
@@ -655,6 +716,27 @@ def import_video(
                             compressors=None,
                             overwrite=True
                         )
+
+                if create_down and store_rgb:
+                    rgb_shape = (n_import_frames, down_h, down_w, 3)
+                    if use_sharding:
+                        arrays['downsampled_rgb'] = raw.create_array(
+                            name='images_ds_rgb',
+                            shape=rgb_shape,
+                            chunks=(down_chunk_size, down_h, down_w, 3),
+                            shards=(down_io_batch, down_h, down_w, 3),
+                            dtype="uint8",
+                            fill_value=0,
+                            compressors=None,
+                            overwrite=True
+                        )
+
+                if 'downsampled_gray' in arrays:
+                    arrays['downsampled_gray'].attrs['format'] = 'gray'
+                    arrays['downsampled_gray'].attrs['resolution'] = [down_h, down_w]
+                if 'downsampled_rgb' in arrays:
+                    arrays['downsampled_rgb'].attrs['format'] = 'rgb'
+                    arrays['downsampled_rgb'].attrs['resolution'] = [down_h, down_w, 3]
 
                 # Build metadata
                 metadata = {
@@ -690,6 +772,9 @@ def import_video(
                     metadata["has_downsampled"] = True
                     metadata["downsampled_resolution"] = list(down_target)
                     metadata["downsample_method"] = down_config.get("method", "area")
+                    metadata["downsample_formats"] = down_formats
+                    if downsample_specs:
+                        metadata["downsampled_shapes"] = {k: list(v) for k, v in downsample_specs.items()}
                 
                 if use_sharding:
                     metadata["sharding_enabled"] = True
@@ -730,7 +815,17 @@ def import_video(
                     "source_path": str(video_path.absolute()),
                     "import_timestamp": datetime.now(timezone.utc).isoformat(),
                 }
-                
+
+                # Add training data mode metadata if applicable
+                if training_data_mode and frame_step:
+                    metadata["import_mode"] = "sampled"
+                    metadata["frame_step"] = frame_step
+                    metadata["original_video_length"] = n_frames
+                    metadata["imported_frame_count"] = n_import_frames
+                    metadata["import_purpose"] = "training_data"
+                else:
+                    metadata["import_mode"] = "full"
+
                 raw.attrs.update(metadata)
 
             # ---- Console info --------------------------------------------------------
@@ -743,7 +838,8 @@ def import_video(
                 res_info.append(f"Full: {full_h}×{full_w}")
             if create_down:
                 target_size = down_config.get("size", [640, 640])
-                res_info.append(f"Downsampled: {target_size[0]}×{target_size[1]}")
+                fmt_label = "/".join(down_formats)
+                res_info.append(f"Downsampled ({fmt_label}): {target_size[0]}×{target_size[1]}")
 
             frames_info = f"{n_import_frames}"
             if training_data_mode and frame_step:
@@ -773,9 +869,8 @@ def import_video(
                     Path(zarr_path),
                     n_frames=n_import_frames,
                     full_shape=(full_h, full_w) if create_full else None,
-                    down_shape=(down_h, down_w) if create_down else None,
+                    downsample_specs=downsample_specs,
                     create_full=create_full,
-                    create_down=create_down,
                     chunk_size=chunk_size,
                     io_batch_size=io_batch_size,
                     down_chunk_size=down_chunk_size,
@@ -810,9 +905,12 @@ def import_video(
             total_gb = 0
             if 'full' in arrays:
                 total_gb += (n_import_frames * full_h * full_w) / (1024**3)
-            if 'downsampled' in arrays:
+            if 'downsampled_gray' in arrays:
                 down_h, down_w = down_config.get("size", [640, 640])
                 total_gb += (n_import_frames * down_h * down_w) / (1024**3)
+            if 'downsampled_rgb' in arrays:
+                down_h, down_w = down_config.get("size", [640, 640])
+                total_gb += (n_import_frames * down_h * down_w * 3) / (1024**3)
 
             throughput_gbps = total_gb / max(duration, 1e-9)
 
@@ -1002,9 +1100,12 @@ def import_video(
             output_arrays = []
             if 'full' in arrays:
                 output_arrays.append(f"  - raw_video/images_full: ({n_import_frames}, {full_h}, {full_w})")
-            if 'downsampled' in arrays:
-                down_h, down_w = down_config.get("size", [640, 640])
-                output_arrays.append(f"  - raw_video/images_ds: ({n_import_frames}, {down_h}, {down_w})")
+            if 'downsampled_gray' in arrays:
+                _, h, w = arrays['downsampled_gray'].shape
+                output_arrays.append(f"  - raw_video/images_ds: ({n_import_frames}, {h}, {w})")
+            if 'downsampled_rgb' in arrays:
+                _, h, w, c = arrays['downsampled_rgb'].shape
+                output_arrays.append(f"  - raw_video/images_ds_rgb: ({n_import_frames}, {h}, {w}, {c})")
             if training_data_mode and frame_step:
                 output_arrays.append(f"  - raw_video/original_frame_indices: ({n_import_frames},)")
 

@@ -23,8 +23,9 @@ names: ['fish']
 datasets:
   # Dataset 1
   arena4:
-    zarr_path: /nvme1/2025_10_23_11_40_55/2025-10-23T15-41-09Z_arena_4_chaser_arena4.zarr
-    source_type: filtered  # Use real detections with jumps removed (recommended)
+    zarr_path: /nvme1/danio/danio-rgb4.zarr
+    source_type: detect        # detect | filtered | interpolated
+    input_format: rgb         # gray (default) or rgb if importing color downsampled frames
     
     # Optional: Custom split ratios per dataset (defaults to global split below)
     split:
@@ -66,9 +67,10 @@ training_params:
   model: yolo11n.pt
   
   # Core hyperparameters
-  epochs: 1  # Number of training epochs
+  epochs: 100  # Number of training epochs
   batch: 128    # Batch size for training
-  imgsz: 640   # Input image size for training
+  imgsz: 2304   # Input image size for training
+  rect: true           # Enable rectangular training batches to reduce padding
   lr0: 0.002   # Initial learning rate
   momentum: 0.9          # Momentum factor
   weight_decay: 0.0005   # Weight decay (L2 penalty)

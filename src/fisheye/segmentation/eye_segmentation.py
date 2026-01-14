@@ -18,8 +18,6 @@ import dask
 from dask import delayed
 from dask.diagnostics import ProgressBar
 from skimage import filters, measure, morphology
-from skimage.draw import ellipse
-
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
 
@@ -27,8 +25,6 @@ from ..utils.system import get_environment_info, get_git_info
 @dataclass
 class EyeSegmentationConfig:
     roi_padding: int = 12
-    threshold_block_size: int = 21
-    threshold_offset: float = -10.0
     sobel_strength: float = 0.0
     pre_threshold: Optional[int] = None
     min_area: int = 15
@@ -36,9 +32,6 @@ class EyeSegmentationConfig:
     closing_radius: int = 3
     opening_radius: int = 1
     contour_min_points: int = 5
-    use_feret_ellipse: bool = False
-    compute_feret_axes: bool = False
-    feret_min_roundness: float = 0.0
     min_eye_separation: float = 4.0
     max_eye_separation: float = 80.0
     keypoint_run: Optional[str] = None
@@ -50,25 +43,17 @@ def _set_config_value(cfg: EyeSegmentationConfig, key: str, value: Any) -> None:
         if key in {"max_area", "pre_threshold"}:
             setattr(cfg, key, None)
         return
-    if key in {"roi_padding", "threshold_block_size", "min_area", "closing_radius", "opening_radius", "contour_min_points"}:
+    if key in {"roi_padding", "min_area", "closing_radius", "opening_radius", "contour_min_points"}:
         setattr(cfg, key, int(value))
     elif key in {"max_area", "pre_threshold"}:
         setattr(cfg, key, int(value))
-    elif key in {"threshold_offset"}:
-        setattr(cfg, key, float(value))
     elif key == "sobel_strength":
-        setattr(cfg, key, float(np.clip(value, 0.0, 1.0)))
-    elif key in {"feret_min_roundness"}:
         setattr(cfg, key, float(np.clip(value, 0.0, 1.0)))
     elif key in {"min_eye_separation", "max_eye_separation"}:
         if value is None:
             setattr(cfg, key, None)
         else:
             setattr(cfg, key, float(max(0.0, value)))
-    elif key == "use_feret_ellipse":
-        setattr(cfg, key, bool(value))
-    elif key == "compute_feret_axes":
-        setattr(cfg, key, bool(value))
     else:
         setattr(cfg, key, value)
 
@@ -90,14 +75,8 @@ def _apply_tuned_parameters(
     timestamp = tuning.get("tuned_timestamp") if isinstance(tuning, dict) else None
 
     for key, value in tuned_params.items():
-        target_key = key
-        if key == "min_roundness":
-            target_key = "feret_min_roundness"
-        if hasattr(cfg, target_key):
-            _set_config_value(cfg, target_key, value)
-
-    if cfg.use_feret_ellipse and cfg.feret_min_roundness is None:
-        cfg.feret_min_roundness = 0.0
+        if hasattr(cfg, key):
+            _set_config_value(cfg, key, value)
 
     if console is not None:
         ts_msg = f" (saved {timestamp})" if timestamp else ""
@@ -110,9 +89,8 @@ def _apply_overrides(cfg: EyeSegmentationConfig, overrides: Optional[Dict[str, A
     if not overrides:
         return cfg
     for key, value in overrides.items():
-        target_key = "feret_min_roundness" if key == "min_roundness" else key
-        if hasattr(cfg, target_key):
-            _set_config_value(cfg, target_key, value)
+        if hasattr(cfg, key):
+            _set_config_value(cfg, key, value)
     return cfg
 
 
@@ -137,13 +115,14 @@ def _apply_sobel_filter(patch: np.ndarray, strength: float) -> np.ndarray:
     return (filtered * 255.0).astype(patch.dtype, copy=False)
 
 
-def _local_threshold(patch: np.ndarray, config: EyeSegmentationConfig) -> np.ndarray:
+def _global_threshold(patch: np.ndarray, config: EyeSegmentationConfig) -> Tuple[np.ndarray, np.ndarray]:
     filtered_patch = _apply_sobel_filter(patch, config.sobel_strength)
-    block_size = int(config.threshold_block_size)
-    block = max(3, block_size | 1)
-    thresh = filters.threshold_local(filtered_patch, block_size=block, offset=config.threshold_offset)
-    binary = filtered_patch < thresh
-    return binary
+    try:
+        threshold_value = float(filters.threshold_otsu(filtered_patch))
+    except ValueError:
+        threshold_value = float(np.mean(filtered_patch))
+    binary = filtered_patch < threshold_value
+    return binary, filtered_patch
 
 
 def _select_region(
@@ -182,142 +161,7 @@ def _select_region(
 
     region_mask = labeled == best.label
 
-    feret_info: Optional[Dict[str, Any]] = None
-    if config.use_feret_ellipse or getattr(config, "compute_feret_axes", False):
-        feret_info = _feret_info_from_region(region_mask, config.contour_min_points)
-        if feret_info is not None:
-            min_round = config.feret_min_roundness if config.feret_min_roundness is not None else 0.0
-            if float(feret_info.get("roundness", 0.0)) < min_round:
-                feret_info = None
-        if config.use_feret_ellipse and feret_info is not None:
-            feret_mask = _render_feret_mask(feret_info, region_mask.shape)
-            if feret_mask is not None:
-                return feret_mask, feret_info
-
-    return region_mask, feret_info
-
-
-def _extract_contour(mask: np.ndarray, min_points: int) -> Optional[np.ndarray]:
-    contours = measure.find_contours(mask.astype(float), 0.5)
-    if not contours:
-        return None
-    contour = max(contours, key=lambda c: c.shape[0])
-    if contour.shape[0] < min_points:
-        return None
-    return contour[:, ::-1]  # Convert to (x, y)
-
-
-def _calculate_max_feret(contour: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], float]:
-    max_dist = 0.0
-    p1 = p2 = None
-    num_points = contour.shape[0]
-    for i in range(num_points):
-        for j in range(i + 1, num_points):
-            dist = np.linalg.norm(contour[i] - contour[j])
-            if dist > max_dist:
-                max_dist = dist
-                p1, p2 = contour[i], contour[j]
-    return p1, p2, max_dist
-
-
-def _compute_feret_geometry(contour: np.ndarray) -> Optional[Dict[str, Any]]:
-    p1, p2, max_dist = _calculate_max_feret(contour)
-    if p1 is None or p2 is None or max_dist <= 0:
-        return None
-
-    center = (p1 + p2) / 2.0
-    cx, cy = center  # contour already in (x, y)
-
-    feret_vec = p2 - p1
-    feret_len = np.linalg.norm(feret_vec)
-    if feret_len == 0:
-        return None
-    orientation = np.arctan2(feret_vec[1], feret_vec[0])
-    major_len = feret_len
-
-    feret_vec_norm = feret_vec / feret_len
-    perp_vec = np.array([-feret_vec_norm[1], feret_vec_norm[0]])
-    projections = np.dot(contour - center, perp_vec)
-    minor_len = float(np.max(projections) - np.min(projections))
-    minor_len = float(max(minor_len, 0.0))
-    major_len = float(major_len)
-    roundness = float(np.clip(minor_len / major_len if major_len > 0 else 0.0, 0.0, 1.0))
-
-    major_pts = np.array([p1, p2], dtype=np.float32)
-    midpoint = (p1 + p2) / 2.0
-    if minor_len > 0:
-        perp_norm = perp_vec / np.linalg.norm(perp_vec)
-        half_minor = minor_len / 2.0
-        minor_pts = np.array(
-            [
-                midpoint + perp_norm * half_minor,
-                midpoint - perp_norm * half_minor,
-            ],
-            dtype=np.float32,
-        )
-    else:
-        minor_pts = np.array([midpoint, midpoint], dtype=np.float32)
-
-    return {
-        "roundness": roundness,
-        "major_pts": major_pts.astype(np.float32),
-        "minor_pts": minor_pts.astype(np.float32),
-        "center": (float(cx), float(cy)),
-        "orientation": float(orientation),
-        "major_length": major_len,
-        "minor_length": minor_len,
-    }
-
-
-def _render_feret_mask(info: Dict[str, Any], shape: Tuple[int, int]) -> Optional[np.ndarray]:
-    cx, cy = info.get("center", (None, None))
-    orientation = float(info.get("orientation", 0.0))
-    major_len = float(info.get("major_length", 0.0))
-    minor_len = float(info.get("minor_length", 0.0))
-
-    if cx is None or cy is None or major_len <= 0.0:
-        return None
-
-    mask = np.zeros(shape, dtype=bool)
-    major_radius = max(major_len / 2.0, 0.0)
-    minor_radius = max(minor_len / 2.0, 0.0)
-
-    try:
-        rr, cc = ellipse(
-            cy,
-            cx,
-            minor_radius,
-            major_radius,
-            shape=shape,
-            rotation=-orientation,
-        )
-        mask[rr, cc] = True
-    except Exception:
-        return None
-
-    return mask
-
-
-def _feret_info_from_region(region_mask: np.ndarray, min_points: int) -> Optional[Dict[str, Any]]:
-    contour = _extract_contour(region_mask, min_points)
-    if contour is None:
-        return None
-    return _compute_feret_geometry(contour)
-
-
-def _feret_mask_from_region(
-    region_mask: np.ndarray, min_roundness: float, min_points: int = 5
-) -> Tuple[Optional[np.ndarray], Optional[Dict[str, Any]]]:
-    info = _feret_info_from_region(region_mask, min_points)
-    if info is None:
-        return None, None
-    roundness = float(info.get("roundness", 0.0))
-    if roundness < min_roundness:
-        return None, None
-    feret_mask = _render_feret_mask(info, region_mask.shape)
-    if feret_mask is None:
-        return None, None
-    return feret_mask, info
+    return region_mask, None
 
 
 def _process_roi_data(
@@ -332,9 +176,6 @@ def _process_roi_data(
     ellipse_rows = [np.full(5, np.nan, dtype=np.float32) for _ in range(2)]
     ellipse_success = [False, False]
     contours = [None, None]
-    feret_major = [np.full(4, np.nan, dtype=np.float32) for _ in range(2)]
-    feret_minor = [np.full(4, np.nan, dtype=np.float32) for _ in range(2)]
-    feret_roundness = [np.nan, np.nan]
     centroids_roi = [None, None]
     reject_reason: Optional[str] = None
     separation_value = np.nan
@@ -346,9 +187,6 @@ def _process_roi_data(
             "ellipse_params": ellipse_rows,
             "ellipse_success": ellipse_success,
             "contours": contours,
-            "feret_major": feret_major,
-            "feret_minor": feret_minor,
-            "feret_roundness": feret_roundness,
             "reject_reason": "keypoint_fail",
         }
 
@@ -369,12 +207,12 @@ def _process_roi_data(
         if patch.size == 0:
             continue
 
-        binary = _local_threshold(patch, cfg)
+        binary, filtered_patch = _global_threshold(patch, cfg)
         if cfg.pre_threshold is not None:
-            base_mask = patch < cfg.pre_threshold
+            base_mask = filtered_patch < cfg.pre_threshold
             binary = np.logical_and(binary, base_mask)
 
-        region_mask, feret_info = _select_region(binary, (cx - x0, cy - y0), cfg)
+        region_mask, _ = _select_region(binary, (cx - x0, cy - y0), cfg)
         if region_mask is None:
             reject_reason = reject_reason or "no_region"
             continue
@@ -399,29 +237,11 @@ def _process_roi_data(
         contour = measure.find_contours(region_mask.astype(float), 0.5)
         if contour:
             best = max(contour, key=lambda c: c.shape[0])
-            if best.shape[0] >= 5:
+            if best.shape[0] >= cfg.contour_min_points:
                 best = best[:, ::-1]
                 best[:, 0] += x0
                 best[:, 1] += y0
                 contours[eye_idx] = best.astype(np.float32)
-
-        if feret_info is not None and feret_info.get("major_pts") is not None:
-            roundness_val = feret_info.get("roundness", np.nan)
-            major_pts_local = feret_info["major_pts"]
-            minor_pts_local = feret_info["minor_pts"]
-            if major_pts_local is not None:
-                major_pts = major_pts_local + np.array([x0, y0], dtype=np.float32)
-                feret_major[eye_idx] = np.array(
-                    [major_pts[0, 0], major_pts[0, 1], major_pts[1, 0], major_pts[1, 1]],
-                    dtype=np.float32,
-                )
-            if minor_pts_local is not None:
-                minor_pts = minor_pts_local + np.array([x0, y0], dtype=np.float32)
-                feret_minor[eye_idx] = np.array(
-                    [minor_pts[0, 0], minor_pts[0, 1], minor_pts[1, 0], minor_pts[1, 1]],
-                    dtype=np.float32,
-                )
-            feret_roundness[eye_idx] = float(roundness_val)
 
     valid = all(ellipse_success)
     if valid:
@@ -458,9 +278,6 @@ def _process_roi_data(
         ellipse_rows = [np.full(5, np.nan, dtype=np.float32) for _ in range(2)]
         ellipse_success = [False, False]
         contours = [None, None]
-        feret_major = [np.full(4, np.nan, dtype=np.float32) for _ in range(2)]
-        feret_minor = [np.full(4, np.nan, dtype=np.float32) for _ in range(2)]
-        feret_roundness = [np.nan, np.nan]
 
     return {
         "index": idx,
@@ -468,9 +285,6 @@ def _process_roi_data(
         "ellipse_params": ellipse_rows,
         "ellipse_success": ellipse_success,
         "contours": contours,
-        "feret_major": feret_major,
-        "feret_minor": feret_minor,
-        "feret_roundness": feret_roundness,
         "eye_separation": separation_value,
         "reject_reason": reject_reason,
     }
@@ -514,11 +328,6 @@ def segment_eye_masks(
     cfg = EyeSegmentationConfig()
     cfg = _apply_tuned_parameters(root, cfg, console)
     cfg = _apply_overrides(cfg, config_dict)
-    if cfg.threshold_block_size % 2 == 0:
-        cfg.threshold_block_size += 1
-    feret_round = cfg.feret_min_roundness if cfg.feret_min_roundness is not None else 0.0
-    cfg.feret_min_roundness = float(np.clip(feret_round, 0.0, 1.0))
-
     if "crop_runs" not in root:
         raise ValueError("crop_runs missing from Zarr; run crop stage first")
     crop_run = cfg.crop_run or root["crop_runs"].attrs.get("latest")
@@ -541,9 +350,6 @@ def segment_eye_masks(
     masks = np.zeros((total_rois, 2, roi_h, roi_w), dtype=np.uint8)
     ellipse_params = np.full((total_rois, 2, 5), np.nan, dtype=np.float32)
     ellipse_success = np.zeros((total_rois, 2), dtype=bool)
-    feret_axes_major = np.full((total_rois, 2, 4), np.nan, dtype=np.float32)
-    feret_axes_minor = np.full((total_rois, 2, 4), np.nan, dtype=np.float32)
-    feret_roundness = np.full((total_rois, 2), np.nan, dtype=np.float32)
     eye_separation = np.full((total_rois,), np.nan, dtype=np.float32)
 
     left_ptr = np.full((total_rois,), -1, dtype=np.int64)
@@ -697,13 +503,6 @@ def segment_eye_masks(
                 if result["ellipse_success"][eye_idx]:
                     ellipse_success[idx, eye_idx] = True
                     ellipse_params[idx, eye_idx] = result["ellipse_params"][eye_idx]
-                feret_axes_major[idx, eye_idx] = np.asarray(
-                    result["feret_major"][eye_idx], dtype=np.float32
-                )
-                feret_axes_minor[idx, eye_idx] = np.asarray(
-                    result["feret_minor"][eye_idx], dtype=np.float32
-                )
-                feret_roundness[idx, eye_idx] = result["feret_roundness"][eye_idx]
                 contour = result["contours"][eye_idx]
                 if contour is not None:
                     contour = np.asarray(contour, dtype=np.float32)
@@ -753,24 +552,6 @@ def segment_eye_masks(
     run_group.create_array(
         "ellipse_success",
         data=ellipse_success,
-        chunks=(min(1024, total_rois), 2),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "feret_axes_major",
-        data=feret_axes_major,
-        chunks=(min(1024, total_rois), 2, 4),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "feret_axes_minor",
-        data=feret_axes_minor,
-        chunks=(min(1024, total_rois), 2, 4),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "feret_roundness",
-        data=feret_roundness,
         chunks=(min(1024, total_rois), 2),
         overwrite=True,
     )

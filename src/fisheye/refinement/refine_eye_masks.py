@@ -37,10 +37,6 @@ from scipy.ndimage import distance_transform_edt, gaussian_filter, median_filter
 from skimage import measure, morphology
 from collections import Counter
 
-from ..segmentation.eye_segmentation import (
-    _extract_contour,
-    _feret_mask_from_region,
-)
 from ..shared.mask_source import load_mask_bundle
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
@@ -113,6 +109,16 @@ def _append_reason_tag(reason: Optional[str], tag: str) -> str:
     if tag in parts:
         return reason
     return f"{reason}|{tag}"
+
+
+def _extract_contour(mask: np.ndarray, min_points: int) -> Optional[np.ndarray]:
+    contours = measure.find_contours(mask.astype(float), 0.5)
+    if not contours:
+        return None
+    contour = max(contours, key=lambda c: c.shape[0])
+    if contour.shape[0] < min_points:
+        return None
+    return contour[:, ::-1]  # Convert to (x, y)
 
 def _largest_component(mask: np.ndarray) -> np.ndarray:
     """Return the largest 8-connected component of a boolean mask."""
@@ -281,9 +287,6 @@ class ROIOutput:
     masks: np.ndarray  # (2, H, W) uint8
     ellipse_params: np.ndarray  # (2, 5) float32
     ellipse_success: np.ndarray  # (2,) bool
-    feret_major: np.ndarray  # (2, 4) float32
-    feret_minor: np.ndarray  # (2, 4) float32
-    feret_roundness: np.ndarray  # (2,) float32
     centroids: np.ndarray  # (2, 2) float32 (x, y) or nan
     contours: Tuple[Optional[np.ndarray], Optional[np.ndarray]]
     eye_separation: float
@@ -386,24 +389,20 @@ def _split_mask_by_heading(
     return left_mask, right_mask
 
 
-def _measure_mask(mask: np.ndarray, min_contour_points: int = 5) -> Tuple[bool, np.ndarray, np.ndarray, np.ndarray, float, np.ndarray, Optional[np.ndarray]]:
+def _measure_mask(mask: np.ndarray, min_contour_points: int = 5) -> Tuple[bool, np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """Extract metrics from a binary mask."""
 
     if mask.sum() == 0:
         ellipse = np.full(5, np.nan, dtype=np.float32)
-        feret_major = np.full(4, np.nan, dtype=np.float32)
-        feret_minor = np.full(4, np.nan, dtype=np.float32)
         centroid = np.full(2, np.nan, dtype=np.float32)
-        return False, ellipse, feret_major, feret_minor, float("nan"), centroid, None
+        return False, ellipse, centroid, None
 
     region_mask = mask.astype(np.uint8)
     props = measure.regionprops(region_mask)
     if not props:
         ellipse = np.full(5, np.nan, dtype=np.float32)
-        feret_major = np.full(4, np.nan, dtype=np.float32)
-        feret_minor = np.full(4, np.nan, dtype=np.float32)
         centroid = np.full(2, np.nan, dtype=np.float32)
-        return False, ellipse, feret_major, feret_minor, float("nan"), centroid, None
+        return False, ellipse, centroid, None
 
     region = props[0]
     centroid = np.array([float(region.centroid[1]), float(region.centroid[0])], dtype=np.float32)
@@ -418,31 +417,11 @@ def _measure_mask(mask: np.ndarray, min_contour_points: int = 5) -> Tuple[bool, 
         dtype=np.float32,
     )
 
-    feret_major = np.full(4, np.nan, dtype=np.float32)
-    feret_minor = np.full(4, np.nan, dtype=np.float32)
-    feret_roundness = float("nan")
-
-    feret_mask, info = _feret_mask_from_region(region_mask, 0.0)
-    if feret_mask is not None and info:
-        feret_roundness = float(info.get("roundness", float("nan")))
-        major_pts = info.get("major_pts")
-        minor_pts = info.get("minor_pts")
-        if isinstance(major_pts, np.ndarray) and major_pts.shape == (2, 2):
-            feret_major = np.array(
-                [major_pts[0, 0], major_pts[0, 1], major_pts[1, 0], major_pts[1, 1]],
-                dtype=np.float32,
-            )
-        if isinstance(minor_pts, np.ndarray) and minor_pts.shape == (2, 2):
-            feret_minor = np.array(
-                [minor_pts[0, 0], minor_pts[0, 1], minor_pts[1, 0], minor_pts[1, 1]],
-                dtype=np.float32,
-            )
-
     contour = _extract_contour(mask.astype(float), min_contour_points)
     if contour is not None:
         contour = contour.astype(np.float32)
 
-    return True, ellipse, feret_major, feret_minor, feret_roundness, centroid, contour
+    return True, ellipse, centroid, contour
 
 
 def _compute_roi_metrics(
@@ -593,9 +572,6 @@ def _refine_roi(
     masks_out = np.zeros((2, roi_h, roi_w), dtype=np.uint8)
     ellipse_params = np.full((2, 5), np.nan, dtype=np.float32)
     ellipse_success = np.zeros(2, dtype=bool)
-    feret_major = np.full((2, 4), np.nan, dtype=np.float32)
-    feret_minor = np.full((2, 4), np.nan, dtype=np.float32)
-    feret_roundness = np.full(2, np.nan, dtype=np.float32)
     centroids = np.full((2, 2), np.nan, dtype=np.float32)
 
     def _append_reason(reason_val: Optional[str], tag: str) -> str:
@@ -612,17 +588,11 @@ def _refine_roi(
             (
                 success,
                 ellipse,
-                major,
-                minor,
-                roundness,
                 centroid,
                 contour,
             ) = _measure_mask(mask_bool.astype(np.uint8))
             ellipse_success[eye_idx] = success
             ellipse_params[eye_idx] = ellipse
-            feret_major[eye_idx] = major
-            feret_minor[eye_idx] = minor
-            feret_roundness[eye_idx] = roundness
             centroids[eye_idx] = centroid
             if contour is not None:
                 if eye_idx == 0:
@@ -676,9 +646,6 @@ def _refine_roi(
             masks_out,
             ellipse_params,
             ellipse_success,
-            feret_major,
-            feret_minor,
-            feret_roundness,
             centroids,
             contours,
             separation,
@@ -828,18 +795,12 @@ def _refine_roi(
         (
             success,
             ellipse,
-            major,
-            minor,
-            roundness,
             centroid,
             contour,
         ) = _measure_mask(mask.astype(np.uint8))
 
         ellipse_success[eye_idx] = success
         ellipse_params[eye_idx] = ellipse
-        feret_major[eye_idx] = major
-        feret_minor[eye_idx] = minor
-        feret_roundness[eye_idx] = roundness
         centroids[eye_idx] = centroid
         contours[eye_idx] = contour
 
@@ -886,9 +847,6 @@ def _refine_roi(
         masks_out,
         ellipse_params,
         ellipse_success,
-        feret_major,
-        feret_minor,
-        feret_roundness,
         centroids,
         (contours[0], contours[1]),
         eye_separation,
@@ -978,9 +936,6 @@ def _process_and_write_chunk(
     masks_chunk = np.stack([roi_output.masks for _, roi_output in results], axis=0).astype(np.uint8, copy=False)
     ellipse_params_chunk = np.stack([roi_output.ellipse_params for _, roi_output in results], axis=0)
     ellipse_success_chunk = np.stack([roi_output.ellipse_success for _, roi_output in results], axis=0)
-    feret_major_chunk = np.stack([roi_output.feret_major for _, roi_output in results], axis=0)
-    feret_minor_chunk = np.stack([roi_output.feret_minor for _, roi_output in results], axis=0)
-    feret_roundness_chunk = np.stack([roi_output.feret_roundness for _, roi_output in results], axis=0)
     eye_separation_chunk = np.array([roi_output.eye_separation for _, roi_output in results], dtype=np.float32)
 
     if write_probabilities:
@@ -997,9 +952,6 @@ def _process_and_write_chunk(
     run_group["masks_roi"][start:stop] = masks_chunk
     run_group["ellipse_params"][start:stop] = ellipse_params_chunk.astype(np.float32, copy=False)
     run_group["ellipse_success"][start:stop] = ellipse_success_chunk.astype(bool, copy=False)
-    run_group["feret_axes_major"][start:stop] = feret_major_chunk.astype(np.float32, copy=False)
-    run_group["feret_axes_minor"][start:stop] = feret_minor_chunk.astype(np.float32, copy=False)
-    run_group["feret_roundness"][start:stop] = feret_roundness_chunk.astype(np.float32, copy=False)
     run_group["eye_separation"][start:stop] = eye_separation_chunk
 
     if write_probabilities and probs_chunk_out is not None:
@@ -1264,27 +1216,6 @@ def refine_eye_masks(
         chunks=(chunk_rois, 2),
         dtype=np.dtype(bool),
         fill_value=False,
-    )
-    _prepare_dataset(
-        "feret_axes_major",
-        shape=(total_rois, 2, 4),
-        chunks=(chunk_rois, 2, 4),
-        dtype=np.dtype(np.float32),
-        fill_value=np.float32(np.nan),
-    )
-    _prepare_dataset(
-        "feret_axes_minor",
-        shape=(total_rois, 2, 4),
-        chunks=(chunk_rois, 2, 4),
-        dtype=np.dtype(np.float32),
-        fill_value=np.float32(np.nan),
-    )
-    _prepare_dataset(
-        "feret_roundness",
-        shape=(total_rois, 2),
-        chunks=(chunk_rois, 2),
-        dtype=np.dtype(np.float32),
-        fill_value=np.float32(np.nan),
     )
     _prepare_dataset(
         "eye_separation",

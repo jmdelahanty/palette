@@ -3,46 +3,35 @@
 
 from __future__ import annotations
 
+# Limit threading BEFORE importing numpy/cv2/skimage to prevent using all CPU cores
+import os
+os.environ.setdefault('OMP_NUM_THREADS', '2')
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '2')
+os.environ.setdefault('MKL_NUM_THREADS', '2')
+
 import argparse
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
 
 import cv2
+
+# Limit OpenCV threads
+cv2.setNumThreads(2)
 import numpy as np
 import zarr
 from skimage import filters, measure, morphology
 from datetime import datetime, timezone
 
 
-SLIDER_MAX_BLOCK = 20  # maps to block size = 3 + 2 * value
-SLIDER_MAX_OFFSET = 200  # maps to offset in range [-20, 20]
 SLIDER_MAX_PADDING = 40
 SLIDER_MAX_AREA = 500
 SLIDER_MAX_RADIUS = 10
 SLIDER_MAX_PRETHRESH = 255
-SLIDER_MAX_ROUNDNESS = 100
 SLIDER_MAX_EYE_GAP = 200
-SLIDER_MAX_SCALE = 10  # corresponds to 0.5x .. 5x
 SLIDER_MAX_SOBEL = 100  # maps to strength in range [0, 1]
 DEBUG_PANEL_SCALE = 5
 DEBUG_PANEL_MARGIN = 10
 DEBUG_PANEL_SPACING = 20
-
-
-def block_from_slider(val: int) -> int:
-    return max(3, 3 + 2 * val)
-
-
-def offset_from_slider(val: int) -> float:
-    return (val - 100) / 5.0
-
-
-def slider_from_offset(offset: float) -> int:
-    return int(np.clip(round(offset * 5 + 100), 0, SLIDER_MAX_OFFSET))
-
-
-def roundness_from_slider(val: int) -> float:
-    return np.clip(val / SLIDER_MAX_ROUNDNESS, 0.0, 1.0)
 
 
 def axis_roundness(major: float, minor: float) -> float:
@@ -62,7 +51,7 @@ def save_eye_mask_params(zarr_path: Path, params: Dict[str, Any]) -> Tuple[bool,
 
         metadata = dict(analysis_meta.attrs) if analysis_meta.attrs else {}
         metadata['eye_mask_tuning'] = {
-            'method': 'adaptive_threshold_with_feret',
+            'method': 'global_threshold_otsu',
             'version': '1.0',
             'tuned_timestamp': datetime.now(timezone.utc).isoformat(),
             'tuned_parameters': params['tuned_parameters'],
@@ -80,9 +69,12 @@ def save_eye_mask_params(zarr_path: Path, params: Dict[str, Any]) -> Tuple[bool,
     except Exception as exc:
         return False, f"Error saving parameters: {exc}"
 
-def adaptive_mask(patch: np.ndarray, block_size: int, offset: float) -> np.ndarray:
-    thresh = filters.threshold_local(patch, block_size=block_size, offset=offset)
-    return patch < thresh  # Eyes are DARKER than background
+def global_mask(patch: np.ndarray) -> Tuple[np.ndarray, float]:
+    try:
+        threshold_value = float(filters.threshold_otsu(patch))
+    except ValueError:
+        threshold_value = float(np.mean(patch))
+    return patch < threshold_value, threshold_value  # Eyes are DARKER than background
 
 
 def apply_sobel_filter(patch: np.ndarray, strength: float) -> Tuple[np.ndarray, Optional[np.ndarray]]:
@@ -106,54 +98,107 @@ def apply_sobel_filter(patch: np.ndarray, strength: float) -> Tuple[np.ndarray, 
     return filtered_uint8, sobel_visual
 
 
-def create_feret_ellipse_mask(contour: np.ndarray, shape: Tuple[int, int]) -> Tuple[np.ndarray, float, float, float]:
-    """Create an ellipse mask based on Feret diameter.
+def compute_heading_deg(kp: np.ndarray) -> Optional[float]:
+    if kp.shape[0] < 3:
+        return None
+    bladder = kp[0]
+    eye_left = kp[1]
+    eye_right = kp[2]
+    if not (np.all(np.isfinite(bladder)) and np.all(np.isfinite(eye_left)) and np.all(np.isfinite(eye_right))):
+        return None
+    eye_mean = (eye_left + eye_right) / 2.0
+    head_vec = eye_mean - bladder
+    if not np.any(np.isfinite(head_vec)):
+        return None
+    dx = float(head_vec[0])
+    dy = float(head_vec[1])
+    if dx == 0.0 and dy == 0.0:
+        return None
+    return float(np.degrees(np.arctan2(-dy, dx)))
 
-    Returns:
-        mask: Boolean mask of the Feret ellipse.
-        roundness: minor-to-major axis ratio (0-1).
-    """
-    from skimage.draw import ellipse
-    
-    # Get Feret diameter
-    p1, p2, max_dist = calculate_max_feret(contour)
-    if p1 is None or p2 is None or max_dist <= 0:
-        return np.zeros(shape, dtype=bool), 0.0, 0.0, 0.0
-    
-    # Midpoint is the center
-    center = (p1 + p2) / 2
-    cy, cx = center[1], center[0]  # Note: y, x order for ellipse function
-    
-    # Major axis length is the Feret diameter
-    major_len = max_dist
-    
-    # Calculate orientation from Feret line
-    feret_vec = p2 - p1
-    orientation = np.arctan2(feret_vec[1], feret_vec[0])
-    
-    # Calculate perpendicular extent for minor axis
-    feret_vec_norm = feret_vec / np.linalg.norm(feret_vec)
-    perp_vec = np.array([-feret_vec_norm[1], feret_vec_norm[0]])
-    projections = np.dot(contour - center, perp_vec)
-    minor_len = np.max(projections) - np.min(projections)
-    
-    # Create mask
-    mask = np.zeros(shape, dtype=bool)
-    
-    roundness = axis_roundness(major_len, minor_len)
-    
-    try:
-        rr, cc = ellipse(
-            cy, cx,
-            minor_len / 2, major_len / 2,
-            shape=shape,
-            rotation=-orientation
-        )
-        mask[rr, cc] = True
-    except Exception:
-        pass
-    
-    return mask, roundness, float(major_len), float(minor_len)
+
+def rotate_image_and_points(
+    image: np.ndarray,
+    points: np.ndarray,
+    angle_deg: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    h, w = image.shape[:2]
+    center = (w / 2.0, h / 2.0)
+    mat = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
+    rotated = cv2.warpAffine(
+        image,
+        mat,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    pts = points.astype(np.float64, copy=True)
+    mask = np.all(np.isfinite(pts), axis=1)
+    if np.any(mask):
+        pts_xy = pts[mask]
+        rotated_xy = (pts_xy @ mat[:, :2].T) + mat[:, 2]
+        pts[mask] = rotated_xy
+    return rotated, pts
+
+
+def max_distance_and_perp_chord(
+    mask: np.ndarray,
+    max_points: int = 500,
+) -> Optional[Tuple[np.ndarray, np.ndarray, float, Optional[np.ndarray], Optional[np.ndarray]]]:
+    contours = measure.find_contours(mask.astype(float), 0.5)
+    if not contours:
+        return None
+    contour = max(contours, key=lambda c: c.shape[0])
+    if contour.shape[0] < 2:
+        return None
+    points_full = contour[:, ::-1]  # (x, y)
+    points = points_full
+    if points.shape[0] > max_points:
+        idx = np.linspace(0, points.shape[0] - 1, max_points).astype(int)
+        points = points[idx]
+
+    diffs = points[:, None, :] - points[None, :, :]
+    dist2 = np.sum(diffs * diffs, axis=2)
+    max_idx = np.unravel_index(int(np.argmax(dist2)), dist2.shape)
+    p1 = points[max_idx[0]]
+    p2 = points[max_idx[1]]
+    max_dist = float(np.sqrt(dist2[max_idx]))
+
+    d = p2 - p1
+    norm = float(np.linalg.norm(d))
+    if norm == 0.0:
+        return p1, p2, max_dist, None, None
+    n = d / norm  # line normal for perpendicular chord
+    u = np.array([-n[1], n[0]], dtype=np.float64)  # line direction for perpendicular chord
+    mid = (p1 + p2) / 2.0
+
+    intersections: list[np.ndarray] = []
+    for i in range(points_full.shape[0]):
+        a = points_full[i]
+        b = points_full[(i + 1) % points_full.shape[0]]
+        da = float(np.dot(a - mid, n))
+        db = float(np.dot(b - mid, n))
+        if da == 0.0 and db == 0.0:
+            continue
+        if da * db > 0.0:
+            continue
+        denom = da - db
+        if denom == 0.0:
+            continue
+        t = da / denom
+        if 0.0 <= t <= 1.0:
+            intersections.append(a + t * (b - a))
+
+    if len(intersections) < 2:
+        return p1, p2, max_dist, None, None
+
+    proj = [float(np.dot(p - mid, u)) for p in intersections]
+    min_idx = int(np.argmin(proj))
+    max_idx = int(np.argmax(proj))
+    perp_p1 = intersections[min_idx]
+    perp_p2 = intersections[max_idx]
+    return p1, p2, max_dist, perp_p1, perp_p2
 
 
 def select_region(
@@ -163,9 +208,6 @@ def select_region(
     max_area: Optional[int],
     closing: int,
     opening: int,
-    use_feret_ellipse: bool = False,
-    min_roundness: float = 0.0,
-    compute_feret_axes: bool = False,
 ) -> Tuple[Optional[np.ndarray], dict]:
     if closing > 0:
         mask = morphology.binary_closing(mask, morphology.disk(closing))
@@ -200,66 +242,13 @@ def select_region(
 
     region_mask = (labeled == best.label)
 
-    selection_info: dict = {'used_feret': False, 'feret_axes': False, 'feret_mask_candidate': None}
-
-    if use_feret_ellipse or compute_feret_axes:
-        region_contours = measure.find_contours(region_mask.astype(float), 0.5)
-        if region_contours:
-            best_contour = max(region_contours, key=lambda c: c.shape[0])
-            best_contour = best_contour[:, ::-1]  # convert to (x, y)
-            feret_mask, feret_roundness, major_len, minor_len = create_feret_ellipse_mask(best_contour, mask.shape)
-            selection_info['feret_mask_candidate'] = feret_mask
-            selection_info['feret_roundness'] = feret_roundness
-            selection_info['feret_major_len'] = major_len
-            selection_info['feret_minor_len'] = minor_len
-            if feret_roundness >= min_roundness:
-                if use_feret_ellipse and feret_mask is not None:
-                    selection_info['used_feret'] = True
-                    selection_info['feret_axes'] = True
-                    selection_info['roundness'] = feret_roundness
-                    return feret_mask, selection_info
-                if compute_feret_axes:
-                    selection_info['feret_axes'] = True
-                    selection_info['roundness'] = feret_roundness
-
-    # Fallback to original segmentation
     major = best.major_axis_length
     minor = best.minor_axis_length
-    if 'roundness' not in selection_info:
-        selection_info['roundness'] = axis_roundness(major, minor)
-    if 'feret_major_len' not in selection_info:
-        feret_major_len = float(major)
-        selection_info['feret_major_len'] = feret_major_len
-    if 'feret_minor_len' not in selection_info:
-        feret_minor_len = float(minor)
-        selection_info['feret_minor_len'] = feret_minor_len
-    if 'feret_roundness' not in selection_info:
-        selection_info['feret_roundness'] = None
-    if 'feret_mask_candidate' not in selection_info:
-        selection_info['feret_mask_candidate'] = None
+    selection_info: dict = {'roundness': axis_roundness(major, minor)}
     return region_mask, selection_info
 
 
-def calculate_max_feret(contour: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
-    """
-    Calculate the maximum Feret diameter (longest distance between any two points).
-    Returns: (point1, point2, distance)
-    """
-    max_dist = 0
-    p1, p2 = None, None
-    
-    # Check all pairs of contour points
-    for i in range(len(contour)):
-        for j in range(i + 1, len(contour)):
-            dist = np.linalg.norm(contour[i] - contour[j])
-            if dist > max_dist:
-                max_dist = dist
-                p1, p2 = contour[i], contour[j]
-    
-    return p1, p2, max_dist
-
-
-def draw_overlay(roi_img: np.ndarray, masks: Tuple[np.ndarray, np.ndarray], contours: Tuple[Optional[np.ndarray], Optional[np.ndarray]], regions_info: Tuple[Optional[dict], Optional[dict]], feret_axes: Tuple[bool, bool]) -> np.ndarray:
+def draw_overlay(roi_img: np.ndarray, masks: Tuple[np.ndarray, np.ndarray], contours: Tuple[Optional[np.ndarray], Optional[np.ndarray]], regions_info: Tuple[Optional[dict], Optional[dict]]) -> np.ndarray:
     base = cv2.cvtColor(roi_img.astype(np.uint8), cv2.COLOR_GRAY2BGR)
     overlay = base.copy()
 
@@ -277,71 +266,34 @@ def draw_overlay(roi_img: np.ndarray, masks: Tuple[np.ndarray, np.ndarray], cont
         pts = contour.astype(np.int32).reshape(-1, 1, 2)
         cv2.polylines(output, [pts], isClosed=True, color=colors[idx], thickness=1)
     
-    # Draw major/minor axes or Feret diameter
+    # Draw moment-based major/minor axes
     for idx, region_info in enumerate(regions_info):
         if region_info is None:
             continue
-        
+
         color = colors[idx]
-        
-        if feret_axes[idx] and contours[idx] is not None:
-            # Use maximum Feret diameter
-            p1, p2, max_dist = calculate_max_feret(contours[idx])
-            
-            # Draw the longest line
-            cv2.line(output, tuple(p1.astype(int)), tuple(p2.astype(int)), color, 2)
-            
-            # Calculate perpendicular line at midpoint
-            midpoint = (p1 + p2) / 2
-            
-            # Vector along Feret diameter
-            feret_vec = p2 - p1
-            feret_len = np.linalg.norm(feret_vec)
-            feret_vec_norm = feret_vec / feret_len
-            
-            # Perpendicular vector
-            perp_vec = np.array([-feret_vec_norm[1], feret_vec_norm[0]])
-            
-            # Find extent in perpendicular direction by projecting contour points
-            projections = np.dot(contours[idx] - midpoint, perp_vec)
-            perp_len = np.max(projections) - np.min(projections)
-            
-            # Draw perpendicular line
-            perp_p1 = midpoint + perp_vec * perp_len / 2
-            perp_p2 = midpoint - perp_vec * perp_len / 2
-            cv2.line(output, tuple(perp_p1.astype(int)), tuple(perp_p2.astype(int)), color, 1)
-            
-            # Draw center point at midpoint
-            cv2.circle(output, tuple(midpoint.astype(int)), 3, color, -1)
-        else:
-            # Use moment-based major/minor axes
-            cy, cx = region_info['centroid']
-            orientation = region_info['orientation']
-            major_len = region_info['major_axis_length']
-            minor_len = region_info['minor_axis_length']
-            
-            # Calculate endpoints of major axis
-            cos_angle = np.cos(orientation)
-            sin_angle = np.sin(orientation)
-            
-            # Major axis endpoints
-            major_dx = cos_angle * major_len / 2
-            major_dy = sin_angle * major_len / 2
-            major_p1 = (int(cx - major_dx), int(cy - major_dy))
-            major_p2 = (int(cx + major_dx), int(cy + major_dy))
-            
-            # Minor axis endpoints (perpendicular to major)
-            minor_dx = -sin_angle * minor_len / 2
-            minor_dy = cos_angle * minor_len / 2
-            minor_p1 = (int(cx - minor_dx), int(cy - minor_dy))
-            minor_p2 = (int(cx + minor_dx), int(cy + minor_dy))
-            
-            # Draw major axis (solid line)
-            cv2.line(output, major_p1, major_p2, color, 2)
-            # Draw minor axis (dashed-like, shorter segments)
-            cv2.line(output, minor_p1, minor_p2, color, 1)
-            # Draw center point
-            cv2.circle(output, (int(cx), int(cy)), 3, color, -1)
+
+        cy, cx = region_info['centroid']
+        orientation = region_info['orientation']
+        major_len = region_info['major_axis_length']
+        minor_len = region_info['minor_axis_length']
+
+        cos_angle = np.cos(orientation)
+        sin_angle = np.sin(orientation)
+
+        major_dx = cos_angle * major_len / 2
+        major_dy = sin_angle * major_len / 2
+        major_p1 = (int(cx - major_dx), int(cy - major_dy))
+        major_p2 = (int(cx + major_dx), int(cy + major_dy))
+
+        minor_dx = -sin_angle * minor_len / 2
+        minor_dy = cos_angle * minor_len / 2
+        minor_p1 = (int(cx - minor_dx), int(cy - minor_dy))
+        minor_p2 = (int(cx + minor_dx), int(cy + minor_dy))
+
+        cv2.line(output, major_p1, major_p2, color, 2)
+        cv2.line(output, minor_p1, minor_p2, color, 1)
+        cv2.circle(output, (int(cx), int(cy)), 3, color, -1)
 
     return output
 
@@ -353,17 +305,11 @@ def create_debug_panel(
     region_mask: Optional[np.ndarray],
     center: Tuple[float, float],
     label: str,
-    block_size: int,
-    offset: float,
     pre_thresh: Optional[int],
     sobel_panel: Optional[np.ndarray] = None,
-    feret_mask: Optional[np.ndarray] = None,
-    show_feret_panel: bool = False
 ) -> np.ndarray:
     """Create a debug panel showing all processing steps for one eye."""
     h, w = original_patch.shape
-
-    thresh_values = filters.threshold_local(filtered_patch, block_size=block_size, offset=offset)
 
     text_height = 16  # reserve space for labels (scaled later)
     panel_total_w = w + 2 * DEBUG_PANEL_MARGIN
@@ -381,12 +327,17 @@ def create_debug_panel(
     panels.append(("Original", original_panel))
 
     if sobel_panel is not None:
-        panels.append(("Filtered", to_bgr(filtered_patch)))
-        panels.append(("Sobel", to_bgr(sobel_panel)))
+        panels.append(("Sobel (edges)", to_bgr(sobel_panel)))
+        panels.append(("Edge-adjusted", to_bgr(filtered_patch)))
 
-    thresh_display = ((thresh_values - thresh_values.min()) /
-                      (thresh_values.max() - thresh_values.min() + 1e-8) * 255).astype(np.uint8)
-    panels.append(("Threshold", to_bgr(thresh_display)))
+    if pre_thresh is None:
+        pre_thresh_label = "PreThresh (off)"
+        pre_thresh_display = np.zeros_like(filtered_patch, dtype=np.uint8)
+    else:
+        pre_thresh_label = f"PreThresh<{int(pre_thresh)}"
+        pre_mask = filtered_patch < pre_thresh
+        pre_thresh_display = (pre_mask.astype(np.uint8) * 255)
+    panels.append((pre_thresh_label, to_bgr(pre_thresh_display)))
 
     binary_display = (binary.astype(np.uint8) * 255)
     if pre_thresh is not None:
@@ -404,13 +355,96 @@ def create_debug_panel(
         cv2.putText(region_display, "NO REGION", (5, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
     panels.append(("Segmented", region_display))
 
-    if show_feret_panel:
-        if feret_mask is not None:
-            feret_display = cv2.cvtColor((feret_mask.astype(np.uint8) * 255), cv2.COLOR_GRAY2BGR)
-        else:
-            feret_display = np.zeros((h, w, 3), dtype=np.uint8)
-            cv2.putText(feret_display, "NO FERET", (5, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
-        panels.append(("Feret", feret_display))
+    overlay_panel = to_bgr(original_patch).copy()
+    major_color = (0, 200, 255)
+    minor_color = (0, 0, 255)
+    if region_mask is not None:
+        overlay_color = np.zeros_like(overlay_panel, dtype=np.uint8)
+        overlay_color[region_mask] = (0, 255, 0)
+        overlay_panel = cv2.addWeighted(overlay_panel, 1.0, overlay_color, 0.4, 0)
+    else:
+        cv2.putText(overlay_panel, "NO REGION", (5, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
+    panels.append(("Overlay", overlay_panel))
+
+    overlay_axes_panel = overlay_panel.copy()
+    if region_mask is not None:
+        region_props = measure.regionprops(region_mask.astype(np.uint8))
+        if region_props:
+            region = region_props[0]
+            cy, cx = region.centroid
+            orientation = region.orientation
+            major_len = region.major_axis_length
+            minor_len = region.minor_axis_length
+            center_pt = (int(round(cx)), int(round(cy)))
+            cos_angle = np.cos(orientation)
+            sin_angle = np.sin(orientation)
+            major_dx = cos_angle * major_len / 2
+            major_dy = sin_angle * major_len / 2
+            minor_dx = -sin_angle * minor_len / 2
+            minor_dy = cos_angle * minor_len / 2
+            major_p1 = (int(round(cx - major_dx)), int(round(cy - major_dy)))
+            major_p2 = (int(round(cx + major_dx)), int(round(cy + major_dy)))
+            minor_p1 = (int(round(cx - minor_dx)), int(round(cy - minor_dy)))
+            minor_p2 = (int(round(cx + minor_dx)), int(round(cy + minor_dy)))
+            cv2.line(overlay_axes_panel, major_p1, major_p2, major_color, 1)
+            cv2.line(overlay_axes_panel, minor_p1, minor_p2, minor_color, 1)
+            cv2.circle(overlay_axes_panel, center_pt, 2, major_color, -1)
+    panels.append(("Overlay+Axes", overlay_axes_panel))
+
+    max_dist_panel = to_bgr(original_patch).copy()
+    max_dist_label = "Max Dist"
+    if region_mask is not None:
+        segment = max_distance_and_perp_chord(region_mask)
+        if segment is not None:
+            p1, p2, dist, perp_p1, perp_p2 = segment
+            max_dist_label = f"Max Dist {dist:.1f}px"
+            p1_i = (int(round(p1[0])), int(round(p1[1])))
+            p2_i = (int(round(p2[0])), int(round(p2[1])))
+            cv2.line(max_dist_panel, p1_i, p2_i, (220, 220, 220), 1)
+            cv2.circle(max_dist_panel, p1_i, 2, (220, 220, 220), -1)
+            cv2.circle(max_dist_panel, p2_i, 2, (220, 220, 220), -1)
+            if perp_p1 is not None and perp_p2 is not None:
+                q1_i = (int(round(perp_p1[0])), int(round(perp_p1[1])))
+                q2_i = (int(round(perp_p2[0])), int(round(perp_p2[1])))
+                cv2.line(max_dist_panel, q1_i, q2_i, (255, 0, 0), 1)
+                cv2.circle(max_dist_panel, q1_i, 2, (255, 0, 0), -1)
+                cv2.circle(max_dist_panel, q2_i, 2, (255, 0, 0), -1)
+    panels.append((max_dist_label, max_dist_panel))
+
+    ellipse_panel = to_bgr(original_patch).copy()
+    ellipse_label = "Ellipse Fit"
+    ellipse_mask = region_mask
+
+    if ellipse_mask is not None:
+        region_props = measure.regionprops(ellipse_mask.astype(np.uint8))
+        if region_props:
+            region = region_props[0]
+            cy, cx = region.centroid
+            orientation = region.orientation
+            major_len = region.major_axis_length
+            minor_len = region.minor_axis_length
+            center_pt = (int(round(cx)), int(round(cy)))
+            axes = (
+                max(1, int(round(major_len / 2))),
+                max(1, int(round(minor_len / 2))),
+            )
+            angle_deg = float(np.degrees(orientation))
+            cos_angle = np.cos(orientation)
+            sin_angle = np.sin(orientation)
+            major_dx = cos_angle * major_len / 2
+            major_dy = sin_angle * major_len / 2
+            minor_dx = -sin_angle * minor_len / 2
+            minor_dy = cos_angle * minor_len / 2
+            major_p1 = (int(round(cx - major_dx)), int(round(cy - major_dy)))
+            major_p2 = (int(round(cx + major_dx)), int(round(cy + major_dy)))
+            minor_p1 = (int(round(cx - minor_dx)), int(round(cy - minor_dy)))
+            minor_p2 = (int(round(cx + minor_dx)), int(round(cy + minor_dy)))
+            cv2.line(ellipse_panel, major_p1, major_p2, major_color, 1)
+            cv2.line(ellipse_panel, minor_p1, minor_p2, minor_color, 1)
+            cv2.circle(ellipse_panel, center_pt, 2, major_color, -1)
+    else:
+        cv2.putText(ellipse_panel, "NO REGION", (5, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
+    panels.append((ellipse_label, ellipse_panel))
 
     num_panels = len(panels)
     total_width = num_panels * panel_total_w + (num_panels - 1) * DEBUG_PANEL_SPACING
@@ -467,6 +501,7 @@ def run_tuner(args: argparse.Namespace) -> None:
     roi_images = crop_group["roi_images"]
     keypoints = kp_group["keypoints_roi"][:]
     success = kp_group["detection_success"][:]
+    heading_vals = kp_group["heading"][:] if "heading" in kp_group else None
 
     total_rois = roi_images.shape[0]
     if total_rois == 0:
@@ -484,19 +519,14 @@ def run_tuner(args: argparse.Namespace) -> None:
     cv2.createTrackbar("ROI Index", main_window, 0, total_rois - 1, nothing)
     cv2.createTrackbar("ROI Padding", main_window, min(12, SLIDER_MAX_PADDING), SLIDER_MAX_PADDING, nothing)
     cv2.createTrackbar("PreThresh", main_window, 0, SLIDER_MAX_PRETHRESH, nothing)
-    cv2.createTrackbar("Block Size", main_window, 4, SLIDER_MAX_BLOCK, nothing)
-    cv2.createTrackbar("Offset", main_window, slider_from_offset(-10.0), SLIDER_MAX_OFFSET, nothing)
     cv2.createTrackbar("Sobel %", main_window, 0, SLIDER_MAX_SOBEL, nothing)
     cv2.createTrackbar("Min Area", main_window, 15, SLIDER_MAX_AREA, nothing)
     cv2.createTrackbar("Max Area", main_window, 0, SLIDER_MAX_AREA, nothing)  # 0 => None
     cv2.createTrackbar("Closing r", main_window, 3, SLIDER_MAX_RADIUS, nothing)
     cv2.createTrackbar("Opening r", main_window, 1, SLIDER_MAX_RADIUS, nothing)
-    cv2.createTrackbar("Min Round", main_window, 40, SLIDER_MAX_ROUNDNESS, nothing)
     cv2.createTrackbar("Min Gap", main_window, 4, SLIDER_MAX_EYE_GAP, nothing)
     cv2.createTrackbar("Max Gap", main_window, 0, SLIDER_MAX_EYE_GAP, nothing)  # 0 => unlimited
-    cv2.createTrackbar("Feret Axes", main_window, 0, 1, nothing)  # Toggle: compute Feret axes without replacing mask
-    cv2.createTrackbar("Feret Ellipse", main_window, 0, 1, nothing)  # Toggle: 0=off, 1=Feret-based ellipse
-    cv2.createTrackbar("Scale", main_window, 2, SLIDER_MAX_SCALE, nothing)  # 2 -> 1.0x
+    cv2.createTrackbar("Rotate ROI", main_window, 1, 1, nothing)
 
     roi_idx = max(0, min(total_rois - 1, args.roi_index))
     cv2.setTrackbarPos("ROI Index", main_window, roi_idx)
@@ -508,21 +538,17 @@ def run_tuner(args: argparse.Namespace) -> None:
     print("  n/p: Next/Previous ROI")
     print("  s: Save current parameters to Zarr metadata")
     print("  q/ESC: Quit")
-    print("  Feret Axes: Use Feret major/minor axes while keeping original mask (0=off, 1=on)")
-    print("  Feret Ellipse: Replace mask with Feret-based ellipse (0=off, 1=on)")
-    print("  Min Round: Require Feret ellipse minor/major ratio >= slider value (0-1) when Feret Axes/Ellipse enabled")
+    print("  Rotate ROI: Align heading to 0° for tuner-only preview")
     print("  Min Gap / Max Gap: enforce eye-center separation bounds (Max Gap=0 disables upper limit)")
-    print("  Sobel %: Blend Sobel edge subtraction into adaptive thresholding (0=off)")
-    print("  Scale: Adjust display magnification (0.5x to 5x)")
+    print("  Sobel %: Blend Sobel edge subtraction into global thresholding (0=off)")
+    print("  Axis colors: Major (blue), Minor (red)")
     print("  Adjust other sliders to tune parameters\n")
 
     while True:
         roi_idx = cv2.getTrackbarPos("ROI Index", main_window)
         padding = cv2.getTrackbarPos("ROI Padding", main_window)
-        block_size = block_from_slider(cv2.getTrackbarPos("Block Size", main_window))
         pre_thresh_val = cv2.getTrackbarPos("PreThresh", main_window)
         pre_thresh = pre_thresh_val if pre_thresh_val > 0 else None
-        offset = offset_from_slider(cv2.getTrackbarPos("Offset", main_window))
         sobel_slider = cv2.getTrackbarPos("Sobel %", main_window)
         sobel_strength = sobel_slider / float(SLIDER_MAX_SOBEL) if SLIDER_MAX_SOBEL > 0 else 0.0
         min_area = cv2.getTrackbarPos("Min Area", main_window)
@@ -530,31 +556,36 @@ def run_tuner(args: argparse.Namespace) -> None:
         max_area = max_area_slider if max_area_slider > 0 else None
         closing = cv2.getTrackbarPos("Closing r", main_window)
         opening = cv2.getTrackbarPos("Opening r", main_window)
-        min_roundness = roundness_from_slider(cv2.getTrackbarPos("Min Round", main_window))
         min_gap_slider = cv2.getTrackbarPos("Min Gap", main_window)
         max_gap_slider = cv2.getTrackbarPos("Max Gap", main_window)
         min_gap = float(min_gap_slider)
         max_gap = float(max_gap_slider) if max_gap_slider > 0 else None
-        compute_feret_axes = cv2.getTrackbarPos("Feret Axes", main_window) > 0
-        use_feret_ellipse = cv2.getTrackbarPos("Feret Ellipse", main_window) > 0
-        scale_slider = cv2.getTrackbarPos("Scale", main_window)
-        display_scale = max(1, scale_slider) / 2.0  # 0.5x .. 5x
 
         roi_img = np.asarray(roi_images[roi_idx])
-        kp = keypoints[roi_idx]
+        kp = np.asarray(keypoints[roi_idx])
         success_flag = success[roi_idx]
+        rotate_roi = cv2.getTrackbarPos("Rotate ROI", main_window) > 0
+        heading_deg = None
+        if heading_vals is not None:
+            heading_val = float(heading_vals[roi_idx])
+            if np.isfinite(heading_val):
+                heading_deg = heading_val
+        if heading_deg is None:
+            heading_deg = compute_heading_deg(kp)
+        if rotate_roi and heading_deg is not None:
+            roi_img, kp = rotate_image_and_points(roi_img, kp, -heading_deg)
 
         # Main display
         display = cv2.cvtColor(roi_img.astype(np.uint8), cv2.COLOR_GRAY2BGR)
         info_lines = [f"ROI {roi_idx+1}/{total_rois}"]
         info_lines.append(
-            f"Block: {block_size}, Offset: {offset:.1f}, PreThresh: {pre_thresh or 'None'} (keep DARKER), "
-            f"Sobel: {sobel_strength:.2f}"
+            f"Threshold: Otsu, PreThresh: {pre_thresh or 'None'} (keep DARKER), Sobel: {sobel_strength:.2f}"
         )
-        mask_mode = "Feret Ellipse" if use_feret_ellipse else "Original Seg"
-        axes_mode = "Feret" if (use_feret_ellipse or compute_feret_axes) else "Moment"
-        roundness_text = f" | Round≥{min_roundness:.2f}" if (use_feret_ellipse or compute_feret_axes) else ""
-        info_lines.append(f"Mask: {mask_mode} | Axes: {axes_mode}{roundness_text}")
+        info_lines.append("Mask: Original Seg | Axes: Moment")
+        if rotate_roi and heading_deg is not None:
+            info_lines.append(f"Rotation: {heading_deg:.1f}° -> 0°")
+        elif rotate_roi:
+            info_lines.append("Rotation: on (heading missing)")
         if max_gap is None:
             info_lines.append(f"Gap limits: min≥{min_gap:.1f}px | max=None")
         else:
@@ -567,7 +598,6 @@ def run_tuner(args: argparse.Namespace) -> None:
             masks = [None, None]
             contours = [None, None]
             regions_info = [None, None]
-            feret_axes_flags = [False, False]
             eye_labels = ["Left", "Right"]
             eye_centers_roi = [None, None]
 
@@ -591,15 +621,10 @@ def run_tuner(args: argparse.Namespace) -> None:
 
                 filtered_patch, sobel_panel = apply_sobel_filter(patch, sobel_strength)
 
-                binary = adaptive_mask(filtered_patch, block_size, offset)
+                binary, threshold_value = global_mask(filtered_patch)
                 if pre_thresh is not None:
                     # PreThresh: keep pixels DARKER than this value (eyes are dark)
-                    binary = np.logical_and(binary, patch < pre_thresh)
-                
-                # Get original segmented region for comparison
-                region_mask_original, _ = select_region(
-                    binary, (cx - x0, cy - y0), min_area, max_area, closing, opening
-                )
+                    binary = np.logical_and(binary, filtered_patch < pre_thresh)
                 
                 # Get the mask to actually use
                 region_mask, selection_info = select_region(
@@ -609,31 +634,18 @@ def run_tuner(args: argparse.Namespace) -> None:
                     max_area,
                     closing,
                     opening,
-                    use_feret_ellipse=use_feret_ellipse,
-                    min_roundness=min_roundness,
-                    compute_feret_axes=compute_feret_axes,
                 )
-                
-                # For debug panel, show Feret-based mask when enabled
-                feret_used = selection_info.get('used_feret', False)
-                feret_axes_active = selection_info.get('feret_axes', feret_used)
-                feret_axes_flags[eye_idx] = feret_axes_active
-                feret_mask_for_debug = selection_info.get('feret_mask_candidate') if feret_axes_active else None
                 
                 # Create debug panel for this eye
                 debug_panel = create_debug_panel(
                     patch,
                     filtered_patch,
                     binary,
-                    region_mask_original,
+                    region_mask,
                     (cx - x0, cy - y0),
                     eye_labels[eye_idx],
-                    block_size,
-                    offset,
                     pre_thresh,
-                    sobel_panel=sobel_panel,
-                    feret_mask=feret_mask_for_debug,
-                    show_feret_panel=(use_feret_ellipse or compute_feret_axes)
+                    sobel_panel=sobel_panel
                 )
                 debug_panels.append(debug_panel)
                 
@@ -649,21 +661,12 @@ def run_tuner(args: argparse.Namespace) -> None:
                 
                 # Store region info for axis drawing (in full ROI coordinates)
                 roundness_val = selection_info.get('roundness')
-                feret_roundness = selection_info.get('feret_roundness')
-                feret_major_len = selection_info.get('feret_major_len')
-                feret_minor_len = selection_info.get('feret_minor_len')
-                feret_axes_active = selection_info.get('feret_axes', False)
                 regions_info[eye_idx] = {
                     'centroid': (region.centroid[0] + y0, region.centroid[1] + x0),
                     'orientation': region.orientation,
                     'major_axis_length': region.major_axis_length,
                     'minor_axis_length': region.minor_axis_length,
                     'roundness': roundness_val,
-                    'used_feret': feret_used,
-                    'feret_roundness': feret_roundness,
-                    'feret_major_len': feret_major_len,
-                    'feret_minor_len': feret_minor_len,
-                    'feret_axes': feret_axes_active,
                 }
                 eye_centers_roi[eye_idx] = (
                     float(region.centroid[1] + x0),
@@ -672,21 +675,11 @@ def run_tuner(args: argparse.Namespace) -> None:
                 
                 info_line = (
                     f"{eye_labels[eye_idx]}: area={region.area:.0f} "
-                    f"major={region.major_axis_length:.1f} minor={region.minor_axis_length:.1f}"
+                    f"major={region.major_axis_length:.1f} minor={region.minor_axis_length:.1f} "
+                    f"thr={threshold_value:.1f}"
                 )
                 if roundness_val is not None:
                     info_line += f" round={roundness_val:.2f}"
-                if feret_roundness is not None:
-                    if feret_used:
-                        info_line += f" feret={feret_roundness:.2f}"
-                    elif feret_axes_active:
-                        info_line += f" feret_axes={feret_roundness:.2f}"
-                    else:
-                        info_line += f" feret={feret_roundness:.2f}"
-                if feret_major_len is not None and feret_minor_len is not None:
-                    info_line += (
-                        f" | maxR={feret_major_len / 2.0:.1f}px minR={max(feret_minor_len, 0) / 2.0:.1f}px"
-                    )
                 info_lines.append(info_line)
 
                 contour = measure.find_contours(region_mask.astype(float), 0.5)
@@ -704,10 +697,10 @@ def run_tuner(args: argparse.Namespace) -> None:
                     eye_centers_roi[0][1] - eye_centers_roi[1][1]
                 ))
                 info_lines.append(f"Eye separation: {separation:.1f}px")
-            display = draw_overlay(roi_img, tuple(masks), tuple(contours), tuple(regions_info), tuple(feret_axes_flags))
+            display = draw_overlay(roi_img, tuple(masks), tuple(contours), tuple(regions_info))
         else:
             info_lines.append("Keypoints failed for this ROI")
-            display = draw_overlay(roi_img, (None, None), (None, None), (None, None), (False, False))
+            display = draw_overlay(roi_img, (None, None), (None, None), (None, None))
 
         # Build info panel
         info_width = max(700, int(display.shape[1] * 0.5))
@@ -719,10 +712,6 @@ def run_tuner(args: argparse.Namespace) -> None:
         spacer_width = 30  # pixels of space between panels
         spacer = np.full((display.shape[0], spacer_width, 3), 200, dtype=np.uint8)
         combined_display = np.hstack([info_panel, spacer, display])
-
-        if display_scale != 1.0:
-            interpolation = cv2.INTER_NEAREST if display_scale >= 1.0 else cv2.INTER_AREA
-            combined_display = cv2.resize(combined_display, None, fx=display_scale, fy=display_scale, interpolation=interpolation)
 
         cv2.imshow(main_window, combined_display)
         
@@ -748,17 +737,12 @@ def run_tuner(args: argparse.Namespace) -> None:
         elif key == ord("s"):
             tuned_parameters = {
                 'roi_padding': int(padding),
-                'threshold_block_size': int(block_size),
-                'threshold_offset': float(offset),
                 'pre_threshold': int(pre_thresh) if pre_thresh is not None else None,
                 'sobel_strength': float(sobel_strength),
                 'min_area': int(min_area),
                 'max_area': int(max_area) if max_area is not None else None,
                 'closing_radius': int(closing),
                 'opening_radius': int(opening),
-                'use_feret_ellipse': bool(use_feret_ellipse),
-                'compute_feret_axes': bool(compute_feret_axes),
-                'min_roundness': float(min_roundness) if (use_feret_ellipse or compute_feret_axes) else None,
                 'min_eye_separation': float(min_gap) if min_gap > 0 else None,
                 'max_eye_separation': float(max_gap) if max_gap is not None and max_gap > 0 else None,
             }
@@ -768,8 +752,6 @@ def run_tuner(args: argparse.Namespace) -> None:
                 'total_rois': int(total_rois),
                 'crop_run': crop_run,
                 'keypoint_run': keypoint_run,
-                'feret_ellipse': bool(use_feret_ellipse),
-                'feret_axes': bool(compute_feret_axes),
                 'roi_success': bool(success_flag),
             }
             success_save, message = save_eye_mask_params(

@@ -107,23 +107,38 @@ def detect_keypoints_traditional(
             if np.all(angles >= np.deg2rad(min_valid_angle)) and tri_area >= min_triangle_area:
                 keypoint_stats = candidate_stats
                 effective_se2 = max(1, int(round(current_se2)))
+                # Store triangle metrics for later
+                triangle_angles = np.rad2deg(angles)  # Convert to degrees
+                triangle_area = tri_area
                 break
 
         current_se2 = max(1, current_se2 - se2_decrement)
-    
+
     if len(keypoint_stats) != 3:
         return None
-    
+
     keypoints = identify_keypoints_by_geometry(keypoint_stats)
     if keypoints is None:
         return None
-    
+
     keypoints['confidence'] = calculate_confidence(keypoint_stats)
     keypoints['effective_threshold'] = roi_thresh
     keypoints['effective_se2_radius'] = effective_se2
-    keypoints['effective_se2_radius'] = effective_se2
     keypoints['num_blobs_found'] = len(keypoint_stats)
-    
+
+    # Triangle geometry metrics
+    keypoints['triangle_angles'] = triangle_angles  # (3,) array in degrees
+    keypoints['triangle_area'] = triangle_area      # scalar in pixels^2
+
+    # Per-keypoint confidence from blob areas (normalized)
+    blob_areas = np.array([
+        keypoints['bladder_stats'].area,
+        keypoints['eye_left_stats'].area,
+        keypoints['eye_right_stats'].area
+    ])
+    # Normalize: larger area = higher confidence, cap at 1.0
+    keypoints['keypoint_confidences'] = np.clip(blob_areas / 100.0, 0.0, 1.0)
+
     return keypoints
 
 
@@ -274,6 +289,11 @@ def process_keypoint_chunk_delayed(
     se2_radii = np.full(chunk_len, np.nan, dtype='f8')
     success_mask = np.zeros(chunk_len, dtype='bool')
 
+    # NEW: Per-keypoint confidence and triangle metrics
+    keypoint_confidences = np.full((chunk_len, 3), np.nan, dtype='f8')
+    triangle_angles = np.full((chunk_len, 3), np.nan, dtype='f8')
+    triangle_area = np.full(chunk_len, np.nan, dtype='f8')
+
     num_successful = 0
     num_failed = 0
     
@@ -335,7 +355,12 @@ def process_keypoint_chunk_delayed(
         confidence[i] = keypoints['confidence']
         thresholds[i] = keypoints['effective_threshold']
         se2_radii[i] = keypoints['effective_se2_radius']
-        
+
+        # NEW: Store per-keypoint and triangle metrics
+        keypoint_confidences[i] = keypoints['keypoint_confidences']
+        triangle_angles[i] = keypoints['triangle_angles']
+        triangle_area[i] = keypoints['triangle_area']
+
         num_successful += 1
     
     # Write results to zarr
@@ -349,7 +374,12 @@ def process_keypoint_chunk_delayed(
     keypoint_group['effective_threshold'][start_idx:end_idx] = thresholds
     keypoint_group['effective_se2_radius'][start_idx:end_idx] = se2_radii
     keypoint_group['detection_success'][start_idx:end_idx] = success_mask
-    
+
+    # NEW: Write additional metrics
+    keypoint_group['keypoint_confidences'][start_idx:end_idx] = keypoint_confidences
+    keypoint_group['triangle_angles'][start_idx:end_idx] = triangle_angles
+    keypoint_group['triangle_area'][start_idx:end_idx] = triangle_area
+
     return num_successful, num_failed
 
 
@@ -490,7 +520,7 @@ def detect_keypoints(
     
     # Precompute frame indices and counts (align with detection outputs)
     frame_indices = crop_group['frame_indices'][:].astype('i4', copy=False)
-    frame_chunks = (min(chunk_size * 4, total_rois),) if total_rois > 0 else None
+    frame_chunks = (min(chunk_size, total_rois),) if total_rois > 0 else None
     keypoint_group.create_array(
         'frame_indices',
         data=frame_indices,
@@ -502,7 +532,7 @@ def detect_keypoints(
         np.bincount(frame_indices, minlength=root['raw_video/images_full'].shape[0]).astype('i4', copy=False)
         if total_rois > 0 else np.zeros(root['raw_video/images_full'].shape[0], dtype='i4')
     )
-    count_chunks = (min(chunk_size * 4, len(frame_counts_total)),) if len(frame_counts_total) > 0 else None
+    count_chunks = (min(chunk_size, len(frame_counts_total)),) if len(frame_counts_total) > 0 else None
     keypoint_group.create_array(
         'n_rois',
         data=frame_counts_total,
@@ -518,7 +548,7 @@ def detect_keypoints(
 
     if 'detection_indices' in crop_group:
         detection_indices = crop_group['detection_indices'][:].astype('i4', copy=False)
-        det_chunks = (min(chunk_size * 4, detection_indices.shape[0]),) if detection_indices.size > 0 else None
+        det_chunks = (min(chunk_size, detection_indices.shape[0]),) if detection_indices.size > 0 else None
         keypoint_group.create_array(
             'detection_indices',
             data=detection_indices,
@@ -529,7 +559,7 @@ def detect_keypoints(
         console.print("[yellow]Crop run missing 'detection_indices'; keypoint run will omit them.[/yellow]")
     
     # Create output arrays matching detection-style layout
-    chunk_len = max(1, min(chunk_size * 4, total_rois if total_rois > 0 else 1))
+    chunk_len = max(1, min(chunk_size, total_rois if total_rois > 0 else 1))
     data_chunk = (chunk_len, 3, 2)
     scalar_chunk = (chunk_len,)
     
@@ -620,9 +650,45 @@ def detect_keypoints(
         fill_value=False,
         overwrite=True
     )
-    
+
+    # NEW: Per-keypoint confidence (N, 3) for [bladder, eye_left, eye_right]
+    keypoint_group.create_array(
+        'keypoint_confidences',
+        shape=(total_rois, 3),
+        chunks=(chunk_len, 3),
+        dtype='f8',
+        fill_value=np.nan,
+        overwrite=True
+    )
+
+    # NEW: Triangle angles at each vertex (N, 3) in degrees
+    keypoint_group.create_array(
+        'triangle_angles',
+        shape=(total_rois, 3),
+        chunks=(chunk_len, 3),
+        dtype='f8',
+        fill_value=np.nan,
+        overwrite=True
+    )
+
+    # NEW: Triangle area (N,) in pixels^2
+    keypoint_group.create_array(
+        'triangle_area',
+        shape=(total_rois,),
+        chunks=scalar_chunk,
+        dtype='f8',
+        fill_value=np.nan,
+        overwrite=True
+    )
+
     keypoint_group.attrs['keypoint_labels'] = ['bladder', 'eye_left', 'eye_right']
-    
+    keypoint_group.attrs['keypoint_confidence_labels'] = ['bladder', 'eye_left', 'eye_right']
+    keypoint_group.attrs['triangle_angle_order'] = [
+        'angle at vertex 0 (smallest, typically bladder)',
+        'angle at vertex 1',
+        'angle at vertex 2'
+    ]
+
     # Mark group path for workers
     root.attrs['current_keypoint_group_path'] = keypoint_group.path
     

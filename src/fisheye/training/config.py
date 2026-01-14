@@ -1,6 +1,6 @@
 # src/fisheye/training/config.py
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Tuple, Dict, Any, Literal
+from typing import List, Optional, Tuple, Dict, Any, Literal, Union
 from enum import Enum
 from pathlib import Path
 import yaml
@@ -33,6 +33,7 @@ class DatasetConfig(BaseModel):
     """Configuration for a single dataset"""
     zarr_path: Path
     source_type: SourceType = SourceType.FILTERED
+    input_format: Literal["gray", "rgb"] = "gray"
     split: Optional[DatasetSplit] = None
     
     @field_validator('zarr_path')
@@ -50,12 +51,13 @@ class TrainingParams(BaseModel):
     model: str
     epochs: int = Field(..., gt=0)
     batch: int = Field(..., gt=0)
-    imgsz: int = Field(..., gt=0)
+    imgsz: Union[int, Tuple[int, int], List[int]] = Field(...)
     lr0: float = Field(..., gt=0)
     momentum: float
     weight_decay: float
     patience: int
     device: str
+    rect: bool = False
     project: Optional[str] = None
     max_det: Optional[int] = Field(None, ge=1)
     conf: Optional[float] = Field(None, ge=0.0, le=1.0)
@@ -69,6 +71,22 @@ class TrainingParams(BaseModel):
         le=1.0,
         description="Blend weight for BCE term when using BCE+Dice loss.",
     )
+
+    @field_validator("imgsz")
+    @classmethod
+    def validate_imgsz(cls, value):
+        if isinstance(value, int):
+            if value <= 0:
+                raise ValueError("imgsz must be positive")
+            return value
+        if isinstance(value, (list, tuple)):
+            if len(value) != 2:
+                raise ValueError("imgsz list/tuple must specify [height, width].")
+            ints = [int(v) for v in value]
+            if any(v <= 0 for v in ints):
+                raise ValueError("imgsz height/width must be positive.")
+            return ints
+        raise TypeError("imgsz must be an int or a [height, width] list/tuple.")
 
 
 class EyeMaskTrainingParams(TrainingParams):

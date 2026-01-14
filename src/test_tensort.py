@@ -21,7 +21,14 @@ import re
 # Path to the exact trtexec executable
 TRTEXEC_PATH = "/usr/local/TensorRT-10.0.1.6/bin/trtexec"
 
-def preprocess_array(original_image, target_size=(640, 640)):
+# Model input dimensions
+BATCH = 1
+CHANNELS = 3
+INPUT_HEIGHT = 224
+INPUT_WIDTH = 2304
+INPUT_SIZE_BYTES = BATCH * CHANNELS * INPUT_HEIGHT * INPUT_WIDTH * 4  # float32
+
+def preprocess_array(original_image, target_size=(INPUT_HEIGHT, INPUT_WIDTH)):
     """Preprocess a numpy array image for YOLO inference."""
     if original_image.ndim == 2:  # Grayscale
         original_image = cv2.cvtColor(original_image, cv2.COLOR_GRAY2BGR)
@@ -116,6 +123,7 @@ def run_trtexec_inference(engine_path, preprocessed_image):
             TRTEXEC_PATH,
             f"--loadEngine={engine_path}",
             f"--loadInputs=images:{input_bin_path}",
+            f"--verbose",
             "--dumpOutput"
         ]
 

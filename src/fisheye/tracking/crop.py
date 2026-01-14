@@ -1482,7 +1482,7 @@ def crop_detections(
     roi_images = crop_group.create_array(
         'roi_images',
         shape=(total_detections, *roi_sz),
-        chunks=(min(chunk_size * 4, total_detections), roi_sz[0], roi_sz[1]),
+        chunks=(min(chunk_size, total_detections), roi_sz[0], roi_sz[1]),
         dtype='uint8',
         overwrite=True,
         compressors=compressor
@@ -1491,7 +1491,7 @@ def crop_detections(
     roi_coordinates_full = crop_group.create_array(
         'roi_coordinates_full',
         shape=(total_detections, 2),
-        chunks=(min(chunk_size * 8, total_detections), 2),
+        chunks=(min(chunk_size, total_detections), 2),
         dtype='i4',
         overwrite=True
     )
@@ -1499,7 +1499,7 @@ def crop_detections(
     roi_coordinates_ds = crop_group.create_array(
         'roi_coordinates_ds',
         shape=(total_detections, 2),
-        chunks=(min(chunk_size * 8, total_detections), 2),
+        chunks=(min(chunk_size, total_detections), 2),
         dtype='i4',
         overwrite=True
     )
@@ -1542,6 +1542,29 @@ def crop_detections(
             chunks.append((chunk_slice, (start_det, end_det)))
     
     frames_with_crops = int(np.sum(n_detections_per_frame > 0))
+
+    if use_distributed:
+        det_chunk_len = None
+        if getattr(roi_images, "chunks", None):
+            det_chunk_len = int(roi_images.chunks[0])
+        if det_chunk_len:
+            boundaries = set()
+            for _, (start_det, end_det) in chunks:
+                boundaries.add(start_det)
+                boundaries.add(end_det)
+            unsafe = [
+                b for b in boundaries
+                if b not in (0, total_detections) and (b % det_chunk_len) != 0
+            ]
+            if unsafe:
+                sample = ", ".join(str(b) for b in sorted(unsafe)[:8])
+                raise ValueError(
+                    "Distributed cropping would write to overlapping Zarr chunks. "
+                    f"Detection boundaries must align to chunk size {det_chunk_len}, "
+                    f"but found misaligned boundaries at: {sample}. "
+                    "Use --scheduler single-threaded (or processes) to avoid parallel writes, "
+                    "or adjust crop chunking so detection boundaries align."
+                )
 
     # Create delayed tasks
     delayed_tasks = [

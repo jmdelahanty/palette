@@ -91,9 +91,9 @@ STAGE_ORDER = [
     'background',
     'detect',
     'refine',
+    'assign_ids',
     'crop',
     'keypoints',
-    'assign_ids',
     'track'
 ]
 
@@ -264,6 +264,8 @@ class PipelineLauncherApp(App):
     is_running = reactive(False)
     current_stage = reactive("")
     batch_mode = reactive(False)
+    training_data_enabled = reactive(False)
+    frame_step_value = reactive("")
     
     def __init__(self):
         super().__init__()
@@ -590,6 +592,26 @@ class PipelineLauncherApp(App):
                     
                     yield Checkbox(label, id=f"stage_{stage}", classes="stage_checkbox")
 
+                    if stage == 'import':
+                        yield Label("  └─ Training data sampling:", classes="info_text")
+                        yield Checkbox(
+                            "      Enable frame sampling",
+                            value=False,
+                            id="training_data_checkbox",
+                            classes="stage_option"
+                        )
+                        yield Label("      Sample every Nth frame:", classes="info_text")
+                        yield Input(
+                            placeholder="e.g. 100",
+                            value="",
+                            id="frame_step_input",
+                            classes="stage_option"
+                        )
+                        yield Static(
+                            "      [dim]Leave empty to import all frames[/dim]",
+                            classes="info_text"
+                        )
+
                     if stage == 'crop':
                         yield Label("  └─ Crop source:", classes="info_text")
                         yield Select(
@@ -654,6 +676,12 @@ class PipelineLauncherApp(App):
                 )
 
                 yield Button("Open Visualizer", id="run_viz_button", variant="primary")
+                yield Checkbox(
+                    "Show refined/interpolated detections (orange overlay)",
+                    value=True,
+                    id="show_refined_checkbox",
+                    classes="stage_option"
+                )
                 
                 # Advanced Settings Section
                 yield Label("\n⚙️ Advanced Settings", classes="section_header")
@@ -712,7 +740,7 @@ class PipelineLauncherApp(App):
     def _handle_file_selection(self, path) -> None:
         """Handle selection of a file from the tree."""
         path_str = str(path)
-        
+
         if self._is_zarr_dir(path_str):
             if self.batch_mode:
                 # Batch mode: add/remove from queue
@@ -726,15 +754,51 @@ class PipelineLauncherApp(App):
                     self.status_message = f"Added to batch: {os.path.basename(path_str)} | {len(self.batch_queue)} in queue"
                     if self.progress_log:
                         self.progress_log.write(f"[green]Added:[/green] {os.path.basename(path_str)}\n")
-                
+
                 # Update selected_zarr so panels show info for this file
                 self.selected_zarr = path_str
-                
+
                 self._update_batch_display()
             else:
                 # Normal mode: set as selected file
                 self.selected_zarr = path_str
                 self.status_message = f"Selected zarr: {os.path.basename(path_str)}"
+
+        elif self._is_video_file(path_str):
+            # Handle video file selection
+            if self.batch_mode:
+                # Batch mode: add/remove videos from queue
+                if path_str in self.batch_queue:
+                    self.batch_queue.remove(path_str)
+                    self.status_message = f"Removed from batch: {os.path.basename(path_str)} | {len(self.batch_queue)} in queue"
+                    if self.progress_log:
+                        self.progress_log.write(f"[yellow]Removed:[/yellow] {os.path.basename(path_str)}\n")
+                else:
+                    self.batch_queue.add(path_str)
+                    self.status_message = f"Added to batch: {os.path.basename(path_str)} | {len(self.batch_queue)} in queue"
+                    if self.progress_log:
+                        self.progress_log.write(f"[green]Added:[/green] {os.path.basename(path_str)}\n")
+
+                # Update selected_video so panels show info
+                self.selected_video = path_str
+                self._update_batch_display()
+            else:
+                # Normal mode: set as selected file
+                self.selected_video = path_str
+                video_path = Path(path_str)
+                proposed_zarr = video_path.with_suffix('.zarr')
+
+                # Only auto-set zarr if no zarr is currently selected
+                if not self.selected_zarr:
+                    self.selected_zarr = str(proposed_zarr)
+                    self.status_message = f"Selected video: {video_path.name} → will create {proposed_zarr.name}"
+                else:
+                    self.status_message = f"Selected video: {video_path.name}"
+
+        elif path_str.endswith('.yaml') or path_str.endswith('.yml'):
+            # Handle config file selection
+            self.selected_config = path_str
+            self.status_message = f"Selected config: {os.path.basename(path_str)}"
     
     def _is_zarr_dir(self, path: str) -> bool:
         """Check if path is a zarr directory."""
@@ -775,6 +839,29 @@ class PipelineLauncherApp(App):
             # Fallback if widget not found
             return "detect"
     
+    def _get_training_data_options(self) -> Dict[str, Optional[Any]]:
+        """Read training data sampling options from the UI."""
+        options: Dict[str, Optional[Any]] = {
+            "enabled": False,
+            "frame_step": None,
+        }
+        try:
+            training_checkbox = self.query_one("#training_data_checkbox", Checkbox)
+            options["enabled"] = training_checkbox.value
+
+            if options["enabled"]:
+                frame_step_input = self.query_one("#frame_step_input", Input)
+                frame_step_str = frame_step_input.value.strip()
+                if frame_step_str:
+                    try:
+                        options["frame_step"] = int(frame_step_str)
+                    except ValueError:
+                        pass  # Will be validated later
+        except Exception:
+            pass  # Fall back to defaults
+
+        return options
+
     def _get_refine_options(self) -> Dict[str, Optional[Any]]:
         """Read refinement parameter overrides from the UI."""
         options: Dict[str, Optional[Any]] = {
@@ -910,29 +997,41 @@ class PipelineLauncherApp(App):
     
     def _build_command(self, dry_run: bool = False) -> Optional[List[str]]:
         """Build the pipeline command."""
-        zarr_path = self.selected_zarr
         video_path = self.selected_video
         config_path = self.selected_config
-        
-        if not zarr_path:
-            self.status_message = " Error: Select a zarr file from the tree!"
-            if self.progress_log:
-                self.progress_log.write("[red] Error: Select a zarr file first![/]")
-            return None
-        
+
         stages = self._get_selected_stages()
         if not stages:
             self.status_message = " Error: Select at least one stage!"
             if self.progress_log:
                 self.progress_log.write("[red] Error: Select at least one stage![/]")
             return None
-        
-        if 'import' in stages and not video_path:
-            self.status_message = " Error: Select a video file for import stage!"
-            if self.progress_log:
-                self.progress_log.write("[red] Error: Import stage requires a video file![/]")
-            return None
-        
+
+        # Special case: import stage
+        if 'import' in stages:
+            if not video_path:
+                self.status_message = " Error: Select a video file for import stage!"
+                if self.progress_log:
+                    self.progress_log.write("[red] Error: Import stage requires a video file![/]")
+                return None
+
+            # Auto-create zarr path if not specified
+            zarr_path = self.selected_zarr
+            if not zarr_path:
+                video_path_obj = Path(video_path)
+                zarr_path = str(video_path_obj.with_suffix('.zarr'))
+                self.selected_zarr = zarr_path  # Update the selection
+                if self.progress_log:
+                    self.progress_log.write(f"[yellow]Auto-generated zarr path: {zarr_path}[/yellow]\n")
+        else:
+            # For non-import stages, require existing zarr
+            zarr_path = self.selected_zarr
+            if not zarr_path:
+                self.status_message = " Error: Select a zarr file from the tree!"
+                if self.progress_log:
+                    self.progress_log.write("[red] Error: Select a zarr file first![/]")
+                return None
+
         cmd = [sys.executable, "-m", "fisheye", zarr_path]
         
         if video_path:
@@ -942,6 +1041,28 @@ class PipelineLauncherApp(App):
             cmd.extend(["--config", config_path])
         
         cmd.extend(["--stages"] + stages)
+
+        # Add training data parameters if import stage is selected
+        if 'import' in stages:
+            training_opts = self._get_training_data_options()
+            if training_opts["enabled"]:
+                frame_step = training_opts["frame_step"]
+                if frame_step is not None:
+                    if frame_step < 1:
+                        self.status_message = " Error: Frame step must be >= 1"
+                        if self.progress_log:
+                            self.progress_log.write("[red] Error: Frame step must be >= 1[/red]\n")
+                        return None
+                    cmd.extend(["--training-data", "--frame-step", str(frame_step)])
+                    if self.progress_log:
+                        self.progress_log.write(
+                            f"[yellow]Training data mode: sampling every {frame_step}th frame[/yellow]\n"
+                        )
+                else:
+                    self.status_message = " Error: Frame step required when training mode enabled"
+                    if self.progress_log:
+                        self.progress_log.write("[red] Error: Enter a frame step value[/red]\n")
+                    return None
 
         # Add crop source if crop stage is selected
         if 'crop' in stages:
@@ -1103,29 +1224,64 @@ class PipelineLauncherApp(App):
             pass
         
         return cmd
-    
 
-    def _run_batch_worker(self, zarr_files: List[str], stages: List[str]) -> None:
+    def _build_command_for_video_import(self, video_path: str, zarr_path: str, stages: List[str]) -> Optional[List[str]]:
+        """Build command for video import in batch mode."""
+        cmd = [sys.executable, "-m", "fisheye", zarr_path]
+        cmd.extend(["--video-path", video_path])
+
+        if self.selected_config:
+            cmd.extend(["--config", self.selected_config])
+
+        cmd.extend(["--stages"] + stages)
+
+        # Add training data parameters if enabled
+        training_opts = self._get_training_data_options()
+        if training_opts["enabled"] and training_opts["frame_step"] is not None:
+            cmd.extend(["--training-data", "--frame-step", str(training_opts["frame_step"])])
+
+        return cmd
+
+    def _run_batch_worker(self, files: List[str], stages: List[str]) -> None:
         """Worker thread for batch processing."""
         results = {
-            'total': len(zarr_files),
+            'total': len(files),
             'success': 0,
             'failed': 0,
             'errors': []
         }
-        
-        for i, zarr_path in enumerate(zarr_files, 1):
-            zarr_name = os.path.basename(zarr_path)
-            self.current_stage = f"{i}/{len(zarr_files)}"
-            
-            if self.progress_log:
-                self.progress_log.write(f"\n[bold cyan]▶ Processing {i}/{len(zarr_files)}: {zarr_name}[/bold cyan]")
-            
-            cmd = self._build_command_for_file(zarr_path, stages)
+
+        # Detect if batch contains videos or zarrs
+        is_video_batch = self._is_video_file(files[0]) if files else False
+
+        for i, file_path in enumerate(files, 1):
+            file_name = os.path.basename(file_path)
+            self.current_stage = f"{i}/{len(files)}"
+
+            if is_video_batch:
+                # For video imports, auto-generate zarr path
+                video_path = Path(file_path)
+                zarr_path = str(video_path.with_suffix('.zarr'))
+
+                if self.progress_log:
+                    self.progress_log.write(
+                        f"\n[bold cyan]▶ Processing {i}/{len(files)}: {file_name}[/bold cyan]\n"
+                        f"  [yellow]→ Output: {os.path.basename(zarr_path)}[/yellow]"
+                    )
+
+                cmd = self._build_command_for_video_import(file_path, zarr_path, stages)
+            else:
+                # For zarr files, use existing logic
+                zarr_path = file_path
+
+                if self.progress_log:
+                    self.progress_log.write(f"\n[bold cyan]▶ Processing {i}/{len(files)}: {file_name}[/bold cyan]")
+
+                cmd = self._build_command_for_file(zarr_path, stages)
             
             if not cmd:
                 results['failed'] += 1
-                results['errors'].append(f"{zarr_name}: Failed to build command")
+                results['errors'].append(f"{file_name}: Failed to build command")
                 if self.progress_log:
                     self.progress_log.write(f"[red]  ✗ Failed to build command[/red]")
                 continue
@@ -1231,9 +1387,25 @@ class PipelineLauncherApp(App):
             if self.progress_log:
                 self.progress_log.write("[red]❌ Select at least one stage first![/red]\n")
             return
-        
-        self.is_running = True
+
+        # Check if batch contains videos (for import) or zarrs (for other stages)
         batch_files = list(self.batch_queue)
+        first_file = batch_files[0]
+        is_video_batch = self._is_video_file(first_file)
+
+        if is_video_batch and 'import' not in stages:
+            self.status_message = "❌ Video batch requires 'import' stage!"
+            if self.progress_log:
+                self.progress_log.write("[red]❌ Video files in batch require 'import' stage[/red]\n")
+            return
+
+        if not is_video_batch and 'import' in stages:
+            self.status_message = "❌ Import stage requires video files in batch!"
+            if self.progress_log:
+                self.progress_log.write("[red]❌ Import stage requires video files, not zarr files[/red]\n")
+            return
+
+        self.is_running = True
         
         if self.progress_log:
             self.progress_log.write(f"\n[bold cyan]═══════════════════════════════════[/bold cyan]")
@@ -1432,14 +1604,23 @@ class PipelineLauncherApp(App):
         self.status_message = f"Launching {viz_info['desc']}..."
         if self.progress_log:
             self.progress_log.write(f"\n[cyan]Launching {viz_info['desc']}...[/cyan]\n")
-        
+
+        # Build command with optional flags
+        cmd = [sys.executable, str(viz_script), zarr_path]
+
+        # Check if refined overlay is enabled
+        try:
+            show_refined_checkbox = self.query_one("#show_refined_checkbox", Checkbox)
+            if show_refined_checkbox.value:
+                cmd.append("--show-refined")
+                if self.progress_log:
+                    self.progress_log.write("[dim]  └─ With refined/interpolated overlay[/dim]\n")
+        except Exception:
+            pass  # Checkbox might not exist for all visualizers
+
         try:
             # Run in background so TUI stays responsive
-            subprocess.Popen([
-                sys.executable,
-                str(viz_script),
-                zarr_path
-            ])
+            subprocess.Popen(cmd)
             self.status_message = f"✓ Visualizer launched! Check your display."
             if self.progress_log:
                 self.progress_log.write("[green]✓ Visualizer window opened[/green]\n")
@@ -1464,7 +1645,7 @@ class PipelineLauncherApp(App):
             return
         
         # Run setup tool
-        setup_script = Path(__file__).parent.parent.parent / "setup_experiment_metadata.py"
+        setup_script = Path(__file__).parent.parent / "utils" / "setup_experiment_metadata.py"
         
         self.status_message = "Running experiment setup..."
         if self.progress_log:

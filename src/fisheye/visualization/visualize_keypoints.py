@@ -759,12 +759,28 @@ def main() -> None:
             print(f"Warning: {exc}")
             print("Will show crops without keypoints.")
             keypoint_run = None
-    
-    crop_run = get_latest_run(root, "crop", args.crop_run)
+
+    keypoint_group = None
+    if keypoint_run:
+        if "keypoints_runs" in root and keypoint_run in root["keypoints_runs"]:
+            keypoint_group = root[f"keypoints_runs/{keypoint_run}"]
+        elif "keypoint_runs" in root and keypoint_run in root["keypoint_runs"]:
+            keypoint_group = root[f"keypoint_runs/{keypoint_run}"]
+
+    crop_run = None
+    if args.crop_run:
+        crop_run = get_latest_run(root, "crop", args.crop_run)
+    elif keypoint_group is not None:
+        source_crop_run = keypoint_group.attrs.get("source_crop_run")
+        if source_crop_run and "crop_runs" in root and source_crop_run in root["crop_runs"]:
+            crop_run = source_crop_run
+
+    if crop_run is None:
+        crop_run = get_latest_run(root, "crop", None)
     
     # Get keypoint labels if available
     keypoint_method = "unknown"
-    if keypoint_run:
+    if keypoint_run and keypoint_group is None:
         keypoint_group = root[f"keypoints_runs/{keypoint_run}"]
         pose_schema = None
         schema_meta = keypoint_group.attrs.get("pose_schema")

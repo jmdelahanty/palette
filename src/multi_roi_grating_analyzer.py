@@ -9,24 +9,28 @@ Analyzes behavioral responses of multiple fish to moving grating stimuli, integr
 - Speed and movement analysis during different stimulus phases
 """
 
-import zarr
-import h5py
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-import seaborn as sns
-import pandas as pd
 import argparse
-from pathlib import Path
-from datetime import datetime
-from typing import Dict, List, Tuple, Optional, Any
-from dataclasses import dataclass, asdict
 import json
-from scipy.ndimage import gaussian_filter1d
-from rich.console import Console
-from rich.table import Table
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 import warnings
+from dataclasses import dataclass, asdict
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import h5py
+import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import zarr
+from rich.console import Console
+from rich.progress import (BarColumn, Progress, SpinnerColumn, TaskProgressColumn,
+                           TextColumn)
+from rich.table import Table
+from scipy.ndimage import gaussian_filter1d
+
+from fisheye.utils.zarr_metadata import get_downsample_shape
 warnings.filterwarnings('ignore')
 
 console = Console()
@@ -119,6 +123,14 @@ class MultiROIGratingAnalyzer:
         self.camera_width = self.root.attrs.get('width', 4512)
         self.camera_height = self.root.attrs.get('height', 4512)
         self.fps = self.root.attrs.get('fps', 60.0)
+        ds_shape = get_downsample_shape(self.root, format_hint="gray")
+        if ds_shape is None:
+            self.ds_height, self.ds_width = 640, 640
+        else:
+            self.ds_height = int(ds_shape[0])
+            self.ds_width = int(ds_shape[1])
+        self._ds_scale_x = self.camera_width / self.ds_width
+        self._ds_scale_y = self.camera_height / self.ds_height
 
         self.load_roi_boundaries_from_config()
         
@@ -222,13 +234,12 @@ class MultiROIGratingAnalyzer:
                         center_x_norm = bbox[0]
                         center_y_norm = bbox[1]
                         
-                        # Convert to camera pixels (640 -> 4512)
-                        centroid_x_ds = center_x_norm * 640
-                        centroid_y_ds = center_y_norm * 640
-                        scale = self.camera_width / 640
+                        # Convert to camera pixels
+                        centroid_x_ds = center_x_norm * self.ds_width
+                        centroid_y_ds = center_y_norm * self.ds_height
                         
-                        positions[i, 0] = centroid_x_ds * scale
-                        positions[i, 1] = centroid_y_ds * scale
+                        positions[i, 0] = centroid_x_ds * self._ds_scale_x
+                        positions[i, 1] = centroid_y_ds * self._ds_scale_y
             
             cumulative_idx += frame_det_count
         
@@ -243,12 +254,11 @@ class MultiROIGratingAnalyzer:
                         center_x_norm = bbox[0]
                         center_y_norm = bbox[1]
                         
-                        centroid_x_ds = center_x_norm * 640
-                        centroid_y_ds = center_y_norm * 640
-                        scale = self.camera_width / 640
+                        centroid_x_ds = center_x_norm * self.ds_width
+                        centroid_y_ds = center_y_norm * self.ds_height
                         
-                        positions[i, 0] = centroid_x_ds * scale
-                        positions[i, 1] = centroid_y_ds * scale
+                        positions[i, 0] = centroid_x_ds * self._ds_scale_x
+                        positions[i, 1] = centroid_y_ds * self._ds_scale_y
         
         return positions
     
@@ -870,7 +880,7 @@ class MultiROIGratingAnalyzer:
         """Load predefined ROI boundaries from config."""
         self.roi_boundaries_cache = {}
         
-        # Hardcoded from config file - these are in 640x640 space
+        # Hardcoded from config file - these are defined in downsampled space (default 640x640)
         sub_dish_rois = [
             {'id': 0, 'roi_pixels': [59, 73, 71, 180]},
             {'id': 1, 'roi_pixels': [139, 74, 71, 178]},
@@ -886,18 +896,19 @@ class MultiROIGratingAnalyzer:
             {'id': 11, 'roi_pixels': [502, 275, 70, 184]}
         ]
         
-        # Convert from 640x640 to camera resolution
-        scale = self.camera_width / 640
+        # Convert from downsampled coordinates to camera resolution
+        scale_x = self.camera_width / self.ds_width
+        scale_y = self.camera_height / self.ds_height
         
         for roi_info in sub_dish_rois:
             roi_id = roi_info['id']
             x, y, width, height = roi_info['roi_pixels']
             
             # Scale to camera resolution
-            x_min = x * scale
-            y_min = y * scale
-            x_max = (x + width) * scale
-            y_max = (y + height) * scale
+            x_min = x * scale_x
+            y_min = y * scale_y
+            x_max = (x + width) * scale_x
+            y_max = (y + height) * scale_y
             
             self.roi_boundaries_cache[roi_id] = {
                 'x_min': x_min,

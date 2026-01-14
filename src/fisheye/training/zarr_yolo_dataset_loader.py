@@ -14,6 +14,8 @@ import yaml
 from typing import Union, Any
 from datetime import datetime
 
+from ..utils.zarr_metadata import get_downsample_array_path, get_downsample_formats
+
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -31,6 +33,7 @@ class SingleDatasetConfig:
     """Configuration for a single dataset."""
     zarr_path: str
     source_type: str = 'filtered'  # 'detect', 'filtered', or 'interpolated'
+    input_format: str = 'gray'  # 'gray' or 'rgb'
     split: Optional[Dict[str, float]] = None  # {'train': 0.8, 'val': 0.2}
     keypoint_run: Optional[str] = None  # Optional specific keypoints run
 
@@ -102,8 +105,19 @@ class ZarrDatasetConfig:
         """Get configured keypoint run for a specific zarr path, if provided."""
         for config in self.datasets.values():
             if config.zarr_path == zarr_path:
-                return config.keypoint_run
+                if isinstance(config, dict):
+                    return config.get("keypoint_run")
+                return getattr(config, "keypoint_run", None)
         return None
+
+    def get_input_format(self, zarr_path: str) -> str:
+        """Return the requested input format ('gray' or 'rgb') for this dataset."""
+        for config in self.datasets.values():
+            if config.zarr_path == zarr_path:
+                value = getattr(config, "input_format", "gray")
+                fmt = str(value).strip().lower()
+                return "rgb" if fmt == "rgb" else "gray"
+        return "gray"
 
     @classmethod
     def from_yaml(cls, path: str):
@@ -147,6 +161,12 @@ class DatasetMetadata:
     roi_shape: Tuple[int, int] = (0, 0)
     keypoint_run: Optional[str] = None
     requested_keypoint_run: Optional[str] = None
+    bbox_array_path: str = ""
+    frame_indices_path: Optional[str] = None
+    detection_source_path: Optional[str] = None
+    uses_crop_data: bool = True
+    input_format: str = "gray"
+    frame_array_path: str = "raw_video/images_ds"
 
 
 class GlobalIndexManager:
@@ -197,37 +217,90 @@ class GlobalIndexManager:
             try:
                 root = zarr.open(path_str, mode='r')
                 
-                # Get requested source type for this dataset
+                # Get requested source type and input format for this dataset
                 requested_source = self.config.get_source_type(path_str)
+                requested_input_format = self.config.get_input_format(path_str)
+                if requested_input_format not in {"gray", "rgb"}:
+                    requested_input_format = "gray"
                 
-                # Check for crop_runs (required for all source types)
-                if 'crop_runs' not in root or 'latest' not in root['crop_runs'].attrs:
-                    raise KeyError(f"Could not find 'crop_runs' in {Path(path_str).name}")
-                
-                latest_crop = root['crop_runs'].attrs['latest']
-                crop_group = root[f'crop_runs/{latest_crop}']
-                
-                # Get actual crop source info
-                actual_source_type = crop_group.attrs.get('detection_source_type', 'detect')
-                has_interpolated = crop_group.attrs.get('includes_interpolated', False)
-                n_real_rois = crop_group.attrs.get('n_real_detections', 0)
-                n_interpolated_rois = crop_group.attrs.get('n_interpolated_detections', 0)
-                
-                # Validate that requested source matches what's available
-                if requested_source != actual_source_type:
-                    logger.warning(
-                        f"  ⚠ {Path(path_str).name}: Requested '{requested_source}' but crops are from '{actual_source_type}'. "
-                        f"Using available '{actual_source_type}' data."
+                crop_parent = root.get('crop_runs')
+                latest_crop = crop_parent.attrs.get('latest') if crop_parent is not None else None
+                crop_group = None
+                uses_crop_data = False
+                if crop_parent is not None and latest_crop and latest_crop in crop_parent:
+                    crop_group = crop_parent[latest_crop]
+                    uses_crop_data = True
+
+                detect_parent = root.get('detect_runs')
+                frame_array_rel = get_downsample_array_path(root, format_hint=requested_input_format)
+                if frame_array_rel is None:
+                    available_formats = get_downsample_formats(root)
+                    raise KeyError(
+                        f"Downsampled frames for format '{requested_input_format}' not found in {Path(path_str).name}. "
+                        f"Available formats: {available_formats or 'none'}."
                     )
-                
-                # Check for tracking data (ONLY required for pose task)
+                frame_array_path = frame_array_rel
+
+                # Tracking setup
                 column_names: List[str] = []
                 total_frames = 0
                 tracking_success_rate = 0.0
-                
                 requested_kp_run_raw = self.config.get_keypoint_run(path_str)
                 requested_kp_run = self._normalize_requested_keypoint_run(requested_kp_run_raw)
                 keypoint_run_name: Optional[str] = None
+                success_arr: Optional[np.ndarray] = None
+
+                roi_shape: Tuple[int, int] = (0, 0)
+                bbox_array_path: Optional[str] = None
+                frame_indices_path: Optional[str] = None
+                detection_source_path: Optional[str] = None
+                actual_source_type = requested_source
+                has_interpolated = False
+                n_real_rois = 0
+                n_interpolated_rois = 0
+
+                if uses_crop_data:
+                    actual_source_type = crop_group.attrs.get('detection_source_type', 'detect')
+                    has_interpolated = crop_group.attrs.get('includes_interpolated', False)
+                    n_real_rois = crop_group.attrs.get('n_real_detections', crop_group['bbox_norm_coords'].shape[0])
+                    n_interpolated_rois = crop_group.attrs.get('n_interpolated_detections', 0)
+                    roi_shape = crop_group['roi_images'].shape[1:3] if 'roi_images' in crop_group else (0, 0)
+                    total_frames = crop_group['roi_images'].shape[0] if 'roi_images' in crop_group else crop_group['bbox_norm_coords'].shape[0]
+                    bbox_array_path = f"crop_runs/{latest_crop}/bbox_norm_coords"
+                    if 'frame_indices' in crop_group:
+                        frame_indices_path = f"crop_runs/{latest_crop}/frame_indices"
+                    detection_source_path = f"crop_runs/{latest_crop}/detection_source" if 'detection_source' in crop_group else None
+                elif self.config.task == 'detect':
+                    if detect_parent is None or 'latest' not in detect_parent.attrs:
+                        raise KeyError(
+                            f"Could not find 'crop_runs' in {Path(path_str).name} and no detect_runs available for fallback."
+                        )
+                    detect_run_name = detect_parent.attrs['latest']
+                    if detect_run_name not in detect_parent:
+                        raise KeyError(f"Detect run '{detect_run_name}' not found in {Path(path_str).name}.")
+                    detect_group = detect_parent[detect_run_name]
+                    actual_source_type = 'detect'
+                    has_interpolated = False
+                    n_interpolated_rois = 0
+                    n_real_rois = int(detect_group['bbox_norm_coords'].shape[0])
+                    roi_shape = (0, 0)
+                    total_frames = n_real_rois
+                    bbox_array_path = f"detect_runs/{detect_run_name}/bbox_norm_coords"
+                    if 'frame_indices' in detect_group:
+                        frame_indices_path = f"detect_runs/{detect_run_name}/frame_indices"
+                    detection_source_path = None
+                    logger.warning(
+                        f"  ⚠ {Path(path_str).name}: crop_runs missing; training will read boxes directly from detect_runs/{detect_run_name}."
+                    )
+                else:
+                    raise KeyError(f"Could not find 'crop_runs' in {Path(path_str).name}")
+
+                # Warn if requested != available
+                if requested_source != actual_source_type:
+                    logger.warning(
+                        f"  ⚠ {Path(path_str).name}: Requested '{requested_source}' but data is '{actual_source_type}'. "
+                        f"Using available '{actual_source_type}' data."
+                    )
 
                 if self.config.task == 'pose':
                     if 'keypoints_runs' not in root:
@@ -271,29 +344,21 @@ class GlobalIndexManager:
                     success_arr = kp_group['detection_success'][:]
                     if total_frames > 0:
                         tracking_success_rate = float(np.mean(success_arr) * 100.0)
-                else:
-                    # Detect task only needs crops
-                    if 'roi_images' not in crop_group:
-                        raise KeyError(f"No ROI images found in crop run {latest_crop}")
-                    
-                    total_frames = crop_group['roi_images'].shape[0]
-                
-                # Determine source coordinates
-                if 'refine_runs' in root and 'latest' in root['refine_runs'].attrs:
-                    latest_refine_run = root['refine_runs'].attrs['latest']
-                    source_coords = root[f'refine_runs/{latest_refine_run}/refined_bbox_norm_coords']
-                elif 'crop_runs' in root:
-                    source_coords = crop_group['bbox_norm_coords']
-                else:
-                    raise KeyError("No valid coordinates found")
-                
-                valid_mask = ~np.isnan(source_coords[:, 0])
-                if requested_source in ['filtered', 'detect'] and has_interpolated:
-                    if 'detection_source' in crop_group:
-                        real_mask = (crop_group['detection_source'][:] == 0)
-                        valid_mask = valid_mask & real_mask
-                if self.config.task == 'pose':
+
+                if not bbox_array_path:
+                    raise KeyError(f"Unable to determine bbox source for {Path(path_str).name}.")
+
+                source_coords = root[bbox_array_path][:]
+                valid_mask = np.zeros(source_coords.shape[0], dtype=bool) if source_coords.size == 0 else ~np.isnan(source_coords[:, 0])
+
+                if requested_source in ['filtered', 'detect'] and has_interpolated and detection_source_path:
+                    detection_source = root[detection_source_path][:]
+                    real_mask = (detection_source == 0)
+                    valid_mask = valid_mask & real_mask
+
+                if self.config.task == 'pose' and success_arr is not None:
                     valid_mask = valid_mask & success_arr
+
                 valid_frames = int(np.sum(valid_mask))
 
                 metadata = DatasetMetadata(
@@ -308,9 +373,15 @@ class GlobalIndexManager:
                     n_real_rois=n_real_rois,
                     n_interpolated_rois=n_interpolated_rois,
                     requested_source_type=requested_source,
-                    roi_shape=crop_group['roi_images'].shape[1:3] if 'roi_images' in crop_group else (0, 0),
+                    roi_shape=roi_shape,
                     keypoint_run=keypoint_run_name,
                     requested_keypoint_run=requested_kp_run,
+                    bbox_array_path=bbox_array_path,
+                    frame_indices_path=frame_indices_path,
+                    detection_source_path=detection_source_path,
+                    uses_crop_data=uses_crop_data,
+                    input_format=requested_input_format,
+                    frame_array_path=frame_array_path,
                 )
                 
                 # Log crop source info
@@ -331,25 +402,25 @@ class GlobalIndexManager:
         """Get valid frame indices, optionally filtering out interpolated data."""
         root = zarr.open(metadata.path, mode='r')
         
-        # Get source coordinates
-        source_coords_path = (f"refine_runs/{root['refine_runs'].attrs['latest']}/refined_bbox_norm_coords" 
-                              if 'refine_runs' in root and 'latest' in root['refine_runs'].attrs 
-                              else f"crop_runs/{root['crop_runs'].attrs['latest']}/bbox_norm_coords")
-        valid_mask = ~np.isnan(root[source_coords_path][:, 0])
+        if not metadata.bbox_array_path:
+            raise KeyError(f"No bbox path recorded for dataset '{metadata.name}'.")
+
+        coords = root[metadata.bbox_array_path][:]
+        if coords.size == 0:
+            return np.empty(0, dtype=int)
+        valid_mask = ~np.isnan(coords[:, 0])
         
         # Filter out interpolated data if source_type is 'filtered' or 'detect'
-        if metadata.requested_source_type in ['filtered', 'detect'] and metadata.has_interpolated:
-            latest_crop = root['crop_runs'].attrs['latest']
-            crop_group = root[f'crop_runs/{latest_crop}']
-            
-            if 'detection_source' in crop_group:
-                detection_source = crop_group['detection_source'][:]
-                # Only keep real detections (0), filter out interpolated (1)
-                real_mask = (detection_source == 0)
-                valid_mask = valid_mask & real_mask
-                
-                n_filtered = np.sum(detection_source == 1)
-                logger.info(f"    Filtered out {n_filtered} interpolated ROIs from {metadata.name}")
+        if (
+            metadata.requested_source_type in ['filtered', 'detect']
+            and metadata.has_interpolated
+            and metadata.detection_source_path
+        ):
+            detection_source = root[metadata.detection_source_path][:]
+            real_mask = (detection_source == 0)
+            n_filtered = np.sum(~real_mask)
+            valid_mask = valid_mask & real_mask
+            logger.info(f"    Filtered out {n_filtered} interpolated ROIs from {metadata.name}")
 
         # For pose task, also check keypoints validity
         if self.config.task == 'pose':
@@ -429,18 +500,42 @@ class ZarrYOLODataset(Dataset):
         self.kp_flat_cache = {}
         self.roi_size_cache = {}
         if self.config.task == 'detect':
-            for zarr_path in self.zarr_roots.keys():
-                root = self.zarr_roots[zarr_path]
-                latest_crop = root['crop_runs'].attrs['latest']
-                crop_group = root[f'crop_runs/{latest_crop}']
-                self.bbox_cache[zarr_path] = crop_group['bbox_norm_coords'][:]  # Load once
-                if 'frame_indices' in crop_group:
-                    self.frame_index_cache[zarr_path] = crop_group['frame_indices'][:]
-                else:
-                    # Fallback to detect run
-                    detect_latest = root['detect_runs'].attrs['latest']
-                    self.frame_index_cache[zarr_path] = root[f'detect_runs/{detect_latest}/frame_indices'][:]
-                logger.info(f"  Cached {self.bbox_cache[zarr_path].shape[0]} bboxes from {Path(zarr_path).name}")
+            for zarr_path, root in self.zarr_roots.items():
+                metadata = self.metadata_map.get(zarr_path)
+                if metadata is None or not metadata.bbox_array_path:
+                    raise KeyError(f"Missing metadata for detection dataset '{Path(zarr_path).name}'.")
+
+                self.bbox_cache[zarr_path] = root[metadata.bbox_array_path][:]
+
+                frame_indices = None
+                if metadata.frame_indices_path:
+                    try:
+                        frame_indices = root[metadata.frame_indices_path][:]
+                    except KeyError:
+                        frame_indices = None
+
+                if frame_indices is None:
+                    detect_parent = root.get('detect_runs')
+                    if detect_parent is not None and 'latest' in detect_parent.attrs:
+                        detect_latest = detect_parent.attrs['latest']
+                        frame_indices = root[f'detect_runs/{detect_latest}/frame_indices'][:]
+
+                if frame_indices is None or frame_indices.shape[0] != self.bbox_cache[zarr_path].shape[0]:
+                    frame_count = self.bbox_cache[zarr_path].shape[0]
+                    if frame_indices is not None and frame_indices.shape[0] != frame_count:
+                        logger.warning(
+                            f"  ⚠ Frame index count mismatch for {Path(zarr_path).name}; falling back to sequential indices."
+                        )
+                    if frame_count == 0:
+                        frame_indices = np.empty(0, dtype=np.int64)
+                    else:
+                        frame_indices = np.arange(frame_count, dtype=np.int64)
+
+                self.frame_index_cache[zarr_path] = frame_indices
+                source_label = "crop_runs" if metadata.uses_crop_data else "detect_runs"
+                logger.info(
+                    f"  Cached {self.bbox_cache[zarr_path].shape[0]} bboxes from {Path(zarr_path).name} ({source_label})."
+                )
         else:
             for zarr_path in self.zarr_roots.keys():
                 root = self.zarr_roots[zarr_path]
@@ -559,9 +654,14 @@ class ZarrYOLODataset(Dataset):
     def __getitem__(self, index: int) -> Dict:
         zarr_path, det_idx = self.indices[index]
         root = self.zarr_roots[zarr_path]
+        metadata = self.metadata_map.get(zarr_path)
+        if metadata is None:
+            raise KeyError(f"Metadata missing for dataset '{Path(zarr_path).name}'.")
         
-        image_source_path = ('raw_video/images_ds' if self.config.task == 'detect' 
-                             else f"crop_runs/{root['crop_runs'].attrs['latest']}/roi_images")
+        if self.config.task == 'detect':
+            image_source_path = metadata.frame_array_path
+        else:
+            image_source_path = f"crop_runs/{root['crop_runs'].attrs['latest']}/roi_images"
         
         frame_idx = None
         if self.config.task == 'detect':
@@ -581,13 +681,16 @@ class ZarrYOLODataset(Dataset):
             else:
                 image = root[image_source_path][roi_idx]
 
-        image_3ch = np.stack([image] * 3, axis=-1)
+        if self.config.task == 'detect' and metadata.input_format == 'rgb' and image.ndim == 3:
+            image_3ch = image
+        else:
+            if image.ndim == 2:
+                image_3ch = np.stack([image] * 3, axis=-1)
+            else:
+                image_3ch = image
         
-        if image_3ch.shape[0] != self.target_size or image_3ch.shape[1] != self.target_size:
-            import cv2
-            image_3ch = cv2.resize(image_3ch, (self.target_size, self.target_size), interpolation=cv2.INTER_LINEAR)
-            
         label_info = self.labels[index]
+        ori_shape = (image_3ch.shape[0], image_3ch.shape[1])
         
         im_identifier = (f"{Path(zarr_path).stem}_frame_{frame_idx}"
                          if self.config.task == 'detect'
@@ -599,9 +702,7 @@ class ZarrYOLODataset(Dataset):
             "bboxes": label_info.get('bboxes', np.zeros((0, 4), dtype=np.float32)).astype(np.float32),
             "keypoints": label_info.get('keypoints', np.zeros((0, 9), dtype=np.float32)).astype(np.float32),
             "im_file": im_identifier,
-            "ori_shape": (self.target_size, self.target_size),
-            # Identity letterbox metadata: no resize (ratios 1.0), no pad (0.0)
-            # Ultralytics validators may unpack this as ((h_ratio, w_ratio), (pad_w, pad_h))
+            "ori_shape": ori_shape,
             "ratio_pad": ((1.0, 1.0), (0.0, 0.0)),
             "segments": np.zeros((0, 0), dtype=np.float32)
         }

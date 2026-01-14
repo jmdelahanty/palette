@@ -4,16 +4,19 @@ Export fish tracking detections to CSV files with multiple coordinate systems.
 Exports one CSV per fish ID with both normalized and pixel coordinates.
 """
 
-import zarr
+import argparse
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import cv2
 import numpy as np
 import pandas as pd
-import argparse
-from pathlib import Path
-from tqdm import tqdm
-import cv2
 import yaml
-from datetime import datetime
-from typing import Dict, List, Tuple
+import zarr
+from tqdm import tqdm
+
+from fisheye.utils.zarr_metadata import get_downsample_shape
 
 def load_config(config_path: str) -> Dict:
     """Load pipeline configuration if available."""
@@ -47,8 +50,14 @@ def export_detections_with_coordinates(zarr_path: str, output_dir: str,
         img_width = root.attrs.get('width', 4512)
         img_height = root.attrs.get('height', 4512)
         fps = root.attrs.get('fps', 60.0)
-        ds_width = 640
-        ds_height = 640
+        ds_shape = get_downsample_shape(root, format_hint="gray")
+        if ds_shape is None:
+            print("[yellow]Warning:[/yellow] Could not determine downsampled resolution; assuming 640×640.")
+            ds_height, ds_width = 640, 640
+        else:
+            # shape returns (H, W[, C])
+            ds_height, ds_width = int(ds_shape[0]), int(ds_shape[1])
+        legacy_square = ds_width == 640 and ds_height == 640
         
         # Load detection data
         detect_group = root['detect_runs']
@@ -118,15 +127,21 @@ def export_detections_with_coordinates(zarr_path: str, output_dir: str,
                 width_ds = width_norm * ds_width
                 height_ds = height_norm * ds_height
                 
-                # Convert to full resolution
-                scale_factor = img_width / ds_width
-                center_x_full = center_x_ds * scale_factor
-                center_y_full = center_y_ds * scale_factor
-                width_full = width_ds * scale_factor
-                height_full = height_ds * scale_factor
+                # Convert to full resolution (handle rectangular aspect ratios)
+                scale_x = img_width / ds_width
+                scale_y = img_height / ds_height
+                center_x_full = center_x_ds * scale_x
+                center_y_full = center_y_ds * scale_y
+                width_full = width_ds * scale_x
+                height_full = height_ds * scale_y
                 
                 # Calculate time
                 time_sec = frame_idx / fps
+
+                x1_ds = center_x_ds - width_ds / 2
+                y1_ds = center_y_ds - height_ds / 2
+                x2_ds = center_x_ds + width_ds / 2
+                y2_ds = center_y_ds + height_ds / 2
                 
                 data_by_id[assigned_id].append({
                     'frame': frame_idx,
@@ -137,22 +152,34 @@ def export_detections_with_coordinates(zarr_path: str, output_dir: str,
                     'center_y_norm': center_y_norm,
                     'width_norm': width_norm,
                     'height_norm': height_norm,
-                    # 640x640 pixel coordinates
-                    'center_x_640': center_x_ds,
-                    'center_y_640': center_y_ds,
-                    'width_640': width_ds,
-                    'height_640': height_ds,
+                    # Downsampled pixel coordinates
+                    'center_x_ds': center_x_ds,
+                    'center_y_ds': center_y_ds,
+                    'width_ds': width_ds,
+                    'height_ds': height_ds,
+                    'x1_ds': x1_ds,
+                    'y1_ds': y1_ds,
+                    'x2_ds': x2_ds,
+                    'y2_ds': y2_ds,
                     # Full resolution coordinates
                     'center_x_full': center_x_full,
                     'center_y_full': center_y_full,
                     'width_full': width_full,
                     'height_full': height_full,
-                    # Bounding box corners (640x640)
-                    'x1_640': center_x_ds - width_ds/2,
-                    'y1_640': center_y_ds - height_ds/2,
-                    'x2_640': center_x_ds + width_ds/2,
-                    'y2_640': center_y_ds + height_ds/2,
+                    'ds_width_px': ds_width,
+                    'ds_height_px': ds_height,
                 })
+                if legacy_square:
+                    data_by_id[assigned_id][-1].update({
+                        'center_x_640': center_x_ds,
+                        'center_y_640': center_y_ds,
+                        'width_640': width_ds,
+                        'height_640': height_ds,
+                        'x1_640': x1_ds,
+                        'y1_640': y1_ds,
+                        'x2_640': x2_ds,
+                        'y2_640': y2_ds,
+                    })
         
         cumulative_idx += frame_det_count
     
@@ -187,13 +214,19 @@ def export_detections_with_coordinates(zarr_path: str, output_dir: str,
                 width_ds = width_norm * ds_width
                 height_ds = height_norm * ds_height
                 
-                scale_factor = img_width / ds_width
-                center_x_full = center_x_ds * scale_factor
-                center_y_full = center_y_ds * scale_factor
-                width_full = width_ds * scale_factor
-                height_full = height_ds * scale_factor
+                scale_x = img_width / ds_width
+                scale_y = img_height / ds_height
+                center_x_full = center_x_ds * scale_x
+                center_y_full = center_y_ds * scale_y
+                width_full = width_ds * scale_x
+                height_full = height_ds * scale_y
                 
                 time_sec = frame_idx / fps
+
+                x1_ds = center_x_ds - width_ds / 2
+                y1_ds = center_y_ds - height_ds / 2
+                x2_ds = center_x_ds + width_ds / 2
+                y2_ds = center_y_ds + height_ds / 2
                 
                 data_by_id[assigned_id].append({
                     'frame': frame_idx,
@@ -203,19 +236,32 @@ def export_detections_with_coordinates(zarr_path: str, output_dir: str,
                     'center_y_norm': center_y_norm,
                     'width_norm': width_norm,
                     'height_norm': height_norm,
-                    'center_x_640': center_x_ds,
-                    'center_y_640': center_y_ds,
-                    'width_640': width_ds,
-                    'height_640': height_ds,
+                    'center_x_ds': center_x_ds,
+                    'center_y_ds': center_y_ds,
+                    'width_ds': width_ds,
+                    'height_ds': height_ds,
                     'center_x_full': center_x_full,
                     'center_y_full': center_y_full,
                     'width_full': width_full,
                     'height_full': height_full,
-                    'x1_640': center_x_ds - width_ds/2,
-                    'y1_640': center_y_ds - height_ds/2,
-                    'x2_640': center_x_ds + width_ds/2,
-                    'y2_640': center_y_ds + height_ds/2,
+                    'x1_ds': x1_ds,
+                    'y1_ds': y1_ds,
+                    'x2_ds': x2_ds,
+                    'y2_ds': y2_ds,
+                    'ds_width_px': ds_width,
+                    'ds_height_px': ds_height,
                 })
+                if legacy_square:
+                    data_by_id[assigned_id][-1].update({
+                        'center_x_640': center_x_ds,
+                        'center_y_640': center_y_ds,
+                        'width_640': width_ds,
+                        'height_640': height_ds,
+                        'x1_640': x1_ds,
+                        'y1_640': y1_ds,
+                        'x2_640': x2_ds,
+                        'y2_640': y2_ds,
+                    })
     
     # Export to CSV files
     print(f"\n✅ Found {len(data_by_id)} unique fish IDs. Exporting to CSV files...")
