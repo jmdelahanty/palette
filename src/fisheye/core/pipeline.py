@@ -199,8 +199,6 @@ class Pipeline:
                 'se1_radius': 1,
                 'se2_radius': 2,
                 'min_area': 5,
-                'adaptive_steps': 5,
-                'thresh_decrement': 5,
                 'scheduler': 'processes',
                 'num_workers': None
             },

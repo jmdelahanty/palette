@@ -7,8 +7,9 @@ in fish ROI images. The goal is to consistently detect exactly 3 blobs that can 
 identified as bladder, left eye, and right eye.
 
 Usage:
-    python keypoint_tuner.py data.zarr [start_frame]
-    
+    python -m fisheye.tune.keypoint_tuner data.zarr [start_frame]
+    python -m fisheye.tune.keypoint_review data.zarr --retune  # failure retune
+
 Controls:
     - Arrow keys: Navigate frames
     - Trackbars: Adjust detection parameters
@@ -16,34 +17,54 @@ Controls:
     - 'd': Toggle difference image
     - 'g': Toggle geometry visualization
     - 'q' or ESC: Quit
+    
+Failure retune mode (via keypoint_review):
+    - 'e': Evaluate params on remaining failures
+    - 'a': Apply params to remaining failures
 """
 
 import cv2
 import numpy as np
 import zarr
 import argparse
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import yaml
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from skimage.morphology import disk, erosion, dilation
 from skimage.measure import label, regionprops
+
+try:
+    from ..detection.detect_keypoints_traditional import detect_keypoints_traditional
+    from ..refinement.keypoint_quality import compute_geometry_metrics
+    from ..refinement.refine_keypoints import _compute_heading_from_points, _detect_eye_flip
+except ImportError:  # pragma: no cover - fallback for script execution
+    from fisheye.detection.detect_keypoints_traditional import detect_keypoints_traditional
+    from fisheye.refinement.keypoint_quality import compute_geometry_metrics
+    from fisheye.refinement.refine_keypoints import _compute_heading_from_points, _detect_eye_flip
 
 # Global variables for trackbar values
 current_frame = 1
 min_valid_angle = 10
+max_valid_angle = 90
 min_triangle_area = 100
 current_detection = 0
 roi_thresh = 50
 se1_radius = 1
 se2_radius = 2
 min_area = 5
-adaptive_steps = 5
-se2_decrement = 1
 use_difference = 1  # Default to using difference (matches actual pipeline)
 show_geometry = 1   # Show triangle geometry analysis
 
 MIN_AREA_SLIDER_MAX = 1000
 MIN_TRI_AREA_SLIDER_MAX = 2000
+MIN_ANGLE_SLIDER_MAX = 90
+MAX_ANGLE_SLIDER_MAX = 180
+EVAL_SAMPLE_DEFAULT = 300
+APPLY_BATCH_DEFAULT = 128
+APPLY_WORKERS_DEFAULT = max(1, min(4, os.cpu_count() or 1))
 
 def update_frame(val):
     global current_frame
@@ -69,14 +90,6 @@ def update_min_area(val):
     global min_area
     min_area = max(1, val)
 
-def update_adaptive_steps(val):
-    global adaptive_steps
-    adaptive_steps = max(1, val)
-
-def update_se2_decrement(val):
-    global se2_decrement
-    se2_decrement = max(1, val)
-
 def update_use_difference(val):
     global use_difference
     use_difference = val
@@ -89,9 +102,57 @@ def update_min_valid_angle(val):
     global min_valid_angle
     min_valid_angle = max(1, val)
 
+def update_max_valid_angle(val):
+    global max_valid_angle
+    max_valid_angle = max(1, val)
+
 def update_min_triangle_area(val):
     global min_triangle_area
     min_triangle_area = max(1, val)
+
+
+def _apply_keypoint_params(params: Dict[str, Any]) -> None:
+    global roi_thresh, se1_radius, se2_radius
+    global min_area, min_triangle_area, min_valid_angle, max_valid_angle
+    if params is None:
+        return
+    if 'roi_thresh' in params:
+        roi_thresh = int(params['roi_thresh'])
+    if 'se1_radius' in params:
+        se1_radius = int(params['se1_radius'])
+    if 'se2_radius' in params:
+        se2_radius = int(params['se2_radius'])
+    if 'min_area' in params:
+        min_area = int(params['min_area'])
+    if 'min_triangle_area' in params:
+        min_triangle_area = int(params['min_triangle_area'])
+    if 'min_valid_angle' in params:
+        min_valid_angle = int(params['min_valid_angle'])
+    if 'max_valid_angle' in params:
+        max_valid_angle = int(params['max_valid_angle'])
+
+
+def _load_initial_params(config_path: Path) -> None:
+    if not config_path.exists():
+        return
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+        kp_params = config.get('keypoints', {})
+        _apply_keypoint_params(kp_params)
+    print(f"✓ Loaded initial parameters from {config_path}")
+
+
+def _load_tuned_params_from_zarr(root: zarr.Group) -> Optional[Dict[str, Any]]:
+    if 'analysis_metadata' not in root:
+        return None
+    analysis_meta = root['analysis_metadata']
+    tuning = analysis_meta.attrs.get('keypoint_tuning')
+    if not isinstance(tuning, dict):
+        return None
+    tuned_params = tuning.get('tuned_parameters')
+    if not isinstance(tuned_params, dict) or not tuned_params:
+        return None
+    return tuned_params
 
 def calculate_triangle_area(p1, p2, p3):
     """Calculate area of triangle using cross product method."""
@@ -104,7 +165,7 @@ def calculate_triangle_area(p1, p2, p3):
 
 def process_roi_for_keypoints(roi_image, background_roi, params):
     """
-    Process an ROI image to detect keypoints using adaptive thresholding.
+    Process an ROI image to detect keypoints using morphology + geometry validation.
     Returns processed image, all regions, and identified keypoints.
     """
     if roi_image is None or roi_image.size == 0:
@@ -119,48 +180,49 @@ def process_roi_for_keypoints(roi_image, background_roi, params):
     else:
         diff_roi = roi_image
     
-    # Adaptive thresholding with geometry validation
+    # Morphology with geometry validation
     se1 = disk(params['se1_radius'])
     
     base_thresh = params['roi_thresh']
     current_se2_radius = params['se2_radius']
-    se2_step = params.get('se2_decrement', 1)
     keypoint_stats = []
     last_roi_stats = []
     effective_se2_radius = current_se2_radius
     min_angle_threshold = params.get('min_valid_angle', 10.0)
+    max_angle_threshold = params.get('max_valid_angle', 90.0)
     min_triangle_area = params.get('min_triangle_area', 100.0)  # NEW
+    angle_min = min(min_angle_threshold, max_angle_threshold)
+    angle_max = max(min_angle_threshold, max_angle_threshold)
     
-    for step in range(params['adaptive_steps']):
-        se2_radius_int = max(1, int(round(current_se2_radius)))
-        se2 = disk(se2_radius_int)
-        # Apply morphological operations
-        im_roi = erosion(dilation(erosion(
-            diff_roi >= base_thresh, se1), se2), se1
-        )
-        
-        # Find regions
-        roi_stat = [r for r in regionprops(label(im_roi)) 
-                    if r.area > params['min_area']]
-        last_roi_stats = roi_stat
-        
-        if len(roi_stat) >= 3:
-            # Take top 3 by area
-            candidate_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
-            
-            # Calculate triangle geometry for validation
-            centroids = np.array([r.centroid for r in candidate_stats])
-            angles = calculate_triangle_angles(centroids[0], centroids[1], centroids[2])
-            tri_area = calculate_triangle_area(centroids[0], centroids[1], centroids[2])
-            
-            # Check if angles form a valid triangle AND triangle is large enough
-            if np.all(angles >= min_angle_threshold) and tri_area >= min_triangle_area:
-                keypoint_stats = candidate_stats
-                effective_se2_radius = se2_radius_int
-                break
-            # Otherwise continue adaptive search
-        
-        current_se2_radius = max(1, current_se2_radius - se2_step)
+    se2_radius_int = max(1, int(round(current_se2_radius)))
+    se2 = disk(se2_radius_int)
+    # Apply morphological operations
+    im_roi = erosion(dilation(erosion(
+        diff_roi >= base_thresh, se1), se2), se1
+    )
+
+    # Find regions
+    roi_stat = [r for r in regionprops(label(im_roi))
+                if r.area > params['min_area']]
+    last_roi_stats = roi_stat
+
+    if len(roi_stat) >= 3:
+        # Take top 3 by area
+        candidate_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
+
+        # Calculate triangle geometry for validation
+        centroids = np.array([r.centroid for r in candidate_stats])
+        angles = calculate_triangle_angles(centroids[0], centroids[1], centroids[2])
+        tri_area = calculate_triangle_area(centroids[0], centroids[1], centroids[2])
+
+        # Check if angles form a valid triangle AND triangle is large enough
+        if (
+            np.all(angles >= angle_min)
+            and np.all(angles <= angle_max)
+            and tri_area >= min_triangle_area
+        ):
+            keypoint_stats = candidate_stats
+            effective_se2_radius = se2_radius_int
     
     # Try to identify keypoints if we have valid 3 blobs
     keypoint_id = None
@@ -177,115 +239,6 @@ def process_roi_for_keypoints(roi_image, background_roi, params):
     )
     
     return final_processed, keypoint_stats, keypoint_id, len(last_roi_stats)
-
-# Add this function after process_roi_for_keypoints():
-
-def run_adaptive_threshold_demo(roi_image, background_roi, params, window_name="Adaptive Demo"):
-    """
-    Run adaptive threshold step-by-step with visualization.
-    Shows each threshold iteration until valid keypoints are found.
-    """
-    if roi_image is None or roi_image.size == 0:
-        print("No ROI available for demo")
-        return
-    
-    # Use difference image
-    if params['use_diff'] and background_roi is not None:
-        diff_roi = np.clip(
-            background_roi.astype(np.int16) - roi_image.astype(np.int16), 
-            0, 255
-        ).astype(np.uint8)
-    else:
-        diff_roi = roi_image
-    
-    se1 = disk(params['se1_radius'])
-    
-    base_thresh = params['roi_thresh']
-    current_se2_radius = params['se2_radius']
-    se2_step = params.get('se2_decrement', 1)
-    min_angle = params.get('min_valid_angle', 10.0)
-    
-    print("\n=== ADAPTIVE THRESHOLD DEMO ===")
-    print(f"Starting SE2 radius: {current_se2_radius}")
-    print(f"Threshold held at: {base_thresh}")
-    print(f"Min valid angle: {min_angle}°")
-    print(f"Max steps: {params['adaptive_steps']}")
-    print("Press any key to advance to next step...")
-    
-    for step in range(params['adaptive_steps']):
-        se2_radius_int = max(1, int(round(current_se2_radius)))
-        se2 = disk(se2_radius_int)
-        # Apply morphological operations
-        im_roi = erosion(dilation(erosion(
-            diff_roi >= base_thresh, se1), se2), se1
-        )
-        
-        # Find regions
-        roi_stat = [r for r in regionprops(label(im_roi)) 
-                    if r.area > params['min_area']]
-        
-        # Visualize this step
-        vis_panel = cv2.cvtColor((im_roi * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
-        
-        # Draw detected blobs
-        for i, region in enumerate(sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]):
-            y, x = map(int, region.centroid)
-            color = [(0, 255, 0), (255, 0, 0), (0, 0, 255)][i] if i < 3 else (128, 128, 128)
-            cv2.circle(vis_panel, (x, y), 5, color, -1)
-            cv2.putText(vis_panel, f"A:{region.area}", (x+8, y), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
-        
-        # Status text
-        status = (
-            f"Step {step+1}/{params['adaptive_steps']} | "
-            f"SE2 radius: {se2_radius_int} | Blobs: {len(roi_stat)}"
-        )
-        cv2.putText(vis_panel, status, (5, 15), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-        
-        
-        # Check if we have valid keypoints
-        valid = False
-        if len(roi_stat) >= 3:
-            candidate_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
-            centroids = np.array([r.centroid for r in candidate_stats])
-            angles = calculate_triangle_angles(centroids[0], centroids[1], centroids[2])
-            tri_area = calculate_triangle_area(centroids[0], centroids[1], centroids[2])
-            
-            if np.all(angles >= min_angle) and tri_area >= params.get('min_triangle_area', 100):
-                valid = True
-                msg = (
-                    f"VALID! SE2:{se2_radius_int} A:{tri_area:.1f} "
-                    f"Ang:{angles[0]:.1f},{angles[1]:.1f},{angles[2]:.1f}"
-                )
-                color = (0, 255, 0)
-            else:
-                msg = f"Invalid angles: {angles[0]:.1f}, {angles[1]:.1f}, {angles[2]:.1f}"
-                color = (0, 165, 255)
-        else:
-            msg = f"Need 3 blobs (have {len(roi_stat)})"
-            color = (0, 0, 255)
-        
-        cv2.putText(vis_panel, msg, (5, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-        
-        # Show
-        cv2.imshow(window_name, cv2.resize(vis_panel, (600, 600)))
-        print(
-            f"  Step {step+1}: SE2 radius={se2_radius_int}, "
-            f"blobs={len(roi_stat)}, {msg}"
-        )
-        
-        if valid:
-            print("  ✓ Valid keypoints found!")
-            cv2.waitKey(2000)  # Show for 2 seconds
-            break
-        
-        cv2.waitKey(0)  # Wait for keypress
-        current_se2_radius = max(1, current_se2_radius - se2_step)
-    
-    cv2.destroyWindow(window_name)
-    print("=== DEMO COMPLETE ===\n")
 
 def save_keypoint_params(zarr_path, params):
     """
@@ -314,17 +267,16 @@ def save_keypoint_params(zarr_path, params):
         
         # Add/update keypoint tuning data
         metadata['keypoint_tuning'] = {
-            'method': 'adaptive_threshold_morphology',
-            'version': '1.0',
+            'method': 'threshold_morphology',
+            'version': '2.0',
             'tuned_timestamp': datetime.now(timezone.utc).isoformat(),
             'tuned_parameters': {
                 'roi_thresh': params['roi_thresh'],
                 'se1_radius': params['se1_radius'],
                 'se2_radius': params['se2_radius'],
                 'min_area': params['min_area'],
-                'adaptive_steps': params['adaptive_steps'],
-                'se2_decrement': params['se2_decrement'],
                 'min_valid_angle': params.get('min_valid_angle', 10),
+                'max_valid_angle': params.get('max_valid_angle', 90),
                 'min_triangle_area': params.get('min_triangle_area', 100),
             },
             'tuned_on_frame': params.get('frame_index', None),
@@ -340,9 +292,9 @@ def save_keypoint_params(zarr_path, params):
         print(f"   se1_radius: {params['se1_radius']}")
         print(f"   se2_radius: {params['se2_radius']}")
         print(f"   min_area: {params['min_area']}")
+        print(f"   min_valid_angle: {params.get('min_valid_angle', 'N/A')}")
         print(f"   min_triangle_area: {params['min_triangle_area']}")
-        print(f"   adaptive_steps: {params['adaptive_steps']}")
-        print(f"   se2_decrement: {params['se2_decrement']}")
+        print(f"   max_valid_angle: {params.get('max_valid_angle', 'N/A')}")
         print(f"   Tuned on frame: {params.get('frame_index', 'N/A')}")
         print(f"   Tuned on detection: {params.get('detection_index', 'N/A')}")
         
@@ -374,6 +326,98 @@ def calculate_triangle_angles(p1, p2, p3):
         angles[2] = np.arccos(np.clip(cos_angle, -1.0, 1.0))
     
     return np.rad2deg(angles)
+
+
+def _load_failure_indices(refined: zarr.Group) -> np.ndarray:
+    if "refined_success" in refined:
+        success = np.asarray(refined["refined_success"][:], dtype=bool)
+        return np.where(~success)[0].astype("i4", copy=False)
+    if "source_success" in refined:
+        success = np.asarray(refined["source_success"][:], dtype=bool)
+        return np.where(~success)[0].astype("i4", copy=False)
+    if "failure_indices" in refined:
+        return np.asarray(refined["failure_indices"][:], dtype="i4")
+    return np.zeros(0, dtype="i4")
+
+
+def _ensure_retune_id_array(refined: zarr.Group, chunks: Sequence[int]) -> zarr.Array:
+    if "retune_id" in refined:
+        return refined["retune_id"]
+    total_rois = refined["keypoints_roi"].shape[0]
+    return refined.create_array(
+        "retune_id",
+        shape=(total_rois,),
+        chunks=chunks,
+        dtype="i4",
+        fill_value=-1,
+        overwrite=True,
+    )
+
+
+def _get_or_create_retune_id(refined: zarr.Group, params: Dict[str, Any]) -> int:
+    existing = refined.attrs.get("retune_params")
+    retune_params = existing if isinstance(existing, dict) else {}
+
+    def signature(values: Dict[str, Any]) -> tuple:
+        return tuple(sorted(values.items()))
+
+    target = signature(params)
+    for key, value in retune_params.items():
+        if isinstance(value, dict) and signature(value) == target:
+            try:
+                return int(key)
+            except ValueError:
+                continue
+
+    existing_ids = [int(k) for k in retune_params.keys() if str(k).isdigit()]
+    next_id = max(existing_ids, default=0) + 1
+    retune_params[str(next_id)] = params
+    refined.attrs["retune_params"] = retune_params
+    return next_id
+
+
+def _merge_reason(existing: str, tags: Sequence[str]) -> str:
+    existing_tags = [tag for tag in existing.split("|") if tag and tag != "detection_failed"]
+    merged = sorted(set(existing_tags + list(tags)))
+    return "|".join(merged) if merged else "clean"
+
+
+def _extract_background_roi(
+    background: Optional[np.ndarray], roi_coord: np.ndarray, roi_shape: tuple
+) -> Optional[np.ndarray]:
+    if background is None or roi_coord[0] == -1:
+        return None
+    y1, x1 = int(roi_coord[1]), int(roi_coord[0])
+    y2, x2 = y1 + roi_shape[0], x1 + roi_shape[1]
+    if y2 > background.shape[0] or x2 > background.shape[1]:
+        return None
+    roi = background[y1:y2, x1:x2]
+    if roi.shape != roi_shape:
+        return None
+    return roi
+
+
+def _sanitize_reason_array(reason_arr: zarr.Array) -> None:
+    try:
+        raw = reason_arr[:]
+    except Exception:
+        return
+    if raw.size == 0:
+        return
+
+    def coerce(val: Any) -> str:
+        if val is None:
+            return ""
+        if isinstance(val, np.ndarray):
+            if val.size == 0:
+                return ""
+            if val.size == 1:
+                return str(val.item())
+            return "|".join(str(item) for item in val.tolist())
+        return str(val)
+
+    cleaned = np.array([coerce(v) for v in raw], dtype=object)
+    reason_arr[:] = cleaned
 
 
 def identify_keypoints_by_geometry(keypoint_stats):
@@ -436,7 +480,7 @@ def identify_keypoints_by_geometry(keypoint_stats):
     }
 
 
-def create_keypoint_dashboard(roi_image, background_roi, params, frame_num, det_num, roi_idx):
+def create_keypoint_dashboard(roi_image, background_roi, params, frame_num, det_num, roi_idx, mode_label=None):
     """
     Create comprehensive visualization for keypoint detection tuning.
     """
@@ -584,7 +628,8 @@ def create_keypoint_dashboard(roi_image, background_roi, params, frame_num, det_
     slider_info = (
         f"Thresh:{params['roi_thresh']} | SE1:{params['se1_radius']} "
         f"| SE2 slider:{params['se2_radius']} | SE2 eff:{effective_se2} "
-        f"| MinArea:{params['min_area']} | MinTri:{params['min_triangle_area']}"
+        f"| MinArea:{params['min_area']} | Ang:{params['min_valid_angle']}-{params.get('max_valid_angle', 90)} "
+        f"| MinTri:{params['min_triangle_area']}"
     )
     cv2.putText(panel4, slider_info, (10, 38),
                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
@@ -596,6 +641,11 @@ def create_keypoint_dashboard(roi_image, background_roi, params, frame_num, det_
     panel4 = cv2.resize(panel4, display_size)
     panel5 = cv2.resize(panel5, display_size)
     blank_panel = np.zeros_like(panel1)
+    if mode_label:
+        for i, line in enumerate(str(mode_label).split("\n")):
+            y = 30 + i * 22
+            cv2.putText(blank_panel, line, (10, y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
 
     # Add frame info to panel 1
     info_text = f"Frame: {frame_num}, Det: {det_num}, ROI: {roi_idx}"
@@ -610,26 +660,412 @@ def create_keypoint_dashboard(roi_image, background_roi, params, frame_num, det_
     return dashboard
 
 
+def run_failure_tuner(
+    zarr_path: str,
+    refined_run: Optional[str],
+    start_index: int,
+    *,
+    apply_batch_size: int = APPLY_BATCH_DEFAULT,
+    apply_workers: int = APPLY_WORKERS_DEFAULT,
+) -> None:
+    global current_frame, roi_thresh, se1_radius, se2_radius
+    global min_area, min_triangle_area, use_difference, show_geometry
+    global min_valid_angle, max_valid_angle
+
+    current_frame = max(1, start_index)
+    use_difference = 1
+
+    config_path = Path("configs/fisheye/default.yaml")
+    _load_initial_params(config_path)
+
+    try:
+        zarr_root = zarr.open_group(zarr_path, mode='a')
+    except Exception as e:
+        print(f"Error opening Zarr: {e}")
+        return
+
+    tuned_params = _load_tuned_params_from_zarr(zarr_root)
+    if tuned_params:
+        _apply_keypoint_params(tuned_params)
+        print("✓ Loaded tuned keypoint parameters from analysis_metadata")
+
+    refined_parent = zarr_root.get("refined_keypoints_runs")
+    if refined_parent is None:
+        print("Error: No refined_keypoints_runs found")
+        return
+    refined_run = refined_run or refined_parent.attrs.get("latest")
+    if not refined_run or refined_run not in refined_parent:
+        print("Error: Refined keypoint run not found")
+        return
+    refined = refined_parent[refined_run]
+
+    failures = _load_failure_indices(refined)
+    if failures.size == 0:
+        print("No failed keypoints to retune.")
+        return
+
+    crop_run = refined.attrs.get("source_crop_run")
+    if not crop_run and "crop_runs" in zarr_root:
+        crop_run = zarr_root["crop_runs"].attrs.get("latest")
+    if not crop_run:
+        print("Error: No crop run found for failures")
+        return
+    crop_group = zarr_root[f"crop_runs/{crop_run}"]
+    roi_images = crop_group["roi_images"]
+    roi_coords = crop_group["roi_coordinates_full"]
+    frame_indices = crop_group["frame_indices"][:]
+    det_indices = crop_group.get("detection_indices")
+
+    if "background_runs" not in zarr_root:
+        print("Error: Run background stage first")
+        return
+    latest_bg = zarr_root["background_runs"].attrs.get("latest")
+    if not latest_bg:
+        print("Error: No latest background run found")
+        return
+    bg_group = zarr_root[f"background_runs/{latest_bg}"]
+    if "background_full" in bg_group:
+        background = bg_group["background_full"][:]
+    else:
+        print("Error: Background full-resolution array missing")
+        return
+
+    if "raw_video" in zarr_root and "images_full" in zarr_root["raw_video"]:
+        full_h, full_w = zarr_root["raw_video/images_full"].shape[1:]
+    elif "raw_video" in zarr_root and "images_ds" in zarr_root["raw_video"]:
+        full_h, full_w = zarr_root["raw_video/images_ds"].shape[1:]
+    else:
+        print("Error: No raw_video images found")
+        return
+    norm_factor = np.array([full_w, full_h], dtype=np.float64)
+
+    kp_roi_arr = refined.get("keypoints_roi")
+    kp_img_arr = refined.get("keypoints_img")
+    kp_norm_arr = refined.get("keypoints_norm")
+    heading_arr = refined.get("heading")
+    confidence_arr = refined.get("confidence")
+    kp_conf_arr = refined.get("keypoint_confidences")
+    thresh_arr = refined.get("effective_threshold")
+    se2_arr = refined.get("effective_se2_radius")
+    triangle_area_arr = refined.get("triangle_area")
+    min_angle_arr = refined.get("min_angle")
+    triangle_angles_arr = refined.get("triangle_angles")
+    refined_success_arr = refined.get("refined_success")
+    flip_corrected_arr = refined.get("flip_corrected")
+    quality_labels_arr = refined.get("quality_labels")
+    confidence_valid_arr = refined.get("confidence_valid")
+    geometry_valid_arr = refined.get("geometry_valid")
+    usable_arr = refined.get("usable_keypoints")
+    reason_arr = refined.get("reason")
+    heading_valid_arr = refined.get("heading_valid")
+    detection_source_arr = refined.get("detection_source")
+
+    retune_id_arr = _ensure_retune_id_array(
+        refined, heading_arr.chunks or (min(1024, kp_roi_arr.shape[0]),)
+    )
+    if reason_arr is not None:
+        _sanitize_reason_array(reason_arr)
+
+    summary_raw = refined.attrs.get("summary_statistics", {})
+    summary = summary_raw.get("refine", summary_raw) if isinstance(summary_raw, dict) else {}
+    confidence_threshold = float(summary.get("confidence_threshold", 0.3))
+    min_triangle_angle = float(summary.get("min_triangle_angle", 10.0))
+    min_triangle_area = float(summary.get("min_triangle_area", 100.0))
+
+    apply_batch_size = max(1, int(apply_batch_size))
+    apply_workers = max(1, int(apply_workers))
+
+    print("\nKeypoint Failure Retune")
+    print(f"  Zarr: {zarr_path}")
+    print(f"  Refined run: {refined_run}")
+    print(f"  Crop run: {crop_run}")
+    print(f"  Failures to retune: {len(failures)}")
+    print(f"  Apply batch: {apply_batch_size} | Workers: {apply_workers}")
+
+    window_name = "Keypoint Failure Retune"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, 1600, 800)
+
+    cv2.createTrackbar("Failure", window_name, current_frame, len(failures), update_frame)
+    cv2.createTrackbar("Threshold", window_name, roi_thresh, 255, update_roi_thresh)
+    cv2.createTrackbar("SE1 Radius", window_name, se1_radius, 10, update_se1)
+    cv2.createTrackbar("SE2 Radius", window_name, se2_radius, 10, update_se2)
+
+    min_area = int(min(min_area, MIN_AREA_SLIDER_MAX))
+    min_triangle_area = int(min(min_triangle_area, MIN_TRI_AREA_SLIDER_MAX))
+    min_valid_angle = int(min(min_valid_angle, MIN_ANGLE_SLIDER_MAX))
+    max_valid_angle = int(min(max_valid_angle, MAX_ANGLE_SLIDER_MAX))
+
+    cv2.createTrackbar("Min Area", window_name, int(min_area), MIN_AREA_SLIDER_MAX, update_min_area)
+    cv2.createTrackbar("Min Angle", window_name, min_valid_angle, MIN_ANGLE_SLIDER_MAX, update_min_valid_angle)
+    cv2.createTrackbar("Max Angle", window_name, max_valid_angle, MAX_ANGLE_SLIDER_MAX, update_max_valid_angle)
+    cv2.createTrackbar("Min Tri Area", window_name, int(min_triangle_area), MIN_TRI_AREA_SLIDER_MAX, update_min_triangle_area)
+    cv2.createTrackbar("Show Geometry", window_name, show_geometry, 1, update_show_geometry)
+
+    print("\nControls:")
+    print("  Arrow keys: Navigate failures")
+    print("  e: Quick eval on a sample of remaining failures")
+    print("  E: Eval all remaining failures (slow)")
+    print("  a: Apply params to remaining failures")
+    print("  g: Toggle geometry display")
+    print("  q/ESC: Quit")
+
+    def current_params() -> Dict[str, Any]:
+        return {
+            "roi_thresh": roi_thresh,
+            "se1_radius": se1_radius,
+            "se2_radius": se2_radius,
+            "min_area": min_area,
+            "min_valid_angle": min_valid_angle,
+            "max_valid_angle": max_valid_angle,
+            "min_triangle_area": min_triangle_area,
+        }
+
+    def evaluate_params(full: bool = False) -> None:
+        params = current_params()
+        total_failures = len(failures)
+        if total_failures == 0:
+            print("Eval: no failures remaining.")
+            return
+
+        if full or total_failures <= EVAL_SAMPLE_DEFAULT:
+            sample_indices = failures
+            label = f"all {total_failures}"
+        else:
+            sample_size = min(EVAL_SAMPLE_DEFAULT, total_failures)
+            rng = np.random.default_rng(0)
+            sample_indices = rng.choice(failures, size=sample_size, replace=False)
+            label = f"sample {sample_size}/{total_failures}"
+
+        success = 0
+        total = len(sample_indices)
+        for roi_idx in sample_indices:
+            roi_idx = int(roi_idx)
+            roi_image = roi_images[roi_idx]
+            roi_coord = roi_coords[roi_idx]
+            background_roi = _extract_background_roi(background, roi_coord, roi_image.shape)
+            if background_roi is None:
+                continue
+            if detect_keypoints_traditional(roi_image, background_roi, **params) is not None:
+                success += 1
+        rate = (success / total * 100.0) if total else 0.0
+        print(f"Eval ({label}): {success}/{total} would pass ({rate:.1f}%)")
+
+    def apply_params() -> None:
+        nonlocal failures
+        global current_frame
+        params = current_params()
+        retune_id = _get_or_create_retune_id(refined, params)
+        updated = 0
+        total = len(failures)
+        failures_list = [int(idx) for idx in failures]
+        total_batches = (total + apply_batch_size - 1) // apply_batch_size if total else 0
+
+        executor = ThreadPoolExecutor(max_workers=apply_workers) if apply_workers > 1 else None
+        try:
+            for batch_idx, start in enumerate(range(0, total, apply_batch_size), start=1):
+                batch_indices = failures_list[start:start + apply_batch_size]
+                batch_items: List[Tuple[int, np.ndarray, np.ndarray, Optional[np.ndarray]]] = []
+                for roi_idx in batch_indices:
+                    roi_image = roi_images[roi_idx]
+                    roi_coord = roi_coords[roi_idx]
+                    background_roi = _extract_background_roi(background, roi_coord, roi_image.shape)
+                    batch_items.append((roi_idx, roi_image, roi_coord, background_roi))
+                    retune_id_arr[roi_idx] = retune_id
+
+                results: List[Optional[Dict[str, Any]]] = [None] * len(batch_items)
+                if executor is None:
+                    for i, (_, roi_image, _, background_roi) in enumerate(batch_items):
+                        if background_roi is not None:
+                            results[i] = detect_keypoints_traditional(
+                                roi_image, background_roi, **params
+                            )
+                else:
+                    futures = []
+                    for i, (_, roi_image, _, background_roi) in enumerate(batch_items):
+                        if background_roi is None:
+                            continue
+                        futures.append(
+                            (i, executor.submit(
+                                detect_keypoints_traditional, roi_image, background_roi, **params
+                            ))
+                        )
+                    for i, future in futures:
+                        results[i] = future.result()
+
+                for (roi_idx, _, roi_coord, _), keypoints in zip(batch_items, results):
+                    if keypoints is None:
+                        continue
+
+                    points = np.array(
+                        [keypoints["bladder"], keypoints["eye_left"], keypoints["eye_right"]],
+                        dtype=np.float64,
+                    )
+                    heading_val = _compute_heading_from_points(points[0], points[1], points[2])
+                    flip_detected = _detect_eye_flip(points[0], points[1], points[2], heading_val)
+                    if flip_detected:
+                        points[[1, 2]] = points[[2, 1]]
+
+                    conf_missing = True
+                    conf_ok = False
+                    if kp_conf_arr is not None:
+                        conf_vals = np.array(keypoints["keypoint_confidences"], dtype=np.float64)
+                        if flip_detected:
+                            conf_vals[[1, 2]] = conf_vals[[2, 1]]
+                        kp_conf_arr[roi_idx] = conf_vals
+                        if np.all(np.isfinite(conf_vals)):
+                            conf_missing = False
+                            conf_ok = bool(np.all(conf_vals >= confidence_threshold))
+
+                    metrics = compute_geometry_metrics(points)
+                    geom_ok = bool(
+                        np.isfinite(metrics.min_angle)
+                        and np.isfinite(metrics.area)
+                        and metrics.min_angle >= min_triangle_angle
+                        and metrics.area >= min_triangle_area
+                    )
+
+                    if kp_roi_arr is not None:
+                        kp_roi_arr[roi_idx] = points
+                    full_points = points + roi_coord
+                    if kp_img_arr is not None:
+                        kp_img_arr[roi_idx] = full_points
+                    if kp_norm_arr is not None:
+                        kp_norm_arr[roi_idx] = full_points / norm_factor
+
+                    if heading_arr is not None:
+                        heading_arr[roi_idx] = heading_val
+                    if confidence_arr is not None:
+                        confidence_arr[roi_idx] = float(keypoints.get("confidence", 1.0))
+                    if thresh_arr is not None:
+                        thresh_arr[roi_idx] = float(keypoints.get("effective_threshold", params["roi_thresh"]))
+                    if se2_arr is not None:
+                        se2_arr[roi_idx] = float(keypoints.get("effective_se2_radius", params["se2_radius"]))
+
+                    if triangle_area_arr is not None:
+                        triangle_area_arr[roi_idx] = metrics.area
+                    if min_angle_arr is not None:
+                        min_angle_arr[roi_idx] = metrics.min_angle
+                    if triangle_angles_arr is not None:
+                        triangle_angles_arr[roi_idx] = metrics.angles
+
+                    if refined_success_arr is not None:
+                        refined_success_arr[roi_idx] = True
+                    if flip_corrected_arr is not None:
+                        flip_corrected_arr[roi_idx] = flip_detected
+                    if quality_labels_arr is not None:
+                        quality_labels_arr[roi_idx] = 6 if flip_detected else 0
+                    if confidence_valid_arr is not None:
+                        confidence_valid_arr[roi_idx] = conf_ok
+                    if geometry_valid_arr is not None:
+                        geometry_valid_arr[roi_idx] = geom_ok
+                    if usable_arr is not None:
+                        usable_arr[roi_idx] = conf_ok and geom_ok
+                    if heading_valid_arr is not None:
+                        det_src = int(detection_source_arr[roi_idx]) if detection_source_arr is not None else 0
+                        heading_valid_arr[roi_idx] = det_src == 0
+                    if reason_arr is not None:
+                        tags = []
+                        if flip_detected:
+                            tags.append("flip_corrected")
+                        if conf_missing:
+                            tags.append("confidence_missing")
+                        elif not conf_ok:
+                            tags.append("low_confidence")
+                        if not geom_ok:
+                            tags.append("geometry_issue")
+                        existing_val = reason_arr[roi_idx]
+                        existing = "" if existing_val is None else str(existing_val)
+                        reason_value = str(_merge_reason(existing, tags))
+                        reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
+
+                    updated += 1
+
+                if total_batches > 1:
+                    print(f"  Batch {batch_idx}/{total_batches} processed ({updated}/{total} updated)")
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
+
+        failures = _load_failure_indices(refined)
+        remaining = len(failures)
+        rate = (updated / total * 100.0) if total else 0.0
+        print(f"Applied retune {retune_id}: {updated}/{total} updated ({rate:.1f}%)")
+        print(f"Remaining failures: {remaining}")
+        new_max = max(1, remaining)
+        cv2.setTrackbarMax("Failure", window_name, new_max)
+        current_frame = min(current_frame, new_max)
+        cv2.setTrackbarPos("Failure", window_name, current_frame)
+
+    while True:
+        if len(failures) == 0:
+            print("No failures remaining.")
+            break
+
+        current_frame = max(1, min(current_frame, len(failures)))
+        failure_pos = current_frame - 1
+        roi_idx = int(failures[failure_pos])
+        roi_image = roi_images[roi_idx]
+        roi_coord = roi_coords[roi_idx]
+        background_roi = _extract_background_roi(background, roi_coord, roi_image.shape)
+
+        frame_idx = int(frame_indices[roi_idx]) if frame_indices is not None else roi_idx
+        det_num = int(det_indices[roi_idx]) if det_indices is not None else 0
+
+        params = {
+            "roi_thresh": roi_thresh,
+            "se1_radius": se1_radius,
+            "se2_radius": se2_radius,
+            "min_area": min_area,
+            "min_valid_angle": min_valid_angle,
+            "max_valid_angle": max_valid_angle,
+            "use_diff": 1,
+            "show_geometry": show_geometry,
+            "min_triangle_area": min_triangle_area,
+        }
+
+        mode_label = f"RETUNE FAILURES\nCorrecting {failure_pos + 1}/{len(failures)}"
+        dashboard = create_keypoint_dashboard(
+            roi_image, background_roi, params, frame_idx, det_num, roi_idx, mode_label
+        )
+
+        cv2.imshow(window_name, dashboard)
+        key = cv2.waitKey(30) & 0xFF
+
+        if key == ord('q') or key == 27:
+            break
+        if key == ord('e'):
+            evaluate_params(full=False)
+        elif key == ord('E'):
+            evaluate_params(full=True)
+        elif key == ord('a'):
+            apply_params()
+            if len(failures) == 0:
+                break
+            cv2.setTrackbarPos("Failure", window_name, min(current_frame, len(failures)))
+        elif key == ord('g'):
+            show_geometry = 1 - show_geometry
+            cv2.setTrackbarPos("Show Geometry", window_name, show_geometry)
+        elif key == 83:  # Right arrow
+            current_frame = min(len(failures), current_frame + 1)
+            cv2.setTrackbarPos("Failure", window_name, current_frame)
+        elif key == 81:  # Left arrow
+            current_frame = max(1, current_frame - 1)
+            cv2.setTrackbarPos("Failure", window_name, current_frame)
+
+    cv2.destroyAllWindows()
+
+
 def main(zarr_path, start_frame=1):
     global current_frame, roi_thresh, se1_radius, se2_radius
-    global min_area, min_triangle_area, adaptive_steps, se2_decrement, use_difference, show_geometry
+    global min_area, min_triangle_area, use_difference, show_geometry
+    global min_valid_angle, max_valid_angle
     
     current_frame = start_frame
     
     # Load config for initial values
     config_path = Path("configs/fisheye/default.yaml")
-    if config_path.exists():
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-            kp_params = config.get('keypoints', {})
-            roi_thresh = kp_params.get('roi_thresh', roi_thresh)
-            se1_radius = kp_params.get('se1_radius', se1_radius)
-            se2_radius = kp_params.get('se2_radius', se2_radius)
-            min_area = kp_params.get('min_area', min_area)
-            min_triangle_area = kp_params.get('min_triangle_area', min_triangle_area)
-            adaptive_steps = kp_params.get('adaptive_steps', adaptive_steps)
-            se2_decrement = kp_params.get('se2_decrement', se2_decrement)
-            print(f"✓ Loaded initial parameters from {config_path}")
+    _load_initial_params(config_path)
     
     # Open zarr
     try:
@@ -725,11 +1161,12 @@ def main(zarr_path, start_frame=1):
     # Clamp globals to slider limits before creating trackbars
     min_area = int(min(min_area, MIN_AREA_SLIDER_MAX))
     min_triangle_area = int(min(min_triangle_area, MIN_TRI_AREA_SLIDER_MAX))
+    min_valid_angle = int(min(min_valid_angle, MIN_ANGLE_SLIDER_MAX))
+    max_valid_angle = int(min(max_valid_angle, MAX_ANGLE_SLIDER_MAX))
 
     cv2.createTrackbar("Min Area", window_name, int(min_area), MIN_AREA_SLIDER_MAX, update_min_area)
-    cv2.createTrackbar("Adaptive Steps", window_name, adaptive_steps, 10, update_adaptive_steps)
-    cv2.createTrackbar("SE2 Dec", window_name, se2_decrement, 10, update_se2_decrement)
-    cv2.createTrackbar("Min Angle", window_name, min_valid_angle, 90, update_min_valid_angle)
+    cv2.createTrackbar("Min Angle", window_name, min_valid_angle, MIN_ANGLE_SLIDER_MAX, update_min_valid_angle)
+    cv2.createTrackbar("Max Angle", window_name, max_valid_angle, MAX_ANGLE_SLIDER_MAX, update_max_valid_angle)
     cv2.createTrackbar("Min Tri Area", window_name, int(min_triangle_area), MIN_TRI_AREA_SLIDER_MAX, update_min_triangle_area)
     if background is not None:
         cv2.createTrackbar("Use Diff", window_name, use_difference, 1, update_use_difference)
@@ -740,7 +1177,6 @@ def main(zarr_path, start_frame=1):
     print("  s: Save parameters to Zarr metadata")
     print("  d: Toggle difference mode")
     print("  g: Toggle geometry display")
-    print("  a: Run adaptive threshold demo")
     print("  q/ESC: Quit")
     
     while True:
@@ -779,9 +1215,8 @@ def main(zarr_path, start_frame=1):
             'se1_radius': se1_radius,
             'se2_radius': se2_radius,
             'min_area': min_area,
-            'adaptive_steps': adaptive_steps,
-            'se2_decrement': se2_decrement,
             'min_valid_angle': min_valid_angle,
+            'max_valid_angle': max_valid_angle,
             'use_diff': use_difference,
             'show_geometry': show_geometry,
             'min_triangle_area': min_triangle_area
@@ -806,9 +1241,8 @@ def main(zarr_path, start_frame=1):
                     'se1_radius': se1_radius,
                     'se2_radius': se2_radius,
                     'min_area': min_area,
-                    'adaptive_steps': adaptive_steps,
-                    'se2_decrement': se2_decrement,
                     'min_valid_angle': min_valid_angle,
+                    'max_valid_angle': max_valid_angle,
                     'min_triangle_area': min_triangle_area,
                     'frame_index': current_frame,
                     'detection_index': current_detection
@@ -830,10 +1264,6 @@ def main(zarr_path, start_frame=1):
         elif key == ord('g'):
             show_geometry = 1 - show_geometry
             cv2.setTrackbarPos("Show Geometry", window_name, show_geometry)
-        elif key == ord('a'):  # 'a' for adaptive demo
-            print("\n[Starting adaptive threshold demo...]")
-            run_adaptive_threshold_demo(roi_image, background_roi, params, 
-                                        window_name="Adaptive Threshold Demo")
         elif key == 83:  # Right arrow
             current_frame = min(num_frames, current_frame + 1)
             cv2.setTrackbarPos("Frame", window_name, current_frame)
@@ -848,7 +1278,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Keypoint Detection Tuner")
     parser.add_argument("zarr_path", help="Path to Zarr archive")
     parser.add_argument("start_frame", type=int, nargs='?', default=1,
-                       help="Starting frame (default: 1)")
+                       help="Starting frame or failure index (default: 1)")
     args = parser.parse_args()
-    
+
     main(args.zarr_path, args.start_frame)

@@ -2,8 +2,8 @@
 Utility for inspecting traditional keypoint detection results.
 
 Loads the most recent crop and keypoint runs from a Palette Zarr store,
-then overlays detected keypoints (swim bladder + eyes) on both the ROI
-crop and the original frame.
+then overlays detected keypoints (swim bladder + eyes) on the ROI
+crop.
 
 Enhanced with slider to scroll through all frames.
 """
@@ -11,7 +11,6 @@ Enhanced with slider to scroll through all frames.
 from __future__ import annotations
 
 import argparse
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence, Dict, Any, List
@@ -22,7 +21,6 @@ import matplotlib.colors as mcolors
 import numpy as np
 import zarr
 from matplotlib.widgets import Slider, Button
-from matplotlib.transforms import Affine2D
 
 from ..pose.schema import PoseSchema, schema_from_metadata, schema_from_package
 
@@ -122,118 +120,6 @@ def get_latest_run(root: zarr.Group, group_name: str, explicit: Optional[str]) -
         raise RuntimeError(f"No runs recorded under '{runs_group_name}'.")
     return latest
 
-
-class ChunkedFrameCache:
-    """Lightweight LRU cache that keeps a few decompressed frame chunks in memory."""
-
-    def __init__(self, array: zarr.Array, max_chunks: int = 2) -> None:
-        self._array = array
-        chunks = getattr(array, "chunks", None)
-        self._chunk_len = int(chunks[0]) if chunks and chunks[0] else 1
-        self._max_chunks = max(1, max_chunks)
-        self._cache: dict[int, np.ndarray] = {}
-        self._lru = deque()
-
-    @property
-    def chunk_len(self) -> int:
-        return self._chunk_len
-
-    def get(self, frame_idx: int) -> np.ndarray:
-        if frame_idx < 0 or frame_idx >= self._array.shape[0]:
-            raise IndexError(f"Frame index {frame_idx} out of bounds for array of length {self._array.shape[0]}")
-
-        chunk_idx = frame_idx // self._chunk_len
-        chunk = self._cache.get(chunk_idx)
-        if chunk is None:
-            start = chunk_idx * self._chunk_len
-            stop = min(start + self._chunk_len, self._array.shape[0])
-            chunk = np.asarray(self._array[start:stop])
-            self._cache[chunk_idx] = chunk
-            self._lru.append(chunk_idx)
-            if len(self._lru) > self._max_chunks:
-                stale = self._lru.popleft()
-                self._cache.pop(stale, None)
-        else:
-            # Refresh LRU order
-            self._lru.remove(chunk_idx)
-            self._lru.append(chunk_idx)
-
-        local_idx = frame_idx - chunk_idx * self._chunk_len
-        return chunk[local_idx]
-
-def rotate_and_mask_roi(roi_img: np.ndarray, heading_deg: float) -> np.ndarray:
-    """
-    Rotate ROI image to stabilize fish orientation and apply circular mask.
-    
-    Args:
-        roi_img: Grayscale ROI image
-        heading_deg: Fish heading in degrees (0° = right, CCW positive)
-    
-    Returns:
-        Rotated and masked ROI image
-    """
-    h, w = roi_img.shape
-    center = (w / 2.0, h / 2.0)
-    
-    # Create circular mask first
-    Y, X = np.ogrid[:h, :w]
-    dist_sq = (X - center[0]) ** 2 + (Y - center[1]) ** 2
-    radius = min(center[0], center[1])
-    mask = dist_sq <= radius ** 2
-    
-    # Apply mask to original image
-    masked_img = np.zeros_like(roi_img, dtype=np.float32)
-    masked_img[mask] = roi_img[mask].astype(np.float32)
-    
-    # Rotate the masked image
-    # CV2 rotates CLOCKWISE for positive angles, but our heading is CCW positive
-    # So we need to negate the heading to make fish point right (0°)
-    import cv2
-    rotation_matrix = cv2.getRotationMatrix2D(center, -heading_deg, 1.0)
-    rotated = cv2.warpAffine(
-        masked_img,
-        rotation_matrix,
-        (w, h),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0
-    )
-    
-    return rotated.astype(roi_img.dtype)
-
-def rotate_keypoints(keypoints_dict: dict, center: tuple, heading_deg: float) -> dict:
-    """
-    Rotate keypoint coordinates around a center point.
-    
-    Args:
-        keypoints_dict: Dict of label -> (x, y) coordinates
-        center: (center_x, center_y) rotation center
-        heading_deg: Rotation angle in degrees
-    
-    Returns:
-        Dict of label -> rotated (x, y) coordinates
-    """
-    center_x, center_y = center
-    theta = np.deg2rad(heading_deg)
-    
-    # Rotation matrix (clockwise rotation for positive angle to match CV2)
-    cos_theta = np.cos(theta)
-    sin_theta = np.sin(theta)
-    
-    rotated_kp = {}
-    for label, (x, y) in keypoints_dict.items():
-        # Translate to origin
-        dx = x - center_x
-        dy = y - center_y
-        
-        # Rotate
-        x_rot = dx * cos_theta - dy * sin_theta
-        y_rot = dx * sin_theta + dy * cos_theta
-        
-        # Translate back
-        rotated_kp[label] = (x_rot + center_x, y_rot + center_y)
-    
-    return rotated_kp
 
 def get_record_for_frame(
     root: zarr.Group,
@@ -352,16 +238,13 @@ def plot_record_interactive(
     crop_run: str,
     labels: Sequence[str],
     pose_schema: Optional[PoseSchema],
-    eye_mask_data: Optional[Dict[str, Any]],
     start_frame: int = 0,
     keypoint_method: str = "unknown",
 ) -> None:
     """Interactive viewer with slider to scroll through frames."""
     
     # Get total number of frames
-    full_frames = root["raw_video/images_full"]
-    frame_cache = ChunkedFrameCache(full_frames)
-    n_frames = full_frames.shape[0]
+    n_frames = root["raw_video/images_full"].shape[0]
     
     # Pre-build frame-to-ROI mapping for fast lookups
     print("Building frame-to-ROI index...")
@@ -381,7 +264,6 @@ def plot_record_interactive(
             keypoint_group = root[f"keypoints_runs/{keypoint_run}"]
             keypoint_data = {
                 'keypoints_roi': keypoint_group["keypoints_roi"],
-                'keypoints_img': keypoint_group["keypoints_img"],
                 'heading': keypoint_group["heading"],
                 'confidence': keypoint_group["confidence"],
                 'effective_threshold': keypoint_group["effective_threshold"],
@@ -394,25 +276,17 @@ def plot_record_interactive(
     
     # Pre-load crop data references (but don't load all images)
     roi_images = crop_group["roi_images"]
-    roi_coords_full = crop_group["roi_coordinates_full"]
-    full_h, full_w = full_frames.shape[1], full_frames.shape[2]
     
     print(
-        f"Ready! {len(frame_to_roi_map)} frames with detections out of {n_frames} total. "
-        f"(frame chunk size ≈ {frame_cache.chunk_len})"
+        f"Ready! {len(frame_to_roi_map)} frames with detections out of {n_frames} total."
     )
     
-    cmap_palette = plt.cm.get_cmap("tab10", max(len(labels), 3))
+    cmap_palette = plt.colormaps.get_cmap("tab10").resampled(max(len(labels), 3))
     colors = {label: mcolors.to_hex(cmap_palette(i)) for i, label in enumerate(labels)}
-    left_label = next((lab for lab in labels if "left" in lab.lower()), labels[1] if len(labels) > 1 else labels[0])
-    right_label = next((lab for lab in labels if "right" in lab.lower()), labels[-1])
-    left_color = colors.get(left_label, "#1a66f3")
-    right_color = colors.get(right_label, "#f85151")
     cmap = "gray"
     
-    # Create figure with three subplots (ROI, Rotated ROI, Full frame)
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    ax_roi, ax_rot, ax_full = axes
+    # Create figure with one subplot (ROI)
+    fig, ax_roi = plt.subplots(1, 1, figsize=(8, 6))
     plt.subplots_adjust(bottom=0.2)
     
     # Current frame state
@@ -427,13 +301,8 @@ def plot_record_interactive(
         roi_indices = frame_to_roi_map.get(frame_idx, [])
         roi_idx = roi_indices[0] if roi_indices else -1
         
-        # Load full frame (single zarr access)
-        full_img = frame_cache.get(frame_idx)
-        
         # Clear axes
         ax_roi.clear()
-        ax_rot.clear()
-        ax_full.clear()
         
         # --- LEFT PANEL: ROI with keypoints ---
         kp_roi = None
@@ -441,7 +310,6 @@ def plot_record_interactive(
         if len(roi_indices) > 0:
             # Load crop data (single zarr accesses)
             roi_img = roi_images[roi_idx]
-            roi_origin = roi_coords_full[roi_idx]
             
             ax_roi.imshow(roi_img, cmap=cmap)
             
@@ -453,10 +321,8 @@ def plot_record_interactive(
                     if success:
                         # Load keypoint positions
                         kp_roi_arr = keypoint_data['keypoints_roi'][roi_idx]
-                        kp_full_arr = keypoint_data['keypoints_img'][roi_idx]
                         
                         kp_roi = {label: kp_roi_arr[i] for i, label in enumerate(labels)}
-                        kp_full = {label: kp_full_arr[i] for i, label in enumerate(labels)}
                         
                         # Draw keypoints on ROI
                         for label, pt in kp_roi.items():
@@ -477,14 +343,6 @@ def plot_record_interactive(
                         )
                         has_keypoints = True
                         heading = heading_raw if np.isfinite(heading_raw) else None
-                        
-                        # Store for full frame overlay
-                        kp_full_clamped = {}
-                        for label, pt in kp_full.items():
-                            kp_full_clamped[label] = np.array([
-                                np.clip(pt[0], 0, full_w - 1),
-                                np.clip(pt[1], 0, full_h - 1)
-                            ])
                 except (KeyError, IndexError):
                     pass
             
@@ -493,7 +351,6 @@ def plot_record_interactive(
                 status = "✗ No keypoints"
                 title_color = "orange"
                 title = f"ROI {roi_idx} — Frame {frame_idx} [{status}]"
-                kp_full_clamped = None
         else:
             # No crop available - show black square
             dummy_img = np.zeros((100, 100), dtype=np.uint8)
@@ -502,153 +359,10 @@ def plot_record_interactive(
             title_color = "red"
             title = f"Frame {frame_idx} [{status}]"
             roi_img = None
-            roi_origin = None
-            kp_full_clamped = None
         
-        feret_segments_full: List[tuple] = []
-        feret_summary = ""
-        if eye_mask_data and roi_img is not None and roi_idx >= 0 and roi_idx < eye_mask_data.get("total", 0):
-            feret_major = eye_mask_data.get("feret_axes_major")
-            feret_minor = eye_mask_data.get("feret_axes_minor")
-            feret_round = eye_mask_data.get("feret_roundness")
-            if (
-                feret_major is not None
-                and feret_minor is not None
-                and feret_major.shape[0] > roi_idx
-                and feret_minor.shape[0] > roi_idx
-            ):
-                for side_idx, side in enumerate(("left", "right")):
-                    major_seg = feret_major[roi_idx, side_idx]
-                    minor_seg = feret_minor[roi_idx, side_idx]
-                    color_seg = left_color if side == "left" else right_color
-                    if np.all(np.isfinite(major_seg)):
-                        ax_roi.plot(
-                            [major_seg[0], major_seg[2]],
-                            [major_seg[1], major_seg[3]],
-                            color=color_seg,
-                            linewidth=1.8,
-                        )
-                    if np.all(np.isfinite(minor_seg)):
-                        ax_roi.plot(
-                            [minor_seg[0], minor_seg[2]],
-                            [minor_seg[1], minor_seg[3]],
-                            color=color_seg,
-                            linewidth=1.2,
-                            linestyle="--",
-                        )
-                    if roi_origin is not None:
-                        if np.all(np.isfinite(major_seg)):
-                            feret_segments_full.append(("solid", color_seg, major_seg, roi_origin))
-                        if np.all(np.isfinite(minor_seg)):
-                            feret_segments_full.append(("dashed", color_seg, minor_seg, roi_origin))
-                if feret_round is not None:
-                    round_left = feret_round[roi_idx, 0]
-                    round_right = feret_round[roi_idx, 1]
-                    text_parts = []
-                    if np.isfinite(round_left):
-                        text_parts.append(f"L round={round_left:.2f}")
-                    if np.isfinite(round_right):
-                        text_parts.append(f"R round={round_right:.2f}")
-                    feret_summary = " | ".join(text_parts)
-
-        full_title = title if not feret_summary else f"{title}\n{feret_summary}"
-        ax_roi.set_title(full_title, color=title_color, fontweight='bold')
+        ax_roi.set_title(title, color=title_color, fontweight='bold')
         ax_roi.set_axis_off()
 
-        # --- MIDDLE PANEL: Rotated ROI ---
-        if len(roi_indices) > 0 and roi_img is not None and has_keypoints and heading is not None and kp_roi is not None:
-            # Rotate and mask the ROI image
-            rotated_img = rotate_and_mask_roi(roi_img, heading)
-            
-            ax_rot.imshow(rotated_img, cmap=cmap)
-            ax_rot.set_title(f"Stabilized ROI (H={heading:.1f}°)")
-            ax_rot.set_axis_off()
-            
-            # Rotate keypoints to match
-            h, w = roi_img.shape
-            center = (w / 2.0, h / 2.0)
-            rotated_kp = rotate_keypoints(kp_roi, center, heading)
-            
-            # Draw rotated keypoints
-            for label, (x, y) in rotated_kp.items():
-                ax_rot.scatter(
-                    x, y,
-                    s=60,
-                    c=colors[label],
-                    edgecolors="black",
-                    linewidths=1.0,
-                )
-                ax_rot.text(
-                    x + 3, y - 3,
-                    label,
-                    color=colors[label],
-                    fontsize=8,
-                    weight="bold",
-                    bbox=dict(facecolor="black", alpha=0.5, pad=2),
-                )
-            
-            # Draw heading arrow (should point to the right after rotation)
-            arrow_length = min(w, h) * 0.15  # 15% of image size
-            arrow_start = center
-            # After rotation, heading should be horizontal (pointing right)
-            arrow_end = (center[0] + arrow_length, center[1])
-            ax_rot.annotate(
-                '',
-                xy=arrow_end,
-                xytext=arrow_start,
-                arrowprops=dict(
-                    arrowstyle='->',
-                    lw=2,
-                    color='magenta'
-                )
-            )
-            
-        else:
-            # No keypoints or no ROI - show black screen
-            black_img = np.zeros((100, 100), dtype=np.uint8)
-            ax_rot.imshow(black_img, cmap=cmap, vmin=0, vmax=255)
-            ax_rot.set_axis_off()
-            
-            if len(roi_indices) > 0 and roi_img is not None:
-                # Have ROI but no keypoints
-                ax_rot.set_title("Stabilized ROI (no keypoints)", color="orange")
-            else:
-                # No ROI at all
-                ax_rot.set_title("Stabilized ROI (no data)", color="red")
-        
-        # --- RIGHT PANEL: Full frame with overlay ---
-        ax_full.imshow(full_img, cmap=cmap)
-        ax_full.set_title(f"Full Frame {frame_idx}")
-        ax_full.set_axis_off()
-        
-        # Draw ROI rectangle if available
-        if len(roi_indices) > 0 and roi_origin is not None and roi_img is not None:
-            origin_x, origin_y = roi_origin
-            roi_h, roi_w = roi_img.shape
-            rect_x = [origin_x, origin_x + roi_w, origin_x + roi_w, origin_x, origin_x]
-            rect_y = [origin_y, origin_y, origin_y + roi_h, origin_y + roi_h, origin_y]
-            ax_full.plot(rect_x, rect_y, color="cyan", linewidth=1.5, linestyle="--")
-
-        for style, color_seg, seg, origin in feret_segments_full:
-            linewidth = 1.5 if style == "solid" else 1.0
-            linestyle = "-" if style == "solid" else "--"
-            ax_full.plot(
-                [seg[0] + origin[0], seg[2] + origin[0]],
-                [seg[1] + origin[1], seg[3] + origin[1]],
-                color=color_seg,
-                linewidth=linewidth,
-                linestyle=linestyle,
-            )
-        
-        # Draw keypoints on full frame if available
-        if has_keypoints and kp_full_clamped is not None:
-            for label, pt in kp_full_clamped.items():
-                ax_full.scatter(pt[0], pt[1], s=60, c=colors[label], 
-                              edgecolors="black", linewidths=1.0)
-                ax_full.text(pt[0] + 3, pt[1] - 3, label, color=colors[label], 
-                           fontsize=8, weight="bold",
-                           bbox=dict(facecolor='black', alpha=0.5, pad=2))
-        
         fig.canvas.draw_idle()
     
     # Initial display
@@ -739,10 +453,6 @@ def main() -> None:
         default=0,
         help="Frame to start viewing from (default: 0).",
     )
-    parser.add_argument(
-        "--eye-run",
-        help="Eye mask run name or shortcut (latest, latest_traditional, latest_yolo, latest_refine).",
-    )
 
     args = parser.parse_args()
 
@@ -780,48 +490,30 @@ def main() -> None:
     
     # Get keypoint labels if available
     keypoint_method = "unknown"
-    if keypoint_run and keypoint_group is None:
-        keypoint_group = root[f"keypoints_runs/{keypoint_run}"]
-        pose_schema = None
-        schema_meta = keypoint_group.attrs.get("pose_schema")
-        if isinstance(schema_meta, dict):
-            try:
-                pose_schema = schema_from_metadata(schema_meta)
-            except Exception:
-                schema_name = schema_meta.get("name")
-                if schema_name:
-                    try:
-                        pose_schema = schema_from_package(schema_name)
-                    except FileNotFoundError:
-                        pose_schema = None
-        else:
-            pose_schema = None
+    pose_schema = None
+    labels = ["bladder", "eye_left", "eye_right"]
+    if keypoint_run:
+        if keypoint_group is None:
+            keypoint_group = root[f"keypoints_runs/{keypoint_run}"]
+        if keypoint_group is not None:
+            schema_meta = keypoint_group.attrs.get("pose_schema")
+            if isinstance(schema_meta, dict):
+                try:
+                    pose_schema = schema_from_metadata(schema_meta)
+                except Exception:
+                    schema_name = schema_meta.get("name")
+                    if schema_name:
+                        try:
+                            pose_schema = schema_from_package(schema_name)
+                        except FileNotFoundError:
+                            pose_schema = None
+            default_labels = ["bladder", "eye_left", "eye_right"]
+            if pose_schema:
+                labels = pose_schema.node_names
+            else:
+                labels = keypoint_group.attrs.get("keypoint_labels", default_labels)
+            keypoint_method = keypoint_group.attrs.get("method", "unknown")
 
-        default_labels = ["bladder", "eye_left", "eye_right"]
-        if pose_schema:
-            labels = pose_schema.node_names
-        else:
-            labels = keypoint_group.attrs.get("keypoint_labels", default_labels)
-        keypoint_method = keypoint_group.attrs.get("method", "unknown")
-    else:
-        pose_schema = None
-        labels = ["bladder", "eye_left", "eye_right"]
-
-    eye_mask_data: Optional[Dict[str, Any]] = None
-    eye_run = None
-    try:
-        eye_run = get_latest_run(root, "eye_masks", args.eye_run)
-        eye_group = root[f"eye_masks_runs/{eye_run}"]
-        if "feret_axes_major" in eye_group and "feret_axes_minor" in eye_group:
-            eye_mask_data = {
-                "feret_axes_major": eye_group["feret_axes_major"],
-                "feret_axes_minor": eye_group["feret_axes_minor"],
-                "feret_roundness": eye_group.get("feret_roundness"),
-                "total": int(eye_group["masks_roi"].shape[0]),
-            }
-    except RuntimeError:
-        eye_run = None
-    
     print(f"\nKeypoint Visualizer")
     print(f"  Zarr: {args.zarr_path}")
     print(f"  Keypoint run: {keypoint_run or 'None (will show crops only)'}")
@@ -830,8 +522,6 @@ def main() -> None:
     print(f"  Crop run: {crop_run}")
     if pose_schema:
         print(f"  Pose schema: {pose_schema.name} ({pose_schema.num_keypoints} keypoints)")
-    if eye_run:
-        print(f"  Eye mask run: {eye_run}")
     print(f"\nControls:")
     print(f"  - Slider: Navigate to specific frame")
     print(f"  - Buttons: Prev/Next (±1), Prev 10/Next 10 (±10)")
@@ -845,7 +535,6 @@ def main() -> None:
         crop_run=crop_run,
         labels=labels,
         pose_schema=pose_schema,
-        eye_mask_data=eye_mask_data,
         start_frame=args.start_frame,
         keypoint_method=keypoint_method,
     )

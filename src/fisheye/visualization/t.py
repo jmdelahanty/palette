@@ -266,10 +266,21 @@
 # print(f"Num workers: {crop_group.attrs.get('num_workers', 'unknown')}")
 # print(f"Use distributed: {crop_group.attrs.get('use_distributed', 'unknown')}")
 
-import zarr
-root = zarr.open('/nvme1/2026_01_13_22_41_02/Cam2010096.zarr', mode='r')
-crop_group = root['crop_runs'][root['crop_runs'].attrs['latest']]
-roi_images = crop_group['roi_images']
-print(f"roi_images chunks: {roi_images.chunks}")  # Should be (32, 256, 256) now
-black_count = sum(1 for i in range(0, roi_images.shape[0], 100) if roi_images[i].max() == 0)
-print(f"Sample black crops: {black_count}")
+# import zarr
+# root = zarr.open('/nvme1/2026_01_13_22_41_02/Cam2010096.zarr', mode='r')
+# crop_group = root['crop_runs'][root['crop_runs'].attrs['latest']]
+
+# roi_images = crop_group['roi_images']
+# print(f"roi_images chunks: {roi_images.chunks}")  # Should be (32, 256, 256) now
+# black_count = sum(1 for i in range(0, roi_images.shape[0], 100) if roi_images[i].max() == 0)
+# print(f"Sample black crops: {black_count}")
+
+import zarr, numpy as np
+root = zarr.open("/nvme1/2026_01_13_22_41_02/Cam2010096.zarr", mode="r")
+kp = root["keypoints_runs/keypoints_2026-01-16_16-39-13/keypoints_roi"][:]
+success = root["keypoints_runs/keypoints_2026-01-16_16-39-13/detection_success"][:].astype(bool)
+bad = np.any(~np.isfinite(kp[:, 1:]), axis=(1,2))
+print("bad keypoints:", bad.sum(), "bad but success=True:", np.count_nonzero(bad & success))
+
+ref = root["refined_eye_masks_runs/refined_eye_masks_2026-01-16_21-34-57"]
+print("ellipse_success pairs:", np.sum(np.all(ref["ellipse_success"][:], axis=1)))

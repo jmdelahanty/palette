@@ -96,6 +96,23 @@ def run_tuner(
                 start_frame=frame_idx if frame_idx else 1
             )
             return 0
+
+        elif tuner_name in {'keypoint-review', 'keypoint_review', 'review'}:
+            console.print(
+                "[yellow]Keypoint review uses a separate entrypoint.[/yellow]"
+            )
+            console.print(
+                "Run: `python -m fisheye.tune.keypoint_review <zarr> --retune|--manual|--audit`"
+            )
+            return 0
+        elif tuner_name in {'eye-mask-review', 'eye_mask_review', 'eye-mask-reviewer'}:
+            console.print(
+                "[yellow]Eye mask review uses a separate entrypoint.[/yellow]"
+            )
+            console.print(
+                "Run: `python -m fisheye.tune.eye_mask_review <zarr> --retune|--manual|--audit`"
+            )
+            return 0
             
         else:
             console.print(f"[red]Error: Unknown tuner '{tuner_name}'[/red]")
@@ -106,6 +123,7 @@ def run_tuner(
             console.print("  • threshold - Alias for 'detect'")
             console.print("  • keypoint  - Tune anatomical keypoint detection (swim bladder & eyes)")
             console.print("  • keypoints - Alias for 'keypoint'")
+            console.print("  • eye-mask-review - Retune/manual review for refined eye masks")
             return 1
             
     except ImportError as e:
@@ -132,6 +150,8 @@ def list_tuners(console: Optional[Console] = None):
         ("detect", "Tune fish detection thresholds and morphological parameters"),
         ("threshold", "Alias for 'detect' tuner"),
         ("keypoints", "Tune anatomical keypoint detection (swim bladder and eyes)"),
+        ("keypoint-review", "Review refined keypoints (retune/manual/audit)"),
+        ("eye-mask-review", "Review refined eye masks (retune/manual/audit)"),
     ]
     
     for name, description in tuners:

@@ -11,7 +11,8 @@ os.environ.setdefault('MKL_NUM_THREADS', '2')
 
 import argparse
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Sequence, List
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 
@@ -20,7 +21,10 @@ cv2.setNumThreads(2)
 import numpy as np
 import zarr
 from skimage import filters, measure, morphology
+from skimage.measure import EllipseModel
 from datetime import datetime, timezone
+
+from ..segmentation.eye_segmentation import EyeSegmentationConfig, _process_roi_data
 
 
 SLIDER_MAX_PADDING = 40
@@ -33,11 +37,6 @@ DEBUG_PANEL_SCALE = 5
 DEBUG_PANEL_MARGIN = 10
 DEBUG_PANEL_SPACING = 20
 
-
-def axis_roundness(major: float, minor: float) -> float:
-    if major <= 0:
-        return 0.0
-    return float(np.clip(minor / major, 0.0, 1.0))
 
 def save_eye_mask_params(zarr_path: Path, params: Dict[str, Any]) -> Tuple[bool, str]:
     """
@@ -142,63 +141,18 @@ def rotate_image_and_points(
     return rotated, pts
 
 
-def max_distance_and_perp_chord(
-    mask: np.ndarray,
-    max_points: int = 500,
-) -> Optional[Tuple[np.ndarray, np.ndarray, float, Optional[np.ndarray], Optional[np.ndarray]]]:
-    contours = measure.find_contours(mask.astype(float), 0.5)
-    if not contours:
-        return None
-    contour = max(contours, key=lambda c: c.shape[0])
-    if contour.shape[0] < 2:
-        return None
-    points_full = contour[:, ::-1]  # (x, y)
-    points = points_full
-    if points.shape[0] > max_points:
-        idx = np.linspace(0, points.shape[0] - 1, max_points).astype(int)
-        points = points[idx]
-
-    diffs = points[:, None, :] - points[None, :, :]
-    dist2 = np.sum(diffs * diffs, axis=2)
-    max_idx = np.unravel_index(int(np.argmax(dist2)), dist2.shape)
-    p1 = points[max_idx[0]]
-    p2 = points[max_idx[1]]
-    max_dist = float(np.sqrt(dist2[max_idx]))
-
-    d = p2 - p1
-    norm = float(np.linalg.norm(d))
-    if norm == 0.0:
-        return p1, p2, max_dist, None, None
-    n = d / norm  # line normal for perpendicular chord
-    u = np.array([-n[1], n[0]], dtype=np.float64)  # line direction for perpendicular chord
-    mid = (p1 + p2) / 2.0
-
-    intersections: list[np.ndarray] = []
-    for i in range(points_full.shape[0]):
-        a = points_full[i]
-        b = points_full[(i + 1) % points_full.shape[0]]
-        da = float(np.dot(a - mid, n))
-        db = float(np.dot(b - mid, n))
-        if da == 0.0 and db == 0.0:
-            continue
-        if da * db > 0.0:
-            continue
-        denom = da - db
-        if denom == 0.0:
-            continue
-        t = da / denom
-        if 0.0 <= t <= 1.0:
-            intersections.append(a + t * (b - a))
-
-    if len(intersections) < 2:
-        return p1, p2, max_dist, None, None
-
-    proj = [float(np.dot(p - mid, u)) for p in intersections]
-    min_idx = int(np.argmin(proj))
-    max_idx = int(np.argmax(proj))
-    perp_p1 = intersections[min_idx]
-    perp_p2 = intersections[max_idx]
-    return p1, p2, max_dist, perp_p1, perp_p2
+def apply_circular_window(image: np.ndarray) -> np.ndarray:
+    """Mask image to a centered circular window to hide rotation edges."""
+    h, w = image.shape[:2]
+    center = (w // 2, h // 2)
+    radius = min(center)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.circle(mask, center, radius, 255, -1)
+    if image.ndim == 2:
+        return np.where(mask > 0, image, 0)
+    masked = image.copy()
+    masked[mask == 0] = 0
+    return masked
 
 
 def select_region(
@@ -208,7 +162,7 @@ def select_region(
     max_area: Optional[int],
     closing: int,
     opening: int,
-) -> Tuple[Optional[np.ndarray], dict]:
+) -> Optional[np.ndarray]:
     if closing > 0:
         mask = morphology.binary_closing(mask, morphology.disk(closing))
     if opening > 0:
@@ -216,11 +170,11 @@ def select_region(
 
     labeled = measure.label(mask)
     if labeled.max() == 0:
-        return None, {}
+        return None
 
     regions = measure.regionprops(labeled)
     if not regions:
-        return None, {}
+        return None
 
     cx, cy = center
     best = None
@@ -238,14 +192,11 @@ def select_region(
             best_dist = dist
 
     if best is None:
-        return None, {}
+        return None
 
     region_mask = (labeled == best.label)
 
-    major = best.major_axis_length
-    minor = best.minor_axis_length
-    selection_info: dict = {'roundness': axis_roundness(major, minor)}
-    return region_mask, selection_info
+    return region_mask
 
 
 def draw_overlay(roi_img: np.ndarray, masks: Tuple[np.ndarray, np.ndarray], contours: Tuple[Optional[np.ndarray], Optional[np.ndarray]], regions_info: Tuple[Optional[dict], Optional[dict]]) -> np.ndarray:
@@ -356,7 +307,7 @@ def create_debug_panel(
     panels.append(("Segmented", region_display))
 
     overlay_panel = to_bgr(original_patch).copy()
-    major_color = (0, 200, 255)
+    major_color = (255, 255, 0)  # cyan in BGR
     minor_color = (0, 0, 255)
     if region_mask is not None:
         overlay_color = np.zeros_like(overlay_panel, dtype=np.uint8)
@@ -366,85 +317,70 @@ def create_debug_panel(
         cv2.putText(overlay_panel, "NO REGION", (5, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
     panels.append(("Overlay", overlay_panel))
 
-    overlay_axes_panel = overlay_panel.copy()
+    # Ellipse fit panel - TRUE least-squares fit to contour
+    ellipse_fit_panel = to_bgr(original_patch).copy()
+    ellipse_fit_label = "Ellipse Fit"
+
     if region_mask is not None:
-        region_props = measure.regionprops(region_mask.astype(np.uint8))
-        if region_props:
-            region = region_props[0]
-            cy, cx = region.centroid
-            orientation = region.orientation
-            major_len = region.major_axis_length
-            minor_len = region.minor_axis_length
-            center_pt = (int(round(cx)), int(round(cy)))
-            cos_angle = np.cos(orientation)
-            sin_angle = np.sin(orientation)
-            major_dx = cos_angle * major_len / 2
-            major_dy = sin_angle * major_len / 2
-            minor_dx = -sin_angle * minor_len / 2
-            minor_dy = cos_angle * minor_len / 2
-            major_p1 = (int(round(cx - major_dx)), int(round(cy - major_dy)))
-            major_p2 = (int(round(cx + major_dx)), int(round(cy + major_dy)))
-            minor_p1 = (int(round(cx - minor_dx)), int(round(cy - minor_dy)))
-            minor_p2 = (int(round(cx + minor_dx)), int(round(cy + minor_dy)))
-            cv2.line(overlay_axes_panel, major_p1, major_p2, major_color, 1)
-            cv2.line(overlay_axes_panel, minor_p1, minor_p2, minor_color, 1)
-            cv2.circle(overlay_axes_panel, center_pt, 2, major_color, -1)
-    panels.append(("Overlay+Axes", overlay_axes_panel))
+        # Find contour points
+        contours = measure.find_contours(region_mask.astype(float), 0.5)
+        if contours:
+            contour = max(contours, key=lambda c: c.shape[0])
+            # contour is (row, col) = (y, x), need (x, y) for EllipseModel
+            contour_xy = contour[:, ::-1]  # Convert to (x, y)
 
-    max_dist_panel = to_bgr(original_patch).copy()
-    max_dist_label = "Max Dist"
-    if region_mask is not None:
-        segment = max_distance_and_perp_chord(region_mask)
-        if segment is not None:
-            p1, p2, dist, perp_p1, perp_p2 = segment
-            max_dist_label = f"Max Dist {dist:.1f}px"
-            p1_i = (int(round(p1[0])), int(round(p1[1])))
-            p2_i = (int(round(p2[0])), int(round(p2[1])))
-            cv2.line(max_dist_panel, p1_i, p2_i, (220, 220, 220), 1)
-            cv2.circle(max_dist_panel, p1_i, 2, (220, 220, 220), -1)
-            cv2.circle(max_dist_panel, p2_i, 2, (220, 220, 220), -1)
-            if perp_p1 is not None and perp_p2 is not None:
-                q1_i = (int(round(perp_p1[0])), int(round(perp_p1[1])))
-                q2_i = (int(round(perp_p2[0])), int(round(perp_p2[1])))
-                cv2.line(max_dist_panel, q1_i, q2_i, (255, 0, 0), 1)
-                cv2.circle(max_dist_panel, q1_i, 2, (255, 0, 0), -1)
-                cv2.circle(max_dist_panel, q2_i, 2, (255, 0, 0), -1)
-    panels.append((max_dist_label, max_dist_panel))
+            if contour_xy.shape[0] >= 5:  # Need at least 5 points for ellipse
+                ellipse_model = EllipseModel()
+                success = ellipse_model.estimate(contour_xy)
 
-    ellipse_panel = to_bgr(original_patch).copy()
-    ellipse_label = "Ellipse Fit"
-    ellipse_mask = region_mask
+                if success and ellipse_model.params is not None:
+                    xc, yc, a, b, theta = ellipse_model.params
+                    # Ensure major >= minor (swap if needed, rotate theta by 90°)
+                    if a < b:
+                        a, b = b, a
+                        theta = theta + np.pi / 2
 
-    if ellipse_mask is not None:
-        region_props = measure.regionprops(ellipse_mask.astype(np.uint8))
-        if region_props:
-            region = region_props[0]
-            cy, cx = region.centroid
-            orientation = region.orientation
-            major_len = region.major_axis_length
-            minor_len = region.minor_axis_length
-            center_pt = (int(round(cx)), int(round(cy)))
-            axes = (
-                max(1, int(round(major_len / 2))),
-                max(1, int(round(minor_len / 2))),
-            )
-            angle_deg = float(np.degrees(orientation))
-            cos_angle = np.cos(orientation)
-            sin_angle = np.sin(orientation)
-            major_dx = cos_angle * major_len / 2
-            major_dy = sin_angle * major_len / 2
-            minor_dx = -sin_angle * minor_len / 2
-            minor_dy = cos_angle * minor_len / 2
-            major_p1 = (int(round(cx - major_dx)), int(round(cy - major_dy)))
-            major_p2 = (int(round(cx + major_dx)), int(round(cy + major_dy)))
-            minor_p1 = (int(round(cx - minor_dx)), int(round(cy - minor_dy)))
-            minor_p2 = (int(round(cx + minor_dx)), int(round(cy + minor_dy)))
-            cv2.line(ellipse_panel, major_p1, major_p2, major_color, 1)
-            cv2.line(ellipse_panel, minor_p1, minor_p2, minor_color, 1)
-            cv2.circle(ellipse_panel, center_pt, 2, major_color, -1)
+                    ellipse_fit_label = f"Ellipse θ={np.degrees(theta):.1f}°"
+
+                    # Draw fitted ellipse outline (cv2.ellipse expects (major, minor) order)
+                    axes = (max(1, int(round(a))), max(1, int(round(b))))
+                    center_pt = (int(round(xc)), int(round(yc)))
+                    angle_deg = float(np.degrees(theta))
+                    cv2.ellipse(ellipse_fit_panel, center_pt, axes, angle_deg, 0, 360, (0, 255, 0), 1)
+
+                    # Draw major axis (along theta direction)
+                    cos_t = np.cos(theta)
+                    sin_t = np.sin(theta)
+                    major_dx = cos_t * a
+                    major_dy = sin_t * a
+                    major_p1 = (int(round(xc - major_dx)), int(round(yc - major_dy)))
+                    major_p2 = (int(round(xc + major_dx)), int(round(yc + major_dy)))
+                    cv2.line(ellipse_fit_panel, major_p1, major_p2, major_color, 1)
+
+                    # Draw minor axis (perpendicular)
+                    minor_dx = -sin_t * b
+                    minor_dy = cos_t * b
+                    minor_p1 = (int(round(xc - minor_dx)), int(round(yc - minor_dy)))
+                    minor_p2 = (int(round(xc + minor_dx)), int(round(yc + minor_dy)))
+                    cv2.line(ellipse_fit_panel, minor_p1, minor_p2, minor_color, 1)
+
+                    # Center point
+                    cv2.circle(ellipse_fit_panel, center_pt, 2, major_color, -1)
+                else:
+                    ellipse_fit_label = "Ellipse (fit failed)"
+                    cv2.putText(ellipse_fit_panel, "FIT FAILED", (5, h // 2),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
+            else:
+                ellipse_fit_label = "Ellipse (<5 pts)"
+                cv2.putText(ellipse_fit_panel, "TOO FEW PTS", (5, h // 2),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
+        else:
+            cv2.putText(ellipse_fit_panel, "NO CONTOUR", (5, h // 2),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
     else:
-        cv2.putText(ellipse_panel, "NO REGION", (5, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
-    panels.append((ellipse_label, ellipse_panel))
+        cv2.putText(ellipse_fit_panel, "NO REGION", (5, h // 2),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
+    panels.append((ellipse_fit_label, ellipse_fit_panel))
 
     num_panels = len(panels)
     total_width = num_panels * panel_total_w + (num_panels - 1) * DEBUG_PANEL_SPACING
@@ -479,6 +415,233 @@ def create_debug_panel(
     return debug
 
 
+def _get_sep_limits(root: zarr.Group, refined: zarr.Group) -> tuple[Optional[float], Optional[float]]:
+    analysis = root.get("analysis_metadata")
+    if analysis is not None:
+        tuning = analysis.attrs.get("eye_mask_tuning")
+        if isinstance(tuning, dict):
+            params = tuning.get("tuned_parameters", {})
+            min_sep = params.get("min_eye_separation")
+            max_sep = params.get("max_eye_separation")
+            return (
+                float(min_sep) if min_sep is not None else None,
+                float(max_sep) if max_sep is not None else None,
+            )
+
+    source_run = refined.attrs.get("source_eye_masks_run")
+    if source_run and "eye_masks_runs" in root and source_run in root["eye_masks_runs"]:
+        src = root["eye_masks_runs"][source_run]
+        min_sep = src.attrs.get("min_eye_separation")
+        max_sep = src.attrs.get("max_eye_separation")
+        return (
+            float(min_sep) if min_sep is not None else None,
+            float(max_sep) if max_sep is not None else None,
+        )
+    return None, None
+
+
+def _compute_success_mask(
+    ellipse_success: np.ndarray,
+    eye_separation: np.ndarray,
+    min_sep: Optional[float],
+    max_sep: Optional[float],
+) -> np.ndarray:
+    pair_success = np.all(ellipse_success, axis=1)
+    sep_ok = np.ones_like(pair_success, dtype=bool)
+    if eye_separation.size:
+        sep_ok = np.isfinite(eye_separation)
+        if min_sep is not None:
+            sep_ok &= eye_separation >= float(min_sep)
+        if max_sep is not None:
+            sep_ok &= eye_separation <= float(max_sep)
+    return pair_success & sep_ok
+
+
+def _load_failure_indices(
+    refined: zarr.Group,
+    min_sep: Optional[float],
+    max_sep: Optional[float],
+) -> np.ndarray:
+    ellipse_success = np.asarray(refined["ellipse_success"][:], dtype=bool)
+    eye_separation = np.asarray(refined["eye_separation"][:], dtype=np.float32)
+    success_mask = _compute_success_mask(ellipse_success, eye_separation, min_sep, max_sep)
+    return np.where(~success_mask)[0].astype("i4", copy=False)
+
+
+def _get_reason_array(refined: zarr.Group) -> Optional[zarr.Array]:
+    metrics = refined.get("metrics")
+    if isinstance(metrics, zarr.Group) and "reason" in metrics:
+        return metrics["reason"]
+    return None
+
+
+def _ensure_retune_id_array(refined: zarr.Group, chunks: Sequence[int]) -> zarr.Array:
+    if "retune_id" in refined:
+        return refined["retune_id"]
+    total_rois = refined["masks_roi"].shape[0]
+    return refined.create_array(
+        "retune_id",
+        shape=(total_rois,),
+        chunks=chunks,
+        dtype="i4",
+        fill_value=-1,
+        overwrite=True,
+    )
+
+
+def _get_or_create_retune_id(refined: zarr.Group, params: Dict[str, Any]) -> int:
+    existing = refined.attrs.get("retune_params")
+    retune_params = existing if isinstance(existing, dict) else {}
+
+    def signature(values: Dict[str, Any]) -> tuple:
+        return tuple(sorted(values.items()))
+
+    target = signature(params)
+    for key, value in retune_params.items():
+        if isinstance(value, dict) and signature(value) == target:
+            try:
+                return int(key)
+            except ValueError:
+                continue
+
+    existing_ids = [int(k) for k in retune_params.keys() if str(k).isdigit()]
+    next_id = max(existing_ids, default=0) + 1
+    retune_params[str(next_id)] = params
+    refined.attrs["retune_params"] = retune_params
+    return next_id
+
+
+def _merge_reason(existing: str, tags: Sequence[str]) -> str:
+    existing_tags = [tag for tag in existing.split("|") if tag]
+    merged = sorted(set(existing_tags + list(tags)))
+    return "|".join(merged) if merged else "clean"
+
+
+def _sanitize_reason_array(reason_arr: zarr.Array) -> None:
+    try:
+        raw = reason_arr[:]
+    except Exception:
+        return
+    if raw.size == 0:
+        return
+
+    def coerce(val: Any) -> str:
+        if val is None:
+            return ""
+        if isinstance(val, np.ndarray):
+            if val.size == 0:
+                return ""
+            if val.size == 1:
+                return str(val.item())
+            return "|".join(str(item) for item in val.tolist())
+        return str(val)
+
+    cleaned = np.array([coerce(v) for v in raw], dtype=object)
+    reason_arr[:] = cleaned
+
+
+def _resolve_keypoints_group(
+    root: zarr.Group,
+    keypoint_run: Optional[str],
+) -> tuple[zarr.Group, str]:
+    refined_keypoints = root.get("refined_keypoints_runs")
+    keypoint_runs = root.get("keypoints_runs")
+
+    if keypoint_run:
+        if refined_keypoints is not None and keypoint_run in refined_keypoints:
+            return refined_keypoints[keypoint_run], keypoint_run
+        if keypoint_runs is not None and keypoint_run in keypoint_runs:
+            return keypoint_runs[keypoint_run], keypoint_run
+        raise RuntimeError(f"Keypoint run '{keypoint_run}' not found.")
+
+    refined_latest = refined_keypoints.attrs.get("latest") if refined_keypoints is not None else None
+    raw_latest = keypoint_runs.attrs.get("latest") if keypoint_runs is not None else None
+
+    if refined_keypoints is not None and refined_latest in refined_keypoints:
+        return refined_keypoints[refined_latest], refined_latest
+    if keypoint_runs is not None and raw_latest in keypoint_runs:
+        return keypoint_runs[raw_latest], raw_latest
+    raise RuntimeError("No keypoint runs found; run keypoints stage first.")
+
+
+def _update_contour_arrays(
+    refined: zarr.Group,
+    roi_idx: int,
+    contour: Optional[np.ndarray],
+    *,
+    side: str,
+) -> None:
+    ptr_name = f"contour_{side}_ptr"
+    len_name = f"contour_{side}_len"
+    cont_name = f"contours_{side}"
+
+    if ptr_name not in refined or len_name not in refined or cont_name not in refined:
+        return
+
+    ptr_arr = refined[ptr_name]
+    len_arr = refined[len_name]
+    cont_arr = refined[cont_name]
+
+    if contour is None or contour.size == 0:
+        ptr_arr[roi_idx] = -1
+        len_arr[roi_idx] = 0
+        return
+
+    contour = np.asarray(contour, dtype=np.float32)
+    n_points = contour.shape[0]
+    existing_ptr = int(ptr_arr[roi_idx])
+    existing_len = int(len_arr[roi_idx])
+
+    if existing_ptr >= 0 and existing_len >= n_points:
+        cont_arr[existing_ptr:existing_ptr + n_points] = contour
+        len_arr[roi_idx] = n_points
+        return
+
+    current_len = cont_arr.shape[0]
+    new_len = current_len + n_points
+    try:
+        cont_arr.resize((new_len, 2))
+    except Exception:
+        old = cont_arr[:]
+        del refined[cont_name]
+        cont_arr = refined.create_array(
+            cont_name,
+            shape=(new_len, 2),
+            chunks=(max(1, min(4096, new_len)), 2),
+            dtype=old.dtype,
+            overwrite=True,
+        )
+        cont_arr[:old.shape[0]] = old
+    cont_arr[current_len:new_len] = contour
+    ptr_arr[roi_idx] = current_len
+    len_arr[roi_idx] = n_points
+
+
+def _build_config_from_params(
+    *,
+    roi_padding: int,
+    pre_threshold: Optional[int],
+    sobel_strength: float,
+    min_area: int,
+    max_area: Optional[int],
+    closing_radius: int,
+    opening_radius: int,
+    min_eye_separation: Optional[float],
+    max_eye_separation: Optional[float],
+) -> EyeSegmentationConfig:
+    return EyeSegmentationConfig(
+        roi_padding=int(roi_padding),
+        pre_threshold=int(pre_threshold) if pre_threshold is not None else None,
+        sobel_strength=float(sobel_strength),
+        min_area=int(min_area),
+        max_area=int(max_area) if max_area is not None else None,
+        closing_radius=int(closing_radius),
+        opening_radius=int(opening_radius),
+        min_eye_separation=float(min_eye_separation) if min_eye_separation is not None else None,
+        max_eye_separation=float(max_eye_separation) if max_eye_separation is not None else None,
+    )
+
+
 def run_tuner(args: argparse.Namespace) -> None:
     zarr_path = Path(args.zarr_path)
     if not zarr_path.exists():
@@ -492,15 +655,47 @@ def run_tuner(args: argparse.Namespace) -> None:
     crop_run = args.crop_run or crop_runs.attrs["latest"]
     crop_group = crop_runs[crop_run]
 
+    refined_keypoints = root.get("refined_keypoints_runs", None)
     keypoint_runs = root.get("keypoints_runs", None)
-    if keypoint_runs is None or "latest" not in keypoint_runs.attrs:
-        raise RuntimeError("No keypoints_runs found; run keypoints stage first")
-    keypoint_run = args.keypoint_run or keypoint_runs.attrs["latest"]
-    kp_group = keypoint_runs[keypoint_run]
+
+    keypoint_run = args.keypoint_run
+    kp_group = None
+    kp_source = None
+
+    if keypoint_run:
+        if refined_keypoints is not None and keypoint_run in refined_keypoints:
+            kp_group = refined_keypoints[keypoint_run]
+            kp_source = "refined_keypoints_runs"
+        elif keypoint_runs is not None and keypoint_run in keypoint_runs:
+            kp_group = keypoint_runs[keypoint_run]
+            kp_source = "keypoints_runs"
+        else:
+            raise RuntimeError(f"Keypoint run '{keypoint_run}' not found in refined or raw runs.")
+    else:
+        refined_latest = refined_keypoints.attrs.get("latest") if refined_keypoints is not None else None
+        raw_latest = keypoint_runs.attrs.get("latest") if keypoint_runs is not None else None
+
+        if refined_keypoints is not None and refined_latest in refined_keypoints:
+            keypoint_run = refined_latest
+            kp_group = refined_keypoints[keypoint_run]
+            kp_source = "refined_keypoints_runs"
+        elif keypoint_runs is not None and raw_latest in keypoint_runs:
+            keypoint_run = raw_latest
+            kp_group = keypoint_runs[keypoint_run]
+            kp_source = "keypoints_runs"
+        else:
+            raise RuntimeError("No keypoint runs found; run keypoints stage first")
 
     roi_images = crop_group["roi_images"]
     keypoints = kp_group["keypoints_roi"][:]
-    success = kp_group["detection_success"][:]
+    if "refined_success" in kp_group:
+        success = kp_group["refined_success"][:]
+    elif "detection_success" in kp_group:
+        success = kp_group["detection_success"][:]
+    elif "source_success" in kp_group:
+        success = kp_group["source_success"][:]
+    else:
+        success = np.ones(keypoints.shape[0], dtype=bool)
     heading_vals = kp_group["heading"][:] if "heading" in kp_group else None
 
     total_rois = roi_images.shape[0]
@@ -532,6 +727,7 @@ def run_tuner(args: argparse.Namespace) -> None:
     cv2.setTrackbarPos("ROI Index", main_window, roi_idx)
 
     print("\n=== Eye Mask Tuner ===")
+    print(f"Keypoints source: {kp_source}/{keypoint_run}")
     print("Main window: Shows final segmentation result")
     print("Debug window: Shows threshold processing steps")
     print("Controls:")
@@ -541,7 +737,7 @@ def run_tuner(args: argparse.Namespace) -> None:
     print("  Rotate ROI: Align heading to 0° for tuner-only preview")
     print("  Min Gap / Max Gap: enforce eye-center separation bounds (Max Gap=0 disables upper limit)")
     print("  Sobel %: Blend Sobel edge subtraction into global thresholding (0=off)")
-    print("  Axis colors: Major (blue), Minor (red)")
+    print("  Axis colors: Major (cyan), Minor (red)")
     print("  Adjust other sliders to tune parameters\n")
 
     while True:
@@ -627,7 +823,7 @@ def run_tuner(args: argparse.Namespace) -> None:
                     binary = np.logical_and(binary, filtered_patch < pre_thresh)
                 
                 # Get the mask to actually use
-                region_mask, selection_info = select_region(
+                region_mask = select_region(
                     binary,
                     (cx - x0, cy - y0),
                     min_area,
@@ -658,15 +854,13 @@ def run_tuner(args: argparse.Namespace) -> None:
                 masks[eye_idx] = full_mask
 
                 region = measure.regionprops(region_mask.astype(int))[0]
-                
+
                 # Store region info for axis drawing (in full ROI coordinates)
-                roundness_val = selection_info.get('roundness')
                 regions_info[eye_idx] = {
                     'centroid': (region.centroid[0] + y0, region.centroid[1] + x0),
                     'orientation': region.orientation,
                     'major_axis_length': region.major_axis_length,
                     'minor_axis_length': region.minor_axis_length,
-                    'roundness': roundness_val,
                 }
                 eye_centers_roi[eye_idx] = (
                     float(region.centroid[1] + x0),
@@ -678,8 +872,6 @@ def run_tuner(args: argparse.Namespace) -> None:
                     f"major={region.major_axis_length:.1f} minor={region.minor_axis_length:.1f} "
                     f"thr={threshold_value:.1f}"
                 )
-                if roundness_val is not None:
-                    info_line += f" round={roundness_val:.2f}"
                 info_lines.append(info_line)
 
                 contour = measure.find_contours(region_mask.astype(float), 0.5)
@@ -701,6 +893,9 @@ def run_tuner(args: argparse.Namespace) -> None:
         else:
             info_lines.append("Keypoints failed for this ROI")
             display = draw_overlay(roi_img, (None, None), (None, None), (None, None))
+
+        if rotate_roi:
+            display = apply_circular_window(display)
 
         # Build info panel
         info_width = max(700, int(display.shape[1] * 0.5))
@@ -752,6 +947,7 @@ def run_tuner(args: argparse.Namespace) -> None:
                 'total_rois': int(total_rois),
                 'crop_run': crop_run,
                 'keypoint_run': keypoint_run,
+                'keypoint_source': kp_source,
                 'roi_success': bool(success_flag),
             }
             success_save, message = save_eye_mask_params(
@@ -771,12 +967,403 @@ def run_tuner(args: argparse.Namespace) -> None:
     cv2.destroyAllWindows()
 
 
+def run_failure_tuner(
+    zarr_path: str,
+    refined_run: str,
+    start_failure: int = 1,
+    *,
+    apply_batch_size: int = 128,
+    apply_workers: int = 4,
+) -> None:
+    root = zarr.open(str(zarr_path), mode="a")
+    refined_parent = root.get("refined_eye_masks_runs")
+    if refined_parent is None or refined_run not in refined_parent:
+        raise RuntimeError(f"Refined eye mask run '{refined_run}' not found.")
+    refined = refined_parent[refined_run]
+
+    crop_run = refined.attrs.get("source_crop_run") or root["crop_runs"].attrs.get("latest")
+    if not crop_run or "crop_runs" not in root or crop_run not in root["crop_runs"]:
+        raise RuntimeError("Crop run not found for eye mask retune.")
+    crop_group = root["crop_runs"][crop_run]
+
+    keypoint_run_name = refined.attrs.get("source_keypoints_run")
+    keypoint_group_name = refined.attrs.get("source_keypoint_group")
+    if (
+        keypoint_group_name
+        and keypoint_run_name
+        and keypoint_group_name in root
+        and keypoint_run_name in root[keypoint_group_name]
+    ):
+        kp_group = root[keypoint_group_name][keypoint_run_name]
+        kp_run = keypoint_run_name
+        kp_group_name = keypoint_group_name
+    else:
+        kp_group, kp_run = _resolve_keypoints_group(root, keypoint_run_name)
+        kp_group_name = "refined_keypoints_runs" if "refined_keypoints_runs" in root and kp_run in root["refined_keypoints_runs"] else "keypoints_runs"
+
+    roi_images = crop_group["roi_images"]
+    keypoints = kp_group["keypoints_roi"][:]
+    if "refined_success" in kp_group:
+        success_flags = kp_group["refined_success"][:]
+    elif "detection_success" in kp_group:
+        success_flags = kp_group["detection_success"][:]
+    elif "source_success" in kp_group:
+        success_flags = kp_group["source_success"][:]
+    else:
+        success_flags = np.ones(keypoints.shape[0], dtype=bool)
+
+    masks_arr = refined["masks_roi"]
+    ellipse_params_arr = refined["ellipse_params"]
+    ellipse_success_arr = refined["ellipse_success"]
+    eye_separation_arr = refined["eye_separation"]
+
+    min_sep, max_sep = _get_sep_limits(root, refined)
+    failures = _load_failure_indices(refined, min_sep, max_sep)
+    if failures.size == 0:
+        print("No failed eye masks to retune.")
+        return
+
+    reason_arr = _get_reason_array(refined)
+    if reason_arr is not None:
+        _sanitize_reason_array(reason_arr)
+
+    retune_id_arr = _ensure_retune_id_array(refined, (min(1024, roi_images.shape[0]),))
+
+    tuning = None
+    analysis = root.get("analysis_metadata")
+    if analysis is not None:
+        tuning = analysis.attrs.get("eye_mask_tuning")
+    tuned_params = tuning.get("tuned_parameters", {}) if isinstance(tuning, dict) else {}
+
+    cfg_defaults = EyeSegmentationConfig()
+    roi_padding_default = int(tuned_params.get("roi_padding", cfg_defaults.roi_padding))
+    pre_thresh_default = tuned_params.get("pre_threshold", cfg_defaults.pre_threshold)
+    sobel_default = float(tuned_params.get("sobel_strength", cfg_defaults.sobel_strength))
+    min_area_default = int(tuned_params.get("min_area", cfg_defaults.min_area))
+    max_area_default = tuned_params.get("max_area", cfg_defaults.max_area)
+    closing_default = int(tuned_params.get("closing_radius", cfg_defaults.closing_radius))
+    opening_default = int(tuned_params.get("opening_radius", cfg_defaults.opening_radius))
+    min_gap_default = tuned_params.get("min_eye_separation", cfg_defaults.min_eye_separation)
+    max_gap_default = tuned_params.get("max_eye_separation", cfg_defaults.max_eye_separation)
+
+    window_name = "Eye Mask Failure Retune"
+    debug_window = "Eye Mask Failure Retune - Debug"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(debug_window, cv2.WINDOW_NORMAL)
+
+    current_failure = max(1, min(start_failure, len(failures)))
+
+    def update_failure(val: int) -> None:
+        nonlocal current_failure
+        if len(failures) == 0:
+            current_failure = 1
+            return
+        current_failure = max(1, min(val, len(failures)))
+
+    cv2.createTrackbar("Failure", window_name, current_failure, max(1, len(failures)), update_failure)
+    cv2.createTrackbar("ROI Padding", window_name, min(roi_padding_default, SLIDER_MAX_PADDING), SLIDER_MAX_PADDING, nothing)
+    cv2.createTrackbar("PreThresh", window_name, int(pre_thresh_default) if pre_thresh_default is not None else 0, SLIDER_MAX_PRETHRESH, nothing)
+    cv2.createTrackbar("Sobel %", window_name, int(sobel_default * SLIDER_MAX_SOBEL), SLIDER_MAX_SOBEL, nothing)
+    cv2.createTrackbar("Min Area", window_name, min(min_area_default, SLIDER_MAX_AREA), SLIDER_MAX_AREA, nothing)
+    cv2.createTrackbar("Max Area", window_name, int(max_area_default) if max_area_default is not None else 0, SLIDER_MAX_AREA, nothing)
+    cv2.createTrackbar("Closing r", window_name, min(closing_default, SLIDER_MAX_RADIUS), SLIDER_MAX_RADIUS, nothing)
+    cv2.createTrackbar("Opening r", window_name, min(opening_default, SLIDER_MAX_RADIUS), SLIDER_MAX_RADIUS, nothing)
+    cv2.createTrackbar("Min Gap", window_name, int(min_gap_default) if min_gap_default is not None else 0, SLIDER_MAX_EYE_GAP, nothing)
+    cv2.createTrackbar("Max Gap", window_name, int(max_gap_default) if max_gap_default is not None else 0, SLIDER_MAX_EYE_GAP, nothing)
+
+    print("\nKeypoint Failure Retune (Eye Masks)")
+    print(f"  Zarr: {zarr_path}")
+    print(f"  Refined run: {refined_run}")
+    print(f"  Crop run: {crop_run}")
+    print(f"  Keypoint run: {kp_group_name}/{kp_run}")
+    print(f"  Failures to retune: {len(failures)}")
+    print(f"  Apply batch: {apply_batch_size} | Workers: {apply_workers}")
+    print("Controls:")
+    print("  Arrow keys: Navigate failures")
+    print("  e: Quick eval on a sample of remaining failures")
+    print("  E: Eval all remaining failures (slow)")
+    print("  a: Apply params to remaining failures")
+    print("  q/ESC: Quit")
+
+    def _current_params() -> Dict[str, Any]:
+        padding = cv2.getTrackbarPos("ROI Padding", window_name)
+        pre_thresh_val = cv2.getTrackbarPos("PreThresh", window_name)
+        pre_thresh = pre_thresh_val if pre_thresh_val > 0 else None
+        sobel_slider = cv2.getTrackbarPos("Sobel %", window_name)
+        sobel_strength = sobel_slider / float(SLIDER_MAX_SOBEL) if SLIDER_MAX_SOBEL > 0 else 0.0
+        min_area = cv2.getTrackbarPos("Min Area", window_name)
+        max_area_slider = cv2.getTrackbarPos("Max Area", window_name)
+        max_area = max_area_slider if max_area_slider > 0 else None
+        closing = cv2.getTrackbarPos("Closing r", window_name)
+        opening = cv2.getTrackbarPos("Opening r", window_name)
+        min_gap_slider = cv2.getTrackbarPos("Min Gap", window_name)
+        max_gap_slider = cv2.getTrackbarPos("Max Gap", window_name)
+        min_gap = float(min_gap_slider) if min_gap_slider > 0 else None
+        max_gap = float(max_gap_slider) if max_gap_slider > 0 else None
+        return {
+            "roi_padding": padding,
+            "pre_threshold": pre_thresh,
+            "sobel_strength": sobel_strength,
+            "min_area": min_area,
+            "max_area": max_area,
+            "closing_radius": closing,
+            "opening_radius": opening,
+            "min_eye_separation": min_gap,
+            "max_eye_separation": max_gap,
+        }
+
+    def _eval_failures(sample_limit: Optional[int]) -> None:
+        if len(failures) == 0:
+            print("No failures remaining.")
+            return
+        params = _current_params()
+        cfg = _build_config_from_params(**params)
+        if sample_limit is not None and len(failures) > sample_limit:
+            rng = np.random.default_rng(0)
+            sample = rng.choice(failures, size=sample_limit, replace=False)
+        else:
+            sample = failures
+        success = 0
+        for idx in sample:
+            roi_img = np.asarray(roi_images[idx])
+            kp = np.asarray(keypoints[idx])
+            success_flag = bool(success_flags[idx])
+            result = _process_roi_data(int(idx), roi_img, kp, success_flag, cfg)
+            if result.get("reject_reason") is None:
+                success += 1
+        total = len(sample)
+        rate = (success / total * 100.0) if total else 0.0
+        label = f"sample {total}/{len(failures)}" if sample_limit is not None else f"all {total}"
+        print(f"Eval ({label}): {success}/{total} would pass ({rate:.1f}%)")
+
+    def apply_params() -> None:
+        nonlocal failures
+        if len(failures) == 0:
+            print("No failures remaining.")
+            return
+        params = _current_params()
+        cfg = _build_config_from_params(**params)
+        retune_id = _get_or_create_retune_id(refined, params)
+
+        updated = 0
+        total = len(failures)
+
+        def process_one(idx: int) -> tuple[int, Dict[str, Any]]:
+            roi_img = np.asarray(roi_images[idx])
+            kp = np.asarray(keypoints[idx])
+            success_flag = bool(success_flags[idx])
+            return idx, _process_roi_data(int(idx), roi_img, kp, success_flag, cfg)
+
+        batch_size = max(1, int(apply_batch_size))
+        batches = [
+            failures[i:i + batch_size]
+            for i in range(0, len(failures), batch_size)
+        ]
+
+        for batch_idx, batch in enumerate(batches, start=1):
+            if apply_workers and apply_workers > 1:
+                with ThreadPoolExecutor(max_workers=apply_workers) as executor:
+                    results = list(executor.map(process_one, batch))
+            else:
+                results = [process_one(idx) for idx in batch]
+
+            for roi_idx, result in results:
+                if result.get("reject_reason") is not None:
+                    continue
+                masks = result["masks"]
+                ellipse_params = result["ellipse_params"]
+                ellipse_success = result["ellipse_success"]
+                contours = result["contours"]
+                separation = result.get("eye_separation", np.nan)
+
+                masks_arr[roi_idx, 0] = masks[0]
+                masks_arr[roi_idx, 1] = masks[1]
+                ellipse_params_arr[roi_idx, 0] = ellipse_params[0]
+                ellipse_params_arr[roi_idx, 1] = ellipse_params[1]
+                ellipse_success_arr[roi_idx, 0] = ellipse_success[0]
+                ellipse_success_arr[roi_idx, 1] = ellipse_success[1]
+                eye_separation_arr[roi_idx] = separation
+
+                _update_contour_arrays(refined, roi_idx, contours[0], side="left")
+                _update_contour_arrays(refined, roi_idx, contours[1], side="right")
+
+                retune_id_arr[roi_idx] = retune_id
+                if reason_arr is not None:
+                    existing = "" if reason_arr[roi_idx] is None else str(reason_arr[roi_idx])
+                    reason_value = _merge_reason(existing, ["retuned"])
+                    reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
+
+                updated += 1
+
+            if len(batches) > 1:
+                print(f"  Batch {batch_idx}/{len(batches)} processed ({updated}/{total} updated)")
+
+        min_sep_local = params["min_eye_separation"]
+        max_sep_local = params["max_eye_separation"]
+        failures = _load_failure_indices(refined, min_sep_local, max_sep_local)
+        remaining = len(failures)
+        rate = (updated / total * 100.0) if total else 0.0
+        print(f"Applied retune {retune_id}: {updated}/{total} updated ({rate:.1f}%)")
+        print(f"Remaining failures: {remaining}")
+        new_max = max(1, remaining)
+        cv2.setTrackbarMax("Failure", window_name, new_max)
+        current_failure = min(current_failure, remaining if remaining > 0 else 1)
+        cv2.setTrackbarPos("Failure", window_name, current_failure)
+
+    while True:
+        if len(failures) == 0:
+            print("No failures remaining.")
+            break
+
+        failure_pos = max(1, min(current_failure, len(failures))) - 1
+        roi_idx = int(failures[failure_pos])
+
+        params = _current_params()
+        cfg = _build_config_from_params(**params)
+
+        roi_img = np.asarray(roi_images[roi_idx])
+        kp = np.asarray(keypoints[roi_idx])
+        success_flag = bool(success_flags[roi_idx])
+
+        masks = [None, None]
+        contours = [None, None]
+        regions_info = [None, None]
+        eye_labels = ["Left", "Right"]
+        debug_panels: List[np.ndarray] = []
+
+        info_lines = [f"Failure {failure_pos + 1}/{len(failures)} | ROI {roi_idx}"]
+        info_lines.append(
+            f"PreThresh: {params['pre_threshold'] or 'None'} | Sobel: {params['sobel_strength']:.2f}"
+        )
+
+        if success_flag:
+            for eye_idx in (0, 1):
+                center = kp[1 + eye_idx]
+                cx, cy = float(center[0]), float(center[1])
+                if not np.isfinite(cx) or not np.isfinite(cy):
+                    continue
+
+                roi_h, roi_w = roi_img.shape
+                x0 = max(0, int(round(cx)) - cfg.roi_padding)
+                x1 = min(roi_w, int(round(cx)) + cfg.roi_padding + 1)
+                y0 = max(0, int(round(cy)) - cfg.roi_padding)
+                y1 = min(roi_h, int(round(cy)) + cfg.roi_padding + 1)
+
+                patch = roi_img[y0:y1, x0:x1]
+                if patch.size == 0:
+                    continue
+
+                filtered_patch, sobel_panel = apply_sobel_filter(patch, cfg.sobel_strength)
+                binary, threshold_value = global_mask(filtered_patch)
+                if cfg.pre_threshold is not None:
+                    binary = np.logical_and(binary, filtered_patch < cfg.pre_threshold)
+
+                region_mask = select_region(
+                    binary,
+                    (cx - x0, cy - y0),
+                    cfg.min_area,
+                    cfg.max_area,
+                    cfg.closing_radius,
+                    cfg.opening_radius,
+                )
+
+                debug_panel = create_debug_panel(
+                    patch,
+                    filtered_patch,
+                    binary,
+                    region_mask,
+                    (cx - x0, cy - y0),
+                    eye_labels[eye_idx],
+                    cfg.pre_threshold,
+                    sobel_panel=sobel_panel
+                )
+                debug_panels.append(debug_panel)
+
+                if region_mask is None:
+                    continue
+
+                full_mask = np.zeros_like(roi_img, dtype=np.uint8)
+                full_mask[y0:y1, x0:x1][region_mask] = 1
+                masks[eye_idx] = full_mask
+
+                region = measure.regionprops(region_mask.astype(int))[0]
+                regions_info[eye_idx] = {
+                    'centroid': (region.centroid[0] + y0, region.centroid[1] + x0),
+                    'orientation': region.orientation,
+                    'major_axis_length': region.major_axis_length,
+                    'minor_axis_length': region.minor_axis_length,
+                }
+
+                contour = measure.find_contours(region_mask.astype(float), 0.5)
+                if contour:
+                    best = max(contour, key=lambda c: c.shape[0])
+                    if best.shape[0] >= 5:
+                        best = best[:, ::-1]
+                        best[:, 0] += x0
+                        best[:, 1] += y0
+                        contours[eye_idx] = best
+
+            display = draw_overlay(roi_img, tuple(masks), tuple(contours), tuple(regions_info))
+        else:
+            info_lines.append("Keypoints failed for this ROI")
+            display = draw_overlay(roi_img, (None, None), (None, None), (None, None))
+            debug_panels = []
+
+        info_width = max(500, int(display.shape[1] * 0.5))
+        info_panel = np.full((display.shape[0], info_width, 3), 240, dtype=np.uint8)
+        for idx, line in enumerate(info_lines):
+            cv2.putText(info_panel, line, (18, 30 + idx * 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1, cv2.LINE_AA)
+        spacer = np.full((display.shape[0], 30, 3), 200, dtype=np.uint8)
+        combined_display = np.hstack([info_panel, spacer, display])
+        cv2.imshow(window_name, combined_display)
+
+        if debug_panels:
+            if len(debug_panels) == 2:
+                debug_display = np.vstack(debug_panels)
+            else:
+                debug_display = debug_panels[0]
+            cv2.imshow(debug_window, debug_display)
+        else:
+            empty = np.zeros((100, 400, 3), dtype=np.uint8)
+            cv2.putText(
+                empty,
+                "No valid keypoints for this ROI",
+                (10, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 255),
+                1,
+            )
+            cv2.imshow(debug_window, empty)
+
+        key = cv2.waitKey(30) & 0xFF
+        if key in (ord("q"), 27):
+            break
+        elif key == ord("e"):
+            _eval_failures(min(300, len(failures)))
+        elif key == ord("E"):
+            _eval_failures(None)
+        elif key == ord("a"):
+            apply_params()
+        elif key == ord("n"):
+            current_failure = min(len(failures), current_failure + 1)
+            cv2.setTrackbarPos("Failure", window_name, current_failure)
+        elif key == ord("p"):
+            current_failure = max(1, current_failure - 1)
+            cv2.setTrackbarPos("Failure", window_name, current_failure)
+
+    cv2.destroyAllWindows()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Interactive tuner for eye segmentation parameters")
     parser.add_argument("zarr_path", help="Path to Palette Zarr store")
     parser.add_argument("--roi-index", type=int, default=0, help="Initial ROI index")
     parser.add_argument("--crop-run", help="Specific crop run name")
-    parser.add_argument("--keypoint-run", help="Specific keypoint run name")
+    parser.add_argument(
+        "--keypoint-run",
+        help="Specific keypoint run name (checks refined_keypoints_runs first, then keypoints_runs)",
+    )
     args = parser.parse_args()
     run_tuner(args)
 

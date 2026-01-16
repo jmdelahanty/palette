@@ -57,8 +57,13 @@ def show_parameter_provenance(zarr_path, console):
             'detect': 'detect_runs',
             'crop': 'crop_runs',
             'keypoints': 'keypoints_runs',
+            'refine_keypoints': REFINED_KEYPOINT_GROUP,
             'track': 'tracking_runs',
-            'assign_ids': 'id_assignment_runs'
+            'assign_ids': 'id_assignment_runs',
+        }
+        tuning_key_map = {
+            'detect': 'detection_tuning',
+            'keypoints': 'keypoint_tuning',
         }
         
         for stage_name, group_name in stage_groups.items():
@@ -81,7 +86,7 @@ def show_parameter_provenance(zarr_path, console):
             # Check if from tuning
             if 'analysis_metadata' in root:
                 analysis = root['analysis_metadata']
-                tuning_key = f"{stage_name}_tuning"
+                tuning_key = tuning_key_map.get(stage_name, f"{stage_name}_tuning")
                 if tuning_key in analysis.attrs:
                     param_source = "Zarr (tuned)"
                     tuning_data = analysis.attrs[tuning_key]
@@ -97,7 +102,17 @@ def show_parameter_provenance(zarr_path, console):
             
             # Default fallback
             if param_source == "Unknown":
-                param_source = "Code defaults"
+                provenance = run.attrs.get('provenance')
+                if isinstance(provenance, dict):
+                    param_info = provenance.get('parameters', {})
+                    source_label = param_info.get('parameter_source')
+                    if source_label:
+                        param_source = f"Run ({source_label})"
+                        created_at = provenance.get('created_at_utc')
+                        if created_at:
+                            details = format_timestamp(created_at)
+                if param_source == "Unknown":
+                    param_source = "Code defaults"
             
             prov_table.add_row(
                 stage_name,
@@ -605,6 +620,30 @@ def display_analysis_metadata(zarr_path, console):
             
             console.print(detect_table)
             tables_shown = True
+
+        # Check for keypoint tuning
+        if 'keypoint_tuning' in analysis_meta.attrs:
+            keypoint_data = analysis_meta.attrs['keypoint_tuning']
+            params = keypoint_data.get('tuned_parameters', {})
+
+            keypoint_table = Table(title="Keypoint Parameters", box=box.ROUNDED)
+            keypoint_table.add_column("Parameter", style="cyan")
+            keypoint_table.add_column("Value", style="yellow")
+
+            if isinstance(params, dict) and params:
+                for key in sorted(params.keys()):
+                    keypoint_table.add_row(str(key), str(params.get(key)))
+            else:
+                keypoint_table.add_row("tuned_parameters", "missing")
+
+            if 'tuned_on_frame' in keypoint_data:
+                keypoint_table.add_row("Tuned on frame", str(keypoint_data['tuned_on_frame']))
+
+            if 'tuned_timestamp' in keypoint_data:
+                keypoint_table.add_row("Tuned at", format_timestamp(keypoint_data['tuned_timestamp']))
+
+            console.print(keypoint_table)
+            tables_shown = True
         
         return tables_shown
             
@@ -747,6 +786,177 @@ def display_keypoints_metadata(zarr_path, console):
 
     except Exception as e:
         console.print(f"[yellow]Could not load keypoints metadata: {e}[/yellow]")
+        return False
+
+
+def _split_keypoint_summary(stats):
+    if not isinstance(stats, dict):
+        return {}, {}
+    if isinstance(stats.get("refine"), dict):
+        refine_stats = stats.get("refine", {})
+        post_stats = stats.get("postprocess", {})
+        if not isinstance(post_stats, dict):
+            post_stats = {}
+        return refine_stats, post_stats
+    return stats, {}
+
+
+def _format_rate(value):
+    try:
+        return f"{float(value):.2f}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def display_refined_keypoints_metadata(zarr_path, console):
+    """Display refined keypoints run metadata."""
+    try:
+        import zarr
+        root = zarr.open(zarr_path, mode='r')
+
+        refined_parent = None
+        for group_name in (REFINED_KEYPOINT_GROUP, LEGACY_REFINED_KEYPOINT_GROUP):
+            if group_name in root:
+                refined_parent = root[group_name]
+                break
+
+        if refined_parent is None:
+            return False
+
+        run_names = [name for name in refined_parent.group_keys()]
+        if not run_names:
+            return False
+
+        summary_table = Table(title=" Refined Keypoints Runs", box=box.ROUNDED)
+        summary_table.add_column("Run", style="cyan")
+        summary_table.add_column("Timestamp", style="yellow")
+        summary_table.add_column("Success Rate", style="green")
+        summary_table.add_column("Refined", style="magenta")
+        summary_table.add_column("Usable", style="magenta")
+        summary_table.add_column("Manual", style="blue")
+        summary_table.add_column("Retune", style="blue")
+
+        latest_run = refined_parent.attrs.get('latest', '')
+
+        for run_name in sorted(run_names):
+            run = refined_parent[run_name]
+            attrs = run.attrs
+            stats = attrs.get('summary_statistics', {})
+            refine_stats, post_stats = _split_keypoint_summary(stats)
+
+            use_stats = post_stats or refine_stats
+
+            run_display = f"{run_name} [bold green]★[/bold green]" if run_name == latest_run else run_name
+
+            timestamp = format_timestamp(
+                attrs.get('created_utc', attrs.get('created_at', ''))
+            )
+            success_rate = use_stats.get(
+                'success_rate_percent',
+                refine_stats.get('pass_rate_percent', 0),
+            )
+            refined_success = use_stats.get('refined_success', refine_stats.get('refined_success', 0))
+            usable = use_stats.get('usable_keypoints', refine_stats.get('usable_keypoints', 0))
+            manual = post_stats.get('manual_corrections', 0)
+            retune_total = post_stats.get('retune_total', 0)
+
+            summary_table.add_row(
+                run_display,
+                timestamp,
+                _format_rate(success_rate),
+                str(refined_success),
+                str(usable),
+                str(manual),
+                str(retune_total),
+            )
+
+        console.print(summary_table)
+
+        if latest_run and latest_run in refined_parent:
+            latest = refined_parent[latest_run]
+            attrs = latest.attrs
+
+            detail_table = Table(title=f"Latest Refined Keypoint Details ({latest_run})", box=box.SIMPLE)
+            detail_table.add_column("Field", style="cyan")
+            detail_table.add_column("Value", style="yellow")
+
+            detail_table.add_row("Source keypoints", str(attrs.get("source_keypoints_run", "unknown")))
+            detail_table.add_row("Source crop", str(attrs.get("source_crop_run", "unknown")))
+            detail_table.add_row("Source detect", str(attrs.get("source_detect_run", "unknown")))
+
+            retune_params = attrs.get("retune_params")
+            retune_count = len(retune_params) if isinstance(retune_params, dict) else 0
+            detail_table.add_row("Retune parameter sets", str(retune_count))
+
+            summary_stats = attrs.get("summary_statistics", {})
+            if isinstance(summary_stats, dict):
+                post_updated = summary_stats.get("postprocess_updated_utc")
+            else:
+                post_updated = None
+            if post_updated:
+                detail_table.add_row("Postprocess updated", format_timestamp(post_updated))
+
+            provenance = attrs.get("provenance", {})
+            param_info = provenance.get("parameters", {}) if isinstance(provenance, dict) else {}
+            if param_info:
+                detail_table.add_row("Parameter source", str(param_info.get("parameter_source", "unknown")))
+                detail_table.add_row("Chunk size", str(param_info.get("chunk_size", "unknown")))
+                detail_table.add_row("Scheduler", str(param_info.get("scheduler", "unknown")))
+
+            console.print(detail_table)
+
+            stats = attrs.get("summary_statistics", {})
+            refine_stats, post_stats = _split_keypoint_summary(stats)
+
+            if refine_stats:
+                refine_table = Table(title="Refine Summary", box=box.SIMPLE)
+                refine_table.add_column("Metric", style="cyan")
+                refine_table.add_column("Value", style="yellow")
+                for key in (
+                    "total_rois",
+                    "source_success",
+                    "source_failures",
+                    "refined_success",
+                    "flips_corrected",
+                    "low_confidence",
+                    "confidence_missing",
+                    "geometry_issues",
+                    "clean",
+                    "usable_keypoints",
+                    "pass_rate_percent",
+                    "duration_seconds",
+                ):
+                    if key in refine_stats:
+                        value = refine_stats[key]
+                        if key.endswith("percent"):
+                            value = _format_rate(value)
+                        refine_table.add_row(str(key), str(value))
+                console.print(refine_table)
+
+            if post_stats:
+                post_table = Table(title="Postprocess Summary", box=box.SIMPLE)
+                post_table.add_column("Metric", style="cyan")
+                post_table.add_column("Value", style="yellow")
+                for key in (
+                    "total_rois",
+                    "refined_success",
+                    "remaining_failures",
+                    "success_rate_percent",
+                    "usable_keypoints",
+                    "retune_total",
+                    "manual_corrections",
+                ):
+                    if key in post_stats:
+                        value = post_stats[key]
+                        if key.endswith("percent"):
+                            value = _format_rate(value)
+                        post_table.add_row(str(key), str(value))
+                console.print(post_table)
+
+        return True
+
+    except Exception as e:
+        console.print(f"[yellow]Could not load refined keypoints metadata: {e}[/yellow]")
         return False
 
 
@@ -955,6 +1165,8 @@ def inspect_video_zarr(zarr_path, mode='normal', show_full_env=False, focus_stag
             
         elif focus_stage == 'keypoints':
             stage_shown = display_keypoints_metadata(zarr_path, console)
+            refined_shown = display_refined_keypoints_metadata(zarr_path, console)
+            stage_shown = stage_shown or refined_shown
             
         elif focus_stage == 'track':
             stage_shown = display_tracking_metadata(zarr_path, console)
@@ -1211,6 +1423,19 @@ def inspect_video_zarr(zarr_path, mode='normal', show_full_env=False, focus_stag
     if detect_path.exists():
         console.print("[green] Fish detection runs found[/green]")
         display_detection_metadata(zarr_path, console)
+        console.print()
+
+    keypoints_path = zarr_path / "keypoints_runs"
+    if keypoints_path.exists():
+        console.print("[green] Keypoint runs found[/green]")
+        display_keypoints_metadata(zarr_path, console)
+        console.print()
+
+    refined_keypoints_path = zarr_path / REFINED_KEYPOINT_GROUP
+    legacy_refined_keypoints_path = zarr_path / LEGACY_REFINED_KEYPOINT_GROUP
+    if refined_keypoints_path.exists() or legacy_refined_keypoints_path.exists():
+        console.print("[green] Refined keypoint runs found[/green]")
+        display_refined_keypoints_metadata(zarr_path, console)
         console.print()
         
     # Optionally display full environment info

@@ -35,6 +35,7 @@ from dask.diagnostics import ProgressBar
 from rich.console import Console
 from scipy.ndimage import distance_transform_edt, gaussian_filter, median_filter
 from skimage import measure, morphology
+from skimage.measure import EllipseModel
 from collections import Counter
 
 from ..shared.mask_source import load_mask_bundle
@@ -74,6 +75,37 @@ def _get_zarr_array(zarr_path: str, array_path: str) -> zarr.Array:
     arr = group[array_path]
     _ZARR_ARRAY_CACHE[key] = arr
     return arr
+
+
+def _resolve_keypoint_group(
+    root: zarr.Group,
+    keypoint_run: Optional[str],
+    source_keypoint_group: Optional[str],
+    source_keypoint_run: Optional[str],
+) -> Tuple[zarr.Group, str, str]:
+    refined = root.get("refined_keypoints_runs")
+    raw = root.get("keypoints_runs")
+
+    if keypoint_run:
+        if refined is not None and keypoint_run in refined:
+            return refined[keypoint_run], keypoint_run, "refined_keypoints_runs"
+        if raw is not None and keypoint_run in raw:
+            return raw[keypoint_run], keypoint_run, "keypoints_runs"
+        raise ValueError(f"Keypoint run '{keypoint_run}' not found in refined or raw runs.")
+
+    if source_keypoint_group and source_keypoint_run:
+        group = root.get(source_keypoint_group)
+        if group is not None and source_keypoint_run in group:
+            return group[source_keypoint_run], source_keypoint_run, source_keypoint_group
+
+    refined_latest = refined.attrs.get("latest") if refined is not None else None
+    raw_latest = raw.attrs.get("latest") if raw is not None else None
+
+    if refined is not None and refined_latest in refined:
+        return refined[refined_latest], refined_latest, "refined_keypoints_runs"
+    if raw is not None and raw_latest in raw:
+        return raw[raw_latest], raw_latest, "keypoints_runs"
+    raise ValueError("No keypoint runs found; run keypoints stage first.")
 
 
 def _compression_kwargs(array: zarr.Array) -> Dict[str, object]:
@@ -390,36 +422,55 @@ def _split_mask_by_heading(
 
 
 def _measure_mask(mask: np.ndarray, min_contour_points: int = 5) -> Tuple[bool, np.ndarray, np.ndarray, Optional[np.ndarray]]:
-    """Extract metrics from a binary mask."""
+    """Extract metrics from a binary mask using least-squares ellipse fitting."""
 
     if mask.sum() == 0:
         ellipse = np.full(5, np.nan, dtype=np.float32)
         centroid = np.full(2, np.nan, dtype=np.float32)
         return False, ellipse, centroid, None
 
-    region_mask = mask.astype(np.uint8)
-    props = measure.regionprops(region_mask)
-    if not props:
+    # Extract contour first (already in x, y format)
+    contour = _extract_contour(mask.astype(float), min_contour_points)
+    if contour is None:
         ellipse = np.full(5, np.nan, dtype=np.float32)
         centroid = np.full(2, np.nan, dtype=np.float32)
         return False, ellipse, centroid, None
 
-    region = props[0]
-    centroid = np.array([float(region.centroid[1]), float(region.centroid[0])], dtype=np.float32)
+    contour = contour.astype(np.float32)
+
+    # Fit ellipse to contour using least-squares (more stable than moments)
+    ellipse_model = EllipseModel()
+    success = ellipse_model.estimate(contour)
+
+    if not success or ellipse_model.params is None:
+        # Fallback: use centroid from mask, return NaN for ellipse params
+        region_mask = mask.astype(np.uint8)
+        props = measure.regionprops(region_mask)
+        if props:
+            centroid = np.array([float(props[0].centroid[1]), float(props[0].centroid[0])], dtype=np.float32)
+        else:
+            centroid = np.full(2, np.nan, dtype=np.float32)
+        ellipse = np.full(5, np.nan, dtype=np.float32)
+        return False, ellipse, centroid, contour
+
+    # EllipseModel.params = (xc, yc, a, b, theta)
+    # a, b are semi-axes; theta is rotation angle in radians
+    xc, yc, a, b, theta = ellipse_model.params
+
+    centroid = np.array([float(xc), float(yc)], dtype=np.float32)
+
+    # Convert semi-axes to full axis lengths (to match existing schema)
+    # and angle to degrees
     ellipse = np.array(
         [
-            centroid[0],
-            centroid[1],
-            float(region.major_axis_length),
-            float(region.minor_axis_length),
-            float(np.rad2deg(region.orientation)),
+            float(xc),
+            float(yc),
+            float(2 * a),  # major_axis_length (full length)
+            float(2 * b),  # minor_axis_length (full length)
+            float(np.rad2deg(theta)),  # angle in degrees
         ],
         dtype=np.float32,
     )
-
-    contour = _extract_contour(mask.astype(float), min_contour_points)
-    if contour is not None:
-        contour = contour.astype(np.float32)
 
     return True, ellipse, centroid, contour
 
@@ -487,7 +538,10 @@ def _compute_roi_metrics(
             diffs = np.diff(contour, axis=0, append=contour[0:1])
             perimeter = float(np.linalg.norm(diffs, axis=1).sum())
         else:
-            perimeter = float(measure.perimeter(mask.astype(np.uint8), neighbourhood=8))
+            try:
+                perimeter = float(measure.perimeter(mask.astype(np.uint8), neighborhood=8))
+            except TypeError:
+                perimeter = float(measure.perimeter(mask.astype(np.uint8), neighbourhood=8))
         if perimeter > 0:
             circularity[idx] = float((4.0 * math.pi * area) / (perimeter ** 2 + 1e-12))
 
@@ -535,6 +589,98 @@ def _compute_roi_metrics(
         "probability_var": prob_var,
         "probability_high_fraction": prob_high,
     }
+
+
+def _build_passthrough_output(
+    source_masks: np.ndarray,
+    source_ellipse_params: np.ndarray,
+    source_ellipse_success: np.ndarray,
+    source_eye_separation: Optional[float],
+    keypoints_roi: np.ndarray,
+    reason: Optional[str],
+) -> ROIOutput:
+    """Build a ROIOutput that preserves the source masks/ellipses unchanged."""
+
+    masks = np.asarray(source_masks)
+    if masks.ndim == 2:
+        masks = masks[None, ...]
+    if masks.shape[0] == 1:
+        masks = np.repeat(masks, 2, axis=0)
+
+    masks_out = masks.astype(np.uint8, copy=False)
+    ellipse_params = np.asarray(source_ellipse_params, dtype=np.float32)
+    ellipse_success = np.asarray(source_ellipse_success, dtype=bool)
+
+    if ellipse_params.shape != (2, 5):
+        ellipse_params = np.full((2, 5), np.nan, dtype=np.float32)
+    if ellipse_success.shape != (2,):
+        ellipse_success = np.zeros(2, dtype=bool)
+
+    centroids = np.full((2, 2), np.nan, dtype=np.float32)
+    for idx in range(2):
+        if ellipse_success[idx] and np.all(np.isfinite(ellipse_params[idx, :2])):
+            centroids[idx] = ellipse_params[idx, :2]
+        else:
+            centroid = _mask_centroid(masks_out[idx])
+            if centroid is not None:
+                centroids[idx] = centroid
+
+    if source_eye_separation is not None and np.isfinite(source_eye_separation):
+        separation = float(source_eye_separation)
+    elif np.all(np.isfinite(centroids)):
+        separation = float(
+            math.hypot(
+                float(centroids[0, 0] - centroids[1, 0]),
+                float(centroids[0, 1] - centroids[1, 1]),
+            )
+        )
+    else:
+        separation = float("nan")
+
+    eye_left = keypoints_roi[1]
+    eye_right = keypoints_roi[2]
+    keypoints_valid = (
+        eye_left.size >= 2
+        and eye_right.size >= 2
+        and np.all(np.isfinite(eye_left))
+        and np.all(np.isfinite(eye_right))
+        and not np.allclose(eye_left, eye_right, atol=1e-3)
+    )
+
+    reason_val = str(reason) if reason not in (None, "") else ""
+    reason_val = _append_reason_tag(reason_val, "copied_original")
+
+    source_union = (masks_out[0] | masks_out[1]).astype(bool, copy=False)
+    metrics = _compute_roi_metrics(
+        masks_out[0],
+        masks_out[1],
+        masks_out[0],
+        masks_out[1],
+        source_union,
+        centroids,
+        eye_left,
+        eye_right,
+        keypoints_valid,
+        separation,
+        ellipse_params,
+        (None, None),
+        None,
+    )
+
+    return ROIOutput(
+        masks_out,
+        ellipse_params,
+        ellipse_success,
+        centroids,
+        (None, None),
+        separation,
+        reason_val,
+        np.zeros(2, dtype=bool),
+        0,
+        False,
+        None,
+        **metrics,
+    )
 
 def _refine_roi(
     source_masks: np.ndarray,
@@ -868,6 +1014,12 @@ def _process_refine_chunk(
     success_path: str,
     start: int,
     stop: int,
+    *,
+    fast_path: bool = False,
+    source_ellipse_params_path: Optional[str] = None,
+    source_ellipse_success_path: Optional[str] = None,
+    source_eye_sep_path: Optional[str] = None,
+    source_reason_path: Optional[str] = None,
 ) -> List[Tuple[int, ROIOutput]]:
     """Process a batch of ROI indices and return their refinement outputs."""
     slice_obj = slice(start, stop)
@@ -879,26 +1031,59 @@ def _process_refine_chunk(
     heading_np = np.asarray(_get_zarr_array(zarr_path, heading_path)[slice_obj])
     success_np = np.asarray(_get_zarr_array(zarr_path, success_path)[slice_obj])
 
+    if fast_path:
+        if not source_ellipse_params_path or not source_ellipse_success_path:
+            raise ValueError("Fast path requires source ellipse parameters.")
+        ellipse_params_np = np.asarray(_get_zarr_array(zarr_path, source_ellipse_params_path)[slice_obj])
+        ellipse_success_np = np.asarray(_get_zarr_array(zarr_path, source_ellipse_success_path)[slice_obj])
+        eye_sep_np = (
+            np.asarray(_get_zarr_array(zarr_path, source_eye_sep_path)[slice_obj])
+            if source_eye_sep_path
+            else None
+        )
+        reason_np = (
+            np.asarray(_get_zarr_array(zarr_path, source_reason_path)[slice_obj])
+            if source_reason_path
+            else None
+        )
+
     results: List[Tuple[int, ROIOutput]] = []
     for local_idx in range(masks_np.shape[0]):
         global_idx = start + local_idx
         source_masks = masks_np[local_idx]
         keypoints_roi = keypoints_np[local_idx]
-        heading = float(heading_np[local_idx])
-        success_flag = bool(success_np[local_idx])
-        mask_probs_roi = mask_probs_np[local_idx] if mask_probs_np is not None else None
-        results.append(
-            (
-                global_idx,
-                _refine_roi(
-                    source_masks,
-                    keypoints_roi,
-                    heading,
-                    success_flag,
-                    mask_probs=mask_probs_roi,
-                ),
+        if fast_path:
+            reason_val = reason_np[local_idx] if reason_np is not None else None
+            eye_sep_val = float(eye_sep_np[local_idx]) if eye_sep_np is not None else None
+            results.append(
+                (
+                    global_idx,
+                    _build_passthrough_output(
+                        source_masks,
+                        ellipse_params_np[local_idx],
+                        ellipse_success_np[local_idx],
+                        eye_sep_val,
+                        keypoints_roi,
+                        reason_val,
+                    ),
+                )
             )
-        )
+        else:
+            heading = float(heading_np[local_idx])
+            success_flag = bool(success_np[local_idx])
+            mask_probs_roi = mask_probs_np[local_idx] if mask_probs_np is not None else None
+            results.append(
+                (
+                    global_idx,
+                    _refine_roi(
+                        source_masks,
+                        keypoints_roi,
+                        heading,
+                        success_flag,
+                        mask_probs=mask_probs_roi,
+                    ),
+                )
+            )
     return results
 
 
@@ -914,6 +1099,11 @@ def _process_and_write_chunk(
     stop: int,
     *,
     write_probabilities: bool,
+    fast_path: bool = False,
+    source_ellipse_params_path: Optional[str] = None,
+    source_ellipse_success_path: Optional[str] = None,
+    source_eye_sep_path: Optional[str] = None,
+    source_reason_path: Optional[str] = None,
 ) -> List[Tuple[int, ROIOutput]]:
     """Process a chunk, write outputs into Zarr arrays, and return ROI results."""
     results = _process_refine_chunk(
@@ -925,6 +1115,11 @@ def _process_and_write_chunk(
         success_path,
         start,
         stop,
+        fast_path=fast_path,
+        source_ellipse_params_path=source_ellipse_params_path,
+        source_ellipse_success_path=source_ellipse_success_path,
+        source_eye_sep_path=source_eye_sep_path,
+        source_reason_path=source_reason_path,
     )
     if not results:
         return results
@@ -974,6 +1169,7 @@ def refine_eye_masks(
     created_at_utc: Optional[str] = None,
     area_filter_z: Optional[float] = _AREA_FILTER_Z_DEFAULT,
     area_filter_mode: str = _AREA_FILTER_MODE_DEFAULT,
+    force_refine_traditional: bool = False,
 ) -> str:
     """Refine an eye-mask run and return the name of the new run."""
 
@@ -1006,30 +1202,36 @@ def refine_eye_masks(
     if src_run_name is None or src_run_name not in eye_parent:
         raise ValueError("Source eye mask run not found.")
     src_run = eye_parent[src_run_name]
+    source_method = str(src_run.attrs.get("method", "unknown"))
     console.print(
         f"Refining eye masks from [cyan]eye_masks_runs/{src_run_name}[/cyan] "
-        f"(method={src_run.attrs.get('method', 'unknown')})"
+        f"(method={source_method})"
     )
 
     crop_run_name = src_run.attrs.get("source_crop_run") or root.get("crop_runs", {}).attrs.get("latest")
     if crop_run_name is None:
         raise ValueError("Unable to determine crop run (missing attribute 'source_crop_run').")
 
-    kp_parent = root.require_group("keypoints_runs")
-    keypoint_run_name = (
-        keypoint_run
-        or src_run.attrs.get("source_keypoints_run")
-        or kp_parent.attrs.get("latest")
+    kp_group, keypoint_run_name, keypoint_group_name = _resolve_keypoint_group(
+        root,
+        keypoint_run,
+        src_run.attrs.get("source_keypoint_group"),
+        src_run.attrs.get("source_keypoint_run"),
     )
-    if keypoint_run_name is None or keypoint_run_name not in kp_parent:
-        raise ValueError("Keypoint run required for refinement (set --keypoint-run).")
-    kp_group = kp_parent[keypoint_run_name]
 
-    required_kp = ["keypoints_roi", "heading", "detection_success"]
+    success_dataset_name = None
+    for candidate in ("detection_success", "refined_success", "source_success"):
+        if candidate in kp_group:
+            success_dataset_name = candidate
+            break
+    if success_dataset_name is None:
+        raise ValueError(f"Keypoint run '{keypoint_run_name}' missing success flags.")
+
+    required_kp = ["keypoints_roi", "heading", success_dataset_name]
     for arr in required_kp:
         if arr not in kp_group:
             raise ValueError(f"Keypoint run '{keypoint_run_name}' missing '{arr}'.")
-    kp_paths = ", ".join(f"keypoints_runs/{keypoint_run_name}/{name}" for name in required_kp)
+    kp_paths = ", ".join(f"{keypoint_group_name}/{keypoint_run_name}/{name}" for name in required_kp)
     console.print(f"Using keypoint datasets: [cyan]{kp_paths}[/cyan]")
 
     console.print(
@@ -1069,6 +1271,22 @@ def refine_eye_masks(
     source_channels = int(source_channels)
     roi_h = int(roi_h)
     roi_w = int(roi_w)
+
+    source_method_lower = source_method.lower()
+    source_has_ellipses = all(
+        name in src_run for name in ("ellipse_params", "ellipse_success", "eye_separation")
+    )
+    use_fast_path = (
+        "traditional" in source_method_lower
+        and not force_refine_traditional
+        and source_channels == 2
+        and source_has_ellipses
+    )
+    if use_fast_path:
+        console.print(
+            "[yellow]Traditional fast path enabled:[/yellow] preserving source masks/ellipses and skipping "
+            "smoothing/component enforcement. Use --force-refine-traditional to opt in to refinement."
+        )
 
     mask_bundle_provenance = dict(bundle.provenance)
     mask_binary_source = None
@@ -1119,11 +1337,22 @@ def refine_eye_masks(
     else:
         console.print("Probability source: [yellow]none[/yellow]; using binary masks only.")
 
-    keypoints_path = f"keypoints_runs/{keypoint_run_name}/keypoints_roi"
-    heading_path = f"keypoints_runs/{keypoint_run_name}/heading"
-    success_path = f"keypoints_runs/{keypoint_run_name}/detection_success"
+    keypoints_path = f"{keypoint_group_name}/{keypoint_run_name}/keypoints_roi"
+    heading_path = f"{keypoint_group_name}/{keypoint_run_name}/heading"
+    success_path = f"{keypoint_group_name}/{keypoint_run_name}/{success_dataset_name}"
 
-    has_mask_probs = probs_data is not None
+    source_ellipse_params_path = (
+        f"eye_masks_runs/{src_run_name}/ellipse_params" if "ellipse_params" in src_run else None
+    )
+    source_ellipse_success_path = (
+        f"eye_masks_runs/{src_run_name}/ellipse_success" if "ellipse_success" in src_run else None
+    )
+    source_eye_sep_path = (
+        f"eye_masks_runs/{src_run_name}/eye_separation" if "eye_separation" in src_run else None
+    )
+    source_reason_path = f"eye_masks_runs/{src_run_name}/reason" if "reason" in src_run else None
+
+    has_mask_probs = probs_data is not None and not use_fast_path
 
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
 
@@ -1332,6 +1561,11 @@ def refine_eye_masks(
                     start,
                     stop,
                     write_probabilities=has_mask_probs,
+                    fast_path=use_fast_path,
+                    source_ellipse_params_path=source_ellipse_params_path,
+                    source_ellipse_success_path=source_ellipse_success_path,
+                    source_eye_sep_path=source_eye_sep_path,
+                    source_reason_path=source_reason_path,
                 )
             )
             cumulative = stop
@@ -1450,6 +1684,8 @@ def refine_eye_masks(
             stats["copied_original"] += 1
         elif "empty_union" in reason_tags:
             stats["empty_union"] += 1
+            stats["copied_original"] += 1
+        elif "copied_original" in reason_tags:
             stats["copied_original"] += 1
         else:
             stats["refined"] += 1
@@ -1761,9 +1997,11 @@ def refine_eye_masks(
 
     probabilities_available = bool(has_mask_probs) or wrote_any_probs
 
+    smoothing_mode = "off" if use_fast_path else _SMOOTHING_MODE
+    smoothing_enabled = (smoothing_mode or "").lower() != "off"
     smoothing_info = {
-        "mode": _SMOOTHING_MODE,
-        "enabled": (_SMOOTHING_MODE or "").lower() != "off",
+        "mode": smoothing_mode,
+        "enabled": smoothing_enabled,
         "median_k": int(_MEDIAN_K),
         "sdf_sigma": float(_SDF_SIGMA),
         "morph_closing_radius": int(_MORPH_CLOSING_RADIUS),
@@ -1810,6 +2048,8 @@ def refine_eye_masks(
         "mask_binary_source": mask_binary_source or "unknown",
         "mask_bundle": mask_bundle_provenance,
         "smoothing": smoothing_info,
+        "traditional_fast_path": bool(use_fast_path),
+        "force_refine_traditional": bool(force_refine_traditional),
         "components_reassigned": int(stats["components_reassigned"]),
         "probability_split": int(stats["probability_split"]),
         "metrics_version": 1,
@@ -1860,6 +2100,7 @@ def refine_eye_masks(
         "source_eye_masks_run": src_run_name,
         "source_eye_masks_method": source_method,
         "source_keypoints_run": keypoint_run_name,
+        "source_keypoint_group": keypoint_group_name,
         "source_crop_run": crop_run_name,
         "total_rois": total_rois,
         "successful_eyes": total_eyes,
@@ -1878,6 +2119,8 @@ def refine_eye_masks(
         "mask_binary_identity": bundle.binary_identity,
         "mask_probability_identity": bundle.probs_identity or "none",
         "mask_bundle_provenance": mask_bundle_provenance,
+        "traditional_fast_path": bool(use_fast_path),
+        "force_refine_traditional": bool(force_refine_traditional),
         "dask_scheduler": scheduler_key,
         "dask_num_workers": int(num_workers) if num_workers is not None else None,
         "dask_chunk_size": chunk_size,
@@ -1887,6 +2130,7 @@ def refine_eye_masks(
         "hostname": env_info["platform"].get("hostname", "unknown"),
         "provenance": provenance_record,
         "metrics_summary": metrics_summary,
+        "summary_statistics": {"refine": stats},
     }
 
     source_provenance = src_run.attrs.get("provenance")
@@ -1947,6 +2191,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=_AREA_FILTER_MODE_DEFAULT,
         help="Require either eye or both eyes to exceed the threshold before flagging a pair.",
     )
+    parser.add_argument(
+        "--force-refine-traditional",
+        action="store_true",
+        help="Run full refinement even for traditional eye-mask runs (enables smoothing/component enforcement).",
+    )
     return parser
 
 
@@ -1975,6 +2224,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             created_at_utc=created_at,
             area_filter_z=args.area_filter_z,
             area_filter_mode=args.area_filter_mode,
+            force_refine_traditional=args.force_refine_traditional,
         )
     except Exception as exc:
         console.print(f"[red]✗[/red] Failed to refine eye masks: {exc}")

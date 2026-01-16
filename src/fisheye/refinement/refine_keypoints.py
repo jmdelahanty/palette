@@ -19,6 +19,7 @@ import zarr
 from rich.console import Console
 import argparse
 import yaml
+from zarr.core.dtype import VariableLengthUTF8
 
 import dask
 from dask import delayed
@@ -47,6 +48,9 @@ class KeypointRefinementParams:
     scheduler: str = "processes"
     num_workers: Optional[int] = None
     memory_limit: Optional[str] = None
+    confidence_threshold: float = 0.3
+    min_triangle_angle: float = 10.0
+    min_triangle_area: float = 100.0
 
     @classmethod
     def from_config(
@@ -68,6 +72,12 @@ class KeypointRefinementParams:
                 params.num_workers = int(config["num_workers"])
             if config.get("memory_limit") is not None:
                 params.memory_limit = str(config["memory_limit"])
+            if config.get("confidence_threshold") is not None:
+                params.confidence_threshold = float(config["confidence_threshold"])
+            if config.get("min_triangle_angle") is not None:
+                params.min_triangle_angle = float(config["min_triangle_angle"])
+            if config.get("min_triangle_area") is not None:
+                params.min_triangle_area = float(config["min_triangle_area"])
             source = config.get("parameter_source", "config")
         return params, source
 
@@ -145,6 +155,11 @@ def _process_refinement_chunk(
     kp_norm_src = kp_source["keypoints_norm"][idx]
     heading_src = kp_source["heading"][idx]
     confidence_src = kp_source["confidence"][idx]
+    kp_conf_src = (
+        kp_source["keypoint_confidences"][idx]
+        if "keypoint_confidences" in kp_source
+        else None
+    )
     thresh_src = (
         kp_source["effective_threshold"][idx]
         if "effective_threshold" in kp_source
@@ -164,6 +179,9 @@ def _process_refinement_chunk(
     norm_out = np.full_like(kp_norm_src, np.nan)
     heading_out = np.full_like(heading_src, np.nan)
     confidence_out = np.full_like(confidence_src, np.nan)
+    kp_conf_out = (
+        np.full_like(kp_conf_src, np.nan) if kp_conf_src is not None else None
+    )
     thresh_out = (
         np.full_like(thresh_src, np.nan) if thresh_src is not None else None
     )
@@ -171,32 +189,48 @@ def _process_refinement_chunk(
 
     area_out = np.full(length, np.nan, dtype=np.float64)
     min_angle_out = np.full(length, np.nan, dtype=np.float64)
-    angles_out = np.full((length, 3), np.nan, dtype=np.float64)
+    triangle_angles_out = np.full((length, 3), np.nan, dtype=np.float64)
     quality_out = np.zeros(length, dtype=np.int8)
     refined_success_out = np.zeros(length, dtype=bool)
     flip_flags_out = np.zeros(length, dtype=bool)
+    confidence_valid_out = np.zeros(length, dtype=bool)
+    geometry_valid_out = np.zeros(length, dtype=bool)
+    usable_out = np.zeros(length, dtype=bool)
+    reason_out = np.full(length, "", dtype=object)
+
+    confidence_threshold = float(params_dict.get("confidence_threshold", 0.3))
+    min_triangle_angle = float(params_dict.get("min_triangle_angle", 10.0))
+    min_triangle_area = float(params_dict.get("min_triangle_area", 100.0))
 
     stats = {
         "refined_success": 0,
         "source_success": int(np.sum(success_chunk)),
         "source_failures": int(len(success_chunk) - int(np.sum(success_chunk))),
         "flips_corrected": 0,
+        "low_confidence": 0,
+        "confidence_missing": 0,
+        "geometry_issues": 0,
+        "clean": 0,
+        "usable": 0,
     }
 
     for i in range(length):
         if not success_chunk[i]:
             quality_out[i] = 4  # source detection failed
+            reason_out[i] = "detection_failed"
             continue
 
         metrics: KeypointGeometryMetrics = compute_geometry_metrics(kp_roi_src[i])
         area_out[i] = metrics.area
         min_angle_out[i] = metrics.min_angle
-        angles_out[i] = metrics.angles
+        triangle_angles_out[i] = metrics.angles
 
         roi_out[i] = kp_roi_src[i]
         img_out[i] = kp_img_src[i]
         norm_out[i] = kp_norm_src[i]
         confidence_out[i] = confidence_src[i]
+        if kp_conf_out is not None and kp_conf_src is not None:
+            kp_conf_out[i] = kp_conf_src[i]
 
         heading_val = heading_src[i]
         heading_val = _compute_heading_from_points(
@@ -217,11 +251,57 @@ def _process_refinement_chunk(
             roi_out[i][[1, 2]] = roi_out[i][[2, 1]]
             img_out[i][[1, 2]] = img_out[i][[2, 1]]
             norm_out[i][[1, 2]] = norm_out[i][[2, 1]]
+            if kp_conf_out is not None:
+                kp_conf_out[i][[1, 2]] = kp_conf_out[i][[2, 1]]
             flip_flags_out[i] = True
             quality_out[i] = 6  # Flag flip correction
             stats["flips_corrected"] += 1
         else:
             quality_out[i] = 0
+
+        conf_missing = False
+        conf_ok = False
+        if kp_conf_out is None:
+            conf_missing = True
+        else:
+            conf_vals = kp_conf_out[i]
+            if not np.all(np.isfinite(conf_vals)):
+                conf_missing = True
+            else:
+                conf_ok = bool(np.all(conf_vals >= confidence_threshold))
+        confidence_valid_out[i] = conf_ok
+
+        geom_ok = bool(
+            np.isfinite(metrics.min_angle)
+            and np.isfinite(metrics.area)
+            and metrics.min_angle >= min_triangle_angle
+            and metrics.area >= min_triangle_area
+        )
+        geometry_valid_out[i] = geom_ok
+
+        tags: List[str] = []
+        if flip_detected:
+            tags.append("flip_corrected")
+        if conf_missing:
+            tags.append("confidence_missing")
+            stats["confidence_missing"] += 1
+        elif not conf_ok:
+            tags.append("low_confidence")
+            stats["low_confidence"] += 1
+        if not geom_ok:
+            tags.append("geometry_issue")
+            stats["geometry_issues"] += 1
+
+        if tags:
+            reason_out[i] = "|".join(tags)
+        else:
+            reason_out[i] = "clean"
+            stats["clean"] += 1
+
+        usable = conf_ok and geom_ok
+        usable_out[i] = usable
+        if usable:
+            stats["usable"] += 1
 
         refined_success_out[i] = True
         stats["refined_success"] += 1
@@ -236,12 +316,17 @@ def _process_refinement_chunk(
         "norm": norm_out,
         "heading": heading_out,
         "confidence": confidence_out,
+        "kp_conf": kp_conf_out,
         "thresh": thresh_out,
         "se2": se2_out,
         "flip_flags": flip_flags_out,
         "area": area_out,
         "min_angle": min_angle_out,
-        "angles": angles_out,
+        "triangle_angles": triangle_angles_out,
+        "confidence_valid": confidence_valid_out,
+        "geometry_valid": geometry_valid_out,
+        "usable": usable_out,
+        "reason": reason_out,
         "stats": stats,
     }
 
@@ -284,6 +369,9 @@ def create_refined_keypoint_run(
     console.print(f"  Scheduler: {params.scheduler}")
     if params.num_workers is not None:
         console.print(f"  Num workers: {params.num_workers}")
+    console.print(f"  Confidence threshold: {params.confidence_threshold}")
+    console.print(f"  Min triangle angle: {params.min_triangle_angle}")
+    console.print(f"  Min triangle area: {params.min_triangle_area}")
 
     total_rois = kp_source["keypoints_roi"].shape[0]
     console.print(f"Total ROI keypoints: {total_rois}")
@@ -347,6 +435,14 @@ def create_refined_keypoint_run(
         overwrite=True,
     )
     detection_source_dst[:] = detection_source_values
+    kp_refined.create_array(
+        "retune_id",
+        shape=(total_rois,),
+        chunks=heading_chunks,
+        dtype="i4",
+        fill_value=-1,
+        overwrite=True,
+    )
 
     # Prepare output arrays
     kp_roi_dst = kp_refined.create_array(
@@ -390,6 +486,16 @@ def create_refined_keypoint_run(
         fill_value=np.nan,
         overwrite=True,
     )
+    kp_conf_dst = None
+    if "keypoint_confidences" in kp_source:
+        kp_conf_dst = kp_refined.create_array(
+            "keypoint_confidences",
+            shape=kp_source["keypoint_confidences"].shape,
+            chunks=kp_source["keypoint_confidences"].chunks,
+            dtype="f8",
+            fill_value=np.nan,
+            overwrite=True,
+        )
     thresh_dst = None
     if "effective_threshold" in kp_source:
         thresh_dst = kp_refined.create_array(
@@ -429,7 +535,7 @@ def create_refined_keypoint_run(
         overwrite=True,
     )
     geom_angles_dst = kp_refined.create_array(
-        "angles",
+        "triangle_angles",
         shape=(total_rois, 3),
         chunks=(
             kp_source["heading"].chunks[0]
@@ -456,6 +562,38 @@ def create_refined_keypoint_run(
         chunks=kp_source["heading"].chunks,
         dtype="bool",
         fill_value=False,
+        overwrite=True,
+    )
+    confidence_valid_dst = kp_refined.create_array(
+        "confidence_valid",
+        shape=(total_rois,),
+        chunks=kp_source["heading"].chunks,
+        dtype="bool",
+        fill_value=False,
+        overwrite=True,
+    )
+    geometry_valid_dst = kp_refined.create_array(
+        "geometry_valid",
+        shape=(total_rois,),
+        chunks=kp_source["heading"].chunks,
+        dtype="bool",
+        fill_value=False,
+        overwrite=True,
+    )
+    usable_dst = kp_refined.create_array(
+        "usable_keypoints",
+        shape=(total_rois,),
+        chunks=kp_source["heading"].chunks,
+        dtype="bool",
+        fill_value=False,
+        overwrite=True,
+    )
+    reason_dst = kp_refined.create_array(
+        "reason",
+        shape=(total_rois,),
+        chunks=kp_source["heading"].chunks,
+        dtype=VariableLengthUTF8(),
+        fill_value="",
         overwrite=True,
     )
     source_success = kp_source["detection_success"][:]
@@ -488,6 +626,11 @@ def create_refined_keypoint_run(
         "refined_success": 0,
         "source_failures": int(total_rois - np.sum(source_success)),
         "flips_corrected": 0,
+        "low_confidence": 0,
+        "confidence_missing": 0,
+        "geometry_issues": 0,
+        "clean": 0,
+        "usable": 0,
     }
 
     console.print("\nEvaluating keypoints for eye flips...")
@@ -506,7 +649,11 @@ def create_refined_keypoint_run(
                 keypoint_run,
                 int(start),
                 int(end),
-                {},
+                {
+                    "confidence_threshold": params.confidence_threshold,
+                    "min_triangle_angle": params.min_triangle_angle,
+                    "min_triangle_area": params.min_triangle_area,
+                },
             )
         )
 
@@ -552,19 +699,30 @@ def create_refined_keypoint_run(
         kp_norm_dst[idx] = result["norm"]
         heading_dst[idx] = result["heading"]
         confidence_dst[idx] = result["confidence"]
+        if kp_conf_dst is not None and result.get("kp_conf") is not None:
+            kp_conf_dst[idx] = result["kp_conf"]
         if thresh_dst is not None and result["thresh"] is not None:
             thresh_dst[idx] = result["thresh"]
         if se2_dst is not None and result["se2"] is not None:
             se2_dst[idx] = result["se2"]
         geom_area_dst[idx] = result["area"]
         geom_min_angle_dst[idx] = result["min_angle"]
-        geom_angles_dst[idx] = result["angles"]
+        geom_angles_dst[idx] = result["triangle_angles"]
         quality_dst[idx] = result["quality"]
         refined_success_dst[idx] = result["refined_success"]
+        confidence_valid_dst[idx] = result["confidence_valid"]
+        geometry_valid_dst[idx] = result["geometry_valid"]
+        usable_dst[idx] = result["usable"]
+        reason_dst[idx] = result["reason"]
         flip_dst[idx] = result["flip_flags"]
 
         stats["refined_success"] += result["stats"]["refined_success"]
         stats["flips_corrected"] += result["stats"]["flips_corrected"]
+        stats["low_confidence"] += result["stats"]["low_confidence"]
+        stats["confidence_missing"] += result["stats"]["confidence_missing"]
+        stats["geometry_issues"] += result["stats"]["geometry_issues"]
+        stats["clean"] += result["stats"]["clean"]
+        stats["usable"] += result["stats"]["usable"]
 
     duration = time.perf_counter() - start_time
 
@@ -575,9 +733,26 @@ def create_refined_keypoint_run(
         "source_failures": stats["source_failures"],
         "refined_success": stats["refined_success"],
         "flips_corrected": stats["flips_corrected"],
+        "low_confidence": stats["low_confidence"],
+        "confidence_missing": stats["confidence_missing"],
+        "geometry_issues": stats["geometry_issues"],
+        "clean": stats["clean"],
+        "usable_keypoints": stats["usable"],
+        "confidence_threshold": params.confidence_threshold,
+        "min_triangle_angle": params.min_triangle_angle,
+        "min_triangle_area": params.min_triangle_area,
         "pass_rate_percent": pass_rate,
         "duration_seconds": duration,
     }
+
+    failure_indices = np.where(~source_success)[0].astype("i4", copy=False)
+    failure_chunk = (max(1, min(10000, failure_indices.size)),)
+    kp_refined.create_array(
+        "failure_indices",
+        data=failure_indices,
+        chunks=failure_chunk,
+        overwrite=True,
+    )
 
     git_info = get_git_info()
     env_info = get_environment_info()
@@ -603,6 +778,9 @@ def create_refined_keypoint_run(
         "num_workers": params.num_workers,
         "memory_limit": params.memory_limit,
         "parameter_source": param_source,
+        "confidence_threshold": params.confidence_threshold,
+        "min_triangle_angle": params.min_triangle_angle,
+        "min_triangle_area": params.min_triangle_area,
     }
 
     artifact_keys = [
@@ -651,6 +829,11 @@ def create_refined_keypoint_run(
         f"  Refined success: {stats['refined_success']}",
         f"  Source failures: {stats['source_failures']}",
         f"  Flips corrected: {stats['flips_corrected']}",
+        f"  Low confidence: {stats['low_confidence']}",
+        f"  Confidence missing: {stats['confidence_missing']}",
+        f"  Geometry issues: {stats['geometry_issues']}",
+        f"  Clean: {stats['clean']}",
+        f"  Usable keypoints: {stats['usable']}",
         f"  Pass rate: {pass_rate:.1f}%",
         f"  Duration: {duration:.2f}s",
     ]
@@ -693,6 +876,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument(
         "--memory-limit",
         help="Override Dask worker memory limit (e.g. '32GB').",
+    )
+    parser.add_argument(
+        "--review-failures",
+        action="store_true",
+        help="Launch the manual keypoint failure review tool after refinement.",
     )
 
     args = parser.parse_args(argv)
@@ -744,6 +932,15 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         f"[green]✓[/green] Refined keypoints written to "
         f"[bold]refined_keypoints_runs/{run_name}[/bold]"
     )
+
+    if args.review_failures:
+        try:
+            from ..tune.keypoint_review import run_manual_review
+        except Exception as exc:  # pragma: no cover - optional UI dependency
+            console.print(f"[yellow]Warning:[/yellow] Review tool unavailable: {exc}")
+            return
+        console.print("[blue]Launching keypoint review (manual)...[/blue]")
+        run_manual_review(args.zarr_path, refined_run=run_name)
 
 
 if __name__ == "__main__":  # pragma: no cover

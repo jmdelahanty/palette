@@ -1711,8 +1711,12 @@ class PipelineLauncherApp(App):
             return
         
         # Find zarr inspector script
-        inspector_script = Path(__file__).resolve().parent.parent.parent / "zarr_inspector.py"
-        
+        inspector_script = Path(__file__).resolve().parent.parent / "utils" / "zarr_inspector.py"
+        fallback_script = Path(__file__).resolve().parent.parent.parent / "zarr_inspector.py"
+
+        if not inspector_script.exists():
+            inspector_script = fallback_script
+
         if not inspector_script.exists():
             self.status_message = "❌ zarr_inspector.py not found"
             if self.progress_log:

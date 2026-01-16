@@ -50,9 +50,8 @@ def detect_keypoints_traditional(
     se1_radius: int = 1,
     se2_radius: int = 2,
     min_area: int = 5,
-    adaptive_steps: int = 5,
-    se2_decrement: int = 1,
     min_valid_angle: float = 10.0,
+    max_valid_angle: float = 90.0,
     min_triangle_area: float = 100.0
 ) -> Optional[Dict[str, Any]]:
     """
@@ -65,9 +64,8 @@ def detect_keypoints_traditional(
         se1_radius: Radius for first morphological structuring element
         se2_radius: Radius for second morphological structuring element
         min_area: Minimum area for valid blobs
-        adaptive_steps: Number of adaptive threshold steps to try
-        se2_decrement: Amount to decrease SE2 radius each adaptive step
         min_valid_angle: Minimum angle in degrees for valid triangle
+        max_valid_angle: Maximum angle in degrees for valid triangle
         min_triangle_area: Minimum triangle area in pixels^2
     
     Returns:
@@ -86,33 +84,35 @@ def detect_keypoints_traditional(
     current_se2 = se2_radius
     keypoint_stats = []
     effective_se2 = se2_radius
+    triangle_angles_raw = np.full(3, np.nan, dtype=np.float64)
+    triangle_area = float("nan")
     
-    for _ in range(adaptive_steps):
-        se2 = disk(max(1, int(round(current_se2))))
-        im_roi = erosion(dilation(erosion(
-            diff_roi >= roi_thresh, se1), se2), se1
-        )
-        
-        roi_stat = [r for r in regionprops(label(im_roi)) if r.area > min_area]
-        
-        if len(roi_stat) >= 3:
-            # Take top 3 by area
-            candidate_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
-            
-            # Calculate triangle geometry for validation
-            centroids = np.array([r.centroid for r in candidate_stats])
-            angles, tri_area = calculate_triangle_metrics(centroids[0], centroids[1], centroids[2])
-            
-            # Check if angles form a valid triangle AND triangle is large enough
-            if np.all(angles >= np.deg2rad(min_valid_angle)) and tri_area >= min_triangle_area:
-                keypoint_stats = candidate_stats
-                effective_se2 = max(1, int(round(current_se2)))
-                # Store triangle metrics for later
-                triangle_angles = np.rad2deg(angles)  # Convert to degrees
-                triangle_area = tri_area
-                break
+    se2 = disk(max(1, int(round(current_se2))))
+    im_roi = erosion(dilation(erosion(
+        diff_roi >= roi_thresh, se1), se2), se1
+    )
 
-        current_se2 = max(1, current_se2 - se2_decrement)
+    roi_stat = [r for r in regionprops(label(im_roi)) if r.area > min_area]
+
+    if len(roi_stat) >= 3:
+        # Take top 3 by area
+        candidate_stats = sorted(roi_stat, key=lambda r: r.area, reverse=True)[:3]
+
+        # Calculate triangle geometry for validation
+        centroids = np.array([r.centroid for r in candidate_stats])
+        angles, tri_area = calculate_triangle_metrics(centroids[0], centroids[1], centroids[2])
+
+        # Check if angles form a valid triangle AND triangle is large enough
+        if (
+            np.all(angles >= np.deg2rad(min_valid_angle))
+            and np.all(angles <= np.deg2rad(max_valid_angle))
+            and tri_area >= min_triangle_area
+        ):
+            keypoint_stats = candidate_stats
+            effective_se2 = max(1, int(round(current_se2)))
+            # Store triangle metrics for later
+            triangle_angles_raw = np.rad2deg(angles)  # Candidate-order angles (degrees)
+            triangle_area = tri_area
 
     if len(keypoint_stats) != 3:
         return None
@@ -127,7 +127,11 @@ def detect_keypoints_traditional(
     keypoints['num_blobs_found'] = len(keypoint_stats)
 
     # Triangle geometry metrics
-    keypoints['triangle_angles'] = triangle_angles  # (3,) array in degrees
+    canonical_angles, _ = calculate_triangle_metrics(
+        keypoints['bladder'], keypoints['eye_left'], keypoints['eye_right']
+    )
+    keypoints['triangle_angles'] = np.rad2deg(canonical_angles)  # (3,) array in degrees
+    keypoints['triangle_angles_raw'] = triangle_angles_raw  # Candidate-order angles (degrees)
     keypoints['triangle_area'] = triangle_area      # scalar in pixels^2
 
     # Per-keypoint confidence from blob areas (normalized)
@@ -292,6 +296,7 @@ def process_keypoint_chunk_delayed(
     # NEW: Per-keypoint confidence and triangle metrics
     keypoint_confidences = np.full((chunk_len, 3), np.nan, dtype='f8')
     triangle_angles = np.full((chunk_len, 3), np.nan, dtype='f8')
+    triangle_angles_raw = np.full((chunk_len, 3), np.nan, dtype='f8')
     triangle_area = np.full(chunk_len, np.nan, dtype='f8')
 
     num_successful = 0
@@ -320,9 +325,8 @@ def process_keypoint_chunk_delayed(
             se1_radius=detection_params.get('se1_radius', 1),
             se2_radius=detection_params.get('se2_radius', 2),
             min_area=detection_params.get('min_area', 5),
-            adaptive_steps=detection_params.get('adaptive_steps', 5),
-            se2_decrement=detection_params.get('se2_decrement', 1),
             min_valid_angle=detection_params.get('min_valid_angle', 10.0),
+            max_valid_angle=detection_params.get('max_valid_angle', 90.0),
             min_triangle_area=detection_params.get('min_triangle_area', 100.0)
         )
         
@@ -359,6 +363,7 @@ def process_keypoint_chunk_delayed(
         # NEW: Store per-keypoint and triangle metrics
         keypoint_confidences[i] = keypoints['keypoint_confidences']
         triangle_angles[i] = keypoints['triangle_angles']
+        triangle_angles_raw[i] = keypoints['triangle_angles_raw']
         triangle_area[i] = keypoints['triangle_area']
 
         num_successful += 1
@@ -378,6 +383,7 @@ def process_keypoint_chunk_delayed(
     # NEW: Write additional metrics
     keypoint_group['keypoint_confidences'][start_idx:end_idx] = keypoint_confidences
     keypoint_group['triangle_angles'][start_idx:end_idx] = triangle_angles
+    keypoint_group['triangle_angles_raw'][start_idx:end_idx] = triangle_angles_raw
     keypoint_group['triangle_area'][start_idx:end_idx] = triangle_area
 
     return num_successful, num_failed
@@ -395,9 +401,8 @@ def get_keypoint_parameters(root: zarr.Group, config: Dict[str, Any], console: O
     keypoint_params.setdefault('se1_radius', 1)
     keypoint_params.setdefault('se2_radius', 2)
     keypoint_params.setdefault('min_area', 5)
-    keypoint_params.setdefault('adaptive_steps', 5)
-    keypoint_params.setdefault('se2_decrement', 1)
     keypoint_params.setdefault('min_valid_angle', 10.0)
+    keypoint_params.setdefault('max_valid_angle', 90.0)
     keypoint_params.setdefault('min_triangle_area', 100.0)
     
     param_source = 'config_default'
@@ -415,7 +420,9 @@ def get_keypoint_parameters(root: zarr.Group, config: Dict[str, Any], console: O
                 if console:
                     console.print(f"[green]✓ Using tuned keypoint parameters from zarr[/green]")
                     console.print(f"  Tuned on: {tuning_data.get('tuned_timestamp', 'unknown')}")
-    
+
+    keypoint_params.pop('adaptive_steps', None)
+    keypoint_params.pop('se2_decrement', None)
     return keypoint_params, param_source
 
 
@@ -661,9 +668,18 @@ def detect_keypoints(
         overwrite=True
     )
 
-    # NEW: Triangle angles at each vertex (N, 3) in degrees
+    # NEW: Triangle angles at each vertex (N, 3) in degrees (bladder, left, right)
     keypoint_group.create_array(
         'triangle_angles',
+        shape=(total_rois, 3),
+        chunks=(chunk_len, 3),
+        dtype='f8',
+        fill_value=np.nan,
+        overwrite=True
+    )
+    # NEW: Triangle angles in candidate order (largest -> smallest blob by area)
+    keypoint_group.create_array(
+        'triangle_angles_raw',
         shape=(total_rois, 3),
         chunks=(chunk_len, 3),
         dtype='f8',
@@ -684,9 +700,14 @@ def detect_keypoints(
     keypoint_group.attrs['keypoint_labels'] = ['bladder', 'eye_left', 'eye_right']
     keypoint_group.attrs['keypoint_confidence_labels'] = ['bladder', 'eye_left', 'eye_right']
     keypoint_group.attrs['triangle_angle_order'] = [
-        'angle at vertex 0 (smallest, typically bladder)',
-        'angle at vertex 1',
-        'angle at vertex 2'
+        'angle at bladder',
+        'angle at eye_left',
+        'angle at eye_right'
+    ]
+    keypoint_group.attrs['triangle_angle_raw_order'] = [
+        'angle at vertex 0 (largest blob by area)',
+        'angle at vertex 1 (2nd largest blob)',
+        'angle at vertex 2 (3rd largest blob)'
     ]
 
     # Mark group path for workers

@@ -9,15 +9,18 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from collections import Counter
 import numpy as np
 import yaml
 import zarr
+from zarr.core.dtype import VariableLengthUTF8
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 import dask
 from dask import delayed
 from dask.diagnostics import ProgressBar
 from skimage import filters, measure, morphology
+from skimage.measure import EllipseModel
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
 
@@ -36,6 +39,30 @@ class EyeSegmentationConfig:
     max_eye_separation: float = 80.0
     keypoint_run: Optional[str] = None
     crop_run: Optional[str] = None
+
+
+def _resolve_keypoint_group(
+    root: zarr.Group,
+    keypoint_run: Optional[str],
+) -> Tuple[zarr.Group, str, str]:
+    refined = root.get("refined_keypoints_runs")
+    raw = root.get("keypoints_runs")
+
+    if keypoint_run:
+        if refined is not None and keypoint_run in refined:
+            return refined[keypoint_run], keypoint_run, "refined_keypoints_runs"
+        if raw is not None and keypoint_run in raw:
+            return raw[keypoint_run], keypoint_run, "keypoints_runs"
+        raise ValueError(f"Keypoint run '{keypoint_run}' not found in refined or raw runs.")
+
+    refined_latest = refined.attrs.get("latest") if refined is not None else None
+    raw_latest = raw.attrs.get("latest") if raw is not None else None
+
+    if refined is not None and refined_latest in refined:
+        return refined[refined_latest], refined_latest, "refined_keypoints_runs"
+    if raw is not None and raw_latest in raw:
+        return raw[raw_latest], raw_latest, "keypoints_runs"
+    raise ValueError("No keypoint runs found; run keypoints stage first.")
 
 
 def _set_config_value(cfg: EyeSegmentationConfig, key: str, value: Any) -> None:
@@ -219,29 +246,43 @@ def _process_roi_data(
 
         masks[eye_idx][y0:y1, x0:x1][region_mask] = 1
 
+        # Get centroid from regionprops (used for separation check)
         region = measure.regionprops(region_mask.astype(int))[0]
         centroid_local = region.centroid
         centroids_roi[eye_idx] = (
             float(x0 + centroid_local[1]),
             float(y0 + centroid_local[0]),
         )
-        ellipse_rows[eye_idx] = [
-            float(x0 + centroid_local[1]),
-            float(y0 + centroid_local[0]),
-            float(region.major_axis_length),
-            float(region.minor_axis_length),
-            float(np.rad2deg(region.orientation)),
-        ]
-        ellipse_success[eye_idx] = True
 
+        # Fit ellipse using EllipseModel (true least-squares contour fit)
         contour = measure.find_contours(region_mask.astype(float), 0.5)
         if contour:
             best = max(contour, key=lambda c: c.shape[0])
             if best.shape[0] >= cfg.contour_min_points:
-                best = best[:, ::-1]
-                best[:, 0] += x0
-                best[:, 1] += y0
-                contours[eye_idx] = best.astype(np.float32)
+                # contour is (row, col) = (y, x), need (x, y) for EllipseModel
+                contour_xy = best[:, ::-1]
+                ellipse_model = EllipseModel()
+                if ellipse_model.estimate(contour_xy) and ellipse_model.params is not None:
+                    xc, yc, a, b, theta = ellipse_model.params
+                    # Ensure major >= minor (swap if needed, rotate theta by 90°)
+                    if a < b:
+                        a, b = b, a
+                        theta = theta + np.pi / 2
+                    # a, b are semi-axes; multiply by 2 for full axis lengths
+                    ellipse_rows[eye_idx] = [
+                        float(x0 + xc),
+                        float(y0 + yc),
+                        float(a * 2),
+                        float(b * 2),
+                        float(np.degrees(theta)),
+                    ]
+                    ellipse_success[eye_idx] = True
+
+                # Store contour in ROI coords
+                best_roi = best[:, ::-1].copy()
+                best_roi[:, 0] += x0
+                best_roi[:, 1] += y0
+                contours[eye_idx] = best_roi.astype(np.float32)
 
     valid = all(ellipse_success)
     if valid:
@@ -335,12 +376,10 @@ def segment_eye_masks(
         raise ValueError("No crop run available")
     crop_group = root[f"crop_runs/{crop_run}"]
 
-    if "keypoints_runs" not in root:
-        raise ValueError("keypoints_runs missing from Zarr; run keypoints stage first")
-    keypoint_run = cfg.keypoint_run or root["keypoints_runs"].attrs.get("latest")
-    if keypoint_run is None:
-        raise ValueError("No keypoint run available")
-    kp_group = root[f"keypoints_runs/{keypoint_run}"]
+    if "keypoints_runs" not in root and "refined_keypoints_runs" not in root:
+        raise ValueError("Keypoints runs missing from Zarr; run keypoints stage first")
+    kp_group, keypoint_run, keypoint_group_name = _resolve_keypoint_group(root, cfg.keypoint_run)
+    console.print(f"[dim]Using keypoints from {keypoint_group_name}/{keypoint_run}[/dim]")
 
     roi_images = crop_group["roi_images"]
 
@@ -376,8 +415,17 @@ def segment_eye_masks(
     roi_results: List[Dict[str, Any]] = []
     cfg_dict = asdict(cfg)
     roi_dataset_path = f"crop_runs/{crop_run}/roi_images"
-    kp_dataset_path = f"keypoints_runs/{keypoint_run}/keypoints_roi"
-    success_dataset_path = f"keypoints_runs/{keypoint_run}/detection_success"
+    kp_dataset_path = f"{keypoint_group_name}/{keypoint_run}/keypoints_roi"
+    success_dataset_name = None
+    for candidate in ("detection_success", "refined_success", "source_success"):
+        if candidate in kp_group:
+            success_dataset_name = candidate
+            break
+    if success_dataset_name is None:
+        raise ValueError(
+            f"Keypoint run '{keypoint_run}' missing detection/refinement success flags."
+        )
+    success_dataset_path = f"{keypoint_group_name}/{keypoint_run}/{success_dataset_name}"
     if total_rois > 0:
         default_workers = os.cpu_count() or 4
         worker_count = num_workers or min(default_workers, 16)
@@ -476,6 +524,7 @@ def segment_eye_masks(
     overlap_rejects = 0
     proximity_rejects = 0
     distance_rejects = 0
+    reason_strings: List[str] = ["clean"] * total_rois
 
     progress = Progress(
         SpinnerColumn(),
@@ -492,6 +541,8 @@ def segment_eye_masks(
         for result in roi_results:
             idx = result["index"]
             reason = result.get("reject_reason")
+            if reason:
+                reason_strings[idx] = str(reason)
             if reason == "overlap":
                 overlap_rejects += 1
             elif reason == "too_close":
@@ -587,11 +638,21 @@ def segment_eye_masks(
         chunks=(max(1, min(4096, right_store.shape[0])), 2),
         overwrite=True,
     )
+    reason_ds = run_group.create_array(
+        "reason",
+        shape=(total_rois,),
+        dtype=VariableLengthUTF8(),
+        fill_value="clean",
+        chunks=(min(1024, total_rois),),
+        overwrite=True,
+    )
+    reason_ds[:] = np.array(reason_strings, dtype=object)
 
     both_eyes_success_count = int(np.all(ellipse_success, axis=1).sum())
     dual_eye_success_rate = (
         float(both_eyes_success_count / total_rois) if total_rois > 0 else float("nan")
     )
+    reason_counts = dict(Counter(reason_strings))
 
     if overlap_rejects or proximity_rejects or distance_rejects:
         min_sep = cfg.min_eye_separation if cfg.min_eye_separation is not None else 0.0
@@ -614,6 +675,7 @@ def segment_eye_masks(
             "config": cfg.__dict__,
             "source_crop_run": crop_run,
             "source_keypoint_run": keypoint_run,
+            "source_keypoint_group": keypoint_group_name,
             "total_rois": total_rois,
             "successful_eyes": int(ellipse_success.sum()),
             "contours_left_count": int(left_concat.shape[0]),
@@ -623,7 +685,9 @@ def segment_eye_masks(
             "git_branch": git_info.get("branch", "unknown"),
             "hostname": env_info["platform"].get("hostname", "unknown"),
             "ellipse_angle_units": "degrees",
-            "ellipse_angle_ref": "skimage major-axis orientation, deg CCW from +x",
+            "ellipse_angle_ref": "EllipseModel theta, deg CCW from +x (true contour fit)",
+            "ellipse_fit_method": "EllipseModel_least_squares",
+            "reason_counts": reason_counts,
         }
     )
     run_group.attrs["rejected_overlap"] = int(overlap_rejects)
@@ -679,7 +743,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument(
         "--keypoint-run",
-        help="Specify a keypoint run name instead of using the latest available.",
+        help="Specify a keypoint run name instead of using the latest available (checks refined first).",
     )
     parser.add_argument(
         "--set",

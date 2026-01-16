@@ -112,3 +112,33 @@ def get_downsample_array_path(
     if array_name is None:
         return None
     return f"raw_video/{array_name}"
+
+
+def _get_refined_keypoints_group(root: zarr.Group) -> Optional[zarr.Group]:
+    if "refined_keypoints_runs" in root:
+        return root["refined_keypoints_runs"]
+    if "keypoints_refined_runs" in root:
+        return root["keypoints_refined_runs"]
+    return None
+
+
+def get_latest_refined_keypoints_run(root: zarr.Group) -> Optional[str]:
+    """Return latest refined keypoints run name if available."""
+    group = _get_refined_keypoints_group(root)
+    if group is None:
+        return None
+    latest = group.attrs.get("latest")
+    if latest and latest in group:
+        return str(latest)
+    return None
+
+
+def get_latest_refined_keypoints_summary(root: zarr.Group) -> Optional[Dict[str, object]]:
+    """Return summary_statistics for the latest refined keypoints run."""
+    group = _get_refined_keypoints_group(root)
+    if group is None:
+        return None
+    run_name = get_latest_refined_keypoints_run(root)
+    if run_name is None:
+        return None
+    return group[run_name].attrs.get("summary_statistics")
