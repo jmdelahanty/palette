@@ -115,22 +115,6 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         "vergence_minor_signed_smoothed": _maybe("vergence_minor_signed_deg_smoothed"),
         "version_minor": _maybe("version_minor_deg"),
         "version_minor_smoothed": _maybe("version_minor_deg_smoothed"),
-        "left_feret_major_signed": _maybe("left_feret_major_signed_deg"),
-        "left_feret_major_signed_smoothed": _maybe("left_feret_major_signed_deg_smoothed"),
-        "right_feret_major_signed": _maybe("right_feret_major_signed_deg"),
-        "right_feret_major_signed_smoothed": _maybe("right_feret_major_signed_deg_smoothed"),
-        "vergence_feret_major_signed": _maybe("vergence_feret_major_signed_deg"),
-        "vergence_feret_major_signed_smoothed": _maybe("vergence_feret_major_signed_deg_smoothed"),
-        "version_feret_major": _maybe("version_feret_major_deg"),
-        "version_feret_major_smoothed": _maybe("version_feret_major_deg_smoothed"),
-        "left_feret_minor_signed": _maybe("left_feret_minor_signed_deg"),
-        "left_feret_minor_signed_smoothed": _maybe("left_feret_minor_signed_deg_smoothed"),
-        "right_feret_minor_signed": _maybe("right_feret_minor_signed_deg"),
-        "right_feret_minor_signed_smoothed": _maybe("right_feret_minor_signed_deg_smoothed"),
-        "vergence_feret_minor_signed": _maybe("vergence_feret_minor_signed_deg"),
-        "vergence_feret_minor_signed_smoothed": _maybe("vergence_feret_minor_signed_deg_smoothed"),
-        "version_feret_minor": _maybe("version_feret_minor_deg"),
-        "version_feret_minor_smoothed": _maybe("version_feret_minor_deg_smoothed"),
         "left_speed": _maybe("left_speed_deg_s"),
         "right_speed": _maybe("right_speed_deg_s"),
         "vergence_speed": _maybe("vergence_speed_deg_s"),
@@ -161,22 +145,6 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         "vergence_minor_signed_smoothed": _maybe("vergence_minor_signed_delta_deg_smoothed"),
         "version_minor": _maybe("version_minor_delta_deg"),
         "version_minor_smoothed": _maybe("version_minor_delta_deg_smoothed"),
-        "left_feret_major_signed": _maybe("left_feret_major_signed_delta_deg"),
-        "left_feret_major_signed_smoothed": _maybe("left_feret_major_signed_delta_deg_smoothed"),
-        "right_feret_major_signed": _maybe("right_feret_major_signed_delta_deg"),
-        "right_feret_major_signed_smoothed": _maybe("right_feret_major_signed_delta_deg_smoothed"),
-        "vergence_feret_major_signed": _maybe("vergence_feret_major_signed_delta_deg"),
-        "vergence_feret_major_signed_smoothed": _maybe("vergence_feret_major_signed_delta_deg_smoothed"),
-        "version_feret_major": _maybe("version_feret_major_delta_deg"),
-        "version_feret_major_smoothed": _maybe("version_feret_major_delta_deg_smoothed"),
-        "left_feret_minor_signed": _maybe("left_feret_minor_signed_delta_deg"),
-        "left_feret_minor_signed_smoothed": _maybe("left_feret_minor_signed_delta_deg_smoothed"),
-        "right_feret_minor_signed": _maybe("right_feret_minor_signed_delta_deg"),
-        "right_feret_minor_signed_smoothed": _maybe("right_feret_minor_signed_delta_deg_smoothed"),
-        "vergence_feret_minor_signed": _maybe("vergence_feret_minor_signed_delta_deg"),
-        "vergence_feret_minor_signed_smoothed": _maybe("vergence_feret_minor_signed_delta_deg_smoothed"),
-        "version_feret_minor": _maybe("version_feret_minor_delta_deg"),
-        "version_feret_minor_smoothed": _maybe("version_feret_minor_delta_deg_smoothed"),
     }
 
     qa_roi = {
@@ -202,18 +170,10 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         frame_data["vergence_signed_smoothed"] = _frame_maybe("vergence_signed_deg_smoothed")
         frame_data["vergence_minor_signed"] = _frame_maybe("vergence_minor_signed_deg")
         frame_data["vergence_minor_signed_smoothed"] = _frame_maybe("vergence_minor_signed_deg_smoothed")
-        frame_data["vergence_feret_major_signed"] = _frame_maybe("vergence_feret_major_signed_deg")
-        frame_data["vergence_feret_major_signed_smoothed"] = _frame_maybe("vergence_feret_major_signed_deg_smoothed")
-        frame_data["vergence_feret_minor_signed"] = _frame_maybe("vergence_feret_minor_signed_deg")
-        frame_data["vergence_feret_minor_signed_smoothed"] = _frame_maybe("vergence_feret_minor_signed_deg_smoothed")
         frame_data["version"] = _frame_maybe("version_deg")
         frame_data["version_smoothed"] = _frame_maybe("version_deg_smoothed")
         frame_data["version_minor"] = _frame_maybe("version_minor_deg")
         frame_data["version_minor_smoothed"] = _frame_maybe("version_minor_deg_smoothed")
-        frame_data["version_feret_major"] = _frame_maybe("version_feret_major_deg")
-        frame_data["version_feret_major_smoothed"] = _frame_maybe("version_feret_major_deg_smoothed")
-        frame_data["version_feret_minor"] = _frame_maybe("version_feret_minor_deg")
-        frame_data["version_feret_minor_smoothed"] = _frame_maybe("version_feret_minor_deg_smoothed")
         frame_deltas["left"] = _frame_maybe("left_delta_deg")
         frame_deltas["left_smoothed"] = _frame_maybe("left_delta_deg_smoothed")
         frame_deltas["right"] = _frame_maybe("right_delta_deg")
@@ -224,18 +184,10 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         frame_deltas["vergence_signed_smoothed"] = _frame_maybe("vergence_signed_delta_deg_smoothed")
         frame_deltas["vergence_minor_signed"] = _frame_maybe("vergence_minor_signed_delta_deg")
         frame_deltas["vergence_minor_signed_smoothed"] = _frame_maybe("vergence_minor_signed_delta_deg_smoothed")
-        frame_deltas["vergence_feret_major_signed"] = _frame_maybe("vergence_feret_major_signed_delta_deg")
-        frame_deltas["vergence_feret_major_signed_smoothed"] = _frame_maybe("vergence_feret_major_signed_delta_deg_smoothed")
-        frame_deltas["vergence_feret_minor_signed"] = _frame_maybe("vergence_feret_minor_signed_delta_deg")
-        frame_deltas["vergence_feret_minor_signed_smoothed"] = _frame_maybe("vergence_feret_minor_signed_delta_deg_smoothed")
         frame_deltas["version"] = _frame_maybe("version_delta_deg")
         frame_deltas["version_smoothed"] = _frame_maybe("version_delta_deg_smoothed")
         frame_deltas["version_minor"] = _frame_maybe("version_minor_delta_deg")
         frame_deltas["version_minor_smoothed"] = _frame_maybe("version_minor_delta_deg_smoothed")
-        frame_deltas["version_feret_major"] = _frame_maybe("version_feret_major_delta_deg")
-        frame_deltas["version_feret_major_smoothed"] = _frame_maybe("version_feret_major_delta_deg_smoothed")
-        frame_deltas["version_feret_minor"] = _frame_maybe("version_feret_minor_delta_deg")
-        frame_deltas["version_feret_minor_smoothed"] = _frame_maybe("version_feret_minor_delta_deg_smoothed")
     if "frame" in qa:
         frame_data["frame_valid"] = qa["frame"]["valid_frame"][:]
         frame_data["frame_reason"] = qa["frame"]["reason_codes"][:]
@@ -419,56 +371,6 @@ def _select_angle_variant(
             }
         )
         label = "Ellipse minor axis"
-    elif source == "feret_major":
-        left_signed = _pick("left_feret_major_signed")
-        right_signed = _pick("right_feret_major_signed")
-        vergence_signed = _pick("vergence_feret_major_signed")
-        variant = {
-            "left": np.abs(left_signed),
-            "right": np.abs(right_signed),
-            "vergence": np.abs(vergence_signed),
-            "left_signed": left_signed,
-            "right_signed": right_signed,
-            "vergence_signed": vergence_signed,
-            "version": _pick("version_feret_major", required=False),
-        }
-        series_lookup.update(
-            {
-                "left": "left_feret_major_signed",
-                "right": "right_feret_major_signed",
-                "vergence": "vergence_feret_major_signed",
-                "left_signed": "left_feret_major_signed",
-                "right_signed": "right_feret_major_signed",
-                "vergence_signed": "vergence_feret_major_signed",
-                "version": "version_feret_major",
-            }
-        )
-        label = "Feret major axis"
-    elif source == "feret_minor":
-        left_signed = _pick("left_feret_minor_signed")
-        right_signed = _pick("right_feret_minor_signed")
-        vergence_signed = _pick("vergence_feret_minor_signed")
-        variant = {
-            "left": np.abs(left_signed),
-            "right": np.abs(right_signed),
-            "vergence": np.abs(vergence_signed),
-            "left_signed": left_signed,
-            "right_signed": right_signed,
-            "vergence_signed": vergence_signed,
-            "version": _pick("version_feret_minor", required=False),
-        }
-        series_lookup.update(
-            {
-                "left": "left_feret_minor_signed",
-                "right": "right_feret_minor_signed",
-                "vergence": "vergence_feret_minor_signed",
-                "left_signed": "left_feret_minor_signed",
-                "right_signed": "right_feret_minor_signed",
-                "vergence_signed": "vergence_feret_minor_signed",
-                "version": "version_feret_minor",
-            }
-        )
-        label = "Feret minor axis"
     else:
         raise ValueError(f"Unknown angle source '{source}'.")
 
@@ -934,14 +836,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--angle-source",
-        choices=["ellipse", "minor", "feret_major", "feret_minor"],
+        choices=["ellipse", "minor"],
         default="ellipse",
         help="Which angle series to treat as primary (default: ellipse).",
     )
     parser.add_argument(
         "--all-variants",
         action="store_true",
-        help="Render dashboards for every angle variant (ellipse, minor, feret_major, feret_minor).",
+        help="Render dashboards for every angle variant (ellipse, minor).",
     )
     parser.add_argument(
         "--title",
@@ -970,7 +872,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Loaded eye angle run '{attrs['run_name']}' from {args.zarr_path}")
 
     requested_sources = (
-        ["ellipse", "minor", "feret_major", "feret_minor"]
+        ["ellipse", "minor"]
         if args.all_variants
         else [args.angle_source]
     )

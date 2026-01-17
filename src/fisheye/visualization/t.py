@@ -275,12 +275,26 @@
 # black_count = sum(1 for i in range(0, roi_images.shape[0], 100) if roi_images[i].max() == 0)
 # print(f"Sample black crops: {black_count}")
 
-import zarr, numpy as np
-root = zarr.open("/nvme1/2026_01_13_22_41_02/Cam2010096.zarr", mode="r")
-kp = root["keypoints_runs/keypoints_2026-01-16_16-39-13/keypoints_roi"][:]
-success = root["keypoints_runs/keypoints_2026-01-16_16-39-13/detection_success"][:].astype(bool)
-bad = np.any(~np.isfinite(kp[:, 1:]), axis=(1,2))
-print("bad keypoints:", bad.sum(), "bad but success=True:", np.count_nonzero(bad & success))
+# import zarr, numpy as np
+# root = zarr.open("/nvme1/2026_01_13_22_41_02/Cam2010096.zarr", mode="r")
+# kp = root["keypoints_runs/keypoints_2026-01-16_16-39-13/keypoints_roi"][:]
+# success = root["keypoints_runs/keypoints_2026-01-16_16-39-13/detection_success"][:].astype(bool)
+# bad = np.any(~np.isfinite(kp[:, 1:]), axis=(1,2))
+# print("bad keypoints:", bad.sum(), "bad but success=True:", np.count_nonzero(bad & success))
 
-ref = root["refined_eye_masks_runs/refined_eye_masks_2026-01-16_21-34-57"]
-print("ellipse_success pairs:", np.sum(np.all(ref["ellipse_success"][:], axis=1)))
+# ref = root["refined_eye_masks_runs/refined_eye_masks_2026-01-16_21-34-57"]
+# print("ellipse_success pairs:", np.sum(np.all(ref["ellipse_success"][:], axis=1)))
+
+import zarr
+root = zarr.open('/nvme1/2026_01_13_22_41_02/Cam2010096.zarr/', mode='r')
+
+refined_kp = root['refined_keypoints_runs/refined_keypoints_2026-01-16_13-18-49']
+print('Refined keypoints datasets:', list(refined_kp.array_keys()))
+print('Refined attrs:', dict(refined_kp.attrs))
+
+source_name = refined_kp.attrs.get('source_keypoints_run')
+print(f'\nSource run: {source_name}')
+if source_name:
+    source_kp = root.get(f'keypoints_runs/{source_name}')
+    if source_kp:
+        print('Source keypoints datasets:', list(source_kp.array_keys()))

@@ -29,11 +29,16 @@ python -m fisheye.diagnostics.crop_dry_run path/to/session.zarr --crop-source in
 Eye segmentation runs can now be post-processed with `python -m fisheye.refinement.refine_eye_masks`. The tool:
 
 - Reads an existing `eye_masks_runs/<source>` entry plus its paired keypoint run
+- New eye-mask runs default to the latest refined keypoints when present and record `source_keypoint_group` for provenance
 - Reassigns pixels to anatomical left/right using keypoint geometry (with heading-based fallback)
-- Emits a new `eye_masks_runs/<run_name>` containing the same arrays as the traditional segmenter (`masks_roi`, ellipse metrics, contour tables, etc.)
+- Emits a new `refined_eye_masks_runs/<run_name>` containing the same arrays as the traditional segmenter (`masks_roi`, ellipse metrics, contour tables, etc.)
 - Records provenance in the run attributes (`method="refine_eye_masks"`, `source_*_run`, `source_eye_masks_method`, `eye_labels`, summary stats)
 
 This keeps the original masks untouched for provenance while providing a refined alternative that matches keypoint labels.
+
+By default, traditional segmentations use a fast path that preserves the source masks and ellipse fits and skips smoothing/component enforcement. Use `--force-refine-traditional` to opt into the full refinement pass.
+
+After refinement, use `python -m fisheye.tune.eye_mask_review --retune/--manual` to correct failures and `--audit` to refresh the postprocess summary stored in `summary_statistics`.
 
 > ℹ️ **Optional datasets.**  
 > - YOLO-based segmentation writes an additional `mask_probs_roi` dataset with float16 probabilities.  

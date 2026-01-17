@@ -201,9 +201,6 @@ class MaskVariant:
     mask_probs: Optional[object]
     ellipse_params: Optional[object]
     ellipse_success: Optional[object]
-    feret_major: Optional[object]
-    feret_minor: Optional[object]
-    feret_roundness: Optional[object]
     eye_labels: List[str]
     display_names: List[str]
     channel_colors: List[np.ndarray]
@@ -239,9 +236,6 @@ def build_mask_variant(root: zarr.Group, group_path: str, name: str) -> MaskVari
 
     ellipse_params = group["ellipse_params"] if "ellipse_params" in group else None
     ellipse_success = group["ellipse_success"] if "ellipse_success" in group else None
-    feret_major = group["feret_axes_major"] if "feret_axes_major" in group else None
-    feret_minor = group["feret_axes_minor"] if "feret_axes_minor" in group else None
-    feret_roundness = group["feret_roundness"] if "feret_roundness" in group else None
 
     eye_labels_attr = group.attrs.get("eye_labels")
     if isinstance(eye_labels_attr, (list, tuple)):
@@ -280,9 +274,6 @@ def build_mask_variant(root: zarr.Group, group_path: str, name: str) -> MaskVari
         mask_probs=mask_probs,
         ellipse_params=ellipse_params,
         ellipse_success=ellipse_success,
-        feret_major=feret_major,
-        feret_minor=feret_minor,
-        feret_roundness=feret_roundness,
         eye_labels=eye_labels,
         display_names=display_names,
         channel_colors=channel_colors,
@@ -477,55 +468,17 @@ class EyeMaskViewer:
             )
 
             channel_axes: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {}
-            feret_len = None
-            feret_minor_len = None
-            feret_round_val = None
 
-            if (
-                variant.feret_major is not None
-                and variant.feret_major.shape[0] > idx
-                and variant.feret_major.shape[1] > ch_idx
-            ):
-                major_seg = np.asarray(variant.feret_major[idx, ch_idx])
-                if np.all(np.isfinite(major_seg)):
-                    channel_axes["major"] = (
-                        (major_seg[0], major_seg[1]),
-                        (major_seg[2], major_seg[3]),
-                    )
-                    feret_len = self._length_from_segment(major_seg)
-            if (
-                variant.feret_minor is not None
-                and variant.feret_minor.shape[0] > idx
-                and variant.feret_minor.shape[1] > ch_idx
-            ):
-                minor_seg = np.asarray(variant.feret_minor[idx, ch_idx])
-                if np.all(np.isfinite(minor_seg)):
-                    channel_axes["minor"] = (
-                        (minor_seg[0], minor_seg[1]),
-                        (minor_seg[2], minor_seg[3]),
-                    )
-                    feret_minor_len = self._length_from_segment(minor_seg)
-            if (
-                variant.feret_roundness is not None
-                and variant.feret_roundness.shape[0] > idx
-                and variant.feret_roundness.shape[1] > ch_idx
-            ):
-                feret_round_val = float(np.asarray(variant.feret_roundness[idx, ch_idx]))
-
-            if success and "major" not in channel_axes:
+            if success:
                 channel_axes = self._axis_endpoints(cx, cy, major_len_raw, minor_len_raw, theta)
 
             axes_data.append(channel_axes)
 
             display_name = variant.display_names[ch_idx]
-            major_len = feret_len if feret_len is not None else major_len_raw
-            minor_len = feret_minor_len if feret_minor_len is not None else minor_len_raw
             summary_line = (
                 f"{display_name}: area={area} success={success} "
-                f"major={self._format_measure(major_len)} minor={self._format_measure(minor_len)}"
+                f"major={self._format_measure(major_len_raw)} minor={self._format_measure(minor_len_raw)}"
             )
-            if feret_round_val is not None and np.isfinite(feret_round_val):
-                summary_line += f" round={feret_round_val:.2f}"
             summary_lines.append(summary_line)
 
         if variant.unrefined_note:

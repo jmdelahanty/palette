@@ -5,7 +5,7 @@ This note captures the sequencing we used to align refined detections, crops, ke
 ## Stage Overview
 
 ```
-detect_runs → refined_detect_runs → crop_runs → keypoints_runs → refined_keypoints_runs → id_assignment_runs → movement_runs
+detect_runs → refined_detect_runs → crop_runs → keypoints_runs → refined_keypoints_runs → eye_masks_runs → refined_eye_masks_runs → id_assignment_runs → movement_runs
 ```
 
 Relevant provenance attributes:
@@ -17,6 +17,8 @@ Relevant provenance attributes:
 | `crop_runs/<run>` | `roi_images` | `detection_source_path`, `refined_roi_path`, `refined_roi_count` |
 | `keypoints_runs/<run>` | `heading`, `frame_indices` | `source_crop_run` |
 | `refined_keypoints_runs/<run>` | `heading`, `detection_success` | `source_keypoints_run`, `source_crop_run` |
+| `eye_masks_runs/<run>` | `masks_roi` | `source_crop_run`, `source_keypoint_group`, `source_keypoint_run` |
+| `refined_eye_masks_runs/<run>` | `masks_roi`, `ellipse_params` | `source_eye_masks_run`, `source_keypoint_group`, `source_keypoint_run` |
 | `id_assignment_runs/<run>` | `detection_ids` | `source_detect_run`, `source_refined_run` |
 
 ## Regenerating Interpolated Crops
@@ -50,12 +52,24 @@ After new ROIs exist, rerun stages that depend on them:
    ```
    The keypoint script now auto-applies refined ROI overrides when available.
 
-2. ID assignment (if IDs align with refined detections):
+2. Eye masks (defaults to refined keypoints when present):
+   ```bash
+   python -m fisheye.segmentation.eye_segmentation <archive>.zarr
+   python -m fisheye.refinement.refine_eye_masks <archive>.zarr
+   ```
+   Optional review/audit:
+   ```bash
+   python -m fisheye.tune.eye_mask_review <archive>.zarr --retune
+   python -m fisheye.tune.eye_mask_review <archive>.zarr --manual
+   python -m fisheye.tune.eye_mask_review <archive>.zarr --audit
+   ```
+
+3. ID assignment (if IDs align with refined detections):
    ```bash
    python -m fisheye.tracking.assign_ids <archive>.zarr
    ```
 
-3. Movement analysis / downstream pipelines can now run without length mismatches.
+4. Movement analysis / downstream pipelines can now run without length mismatches.
 
 ## Provenance Validation
 
@@ -74,5 +88,23 @@ Expected healthy output shows consistent row counts (e.g., refined detections = 
 2. Rerun YOLO keypoints and keypoint refinement.
 3. Rerun ID assignment (and analysis).
 4. Confirm with diagnostics.
+
+## Detection Training Preflight
+
+Before training a YOLO detection model, run the preflight builder to validate
+crop provenance, bbox integrity, and downsample inputs while generating a
+training config + manifest:
+
+```bash
+python -m fisheye.diagnostics.prepare_detect_training \
+  <archive>.zarr \
+  --source-type filtered \
+  --input-format gray \
+  --out-config configs/fisheye/detect_config_<dataset>.yaml \
+  --project runs/detect
+```
+
+Use `--dry-run` to print the generated config + manifest without writing files,
+or `--provenance-policy strict` to fail if arena/camera metadata is missing.
 
 Following these steps keeps provenance clean and prevents downstream stage failures when interpolated detections are added. 

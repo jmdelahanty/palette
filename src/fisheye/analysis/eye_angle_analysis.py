@@ -57,19 +57,11 @@ class EyeAngleResults:
     right_signed_deg: np.ndarray
     left_minor_signed_deg: np.ndarray
     right_minor_signed_deg: np.ndarray
-    left_feret_major_signed_deg: np.ndarray
-    right_feret_major_signed_deg: np.ndarray
-    left_feret_minor_signed_deg: np.ndarray
-    right_feret_minor_signed_deg: np.ndarray
     vergence_deg: np.ndarray
     vergence_signed_deg: np.ndarray
     vergence_minor_signed_deg: np.ndarray
-    vergence_feret_major_signed_deg: np.ndarray
-    vergence_feret_minor_signed_deg: np.ndarray
     version_deg: np.ndarray
     version_minor_deg: np.ndarray
-    version_feret_major_deg: np.ndarray
-    version_feret_minor_deg: np.ndarray
     ellipse_major: np.ndarray
     ellipse_minor: np.ndarray
     ellipse_ratio: np.ndarray
@@ -153,8 +145,6 @@ def _compute_heading_fallback(bladder: np.ndarray, eye_left: np.ndarray, eye_rig
 def _process_chunk(
     ellipse_params: np.ndarray,
     ellipse_success: np.ndarray,
-    feret_major_axes: Optional[np.ndarray],
-    feret_minor_axes: Optional[np.ndarray],
     keypoints_roi: np.ndarray,
     heading_deg: np.ndarray,
     detection_success: np.ndarray,
@@ -173,14 +163,6 @@ def _process_chunk(
     right_minor_signed = np.full(chunk_len, np.nan, dtype=np.float32)
     vergence_minor_signed = np.full(chunk_len, np.nan, dtype=np.float32)
     version_minor = np.full(chunk_len, np.nan, dtype=np.float32)
-    left_feret_major = np.full(chunk_len, np.nan, dtype=np.float32)
-    right_feret_major = np.full(chunk_len, np.nan, dtype=np.float32)
-    vergence_feret_major = np.full(chunk_len, np.nan, dtype=np.float32)
-    version_feret_major = np.full(chunk_len, np.nan, dtype=np.float32)
-    left_feret_minor = np.full(chunk_len, np.nan, dtype=np.float32)
-    right_feret_minor = np.full(chunk_len, np.nan, dtype=np.float32)
-    vergence_feret_minor = np.full(chunk_len, np.nan, dtype=np.float32)
-    version_feret_minor = np.full(chunk_len, np.nan, dtype=np.float32)
     ellipse_major = np.full(chunk_len, np.nan, dtype=np.float32)
     ellipse_minor = np.full(chunk_len, np.nan, dtype=np.float32)
     ellipse_ratio = np.full(chunk_len, np.nan, dtype=np.float32)
@@ -297,67 +279,6 @@ def _process_chunk(
             else:
                 right_minor_signed[idxs] = sign_minor.astype(np.float32) * theta_minor_clipped
 
-            if feret_major_axes is not None:
-                feret_major_slice = feret_major_axes[idxs, eye_idx]
-                if feret_major_slice.ndim == 2 and feret_major_slice.shape[1] >= 4:
-                    fm_vec = feret_major_slice[:, 2:4] - feret_major_slice[:, 0:2]
-                    fm_len = np.linalg.norm(fm_vec, axis=1, keepdims=True)
-                    fm_valid = np.isfinite(fm_vec).all(axis=1) & (fm_len[:, 0] > 0)
-                    if np.any(fm_valid):
-                        major_norm = fm_vec[fm_valid] / fm_len[fm_valid]
-                        fm_sign = np.where(
-                            np.einsum("ij,ij->i", major_norm, temporal_axis[fm_valid]) >= 0.0,
-                            1.0,
-                            -1.0,
-                        )
-                        major_aligned = major_norm * fm_sign[:, None]
-                        fm_theta = np.degrees(
-                            np.arccos(
-                                np.clip(
-                                    np.einsum(
-                                        "ij,ij->i",
-                                        major_aligned,
-                                        head_axis[fm_valid],
-                                    ),
-                                    -1.0,
-                                    1.0,
-                                )
-                            )
-                        ).astype(np.float32)
-                        target = left_feret_major if eye_idx == 0 else right_feret_major
-                        target[idxs[fm_valid]] = fm_sign.astype(np.float32) * fm_theta
-
-            if feret_minor_axes is not None:
-                feret_minor_slice = feret_minor_axes[idxs, eye_idx]
-                if feret_minor_slice.ndim == 2 and feret_minor_slice.shape[1] >= 4:
-                    fn_vec = feret_minor_slice[:, 2:4] - feret_minor_slice[:, 0:2]
-                    fn_len = np.linalg.norm(fn_vec, axis=1, keepdims=True)
-                    fn_valid = np.isfinite(fn_vec).all(axis=1) & (fn_len[:, 0] > 0)
-                    if np.any(fn_valid):
-                        minor_norm = fn_vec[fn_valid] / fn_len[fn_valid]
-                        fn_sign = np.where(
-                            np.einsum("ij,ij->i", minor_norm, temporal_axis[fn_valid]) >= 0.0,
-                            1.0,
-                            -1.0,
-                        )
-                        minor_aligned = minor_norm * fn_sign[:, None]
-                        fn_theta = np.degrees(
-                            np.arccos(
-                                np.clip(
-                                    np.einsum(
-                                        "ij,ij->i",
-                                        minor_aligned,
-                                        head_axis[fn_valid],
-                                    ),
-                                    -1.0,
-                                    1.0,
-                                )
-                            )
-                        ).astype(np.float32)
-                        fn_theta = np.clip(fn_theta, 0.0, 90.0)
-                        target = left_feret_minor if eye_idx == 0 else right_feret_minor
-                        target[idxs[fn_valid]] = fn_sign.astype(np.float32) * fn_theta
-
             ellipse_major[idxs] = major[idxs].astype(np.float32, copy=False)
             ellipse_minor[idxs] = minor[idxs].astype(np.float32, copy=False)
             # ratio stored post-thresholding to allow post-hoc tuning
@@ -372,10 +293,6 @@ def _process_chunk(
     right_signed[~valid_right] = np.nan
     left_minor_signed[~valid_left] = np.nan
     right_minor_signed[~valid_right] = np.nan
-    left_feret_major[~valid_left] = np.nan
-    right_feret_major[~valid_right] = np.nan
-    left_feret_minor[~valid_left] = np.nan
-    right_feret_minor[~valid_right] = np.nan
 
     valid_frame[:] = valid_left & valid_right & detection_success
 
@@ -385,24 +302,16 @@ def _process_chunk(
         #   vergence  = θ_L(nasal) + θ_R(nasal)
         #             = -(left_temporal + right_temporal)
         #   version   = 0.5 * (θ_L(nasal) - θ_R(nasal))
-        # Minor/Feret variants follow the same relationships.
+        # Minor variants follow the same relationships.
         left_temporal = left_signed[mask]
         right_temporal = right_signed[mask]
         left_minor_temporal = left_minor_signed[mask]
         right_minor_temporal = right_minor_signed[mask]
-        left_feret_major_temporal = left_feret_major[mask]
-        right_feret_major_temporal = right_feret_major[mask]
-        left_feret_minor_temporal = left_feret_minor[mask]
-        right_feret_minor_temporal = right_feret_minor[mask]
 
         left_nasal = -left_temporal
         right_nasal = -right_temporal
         left_minor_nasal = -left_minor_temporal
         right_minor_nasal = -right_minor_temporal
-        left_feret_major_nasal = -left_feret_major_temporal
-        right_feret_major_nasal = -right_feret_major_temporal
-        left_feret_minor_nasal = -left_feret_minor_temporal
-        right_feret_minor_nasal = -right_feret_minor_temporal
 
         vergence_signed_vals = left_nasal + right_nasal
         vergence[mask] = np.abs(vergence_signed_vals)
@@ -413,14 +322,6 @@ def _process_chunk(
         vergence_minor_signed[mask] = vergence_minor_signed_vals
         version_minor[mask] = 0.5 * (left_minor_nasal - right_minor_nasal)
 
-        vergence_feret_major_vals = left_feret_major_nasal + right_feret_major_nasal
-        vergence_feret_major[mask] = vergence_feret_major_vals
-        version_feret_major[mask] = 0.5 * (left_feret_major_nasal - right_feret_major_nasal)
-
-        vergence_feret_minor_vals = left_feret_minor_nasal + right_feret_minor_nasal
-        vergence_feret_minor[mask] = vergence_feret_minor_vals
-        version_feret_minor[mask] = 0.5 * (left_feret_minor_nasal - right_feret_minor_nasal)
-
     return EyeAngleResults(
         left_deg=left_angles,
         right_deg=right_angles,
@@ -428,19 +329,11 @@ def _process_chunk(
         right_signed_deg=right_signed,
         left_minor_signed_deg=left_minor_signed,
         right_minor_signed_deg=right_minor_signed,
-        left_feret_major_signed_deg=left_feret_major,
-        right_feret_major_signed_deg=right_feret_major,
-        left_feret_minor_signed_deg=left_feret_minor,
-        right_feret_minor_signed_deg=right_feret_minor,
         vergence_deg=vergence,
         vergence_signed_deg=vergence_signed,
         vergence_minor_signed_deg=vergence_minor_signed,
-        vergence_feret_major_signed_deg=vergence_feret_major,
-        vergence_feret_minor_signed_deg=vergence_feret_minor,
         version_deg=version,
         version_minor_deg=version_minor,
-        version_feret_major_deg=version_feret_major,
-        version_feret_minor_deg=version_feret_minor,
         ellipse_major=ellipse_major,
         ellipse_minor=ellipse_minor,
         ellipse_ratio=ellipse_ratio,
@@ -529,7 +422,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--keypoint-run",
         type=str,
-        help="Keypoint run providing heading and ROI coordinates (default: inferred from refined run or latest).",
+        help="Refined keypoint run providing heading and ROI coordinates (default: inferred from refined eye run or latest).",
     )
     parser.add_argument(
         "--run-name",
@@ -575,14 +468,14 @@ def run(args: argparse.Namespace) -> None:
         raise ValueError("Refined eye mask run not found; specify --refined-eye-run.")
     refined_group = refined_parent[refined_run_name]
 
-    kp_parent = root.require_group("keypoints_runs")
+    kp_parent = root.require_group("refined_keypoints_runs")
     keypoint_run_name = (
         args.keypoint_run
         or refined_group.attrs.get("source_keypoints_run")
         or kp_parent.attrs.get("latest")
     )
     if not keypoint_run_name or keypoint_run_name not in kp_parent:
-        raise ValueError("Keypoint run not found; specify --keypoint-run.")
+        raise ValueError("Refined keypoint run not found; specify --keypoint-run.")
     kp_group = kp_parent[keypoint_run_name]
 
     required_refined = ["ellipse_params", "ellipse_success"]
@@ -590,13 +483,47 @@ def run(args: argparse.Namespace) -> None:
         if dataset not in refined_group:
             raise ValueError(f"Refined run '{refined_run_name}' missing dataset '{dataset}'.")
 
-    feret_major_full = refined_group.get("feret_axes_major")
-    feret_minor_full = refined_group.get("feret_axes_minor")
+    # Refined keypoints runs may not have all datasets; fall back to source keypoints run
+    source_kp_run_name = kp_group.attrs.get("source_keypoints_run")
+    source_kp_group = None
+    if source_kp_run_name:
+        source_kp_parent = root.get("keypoints_runs")
+        if source_kp_parent and source_kp_run_name in source_kp_parent:
+            source_kp_group = source_kp_parent[source_kp_run_name]
 
-    required_kp = ["keypoints_roi", "heading", "detection_success", "frame_indices"]
+    required_kp = ["keypoints_roi", "heading"]
     for dataset in required_kp:
         if dataset not in kp_group:
             raise ValueError(f"Keypoint run '{keypoint_run_name}' missing dataset '{dataset}'.")
+
+    # detection_success: prefer refined_success from refined keypoints run, fall back to
+    # detection_success in refined run, then source keypoints run
+    if "refined_success" in kp_group:
+        detection_success_key = "refined_success"
+        detection_success_source = kp_group
+    elif "detection_success" in kp_group:
+        detection_success_key = "detection_success"
+        detection_success_source = kp_group
+    elif source_kp_group is not None and "detection_success" in source_kp_group:
+        detection_success_key = "detection_success"
+        detection_success_source = source_kp_group
+    else:
+        detection_success_key = None
+        detection_success_source = None
+
+    # frame_indices may be in refined or source keypoints run
+    frame_indices_source = kp_group if "frame_indices" in kp_group else source_kp_group
+
+    if detection_success_source is None:
+        raise ValueError(
+            f"Keypoint run '{keypoint_run_name}' missing detection success data "
+            "(no 'refined_success' or 'detection_success' in refined or source keypoints run)."
+        )
+    if frame_indices_source is None or "frame_indices" not in frame_indices_source:
+        raise ValueError(
+            f"Keypoint run '{keypoint_run_name}' missing 'frame_indices' "
+            "(not in refined or source keypoints run)."
+        )
 
     total_detections = refined_group["ellipse_params"].shape[0]
     if kp_group["keypoints_roi"].shape[0] != total_detections:
@@ -612,19 +539,11 @@ def run(args: argparse.Namespace) -> None:
     right_signed = np.full(total_detections, np.nan, dtype=np.float32)
     left_minor_signed = np.full(total_detections, np.nan, dtype=np.float32)
     right_minor_signed = np.full(total_detections, np.nan, dtype=np.float32)
-    left_feret_major = np.full(total_detections, np.nan, dtype=np.float32)
-    right_feret_major = np.full(total_detections, np.nan, dtype=np.float32)
-    left_feret_minor = np.full(total_detections, np.nan, dtype=np.float32)
-    right_feret_minor = np.full(total_detections, np.nan, dtype=np.float32)
     vergence = np.full(total_detections, np.nan, dtype=np.float32)
     vergence_signed = np.full(total_detections, np.nan, dtype=np.float32)
     vergence_minor_signed = np.full(total_detections, np.nan, dtype=np.float32)
-    vergence_feret_major = np.full(total_detections, np.nan, dtype=np.float32)
-    vergence_feret_minor = np.full(total_detections, np.nan, dtype=np.float32)
     version = np.full(total_detections, np.nan, dtype=np.float32)
     version_minor = np.full(total_detections, np.nan, dtype=np.float32)
-    version_feret_major = np.full(total_detections, np.nan, dtype=np.float32)
-    version_feret_minor = np.full(total_detections, np.nan, dtype=np.float32)
     ellipse_major = np.full(total_detections, np.nan, dtype=np.float32)
     ellipse_minor = np.full(total_detections, np.nan, dtype=np.float32)
     ellipse_ratio = np.full(total_detections, np.nan, dtype=np.float32)
@@ -638,21 +557,13 @@ def run(args: argparse.Namespace) -> None:
         stop = min(start + chunk_size, total_detections)
         ellipse_params = refined_group["ellipse_params"][start:stop]
         ellipse_success = refined_group["ellipse_success"][start:stop]
-        feret_major_chunk = (
-            feret_major_full[start:stop] if feret_major_full is not None else None
-        )
-        feret_minor_chunk = (
-            feret_minor_full[start:stop] if feret_minor_full is not None else None
-        )
         keypoints_roi = kp_group["keypoints_roi"][start:stop]
         heading_deg = kp_group["heading"][start:stop]
-        detection_success = kp_group["detection_success"][start:stop].astype(bool, copy=False)
+        detection_success = detection_success_source[detection_success_key][start:stop].astype(bool, copy=False)
 
         chunk_result = _process_chunk(
             ellipse_params=ellipse_params,
             ellipse_success=ellipse_success,
-            feret_major_axes=feret_major_chunk,
-            feret_minor_axes=feret_minor_chunk,
             keypoints_roi=keypoints_roi,
             heading_deg=heading_deg,
             detection_success=detection_success,
@@ -664,19 +575,11 @@ def run(args: argparse.Namespace) -> None:
         right_signed[start:stop] = chunk_result.right_signed_deg
         left_minor_signed[start:stop] = chunk_result.left_minor_signed_deg
         right_minor_signed[start:stop] = chunk_result.right_minor_signed_deg
-        left_feret_major[start:stop] = chunk_result.left_feret_major_signed_deg
-        right_feret_major[start:stop] = chunk_result.right_feret_major_signed_deg
-        left_feret_minor[start:stop] = chunk_result.left_feret_minor_signed_deg
-        right_feret_minor[start:stop] = chunk_result.right_feret_minor_signed_deg
         vergence[start:stop] = chunk_result.vergence_deg
         vergence_signed[start:stop] = chunk_result.vergence_signed_deg
         vergence_minor_signed[start:stop] = chunk_result.vergence_minor_signed_deg
-        vergence_feret_major[start:stop] = chunk_result.vergence_feret_major_signed_deg
-        vergence_feret_minor[start:stop] = chunk_result.vergence_feret_minor_signed_deg
         version[start:stop] = chunk_result.version_deg
         version_minor[start:stop] = chunk_result.version_minor_deg
-        version_feret_major[start:stop] = chunk_result.version_feret_major_deg
-        version_feret_minor[start:stop] = chunk_result.version_feret_minor_deg
         ellipse_major[start:stop] = chunk_result.ellipse_major
         ellipse_minor[start:stop] = chunk_result.ellipse_minor
         ellipse_ratio[start:stop] = chunk_result.ellipse_ratio
@@ -686,7 +589,7 @@ def run(args: argparse.Namespace) -> None:
         reason_codes[start:stop] |= chunk_result.reason_codes
         heading_deg_out[start:stop] = chunk_result.heading_deg
 
-    frame_indices = kp_group["frame_indices"][:].astype(np.int64, copy=False)
+    frame_indices = frame_indices_source["frame_indices"][:].astype(np.int64, copy=False)
     if frame_indices.shape[0] != total_detections:
         raise ValueError("Mismatch between frame_indices and detection count.")
 
@@ -766,14 +669,6 @@ def run(args: argparse.Namespace) -> None:
         right_minor_signed_smoothed = _smooth_signal(right_minor_signed, detection_smooth_window).astype(np.float32, copy=False)
         vergence_minor_signed_smoothed = _smooth_signal(vergence_minor_signed, detection_smooth_window).astype(np.float32, copy=False)
         version_minor_smoothed = _smooth_signal(version_minor, detection_smooth_window).astype(np.float32, copy=False)
-        left_feret_major_smoothed = _smooth_signal(left_feret_major, detection_smooth_window).astype(np.float32, copy=False)
-        right_feret_major_smoothed = _smooth_signal(right_feret_major, detection_smooth_window).astype(np.float32, copy=False)
-        vergence_feret_major_smoothed = _smooth_signal(vergence_feret_major, detection_smooth_window).astype(np.float32, copy=False)
-        version_feret_major_smoothed = _smooth_signal(version_feret_major, detection_smooth_window).astype(np.float32, copy=False)
-        left_feret_minor_smoothed = _smooth_signal(left_feret_minor, detection_smooth_window).astype(np.float32, copy=False)
-        right_feret_minor_smoothed = _smooth_signal(right_feret_minor, detection_smooth_window).astype(np.float32, copy=False)
-        vergence_feret_minor_smoothed = _smooth_signal(vergence_feret_minor, detection_smooth_window).astype(np.float32, copy=False)
-        version_feret_minor_smoothed = _smooth_signal(version_feret_minor, detection_smooth_window).astype(np.float32, copy=False)
     else:
         left_smoothed = np.array(left_angles, copy=True)
         right_smoothed = np.array(right_angles, copy=True)
@@ -786,14 +681,6 @@ def run(args: argparse.Namespace) -> None:
         right_minor_signed_smoothed = np.array(right_minor_signed, copy=True)
         vergence_minor_signed_smoothed = np.array(vergence_minor_signed, copy=True)
         version_minor_smoothed = np.array(version_minor, copy=True)
-        left_feret_major_smoothed = np.array(left_feret_major, copy=True)
-        right_feret_major_smoothed = np.array(right_feret_major, copy=True)
-        vergence_feret_major_smoothed = np.array(vergence_feret_major, copy=True)
-        version_feret_major_smoothed = np.array(version_feret_major, copy=True)
-        left_feret_minor_smoothed = np.array(left_feret_minor, copy=True)
-        right_feret_minor_smoothed = np.array(right_feret_minor, copy=True)
-        vergence_feret_minor_smoothed = np.array(vergence_feret_minor, copy=True)
-        version_feret_minor_smoothed = np.array(version_feret_minor, copy=True)
 
     left_delta = _compute_delta(left_angles)
     right_delta = _compute_delta(right_angles)
@@ -806,14 +693,6 @@ def run(args: argparse.Namespace) -> None:
     right_minor_delta = _compute_delta(right_minor_signed)
     vergence_minor_delta = _compute_delta(vergence_minor_signed)
     version_minor_delta = _compute_delta(version_minor)
-    left_feret_major_delta = _compute_delta(left_feret_major)
-    right_feret_major_delta = _compute_delta(right_feret_major)
-    vergence_feret_major_delta = _compute_delta(vergence_feret_major)
-    version_feret_major_delta = _compute_delta(version_feret_major)
-    left_feret_minor_delta = _compute_delta(left_feret_minor)
-    right_feret_minor_delta = _compute_delta(right_feret_minor)
-    vergence_feret_minor_delta = _compute_delta(vergence_feret_minor)
-    version_feret_minor_delta = _compute_delta(version_feret_minor)
 
     left_delta_smoothed = _compute_delta(left_smoothed)
     right_delta_smoothed = _compute_delta(right_smoothed)
@@ -826,14 +705,6 @@ def run(args: argparse.Namespace) -> None:
     right_minor_delta_smoothed = _compute_delta(right_minor_signed_smoothed)
     vergence_minor_delta_smoothed = _compute_delta(vergence_minor_signed_smoothed)
     version_minor_delta_smoothed = _compute_delta(version_minor_smoothed)
-    left_feret_major_delta_smoothed = _compute_delta(left_feret_major_smoothed)
-    right_feret_major_delta_smoothed = _compute_delta(right_feret_major_smoothed)
-    vergence_feret_major_delta_smoothed = _compute_delta(vergence_feret_major_smoothed)
-    version_feret_major_delta_smoothed = _compute_delta(version_feret_major_smoothed)
-    left_feret_minor_delta_smoothed = _compute_delta(left_feret_minor_smoothed)
-    right_feret_minor_delta_smoothed = _compute_delta(right_feret_minor_smoothed)
-    vergence_feret_minor_delta_smoothed = _compute_delta(vergence_feret_minor_smoothed)
-    version_feret_minor_delta_smoothed = _compute_delta(version_feret_minor_smoothed)
 
     num_frames = int(frame_indices.max() + 1) if frame_indices.size else 0
     frame_left = np.full(num_frames, np.nan, dtype=np.float32)
@@ -841,12 +712,8 @@ def run(args: argparse.Namespace) -> None:
     frame_vergence = np.full(num_frames, np.nan, dtype=np.float32)
     frame_vergence_signed = np.full(num_frames, np.nan, dtype=np.float32)
     frame_vergence_signed_minor = np.full(num_frames, np.nan, dtype=np.float32)
-    frame_vergence_feret_major = np.full(num_frames, np.nan, dtype=np.float32)
-    frame_vergence_feret_minor = np.full(num_frames, np.nan, dtype=np.float32)
     frame_version = np.full(num_frames, np.nan, dtype=np.float32)
     frame_version_minor = np.full(num_frames, np.nan, dtype=np.float32)
-    frame_version_feret_major = np.full(num_frames, np.nan, dtype=np.float32)
-    frame_version_feret_minor = np.full(num_frames, np.nan, dtype=np.float32)
     frame_valid = np.zeros(num_frames, dtype=bool)
     frame_reason = np.zeros(num_frames, dtype=np.uint16)
 
@@ -865,12 +732,8 @@ def run(args: argparse.Namespace) -> None:
             frame_vergence[frame] = vergence[idx]
             frame_vergence_signed[frame] = vergence_signed[idx]
             frame_vergence_signed_minor[frame] = vergence_minor_signed[idx]
-            frame_vergence_feret_major[frame] = vergence_feret_major[idx]
-            frame_vergence_feret_minor[frame] = vergence_feret_minor[idx]
             frame_version[frame] = version[idx]
             frame_version_minor[frame] = version_minor[idx]
-            frame_version_feret_major[frame] = version_feret_major[idx]
-            frame_version_feret_minor[frame] = version_feret_minor[idx]
             frame_valid[frame] = valid_frame[idx]
             frame_reason[frame] |= reason_codes[idx]
 
@@ -882,11 +745,7 @@ def run(args: argparse.Namespace) -> None:
         frame_vergence_signed_smoothed = _smooth_signal(frame_vergence_signed, frame_smooth_window).astype(np.float32, copy=False)
         frame_version_smoothed = _smooth_signal(frame_version, frame_smooth_window).astype(np.float32, copy=False)
         frame_vergence_minor_signed_smoothed = _smooth_signal(frame_vergence_signed_minor, frame_smooth_window).astype(np.float32, copy=False)
-        frame_vergence_feret_major_smoothed = _smooth_signal(frame_vergence_feret_major, frame_smooth_window).astype(np.float32, copy=False)
-        frame_vergence_feret_minor_smoothed = _smooth_signal(frame_vergence_feret_minor, frame_smooth_window).astype(np.float32, copy=False)
         frame_version_minor_smoothed = _smooth_signal(frame_version_minor, frame_smooth_window).astype(np.float32, copy=False)
-        frame_version_feret_major_smoothed = _smooth_signal(frame_version_feret_major, frame_smooth_window).astype(np.float32, copy=False)
-        frame_version_feret_minor_smoothed = _smooth_signal(frame_version_feret_minor, frame_smooth_window).astype(np.float32, copy=False)
     else:
         frame_left_smoothed = np.array(frame_left, copy=True)
         frame_right_smoothed = np.array(frame_right, copy=True)
@@ -894,35 +753,23 @@ def run(args: argparse.Namespace) -> None:
         frame_vergence_signed_smoothed = np.array(frame_vergence_signed, copy=True)
         frame_version_smoothed = np.array(frame_version, copy=True)
         frame_vergence_minor_signed_smoothed = np.array(frame_vergence_signed_minor, copy=True)
-        frame_vergence_feret_major_smoothed = np.array(frame_vergence_feret_major, copy=True)
-        frame_vergence_feret_minor_smoothed = np.array(frame_vergence_feret_minor, copy=True)
         frame_version_minor_smoothed = np.array(frame_version_minor, copy=True)
-        frame_version_feret_major_smoothed = np.array(frame_version_feret_major, copy=True)
-        frame_version_feret_minor_smoothed = np.array(frame_version_feret_minor, copy=True)
 
     frame_left_delta = _compute_delta(frame_left)
     frame_right_delta = _compute_delta(frame_right)
     frame_vergence_delta = _compute_delta(frame_vergence)
     frame_vergence_signed_delta = _compute_delta(frame_vergence_signed)
     frame_vergence_minor_delta = _compute_delta(frame_vergence_signed_minor)
-    frame_vergence_feret_major_delta = _compute_delta(frame_vergence_feret_major)
-    frame_vergence_feret_minor_delta = _compute_delta(frame_vergence_feret_minor)
     frame_version_delta = _compute_delta(frame_version)
     frame_version_minor_delta = _compute_delta(frame_version_minor)
-    frame_version_feret_major_delta = _compute_delta(frame_version_feret_major)
-    frame_version_feret_minor_delta = _compute_delta(frame_version_feret_minor)
 
     frame_left_delta_smoothed = _compute_delta(frame_left_smoothed)
     frame_right_delta_smoothed = _compute_delta(frame_right_smoothed)
     frame_vergence_delta_smoothed = _compute_delta(frame_vergence_smoothed)
     frame_vergence_signed_delta_smoothed = _compute_delta(frame_vergence_signed_smoothed)
     frame_vergence_minor_delta_smoothed = _compute_delta(frame_vergence_minor_signed_smoothed)
-    frame_vergence_feret_major_delta_smoothed = _compute_delta(frame_vergence_feret_major_smoothed)
-    frame_vergence_feret_minor_delta_smoothed = _compute_delta(frame_vergence_feret_minor_smoothed)
     frame_version_delta_smoothed = _compute_delta(frame_version_smoothed)
     frame_version_minor_delta_smoothed = _compute_delta(frame_version_minor_smoothed)
-    frame_version_feret_major_delta_smoothed = _compute_delta(frame_version_feret_major_smoothed)
-    frame_version_feret_minor_delta_smoothed = _compute_delta(frame_version_feret_minor_smoothed)
 
     if args.run_name:
         resolved_run_name = args.run_name
@@ -991,38 +838,6 @@ def run(args: argparse.Namespace) -> None:
             ("version_minor_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("version_minor_delta_deg", (total_detections,), (chunk_len,), "f4"),
             ("version_minor_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("left_feret_major_signed_deg", (total_detections,), (chunk_len,), "f4"),
-            ("left_feret_major_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("left_feret_major_signed_delta_deg", (total_detections,), (chunk_len,), "f4"),
-            ("left_feret_major_signed_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("right_feret_major_signed_deg", (total_detections,), (chunk_len,), "f4"),
-            ("right_feret_major_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("right_feret_major_signed_delta_deg", (total_detections,), (chunk_len,), "f4"),
-            ("right_feret_major_signed_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("vergence_feret_major_signed_deg", (total_detections,), (chunk_len,), "f4"),
-            ("vergence_feret_major_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("vergence_feret_major_signed_delta_deg", (total_detections,), (chunk_len,), "f4"),
-            ("vergence_feret_major_signed_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("version_feret_major_deg", (total_detections,), (chunk_len,), "f4"),
-            ("version_feret_major_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("version_feret_major_delta_deg", (total_detections,), (chunk_len,), "f4"),
-            ("version_feret_major_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("left_feret_minor_signed_deg", (total_detections,), (chunk_len,), "f4"),
-            ("left_feret_minor_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("left_feret_minor_signed_delta_deg", (total_detections,), (chunk_len,), "f4"),
-            ("left_feret_minor_signed_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("right_feret_minor_signed_deg", (total_detections,), (chunk_len,), "f4"),
-            ("right_feret_minor_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("right_feret_minor_signed_delta_deg", (total_detections,), (chunk_len,), "f4"),
-            ("right_feret_minor_signed_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("vergence_feret_minor_signed_deg", (total_detections,), (chunk_len,), "f4"),
-            ("vergence_feret_minor_signed_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("vergence_feret_minor_signed_delta_deg", (total_detections,), (chunk_len,), "f4"),
-            ("vergence_feret_minor_signed_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("version_feret_minor_deg", (total_detections,), (chunk_len,), "f4"),
-            ("version_feret_minor_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
-            ("version_feret_minor_delta_deg", (total_detections,), (chunk_len,), "f4"),
-            ("version_feret_minor_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
             ("left_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
             ("right_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
             ("vergence_speed_deg_s", (total_detections,), (chunk_len,), "f4"),
@@ -1080,38 +895,6 @@ def run(args: argparse.Namespace) -> None:
     roi_group["version_minor_deg_smoothed"][:] = version_minor_smoothed
     roi_group["version_minor_delta_deg"][:] = version_minor_delta
     roi_group["version_minor_delta_deg_smoothed"][:] = version_minor_delta_smoothed
-    roi_group["left_feret_major_signed_deg"][:] = left_feret_major
-    roi_group["left_feret_major_signed_deg_smoothed"][:] = left_feret_major_smoothed
-    roi_group["left_feret_major_signed_delta_deg"][:] = left_feret_major_delta
-    roi_group["left_feret_major_signed_delta_deg_smoothed"][:] = left_feret_major_delta_smoothed
-    roi_group["right_feret_major_signed_deg"][:] = right_feret_major
-    roi_group["right_feret_major_signed_deg_smoothed"][:] = right_feret_major_smoothed
-    roi_group["right_feret_major_signed_delta_deg"][:] = right_feret_major_delta
-    roi_group["right_feret_major_signed_delta_deg_smoothed"][:] = right_feret_major_delta_smoothed
-    roi_group["vergence_feret_major_signed_deg"][:] = vergence_feret_major
-    roi_group["vergence_feret_major_signed_deg_smoothed"][:] = vergence_feret_major_smoothed
-    roi_group["vergence_feret_major_signed_delta_deg"][:] = vergence_feret_major_delta
-    roi_group["vergence_feret_major_signed_delta_deg_smoothed"][:] = vergence_feret_major_delta_smoothed
-    roi_group["version_feret_major_deg"][:] = version_feret_major
-    roi_group["version_feret_major_deg_smoothed"][:] = version_feret_major_smoothed
-    roi_group["version_feret_major_delta_deg"][:] = version_feret_major_delta
-    roi_group["version_feret_major_delta_deg_smoothed"][:] = version_feret_major_delta_smoothed
-    roi_group["left_feret_minor_signed_deg"][:] = left_feret_minor
-    roi_group["left_feret_minor_signed_deg_smoothed"][:] = left_feret_minor_smoothed
-    roi_group["left_feret_minor_signed_delta_deg"][:] = left_feret_minor_delta
-    roi_group["left_feret_minor_signed_delta_deg_smoothed"][:] = left_feret_minor_delta_smoothed
-    roi_group["right_feret_minor_signed_deg"][:] = right_feret_minor
-    roi_group["right_feret_minor_signed_deg_smoothed"][:] = right_feret_minor_smoothed
-    roi_group["right_feret_minor_signed_delta_deg"][:] = right_feret_minor_delta
-    roi_group["right_feret_minor_signed_delta_deg_smoothed"][:] = right_feret_minor_delta_smoothed
-    roi_group["vergence_feret_minor_signed_deg"][:] = vergence_feret_minor
-    roi_group["vergence_feret_minor_signed_deg_smoothed"][:] = vergence_feret_minor_smoothed
-    roi_group["vergence_feret_minor_signed_delta_deg"][:] = vergence_feret_minor_delta
-    roi_group["vergence_feret_minor_signed_delta_deg_smoothed"][:] = vergence_feret_minor_delta_smoothed
-    roi_group["version_feret_minor_deg"][:] = version_feret_minor
-    roi_group["version_feret_minor_deg_smoothed"][:] = version_feret_minor_smoothed
-    roi_group["version_feret_minor_delta_deg"][:] = version_feret_minor_delta
-    roi_group["version_feret_minor_delta_deg_smoothed"][:] = version_feret_minor_delta_smoothed
     roi_group["left_speed_deg_s"][:] = left_speed
     roi_group["right_speed_deg_s"][:] = right_speed
     roi_group["vergence_speed_deg_s"][:] = vergence_speed
@@ -1147,14 +930,6 @@ def run(args: argparse.Namespace) -> None:
             ("vergence_minor_signed_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("vergence_minor_signed_delta_deg", (num_frames,), (frame_chunk,), "f4"),
             ("vergence_minor_signed_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
-            ("vergence_feret_major_signed_deg", (num_frames,), (frame_chunk,), "f4"),
-            ("vergence_feret_major_signed_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
-            ("vergence_feret_major_signed_delta_deg", (num_frames,), (frame_chunk,), "f4"),
-            ("vergence_feret_major_signed_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
-            ("vergence_feret_minor_signed_deg", (num_frames,), (frame_chunk,), "f4"),
-            ("vergence_feret_minor_signed_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
-            ("vergence_feret_minor_signed_delta_deg", (num_frames,), (frame_chunk,), "f4"),
-            ("vergence_feret_minor_signed_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("version_deg", (num_frames,), (frame_chunk,), "f4"),
             ("version_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("version_delta_deg", (num_frames,), (frame_chunk,), "f4"),
@@ -1163,14 +938,6 @@ def run(args: argparse.Namespace) -> None:
             ("version_minor_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("version_minor_delta_deg", (num_frames,), (frame_chunk,), "f4"),
             ("version_minor_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
-            ("version_feret_major_deg", (num_frames,), (frame_chunk,), "f4"),
-            ("version_feret_major_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
-            ("version_feret_major_delta_deg", (num_frames,), (frame_chunk,), "f4"),
-            ("version_feret_major_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
-            ("version_feret_minor_deg", (num_frames,), (frame_chunk,), "f4"),
-            ("version_feret_minor_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
-            ("version_feret_minor_delta_deg", (num_frames,), (frame_chunk,), "f4"),
-            ("version_feret_minor_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
         ],
     )
     if num_frames > 0:
@@ -1194,14 +961,6 @@ def run(args: argparse.Namespace) -> None:
         frame_group["vergence_minor_signed_deg_smoothed"][:] = frame_vergence_minor_signed_smoothed
         frame_group["vergence_minor_signed_delta_deg"][:] = frame_vergence_minor_delta
         frame_group["vergence_minor_signed_delta_deg_smoothed"][:] = frame_vergence_minor_delta_smoothed
-        frame_group["vergence_feret_major_signed_deg"][:] = frame_vergence_feret_major
-        frame_group["vergence_feret_major_signed_deg_smoothed"][:] = frame_vergence_feret_major_smoothed
-        frame_group["vergence_feret_major_signed_delta_deg"][:] = frame_vergence_feret_major_delta
-        frame_group["vergence_feret_major_signed_delta_deg_smoothed"][:] = frame_vergence_feret_major_delta_smoothed
-        frame_group["vergence_feret_minor_signed_deg"][:] = frame_vergence_feret_minor
-        frame_group["vergence_feret_minor_signed_deg_smoothed"][:] = frame_vergence_feret_minor_smoothed
-        frame_group["vergence_feret_minor_signed_delta_deg"][:] = frame_vergence_feret_minor_delta
-        frame_group["vergence_feret_minor_signed_delta_deg_smoothed"][:] = frame_vergence_feret_minor_delta_smoothed
         frame_group["version_deg"][:] = frame_version
         frame_group["version_deg_smoothed"][:] = frame_version_smoothed
         frame_group["version_delta_deg"][:] = frame_version_delta
@@ -1210,14 +969,6 @@ def run(args: argparse.Namespace) -> None:
         frame_group["version_minor_deg_smoothed"][:] = frame_version_minor_smoothed
         frame_group["version_minor_delta_deg"][:] = frame_version_minor_delta
         frame_group["version_minor_delta_deg_smoothed"][:] = frame_version_minor_delta_smoothed
-        frame_group["version_feret_major_deg"][:] = frame_version_feret_major
-        frame_group["version_feret_major_deg_smoothed"][:] = frame_version_feret_major_smoothed
-        frame_group["version_feret_major_delta_deg"][:] = frame_version_feret_major_delta
-        frame_group["version_feret_major_delta_deg_smoothed"][:] = frame_version_feret_major_delta_smoothed
-        frame_group["version_feret_minor_deg"][:] = frame_version_feret_minor
-        frame_group["version_feret_minor_deg_smoothed"][:] = frame_version_feret_minor_smoothed
-        frame_group["version_feret_minor_delta_deg"][:] = frame_version_feret_minor_delta
-        frame_group["version_feret_minor_delta_deg_smoothed"][:] = frame_version_feret_minor_delta_smoothed
 
     qa_group = run_group.require_group("qa")
     qa_roi = qa_group.require_group("roi")
@@ -1341,22 +1092,6 @@ def run(args: argparse.Namespace) -> None:
             "right_minor_signed_deg_smoothed": True,
             "vergence_minor_signed_deg_smoothed": True,
             "version_minor_deg_smoothed": True,
-            "left_feret_major_signed_deg": True,
-            "right_feret_major_signed_deg": True,
-            "vergence_feret_major_signed_deg": True,
-            "version_feret_major_deg": True,
-            "left_feret_major_signed_deg_smoothed": True,
-            "right_feret_major_signed_deg_smoothed": True,
-            "vergence_feret_major_signed_deg_smoothed": True,
-            "version_feret_major_deg_smoothed": True,
-            "left_feret_minor_signed_deg": True,
-            "right_feret_minor_signed_deg": True,
-            "vergence_feret_minor_signed_deg": True,
-            "version_feret_minor_deg": True,
-            "left_feret_minor_signed_deg_smoothed": True,
-            "right_feret_minor_signed_deg_smoothed": True,
-            "vergence_feret_minor_signed_deg_smoothed": True,
-            "version_feret_minor_deg_smoothed": True,
             "left_delta_deg": True,
             "right_delta_deg": True,
             "vergence_delta_deg": True,
@@ -1379,22 +1114,6 @@ def run(args: argparse.Namespace) -> None:
             "right_minor_signed_delta_deg_smoothed": True,
             "vergence_minor_signed_delta_deg_smoothed": True,
             "version_minor_delta_deg_smoothed": True,
-            "left_feret_major_signed_delta_deg": True,
-            "right_feret_major_signed_delta_deg": True,
-            "vergence_feret_major_signed_delta_deg": True,
-            "version_feret_major_delta_deg": True,
-            "left_feret_major_signed_delta_deg_smoothed": True,
-            "right_feret_major_signed_delta_deg_smoothed": True,
-            "vergence_feret_major_signed_delta_deg_smoothed": True,
-            "version_feret_major_delta_deg_smoothed": True,
-            "left_feret_minor_signed_delta_deg": True,
-            "right_feret_minor_signed_delta_deg": True,
-            "vergence_feret_minor_signed_delta_deg": True,
-            "version_feret_minor_delta_deg": True,
-            "left_feret_minor_signed_delta_deg_smoothed": True,
-            "right_feret_minor_signed_delta_deg_smoothed": True,
-            "vergence_feret_minor_signed_delta_deg_smoothed": True,
-            "version_feret_minor_delta_deg_smoothed": True,
             "frame_left_deg_smoothed": True,
             "frame_right_deg_smoothed": True,
             "frame_vergence_deg_smoothed": True,
@@ -1402,10 +1121,6 @@ def run(args: argparse.Namespace) -> None:
             "frame_version_deg_smoothed": True,
             "frame_vergence_minor_signed_deg": True,
             "frame_vergence_minor_signed_deg_smoothed": True,
-            "frame_vergence_feret_major_signed_deg": True,
-            "frame_vergence_feret_major_signed_deg_smoothed": True,
-            "frame_vergence_feret_minor_signed_deg": True,
-            "frame_vergence_feret_minor_signed_deg_smoothed": True,
             "frame_left_delta_deg": True,
             "frame_right_delta_deg": True,
             "frame_vergence_delta_deg": True,
@@ -1418,22 +1133,10 @@ def run(args: argparse.Namespace) -> None:
             "frame_version_delta_deg_smoothed": True,
             "frame_vergence_minor_signed_delta_deg": True,
             "frame_vergence_minor_signed_delta_deg_smoothed": True,
-            "frame_vergence_feret_major_signed_delta_deg": True,
-            "frame_vergence_feret_major_signed_delta_deg_smoothed": True,
-            "frame_vergence_feret_minor_signed_delta_deg": True,
-            "frame_vergence_feret_minor_signed_delta_deg_smoothed": True,
             "frame_version_minor_delta_deg": True,
             "frame_version_minor_delta_deg_smoothed": True,
-            "frame_version_feret_major_delta_deg": True,
-            "frame_version_feret_major_delta_deg_smoothed": True,
-            "frame_version_feret_minor_delta_deg": True,
-            "frame_version_feret_minor_delta_deg_smoothed": True,
             "frame_version_minor_deg": True,
             "frame_version_minor_deg_smoothed": True,
-            "frame_version_feret_major_deg": True,
-            "frame_version_feret_major_deg_smoothed": True,
-            "frame_version_feret_minor_deg": True,
-            "frame_version_feret_minor_deg_smoothed": True,
         },
         "valid_reason_counts": _count_reason_bits(reason_codes),
         "frame_reason_counts": _count_reason_bits(frame_reason) if num_frames else {},

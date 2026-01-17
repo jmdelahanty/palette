@@ -31,7 +31,7 @@ The refined keypoint and eye-mask runs referenced by the analysis are captured i
 Angles are generated inside `fisheye.analysis.eye_angle_analysis._process_chunk`, which receives:
 
 1. Keypoint ROIs (swim bladder, left/right eye centers).
-2. Refined eye-mask ellipse fits and (optionally) Feret axes.
+2. Refined eye-mask ellipse fits.
 3. Heading estimates exported by the keypoint run.
 
 ### Per-eye angles
@@ -42,7 +42,6 @@ For each detection and eye:
 2. The ellipse major-axis direction (`theta_deg`) is converted to a unit vector. To remove the 180° ambiguity, the vector is flipped so it points **temporally**—i.e., away from the midline. The sign of the resulting angle encodes temporal (positive) vs. nasal (negative) rotation.
 3. The unsigned magnitude is simply `arccos(major_axis ⋅ head_axis)`, yielding values in `[0°, 180°]`. We no longer clamp at 90°, so values beyond right angles remain visible.
 4. The minor-axis direction is produced by rotating the aligned major axis by 90°. It is flipped toward the temporal direction before the dot product with the head vector, producing the minor signed angles.
-5. If Feret major/minor axes are available, they undergo the same alignment (temporal-positive) before the angle computation.
 
 Invalid or near-circular fits are rejected early; reason bits (`REASON_*`) mark any failure so consumers can down-weight those detections.
 
@@ -53,7 +52,7 @@ Once left and right signed angles are available:
 - We reinterpret the temporal-positive angles as nasal rotations by negating them (`left_nasal = -left_signed`). This keeps convergence defined as *both eyes turning nasally*.
 - **Vergence (signed)** is `left_nasal + right_nasal`. The unsigned magnitude is stored separately (`vergence_deg`).
 - **Version (signed)** is `0.5 * (left_nasal - right_nasal)`.
-- Minor and Feret variants follow the same algebra (`left_minor_signed`, `left_feret_major_signed`, …).
+- Minor axis variants follow the same algebra (`left_minor_signed`, …).
 
 ### Deltas and smoothing
 

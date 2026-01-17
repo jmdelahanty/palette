@@ -110,14 +110,6 @@ class AngleRecord:
     right_minor_signed: float = float("nan")
     vergence_minor_signed: float = float("nan")
     version_minor: float = float("nan")
-    left_feret_major_signed: float = float("nan")
-    right_feret_major_signed: float = float("nan")
-    vergence_feret_major_signed: float = float("nan")
-    version_feret_major: float = float("nan")
-    left_feret_minor_signed: float = float("nan")
-    right_feret_minor_signed: float = float("nan")
-    vergence_feret_minor_signed: float = float("nan")
-    version_feret_minor: float = float("nan")
     reason_names: List[str] = field(default_factory=list)
     summary_text: str = ""
     using_smoothed: bool = False
@@ -131,8 +123,6 @@ class EyeAngleOverlayViewer:
         angles: Sequence[AngleRecord],
         keypoints_roi: Optional[zarr.Array],
         ellipse_params: Optional[zarr.Array],
-        feret_major_axes: Optional[zarr.Array],
-        feret_minor_axes: Optional[zarr.Array],
         vergence_threshold: float,
     ) -> None:
         self._roi_images = roi_images
@@ -140,8 +130,6 @@ class EyeAngleOverlayViewer:
         self._angles = list(angles)
         self._keypoints = keypoints_roi
         self._ellipse_params = ellipse_params
-        self._feret_major = feret_major_axes
-        self._feret_minor = feret_minor_axes
         self._vergence_threshold = float(vergence_threshold)
         self.total = int(roi_images.shape[0])
         self.channel_count = int(masks.shape[1]) if masks.ndim >= 4 else 0
@@ -159,10 +147,6 @@ class EyeAngleOverlayViewer:
             self.modes.append("ellipse_major")
         if any(np.isfinite(rec.left_minor_signed) and np.isfinite(rec.right_minor_signed) for rec in self._angles):
             self.modes.append("ellipse_minor")
-        if self._feret_major is not None and any(np.isfinite(rec.left_feret_major_signed) and np.isfinite(rec.right_feret_major_signed) for rec in self._angles):
-            self.modes.append("feret_major")
-        if self._feret_minor is not None and any(np.isfinite(rec.left_feret_minor_signed) and np.isfinite(rec.right_feret_minor_signed) for rec in self._angles):
-            self.modes.append("feret_minor")
         if not self.modes:
             self.modes.append("ellipse_major")
         else:
@@ -290,8 +274,6 @@ class EyeAngleOverlayViewer:
         return {
             "ellipse_major": "Ellipse Major",
             "ellipse_minor": "Ellipse Minor",
-            "feret_major": "Feret Major",
-            "feret_minor": "Feret Minor",
         }.get(self.angle_mode, self.angle_mode.title())
 
     def _toggle_mode(self, _event=None) -> None:
@@ -433,48 +415,6 @@ class EyeAngleOverlayViewer:
                 marker = self.ax.scatter([x1], [y1], color=color, s=22, edgecolors="white", linewidths=0.5, zorder=6)
                 self.line_artists.extend([line, marker])
 
-        elif mode.startswith("feret"):
-            axes_source = self._feret_major if mode == "feret_major" else self._feret_minor
-            if axes_source is None:
-                return
-            axes = np.asarray(axes_source[idx])
-            if axes.ndim != 2 or axes.shape[1] < 4:
-                return
-            ellipse_params = (
-                np.asarray(self._ellipse_params[idx])
-                if self._ellipse_params is not None and self._ellipse_params[idx].ndim == 2
-                else None
-            )
-            for ch in range(min(self.channel_count, axes.shape[0])):
-                row = axes[ch]
-                if not np.all(np.isfinite(row[:4])):
-                    continue
-                x1, y1, x2, y2 = row[:4]
-                base_vec = np.array([x2 - x1, y2 - y1], dtype=np.float32)
-                norm = np.linalg.norm(base_vec)
-                if not np.isfinite(norm) or norm == 0:
-                    continue
-                base_vec /= norm
-                signed_value = {
-                    "feret_major": [record.left_feret_major_signed, record.right_feret_major_signed],
-                    "feret_minor": [record.left_feret_minor_signed, record.right_feret_minor_signed],
-                }[mode][ch] if ch < 2 else np.nan
-                if not np.isfinite(signed_value):
-                    continue
-                length = max(norm * 0.5, 1.5)
-                vec = base_vec * (1.0 if signed_value >= 0 else -1.0)
-                if ellipse_params is not None and ch < ellipse_params.shape[0] and np.all(np.isfinite(ellipse_params[ch, :2])):
-                    cx, cy = float(ellipse_params[ch, 0]), float(ellipse_params[ch, 1])
-                else:
-                    cx = float((x1 + x2) * 0.5)
-                    cy = float((y1 + y2) * 0.5)
-                x_end = cx + vec[0] * length
-                y_end = cy + vec[1] * length
-                color = self.colors[ch % len(self.colors)]
-                line = self.ax.plot([cx, x_end], [cy, y_end], color=color, linewidth=1.8, alpha=0.9)[0]
-                marker = self.ax.scatter([x_end], [y_end], color=color, s=22, edgecolors="white", linewidths=0.5, zorder=6)
-                self.line_artists.extend([line, marker])
-
 
 def _load_roi_images(root: zarr.Group, keypoint_run: str) -> zarr.Array:
     kp_group = root[f"keypoints_runs/{keypoint_run}"]
@@ -501,9 +441,7 @@ def _load_masks(root: zarr.Group, refined_run: str) -> tuple[zarr.Array, Optiona
     if "masks_roi" not in group:
         raise RuntimeError(f"Group '{group_path}' missing 'masks_roi' dataset.")
     ellipse = group["ellipse_params"] if "ellipse_params" in group else None
-    feret_major = group["feret_axes_major"] if "feret_axes_major" in group else None
-    feret_minor = group["feret_axes_minor"] if "feret_axes_minor" in group else None
-    return group["masks_roi"], ellipse, feret_major, feret_minor
+    return group["masks_roi"], ellipse
 
 
 def _load_angles(run_group: zarr.Group, prefer_smoothed: bool) -> tuple[List[AngleRecord], Dict[int, str]]:
@@ -556,30 +494,6 @@ def _load_angles(run_group: zarr.Group, prefer_smoothed: bool) -> tuple[List[Ang
     version_minor, version_minor_smoothed = _pick_series(
         "version_minor_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
     )
-    left_feret_major_signed, left_feret_major_smoothed = _pick_series(
-        "left_feret_major_signed_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
-    )
-    right_feret_major_signed, right_feret_major_smoothed = _pick_series(
-        "right_feret_major_signed_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
-    )
-    vergence_feret_major_signed, vergence_feret_major_smoothed = _pick_series(
-        "vergence_feret_major_signed_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
-    )
-    version_feret_major, version_feret_major_smoothed = _pick_series(
-        "version_feret_major_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
-    )
-    left_feret_minor_signed, left_feret_minor_smoothed = _pick_series(
-        "left_feret_minor_signed_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
-    )
-    right_feret_minor_signed, right_feret_minor_smoothed = _pick_series(
-        "right_feret_minor_signed_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
-    )
-    vergence_feret_minor_signed, vergence_feret_minor_smoothed = _pick_series(
-        "vergence_feret_minor_signed_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
-    )
-    version_feret_minor, version_feret_minor_smoothed = _pick_series(
-        "version_feret_minor_deg", fallback=np.full_like(left, np.nan, dtype=np.float32)
-    )
 
     heading = (
         np.asarray(angles_grp["heading_deg"][:], dtype=np.float32)
@@ -600,14 +514,6 @@ def _load_angles(run_group: zarr.Group, prefer_smoothed: bool) -> tuple[List[Ang
             right_minor_smoothed,
             vergence_minor_smoothed,
             version_minor_smoothed,
-            left_feret_major_smoothed,
-            right_feret_major_smoothed,
-            vergence_feret_major_smoothed,
-            version_feret_major_smoothed,
-            left_feret_minor_smoothed,
-            right_feret_minor_smoothed,
-            vergence_feret_minor_smoothed,
-            version_feret_minor_smoothed,
         ]
     )
 
@@ -651,14 +557,6 @@ def _load_angles(run_group: zarr.Group, prefer_smoothed: bool) -> tuple[List[Ang
             f"Valid (L/R/frame): {int(valid_left[idx])}/{int(valid_right[idx])}/{int(valid_frame[idx])}",
             f"Heading: {_fmt(heading[idx])}°",
         ]
-        if np.isfinite(left_feret_major_signed[idx]) or np.isfinite(right_feret_major_signed[idx]):
-            lines.append(
-                f"Feret major (L/R): {_fmt(left_feret_major_signed[idx])}° / {_fmt(right_feret_major_signed[idx])}°"
-            )
-        if np.isfinite(left_feret_minor_signed[idx]) or np.isfinite(right_feret_minor_signed[idx]):
-            lines.append(
-                f"Feret minor (L/R): {_fmt(left_feret_minor_signed[idx])}° / {_fmt(right_feret_minor_signed[idx])}°"
-            )
         if ellipse_major is not None and np.isfinite(ellipse_major[idx]):
             lines.append(
                 f"Ellipse major/minor: {_fmt(ellipse_major[idx])} / {_fmt(ellipse_minor[idx])} px | ratio={_fmt(ellipse_ratio[idx])}"
@@ -680,14 +578,6 @@ def _load_angles(run_group: zarr.Group, prefer_smoothed: bool) -> tuple[List[Ang
             vergence_minor_signed=float(vergence_minor_signed[idx]),
             version=float(version[idx]),
             version_minor=float(version_minor[idx]),
-            left_feret_major_signed=float(left_feret_major_signed[idx]),
-            right_feret_major_signed=float(right_feret_major_signed[idx]),
-            vergence_feret_major_signed=float(vergence_feret_major_signed[idx]),
-            version_feret_major=float(version_feret_major[idx]),
-            left_feret_minor_signed=float(left_feret_minor_signed[idx]),
-            right_feret_minor_signed=float(right_feret_minor_signed[idx]),
-            vergence_feret_minor_signed=float(vergence_feret_minor_signed[idx]),
-            version_feret_minor=float(version_feret_minor[idx]),
             valid_left=bool(valid_left[idx]),
             valid_right=bool(valid_right[idx]),
             valid_frame=bool(valid_frame[idx]),
@@ -750,7 +640,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     roi_images = _load_roi_images(root, keypoint_run)
     keypoints_roi = _load_keypoints(root, keypoint_run)
-    masks, ellipse_params, feret_major_axes, feret_minor_axes = _load_masks(root, refined_run)
+    masks, ellipse_params = _load_masks(root, refined_run)
 
     if roi_images.shape[0] != masks.shape[0]:
         raise ValueError(
@@ -775,8 +665,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         angle_records,
         keypoints_roi,
         ellipse_params,
-        feret_major_axes,
-        feret_minor_axes,
         args.vergence_threshold,
     )
     viewer.alpha = float(np.clip(args.alpha, 0.05, 0.95))
