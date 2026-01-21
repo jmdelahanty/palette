@@ -285,16 +285,82 @@
 # ref = root["refined_eye_masks_runs/refined_eye_masks_2026-01-16_21-34-57"]
 # print("ellipse_success pairs:", np.sum(np.all(ref["ellipse_success"][:], axis=1)))
 
-import zarr
-root = zarr.open('/nvme1/2026_01_13_22_41_02/Cam2010096.zarr/', mode='r')
+# import zarr
+# root = zarr.open('/nvme1/2026_01_13_22_41_02/Cam2010096.zarr/', mode='r')
 
-refined_kp = root['refined_keypoints_runs/refined_keypoints_2026-01-16_13-18-49']
-print('Refined keypoints datasets:', list(refined_kp.array_keys()))
-print('Refined attrs:', dict(refined_kp.attrs))
+# refined_kp = root['refined_keypoints_runs/refined_keypoints_2026-01-16_13-18-49']
+# print('Refined keypoints datasets:', list(refined_kp.array_keys()))
+# print('Refined attrs:', dict(refined_kp.attrs))
 
-source_name = refined_kp.attrs.get('source_keypoints_run')
-print(f'\nSource run: {source_name}')
-if source_name:
-    source_kp = root.get(f'keypoints_runs/{source_name}')
-    if source_kp:
-        print('Source keypoints datasets:', list(source_kp.array_keys()))
+# source_name = refined_kp.attrs.get('source_keypoints_run')
+# print(f'\nSource run: {source_name}')
+# if source_name:
+#     source_kp = root.get(f'keypoints_runs/{source_name}')
+#     if source_kp:
+#         print('Source keypoints datasets:', list(source_kp.array_keys()))
+
+# import zarr
+
+# path = "/nvme1/2026_01_13_22_41_02/Cam2010096.zarr/"  # root of your v3 store
+
+# g = zarr.open_group(path, mode="r")  # or zarr.open(path, mode="r") if you want
+# cm = getattr(g.metadata, "consolidated_metadata", None)
+
+# if cm is None:
+#     print("❌ No consolidated_metadata attribute found on group metadata (unexpected for recent zarr-python).")
+# elif cm is None or getattr(cm, "metadata", None) in (None, {}):
+#     print("❌ Consolidated metadata not present (or empty).")
+# else:
+#     # cm.metadata is a mapping of paths -> metadata objects
+#     print("✅ Consolidated metadata present.")
+#     print("Entries in consolidated metadata:", len(cm.metadata))
+# import zarr
+# root = zarr.open_group("/nvme1/2026_01_13_22_41_02/Cam2010096.zarr/", mode="r")
+# arr = root["raw_video/images_full"]
+# print("chunks:", arr.chunks)
+# print("shards:", getattr(arr, "shards", None))
+# print("chunk_grid:", getattr(arr.metadata, "chunk_grid", None))
+# import zarr
+
+# path = "/nvme1/2026_01_13_22_41_02/Cam2010096.zarr/"
+
+# try:
+#     g = zarr.open_consolidated(path, mode="r")
+#     print("✅ Consolidated metadata is present (open_consolidated succeeded).")
+# except Exception as e:
+#     print("❌ Consolidated metadata not present / not readable:", type(e).__name__, e)
+# import json
+# from pathlib import Path
+
+# root = Path("/nvme1/2026_01_13_22_41_02/Cam2010096.zarr/")
+# meta = json.loads((root / "zarr.json").read_text())
+
+# print("has consolidated_metadata key:", "consolidated_metadata" in meta)
+# if "consolidated_metadata" in meta:
+#     cm = meta["consolidated_metadata"]
+#     # depending on representation, this may be a dict with entries
+#     print("type:", type(cm))
+
+# import zarr
+# path = "/nvme1/2026_01_13_22_41_02/Cam2010096.zarr/"
+
+# g = zarr.open_group(path, mode="r")
+# print("g type:", type(g))
+# print("metadata type:", type(g.metadata))
+# print("has consolidated_metadata attr:", hasattr(g.metadata, "consolidated_metadata"))
+# print("metadata dir contains 'consolid':", [x for x in dir(g.metadata) if "consolid" in x])
+# import zarr
+# path = "/nvme1/2026_01_13_22_41_02/Cam2010096.zarr/"
+# zarr.consolidate_metadata(path)
+# print("done")
+# import zarr
+# path = "/nvme1/2026_01_13_22_41_02/Cam2010096.zarr/"
+
+# zarr.open_consolidated(path, mode="r")
+# print("✅ consolidated metadata now present and readable")
+import json
+from pathlib import Path
+
+root = Path("/nvme1/2026_01_13_22_41_02/Cam2010096.zarr/")
+meta = json.loads((root / "zarr.json").read_text())
+print(type(meta.get("consolidated_metadata")), meta.get("consolidated_metadata") is None)

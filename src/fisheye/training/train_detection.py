@@ -11,6 +11,10 @@ Features:
 """
 
 import argparse
+import hashlib
+import subprocess
+import sys
+import re
 import torch
 import yaml
 from pathlib import Path
@@ -31,6 +35,7 @@ import zarr
 from .config import DetectConfig, DatasetConfig
 from .zarr_yolo_dataset_loader import create_zarr_dataset, ZarrDatasetConfig
 from ..utils.system import get_git_info
+from ..registry.db import Registry, RegistryPaths
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
@@ -282,8 +287,375 @@ def display_zarr_metadata(metadata, console):
             if 'gaps_filled' in quality:
                 table.add_row("Gaps Filled", str(quality['gaps_filled']))
         
-        console.print(table)
-        console.print()
+    console.print(table)
+    console.print()
+
+
+def _load_manifest_summary(manifest_path: str | None) -> dict:
+    if not manifest_path:
+        return {}
+    path = Path(manifest_path)
+    if not path.exists():
+        return {"manifest_error": f"Manifest not found: {path}"}
+    try:
+        text = path.read_text(encoding="utf-8")
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        payload = json.loads(text)
+        datasets = payload.get("datasets") or []
+        dataset_ids = [
+            ds.get("dataset_id") for ds in datasets if isinstance(ds, dict) and ds.get("dataset_id")
+        ]
+        return {
+            "manifest_path": str(path),
+            "manifest_sha256": digest,
+            "manifest_dataset_ids": dataset_ids,
+            "manifest_dataset_count": len(dataset_ids),
+        }
+    except Exception as exc:
+        return {"manifest_error": str(exc), "manifest_path": str(path)}
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _normalize_imgsz(value) -> tuple[int, int]:
+    if value is None:
+        return 640, 640
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return 640, 640
+        if len(value) == 1:
+            size = int(value[0])
+            return size, size
+        return int(value[0]), int(value[1])
+    size = int(value)
+    return size, size
+
+
+def _resolve_export_device(value) -> str:
+    if isinstance(value, str) and value:
+        if value.isdigit():
+            return f"cuda:{value}"
+        if value.lower().startswith("cuda") or value.lower() == "cpu":
+            return value
+    return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+
+def _run_subprocess(
+    command: list[str],
+    console: Console,
+    label: str,
+    log_path: Path | None = None,
+) -> bool:
+    console.print(f"[dim]Running {label}:[/dim] {' '.join(command)}")
+    log_handle = None
+    if log_path:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_handle = log_path.open("w", encoding="utf-8")
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if process.stdout:
+            for line in process.stdout:
+                if log_handle:
+                    log_handle.write(line)
+                console.print(line.rstrip(), markup=False)
+        process.wait()
+        if process.returncode != 0:
+            console.print(f"[red]✗ {label} failed with code {process.returncode}[/red]")
+            return False
+        return True
+    except Exception as exc:
+        console.print(f"[red]✗ {label} failed:[/red] {exc}")
+        return False
+    finally:
+        if log_handle:
+            log_handle.close()
+
+
+def _read_trtexec_version(trtexec_path: Path | None) -> tuple[str | None, str | None, str | None]:
+    if not trtexec_path:
+        return None, None, None
+    raw_output = None
+    try:
+        result = subprocess.run(
+            [str(trtexec_path), "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        raw_output = "\n".join(
+            [part for part in [result.stdout.strip(), result.stderr.strip()] if part]
+        ).strip()
+        if raw_output:
+            dotted = re.search(r"TensorRT\\s+Version[:\\s]+(\\d+\\.\\d+\\.\\d+\\.\\d+)", raw_output)
+            if dotted:
+                return dotted.group(1), "trtexec", raw_output
+            dotted = re.search(r"TensorRT\\s*v?(\\d+\\.\\d+\\.\\d+\\.\\d+)", raw_output)
+            if dotted:
+                return dotted.group(1), "trtexec", raw_output
+    except Exception:
+        raw_output = None
+    path_match = re.search(r"TensorRT-(\\d+\\.\\d+\\.\\d+\\.\\d+)", str(trtexec_path))
+    if path_match:
+        return path_match.group(1), "path", raw_output
+    return None, None, raw_output
+
+
+def _collect_export_env(trtexec_path: Path | None) -> dict:
+    env = {
+        "torch_version": str(torch.__version__),
+        "cuda_version": torch.version.cuda,
+        "trtexec_path": str(trtexec_path) if trtexec_path else None,
+    }
+    if torch.cuda.is_available():
+        try:
+            env["gpu_name"] = torch.cuda.get_device_name(0)
+        except Exception:
+            env["gpu_name"] = None
+    try:
+        import tensorrt as trt  # type: ignore
+    except Exception:
+        version, source, raw_output = _read_trtexec_version(trtexec_path)
+        env["tensorrt_version"] = version
+        if source:
+            env["tensorrt_version_source"] = source
+        if raw_output:
+            env["trtexec_version_output"] = raw_output
+    else:
+        env["tensorrt_version"] = trt.__version__
+        env["tensorrt_version_source"] = "python"
+    return env
+
+
+def _export_detection_artifacts(
+    *,
+    run_dir: Path,
+    run_id: str,
+    weights_path: Path,
+    training_params: dict,
+    args,
+    manifest_summary: dict,
+    console: Console,
+) -> dict:
+    export_info: dict = {"enabled": True, "errors": []}
+    export_onnx = args.export_onnx or args.export_trt
+    if not export_onnx:
+        return export_info
+
+    exports_root = run_dir / "exports"
+    onnx_dir = exports_root / "onnx"
+    trt_dir = exports_root / "tensorrt"
+    onnx_dir.mkdir(parents=True, exist_ok=True)
+    trt_dir.mkdir(parents=True, exist_ok=True)
+
+    existing_onnx_path = None
+    if getattr(args, "onnx_path", None):
+        existing_onnx_path = Path(args.onnx_path).expanduser().resolve()
+        if not existing_onnx_path.exists():
+            export_info["errors"].append(f"onnx_not_found:{existing_onnx_path}")
+            return export_info
+
+    img_h, img_w = _normalize_imgsz(training_params.get("imgsz"))
+    input_shape = [1, 3, img_h, img_w]
+    export_device = _resolve_export_device(training_params.get("device"))
+
+    onnx_path = existing_onnx_path or (onnx_dir / f"{run_id}.onnx")
+    onnx_log_path = onnx_dir / f"{run_id}_onnx_export.log"
+    onnx_manifest_path = onnx_dir / f"{run_id}.onnx.manifest.json"
+    export_info["onnx_path"] = str(onnx_path)
+    export_info["onnx_log_path"] = str(onnx_log_path) if existing_onnx_path is None else None
+    export_info["onnx_manifest_path"] = str(onnx_manifest_path)
+
+    export_script = Path(__file__).resolve().parent / "export_onnx.py"
+    onnx_cmd = [
+        sys.executable,
+        str(export_script),
+        "-w",
+        str(weights_path),
+        "--input-shape",
+        *[str(v) for v in input_shape],
+        "--device",
+        export_device,
+        "--opset",
+        str(args.onnx_opset),
+        "--conf-thres",
+        str(args.nms_conf),
+        "--iou-thres",
+        str(args.nms_iou),
+        "--topk",
+        str(args.nms_topk),
+        "--output-path",
+        str(onnx_path),
+    ]
+    if args.onnx_simplify:
+        onnx_cmd.append("--sim")
+    export_info["onnx_command"] = onnx_cmd
+
+    if existing_onnx_path is None:
+        if export_script.exists():
+            console.print("[bold cyan]Exporting ONNX...[/bold cyan]")
+            ok = _run_subprocess(onnx_cmd, console, "ONNX export", log_path=onnx_log_path)
+            if not ok:
+                export_info["errors"].append("onnx_export_failed")
+                return export_info
+        else:
+            export_info["errors"].append(f"export_script_missing:{export_script}")
+            return export_info
+    else:
+        console.print(f"[cyan]Using existing ONNX:[/cyan] {onnx_path}")
+
+    weights_sha = _sha256_file(weights_path)
+    onnx_sha = _sha256_file(onnx_path)
+    export_info["weights_sha256"] = weights_sha
+    export_info["onnx_sha256"] = onnx_sha
+    export_info["onnx_source"] = "existing" if existing_onnx_path else "exported"
+
+    onnx_manifest = {
+        "schema_version": 1,
+        "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "run_id": run_id,
+        "weights": {
+            "path": str(weights_path),
+            "sha256": weights_sha,
+        },
+        "onnx": {
+            "path": str(onnx_path),
+            "sha256": onnx_sha,
+        },
+        "export": {
+            "source": "existing" if existing_onnx_path else "exported",
+            "input_shape": input_shape,
+            "imgsz": [img_h, img_w],
+            "opset": args.onnx_opset,
+            "simplify": bool(args.onnx_simplify),
+            "nms": {
+                "conf": args.nms_conf,
+                "iou": args.nms_iou,
+                "topk": args.nms_topk,
+            },
+            "device": export_device,
+            "command": onnx_cmd if existing_onnx_path is None else None,
+        },
+        "logs": {
+            "onnx_export": str(onnx_log_path) if existing_onnx_path is None else None,
+        },
+        "source_manifest": {
+            "manifest_path": manifest_summary.get("manifest_path"),
+            "manifest_sha256": manifest_summary.get("manifest_sha256"),
+            "manifest_dataset_ids": manifest_summary.get("manifest_dataset_ids"),
+        },
+    }
+    onnx_manifest_path.write_text(json.dumps(onnx_manifest, indent=2))
+
+    if not args.export_trt:
+        return export_info
+
+    engine_name = f"{run_id}_{args.trt_precision}"
+    engine_path = trt_dir / f"{engine_name}.engine"
+    manifest_path = trt_dir / f"{engine_name}.manifest.json"
+    trt_log_path = trt_dir / f"{engine_name}_trtexec.log"
+    export_info["trt_log_path"] = str(trt_log_path)
+
+    trtexec_path = Path(args.trtexec) if args.trtexec else None
+    trt_script = Path(__file__).resolve().parent / "onnx_to_tensorrt.py"
+    trt_cmd = [
+        sys.executable,
+        str(trt_script),
+        "--onnx",
+        str(onnx_path),
+        "--engine",
+        str(engine_path),
+        "--precision",
+        args.trt_precision,
+    ]
+    if args.trtexec:
+        trt_cmd.extend(["--trtexec", args.trtexec])
+    if args.trt_cuda_graph:
+        trt_cmd.append("--cuda-graph")
+    if args.trt_profiling:
+        trt_cmd.append("--profiling")
+    if args.trt_verbose:
+        trt_cmd.append("--verbose")
+    export_info["trt_command"] = trt_cmd
+
+    if trt_script.exists():
+        console.print("[bold cyan]Building TensorRT engine...[/bold cyan]")
+        ok = _run_subprocess(trt_cmd, console, "TensorRT export", log_path=trt_log_path)
+        if not ok:
+            export_info["errors"].append("tensorrt_export_failed")
+            return export_info
+    else:
+        export_info["errors"].append(f"tensorrt_script_missing:{trt_script}")
+        return export_info
+
+    if engine_path.exists():
+        engine_manifest = {
+            "schema_version": 1,
+            "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "run_id": run_id,
+            "weights": {
+                "path": str(weights_path),
+                "sha256": weights_sha,
+            },
+            "onnx": {
+                "path": str(onnx_path),
+                "sha256": onnx_sha,
+            },
+            "engine": {
+                "path": str(engine_path),
+                "sha256": _sha256_file(engine_path),
+            },
+            "onnx_manifest_path": str(onnx_manifest_path),
+            "export": {
+                "precision": args.trt_precision,
+                "input_shape": input_shape,
+                "imgsz": [img_h, img_w],
+                "opset": args.onnx_opset,
+                "nms": {
+                    "conf": args.nms_conf,
+                    "iou": args.nms_iou,
+                    "topk": args.nms_topk,
+                },
+                "device": export_device,
+            },
+            "trt": {
+                "precision": args.trt_precision,
+                "cuda_graph": bool(args.trt_cuda_graph),
+                "profiling": bool(args.trt_profiling),
+                "verbose": bool(args.trt_verbose),
+                "trtexec_path": str(trtexec_path) if trtexec_path else None,
+                "command": trt_cmd,
+            },
+            "logs": {
+                "onnx_export": str(onnx_log_path),
+                "tensorrt_export": str(trt_log_path),
+            },
+            "build_env": _collect_export_env(trtexec_path),
+            "source_manifest": {
+                "manifest_path": manifest_summary.get("manifest_path"),
+                "manifest_sha256": manifest_summary.get("manifest_sha256"),
+                "manifest_dataset_ids": manifest_summary.get("manifest_dataset_ids"),
+            },
+        }
+        manifest_path.write_text(json.dumps(engine_manifest, indent=2))
+
+    export_info.update(
+        {
+            "engine_path": str(engine_path),
+            "engine_manifest_path": str(manifest_path),
+        }
+    )
+    return export_info
 
 
 def main(args):
@@ -367,6 +739,20 @@ def main(args):
     
     training_duration_seconds = time.time() - training_start_time
 
+    manifest_summary = _load_manifest_summary(args.manifest)
+    export_artifacts = {}
+    if args.export_onnx or args.export_trt:
+        weights_path = results.save_dir / "weights" / "best.pt"
+        export_artifacts = _export_detection_artifacts(
+            run_dir=results.save_dir,
+            run_id=results.save_dir.name,
+            weights_path=weights_path,
+            training_params=training_params,
+            args=args,
+            manifest_summary=manifest_summary,
+            console=console,
+        )
+
     # Log training metadata
     console.print("\n[bold cyan] Logging Training Report...[/bold cyan]")
     try:
@@ -383,6 +769,8 @@ def main(args):
         final_report = full_config.model_dump()
         final_report['training_history'] = {
             'source_zarr_metadata': zarr_metadata,
+            **manifest_summary,
+            'export_artifacts': export_artifacts,
             'training_run_name': results.save_dir.name,
             'output_directory': str(results.save_dir),
             'final_model_path': str(results.save_dir / 'weights' / 'best.pt'),
@@ -430,6 +818,49 @@ def main(args):
         console.print(f"[bold red]✗ Could not save training report:[/bold red] {e}")
         traceback.print_exc()
     
+    if args.log_registry:
+        try:
+            registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
+            registry = Registry(registry_path)
+            run_id = results.save_dir.name
+            model_path = results.save_dir / "weights" / "best.pt"
+            metrics_path = results.save_dir / "results.csv"
+            registry.record_training_run(
+                run_id=run_id,
+                set_id=args.set_id,
+                config_path=Path(args.config_path),
+                manifest_path=Path(args.manifest) if args.manifest else None,
+                model_path=model_path if model_path.exists() else None,
+                metrics_path=metrics_path if metrics_path.exists() else None,
+            )
+            if export_artifacts:
+                onnx_path = export_artifacts.get("onnx_path")
+                if onnx_path:
+                    registry.record_model_export(
+                        run_id=run_id,
+                        export_type="onnx",
+                        path=Path(onnx_path),
+                        metadata={
+                            "sha256": export_artifacts.get("onnx_sha256"),
+                            "errors": export_artifacts.get("errors"),
+                        },
+                    )
+                engine_path = export_artifacts.get("engine_path")
+                if engine_path:
+                    registry.record_model_export(
+                        run_id=run_id,
+                        export_type="tensorrt",
+                        path=Path(engine_path),
+                        manifest_path=Path(export_artifacts.get("engine_manifest_path"))
+                        if export_artifacts.get("engine_manifest_path")
+                        else None,
+                        metadata={"errors": export_artifacts.get("errors")},
+                    )
+            registry.close()
+            console.print(f"[green]✓ Registry updated:[/green] {registry_path}")
+        except Exception as exc:
+            console.print(f"[yellow]Registry update skipped:[/yellow] {exc}")
+
     console.print("\n[bold green]✓ Training Complete![/bold green]")
 
 
@@ -446,6 +877,98 @@ if __name__ == '__main__':
         "--run-name",
         type=str,
         help="Optional name for the training run directory"
+    )
+    parser.add_argument(
+        "--manifest",
+        type=str,
+        help="Optional manifest JSON path to record in the registry."
+    )
+    parser.add_argument(
+        "--set-id",
+        type=str,
+        help="Optional training set ID to associate with this run."
+    )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help="Optional registry SQLite path."
+    )
+    parser.add_argument(
+        "--log-registry",
+        action="store_true",
+        help="Record this training run in the registry."
+    )
+    parser.add_argument(
+        "--export-onnx",
+        action="store_true",
+        help="Export the trained model to ONNX."
+    )
+    parser.add_argument(
+        "--export-trt",
+        action="store_true",
+        help="Export the trained model to a TensorRT engine (implies --export-onnx)."
+    )
+    parser.add_argument(
+        "--onnx-opset",
+        type=int,
+        default=11,
+        help="ONNX opset to use for export."
+    )
+    parser.add_argument(
+        "--onnx-simplify",
+        action="store_true",
+        help="Run ONNX simplification after export."
+    )
+    parser.add_argument(
+        "--onnx-path",
+        type=str,
+        default=None,
+        help="Optional existing ONNX path to reuse (skips ONNX export)."
+    )
+    parser.add_argument(
+        "--nms-conf",
+        type=float,
+        default=0.8,
+        help="NMS confidence threshold baked into the ONNX export."
+    )
+    parser.add_argument(
+        "--nms-iou",
+        type=float,
+        default=0.65,
+        help="NMS IoU threshold baked into the ONNX export."
+    )
+    parser.add_argument(
+        "--nms-topk",
+        type=int,
+        default=1,
+        help="Max detections for the ONNX NMS export."
+    )
+    parser.add_argument(
+        "--trt-precision",
+        choices=["fp16", "int8"],
+        default="fp16",
+        help="Precision to use for TensorRT export."
+    )
+    parser.add_argument(
+        "--trtexec",
+        type=str,
+        default=None,
+        help="Optional path to trtexec for TensorRT export."
+    )
+    parser.add_argument(
+        "--trt-cuda-graph",
+        action="store_true",
+        help="Enable CUDA graph capture during TensorRT export."
+    )
+    parser.add_argument(
+        "--trt-profiling",
+        action="store_true",
+        help="Enable TensorRT profiling outputs (timing/output/profile JSON)."
+    )
+    parser.add_argument(
+        "--trt-verbose",
+        action="store_true",
+        help="Enable verbose TensorRT build logs."
     )
     args = parser.parse_args()
     main(args)

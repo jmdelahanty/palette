@@ -30,8 +30,8 @@ def main():
     parser = argparse.ArgumentParser(description="Export YOLO model with built-in NMS")
     parser.add_argument('-w', '--weights', type=str, required=True, help='PyTorch YOLOv8 weights file (.pt)')
     parser.add_argument('--iou-thres', type=float, default=0.65, help='IOU threshold for the NMS operation')
-    parser.add_argument('--conf-thres', type=float, default=0.25, help='Confidence threshold for the NMS operation')
-    parser.add_argument('--topk', type=int, default=100, help='Max number of detections to return')
+    parser.add_argument('--conf-thres', type=float, default=0.8, help='Confidence threshold for the NMS operation')
+    parser.add_argument('--topk', type=int, default=1, help='Max number of detections to return')
     parser.add_argument('--opset', type=int, default=11, help='ONNX opset version')
     parser.add_argument('--sim', action='store_true', help='Simplify the ONNX model')
     parser.add_argument('--input-shape', nargs='+', type=int, default=[1, 3, 640, 640], help='Model input shape [batch, channels, height, width]')
@@ -110,7 +110,10 @@ def main():
         console.print(f"   Saved as: [cyan]{save_path}[/cyan]")
         console.print(f"   File size: {file_size:.2f} MB")
         
-        console.print(f"\n💡 [bold]Next step:[/bold] Convert to TensorRT using your [cyan]onnx_to_tensorrt.py[/cyan] script.")
+        console.print(
+            "\n💡 [bold]Next step:[/bold] Convert to TensorRT using "
+            "[cyan]python -m fisheye.training.onnx_to_tensorrt[/cyan]."
+        )
 
     except Exception as e:
         console.print(f"[bold red]Export failed:[/bold red]")

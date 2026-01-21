@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -20,6 +21,7 @@ import zarr
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..utils.zarr_metadata import get_downsample_array_path, get_downsample_shape
+from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
 
 
 class CameraParameters(BaseModel):
@@ -69,6 +71,11 @@ class ProvenanceInfo(BaseModel):
     calibration: Optional[CalibrationSummary] = None
     rig_info: Optional[Dict[str, Any]] = None
     arena_config: Optional[Dict[str, Any]] = None
+    camera_metadata: Optional[Dict[str, Any]] = None
+    camera_config_hash: Optional[str] = None
+    video_codec: Optional[str] = None
+    video_pix_fmt: Optional[str] = None
+    video_source: Optional[str] = None
     provenance_source: str = "missing"
     missing_fields: List[str] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
@@ -80,6 +87,8 @@ class ProvenanceInfo(BaseModel):
 class DatasetManifest(BaseModel):
     name: str
     zarr_path: str
+    dataset_id: Optional[str] = None
+    session_uuid: Optional[str] = None
     crop_run: Optional[str] = None
     bbox_array_path: str
     detection_source_type: str
@@ -111,6 +120,7 @@ class TrainingManifest(BaseModel):
     project: Optional[str] = None
     run_name: Optional[str] = None
     provenance_policy: str
+    registry_path: Optional[str] = None
 
     model_config = ConfigDict(extra="allow")
 
@@ -287,6 +297,45 @@ def _load_rig_info(root: zarr.Group) -> Optional[Dict[str, Any]]:
     return {k: rig_group.attrs.get(k) for k in rig_group.attrs.keys()}
 
 
+def _hash_json(payload: Dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _load_camera_metadata(root: zarr.Group) -> Optional[Dict[str, Any]]:
+    analysis = root.get("analysis_metadata")
+    if analysis is None:
+        return None
+    raw = analysis.attrs.get("camera_metadata")
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            raw = raw.decode("utf-8")
+        except Exception:
+            return None
+    if isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
+def _load_video_metadata(root: zarr.Group) -> Dict[str, Optional[str]]:
+    raw = root.get("raw_video")
+    if raw is None:
+        return {"video_codec": None, "video_pix_fmt": None, "video_source": None}
+    return {
+        "video_codec": raw.attrs.get("codec"),
+        "video_pix_fmt": raw.attrs.get("pix_fmt"),
+        "video_source": raw.attrs.get("source_video"),
+    }
+
+
 def _extract_provenance(
     root: zarr.Group,
     override: Optional[Dict[str, Any]],
@@ -319,6 +368,14 @@ def _extract_provenance(
 
     provenance.calibration = _load_calibration_summary(root)
     provenance.rig_info = _load_rig_info(root)
+    camera_metadata = _load_camera_metadata(root)
+    if camera_metadata:
+        provenance.camera_metadata = camera_metadata
+        provenance.camera_config_hash = _hash_json(camera_metadata)
+    video_meta = _load_video_metadata(root)
+    provenance.video_codec = video_meta.get("video_codec")
+    provenance.video_pix_fmt = video_meta.get("video_pix_fmt")
+    provenance.video_source = video_meta.get("video_source")
 
     if stim_group is not None:
         provenance.provenance_source = "stimulus_import"
@@ -376,6 +433,27 @@ def _load_override(path: Optional[Path]) -> Optional[Dict[str, Any]]:
     if path.suffix.lower() in {".yml", ".yaml"}:
         return yaml.safe_load(text) or {}
     return json.loads(text)
+
+
+def _ensure_dummy_paths(config: Dict[str, Any], config_path: Path) -> List[Path]:
+    created: List[Path] = []
+    data_root = config.get("path")
+    base_dir = Path(data_root) if data_root else config_path.parent
+    for key in ("train", "val"):
+        value = config.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        target = Path(value)
+        if not target.is_absolute():
+            target = (base_dir / target).resolve()
+        if target.exists():
+            continue
+        if target.suffix.lower() not in {".txt"} and "dummy" not in target.name:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("", encoding="utf-8")
+        created.append(target)
+    return created
 
 
 def _validate_bboxes(bbox: np.ndarray) -> Tuple[int, List[int]]:
@@ -471,6 +549,16 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         help="Optional JSON/YAML file with provenance overrides.",
     )
     parser.add_argument(
+        "--registry",
+        type=Path,
+        help="Optional registry SQLite path to update.",
+    )
+    parser.add_argument(
+        "--register",
+        action="store_true",
+        help="Write scanned datasets into the registry.",
+    )
+    parser.add_argument(
         "--allow-source-mismatch",
         action="store_true",
         help="Allow crop source type to differ from requested source_type.",
@@ -491,6 +579,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
     dataset_entries: Dict[str, Dict[str, Any]] = {}
     manifests: List[DatasetManifest] = []
+    registry: Optional[Registry] = None
+    registry_path: Optional[str] = None
+    if args.register or args.registry:
+        resolved_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
+        registry_path = str(resolved_path)
+        registry = Registry(resolved_path)
     seen_names: set = set()
     reference_shape: Optional[Tuple[int, int]] = None
 
@@ -582,10 +676,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         if args.provenance_policy == "ignore":
             provenance.warnings = []
 
+        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
         manifests.append(
             DatasetManifest(
                 name=dataset_name,
                 zarr_path=str(zarr_path),
+                dataset_id=dataset_id,
+                session_uuid=session_uuid,
                 crop_run=crop_run,
                 bbox_array_path=bbox_array_path,
                 detection_source_type=detection_source_type,
@@ -602,6 +699,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 provenance=provenance,
             )
         )
+        if registry is not None:
+            registry.register_from_root(root, zarr_path)
 
     imgsz = args.imgsz if args.imgsz is not None else int(reference_shape[0])
     if args.imgsz is None and reference_shape and reference_shape[0] != reference_shape[1]:
@@ -626,6 +725,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     if args.project:
         base_config["training_params"]["project"] = args.project
 
+    if registry is not None:
+        registry.close()
     manifest = TrainingManifest(
         created_at_utc=datetime.now(timezone.utc).isoformat(),
         task="detect",
@@ -639,6 +740,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         project=args.project,
         run_name=args.run_name,
         provenance_policy=args.provenance_policy,
+        registry_path=registry_path,
     )
 
     _print_summary(manifest)
@@ -667,6 +769,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
     print(f"\nWrote config: {args.out_config}")
     print(f"Wrote manifest: {out_manifest}")
+    created = _ensure_dummy_paths(base_config, args.out_config)
+    for path in created:
+        print(f"Created dummy dataset file: {path}")
     if args.run_name:
         print(
             "Next: python -m fisheye.training.train_detection "

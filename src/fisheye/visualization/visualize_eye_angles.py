@@ -120,6 +120,13 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         "vergence_speed": _maybe("vergence_speed_deg_s"),
         "vergence_signed_speed": _maybe("vergence_signed_speed_deg_s"),
         "version_speed": _maybe("version_speed_deg_s"),
+        # Centroid-based angles (paper-comparable)
+        "left_centroid": _maybe("left_centroid_deg"),
+        "left_centroid_smoothed": _maybe("left_centroid_deg_smoothed"),
+        "right_centroid": _maybe("right_centroid_deg"),
+        "right_centroid_smoothed": _maybe("right_centroid_deg_smoothed"),
+        "vergence_centroid": _maybe("vergence_centroid_deg"),
+        "vergence_centroid_smoothed": _maybe("vergence_centroid_deg_smoothed"),
     }
 
     roi_deltas = {
@@ -145,6 +152,13 @@ def _load_eye_angle_run(zarr_path: Path, run_name: Optional[str]) -> Tuple[Dict[
         "vergence_minor_signed_smoothed": _maybe("vergence_minor_signed_delta_deg_smoothed"),
         "version_minor": _maybe("version_minor_delta_deg"),
         "version_minor_smoothed": _maybe("version_minor_delta_deg_smoothed"),
+        # Centroid-based deltas
+        "left_centroid": _maybe("left_centroid_delta_deg"),
+        "left_centroid_smoothed": _maybe("left_centroid_delta_deg_smoothed"),
+        "right_centroid": _maybe("right_centroid_delta_deg"),
+        "right_centroid_smoothed": _maybe("right_centroid_delta_deg_smoothed"),
+        "vergence_centroid": _maybe("vergence_centroid_delta_deg"),
+        "vergence_centroid_smoothed": _maybe("vergence_centroid_delta_deg_smoothed"),
     }
 
     qa_roi = {
@@ -371,6 +385,32 @@ def _select_angle_variant(
             }
         )
         label = "Ellipse minor axis"
+    elif source == "centroid":
+        # Centroid-based angles measure eye position (not orientation) in fish frame
+        left_centroid = _pick("left_centroid")
+        right_centroid = _pick("right_centroid")
+        vergence_centroid = _pick("vergence_centroid")
+        variant = {
+            "left": np.abs(left_centroid),
+            "right": np.abs(right_centroid),
+            "vergence": vergence_centroid,  # already |L| + |R|
+            "left_signed": left_centroid,
+            "right_signed": right_centroid,
+            "vergence_signed": vergence_centroid,
+            "version": None,  # not computed for centroid method
+        }
+        series_lookup.update(
+            {
+                "left": "left_centroid",
+                "right": "right_centroid",
+                "vergence": "vergence_centroid",
+                "left_signed": "left_centroid",
+                "right_signed": "right_centroid",
+                "vergence_signed": "vergence_centroid",
+                "version": None,
+            }
+        )
+        label = "Centroid position (paper)"
     else:
         raise ValueError(f"Unknown angle source '{source}'.")
 
@@ -836,14 +876,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--angle-source",
-        choices=["ellipse", "minor"],
+        choices=["ellipse", "minor", "centroid"],
         default="ellipse",
         help="Which angle series to treat as primary (default: ellipse).",
     )
     parser.add_argument(
         "--all-variants",
         action="store_true",
-        help="Render dashboards for every angle variant (ellipse, minor).",
+        help="Render dashboards for every angle variant (ellipse, minor, centroid).",
     )
     parser.add_argument(
         "--title",
@@ -872,7 +912,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Loaded eye angle run '{attrs['run_name']}' from {args.zarr_path}")
 
     requested_sources = (
-        ["ellipse", "minor"]
+        ["ellipse", "minor", "centroid"]
         if args.all_variants
         else [args.angle_source]
     )

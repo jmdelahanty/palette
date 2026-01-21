@@ -391,6 +391,8 @@ class EyeAngleOverlayViewer:
                     continue
                 cx, cy, major_len, minor_len, theta_deg = row[:5]
                 theta_rad = np.deg2rad(theta_deg)
+                # Apply half-turn normalization to match analysis convention
+                theta_rad = theta_rad % np.pi
                 base_vec = (
                     np.array([np.cos(theta_rad), np.sin(theta_rad)], dtype=np.float32)
                     if mode == "ellipse_major"
@@ -417,20 +419,29 @@ class EyeAngleOverlayViewer:
 
 
 def _load_roi_images(root: zarr.Group, keypoint_run: str) -> zarr.Array:
-    kp_group = root[f"keypoints_runs/{keypoint_run}"]
-    if "roi_images" in kp_group:
-        return kp_group["roi_images"]
-    crop_run = kp_group.attrs.get("source_crop_run")
-    if crop_run and f"crop_runs/{crop_run}/roi_images" in root:
-        return root[f"crop_runs/{crop_run}/roi_images"]
+    # Check both keypoints_runs and refined_keypoints_runs paths
+    for prefix in ("keypoints_runs", "refined_keypoints_runs"):
+        kp_path = f"{prefix}/{keypoint_run}"
+        if kp_path in root:
+            kp_group = root[kp_path]
+            if "roi_images" in kp_group:
+                return kp_group["roi_images"]
+            crop_run = kp_group.attrs.get("source_crop_run")
+            if crop_run and f"crop_runs/{crop_run}/roi_images" in root:
+                return root[f"crop_runs/{crop_run}/roi_images"]
     raise RuntimeError(
         "Could not locate ROI images. Ensure keypoints run stores 'roi_images' or its source crop run does."
     )
 
 
 def _load_keypoints(root: zarr.Group, keypoint_run: str) -> Optional[zarr.Array]:
-    kp_group = root[f"keypoints_runs/{keypoint_run}"]
-    return kp_group["keypoints_roi"] if "keypoints_roi" in kp_group else None
+    # Check both keypoints_runs and refined_keypoints_runs paths
+    for prefix in ("keypoints_runs", "refined_keypoints_runs"):
+        kp_path = f"{prefix}/{keypoint_run}"
+        if kp_path in root:
+            kp_group = root[kp_path]
+            return kp_group["keypoints_roi"] if "keypoints_roi" in kp_group else None
+    return None
 
 
 def _load_masks(root: zarr.Group, refined_run: str) -> tuple[zarr.Array, Optional[zarr.Array], Optional[zarr.Array], Optional[zarr.Array]]:

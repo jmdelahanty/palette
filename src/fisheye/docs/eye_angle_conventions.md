@@ -20,6 +20,7 @@ analysis/eye_angle_runs/<run>/
 Key datasets:
 
 - `angles/roi/left_deg`, `right_deg`, `vergence_deg`, etc. hold the **unsigned** magnitudes (0–180° after the 2025-10 update) for each primary axis. Signed counterparts append `_signed_deg`.
+- `angles/roi/left_centroid_deg`, `right_centroid_deg`, `vergence_centroid_deg` hold the **centroid-based** angles (paper-comparable methodology).
 - `_delta_deg` and `_delta_deg_smoothed` arrays contain absolute frame-to-frame changes.
 - `qa/roi/valid_left`, `valid_right`, `valid_frame`, and `reason_codes` provide flags and bitmasks that explain any exclusions.
 - `support/time_seconds`, `frame_indices`, `ellipse_*` expose timing metadata and ellipse diagnostics used by the visualizations.
@@ -53,6 +54,26 @@ Once left and right signed angles are available:
 - **Vergence (signed)** is `left_nasal + right_nasal`. The unsigned magnitude is stored separately (`vergence_deg`).
 - **Version (signed)** is `0.5 * (left_nasal - right_nasal)`.
 - Minor axis variants follow the same algebra (`left_minor_signed`, …).
+
+### Centroid-based angles (paper-comparable)
+
+In addition to the ellipse-based angles, we compute **centroid-based** angles following the methodology of Johnson et al. (2020). These measure the *position* of each eye centroid relative to the fish's heading, rather than the *orientation* of the ellipse major axis.
+
+For each detection:
+
+1. Compute `head_center = mean(swim_bladder, left_eye, right_eye)`.
+2. Build vectors from `head_center` to each eye centroid.
+3. Convert to math coordinates (`y` flipped to point up) to match the heading convention.
+4. Rotate into the fish frame by `-heading_rad` so the heading aligns with `+x`.
+5. Compute per-eye angles: `theta_L = atan2(Ly, Lx)`, `theta_R = atan2(Ry, Rx)`.
+6. Compute vergence: `vergence_centroid = |theta_L| + |theta_R|`.
+
+This centroid-based vergence is directly comparable to the paper's definition and can be used with thresholds like 24° for hunting-state classification in downstream bout analysis.
+
+Outputs:
+- `angles/roi/left_centroid_deg`, `right_centroid_deg`, `vergence_centroid_deg`
+- Smoothed and delta variants follow the same naming pattern as ellipse-based angles.
+- Frame-level equivalents in `angles/frame/`.
 
 ### Deltas and smoothing
 

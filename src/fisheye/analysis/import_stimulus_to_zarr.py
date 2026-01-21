@@ -79,6 +79,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+from hashlib import sha256
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -120,6 +122,124 @@ def _normalize_attr_value(value):
 def _collect_attrs(h5_obj: h5py.Group | h5py.Dataset) -> Dict[str, object]:
     """Collect and normalize attributes from an HDF5 object."""
     return {name: _normalize_attr_value(val) for name, val in h5_obj.attrs.items()}
+
+
+def _parse_json_payload(raw: object) -> Optional[Dict[str, object]]:
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "ignore")
+    if isinstance(raw, np.generic):
+        raw = raw.item()
+    if isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
+def _filter_camera_metadata(payload: Dict[str, object]) -> Dict[str, object]:
+    filtered = dict(payload)
+    for key in ("device_snmp_comm_read", "device_snmp_comm_write", "yolo"):
+        filtered.pop(key, None)
+    return filtered
+
+
+def _read_h5_group_attrs(h5: h5py.File, path: str) -> Optional[Dict[str, object]]:
+    if path not in h5:
+        return None
+    group = h5[path]
+    if not hasattr(group, "attrs"):
+        return None
+    attrs = _collect_attrs(group)
+    return attrs or None
+
+
+def _read_h5_camera_metadata(h5: h5py.File) -> Optional[Dict[str, object]]:
+    for path in ("/camera_metadata", "/device_metadata"):
+        if path not in h5:
+            continue
+        node = h5[path]
+        if isinstance(node, h5py.Dataset):
+            payload = _parse_json_payload(node[()])
+            if payload:
+                return _filter_camera_metadata(payload)
+            return None
+        raw = None
+        if "config_json" in node:
+            raw = node["config_json"][()]
+        if raw is None:
+            raw = node.attrs.get("config_json") or node.attrs.get("camera_config_json")
+        payload = _parse_json_payload(raw)
+        if payload:
+            return _filter_camera_metadata(payload)
+        attrs = _read_h5_group_attrs(h5, path)
+        if attrs:
+            return _filter_camera_metadata(attrs)
+    return None
+
+
+def _camera_metadata_hash(payload: Dict[str, object]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _derive_camera_id(ipc_source_name: object) -> Optional[str]:
+    if ipc_source_name is None:
+        return None
+    value = _normalize_attr_value(ipc_source_name)
+    if value is None:
+        return None
+    text = str(value)
+    match = re.search(r"cam_(\d+)", text)
+    if match:
+        return match.group(1)
+    digits = re.findall(r"\d+", text)
+    return digits[-1] if digits else None
+
+
+def _read_h5_session_context(h5: h5py.File) -> Optional[Dict[str, object]]:
+    root_attrs = h5.attrs
+    keys = [
+        "session_uuid",
+        "session_start_iso8601_utc",
+        "rig_id",
+        "arena_id",
+        "camera_id",
+        "canvas_name",
+        "protocol_name_from_definition",
+        "loaded_protocol_filepath",
+        "stimulus_output_width",
+        "stimulus_output_height",
+        "ipc_source_name",
+        "active_ipc_source",
+        "hostname",
+        "software_version",
+    ]
+    context: Dict[str, object] = {}
+    for key in keys:
+        if key in root_attrs:
+            context[key] = _normalize_attr_value(root_attrs.get(key))
+
+    camera_id = context.get("camera_id")
+    if not camera_id:
+        derived = _derive_camera_id(context.get("ipc_source_name"))
+        if derived:
+            context["camera_id"] = derived
+            context["camera_id_source"] = "ipc_source_name"
+
+    canvas_name = context.get("canvas_name")
+    if not canvas_name:
+        fallback = context.get("protocol_name_from_definition")
+        if fallback:
+            context["canvas_name"] = fallback
+            context["canvas_name_source"] = "protocol_name_from_definition"
+
+    return context or None
 
 
 def _resolve_struct_field(array: np.ndarray, *candidates: str) -> str:
@@ -362,6 +482,21 @@ def import_stimulus_to_zarr(
 
     run_group = runs_parent.create_group(run_name)
     with h5py.File(resolved_h5, "r") as h5:
+        analysis_meta = root.require_group("analysis_metadata")
+        subject_meta = _read_h5_group_attrs(h5, "/subject_metadata")
+        if subject_meta:
+            analysis_meta.attrs["subject_metadata"] = json.dumps(subject_meta, sort_keys=True)
+        camera_meta = _read_h5_camera_metadata(h5)
+        if camera_meta:
+            analysis_meta.attrs["camera_metadata"] = json.dumps(camera_meta, sort_keys=True)
+            analysis_meta.attrs["camera_config_hash"] = _camera_metadata_hash(camera_meta)
+        session_context = _read_h5_session_context(h5)
+        if session_context:
+            analysis_meta.attrs["session_context"] = json.dumps(session_context, sort_keys=True)
+        session_uuid = h5.attrs.get("session_uuid")
+        if session_uuid:
+            analysis_meta.attrs["session_uuid"] = _normalize_attr_value(session_uuid)
+
         _copy_enums(h5, analysis, console)
         if "/video_metadata/frame_metadata" not in h5:
             raise ValueError("Stimulus H5 missing /video_metadata/frame_metadata dataset.")

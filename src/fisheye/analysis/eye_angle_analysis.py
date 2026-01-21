@@ -70,6 +70,10 @@ class EyeAngleResults:
     valid_frame: np.ndarray
     reason_codes: np.ndarray
     heading_deg: np.ndarray
+    # Centroid-based angles (paper-comparable)
+    left_centroid_deg: np.ndarray
+    right_centroid_deg: np.ndarray
+    vergence_centroid_deg: np.ndarray
 
 
 def _to_half_turn(angle_rad: np.ndarray) -> np.ndarray:
@@ -198,6 +202,51 @@ def _process_chunk(
     heading_rad = np.full(chunk_len, np.nan, dtype=np.float64)
     heading_rad[heading_valid] = np.deg2rad(heading_out[heading_valid])
     heading_rad = _to_half_turn(heading_rad)
+
+    # ---------- Centroid-based angles (paper-comparable) ----------
+    # Measures eye position angle in fish-frame coordinates.
+    # Paper method: vergence = |theta_L| + |theta_R|
+    left_centroid = np.full(chunk_len, np.nan, dtype=np.float32)
+    right_centroid = np.full(chunk_len, np.nan, dtype=np.float32)
+    vergence_centroid = np.full(chunk_len, np.nan, dtype=np.float32)
+
+    # Paper head center: mean of the 3 ROI keypoints
+    head_center = (bladder + eye_left_kp + eye_right_kp) / 3.0
+
+    centroid_mask = (
+        detection_success
+        & heading_valid
+        & np.all(np.isfinite(head_center), axis=1)
+        & np.all(np.isfinite(eye_left_kp), axis=1)
+        & np.all(np.isfinite(eye_right_kp), axis=1)
+    )
+
+    if np.any(centroid_mask):
+        cidxs = np.where(centroid_mask)[0]
+
+        # Vectors from head center to each eye in image coords
+        vL = eye_left_kp[cidxs] - head_center[cidxs]
+        vR = eye_right_kp[cidxs] - head_center[cidxs]
+
+        # Convert to math coords (y up) to match heading computation: (x, -y)
+        vLx, vLy = vL[:, 0], -vL[:, 1]
+        vRx, vRy = vR[:, 0], -vR[:, 1]
+
+        # Rotate by -heading into fish frame (heading aligned to +x)
+        ang = np.deg2rad(heading_out[cidxs]).astype(np.float64)
+        c, s = np.cos(-ang), np.sin(-ang)
+
+        Lx = c * vLx - s * vLy
+        Ly = s * vLx + c * vLy
+        Rx = c * vRx - s * vRy
+        Ry = s * vRx + c * vRy
+
+        theta_L = np.degrees(np.arctan2(Ly, Lx)).astype(np.float32)
+        theta_R = np.degrees(np.arctan2(Ry, Rx)).astype(np.float32)
+
+        left_centroid[cidxs] = theta_L
+        right_centroid[cidxs] = theta_R
+        vergence_centroid[cidxs] = np.abs(theta_L) + np.abs(theta_R)
 
     for eye_idx, target_array, valid_array, signed_array, fail_bit in (
         (0, left_angles, valid_left, left_signed, REASON_LEFT_ELLIPSE_INVALID),
@@ -342,6 +391,9 @@ def _process_chunk(
         valid_frame=valid_frame,
         reason_codes=reason_codes,
         heading_deg=heading_out.astype(np.float32, copy=False),
+        left_centroid_deg=left_centroid,
+        right_centroid_deg=right_centroid,
+        vergence_centroid_deg=vergence_centroid,
     )
 
 
@@ -552,6 +604,10 @@ def run(args: argparse.Namespace) -> None:
     valid_frame = np.zeros(total_detections, dtype=bool)
     reason_codes = np.zeros(total_detections, dtype=np.uint16)
     heading_deg_out = np.full(total_detections, np.nan, dtype=np.float32)
+    # Centroid-based arrays
+    left_centroid = np.full(total_detections, np.nan, dtype=np.float32)
+    right_centroid = np.full(total_detections, np.nan, dtype=np.float32)
+    vergence_centroid = np.full(total_detections, np.nan, dtype=np.float32)
 
     for start in range(0, total_detections, chunk_size):
         stop = min(start + chunk_size, total_detections)
@@ -588,6 +644,9 @@ def run(args: argparse.Namespace) -> None:
         valid_frame[start:stop] = chunk_result.valid_frame
         reason_codes[start:stop] |= chunk_result.reason_codes
         heading_deg_out[start:stop] = chunk_result.heading_deg
+        left_centroid[start:stop] = chunk_result.left_centroid_deg
+        right_centroid[start:stop] = chunk_result.right_centroid_deg
+        vergence_centroid[start:stop] = chunk_result.vergence_centroid_deg
 
     frame_indices = frame_indices_source["frame_indices"][:].astype(np.int64, copy=False)
     if frame_indices.shape[0] != total_detections:
@@ -669,6 +728,9 @@ def run(args: argparse.Namespace) -> None:
         right_minor_signed_smoothed = _smooth_signal(right_minor_signed, detection_smooth_window).astype(np.float32, copy=False)
         vergence_minor_signed_smoothed = _smooth_signal(vergence_minor_signed, detection_smooth_window).astype(np.float32, copy=False)
         version_minor_smoothed = _smooth_signal(version_minor, detection_smooth_window).astype(np.float32, copy=False)
+        left_centroid_smoothed = _smooth_signal(left_centroid, detection_smooth_window).astype(np.float32, copy=False)
+        right_centroid_smoothed = _smooth_signal(right_centroid, detection_smooth_window).astype(np.float32, copy=False)
+        vergence_centroid_smoothed = _smooth_signal(vergence_centroid, detection_smooth_window).astype(np.float32, copy=False)
     else:
         left_smoothed = np.array(left_angles, copy=True)
         right_smoothed = np.array(right_angles, copy=True)
@@ -681,6 +743,9 @@ def run(args: argparse.Namespace) -> None:
         right_minor_signed_smoothed = np.array(right_minor_signed, copy=True)
         vergence_minor_signed_smoothed = np.array(vergence_minor_signed, copy=True)
         version_minor_smoothed = np.array(version_minor, copy=True)
+        left_centroid_smoothed = np.array(left_centroid, copy=True)
+        right_centroid_smoothed = np.array(right_centroid, copy=True)
+        vergence_centroid_smoothed = np.array(vergence_centroid, copy=True)
 
     left_delta = _compute_delta(left_angles)
     right_delta = _compute_delta(right_angles)
@@ -693,6 +758,9 @@ def run(args: argparse.Namespace) -> None:
     right_minor_delta = _compute_delta(right_minor_signed)
     vergence_minor_delta = _compute_delta(vergence_minor_signed)
     version_minor_delta = _compute_delta(version_minor)
+    left_centroid_delta = _compute_delta(left_centroid)
+    right_centroid_delta = _compute_delta(right_centroid)
+    vergence_centroid_delta = _compute_delta(vergence_centroid)
 
     left_delta_smoothed = _compute_delta(left_smoothed)
     right_delta_smoothed = _compute_delta(right_smoothed)
@@ -705,6 +773,9 @@ def run(args: argparse.Namespace) -> None:
     right_minor_delta_smoothed = _compute_delta(right_minor_signed_smoothed)
     vergence_minor_delta_smoothed = _compute_delta(vergence_minor_signed_smoothed)
     version_minor_delta_smoothed = _compute_delta(version_minor_smoothed)
+    left_centroid_delta_smoothed = _compute_delta(left_centroid_smoothed)
+    right_centroid_delta_smoothed = _compute_delta(right_centroid_smoothed)
+    vergence_centroid_delta_smoothed = _compute_delta(vergence_centroid_smoothed)
 
     num_frames = int(frame_indices.max() + 1) if frame_indices.size else 0
     frame_left = np.full(num_frames, np.nan, dtype=np.float32)
@@ -716,6 +787,10 @@ def run(args: argparse.Namespace) -> None:
     frame_version_minor = np.full(num_frames, np.nan, dtype=np.float32)
     frame_valid = np.zeros(num_frames, dtype=bool)
     frame_reason = np.zeros(num_frames, dtype=np.uint16)
+    # Centroid frame-level arrays
+    frame_left_centroid = np.full(num_frames, np.nan, dtype=np.float32)
+    frame_right_centroid = np.full(num_frames, np.nan, dtype=np.float32)
+    frame_vergence_centroid = np.full(num_frames, np.nan, dtype=np.float32)
 
     if num_frames > 0:
         for frame in range(num_frames):
@@ -736,6 +811,9 @@ def run(args: argparse.Namespace) -> None:
             frame_version_minor[frame] = version_minor[idx]
             frame_valid[frame] = valid_frame[idx]
             frame_reason[frame] |= reason_codes[idx]
+            frame_left_centroid[frame] = left_centroid[idx]
+            frame_right_centroid[frame] = right_centroid[idx]
+            frame_vergence_centroid[frame] = vergence_centroid[idx]
 
     frame_smooth_window = _resolve_smoothing_window(num_frames, window_setting)
     if frame_smooth_window:
@@ -746,6 +824,9 @@ def run(args: argparse.Namespace) -> None:
         frame_version_smoothed = _smooth_signal(frame_version, frame_smooth_window).astype(np.float32, copy=False)
         frame_vergence_minor_signed_smoothed = _smooth_signal(frame_vergence_signed_minor, frame_smooth_window).astype(np.float32, copy=False)
         frame_version_minor_smoothed = _smooth_signal(frame_version_minor, frame_smooth_window).astype(np.float32, copy=False)
+        frame_left_centroid_smoothed = _smooth_signal(frame_left_centroid, frame_smooth_window).astype(np.float32, copy=False)
+        frame_right_centroid_smoothed = _smooth_signal(frame_right_centroid, frame_smooth_window).astype(np.float32, copy=False)
+        frame_vergence_centroid_smoothed = _smooth_signal(frame_vergence_centroid, frame_smooth_window).astype(np.float32, copy=False)
     else:
         frame_left_smoothed = np.array(frame_left, copy=True)
         frame_right_smoothed = np.array(frame_right, copy=True)
@@ -754,6 +835,9 @@ def run(args: argparse.Namespace) -> None:
         frame_version_smoothed = np.array(frame_version, copy=True)
         frame_vergence_minor_signed_smoothed = np.array(frame_vergence_signed_minor, copy=True)
         frame_version_minor_smoothed = np.array(frame_version_minor, copy=True)
+        frame_left_centroid_smoothed = np.array(frame_left_centroid, copy=True)
+        frame_right_centroid_smoothed = np.array(frame_right_centroid, copy=True)
+        frame_vergence_centroid_smoothed = np.array(frame_vergence_centroid, copy=True)
 
     frame_left_delta = _compute_delta(frame_left)
     frame_right_delta = _compute_delta(frame_right)
@@ -762,6 +846,9 @@ def run(args: argparse.Namespace) -> None:
     frame_vergence_minor_delta = _compute_delta(frame_vergence_signed_minor)
     frame_version_delta = _compute_delta(frame_version)
     frame_version_minor_delta = _compute_delta(frame_version_minor)
+    frame_left_centroid_delta = _compute_delta(frame_left_centroid)
+    frame_right_centroid_delta = _compute_delta(frame_right_centroid)
+    frame_vergence_centroid_delta = _compute_delta(frame_vergence_centroid)
 
     frame_left_delta_smoothed = _compute_delta(frame_left_smoothed)
     frame_right_delta_smoothed = _compute_delta(frame_right_smoothed)
@@ -770,6 +857,9 @@ def run(args: argparse.Namespace) -> None:
     frame_vergence_minor_delta_smoothed = _compute_delta(frame_vergence_minor_signed_smoothed)
     frame_version_delta_smoothed = _compute_delta(frame_version_smoothed)
     frame_version_minor_delta_smoothed = _compute_delta(frame_version_minor_smoothed)
+    frame_left_centroid_delta_smoothed = _compute_delta(frame_left_centroid_smoothed)
+    frame_right_centroid_delta_smoothed = _compute_delta(frame_right_centroid_smoothed)
+    frame_vergence_centroid_delta_smoothed = _compute_delta(frame_vergence_centroid_smoothed)
 
     if args.run_name:
         resolved_run_name = args.run_name
@@ -849,6 +939,19 @@ def run(args: argparse.Namespace) -> None:
             ("vergence_signed_accel_deg_s2", (total_detections,), (chunk_len,), "f4"),
             ("version_accel_deg_s2", (total_detections,), (chunk_len,), "f4"),
             ("heading_deg", (total_detections,), (chunk_len,), "f4"),
+            # Centroid-based angles (paper-comparable)
+            ("left_centroid_deg", (total_detections,), (chunk_len,), "f4"),
+            ("left_centroid_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("left_centroid_delta_deg", (total_detections,), (chunk_len,), "f4"),
+            ("left_centroid_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("right_centroid_deg", (total_detections,), (chunk_len,), "f4"),
+            ("right_centroid_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("right_centroid_delta_deg", (total_detections,), (chunk_len,), "f4"),
+            ("right_centroid_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_centroid_deg", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_centroid_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_centroid_delta_deg", (total_detections,), (chunk_len,), "f4"),
+            ("vergence_centroid_delta_deg_smoothed", (total_detections,), (chunk_len,), "f4"),
         ],
     )
     roi_group["left_deg"][:] = left_angles
@@ -906,6 +1009,19 @@ def run(args: argparse.Namespace) -> None:
     roi_group["vergence_signed_accel_deg_s2"][:] = vergence_signed_accel
     roi_group["version_accel_deg_s2"][:] = version_accel
     roi_group["heading_deg"][:] = heading_deg_out
+    # Centroid-based angles
+    roi_group["left_centroid_deg"][:] = left_centroid
+    roi_group["left_centroid_deg_smoothed"][:] = left_centroid_smoothed
+    roi_group["left_centroid_delta_deg"][:] = left_centroid_delta
+    roi_group["left_centroid_delta_deg_smoothed"][:] = left_centroid_delta_smoothed
+    roi_group["right_centroid_deg"][:] = right_centroid
+    roi_group["right_centroid_deg_smoothed"][:] = right_centroid_smoothed
+    roi_group["right_centroid_delta_deg"][:] = right_centroid_delta
+    roi_group["right_centroid_delta_deg_smoothed"][:] = right_centroid_delta_smoothed
+    roi_group["vergence_centroid_deg"][:] = vergence_centroid
+    roi_group["vergence_centroid_deg_smoothed"][:] = vergence_centroid_smoothed
+    roi_group["vergence_centroid_delta_deg"][:] = vergence_centroid_delta
+    roi_group["vergence_centroid_delta_deg_smoothed"][:] = vergence_centroid_delta_smoothed
 
     _prepare_output_arrays(
         frame_group,
@@ -938,6 +1054,19 @@ def run(args: argparse.Namespace) -> None:
             ("version_minor_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
             ("version_minor_delta_deg", (num_frames,), (frame_chunk,), "f4"),
             ("version_minor_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            # Centroid-based angles (paper-comparable)
+            ("left_centroid_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("left_centroid_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("left_centroid_delta_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("left_centroid_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("right_centroid_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("right_centroid_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("right_centroid_delta_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("right_centroid_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_centroid_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_centroid_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_centroid_delta_deg", (num_frames,), (frame_chunk,), "f4"),
+            ("vergence_centroid_delta_deg_smoothed", (num_frames,), (frame_chunk,), "f4"),
         ],
     )
     if num_frames > 0:
@@ -969,6 +1098,19 @@ def run(args: argparse.Namespace) -> None:
         frame_group["version_minor_deg_smoothed"][:] = frame_version_minor_smoothed
         frame_group["version_minor_delta_deg"][:] = frame_version_minor_delta
         frame_group["version_minor_delta_deg_smoothed"][:] = frame_version_minor_delta_smoothed
+        # Centroid-based angles
+        frame_group["left_centroid_deg"][:] = frame_left_centroid
+        frame_group["left_centroid_deg_smoothed"][:] = frame_left_centroid_smoothed
+        frame_group["left_centroid_delta_deg"][:] = frame_left_centroid_delta
+        frame_group["left_centroid_delta_deg_smoothed"][:] = frame_left_centroid_delta_smoothed
+        frame_group["right_centroid_deg"][:] = frame_right_centroid
+        frame_group["right_centroid_deg_smoothed"][:] = frame_right_centroid_smoothed
+        frame_group["right_centroid_delta_deg"][:] = frame_right_centroid_delta
+        frame_group["right_centroid_delta_deg_smoothed"][:] = frame_right_centroid_delta_smoothed
+        frame_group["vergence_centroid_deg"][:] = frame_vergence_centroid
+        frame_group["vergence_centroid_deg_smoothed"][:] = frame_vergence_centroid_smoothed
+        frame_group["vergence_centroid_delta_deg"][:] = frame_vergence_centroid_delta
+        frame_group["vergence_centroid_delta_deg_smoothed"][:] = frame_vergence_centroid_delta_smoothed
 
     qa_group = run_group.require_group("qa")
     qa_roi = qa_group.require_group("roi")
@@ -1049,6 +1191,10 @@ def run(args: argparse.Namespace) -> None:
             "angle_smoothing_window_detections": int(detection_smooth_window) if detection_smooth_window else None,
             "angle_smoothing_window_frames": int(frame_smooth_window) if frame_smooth_window else None,
             "angle_smoothing_window_requested": int(smoothing_window_param) if smoothing_window_param else None,
+            # Centroid-based angles (paper-comparable)
+            "centroid_angles": True,
+            "centroid_angle_definition": "atan2(rotated_eye_vector_y, rotated_eye_vector_x) in fish frame",
+            "centroid_vergence_definition": "abs(left_centroid_deg) + abs(right_centroid_deg)",
         }
     )
 
@@ -1137,6 +1283,31 @@ def run(args: argparse.Namespace) -> None:
             "frame_version_minor_delta_deg_smoothed": True,
             "frame_version_minor_deg": True,
             "frame_version_minor_deg_smoothed": True,
+            # Centroid-based angles (paper-comparable)
+            "left_centroid_deg": True,
+            "right_centroid_deg": True,
+            "vergence_centroid_deg": True,
+            "left_centroid_deg_smoothed": True,
+            "right_centroid_deg_smoothed": True,
+            "vergence_centroid_deg_smoothed": True,
+            "left_centroid_delta_deg": True,
+            "right_centroid_delta_deg": True,
+            "vergence_centroid_delta_deg": True,
+            "left_centroid_delta_deg_smoothed": True,
+            "right_centroid_delta_deg_smoothed": True,
+            "vergence_centroid_delta_deg_smoothed": True,
+            "frame_left_centroid_deg": True,
+            "frame_right_centroid_deg": True,
+            "frame_vergence_centroid_deg": True,
+            "frame_left_centroid_deg_smoothed": True,
+            "frame_right_centroid_deg_smoothed": True,
+            "frame_vergence_centroid_deg_smoothed": True,
+            "frame_left_centroid_delta_deg": True,
+            "frame_right_centroid_delta_deg": True,
+            "frame_vergence_centroid_delta_deg": True,
+            "frame_left_centroid_delta_deg_smoothed": True,
+            "frame_right_centroid_delta_deg_smoothed": True,
+            "frame_vergence_centroid_delta_deg_smoothed": True,
         },
         "valid_reason_counts": _count_reason_bits(reason_codes),
         "frame_reason_counts": _count_reason_bits(frame_reason) if num_frames else {},

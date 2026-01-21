@@ -10,8 +10,10 @@ import zarr
 import argparse
 import json
 import os
+import re
 import numpy as np
 from datetime import datetime
+from typing import Any, Dict, Optional
 from rich.console import Console
 from rich.table import Table
 from rich.tree import Tree
@@ -91,6 +93,127 @@ def detect_pipeline_components(root):
                         components['multi_scale'] = True
     
     return components
+
+
+def _parse_json_attr(value: Any) -> Optional[Dict[str, Any]]:
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", "ignore")
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+    if isinstance(value, dict):
+        return value
+    return None
+
+
+def _short_hash(value: Any) -> str:
+    if not value:
+        return "-"
+    text = str(value)
+    return f"{text[:8]}…" if len(text) > 10 else text
+
+
+def _format_list(value: Any) -> str:
+    if not value:
+        return "-"
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value) if value else "-"
+    return str(value)
+
+
+def _infer_camera_id(ipc_source_name: Any) -> Optional[str]:
+    if not ipc_source_name:
+        return None
+    text = str(ipc_source_name)
+    match = re.search(r"cam_(\d+)", text)
+    if match:
+        return match.group(1)
+    digits = re.findall(r"\d+", text)
+    return digits[-1] if digits else None
+
+
+def print_provenance_summary(console: Console, root) -> None:
+    analysis = root.get("analysis_metadata")
+    if analysis is None:
+        console.print("[yellow]No analysis_metadata group found.[/yellow]")
+        return
+
+    session_uuid = analysis.attrs.get("session_uuid")
+    session_context = _parse_json_attr(analysis.attrs.get("session_context"))
+    subject_metadata = _parse_json_attr(analysis.attrs.get("subject_metadata"))
+    zebrobot_snapshot = _parse_json_attr(analysis.attrs.get("zebrobot_snapshot"))
+    camera_metadata = _parse_json_attr(analysis.attrs.get("camera_metadata"))
+    camera_config_hash = analysis.attrs.get("camera_config_hash")
+
+    lines = []
+    lines.append(f"Session UUID: {session_uuid or '-'}")
+
+    if session_context:
+        rig_id = session_context.get("rig_id") or "-"
+        arena_id = session_context.get("arena_id") or "-"
+        camera_id = session_context.get("camera_id") or _infer_camera_id(session_context.get("ipc_source_name")) or "-"
+        canvas_name = session_context.get("canvas_name") or "-"
+        protocol_name = session_context.get("protocol_name_from_definition") or "-"
+        loaded_protocol = session_context.get("loaded_protocol_filepath") or "-"
+        lines.append(f"Context: rig={rig_id} arena={arena_id} camera={camera_id} canvas={canvas_name}")
+        lines.append(f"Protocol: {protocol_name} ({loaded_protocol})")
+    else:
+        lines.append("Context: - (analysis_metadata.session_context missing)")
+
+    if subject_metadata:
+        dish_id = subject_metadata.get("dish_id") or "-"
+        cross_id = subject_metadata.get("cross_id") or "-"
+        genotype = subject_metadata.get("genotype") or "-"
+        line_strain = subject_metadata.get("line_strain") or "-"
+        dof = subject_metadata.get("date_of_fertilization") or subject_metadata.get("dof") or "-"
+        fish_count = subject_metadata.get("fish_count")
+        fish_count_str = str(fish_count) if fish_count is not None else "-"
+        species = subject_metadata.get("species") or "-"
+        sex = subject_metadata.get("sex") or "-"
+        parents = _format_list(subject_metadata.get("parents"))
+        lines.append(f"Subject: dish={dish_id} cross={cross_id} genotype={genotype}")
+        lines.append(f"  strain={line_strain} dof={dof} fish_count={fish_count_str}")
+        lines.append(f"  species={species} sex={sex} parents={parents}")
+    else:
+        lines.append("Subject: - (analysis_metadata.subject_metadata missing)")
+
+    if zebrobot_snapshot:
+        status = zebrobot_snapshot.get("status") or "-"
+        missing = _format_list(zebrobot_snapshot.get("missing"))
+        dish_id = zebrobot_snapshot.get("dish_id") or "-"
+        lines.append(f"Zebrobot snapshot: status={status} missing={missing} dish_id={dish_id}")
+    else:
+        lines.append("Zebrobot snapshot: -")
+
+    if camera_metadata:
+        vendor = camera_metadata.get("device_vendor_name") or "-"
+        model = camera_metadata.get("device_model_name") or "-"
+        serial = camera_metadata.get("device_serial_number") or "-"
+        width = camera_metadata.get("width") or "-"
+        height = camera_metadata.get("height") or "-"
+        fps = camera_metadata.get("frame_rate") or "-"
+        pixel_format = camera_metadata.get("pixel_format") or "-"
+        lens = camera_metadata.get("lens_name") or "-"
+        lines.append(
+            f"Camera: {vendor} {model} ({serial}) {width}x{height} {fps}fps {pixel_format}"
+        )
+        if lens != "-":
+            lines.append(f"  lens={lens}")
+        lines.append(f"  config_hash={_short_hash(camera_config_hash)}")
+    else:
+        lines.append("Camera: - (analysis_metadata.camera_metadata missing)")
+        if camera_config_hash:
+            lines.append(f"  config_hash={_short_hash(camera_config_hash)}")
+
+    panel = Panel("\n".join(lines), title="🧾 Provenance Summary", border_style="cyan")
+    console.print(panel)
 
 
 def get_frame_counts_from_group(group, expected_length: int | None = None):
@@ -509,6 +632,7 @@ def inspect_zarr_archive(zarr_path: str, tree_depth: int = 3):
     
     # Summary panel and environment info
     print_summary_panel(console, root, components, zarr_path)
+    print_provenance_summary(console, root)
     print_environment_info(console, root)
     
     # Archive structure tree

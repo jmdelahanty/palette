@@ -25,6 +25,12 @@ def parse_args():
         help='Path to save the output TensorRT engine file.'
     )
     parser.add_argument(
+        '--trtexec',
+        type=str,
+        default=None,
+        help='Optional path to trtexec (overrides the built-in default).'
+    )
+    parser.add_argument(
         '--precision',
         type=str,
         default='fp16',
@@ -54,7 +60,7 @@ def main(args):
 
     onnx_path = Path(args.onnx)
     engine_path = Path(args.engine)
-    trtexec_path = Path(TRTEXEC_PATH)
+    trtexec_path = Path(args.trtexec) if args.trtexec else Path(TRTEXEC_PATH)
 
     # Validate paths
     if not onnx_path.exists():
