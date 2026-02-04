@@ -54,6 +54,8 @@ def get_detection_parameters(
     detect_params.setdefault('max_area', 500)
     detect_params.setdefault('max_fish', 20)
     
+    param_source = 'config_default'
+
     # Check for tuned parameters in zarr
     if 'analysis_metadata' in root:
         analysis_meta = root['analysis_metadata']
@@ -66,6 +68,7 @@ def get_detection_parameters(
             if tuned_params:
                 # Merge tuned parameters over config defaults
                 detect_params.update(tuned_params)
+                param_source = 'zarr_tuned'
                 
                 if console:
                     tuned_date = tuning_data.get('tuned_timestamp', 'unknown')[:10]
@@ -74,8 +77,6 @@ def get_detection_parameters(
                                 f"Min area: {detect_params['min_area']}, "
                                 f"Max area: {detect_params['max_area']}, "
                                 f"Max fish: {detect_params['max_fish']}")
-                
-                return detect_params, 'zarr_tuned'
         
         # Check for mask tuning
         if 'dish_mask' in analysis_meta.attrs:
@@ -103,18 +104,18 @@ def get_detection_parameters(
                 detect_params['dish_mask'].update({
                     'shape': 'circle',
                     'center': circle['center'],
-                    'radius': circle['radius']
+                    'radius': circle['radius'],
                 })
                 if console:
                     console.print(f"[green]✓ Using circular dish mask from zarr[/green]")
     
     # No tuned parameters found - using config
-    if console:
+    if param_source == 'config_default' and console:
         console.print(f"[yellow]⚠️  Using default config parameters - consider tuning first[/yellow]")
         console.print(f"  Run: python -m fisheye --tune mask")
         console.print(f"  Run: python -m fisheye --tune detect")
     
-    return detect_params, 'config_default'
+    return detect_params, param_source
 
 
 def create_dish_mask(mask_params: Dict, img_shape: Tuple[int, int], console: Optional[Console] = None) -> Optional[np.ndarray]:
@@ -231,7 +232,8 @@ def detect_fish(
     config_path: Optional[str] = "pipeline_config.yaml",
     scheduler: str = "processes",
     num_workers: Optional[int] = None,
-    console: Optional[Console] = None
+    console: Optional[Console] = None,
+    show_progress: bool = True,
 ) -> Dict[str, Any]:
     """Detect fish in video frames using blob detection."""
     if console is None:
@@ -292,7 +294,10 @@ def detect_fish(
     
     delayed_tasks = [detect_chunk_delayed(zarr_path, s, detect_params, mask, latest_bg_run) for s in chunk_slices]
     
-    with ProgressBar():
+    if show_progress:
+        with ProgressBar():
+            results = dask.compute(*delayed_tasks)
+    else:
         results = dask.compute(*delayed_tasks)
     
     console.print("Writing detection results to Zarr...")
@@ -537,6 +542,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Optional worker count hint for multi-processing schedulers.",
     )
+    parser.add_argument(
+        "--no-dask-progress",
+        action="store_true",
+        help="Disable the Dask progress bar (useful when embedding in other progress displays).",
+    )
     return parser
 
 
@@ -552,6 +562,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             scheduler=args.scheduler,
             num_workers=args.num_workers,
             console=console,
+            show_progress=not args.no_dask_progress,
         )
     except Exception as exc:
         console.print(f"[bold red]Detection failed:[/bold red] {exc}")

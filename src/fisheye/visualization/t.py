@@ -358,9 +358,202 @@
 
 # zarr.open_consolidated(path, mode="r")
 # print("✅ consolidated metadata now present and readable")
-import json
-from pathlib import Path
+# import json
+# from pathlib import Path
 
-root = Path("/nvme1/2026_01_13_22_41_02/Cam2010096.zarr/")
-meta = json.loads((root / "zarr.json").read_text())
-print(type(meta.get("consolidated_metadata")), meta.get("consolidated_metadata") is None)
+# root = Path("/nvme1/2026_01_13_22_41_02/Cam2010096.zarr/")
+# meta = json.loads((root / "zarr.json").read_text())
+# print(type(meta.get("consolidated_metadata")), meta.get("consolidated_metadata") is None)
+# import zarr
+# root = zarr.open_group("/nvme1/2026_01_13_22_41_02/test.zarr", mode="r")
+# print(root["raw_video"].attrs.get("chunk_size"))
+# print(root["raw_video"].attrs.get("io_batch_size"))
+# print(root["raw_video"].attrs.get("batch_size"))
+# print(root["raw_video"].attrs.get("chunks_per_shard"))
+# print(root["raw_video"].attrs.get("import_timestamp"))
+
+# import zarr, numpy as np
+# from pathlib import Path
+
+# zarr_path = Path("/nvme1/recordings/2026-01-28T22-22-57Z_arena_1_Feeding/zarr/2026-01-28T22-22-57Z_arena_1_Feeding.zarr")
+# root = zarr.open_group(str(zarr_path), mode="r")
+
+# refined_parent = root.get("refined_detect_runs") or root.get("refined_runs")
+# print("refined_parent:", bool(refined_parent))
+# latest = refined_parent.attrs.get("latest") if refined_parent else None
+# print("latest refined:", latest)
+# ref = refined_parent[latest]
+
+# print("operations:", ref.attrs.get("operations"))
+# params = ref.attrs.get("parameters") or {}
+# print("sampled_import:", params.get("sampled_import"))
+# print("sampled_import_meta:", params.get("sampled_import_meta"))
+# print("manual_review_latest:", ref.attrs.get("manual_review_latest"))
+# print("coverage_frames_total:", ref.attrs.get("coverage_frames_total"))
+# print("coverage_frame_source:", ref.attrs.get("coverage_frame_source"))
+# print("coverage_frames_full:", ref.attrs.get("coverage_frames_full"))
+
+# raw = root.get("raw_video")
+# if raw is None:
+#     print("raw_video: MISSING")
+#     original_idx = None
+# else:
+#     original_idx = raw.get("original_frame_indices")
+#     print("images_ds:", raw["images_ds"].shape if "images_ds" in raw else None)
+#     print("images_full:", raw["images_full"].shape if "images_full" in raw else None)
+#     print("original_frame_indices:", original_idx.shape if original_idx is not None else None)
+#     print("raw import_mode:", raw.attrs.get("import_mode"))
+#     print("raw import_purpose:", raw.attrs.get("import_purpose"))
+#     print("raw frame_step:", raw.attrs.get("frame_step"))
+
+# base = ref.get("interpolated") or ref.get("filtered")
+# print("base group:", "interpolated" if ref.get("interpolated") is not None else "filtered" if ref.get("filtered") is not None else None)
+# fc = base.get("frame_counts") or base.get("n_detections")
+# print("frame_counts shape:", fc.shape, "chunks:", fc.chunks)
+
+# n = fc.shape[0]
+# chunk = fc.chunks[0] if fc.chunks else 10000
+# nz = 0
+# for start in range(0, n, chunk):
+#     arr = fc[start:start+chunk]
+#     nz += int(np.sum(arr > 0))
+# print("coverage over frame_counts array:", nz, "/", n, "=", (nz / n * 100.0 if n else None))
+
+# if original_idx is not None:
+#     idx = original_idx[:].astype(np.int64, copy=False)
+#     idx = idx[(idx >= 0) & (idx < n)]
+#     if idx.size:
+#         idx = np.unique(idx)
+#         sampled_nz = int(np.sum(fc[idx] > 0))
+#         print("coverage over original_frame_indices:", sampled_nz, "/", idx.size, "=", sampled_nz / idx.size * 100.0)
+# import zarr, numpy as np
+# from pathlib import Path
+
+# zarr_path = Path("/nvme1/recordings/2026-01-28T22-22-57Z_arena_1_Feeding/zarr/2026-01-28T22-22-57Z_arena_1_Feeding.zarr")
+# root = zarr.open_group(str(zarr_path), mode="r")
+# refined_parent = root.get("refined_detect_runs") or root.get("refined_runs")
+# run = refined_parent.attrs.get("latest")
+# ref = refined_parent[run]
+
+# print("run:", run)
+# print("group keys:", list(ref.group_keys()) if hasattr(ref, "group_keys") else list(ref.keys()))
+# print("manual_review_latest:", ref.attrs.get("manual_review_latest"))
+
+# def cov(name):
+#     grp = ref.get(name)
+#     if grp is None:
+#         print(f"{name}: MISSING")
+#         return
+#     fc = grp.get("frame_counts") or grp.get("n_detections")
+#     if fc is None:
+#         print(f"{name}: no frame_counts")
+#         return
+#     counts = fc[:]
+#     print(f"{name}: {(counts>0).sum()}/{len(counts)} = {(counts>0).sum()/len(counts)*100:.1f}%")
+
+# cov("interpolated")
+# cov("manual")
+
+# import zarr
+# from pathlib import Path
+
+# zarr_path = Path("/nvme1/recordings/2026-01-28T22-22-57Z_arena_1_Feeding/zarr/2026-01-28T22-22-57Z_arena_1_Feeding.zarr")
+# root = zarr.open_group(str(zarr_path), mode="a")
+# refined_parent = root.get("refined_detect_runs") or root.get("refined_runs")
+# run = refined_parent.attrs.get("latest")
+# ref = refined_parent[run]
+
+# if "manual" in ref:
+#     ref.attrs["manual_review_latest"] = "manual"
+#     print("set manual_review_latest=manual")
+# else:
+#     print("manual group missing")
+
+# import zarr, numpy as np
+# path="/nvme1/recordings/2026-01-28T19-36-18Z_arena_2_Feeding/zarr/2026-01-28T19-36-18Z_arena_2_Feeding.zarr"
+# root=zarr.open(path, mode="r")
+# run=root["refined_detect_runs"].attrs["latest"]
+# manual=root[f"refined_detect_runs/{run}/manual"]
+# frame=40
+# mf=(manual["frame_indices"][:]==frame).sum()
+# print("manual detections @ frame 40:", mf)
+# det_run=root["detect_runs"].attrs["latest"]
+# det=root[f"detect_runs/{det_run}"]
+# df=(det["frame_indices"][:]==frame).sum()
+# print("original detections @ frame 40:", df)
+# import zarr, numpy as np
+
+# z = zarr.open("/nvme1/recordings/2026-01-28T22-15-03Z_arena_1_DefaultScreen/zarr/2026-01-28T22-15-03Z_arena_1_DefaultScreen.zarr", mode="r")
+# crop_run = z["crop_runs"].attrs["latest"]
+# cg = z[f"crop_runs/{crop_run}"]
+
+# idx = 93
+# roi = cg["roi_images"][idx]
+# frame_idx = int(cg["frame_indices"][idx])
+# x0, y0 = map(int, cg["roi_coordinates_full"][idx])
+# h, w = roi.shape[:2]
+
+# frame = z["raw_video/images_full"][frame_idx]
+
+# # Handle edge padding (crop code pads with zeros if ROI goes out of bounds)
+# frame_crop = np.zeros_like(roi)
+# y1, y2 = max(0, y0), min(frame.shape[0], y0 + h)
+# x1, x2 = max(0, x0), min(frame.shape[1], x0 + w)
+# py1, py2 = y1 - y0, y2 - y0
+# px1, px2 = x1 - x0, x2 - x0
+# frame_crop[py1:py2, px1:px2] = frame[y1:y2, x1:x2]
+
+# diff = np.abs(frame_crop.astype("i2") - roi.astype("i2"))
+# print("roi dtype:", roi.dtype, "frame dtype:", frame.dtype)
+# print("max abs diff:", diff.max())
+# print("mean abs diff:", diff.mean())
+
+# import zarr, numpy as np
+
+# z = zarr.open("/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen.zarr", mode="r")
+# crop_run = z["crop_runs"].attrs["latest"]
+# cg = z[f"crop_runs/{crop_run}"]
+
+# idx = 170
+# x1, y1 = map(int, cg["roi_coordinates_full"][idx])
+# h, w = cg["roi_images"].shape[1:]
+# H, W = z["raw_video/images_full"].shape[1:]
+
+# print("ROI top-left:", (x1, y1), "size:", (w, h))
+# print("Frame size:", (W, H))
+# print("Out of bounds?",
+#     x1 < 0 or y1 < 0 or (x1 + w) > W or (y1 + h) > H)
+
+# bg_runs = z.get("background_runs")
+# if bg_runs is not None:
+#     latest = bg_runs.attrs.get("latest")
+#     if latest and latest in bg_runs:
+#         bg_group = bg_runs[latest]
+#         print("background_full present:", "background_full" in bg_group)
+
+import zarr, numpy as np
+
+z = zarr.open("/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen.zarr", mode="r")
+crop_run = z["crop_runs"].attrs["latest"]
+cg = z[f"crop_runs/{crop_run}"]
+
+frame = 170
+det = 0
+frame_counts = cg["frame_counts"][:]
+roi_idx = int(frame_counts[:frame].sum() + det)
+
+roi = cg["roi_images"][roi_idx]
+x1, y1 = map(int, cg["roi_coordinates_full"][roi_idx])
+h, w = roi.shape
+H, W = z["raw_video/images_full"].shape[1:]
+
+print("ROI idx:", roi_idx)
+print("ROI top-left:", (x1, y1), "size:", (w, h))
+print("Frame size:", (W, H))
+print("Out of bounds?", x1 < 0 or y1 < 0 or (x1+w) > W or (y1+h) > H)
+
+bg = z["background_runs"][z["background_runs"].attrs["latest"]]["background_full"][:]
+bg_roi = bg[y1:y1+h, x1:x1+w]
+print("background_full shape:", bg.shape)
+print("background_roi shape:", bg_roi.shape)
+print("roi shape:", roi.shape)

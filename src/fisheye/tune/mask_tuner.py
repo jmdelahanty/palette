@@ -58,7 +58,7 @@ def update_frame(val):
     global frame_index
     frame_index = val
 
-def save_mask_to_zarr(zarr_path, mask_definition, array_name, frame_index, params=None):
+def save_mask_to_zarr(zarr_path, mask_definition, array_name, frame_index, params=None, image_shape=None):
     """Save mask parameters to Zarr metadata ONLY."""
     try:
         zarr_root = open_zarr_root(zarr_path, mode='r+')
@@ -84,13 +84,31 @@ def save_mask_to_zarr(zarr_path, mask_definition, array_name, frame_index, param
         payload['tuned_on_array'] = array_name
         payload['tuned_on_frame'] = int(frame_index)
 
+        metrics = None
+        if image_shape is not None:
+            height, width = int(image_shape[0]), int(image_shape[1])
+            metrics = {
+                'image_shape': [height, width],
+            }
+
         if shape == 'circle':
             circle = mask_definition['detected_circle']
+            center_x, center_y, radius = int(circle['center'][0]), int(circle['center'][1]), int(circle['radius'])
             payload['method'] = mask_definition.get('method', 'hough_circle')
             payload['detected_circle'] = {
-                'center': [int(circle['center'][0]), int(circle['center'][1])],
-                'radius': int(circle['radius'])
+                'center': [center_x, center_y],
+                'radius': radius
             }
+            if metrics is not None:
+                area_px = 3.141592653589793 * (radius ** 2)
+                metrics.update({
+                    'center_px': [center_x, center_y],
+                    'center_norm': [center_x / width, center_y / height],
+                    'radius_px': radius,
+                    'radius_norm': radius / min(width, height),
+                    'area_px': area_px,
+                    'area_fraction': area_px / float(width * height),
+                })
             if params:
                 payload['hough_params'] = {
                     'param1': int(params.get('param1', 0)),
@@ -100,11 +118,26 @@ def save_mask_to_zarr(zarr_path, mask_definition, array_name, frame_index, param
         elif shape == 'rectangle':
             payload['method'] = mask_definition.get('method', 'manual_rectangle')
             roi = mask_definition['rectangle']['roi']
+            roi = [int(roi[0]), int(roi[1]), int(roi[2]), int(roi[3])]
             payload['rectangle'] = {
-                'roi': [int(roi[0]), int(roi[1]), int(roi[2]), int(roi[3])]
+                'roi': roi
             }
+            if metrics is not None:
+                x, y, w, h = roi
+                center_x = x + (w / 2.0)
+                center_y = y + (h / 2.0)
+                area_px = float(w * h)
+                metrics.update({
+                    'center_px': [center_x, center_y],
+                    'center_norm': [center_x / width, center_y / height],
+                    'area_px': area_px,
+                    'area_fraction': area_px / float(width * height),
+                })
         else:
             raise ValueError(f"Unsupported mask shape '{shape}'")
+
+        if metrics is not None:
+            payload['metrics'] = metrics
         
         metadata['dish_mask'] = payload
         
@@ -364,7 +397,8 @@ def main(zarr_path, use_full_res=False, frame_idx=None, config_path=None, mode="
                         mask_payload,
                         array_name,
                         frame_index,
-                        params=params
+                        params=params,
+                        image_shape=current_frame.shape[:2],
                     )
                     if success:
                         print("Press 'q' to quit or continue tuning")
@@ -382,7 +416,8 @@ def main(zarr_path, use_full_res=False, frame_idx=None, config_path=None, mode="
                         zarr_path,
                         mask_payload,
                         array_name,
-                        frame_index
+                        frame_index,
+                        image_shape=current_frame.shape[:2],
                     )
                     if success:
                         print("Press 'q' to quit or continue tuning")

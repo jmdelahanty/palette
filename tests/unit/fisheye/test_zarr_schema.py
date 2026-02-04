@@ -1,23 +1,87 @@
 """Unit tests for Zarr schema."""
 
 import pytest
+import asyncio
+import threading
 import tempfile
 import shutil
 from pathlib import Path
 import sys
 import zarr
 import numpy as np
+import zarr.core.sync as zarr_sync
+import zarr.api.synchronous as zarr_sync_api
+from zarr.storage import MemoryStore
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.shared.zarr.schema import (
     create_palette_zarr,
     get_run_group,
+    ZARR_SCHEMA,
     ZARR_SCHEMA_VERSION
 )
 
 class TestZarrSchema:
     """Test Zarr schema creation and structure."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_zarr_sync(self, monkeypatch):
+        """Patch zarr's sync helper to avoid hangs in this environment."""
+
+        def _sync_via_asyncio_run(coro, loop=None, timeout=None):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(coro)
+
+            result = {}
+            error = {}
+
+            def _runner():
+                try:
+                    result["value"] = asyncio.run(coro)
+                except Exception as exc:  # pragma: no cover - defensive
+                    error["exc"] = exc
+
+            thread = threading.Thread(target=_runner, daemon=True)
+            thread.start()
+            thread.join()
+
+            if "exc" in error:
+                raise error["exc"]
+            return result.get("value")
+
+        monkeypatch.setattr(zarr_sync, "sync", _sync_via_asyncio_run)
+        monkeypatch.setattr(zarr_sync_api, "sync", _sync_via_asyncio_run)
+        # Use an in-memory store to avoid LocalStore async deadlocks in this environment.
+        monkeypatch.setattr(
+            "fisheye.shared.zarr.schema.LocalStore",
+            lambda *_args, **_kwargs: MemoryStore(),
+        )
+        # Avoid slow or GPU-dependent environment introspection in tests.
+        monkeypatch.setattr(
+            "fisheye.shared.zarr.schema.get_environment_summary",
+            lambda: {
+                "environment_type": "test",
+                "environment_name": "pytest",
+                "python_version": "3.x",
+                "total_packages": 0,
+                "key_packages": {},
+            },
+        )
+        monkeypatch.setattr(
+            "fisheye.shared.zarr.schema.get_platform_info",
+            lambda **_kwargs: {"hostname": "test-host", "system": "test", "cpu_cores": 1},
+        )
+        monkeypatch.setattr(
+            "fisheye.shared.zarr.schema.get_git_info",
+            lambda: {"commit_hash": "test", "short_hash": "test", "branch": "test", "is_dirty": False},
+        )
+        monkeypatch.setattr(
+            "fisheye.shared.zarr.schema.get_gpu_info",
+            lambda: {"devices": [{"name": "test-gpu"}]},
+        )
     
     @pytest.fixture
     def temp_zarr_path(self):
@@ -26,21 +90,21 @@ class TestZarrSchema:
         yield tmpdir
         shutil.rmtree(tmpdir)
     
-    def test_create_palette_zarr(self, temp_zarr_path):
+    def test_create_palette_zarr(self, temp_zarr_path, monkeypatch):
         """Test basic zarr creation."""
         video_metadata = {
             'fps': 30.0,
-            'width': 640,
-            'height': 480,
-            'total_frames': 100,
+            'width': 64,
+            'height': 48,
+            'total_frames': 10,
             'source_video': 'test.mp4'
         }
         
         config = {
             'import': {
-                'downsample_size': [240, 320],
-                'chunk_size': 10,
-                'batch_size': 5
+                'downsample_size': [24, 32],
+                'chunk_size': 4,
+                'batch_size': 2
             }
         }
         
@@ -53,18 +117,19 @@ class TestZarrSchema:
         # Check root attributes
         assert root.attrs['schema_version'] == ZARR_SCHEMA_VERSION
         assert root.attrs['fps'] == 30.0
-        assert root.attrs['width'] == 640
+        assert root.attrs['width'] == 64
+        assert root.attrs['height'] == 48
+        assert root.attrs['total_frames'] == 10
         
         # Check group structure
         assert 'raw_video' in root
-        assert 'processing' in root
-        assert 'analysis' in root
-        assert 'metadata' in root
-        
-        # Check subgroups
-        assert 'background' in root['processing']
-        assert 'detection' in root['processing']
-        assert 'tracking' in root['processing']
+        assert 'pipeline_params' in root
+        assert 'background_runs' in root
+        assert 'detect_runs' in root
+        assert 'refined_detect_runs' in root
+        assert 'crop_runs' in root
+        assert 'keypoints_runs' in root
+        assert 'analysis_metadata' in root
         
         # Check arrays
         assert 'images_full' in root['raw_video']
@@ -73,10 +138,10 @@ class TestZarrSchema:
         
         # Check array shapes
         images_full = root['raw_video']['images_full']
-        assert images_full.shape == (100, 480, 640)
+        assert images_full.shape == (10, 48, 64)
         
         images_ds = root['raw_video']['images_ds']
-        assert images_ds.shape == (100, 240, 320)
+        assert images_ds.shape == (10, 24, 32)
     
     def test_get_run_group(self, temp_zarr_path):
         """Test run group creation."""
@@ -86,9 +151,49 @@ class TestZarrSchema:
         root = create_palette_zarr(temp_zarr_path, video_metadata, config)
         
         # Create a new run group
-        run_group = get_run_group(root, 'test_run_001')
-        assert 'test_run_001' in root['processing']
-        
-        # Getting same group should return existing
-        run_group2 = get_run_group(root, 'test_run_001')
-        assert run_group == run_group2
+        run_group, run_name = get_run_group(root, 'detect')
+        assert 'detect_runs' in root
+        assert run_name in root['detect_runs']
+        assert root['detect_runs'].attrs['latest'] == run_name
+        assert run_group == root['detect_runs'][run_name]
+
+        # Getting latest run should return existing when create_new=False
+        run_group2, run_name2 = get_run_group(root, 'detect', create_new=False)
+        assert run_name2 == run_name
+        assert run_group2 == run_group
+
+    def test_schema_refined_detect_run_attributes(self):
+        """Test refined detect run attribute schema keys."""
+        attrs = ZARR_SCHEMA["groups"]["refined_detect_runs"]["run_attributes"]
+        expected = {
+            "source_detect_run",
+            "source_quality_run",
+            "refinement_timestamp",
+            "operations",
+            "parameters",
+            "coverage_comparison",
+            "coverage_frames_total",
+            "coverage_frame_source",
+            "coverage_frames_full",
+            "manual_review_latest",
+            "detect_review_status",
+            "retune_params",
+        }
+        assert expected.issubset(set(attrs.keys()))
+
+        parent_attrs = ZARR_SCHEMA["groups"]["refined_detect_runs"]["parent_attributes"]
+        assert "detect_review_status_latest" in parent_attrs
+
+    def test_schema_crop_run_attributes(self):
+        """Test crop run attribute schema keys."""
+        attrs = ZARR_SCHEMA["groups"]["crop_runs"]["run_attributes"]
+        expected = {
+            "detection_source_type",
+            "detection_source_path",
+            "detection_preferred_policy",
+            "detect_review_status",
+            "detect_review_status_ref",
+            "source_detect_run",
+            "source_refined_run",
+        }
+        assert expected.issubset(set(attrs.keys()))

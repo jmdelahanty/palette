@@ -16,6 +16,11 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Any
 
+try:
+    from rich.console import Console
+except Exception:  # pragma: no cover - rich is optional
+    Console = None  # type: ignore
+
 
 # Custom YAML constructor for OpenCV matrices
 def opencv_matrix_constructor(loader, node):
@@ -30,7 +35,7 @@ yaml.SafeLoader.add_constructor('tag:yaml.org,2002:opencv-matrix', opencv_matrix
 class CalibrationManager:
     """Manage calibration data for fish tracking experiments."""
     
-    def __init__(self, zarr_path: str, verbose: bool = True):
+    def __init__(self, zarr_path: str, verbose: bool = True, console: Optional["Console"] = None):
         """
         Initialize calibration manager.
         
@@ -41,6 +46,15 @@ class CalibrationManager:
         self.zarr_path = Path(zarr_path)
         self.root = zarr.open(str(self.zarr_path), mode='r+')
         self.verbose = verbose
+        self.console = console
+
+    def _log(self, message: str) -> None:
+        if not self.verbose:
+            return
+        if self.console is not None:
+            self.console.print(message)
+        else:
+            print(message)
     
     def find_default_h5(self) -> Optional[Path]:
         """
@@ -87,8 +101,7 @@ class CalibrationManager:
         Returns:
             Dictionary with calibration data
         """
-        if self.verbose:
-            print(f"\nExtracting calibration from: {Path(h5_path).name}")
+        self._log(f"\n[cyan]Extracting calibration from:[/cyan] {Path(h5_path).name}")
         
         calibration_data = {}
         
@@ -102,8 +115,7 @@ class CalibrationManager:
                     arena_json = calib_group['arena_config_json'][()].decode('utf-8')
                     arena_config = json.loads(arena_json)
                     
-                    if self.verbose:
-                        print(f"  Found arena config")
+                    self._log("  [green]✓[/green] Found arena config")
                     
                     # Extract camera calibration data
                     if 'camera_calibrations' in arena_config:
@@ -114,8 +126,7 @@ class CalibrationManager:
                                 calibration_data['pixel_to_mm'] = 1.0 / pixels_per_mm
                                 calibration_data['pixels_per_mm'] = pixels_per_mm
                                 
-                                if self.verbose:
-                                    print(f"  Found pixels_per_mm_camera: {pixels_per_mm:.2f}")
+                                self._log(f"  [green]✓[/green] Found pixels_per_mm_camera: {pixels_per_mm:.2f}")
                             
                             # Extract other camera info
                             calibration_data['camera_info'] = {
@@ -194,8 +205,7 @@ class CalibrationManager:
                                             calibration_data['primary_camera_id'] = item_name
                                             calibration_data['homography_matrix'] = matrix.tolist()
                                             calibration_data['homography_metadata'] = camera_entry['homography_metadata']
-                                        if self.verbose:
-                                            print("  ✓ Parsed homography matrix")
+                                        self._log("  [green]✓[/green] Parsed homography matrix")
                                     else:
                                         if self.verbose:
                                             print("  Homography YAML missing matrix data")
@@ -243,8 +253,7 @@ class CalibrationManager:
                 'session_start': root_attrs.get('session_start_iso8601_utc', 'unknown')
             }
             
-            if self.verbose:
-                print(f"  Found rig_id: {calibration_data['rig_info']['rig_id']}")
+            self._log(f"  [green]✓[/green] Found rig_id: {calibration_data['rig_info']['rig_id']}")
             
             # Extract protocol information
             if '/protocol_snapshot' in hf:
@@ -275,10 +284,13 @@ class CalibrationManager:
                     time_diffs = np.diff(timestamps)
                     avg_time_diff_ns = np.mean(time_diffs)
                     avg_fps = 1e9 / avg_time_diff_ns
+                    calibration_data['measured_stimulus_fps'] = float(avg_fps)
+                    # Backwards-compatibility alias (legacy name).
                     calibration_data['measured_fps'] = float(avg_fps)
                     
-                    if self.verbose:
-                        print(f"  Calculated FPS from timestamps: {avg_fps:.1f}")
+                    self._log(
+                        f"  [yellow]Calculated FPS for stimulus video from timestamps:[/yellow] {avg_fps:.1f}"
+                    )
         
         return calibration_data
     
@@ -338,20 +350,18 @@ class CalibrationManager:
         """
         if 'calibration' in self.root:
             if not overwrite:
-                print("Calibration already exists. Use --overwrite to replace.")
+                self._log("Calibration already exists. Use --overwrite to replace.")
                 return False
             del self.root['calibration']
         
-        if self.verbose:
-            print("\nSaving calibration to zarr...")
+        self._log("\n[cyan]Saving calibration to zarr...[/cyan]")
         
         calib_group = self.root.create_group('calibration')
         
         # Save the most critical value
         if 'pixel_to_mm' in calibration_data:
             calib_group.attrs['pixel_to_mm'] = calibration_data['pixel_to_mm']
-            if self.verbose:
-                print(f"  ✓ pixel_to_mm: {calibration_data['pixel_to_mm']:.6f}")
+            self._log(f"  [green]✓[/green] pixel_to_mm: {calibration_data['pixel_to_mm']:.6f}")
 
         # Save pixels_per_mm for convenience
         if 'pixels_per_mm' in calibration_data:
@@ -375,15 +385,13 @@ class CalibrationManager:
             for key, value in calibration_data['rig_info'].items():
                 if value is not None:
                     rig_group.attrs[key] = value
-            if self.verbose:
-                print(f"  ✓ Rig info saved")
+            self._log("  [green]✓[/green] Rig info saved")
         
         # Save homography matrix if available
         if 'homography_matrix' in calibration_data:
             calib_group.create_array('homography_matrix', 
                                       data=np.array(calibration_data['homography_matrix']))
-            if self.verbose:
-                print(f"  ✓ Homography matrix saved")
+            self._log("  [green]✓[/green] Homography matrix saved")
 
         # Save primary camera identifier if available
         if 'primary_camera_id' in calibration_data:
@@ -393,8 +401,7 @@ class CalibrationManager:
         for offset_key in ('stimulus_offset_x', 'stimulus_offset_y'):
             if offset_key in calibration_data and calibration_data[offset_key] is not None:
                 calib_group.attrs[offset_key] = float(calibration_data[offset_key])
-                if self.verbose:
-                    print(f"  ✓ {offset_key}: {calibration_data[offset_key]}")
+                self._log(f"  [green]✓[/green] {offset_key}: {calibration_data[offset_key]}")
 
         # Save per-camera calibration details if provided
         cameras_data = calibration_data.get('cameras')
@@ -408,8 +415,7 @@ class CalibrationManager:
             for cam_id, cam_info in cameras_iterable.items():
                 cam_info = cam_info or {}
                 cam_group = cameras_group.create_group(str(cam_id))
-                if self.verbose:
-                    print(f"  ✓ Camera {cam_id} calibration saved")
+                self._log(f"  [green]✓[/green] Camera {cam_id} calibration saved")
 
                 # Persist per-camera attributes
                 for attr_key in ('stimulus_offset_x', 'stimulus_offset_y'):
@@ -428,11 +434,10 @@ class CalibrationManager:
                     )
 
         # Save other calibration data
-        for key in ['water_depth_mm', 'camera_model', 'measured_fps', 'camera_id']:
+        for key in ['water_depth_mm', 'camera_model', 'measured_stimulus_fps', 'measured_fps', 'camera_id']:
             if key in calibration_data:
                 calib_group.attrs[key] = calibration_data[key]
-                if self.verbose:
-                    print(f"  ✓ {key}: {calibration_data[key]}")
+                self._log(f"  [green]✓[/green] {key}: {calibration_data[key]}")
         
         # Save subject metadata if available
         if 'subject_metadata' in calibration_data:
@@ -446,8 +451,7 @@ class CalibrationManager:
             for key, value in calibration_data['protocol_info'].items():
                 protocol_group.attrs[key] = value
         
-        if self.verbose:
-            print(f"\n✓ Calibration saved to {self.zarr_path}/calibration")
+        self._log(f"\n[green]✓ Calibration saved to {self.zarr_path}/calibration[/green]")
         
         return True
     
@@ -587,7 +591,7 @@ class CalibrationManager:
             print(f"{matrix_str}")
 
         # Other measurements
-        for key in ['water_depth_mm', 'camera_model', 'measured_fps', 'camera_id']:
+        for key in ['water_depth_mm', 'camera_model', 'measured_stimulus_fps', 'measured_fps', 'camera_id']:
             if key in calibration:
                 print(f"\n{key}: {calibration[key]}")
 

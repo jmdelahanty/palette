@@ -2,6 +2,56 @@ Refined Runs Implementation Specification
 Overview
 The refined_detect_runs/ group stores filtered and interpolated detection data, providing clean datasets for downstream analysis while maintaining full traceability to the original detections.
 
+### Status semantics for refine-detect
+
+Refined runs always include `filtered/` and `interpolated/` groups to keep the
+schema stable for downstream tools. When refinement is a no-op, we rely on
+metadata + status labels rather than changing the on-disk layout:
+
+- **passthrough**: Training/sample imports where refinement is intentionally
+  disabled (`refine_mode=passthrough`); refined data mirrors the source.
+- **unchanged**: Standard refinement ran but removed 0 detections and added 0
+  interpolations; refined data is identical to the source.
+- **filtered/interpolated**: Refinement actually changed the data.
+
+The status reporter (`check_recording_steps.py`) uses these labels so “interpolated”
+does not imply synthetic data when refinement was a no-op.
+
+### Manual detection review
+
+If you need to correct missing detections by hand, use:
+
+```bash
+python -m fisheye.tune.detect_review path/to/session.zarr --variant interpolated
+```
+
+This writes a new group under `refined_detect_runs/<run>/manual` and records
+`manual_review_latest` on the refined run. The crop stage automatically
+prefers the manual subgroup when present (unless you explicitly request
+`--crop-source filtered`).
+
+When you approve a refined run in the review UI, it records
+`detect_review_status` on the refined run (and updates the parent-level
+`detect_review_status_latest`). Crop runs created with
+`--crop-source preferred` or `auto` consult this status to choose the
+resolved group, and store both a snapshot (`detect_review_status`) and a
+reference (`detect_review_status_ref`) on the crop run for provenance.
+
+Retunes are incremental when a manual subgroup already exists: the retune UI
+uses that subgroup as its base and records `retune_base_group` plus
+`retune_params` for auditability. The retuned subgroup also stores per-detection
+`retune_id` and `reason` labels, along with `detection_source_type` and
+`detection_source_path` metadata.
+
+Preferred crop resolution uses the refinement review status plus a policy
+chain (`manual → interpolated → filtered → raw`). The policy label is recorded
+in crop runs as `detection_preferred_policy`.
+
+For sampled training imports, coverage percentages are computed against the
+sampled frame universe and stored on the refined run as
+`coverage_frames_total`, `coverage_frame_source`, and (when applicable)
+`coverage_frames_full`.
+
 ### Verifying that crops reference refined detections
 
 After creating a refined detect run, confirm that subsequent crop runs pulled from the interpolated coordinates with:
@@ -54,11 +104,15 @@ Directory Structure
     @source_detect_run = "detect_2025-10-03_20-28-11"
     @source_quality_run = "detect_quality_2025-10-03_20-30-45"
     @refinement_timestamp = "2025-10-03T21:00:00Z"
-    @operations = ["filter_jumps", "interpolate_gaps"]
+    @operations = ["filter", "interpolate"]
     @parameters = {
         "max_gap": 20,
         "interpolation_method": "linear",
-        "filters_applied": ["remove_jumps"]
+        "filters_applied": ["remove_jumps"],
+        "parameter_source": "config",
+        "refine_mode": "standard",
+        "sampled_import": false,
+        "sampled_import_meta": {}
     }
     
     /filtered/

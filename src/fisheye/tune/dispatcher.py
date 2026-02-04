@@ -113,6 +113,14 @@ def run_tuner(
                 "Run: `python -m fisheye.tune.eye_mask_review <zarr> --retune|--manual|--audit`"
             )
             return 0
+        elif tuner_name in {'detect-review', 'detect_review', 'detection-review'}:
+            console.print(
+                "[yellow]Detection manual review uses a separate entrypoint.[/yellow]"
+            )
+            console.print(
+                "Run: `python -m fisheye.tune.detect_review <zarr> --variant interpolated`"
+            )
+            return 0
             
         else:
             console.print(f"[red]Error: Unknown tuner '{tuner_name}'[/red]")
@@ -152,6 +160,7 @@ def list_tuners(console: Optional[Console] = None):
         ("keypoints", "Tune anatomical keypoint detection (swim bladder and eyes)"),
         ("keypoint-review", "Review refined keypoints (retune/manual/audit)"),
         ("eye-mask-review", "Review refined eye masks (retune/manual/audit)"),
+        ("detect-review", "Manual review for refined detections (draw boxes on missing frames)"),
     ]
     
     for name, description in tuners:

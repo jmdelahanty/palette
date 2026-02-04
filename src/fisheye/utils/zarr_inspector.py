@@ -36,6 +36,70 @@ def format_timestamp(iso_str):
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except:
         return iso_str
+
+
+def _coverage_from_group(group):
+    frame_counts = group.get("frame_counts") or group.get("n_detections")
+    if frame_counts is None:
+        return None
+    try:
+        counts = frame_counts[:]
+    except Exception:
+        return None
+    if counts.shape[0] == 0:
+        return None
+    present = (counts > 0).sum()
+    return float(present) / float(counts.shape[0]) * 100.0
+
+
+def _refined_detect_mode(run):
+    attrs = run.attrs
+    parameters = attrs.get("parameters")
+    refine_mode = parameters.get("refine_mode") if isinstance(parameters, dict) else None
+    operations = attrs.get("operations")
+    if refine_mode == "passthrough" or operations == ["passthrough"]:
+        return "passthrough"
+    comparison = attrs.get("coverage_comparison")
+    if isinstance(comparison, dict):
+        filtered = comparison.get("filtered")
+        interpolated = comparison.get("interpolated")
+        if isinstance(filtered, dict) and isinstance(interpolated, dict):
+            removed = filtered.get("detections_removed")
+            added = interpolated.get("detections_added")
+            if removed == 0 and added == 0:
+                return "unchanged"
+    if "interpolated" in run:
+        return "interpolated"
+    if "filtered" in run:
+        return "filtered"
+    return "unknown"
+
+
+def _normalize_attr(value):
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "ignore")
+    return str(value)
+
+
+def _format_review_status(status: Optional[dict]) -> str:
+    if not isinstance(status, dict):
+        return "none"
+    parts = []
+    state = status.get("state")
+    method = status.get("method")
+    intended = status.get("intended_use")
+    resolved = status.get("resolved_group") or status.get("target_group")
+    if state:
+        parts.append(f"state={state}")
+    if method:
+        parts.append(f"method={method}")
+    if intended:
+        parts.append(f"use={intended}")
+    if resolved:
+        parts.append(f"group={resolved}")
+    return ", ".join(parts) if parts else "set"
     
 def show_parameter_provenance(zarr_path, console):
     """Show where parameters came from for each completed stage."""
@@ -55,6 +119,7 @@ def show_parameter_provenance(zarr_path, console):
         stage_groups = {
             'background': 'background_runs',
             'detect': 'detect_runs',
+            'refine_detect': REFINED_DETECT_GROUP,
             'crop': 'crop_runs',
             'keypoints': 'keypoints_runs',
             'refine_keypoints': REFINED_KEYPOINT_GROUP,
@@ -68,7 +133,10 @@ def show_parameter_provenance(zarr_path, console):
         
         for stage_name, group_name in stage_groups.items():
             if group_name not in root:
-                continue
+                if stage_name == "refine_detect" and LEGACY_REFINED_DETECT_GROUP in root:
+                    group_name = LEGACY_REFINED_DETECT_GROUP
+                else:
+                    continue
             
             stage_group = root[group_name]
             latest = stage_group.attrs.get('latest')
@@ -102,6 +170,10 @@ def show_parameter_provenance(zarr_path, console):
             
             # Default fallback
             if param_source == "Unknown":
+                if stage_name == "refine_detect" and isinstance(params, dict):
+                    source_label = params.get("parameter_source")
+                    if source_label:
+                        param_source = f"Run ({source_label})"
                 provenance = run.attrs.get('provenance')
                 if isinstance(provenance, dict):
                     param_info = provenance.get('parameters', {})
@@ -138,7 +210,7 @@ def show_quick_summary(zarr_path, console):
         root = zarr.open(zarr_path, mode='r')
         
         # Count completed stages
-        stages = ['import', 'background', 'detect', 'crop', 'keypoints', 'track', 'assign_ids']
+        stages = ['import', 'background', 'detect', 'refine_detect', 'crop', 'keypoints', 'track', 'assign_ids']
         completed = []
         
         if 'raw_video' in root and 'images_full' in root['raw_video']:
@@ -147,6 +219,10 @@ def show_quick_summary(zarr_path, console):
             completed.append('background')
         if 'detect_runs' in root and root['detect_runs'].attrs.get('latest'):
             completed.append('detect')
+        if (REFINED_DETECT_GROUP in root and root[REFINED_DETECT_GROUP].attrs.get('latest')) or (
+            LEGACY_REFINED_DETECT_GROUP in root and root[LEGACY_REFINED_DETECT_GROUP].attrs.get('latest')
+        ):
+            completed.append('refine_detect')
         if 'crop_runs' in root and root['crop_runs'].attrs.get('latest'):
             completed.append('crop')
         if 'keypoints_runs' in root and root['keypoints_runs'].attrs.get('latest'):
@@ -163,6 +239,31 @@ def show_quick_summary(zarr_path, console):
             if latest and latest in root['detect_runs']:
                 stats = root['detect_runs'][latest].attrs.get('summary_statistics', {})
                 coverage_str = f"{stats.get('percent_frames_with_detections', 0):.1f}%"
+
+        refined_coverage_str = "N/A"
+        refined_parent = root.get(REFINED_DETECT_GROUP) or root.get(LEGACY_REFINED_DETECT_GROUP)
+        if refined_parent is not None:
+            latest_refined = refined_parent.attrs.get("latest")
+            if latest_refined and latest_refined in refined_parent:
+                refined_run = refined_parent[latest_refined]
+                manual_label = _normalize_attr(refined_run.attrs.get("manual_review_latest"))
+                base_group = None
+                label = None
+                if manual_label and manual_label in refined_run:
+                    base_group = refined_run[manual_label]
+                    label = f"manual:{manual_label}"
+                elif "interpolated" in refined_run:
+                    base_group = refined_run["interpolated"]
+                    label = "interpolated"
+                elif "filtered" in refined_run:
+                    base_group = refined_run["filtered"]
+                    label = "filtered"
+                if base_group is not None:
+                    cov = _coverage_from_group(base_group)
+                    if cov is not None:
+                        refined_coverage_str = f"{cov:.1f}%"
+                        if label:
+                            refined_coverage_str = f"{refined_coverage_str} ({label})"
         
         # Get experiment setup
         exp_setup = root.attrs.get('experiment_setup', {})
@@ -176,6 +277,7 @@ def show_quick_summary(zarr_path, console):
         summary_panel = Panel(
             f"[cyan]Stages:[/cyan] {len(completed)}/{len(stages)} completed ({', '.join(completed) if completed else 'none'})\n"
             f"[cyan]Detection Coverage:[/cyan] {coverage_str}\n"
+            f"[cyan]Refined Coverage:[/cyan] {refined_coverage_str}\n"
             f"[cyan]Experiment Type:[/cyan] {setup_type}\n"
             f"[cyan]Last Modified:[/cyan] {last_mod.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"[cyan]Size:[/cyan] {format_bytes(sum(f.stat().st_size for f in zarr_path_obj.rglob('*') if f.is_file()))}",
@@ -544,6 +646,136 @@ def display_detection_metadata(zarr_path, console):
         console.print(f"[yellow]Could not load detection metadata: {e}[/yellow]")
         return False
 
+
+def display_refined_detect_metadata(zarr_path, console):
+    """Display refined detection run metadata (including manual/retune groups)."""
+    try:
+        import zarr
+
+        root = zarr.open(zarr_path, mode="r")
+
+        refined_parent = root.get(REFINED_DETECT_GROUP) or root.get(LEGACY_REFINED_DETECT_GROUP)
+        if refined_parent is None:
+            return False
+
+        run_names = [name for name in refined_parent.group_keys()]
+        if not run_names:
+            return False
+
+        latest_run = refined_parent.attrs.get("latest", "")
+
+        summary_table = Table(title=" Refined Detection Runs", box=box.ROUNDED)
+        summary_table.add_column("Run", style="cyan")
+        summary_table.add_column("Timestamp", style="yellow")
+        summary_table.add_column("Mode", style="magenta")
+        summary_table.add_column("Coverage", style="green")
+        summary_table.add_column("Manual Group", style="blue")
+        summary_table.add_column("Source Detect", style="blue")
+
+        for run_name in sorted(run_names):
+            run = refined_parent[run_name]
+            attrs = run.attrs
+
+            run_display = f"{run_name} [bold green]★[/bold green]" if run_name == latest_run else run_name
+            timestamp = format_timestamp(attrs.get("refinement_timestamp", attrs.get("created_at", "")))
+            mode = _refined_detect_mode(run)
+
+            manual_group_name = _normalize_attr(attrs.get("manual_review_latest"))
+            manual_group = run.get(manual_group_name) if manual_group_name else None
+            coverage = None
+            coverage_label = None
+            if manual_group is not None:
+                coverage = _coverage_from_group(manual_group)
+                coverage_label = f"manual:{manual_group_name}"
+            elif "interpolated" in run:
+                coverage = _coverage_from_group(run["interpolated"])
+                coverage_label = "interpolated"
+            elif "filtered" in run:
+                coverage = _coverage_from_group(run["filtered"])
+                coverage_label = "filtered"
+
+            coverage_str = "N/A"
+            if coverage is not None:
+                coverage_str = f"{coverage:.1f}%"
+                if coverage_label:
+                    coverage_str = f"{coverage_str} ({coverage_label})"
+
+            source_detect = str(attrs.get("source_detect_run", "unknown"))
+
+            summary_table.add_row(
+                run_display,
+                timestamp,
+                mode,
+                coverage_str,
+                str(manual_group_name or "-"),
+                source_detect,
+            )
+
+        console.print(summary_table)
+
+        if latest_run and latest_run in refined_parent:
+            latest = refined_parent[latest_run]
+            attrs = latest.attrs
+
+            detail_table = Table(title=f"Latest Refined Detect Details ({latest_run})", box=box.SIMPLE)
+            detail_table.add_column("Field", style="cyan")
+            detail_table.add_column("Value", style="yellow")
+
+            detail_table.add_row("Source detect", str(attrs.get("source_detect_run", "unknown")))
+            detail_table.add_row("Source quality", str(attrs.get("source_quality_run", "unknown")))
+            detail_table.add_row("Operations", str(attrs.get("operations", "unknown")))
+
+            parameters = attrs.get("parameters", {})
+            if isinstance(parameters, dict):
+                detail_table.add_row("Refine mode", str(parameters.get("refine_mode", "unknown")))
+                detail_table.add_row("Parameter source", str(parameters.get("parameter_source", "unknown")))
+                detail_table.add_row("Interpolation method", str(parameters.get("interpolation_method", "unknown")))
+                detail_table.add_row("Max gap", str(parameters.get("max_gap", "unknown")))
+                detail_table.add_row("Filters", str(parameters.get("filters_applied", [])))
+                detail_table.add_row("Sampled import", str(parameters.get("sampled_import", False)))
+
+            detail_table.add_row("Coverage source", str(attrs.get("coverage_frame_source", "unknown")))
+            detail_table.add_row("Coverage frames total", str(attrs.get("coverage_frames_total", "unknown")))
+            detail_table.add_row("Coverage frames full", str(attrs.get("coverage_frames_full", "unknown")))
+
+            manual_group_name = _normalize_attr(attrs.get("manual_review_latest"))
+            detail_table.add_row("Manual group", str(manual_group_name or "none"))
+
+            retune_params = attrs.get("retune_params")
+            retune_count = len(retune_params) if isinstance(retune_params, dict) else 0
+            detail_table.add_row("Retune parameter sets", str(retune_count))
+
+            console.print(detail_table)
+
+            if manual_group_name and manual_group_name in latest:
+                manual = latest[manual_group_name]
+                manual_attrs = manual.attrs
+                manual_table = Table(title=f"Manual/Retune Details ({manual_group_name})", box=box.SIMPLE)
+                manual_table.add_column("Field", style="cyan")
+                manual_table.add_column("Value", style="yellow")
+
+                manual_table.add_row("Detection source type", str(manual_attrs.get("detection_source_type", "unknown")))
+                manual_table.add_row("Detection source path", str(manual_attrs.get("detection_source_path", "unknown")))
+                manual_table.add_row("Retune base group", str(manual_attrs.get("retune_base_group", "unknown")))
+                manual_table.add_row("Retune parameter source", str(manual_attrs.get("retune_parameter_source", "unknown")))
+                manual_table.add_row("Retune score", str(manual_attrs.get("retune_score", "unknown")))
+                manual_table.add_row("Retune class id", str(manual_attrs.get("retune_class_id", "unknown")))
+                manual_table.add_row("Retune frames requested", str(manual_attrs.get("retune_frames_requested", "unknown")))
+                manual_table.add_row("Retune detections added", str(manual_attrs.get("retune_detections_added", "unknown")))
+                manual_table.add_row("Retune timestamp", format_timestamp(manual_attrs.get("retune_timestamp", "")))
+
+                manual_coverage = _coverage_from_group(manual)
+                if manual_coverage is not None:
+                    manual_table.add_row("Manual coverage", f"{manual_coverage:.1f}%")
+
+                console.print(manual_table)
+
+        return True
+
+    except Exception as e:
+        console.print(f"[yellow]Could not load refined detect metadata: {e}[/yellow]")
+        return False
+
 def display_analysis_metadata(zarr_path, console):
     """Display analysis metadata including mask and detection tuning."""
     try:
@@ -705,15 +937,29 @@ def display_crop_metadata(zarr_path, console):
         if latest_run and latest_run in crop_runs:
             latest = crop_runs[latest_run]
             params = latest.attrs.get('parameters', {})
-            
+
             detail_table = Table(title=f"Latest Crop Parameters ({latest_run})", box=box.SIMPLE)
             detail_table.add_column("Parameter", style="cyan")
             detail_table.add_column("Value", style="yellow")
 
             for key, value in params.items():
                 detail_table.add_row(str(key), str(value))
-            
+
             console.print(detail_table)
+
+            meta_table = Table(title=f"Latest Crop Details ({latest_run})", box=box.SIMPLE)
+            meta_table.add_column("Field", style="cyan")
+            meta_table.add_column("Value", style="yellow")
+
+            meta_table.add_row("Detection source type", str(latest.attrs.get("detection_source_type", "unknown")))
+            meta_table.add_row("Detection source path", str(latest.attrs.get("detection_source_path", "unknown")))
+            meta_table.add_row("Preferred policy", str(latest.attrs.get("detection_preferred_policy", "none")))
+            meta_table.add_row("Review status", _format_review_status(latest.attrs.get("detect_review_status")))
+            meta_table.add_row("Review status ref", str(latest.attrs.get("detect_review_status_ref", "none")))
+            meta_table.add_row("Source detect run", str(latest.attrs.get("source_detect_run", "unknown")))
+            meta_table.add_row("Source refined run", str(latest.attrs.get("source_refined_run", "unknown")))
+
+            console.print(meta_table)
 
         return True
 
@@ -1159,6 +1405,9 @@ def inspect_video_zarr(zarr_path, mode='normal', show_full_env=False, focus_stag
             
         elif focus_stage == 'detect':
             stage_shown = display_detection_metadata(zarr_path, console)
+
+        elif focus_stage in ('refined_detect', 'refine_detect'):
+            stage_shown = display_refined_detect_metadata(zarr_path, console)
             
         elif focus_stage == 'crop':
             stage_shown = display_crop_metadata(zarr_path, console)
@@ -1180,7 +1429,7 @@ def inspect_video_zarr(zarr_path, mode='normal', show_full_env=False, focus_stag
             
         else:
             console.print(f"[yellow]Unknown stage: {focus_stage}[/yellow]")
-            console.print("[dim]Valid stages: import, background, detect, crop, keypoints, track, assign_ids[/dim]")
+            console.print("[dim]Valid stages: import, background, detect, refined_detect, crop, keypoints, track, assign_ids[/dim]")
         
         if not stage_shown:
             console.print(f"[yellow]Stage '{focus_stage}' has not been run yet[/yellow]")
@@ -1388,7 +1637,7 @@ def inspect_video_zarr(zarr_path, mode='normal', show_full_env=False, focus_stag
                     # Special highlight for analysis metadata
                     node = parent_node.add(f"[magenta]{item.name}/[/magenta] [dim](calibration data)[/dim]")
                     add_tree_node(node, item, max_depth, current_depth + 1)
-                elif item.name in ['background_runs', 'detect_runs']: # HIGHLIGHT RUNS
+                elif item.name in ['background_runs', 'detect_runs', REFINED_DETECT_GROUP]: # HIGHLIGHT RUNS
                     node = parent_node.add(f"[yellow]{item.name}/[/yellow] [dim](processing runs)[/dim]")
                     add_tree_node(node, item, max_depth, current_depth + 1)
                 elif item.name == 'raw_video':
@@ -1423,6 +1672,13 @@ def inspect_video_zarr(zarr_path, mode='normal', show_full_env=False, focus_stag
     if detect_path.exists():
         console.print("[green] Fish detection runs found[/green]")
         display_detection_metadata(zarr_path, console)
+        console.print()
+
+    refined_detect_path = zarr_path / REFINED_DETECT_GROUP
+    legacy_refined_detect_path = zarr_path / LEGACY_REFINED_DETECT_GROUP
+    if refined_detect_path.exists() or legacy_refined_detect_path.exists():
+        console.print("[green] Refined detection runs found[/green]")
+        display_refined_detect_metadata(zarr_path, console)
         console.print()
 
     keypoints_path = zarr_path / "keypoints_runs"
@@ -1509,8 +1765,10 @@ Examples:
                        default='normal', help="Display verbosity level")
     parser.add_argument("--full-env", action="store_true", 
                        help="Display complete environment information JSON")
-    parser.add_argument("--stage", 
-                       help="Focus on specific stage (background, detect, crop, etc.)")
+    parser.add_argument(
+        "--stage",
+        help="Focus on specific stage (import, background, detect, refined_detect, crop, keypoints, track, assign_ids).",
+    )
     
     args = parser.parse_args()
     

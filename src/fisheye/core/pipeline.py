@@ -28,6 +28,7 @@ from ..tracking.crop import crop_detections, infer_detection_source_type
 from ..tracking.assign_ids import assign_ids_spatial
 from ..refinement.refine_detect import create_refined_run
 from ..refinement.refine_keypoints import create_refined_keypoint_run
+from ..shared.experiment_setup import infer_experiment_setup
 from ..shared.zarr.schema import validate_zarr_structure
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
@@ -59,6 +60,7 @@ class PipelineConfig:
     dry_run: bool = False
     crop_source: Optional[str] = None
     crop_source_path: Optional[str] = None
+    crop_preferred_policy: Optional[str] = None
     crop_acceleration: str = "auto"
     refine_max_gap: Optional[int] = None
     refine_method: Optional[str] = None
@@ -66,6 +68,7 @@ class PipelineConfig:
     refine_remove_blips: Optional[bool] = None
     training_data: bool = False
     frame_step: Optional[int] = None
+    no_dask_progress: bool = False
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "PipelineConfig":
@@ -83,13 +86,15 @@ class PipelineConfig:
             dry_run=getattr(args, 'dry_run', False),
             crop_source=getattr(args, 'crop_source', None),
             crop_source_path=getattr(args, 'crop_source_path', None),
+            crop_preferred_policy=getattr(args, 'crop_preferred_policy', None),
             crop_acceleration=getattr(args, 'crop_acceleration', 'auto'),
             refine_max_gap=getattr(args, 'refine_max_gap', None),
             refine_method=getattr(args, 'refine_method', None),
             refine_remove_jumps=getattr(args, 'refine_remove_jumps', None),
             refine_remove_blips=getattr(args, 'refine_remove_blips', None),
             training_data=getattr(args, 'training_data', False),
-            frame_step=getattr(args, 'frame_step', None)
+            frame_step=getattr(args, 'frame_step', None),
+            no_dask_progress=getattr(args, 'no_dask_progress', False),
         )
 
 
@@ -425,7 +430,8 @@ class Pipeline:
             config_path=self.config.config_path,
             scheduler=self.config.scheduler,
             num_workers=self.config.num_workers,
-            console=self.console
+            console=self.console,
+            show_progress=not self.config.no_dask_progress,
         )
         
         self.console.print(f" Detected {results['total_detections']} fish in {results['frames_with_detections']} frames")
@@ -438,6 +444,7 @@ class Pipeline:
         crop_params = self.pipeline_params.get('crop', {}) or {}
         config_source_type = crop_params.get('source_type')
         config_source_path = crop_params.get('source_path')
+        preferred_policy = self.config.crop_preferred_policy or crop_params.get('preferred_policy')
         
         cli_source_type = self.config.crop_source
         cli_source_path = self.config.crop_source_path
@@ -457,6 +464,7 @@ class Pipeline:
             config=self.pipeline_params,
             source_type=source_type,
             source_path=source_path,
+            preferred_policy=preferred_policy,
             scheduler=self.config.scheduler,
             num_workers=self.config.num_workers,
             console=self.console,
@@ -645,9 +653,9 @@ class Pipeline:
         """
         # Check if experiment setup is configured
         root = zarr.open(self.config.zarr_path, mode='r')
-        
-        has_setup = 'experiment_setup' in root.attrs
-        if not has_setup:
+        setup_info = infer_experiment_setup(root.attrs)
+
+        if setup_info.source == "unknown":
             self.console.print("[yellow]⚠️  No experiment setup metadata found[/yellow]")
             self.console.print("[yellow]This helps determine single vs multi-dish mode[/yellow]")
             self.console.print()
@@ -666,12 +674,19 @@ class Pipeline:
                 
                 # Reload to check if configured
                 root = zarr.open(self.config.zarr_path, mode='r')
-                if 'experiment_setup' not in root.attrs:
+                setup_info = infer_experiment_setup(root.attrs)
+                if setup_info.source == "unknown":
                     self.console.print("[yellow]Setup not configured, continuing anyway...[/yellow]")
+        elif setup_info.source == "experimental_chamber":
+            self.console.print("[yellow]⚠️  No experiment_setup metadata found; using experimental_chamber to infer single-dish mode[/yellow]")
+            self.console.print("[yellow]Consider backfilling experiment_setup for future runs.[/yellow]")
+            self.console.print()
         
         # Get experiment setup info
-        experiment_setup = root.attrs.get('experiment_setup', {})
-        setup_type = experiment_setup.get('setup_type', 'unknown')
+        setup_type = setup_info.setup_type
+        if setup_type not in {'single_dish', 'multi_dish'}:
+            self.console.print("[yellow]Unknown setup type; defaulting to multi-dish mode.[/yellow]")
+            setup_type = 'multi_dish'
         
         # For multi-dish, check if subdish masks are defined
         if setup_type == 'multi_dish':
@@ -885,7 +900,7 @@ class Pipeline:
                         crop_info = f"[bold]Crops:[/bold] {total_crops:,} ROIs from {frames_with_crops:,} frames"
                         
                         # Add source info
-                        source_color = "yellow" if crop_source in ['filtered', 'interpolated'] else "cyan"
+                        source_color = "yellow" if crop_source in ['filtered', 'interpolated', 'manual'] else "cyan"
                         crop_info += f" ([{source_color}]{crop_source}[/{source_color}])"
                         source_path = crop_group.attrs.get('detection_source_path')
                         if source_path:
@@ -1269,7 +1284,7 @@ Examples:
         "--crop-source",
         type=str,
         default=None,
-        choices=["detect", "filtered", "interpolated"],
+        choices=["detect", "filtered", "interpolated", "manual", "preferred", "auto"],
         help="Detection source stage for cropping (default: config value)"
     )
 
@@ -1278,6 +1293,14 @@ Examples:
         type=str,
         default=None,
         help="Explicit detection source path inside the zarr (e.g. detect_runs/<run> or refined_detect_runs/<run>/interpolated)"
+    )
+
+    parser.add_argument(
+        "--crop-preferred-policy",
+        type=str,
+        default=None,
+        choices=["training", "full_recording"],
+        help="Policy for preferred crop source selection (default: config value)"
     )
     
     parser.add_argument(
@@ -1292,6 +1315,11 @@ Examples:
         choices=['processes', 'threads', 'single-thread', 'distributed'],
         default='processes',
         help="Dask scheduler to use"
+    )
+    parser.add_argument(
+        "--no-dask-progress",
+        action="store_true",
+        help="Disable Dask progress bars (useful when running batch jobs).",
     )
     
     parser.add_argument(

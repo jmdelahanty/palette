@@ -159,6 +159,40 @@ def _read_h5_group_attrs(h5: h5py.File, path: str) -> Optional[Dict[str, object]
     return attrs or None
 
 
+def _parse_int(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _derive_experiment_setup(subject_meta: Dict[str, object]) -> Optional[Dict[str, object]]:
+    subject_count = _parse_int(subject_meta.get("subject_count"))
+    if subject_count is None or subject_count < 1:
+        return None
+    num_dishes = 1
+    fish_per_dish = subject_count
+    total_expected = num_dishes * fish_per_dish
+    return {
+        "num_dishes": num_dishes,
+        "fish_per_dish": fish_per_dish,
+        "total_expected_fish": total_expected,
+        "setup_type": "single_dish" if num_dishes == 1 else "multi_dish",
+        "source": "subject_metadata",
+        "configured_at": datetime.now(timezone.utc).isoformat(),
+        "subject_count": subject_count,
+        "subject_type": subject_meta.get("subject_type"),
+    }
+
+
 def _read_h5_camera_metadata(h5: h5py.File) -> Optional[Dict[str, object]]:
     for path in ("/camera_metadata", "/device_metadata"):
         if path not in h5:
@@ -186,6 +220,28 @@ def _read_h5_camera_metadata(h5: h5py.File) -> Optional[Dict[str, object]]:
 def _camera_metadata_hash(payload: Dict[str, object]) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _read_experimental_chamber_from_h5(h5: h5py.File) -> Optional[str]:
+    if "experimental_chamber" in h5.attrs:
+        value = _normalize_attr_value(h5.attrs.get("experimental_chamber"))
+        if isinstance(value, str) and value:
+            return value
+
+    if "/calibration_snapshot/arena_config_json" in h5:
+        node = h5["/calibration_snapshot/arena_config_json"]
+        raw = node[()] if isinstance(node, h5py.Dataset) else node.attrs.get("arena_config_json")
+        payload = _parse_json_payload(raw)
+        if payload:
+            value = payload.get("experimental_chamber")
+            value = _normalize_attr_value(value)
+            if isinstance(value, str) and value:
+                return value
+            value = payload.get("selected_dish_type_name")
+            value = _normalize_attr_value(value)
+            if isinstance(value, str) and value:
+                return value
+    return None
 
 
 def _derive_camera_id(ipc_source_name: object) -> Optional[str]:
@@ -336,6 +392,9 @@ def _copy_h5_dataset(
     if name not in h5_group:
         return
     data = h5_group[name][:]
+    # Skip empty datasets (common for experiments without tracking output).
+    if data.size == 0 or (data.shape and data.shape[0] == 0):
+        return
     if (
         name == "bounding_boxes"
         and data.dtype.names is not None
@@ -437,7 +496,7 @@ def import_stimulus_to_zarr(
     """Main import routine."""
     console = Console() if verbose else None
 
-    calib_manager = CalibrationManager(str(zarr_path), verbose=verbose)
+    calib_manager = CalibrationManager(str(zarr_path), verbose=verbose, console=console)
 
     resolved_h5: Optional[Path] = stimulus_h5
     if resolved_h5 is None:
@@ -486,6 +545,23 @@ def import_stimulus_to_zarr(
         subject_meta = _read_h5_group_attrs(h5, "/subject_metadata")
         if subject_meta:
             analysis_meta.attrs["subject_metadata"] = json.dumps(subject_meta, sort_keys=True)
+            if "experiment_setup" not in root.attrs:
+                experiment_setup = _derive_experiment_setup(subject_meta)
+                if experiment_setup:
+                    root.attrs["experiment_setup"] = experiment_setup
+                    _log(
+                        console,
+                        "[green]✓ Auto-set experiment setup from subject_metadata "
+                        f"(subject_count={experiment_setup.get('subject_count')})[/green]",
+                    )
+                else:
+                    _log(
+                        console,
+                        "[yellow]No valid subject_count in subject_metadata; "
+                        "experiment_setup not set.[/yellow]",
+                    )
+            else:
+                _log(console, "[dim]experiment_setup already present; leaving as-is.[/dim]")
         camera_meta = _read_h5_camera_metadata(h5)
         if camera_meta:
             analysis_meta.attrs["camera_metadata"] = json.dumps(camera_meta, sort_keys=True)
@@ -496,6 +572,13 @@ def import_stimulus_to_zarr(
         session_uuid = h5.attrs.get("session_uuid")
         if session_uuid:
             analysis_meta.attrs["session_uuid"] = _normalize_attr_value(session_uuid)
+        if "experimental_chamber" not in root.attrs:
+            chamber = _read_experimental_chamber_from_h5(h5)
+            if chamber:
+                root.attrs["experimental_chamber"] = chamber
+                _log(console, f"[green]✓ Set experimental_chamber: {chamber}[/green]")
+            else:
+                _log(console, "[dim]experimental_chamber not found in H5.[/dim]")
 
         _copy_enums(h5, analysis, console)
         if "/video_metadata/frame_metadata" not in h5:

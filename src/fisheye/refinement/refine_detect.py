@@ -24,6 +24,59 @@ from ..utils.system import get_environment_info, get_git_info
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
 
+def _normalize_attr(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "ignore")
+    return str(value)
+
+
+def _read_sampled_import_meta(root: zarr.Group) -> Tuple[bool, Dict[str, Any]]:
+    raw = root.get("raw_video")
+    if raw is None:
+        return False, {}
+    attrs = raw.attrs
+    import_mode = _normalize_attr(attrs.get("import_mode"))
+    import_purpose = _normalize_attr(attrs.get("import_purpose"))
+    frame_step = attrs.get("frame_step")
+    has_mapping = "original_frame_indices" in raw
+
+    sampled = False
+    if import_mode == "sampled":
+        sampled = True
+    if import_purpose == "training_data":
+        sampled = True
+    try:
+        if frame_step is not None and int(frame_step) > 1:
+            sampled = True
+    except Exception:
+        pass
+    if has_mapping:
+        sampled = True
+
+    meta = {
+        "import_mode": import_mode,
+        "import_purpose": import_purpose,
+        "frame_step": int(frame_step) if isinstance(frame_step, (int, np.integer)) else frame_step,
+        "has_original_frame_indices": bool(has_mapping),
+    }
+    return sampled, meta
+
+
+def _get_sampled_frame_count(root: zarr.Group, detect_group: Optional[zarr.Group]) -> Optional[int]:
+    raw = root.get("raw_video")
+    if raw is not None:
+        if "original_frame_indices" in raw:
+            return int(raw["original_frame_indices"].shape[0])
+        if "images_ds" in raw:
+            return int(raw["images_ds"].shape[0])
+        if "images_full" in raw:
+            return int(raw["images_full"].shape[0])
+    if detect_group is not None and "frame_counts" in detect_group:
+        return int(detect_group["frame_counts"].shape[0])
+    return None
+
 def filter_detections(
     bbox_coords: np.ndarray,
     scores: np.ndarray,
@@ -424,11 +477,7 @@ def create_refined_run(
     
     max_gap_val = params['max_gap']
     interp_method = params['interpolation_method']
-    
-    console.print(f"Parameters source: [cyan]{param_source}[/cyan]")
-    console.print(f"  Max gap: {max_gap_val}")
-    console.print(f"  Interpolation: {interp_method}")
-    console.print(f"  Filters: {filters}")
+    refine_mode = "standard"
     
     # Open zarr
     root = zarr.open(zarr_path, mode='a')
@@ -460,9 +509,37 @@ def create_refined_run(
         console.print("[yellow]⚠ No detection quality reports found; assuming all detections are valid.[/yellow]")
         detection_quality_labels = np.zeros(len(bbox_coords), dtype='i1')
 
+    sampled_import, sampled_meta = _read_sampled_import_meta(root)
+    if sampled_import:
+        console.print("[yellow]⚠ Sampled training import detected; disabling refine filters and interpolation.[/yellow]")
+        detection_quality_labels = np.zeros_like(detection_quality_labels)
+        filters = []
+        max_gap_val = 0
+        refine_mode = "passthrough"
+        param_source = "sampled_import_guard"
+
+    console.print(f"Parameters source: [cyan]{param_source}[/cyan]")
+    console.print(f"  Max gap: {max_gap_val}")
+    console.print(f"  Interpolation: {interp_method}")
+    console.print(f"  Filters: {filters}")
+    if sampled_import:
+        console.print("  Refine mode: passthrough (sampled import)")
+
     # Get total frames using unified metadata helper
     num_frames = get_total_frames(root, detect_group)
-    
+    full_frame_count = num_frames
+    coverage_frame_source = "full"
+    if sampled_import:
+        sampled_frames = _get_sampled_frame_count(root, detect_group)
+        if sampled_frames is not None:
+            if full_frame_count is not None and sampled_frames != full_frame_count:
+                console.print(
+                    f"[yellow]⚠ Using sampled frame count ({sampled_frames}) "
+                    f"for coverage stats (full={full_frame_count}).[/yellow]"
+                )
+            num_frames = sampled_frames
+            coverage_frame_source = "sampled"
+
     if num_frames is None:
         # Infer from detections as last resort
         num_frames = int(frame_indices.max() + 1)
@@ -590,16 +667,23 @@ def create_refined_run(
         'max_gap': max_gap_val,
         'interpolation_method': interp_method,
         'filters_applied': filters,
-        'parameter_source': param_source
+        'parameter_source': param_source,
+        'refine_mode': refine_mode,
+        'sampled_import': sampled_import,
+        'sampled_import_meta': sampled_meta,
     }
 
     refined_group.attrs['source_detect_run'] = detect_run
     refined_group.attrs['source_quality_run'] = resolved_quality_run or 'N/A'
     refined_group.attrs['refinement_timestamp'] = created_timestamp
     refined_group.attrs['processing_time_seconds'] = float(duration)
-    refined_group.attrs['operations'] = ['filter', 'interpolate']
+    refined_group.attrs['operations'] = ['filter', 'interpolate'] if refine_mode == "standard" else ['passthrough']
     refined_group.attrs['parameters'] = parameters_payload
     refined_group.attrs['coverage_comparison'] = comparison_stats
+    refined_group.attrs['coverage_frames_total'] = int(num_frames)
+    refined_group.attrs['coverage_frame_source'] = coverage_frame_source
+    if full_frame_count is not None:
+        refined_group.attrs['coverage_frames_full'] = int(full_frame_count)
     refined_group.attrs['inputs'] = {
         'detect_run': detect_run,
         'quality_run': quality_run or 'N/A'

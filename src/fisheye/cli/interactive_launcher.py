@@ -10,13 +10,13 @@ Provides a user-friendly interface for:
 """
 
 import os
+import tempfile
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Set, Dict, Any
 import subprocess
 import sys
 import zarr
 import time
-from typing import Set, Dict, Any
 
 try:
     from textual.app import App, ComposeResult
@@ -248,6 +248,7 @@ class PipelineLauncherApp(App):
         Binding("r", "run_pipeline", "Run Pipeline", show=True),
         Binding("b", "toggle_batch_mode", "Batch Mode", show=True),
         Binding("B", "run_batch", "Run Batch", show=True),
+        Binding("C", "run_crop_batch", "Crop Batch", show=True),
         Binding("x", "clear_batch", "Clear Batch", show=True),
         Binding("i", "inspect_zarr", "Inspect Zarr", show=True),
         Binding("t", "run_tuner", "Run Tuner", show=True),
@@ -617,8 +618,11 @@ class PipelineLauncherApp(App):
                         yield Select(
                         [
                             ("Original detections", "detect"),
-                            ("Filtered (jumps removed)", "filtered"),  
-                            ("Gaps filled (interpolated)", "interpolated")
+                            ("Filtered (jumps removed)", "filtered"),
+                            ("Gaps filled (interpolated)", "interpolated"),
+                            ("Manual (reviewed)", "manual"),
+                            ("Preferred (review status)", "preferred"),
+                            ("Auto (preferred fallback)", "auto"),
                         ],
                         value="detect",
                         id="crop_source_select",
@@ -1069,7 +1073,7 @@ class PipelineLauncherApp(App):
             crop_source = self._get_crop_source_selection()
             
             # Check if refined source is available
-            if crop_source in ['filtered', 'interpolated']:
+            if crop_source in ['filtered', 'interpolated', 'manual']:
                 if not self._check_refined_runs_exist(zarr_path):
                     self.status_message = f" Error: No refined detection runs found for '{crop_source}' source"
                     if self.progress_log:
@@ -1417,6 +1421,81 @@ class PipelineLauncherApp(App):
             lambda: self._run_batch_worker(batch_files, stages),
             thread=True
         )
+
+    def action_run_crop_batch(self) -> None:
+        """Run crop batch utility on queued zarr files."""
+        if not self.batch_queue:
+            self.status_message = "❌ Batch queue is empty!"
+            if self.progress_log:
+                self.progress_log.write("[red]❌ Batch queue is empty! Add files with batch mode first.[/red]\n")
+            return
+
+        batch_files = list(self.batch_queue)
+        invalid = [
+            path for path in batch_files
+            if self._is_video_file(path) or not str(path).endswith(".zarr")
+        ]
+        if invalid:
+            self.status_message = "❌ Crop batch requires zarr files only!"
+            if self.progress_log:
+                self.progress_log.write(
+                    "[red]❌ Crop batch requires .zarr files only. Remove video paths from batch queue.[/red]\n"
+                )
+            return
+
+        try:
+            temp_file = tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".txt",
+                prefix="crop_batch_",
+                delete=False,
+                dir=Path.cwd(),
+                encoding="utf-8",
+            )
+            for path in sorted(batch_files):
+                temp_file.write(f"{path}\n")
+            temp_file.close()
+            file_list_path = temp_file.name
+        except Exception as exc:
+            self.status_message = f"❌ Failed to build crop batch list: {exc}"
+            if self.progress_log:
+                self.progress_log.write(f"[red]❌ Failed to write crop batch list: {exc}[/red]\n")
+            return
+
+        cmd = [sys.executable, "-m", "fisheye.utils.crop_batch", "--apply", "--file-list", file_list_path]
+
+        if self.selected_config:
+            cmd.extend(["--config", self.selected_config])
+
+        crop_source = self._get_crop_source_selection()
+        if crop_source:
+            cmd.extend(["--source-type", crop_source])
+
+        try:
+            scheduler_select = self.query_one("#scheduler_select", Select)
+            scheduler = scheduler_select.value
+            if scheduler and scheduler != Select.BLANK:
+                cmd.extend(["--scheduler", str(scheduler)])
+        except Exception:
+            pass
+
+        self.status_message = "Launching crop batch utility..."
+        if self.progress_log:
+            self.progress_log.write(
+                f"\n[cyan]Launching crop batch on {len(batch_files)} zarrs[/cyan]\n"
+                f"[dim]  File list: {file_list_path}[/dim]\n"
+                f"[dim]  Command: {' '.join(cmd)}[/dim]\n"
+            )
+
+        try:
+            subprocess.Popen(cmd)
+            self.status_message = "✓ Crop batch started"
+            if self.progress_log:
+                self.progress_log.write("[green]✓ Crop batch started[/green]\n")
+        except Exception as exc:
+            self.status_message = f"❌ Failed to launch crop batch: {exc}"
+            if self.progress_log:
+                self.progress_log.write(f"[red]❌ Failed to launch crop batch: {exc}[/red]\n")
     
     def _run_subprocess_with_output(self, cmd: List[str]) -> None:
         """Run subprocess and capture output in real-time."""

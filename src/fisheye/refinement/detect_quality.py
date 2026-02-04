@@ -16,6 +16,60 @@ from typing import Dict, List, Optional, Tuple, Any
 from .utils import identify_gaps, categorize_gaps, calculate_coverage_stats, Gap
 
 
+def _normalize_attr(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "ignore")
+    return str(value)
+
+
+def _read_sampled_import_meta(root: zarr.Group) -> Tuple[bool, Dict[str, Any]]:
+    raw = root.get("raw_video")
+    if raw is None:
+        return False, {}
+    attrs = raw.attrs
+    import_mode = _normalize_attr(attrs.get("import_mode"))
+    import_purpose = _normalize_attr(attrs.get("import_purpose"))
+    frame_step = attrs.get("frame_step")
+    has_mapping = "original_frame_indices" in raw
+
+    sampled = False
+    if import_mode == "sampled":
+        sampled = True
+    if import_purpose == "training_data":
+        sampled = True
+    try:
+        if frame_step is not None and int(frame_step) > 1:
+            sampled = True
+    except Exception:
+        pass
+    if has_mapping:
+        sampled = True
+
+    meta = {
+        "import_mode": import_mode,
+        "import_purpose": import_purpose,
+        "frame_step": int(frame_step) if isinstance(frame_step, (int, np.integer)) else frame_step,
+        "has_original_frame_indices": bool(has_mapping),
+    }
+    return sampled, meta
+
+
+def _get_expected_subject_count(root: zarr.Group) -> Optional[int]:
+    setup = root.attrs.get("experiment_setup", {})
+    if setup:
+        total_expected = setup.get("total_expected_fish")
+        if total_expected is None:
+            total_expected = setup.get("subject_count")
+        try:
+            if total_expected is not None:
+                return int(total_expected)
+        except Exception:
+            pass
+    return None
+
+
 def identify_temporal_artifacts(
     bbox_coords: np.ndarray,
     frame_indices: np.ndarray,
@@ -218,6 +272,60 @@ def calculate_quality_score(
     }
 
 
+def calculate_sampled_quality_score(
+    coverage_stats: Dict,
+    frame_counts: np.ndarray,
+    expected_count: Optional[int],
+    bbox_validation: Dict,
+) -> Dict:
+    """
+    Calculate quality score for sampled imports (training data).
+
+    Focuses on per-frame detection counts vs expected subjects and overall detection coverage.
+    """
+    coverage_score = float(coverage_stats["coverage_percent"])
+    expected_score = None
+    if expected_count and expected_count > 0:
+        expected_score = float(np.mean(frame_counts == expected_count) * 100.0)
+    else:
+        expected_score = coverage_score
+
+    if bbox_validation["total_bboxes"] > 0:
+        invalid_ratio = (
+            bbox_validation["out_of_range"] + bbox_validation["malformed"]
+        ) / bbox_validation["total_bboxes"]
+        bbox_score = max(0.0, 100.0 - (invalid_ratio * 100.0))
+    else:
+        bbox_score = 0.0
+
+    overall_score = (
+        expected_score * 0.6 +
+        coverage_score * 0.3 +
+        bbox_score * 0.1
+    )
+
+    if overall_score >= 90.0:
+        grade = "A"
+    elif overall_score >= 80.0:
+        grade = "B"
+    elif overall_score >= 70.0:
+        grade = "C"
+    elif overall_score >= 60.0:
+        grade = "D"
+    else:
+        grade = "F"
+
+    return {
+        "coverage_score": float(coverage_score),
+        "expected_count_score": float(expected_score),
+        "bbox_score": float(bbox_score),
+        "overall_score": float(overall_score),
+        "grade": grade,
+        "mode": "sampled",
+        "expected_count": expected_count,
+    }
+
+
 def save_quality_report(
     zarr_path: str,
     quality_report: Dict,
@@ -268,6 +376,8 @@ def save_quality_report(
         "jump_threshold": quality_report["artifacts"]["jump_threshold"],
         "blip_gap_threshold": quality_report["artifacts"].get("blip_gap_threshold", 10),
     }
+    if "sampling" in quality_report:
+        quality_group.attrs["sampling"] = quality_report["sampling"]
 
     # Load detection data
     frame_indices = detect_group["frame_indices"][:].astype(np.int64, copy=False)
@@ -420,6 +530,8 @@ def analyze_detect_quality(
         Complete quality analysis report
     """
     root = zarr.open(zarr_path, mode="r")
+    sampled, sampled_meta = _read_sampled_import_meta(root)
+    expected_count = _get_expected_subject_count(root)
 
     # Get detect run
     if run_name is None:
@@ -460,31 +572,64 @@ def analyze_detect_quality(
     multi_detection_frames = int(np.sum(frame_counts > 1))
 
     # Temporal artifact detection
-    artifacts = identify_temporal_artifacts(
-        bbox_coords,
-        frame_indices,
-        width,
-        height,
-        jump_threshold_pixels=jump_threshold,
-        blip_gap_threshold=blip_gap_threshold
-    )
+    if sampled:
+        artifacts = {
+            "blips": [],
+            "jumps": [],
+            "total_artifacts": 0,
+            "distances": np.array([]),
+            "frame_gaps": np.array([]),
+            "jump_threshold": jump_threshold,
+            "blip_gap_threshold": blip_gap_threshold,
+        }
+    else:
+        artifacts = identify_temporal_artifacts(
+            bbox_coords,
+            frame_indices,
+            width,
+            height,
+            jump_threshold_pixels=jump_threshold,
+            blip_gap_threshold=blip_gap_threshold
+        )
 
     # Bounding box validation
     bbox_validation = validate_bboxes(bbox_coords, frame_indices)
 
     # Quality score
-    quality_score = calculate_quality_score(
-        coverage_stats, artifacts, bbox_validation
-    )
+    if sampled:
+        quality_score = calculate_sampled_quality_score(
+            coverage_stats,
+            frame_counts,
+            expected_count,
+            bbox_validation,
+        )
+    else:
+        quality_score = calculate_quality_score(
+            coverage_stats, artifacts, bbox_validation
+        )
 
     # Gap statistics
     gap_sizes = [gap.size for gap in all_gaps]
+
+    coverage_extras: Dict[str, Any] = {}
+    if expected_count and expected_count > 0:
+        frames_expected = int(np.sum(frame_counts == expected_count))
+        frames_under = int(np.sum((frame_counts > 0) & (frame_counts < expected_count)))
+        frames_over = int(np.sum(frame_counts > expected_count))
+        coverage_extras = {
+            "expected_count": int(expected_count),
+            "frames_with_expected_count": frames_expected,
+            "frames_under_expected": frames_under,
+            "frames_over_expected": frames_over,
+            "expected_count_percent": float(frames_expected / max(num_frames, 1) * 100.0),
+        }
 
     return {
         "source_run": run_name,
         "coverage": {
             **coverage_stats,
             "multi_detection_frames": multi_detection_frames,
+            **coverage_extras,
             "gaps": {
                 "total_count": len(all_gaps),
                 "categories": gap_categories,
@@ -496,6 +641,10 @@ def analyze_detect_quality(
         "artifacts": artifacts,
         "bbox_validation": bbox_validation,
         "quality_score": quality_score,
+        "sampling": {
+            "sampled": bool(sampled),
+            **sampled_meta,
+        },
     }
 
 

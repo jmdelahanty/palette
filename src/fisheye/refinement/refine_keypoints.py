@@ -9,6 +9,8 @@ already execute during detection.
 from __future__ import annotations
 
 import time
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +53,7 @@ class KeypointRefinementParams:
     confidence_threshold: float = 0.3
     min_triangle_angle: float = 10.0
     min_triangle_area: float = 100.0
+    max_triangle_area: Optional[float] = None
 
     @classmethod
     def from_config(
@@ -78,6 +81,8 @@ class KeypointRefinementParams:
                 params.min_triangle_angle = float(config["min_triangle_angle"])
             if config.get("min_triangle_area") is not None:
                 params.min_triangle_area = float(config["min_triangle_area"])
+            if config.get("max_triangle_area") is not None:
+                params.max_triangle_area = float(config["max_triangle_area"])
             source = config.get("parameter_source", "config")
         return params, source
 
@@ -96,6 +101,31 @@ def _copy_array(src: zarr.Array, dst_group: zarr.Group, name: str) -> None:
         chunks=src.chunks,
         overwrite=True,
     )
+
+
+def _hash_parameters(params: object) -> Optional[str]:
+    if params is None:
+        return None
+    try:
+        payload = json.dumps(params, sort_keys=True, default=str).encode("utf-8")
+    except (TypeError, ValueError):
+        payload = str(params).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _build_keypoint_signature(
+    attrs: Dict[str, object],
+    parameters: Optional[Dict[str, object]],
+) -> Dict[str, object]:
+    return {
+        "signature_version": 1,
+        "source_keypoints_run": attrs.get("source_keypoints_run"),
+        "source_crop_run": attrs.get("source_crop_run"),
+        "source_detect_run": attrs.get("source_detect_run"),
+        "source_refined_run": attrs.get("source_refined_run"),
+        "parameter_source": parameters.get("parameter_source") if parameters else None,
+        "parameters_hash": _hash_parameters(parameters),
+    }
 
 
 def _compute_heading_from_points(
@@ -201,6 +231,11 @@ def _process_refinement_chunk(
     confidence_threshold = float(params_dict.get("confidence_threshold", 0.3))
     min_triangle_angle = float(params_dict.get("min_triangle_angle", 10.0))
     min_triangle_area = float(params_dict.get("min_triangle_area", 100.0))
+    max_tri_val = params_dict.get("max_triangle_area")
+    try:
+        max_triangle_area = float(max_tri_val) if max_tri_val is not None else None
+    except (TypeError, ValueError):
+        max_triangle_area = None
 
     stats = {
         "refined_success": 0,
@@ -271,11 +306,13 @@ def _process_refinement_chunk(
                 conf_ok = bool(np.all(conf_vals >= confidence_threshold))
         confidence_valid_out[i] = conf_ok
 
+        max_ok = max_triangle_area is None or metrics.area <= max_triangle_area
         geom_ok = bool(
             np.isfinite(metrics.min_angle)
             and np.isfinite(metrics.area)
             and metrics.min_angle >= min_triangle_angle
             and metrics.area >= min_triangle_area
+            and max_ok
         )
         geometry_valid_out[i] = geom_ok
 
@@ -372,6 +409,8 @@ def create_refined_keypoint_run(
     console.print(f"  Confidence threshold: {params.confidence_threshold}")
     console.print(f"  Min triangle angle: {params.min_triangle_angle}")
     console.print(f"  Min triangle area: {params.min_triangle_area}")
+    if params.max_triangle_area is not None:
+        console.print(f"  Max triangle area: {params.max_triangle_area}")
 
     total_rois = kp_source["keypoints_roi"].shape[0]
     console.print(f"Total ROI keypoints: {total_rois}")
@@ -653,6 +692,7 @@ def create_refined_keypoint_run(
                     "confidence_threshold": params.confidence_threshold,
                     "min_triangle_angle": params.min_triangle_angle,
                     "min_triangle_area": params.min_triangle_area,
+                    "max_triangle_area": params.max_triangle_area,
                 },
             )
         )
@@ -741,6 +781,7 @@ def create_refined_keypoint_run(
         "confidence_threshold": params.confidence_threshold,
         "min_triangle_angle": params.min_triangle_angle,
         "min_triangle_area": params.min_triangle_area,
+        "max_triangle_area": params.max_triangle_area,
         "pass_rate_percent": pass_rate,
         "duration_seconds": duration,
     }
@@ -781,7 +822,10 @@ def create_refined_keypoint_run(
         "confidence_threshold": params.confidence_threshold,
         "min_triangle_angle": params.min_triangle_angle,
         "min_triangle_area": params.min_triangle_area,
+        "max_triangle_area": params.max_triangle_area,
     }
+    kp_refined.attrs["parameter_source"] = param_source
+    kp_refined.attrs["parameters"] = parameters_info
 
     artifact_keys = [
         "model_checkpoint",
@@ -815,6 +859,9 @@ def create_refined_keypoint_run(
     provenance_record = {k: v for k, v in provenance_record.items() if v is not None}
 
     kp_refined.attrs["provenance"] = provenance_record
+    kp_refined.attrs["keypoint_signature"] = _build_keypoint_signature(
+        kp_refined.attrs, parameters_info
+    )
 
     refined_success_values = refined_success_dst[:]
     heading_valid_values = refined_success_values.astype(bool)

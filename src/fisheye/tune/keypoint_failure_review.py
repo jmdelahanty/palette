@@ -7,7 +7,11 @@ Edits are applied to the refined run only (raw keypoints remain untouched).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Dict, Any
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -74,10 +78,82 @@ def _sanitize_reason_array(reason_arr: zarr.Array) -> None:
     reason_arr[:] = cleaned
 
 
+def _hash_parameters(params: object) -> Optional[str]:
+    if params is None:
+        return None
+    try:
+        payload = json.dumps(params, sort_keys=True, default=str).encode("utf-8")
+    except (TypeError, ValueError):
+        payload = str(params).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _build_keypoint_signature(attrs: Dict[str, Any]) -> Dict[str, object]:
+    params = attrs.get("parameters")
+    if not isinstance(params, dict):
+        provenance = attrs.get("provenance")
+        if isinstance(provenance, dict):
+            params = provenance.get("parameters")
+    if not isinstance(params, dict):
+        params = None
+
+    parameter_source = attrs.get("parameter_source")
+    if parameter_source is None and isinstance(params, dict):
+        parameter_source = params.get("parameter_source")
+
+    return {
+        "signature_version": 1,
+        "source_keypoints_run": attrs.get("source_keypoints_run"),
+        "source_crop_run": attrs.get("source_crop_run"),
+        "source_detect_run": attrs.get("source_detect_run"),
+        "source_refined_run": attrs.get("source_refined_run"),
+        "parameter_source": parameter_source,
+        "parameters_hash": _hash_parameters(params),
+    }
+
+
+def _apply_review_status(
+    refined_parent: zarr.Group,
+    refined_run: str,
+    refined: zarr.Group,
+    *,
+    state: str,
+    method: str,
+    intended_use: str,
+    reviewer: Optional[str],
+    notes: Optional[str],
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {
+        "state": state,
+        "method": method,
+        "intended_use": intended_use,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if reviewer:
+        payload["reviewer"] = reviewer
+    if notes:
+        payload["notes"] = notes
+
+    refined.attrs["keypoint_review_status"] = payload
+
+    signature = refined.attrs.get("keypoint_signature")
+    if not isinstance(signature, dict):
+        signature = _build_keypoint_signature(refined.attrs)
+        refined.attrs["keypoint_signature"] = signature
+    refined.attrs["keypoint_review_signature"] = signature
+    refined_parent.attrs["keypoint_review_status_latest"] = refined_run
+    return payload
+
+
 def launch_review(
     zarr_path: str,
     refined_run: Optional[str] = None,
     crop_run: Optional[str] = None,
+    review_state: str = "approved",
+    review_method: str = "manual",
+    review_intended_use: str = "training",
+    reviewer: Optional[str] = None,
+    review_notes: Optional[str] = None,
 ) -> None:
     root = zarr.open_group(zarr_path, mode="a")
 
@@ -111,6 +187,11 @@ def launch_review(
     confidence_threshold = float(summary.get("confidence_threshold", 0.3))
     min_triangle_angle = float(summary.get("min_triangle_angle", 10.0))
     min_triangle_area = float(summary.get("min_triangle_area", 100.0))
+    max_tri_val = summary.get("max_triangle_area")
+    try:
+        max_triangle_area = float(max_tri_val) if max_tri_val is not None else None
+    except (TypeError, ValueError):
+        max_triangle_area = None
 
     if "keypoints_roi" not in refined:
         raise RuntimeError("Refined run is missing keypoints_roi.")
@@ -196,11 +277,13 @@ def launch_review(
             heading_arr[roi_idx] = heading_val
 
         metrics = compute_geometry_metrics(points)
+        max_ok = max_triangle_area is None or metrics.area <= max_triangle_area
         geom_ok = bool(
             np.isfinite(metrics.min_angle)
             and np.isfinite(metrics.area)
             and metrics.min_angle >= min_triangle_angle
             and metrics.area >= min_triangle_area
+            and max_ok
         )
 
         if triangle_area_arr is not None:
@@ -277,6 +360,19 @@ def launch_review(
 
     def on_key(event) -> None:
         nonlocal active_idx
+        def apply_state(state: str) -> None:
+            payload = _apply_review_status(
+                refined_parent,
+                refined_run,
+                refined,
+                state=state,
+                method=review_method,
+                intended_use=review_intended_use,
+                reviewer=reviewer or os.environ.get("USER"),
+                notes=review_notes,
+            )
+            print(f"✓ Keypoint review set: {payload.get('state')} ({payload.get('method')}/{payload.get('intended_use')})")
+
         if event.key in {"1", "2", "3"}:
             active_idx = int(event.key) - 1
             update_display()
@@ -288,6 +384,14 @@ def launch_review(
             reset_points()
         elif event.key == "s":
             save_current()
+        elif event.key == "a":
+            apply_state(review_state)
+        elif event.key == "R":
+            apply_state("rejected")
+        elif event.key == "N":
+            apply_state("needs_review")
+        elif event.key == "P":
+            apply_state("pending")
         elif event.key == "q":
             plt.close(fig)
 
@@ -303,6 +407,10 @@ def launch_review(
     print("  s: save correction")
     print("  r: reset points from current data")
     print("  n/p: next/previous failure")
+    print("  a: approve keypoints")
+    print("  N: mark needs_review")
+    print("  R: mark rejected")
+    print("  P: mark pending")
     print("  q: quit")
 
     load_current_points()

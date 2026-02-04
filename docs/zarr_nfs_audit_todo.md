@@ -5,6 +5,7 @@
 - Filesystem: NFS.
 - Workload: single node, write-once read-many after import.
 - Archiving: rare (not a primary requirement yet).
+- Sharding is optional (not required) while the pipeline is still evolving.
 
 ## Current behavior in this repo
 
@@ -52,3 +53,12 @@
 - Predictable open times and stable read throughput on NFS.
 - File counts stay within NFS inode/metadata constraints.
 - Storage layout is explicit and auditable in metadata.
+
+## Checklist (short version)
+
+- [ ] Capture baseline timings (open + read + crop access).
+- [ ] Capture file counts per dataset (raw_video + derived runs).
+- [ ] Verify whether GDS path can shard (or fails) and document outcome.
+- [ ] Pick shard targets for raw_video and crops based on measurements.
+- [ ] Decide how sharding is enabled (config flag vs auto policy).
+- [ ] Document the final policy and update schema docs.

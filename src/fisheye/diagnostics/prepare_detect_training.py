@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
@@ -123,6 +124,31 @@ class TrainingManifest(BaseModel):
     registry_path: Optional[str] = None
 
     model_config = ConfigDict(extra="allow")
+
+
+def _sanitize_name(value: str) -> str:
+    cleaned = []
+    for ch in value:
+        if ch.isalnum() or ch in ("-", "_", "."):
+            cleaned.append(ch)
+        else:
+            cleaned.append("_")
+    return "".join(cleaned)
+
+
+def _next_version(prefix: str, config_dir: Path, manifest_dir: Path) -> int:
+    versions: List[int] = []
+    config_re = re.compile(rf"^{re.escape(prefix)}_v(\d+)\.ya?ml$")
+    manifest_re = re.compile(rf"^{re.escape(prefix)}_v(\d+)\.manifest\.json$")
+    for path in config_dir.glob(f"{prefix}_v*.y*ml"):
+        match = config_re.match(path.name)
+        if match:
+            versions.append(int(match.group(1)))
+    for path in manifest_dir.glob(f"{prefix}_v*.manifest.json"):
+        match = manifest_re.match(path.name)
+        if match:
+            versions.append(int(match.group(1)))
+    return max(versions) + 1 if versions else 1
 
 
 def _as_float(value: Any) -> Optional[float]:
@@ -534,6 +560,16 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     )
     parser.add_argument("--out-config", type=Path, help="Output path for the generated config YAML.")
     parser.add_argument("--out-manifest", type=Path, help="Output path for the manifest JSON.")
+    parser.add_argument(
+        "--set-name",
+        type=str,
+        help="Auto-generate versioned output paths under runs/{configs,manifests}/detect/.",
+    )
+    parser.add_argument(
+        "--set-version",
+        type=int,
+        help="Optional explicit version number to use with --set-name.",
+    )
     parser.add_argument("--project", type=str, help="Ultralytics project directory for outputs.")
     parser.add_argument("--run-name", type=str, help="Suggested run name for training.")
     parser.add_argument("--imgsz", type=int, help="Override training image size.")
@@ -572,6 +608,24 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     args = parser.parse_args(argv)
 
     override = _load_override(args.metadata_json)
+
+    set_version: Optional[int] = None
+    if args.set_name and args.out_config is None:
+        safe_name = _sanitize_name(args.set_name)
+        config_dir = Path("runs") / "configs" / "detect"
+        manifest_dir = Path("runs") / "manifests" / "detect"
+        if args.set_version is not None:
+            if args.set_version < 1:
+                raise ValueError("--set-version must be >= 1")
+            set_version = args.set_version
+        else:
+            set_version = _next_version(safe_name, config_dir, manifest_dir)
+        suffix = f"_v{set_version:03d}"
+        args.out_config = config_dir / f"{safe_name}{suffix}.yaml"
+        if args.out_manifest is None:
+            args.out_manifest = manifest_dir / f"{safe_name}{suffix}.manifest.json"
+    elif args.set_name and args.out_config is not None:
+        print("Note: --set-name ignored because --out-config was provided.")
 
     if not args.base_config.exists():
         raise FileNotFoundError(f"Base config not found: {args.base_config}")
@@ -741,6 +795,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         run_name=args.run_name,
         provenance_policy=args.provenance_policy,
         registry_path=registry_path,
+        set_name=args.set_name,
+        set_version=set_version,
     )
 
     _print_summary(manifest)

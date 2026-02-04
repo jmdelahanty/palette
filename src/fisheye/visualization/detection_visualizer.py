@@ -1,6 +1,8 @@
 import argparse
+import json
 import os, sys, shutil, subprocess
 from pathlib import Path
+from typing import Optional
 
 quality_flags = None
 blip_frames = None
@@ -12,6 +14,108 @@ HISTORY_WINDOW = 10
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
+flag_file_path = None
+frame_flag_file_path = None
+current_zarr_path = None
+current_zarr_dir = None
+
+
+def _resolve_manual_label(refined_group_root) -> Optional[str]:
+    manual_label = refined_group_root.attrs.get("manual_review_latest")
+    if manual_label and manual_label in refined_group_root:
+        return str(manual_label)
+    if "manual" in refined_group_root:
+        return "manual"
+    return None
+
+
+def _pick_refined_group(refined_group_root, requested: Optional[str]) -> Optional[str]:
+    if requested and requested != "auto":
+        if requested == "manual":
+            return _resolve_manual_label(refined_group_root)
+        if requested in refined_group_root:
+            return requested
+        return None
+    manual_label = _resolve_manual_label(refined_group_root)
+    if manual_label:
+        return manual_label
+    if "interpolated" in refined_group_root:
+        return "interpolated"
+    if "filtered" in refined_group_root:
+        return "filtered"
+    return None
+
+
+def _append_flagged_path() -> None:
+    if not flag_file_path or not current_zarr_path:
+        print("No flag file configured. Pass --flag-file to enable flagging.")
+        return
+    try:
+        flag_path = Path(flag_file_path)
+        flag_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = set()
+        if flag_path.exists():
+            with open(flag_path, "r", encoding="utf-8") as handle:
+                existing = {line.strip() for line in handle if line.strip()}
+        if current_zarr_path in existing:
+            print(f"Already flagged: {current_zarr_path}")
+            return
+        with open(flag_path, "a", encoding="utf-8") as handle:
+            handle.write(f"{current_zarr_path}\n")
+        print(f"Flagged for retune: {current_zarr_path}")
+        if current_zarr_dir:
+            print(f"Flag file: {flag_path} (cwd: {current_zarr_dir})")
+        else:
+            print(f"Flag file: {flag_path}")
+    except Exception as exc:
+        print(f"Failed to flag path: {exc}")
+
+
+def _load_frame_flags(path: Path) -> dict[str, list[int]]:
+    if not path.exists():
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return {}
+        data = json.loads(raw)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load frame flags from {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Frame flag file must contain a JSON object: {path}")
+    parsed: dict[str, list[int]] = {}
+    for key, value in data.items():
+        if isinstance(value, list):
+            frames: list[int] = []
+            for item in value:
+                try:
+                    frames.append(int(item))
+                except (TypeError, ValueError):
+                    continue
+            parsed[str(key)] = frames
+    return parsed
+
+
+def _append_flagged_frame(frame_idx: int) -> None:
+    if not frame_flag_file_path or not current_zarr_path:
+        print("No frame flag file configured. Pass --frame-flag-file to enable frame flagging.")
+        return
+    try:
+        flag_path = Path(frame_flag_file_path)
+        flag_path.parent.mkdir(parents=True, exist_ok=True)
+        data = _load_frame_flags(flag_path)
+        frames = set(data.get(current_zarr_path, []))
+        frames.add(int(frame_idx))
+        data[current_zarr_path] = sorted(frames)
+        flag_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"Flagged frame {frame_idx} for retune: {current_zarr_path}")
+        if current_zarr_dir:
+            print(f"Frame flag file: {flag_path} (cwd: {current_zarr_dir})")
+        else:
+            print(f"Frame flag file: {flag_path}")
+    except Exception as exc:
+        print(f"Failed to flag frame: {exc}")
+
 
 def load_quality_data(zarr_root, detect_run_name):
     """Load quality report data and the jump threshold used for analysis."""
@@ -364,6 +468,8 @@ refined_frame_indices = None
 refined_frame_map = None
 refined_detection_source = None
 refined_interpolated_count = 0
+refined_variant_label = None
+refined_is_manual = False
 using_refined_as_primary = False  # Track if we're using refined detections as primary source
 primary_detection_source = None  # Source array for primary detections (0=original, 1=interpolated)
 
@@ -615,9 +721,16 @@ def update_frame(frame_idx):
                 x1 = center_x - (box_w / 2)
                 y1 = center_y - (box_h / 2)
 
-                is_interpolated = refined_sources[i] == 1 if refined_sources is not None else False
-                color = 'orange' if is_interpolated else 'cyan'
-                label = "Interpolated" if is_interpolated else "Refined"
+                if refined_is_manual:
+                    color = 'magenta'
+                    if refined_variant_label and refined_variant_label != "manual":
+                        label = f"Manual ({refined_variant_label})"
+                    else:
+                        label = "Manual"
+                else:
+                    is_interpolated = refined_sources[i] == 1 if refined_sources is not None else False
+                    color = 'orange' if is_interpolated else 'cyan'
+                    label = "Interpolated" if is_interpolated else "Refined"
 
                 rect = patches.Rectangle((x1, y1), box_w, box_h, linewidth=1.5,
                                          edgecolor=color, facecolor='none', linestyle='--')
@@ -697,19 +810,25 @@ def jump_to_prev_artifact():
 
 def on_key_press(event):
     global frame_slider
-    if event.key == 's':
+    key = (event.key or "").lower()
+    if key == 's':
         save_current_frame()
-    elif event.key == 'right' and frame_slider is not None:
+    elif key == 'right' and frame_slider is not None:
         new_val = min(frame_slider.val + 1, frame_slider.valmax)
         frame_slider.set_val(new_val)
-    elif event.key == 'left' and frame_slider is not None:
+    elif key == 'left' and frame_slider is not None:
         new_val = max(frame_slider.val - 1, frame_slider.valmin)
         frame_slider.set_val(new_val)
-    elif event.key == 'n':  # Next artifact
+    elif key == 'n':  # Next artifact
         jump_to_next_artifact()
-    elif event.key == 'p':  # Previous artifact
+    elif key == 'p':  # Previous artifact
         jump_to_prev_artifact()
-    elif event.key in ('q', 'escape'):
+    elif key == 'f':
+        _append_flagged_path()
+    elif key == 'b':
+        if frame_slider is not None:
+            _append_flagged_frame(int(frame_slider.val))
+    elif key in ('q', 'escape'):
         print("Closing figure...")
         plt.close(fig)
 
@@ -731,7 +850,14 @@ def main(args):
     global output_dir, frame_slider, detection_ids
     global refined_enabled, refined_run_name, refined_bbox_coords, refined_frame_indices
     global refined_frame_map, refined_detection_source, refined_interpolated_count
+    global refined_variant_label, refined_is_manual
+    global flag_file_path, frame_flag_file_path, current_zarr_path, current_zarr_dir
     global using_refined_as_primary, primary_detection_source
+
+    current_zarr_path = str(Path(args.zarr_path).expanduser().resolve(strict=False))
+    current_zarr_dir = os.getcwd()
+    flag_file_path = args.flag_file
+    frame_flag_file_path = args.frame_flag_file
 
     if args.output_dir:
         output_dir = Path(args.output_dir)
@@ -845,9 +971,13 @@ def main(args):
         refined_frame_map = {}
         refined_detection_source = None
         refined_interpolated_count = 0
+        refined_variant_label = None
+        refined_is_manual = False
 
         # Determine which detection source to use as primary
         # Strategy: When --show-refined is set, prioritize using refined detections if they exist and match IDs
+        if args.refined_only:
+            args.show_refined = True
         if args.show_refined:
             print("\n🔍 Checking for refined detections to use as primary source...")
 
@@ -875,24 +1005,32 @@ def main(args):
                         print(f"     but original detections are from '{latest_detect_run}'")
                         # Don't skip - this is expected when using refined detections
 
-                    if 'interpolated' not in refined_group_root:
-                        print(f"  Refined run '{candidate_run}' does not contain 'interpolated' stage - will use original detections")
+                    manual_label = _resolve_manual_label(refined_group_root)
+                    refined_group_name = _pick_refined_group(refined_group_root, args.refined_variant)
+                    if refined_group_name is None:
+                        print(
+                            f"  Refined run '{candidate_run}' does not contain requested group "
+                            f"({args.refined_variant}) - will use original detections"
+                        )
                     else:
+                        refined_group = refined_group_root[refined_group_name]
                         # Load refined detection data
-                        interp_group = refined_group_root['interpolated']
-                        refined_bbox_coords = interp_group['bbox_norm_coords'][:]
-                        refined_frame_indices = interp_group['frame_indices'][:]
-                        refined_detection_source = interp_group.get('detection_source', None)
+                        refined_bbox_coords = refined_group['bbox_norm_coords'][:]
+                        refined_frame_indices = refined_group['frame_indices'][:]
+                        refined_detection_source = refined_group.get('detection_source', None)
                         if refined_detection_source is not None:
                             refined_detection_source = refined_detection_source[:]
 
                         refined_run_name = candidate_run
+                        refined_variant_label = refined_group_name
+                        refined_is_manual = manual_label is not None and refined_group_name == manual_label
                         total_refined = refined_bbox_coords.shape[0]
                         refined_interpolated_count = int(np.sum(refined_detection_source == 1)) if refined_detection_source is not None else 0
 
-                        print(f"  Loaded refined detections from {candidate_run}:")
+                        print(f"  Loaded refined detections from {candidate_run}/{refined_group_name}:")
                         print(f"    • Total: {total_refined}")
-                        print(f"    • Interpolated: {refined_interpolated_count}")
+                        if refined_detection_source is not None:
+                            print(f"    • Interpolated: {refined_interpolated_count}")
 
                         refined_available = True
 
@@ -925,14 +1063,26 @@ def main(args):
                             detection_ids = raw_detection_ids
                             refined_enabled = False  # Not showing as overlay since it's primary
                         else:
-                            print(f"  ⚠️ IDs do not match refined detections (IDs: {len(raw_detection_ids) if raw_detection_ids is not None else 0}, Refined: {total_refined})")
-                            print(f"  Will use original detections as primary and show refined as overlay")
+                            print(
+                                f"  ⚠️ IDs do not match refined detections "
+                                f"(IDs: {len(raw_detection_ids) if raw_detection_ids is not None else 0}, Refined: {total_refined})"
+                            )
+                            if args.refined_only:
+                                print("  Using refined detections as primary (forced by --refined-only); IDs disabled.")
+                                bbox_coords = refined_bbox_coords
+                                frame_indices = refined_frame_indices
+                                using_refined_as_primary = True
+                                primary_detection_source = refined_detection_source
+                                detection_ids = None
+                                refined_enabled = False
+                            else:
+                                print("  Will use original detections as primary and show refined as overlay")
 
-                            # Build refined frame map for overlay
-                            refined_frame_map = {}
-                            for det_idx, frame_idx in enumerate(refined_frame_indices):
-                                refined_frame_map.setdefault(int(frame_idx), []).append(det_idx)
-                            refined_enabled = True
+                                # Build refined frame map for overlay
+                                refined_frame_map = {}
+                                for det_idx, frame_idx in enumerate(refined_frame_indices):
+                                    refined_frame_map.setdefault(int(frame_idx), []).append(det_idx)
+                                refined_enabled = True
 
         # If we haven't set bbox_coords yet, use original detections as primary
         if bbox_coords is None:
@@ -988,14 +1138,24 @@ def main(args):
         print(f"  - Average detections per frame (with dets): {avg_per_frame:.2f}")
         print(f"  - Frames without detections: {num_frames - frames_with_detections}")
         if refined_enabled:
-            print(f"  - Refined overlay: {refined_run_name} (interpolated: {refined_interpolated_count})")
+            label = refined_run_name or "unknown"
+            if refined_variant_label:
+                label = f"{label}/{refined_variant_label}"
+            if refined_detection_source is not None:
+                print(f"  - Refined overlay: {label} (interpolated: {refined_interpolated_count})")
+            else:
+                print(f"  - Refined overlay: {label}")
         if using_refined_as_primary:
             interpolated_count = int(np.sum(primary_detection_source == 1)) if primary_detection_source is not None else 0
             original_count = total_detections - interpolated_count
             print(f"  - Using refined detections as primary source:")
-            print(f"    • Original detections: {original_count}")
-            print(f"    • Interpolated detections: {interpolated_count} (shown in orange)")
-            print(f"    • Source run: {refined_run_name}")
+            if primary_detection_source is not None:
+                print(f"    • Original detections: {original_count}")
+                print(f"    • Interpolated detections: {interpolated_count} (shown in orange)")
+            if refined_variant_label:
+                print(f"    • Source run: {refined_run_name}/{refined_variant_label}")
+            else:
+                print(f"    • Source run: {refined_run_name}")
 
     except Exception as e:
         print(f"Error opening Zarr file or finding data: {e}")
@@ -1033,6 +1193,8 @@ def main(args):
     print("  - Press 'n' to jump to NEXT artifact frame")
     print("  - Press 'p' to jump to PREVIOUS artifact frame")
     print("  - Press 's' to save the current view as a PNG")
+    print("  - Press 'f' to flag this recording for retune (requires --flag-file)")
+    print("  - Press 'b' to flag the current frame for retune (requires --frame-flag-file)")
     print("  - Press 'q' or 'Esc' to close the figure")
 
     plt.show()
@@ -1082,7 +1244,11 @@ if __name__ == "__main__":
                     inline=_pre_args.inline,
                     debug_ids=False,
                     show_refined=False,
-                    refined_run=None
+                    refined_run=None,
+                    refined_variant="auto",
+                    refined_only=False,
+                    flag_file=None,
+                    frame_flag_file=None
                 )
                 main(ns)
 
@@ -1115,6 +1281,27 @@ if __name__ == "__main__":
                         help="Overlay detections from the latest (or specified) refined run.")
     parser.add_argument("--refined-run", type=str,
                         help="Specific refined run name to use for overlay.")
+    parser.add_argument(
+        "--refined-variant",
+        choices=["auto", "interpolated", "filtered", "manual"],
+        default="auto",
+        help="Refined group to visualize (default: auto prefers manual if available).",
+    )
+    parser.add_argument(
+        "--refined-only",
+        action="store_true",
+        help="Use refined detections as primary when available (disables IDs if they don't match).",
+    )
+    parser.add_argument(
+        "--flag-file",
+        type=str,
+        help="Append current zarr path to this file when pressing 'f'.",
+    )
+    parser.add_argument(
+        "--frame-flag-file",
+        type=str,
+        help="Append current frame index to this JSON file when pressing 'b'.",
+    )
     parser.add_argument("--video", type=str,
                         help="Explicit path to source video when raw frames are absent in the Zarr.")
     args = parser.parse_args()

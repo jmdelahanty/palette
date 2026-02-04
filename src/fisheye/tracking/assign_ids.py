@@ -16,6 +16,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 
+from ..shared.experiment_setup import infer_experiment_setup
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info
 
@@ -274,20 +275,29 @@ def assign_ids_spatial(
     
     # Check experiment setup metadata
     experiment_setup = root.attrs.get('experiment_setup', {})
-    setup_type = experiment_setup.get('setup_type', 'unknown')
-    num_dishes = experiment_setup.get('num_dishes', 0)
-    
-    if experiment_setup:
+    setup_info = infer_experiment_setup(root.attrs)
+    setup_type = setup_info.setup_type
+    num_dishes = setup_info.num_dishes or 0
+
+    if setup_info.source == "experiment_setup" and experiment_setup:
         console.print(f"[cyan]Experiment setup detected:[/cyan]")
         console.print(f"  Setup type: {setup_type}")
         console.print(f"  Dishes: {num_dishes}")
         console.print(f"  Fish per dish: {experiment_setup.get('fish_per_dish', '?')}")
         console.print(f"  Expected total: {experiment_setup.get('total_expected_fish', '?')}")
         console.print()
+    elif setup_info.source == "experimental_chamber":
+        console.print("[yellow]No experiment_setup metadata found; using experimental_chamber to infer single-dish mode.[/yellow]")
+        console.print("[yellow]Consider backfilling experiment_setup for future runs.[/yellow]")
+        console.print()
     else:
         console.print("[yellow]No experiment setup metadata found.[/yellow]")
         console.print("[yellow]Run: python setup_experiment_metadata.py data.zarr --interactive[/yellow]")
         console.print("[yellow]Defaulting to multi-dish mode...[/yellow]\n")
+        setup_type = 'multi_dish'
+
+    if setup_type not in {'single_dish', 'multi_dish'}:
+        console.print("[yellow]Unknown setup type; defaulting to multi-dish mode.[/yellow]\n")
         setup_type = 'multi_dish'
     
     # Get sub-dish masks based on setup type

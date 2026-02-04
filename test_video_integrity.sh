@@ -40,12 +40,27 @@ else
 fi
 echo ""
 
-# Test 3: Decode from specific frame near end
-echo "3. Decoding from frame 45700 onwards (53 frames)..."
-timeout 20s ffmpeg -i "$VIDEO" -vf "select='gte(n,45700)'" -vsync 0 -f null - 2>&1 | grep "frame=" | tail -1
+# Test 3: Decode last N frames using frame count
+echo "3. Decoding last 100 frames..."
+FRAME_COUNT=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of default=nokey=1:noprint_wrappers=1 "$VIDEO")
+if [ -z "$FRAME_COUNT" ]; then
+    FRAME_COUNT=$(ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of default=nokey=1:noprint_wrappers=1 "$VIDEO")
+fi
+if [ -z "$FRAME_COUNT" ]; then
+    echo "   ⚠️  Could not determine frame count; skipping frame-based tail decode"
+    RESULT3=0
+else
+    START_FRAME=$((FRAME_COUNT - 100))
+    if [ "$START_FRAME" -lt 0 ]; then
+        START_FRAME=0
+    fi
+    echo "   Using start frame: $START_FRAME (total frames: $FRAME_COUNT)"
+    timeout 20s ffmpeg -i "$VIDEO" -vf "select='gte(n,$START_FRAME)'" -vsync 0 -f null - 2>&1 | grep "frame=" | tail -1
+    RESULT3=$?
+fi
 RESULT3=$?
 if [ $RESULT3 -eq 0 ]; then
-    echo "   ✓ Frames 45700+ decoded successfully"
+    echo "   ✓ Frames ${START_FRAME}+ decoded successfully"
 elif [ $RESULT3 -eq 124 ]; then
     echo "   ❌ TIMEOUT - ffmpeg hung on frames near end"
 else

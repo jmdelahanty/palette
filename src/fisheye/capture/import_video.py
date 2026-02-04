@@ -50,7 +50,12 @@ from ..shared.zarr.schema import create_palette_zarr, update_import_duration
 
 # ---------------- GDS support helpers ---------------- #
 
-def _compute_frame_indices(total_frames: int, frame_step: Optional[int]) -> list[int]:
+def _compute_frame_indices(
+    total_frames: int,
+    frame_step: Optional[int],
+    *,
+    skip_tail_frames: int = 0,
+) -> list[int]:
     """
     Compute which frame indices to import based on sampling strategy.
 
@@ -61,12 +66,17 @@ def _compute_frame_indices(total_frames: int, frame_step: Optional[int]) -> list
     Returns:
         List of frame indices to import
     """
+    if skip_tail_frames < 0:
+        skip_tail_frames = 0
+
+    effective_total = max(total_frames - skip_tail_frames, 0)
+
     if frame_step is None or frame_step == 1:
         # Import all frames
-        return list(range(total_frames))
+        return list(range(effective_total))
     else:
         # Uniform sampling: [0, step, 2*step, ...]
-        return list(range(0, total_frames, frame_step))
+        return list(range(0, effective_total, frame_step))
 
 
 def _default_import_config() -> Dict[str, Any]:
@@ -74,17 +84,18 @@ def _default_import_config() -> Dict[str, Any]:
     return {
         "import": {
             "resolutions": "both",
-            "chunk_size": 64,
+            "chunk_size": 16,
             "batch_size": 32,
             "gpu_fp16": True,
             "use_kvikio_zarr": True,
-            "use_sharding": False,
-            "chunks_per_shard": 8,
+            "use_sharding": True,
+            "chunks_per_shard": 2,
             "include_system_info": True,
             "full": {},
             "downsampled": {
                 "size": [640, 640],
                 "method": "area",
+                "chunk_size": 16,
             },
         }
     }
@@ -589,17 +600,44 @@ def import_video(
             # Check if this is a training data import with frame sampling
             training_data_mode = cli_args.get('training_data', False) if cli_args else False
             frame_step = cli_args.get('frame_step', None) if cli_args else None
+            skip_tail_frames = int(cli_args.get('skip_tail_frames', 0) or 0) if cli_args else 0
+
+            if skip_tail_frames >= n_frames:
+                raise ValueError(
+                    f"skip_tail_frames ({skip_tail_frames}) must be less than total frames ({n_frames})"
+                )
 
             if training_data_mode and frame_step:
                 # Compute frame indices for sampled import
-                frame_indices_to_import = _compute_frame_indices(n_frames, frame_step)
+                frame_indices_to_import = _compute_frame_indices(
+                    n_frames,
+                    frame_step,
+                    skip_tail_frames=skip_tail_frames,
+                )
                 n_import_frames = len(frame_indices_to_import)
+                if n_import_frames == 0:
+                    raise ValueError("No frames to import after applying frame_step/skip_tail_frames")
                 console.print(f"[yellow]Training data mode:[/yellow] Importing every {frame_step}th frame")
-                console.print(f"[yellow]Frames:[/yellow] {n_import_frames} of {n_frames} ({100*n_import_frames/n_frames:.1f}%)")
+                if skip_tail_frames:
+                    console.print(f"[yellow]Skipping tail:[/yellow] last {skip_tail_frames} frame(s)")
+                effective_total = n_frames - skip_tail_frames
+                console.print(
+                    f"[yellow]Frames:[/yellow] {n_import_frames} of {effective_total} "
+                    f"({100*n_import_frames/effective_total:.1f}%)"
+                )
             else:
                 # Standard full import
-                frame_indices_to_import = None
-                n_import_frames = n_frames
+                if skip_tail_frames:
+                    frame_indices_to_import = _compute_frame_indices(
+                        n_frames,
+                        None,
+                        skip_tail_frames=skip_tail_frames,
+                    )
+                    n_import_frames = len(frame_indices_to_import)
+                    console.print(f"[yellow]Skipping tail:[/yellow] last {skip_tail_frames} frame(s)")
+                else:
+                    frame_indices_to_import = None
+                    n_import_frames = n_frames
 
 
             # Determine io_batch_size based on sharding
@@ -826,6 +864,10 @@ def import_video(
                 else:
                     metadata["import_mode"] = "full"
 
+                if skip_tail_frames:
+                    metadata["skip_tail_frames"] = skip_tail_frames
+                    metadata["effective_video_length"] = n_frames - skip_tail_frames
+
                 raw.attrs.update(metadata)
 
             # ---- Console info --------------------------------------------------------
@@ -843,7 +885,10 @@ def import_video(
 
             frames_info = f"{n_import_frames}"
             if training_data_mode and frame_step:
-                frames_info += f" (sampled from {n_frames}, every {frame_step}th)"
+                sample_total = n_frames - skip_tail_frames
+                frames_info += f" (sampled from {sample_total}, every {frame_step}th)"
+            elif skip_tail_frames:
+                frames_info += f" (skipped last {skip_tail_frames} of {n_frames})"
 
             console.print(Panel.fit(
                 f"[cyan]Video:[/cyan] {video_path.name}\n"
@@ -889,7 +934,6 @@ def import_video(
                         'original_frame_indices',
                         data=np.array(frame_indices_to_import, dtype=np.int32),
                         chunks=(min(1000, n_import_frames),),
-                        dtype='int32',
                         overwrite=True
                     )
                     console.print(f"[green]✓ Stored mapping of {n_import_frames} imported frames to original video indices[/green]")
@@ -915,6 +959,9 @@ def import_video(
             throughput_gbps = total_gb / max(duration, 1e-9)
 
             fps = n_import_frames / max(duration, 1e-9)
+            eq_fps = None
+            if training_data_mode and frame_step:
+                eq_fps = fps * frame_step
 
             # Store performance metadata
             performance_metadata = {
@@ -1109,12 +1156,20 @@ def import_video(
             if training_data_mode and frame_step:
                 output_arrays.append(f"  - raw_video/original_frame_indices: ({n_import_frames},)")
 
+            perf_lines = [
+                f"  Time: {duration:.1f}s ({duration/60:.1f} min)",
+                f"  FPS (saved frames): {fps:.1f}",
+            ]
+            if eq_fps is not None:
+                perf_lines.append(f"  FPS (equivalent source): {eq_fps:.1f}")
+                perf_lines.append("  Note: sampled import; FPS reflects saved frames, not full decode")
+            perf_lines.append(f"  Throughput: {throughput_gbps:.2f} GB/s")
+
             console.print(Panel(
                 f"[green]✓ Import completed successfully[/green]\n\n"
                 f"[yellow]Performance:[/yellow]\n"
-                f"  Time: {duration:.1f}s ({duration/60:.1f} min)\n"
-                f"  FPS: {fps:.1f}\n"
-                f"  Throughput: {throughput_gbps:.2f} GB/s\n\n"
+                + "\n".join(perf_lines)
+                + "\n\n"
                 f"[yellow]Output:[/yellow]\n"
                 f"  Path: {zarr_path}\n"
                 f"[yellow]Arrays created:[/yellow]\n" + "\n".join(output_arrays),
@@ -1264,6 +1319,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Import every Nth frame (requires --training-data flag). Example: --frame-step 100 imports frames 0, 100, 200, ...",
     )
+    parser.add_argument(
+        "--skip-tail-frames",
+        type=int,
+        metavar="N",
+        default=0,
+        help="Skip the last N frames to avoid EOF/GOP issues during decoding.",
+    )
     return parser
 
 
@@ -1284,6 +1346,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.frame_step is not None and args.frame_step < 1:
         console.print(f"[bold red]Error:[/bold red] --frame-step must be >= 1, got {args.frame_step}")
+        return 1
+    if args.skip_tail_frames is not None and args.skip_tail_frames < 0:
+        console.print(f"[bold red]Error:[/bold red] --skip-tail-frames must be >= 0, got {args.skip_tail_frames}")
         return 1
 
     video_path = Path(args.video_path).expanduser()
@@ -1323,6 +1388,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "overwrite": bool(args.overwrite),
         "training_data": bool(args.training_data),
         "frame_step": int(args.frame_step) if args.frame_step else None,
+        "skip_tail_frames": int(args.skip_tail_frames) if args.skip_tail_frames else 0,
     }
 
     try:

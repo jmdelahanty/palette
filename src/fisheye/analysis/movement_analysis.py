@@ -308,6 +308,7 @@ def resolve_calibration(root: zarr.Group) -> Tuple[Optional[float], Dict[str, An
         return None, {
             "has_calibration": False,
             "measured_fps": None,
+            "measured_stimulus_fps": None,
             "stimulus_offset_x": None,
             "stimulus_offset_y": None,
             "primary_camera_id": None,
@@ -316,8 +317,12 @@ def resolve_calibration(root: zarr.Group) -> Tuple[Optional[float], Dict[str, An
 
     pixel_to_mm = calibration.attrs.get("pixel_to_mm")
     pixel_to_mm_val = float(pixel_to_mm) if pixel_to_mm is not None else None
-    measured_fps = calibration.attrs.get("measured_fps")
-    measured_fps_val = float(measured_fps) if measured_fps is not None else None
+    measured_stimulus_fps = calibration.attrs.get("measured_stimulus_fps")
+    if measured_stimulus_fps is None:
+        measured_stimulus_fps = calibration.attrs.get("measured_fps")
+    measured_stimulus_fps_val = (
+        float(measured_stimulus_fps) if measured_stimulus_fps is not None else None
+    )
     stim_offset_x = calibration.attrs.get("stimulus_offset_x")
     stim_offset_y = calibration.attrs.get("stimulus_offset_y")
 
@@ -350,7 +355,8 @@ def resolve_calibration(root: zarr.Group) -> Tuple[Optional[float], Dict[str, An
 
     return pixel_to_mm_val, {
         "has_calibration": pixel_to_mm_val is not None,
-        "measured_fps": measured_fps_val,
+        "measured_fps": measured_stimulus_fps_val,
+        "measured_stimulus_fps": measured_stimulus_fps_val,
         "stimulus_offset_x": stim_offset_x_val,
         "stimulus_offset_y": stim_offset_y_val,
         "primary_camera_id": primary_camera_id_val,

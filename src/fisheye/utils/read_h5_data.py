@@ -346,6 +346,68 @@ def read_stimulus_coordinates(hf):
                 for key, value in custom_group.attrs.items():
                     print(f"    {key}: {value}")
 
+
+def _stringify_payload(value: object) -> str:
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", "ignore")
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return _stringify_payload(value.item())
+        if value.size <= 20:
+            return str(value)
+        return f"array shape={value.shape} dtype={value.dtype}"
+    return str(value)
+
+
+def _print_snapshot_payload(label: str, payload: object) -> None:
+    text = _stringify_payload(payload)
+    if isinstance(text, str):
+        stripped = text.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+                print(f"{label}{json.dumps(parsed, indent=2)}")
+                return
+            except Exception:
+                pass
+    print(f"{label}{text}")
+
+
+def read_recording_snapshot(hf):
+    """Reads and displays the /recording_snapshot group or dataset."""
+    print("\n--- Reading /recording_snapshot ---")
+    node = get_h5_object(hf, "/recording_snapshot")
+    if node is None:
+        print("No recording snapshot found.")
+        return
+
+    if isinstance(node, h5py.Dataset):
+        payload = node[()]
+        _print_snapshot_payload("Recording snapshot: ", payload)
+        return
+
+    if node.attrs:
+        print("Attributes:")
+        for key, value in node.attrs.items():
+            _print_snapshot_payload(f"  {key}: ", value)
+    else:
+        print("No attributes found.")
+
+    if not node.keys():
+        return
+
+    for name, item in node.items():
+        if isinstance(item, h5py.Dataset):
+            print(f"\nDataset: {name}")
+            _print_snapshot_payload("  ", item[()])
+        elif isinstance(item, h5py.Group):
+            print(f"\nGroup: {name}")
+            if item.attrs:
+                for key, value in item.attrs.items():
+                    _print_snapshot_payload(f"  {key}: ", value)
+            else:
+                print("  (no attributes)")
+
 def main():
     parser = argparse.ArgumentParser(description="Inspect components of a citrus HDF5 log file using Polars.")
     parser.add_argument("filepath", help="Path to the HDF5 file.")
@@ -359,6 +421,7 @@ def main():
     parser.add_argument("--protocol", action="store_true", help="Inspect the protocol snapshot.")
     parser.add_argument("--calib", action="store_true", help="Inspect the calibration snapshot.")
     parser.add_argument("--coords", action="store_true", help="Inspect the stimulus coordinate info.")
+    parser.add_argument("--recording-snapshot", action="store_true", help="Inspect the recording snapshot.")
     parser.add_argument("--output_dir", default=".", help="Directory to save extracted files (like calibration images).")
 
     args = parser.parse_args()
@@ -403,6 +466,8 @@ def main():
             read_calibration_snapshot(hf, args.output_dir)
         if args.coords or args.all:
             read_stimulus_coordinates(hf)
+        if args.recording_snapshot or args.all:
+            read_recording_snapshot(hf)
 
     print("\n--- Inspection Complete ---")
 

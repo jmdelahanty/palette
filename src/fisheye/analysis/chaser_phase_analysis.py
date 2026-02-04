@@ -128,7 +128,10 @@ def _collect_pipeline_provenance(root: Any) -> Dict[str, Any]:
     crop_source = crop_group.attrs.get("detection_source_path") if crop_group is not None else None
     if crop_group is not None:
         if refined_run and refined_group is not None:
-            expected = refined_group.path + "/interpolated"
+            manual_label = refined_group.attrs.get("manual_review_latest")
+            if not manual_label and "manual" in refined_group:
+                manual_label = "manual"
+            expected = refined_group.path + (f"/{manual_label}" if manual_label else "/interpolated")
             if crop_source and crop_source != expected:
                 issues.append(
                     f"Crop run '{crop_run}' sourced from '{crop_source}' but refined detection path is '{expected}'."

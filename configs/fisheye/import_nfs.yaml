@@ -1,0 +1,14 @@
+import:
+  resolutions: both
+  use_kvikio_zarr: true
+  use_sharding: true
+  chunk_size: 16
+  chunks_per_shard: 2
+  batch_size: 32
+  gpu_fp16: true
+  full: true
+  downsampled:
+    size: [640, 640]
+    method: area
+    formats: [gray]
+    chunk_size: 16

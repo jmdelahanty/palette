@@ -6,13 +6,20 @@ This tool loads a crop run (defaulting to the latest) and presents the ROI crops
 with an interactive slider and keyboard navigation.  It is intentionally
 lightweight so it can be used during annotation / QA to spot issues in the crop
 stage without bringing keypoints or masks into the picture.
+
+Note: The viewer locks contrast to 0–255 for grayscale crops so intensity
+comparisons are consistent across frames (avoids per-frame auto-scaling).
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import os
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
+from datetime import datetime, timezone
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -66,14 +73,100 @@ def _prepare_image(raw: np.ndarray) -> Tuple[np.ndarray, Optional[str]]:
     raise ValueError(f"Unsupported crop image shape {img.shape!r}")
 
 
-def _format_info(idx: int, frame: int, coords_full: Optional[np.ndarray]) -> str:
+def _format_info(
+    idx: int,
+    frame: int,
+    coords_full: Optional[np.ndarray],
+    review_label: Optional[str] = None,
+) -> str:
     lines = [f"Crop index: {idx}", f"Frame index: {frame}"]
     if coords_full is not None and coords_full.size >= 4:
         x0, y0, x1, y1 = coords_full
         width = x1 - x0
         height = y1 - y0
         lines.append(f"Full-frame box: x0={x0:.1f}, y0={y0:.1f}, w={width:.1f}, h={height:.1f}")
+    if review_label:
+        lines.append(f"Review: {review_label}")
     return "\n".join(lines)
+
+
+def _hash_parameters(params: object) -> Optional[str]:
+    if params is None:
+        return None
+    try:
+        payload = json.dumps(params, sort_keys=True, default=str).encode("utf-8")
+    except (TypeError, ValueError):
+        payload = str(params).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _build_crop_signature(attrs: Dict[str, Any]) -> Dict[str, object]:
+    return {
+        "signature_version": 1,
+        "detection_source_path": attrs.get("detection_source_path"),
+        "detection_source_type": attrs.get("detection_source_type"),
+        "detection_preferred_policy": attrs.get("detection_preferred_policy"),
+        "source_detect_run": attrs.get("source_detect_run"),
+        "source_refined_run": attrs.get("source_refined_run"),
+        "roi_size": attrs.get("roi_size"),
+        "parameter_source": attrs.get("parameter_source"),
+        "parameters_hash": _hash_parameters(attrs.get("parameters")),
+    }
+
+
+def _format_review_status(status: Optional[Dict[str, object]]) -> Optional[str]:
+    if not status:
+        return None
+    state = str(status.get("state", "")).strip()
+    method = str(status.get("method", "")).strip()
+    intended_use = str(status.get("intended_use", "")).strip()
+    parts = []
+    if method:
+        parts.append(method)
+    if intended_use:
+        parts.append(intended_use)
+    if parts:
+        return f"{state or 'review'} ({', '.join(parts)})"
+    return state or "review"
+
+
+def _apply_crop_review_status(
+    zarr_path: Path,
+    crop_run: str,
+    state: str,
+    method: str,
+    intended_use: str,
+    reviewer: Optional[str],
+    notes: Optional[str],
+) -> Dict[str, object]:
+    root = zarr.open(str(zarr_path), mode="a")
+    if "crop_runs" not in root:
+        raise RuntimeError("No crop_runs found in archive.")
+    crop_parent = root["crop_runs"]
+    if crop_run not in crop_parent:
+        raise RuntimeError(f"Crop run '{crop_run}' not found.")
+    crop_group = crop_parent[crop_run]
+
+    payload: Dict[str, object] = {
+        "state": state,
+        "method": method,
+        "intended_use": intended_use,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if reviewer:
+        payload["reviewer"] = reviewer
+    if notes:
+        payload["notes"] = notes
+
+    crop_group.attrs["crop_review_status"] = payload
+
+    signature = crop_group.attrs.get("crop_signature")
+    if not isinstance(signature, dict):
+        signature = _build_crop_signature(crop_group.attrs)
+        crop_group.attrs["crop_signature"] = signature
+    crop_group.attrs["crop_review_signature"] = signature
+    crop_parent.attrs["crop_review_status_latest"] = crop_run
+    return payload
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,6 +187,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Suppress status messages.",
     )
+    parser.add_argument(
+        "--review-state",
+        default="approved",
+        choices=["approved", "pending", "rejected", "needs_review"],
+        help="Review state to set when pressing 'a' (default: approved).",
+    )
+    parser.add_argument(
+        "--review-method",
+        default="manual",
+        choices=["manual", "algorithmic", "hybrid", "spotcheck"],
+        help="Review method label (default: manual).",
+    )
+    parser.add_argument(
+        "--review-intended-use",
+        default="training",
+        choices=["training", "full_recording"],
+        help="Intended use label (default: training).",
+    )
+    parser.add_argument("--reviewer", help="Reviewer name (defaults to $USER).")
+    parser.add_argument("--review-notes", help="Optional review notes.")
     return parser
 
 
@@ -104,6 +217,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     root = zarr.open(str(args.zarr_path), mode="r")
     crop_run = get_latest_run(root, "crop", args.crop_run)
     crop_group = root[f"crop_runs/{crop_run}"]
+    review_status = crop_group.attrs.get("crop_review_status")
+    review_label = _format_review_status(review_status if isinstance(review_status, dict) else None)
 
     roi_images = crop_group["roi_images"]
     frame_indices = crop_group["frame_indices"][:]
@@ -120,14 +235,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     fig, ax = plt.subplots(figsize=(5, 5))
     plt.subplots_adjust(bottom=0.22)
     ax.set_axis_off()
-    image_artist = ax.imshow(first_img, cmap=first_cmap)
+    image_artist = ax.imshow(first_img, cmap=first_cmap, vmin=0, vmax=255)
 
     info_ax = fig.add_axes([0.02, 0.02, 0.4, 0.16])
     info_ax.set_axis_off()
     info_text = info_ax.text(
         0.0,
         0.98,
-        _format_info(0, int(frame_indices[0]), coords_full[0] if coords_full is not None else None),
+        _format_info(
+            0,
+            int(frame_indices[0]),
+            coords_full[0] if coords_full is not None else None,
+            review_label,
+        ),
         va="top",
         ha="left",
         fontsize=9,
@@ -143,14 +263,38 @@ def main(argv: Optional[list[str]] = None) -> int:
         image_artist.set_data(img)
         if cmap:
             image_artist.set_cmap(cmap)
+        image_artist.set_clim(0, 255)
         info_text.set_text(
-            _format_info(idx, int(frame_indices[idx]), coords_full[idx] if coords_full is not None else None)
+            _format_info(
+                idx,
+                int(frame_indices[idx]),
+                coords_full[idx] if coords_full is not None else None,
+                review_label,
+            )
         )
         fig.canvas.draw_idle()
 
     slider.on_changed(update)
 
     def on_key(event) -> None:
+        nonlocal review_label
+        def apply_state(state: str) -> None:
+            nonlocal review_label
+            reviewer = args.reviewer or os.environ.get("USER")
+            payload = _apply_crop_review_status(
+                args.zarr_path,
+                crop_run,
+                state=state,
+                method=args.review_method,
+                intended_use=args.review_intended_use,
+                reviewer=reviewer,
+                notes=args.review_notes,
+            )
+            review_label = _format_review_status(payload)
+            if not args.quiet:
+                print(f"✓ Crop review set: {review_label}")
+            update(slider.val)
+
         if event.key in {"left", "down", "pageup"}:
             slider.set_val(max(slider.val - 1, 0))
         elif event.key in {"right", "up", "pagedown"}:
@@ -159,9 +303,36 @@ def main(argv: Optional[list[str]] = None) -> int:
             slider.set_val(0)
         elif event.key == "end":
             slider.set_val(total - 1)
+        elif event.key == "a":
+            try:
+                apply_state(args.review_state)
+            except Exception as exc:
+                if not args.quiet:
+                    print(f"⚠️ Failed to set crop review: {exc}")
+        elif event.key == "r":
+            try:
+                apply_state("rejected")
+            except Exception as exc:
+                if not args.quiet:
+                    print(f"⚠️ Failed to set crop review: {exc}")
+        elif event.key == "n":
+            try:
+                apply_state("needs_review")
+            except Exception as exc:
+                if not args.quiet:
+                    print(f"⚠️ Failed to set crop review: {exc}")
+        elif event.key == "p":
+            try:
+                apply_state("pending")
+            except Exception as exc:
+                if not args.quiet:
+                    print(f"⚠️ Failed to set crop review: {exc}")
 
     fig.canvas.mpl_connect("key_press_event", on_key)
-    fig.suptitle(f"Crop viewer – run {crop_run}", fontsize=14, fontweight="bold")
+    title = f"Crop viewer – run {crop_run}"
+    if review_label:
+        title = f"{title} | review: {review_label}"
+    fig.suptitle(title, fontsize=14, fontweight="bold")
 
     if not args.no_show:
         plt.show()

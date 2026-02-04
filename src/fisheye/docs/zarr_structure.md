@@ -1,8 +1,9 @@
 # Palette Zarr Layout (v3)
 
 This reference summarizes the structure produced by the modern Palette
-pipeline.  It should match what `fisheye.shared.zarr.schema` and the
-stage implementations currently write.
+pipeline. It is the **authoritative** spec; the stage implementations
+should match it, and `fisheye.shared.zarr.schema` may lag behind until
+it is updated.
 
 ---
 
@@ -28,6 +29,7 @@ stage implementations currently write.
 - `refined_keypoints_runs/`
 - `refined_eye_masks_runs/`
 - `refined_online_runs/`
+- `tracking_runs/` *(legacy/optional)*
 - `id_assignment_runs/`
 - `calibration/`
 - `analysis/`
@@ -121,13 +123,21 @@ Attributes:
 - `source_detect_run`, `source_background_run`, `detection_source_type`,
   `detection_source_path`, `includes_interpolated`, `n_real_detections`,
   `n_interpolated_detections`, ROI size, scaling factors.
+- `detect_review_status` (snapshot of refined review status when crop ran)
+- `detect_review_status_ref` (refined run path where review status lives)
+- `detection_preferred_policy` (policy label used for preferred/auto resolution)
+- `crop_signature` (signature of crop inputs: source path/type, ROI size, parameters hash)
+- `crop_review_status` (review status payload for this crop run, optional)
+- `crop_review_signature` (signature snapshot stored when crop review was set)
 - `summary_statistics` (frames with crops, total ROIs, percentage coverage).
 - GPU/environment provenance.
 
 Cropping resolves the ROI source via `crop.source_type` (`detect`, `filtered`,
-`interpolated`) or an explicit `crop.source_path` override such as
-`detect_runs/<run>` or `refined_detect_runs/<run>/interpolated`, and the chosen
-path is recorded in `detection_source_path`.
+`interpolated`, `manual`, `preferred`, `auto`) or an explicit `crop.source_path`
+override such as `detect_runs/<run>` or `refined_detect_runs/<run>/interpolated`,
+and the chosen path is recorded in `detection_source_path`. When `preferred` or
+`auto` is used, the resolved group is stored in `detection_source_type` and the
+policy label is recorded in `detection_preferred_policy`.
 
 ---
 
@@ -197,21 +207,85 @@ thresholds, separation limits, `successful_eyes`, `successful_roi_pairs`, `reaso
 
 ## `refined_detect_runs/`
 
-Created by `fisheye.refinement.refine_detect`.  Inherits the detection arrays
-from its source run and adds QA channels.
+Created by `fisheye.refinement.refine_detect`. Each refined run is a **group**
+containing multiple subgroups (filtered/interpolated and optional manual/retune).
+
+### Run-level attributes
+
+Common attrs on `refined_detect_runs/<run>`:
+- `source_detect_run`, `source_quality_run`
+- `refinement_timestamp`, `processing_time_seconds`
+- `operations` (`["filter","interpolate"]` or `["passthrough"]`)
+- `parameters` (includes `max_gap`, `interpolation_method`, `filters_applied`,
+  `parameter_source`, `refine_mode`, `sampled_import`, `sampled_import_meta`)
+- `coverage_comparison` (original/filtered/interpolated coverage + counts)
+- `coverage_frames_total` (frame universe used for coverage percent)
+- `coverage_frame_source` (`full` or `sampled`)
+- `coverage_frames_full` (full frame count when sampled coverage is used)
+- `manual_review_latest` (when manual/retune corrections exist)
+- `detect_review_status` (review metadata dict; see below)
+- `retune_params` (mapping retune_id → parameter set, when retune is used)
+- provenance/environment metadata
+
+Parent attrs on `refined_detect_runs/`:
+- `latest`
+- `detect_review_status_latest` (run name containing the most recent review status)
+
+`detect_review_status` payload fields (may be extended over time):
+- `state` (e.g., approved/needs_review)
+- `method` (manual/retune/auto)
+- `intended_use` (training/analysis/etc.)
+- `timestamp`
+- `resolved_group` (manual/interpolated/filtered/raw)
+- `preference_chain` (ordered list used for resolution)
+- optional `reviewer`, `notes`
+
+### `filtered/`
 
 | Array | Shape | Notes |
 | ----- | ----- | ----- |
-| `bbox_norm_coords` | `(n_detections, 4)` | Updated boxes |
-| `scores` | `(n_detections,)` | Updated confidences |
-| `reason` | `(n_detections,)` | UTF-8 labels (e.g. `refined`, `copied`, `filtered`) |
-| `qa_metrics/*` | Various | Stage-specific floats/ints for diagnostics |
+| `frame_indices` | `(n_detections,)` | Frame index per detection |
+| `frame_counts` | `(n_frames,)` | Detections per frame |
+| `n_detections` | `(n_frames,)` | Alias of `frame_counts` |
+| `bbox_norm_coords` | `(n_detections, 4)` | Normalized boxes |
+| `scores` | `(n_detections,)` | Scores (or placeholder for blob) |
+| `class_ids` | `(n_detections,)` | Class labels |
+| `frame_mapping` | `(n_detections,)` | Legacy alias of `frame_indices` |
 
-Attributes summarize counts by `reason`, thresholds, and references to the
-source detect and crop runs. Optional visual artifacts may be stored under
-`visualizations/` (e.g., `visualizations/detect_quality_overview_png` containing a
-PNG summary of the detection-quality analysis with attrs `mime='image/png'`,
-`source_detect_run`, and `source_quality_run`).
+Attrs: `total_detections`, `dropped_detections`, `drop_reasons`, `column_fields`,
+`storage_layout`, `field_names`.
+
+### `interpolated/`
+
+Same arrays as `filtered/`, plus:
+
+| Array | Shape | Notes |
+| ----- | ----- | ----- |
+| `detection_source` | `(n_detections,)` | 0 = real, 1 = interpolated |
+
+Attrs: `original_detections`, `interpolated_detections`, `gaps_filled`,
+`interpolation_stats`, plus columnar metadata.
+
+### Manual / Retune subgroups (e.g. `manual/`)
+
+Written by `fisheye.tune.detect_review` (manual corrections or retune).
+These subgroups mirror the detection arrays and may include:
+
+| Array | Shape | Notes |
+| ----- | ----- | ----- |
+| `retune_id` *(optional)* | `(n_detections,)` | Retune parameter set label (`-1` = none) |
+| `reason` *(optional)* | `(n_detections,)` | UTF-8 labels (e.g. `retune`, `manual_correction`) |
+
+Attrs include `detection_source_type` (`manual`/`retune`), `detection_source_path`,
+and retune metadata such as `retune_parameters` and `retune_base_group`.
+
+`manual_review_latest` is the authoritative pointer used by status reporters
+and downstream consumers to prefer manual/retune corrections. When set, it
+should reference the active manual subgroup (typically `manual`).
+
+Note: even in passthrough/no-op refinement, `filtered/` and `interpolated/` are
+still created to keep the schema stable; the status reporter uses explicit labels
+(`passthrough`, `unchanged`, etc.) to indicate when refinement did not alter data.
 
 ---
 
@@ -251,6 +325,7 @@ Outputs from `fisheye.refinement.refine_keypoints`.
 
 Attributes: `source_keypoints_run`, `source_crop_run`, `source_detect_run`,
 refinement parameters (thresholds), `summary_statistics`, `retune_params`,
+`keypoint_signature`, `keypoint_review_status`, `keypoint_review_signature`,
 scheduler config, environment/provenance metadata.
 
 `summary_statistics` is a dict with a refine-time snapshot plus optional
@@ -341,7 +416,8 @@ parameters for both camera and projector coordinate spaces.
 | `pixels_per_mm_camera` | Alias for pixel_to_mm | pixels/mm | Camera space |
 | `pixels_per_mm_projector` | Projector-space calibration | pixels/mm | **For texture/stimulus coordinates (358×358)** |
 | `z_eff_mm` | Effective viewing distance | mm | Accounts for refraction through media |
-| `measured_fps` | Measured frame rate | fps | Actual measured FPS |
+| `measured_stimulus_fps` | Measured stimulus frame rate | fps | Computed from `/video_metadata/frame_metadata` timestamps |
+| `measured_fps` | Legacy alias for measured_stimulus_fps | fps | Maintained for backward compatibility |
 | `arena_shape` | Arena shape | - | "CIRCLE" or "RECTANGLE" |
 | `arena_center_x_px` | Arena center X | pixels | Camera space |
 | `arena_center_y_px` | Arena center Y | pixels | Camera space |
@@ -492,7 +568,8 @@ Calibration metadata extracted from H5 files:
 - `pixels_per_mm_camera`: Alias for `pixel_to_mm` (pixels/mm)
 - `pixels_per_mm_projector`: Projector/texture-space calibration (pixels/mm) **[for texture space coordinates]**
 - `z_eff_mm`: Effective viewing distance through media
-- `measured_fps`: Measured frame rate
+- `measured_stimulus_fps`: Measured stimulus frame rate (from H5 frame metadata timestamps)
+- `measured_fps`: Legacy alias for `measured_stimulus_fps`
 - `arena_shape`: CIRCLE or RECTANGLE
 - `arena_center_x_px`, `arena_center_y_px`: Arena center
 - `arena_radius_px` or `arena_width_px`, `arena_height_px`: Arena dimensions

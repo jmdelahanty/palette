@@ -50,6 +50,7 @@ current_frame = 1
 min_valid_angle = 10
 max_valid_angle = 90
 min_triangle_area = 100
+max_triangle_area = 0
 current_detection = 0
 roi_thresh = 50
 se1_radius = 1
@@ -60,6 +61,7 @@ show_geometry = 1   # Show triangle geometry analysis
 
 MIN_AREA_SLIDER_MAX = 1000
 MIN_TRI_AREA_SLIDER_MAX = 2000
+MAX_TRI_AREA_SLIDER_MAX = 200000
 MIN_ANGLE_SLIDER_MAX = 90
 MAX_ANGLE_SLIDER_MAX = 180
 EVAL_SAMPLE_DEFAULT = 300
@@ -110,10 +112,14 @@ def update_min_triangle_area(val):
     global min_triangle_area
     min_triangle_area = max(1, val)
 
+def update_max_triangle_area(val):
+    global max_triangle_area
+    max_triangle_area = max(0, val)
+
 
 def _apply_keypoint_params(params: Dict[str, Any]) -> None:
     global roi_thresh, se1_radius, se2_radius
-    global min_area, min_triangle_area, min_valid_angle, max_valid_angle
+    global min_area, min_triangle_area, max_triangle_area, min_valid_angle, max_valid_angle
     if params is None:
         return
     if 'roi_thresh' in params:
@@ -126,6 +132,15 @@ def _apply_keypoint_params(params: Dict[str, Any]) -> None:
         min_area = int(params['min_area'])
     if 'min_triangle_area' in params:
         min_triangle_area = int(params['min_triangle_area'])
+    if 'max_triangle_area' in params:
+        value = params['max_triangle_area']
+        if value is None:
+            max_triangle_area = 0
+        else:
+            try:
+                max_triangle_area = max(0, int(value))
+            except (TypeError, ValueError):
+                max_triangle_area = 0
     if 'min_valid_angle' in params:
         min_valid_angle = int(params['min_valid_angle'])
     if 'max_valid_angle' in params:
@@ -191,6 +206,7 @@ def process_roi_for_keypoints(roi_image, background_roi, params):
     min_angle_threshold = params.get('min_valid_angle', 10.0)
     max_angle_threshold = params.get('max_valid_angle', 90.0)
     min_triangle_area = params.get('min_triangle_area', 100.0)  # NEW
+    max_triangle_area = params.get('max_triangle_area')
     angle_min = min(min_angle_threshold, max_angle_threshold)
     angle_max = max(min_angle_threshold, max_angle_threshold)
     
@@ -216,10 +232,16 @@ def process_roi_for_keypoints(roi_image, background_roi, params):
         tri_area = calculate_triangle_area(centroids[0], centroids[1], centroids[2])
 
         # Check if angles form a valid triangle AND triangle is large enough
+        max_ok = (
+            max_triangle_area is None
+            or max_triangle_area <= 0
+            or tri_area <= max_triangle_area
+        )
         if (
             np.all(angles >= angle_min)
             and np.all(angles <= angle_max)
             and tri_area >= min_triangle_area
+            and max_ok
         ):
             keypoint_stats = candidate_stats
             effective_se2_radius = se2_radius_int
@@ -277,7 +299,8 @@ def save_keypoint_params(zarr_path, params):
                 'min_area': params['min_area'],
                 'min_valid_angle': params.get('min_valid_angle', 10),
                 'max_valid_angle': params.get('max_valid_angle', 90),
-                'min_triangle_area': params.get('min_triangle_area', 100),
+            'min_triangle_area': params.get('min_triangle_area', 100),
+            'max_triangle_area': params.get('max_triangle_area'),
             },
             'tuned_on_frame': params.get('frame_index', None),
             'tuned_on_detection': params.get('detection_index', None)
@@ -294,6 +317,7 @@ def save_keypoint_params(zarr_path, params):
         print(f"   min_area: {params['min_area']}")
         print(f"   min_valid_angle: {params.get('min_valid_angle', 'N/A')}")
         print(f"   min_triangle_area: {params['min_triangle_area']}")
+        print(f"   max_triangle_area: {params.get('max_triangle_area')}")
         print(f"   max_valid_angle: {params.get('max_valid_angle', 'N/A')}")
         print(f"   Tuned on frame: {params.get('frame_index', 'N/A')}")
         print(f"   Tuned on detection: {params.get('detection_index', 'N/A')}")
@@ -387,13 +411,32 @@ def _extract_background_roi(
 ) -> Optional[np.ndarray]:
     if background is None or roi_coord[0] == -1:
         return None
+    roi_h, roi_w = int(roi_shape[0]), int(roi_shape[1])
     y1, x1 = int(roi_coord[1]), int(roi_coord[0])
-    y2, x2 = y1 + roi_shape[0], x1 + roi_shape[1]
-    if y2 > background.shape[0] or x2 > background.shape[1]:
-        return None
-    roi = background[y1:y2, x1:x2]
-    if roi.shape != roi_shape:
-        return None
+    y2, x2 = y1 + roi_h, x1 + roi_w
+
+    bg_h, bg_w = background.shape[:2]
+    vy1, vx1 = max(y1, 0), max(x1, 0)
+    vy2, vx2 = min(y2, bg_h), min(x2, bg_w)
+
+    if vy1 >= vy2 or vx1 >= vx2:
+        return np.zeros((roi_h, roi_w), dtype=background.dtype)
+
+    if y1 >= 0 and x1 >= 0 and y2 <= bg_h and x2 <= bg_w:
+        roi = background[y1:y2, x1:x2]
+        if roi.shape[:2] == (roi_h, roi_w):
+            return roi
+
+    if background.ndim == 2:
+        roi = np.zeros((roi_h, roi_w), dtype=background.dtype)
+    else:
+        roi = np.zeros((roi_h, roi_w, background.shape[2]), dtype=background.dtype)
+
+    py1 = max(0, -y1)
+    px1 = max(0, -x1)
+    py2 = py1 + (vy2 - vy1)
+    px2 = px1 + (vx2 - vx1)
+    roi[py1:py2, px1:px2] = background[vy1:vy2, vx1:vx2]
     return roi
 
 
@@ -625,11 +668,13 @@ def create_keypoint_dashboard(roi_image, background_roi, params, frame_num, det_
     cv2.putText(panel4, status, (10, 20),
                cv2.FONT_HERSHEY_SIMPLEX, 0.45, status_color, 1)
     
+    max_tri = params.get('max_triangle_area')
+    max_tri_label = "off" if max_tri is None or max_tri <= 0 else f"{int(max_tri)}"
     slider_info = (
         f"Thresh:{params['roi_thresh']} | SE1:{params['se1_radius']} "
         f"| SE2 slider:{params['se2_radius']} | SE2 eff:{effective_se2} "
         f"| MinArea:{params['min_area']} | Ang:{params['min_valid_angle']}-{params.get('max_valid_angle', 90)} "
-        f"| MinTri:{params['min_triangle_area']}"
+        f"| MinTri:{params['min_triangle_area']} | MaxTri:{max_tri_label}"
     )
     cv2.putText(panel4, slider_info, (10, 38),
                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
@@ -669,7 +714,7 @@ def run_failure_tuner(
     apply_workers: int = APPLY_WORKERS_DEFAULT,
 ) -> None:
     global current_frame, roi_thresh, se1_radius, se2_radius
-    global min_area, min_triangle_area, use_difference, show_geometry
+    global min_area, min_triangle_area, max_triangle_area, use_difference, show_geometry
     global min_valid_angle, max_valid_angle
 
     current_frame = max(1, start_index)
@@ -771,6 +816,11 @@ def run_failure_tuner(
     confidence_threshold = float(summary.get("confidence_threshold", 0.3))
     min_triangle_angle = float(summary.get("min_triangle_angle", 10.0))
     min_triangle_area = float(summary.get("min_triangle_area", 100.0))
+    max_summary = summary.get("max_triangle_area")
+    try:
+        max_triangle_area = float(max_summary) if max_summary is not None else 0
+    except (TypeError, ValueError):
+        max_triangle_area = 0
 
     apply_batch_size = max(1, int(apply_batch_size))
     apply_workers = max(1, int(apply_workers))
@@ -793,6 +843,7 @@ def run_failure_tuner(
 
     min_area = int(min(min_area, MIN_AREA_SLIDER_MAX))
     min_triangle_area = int(min(min_triangle_area, MIN_TRI_AREA_SLIDER_MAX))
+    max_triangle_area = int(min(max_triangle_area, MAX_TRI_AREA_SLIDER_MAX))
     min_valid_angle = int(min(min_valid_angle, MIN_ANGLE_SLIDER_MAX))
     max_valid_angle = int(min(max_valid_angle, MAX_ANGLE_SLIDER_MAX))
 
@@ -800,6 +851,7 @@ def run_failure_tuner(
     cv2.createTrackbar("Min Angle", window_name, min_valid_angle, MIN_ANGLE_SLIDER_MAX, update_min_valid_angle)
     cv2.createTrackbar("Max Angle", window_name, max_valid_angle, MAX_ANGLE_SLIDER_MAX, update_max_valid_angle)
     cv2.createTrackbar("Min Tri Area", window_name, int(min_triangle_area), MIN_TRI_AREA_SLIDER_MAX, update_min_triangle_area)
+    cv2.createTrackbar("Max Tri Area", window_name, int(max_triangle_area), MAX_TRI_AREA_SLIDER_MAX, update_max_triangle_area)
     cv2.createTrackbar("Show Geometry", window_name, show_geometry, 1, update_show_geometry)
 
     print("\nControls:")
@@ -811,6 +863,7 @@ def run_failure_tuner(
     print("  q/ESC: Quit")
 
     def current_params() -> Dict[str, Any]:
+        max_tri = max_triangle_area if max_triangle_area > 0 else None
         return {
             "roi_thresh": roi_thresh,
             "se1_radius": se1_radius,
@@ -819,6 +872,7 @@ def run_failure_tuner(
             "min_valid_angle": min_valid_angle,
             "max_valid_angle": max_valid_angle,
             "min_triangle_area": min_triangle_area,
+            "max_triangle_area": max_tri,
         }
 
     def evaluate_params(full: bool = False) -> None:
@@ -918,11 +972,13 @@ def run_failure_tuner(
                             conf_ok = bool(np.all(conf_vals >= confidence_threshold))
 
                     metrics = compute_geometry_metrics(points)
+                    max_ok = max_triangle_area <= 0 or metrics.area <= max_triangle_area
                     geom_ok = bool(
                         np.isfinite(metrics.min_angle)
                         and np.isfinite(metrics.area)
                         and metrics.min_angle >= min_triangle_angle
                         and metrics.area >= min_triangle_area
+                        and max_ok
                     )
 
                     if kp_roi_arr is not None:
@@ -1022,6 +1078,7 @@ def run_failure_tuner(
             "use_diff": 1,
             "show_geometry": show_geometry,
             "min_triangle_area": min_triangle_area,
+            "max_triangle_area": max_triangle_area if max_triangle_area > 0 else None,
         }
 
         mode_label = f"RETUNE FAILURES\nCorrecting {failure_pos + 1}/{len(failures)}"
@@ -1058,7 +1115,7 @@ def run_failure_tuner(
 
 def main(zarr_path, start_frame=1):
     global current_frame, roi_thresh, se1_radius, se2_radius
-    global min_area, min_triangle_area, use_difference, show_geometry
+    global min_area, min_triangle_area, max_triangle_area, use_difference, show_geometry
     global min_valid_angle, max_valid_angle
     
     current_frame = start_frame
@@ -1161,6 +1218,7 @@ def main(zarr_path, start_frame=1):
     # Clamp globals to slider limits before creating trackbars
     min_area = int(min(min_area, MIN_AREA_SLIDER_MAX))
     min_triangle_area = int(min(min_triangle_area, MIN_TRI_AREA_SLIDER_MAX))
+    max_triangle_area = int(min(max_triangle_area, MAX_TRI_AREA_SLIDER_MAX))
     min_valid_angle = int(min(min_valid_angle, MIN_ANGLE_SLIDER_MAX))
     max_valid_angle = int(min(max_valid_angle, MAX_ANGLE_SLIDER_MAX))
 
@@ -1168,6 +1226,7 @@ def main(zarr_path, start_frame=1):
     cv2.createTrackbar("Min Angle", window_name, min_valid_angle, MIN_ANGLE_SLIDER_MAX, update_min_valid_angle)
     cv2.createTrackbar("Max Angle", window_name, max_valid_angle, MAX_ANGLE_SLIDER_MAX, update_max_valid_angle)
     cv2.createTrackbar("Min Tri Area", window_name, int(min_triangle_area), MIN_TRI_AREA_SLIDER_MAX, update_min_triangle_area)
+    cv2.createTrackbar("Max Tri Area", window_name, int(max_triangle_area), MAX_TRI_AREA_SLIDER_MAX, update_max_triangle_area)
     if background is not None:
         cv2.createTrackbar("Use Diff", window_name, use_difference, 1, update_use_difference)
     cv2.createTrackbar("Show Geometry", window_name, show_geometry, 1, update_show_geometry)
@@ -1192,15 +1251,7 @@ def main(zarr_path, start_frame=1):
             if roi_idx < total_rois:
                 roi_image = roi_images[roi_idx]
                 roi_coord = roi_coords[roi_idx]
-                
-                # Extract background ROI
-                background_roi = None
-                if background is not None and roi_coord[0] != -1:
-                    y1, x1 = int(roi_coord[1]), int(roi_coord[0])
-                    y2, x2 = y1 + roi_image.shape[0], x1 + roi_image.shape[1]
-                    background_roi = background[y1:y2, x1:x2]
-                    if background_roi.shape != roi_image.shape:
-                        background_roi = None
+                background_roi = _extract_background_roi(background, roi_coord, roi_image.shape)
             else:
                 roi_image = None
                 background_roi = None
@@ -1219,7 +1270,8 @@ def main(zarr_path, start_frame=1):
             'max_valid_angle': max_valid_angle,
             'use_diff': use_difference,
             'show_geometry': show_geometry,
-            'min_triangle_area': min_triangle_area
+            'min_triangle_area': min_triangle_area,
+            'max_triangle_area': max_triangle_area if max_triangle_area > 0 else None
         }
         
         dashboard = create_keypoint_dashboard(
@@ -1244,6 +1296,7 @@ def main(zarr_path, start_frame=1):
                     'min_valid_angle': min_valid_angle,
                     'max_valid_angle': max_valid_angle,
                     'min_triangle_area': min_triangle_area,
+                    'max_triangle_area': max_triangle_area if max_triangle_area > 0 else None,
                     'frame_index': current_frame,
                     'detection_index': current_detection
                 }

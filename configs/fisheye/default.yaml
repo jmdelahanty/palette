@@ -1,8 +1,8 @@
 import:
   resolutions: both
-  chunk_size: 32
-  use_sharding: false
-  chunks_per_shard: 1
+  chunk_size: 16
+  use_sharding: true
+  chunks_per_shard: 2
   batch_size: 32
   gpu_fp16: true
   use_kvikio_zarr: true
@@ -13,7 +13,7 @@ import:
     - 640
     method: bilinear
     formats: [gray]
-    chunk_size: 128
+    chunk_size: 16
     preserve_aspect: false
   post_compress:
     enable: false
@@ -34,9 +34,9 @@ detect:
   se1_radius: 2
   se4_radius: 10
   min_area: 85
-  max_area: 5000
+  max_area: 2000
   max_fish: 1
-  dish_mask: &id001
+  dish_mask:
     shape: circle
     center:
     - 328
@@ -51,14 +51,12 @@ detect:
       frame: 22724
       timestamp: '2025-09-30T23:21:53.102671'
 crop:
-  dish_mask: *id001
   roi_sz:
-  - 256
-  - 256
+  - 512
+  - 512
   scheduler: distributed
-  source_type: interpolated        # detect | filtered | interpolated
-  source_path: null                # set to detect_runs/<run> or refined_detect_runs/<run>/interpolated to pin a run
-  num_workers: 30
+  source_type: preferred           # detect | filtered | interpolated | manual | preferred | auto
+  num_workers: 5
 keypoints:
   method: traditional         # 'traditional' or 'yolo'
   scheduler: distributed  # or 'processes', 'threads'
@@ -72,6 +70,7 @@ keypoints:
   min_valid_angle: 10.0
   max_valid_angle: 90.0
   min_triangle_area: 100.0
+  max_triangle_area: null
 refine_detect:
   filters:
     remove_jumps: true

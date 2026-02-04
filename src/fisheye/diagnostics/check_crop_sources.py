@@ -70,7 +70,10 @@ def _expected_refined_path(root: zarr.Group) -> Tuple[Optional[str], Optional[st
     if latest is None:
         return parent_name, None
 
-    expected_path = f"{parent_name}/{latest}/interpolated"
+    manual_label = refined_parent[latest].attrs.get("manual_review_latest")
+    if not manual_label and "manual" in refined_parent[latest]:
+        manual_label = "manual"
+    expected_path = f"{parent_name}/{latest}/{manual_label or 'interpolated'}"
     return parent_name, expected_path
 
 
@@ -115,6 +118,8 @@ def analyze_crop_run(
             path_status = "latest refined"
         elif normalized_path.startswith("detect_runs/"):
             path_status = "detect"
+        elif source_type == "manual":
+            path_status = "manual"
         else:
             path_status = "custom"
 

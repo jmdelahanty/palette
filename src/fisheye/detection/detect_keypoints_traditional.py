@@ -52,7 +52,8 @@ def detect_keypoints_traditional(
     min_area: int = 5,
     min_valid_angle: float = 10.0,
     max_valid_angle: float = 90.0,
-    min_triangle_area: float = 100.0
+    min_triangle_area: float = 100.0,
+    max_triangle_area: Optional[float] = None
 ) -> Optional[Dict[str, Any]]:
     """
     Detect keypoints (swim bladder and eyes) in a fish ROI using traditional CV methods.
@@ -67,6 +68,7 @@ def detect_keypoints_traditional(
         min_valid_angle: Minimum angle in degrees for valid triangle
         max_valid_angle: Maximum angle in degrees for valid triangle
         min_triangle_area: Minimum triangle area in pixels^2
+        max_triangle_area: Maximum triangle area in pixels^2 (None to disable)
     
     Returns:
         Dictionary with keypoint positions and metadata, or None if detection fails
@@ -103,10 +105,12 @@ def detect_keypoints_traditional(
         angles, tri_area = calculate_triangle_metrics(centroids[0], centroids[1], centroids[2])
 
         # Check if angles form a valid triangle AND triangle is large enough
+        max_ok = max_triangle_area is None or max_triangle_area <= 0 or tri_area <= max_triangle_area
         if (
             np.all(angles >= np.deg2rad(min_valid_angle))
             and np.all(angles <= np.deg2rad(max_valid_angle))
             and tri_area >= min_triangle_area
+            and max_ok
         ):
             keypoint_stats = candidate_stats
             effective_se2 = max(1, int(round(current_se2)))
@@ -327,7 +331,8 @@ def process_keypoint_chunk_delayed(
             min_area=detection_params.get('min_area', 5),
             min_valid_angle=detection_params.get('min_valid_angle', 10.0),
             max_valid_angle=detection_params.get('max_valid_angle', 90.0),
-            min_triangle_area=detection_params.get('min_triangle_area', 100.0)
+            min_triangle_area=detection_params.get('min_triangle_area', 100.0),
+            max_triangle_area=detection_params.get('max_triangle_area')
         )
         
         if keypoints is None:
@@ -404,6 +409,7 @@ def get_keypoint_parameters(root: zarr.Group, config: Dict[str, Any], console: O
     keypoint_params.setdefault('min_valid_angle', 10.0)
     keypoint_params.setdefault('max_valid_angle', 90.0)
     keypoint_params.setdefault('min_triangle_area', 100.0)
+    keypoint_params.setdefault('max_triangle_area', None)
     
     param_source = 'config_default'
     

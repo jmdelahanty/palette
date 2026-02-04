@@ -78,18 +78,42 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
     crop_rois = _safe_len(crop_group["roi_images"]) if crop_group else None
     if crop_group is not None:
         crop_source = crop_group.attrs.get("detection_source_path")
-        if refined_latest and crop_source and refined_group is not None:
-            expected_path = refined_group.path + "/interpolated"
-            if crop_source != expected_path:
-                issues.append(
-                    f"Crop run '{crop_latest}' sourced from '{crop_source}' but refined detection path is '{expected_path}'."
-                )
-        elif detect_latest and crop_source:
-            expected = f"detect_runs/{detect_latest}"
-            if crop_source != expected:
-                issues.append(
-                    f"Crop run '{crop_latest}' sourced from '{crop_source}' but latest detect run is '{expected}'."
-                )
+
+        def _expected_crop_path() -> Optional[str]:
+            if refined_group is None:
+                if detect_latest:
+                    return f"detect_runs/{detect_latest}"
+                return None
+
+            manual_label = refined_group.attrs.get("manual_review_latest")
+            if not manual_label and "manual" in refined_group:
+                manual_label = "manual"
+
+            review_status = refined_group.attrs.get("detect_review_status")
+            resolved_group = None
+            if isinstance(review_status, dict):
+                resolved_group = review_status.get("target_group") or review_status.get("resolved_group")
+            if resolved_group:
+                resolved_group = str(resolved_group)
+                if resolved_group in {"raw", "detect"}:
+                    if detect_latest:
+                        return f"detect_runs/{detect_latest}"
+                    source_detect = refined_group.attrs.get("source_detect_run")
+                    if source_detect:
+                        return f"detect_runs/{source_detect}"
+                    return None
+                if resolved_group == "manual" and manual_label:
+                    return refined_group.path + f"/{manual_label}"
+                if resolved_group in refined_group:
+                    return refined_group.path + f"/{resolved_group}"
+
+            return refined_group.path + (f"/{manual_label}" if manual_label else "/interpolated")
+
+        expected_path = _expected_crop_path()
+        if crop_source and expected_path and crop_source != expected_path:
+            issues.append(
+                f"Crop run '{crop_latest}' sourced from '{crop_source}' but expected '{expected_path}'."
+            )
 
     keypoint_parent = root.get("refined_keypoints_runs") or root.get("keypoints_runs")
     keypoint_latest = _latest(keypoint_parent)
