@@ -17,6 +17,8 @@ import shutil
 import subprocess
 import sys
 import re
+import numpy as np
+# Import NumPy before Torch to avoid MKL/libgomp threading-layer conflicts in some conda envs.
 import torch
 import yaml
 from pathlib import Path
@@ -27,7 +29,6 @@ import pandas as pd
 from ultralytics import YOLO, __version__ as ultralytics_version
 from ultralytics.models.yolo.detect import DetectionTrainer, DetectionValidator
 from torch.utils.data import DataLoader
-import numpy as np
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -145,12 +146,17 @@ def get_zarr_metadata(zarr_paths, console=None):
                 'detection_info': {},
                 'data_quality': {}
             }
-            
+
             # Get video info
             if 'raw_video' in root:
-                if 'images_full' in root['raw_video']:
-                    zarr_meta['video_frames'] = root['raw_video/images_full'].shape[0]
-                zarr_meta['fps'] = root['raw_video'].attrs.get('fps', 'N/A')
+                raw_video = root['raw_video']
+                if 'images_full' in raw_video:
+                    zarr_meta['video_frames'] = int(raw_video['images_full'].shape[0])
+                elif 'images_ds' in raw_video:
+                    zarr_meta['video_frames'] = int(raw_video['images_ds'].shape[0])
+                elif 'images_ds_rgb' in raw_video:
+                    zarr_meta['video_frames'] = int(raw_video['images_ds_rgb'].shape[0])
+                zarr_meta['fps'] = raw_video.attrs.get('fps', 'N/A')
             
             # Get detection info
             if 'detect_runs' in root:
@@ -169,7 +175,7 @@ def get_zarr_metadata(zarr_paths, console=None):
             # Get crop info with source tracking
             if 'crop_runs' in root:
                 latest_crop = root['crop_runs'].attrs.get('latest')
-                if latest_crop:
+                if latest_crop and latest_crop in root['crop_runs']:
                     crop_group = root[f'crop_runs/{latest_crop}']
                     
                     # Get crop source information
@@ -183,7 +189,7 @@ def get_zarr_metadata(zarr_paths, console=None):
                         'source_path': crop_source_path,
                         'includes_interpolated': includes_interpolated
                     }
-                    
+
                     # Get statistics
                     if 'summary_statistics' in crop_group.attrs:
                         stats = crop_group.attrs['summary_statistics']
@@ -192,11 +198,23 @@ def get_zarr_metadata(zarr_paths, console=None):
                             'frames_with_crops': stats.get('frames_with_crops', 0),
                             'roi_size': stats.get('roi_size', [256, 256])
                         })
-                    
+                    elif 'bbox_norm_coords' in crop_group:
+                        # Merged training Zarrs store labels directly in bbox_norm_coords without summary_statistics.
+                        total_rois = int(crop_group['bbox_norm_coords'].shape[0])
+                        zarr_meta['crop_info']['total_rois'] = total_rois
+                        if 'frame_indices' in crop_group:
+                            zarr_meta['crop_info']['frames_with_crops'] = int(crop_group['frame_indices'].shape[0])
+
                     # If interpolated, get breakdown
                     if includes_interpolated:
-                        zarr_meta['crop_info']['n_real'] = crop_group.attrs.get('n_real_detections', 0)
-                        zarr_meta['crop_info']['n_interpolated'] = crop_group.attrs.get('n_interpolated_detections', 0)
+                        if 'n_real_detections' in crop_group.attrs and 'n_interpolated_detections' in crop_group.attrs:
+                            zarr_meta['crop_info']['n_real'] = crop_group.attrs.get('n_real_detections', 0)
+                            zarr_meta['crop_info']['n_interpolated'] = crop_group.attrs.get('n_interpolated_detections', 0)
+                        elif 'detection_source' in crop_group:
+                            det_src = np.asarray(crop_group['detection_source'][:], dtype=np.int64)
+                            n_interpolated = int(np.count_nonzero(det_src != 0))
+                            zarr_meta['crop_info']['n_interpolated'] = n_interpolated
+                            zarr_meta['crop_info']['n_real'] = int(det_src.shape[0] - n_interpolated)
             
             # Get refinement info if available
             refined_root = None
@@ -379,16 +397,20 @@ def _load_manifest_summary(manifest_path: str | None) -> dict:
         rig_info = provenance.get("rig_info") if isinstance(provenance, dict) else {}
         if not isinstance(rig_info, dict):
             rig_info = {}
-        dataset_name = first_dataset.get("name") if isinstance(first_dataset, dict) else None
-        dataset_zarr = first_dataset.get("zarr_path") if isinstance(first_dataset, dict) else None
+        set_name = payload.get("set_name") if isinstance(payload, dict) else None
+        set_slug = _strip_manifest_suffixes(str(manifest_set_id or set_name or "")).strip() or None
         manifest_canvas = (
+            payload.get("canvas_name")
+            if isinstance(payload, dict)
+            else None
+        ) or (
             first_dataset.get("canvas_name")
             or rig_info.get("canvas_name")
-            or _infer_canvas_from_dataset_label(dataset_name)
-            or _infer_canvas_from_dataset_label(Path(str(dataset_zarr)).stem if dataset_zarr else None)
         )
         manifest_dish = (
-            query_filter.get("dish_design")
+            (payload.get("dish_design") if isinstance(payload, dict) else None)
+            or query_filter.get("dish_design")
+            or query_filter.get("dish_design_like")
             or first_dataset.get("dish_design")
             or arena.get("dish_design")
         )
@@ -398,6 +420,7 @@ def _load_manifest_summary(manifest_path: str | None) -> dict:
             "manifest_dataset_ids": dataset_ids,
             "manifest_dataset_count": len(dataset_ids),
             "manifest_set_id": manifest_set_id,
+            "manifest_set_slug": set_slug,
             "manifest_task": payload.get("task") if isinstance(payload, dict) else None,
             "manifest_dish_design": manifest_dish,
             "manifest_canvas_name": manifest_canvas,
@@ -432,19 +455,6 @@ def _strip_manifest_suffixes(value: str) -> str:
     return text
 
 
-def _infer_canvas_from_dataset_label(value: str | None) -> str | None:
-    if not value:
-        return None
-    stem = Path(str(value)).stem
-    tokens = [token for token in stem.split("_") if token]
-    if not tokens:
-        return None
-    for token in reversed(tokens):
-        if token and not token.isdigit() and token.lower() != "arena":
-            return token
-    return tokens[-1]
-
-
 def _sanitize_run_component(value: str | None, fallback: str) -> str:
     text = str(value or "").strip().lower()
     text = re.sub(r"[^a-z0-9]+", "_", text)
@@ -459,12 +469,19 @@ def _build_default_run_name(
     timestamp: str | None = None,
     pid: int | None = None,
 ) -> str:
-    dish = _sanitize_run_component(manifest_summary.get("manifest_dish_design"), "unknown_dish")
-    canvas = _sanitize_run_component(manifest_summary.get("manifest_canvas_name"), "unknown_canvas")
+    raw_dish = manifest_summary.get("manifest_dish_design")
+    raw_canvas = manifest_summary.get("manifest_canvas_name")
+    if raw_dish and raw_canvas:
+        prefix = (
+            f"{_sanitize_run_component(raw_dish, 'unknown_dish')}_"
+            f"{_sanitize_run_component(raw_canvas, 'unknown_canvas')}"
+        )
+    else:
+        prefix = _sanitize_run_component(manifest_summary.get("manifest_set_slug"), "training_set")
     task = _sanitize_run_component(manifest_summary.get("manifest_task") or task_fallback, task_fallback)
     stamp = timestamp or time.strftime("%Y%m%d-%H%M%S")
     process_id = int(os.getpid() if pid is None else pid)
-    return f"{dish}_{canvas}_{task}_{stamp}_{process_id}"
+    return f"{prefix}_{task}_{stamp}_{process_id}"
 
 
 def _infer_set_slug(set_id: str | None, config_path: Path | None) -> str:

@@ -4,11 +4,15 @@ from pathlib import Path
 import sys
 import json
 
+import numpy as np
+import zarr
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.training.train_detection import (
     _build_default_run_name,
     _infer_set_slug,
+    get_zarr_metadata,
     _snapshot_training_inputs,
     _strip_manifest_suffixes,
 )
@@ -60,3 +64,39 @@ def test_build_default_run_name_uses_manifest_hints() -> None:
         pid=1234,
     )
     assert run_name == "cedar_dish_defaultscreen_detect_20260206-200000_1234"
+
+
+def test_build_default_run_name_falls_back_to_set_slug_when_identity_missing() -> None:
+    run_name = _build_default_run_name(
+        manifest_summary={
+            "manifest_set_slug": "detect_cedar_shadow_v001",
+            "manifest_task": "detect",
+        },
+        task_fallback="detect",
+        timestamp="20260206-200000",
+        pid=1234,
+    )
+    assert run_name == "detect_cedar_shadow_v001_detect_20260206-200000_1234"
+
+
+def test_get_zarr_metadata_reads_merged_layout_counts(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "merged_detect.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    raw = root.require_group("raw_video")
+    raw.require_array("images_ds", shape=(5, 8, 8), dtype=np.uint8, overwrite=True)[:] = 0
+    raw.attrs["fps"] = 60.0
+    crop_parent = root.require_group("crop_runs")
+    crop_parent.attrs["latest"] = "merged_export_test"
+    crop = crop_parent.require_group("merged_export_test")
+    crop.require_array("bbox_norm_coords", shape=(5, 4), dtype=np.float32, overwrite=True)[:] = 0
+    crop.require_array("frame_indices", shape=(5,), dtype=np.int64, overwrite=True)[:] = np.arange(5, dtype=np.int64)
+    crop.attrs["detection_source_type"] = "manual"
+    crop.attrs["includes_interpolated"] = False
+    crop.attrs["detection_source_path"] = "merged://source_index"
+
+    metadata = get_zarr_metadata([str(zarr_path)])
+    entry = metadata[zarr_path.name]
+
+    assert entry["video_frames"] == 5
+    assert entry["crop_info"]["total_rois"] == 5
+    assert entry["crop_info"]["source_type"] == "manual"

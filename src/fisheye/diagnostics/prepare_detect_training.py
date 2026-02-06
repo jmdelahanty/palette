@@ -830,7 +830,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     resolved_set_name: Optional[str] = None
     set_version: Optional[int] = None
     set_id: Optional[str] = None
-    if args.set_name and args.out_config is None:
+    if args.set_name:
         safe_name = _sanitize_name(args.set_name)
         resolved_set_name = safe_name
         config_dir = Path("runs") / "configs" / "detect"
@@ -843,11 +843,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             set_version = _next_version(safe_name, config_dir, manifest_dir)
         suffix = f"_v{set_version:03d}"
         set_id = _build_training_set_id(safe_name, set_version)
-        args.out_config = config_dir / f"{safe_name}{suffix}.yaml"
+        if args.out_config is None:
+            args.out_config = config_dir / f"{safe_name}{suffix}.yaml"
         if args.out_manifest is None:
-            args.out_manifest = manifest_dir / f"{safe_name}{suffix}.manifest.json"
-    elif args.set_name and args.out_config is not None:
-        print("Note: --set-name ignored because --out-config was provided.")
+            args.out_manifest = (
+                Path(args.out_config).with_suffix(".manifest.json")
+                if args.out_config is not None
+                else (manifest_dir / f"{safe_name}{suffix}.manifest.json")
+            )
 
     phase_started = perf_counter()
     invocation_payload = build_invocation_record(

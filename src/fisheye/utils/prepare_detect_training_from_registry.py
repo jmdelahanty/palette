@@ -53,6 +53,15 @@ def _resolve_default_dataset_root() -> Path:
 
 def _next_detect_version(set_name: str) -> int:
     versions: list[int] = []
+    dataset_root = _resolve_default_dataset_root()
+    dataset_re = re.compile(rf"^detect_{re.escape(set_name)}_v(\d+)$")
+    if dataset_root.exists():
+        for entry in dataset_root.iterdir():
+            match = dataset_re.match(entry.name)
+            if match:
+                versions.append(int(match.group(1)))
+
+    # Legacy v1 pathing under repo runs/ directories.
     config_dir = Path("runs") / "configs" / "detect"
     manifest_dir = Path("runs") / "manifests" / "detect"
     config_re = re.compile(rf"^{re.escape(set_name)}_v(\d+)\.ya?ml$")
@@ -182,12 +191,10 @@ def _resolve_preflight_output_paths(args: argparse.Namespace) -> tuple[Path, Pat
     if args.set_version is None:
         args.set_version = _next_detect_version(safe_name)
     version = int(args.set_version)
-    config_path = Path("runs") / "configs" / "detect" / f"{safe_name}_v{version:03d}.yaml"
-    manifest_path = (
-        Path(args.out_manifest)
-        if args.out_manifest is not None
-        else (Path("runs") / "manifests" / "detect" / f"{safe_name}_v{version:03d}.manifest.json")
-    )
+    set_id = f"detect_{safe_name}_v{version:03d}"
+    out_dir = _resolve_default_dataset_root() / set_id
+    config_path = out_dir / f"{set_id}.yaml"
+    manifest_path = Path(args.out_manifest) if args.out_manifest is not None else (out_dir / f"{set_id}.manifest.json")
     return config_path, manifest_path
 
 
@@ -415,26 +422,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.set_name = _default_set_name(args, rows, model_input=model_input)
         print(f"Auto set-name: {args.set_name}")
 
-    if (args.export_merged or args.train) and args.out_config is None and args.set_name and args.set_version is None:
-        args.set_version = _next_detect_version(_sanitize_name(args.set_name))
-
-    if args.export_merged and args.out_manifest is None:
-        if args.out_config is not None:
-            args.out_manifest = args.out_config.with_suffix(".manifest.json")
-        elif args.set_name is not None:
-            safe_name = _sanitize_name(args.set_name)
-            if args.set_version is not None:
-                if args.set_version < 1:
-                    raise SystemExit("--set-version must be >= 1.")
-                set_version = int(args.set_version)
-            else:
-                set_version = _next_detect_version(safe_name)
-                args.set_version = set_version
-            args.out_manifest = (
-                Path("runs") / "manifests" / "detect" / f"{safe_name}_v{set_version:03d}.manifest.json"
-            )
-        else:
-            raise SystemExit("--export-merged requires either --set-name or --out-config to infer --out-manifest.")
+    if args.out_config is None:
+        args.out_config, inferred_manifest = _resolve_preflight_output_paths(args)
+        print(f"Auto out-config: {args.out_config}")
+        if args.out_manifest is None:
+            args.out_manifest = inferred_manifest
+            print(f"Auto out-manifest: {args.out_manifest}")
+    elif args.out_manifest is None and (args.export_merged or args.train):
+        args.out_manifest = Path(args.out_config).with_suffix(".manifest.json")
         print(f"Auto out-manifest: {args.out_manifest}")
 
     if args.output_file_list:

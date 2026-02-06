@@ -148,6 +148,46 @@ def test_prepare_detect_training_persists_invocation_metadata(monkeypatch, tmp_p
     assert query_filter.get("set_name") == "smoke_set"
 
 
+def test_prepare_detect_training_preserves_set_id_with_explicit_out_config(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "sample.zarr"
+    _create_minimal_detect_zarr(zarr_path)
+
+    base_config_path = tmp_path / "detect_config.yaml"
+    _write_base_detect_config(base_config_path)
+
+    registry_path = tmp_path / "palette_registry.sqlite"
+    monkeypatch.setenv("PALETTE_REGISTRY_PATH", str(registry_path))
+    monkeypatch.chdir(tmp_path)
+
+    out_config = tmp_path / "custom" / "detect_custom.yaml"
+    argv = [
+        str(zarr_path),
+        "--base-config",
+        str(base_config_path),
+        "--set-name",
+        "smoke_set",
+        "--set-version",
+        "1",
+        "--out-config",
+        str(out_config),
+    ]
+    prepare_detect_training.main(argv)
+
+    out_manifest = out_config.with_suffix(".manifest.json")
+    assert out_manifest.exists()
+    manifest = json.loads(out_manifest.read_text(encoding="utf-8"))
+    assert manifest.get("set_id") == "detect_smoke_set_v001"
+    assert manifest.get("set_name") == "smoke_set"
+    assert manifest.get("set_version") == 1
+
+    with sqlite3.connect(registry_path) as conn:
+        row = conn.execute(
+            "SELECT set_id FROM training_sets WHERE set_id = ?",
+            ("detect_smoke_set_v001",),
+        ).fetchone()
+    assert row is not None
+
+
 def test_registry_record_training_run_persists_invocation_json(tmp_path: Path) -> None:
     registry_path = tmp_path / "palette_registry.sqlite"
     registry = Registry(registry_path)

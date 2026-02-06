@@ -9,8 +9,11 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from fisheye.diagnostics.prepare_detect_training import DatasetManifest
+from fisheye.diagnostics.prepare_detect_training import DatasetManifest, TrainingManifest
 from fisheye.utils.export_detect_training_zarr import (
+    MergeResult,
+    MergeSourceSpec,
+    _build_merged_manifest_payload,
     _copy_indexed_frames,
     _ensure_suffix,
     _normalize_manifest_stem,
@@ -146,3 +149,109 @@ def test_resolve_default_dataset_root_prefers_env_override(monkeypatch, tmp_path
     expected = tmp_path / "training_datasets"
     monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(expected))
     assert _resolve_default_dataset_root() == expected.resolve()
+
+
+def test_build_merged_manifest_payload_carries_identity_fields(tmp_path: Path) -> None:
+    source_zarr = tmp_path / "source.zarr"
+    manifest = TrainingManifest(
+        created_at_utc="2026-02-06T00:00:00+00:00",
+        task="detect",
+        source_type="manual",
+        input_format="gray",
+        imgsz=[640, 640],
+        datasets=[
+            DatasetManifest(
+                name="source_dataset",
+                zarr_path=str(source_zarr),
+                dataset_id="source_dataset",
+                session_uuid="source_dataset",
+                crop_run="crop_001",
+                bbox_array_path="crop_runs/crop_001/bbox_norm_coords",
+                detection_source_type="manual",
+                detection_source_path="crop_runs/crop_001/detection_source",
+                includes_interpolated=False,
+                input_format="gray",
+                images_ds_shape=[8, 8],
+                total_bboxes=3,
+                invalid_bboxes=0,
+            )
+        ],
+        provenance_policy="warn",
+        set_name="cedar_shadow",
+        set_version=1,
+        set_id="detect_cedar_shadow_v001",
+    )
+
+    merge_result = MergeResult(
+        run_name="merged_export_20260206T000000Z",
+        total_samples=3,
+        total_real=3,
+        total_interpolated=0,
+        detection_source_counts={"0": 3},
+        train_indices=np.array([0, 1], dtype=np.int64),
+        val_indices=np.array([2], dtype=np.int64),
+        test_indices=np.array([], dtype=np.int64),
+        source_specs=[
+            MergeSourceSpec(
+                ordinal=1,
+                dataset_name="source_dataset",
+                dataset_id="source_dataset",
+                source_zarr=source_zarr,
+                bbox_path="crop_runs/crop_001/bbox_norm_coords",
+                frame_indices_path="crop_runs/crop_001/frame_indices",
+                detection_source_path="crop_runs/crop_001/detection_source",
+                detection_source_type="manual",
+                sample_count=3,
+                has_gray=True,
+                has_rgb=False,
+                gray_shape=(8, 8),
+                rgb_shape=None,
+                gray_dtype=np.dtype(np.uint8),
+                rgb_dtype=None,
+                gray_chunks=(3, 8, 8),
+                rgb_chunks=None,
+                fps=60.0,
+            )
+        ],
+        downsample_formats=["gray"],
+        training_input_format="gray",
+    )
+
+    payload = _build_merged_manifest_payload(
+        manifest=manifest,
+        manifest_payload={
+            "set_id": "detect_cedar_shadow_v001",
+            "set_name": "cedar_shadow",
+            "datasets": [
+                {
+                    "name": "source_dataset",
+                    "zarr_path": str(source_zarr),
+                    "dataset_id": "source_dataset",
+                    "provenance": {
+                        "arena": {"dish_design": "cedar"},
+                        "rig_info": {"canvas_name": "shadow"},
+                    },
+                }
+            ],
+        },
+        merged_zarr=tmp_path / "merged.zarr",
+        merged_dataset_id="detect_cedar_shadow_v001_merged",
+        merged_dataset_name="cedar_shadow_merged",
+        run_name="merged_export_20260206T000000Z",
+        out_manifest=tmp_path / "merged.manifest.json",
+        out_config=tmp_path / "merged.yaml",
+        merge_result=merge_result,
+        include_rgb=False,
+        train_ratio=0.8,
+        val_ratio=0.2,
+        test_ratio=0.0,
+        seed=123,
+    )
+
+    assert payload["dish_design"] == "cedar"
+    assert payload["canvas_name"] == "shadow"
+    assert payload["datasets"][0]["dish_design"] == "cedar"
+    assert payload["datasets"][0]["canvas_name"] == "shadow"
+    assert payload["merged_export"]["counts"]["source_count"] == 1
+    assert payload["merged_export"]["source_datasets"][0]["dish_design"] == "cedar"
+    assert payload["merged_export"]["source_datasets"][0]["canvas_name"] == "shadow"

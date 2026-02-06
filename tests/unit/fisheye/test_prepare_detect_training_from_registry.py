@@ -108,6 +108,8 @@ def test_export_merged_auto_sets_out_manifest_when_missing(tmp_path: Path, monke
 
     calls: dict[str, list[str]] = {}
     monkeypatch.chdir(tmp_path)
+    dataset_root = tmp_path / "datasets_root"
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(dataset_root))
 
     def fake_prepare(cli: list[str]) -> None:
         calls["prepare"] = list(cli)
@@ -138,7 +140,7 @@ def test_export_merged_auto_sets_out_manifest_when_missing(tmp_path: Path, monke
     prepare_cli = calls["prepare"]
     export_cli = calls["export"]
     manifest_path = Path(prepare_cli[prepare_cli.index("--out-manifest") + 1])
-    expected_manifest_path = tmp_path / "runs" / "manifests" / "detect" / "detect_smoke_v001.manifest.json"
+    expected_manifest_path = dataset_root / "detect_detect_smoke_v001" / "detect_detect_smoke_v001.manifest.json"
     assert manifest_path.resolve() == expected_manifest_path.resolve()
     assert "--manifest" in export_cli
     assert str(manifest_path) in export_cli

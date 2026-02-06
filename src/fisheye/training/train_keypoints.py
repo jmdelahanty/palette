@@ -18,6 +18,8 @@ import argparse
 import os
 import re
 import shutil
+import numpy as np
+# Import NumPy before Torch to avoid MKL/libgomp threading-layer conflicts in some conda envs.
 import torch
 import yaml
 from pathlib import Path
@@ -29,7 +31,6 @@ from hashlib import sha256
 from ultralytics import YOLO, __version__ as ultralytics_version
 from ultralytics.models.yolo.pose import PoseTrainer, PoseValidator
 from torch.utils.data import DataLoader
-import numpy as np
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
