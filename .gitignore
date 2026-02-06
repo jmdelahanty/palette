@@ -1,1 +1,22 @@
 crop_review_list.txt
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyd
+*.egg-info/
+.eggs/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+
+# Logs
+*.log
+
+# Local data/output
+alignment_diagnostics/
+diagnostics_output/
+nvme1/
+runs/
+notes.md
