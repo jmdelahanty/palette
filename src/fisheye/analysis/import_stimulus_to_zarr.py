@@ -336,13 +336,6 @@ def _read_h5_session_context(h5: h5py.File) -> Optional[Dict[str, object]]:
             context["camera_id"] = derived
             context["camera_id_source"] = "ipc_source_name"
 
-    canvas_name = context.get("canvas_name")
-    if not canvas_name:
-        fallback = context.get("protocol_name_from_definition")
-        if fallback:
-            context["canvas_name"] = fallback
-            context["canvas_name_source"] = "protocol_name_from_definition"
-
     return context or None
 
 

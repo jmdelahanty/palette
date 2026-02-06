@@ -11,12 +11,13 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import yaml
@@ -26,6 +27,18 @@ from fisheye.diagnostics.prepare_detect_training import DatasetManifest, Trainin
 from fisheye.registry.db import Registry
 from fisheye.utils.system import build_invocation_record
 from fisheye.utils.zarr_metadata import get_downsample_array_name, get_downsample_array_path
+
+try:
+    from rich.console import Console
+    from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
+except Exception:  # pragma: no cover - rich is optional
+    Console = None  # type: ignore
+    Progress = None  # type: ignore
+    TextColumn = None  # type: ignore
+    BarColumn = None  # type: ignore
+    TaskProgressColumn = None  # type: ignore
+    TimeElapsedColumn = None  # type: ignore
+    TimeRemainingColumn = None  # type: ignore
 
 
 @dataclass
@@ -90,6 +103,16 @@ def _sha256(path: Path) -> str:
     return hasher.hexdigest()
 
 
+def _resolve_default_dataset_root() -> Path:
+    env_override = os.getenv("PALETTE_TRAINING_DATASETS_ROOT")
+    if env_override:
+        return Path(env_override).expanduser().resolve()
+    nvme_default = Path("/nvme1/training/datasets")
+    if nvme_default.exists():
+        return nvme_default
+    return Path("datasets") / "detect"
+
+
 def _chunk_slices(shape: Tuple[int, ...], chunks: Tuple[int, ...]) -> Iterable[Tuple[slice, ...]]:
     if not chunks:
         yield tuple(slice(0, size) for size in shape)
@@ -106,7 +129,7 @@ def _chunk_slices(shape: Tuple[int, ...], chunks: Tuple[int, ...]) -> Iterable[T
 
 def _copy_array(src: zarr.Array, dest_group: zarr.Group, name: str) -> zarr.Array:
     chunks = src.chunks if src.chunks is not None else None
-    dest = dest_group.require_dataset(
+    dest = dest_group.require_array(
         name,
         shape=src.shape,
         dtype=src.dtype,
@@ -272,6 +295,18 @@ def _parse_split_spec(spec: str) -> Tuple[float, float, float]:
     return values[0], values[1], values[2]
 
 
+def _normalize_manifest_stem(value: str) -> str:
+    text = str(value).strip()
+    while text.endswith(".manifest"):
+        text = text[: -len(".manifest")]
+    return text
+
+
+def _ensure_suffix(value: str, suffix: str) -> str:
+    text = str(value).strip()
+    return text if text.endswith(suffix) else f"{text}{suffix}"
+
+
 def _compute_split_indices(
     total: int,
     *,
@@ -304,6 +339,225 @@ def _compute_split_indices(
     return train_idx, val_idx, test_idx
 
 
+def _normalize_input_format(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"gray", "grey", "grayscale"}:
+        return "gray"
+    if text in {"rgb", "color", "colour"}:
+        return "rgb"
+    if text == "both":
+        return "both"
+    return None
+
+
+def validate_merged_training_zarr(
+    zarr_path: Path,
+    *,
+    expected_input_format: Optional[str] = None,
+    expected_total_samples: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Validate merged training Zarr layout and trainer-facing invariants."""
+    root = zarr.open_group(str(zarr_path), mode="r")
+    errors: List[str] = []
+
+    if str(root.attrs.get("zarr_purpose", "")).strip().lower() != "training":
+        errors.append("root attr zarr_purpose must be 'training'.")
+
+    if "raw_video" not in root:
+        errors.append("missing group raw_video.")
+    if "crop_runs" not in root:
+        errors.append("missing group crop_runs.")
+    if "splits" not in root:
+        errors.append("missing group splits.")
+    if "source_index" not in root:
+        errors.append("missing group source_index.")
+
+    if errors:
+        raise ValueError("Merged training zarr validation failed:\n- " + "\n- ".join(errors))
+
+    raw = root["raw_video"]
+    crop_parent = root["crop_runs"]
+
+    train_input_format = _normalize_input_format(expected_input_format)
+    if train_input_format is None:
+        training_export = root.attrs.get("training_export")
+        if isinstance(training_export, dict):
+            train_input_format = _normalize_input_format(training_export.get("input_format"))
+
+    if train_input_format == "gray" and "images_ds" not in raw:
+        errors.append("missing required array raw_video/images_ds for gray training input.")
+    if train_input_format == "rgb" and "images_ds_rgb" not in raw:
+        errors.append("missing required array raw_video/images_ds_rgb for rgb training input.")
+    if "images_ds" not in raw and "images_ds_rgb" not in raw:
+        errors.append("raw_video must include at least one of images_ds or images_ds_rgb.")
+
+    latest_run = crop_parent.attrs.get("latest")
+    if not latest_run or latest_run not in crop_parent:
+        errors.append("crop_runs/latest missing or points to a non-existent run.")
+        raise ValueError("Merged training zarr validation failed:\n- " + "\n- ".join(errors))
+    bbox_path = f"crop_runs/{latest_run}/bbox_norm_coords"
+    frame_idx_path = f"crop_runs/{latest_run}/frame_indices"
+    det_source_path = f"crop_runs/{latest_run}/detection_source"
+    for path in (bbox_path, frame_idx_path, det_source_path):
+        if path not in root:
+            errors.append(f"missing required array {path}.")
+
+    if errors:
+        raise ValueError("Merged training zarr validation failed:\n- " + "\n- ".join(errors))
+
+    bbox = np.asarray(root[bbox_path][:])
+    frame_indices = np.asarray(root[frame_idx_path][:])
+    detection_source = np.asarray(root[det_source_path][:])
+
+    if bbox.ndim != 2 or int(bbox.shape[1]) != 4:
+        errors.append(f"{bbox_path} must have shape (N, 4), got {tuple(int(v) for v in bbox.shape)}.")
+    total_samples = int(bbox.shape[0]) if bbox.ndim >= 1 else 0
+
+    if frame_indices.ndim != 1:
+        errors.append(f"{frame_idx_path} must be 1D, got ndim={frame_indices.ndim}.")
+    if detection_source.ndim != 1:
+        errors.append(f"{det_source_path} must be 1D, got ndim={detection_source.ndim}.")
+    if frame_indices.ndim == 1 and frame_indices.shape[0] != total_samples:
+        errors.append(f"{frame_idx_path} length mismatch ({frame_indices.shape[0]} != {total_samples}).")
+    if detection_source.ndim == 1 and detection_source.shape[0] != total_samples:
+        errors.append(f"{det_source_path} length mismatch ({detection_source.shape[0]} != {total_samples}).")
+
+    if frame_indices.ndim == 1 and not np.issubdtype(frame_indices.dtype, np.integer):
+        errors.append(f"{frame_idx_path} must be integer dtype, got {frame_indices.dtype}.")
+    if detection_source.ndim == 1 and not np.issubdtype(detection_source.dtype, np.integer):
+        errors.append(f"{det_source_path} must be integer dtype, got {detection_source.dtype}.")
+    if frame_indices.ndim == 1 and frame_indices.shape[0] == total_samples:
+        expected_local = np.arange(total_samples, dtype=np.int64)
+        frame_indices_i64 = frame_indices.astype(np.int64, copy=False)
+        if not np.array_equal(frame_indices_i64, expected_local):
+            errors.append(f"{frame_idx_path} must be local 0..N-1 indexing.")
+    if detection_source.ndim == 1 and detection_source.size > 0:
+        det_codes = np.unique(detection_source.astype(np.int64, copy=False))
+        invalid_codes = [int(code) for code in det_codes.tolist() if int(code) not in (0, 1)]
+        if invalid_codes:
+            errors.append(f"{det_source_path} contains invalid codes: {sorted(set(invalid_codes))} (expected 0 or 1).")
+
+    if expected_total_samples is not None and int(expected_total_samples) != total_samples:
+        errors.append(f"total sample mismatch ({total_samples} != expected {int(expected_total_samples)}).")
+
+    split_arrays: Dict[str, np.ndarray] = {}
+    for name in ("train_indices", "val_indices", "test_indices"):
+        path = f"splits/{name}"
+        if name == "test_indices" and path not in root:
+            split_arrays[name] = np.empty(0, dtype=np.int64)
+            continue
+        if path not in root:
+            errors.append(f"missing required array {path}.")
+            continue
+        arr = np.asarray(root[path][:])
+        if arr.ndim != 1:
+            errors.append(f"{path} must be 1D, got ndim={arr.ndim}.")
+            continue
+        if not np.issubdtype(arr.dtype, np.integer):
+            errors.append(f"{path} must be integer dtype, got {arr.dtype}.")
+            continue
+        arr_i64 = arr.astype(np.int64, copy=False)
+        if arr_i64.size > 0:
+            min_idx = int(arr_i64.min())
+            max_idx = int(arr_i64.max())
+            if min_idx < 0 or max_idx >= total_samples:
+                errors.append(
+                    f"{path} indices out of bounds (min={min_idx}, max={max_idx}, total_samples={total_samples})."
+                )
+            if np.unique(arr_i64).size != arr_i64.size:
+                errors.append(f"{path} contains duplicate indices.")
+        split_arrays[name] = arr_i64
+
+    train_idx = split_arrays.get("train_indices", np.empty(0, dtype=np.int64))
+    val_idx = split_arrays.get("val_indices", np.empty(0, dtype=np.int64))
+    test_idx = split_arrays.get("test_indices", np.empty(0, dtype=np.int64))
+    if np.intersect1d(train_idx, val_idx).size > 0:
+        errors.append("splits/train_indices overlaps with splits/val_indices.")
+    if np.intersect1d(train_idx, test_idx).size > 0:
+        errors.append("splits/train_indices overlaps with splits/test_indices.")
+    if np.intersect1d(val_idx, test_idx).size > 0:
+        errors.append("splits/val_indices overlaps with splits/test_indices.")
+    combined = np.concatenate([train_idx, val_idx, test_idx]) if total_samples > 0 else np.empty(0, dtype=np.int64)
+    if total_samples > 0:
+        if combined.size != total_samples:
+            errors.append(
+                "split coverage mismatch "
+                f"(train+val+test={combined.size} but total_samples={total_samples})."
+            )
+        elif np.unique(combined).size != total_samples:
+            errors.append("split coverage must be exact and non-duplicated across all split arrays.")
+
+    src_dataset_idx_path = "source_index/source_dataset_idx"
+    src_frame_idx_path = "source_index/source_frame_idx"
+    src_dataset_id_path = "source_index/source_dataset_id"
+    src_zarr_path_path = "source_index/source_zarr_path"
+    for path in (src_dataset_idx_path, src_frame_idx_path, src_dataset_id_path, src_zarr_path_path):
+        if path not in root:
+            errors.append(f"missing required array {path}.")
+
+    if not errors:
+        source_dataset_idx = np.asarray(root[src_dataset_idx_path][:])
+        source_frame_idx = np.asarray(root[src_frame_idx_path][:])
+        source_dataset_id = np.asarray(root[src_dataset_id_path][:])
+        source_zarr_path = np.asarray(root[src_zarr_path_path][:])
+
+        if source_dataset_idx.ndim != 1 or source_dataset_idx.shape[0] != total_samples:
+            errors.append(
+                f"{src_dataset_idx_path} must be 1D length N ({total_samples}), got {source_dataset_idx.shape}."
+            )
+        if source_frame_idx.ndim != 1 or source_frame_idx.shape[0] != total_samples:
+            errors.append(
+                f"{src_frame_idx_path} must be 1D length N ({total_samples}), got {source_frame_idx.shape}."
+            )
+        if source_dataset_id.ndim != 1 or source_zarr_path.ndim != 1:
+            errors.append("source_index/source_dataset_id and source_index/source_zarr_path must be 1D arrays.")
+        elif source_dataset_id.shape[0] != source_zarr_path.shape[0]:
+            errors.append(
+                "source_index/source_dataset_id and source_index/source_zarr_path length mismatch "
+                f"({source_dataset_id.shape[0]} != {source_zarr_path.shape[0]})."
+            )
+        elif total_samples > 0 and source_dataset_id.shape[0] == 0:
+            errors.append("source index mapping arrays are empty but dataset has samples.")
+
+        if source_dataset_idx.ndim == 1 and np.issubdtype(source_dataset_idx.dtype, np.integer):
+            source_dataset_idx_i64 = source_dataset_idx.astype(np.int64, copy=False)
+            if source_dataset_idx_i64.size > 0 and int(source_dataset_idx_i64.min()) < 0:
+                errors.append(f"{src_dataset_idx_path} contains negative indices.")
+            if source_dataset_id.ndim == 1 and source_dataset_id.shape[0] > 0 and source_dataset_idx_i64.size > 0:
+                max_idx = int(source_dataset_idx_i64.max())
+                if max_idx >= int(source_dataset_id.shape[0]):
+                    errors.append(
+                        f"{src_dataset_idx_path} has value {max_idx} outside mapping length {source_dataset_id.shape[0]}."
+                    )
+        else:
+            errors.append(f"{src_dataset_idx_path} must be integer dtype.")
+
+        if source_frame_idx.ndim == 1 and np.issubdtype(source_frame_idx.dtype, np.integer):
+            source_frame_idx_i64 = source_frame_idx.astype(np.int64, copy=False)
+            if source_frame_idx_i64.size > 0 and int(source_frame_idx_i64.min()) < 0:
+                errors.append(f"{src_frame_idx_path} contains negative indices.")
+        else:
+            errors.append(f"{src_frame_idx_path} must be integer dtype.")
+
+    if errors:
+        raise ValueError("Merged training zarr validation failed:\n- " + "\n- ".join(errors))
+
+    return {
+        "zarr_path": str(zarr_path),
+        "run_name": str(latest_run),
+        "training_input_format": train_input_format,
+        "total_samples": int(total_samples),
+        "split_counts": {
+            "train": int(train_idx.shape[0]),
+            "val": int(val_idx.shape[0]),
+            "test": int(test_idx.shape[0]),
+        },
+        "source_count": int(np.asarray(root[src_dataset_id_path][:]).shape[0]),
+    }
+
+
 def _resolve_frame_indices_path(root: zarr.Group, dataset: DatasetManifest) -> Optional[str]:
     candidates: List[str] = []
     if dataset.crop_run:
@@ -322,15 +576,24 @@ def _resolve_frame_indices_path(root: zarr.Group, dataset: DatasetManifest) -> O
 
 def _resolve_detection_source_path(root: zarr.Group, dataset: DatasetManifest) -> Optional[str]:
     candidates: List[str] = []
-    if dataset.detection_source_path:
-        candidates.append(dataset.detection_source_path)
     if dataset.crop_run:
         candidates.append(f"crop_runs/{dataset.crop_run}/detection_source")
     bbox_path = dataset.bbox_array_path
     if bbox_path.endswith("/bbox_norm_coords"):
         candidates.append(f"{bbox_path.rsplit('/', 1)[0]}/detection_source")
+    if dataset.detection_source_path:
+        source_path = dataset.detection_source_path.rstrip("/")
+        candidates.append(source_path)
+        if not source_path.endswith("/detection_source"):
+            candidates.append(f"{source_path}/detection_source")
+    seen: set[str] = set()
     for candidate in candidates:
-        if candidate in root:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate not in root:
+            continue
+        if isinstance(root[candidate], zarr.Array):
             return candidate
     return None
 
@@ -360,6 +623,20 @@ def _normalize_chunks(chunks: Optional[Tuple[int, ...]], shape: Tuple[int, ...])
     return tuple(normalized)
 
 
+def _copy_progress(total: int) -> Optional["Progress"]:
+    if total <= 0 or Progress is None:
+        return None
+    return Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("{task.completed}/{task.total} samples"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=Console() if Console is not None else None,
+    )
+
+
 def _copy_indexed_frames(
     src_array: zarr.Array,
     frame_indices: np.ndarray,
@@ -367,6 +644,7 @@ def _copy_indexed_frames(
     dest_start: int,
     *,
     batch_size: int = 32,
+    on_copied: Optional[Callable[[int], None]] = None,
 ) -> None:
     if frame_indices.size == 0:
         return
@@ -379,12 +657,14 @@ def _copy_indexed_frames(
         except Exception:
             batch = np.stack([src_array[int(idx)] for idx in selection], axis=0)
         dest_array[dest_start + start : dest_start + stop] = batch
+        if on_copied is not None:
+            on_copied(stop - start)
 
 
 def _write_string_array(group: zarr.Group, name: str, values: Sequence[str]) -> None:
     max_len = max((len(value) for value in values), default=1)
     data = np.asarray(list(values), dtype=f"<U{max_len}")
-    arr = group.require_dataset(
+    arr = group.require_array(
         name,
         shape=data.shape,
         dtype=data.dtype,
@@ -647,35 +927,35 @@ def _export_merged(
     bbox_chunks = (max(1, min(8192, total_samples)), 4)
     vector_chunks = (max(1, min(8192, total_samples)),)
 
-    bbox_dest = crop_group.require_dataset(
+    bbox_dest = crop_group.require_array(
         "bbox_norm_coords",
         shape=(total_samples, 4),
         dtype=np.float32,
         chunks=bbox_chunks,
         overwrite=True,
     )
-    frame_idx_dest = crop_group.require_dataset(
+    frame_idx_dest = crop_group.require_array(
         "frame_indices",
         shape=(total_samples,),
         dtype=np.int64,
         chunks=vector_chunks,
         overwrite=True,
     )
-    det_src_dest = crop_group.require_dataset(
+    det_src_dest = crop_group.require_array(
         "detection_source",
         shape=(total_samples,),
         dtype=np.int8,
         chunks=vector_chunks,
         overwrite=True,
     )
-    src_dataset_idx_dest = source_index_group.require_dataset(
+    src_dataset_idx_dest = source_index_group.require_array(
         "source_dataset_idx",
         shape=(total_samples,),
         dtype=np.int32,
         chunks=vector_chunks,
         overwrite=True,
     )
-    src_frame_idx_dest = source_index_group.require_dataset(
+    src_frame_idx_dest = source_index_group.require_array(
         "source_frame_idx",
         shape=(total_samples,),
         dtype=np.int64,
@@ -689,7 +969,7 @@ def _export_merged(
         gray_shape = tuple(layout["gray_shape"])
         gray_dtype = np.dtype(layout["gray_dtype"])
         gray_chunks = _normalize_chunks(layout["gray_chunks"], (total_samples, *gray_shape))
-        gray_dest = raw_group.require_dataset(
+        gray_dest = raw_group.require_array(
             "images_ds",
             shape=(total_samples, *gray_shape),
             dtype=gray_dtype,
@@ -700,7 +980,7 @@ def _export_merged(
         rgb_shape = tuple(layout["rgb_shape"])
         rgb_dtype = np.dtype(layout["rgb_dtype"])
         rgb_chunks = _normalize_chunks(layout["rgb_chunks"], (total_samples, *rgb_shape))
-        rgb_dest = raw_group.require_dataset(
+        rgb_dest = raw_group.require_array(
             "images_ds_rgb",
             shape=(total_samples, *rgb_shape),
             dtype=rgb_dtype,
@@ -712,72 +992,103 @@ def _export_merged(
     total_interpolated = 0
     detection_source_counts: Dict[str, int] = {}
 
+    copy_passes = int(bool(need_gray)) + int(bool(need_rgb))
+    copy_total = total_samples * copy_passes
+    copy_progress = _copy_progress(copy_total)
+    copy_task_id: Optional[int] = None
+    if copy_progress is not None:
+        copy_progress.start()
+        copy_task_id = copy_progress.add_task("Copying merged samples", total=copy_total)
+
+    def _advance_copy(count: int) -> None:
+        if copy_progress is not None and copy_task_id is not None:
+            copy_progress.advance(copy_task_id, count)
+
     offset = 0
-    for spec in source_specs:
-        root = zarr.open_group(str(spec.source_zarr), mode="r")
-        bbox = np.asarray(root[spec.bbox_path][:], dtype=np.float32)
-        local_total = int(bbox.shape[0])
+    try:
+        for spec in source_specs:
+            if copy_progress is not None and copy_task_id is not None:
+                copy_progress.update(copy_task_id, description=f"Copying {spec.dataset_name}")
 
-        if spec.frame_indices_path:
-            src_frame_indices = np.asarray(root[spec.frame_indices_path][:], dtype=np.int64)
-        else:
-            src_frame_indices = np.arange(local_total, dtype=np.int64)
-        if src_frame_indices.shape[0] != local_total:
-            raise ValueError(
-                f"{spec.source_zarr}: frame_indices length mismatch "
-                f"({src_frame_indices.shape[0]} != {local_total})."
-            )
+            root = zarr.open_group(str(spec.source_zarr), mode="r")
+            bbox = np.asarray(root[spec.bbox_path][:], dtype=np.float32)
+            local_total = int(bbox.shape[0])
 
-        if spec.detection_source_path:
-            detection_source = np.asarray(root[spec.detection_source_path][:], dtype=np.int8)
-            if detection_source.shape[0] != local_total:
+            if spec.frame_indices_path:
+                src_frame_indices = np.asarray(root[spec.frame_indices_path][:], dtype=np.int64)
+            else:
+                src_frame_indices = np.arange(local_total, dtype=np.int64)
+            if src_frame_indices.shape[0] != local_total:
                 raise ValueError(
-                    f"{spec.source_zarr}: detection_source length mismatch "
-                    f"({detection_source.shape[0]} != {local_total})."
+                    f"{spec.source_zarr}: frame_indices length mismatch "
+                    f"({src_frame_indices.shape[0]} != {local_total})."
                 )
-        else:
-            detection_source = np.zeros(local_total, dtype=np.int8)
 
-        if need_gray and gray_dest is not None:
-            src_gray = root["raw_video/images_ds"]
-            frame_limit = int(src_gray.shape[0])
-            if src_frame_indices.size > 0:
-                min_idx = int(np.min(src_frame_indices))
-                max_idx = int(np.max(src_frame_indices))
-                if min_idx < 0 or max_idx >= frame_limit:
-                    raise IndexError(
-                        f"{spec.source_zarr}: frame_indices out of bounds for images_ds "
-                        f"(min={min_idx}, max={max_idx}, frame_count={frame_limit})."
+            if spec.detection_source_path:
+                detection_source = np.asarray(root[spec.detection_source_path][:], dtype=np.int8)
+                if detection_source.shape[0] != local_total:
+                    raise ValueError(
+                        f"{spec.source_zarr}: detection_source length mismatch "
+                        f"({detection_source.shape[0]} != {local_total})."
                     )
-            _copy_indexed_frames(src_gray, src_frame_indices, gray_dest, offset)
+            else:
+                detection_source = np.zeros(local_total, dtype=np.int8)
 
-        if need_rgb and rgb_dest is not None:
-            src_rgb = root["raw_video/images_ds_rgb"]
-            frame_limit = int(src_rgb.shape[0])
-            if src_frame_indices.size > 0:
-                min_idx = int(np.min(src_frame_indices))
-                max_idx = int(np.max(src_frame_indices))
-                if min_idx < 0 or max_idx >= frame_limit:
-                    raise IndexError(
-                        f"{spec.source_zarr}: frame_indices out of bounds for images_ds_rgb "
-                        f"(min={min_idx}, max={max_idx}, frame_count={frame_limit})."
-                    )
-            _copy_indexed_frames(src_rgb, src_frame_indices, rgb_dest, offset)
+            if need_gray and gray_dest is not None:
+                src_gray = root["raw_video/images_ds"]
+                frame_limit = int(src_gray.shape[0])
+                if src_frame_indices.size > 0:
+                    min_idx = int(np.min(src_frame_indices))
+                    max_idx = int(np.max(src_frame_indices))
+                    if min_idx < 0 or max_idx >= frame_limit:
+                        raise IndexError(
+                            f"{spec.source_zarr}: frame_indices out of bounds for images_ds "
+                            f"(min={min_idx}, max={max_idx}, frame_count={frame_limit})."
+                        )
+                _copy_indexed_frames(
+                    src_gray,
+                    src_frame_indices,
+                    gray_dest,
+                    offset,
+                    on_copied=_advance_copy,
+                )
 
-        bbox_dest[offset : offset + local_total] = bbox
-        frame_idx_dest[offset : offset + local_total] = np.arange(offset, offset + local_total, dtype=np.int64)
-        det_src_dest[offset : offset + local_total] = detection_source
-        src_dataset_idx_dest[offset : offset + local_total] = int(spec.ordinal)
-        src_frame_idx_dest[offset : offset + local_total] = src_frame_indices
+            if need_rgb and rgb_dest is not None:
+                src_rgb = root["raw_video/images_ds_rgb"]
+                frame_limit = int(src_rgb.shape[0])
+                if src_frame_indices.size > 0:
+                    min_idx = int(np.min(src_frame_indices))
+                    max_idx = int(np.max(src_frame_indices))
+                    if min_idx < 0 or max_idx >= frame_limit:
+                        raise IndexError(
+                            f"{spec.source_zarr}: frame_indices out of bounds for images_ds_rgb "
+                            f"(min={min_idx}, max={max_idx}, frame_count={frame_limit})."
+                        )
+                _copy_indexed_frames(
+                    src_rgb,
+                    src_frame_indices,
+                    rgb_dest,
+                    offset,
+                    on_copied=_advance_copy,
+                )
 
-        uniques, counts = np.unique(detection_source, return_counts=True)
-        for value, count in zip(uniques.tolist(), counts.tolist()):
-            key = str(int(value))
-            detection_source_counts[key] = detection_source_counts.get(key, 0) + int(count)
-        total_real += int(np.sum(detection_source == 0))
-        total_interpolated += int(np.sum(detection_source != 0))
+            bbox_dest[offset : offset + local_total] = bbox
+            frame_idx_dest[offset : offset + local_total] = np.arange(offset, offset + local_total, dtype=np.int64)
+            det_src_dest[offset : offset + local_total] = detection_source
+            src_dataset_idx_dest[offset : offset + local_total] = int(spec.ordinal)
+            src_frame_idx_dest[offset : offset + local_total] = src_frame_indices
 
-        offset += local_total
+            uniques, counts = np.unique(detection_source, return_counts=True)
+            for value, count in zip(uniques.tolist(), counts.tolist()):
+                key = str(int(value))
+                detection_source_counts[key] = detection_source_counts.get(key, 0) + int(count)
+            total_real += int(np.sum(detection_source == 0))
+            total_interpolated += int(np.sum(detection_source != 0))
+
+            offset += local_total
+    finally:
+        if copy_progress is not None:
+            copy_progress.stop()
 
     train_idx, val_idx, test_idx = _compute_split_indices(
         total_samples,
@@ -787,14 +1098,14 @@ def _export_merged(
         seed=seed,
     )
 
-    split_group.require_dataset(
+    split_group.require_array(
         "train_indices",
         shape=train_idx.shape,
         dtype=train_idx.dtype,
         chunks=(max(1, min(8192, train_idx.shape[0] or 1)),),
         overwrite=True,
     )[:] = train_idx
-    split_group.require_dataset(
+    split_group.require_array(
         "val_indices",
         shape=val_idx.shape,
         dtype=val_idx.dtype,
@@ -802,7 +1113,7 @@ def _export_merged(
         overwrite=True,
     )[:] = val_idx
     if test_idx.size > 0:
-        split_group.require_dataset(
+        split_group.require_array(
             "test_indices",
             shape=test_idx.shape,
             dtype=test_idx.dtype,
@@ -1013,7 +1324,7 @@ def _write_merged_config(
     train_ratio: float,
     val_ratio: float,
     random_seed: int,
-) -> None:
+) -> List[Path]:
     cfg: Dict[str, Any] = {}
     if source_config_path and source_config_path.exists():
         loaded = yaml.safe_load(source_config_path.read_text(encoding="utf-8"))
@@ -1033,8 +1344,27 @@ def _write_merged_config(
     }
     cfg["random_seed"] = int(random_seed)
 
+    created_dummy_paths: List[Path] = []
+    data_root = cfg.get("path")
+    base_dir = Path(data_root) if data_root else out_config.parent
+    for key in ("train", "val"):
+        value = cfg.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        target = Path(value)
+        if not target.is_absolute():
+            target = (base_dir / target).resolve()
+        if target.exists():
+            continue
+        if target.suffix.lower() != ".txt" and "dummy" not in target.name:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("", encoding="utf-8")
+        created_dummy_paths.append(target)
+
     out_config.parent.mkdir(parents=True, exist_ok=True)
     out_config.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    return created_dummy_paths
 
 
 def _write_merge_summary(
@@ -1131,6 +1461,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         type=Path,
         help="Optional registry SQLite path. In merged mode, registers merged dataset and updates training_set linkage.",
     )
+    parser.add_argument(
+        "--skip-validate",
+        action="store_true",
+        help="Skip merged-zarr post-export validation checks.",
+    )
     args = parser.parse_args(argv)
 
     manifest_payload = json.loads(args.manifest.read_text(encoding="utf-8"))
@@ -1138,8 +1473,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not manifest.datasets:
         raise ValueError(f"Manifest has no datasets: {args.manifest}")
 
-    set_id = manifest.set_id or args.manifest.stem
-    out_dir = args.out_dir or (Path("datasets") / "detect" / set_id)
+    set_id_source = str(manifest.set_id).strip() if manifest.set_id else args.manifest.stem
+    set_id = _normalize_manifest_stem(set_id_source)
+    if not set_id:
+        set_id = "training_set"
+    out_dir = args.out_dir or (_resolve_default_dataset_root() / set_id)
     out_manifest = out_dir / f"{set_id}.manifest.json"
     out_config = out_dir / f"{set_id}.yaml"
     invocation = build_invocation_record(
@@ -1150,8 +1488,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.merge:
         train_ratio, val_ratio, test_ratio = _parse_split_spec(args.split)
         merged_zarr = args.out_zarr or (out_dir / "zarr" / f"{set_id}_merged.zarr")
-        merged_dataset_name = f"{manifest.set_name or 'merged'}_merged"
-        merged_dataset_id = f"{manifest.set_id}_merged" if manifest.set_id else f"{merged_zarr.stem}_merged"
+        merged_dataset_name = _ensure_suffix(str(manifest.set_name or "merged"), "_merged")
+        merged_dataset_id_base = str(manifest.set_id).strip() if manifest.set_id else merged_zarr.stem
+        merged_dataset_id_base = _normalize_manifest_stem(merged_dataset_id_base)
+        merged_dataset_id = _ensure_suffix(merged_dataset_id_base, "_merged")
         if train_ratio + val_ratio <= 0.0:
             raise ValueError(
                 f"Invalid --split '{args.split}': train+val must be > 0 for training config generation."
@@ -1190,6 +1530,22 @@ def main(argv: Optional[List[str]] = None) -> int:
             include_rgb=bool(args.include_rgb),
             invocation=invocation,
         )
+
+        if not args.skip_validate:
+            validation_summary = validate_merged_training_zarr(
+                merged_zarr,
+                expected_input_format=merge_result.training_input_format,
+                expected_total_samples=merge_result.total_samples,
+            )
+            split_counts = validation_summary["split_counts"]
+            print(
+                "Validated merged zarr: "
+                f"samples={validation_summary['total_samples']} "
+                f"train={split_counts['train']} "
+                f"val={split_counts['val']} "
+                f"test={split_counts['test']} "
+                f"sources={validation_summary['source_count']}"
+            )
 
         if args.registry:
             try:
@@ -1239,7 +1595,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         out_manifest.write_text(json.dumps(merged_manifest_payload, indent=2), encoding="utf-8")
 
         source_config_path = _resolve_source_config_path(manifest)
-        _write_merged_config(
+        created_dummy_paths = _write_merged_config(
             source_config_path=source_config_path,
             out_config=out_config,
             merged_zarr=merged_zarr,
@@ -1250,6 +1606,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             val_ratio=config_val_ratio,
             random_seed=int(args.seed),
         )
+        for path in created_dummy_paths:
+            print(f"Created dummy dataset file: {path}")
 
         export_log = out_dir / "export_invocation.json"
         export_log.write_text(json.dumps(invocation, indent=2), encoding="utf-8")

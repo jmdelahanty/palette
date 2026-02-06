@@ -12,6 +12,8 @@ Features:
 
 import argparse
 import hashlib
+import os
+import shutil
 import subprocess
 import sys
 import re
@@ -364,12 +366,41 @@ def _load_manifest_summary(manifest_path: str | None) -> dict:
             ds.get("dataset_id") for ds in datasets if isinstance(ds, dict) and ds.get("dataset_id")
         ]
         manifest_set_id = payload.get("set_id")
+        query_filter = payload.get("query_filter") if isinstance(payload, dict) else None
+        if not isinstance(query_filter, dict):
+            query_filter = {}
+        first_dataset = datasets[0] if datasets and isinstance(datasets[0], dict) else {}
+        provenance = first_dataset.get("provenance") if isinstance(first_dataset, dict) else {}
+        if not isinstance(provenance, dict):
+            provenance = {}
+        arena = provenance.get("arena") if isinstance(provenance, dict) else {}
+        if not isinstance(arena, dict):
+            arena = {}
+        rig_info = provenance.get("rig_info") if isinstance(provenance, dict) else {}
+        if not isinstance(rig_info, dict):
+            rig_info = {}
+        dataset_name = first_dataset.get("name") if isinstance(first_dataset, dict) else None
+        dataset_zarr = first_dataset.get("zarr_path") if isinstance(first_dataset, dict) else None
+        manifest_canvas = (
+            first_dataset.get("canvas_name")
+            or rig_info.get("canvas_name")
+            or _infer_canvas_from_dataset_label(dataset_name)
+            or _infer_canvas_from_dataset_label(Path(str(dataset_zarr)).stem if dataset_zarr else None)
+        )
+        manifest_dish = (
+            query_filter.get("dish_design")
+            or first_dataset.get("dish_design")
+            or arena.get("dish_design")
+        )
         return {
             "manifest_path": str(path),
             "manifest_sha256": digest,
             "manifest_dataset_ids": dataset_ids,
             "manifest_dataset_count": len(dataset_ids),
             "manifest_set_id": manifest_set_id,
+            "manifest_task": payload.get("task") if isinstance(payload, dict) else None,
+            "manifest_dish_design": manifest_dish,
+            "manifest_canvas_name": manifest_canvas,
         }
     except Exception as exc:
         return {"manifest_error": str(exc), "manifest_path": str(path)}
@@ -392,6 +423,114 @@ def _safe_sha256_file(path: Path | None) -> str | None:
         return _sha256_file(path)
     except Exception:
         return None
+
+
+def _strip_manifest_suffixes(value: str) -> str:
+    text = str(value).strip()
+    while text.endswith(".manifest"):
+        text = text[: -len(".manifest")]
+    return text
+
+
+def _infer_canvas_from_dataset_label(value: str | None) -> str | None:
+    if not value:
+        return None
+    stem = Path(str(value)).stem
+    tokens = [token for token in stem.split("_") if token]
+    if not tokens:
+        return None
+    for token in reversed(tokens):
+        if token and not token.isdigit() and token.lower() != "arena":
+            return token
+    return tokens[-1]
+
+
+def _sanitize_run_component(value: str | None, fallback: str) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    text = text.strip("_")
+    return text or fallback
+
+
+def _build_default_run_name(
+    *,
+    manifest_summary: dict,
+    task_fallback: str,
+    timestamp: str | None = None,
+    pid: int | None = None,
+) -> str:
+    dish = _sanitize_run_component(manifest_summary.get("manifest_dish_design"), "unknown_dish")
+    canvas = _sanitize_run_component(manifest_summary.get("manifest_canvas_name"), "unknown_canvas")
+    task = _sanitize_run_component(manifest_summary.get("manifest_task") or task_fallback, task_fallback)
+    stamp = timestamp or time.strftime("%Y%m%d-%H%M%S")
+    process_id = int(os.getpid() if pid is None else pid)
+    return f"{dish}_{canvas}_{task}_{stamp}_{process_id}"
+
+
+def _infer_set_slug(set_id: str | None, config_path: Path | None) -> str:
+    if set_id:
+        slug = _strip_manifest_suffixes(set_id)
+        return slug or "detect_training"
+    if config_path is not None:
+        stem = _strip_manifest_suffixes(config_path.stem)
+        return stem or "detect_training"
+    return "detect_training"
+
+
+def _resolve_project_dir(
+    *,
+    args,
+    training_params: dict,
+    set_id: str | None,
+    config_path: Path | None,
+    console: Console,
+) -> None:
+    if args.project:
+        training_params["project"] = str(Path(args.project).expanduser().resolve())
+        return
+
+    configured_project = training_params.get("project")
+    if isinstance(configured_project, str) and configured_project.strip():
+        training_params["project"] = str(Path(configured_project).expanduser().resolve())
+        return
+
+    nvme_root = Path("/nvme1")
+    if not nvme_root.exists():
+        return
+
+    slug = _infer_set_slug(set_id, config_path)
+    project_dir = (nvme_root / "models" / "detect" / slug).resolve()
+    project_dir.mkdir(parents=True, exist_ok=True)
+    training_params["project"] = str(project_dir)
+    console.print(f"[cyan]Using default model output directory:[/cyan] {project_dir}")
+
+
+def _snapshot_training_inputs(
+    *,
+    run_dir: Path,
+    config_path: Path | None,
+    manifest_path: Path | None,
+    invocation_payload: dict | None,
+) -> list[Path]:
+    """Copy immutable run inputs into run_dir/inputs for reproducibility."""
+    inputs_dir = run_dir / "inputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    if config_path is not None and config_path.exists():
+        dest = inputs_dir / config_path.name
+        shutil.copy2(config_path, dest)
+        written.append(dest)
+    if manifest_path is not None and manifest_path.exists():
+        dest = inputs_dir / manifest_path.name
+        shutil.copy2(manifest_path, dest)
+        written.append(dest)
+    if invocation_payload:
+        dest = inputs_dir / "train_invocation.json"
+        dest.write_text(json.dumps(invocation_payload, indent=2), encoding="utf-8")
+        written.append(dest)
+
+    return written
 
 
 def _record_registry_training_run(
@@ -820,7 +959,12 @@ def main(args):
     manifest_path = Path(args.manifest) if args.manifest else None
     manifest_summary = _load_manifest_summary(args.manifest)
     effective_set_id = args.set_id or manifest_summary.get("manifest_set_id")
-    fallback_run_id = f"{(args.run_name or 'multi_zarr_train')}_{time.strftime('%Y%m%d-%H%M%S')}"
+    autogenerated_run_name = _build_default_run_name(
+        manifest_summary=manifest_summary,
+        task_fallback="detect",
+    )
+    effective_run_name = args.run_name or autogenerated_run_name
+    registry_run_id = effective_run_name
 
     try:
         # Load and validate config
@@ -845,7 +989,7 @@ def main(args):
                 args=args,
                 console=console,
                 invocation_payload=invocation_payload,
-                run_id=f"{fallback_run_id}_config_error",
+                run_id=registry_run_id,
                 set_id=effective_set_id,
                 config_path=config_path,
                 manifest_path=manifest_path,
@@ -859,6 +1003,24 @@ def main(args):
                 },
             )
         return
+
+    if args.log_registry:
+        _record_registry_training_run(
+            args=args,
+            console=console,
+            invocation_payload=invocation_payload,
+            run_id=registry_run_id,
+            set_id=effective_set_id,
+            config_path=config_path,
+            manifest_path=manifest_path,
+            model_path=None,
+            metrics_path=None,
+            status="in_progress",
+            final_metrics={
+                "stage": "preflight_and_training",
+                "status_detail": "training_started",
+            },
+        )
 
     # Get comprehensive zarr metadata
     console.print("[bold cyan] Analyzing Zarr Files...[/bold cyan]\n")
@@ -886,6 +1048,24 @@ def main(args):
                 f"{item['dataset_name']}: requested={item['requested_source_type']} available={item['available_source_type']}"
                 for item in source_mismatches
             )
+            if args.log_registry:
+                _record_registry_training_run(
+                    args=args,
+                    console=console,
+                    invocation_payload=invocation_payload,
+                    run_id=registry_run_id,
+                    set_id=effective_set_id,
+                    config_path=config_path,
+                    manifest_path=manifest_path,
+                    model_path=None,
+                    metrics_path=None,
+                    status="failed",
+                    final_metrics={
+                        "stage": "source_type_validation",
+                        "error_type": "ValueError",
+                        "error_message": details,
+                    },
+                )
             raise ValueError(
                 "Dataset source_type mismatch detected: "
                 f"{details}. Re-run crop/curation to match source_type, "
@@ -921,8 +1101,36 @@ def main(args):
 
     # Get training params
     training_params = full_config.training_params.model_dump(exclude_none=True)
+    _resolve_project_dir(
+        args=args,
+        training_params=training_params,
+        set_id=effective_set_id,
+        config_path=config_path,
+        console=console,
+    )
     model_name = training_params.get('model', 'yolov8n.pt')
-    model = YOLO(model_name)
+    try:
+        model = YOLO(model_name)
+    except Exception as exc:
+        if args.log_registry:
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=registry_run_id,
+                set_id=effective_set_id,
+                config_path=config_path,
+                manifest_path=manifest_path,
+                model_path=None,
+                metrics_path=None,
+                status="failed",
+                final_metrics={
+                    "stage": "model_init",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
+        raise
 
     # Display hyperparameters
     params_str = json.dumps(training_params, indent=2)
@@ -936,12 +1144,33 @@ def main(args):
     # Start training
     console.print("[bold green] Starting Training...[/bold green]\n")
     training_start_time = time.time()
+
+    snapshot_state = {"done": False}
+
+    def _on_train_start(trainer) -> None:
+        if snapshot_state["done"]:
+            return
+        snapshot_state["done"] = True
+        try:
+            run_dir = Path(trainer.save_dir)
+            written = _snapshot_training_inputs(
+                run_dir=run_dir,
+                config_path=config_path,
+                manifest_path=manifest_path,
+                invocation_payload=invocation_payload,
+            )
+            if written:
+                console.print(f"[cyan]Snapshotted run inputs:[/cyan] {run_dir / 'inputs'}")
+        except Exception as exc:
+            console.print(f"[yellow]Warning: failed to snapshot run inputs: {exc}[/yellow]")
+
+    model.add_callback("on_train_start", _on_train_start)
     
     try:
         results = model.train(
             trainer=DetTrainer,
             data=args.config_path,
-            name=args.run_name or "multi_zarr_train",
+            name=effective_run_name,
             **training_params
         )
     except Exception as exc:
@@ -951,7 +1180,7 @@ def main(args):
                 args=args,
                 console=console,
                 invocation_payload=invocation_payload,
-                run_id=f"{fallback_run_id}_train_failed",
+                run_id=registry_run_id,
                 set_id=effective_set_id,
                 config_path=config_path,
                 manifest_path=manifest_path,
@@ -1054,21 +1283,23 @@ def main(args):
         traceback.print_exc()
     
     if args.log_registry:
-        run_id = results.save_dir.name
         model_path = results.save_dir / "weights" / "best.pt"
         metrics_path = results.save_dir / "results.csv"
+        final_metrics_payload = dict(final_validation_metrics or {})
+        final_metrics_payload.setdefault("stage", "completed")
+        final_metrics_payload.setdefault("status_detail", "training_complete")
         _record_registry_training_run(
             args=args,
             console=console,
             invocation_payload=invocation_payload,
-            run_id=run_id,
+            run_id=registry_run_id,
             set_id=effective_set_id,
             config_path=config_path,
             manifest_path=manifest_path,
             model_path=model_path if model_path.exists() else None,
             metrics_path=metrics_path if metrics_path.exists() else None,
             status="success",
-            final_metrics=final_validation_metrics,
+            final_metrics=final_metrics_payload,
             export_artifacts=export_artifacts,
         )
 
@@ -1088,6 +1319,11 @@ if __name__ == '__main__':
         "--run-name",
         type=str,
         help="Optional name for the training run directory"
+    )
+    parser.add_argument(
+        "--project",
+        type=str,
+        help="Optional output project directory for Ultralytics runs (overrides config/default).",
     )
     parser.add_argument(
         "--manifest",

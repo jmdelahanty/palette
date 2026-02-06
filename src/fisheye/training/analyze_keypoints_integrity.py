@@ -35,6 +35,8 @@ def build_zarr_config(full_config: PoseConfig) -> ZarrDatasetConfig:
         datasets_dict[name] = {
             "zarr_path": str(ds_cfg.zarr_path),
             "source_type": ds_cfg.source_type.value if hasattr(ds_cfg.source_type, "value") else ds_cfg.source_type,
+            "input_format": ds_cfg.input_format,
+            "keypoint_run": ds_cfg.keypoint_run,
             "split": split_dict,
         }
 
@@ -169,4 +171,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

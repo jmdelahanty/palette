@@ -35,6 +35,7 @@ class DatasetConfig(BaseModel):
     zarr_path: Path
     source_type: SourceType = SourceType.FILTERED
     input_format: Literal["gray", "rgb"] = "gray"
+    keypoint_run: Optional[str] = None
     split: Optional[DatasetSplit] = None
     
     @field_validator('zarr_path')

@@ -751,12 +751,37 @@
 #     con.close()
 # finally:
 #     shutil.rmtree(root_dir, ignore_errors=True)
-import sqlite3
-con = sqlite3.connect("/nvme1/palette_registry.sqlite")
-print(con.execute("""
-SELECT COUNT(*),
-        SUM(CASE WHEN has_images_ds = 1 THEN 1 ELSE 0 END),
-        SUM(CASE WHEN has_images_ds_rgb = 1 THEN 1 ELSE 0 END)
-FROM provenance
-""").fetchone())
-con.close()
+# import sqlite3
+# con = sqlite3.connect("/nvme1/palette_registry.sqlite")
+# print(con.execute("""
+# SELECT COUNT(*),
+#         SUM(CASE WHEN has_images_ds = 1 THEN 1 ELSE 0 END),
+#         SUM(CASE WHEN has_images_ds_rgb = 1 THEN 1 ELSE 0 END)
+# FROM provenance
+# """).fetchone())
+# con.close()
+# import sqlite3
+
+# db = "/nvme1/palette_registry.sqlite"
+# run_id = "multi_zarr_train_20260206-124840_3037026"
+# set_id = "detect_detect_cedar_v001"
+
+# conn = sqlite3.connect(db)
+# with conn:
+#     cur = conn.execute(
+#         "UPDATE training_runs SET set_id = ? WHERE run_id = ?;",
+#         (set_id, run_id),
+#     )
+# print(f"rows_updated={cur.rowcount}")
+import json, zarr
+zarr_path = "/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen.zarr"
+root = zarr.open(zarr_path, mode="r")
+analysis = root.get("analysis_metadata")
+raw = analysis.attrs.get("session_context") if analysis is not None else None
+if isinstance(raw, (bytes, bytearray)):
+    raw = raw.decode("utf-8", "ignore")
+ctx = json.loads(raw) if isinstance(raw, str) else (raw if isinstance(raw, dict) else {})
+print("canvas_name:", ctx.get("canvas_name"))
+print("protocol_name_from_definition:", ctx.get("protocol_name_from_definition"))
+print("loaded_protocol_filepath:", ctx.get("loaded_protocol_filepath"))
+print("keys:", sorted(ctx.keys()))

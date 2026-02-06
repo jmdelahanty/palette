@@ -17,6 +17,14 @@ class InvalidDatasetCandidate:
     reasons: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class FailedRunCandidate:
+    run_id: str
+    set_id: Optional[str]
+    status: Optional[str]
+    created_utc: Optional[str]
+
+
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Registry maintenance (reconcile, prune invalid rows, optional VACUUM).",
@@ -38,6 +46,19 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help=(
             "Reconcile missing rows, then prune invalid datasets "
             "(status=missing or paths that point inside a Zarr store)."
+        ),
+    )
+    parser.add_argument(
+        "--prune-failed-runs",
+        action="store_true",
+        help="Prune training_runs rows with failed statuses.",
+    )
+    parser.add_argument(
+        "--failed-status",
+        action="append",
+        help=(
+            "Status value treated as failed when using --prune-failed-runs "
+            "(repeatable or comma-separated, case-insensitive). Default: failed."
         ),
     )
     parser.add_argument(
@@ -148,6 +169,61 @@ def _delete_dataset_ids(registry: Registry, dataset_ids: Sequence[str], *, dry_r
     return len(dataset_ids)
 
 
+def _normalize_status_values(values: Optional[Sequence[str]]) -> tuple[str, ...]:
+    normalized: set[str] = set()
+    for value in values or ():
+        for token in str(value).split(","):
+            status = token.strip().lower()
+            if status:
+                normalized.add(status)
+    if not normalized:
+        normalized.add("failed")
+    return tuple(sorted(normalized))
+
+
+def _collect_failed_run_candidates(
+    registry: Registry,
+    *,
+    status_values: Sequence[str],
+) -> List[FailedRunCandidate]:
+    target_statuses = {value.strip().lower() for value in status_values if value and value.strip()}
+    if not target_statuses:
+        target_statuses = {"failed"}
+    rows = registry.conn.execute(
+        """
+        SELECT run_id, set_id, status, created_utc
+        FROM training_runs
+        ORDER BY created_utc DESC, run_id DESC;
+        """
+    ).fetchall()
+    candidates: List[FailedRunCandidate] = []
+    for row in rows:
+        status_raw = row["status"]
+        if status_raw is None:
+            continue
+        status = str(status_raw).strip().lower()
+        if status not in target_statuses:
+            continue
+        candidates.append(
+            FailedRunCandidate(
+                run_id=str(row["run_id"]),
+                set_id=row["set_id"],
+                status=row["status"],
+                created_utc=row["created_utc"],
+            )
+        )
+    return candidates
+
+
+def _delete_training_run_ids(registry: Registry, run_ids: Sequence[str], *, dry_run: bool) -> int:
+    if dry_run or not run_ids:
+        return 0
+    with registry.conn:
+        for run_id in run_ids:
+            registry.conn.execute("DELETE FROM training_runs WHERE run_id = ?;", (run_id,))
+    return len(run_ids)
+
+
 def _print_candidates(candidates: Sequence[InvalidDatasetCandidate], *, list_limit: int) -> None:
     if not candidates:
         print("No invalid dataset rows found.")
@@ -163,6 +239,22 @@ def _print_candidates(candidates: Sequence[InvalidDatasetCandidate], *, list_lim
         print(f" ... {len(candidates) - limit} more rows omitted (use --list-limit 0 to show all).")
 
 
+def _print_failed_run_candidates(candidates: Sequence[FailedRunCandidate], *, list_limit: int) -> None:
+    if not candidates:
+        print("No failed training runs found.")
+        return
+
+    print(f"Failed training runs: {len(candidates)}")
+    limit = len(candidates) if list_limit == 0 else min(len(candidates), list_limit)
+    for candidate in candidates[:limit]:
+        set_id = candidate.set_id or "—"
+        status = candidate.status or "—"
+        created_utc = candidate.created_utc or "—"
+        print(f" - {candidate.run_id} [set={set_id} status={status} created={created_utc}]")
+    if limit < len(candidates):
+        print(f" ... {len(candidates) - limit} more rows omitted (use --list-limit 0 to show all).")
+
+
 def _summarize_reconcile(stats: Dict[str, int]) -> None:
     checked = int(stats.get("checked", 0))
     marked_missing = int(stats.get("marked_missing", 0))
@@ -171,8 +263,10 @@ def _summarize_reconcile(stats: Dict[str, int]) -> None:
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
     args = _parse_args(argv)
-    if not args.prune_invalid and not args.vacuum:
-        raise SystemExit("No action selected. Use --prune-invalid and/or --vacuum.")
+    if not args.prune_invalid and not args.prune_failed_runs and not args.vacuum:
+        raise SystemExit(
+            "No action selected. Use --prune-invalid, --prune-failed-runs, and/or --vacuum."
+        )
 
     registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
     scope_paths = [Path(path).expanduser() for path in args.paths]
@@ -198,6 +292,24 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             else:
                 deleted = _delete_dataset_ids(registry, dataset_ids, dry_run=False)
                 print(f"Deleted {deleted} dataset row(s).")
+
+        if args.prune_failed_runs:
+            status_values = _normalize_status_values(args.failed_status)
+            failed_run_candidates = _collect_failed_run_candidates(
+                registry,
+                status_values=status_values,
+            )
+            _print_failed_run_candidates(failed_run_candidates, list_limit=args.list_limit)
+            run_ids = [candidate.run_id for candidate in failed_run_candidates]
+            status_list = ", ".join(status_values)
+            if args.dry_run:
+                print(
+                    f"Dry run: would delete {len(run_ids)} training run row(s) "
+                    f"with status in [{status_list}]."
+                )
+            else:
+                deleted = _delete_training_run_ids(registry, run_ids, dry_run=False)
+                print(f"Deleted {deleted} training run row(s) with status in [{status_list}].")
 
         if args.vacuum:
             if args.dry_run:

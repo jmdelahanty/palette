@@ -81,6 +81,25 @@ training_params:
   weight_decay: 0.0005   # Weight decay (L2 penalty)
   patience: 10           # Early stopping patience
   device: '0'            # CUDA device
+  max_det: 1             # Max detections per image (post-NMS)
+  # Augmentations tuned for single-fish grayscale data
+  mosaic: 0.0
+  close_mosaic: 0
+  auto_augment: null
+  hsv_h: 0.0
+  hsv_s: 0.0
+  hsv_v: 0.15
+  degrees: 15.0
+  translate: 0.05
+  scale: 0.1
+  shear: 0.0
+  perspective: 0.0
+  fliplr: 0.5
+  flipud: 0.0
+  erasing: 0.0
+  mixup: 0.0
+  copy_paste: 0.0
+  cutmix: 0.0
 
 # ================================================================================
 # TRAINING HISTORY & METADATA

@@ -189,3 +189,42 @@ def test_registry_record_training_run_persists_invocation_json(tmp_path: Path) -
     assert row[1] == config_hash
     assert row[2] == "success"
     assert json.loads(row[3]) == final_metrics
+
+
+def test_registry_record_training_run_status_transitions(tmp_path: Path) -> None:
+    registry_path = tmp_path / "palette_registry.sqlite"
+    registry = Registry(registry_path)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("abc", encoding="utf-8")
+
+    run_id = "run_status_001"
+    registry.record_training_run(
+        run_id=run_id,
+        set_id="detect_smoke_set_v001",
+        config_path=config_path,
+        manifest_path=None,
+        model_path=None,
+        metrics_path=None,
+        status="in_progress",
+        final_metrics={"stage": "training_started"},
+    )
+    registry.record_training_run(
+        run_id=run_id,
+        set_id="detect_smoke_set_v001",
+        config_path=config_path,
+        manifest_path=None,
+        model_path=None,
+        metrics_path=None,
+        status="success",
+        final_metrics={"precision": 0.9},
+    )
+    registry.close()
+
+    with sqlite3.connect(registry_path) as conn:
+        row = conn.execute(
+            "SELECT status, final_metrics_json FROM training_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "success"
+    assert json.loads(row[1]) == {"precision": 0.9}

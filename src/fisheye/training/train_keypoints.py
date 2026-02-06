@@ -15,6 +15,9 @@ Usage:
 """
 
 import argparse
+import os
+import re
+import shutil
 import torch
 import yaml
 from pathlib import Path
@@ -22,6 +25,7 @@ import time
 import platform
 import traceback
 import pandas as pd
+from hashlib import sha256
 from ultralytics import YOLO, __version__ as ultralytics_version
 from ultralytics.models.yolo.pose import PoseTrainer, PoseValidator
 from torch.utils.data import DataLoader
@@ -31,10 +35,12 @@ from rich.panel import Panel
 from rich.table import Table
 import json
 import zarr
+from typing import Any, Dict, Optional
 
 from .config import PoseConfig
 from .zarr_yolo_dataset_loader import create_zarr_dataset, ZarrDatasetConfig
-from ..utils.system import get_git_info
+from ..registry.db import Registry, RegistryPaths
+from ..utils.system import build_invocation_record, get_git_info
 
 
 # Custom DataLoader to ensure compatibility with Ultralytics YOLO's expected interface
@@ -352,13 +358,254 @@ def get_zarr_metadata(zarr_paths, console=None):
     return metadata
 
 
-def main(args):
+def _safe_sha256_file(path: Optional[Path]) -> Optional[str]:
+    if not path or not path.exists():
+        return None
+    hasher = sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _load_manifest_set_id(manifest_path: Optional[str]) -> Optional[str]:
+    return _load_manifest_run_hints(manifest_path).get("set_id")
+
+
+def _load_manifest_run_hints(manifest_path: Optional[str]) -> Dict[str, Optional[str]]:
+    hints: Dict[str, Optional[str]] = {
+        "set_id": None,
+        "dish_design": None,
+        "canvas_name": None,
+        "task": None,
+    }
+    if not manifest_path:
+        return hints
+    try:
+        payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    except Exception:
+        return hints
+
+    if not isinstance(payload, dict):
+        return hints
+
+    set_id = payload.get("set_id")
+    if isinstance(set_id, str) and set_id.strip():
+        hints["set_id"] = set_id.strip()
+
+    query_filter = payload.get("query_filter")
+    if not isinstance(query_filter, dict):
+        query_filter = {}
+    datasets = payload.get("datasets") if isinstance(payload.get("datasets"), list) else []
+    first_dataset = datasets[0] if datasets and isinstance(datasets[0], dict) else {}
+    provenance = first_dataset.get("provenance") if isinstance(first_dataset, dict) else {}
+    if not isinstance(provenance, dict):
+        provenance = {}
+    arena = provenance.get("arena") if isinstance(provenance, dict) else {}
+    if not isinstance(arena, dict):
+        arena = {}
+    rig_info = provenance.get("rig_info") if isinstance(provenance, dict) else {}
+    if not isinstance(rig_info, dict):
+        rig_info = {}
+
+    dataset_name = first_dataset.get("name") if isinstance(first_dataset, dict) else None
+    dataset_zarr = first_dataset.get("zarr_path") if isinstance(first_dataset, dict) else None
+    hints["canvas_name"] = (
+        first_dataset.get("canvas_name")
+        or rig_info.get("canvas_name")
+        or _infer_canvas_from_dataset_label(dataset_name)
+        or _infer_canvas_from_dataset_label(Path(str(dataset_zarr)).stem if dataset_zarr else None)
+    )
+    hints["dish_design"] = (
+        query_filter.get("dish_design")
+        or first_dataset.get("dish_design")
+        or arena.get("dish_design")
+    )
+    task = payload.get("task")
+    if isinstance(task, str) and task.strip():
+        hints["task"] = task.strip()
+    return hints
+
+
+def _strip_manifest_suffixes(value: str) -> str:
+    text = value
+    while text.endswith(".manifest"):
+        text = text[: -len(".manifest")]
+    return text
+
+
+def _infer_canvas_from_dataset_label(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    stem = Path(str(value)).stem
+    tokens = [token for token in stem.split("_") if token]
+    if not tokens:
+        return None
+    for token in reversed(tokens):
+        if token and not token.isdigit() and token.lower() != "arena":
+            return token
+    return tokens[-1]
+
+
+def _sanitize_run_component(value: Optional[str], fallback: str) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    text = text.strip("_")
+    return text or fallback
+
+
+def _build_default_run_name(
+    *,
+    manifest_hints: Dict[str, Optional[str]],
+    task_fallback: str,
+    timestamp: Optional[str] = None,
+    pid: Optional[int] = None,
+) -> str:
+    dish = _sanitize_run_component(manifest_hints.get("dish_design"), "unknown_dish")
+    canvas = _sanitize_run_component(manifest_hints.get("canvas_name"), "unknown_canvas")
+    task = _sanitize_run_component(manifest_hints.get("task") or task_fallback, task_fallback)
+    stamp = timestamp or time.strftime("%Y%m%d-%H%M%S")
+    process_id = int(os.getpid() if pid is None else pid)
+    return f"{dish}_{canvas}_{task}_{stamp}_{process_id}"
+
+
+def _infer_set_slug(set_id: Optional[str], config_path: Optional[Path]) -> str:
+    if set_id:
+        slug = _strip_manifest_suffixes(set_id)
+        return slug or "pose_training"
+    if config_path is not None:
+        stem = _strip_manifest_suffixes(config_path.stem)
+        return stem or "pose_training"
+    return "pose_training"
+
+
+def _resolve_project_dir(
+    *,
+    args,
+    training_params: dict,
+    set_id: Optional[str],
+    config_path: Optional[Path],
+    console: Console,
+) -> None:
+    if args.project:
+        training_params["project"] = str(Path(args.project).expanduser().resolve())
+        return
+
+    configured_project = training_params.get("project")
+    if isinstance(configured_project, str) and configured_project.strip():
+        training_params["project"] = str(Path(configured_project).expanduser().resolve())
+        return
+
+    nvme_root = Path("/nvme1")
+    if not nvme_root.exists():
+        return
+
+    slug = _infer_set_slug(set_id, config_path)
+    project_dir = (nvme_root / "models" / "pose" / slug).resolve()
+    project_dir.mkdir(parents=True, exist_ok=True)
+    training_params["project"] = str(project_dir)
+    console.print(f"[cyan]Using default model output directory:[/cyan] {project_dir}")
+
+
+def _snapshot_training_inputs(
+    *,
+    run_dir: Path,
+    config_path: Optional[Path],
+    manifest_path: Optional[Path],
+    invocation_payload: Optional[Dict[str, Any]],
+) -> list[Path]:
+    """Copy immutable run inputs into run_dir/inputs for reproducibility."""
+    inputs_dir = run_dir / "inputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    if config_path is not None and config_path.exists():
+        dest = inputs_dir / config_path.name
+        shutil.copy2(config_path, dest)
+        written.append(dest)
+    if manifest_path is not None and manifest_path.exists():
+        dest = inputs_dir / manifest_path.name
+        shutil.copy2(manifest_path, dest)
+        written.append(dest)
+    if invocation_payload:
+        dest = inputs_dir / "train_invocation.json"
+        dest.write_text(json.dumps(invocation_payload, indent=2), encoding="utf-8")
+        written.append(dest)
+
+    return written
+
+
+def _record_registry_training_run(
+    *,
+    args,
+    console: Console,
+    invocation_payload: dict | None,
+    run_id: str,
+    set_id: Optional[str],
+    config_path: Optional[Path],
+    manifest_path: Optional[Path],
+    model_path: Optional[Path],
+    metrics_path: Optional[Path],
+    status: str,
+    final_metrics: Optional[Dict[str, Any]],
+) -> None:
+    registry = None
+    try:
+        registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
+        registry = Registry(registry_path)
+        registry.record_training_run(
+            run_id=run_id,
+            set_id=set_id,
+            config_path=config_path,
+            manifest_path=manifest_path,
+            model_path=model_path,
+            metrics_path=metrics_path,
+            config_sha256=_safe_sha256_file(config_path),
+            manifest_sha256=_safe_sha256_file(manifest_path),
+            model_sha256=_safe_sha256_file(model_path),
+            metrics_sha256=_safe_sha256_file(metrics_path),
+            status=status,
+            final_metrics=final_metrics,
+            invocation=invocation_payload,
+        )
+        console.print(f"[green]✓ Registry updated:[/green] {registry_path}")
+    except Exception as exc:
+        console.print(f"[yellow]Registry update skipped:[/yellow] {exc}")
+    finally:
+        if registry is not None:
+            try:
+                registry.close()
+            except Exception:
+                pass
+
+
+def main(args) -> int:
     """Main training function."""
     console = Console()
     console.print("[bold cyan]═══════════════════════════════════════════════════════[/bold cyan]")
     console.print("[bold cyan]      Zarr YOLO Pose Training - Fisheye Module        [/bold cyan]")
     console.print("[bold cyan]═══════════════════════════════════════════════════════[/bold cyan]\n")
-    
+
+    config_path = Path(args.config_path) if args.config_path else None
+    manifest_path = Path(args.manifest) if args.manifest else None
+    manifest_hints = _load_manifest_run_hints(args.manifest)
+    manifest_set_id = manifest_hints.get("set_id")
+    effective_set_id = args.set_id or manifest_set_id
+    autogenerated_run_name = _build_default_run_name(
+        manifest_hints=manifest_hints,
+        task_fallback="pose",
+    )
+    effective_run_name = args.run_name or autogenerated_run_name
+    registry_run_id = effective_run_name
+    invocation_payload = (
+        build_invocation_record(
+            tool="fisheye.training.train_keypoints",
+            args=args,
+        )
+        if args.log_registry
+        else None
+    )
+
     # Load and validate config
     global config
     try:
@@ -375,6 +622,8 @@ def main(args):
             datasets_dict[name] = {
                 'zarr_path': str(ds_cfg.zarr_path),
                 'source_type': ds_cfg.source_type.value if hasattr(ds_cfg.source_type, 'value') else ds_cfg.source_type,
+                'input_format': ds_cfg.input_format,
+                'keypoint_run': ds_cfg.keypoint_run,
                 'split': split_dict
             }
 
@@ -396,8 +645,44 @@ def main(args):
     except Exception as e:
         console.print(f"[bold red]✗ Error loading config:[/bold red] {e}")
         traceback.print_exc()
-        return
+        if args.log_registry:
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=registry_run_id,
+                set_id=effective_set_id,
+                config_path=config_path,
+                manifest_path=manifest_path,
+                model_path=None,
+                metrics_path=None,
+                status="failed",
+                final_metrics={
+                    "stage": "config_load",
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                },
+            )
+        return 1
     
+    if args.log_registry:
+        _record_registry_training_run(
+            args=args,
+            console=console,
+            invocation_payload=invocation_payload,
+            run_id=registry_run_id,
+            set_id=effective_set_id,
+            config_path=config_path,
+            manifest_path=manifest_path,
+            model_path=None,
+            metrics_path=None,
+            status="in_progress",
+            final_metrics={
+                "stage": "preflight_and_training",
+                "status_detail": "training_started",
+            },
+        )
+
     # Get zarr metadata
     zarr_paths = config.get_zarr_paths()
     zarr_metadata = get_zarr_metadata(zarr_paths, console)
@@ -440,7 +725,14 @@ def main(args):
             console.print(f"  - {name}")
    
     # Get training params
-    training_params = full_config.training_params.model_dump()
+    training_params = full_config.training_params.model_dump(exclude_none=True)
+    _resolve_project_dir(
+        args=args,
+        training_params=training_params,
+        set_id=effective_set_id,
+        config_path=config_path,
+        console=console,
+    )
     model_name = training_params.get('model', 'yolov8n-pose.pt')
     
     # Display hyperparameters
@@ -458,7 +750,28 @@ def main(args):
     
     # Initialize model
     console.print(f"[bold]Loading model:[/bold] {model_name}")
-    model = YOLO(model_name)
+    try:
+        model = YOLO(model_name)
+    except Exception as exc:
+        if args.log_registry:
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=registry_run_id,
+                set_id=effective_set_id,
+                config_path=config_path,
+                manifest_path=manifest_path,
+                model_path=None,
+                metrics_path=None,
+                status="failed",
+                final_metrics={
+                    "stage": "model_init",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
+        raise
     
     # Monkey-patch the trainer's get_dataloader method
     def get_zarr_dataloader(trainer_self, dataset_path, batch_size, mode, rank=0):
@@ -478,28 +791,76 @@ def main(args):
     # Start training
     console.print("\n[bold green]⚡ Starting Training...[/bold green]\n")
     training_start_time = time.time()
+
+    snapshot_state = {"done": False}
+
+    def _on_train_start(trainer) -> None:
+        if snapshot_state["done"]:
+            return
+        snapshot_state["done"] = True
+        try:
+            run_dir = Path(trainer.save_dir)
+            written = _snapshot_training_inputs(
+                run_dir=run_dir,
+                config_path=config_path,
+                manifest_path=manifest_path,
+                invocation_payload=invocation_payload,
+            )
+            if written:
+                console.print(f"[cyan]Snapshotted run inputs:[/cyan] {run_dir / 'inputs'}")
+        except Exception as exc:
+            console.print(f"[yellow]Warning: failed to snapshot run inputs: {exc}[/yellow]")
+
+    model.add_callback("on_train_start", _on_train_start)
     
     try:
         results = model.train(
             trainer=ZarrPoseTrainer,
             data=args.config_path,
-            name=args.run_name or "zarr_pose_train",
+            name=effective_run_name,
             **training_params
         )
     except Exception as e:
         console.print(f"\n[bold red]✗ Training failed:[/bold red] {e}")
         traceback.print_exc()
-        return
+        if args.log_registry:
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=registry_run_id,
+                set_id=effective_set_id,
+                config_path=config_path,
+                manifest_path=manifest_path,
+                model_path=None,
+                metrics_path=None,
+                status="failed",
+                final_metrics={
+                    "stage": "model_train",
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                },
+            )
+        return 1
     
     training_duration_seconds = time.time() - training_start_time
     
     # Log training metadata
     console.print("\n[bold cyan]Generating Training Report...[/bold cyan]")
+    final_validation_metrics = None
     try:
         git_info = get_git_info()
         results_df = pd.read_csv(results.save_dir / 'results.csv')
         results_df.columns = results_df.columns.str.strip()
         last_epoch_metrics = results_df.iloc[-1]
+        final_validation_metrics = {
+            'precision': float(last_epoch_metrics.get('metrics/precision(B)', 0)),
+            'recall': float(last_epoch_metrics.get('metrics/recall(B)', 0)),
+            'mAP50': float(last_epoch_metrics.get('metrics/mAP50(B)', 0)),
+            'mAP50_95': float(last_epoch_metrics.get('metrics/mAP50-95(B)', 0)),
+            'pose_mAP50': float(last_epoch_metrics.get('metrics/mAP50(P)', 0)),
+            'pose_mAP50_95': float(last_epoch_metrics.get('metrics/mAP50-95(P)', 0))
+        }
         
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(training_start_time))
         final_config_filename = f"{timestamp}_pose_training_report.yaml"
@@ -527,14 +888,7 @@ def main(args):
                 'cls_loss': float(last_epoch_metrics.get('train/cls_loss', 0)),
                 'dfl_loss': float(last_epoch_metrics.get('train/dfl_loss', 0)),
             },
-            'final_validation_metrics': {
-                'precision': float(last_epoch_metrics.get('metrics/precision(B)', 0)),
-                'recall': float(last_epoch_metrics.get('metrics/recall(B)', 0)),
-                'mAP50': float(last_epoch_metrics.get('metrics/mAP50(B)', 0)),
-                'mAP50_95': float(last_epoch_metrics.get('metrics/mAP50-95(B)', 0)),
-                'pose_mAP50': float(last_epoch_metrics.get('metrics/mAP50(P)', 0)),
-                'pose_mAP50_95': float(last_epoch_metrics.get('metrics/mAP50-95(P)', 0))
-            }
+            'final_validation_metrics': final_validation_metrics
         }
         
         # Save report
@@ -570,9 +924,30 @@ def main(args):
     except Exception as e:
         console.print(f"[bold red]✗ Could not save training report:[/bold red] {e}")
         traceback.print_exc()
-    
+
+    if args.log_registry:
+        model_path = results.save_dir / "weights" / "best.pt"
+        metrics_path = results.save_dir / "results.csv"
+        final_metrics_payload = dict(final_validation_metrics or {})
+        final_metrics_payload.setdefault("stage", "completed")
+        final_metrics_payload.setdefault("status_detail", "training_complete")
+        _record_registry_training_run(
+            args=args,
+            console=console,
+            invocation_payload=invocation_payload,
+            run_id=registry_run_id,
+            set_id=effective_set_id,
+            config_path=config_path,
+            manifest_path=manifest_path,
+            model_path=model_path if model_path.exists() else None,
+            metrics_path=metrics_path if metrics_path.exists() else None,
+            status="success",
+            final_metrics=final_metrics_payload,
+        )
+
     console.print("[bold green]✓ Training Complete![/bold green]")
     console.print(f"[dim]Results saved to: {results.save_dir}[/dim]\n")
+    return 0
 
 
 if __name__ == '__main__':
@@ -601,5 +976,38 @@ Examples:
         type=str,
         help="Optional name for the training run directory"
     )
+    parser.add_argument(
+        "--project",
+        type=str,
+        help="Optional output project directory for Ultralytics runs (overrides config/default).",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=str,
+        help="Optional manifest JSON path to record in the registry.",
+    )
+    parser.add_argument(
+        "--set-id",
+        type=str,
+        help="Optional training set ID to associate with this run. Defaults to manifest set_id when available.",
+    )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help="Optional registry SQLite path.",
+    )
+    parser.add_argument(
+        "--log-registry",
+        dest="log_registry",
+        action="store_true",
+        default=True,
+        help="Record this training run in the registry (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-log-registry",
+        dest="log_registry",
+        action="store_false",
+        help="Disable registry logging for this training run.",
+    )
     args = parser.parse_args()
-    main(args)
+    raise SystemExit(main(args))

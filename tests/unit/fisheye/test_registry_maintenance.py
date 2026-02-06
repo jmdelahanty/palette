@@ -7,9 +7,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
 from fisheye.registry.maintenance import (
+    _collect_failed_run_candidates,
     _collect_invalid_dataset_candidates,
+    _delete_training_run_ids,
     _delete_dataset_ids,
     _is_nested_zarr_subpath,
+    _normalize_status_values,
 )
 
 
@@ -78,4 +81,73 @@ def test_collect_candidates_can_infer_missing_without_status(tmp_path: Path) -> 
     assert set(by_id) == {"missing_active", "nested_active"}
     assert by_id["missing_active"].reasons == ("status_missing",)
     assert by_id["nested_active"].reasons == ("nested_zarr_subpath",)
+    registry.close()
+
+
+def test_collect_and_delete_failed_training_runs(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.record_training_run(
+        run_id="run_failed",
+        set_id="set_a",
+        config_path=None,
+        manifest_path=None,
+        model_path=None,
+        metrics_path=None,
+        status="failed",
+    )
+    registry.record_training_run(
+        run_id="run_failed_caps",
+        set_id="set_a",
+        config_path=None,
+        manifest_path=None,
+        model_path=None,
+        metrics_path=None,
+        status="FAILED",
+    )
+    registry.record_training_run(
+        run_id="run_success",
+        set_id="set_a",
+        config_path=None,
+        manifest_path=None,
+        model_path=None,
+        metrics_path=None,
+        status="success",
+    )
+    registry.record_training_run(
+        run_id="run_in_progress",
+        set_id="set_a",
+        config_path=None,
+        manifest_path=None,
+        model_path=None,
+        metrics_path=None,
+        status="in_progress",
+    )
+    registry.record_model_export(run_id="run_failed", export_type="onnx", path=tmp_path / "run_failed.onnx")
+    registry.record_model_export(run_id="run_success", export_type="onnx", path=tmp_path / "run_success.onnx")
+
+    status_values = _normalize_status_values(["failed"])
+    candidates = _collect_failed_run_candidates(registry, status_values=status_values)
+    candidate_ids = {candidate.run_id for candidate in candidates}
+    assert candidate_ids == {"run_failed", "run_failed_caps"}
+
+    # Dry run must not delete.
+    assert _delete_training_run_ids(registry, sorted(candidate_ids), dry_run=True) == 0
+    still_present = {
+        row["run_id"]
+        for row in registry.conn.execute("SELECT run_id FROM training_runs ORDER BY run_id;").fetchall()
+    }
+    assert still_present == {"run_failed", "run_failed_caps", "run_success", "run_in_progress"}
+
+    deleted = _delete_training_run_ids(registry, sorted(candidate_ids), dry_run=False)
+    assert deleted == 2
+    remaining = {
+        row["run_id"]
+        for row in registry.conn.execute("SELECT run_id FROM training_runs ORDER BY run_id;").fetchall()
+    }
+    assert remaining == {"run_success", "run_in_progress"}
+
+    export_rows = registry.conn.execute(
+        "SELECT run_id FROM model_exports ORDER BY run_id;"
+    ).fetchall()
+    assert [row["run_id"] for row in export_rows] == ["run_success"]
     registry.close()

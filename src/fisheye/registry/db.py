@@ -1292,7 +1292,7 @@ class Registry:
             "p.encoder_bpp, p.encoder_target_bps, p.encoder_res, p.encoder_res_width, p.encoder_res_height,",
             "p.encoder_fps, p.encoder_color, p.encoder_params_json,",
             "p.compression_name, p.compression_level,",
-            "p.camera_model, p.camera_serial, p.camera_id, p.rig_id, p.arena_id,",
+            "p.camera_model, p.camera_serial, p.camera_id, p.rig_id, p.arena_id, p.canvas_name,",
             "p.has_images_ds, p.has_images_ds_rgb, p.downsample_formats_json",
             "FROM datasets d",
             "LEFT JOIN provenance p ON d.dataset_id = p.dataset_id",
