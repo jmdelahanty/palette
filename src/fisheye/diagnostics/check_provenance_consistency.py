@@ -18,6 +18,8 @@ class ProvenanceRecord:
     detect_run: Optional[str]
     refined_run: Optional[str]
     crop_run: Optional[str]
+    crop_source_path: Optional[str]
+    crop_source_rows: Optional[int]
     keypoint_run: Optional[str]
     id_run: Optional[str]
     detect_rows: Optional[int]
@@ -35,6 +37,24 @@ def _safe_len(arr: Optional[zarr.Array]) -> Optional[int]:
         return int(arr.shape[0])
     except Exception:
         return None
+
+
+def _group_for_path(root: zarr.Group, path: Optional[str]) -> Optional[zarr.Group]:
+    if not path:
+        return None
+    normalized = path.strip("/")
+    if normalized in root:
+        return root[normalized]
+    return None
+
+
+def _count_detections(group: Optional[zarr.Group]) -> Optional[int]:
+    if group is None:
+        return None
+    if isinstance(group, zarr.Array):
+        return _safe_len(group)
+    arr = group.get("bbox_norm_coords") or group.get("bbox_coords") or group.get("bbox")
+    return _safe_len(arr)
 
 
 def _latest(group: Optional[zarr.Group]) -> Optional[str]:
@@ -76,8 +96,11 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
     crop_latest = _latest(crop_parent)
     crop_group = _first_matching_run(crop_parent, crop_latest)
     crop_rois = _safe_len(crop_group["roi_images"]) if crop_group else None
+    crop_source_rows = None
+    crop_source_path = None
     if crop_group is not None:
         crop_source = crop_group.attrs.get("detection_source_path")
+        crop_source_path = crop_source
 
         def _expected_crop_path() -> Optional[str]:
             if refined_group is None:
@@ -110,6 +133,10 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
             return refined_group.path + (f"/{manual_label}" if manual_label else "/interpolated")
 
         expected_path = _expected_crop_path()
+        source_path = crop_source or expected_path
+        if source_path:
+            crop_source_path = source_path
+        crop_source_rows = _count_detections(_group_for_path(root, source_path))
         if crop_source and expected_path and crop_source != expected_path:
             issues.append(
                 f"Crop run '{crop_latest}' sourced from '{crop_source}' but expected '{expected_path}'."
@@ -130,6 +157,7 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
     id_latest = _latest(id_parent)
     id_group = _first_matching_run(id_parent, id_latest)
     id_rows = _safe_len(id_group["detection_ids"]) if id_group else None
+    id_source_rows = None
     if id_group is not None:
         id_source_detect = id_group.attrs.get("source_detect_run")
         if detect_latest and id_source_detect and detect_latest != id_source_detect:
@@ -141,24 +169,34 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
             issues.append(
                 f"ID run '{id_latest}' references refined detect '{id_source_refined}' but latest refined detect is '{refined_latest}'."
             )
+        if id_source_refined:
+            id_source_rows = _count_detections(
+                _group_for_path(root, f"refined_detect_runs/{id_source_refined}/interpolated")
+                or _group_for_path(root, f"refined_runs/{id_source_refined}/interpolated")
+            )
+        if id_source_rows is None and id_source_detect:
+            id_source_rows = _count_detections(_group_for_path(root, f"detect_runs/{id_source_detect}"))
 
-    if refined_rows is not None and keypoint_rows is not None and refined_rows != keypoint_rows:
+    if crop_rois is not None and crop_source_rows is not None and crop_rois != crop_source_rows:
         issues.append(
-            f"Refined detection count ({refined_rows}) != keypoint heading count ({keypoint_rows})."
+            f"Crop ROI count ({crop_rois}) != detection source count ({crop_source_rows})"
+            + (f" from '{crop_source_path}'." if crop_source_path else ".")
         )
-    if refined_rows is not None and id_rows is not None and refined_rows != id_rows:
+    if crop_rois is not None and keypoint_rows is not None and crop_rois != keypoint_rows:
         issues.append(
-            f"Refined detection count ({refined_rows}) != ID assignments ({id_rows})."
+            f"Crop ROI count ({crop_rois}) != keypoint heading count ({keypoint_rows})."
         )
-    if crop_rois is not None and refined_rows is not None and crop_rois != refined_rows:
+    if id_rows is not None and id_source_rows is not None and id_rows != id_source_rows:
         issues.append(
-            f"Crop ROI count ({crop_rois}) != refined detection count ({refined_rows})."
+            f"ID assignments ({id_rows}) != detection source count ({id_source_rows})."
         )
 
     return ProvenanceRecord(
         detect_run=detect_latest,
         refined_run=refined_latest,
         crop_run=crop_latest,
+        crop_source_path=crop_source_path,
+        crop_source_rows=crop_source_rows,
         keypoint_run=keypoint_latest,
         id_run=id_latest,
         detect_rows=detect_rows,
@@ -168,6 +206,11 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
         id_rows=id_rows,
         issues=issues,
     )
+
+
+def collect_provenance(root: zarr.Group) -> ProvenanceRecord:
+    """Collect provenance consistency info without printing."""
+    return _collect_provenance(root)
 
 
 def show_provenance(zarr_path: Path) -> None:
@@ -188,6 +231,11 @@ def show_provenance(zarr_path: Path) -> None:
     table.add_row("ID Assignment", record.id_run or "—", str(record.id_rows or "—"))
 
     console.print(table)
+    source_label = record.crop_source_path or "—"
+    det_count = record.crop_source_rows if record.crop_source_rows is not None else "—"
+    crop_count = record.crop_rois if record.crop_rois is not None else "—"
+    kp_count = record.keypoint_rows if record.keypoint_rows is not None else "—"
+    console.print(f"[dim]Lineage counts:[/dim] source={source_label} det={det_count} crop={crop_count} kpt={kp_count}")
 
     if record.issues:
         console.print("[bold red]Inconsistencies detected:[/bold red]")

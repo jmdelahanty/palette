@@ -170,6 +170,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Crop run to source ROI images from (manual mode only).",
     )
     parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Review all keypoints (manual mode only; default is failures only).",
+    )
+    parser.add_argument(
+        "--frames",
+        type=str,
+        help=(
+            "Frame indices to review (manual mode only). Accepts comma/space-separated "
+            "indices or a path to a JSON/text list. JSON mappings of zarr->frames are supported."
+        ),
+    )
+    parser.add_argument(
         "--apply-batch-size",
         type=int,
         default=128,
@@ -201,6 +214,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--reviewer", help="Reviewer name (defaults to $USER).")
     parser.add_argument("--review-notes", help="Optional review notes.")
+    parser.add_argument(
+        "--frame-flag-file",
+        default="keypoint_frame_flags.json",
+        help="JSON file to append flagged frames (manual/retune modes).",
+    )
+    parser.add_argument(
+        "--detect-flag-file",
+        default="retune_flags.txt",
+        help="Text file to append recordings flagged for detection retune.",
+    )
+    parser.add_argument(
+        "--detect-frame-flag-file",
+        default="retune_frame_flags.json",
+        help="JSON file to append detection frames flagged for retune.",
+    )
     parser.add_argument(
         "--start",
         type=int,
@@ -291,6 +319,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             cmd.extend(["--apply-workers", str(args.apply_workers)])
 
         if args.manual:
+            if args.all:
+                cmd.append("--all")
             cmd.extend(["--review-state", args.review_state])
             cmd.extend(["--review-method", args.review_method])
             cmd.extend(["--review-intended-use", args.review_intended_use])
@@ -298,6 +328,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 cmd.extend(["--reviewer", args.reviewer])
             if args.review_notes:
                 cmd.extend(["--review-notes", args.review_notes])
+        if args.frames and (args.manual or args.retune):
+            cmd.extend(["--frames", args.frames])
+        if args.frame_flag_file and (args.manual or args.retune):
+            cmd.extend(["--frame-flag-file", args.frame_flag_file])
+        if args.detect_flag_file and (args.manual or args.retune):
+            cmd.extend(["--detect-flag-file", args.detect_flag_file])
+        if args.detect_frame_flag_file and (args.manual or args.retune):
+            cmd.extend(["--detect-frame-flag-file", args.detect_frame_flag_file])
 
         subprocess.run(cmd, check=False)
         if idx < end - 1 and not args.no_prompt:

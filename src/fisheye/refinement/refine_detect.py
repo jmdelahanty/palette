@@ -732,6 +732,8 @@ def create_refined_run(
         'inputs': {
             'detect_run': detect_run,
             'quality_run': quality_run or 'N/A',
+            'frame_source': 'zarr' if root.attrs.get('has_raw_video', True) else 'external',
+            'source_video_path': root.attrs.get('source_video_path'),
         },
         'artifacts': artifact_info,
     }

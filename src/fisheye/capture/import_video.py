@@ -7,6 +7,7 @@ Uses process isolation to avoid segmentation faults during cleanup.
 import os
 import argparse
 import shutil
+import subprocess
 from os import fork, waitpid, WIFEXITED, WEXITSTATUS, _exit
 os.environ.setdefault("BLOSC_NTHREADS", "4")
 # Force kvikIO to use GDS mode, not compatibility mode
@@ -29,6 +30,8 @@ from zarr.storage import LocalStore
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
+
+from ..utils.encoder_tags import parse_encoder_comment
 
 # Optional deps
 try:
@@ -496,6 +499,46 @@ def _get_video_metadata(video_path: Path, vr: decord.VideoReader, width: int, he
         meta["codec"] = iio_meta.get("codec", "unknown")
         meta["pix_fmt"] = iio_meta.get("pix_fmt", "unknown")
         meta["imageio_metadata"] = iio_meta
+    stream_codec = None
+    stream_pix_fmt = None
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "format_tags=title,comment,encoder:stream=codec_name,codec_tag_string,pix_fmt",
+                "-of",
+                "json",
+                str(video_path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout:
+            payload = json.loads(result.stdout)
+            tags = payload.get("format", {}).get("tags", {})
+            if isinstance(tags, dict) and tags:
+                meta["format_tags"] = tags
+                encoder_fields = parse_encoder_comment(tags.get("comment"))
+                if encoder_fields:
+                    meta["encoder_fields"] = encoder_fields
+            streams = payload.get("streams", [])
+            if isinstance(streams, list) and streams:
+                stream = streams[0]
+                if isinstance(stream, dict):
+                    stream_codec = stream.get("codec_name") or stream.get("codec_tag_string")
+                    stream_pix_fmt = stream.get("pix_fmt")
+    except Exception:
+        pass
+    if meta.get("codec") in (None, "", "unknown") and stream_codec:
+        meta["codec"] = stream_codec
+    if meta.get("pix_fmt") in (None, "", "unknown") and stream_pix_fmt:
+        meta["pix_fmt"] = stream_pix_fmt
     return meta
 
 
@@ -822,7 +865,11 @@ def import_video(
                     metadata["gpu_fp16"] = True
                 
                 raw.attrs.update(metadata)
-                
+                if training_data_mode and frame_step:
+                    root.attrs["zarr_purpose"] = "training"
+                else:
+                    root.attrs.setdefault("zarr_purpose", "analysis")
+
             else:
                 # Standard Zarr creation path (CPU or no kvikIO)
                 cfg2 = dict(config)
@@ -869,6 +916,10 @@ def import_video(
                     metadata["effective_video_length"] = n_frames - skip_tail_frames
 
                 raw.attrs.update(metadata)
+                if training_data_mode and frame_step:
+                    root.attrs["zarr_purpose"] = "training"
+                else:
+                    root.attrs.setdefault("zarr_purpose", "analysis")
 
             # ---- Console info --------------------------------------------------------
             method = "kvikIO GPU --> Zarr" if (kvikio_available and use_kvikio_zarr) else "Standard Zarr"
@@ -973,13 +1024,21 @@ def import_video(
             raw.attrs.update(performance_metadata)
 
             # Store video metadata
+            format_tags = vid_meta.get("format_tags") or {}
+            encoder_fields = vid_meta.get("encoder_fields") or {}
             video_metadata = {
                 "video_width": full_w,
                 "video_height": full_h,
                 "video_codec": vid_meta.get("codec", "unknown"),
                 "video_pix_fmt": vid_meta.get("pix_fmt", "unknown"),
                 "video_duration_seconds": vid_meta.get("duration_seconds", 0),
+                "format_title": format_tags.get("title"),
+                "format_comment": format_tags.get("comment"),
+                "format_encoder": format_tags.get("encoder"),
+                "format_tags": format_tags if format_tags else None,
             }
+            if isinstance(encoder_fields, dict) and encoder_fields:
+                video_metadata.update(encoder_fields)
             raw.attrs.update(video_metadata)
 
             # Add comprehensive system info (default to True for HPC tracking)

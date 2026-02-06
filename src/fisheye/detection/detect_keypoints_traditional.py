@@ -9,6 +9,7 @@ import numpy as np
 import zarr
 import time
 import os
+import sys
 from typing import Dict, Optional, Tuple, List, Any
 from datetime import datetime, timezone
 from pathlib import Path
@@ -437,7 +438,8 @@ def detect_keypoints(
     config: Dict[str, Any],
     scheduler: str = None,
     num_workers: Optional[int] = None,
-    console: Optional[Console] = None
+    console: Optional[Console] = None,
+    show_progress: bool = True,
 ) -> Dict[str, Any]:
     """
     Main function to detect keypoints in cropped ROIs.
@@ -448,6 +450,7 @@ def detect_keypoints(
         scheduler: Dask scheduler ('processes', 'threads', 'single-threaded', 'distributed')
         num_workers: Number of workers
         console: Rich console for output
+        show_progress: Whether to show per-chunk progress (default: True)
         
     Returns:
         Dictionary with summary statistics
@@ -754,33 +757,39 @@ def detect_keypoints(
     
     # Execute with progress
     console.print("Processing keypoints...")
-    
+
+    chunk_stats = []
     try:
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TimeRemainingColumn(),
-            console=console
-        ) as progress:
-            task = progress.add_task(f"[cyan]Detecting keypoints ({scheduler})...", total=len(delayed_tasks))
-            
-            chunk_stats = []
-            
+        if show_progress and console is not None:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TimeRemainingColumn(),
+                console=console,
+            ) as progress:
+                task = progress.add_task(
+                    f"[cyan]Detecting keypoints ({scheduler})...", total=len(delayed_tasks)
+                )
+                if use_distributed:
+                    futures = client.compute(delayed_tasks)
+                    for future in futures:
+                        result = future.result()
+                        chunk_stats.append(result)
+                        progress.update(task, advance=1)
+                else:
+                    for dt in delayed_tasks:
+                        result = dt.compute()
+                        chunk_stats.append(result)
+                        progress.update(task, advance=1)
+        else:
             if use_distributed:
-                # Use distributed client
                 futures = client.compute(delayed_tasks)
                 for future in futures:
-                    result = future.result()
-                    chunk_stats.append(result)
-                    progress.update(task, advance=1)
+                    chunk_stats.append(future.result())
             else:
-                # Use local scheduler
                 for dt in delayed_tasks:
-                    result = dt.compute()
-                    chunk_stats.append(result)
-                    progress.update(task, advance=1)
-    
+                    chunk_stats.append(dt.compute())
     finally:
         # Cleanup distributed resources
         if use_distributed and client is not None:
@@ -829,13 +838,53 @@ def detect_keypoints(
     keypoint_group.attrs['keypoints_processed'] = int(total_rois)
     keypoint_group.attrs['success_rate'] = round(success_rate, 2)
     
-    # Environment info
-    env_info = get_environment_info()
+    # Environment info + provenance snapshot
+    env_info = get_environment_info(
+        include_all_packages=False,
+        disk_path=str(zarr_path),
+        collect_ip=False,
+        capture_env_vars=False,
+    )
+    git_info = env_info.get('git', {})
+    platform_info = env_info.get('platform', {})
+
     keypoint_group.attrs.update({
-        'git_commit': env_info['git'].get('commit_hash', 'unknown'),
-        'git_branch': env_info['git'].get('branch', 'unknown'),
-        'hostname': env_info['platform']['hostname']
+        'git_commit': git_info.get('commit_hash', 'unknown'),
+        'git_branch': git_info.get('branch', 'unknown'),
+        'hostname': platform_info.get('hostname', 'unknown')
     })
+    provenance = {
+        'stage': 'keypoints_detect',
+        'method': 'traditional_pose',
+        'command': ' '.join(sys.argv),
+        'created_at_utc': metadata_dict.get('keypoints_timestamp_utc'),
+        'git': git_info,
+        'environment': env_info.get('environment'),
+        'platform': {
+            'hostname': platform_info.get('hostname'),
+            'system': platform_info.get('system'),
+            'release': platform_info.get('release'),
+            'python_version': platform_info.get('python_version'),
+        },
+        'parameters': keypoints_params,
+        'parameter_source': param_source,
+        'inputs': {
+            'source_crop_run': latest_crop,
+            'source_background_run': latest_background,
+            'source_detect_run': source_detect_run or 'unknown',
+            'source_refined_run': source_refined_run,
+            'frame_source': crop_group.attrs.get('video_source_type', 'zarr'),
+            'source_video_path': crop_group.attrs.get('video_source_path'),
+        },
+        'scheduler': {
+            'dask_scheduler': scheduler,
+            'dask_num_workers': num_workers or os.cpu_count(),
+            'threads_per_worker': threads_per_worker if use_distributed else None,
+            'memory_limit': memory_limit if use_distributed else None,
+        },
+    }
+    provenance = {k: v for k, v in provenance.items() if v is not None}
+    keypoint_group.attrs['provenance'] = provenance
     keypoint_group.attrs['pose_schema'] = {
         'name': TRADITIONAL_POSE_SCHEMA.name,
         'nodes': TRADITIONAL_POSE_SCHEMA.node_names,

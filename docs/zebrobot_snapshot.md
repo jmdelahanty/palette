@@ -74,6 +74,14 @@ Normalization rules for /subject_metadata:
   - If parsing fails, set parents=[] and add an error if desired.
 - Normalize date fields to strings (YYYYMMDD or ISO 8601 where applicable).
 
+Recommended subject_metadata fields (capture-time provenance):
+- fish_id (UUID string for the subject, when applicable; format `8-4-4-4-12` hex)
+- subject_count (int; number of subjects in the recording)
+- subject_type (e.g., individual, group)
+- fish_count (int; if provided by acquisition UI)
+- dish_id, cross_id, genotype, line_strain
+- species, sex
+
 ## Derived fields (optional, recommended)
 
 These values are computed at acquisition time and are not fetched from the API:

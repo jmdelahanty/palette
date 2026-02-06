@@ -149,6 +149,33 @@ def _filter_camera_metadata(payload: Dict[str, object]) -> Dict[str, object]:
     return filtered
 
 
+def _read_h5_arena_config(h5: h5py.File) -> Optional[Dict[str, object]]:
+    if "/calibration_snapshot/arena_config_json" not in h5:
+        return None
+    node = h5["/calibration_snapshot/arena_config_json"]
+    raw = node[()] if isinstance(node, h5py.Dataset) else node.attrs.get("arena_config_json")
+    payload = _parse_json_payload(raw)
+    return payload if isinstance(payload, dict) else None
+
+
+def _read_h5_recording_snapshot(h5: h5py.File) -> Optional[Dict[str, object]]:
+    if "/recording_snapshot" not in h5:
+        return None
+    node = h5["/recording_snapshot"]
+    if isinstance(node, h5py.Dataset):
+        payload = _parse_json_payload(node[()])
+        return payload if isinstance(payload, dict) else None
+    for key in ("recording_snapshot_json", "recording_snapshot"):
+        if key in node and isinstance(node[key], h5py.Dataset):
+            payload = _parse_json_payload(node[key][()])
+            return payload if isinstance(payload, dict) else None
+        raw = node.attrs.get(key)
+        payload = _parse_json_payload(raw)
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
 def _read_h5_group_attrs(h5: h5py.File, path: str) -> Optional[Dict[str, object]]:
     if path not in h5:
         return None
@@ -214,6 +241,27 @@ def _read_h5_camera_metadata(h5: h5py.File) -> Optional[Dict[str, object]]:
         attrs = _read_h5_group_attrs(h5, path)
         if attrs:
             return _filter_camera_metadata(attrs)
+    snapshot = _read_h5_recording_snapshot(h5)
+    if not isinstance(snapshot, dict):
+        return None
+    cameras = snapshot.get("cameras")
+    if not isinstance(cameras, dict) or not cameras:
+        return None
+
+    camera_id = None
+    arena_config = _read_h5_arena_config(h5)
+    if isinstance(arena_config, dict):
+        camera_id = arena_config.get("active_camera_id")
+    if camera_id is None:
+        camera_id = _derive_camera_id(h5.attrs.get("ipc_source_name"))
+    if camera_id is not None:
+        camera_id = str(camera_id)
+        if camera_id in cameras and isinstance(cameras[camera_id], dict):
+            return _filter_camera_metadata(cameras[camera_id])
+    if len(cameras) == 1:
+        only_payload = next(iter(cameras.values()))
+        if isinstance(only_payload, dict):
+            return _filter_camera_metadata(only_payload)
     return None
 
 
@@ -579,6 +627,13 @@ def import_stimulus_to_zarr(
                 _log(console, f"[green]✓ Set experimental_chamber: {chamber}[/green]")
             else:
                 _log(console, "[dim]experimental_chamber not found in H5.[/dim]")
+        if "dish_design" not in root.attrs:
+            arena_config = _read_h5_arena_config(h5)
+            if isinstance(arena_config, dict):
+                dish_name = _normalize_attr_value(arena_config.get("selected_dish_type_name"))
+                if isinstance(dish_name, str) and dish_name:
+                    root.attrs["dish_design"] = dish_name
+                    _log(console, f"[green]✓ Set dish_design: {dish_name}[/green]")
 
         _copy_enums(h5, analysis, console)
         if "/video_metadata/frame_metadata" not in h5:

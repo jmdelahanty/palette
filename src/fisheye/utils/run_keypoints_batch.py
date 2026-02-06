@@ -150,6 +150,56 @@ def _iter_h5(paths: List[Path], recursive: bool) -> Iterable[Path]:
             yield from path.glob("*/raw/*.hdf5")
 
 
+def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
+    for path in paths:
+        path = path.expanduser()
+        if path.is_file() and path.suffix == ".zarr":
+            yield path
+            continue
+        if not path.exists():
+            continue
+        if recursive:
+            yield from path.rglob("*.zarr")
+        else:
+            yield from path.glob("*/zarr/*.zarr")
+            yield from path.glob("*.zarr")
+
+
+def _is_zarr_path(path: Path) -> bool:
+    return path.suffix == ".zarr"
+
+
+def _load_paths_file(path: Path) -> List[Path]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read {path}: {exc}") from exc
+
+    items: List[Path] = []
+    for line in lines:
+        value = line.strip()
+        if not value or value.startswith("#"):
+            continue
+        items.append(Path(value))
+    return items
+
+
+def _infer_recording_dir(zarr_path: Path) -> Path:
+    if zarr_path.parent.name == "zarr":
+        return zarr_path.parent.parent
+    return zarr_path.parent
+
+
+def _find_h5(recording_dir: Path, stem: str) -> Optional[Path]:
+    for suffix in (".h5", ".hdf5"):
+        candidate = recording_dir / "raw" / f"{stem}{suffix}"
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _has_keypoints(root: zarr.Group) -> bool:
     kp = root.get("keypoints_runs")
     if kp is None:
@@ -212,6 +262,126 @@ def _keypoints_total_rois(zarr_path: Path, run_name: Optional[str]) -> Optional[
     return None
 
 
+def _plan_from_zarr(
+    *,
+    zarr_path: Path,
+    recording_dir: Path,
+    h5_path: Path,
+    camera_id: Optional[str],
+    skip_existing: bool,
+    require_crop: bool,
+    require_background: bool,
+    require_tuning: bool,
+    refine_only: bool,
+) -> KeypointPlan:
+    if not zarr_path.exists():
+        return KeypointPlan(
+            recording_dir=recording_dir,
+            h5_path=h5_path,
+            zarr_path=zarr_path,
+            camera_id=camera_id,
+            status="missing",
+            reason="zarr missing",
+        )
+
+    try:
+        root = zarr.open(str(zarr_path), mode="r")
+    except Exception as exc:
+        return KeypointPlan(
+            recording_dir=recording_dir,
+            h5_path=h5_path,
+            zarr_path=zarr_path,
+            camera_id=camera_id,
+            status="missing",
+            reason=f"zarr open failed: {exc}",
+        )
+
+    crop_present = _has_crop(root)
+    background_present = _has_background(root)
+    keypoints_present = _has_keypoints(root)
+    tuning_present = _has_keypoint_tuning(root)
+
+    if refine_only:
+        if not keypoints_present:
+            return KeypointPlan(
+                recording_dir=recording_dir,
+                h5_path=h5_path,
+                zarr_path=zarr_path,
+                camera_id=camera_id,
+                status="missing",
+                reason="keypoints missing",
+                crop_present=crop_present,
+                background_present=background_present,
+                keypoints_present=keypoints_present,
+                tuning_present=tuning_present,
+            )
+    else:
+        if require_crop and not crop_present:
+            return KeypointPlan(
+                recording_dir=recording_dir,
+                h5_path=h5_path,
+                zarr_path=zarr_path,
+                camera_id=camera_id,
+                status="missing",
+                reason="crop missing",
+                crop_present=crop_present,
+                background_present=background_present,
+                keypoints_present=keypoints_present,
+                tuning_present=tuning_present,
+            )
+        if require_background and not background_present:
+            return KeypointPlan(
+                recording_dir=recording_dir,
+                h5_path=h5_path,
+                zarr_path=zarr_path,
+                camera_id=camera_id,
+                status="missing",
+                reason="background missing",
+                crop_present=crop_present,
+                background_present=background_present,
+                keypoints_present=keypoints_present,
+                tuning_present=tuning_present,
+            )
+        if require_tuning and not tuning_present:
+            return KeypointPlan(
+                recording_dir=recording_dir,
+                h5_path=h5_path,
+                zarr_path=zarr_path,
+                camera_id=camera_id,
+                status="missing",
+                reason="keypoint_tuning missing",
+                crop_present=crop_present,
+                background_present=background_present,
+                keypoints_present=keypoints_present,
+                tuning_present=tuning_present,
+            )
+        if skip_existing and keypoints_present:
+            return KeypointPlan(
+                recording_dir=recording_dir,
+                h5_path=h5_path,
+                zarr_path=zarr_path,
+                camera_id=camera_id,
+                status="skipped",
+                reason="keypoints already present",
+                crop_present=crop_present,
+                background_present=background_present,
+                keypoints_present=keypoints_present,
+                tuning_present=tuning_present,
+            )
+
+    return KeypointPlan(
+        recording_dir=recording_dir,
+        h5_path=h5_path,
+        zarr_path=zarr_path,
+        camera_id=camera_id,
+        status="ok",
+        crop_present=crop_present,
+        background_present=background_present,
+        keypoints_present=keypoints_present,
+        tuning_present=tuning_present,
+    )
+
+
 def _build_plans(
     roots: List[Path],
     recursive: bool,
@@ -219,119 +389,53 @@ def _build_plans(
     require_crop: bool,
     require_background: bool,
     require_tuning: bool,
+    refine_only: bool,
 ) -> List[KeypointPlan]:
     plans: List[KeypointPlan] = []
     for h5_path in _iter_h5(roots, recursive):
         recording_dir = h5_path.parent.parent
         zarr_path = recording_dir / "zarr" / f"{h5_path.stem}.zarr"
         camera_id = _read_camera_id(h5_path)
-        if not zarr_path.exists():
-            plans.append(
-                KeypointPlan(
-                    recording_dir=recording_dir,
-                    h5_path=h5_path,
-                    zarr_path=zarr_path,
-                    camera_id=camera_id,
-                    status="missing",
-                    reason="zarr missing",
-                )
-            )
-            continue
-        try:
-            root = zarr.open(str(zarr_path), mode="r")
-        except Exception as exc:
-            plans.append(
-                KeypointPlan(
-                    recording_dir=recording_dir,
-                    h5_path=h5_path,
-                    zarr_path=zarr_path,
-                    camera_id=camera_id,
-                    status="missing",
-                    reason=f"zarr open failed: {exc}",
-                )
-            )
-            continue
-        crop_present = _has_crop(root)
-        background_present = _has_background(root)
-        keypoints_present = _has_keypoints(root)
-        tuning_present = _has_keypoint_tuning(root)
-
-        if require_crop and not crop_present:
-            plans.append(
-                KeypointPlan(
-                    recording_dir=recording_dir,
-                    h5_path=h5_path,
-                    zarr_path=zarr_path,
-                    camera_id=camera_id,
-                    status="missing",
-                    reason="crop missing",
-                    crop_present=crop_present,
-                    background_present=background_present,
-                    keypoints_present=keypoints_present,
-                    tuning_present=tuning_present,
-                )
-            )
-            continue
-        if require_background and not background_present:
-            plans.append(
-                KeypointPlan(
-                    recording_dir=recording_dir,
-                    h5_path=h5_path,
-                    zarr_path=zarr_path,
-                    camera_id=camera_id,
-                    status="missing",
-                    reason="background missing",
-                    crop_present=crop_present,
-                    background_present=background_present,
-                    keypoints_present=keypoints_present,
-                    tuning_present=tuning_present,
-                )
-            )
-            continue
-        if require_tuning and not tuning_present:
-            plans.append(
-                KeypointPlan(
-                    recording_dir=recording_dir,
-                    h5_path=h5_path,
-                    zarr_path=zarr_path,
-                    camera_id=camera_id,
-                    status="missing",
-                    reason="keypoint_tuning missing",
-                    crop_present=crop_present,
-                    background_present=background_present,
-                    keypoints_present=keypoints_present,
-                    tuning_present=tuning_present,
-                )
-            )
-            continue
-        if skip_existing and keypoints_present:
-            plans.append(
-                KeypointPlan(
-                    recording_dir=recording_dir,
-                    h5_path=h5_path,
-                    zarr_path=zarr_path,
-                    camera_id=camera_id,
-                    status="skipped",
-                    reason="keypoints already present",
-                    crop_present=crop_present,
-                    background_present=background_present,
-                    keypoints_present=keypoints_present,
-                    tuning_present=tuning_present,
-                )
-            )
-            continue
-
         plans.append(
-            KeypointPlan(
+            _plan_from_zarr(
+                zarr_path=zarr_path,
                 recording_dir=recording_dir,
                 h5_path=h5_path,
-                zarr_path=zarr_path,
                 camera_id=camera_id,
-                status="ok",
-                crop_present=crop_present,
-                background_present=background_present,
-                keypoints_present=keypoints_present,
-                tuning_present=tuning_present,
+                skip_existing=skip_existing,
+                require_crop=require_crop,
+                require_background=require_background,
+                require_tuning=require_tuning,
+                refine_only=refine_only,
+            )
+        )
+    return plans
+
+
+def _build_plans_from_zarr(
+    zarr_paths: Iterable[Path],
+    skip_existing: bool,
+    require_crop: bool,
+    require_background: bool,
+    require_tuning: bool,
+    refine_only: bool,
+) -> List[KeypointPlan]:
+    plans: List[KeypointPlan] = []
+    for zarr_path in zarr_paths:
+        recording_dir = _infer_recording_dir(zarr_path)
+        h5_path = _find_h5(recording_dir, zarr_path.stem)
+        camera_id = _read_camera_id(h5_path) if h5_path else None
+        plans.append(
+            _plan_from_zarr(
+                zarr_path=zarr_path,
+                recording_dir=recording_dir,
+                h5_path=h5_path or (recording_dir / "raw" / f"{zarr_path.stem}.h5"),
+                camera_id=camera_id,
+                skip_existing=skip_existing,
+                require_crop=require_crop,
+                require_background=require_background,
+                require_tuning=require_tuning,
+                refine_only=refine_only,
             )
         )
     return plans
@@ -375,6 +479,7 @@ def _run_traditional(
     scheduler: Optional[str],
     num_workers: Optional[int],
     quiet: bool,
+    show_progress: bool,
 ) -> Dict[str, Any]:
     if quiet and Console is not None:
         with open(os.devnull, "w", encoding="utf-8") as devnull:
@@ -385,6 +490,7 @@ def _run_traditional(
                 scheduler=scheduler,
                 num_workers=num_workers,
                 console=console,
+                show_progress=show_progress,
             )
     return detect_keypoints(
         zarr_path=zarr_path,
@@ -392,6 +498,7 @@ def _run_traditional(
         scheduler=scheduler,
         num_workers=num_workers,
         console=None,
+        show_progress=show_progress,
     )
 
 
@@ -468,7 +575,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         "paths",
         nargs="*",
         type=Path,
-        help="Recording root(s) to scan (default: $PALETTE_RECORDINGS_ROOT or /nvme1/recordings).",
+        help="Recording roots, h5 paths, or zarr paths (default: $PALETTE_RECORDINGS_ROOT or /nvme1/recordings).",
+    )
+    parser.add_argument(
+        "--file-list",
+        type=Path,
+        action="append",
+        help="Text file with one zarr or h5 path per line (comments with # allowed).",
     )
     parser.add_argument(
         "--recursive",
@@ -540,6 +653,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Optional worker count hint for the keypoint scheduler.",
     )
     parser.add_argument(
+        "--dask-progress",
+        action="store_true",
+        help="Enable per-chunk progress bars (disabled by default for batch runs).",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Suppress per-recording console output (recommended for batch runs).",
@@ -548,6 +666,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--refine",
         action="store_true",
         help="Run refine_keypoints immediately after keypoints detection.",
+    )
+    parser.add_argument(
+        "--refine-only",
+        action="store_true",
+        help="Refine existing keypoints runs without re-running keypoint detection.",
     )
     parser.add_argument(
         "--json",
@@ -567,14 +690,41 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.set_defaults(require_background=True, require_crop=True)
 
     args = parser.parse_args(argv)
-    roots = _resolve_root(args.paths)
+    file_list_paths: List[Path] = []
+    if args.file_list:
+        for path in args.file_list:
+            file_list_paths.extend(_load_paths_file(path))
+
+    explicit_paths: List[Path] = []
+    if args.paths:
+        explicit_paths.extend(args.paths)
+    if file_list_paths:
+        explicit_paths.extend(file_list_paths)
+
+    explicit_zarrs: List[Path] = []
+    roots: List[Path] = []
+    if explicit_paths:
+        for raw in explicit_paths:
+            path = raw.expanduser()
+            if _is_zarr_path(path):
+                explicit_zarrs.append(path)
+            else:
+                roots.append(path)
+        if roots:
+            roots = _resolve_root(roots)
+    else:
+        roots = _resolve_root(args.paths)
+
+    log_roots = roots
+    if not log_roots and explicit_zarrs:
+        log_roots = [_infer_recording_dir(explicit_zarrs[0]).parent]
     skip_existing = not args.overwrite
 
     logger: Optional[JsonLogger] = None
     log_path: Optional[Path] = None
     run_id = _run_id()
     if not args.no_log:
-        log_dir = _resolve_log_dir(args.log_dir, roots)
+        log_dir = _resolve_log_dir(args.log_dir, log_roots)
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"run_keypoints_batch_{run_id}.jsonl"
         logger = JsonLogger(log_path, run_id)
@@ -582,6 +732,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.log(
             "run_start",
             roots=[str(root) for root in roots],
+            zarr_paths=[str(path) for path in explicit_zarrs],
+            file_list=[str(path) for path in (args.file_list or [])],
             recursive=bool(args.recursive),
             apply=bool(args.apply),
             dry_run=not bool(args.apply),
@@ -595,6 +747,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             num_workers=args.num_workers,
             quiet=bool(args.quiet),
             refine=bool(args.refine),
+            refine_only=bool(args.refine_only),
+            dask_progress=bool(args.dask_progress),
             json=bool(args.json),
         )
 
@@ -603,14 +757,41 @@ def main(argv: Optional[List[str]] = None) -> int:
     require_background = bool(args.require_background) and not bool(args.no_require_background)
     require_crop = bool(args.require_crop) and not bool(args.no_require_crop)
 
-    plans = _build_plans(
-        roots,
-        args.recursive,
-        skip_existing=skip_existing,
-        require_crop=require_crop,
-        require_background=require_background,
-        require_tuning=bool(args.require_tuning),
-    )
+    plans: List[KeypointPlan] = []
+    if roots:
+        plans.extend(
+            _build_plans(
+                roots,
+                args.recursive,
+                skip_existing=skip_existing,
+                require_crop=require_crop,
+                require_background=require_background,
+                require_tuning=bool(args.require_tuning),
+                refine_only=bool(args.refine_only),
+            )
+        )
+    if explicit_zarrs:
+        plans.extend(
+            _build_plans_from_zarr(
+                explicit_zarrs,
+                skip_existing=skip_existing,
+                require_crop=require_crop,
+                require_background=require_background,
+                require_tuning=bool(args.require_tuning),
+                refine_only=bool(args.refine_only),
+            )
+        )
+
+    if plans:
+        seen: set[str] = set()
+        unique: List[KeypointPlan] = []
+        for plan in plans:
+            key = str(plan.zarr_path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(plan)
+        plans = unique
 
     if not args.apply:
         console = Console() if Console is not None else None
@@ -706,8 +887,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     console = Console() if (Console is not None and not args.json and not args.quiet) else None
     progress = _progress(console if not args.json else None, total=len(runnable_plans))
     quiet = bool(args.quiet or args.json)
+    task_label = "Refining keypoints" if args.refine_only else "Running keypoints"
 
     def _run_plan(plan: KeypointPlan) -> Optional[str]:
+        if args.refine_only:
+            run_name = _latest_keypoints_run(plan.zarr_path)
+            total_rois = _keypoints_total_rois(plan.zarr_path, run_name)
+            if total_rois is None or total_rois > 0:
+                _run_refine(str(plan.zarr_path), config, run_name, quiet=quiet)
+            return run_name
+
         if method in {"yolo", "yolo_pose"}:
             run_name = _run_yolo(str(plan.zarr_path), config, quiet=quiet)
         else:
@@ -717,6 +906,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 scheduler=args.scheduler,
                 num_workers=args.num_workers,
                 quiet=quiet,
+                show_progress=args.dask_progress and not args.quiet and not args.json,
             )
             run_name = _latest_keypoints_run(plan.zarr_path)
         if args.refine:
@@ -751,7 +941,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     )
     else:
         with progress:
-            task = progress.add_task("Running keypoints", total=len(runnable_plans))
+            task = progress.add_task(task_label, total=len(runnable_plans))
             for plan in runnable_plans:
                 try:
                     _run_plan(plan)

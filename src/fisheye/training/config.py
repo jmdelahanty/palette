@@ -15,6 +15,7 @@ class SourceType(str, Enum):
     DETECT = "detect"
     FILTERED = "filtered"
     INTERPOLATED = "interpolated"
+    MANUAL = "manual"
 
 class DatasetSplit(BaseModel):
     """Train/val split configuration"""
@@ -112,6 +113,7 @@ class DetectConfig(BaseModel):
     random_seed: int = 42
     sampling_strategy: SamplingStrategy = SamplingStrategy.BALANCED
     dataset_weights: Optional[Dict[str, float]] = None
+    allow_source_mismatch: bool = False
     
     # Training parameters
     training_params: TrainingParams

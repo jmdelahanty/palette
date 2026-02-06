@@ -1992,7 +1992,13 @@ def refine_eye_masks(
     pair_rate = float(successful_pairs / total_rois) if total_rois else float("nan")
 
     git_info = get_git_info()
-    env_info = get_environment_info()
+    env_info = get_environment_info(
+        include_all_packages=False,
+        disk_path=str(zarr_path),
+        collect_ip=False,
+        capture_env_vars=False,
+    )
+    environment_summary = env_info.get("environment")
     duration = time.perf_counter() - stage_start
 
     probabilities_available = bool(has_mask_probs) or wrote_any_probs
@@ -2024,11 +2030,12 @@ def refine_eye_masks(
         if num_workers is not None:
             scheduler_info["num_workers"] = int(num_workers)
 
-    environment_info = {
+    platform_info = {
         "hostname": env_info["platform"].get("hostname", "unknown"),
         "python_version": env_info["platform"].get("python_version", "unknown"),
         "system": env_info["platform"].get("system", "unknown"),
         "release": env_info["platform"].get("release", "unknown"),
+        "machine": env_info["platform"].get("machine", "unknown"),
     }
 
     area_filter_info = {
@@ -2083,7 +2090,8 @@ def refine_eye_masks(
             "is_dirty": git_info.get("is_dirty"),
             "remote": git_info.get("remote_url"),
         },
-        "environment": environment_info,
+        "environment": environment_summary,
+        "platform": platform_info,
         "scheduler": scheduler_info,
         "parameters": mask_parameters,
         "inputs": {

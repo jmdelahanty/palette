@@ -38,6 +38,20 @@ def get_total_frames(root: zarr.Group, detect_group: Optional[zarr.Group] = None
         n = detect_group.attrs.get('total_frames')
         if n is not None:
             return int(n)
+
+    # Prefer imported frame counts for sampled training data
+    raw = root.get("raw_video") if "raw_video" in root else None
+    if raw is not None:
+        import_mode = raw.attrs.get("import_mode")
+        import_purpose = raw.attrs.get("import_purpose")
+        if import_mode == "sampled" or import_purpose == "training_data":
+            imported = raw.attrs.get("imported_frame_count")
+            if imported is not None:
+                return int(imported)
+            if "images_ds" in raw:
+                return int(raw["images_ds"].shape[0])
+            if "images_full" in raw:
+                return int(raw["images_full"].shape[0])
     
     # Try root attrs (standard location per unified spec)
     n = root.attrs.get('total_frames')
@@ -125,6 +139,23 @@ def get_video_source_path(root: zarr.Group) -> Optional[str]:
         ...     cap = cv2.VideoCapture(video_path)
     """
     return root.attrs.get('source_video_path')
+
+
+def get_frame_source(root: zarr.Group) -> Dict[str, Optional[str]]:
+    """
+    Resolve the frame source for this archive.
+
+    Returns:
+        dict with:
+          - type: 'zarr' | 'external' | 'unknown'
+          - path: external video path if available
+    """
+    if has_raw_video(root):
+        return {"type": "zarr", "path": None}
+    source_path = get_video_source_path(root)
+    if source_path:
+        return {"type": "external", "path": source_path}
+    return {"type": "unknown", "path": None}
 
 
 def get_fps(root: zarr.Group) -> Optional[float]:

@@ -796,7 +796,13 @@ def create_refined_keypoint_run(
     )
 
     git_info = get_git_info()
-    env_info = get_environment_info()
+    env_info = get_environment_info(
+        include_all_packages=False,
+        disk_path=str(zarr_path),
+        collect_ip=False,
+        capture_env_vars=False,
+    )
+    environment_summary = env_info.get("environment")
 
     scheduler_info: Optional[Dict[str, object]] = None
     if params.scheduler:
@@ -806,11 +812,12 @@ def create_refined_keypoint_run(
         if params.memory_limit is not None:
             scheduler_info["memory_limit"] = params.memory_limit
 
-    environment_info = {
+    platform_info = {
         "hostname": env_info["platform"].get("hostname", "unknown"),
         "python_version": env_info["platform"].get("python_version", "unknown"),
         "system": env_info["platform"].get("system", "unknown"),
         "release": env_info["platform"].get("release", "unknown"),
+        "machine": env_info["platform"].get("machine", "unknown"),
     }
 
     parameters_info = {
@@ -838,6 +845,14 @@ def create_refined_keypoint_run(
     ]
     artifact_info = {key: kp_source.attrs[key] for key in artifact_keys if key in kp_source.attrs}
 
+    frame_source = "zarr"
+    source_video_path = root.attrs.get("source_video_path")
+    if source_crop_run:
+        crop_group = root.get(f"crop_runs/{source_crop_run}")
+        if crop_group is not None:
+            frame_source = crop_group.attrs.get("video_source_type", frame_source)
+            source_video_path = crop_group.attrs.get("video_source_path") or source_video_path
+
     provenance_record = {
         "stage": "refine_keypoints",
         "command": command or "unknown",
@@ -850,10 +865,16 @@ def create_refined_keypoint_run(
             "is_dirty": git_info.get("is_dirty"),
             "remote": git_info.get("remote_url"),
         },
-        "environment": environment_info,
+        "environment": environment_summary,
+        "platform": platform_info,
         "scheduler": scheduler_info,
         "parameters": parameters_info,
-        "inputs": {"keypoints_run": keypoint_run},
+        "inputs": {
+            "keypoints_run": keypoint_run,
+            "source_crop_run": source_crop_run,
+            "frame_source": frame_source,
+            "source_video_path": source_video_path,
+        },
         "artifacts": artifact_info,
     }
     provenance_record = {k: v for k, v in provenance_record.items() if v is not None}

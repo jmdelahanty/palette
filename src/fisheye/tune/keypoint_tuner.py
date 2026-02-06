@@ -30,6 +30,7 @@ import argparse
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import json
 import yaml
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -355,13 +356,35 @@ def calculate_triangle_angles(p1, p2, p3):
 def _load_failure_indices(refined: zarr.Group) -> np.ndarray:
     if "refined_success" in refined:
         success = np.asarray(refined["refined_success"][:], dtype=bool)
-        return np.where(~success)[0].astype("i4", copy=False)
-    if "source_success" in refined:
+        failures = np.where(~success)[0].astype("i4", copy=False)
+    elif "source_success" in refined:
         success = np.asarray(refined["source_success"][:], dtype=bool)
-        return np.where(~success)[0].astype("i4", copy=False)
-    if "failure_indices" in refined:
-        return np.asarray(refined["failure_indices"][:], dtype="i4")
-    return np.zeros(0, dtype="i4")
+        failures = np.where(~success)[0].astype("i4", copy=False)
+    elif "failure_indices" in refined:
+        failures = np.asarray(refined["failure_indices"][:], dtype="i4")
+    else:
+        return np.zeros(0, dtype="i4")
+
+    reason_arr = refined.get("reason")
+    if reason_arr is None or failures.size == 0:
+        return failures
+    try:
+        reason_vals = np.asarray(reason_arr[:], dtype=object)
+    except Exception:
+        return failures
+    if reason_vals.size == 0:
+        return failures
+    keep_mask = []
+    for idx in failures:
+        try:
+            text = str(reason_vals[int(idx)]) if reason_vals[int(idx)] is not None else ""
+        except Exception:
+            text = ""
+        keep_mask.append(
+            "fish_present_no_keypoints" not in text
+            and "detection_issue" not in text
+        )
+    return failures[np.array(keep_mask, dtype=bool)]
 
 
 def _ensure_retune_id_array(refined: zarr.Group, chunks: Sequence[int]) -> zarr.Array:
@@ -461,6 +484,111 @@ def _sanitize_reason_array(reason_arr: zarr.Array) -> None:
 
     cleaned = np.array([coerce(v) for v in raw], dtype=object)
     reason_arr[:] = cleaned
+
+
+def _load_frame_flags(path: Path) -> dict[str, list[Dict[str, Optional[int]]]]:
+    if not path.exists():
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return {}
+        data = json.loads(raw)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load frame flags from {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Frame flag file must contain a JSON object: {path}")
+    parsed: dict[str, list[Dict[str, Optional[int]]]] = {}
+    for key, value in data.items():
+        entries: list[Dict[str, Optional[int]]] = []
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    frame_val = item.get("frame_idx")
+                    roi_val = item.get("roi_idx")
+                    try:
+                        frame_idx = int(frame_val) if frame_val is not None else None
+                    except (TypeError, ValueError):
+                        frame_idx = None
+                    try:
+                        roi_idx = int(roi_val) if roi_val is not None else None
+                    except (TypeError, ValueError):
+                        roi_idx = None
+                    if frame_idx is not None:
+                        entries.append({"frame_idx": frame_idx, "roi_idx": roi_idx})
+                else:
+                    try:
+                        frame_idx = int(item)
+                    except (TypeError, ValueError):
+                        continue
+                    entries.append({"frame_idx": frame_idx, "roi_idx": None})
+        parsed[str(key)] = entries
+    return parsed
+
+
+def _append_flagged_frame(
+    flag_path: Path,
+    zarr_path: str,
+    frame_idx: int,
+    roi_idx: Optional[int],
+) -> None:
+    flag_path.parent.mkdir(parents=True, exist_ok=True)
+    data = _load_frame_flags(flag_path)
+    entries = data.get(zarr_path, [])
+    dedupe = {(entry.get("frame_idx"), entry.get("roi_idx")) for entry in entries}
+    key = (int(frame_idx), int(roi_idx) if roi_idx is not None else None)
+    if key in dedupe:
+        return
+    entries.append({"frame_idx": int(frame_idx), "roi_idx": key[1]})
+    entries.sort(key=lambda item: (item.get("frame_idx") or 0, item.get("roi_idx") or -1))
+    data[zarr_path] = entries
+    flag_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _load_detection_frame_flags(path: Path) -> dict[str, list[int]]:
+    if not path.exists():
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return {}
+        data = json.loads(raw)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load frame flags from {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Frame flag file must contain a JSON object: {path}")
+    parsed: dict[str, list[int]] = {}
+    for key, value in data.items():
+        frames: list[int] = []
+        if isinstance(value, list):
+            for item in value:
+                try:
+                    frames.append(int(item))
+                except (TypeError, ValueError):
+                    continue
+        parsed[str(key)] = sorted(set(frames))
+    return parsed
+
+
+def _append_detection_frame(flag_path: Path, zarr_path: str, frame_idx: int) -> None:
+    flag_path.parent.mkdir(parents=True, exist_ok=True)
+    data = _load_detection_frame_flags(flag_path)
+    frames = set(data.get(zarr_path, []))
+    frames.add(int(frame_idx))
+    data[zarr_path] = sorted(frames)
+    flag_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _append_flagged_path(flag_path: Path, zarr_path: str) -> None:
+    flag_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = set()
+    if flag_path.exists():
+        with flag_path.open("r", encoding="utf-8") as handle:
+            existing = {line.strip() for line in handle if line.strip()}
+    if zarr_path in existing:
+        return
+    with flag_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{zarr_path}\n")
 
 
 def identify_keypoints_by_geometry(keypoint_stats):
@@ -712,6 +840,10 @@ def run_failure_tuner(
     *,
     apply_batch_size: int = APPLY_BATCH_DEFAULT,
     apply_workers: int = APPLY_WORKERS_DEFAULT,
+    target_frames: Optional[Sequence[int]] = None,
+    frame_flag_file: Optional[str] = None,
+    detect_flag_file: Optional[str] = None,
+    detect_frame_flag_file: Optional[str] = None,
 ) -> None:
     global current_frame, roi_thresh, se1_radius, se2_radius
     global min_area, min_triangle_area, max_triangle_area, use_difference, show_geometry
@@ -745,9 +877,6 @@ def run_failure_tuner(
     refined = refined_parent[refined_run]
 
     failures = _load_failure_indices(refined)
-    if failures.size == 0:
-        print("No failed keypoints to retune.")
-        return
 
     crop_run = refined.attrs.get("source_crop_run")
     if not crop_run and "crop_runs" in zarr_root:
@@ -760,6 +889,54 @@ def run_failure_tuner(
     roi_coords = crop_group["roi_coordinates_full"]
     frame_indices = crop_group["frame_indices"][:]
     det_indices = crop_group.get("detection_indices")
+
+    targeted = False
+    if target_frames:
+        target_arr = np.array(sorted({int(f) for f in target_frames}), dtype=np.int64)
+        if target_arr.size:
+            targeted = True
+            failures = failures[np.isin(frame_indices[failures], target_arr)]
+
+    filtered_flags = 0
+    if frame_flag_file and failures.size > 0:
+        try:
+            flag_path = Path(frame_flag_file).expanduser()
+            flag_data = _load_frame_flags(flag_path)
+            flagged = flag_data.get(zarr_path, [])
+            flagged_frames = {
+                entry.get("frame_idx")
+                for entry in flagged
+                if isinstance(entry, dict) and entry.get("frame_idx") is not None and entry.get("roi_idx") is None
+            }
+            flagged_pairs = {
+                (entry.get("frame_idx"), entry.get("roi_idx"))
+                for entry in flagged
+                if isinstance(entry, dict) and entry.get("frame_idx") is not None and entry.get("roi_idx") is not None
+            }
+            if flagged_frames or flagged_pairs:
+                keep_mask = []
+                for roi_idx in failures:
+                    frame_idx = int(frame_indices[roi_idx])
+                    pair = (frame_idx, int(roi_idx))
+                    if frame_idx in flagged_frames:
+                        keep_mask.append(False)
+                    elif pair in flagged_pairs:
+                        keep_mask.append(False)
+                    else:
+                        keep_mask.append(True)
+                keep_mask_arr = np.array(keep_mask, dtype=bool)
+                filtered_flags = int(np.sum(~keep_mask_arr))
+                failures = failures[keep_mask_arr]
+        except Exception as exc:
+            print(f"Warning: failed to apply frame flags: {exc}")
+    if failures.size == 0:
+        if targeted:
+            print("No failed keypoints to retune for requested frames.")
+        else:
+            print("No failed keypoints to retune.")
+        return
+
+    current_frame = max(1, min(current_frame, len(failures)))
 
     if "background_runs" not in zarr_root:
         print("Error: Run background stage first")
@@ -830,13 +1007,36 @@ def run_failure_tuner(
     print(f"  Refined run: {refined_run}")
     print(f"  Crop run: {crop_run}")
     print(f"  Failures to retune: {len(failures)}")
+    if filtered_flags:
+        print(f"  Skipped flagged frames: {filtered_flags}")
     print(f"  Apply batch: {apply_batch_size} | Workers: {apply_workers}")
+    flag_path = Path(frame_flag_file).expanduser() if frame_flag_file else None
+    if flag_path is not None:
+        print(f"  Frame flag file: {flag_path.expanduser().resolve(strict=False)}")
+    detect_flag_path = Path(detect_flag_file).expanduser() if detect_flag_file else None
+    detect_frame_flag_path = (
+        Path(detect_frame_flag_file).expanduser() if detect_frame_flag_file else None
+    )
+    if detect_flag_path is not None:
+        print(f"  Detection flag file: {detect_flag_path.expanduser().resolve(strict=False)}")
+    if detect_frame_flag_path is not None:
+        print(f"  Detection frame flag file: {detect_frame_flag_path.expanduser().resolve(strict=False)}")
 
     window_name = "Keypoint Failure Retune"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(window_name, 1600, 800)
 
-    cv2.createTrackbar("Failure", window_name, current_frame, len(failures), update_frame)
+    def update_failure_slider(val: int) -> None:
+        global current_frame
+        current_frame = max(1, int(val) + 1)
+
+    cv2.createTrackbar(
+        "Failure",
+        window_name,
+        max(0, current_frame - 1),
+        max(0, len(failures) - 1),
+        update_failure_slider,
+    )
     cv2.createTrackbar("Threshold", window_name, roi_thresh, 255, update_roi_thresh)
     cv2.createTrackbar("SE1 Radius", window_name, se1_radius, 10, update_se1)
     cv2.createTrackbar("SE2 Radius", window_name, se2_radius, 10, update_se2)
@@ -859,6 +1059,8 @@ def run_failure_tuner(
     print("  e: Quick eval on a sample of remaining failures")
     print("  E: Eval all remaining failures (slow)")
     print("  a: Apply params to remaining failures")
+    print("  b: flag current frame for follow-up (writes --frame-flag-file)")
+    print("  d: flag detection issue (writes detection retune flags)")
     print("  g: Toggle geometry display")
     print("  q/ESC: Quit")
 
@@ -1048,10 +1250,16 @@ def run_failure_tuner(
         rate = (updated / total * 100.0) if total else 0.0
         print(f"Applied retune {retune_id}: {updated}/{total} updated ({rate:.1f}%)")
         print(f"Remaining failures: {remaining}")
-        new_max = max(1, remaining)
+        if remaining <= 0:
+            cv2.setTrackbarMax("Failure", window_name, 0)
+            cv2.setTrackbarPos("Failure", window_name, 0)
+            current_frame = 1
+            return
+
+        new_max = max(0, remaining - 1)
         cv2.setTrackbarMax("Failure", window_name, new_max)
-        current_frame = min(current_frame, new_max)
-        cv2.setTrackbarPos("Failure", window_name, current_frame)
+        current_frame = min(current_frame, remaining)
+        cv2.setTrackbarPos("Failure", window_name, max(0, current_frame - 1))
 
     while True:
         if len(failures) == 0:
@@ -1099,16 +1307,61 @@ def run_failure_tuner(
             apply_params()
             if len(failures) == 0:
                 break
-            cv2.setTrackbarPos("Failure", window_name, min(current_frame, len(failures)))
+            cv2.setTrackbarPos("Failure", window_name, max(0, min(current_frame, len(failures)) - 1))
+        elif key == ord('b'):
+            if flag_path is None:
+                print("No frame flag file configured. Pass --frame-flag-file to enable frame flagging.")
+            else:
+                try:
+                    _append_flagged_frame(flag_path, zarr_path, frame_idx, roi_idx)
+                    print(f"Flagged frame {frame_idx} (ROI {roi_idx}) for keypoint follow-up.")
+                except Exception as exc:
+                    print(f"Failed to flag frame: {exc}")
+        elif key == ord('d'):
+            if detect_frame_flag_path is None and detect_flag_path is None:
+                print("No detection flag files configured. Pass --detect-flag-file/--detect-frame-flag-file.")
+            else:
+                try:
+                    if detect_frame_flag_path is not None:
+                        _append_detection_frame(detect_frame_flag_path, zarr_path, frame_idx)
+                    if detect_flag_path is not None:
+                        _append_flagged_path(detect_flag_path, zarr_path)
+                    if reason_arr is not None:
+                        existing_val = reason_arr[roi_idx]
+                        existing = "" if existing_val is None else str(existing_val)
+                        reason_value = str(_merge_reason(existing, ["detection_issue"]))
+                        reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
+                    if refined_success_arr is not None:
+                        refined_success_arr[roi_idx] = False
+                    if confidence_valid_arr is not None:
+                        confidence_valid_arr[roi_idx] = False
+                    if geometry_valid_arr is not None:
+                        geometry_valid_arr[roi_idx] = False
+                    if usable_arr is not None:
+                        usable_arr[roi_idx] = False
+                    if heading_valid_arr is not None:
+                        heading_valid_arr[roi_idx] = False
+
+                    failure_pos = current_frame - 1
+                    failures = np.delete(failures, failure_pos)
+                    if failures.size == 0:
+                        print("No failures remaining.")
+                        break
+                    new_max = max(0, len(failures) - 1)
+                    cv2.setTrackbarMax("Failure", window_name, new_max)
+                    current_frame = min(current_frame, len(failures))
+                    cv2.setTrackbarPos("Failure", window_name, max(0, current_frame - 1))
+                except Exception as exc:
+                    print(f"Failed to flag detection issue: {exc}")
         elif key == ord('g'):
             show_geometry = 1 - show_geometry
             cv2.setTrackbarPos("Show Geometry", window_name, show_geometry)
         elif key == 83:  # Right arrow
             current_frame = min(len(failures), current_frame + 1)
-            cv2.setTrackbarPos("Failure", window_name, current_frame)
+            cv2.setTrackbarPos("Failure", window_name, max(0, current_frame - 1))
         elif key == 81:  # Left arrow
             current_frame = max(1, current_frame - 1)
-            cv2.setTrackbarPos("Failure", window_name, current_frame)
+            cv2.setTrackbarPos("Failure", window_name, max(0, current_frame - 1))
 
     cv2.destroyAllWindows()
 

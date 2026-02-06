@@ -167,6 +167,10 @@ def create_palette_zarr(
     root.attrs['height'] = int(video_metadata.get('height', 0))
     root.attrs['total_frames'] = int(video_metadata.get('total_frames', 0))
     root.attrs['has_raw_video'] = True
+    if cli_args and cli_args.get("training_data"):
+        root.attrs["zarr_purpose"] = "training"
+    else:
+        root.attrs["zarr_purpose"] = "analysis"
     source_path = video_metadata.get('source_path') or video_metadata.get('source_video_path')
     if source_path:
         root.attrs['source_video_path'] = str(source_path)

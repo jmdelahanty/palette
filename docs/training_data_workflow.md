@@ -170,3 +170,28 @@ python src/fisheye/utils/list_training_versions.py --name detect_base
 
 ---
 For broader registry/provenance context, see `docs/detection_training_plan.md`.
+For merged-export schema/CLI constraints, see `docs/detection_merged_export_contract.md`.
+
+## One-Command Build (Registry -> Preflight -> Merged Zarr)
+
+Use the registry wrapper with `--export-merged` to run selection + preflight + merged export in one invocation:
+
+```bash
+python -m fisheye.utils.prepare_detect_training_from_registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --source-type manual \
+  --input-format gray \
+  --model-input gray \
+  --out-config /tmp/detect_build.yaml \
+  --out-manifest /tmp/detect_build.manifest.json \
+  --export-merged \
+  --merge-out-zarr /nvme1/datasets/detect/detect_build_merged.zarr \
+  --merge-out-dir /nvme1/datasets/detect/detect_build \
+  --merge-split 0.8/0.2 \
+  --merge-seed 42 \
+  --merge-overwrite
+```
+
+Notes:
+- `--export-merged` requires `--out-manifest` (the export step consumes that manifest).
+- `--export-merged` cannot be combined with `--dry-run` because preflight dry-run does not write files.

@@ -10,7 +10,9 @@ import subprocess
 import json
 import sys
 import shutil
+import shlex
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
 # === Helper Functions ===
@@ -48,6 +50,36 @@ def _find_git_root(start: Path, max_depth: int = 8) -> Optional[Path]:
             break
         p = p.parent
     return None
+
+
+def _to_jsonable(value: Any) -> Any:
+    """Convert runtime values into JSON-safe primitives."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_to_jsonable(v) for v in value]
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    return str(value)
+
+
+def _serialize_args(args: Any) -> Dict[str, Any]:
+    if args is None:
+        return {}
+    if isinstance(args, dict):
+        payload = args
+    elif hasattr(args, "__dict__"):
+        payload = vars(args)
+    else:
+        return {"value": _to_jsonable(args)}
+    return {str(k): _to_jsonable(v) for k, v in payload.items()}
 
 # === Git Information ===
 
@@ -647,6 +679,53 @@ def get_environment_summary() -> Dict[str, Any]:
     summary['key_packages'] = get_relevant_packages(all_packages)
     
     return summary
+
+
+def build_invocation_record(
+    *,
+    tool: str,
+    args: Optional[Any] = None,
+    argv: Optional[List[str]] = None,
+    include_git: bool = True,
+    include_environment: bool = True,
+) -> Dict[str, Any]:
+    """
+    Build a compact invocation record for auditability/reproducibility.
+
+    Args:
+        tool: Stable tool identifier (e.g. module path).
+        args: Parsed args object (argparse.Namespace or dict).
+        argv: Raw argv tokens (without interpreter). Defaults to sys.argv[1:].
+        include_git: Include git commit/branch/dirty metadata.
+        include_environment: Include key package + runtime environment summary.
+    """
+    argv_tokens = [str(token) for token in (list(argv) if argv is not None else list(sys.argv[1:]))]
+    entrypoint = str(sys.argv[0]) if sys.argv else ""
+    command_tokens = [entrypoint, *argv_tokens] if entrypoint else argv_tokens
+    platform_info = get_platform_info(collect_ip=False)
+
+    record: Dict[str, Any] = {
+        "tool": tool,
+        "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+        "python_executable": sys.executable,
+        "python_version": platform.python_version(),
+        "cwd": str(Path.cwd()),
+        "entrypoint": entrypoint,
+        "argv": argv_tokens,
+        "command": " ".join(shlex.quote(token) for token in command_tokens),
+        "args": _serialize_args(args),
+        "platform": {
+            "hostname": platform_info.get("hostname"),
+            "username": platform_info.get("username"),
+            "system": platform_info.get("system"),
+            "release": platform_info.get("release"),
+        },
+    }
+    if include_git:
+        record["git"] = _to_jsonable(get_git_info())
+    if include_environment:
+        record["environment"] = _to_jsonable(get_environment_summary())
+    return record
 
 # === Main Entry Point ===
 

@@ -11,9 +11,11 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -23,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..utils.zarr_metadata import get_downsample_array_path, get_downsample_shape
 from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
+from ..utils.system import build_invocation_record
 
 
 class CameraParameters(BaseModel):
@@ -77,6 +80,22 @@ class ProvenanceInfo(BaseModel):
     video_codec: Optional[str] = None
     video_pix_fmt: Optional[str] = None
     video_source: Optional[str] = None
+    format_title: Optional[str] = None
+    format_comment: Optional[str] = None
+    format_encoder: Optional[str] = None
+    encoder_name: Optional[str] = None
+    encoder_codec: Optional[str] = None
+    encoder_preset: Optional[str] = None
+    encoder_tuning: Optional[str] = None
+    encoder_rc: Optional[str] = None
+    encoder_bpp: Optional[float] = None
+    encoder_target_bps: Optional[int] = None
+    encoder_res: Optional[str] = None
+    encoder_res_width: Optional[int] = None
+    encoder_res_height: Optional[int] = None
+    encoder_fps: Optional[float] = None
+    encoder_color: Optional[int] = None
+    encoder_params: Optional[Dict[str, Any]] = None
     provenance_source: str = "missing"
     missing_fields: List[str] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
@@ -122,6 +141,11 @@ class TrainingManifest(BaseModel):
     run_name: Optional[str] = None
     provenance_policy: str
     registry_path: Optional[str] = None
+    set_name: Optional[str] = None
+    set_version: Optional[int] = None
+    set_id: Optional[str] = None
+    query_filter: Optional[Dict[str, Any]] = None
+    invocation: Optional[Dict[str, Any]] = None
 
     model_config = ConfigDict(extra="allow")
 
@@ -149,6 +173,36 @@ def _next_version(prefix: str, config_dir: Path, manifest_dir: Path) -> int:
         if match:
             versions.append(int(match.group(1)))
     return max(versions) + 1 if versions else 1
+
+
+def _build_training_set_id(set_name: str, set_version: int) -> str:
+    return f"detect_{set_name}_v{set_version:03d}"
+
+
+def _build_query_filter_payload(
+    args: argparse.Namespace,
+    *,
+    require_approved: bool,
+    prefer_manual: bool,
+    set_name: Optional[str],
+    set_version: Optional[int],
+    selected_paths: List[Path],
+) -> Dict[str, Any]:
+    return {
+        "tool": "fisheye.diagnostics.prepare_detect_training",
+        "task": "detect",
+        "source_type": args.source_type,
+        "input_format": args.input_format,
+        "provenance_policy": args.provenance_policy,
+        "require_approved": bool(require_approved),
+        "prefer_manual": bool(prefer_manual),
+        "allow_source_mismatch": bool(args.allow_source_mismatch),
+        "base_config_path": str(args.base_config),
+        "imgsz_override": int(args.imgsz) if args.imgsz is not None else None,
+        "set_name": set_name,
+        "set_version": set_version,
+        "selected_zarr_paths": [str(path) for path in selected_paths],
+    }
 
 
 def _as_float(value: Any) -> Optional[float]:
@@ -193,18 +247,90 @@ def _parse_arena_config(raw: Any) -> Dict[str, Any]:
     return {}
 
 
+def _normalize_state(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        text = value.decode("utf-8", "ignore").strip()
+    else:
+        text = str(value).strip()
+    return text.lower() if text else None
+
+
+def _review_state(status: Any) -> Optional[str]:
+    if not isinstance(status, dict):
+        return None
+    return _normalize_state(status.get("state"))
+
+
+def _resolve_refined_group(root: zarr.Group, crop_group: Optional[zarr.Group]) -> Optional[zarr.Group]:
+    if crop_group is not None:
+        ref = crop_group.attrs.get("detect_review_status_ref")
+        if isinstance(ref, (bytes, bytearray)):
+            ref = ref.decode("utf-8", "ignore")
+        if isinstance(ref, str):
+            ref = ref.strip("/")
+            if ref in root:
+                return root[ref]
+    refined_parent = root.get("refined_detect_runs") or root.get("refined_runs")
+    if refined_parent is None:
+        return None
+    latest = refined_parent.attrs.get("latest")
+    if isinstance(latest, (bytes, bytearray)):
+        latest = latest.decode("utf-8", "ignore")
+    if isinstance(latest, str) and latest in refined_parent:
+        return refined_parent[latest]
+    return None
+
+
+def _manual_group_name(refined_group: Optional[zarr.Group]) -> Optional[str]:
+    if refined_group is None:
+        return None
+    manual_label = refined_group.attrs.get("manual_review_latest")
+    if isinstance(manual_label, (bytes, bytearray)):
+        manual_label = manual_label.decode("utf-8", "ignore")
+    if isinstance(manual_label, str) and manual_label in refined_group:
+        return manual_label
+    if "manual" in refined_group:
+        return "manual"
+    return None
+
+
+_ARENA_NUMBER_RE = re.compile(r"arena[_-]?(\d+)", re.IGNORECASE)
+
+
+def _infer_arena_number(*values: Any) -> Optional[str]:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, (int, np.integer)):
+            return str(int(value))
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8", "ignore")
+        text = str(value).strip()
+        if not text:
+            continue
+        if text.isdigit():
+            return text
+        match = _ARENA_NUMBER_RE.search(text)
+        if match:
+            return match.group(1)
+    return None
+
+
 def _build_arena_info(arena_config: Dict[str, Any], root: zarr.Group) -> ArenaParameters:
     arena_id = arena_config.get("arena_id") or root.attrs.get("arena_id")
+    arena_config_name = arena_config.get("arena_config_name") or arena_config.get("config_name")
     arena_number = (
         arena_config.get("arena_number")
         or root.attrs.get("arena_number")
-        or root.attrs.get("arena_id")
+        or _infer_arena_number(arena_id, arena_config_name, arena_config.get("arena_id"))
     )
-    arena_config_name = arena_config.get("arena_config_name")
     dish_design = (
-        arena_config.get("dish_design")
+        arena_config.get("selected_dish_type_name")
+        or arena_config.get("selected_dish_name")
+        or arena_config.get("dish_design")
         or arena_config.get("arena_design")
-        or arena_config_name
         or root.attrs.get("dish_design")
     )
     shape = arena_config.get("experimental_area_shape") or arena_config.get("swimmable_area_shape")
@@ -351,14 +477,50 @@ def _load_camera_metadata(root: zarr.Group) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _load_video_metadata(root: zarr.Group) -> Dict[str, Optional[str]]:
+def _load_video_metadata(root: zarr.Group) -> Dict[str, Any]:
     raw = root.get("raw_video")
     if raw is None:
-        return {"video_codec": None, "video_pix_fmt": None, "video_source": None}
+        return {
+            "video_codec": None,
+            "video_pix_fmt": None,
+            "video_source": None,
+            "format_title": None,
+            "format_comment": None,
+            "format_encoder": None,
+            "encoder_name": None,
+            "encoder_codec": None,
+            "encoder_preset": None,
+            "encoder_tuning": None,
+            "encoder_rc": None,
+            "encoder_bpp": None,
+            "encoder_target_bps": None,
+            "encoder_res": None,
+            "encoder_res_width": None,
+            "encoder_res_height": None,
+            "encoder_fps": None,
+            "encoder_color": None,
+            "encoder_params": None,
+        }
     return {
-        "video_codec": raw.attrs.get("codec"),
-        "video_pix_fmt": raw.attrs.get("pix_fmt"),
+        "video_codec": raw.attrs.get("video_codec") or raw.attrs.get("codec"),
+        "video_pix_fmt": raw.attrs.get("video_pix_fmt") or raw.attrs.get("pix_fmt"),
         "video_source": raw.attrs.get("source_video"),
+        "format_title": raw.attrs.get("format_title"),
+        "format_comment": raw.attrs.get("format_comment"),
+        "format_encoder": raw.attrs.get("format_encoder"),
+        "encoder_name": raw.attrs.get("encoder_name"),
+        "encoder_codec": raw.attrs.get("encoder_codec"),
+        "encoder_preset": raw.attrs.get("encoder_preset"),
+        "encoder_tuning": raw.attrs.get("encoder_tuning"),
+        "encoder_rc": raw.attrs.get("encoder_rc"),
+        "encoder_bpp": raw.attrs.get("encoder_bpp"),
+        "encoder_target_bps": raw.attrs.get("encoder_target_bps"),
+        "encoder_res": raw.attrs.get("encoder_res"),
+        "encoder_res_width": raw.attrs.get("encoder_res_width"),
+        "encoder_res_height": raw.attrs.get("encoder_res_height"),
+        "encoder_fps": raw.attrs.get("encoder_fps"),
+        "encoder_color": raw.attrs.get("encoder_color"),
+        "encoder_params": raw.attrs.get("encoder_params"),
     }
 
 
@@ -402,6 +564,22 @@ def _extract_provenance(
     provenance.video_codec = video_meta.get("video_codec")
     provenance.video_pix_fmt = video_meta.get("video_pix_fmt")
     provenance.video_source = video_meta.get("video_source")
+    provenance.format_title = video_meta.get("format_title")
+    provenance.format_comment = video_meta.get("format_comment")
+    provenance.format_encoder = video_meta.get("format_encoder")
+    provenance.encoder_name = video_meta.get("encoder_name")
+    provenance.encoder_codec = video_meta.get("encoder_codec")
+    provenance.encoder_preset = video_meta.get("encoder_preset")
+    provenance.encoder_tuning = video_meta.get("encoder_tuning")
+    provenance.encoder_rc = video_meta.get("encoder_rc")
+    provenance.encoder_bpp = video_meta.get("encoder_bpp")
+    provenance.encoder_target_bps = video_meta.get("encoder_target_bps")
+    provenance.encoder_res = video_meta.get("encoder_res")
+    provenance.encoder_res_width = video_meta.get("encoder_res_width")
+    provenance.encoder_res_height = video_meta.get("encoder_res_height")
+    provenance.encoder_fps = video_meta.get("encoder_fps")
+    provenance.encoder_color = video_meta.get("encoder_color")
+    provenance.encoder_params = video_meta.get("encoder_params")
 
     if stim_group is not None:
         provenance.provenance_source = "stimulus_import"
@@ -512,12 +690,21 @@ def _choose_dataset_name(existing: set, path: Path, index: int) -> str:
     return name
 
 
+def _log_timing(enabled: bool, label: str, started_at: float) -> float:
+    ended_at = perf_counter()
+    if enabled:
+        print(f"[timing] {label}: {ended_at - started_at:.3f}s")
+    return ended_at
+
+
 def _print_summary(manifest: TrainingManifest) -> None:
     print("\nDetection Training Preflight")
     print(f"  Task: {manifest.task}")
     print(f"  Source type: {manifest.source_type}")
     print(f"  Input format: {manifest.input_format}")
     print(f"  imgsz: {manifest.imgsz}")
+    if manifest.set_id:
+        print(f"  Set ID: {manifest.set_id}")
     for dataset in manifest.datasets:
         print(f"\nDataset: {dataset.name}")
         print(f"  Zarr: {dataset.zarr_path}")
@@ -542,9 +729,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument("zarr_paths", nargs="+", type=Path, help="One or more Palette Zarr paths.")
     parser.add_argument(
         "--source-type",
-        choices=["detect", "filtered", "interpolated"],
-        default="filtered",
-        help="Detection source type to train on.",
+        choices=["detect", "filtered", "interpolated", "manual"],
+        default="manual",
+        help="Detection source type to train on (default: manual).",
     )
     parser.add_argument(
         "--input-format",
@@ -600,18 +787,52 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         help="Allow crop source type to differ from requested source_type.",
     )
     parser.add_argument(
+        "--require-approved",
+        action="store_true",
+        help="Require approved detect + crop reviews (default).",
+    )
+    parser.add_argument(
+        "--allow-unapproved",
+        action="store_true",
+        help="Include datasets even if detect/crop reviews are missing or unapproved.",
+    )
+    parser.add_argument(
+        "--prefer-manual",
+        action="store_true",
+        help="Prefer manual detections when available (default).",
+    )
+    parser.add_argument(
+        "--no-prefer-manual",
+        action="store_true",
+        help="Do not enforce manual preference.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the config + manifest without writing files.",
     )
+    parser.add_argument(
+        "--timing",
+        action="store_true",
+        help="Print timing logs for major preflight phases.",
+    )
 
-    args = parser.parse_args(argv)
+    cli_argv = [str(token) for token in (list(argv) if argv is not None else list(sys.argv[1:]))]
+    args = parser.parse_args(cli_argv)
+    run_started = perf_counter()
 
+    phase_started = perf_counter()
     override = _load_override(args.metadata_json)
+    _log_timing(args.timing, "load metadata override", phase_started)
+    require_approved = True if args.require_approved else not args.allow_unapproved
+    prefer_manual = True if args.prefer_manual else not args.no_prefer_manual
 
+    resolved_set_name: Optional[str] = None
     set_version: Optional[int] = None
+    set_id: Optional[str] = None
     if args.set_name and args.out_config is None:
         safe_name = _sanitize_name(args.set_name)
+        resolved_set_name = safe_name
         config_dir = Path("runs") / "configs" / "detect"
         manifest_dir = Path("runs") / "manifests" / "detect"
         if args.set_version is not None:
@@ -621,31 +842,52 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         else:
             set_version = _next_version(safe_name, config_dir, manifest_dir)
         suffix = f"_v{set_version:03d}"
+        set_id = _build_training_set_id(safe_name, set_version)
         args.out_config = config_dir / f"{safe_name}{suffix}.yaml"
         if args.out_manifest is None:
             args.out_manifest = manifest_dir / f"{safe_name}{suffix}.manifest.json"
     elif args.set_name and args.out_config is not None:
         print("Note: --set-name ignored because --out-config was provided.")
 
+    phase_started = perf_counter()
+    invocation_payload = build_invocation_record(
+        tool="fisheye.diagnostics.prepare_detect_training",
+        args=args,
+        argv=cli_argv,
+    )
+    _log_timing(args.timing, "capture invocation metadata", phase_started)
+
     if not args.base_config.exists():
         raise FileNotFoundError(f"Base config not found: {args.base_config}")
+    phase_started = perf_counter()
     base_config = _ensure_config(yaml.safe_load(args.base_config.read_text(encoding="utf-8")))
+    _log_timing(args.timing, "load base config", phase_started)
 
     dataset_entries: Dict[str, Dict[str, Any]] = {}
     manifests: List[DatasetManifest] = []
+    skipped: List[str] = []
     registry: Optional[Registry] = None
     registry_path: Optional[str] = None
-    if args.register or args.registry:
+    should_write_training_set = bool(set_id and not args.dry_run)
+    should_open_registry = bool(args.register or args.registry or should_write_training_set)
+    should_register_datasets = bool(args.register or args.registry)
+    if should_open_registry:
         resolved_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
         registry_path = str(resolved_path)
+        phase_started = perf_counter()
         registry = Registry(resolved_path)
+        _log_timing(args.timing, f"open registry ({resolved_path})", phase_started)
     seen_names: set = set()
     reference_shape: Optional[Tuple[int, int]] = None
 
     for idx, zarr_path in enumerate(args.zarr_paths, start=1):
+        dataset_started = perf_counter()
+        dataset_label = zarr_path.name
         if not zarr_path.exists():
             raise FileNotFoundError(f"Zarr path not found: {zarr_path}")
+        phase_started = perf_counter()
         root = zarr.open_group(str(zarr_path), mode="r")
+        _log_timing(args.timing, f"{dataset_label}: open zarr group", phase_started)
 
         array_path = get_downsample_array_path(root, format_hint=args.input_format)
         if array_path is None:
@@ -686,9 +928,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             frame_indices_present = "frame_indices" in crop_group
             detection_source_present = "detection_source" in crop_group
             if detection_source_present:
+                phase_started = perf_counter()
                 detection_source = np.asarray(crop_group["detection_source"][:], dtype=np.int8)
                 unique, counts = np.unique(detection_source, return_counts=True)
                 detection_source_counts = {str(int(k)): int(v) for k, v in zip(unique.tolist(), counts.tolist())}
+                _log_timing(args.timing, f"{dataset_label}: read detection_source", phase_started)
         elif "detect_runs" in root and root["detect_runs"].attrs.get("latest"):
             detect_run = root["detect_runs"].attrs.get("latest")
             detect_group = root["detect_runs"][detect_run]
@@ -699,7 +943,35 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         else:
             raise ValueError(f"No crop_runs or detect_runs found in {zarr_path.name}.")
 
-        if not args.allow_source_mismatch and crop_group is not None:
+        refined_group = _resolve_refined_group(root, crop_group)
+        manual_group = _manual_group_name(refined_group)
+        detect_review_status = None
+        if crop_group is not None:
+            detect_review_status = crop_group.attrs.get("detect_review_status")
+        if not isinstance(detect_review_status, dict) and refined_group is not None:
+            detect_review_status = refined_group.attrs.get("detect_review_status")
+        detect_state = _review_state(detect_review_status)
+        crop_state = _review_state(crop_group.attrs.get("crop_review_status")) if crop_group is not None else None
+
+        if require_approved:
+            if detect_state != "approved":
+                skipped.append(f"{zarr_path.name}: detect review not approved")
+                _log_timing(args.timing, f"{dataset_label}: skipped (detect review not approved)", dataset_started)
+                continue
+            if crop_group is None or crop_state != "approved":
+                skipped.append(f"{zarr_path.name}: crop review not approved")
+                _log_timing(args.timing, f"{dataset_label}: skipped (crop review not approved)", dataset_started)
+                continue
+
+        if prefer_manual and manual_group and crop_group is not None:
+            if detection_source_type != "manual":
+                skipped.append(
+                    f"{zarr_path.name}: manual detections available but crop source is '{detection_source_type}'"
+                )
+                _log_timing(args.timing, f"{dataset_label}: skipped (manual preference)", dataset_started)
+                continue
+
+        if not args.allow_source_mismatch and crop_group is not None and args.source_type != "manual":
             if detection_source_type != args.source_type:
                 raise ValueError(
                     f"{zarr_path.name}: crop source type is '{detection_source_type}', "
@@ -716,19 +988,23 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 f"{zarr_path.name}: crop run includes interpolated ROIs but detection_source is missing."
             )
 
+        phase_started = perf_counter()
         bboxes = np.asarray(root[bbox_array_path][:], dtype=np.float32)
         invalid_count, invalid_sample = _validate_bboxes(bboxes)
+        _log_timing(args.timing, f"{dataset_label}: read+validate bbox_norm_coords", phase_started)
 
         dataset_name = _choose_dataset_name(seen_names, zarr_path, idx)
         dataset_entries[dataset_name] = {
             "zarr_path": str(zarr_path),
-            "source_type": args.source_type,
+            "source_type": detection_source_type,
             "input_format": args.input_format,
         }
 
+        phase_started = perf_counter()
         provenance = _extract_provenance(root, override, args.provenance_policy)
         if args.provenance_policy == "ignore":
             provenance.warnings = []
+        _log_timing(args.timing, f"{dataset_label}: extract provenance", phase_started)
 
         dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
         manifests.append(
@@ -753,8 +1029,18 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 provenance=provenance,
             )
         )
-        if registry is not None:
+        if registry is not None and should_register_datasets:
+            phase_started = perf_counter()
             registry.register_from_root(root, zarr_path)
+            _log_timing(args.timing, f"{dataset_label}: registry dataset upsert", phase_started)
+        _log_timing(args.timing, f"{dataset_label}: total preflight", dataset_started)
+
+    if skipped:
+        print(f"\nSkipped {len(skipped)} datasets:")
+        for reason in skipped:
+            print(f"  - {reason}")
+    if not manifests:
+        raise ValueError("No datasets matched the requested filters (approved/manual).")
 
     imgsz = args.imgsz if args.imgsz is not None else int(reference_shape[0])
     if args.imgsz is None and reference_shape and reference_shape[0] != reference_shape[1]:
@@ -779,8 +1065,32 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     if args.project:
         base_config["training_params"]["project"] = args.project
 
+    query_filter_payload = _build_query_filter_payload(
+        args,
+        require_approved=require_approved,
+        prefer_manual=prefer_manual,
+        set_name=resolved_set_name,
+        set_version=set_version,
+        selected_paths=args.zarr_paths,
+    )
+
+    if registry is not None and set_id:
+        dataset_ids = [item.dataset_id for item in manifests if item.dataset_id]
+        phase_started = perf_counter()
+        registry.upsert_training_set(
+            set_id=set_id,
+            name=resolved_set_name,
+            query_filter=query_filter_payload,
+            dataset_ids=dataset_ids,
+            invocation=invocation_payload,
+        )
+        print(f"Recorded training set: {set_id}")
+        _log_timing(args.timing, f"upsert training set ({set_id})", phase_started)
+
     if registry is not None:
+        phase_started = perf_counter()
         registry.close()
+        _log_timing(args.timing, "close registry", phase_started)
     manifest = TrainingManifest(
         created_at_utc=datetime.now(timezone.utc).isoformat(),
         task="detect",
@@ -795,20 +1105,26 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         run_name=args.run_name,
         provenance_policy=args.provenance_policy,
         registry_path=registry_path,
-        set_name=args.set_name,
+        set_name=resolved_set_name,
         set_version=set_version,
+        set_id=set_id,
+        query_filter=query_filter_payload,
+        invocation=invocation_payload,
     )
 
     _print_summary(manifest)
 
+    phase_started = perf_counter()
     config_yaml = yaml.safe_dump(base_config, sort_keys=False)
     manifest_json = json.dumps(manifest.model_dump(exclude_none=True), indent=2)
+    _log_timing(args.timing, "serialize config + manifest", phase_started)
 
     if args.dry_run:
         print("\n--- Generated Config (YAML) ---")
         print(config_yaml.strip())
         print("\n--- Training Manifest (JSON) ---")
         print(manifest_json)
+        _log_timing(args.timing, "total runtime", run_started)
         return
 
     if args.out_config is None:
@@ -820,14 +1136,18 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     args.out_config.parent.mkdir(parents=True, exist_ok=True)
     out_manifest.parent.mkdir(parents=True, exist_ok=True)
 
+    phase_started = perf_counter()
     args.out_config.write_text(config_yaml, encoding="utf-8")
     out_manifest.write_text(manifest_json, encoding="utf-8")
+    _log_timing(args.timing, "write config + manifest", phase_started)
 
     print(f"\nWrote config: {args.out_config}")
     print(f"Wrote manifest: {out_manifest}")
+    phase_started = perf_counter()
     created = _ensure_dummy_paths(base_config, args.out_config)
     for path in created:
         print(f"Created dummy dataset file: {path}")
+    _log_timing(args.timing, "ensure dummy dataset paths", phase_started)
     if args.run_name:
         print(
             "Next: python -m fisheye.training.train_detection "
@@ -835,6 +1155,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         )
     else:
         print(f"Next: python -m fisheye.training.train_detection {args.out_config}")
+    _log_timing(args.timing, "total runtime", run_started)
 
 
 if __name__ == "__main__":  # pragma: no cover

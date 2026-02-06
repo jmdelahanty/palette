@@ -1,5 +1,5 @@
 """
-Manual review tool for failed keypoints in a refined keypoint run.
+Manual review tool for keypoints in a refined keypoint run.
 
 Edits are applied to the refined run only (raw keypoints remain untouched).
 """
@@ -36,16 +36,53 @@ def _get_latest_run(root: zarr.Group, group_name: str) -> str:
     return latest
 
 
-def _load_failure_indices(refined: zarr.Group) -> np.ndarray:
+def _total_keypoints(refined: zarr.Group) -> int:
+    for key in ("keypoints_roi", "keypoints_img", "keypoints_norm"):
+        if key in refined:
+            return int(refined[key].shape[0])
+    for key in ("refined_success", "source_success", "failure_indices"):
+        if key in refined:
+            return int(refined[key].shape[0])
+    return 0
+
+
+def _load_failure_indices(refined: zarr.Group, include_all: bool = False) -> np.ndarray:
+    if include_all:
+        total = _total_keypoints(refined)
+        if total <= 0:
+            return np.zeros(0, dtype="i4")
+        return np.arange(total, dtype="i4")
     if "refined_success" in refined:
         success = np.asarray(refined["refined_success"][:], dtype=bool)
-        return np.where(~success)[0].astype("i4", copy=False)
-    if "source_success" in refined:
+        failures = np.where(~success)[0].astype("i4", copy=False)
+    elif "source_success" in refined:
         success = np.asarray(refined["source_success"][:], dtype=bool)
-        return np.where(~success)[0].astype("i4", copy=False)
-    if "failure_indices" in refined:
-        return np.asarray(refined["failure_indices"][:], dtype="i4")
-    return np.zeros(0, dtype="i4")
+        failures = np.where(~success)[0].astype("i4", copy=False)
+    elif "failure_indices" in refined:
+        failures = np.asarray(refined["failure_indices"][:], dtype="i4")
+    else:
+        return np.zeros(0, dtype="i4")
+
+    reason_arr = refined.get("reason")
+    if reason_arr is None or failures.size == 0:
+        return failures
+    try:
+        reason_vals = np.asarray(reason_arr[:], dtype=object)
+    except Exception:
+        return failures
+    if reason_vals.size == 0:
+        return failures
+    keep_mask = []
+    for idx in failures:
+        try:
+            text = str(reason_vals[int(idx)]) if reason_vals[int(idx)] is not None else ""
+        except Exception:
+            text = ""
+        keep_mask.append(
+            "fish_present_no_keypoints" not in text
+            and "detection_issue" not in text
+        )
+    return failures[np.array(keep_mask, dtype=bool)]
 
 
 def _clean_reason(existing: str, new_tags: Sequence[str]) -> str:
@@ -76,6 +113,111 @@ def _sanitize_reason_array(reason_arr: zarr.Array) -> None:
 
     cleaned = np.array([coerce(v) for v in raw], dtype=object)
     reason_arr[:] = cleaned
+
+
+def _load_frame_flags(path: Path) -> Dict[str, list[Dict[str, Optional[int]]]]:
+    if not path.exists():
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return {}
+        data = json.loads(raw)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load frame flags from {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Frame flag file must contain a JSON object: {path}")
+    parsed: Dict[str, list[Dict[str, Optional[int]]]] = {}
+    for key, value in data.items():
+        entries: list[Dict[str, Optional[int]]] = []
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    frame_val = item.get("frame_idx")
+                    roi_val = item.get("roi_idx")
+                    try:
+                        frame_idx = int(frame_val) if frame_val is not None else None
+                    except (TypeError, ValueError):
+                        frame_idx = None
+                    try:
+                        roi_idx = int(roi_val) if roi_val is not None else None
+                    except (TypeError, ValueError):
+                        roi_idx = None
+                    if frame_idx is not None:
+                        entries.append({"frame_idx": frame_idx, "roi_idx": roi_idx})
+                else:
+                    try:
+                        frame_idx = int(item)
+                    except (TypeError, ValueError):
+                        continue
+                    entries.append({"frame_idx": frame_idx, "roi_idx": None})
+        parsed[str(key)] = entries
+    return parsed
+
+
+def _append_flagged_frame(
+    flag_path: Path,
+    zarr_path: str,
+    frame_idx: int,
+    roi_idx: Optional[int],
+) -> None:
+    flag_path.parent.mkdir(parents=True, exist_ok=True)
+    data = _load_frame_flags(flag_path)
+    entries = data.get(zarr_path, [])
+    dedupe = {(entry.get("frame_idx"), entry.get("roi_idx")) for entry in entries}
+    key = (int(frame_idx), int(roi_idx) if roi_idx is not None else None)
+    if key in dedupe:
+        return
+    entries.append({"frame_idx": int(frame_idx), "roi_idx": key[1]})
+    entries.sort(key=lambda item: (item.get("frame_idx") or 0, item.get("roi_idx") or -1))
+    data[zarr_path] = entries
+    flag_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _load_detection_frame_flags(path: Path) -> Dict[str, list[int]]:
+    if not path.exists():
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return {}
+        data = json.loads(raw)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load frame flags from {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Frame flag file must contain a JSON object: {path}")
+    parsed: Dict[str, list[int]] = {}
+    for key, value in data.items():
+        frames: list[int] = []
+        if isinstance(value, list):
+            for item in value:
+                try:
+                    frames.append(int(item))
+                except (TypeError, ValueError):
+                    continue
+        parsed[str(key)] = sorted(set(frames))
+    return parsed
+
+
+def _append_detection_frame(flag_path: Path, zarr_path: str, frame_idx: int) -> None:
+    flag_path.parent.mkdir(parents=True, exist_ok=True)
+    data = _load_detection_frame_flags(flag_path)
+    frames = set(data.get(zarr_path, []))
+    frames.add(int(frame_idx))
+    data[zarr_path] = sorted(frames)
+    flag_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _append_flagged_path(flag_path: Path, zarr_path: str) -> None:
+    flag_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = set()
+    if flag_path.exists():
+        with flag_path.open("r", encoding="utf-8") as handle:
+            existing = {line.strip() for line in handle if line.strip()}
+    if zarr_path in existing:
+        return
+    with flag_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{zarr_path}\n")
 
 
 def _hash_parameters(params: object) -> Optional[str]:
@@ -138,9 +280,10 @@ def _apply_review_status(
 
     signature = refined.attrs.get("keypoint_signature")
     if not isinstance(signature, dict):
-        signature = _build_keypoint_signature(refined.attrs)
+        signature = _build_keypoint_signature(dict(refined.attrs))
         refined.attrs["keypoint_signature"] = signature
     refined.attrs["keypoint_review_signature"] = signature
+
     refined_parent.attrs["keypoint_review_status_latest"] = refined_run
     return payload
 
@@ -149,11 +292,16 @@ def launch_review(
     zarr_path: str,
     refined_run: Optional[str] = None,
     crop_run: Optional[str] = None,
+    include_all: bool = False,
+    target_frames: Optional[Sequence[int]] = None,
     review_state: str = "approved",
     review_method: str = "manual",
     review_intended_use: str = "training",
     reviewer: Optional[str] = None,
     review_notes: Optional[str] = None,
+    frame_flag_file: Optional[str] = None,
+    detect_flag_file: Optional[str] = None,
+    detect_frame_flag_file: Optional[str] = None,
 ) -> None:
     root = zarr.open_group(zarr_path, mode="a")
 
@@ -168,6 +316,11 @@ def launch_review(
         raise RuntimeError("Refined keypoint run not found.")
     refined = refined_parent[refined_run]
 
+    flag_path = Path(frame_flag_file).expanduser() if frame_flag_file else None
+    detect_flag_path = Path(detect_flag_file).expanduser() if detect_flag_file else None
+    detect_frame_flag_path = (
+        Path(detect_frame_flag_file).expanduser() if detect_frame_flag_file else None
+    )
     crop_run = crop_run or refined.attrs.get("source_crop_run") or _get_latest_run(root, "crop")
     crop_group = root[f"crop_runs/{crop_run}"]
     roi_images = crop_group["roi_images"]
@@ -177,10 +330,28 @@ def launch_review(
     full_h, full_w = root["raw_video/images_full"].shape[1:]
     norm_factor = np.array([full_w, full_h], dtype=np.float64)
 
-    failures = _load_failure_indices(refined)
+    failures = _load_failure_indices(refined, include_all=include_all)
+    targeted = False
+    if target_frames:
+        target_frames_arr = np.array(sorted(set(int(f) for f in target_frames)), dtype=np.int64)
+        target_indices = np.where(np.isin(frame_indices, target_frames_arr))[0].astype("i4", copy=False)
+        targeted = True
+        failures = target_indices
     if failures.size == 0:
-        print("No failed keypoints to review.")
+        if targeted:
+            print("No matching keypoints found for requested frames.")
+            return
+        if include_all:
+            print("No keypoints found to review.")
+        else:
+            print("No failed keypoints to review.")
         return
+    if flag_path is not None:
+        print(f"Frame flag file: {flag_path.expanduser().resolve(strict=False)}")
+    if detect_flag_path is not None:
+        print(f"Detection flag file: {detect_flag_path.expanduser().resolve(strict=False)}")
+    if detect_frame_flag_path is not None:
+        print(f"Detection frame flag file: {detect_frame_flag_path.expanduser().resolve(strict=False)}")
 
     summary_raw = refined.attrs.get("summary_statistics", {})
     summary = summary_raw.get("refine", summary_raw) if isinstance(summary_raw, dict) else {}
@@ -222,6 +393,7 @@ def launch_review(
     idx_pos = 0
     active_idx = 0
     points = np.full((len(labels), 2), np.nan, dtype=np.float64)
+    show_text = True
 
     mpl.rcParams["keymap.save"] = []
     fig, ax = plt.subplots(1, 1, figsize=(6, 6))
@@ -247,14 +419,40 @@ def launch_review(
         for i, (label, color) in enumerate(zip(labels, colors)):
             if np.isfinite(points[i]).all():
                 ax.scatter(points[i, 0], points[i, 1], s=60, c=color, edgecolors="black", linewidths=1.0)
-                ax.text(points[i, 0] + 3, points[i, 1] - 3, label, color=color, fontsize=8, weight="bold")
+                if show_text:
+                    ax.text(points[i, 0] + 3, points[i, 1] - 3, label, color=color, fontsize=8, weight="bold")
 
-        active_label = labels[active_idx] if active_idx < len(labels) else "unknown"
-        ax.set_title(
-            f"ROI {roi_idx} | Frame {frame_idx} | {idx_pos + 1}/{len(failures)} "
-            f"| Active: {active_label}",
-            fontsize=10,
-        )
+        if show_text:
+            active_label = labels[active_idx] if active_idx < len(labels) else "unknown"
+            flag_label = ""
+            if reason_arr is not None:
+                try:
+                    raw_reason = reason_arr[roi_idx]
+                except Exception:
+                    raw_reason = ""
+                reason_text = str(raw_reason) if raw_reason is not None else ""
+                if reason_text:
+                    tags = [tag.strip() for tag in reason_text.split("|") if tag.strip()]
+                    flagged = [tag for tag in tags if tag in {"fish_present_no_keypoints", "detection_issue"}]
+                    if flagged:
+                        flag_label = "Flagged: " + ", ".join(flagged)
+            ax.set_title(
+                f"ROI {roi_idx} | Frame {frame_idx} | {idx_pos + 1}/{len(failures)} "
+                f"| Active: {active_label}",
+                fontsize=10,
+            )
+            if flag_label:
+                ax.text(
+                    0.02,
+                    0.02,
+                    flag_label,
+                    transform=ax.transAxes,
+                    fontsize=8,
+                    color="#f97316",
+                    bbox=dict(facecolor="black", alpha=0.6, pad=2),
+                )
+        else:
+            ax.set_title("")
         ax.set_axis_off()
         fig.canvas.draw_idle()
 
@@ -320,10 +518,26 @@ def launch_review(
             heading_valid_arr[roi_idx] = refined_success_val and det_src == 0
         if reason_arr is not None:
             existing = str(reason_arr[roi_idx]) if reason_arr[roi_idx] is not None else ""
-            tags = ["manual_correction"]
+            existing_tags = [tag for tag in existing.split("|") if tag]
+            drop_tags = {
+                "detection_failed",
+                "low_confidence",
+                "confidence_missing",
+                "fish_present_no_keypoints",
+                "detection_issue",
+            }
+            kept_tags = [tag for tag in existing_tags if tag not in drop_tags and tag != "manual_correction"]
+            tags = kept_tags + ["manual_correction"]
             if not geom_ok:
                 tags.append("geometry_issue")
-            reason_value = str(_clean_reason(existing, tags))
+            unique: list[str] = []
+            seen = set()
+            for tag in tags:
+                if not tag or tag in seen:
+                    continue
+                unique.append(tag)
+                seen.add(tag)
+            reason_value = "|".join(unique) if unique else "manual_correction"
             reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
 
         print(f"Saved manual correction for ROI {roi_idx}.")
@@ -333,6 +547,123 @@ def launch_review(
             idx_pos += 1
             load_current_points()
             update_display()
+
+    def mark_no_keypoints() -> None:
+        nonlocal active_idx, idx_pos, failures
+        roi_idx = int(failures[idx_pos])
+        frame_idx = int(frame_indices[roi_idx])
+
+        if kp_roi_arr is not None:
+            kp_roi_arr[roi_idx] = np.nan
+        if kp_img_arr is not None:
+            kp_img_arr[roi_idx] = np.nan
+        if kp_norm_arr is not None:
+            kp_norm_arr[roi_idx] = np.nan
+        if heading_arr is not None:
+            heading_arr[roi_idx] = np.nan
+        if confidence_arr is not None:
+            confidence_arr[roi_idx] = np.nan
+        if conf_arr is not None:
+            conf_arr[roi_idx] = np.nan
+        if triangle_area_arr is not None:
+            triangle_area_arr[roi_idx] = np.nan
+        if min_angle_arr is not None:
+            min_angle_arr[roi_idx] = np.nan
+        if triangle_angles_arr is not None:
+            triangle_angles_arr[roi_idx] = np.nan
+        if refined_success_arr is not None:
+            refined_success_arr[roi_idx] = False
+        if flip_corrected_arr is not None:
+            flip_corrected_arr[roi_idx] = False
+        if quality_labels_arr is not None:
+            quality_labels_arr[roi_idx] = 0
+        if confidence_valid_arr is not None:
+            confidence_valid_arr[roi_idx] = False
+        if geometry_valid_arr is not None:
+            geometry_valid_arr[roi_idx] = False
+        if usable_arr is not None:
+            usable_arr[roi_idx] = False
+        if heading_valid_arr is not None:
+            heading_valid_arr[roi_idx] = False
+        if reason_arr is not None:
+            existing = str(reason_arr[roi_idx]) if reason_arr[roi_idx] is not None else ""
+            reason_value = str(_clean_reason(existing, ["fish_present_no_keypoints"]))
+            reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
+
+        print(f"Marked fish-present/no-keypoints for ROI {roi_idx} (frame {frame_idx}).")
+
+        failures = np.delete(failures, idx_pos)
+        if failures.size == 0:
+            plt.close(fig)
+            return
+        idx_pos = min(idx_pos, len(failures) - 1)
+        active_idx = 0
+        load_current_points()
+        update_display()
+
+    def mark_detection_issue() -> None:
+        nonlocal active_idx, idx_pos, failures
+        roi_idx = int(failures[idx_pos])
+        frame_idx = int(frame_indices[roi_idx])
+
+        if detect_frame_flag_path is not None:
+            try:
+                _append_detection_frame(detect_frame_flag_path, zarr_path, frame_idx)
+            except Exception as exc:
+                print(f"Failed to flag detection frame: {exc}")
+        if detect_flag_path is not None:
+            try:
+                _append_flagged_path(detect_flag_path, zarr_path)
+            except Exception as exc:
+                print(f"Failed to flag detection path: {exc}")
+
+        if kp_roi_arr is not None:
+            kp_roi_arr[roi_idx] = np.nan
+        if kp_img_arr is not None:
+            kp_img_arr[roi_idx] = np.nan
+        if kp_norm_arr is not None:
+            kp_norm_arr[roi_idx] = np.nan
+        if heading_arr is not None:
+            heading_arr[roi_idx] = np.nan
+        if confidence_arr is not None:
+            confidence_arr[roi_idx] = np.nan
+        if conf_arr is not None:
+            conf_arr[roi_idx] = np.nan
+        if triangle_area_arr is not None:
+            triangle_area_arr[roi_idx] = np.nan
+        if min_angle_arr is not None:
+            min_angle_arr[roi_idx] = np.nan
+        if triangle_angles_arr is not None:
+            triangle_angles_arr[roi_idx] = np.nan
+        if refined_success_arr is not None:
+            refined_success_arr[roi_idx] = False
+        if flip_corrected_arr is not None:
+            flip_corrected_arr[roi_idx] = False
+        if quality_labels_arr is not None:
+            quality_labels_arr[roi_idx] = 0
+        if confidence_valid_arr is not None:
+            confidence_valid_arr[roi_idx] = False
+        if geometry_valid_arr is not None:
+            geometry_valid_arr[roi_idx] = False
+        if usable_arr is not None:
+            usable_arr[roi_idx] = False
+        if heading_valid_arr is not None:
+            heading_valid_arr[roi_idx] = False
+        if reason_arr is not None:
+            existing = str(reason_arr[roi_idx]) if reason_arr[roi_idx] is not None else ""
+            reason_value = str(_clean_reason(existing, ["detection_issue"]))
+            reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
+
+        print(f"Marked detection issue for ROI {roi_idx} (frame {frame_idx}).")
+
+        failures = np.delete(failures, idx_pos)
+        if failures.size == 0:
+            plt.close(fig)
+            return
+        idx_pos = min(idx_pos, len(failures) - 1)
+        active_idx = 0
+        load_current_points()
+        update_display()
 
     def next_failure() -> None:
         nonlocal idx_pos
@@ -359,7 +690,7 @@ def launch_review(
         update_display()
 
     def on_key(event) -> None:
-        nonlocal active_idx
+        nonlocal active_idx, show_text
         def apply_state(state: str) -> None:
             payload = _apply_review_status(
                 refined_parent,
@@ -382,8 +713,27 @@ def launch_review(
             prev_failure()
         elif event.key == "r":
             reset_points()
+        elif event.key == "t":
+            show_text = not show_text
+            update_display()
         elif event.key == "s":
             save_current()
+        elif event.key == "b":
+            if flag_path is None:
+                print("No frame flag file configured. Pass --frame-flag-file to enable frame flagging.")
+            else:
+                roi_idx = int(failures[idx_pos])
+                frame_idx = int(frame_indices[roi_idx])
+                try:
+                    _append_flagged_frame(flag_path, zarr_path, frame_idx, roi_idx)
+                    print(f"Flagged frame {frame_idx} (ROI {roi_idx}) for keypoint follow-up.")
+                    print(f"Frame flag file: {flag_path}")
+                except Exception as exc:
+                    print(f"Failed to flag frame: {exc}")
+        elif event.key == "d":
+            mark_detection_issue()
+        elif event.key == "x":
+            mark_no_keypoints()
         elif event.key == "a":
             apply_state(review_state)
         elif event.key == "R":
@@ -395,16 +745,25 @@ def launch_review(
         elif event.key == "q":
             plt.close(fig)
 
-    print("\nKeypoint Failure Review")
+    print("\nKeypoint Review")
     print(f"  Zarr: {zarr_path}")
     refined_label = f"{refined_run} (latest)" if using_latest else refined_run
     print(f"  Refined run: {refined_label}")
     print(f"  Crop run: {crop_run}")
-    print(f"  Failures to review: {len(failures)}")
+    if targeted:
+        print(f"  ROIs to review (target frames): {len(failures)}")
+    elif include_all:
+        print(f"  ROIs to review: {len(failures)}")
+    else:
+        print(f"  Failures to review: {len(failures)}")
     print("\nControls:")
     print("  Click: set active keypoint")
     print("  1/2/3: select bladder/left/right")
     print("  s: save correction")
+    print("  t: toggle text overlays")
+    print("  b: flag frame for follow-up (writes --frame-flag-file)")
+    print("  d: flag detection issue (writes retune flags)")
+    print("  x: mark fish present but no keypoints")
     print("  r: reset points from current data")
     print("  n/p: next/previous failure")
     print("  a: approve keypoints")

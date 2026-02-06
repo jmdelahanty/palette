@@ -10,6 +10,7 @@ keypoints.
 from __future__ import annotations
 
 import math
+import sys
 import argparse
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Sequence
@@ -534,7 +535,13 @@ def detect_keypoints_yolo(
     )
 
     git_info = get_git_info()
-    env_info = get_environment_info()
+    env_info = get_environment_info(
+        include_all_packages=False,
+        disk_path=str(zarr_path),
+        collect_ip=False,
+        capture_env_vars=False,
+    )
+    platform_info = env_info.get("platform", {})
 
     run_group.attrs.update({
         "method": "yolo_pose",
@@ -571,6 +578,37 @@ def detect_keypoints_yolo(
     })
     if source_refined_run:
         run_group.attrs["source_refined_run"] = source_refined_run
+    provenance = {
+        "stage": "keypoints_detect",
+        "method": "yolo_pose",
+        "command": " ".join(sys.argv),
+        "created_at_utc": run_group.attrs.get("keypoints_timestamp_utc"),
+        "git": git_info,
+        "environment": env_info.get("environment"),
+        "platform": {
+            "hostname": platform_info.get("hostname"),
+            "system": platform_info.get("system"),
+            "release": platform_info.get("release"),
+            "python_version": platform_info.get("python_version"),
+            "machine": platform_info.get("machine"),
+        },
+        "parameters": run_group.attrs.get("parameters"),
+        "inputs": {
+            "source_crop_run": latest_crop,
+            "source_detect_run": source_detect_run or "unknown",
+            "source_refined_run": source_refined_run,
+            "frame_source": crop_group.attrs.get("video_source_type", "zarr"),
+            "source_video_path": crop_group.attrs.get("video_source_path"),
+        },
+        "artifacts": {
+            "model_path": str(model_path_resolved),
+            "model_name": model_path.name,
+            "ultralytics_version": ultralytics_version,
+            "device": model_device,
+        },
+    }
+    provenance = {k: v for k, v in provenance.items() if v is not None}
+    run_group.attrs["provenance"] = provenance
     if override_data is not None:
         run_group.attrs["refined_roi_overrides"] = int(override_data["count"])
         run_group.attrs["refined_roi_source"] = override_data["path"]

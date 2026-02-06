@@ -6,7 +6,8 @@ from .system import (
     get_gpu_info,
     get_environment_info,
     get_environment_summary,
-    get_software_versions
+    get_software_versions,
+    build_invocation_record,
 )
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     'get_gpu_info',
     'get_environment_info',
     'get_environment_summary',
-    'get_software_versions'
+    'get_software_versions',
+    'build_invocation_record',
 ]

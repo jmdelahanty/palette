@@ -246,6 +246,50 @@ def get_video_metadata(video_path: Path, cap: Optional[cv2.VideoCapture], width:
     return meta
 
 
+def _set_attr(attrs: Any, key: str, value: Any, *, overwrite: bool) -> bool:
+    if value is None:
+        return False
+    if overwrite or key not in attrs or attrs.get(key) in (None, ""):
+        attrs[key] = value
+        return True
+    return False
+
+
+def _write_raw_video_metadata(
+    root: zarr.Group,
+    vid_meta: Dict[str, Any],
+    *,
+    overwrite: bool = False,
+    import_purpose: str = "production",
+) -> Dict[str, Any]:
+    raw = root.require_group("raw_video")
+    has_arrays = any(name in raw for name in ("images_full", "images_ds", "images_ds_rgb"))
+    now = datetime.now(timezone.utc).isoformat()
+
+    updates: Dict[str, Any] = {}
+    payload = {
+        "import_method": "metadata_only",
+        "import_mode": "metadata_only",
+        "import_stage": "metadata_only",
+        "import_timestamp": now,
+        "import_purpose": import_purpose,
+        "downsampled": False,
+        "fps": vid_meta.get("fps"),
+        "total_frames": vid_meta.get("total_frames"),
+        "source_video": vid_meta.get("source_video"),
+        "source_path": vid_meta.get("source_path"),
+        "original_resolution": (vid_meta.get("height"), vid_meta.get("width")),
+        "video_codec": vid_meta.get("codec"),
+        "video_pix_fmt": vid_meta.get("pix_fmt"),
+        "has_full_resolution": has_arrays and "images_full" in raw,
+        "has_downsampled": has_arrays and ("images_ds" in raw or "images_ds_rgb" in raw),
+    }
+    for key, value in payload.items():
+        if _set_attr(raw.attrs, key, value, overwrite=overwrite):
+            updates[key] = value
+    return updates
+
+
 def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """Load configuration from YAML file."""
     import yaml
@@ -291,7 +335,9 @@ def detect_yolo(
     max_det: Optional[int] = None,
     batch_size: Optional[int] = None,
     console: Optional[Console] = None,
-    use_gpu: Optional[bool] = None
+    use_gpu: Optional[bool] = None,
+    write_raw_video_metadata: bool = False,
+    overwrite_raw_video_metadata: bool = False,
 ) -> str:
     """
     Run YOLO inference directly on video file, creating minimal zarr output.
@@ -310,6 +356,8 @@ def detect_yolo(
         batch_size: Frames to process at once (overrides config)
         console: Rich console
         use_gpu: Use GPU for inference (overrides config)
+        write_raw_video_metadata: Create/update raw_video attrs (no frames) for registry/provenance
+        overwrite_raw_video_metadata: Overwrite existing raw_video attrs when writing metadata
         
     Returns:
         Name of detect_runs group
@@ -522,6 +570,7 @@ def detect_yolo(
             # Pipeline info
             'created_at_utc': datetime.now(timezone.utc).isoformat(),
             'pipeline_type': 'yolo_inference',
+            'zarr_purpose': 'production',
             'has_raw_video': False,
             'detection_method': 'yolo',
             
@@ -667,6 +716,16 @@ def detect_yolo(
     root.attrs['resized_for_inference'] = resize_dims is not None
     if source_zarr_path is not None:
         root.attrs['source_zarr_path'] = str(source_zarr_path)
+
+    if write_raw_video_metadata:
+        updates = _write_raw_video_metadata(
+            root,
+            vid_meta,
+            overwrite=overwrite_raw_video_metadata,
+            import_purpose="production",
+        )
+        if updates:
+            console.print(f"[green]✓[/green] Wrote metadata-only raw_video attrs ({len(updates)} fields)")
     
     detect_group, run_name = get_run_group(root, 'detect', console, create_new=True)
     console.print(f"[green]✓[/green] Writing detections to detect_runs/{run_name}")
@@ -1027,6 +1086,29 @@ def detect_yolo(
     detect_group.attrs['inference_average_fps'] = float(n_frames / total_time) if total_time > 0 else 0.0
     detect_group.attrs['inference_avg_batch_ms'] = float(avg_inference * 1000.0) if inference_times else 0.0
     detect_group.attrs['inference_avg_read_ms'] = float(np.mean(read_times) * 1000.0) if read_times else 0.0
+
+    provenance = {
+        "stage": "detect",
+        "method": "yolo",
+        "command": " ".join(sys.argv),
+        "created_at_utc": detect_group.attrs.get("detect_timestamp_utc"),
+        "git": git_info,
+        "environment": env_info.get("environment"),
+        "platform": {
+            "hostname": env_info["platform"].get("hostname"),
+            "system": env_info["platform"].get("system"),
+            "release": env_info["platform"].get("release"),
+            "python_version": env_info["platform"].get("python_version"),
+        },
+        "parameters": detect_group.attrs.get("parameters"),
+        "inputs": {
+            "frame_source": "external",
+            "source_video_path": root.attrs.get("source_video_path"),
+            "source_zarr_path": detect_group.attrs.get("source_zarr_path"),
+        },
+    }
+    provenance = {k: v for k, v in provenance.items() if v is not None}
+    detect_group.attrs["provenance"] = provenance
     
     # Mark as latest
     root['detect_runs'].attrs['latest'] = run_name
@@ -1123,6 +1205,16 @@ Examples:
                        help='Inference batch size (overrides config)')
     parser.add_argument('--cpu', action='store_true', 
                        help='Force CPU inference')
+    parser.add_argument(
+        '--write-raw-video-metadata',
+        action='store_true',
+        help='Write metadata-only raw_video attrs (no frames) for registry/provenance',
+    )
+    parser.add_argument(
+        '--overwrite-raw-video-metadata',
+        action='store_true',
+        help='Overwrite existing raw_video attrs when writing metadata-only import',
+    )
     
     args = parser.parse_args()
     
@@ -1136,7 +1228,9 @@ Examples:
             iou_threshold=args.iou,
             max_det=args.max_det,
             batch_size=args.batch_size,
-            use_gpu=not args.cpu if args.cpu else None
+            use_gpu=not args.cpu if args.cpu else None,
+            write_raw_video_metadata=args.write_raw_video_metadata,
+            overwrite_raw_video_metadata=args.overwrite_raw_video_metadata,
         )
     except Exception as e:
         console = Console()

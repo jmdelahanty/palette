@@ -16,6 +16,7 @@ names: ['fish']
 # - 'detect': Original detections (blob/YOLO outputs, may contain jumps)
 # - 'filtered': Refined detections with jumps/outliers removed (RECOMMENDED)
 # - 'interpolated': Refined with gaps filled (includes synthetic data)
+# - 'manual': Manual refined detections (highest quality when available)
 #
 # RECOMMENDATION: Use 'filtered' as default for training on real data only.
 # ================================================================================
@@ -24,7 +25,7 @@ datasets:
   # Dataset 1
   arena4:
     zarr_path: /nvme1/danio/danio-rgb4.zarr
-    source_type: detect        # detect | filtered | interpolated
+    source_type: manual        # detect | filtered | interpolated | manual
     input_format: rgb         # gray (default) or rgb if importing color downsampled frames
     
     # Optional: Custom split ratios per dataset (defaults to global split below)
@@ -52,6 +53,10 @@ random_seed: 42
 # "proportional": Sample proportionally to dataset size (uses all data)
 # "weighted": Manual control via dataset_weights below
 sampling_strategy: balanced
+
+# Fail fast when requested dataset source_type does not match available crop source.
+# Set true only when intentionally allowing fallback to available source.
+allow_source_mismatch: false
 
 # Optional: Only needed for 'weighted' sampling strategy
 # Uncomment and adjust weights as needed (must match dataset names above)

@@ -34,7 +34,7 @@ import zarr
 
 from .config import DetectConfig, DatasetConfig
 from .zarr_yolo_dataset_loader import create_zarr_dataset, ZarrDatasetConfig
-from ..utils.system import get_git_info
+from ..utils.system import get_git_info, build_invocation_record
 from ..registry.db import Registry, RegistryPaths
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
@@ -233,7 +233,7 @@ def get_zarr_metadata(zarr_paths, console=None):
 
 def display_zarr_metadata(metadata, console):
     """Display zarr metadata in a nice table."""
-    
+    printed_tables = 0
     for zarr_name, meta in metadata.items():
         if 'error' in meta:
             console.print(f"[red]✗ {zarr_name}: {meta['error']}[/red]")
@@ -266,6 +266,8 @@ def display_zarr_metadata(metadata, console):
                 source_display = f"[yellow]{source_type}[/yellow] (jumps removed)"
             elif source_type == 'interpolated':
                 source_display = f"[magenta]{source_type}[/magenta] (gaps filled)"
+            elif source_type == 'manual':
+                source_display = f"[green]{source_type}[/green] (manual review)"
             else:
                 source_display = source_type
             
@@ -286,9 +288,65 @@ def display_zarr_metadata(metadata, console):
                 table.add_row("Jumps Removed", str(quality['jumps_removed']))
             if 'gaps_filled' in quality:
                 table.add_row("Gaps Filled", str(quality['gaps_filled']))
-        
-    console.print(table)
-    console.print()
+
+        console.print(table)
+        console.print()
+        printed_tables += 1
+
+    if printed_tables == 0 and metadata:
+        console.print("[yellow]No valid dataset metadata tables to display.[/yellow]")
+
+
+def _normalize_source_type(value, default: str = "detect") -> str:
+    if value is None:
+        return default
+    if hasattr(value, "value"):
+        value = value.value
+    text = str(value).strip().lower()
+    return text if text else default
+
+
+def _collect_source_mismatches(full_config: DetectConfig, zarr_metadata: dict) -> list[dict]:
+    mismatches: list[dict] = []
+    for dataset_name, dataset_cfg in (full_config.datasets or {}).items():
+        zarr_path = getattr(dataset_cfg, "zarr_path", None)
+        if zarr_path is None:
+            continue
+
+        zarr_key = Path(zarr_path).name
+        dataset_meta = zarr_metadata.get(zarr_key)
+        if not isinstance(dataset_meta, dict) or "error" in dataset_meta:
+            continue
+
+        requested_source = _normalize_source_type(getattr(dataset_cfg, "source_type", None))
+        crop_info = dataset_meta.get("crop_info") if isinstance(dataset_meta.get("crop_info"), dict) else {}
+        detection_info = (
+            dataset_meta.get("detection_info") if isinstance(dataset_meta.get("detection_info"), dict) else {}
+        )
+
+        available_source = None
+        available_source_path = None
+        if crop_info:
+            available_source = _normalize_source_type(crop_info.get("source_type"))
+            available_source_path = crop_info.get("source_path")
+        elif detection_info:
+            available_source = "detect"
+            run_name = detection_info.get("run_name")
+            if run_name:
+                available_source_path = f"detect_runs/{run_name}"
+
+        if available_source and requested_source != available_source:
+            mismatches.append(
+                {
+                    "dataset_name": dataset_name,
+                    "zarr_path": str(zarr_path),
+                    "requested_source_type": requested_source,
+                    "available_source_type": available_source,
+                    "available_source_path": available_source_path,
+                }
+            )
+
+    return mismatches
 
 
 def _load_manifest_summary(manifest_path: str | None) -> dict:
@@ -305,11 +363,13 @@ def _load_manifest_summary(manifest_path: str | None) -> dict:
         dataset_ids = [
             ds.get("dataset_id") for ds in datasets if isinstance(ds, dict) and ds.get("dataset_id")
         ]
+        manifest_set_id = payload.get("set_id")
         return {
             "manifest_path": str(path),
             "manifest_sha256": digest,
             "manifest_dataset_ids": dataset_ids,
             "manifest_dataset_count": len(dataset_ids),
+            "manifest_set_id": manifest_set_id,
         }
     except Exception as exc:
         return {"manifest_error": str(exc), "manifest_path": str(path)}
@@ -321,6 +381,93 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _safe_sha256_file(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        return _sha256_file(path)
+    except Exception:
+        return None
+
+
+def _record_registry_training_run(
+    *,
+    args,
+    console: Console,
+    invocation_payload: dict | None,
+    run_id: str,
+    set_id: str | None,
+    config_path: Path | None,
+    manifest_path: Path | None,
+    model_path: Path | None,
+    metrics_path: Path | None,
+    status: str,
+    final_metrics: dict | None,
+    export_artifacts: dict | None = None,
+) -> None:
+    registry = None
+    try:
+        registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
+        registry = Registry(registry_path)
+        registry.record_training_run(
+            run_id=run_id,
+            set_id=set_id,
+            config_path=config_path,
+            manifest_path=manifest_path,
+            model_path=model_path,
+            metrics_path=metrics_path,
+            config_sha256=_safe_sha256_file(config_path),
+            manifest_sha256=_safe_sha256_file(manifest_path),
+            model_sha256=_safe_sha256_file(model_path),
+            metrics_sha256=_safe_sha256_file(metrics_path),
+            status=status,
+            final_metrics=final_metrics,
+            invocation=invocation_payload,
+        )
+        if status == "success" and export_artifacts:
+            onnx_path = export_artifacts.get("onnx_path")
+            if onnx_path:
+                registry.record_model_export(
+                    run_id=run_id,
+                    export_type="onnx",
+                    path=Path(onnx_path),
+                    manifest_path=Path(export_artifacts.get("onnx_manifest_path"))
+                    if export_artifacts.get("onnx_manifest_path")
+                    else None,
+                    metadata={
+                        "sha256": export_artifacts.get("onnx_sha256"),
+                        "manifest_sha256": export_artifacts.get("onnx_manifest_sha256"),
+                        "errors": export_artifacts.get("errors"),
+                    },
+                )
+            engine_path = export_artifacts.get("engine_path")
+            if engine_path:
+                registry.record_model_export(
+                    run_id=run_id,
+                    export_type="tensorrt",
+                    path=Path(engine_path),
+                    manifest_path=Path(export_artifacts.get("engine_manifest_path"))
+                    if export_artifacts.get("engine_manifest_path")
+                    else None,
+                    metadata={
+                        "sha256": export_artifacts.get("engine_sha256"),
+                        "manifest_sha256": export_artifacts.get("engine_manifest_sha256"),
+                        "errors": export_artifacts.get("errors"),
+                    },
+                )
+        console.print(f"[green]✓ Registry updated:[/green] {registry_path}")
+    except Exception as exc:
+        console.print(f"[yellow]Registry update skipped:[/yellow] {exc}")
+    finally:
+        if registry is not None:
+            try:
+                registry.close()
+            except Exception:
+                pass
 
 
 def _normalize_imgsz(value) -> tuple[int, int]:
@@ -599,6 +746,7 @@ def _export_detection_artifacts(
         return export_info
 
     if engine_path.exists():
+        engine_sha = _sha256_file(engine_path)
         engine_manifest = {
             "schema_version": 1,
             "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -613,7 +761,7 @@ def _export_detection_artifacts(
             },
             "engine": {
                 "path": str(engine_path),
-                "sha256": _sha256_file(engine_path),
+                "sha256": engine_sha,
             },
             "onnx_manifest_path": str(onnx_manifest_path),
             "export": {
@@ -653,6 +801,9 @@ def _export_detection_artifacts(
         {
             "engine_path": str(engine_path),
             "engine_manifest_path": str(manifest_path),
+            "engine_sha256": _safe_sha256_file(engine_path),
+            "engine_manifest_sha256": _safe_sha256_file(manifest_path),
+            "onnx_manifest_sha256": _safe_sha256_file(onnx_manifest_path),
         }
     )
     return export_info
@@ -661,10 +812,20 @@ def _export_detection_artifacts(
 def main(args):
     console = Console()
     console.print("[bold cyan] Starting YOLO Detection Training[/bold cyan]\n")
+    invocation_payload = build_invocation_record(
+        tool="fisheye.training.train_detection",
+        args=args,
+    ) if args.log_registry else None
+    config_path = Path(args.config_path) if args.config_path else None
+    manifest_path = Path(args.manifest) if args.manifest else None
+    manifest_summary = _load_manifest_summary(args.manifest)
+    effective_set_id = args.set_id or manifest_summary.get("manifest_set_id")
+    fallback_run_id = f"{(args.run_name or 'multi_zarr_train')}_{time.strftime('%Y%m%d-%H%M%S')}"
 
     try:
         # Load and validate config
         full_config = DetectConfig.from_yaml(args.config_path)
+        allow_source_mismatch = bool(full_config.allow_source_mismatch or args.allow_source_mismatch)
         
         # Extract dataset config fields from flat structure
         zarr_config_dict = {
@@ -673,17 +834,63 @@ def main(args):
             'random_seed': full_config.random_seed,
             'sampling_strategy': full_config.sampling_strategy,
             'dataset_weights': full_config.dataset_weights,
+            'allow_source_mismatch': allow_source_mismatch,
         }
         config = ZarrDatasetConfig(**zarr_config_dict)
         console.print(f"[bold green]✓ Loaded config:[/bold green] {args.config_path}\n")
     except Exception as e:
         console.print(f"[bold red]✗ Error loading config:[/bold red] {e}")
+        if args.log_registry:
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=f"{fallback_run_id}_config_error",
+                set_id=effective_set_id,
+                config_path=config_path,
+                manifest_path=manifest_path,
+                model_path=None,
+                metrics_path=None,
+                status="failed",
+                final_metrics={
+                    "stage": "config_load",
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                },
+            )
         return
 
     # Get comprehensive zarr metadata
     console.print("[bold cyan] Analyzing Zarr Files...[/bold cyan]\n")
     zarr_metadata = get_zarr_metadata(config.get_zarr_paths(), console)
     display_zarr_metadata(zarr_metadata, console)
+
+    source_mismatches = _collect_source_mismatches(full_config, zarr_metadata)
+    if source_mismatches:
+        if allow_source_mismatch:
+            console.print(
+                "[yellow]⚠ Source-type mismatches detected; proceeding because allow_source_mismatch is enabled.[/yellow]"
+            )
+            for mismatch in source_mismatches:
+                console.print(
+                    "[yellow]  - {name}: requested={requested}, available={available} ({path})[/yellow]".format(
+                        name=mismatch["dataset_name"],
+                        requested=mismatch["requested_source_type"],
+                        available=mismatch["available_source_type"],
+                        path=mismatch.get("available_source_path") or "unknown path",
+                    )
+                )
+            console.print()
+        else:
+            details = "; ".join(
+                f"{item['dataset_name']}: requested={item['requested_source_type']} available={item['available_source_type']}"
+                for item in source_mismatches
+            )
+            raise ValueError(
+                "Dataset source_type mismatch detected: "
+                f"{details}. Re-run crop/curation to match source_type, "
+                "or pass --allow-source-mismatch."
+            )
     
     # Check for interpolated data
     has_interpolated = any(
@@ -694,7 +901,7 @@ def main(args):
     
     if has_interpolated:
         console.print("[yellow] Warning: Some datasets include interpolated (synthetic) data[/yellow]")
-        console.print("[dim]  To filter these out, add 'filter_interpolated: true' to your config[/dim]\n")
+        console.print("[dim]  To exclude synthetic rows, use source_type=filtered/detect/manual in dataset config[/dim]\n")
 
     # Setup dataloader
     def get_zarr_dataloader(self, dataset_path, batch_size=16, **kwargs):
@@ -730,16 +937,37 @@ def main(args):
     console.print("[bold green] Starting Training...[/bold green]\n")
     training_start_time = time.time()
     
-    results = model.train(
-        trainer=DetTrainer,
-        data=args.config_path,
-        name=args.run_name or "multi_zarr_train",
-        **training_params
-    )
+    try:
+        results = model.train(
+            trainer=DetTrainer,
+            data=args.config_path,
+            name=args.run_name or "multi_zarr_train",
+            **training_params
+        )
+    except Exception as exc:
+        console.print(f"[bold red]✗ Training failed:[/bold red] {exc}")
+        if args.log_registry:
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=f"{fallback_run_id}_train_failed",
+                set_id=effective_set_id,
+                config_path=config_path,
+                manifest_path=manifest_path,
+                model_path=None,
+                metrics_path=None,
+                status="failed",
+                final_metrics={
+                    "stage": "model_train",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
+        raise
     
     training_duration_seconds = time.time() - training_start_time
 
-    manifest_summary = _load_manifest_summary(args.manifest)
     export_artifacts = {}
     if args.export_onnx or args.export_trt:
         weights_path = results.save_dir / "weights" / "best.pt"
@@ -755,11 +983,18 @@ def main(args):
 
     # Log training metadata
     console.print("\n[bold cyan] Logging Training Report...[/bold cyan]")
+    final_validation_metrics = None
     try:
         git_info = get_git_info()
         results_df = pd.read_csv(results.save_dir / 'results.csv')
         results_df.columns = results_df.columns.str.strip()
         last_epoch_metrics = results_df.iloc[-1]
+        final_validation_metrics = {
+            'precision': float(last_epoch_metrics.get('metrics/precision(B)', 0)),
+            'recall': float(last_epoch_metrics.get('metrics/recall(B)', 0)),
+            'mAP50': float(last_epoch_metrics.get('metrics/mAP50(B)', 0)),
+            'mAP50_95': float(last_epoch_metrics.get('metrics/mAP50-95(B)', 0))
+        }
 
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(training_start_time))
         final_config_filename = f"{timestamp}_detection_training_report.yaml"
@@ -769,6 +1004,11 @@ def main(args):
         final_report = full_config.model_dump()
         final_report['training_history'] = {
             'source_zarr_metadata': zarr_metadata,
+            'source_type_resolution': {
+                'allow_source_mismatch': bool(allow_source_mismatch),
+                'mismatch_count': len(source_mismatches),
+                'mismatches': source_mismatches,
+            },
             **manifest_summary,
             'export_artifacts': export_artifacts,
             'training_run_name': results.save_dir.name,
@@ -787,12 +1027,7 @@ def main(args):
                 'cls_loss': float(last_epoch_metrics.get('train/cls_loss', 0)),
                 'dfl_loss': float(last_epoch_metrics.get('train/dfl_loss', 0)),
             },
-            'final_validation_metrics': {
-                'precision': float(last_epoch_metrics.get('metrics/precision(B)', 0)),
-                'recall': float(last_epoch_metrics.get('metrics/recall(B)', 0)),
-                'mAP50': float(last_epoch_metrics.get('metrics/mAP50(B)', 0)),
-                'mAP50_95': float(last_epoch_metrics.get('metrics/mAP50-95(B)', 0))
-            }
+            'final_validation_metrics': final_validation_metrics
         }
         
         # Save report
@@ -819,47 +1054,23 @@ def main(args):
         traceback.print_exc()
     
     if args.log_registry:
-        try:
-            registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
-            registry = Registry(registry_path)
-            run_id = results.save_dir.name
-            model_path = results.save_dir / "weights" / "best.pt"
-            metrics_path = results.save_dir / "results.csv"
-            registry.record_training_run(
-                run_id=run_id,
-                set_id=args.set_id,
-                config_path=Path(args.config_path),
-                manifest_path=Path(args.manifest) if args.manifest else None,
-                model_path=model_path if model_path.exists() else None,
-                metrics_path=metrics_path if metrics_path.exists() else None,
-            )
-            if export_artifacts:
-                onnx_path = export_artifacts.get("onnx_path")
-                if onnx_path:
-                    registry.record_model_export(
-                        run_id=run_id,
-                        export_type="onnx",
-                        path=Path(onnx_path),
-                        metadata={
-                            "sha256": export_artifacts.get("onnx_sha256"),
-                            "errors": export_artifacts.get("errors"),
-                        },
-                    )
-                engine_path = export_artifacts.get("engine_path")
-                if engine_path:
-                    registry.record_model_export(
-                        run_id=run_id,
-                        export_type="tensorrt",
-                        path=Path(engine_path),
-                        manifest_path=Path(export_artifacts.get("engine_manifest_path"))
-                        if export_artifacts.get("engine_manifest_path")
-                        else None,
-                        metadata={"errors": export_artifacts.get("errors")},
-                    )
-            registry.close()
-            console.print(f"[green]✓ Registry updated:[/green] {registry_path}")
-        except Exception as exc:
-            console.print(f"[yellow]Registry update skipped:[/yellow] {exc}")
+        run_id = results.save_dir.name
+        model_path = results.save_dir / "weights" / "best.pt"
+        metrics_path = results.save_dir / "results.csv"
+        _record_registry_training_run(
+            args=args,
+            console=console,
+            invocation_payload=invocation_payload,
+            run_id=run_id,
+            set_id=effective_set_id,
+            config_path=config_path,
+            manifest_path=manifest_path,
+            model_path=model_path if model_path.exists() else None,
+            metrics_path=metrics_path if metrics_path.exists() else None,
+            status="success",
+            final_metrics=final_validation_metrics,
+            export_artifacts=export_artifacts,
+        )
 
     console.print("\n[bold green]✓ Training Complete![/bold green]")
 
@@ -886,7 +1097,15 @@ if __name__ == '__main__':
     parser.add_argument(
         "--set-id",
         type=str,
-        help="Optional training set ID to associate with this run."
+        help="Optional training set ID to associate with this run. Defaults to manifest set_id when available."
+    )
+    parser.add_argument(
+        "--allow-source-mismatch",
+        action="store_true",
+        help=(
+            "Allow fallback to available crop source type when it differs from "
+            "requested dataset source_type; mismatches are recorded in training report."
+        ),
     )
     parser.add_argument(
         "--registry",
@@ -895,8 +1114,16 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         "--log-registry",
+        dest="log_registry",
         action="store_true",
-        help="Record this training run in the registry."
+        default=True,
+        help="Record this training run in the registry (default: enabled)."
+    )
+    parser.add_argument(
+        "--no-log-registry",
+        dest="log_registry",
+        action="store_false",
+        help="Disable registry logging for this training run."
     )
     parser.add_argument(
         "--export-onnx",

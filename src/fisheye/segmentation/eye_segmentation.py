@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -667,7 +669,13 @@ def segment_eye_masks(
         )
 
     git_info = get_git_info()
-    env_info = get_environment_info()
+    env_info = get_environment_info(
+        include_all_packages=False,
+        disk_path=str(zarr_path),
+        collect_ip=False,
+        capture_env_vars=False,
+    )
+    platform_info = env_info.get("platform", {})
 
     run_group.attrs.update(
         {
@@ -690,6 +698,31 @@ def segment_eye_masks(
             "reason_counts": reason_counts,
         }
     )
+    provenance = {
+        "stage": "eye_masks",
+        "method": "traditional_eye_segmentation",
+        "command": " ".join(sys.argv),
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "git": git_info,
+        "environment": env_info.get("environment"),
+        "platform": {
+            "hostname": platform_info.get("hostname"),
+            "system": platform_info.get("system"),
+            "release": platform_info.get("release"),
+            "python_version": platform_info.get("python_version"),
+            "machine": platform_info.get("machine"),
+        },
+        "parameters": cfg.__dict__,
+        "inputs": {
+            "source_crop_run": crop_run,
+            "source_keypoints_run": keypoint_run,
+            "source_keypoint_group": keypoint_group_name,
+            "frame_source": crop_group.attrs.get("video_source_type", "zarr"),
+            "source_video_path": crop_group.attrs.get("video_source_path"),
+        },
+    }
+    provenance = {k: v for k, v in provenance.items() if v is not None}
+    run_group.attrs["provenance"] = provenance
     run_group.attrs["rejected_overlap"] = int(overlap_rejects)
     run_group.attrs["rejected_too_close"] = int(proximity_rejects)
     run_group.attrs["rejected_too_far"] = int(distance_rejects)

@@ -6,7 +6,6 @@ import numpy as np
 from torch.utils.data import Dataset
 from typing import List, Dict, Tuple, Optional
 from pathlib import Path
-from sklearn.model_selection import train_test_split
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
@@ -32,7 +31,7 @@ class SamplingStrategy(Enum):
 class SingleDatasetConfig:
     """Configuration for a single dataset."""
     zarr_path: str
-    source_type: str = 'filtered'  # 'detect', 'filtered', or 'interpolated'
+    source_type: str = 'filtered'  # 'detect', 'filtered', 'interpolated', or 'manual'
     input_format: str = 'gray'  # 'gray' or 'rgb'
     split: Optional[Dict[str, float]] = None  # {'train': 0.8, 'val': 0.2}
     keypoint_run: Optional[str] = None  # Optional specific keypoints run
@@ -52,6 +51,7 @@ class ZarrDatasetConfig:
     split_ratio: float = 0.8  # Used as default if datasets don't specify splits
     random_seed: int = 42
     dataset_weights: Optional[Dict[str, float]] = None
+    allow_source_mismatch: bool = False
     target_size: Optional[int] = None
     min_confidence: float = 0.0
     filter_interpolated: bool = False  # DEPRECATED: Use source_type instead
@@ -93,12 +93,23 @@ class ZarrDatasetConfig:
     def get_zarr_paths(self) -> List[str]:
         """Get list of all zarr paths from datasets."""
         return [config.zarr_path for config in self.datasets.values()]
+
+    def get_dataset_name(self, zarr_path: str) -> str:
+        """Return configured dataset key for a zarr path."""
+        for name, config in self.datasets.items():
+            if config.zarr_path == zarr_path:
+                return name
+        return Path(zarr_path).stem
     
     def get_source_type(self, zarr_path: str) -> str:
         """Get source_type for a specific zarr path."""
         for config in self.datasets.values():
             if config.zarr_path == zarr_path:
-                return config.source_type
+                value = getattr(config, "source_type", "filtered")
+                if hasattr(value, "value"):
+                    value = value.value
+                text = str(value).strip().lower()
+                return text if text else "filtered"
         return 'filtered'  # Default
 
     def get_keypoint_run(self, zarr_path: str) -> Optional[str]:
@@ -118,6 +129,43 @@ class ZarrDatasetConfig:
                 fmt = str(value).strip().lower()
                 return "rgb" if fmt == "rgb" else "gray"
         return "gray"
+
+    def get_split_config(self, zarr_path: str) -> Optional[Tuple[float, float]]:
+        """Return per-dataset split ratios (train, val) for a zarr path, if configured."""
+        for config in self.datasets.values():
+            if config.zarr_path != zarr_path:
+                continue
+
+            split_cfg = getattr(config, "split", None)
+            if split_cfg is None:
+                return None
+
+            if isinstance(split_cfg, dict):
+                train_raw = split_cfg.get("train")
+                val_raw = split_cfg.get("val")
+            else:
+                train_raw = getattr(split_cfg, "train", None)
+                val_raw = getattr(split_cfg, "val", None)
+
+            if train_raw is None or val_raw is None:
+                raise ValueError(
+                    f"Dataset '{self.get_dataset_name(zarr_path)}' split must define both 'train' and 'val'."
+                )
+
+            train_ratio = float(train_raw)
+            val_ratio = float(val_raw)
+            if train_ratio < 0.0 or val_ratio < 0.0:
+                raise ValueError(
+                    f"Dataset '{self.get_dataset_name(zarr_path)}' split ratios must be non-negative."
+                )
+            if not np.isclose(train_ratio + val_ratio, 1.0, atol=1e-6):
+                raise ValueError(
+                    f"Dataset '{self.get_dataset_name(zarr_path)}' split must sum to 1.0 "
+                    f"(got train={train_ratio}, val={val_ratio})."
+                )
+            return train_ratio, val_ratio
+
+        return None
 
     @classmethod
     def from_yaml(cls, path: str):
@@ -174,6 +222,7 @@ class GlobalIndexManager:
     def __init__(self, config: ZarrDatasetConfig):
         self.config = config
         self.metadata_list = self._validate_and_get_metadata()
+        self.selected_indices_by_path: Dict[str, np.ndarray] = {}
         self.global_indices = self._build_global_index()
 
     @staticmethod
@@ -297,10 +346,20 @@ class GlobalIndexManager:
 
                 # Warn if requested != available
                 if requested_source != actual_source_type:
-                    logger.warning(
-                        f"  ⚠ {Path(path_str).name}: Requested '{requested_source}' but data is '{actual_source_type}'. "
-                        f"Using available '{actual_source_type}' data."
+                    message = (
+                        f"{Path(path_str).name}: requested source_type '{requested_source}' "
+                        f"but available source is '{actual_source_type}'."
                     )
+                    if self.config.allow_source_mismatch:
+                        logger.warning(
+                            f"  ⚠ {message} Using available '{actual_source_type}' data "
+                            "(allow_source_mismatch=True)."
+                        )
+                    else:
+                        raise ValueError(
+                            f"{message} Re-run crop/curation to match source_type, "
+                            "or set allow_source_mismatch=true (or pass --allow-source-mismatch)."
+                        )
 
                 if self.config.task == 'pose':
                     if 'keypoints_runs' not in root:
@@ -351,7 +410,7 @@ class GlobalIndexManager:
                 source_coords = root[bbox_array_path][:]
                 valid_mask = np.zeros(source_coords.shape[0], dtype=bool) if source_coords.size == 0 else ~np.isnan(source_coords[:, 0])
 
-                if requested_source in ['filtered', 'detect'] and has_interpolated and detection_source_path:
+                if requested_source in ['filtered', 'detect', 'manual'] and has_interpolated and detection_source_path:
                     detection_source = root[detection_source_path][:]
                     real_mask = (detection_source == 0)
                     valid_mask = valid_mask & real_mask
@@ -410,9 +469,9 @@ class GlobalIndexManager:
             return np.empty(0, dtype=int)
         valid_mask = ~np.isnan(coords[:, 0])
         
-        # Filter out interpolated data if source_type is 'filtered' or 'detect'
+        # Filter out interpolated data if source_type is 'filtered', 'detect', or 'manual'
         if (
-            metadata.requested_source_type in ['filtered', 'detect']
+            metadata.requested_source_type in ['filtered', 'detect', 'manual']
             and metadata.has_interpolated
             and metadata.detection_source_path
         ):
@@ -435,8 +494,57 @@ class GlobalIndexManager:
         
         return np.where(valid_mask)[0]
 
+    @staticmethod
+    def _sample_without_replacement(indices: np.ndarray, sample_count: int, rng: np.random.Generator) -> np.ndarray:
+        """Sample deterministic subset without replacement."""
+        if sample_count <= 0 or indices.size == 0:
+            return np.empty(0, dtype=int)
+        if sample_count >= indices.size:
+            return indices.copy()
+        return rng.choice(indices, size=sample_count, replace=False)
+
+    def _resolve_weight_map(self) -> Dict[str, float]:
+        """Resolve dataset weights keyed by zarr path."""
+        raw_weights = self.config.dataset_weights or {}
+        if not raw_weights:
+            raise ValueError("dataset_weights is required when sampling_strategy='weighted'.")
+
+        path_to_dataset_name = {
+            metadata.path: self.config.get_dataset_name(metadata.path)
+            for metadata in self.metadata_list
+        }
+        matched_keys = set()
+        path_weights: Dict[str, float] = {}
+
+        for metadata in self.metadata_list:
+            dataset_name = path_to_dataset_name[metadata.path]
+            candidates = [dataset_name, metadata.name, metadata.path]
+            selected_key = next((key for key in candidates if key in raw_weights), None)
+            if selected_key is None:
+                raise ValueError(
+                    "Missing dataset weight for "
+                    f"'{dataset_name}' ({Path(metadata.path).name}). "
+                    "Provide dataset_weights for all configured datasets."
+                )
+            matched_keys.add(selected_key)
+            weight_value = float(raw_weights[selected_key])
+            if weight_value <= 0:
+                raise ValueError(
+                    f"dataset_weights['{selected_key}'] must be > 0 (got {weight_value})."
+                )
+            path_weights[metadata.path] = weight_value
+
+        unknown_keys = sorted(set(raw_weights.keys()) - matched_keys)
+        if unknown_keys:
+            raise ValueError(
+                "dataset_weights has unknown keys that do not match configured datasets: "
+                + ", ".join(unknown_keys)
+            )
+
+        return path_weights
+
     def _build_global_index(self) -> List[Tuple[str, int]]:
-        """Build global index, filtering based on source_type."""
+        """Build global index based on source_type and sampling strategy."""
         logger.info("Building global sample index...")
         
         # Check if any dataset is using filtered/detect source types
@@ -445,25 +553,161 @@ class GlobalIndexManager:
             logger.info("  ℹ Using only real detections (filtering interpolated data)")
         
         all_valid_indices = {m.path: self._get_valid_indices(m) for m in self.metadata_list}
-        
-        global_indices = [(path, index) for path, indices in all_valid_indices.items() for index in indices]
-        
-        np.random.seed(self.config.random_seed)
-        np.random.shuffle(global_indices)
+        rng = np.random.default_rng(self.config.random_seed)
+
+        strategy = self.config.sampling_strategy
+        selected_by_path: Dict[str, np.ndarray] = {path: np.empty(0, dtype=int) for path in all_valid_indices}
+        path_weights_for_logging: Dict[str, float] = {}
+
+        if strategy == SamplingStrategy.PROPORTIONAL:
+            for path, indices in all_valid_indices.items():
+                selected_by_path[path] = indices.copy()
+            logger.info("  ✓ sampling_strategy=proportional (all valid samples).")
+
+        elif strategy == SamplingStrategy.BALANCED:
+            non_empty_counts = [indices.size for indices in all_valid_indices.values() if indices.size > 0]
+            min_count = min(non_empty_counts) if non_empty_counts else 0
+            for path, indices in all_valid_indices.items():
+                selected_by_path[path] = self._sample_without_replacement(indices, min_count, rng)
+            logger.info(
+                "  ✓ sampling_strategy=balanced "
+                f"(target {min_count} samples per non-empty dataset)."
+            )
+
+        elif strategy == SamplingStrategy.WEIGHTED:
+            path_weights = self._resolve_weight_map()
+            path_weights_for_logging = path_weights
+            available_counts = {
+                path: indices.size
+                for path, indices in all_valid_indices.items()
+                if indices.size > 0
+            }
+            if not available_counts:
+                logger.warning("  ⚠ No valid samples available after filtering.")
+                self.selected_indices_by_path = {
+                    path: indices.copy() for path, indices in selected_by_path.items()
+                }
+                return []
+
+            limiting_scale = min(
+                available_counts[path] / path_weights[path] for path in available_counts
+            )
+            target_counts = {
+                path: int(np.floor(path_weights[path] * limiting_scale))
+                for path in available_counts
+            }
+
+            # Guard against all-zero rounding for highly skewed weights.
+            if all(count == 0 for count in target_counts.values()):
+                max_path = max(available_counts, key=lambda p: path_weights[p])
+                target_counts[max_path] = 1
+
+            for path, indices in all_valid_indices.items():
+                target_count = target_counts.get(path, 0)
+                selected_by_path[path] = self._sample_without_replacement(indices, target_count, rng)
+
+            logger.info("  ✓ sampling_strategy=weighted (downsampled by dataset_weights).")
+
+        else:
+            raise ValueError(f"Unknown sampling strategy '{strategy}'.")
+
+        global_indices = [
+            (path, int(index))
+            for path, indices in selected_by_path.items()
+            for index in indices
+        ]
+        rng.shuffle(global_indices)
+        self.selected_indices_by_path = {
+            path: indices.copy() for path, indices in selected_by_path.items()
+        }
 
         logger.info(f"Global index created with {len(global_indices)} total samples.")
-        
-        # Log statistics per dataset
         for metadata in self.metadata_list:
-            n_samples = len(all_valid_indices[metadata.path])
-            logger.info(f"  {metadata.name}: {n_samples} samples")
-        
+            available = len(all_valid_indices[metadata.path])
+            selected = len(selected_by_path[metadata.path])
+            if strategy == SamplingStrategy.WEIGHTED:
+                weight = path_weights_for_logging[metadata.path]
+                logger.info(
+                    f"  {metadata.name}: {selected}/{available} samples (weight={weight:.4g})"
+                )
+            else:
+                logger.info(f"  {metadata.name}: {selected}/{available} samples")
+
         return global_indices
 
-    def get_split_indices(self) -> Tuple[List, List]:
-        return train_test_split(
-            self.global_indices, train_size=self.config.split_ratio, random_state=self.config.random_seed
+    def _resolve_split_ratios(self, zarr_path: str) -> Tuple[float, float, str]:
+        """Resolve train/val ratios for one dataset path."""
+        per_dataset_split = self.config.get_split_config(zarr_path)
+        if per_dataset_split is not None:
+            return per_dataset_split[0], per_dataset_split[1], "dataset"
+
+        train_ratio = float(self.config.split_ratio)
+        val_ratio = 1.0 - train_ratio
+        if train_ratio <= 0.0 or val_ratio <= 0.0:
+            raise ValueError(f"split_ratio must be in (0, 1), got {self.config.split_ratio}.")
+        return train_ratio, val_ratio, "global"
+
+    @staticmethod
+    def _compute_train_count(total_count: int, train_ratio: float, val_ratio: float) -> int:
+        """Compute stable per-dataset train count with small-dataset safeguards."""
+        if total_count <= 0:
+            return 0
+        if total_count == 1:
+            return 1 if train_ratio >= val_ratio else 0
+
+        train_count = int(round(total_count * train_ratio))
+        if train_ratio > 0.0:
+            train_count = max(1, train_count)
+        if val_ratio > 0.0:
+            train_count = min(total_count - 1, train_count)
+        return int(np.clip(train_count, 0, total_count))
+
+    def get_split_indices(self) -> Tuple[List[Tuple[str, int]], List[Tuple[str, int]]]:
+        """Apply per-dataset train/val splits, then merge into global train/val lists."""
+        logger.info("Applying per-dataset train/val splits...")
+
+        if not self.selected_indices_by_path:
+            fallback: Dict[str, List[int]] = {m.path: [] for m in self.metadata_list}
+            for path, det_idx in self.global_indices:
+                fallback.setdefault(path, []).append(int(det_idx))
+            self.selected_indices_by_path = {
+                path: np.asarray(indices, dtype=int) for path, indices in fallback.items()
+            }
+
+        rng = np.random.default_rng(self.config.random_seed)
+        train_indices: List[Tuple[str, int]] = []
+        val_indices: List[Tuple[str, int]] = []
+
+        for metadata in self.metadata_list:
+            path = metadata.path
+            selected = self.selected_indices_by_path.get(path, np.empty(0, dtype=int))
+            total = int(selected.size)
+            if total == 0:
+                logger.info(f"  {metadata.name}: train=0 val=0 (no samples after sampling strategy)")
+                continue
+
+            train_ratio, val_ratio, split_source = self._resolve_split_ratios(path)
+            shuffled = selected.copy()
+            rng.shuffle(shuffled)
+
+            train_count = self._compute_train_count(total, train_ratio, val_ratio)
+            train_part = shuffled[:train_count]
+            val_part = shuffled[train_count:]
+
+            train_indices.extend((path, int(det_idx)) for det_idx in train_part)
+            val_indices.extend((path, int(det_idx)) for det_idx in val_part)
+
+            logger.info(
+                f"  {metadata.name}: train={train_part.size} val={val_part.size} "
+                f"(split={train_ratio:.3f}/{val_ratio:.3f}, source={split_source})"
+            )
+
+        rng.shuffle(train_indices)
+        rng.shuffle(val_indices)
+        logger.info(
+            f"Per-dataset split complete: train={len(train_indices)} samples, val={len(val_indices)} samples."
         )
+        return train_indices, val_indices
 
 
 # Rest of the code remains the same (ZarrYOLODataset and create_zarr_dataset)

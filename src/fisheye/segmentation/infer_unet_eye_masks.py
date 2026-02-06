@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
+from datetime import datetime, timezone
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -394,7 +396,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if total_rois == 0:
         raise ValueError("ROI image array is empty; nothing to segment.")
 
-    env_info = get_environment_info()
+    env_info = get_environment_info(
+        include_all_packages=False,
+        disk_path=str(zarr_path),
+        collect_ip=False,
+        capture_env_vars=False,
+    )
+    platform_info = env_info.get("platform", {})
     parameters: Dict[str, object] = {
         "checkpoint": str(checkpoint_path),
         "batch_size": int(args.batch_size),
@@ -549,6 +557,39 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "hostname": env_info["platform"].get("hostname", "unknown"),
         }
     )
+    provenance = {
+        "stage": "eye_masks",
+        "method": "unet_eye_mask_segmenter",
+        "command": " ".join(sys.argv),
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "git": git_info,
+        "environment": env_info.get("environment"),
+        "platform": {
+            "hostname": platform_info.get("hostname"),
+            "system": platform_info.get("system"),
+            "release": platform_info.get("release"),
+            "python_version": platform_info.get("python_version"),
+            "machine": platform_info.get("machine"),
+        },
+        "parameters": {
+            "batch_size": int(args.batch_size),
+            "device": str(device),
+            "label_mode": label_mode,
+        },
+        "inputs": {
+            "source_eye_masks_run": source_run_name,
+            "source_crop_run": crop_run,
+            "source_keypoints_run": resolved_keypoints_run,
+            "frame_source": crop_group.attrs.get("video_source_type", "zarr"),
+            "source_video_path": crop_group.attrs.get("video_source_path"),
+        },
+        "artifacts": {
+            "checkpoint_path": str(checkpoint_path),
+            "segmenter": "unet",
+        },
+    }
+    provenance = {k: v for k, v in provenance.items() if v is not None}
+    run_group.attrs["provenance"] = provenance
     if "source_keypoints_run" in run_group.attrs:
         del run_group.attrs["source_keypoints_run"]
 

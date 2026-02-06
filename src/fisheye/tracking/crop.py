@@ -1628,6 +1628,41 @@ def crop_detections(
         crop_group.attrs['detect_review_status'] = review_status
     if preferred_policy:
         crop_group.attrs['detection_preferred_policy'] = preferred_policy
+    provenance = {
+        "stage": "crop",
+        "command": " ".join(sys.argv),
+        "created_at_utc": crop_group.attrs.get("created_at_utc"),
+        "git": env_info.get("git"),
+        "environment": env_info.get("environment"),
+        "platform": {
+            "hostname": env_info["platform"].get("hostname"),
+            "system": env_info["platform"].get("system"),
+            "release": env_info["platform"].get("release"),
+            "python_version": env_info["platform"].get("python_version"),
+            "machine": env_info["platform"].get("machine"),
+        },
+        "parameters": crop_params,
+        "parameter_source": param_source,
+        "inputs": {
+            "source_detect_run": detect_run_name,
+            "source_refined_run": refined_run_name,
+            "source_background_run": background_run_name,
+            "frame_source": crop_group.attrs.get("video_source_type", "zarr"),
+            "source_video_path": crop_group.attrs.get("video_source_path"),
+        },
+        "detection_source": {
+            "type": source_type,
+            "path": source_path,
+            "method": get_detection_method(source_group),
+        },
+        "scheduler": {
+            "dask_scheduler": scheduler,
+            "dask_num_workers": num_workers or os.cpu_count(),
+            "distributed": use_distributed,
+        },
+    }
+    provenance = {k: v for k, v in provenance.items() if v is not None}
+    crop_group.attrs['provenance'] = provenance
     crop_group.attrs['crop_signature'] = _build_crop_signature(crop_group.attrs)
 
     # Add GPU details if available (even though zarr workflow uses CPU)

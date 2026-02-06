@@ -531,29 +531,232 @@
 #         bg_group = bg_runs[latest]
 #         print("background_full present:", "background_full" in bg_group)
 
-import zarr, numpy as np
+# import zarr, numpy as np
 
-z = zarr.open("/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen.zarr", mode="r")
-crop_run = z["crop_runs"].attrs["latest"]
-cg = z[f"crop_runs/{crop_run}"]
+# z = zarr.open("/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen.zarr", mode="r")
+# crop_run = z["crop_runs"].attrs["latest"]
+# cg = z[f"crop_runs/{crop_run}"]
 
-frame = 170
-det = 0
-frame_counts = cg["frame_counts"][:]
-roi_idx = int(frame_counts[:frame].sum() + det)
+# frame = 170
+# det = 0
+# frame_counts = cg["frame_counts"][:]
+# roi_idx = int(frame_counts[:frame].sum() + det)
 
-roi = cg["roi_images"][roi_idx]
-x1, y1 = map(int, cg["roi_coordinates_full"][roi_idx])
-h, w = roi.shape
-H, W = z["raw_video/images_full"].shape[1:]
+# roi = cg["roi_images"][roi_idx]
+# x1, y1 = map(int, cg["roi_coordinates_full"][roi_idx])
+# h, w = roi.shape
+# H, W = z["raw_video/images_full"].shape[1:]
 
-print("ROI idx:", roi_idx)
-print("ROI top-left:", (x1, y1), "size:", (w, h))
-print("Frame size:", (W, H))
-print("Out of bounds?", x1 < 0 or y1 < 0 or (x1+w) > W or (y1+h) > H)
+# print("ROI idx:", roi_idx)
+# print("ROI top-left:", (x1, y1), "size:", (w, h))
+# print("Frame size:", (W, H))
+# print("Out of bounds?", x1 < 0 or y1 < 0 or (x1+w) > W or (y1+h) > H)
 
-bg = z["background_runs"][z["background_runs"].attrs["latest"]]["background_full"][:]
-bg_roi = bg[y1:y1+h, x1:x1+w]
-print("background_full shape:", bg.shape)
-print("background_roi shape:", bg_roi.shape)
-print("roi shape:", roi.shape)
+# bg = z["background_runs"][z["background_runs"].attrs["latest"]]["background_full"][:]
+# bg_roi = bg[y1:y1+h, x1:x1+w]
+# print("background_full shape:", bg.shape)
+# print("background_roi shape:", bg_roi.shape)
+# print("roi shape:", roi.shape)
+
+# import json, pathlib
+# src = pathlib.Path("keypoint_frame_flags.json")
+# data = json.loads(src.read_text())
+# out = pathlib.Path("keypoint_manual_list.txt")
+# out.write_text("\n".join(sorted(data.keys())) + "\n")
+# print(f"Wrote {out}")
+
+# import zarr, numpy as np, collections
+
+# path = "/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen.zarr"
+# root = zarr.open_group(path, mode="r")
+# parent = root["refined_keypoints_runs"]
+# run = parent[parent.attrs["latest"]]
+
+# usable = np.asarray(run["usable_keypoints"][:], dtype=bool)
+# print("usable false:", np.sum(~usable))
+
+# for name in ["refined_success", "confidence_valid", "geometry_valid", "heading_valid"]:
+#     arr = run.get(name)
+#     if arr is not None:
+#         vals = np.asarray(arr[:], dtype=bool)
+#         print(f"{name} false:", np.sum(~vals))
+
+# reason = run.get("reason")
+# if reason is not None:
+#     raw = np.asarray(reason[:], dtype=object)
+#     counts = collections.Counter()
+#     for r in raw[~usable]:
+#         if not r:
+#             continue
+#         for tag in str(r).split("|"):
+#             tag = tag.strip()
+#             if tag:
+#                 counts[tag] += 1
+#     print("reason tags (non-usable):", dict(counts))
+# import json
+# from pathlib import Path
+# import zarr
+
+# zarr_path = Path("/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen.zarr")
+# root = zarr.open(str(zarr_path), mode="r")
+
+# print("Zarr:", zarr_path)
+
+# # Camera metadata (exposure, framerate, etc.)
+# analysis = root.get("analysis_metadata")
+# if analysis is None:
+#     print("analysis_metadata: missing")
+# else:
+#     raw = analysis.attrs.get("camera_metadata")
+#     if raw is None:
+#         print("camera_metadata: missing")
+#         cam = None
+#     else:
+#         if isinstance(raw, (bytes, bytearray)):
+#             raw = raw.decode("utf-8", "ignore")
+#         if isinstance(raw, str):
+#             try:
+#                 cam = json.loads(raw)
+#             except Exception as e:
+#                 print("camera_metadata json load error:", e)
+#                 cam = None
+#         elif isinstance(raw, dict):
+#             cam = raw
+#         else:
+#             cam = None
+
+#     if isinstance(cam, dict):
+#         keys = sorted(cam.keys())
+#         print("camera_metadata keys:", keys)
+#         for key in keys:
+#             k = key.lower()
+#             if "exposure" in k or "frame" in k or k in {
+#                 "fps","framerate","frame_rate","frame_rate_hz","frame_rate_fps",
+#                 "acquisition_fps","acquisition_rate","gain","binning","bit_depth"
+#             }:
+#                 print(f"  {key}: {cam.get(key)}")
+#     else:
+#         print("camera_metadata: not dict")
+
+# # Raw video attrs
+# raw_video = root.get("raw_video")
+# if raw_video is None:
+#     print("raw_video: missing")
+# else:
+#     print("raw_video attrs keys:", sorted(raw_video.attrs.keys()))
+#     for key in ("fps","codec","pix_fmt","source_video","compressor","downsampled_resolution","original_resolution"):
+#         if key in raw_video.attrs:
+#             print(f"  raw_video.{key}:", raw_video.attrs.get(key))
+
+# # Root source video metadata
+# source_meta = root.attrs.get("source_video_metadata") or {}
+# print("source_video_metadata keys:", sorted(source_meta.keys()))
+# for key in ("fps","width","height","total_frames","codec","pix_fmt","source_path","source_video_path"):
+#     if key in source_meta:
+#         print(f"  source_video_metadata.{key}:", source_meta.get(key))
+
+# # Dish design (arena config or root attrs)
+# arena_config = None
+# stim_parent = root.get("analysis")
+# if stim_parent is not None and "stimulus_runs" in stim_parent:
+#     stim_runs = stim_parent["stimulus_runs"]
+#     latest = stim_runs.attrs.get("latest")
+#     if latest and latest in stim_runs:
+#         stim = stim_runs[latest]
+#         raw = stim.attrs.get("arena_config_json")
+#         if isinstance(raw, (bytes, bytearray)):
+#             raw = raw.decode("utf-8", "ignore")
+#         if isinstance(raw, str):
+#             try:
+#                 arena_config = json.loads(raw)
+#             except Exception:
+#                 arena_config = None
+#         elif isinstance(raw, dict):
+#             arena_config = raw
+
+# if isinstance(arena_config, dict):
+#     print("arena_config keys (sample):", sorted(arena_config.keys())[:15])
+#     for key in ("dish_design","arena_design","arena_config_name","experimental_area_shape"):
+#         if key in arena_config:
+#             print(f"  arena_config.{key}:", arena_config.get(key))
+# else:
+#     print("arena_config: missing or invalid")
+
+# print("root attrs dish_design:", root.attrs.get("dish_design"))
+# from pathlib import Path
+# import tempfile, shutil
+# import numpy as np, zarr
+
+# root_dir = Path(tempfile.mkdtemp(prefix='zarr_smoke_only_'))
+# print("tmp:", root_dir)
+# try:
+#     zarr_path = root_dir / 'sample.zarr'
+#     g = zarr.open_group(str(zarr_path), mode='w')
+#     raw = g.create_group('raw_video')
+#     raw.create_array('images_ds', data=np.zeros((2,8,8), dtype=np.uint8), chunks=(1,8,8))
+#     raw.create_array('images_ds_rgb', data=np.zeros((2,8,8,3), dtype=np.uint8), chunks=(1,8,8,3))
+#     raw.attrs['downsample_formats'] = ['gray', 'rgb']
+#     print("wrote zarr")
+#     r = zarr.open_group(str(zarr_path), mode='r')
+#     print("keys:", list(r['raw_video'].array_keys()))
+# finally:
+#     shutil.rmtree(root_dir, ignore_errors=True)
+# from pathlib import Path
+# import tempfile, shutil
+# import numpy as np, zarr
+
+# root_dir = Path(tempfile.mkdtemp(prefix='zarr_smoke_only_'))
+# print("tmp:", root_dir)
+# try:
+#     zarr_path = root_dir / 'sample.zarr'
+#     g = zarr.open_group(str(zarr_path), mode='w')
+#     raw = g.create_group('raw_video')
+#     raw.create_array('images_ds', data=np.zeros((2,8,8), dtype=np.uint8), chunks=(1,8,8))
+#     raw.create_array('images_ds_rgb', data=np.zeros((2,8,8,3), dtype=np.uint8), chunks=(1,8,8,3))
+#     raw.attrs['downsample_formats'] = ['gray', 'rgb']
+#     print("wrote zarr")
+#     r = zarr.open_group(str(zarr_path), mode='r')
+#     print("keys:", list(r['raw_video'].array_keys()))
+# finally:
+#     shutil.rmtree(root_dir, ignore_errors=True)
+# from pathlib import Path
+# import tempfile, shutil, sqlite3
+# import numpy as np, zarr
+# from fisheye.registry.db import Registry
+
+# root_dir = Path(tempfile.mkdtemp(prefix='registry_scan_smoke_'))
+# print("tmp:", root_dir)
+# try:
+#     zarr_path = root_dir / 'sample.zarr'
+#     g = zarr.open_group(str(zarr_path), mode='w')
+#     g.attrs['session_uuid'] = 'session_rgb_smoke'
+#     raw = g.create_group('raw_video')
+#     raw.create_array('images_ds', data=np.zeros((2,8,8), dtype=np.uint8), chunks=(1,8,8))
+#     raw.create_array('images_ds_rgb', data=np.zeros((2,8,8,3), dtype=np.uint8), chunks=(1,8,8,3))
+#     raw.attrs['downsample_formats'] = ['gray', 'rgb']
+
+#     db_path = root_dir / 'registry.sqlite'
+#     reg = Registry(db_path)
+#     print("registry ready")
+#     reg.scan_zarr(zarr_path)
+#     reg.close()
+#     print("scan done")
+
+#     con = sqlite3.connect(db_path)
+#     row = con.execute(
+#         "SELECT has_images_ds, has_images_ds_rgb, downsample_formats_json FROM provenance WHERE dataset_id=?",
+#         ('session_rgb_smoke',),
+#     ).fetchone()
+#     print("provenance row:", row)
+#     con.close()
+# finally:
+#     shutil.rmtree(root_dir, ignore_errors=True)
+import sqlite3
+con = sqlite3.connect("/nvme1/palette_registry.sqlite")
+print(con.execute("""
+SELECT COUNT(*),
+        SUM(CASE WHEN has_images_ds = 1 THEN 1 ELSE 0 END),
+        SUM(CASE WHEN has_images_ds_rgb = 1 THEN 1 ELSE 0 END)
+FROM provenance
+""").fetchone())
+con.close()

@@ -10,7 +10,10 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import datetime, timezone
+import json
+import os
 from pathlib import Path
+import re
 from typing import Dict, Iterable, Optional, Sequence
 
 import numpy as np
@@ -60,6 +63,77 @@ def _count_ints(arr: Optional[zarr.Array]) -> Dict[str, int]:
     return {str(int(v)): int(c) for v, c in zip(vals.tolist(), counts.tolist())}
 
 
+def _coerce_frames(value: object) -> Optional[list[int]]:
+    frames: list[int] = []
+    if isinstance(value, (list, tuple, np.ndarray)):
+        items = value
+    else:
+        items = [value]
+    for item in items:
+        if isinstance(item, dict):
+            frame_idx = item.get("frame_idx")
+            if frame_idx is None:
+                frame_idx = item.get("frame")
+            if frame_idx is None:
+                frame_idx = item.get("frame_index")
+            if frame_idx is None:
+                continue
+            try:
+                frames.append(int(frame_idx))
+            except (TypeError, ValueError):
+                continue
+            continue
+        if isinstance(item, (int, np.integer)):
+            frames.append(int(item))
+            continue
+        token = str(item).strip()
+        if not token:
+            continue
+        try:
+            frames.append(int(token))
+        except ValueError:
+            continue
+    if not frames:
+        return None
+    return sorted(set(frames))
+
+
+def _parse_frames_arg(value: Optional[str], zarr_path: Optional[str]) -> Optional[list[int]]:
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    path = Path(text)
+    if path.exists():
+        raw = path.read_text(encoding="utf-8")
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            if not zarr_path:
+                return None
+            zarr_str = str(zarr_path)
+            zarr_resolved = str(Path(zarr_path).resolve())
+            frames_val = data.get(zarr_str) or data.get(zarr_resolved)
+            if frames_val is None:
+                for key, val in data.items():
+                    try:
+                        if Path(key).resolve() == Path(zarr_path).resolve():
+                            frames_val = val
+                            break
+                    except Exception:
+                        continue
+            return _coerce_frames(frames_val)
+        if isinstance(data, list):
+            return _coerce_frames(data)
+        items = re.split(r"[,\s]+", raw.strip())
+        return _coerce_frames(items)
+    items = re.split(r"[,\s]+", text)
+    return _coerce_frames(items)
+
+
 def _update_postprocess_summary(
     refined: zarr.Group,
     *,
@@ -76,6 +150,7 @@ def _update_postprocess_summary(
 
     remaining_failures = max(0, total_rois - refined_success)
     success_rate = (refined_success / total_rois * 100.0) if total_rois else 0.0
+    usable_rate = (usable / total_rois * 100.0) if total_rois else 0.0
 
     detection_source_counts = _count_ints(refined.get("detection_source"))
     retune_id_counts = _count_ints(refined.get("retune_id"))
@@ -117,10 +192,12 @@ def _update_postprocess_summary(
     if print_summary:
         print("\nPostprocess Summary")
         print(f"  Total ROIs: {total_rois}")
-        print(f"  Refined success: {refined_success}")
+        print(f"  Refined success: {refined_success}/{total_rois} ({success_rate:.2f}%)")
         print(f"  Remaining failures: {remaining_failures}")
-        print(f"  Success rate: {success_rate:.2f}%")
-        print(f"  Usable keypoints: {usable}")
+        print(f"  Trainable (QC): {usable}/{total_rois} ({usable_rate:.2f}%)")
+        low_conf = int(reason_counts.get("low_confidence", 0))
+        if low_conf:
+            print(f"  Low confidence: {low_conf} (excluded from training)")
         print(f"  Retune total: {retune_total}")
         print(f"  Manual corrections: {manual_corrections}")
 
@@ -131,12 +208,19 @@ def run_manual_review(
     zarr_path: str,
     refined_run: Optional[str] = None,
     crop_run: Optional[str] = None,
+    include_all: bool = False,
+    target_frames: Optional[Sequence[int]] = None,
     review_state: str = "approved",
     review_method: str = "manual",
     review_intended_use: str = "training",
     reviewer: Optional[str] = None,
     review_notes: Optional[str] = None,
+    frame_flag_file: Optional[str] = None,
+    detect_flag_file: Optional[str] = None,
+    detect_frame_flag_file: Optional[str] = None,
 ) -> Dict[str, object]:
+    if not reviewer:
+        reviewer = os.environ.get("USER")
     root = zarr.open_group(str(zarr_path), mode="a")
     refined_run = refined_run or _get_latest_refined_run(root)
     refined = root[f"refined_keypoints_runs/{refined_run}"]
@@ -147,12 +231,20 @@ def run_manual_review(
         str(zarr_path),
         refined_run=refined_run,
         crop_run=crop_run,
+        include_all=include_all,
+        target_frames=target_frames,
         review_state=review_state,
         review_method=review_method,
         review_intended_use=review_intended_use,
         reviewer=reviewer,
         review_notes=review_notes,
+        frame_flag_file=frame_flag_file,
+        detect_flag_file=detect_flag_file,
+        detect_frame_flag_file=detect_frame_flag_file,
     )
+    # Re-open to pick up review_status written by the UI before updating summary.
+    root = zarr.open_group(str(zarr_path), mode="a")
+    refined = root[f"refined_keypoints_runs/{refined_run}"]
     return _update_postprocess_summary(refined, print_summary=True)
 
 
@@ -174,6 +266,19 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument(
         "--crop-run",
         help="Crop run to source ROI images from (manual mode only).",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Review all keypoints (manual mode only; default is failed keypoints only).",
+    )
+    parser.add_argument(
+        "--frames",
+        type=str,
+        help=(
+            "Frame indices to review (manual/retune only). Accepts comma/space-separated "
+            "indices or a path to a JSON/text list. JSON mappings of zarr->frames are supported."
+        ),
     )
     parser.add_argument(
         "--apply-batch-size",
@@ -207,14 +312,35 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     )
     parser.add_argument("--reviewer", help="Reviewer name (defaults to $USER).")
     parser.add_argument("--review-notes", help="Optional review notes.")
+    parser.add_argument(
+        "--frame-flag-file",
+        default="keypoint_frame_flags.json",
+        help="JSON file to append flagged frames (manual/retune modes).",
+    )
+    parser.add_argument(
+        "--detect-flag-file",
+        default="retune_flags.txt",
+        help="Text file to append recordings flagged for detection retune.",
+    )
+    parser.add_argument(
+        "--detect-frame-flag-file",
+        default="retune_frame_flags.json",
+        help="JSON file to append detection frames flagged for retune.",
+    )
 
     args = parser.parse_args(argv)
 
     root = zarr.open_group(str(args.zarr_path), mode="a")
     refined_run = args.refined_run or _get_latest_refined_run(root)
     refined = root[f"refined_keypoints_runs/{refined_run}"]
+    target_frames = _parse_frames_arg(args.frames, str(args.zarr_path))
+    if args.frames and not target_frames:
+        print("No target frames found for this recording; skipping review.")
+        return
 
     if args.retune:
+        if args.all:
+            print("Warning: --all is ignored in retune mode.")
         from .keypoint_tuner import run_failure_tuner
 
         run_failure_tuner(
@@ -223,6 +349,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             1,
             apply_batch_size=args.apply_batch_size,
             apply_workers=args.apply_workers,
+            target_frames=target_frames,
+            frame_flag_file=args.frame_flag_file,
+            detect_flag_file=args.detect_flag_file,
+            detect_frame_flag_file=args.detect_frame_flag_file,
         )
         _update_postprocess_summary(refined, print_summary=True)
     elif args.manual:
@@ -230,11 +360,16 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             str(args.zarr_path),
             refined_run=refined_run,
             crop_run=args.crop_run,
+            include_all=bool(args.all),
+            target_frames=target_frames,
             review_state=args.review_state,
             review_method=args.review_method,
             review_intended_use=args.review_intended_use,
             reviewer=args.reviewer,
             review_notes=args.review_notes,
+            frame_flag_file=args.frame_flag_file,
+            detect_flag_file=args.detect_flag_file,
+            detect_frame_flag_file=args.detect_frame_flag_file,
         )
     else:
         _update_postprocess_summary(refined, print_summary=True)

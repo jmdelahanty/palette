@@ -124,16 +124,20 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     payload = {key: value for key, value in payload.items() if value is not None}
 
-    refined_run.attrs["keypoint_review_status"] = payload
+    refined_attrs = dict(refined_run.attrs)
+    refined_attrs["keypoint_review_status"] = payload
 
-    signature = refined_run.attrs.get("keypoint_signature")
+    signature = refined_attrs.get("keypoint_signature")
     if not isinstance(signature, dict):
-        signature = _build_keypoint_signature(refined_run.attrs)
-        refined_run.attrs["keypoint_signature"] = signature
-    refined_run.attrs["keypoint_review_signature"] = signature
+        signature = _build_keypoint_signature(refined_attrs)
+        refined_attrs["keypoint_signature"] = signature
+    refined_attrs["keypoint_review_signature"] = signature
+    refined_run.attrs.put(refined_attrs)
 
     if not args.no_latest:
-        refined_parent.attrs["keypoint_review_status_latest"] = refined_run_name
+        parent_attrs = dict(refined_parent.attrs)
+        parent_attrs["keypoint_review_status_latest"] = refined_run_name
+        refined_parent.attrs.put(parent_attrs)
 
     print(f"Set keypoint_review_status on refined_keypoints_runs/{refined_run_name}")
     print(payload)

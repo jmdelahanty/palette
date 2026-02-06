@@ -484,6 +484,10 @@ def detect_fish(
         'created_at_utc': datetime.now(timezone.utc).isoformat(),
         'git': git_info,
         'platform': platform_info,
+        'inputs': {
+            'frame_source': 'zarr',
+            'source_video_path': root.attrs.get('source_video_path'),
+        },
     }
     
     # Run quality analysis
