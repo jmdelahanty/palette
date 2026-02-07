@@ -773,15 +773,11 @@
 #         (set_id, run_id),
 #     )
 # print(f"rows_updated={cur.rowcount}")
-import json, zarr
-zarr_path = "/nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen/zarr/2026-01-28T19-22-28Z_arena_1_DefaultScreen.zarr"
-root = zarr.open(zarr_path, mode="r")
-analysis = root.get("analysis_metadata")
-raw = analysis.attrs.get("session_context") if analysis is not None else None
-if isinstance(raw, (bytes, bytearray)):
-    raw = raw.decode("utf-8", "ignore")
-ctx = json.loads(raw) if isinstance(raw, str) else (raw if isinstance(raw, dict) else {})
-print("canvas_name:", ctx.get("canvas_name"))
-print("protocol_name_from_definition:", ctx.get("protocol_name_from_definition"))
-print("loaded_protocol_filepath:", ctx.get("loaded_protocol_filepath"))
-print("keys:", sorted(ctx.keys()))
+import json, pathlib
+run = pathlib.Path("/nvme1/models/detect/detect_cedar_shadow_v007/omnifin0_cedar_shadow_v007_detect_20260206-235656_25f3fbcb")
+onnx_manifest = run / "exports/onnx" / f"{run.name}.onnx.manifest.json"
+trt_manifest = run / "exports/tensorrt" / f"{run.name}_fp16.tensorrt.manifest.json"
+for p in [onnx_manifest, trt_manifest]:
+    print("\n", p)
+    d = json.loads(p.read_text())
+    print(d.get("onnx", {}).get("outputs"))

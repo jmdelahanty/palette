@@ -2,7 +2,7 @@
 # YOLO DETECTION TRAINING CONFIGURATION
 # ================================================================================
 
-# --- Dummy paths for YOLOv8 trainer compatibility ---
+# --- Dummy paths for YOLO trainer compatibility ---
 # Our custom dataloader ignores these paths, but they are required to pass initial checks.
 train: ./dummy_train.txt
 val: ./dummy_val.txt
@@ -73,7 +73,7 @@ training_params:
   
   # Core hyperparameters
   epochs: 100  # Number of training epochs
-  batch: 128    # Batch size for training
+  batch: 256    # Batch size for training
   imgsz: 640   # Input image size for training
   rect: false           # Enable rectangular training batches to reduce padding
   lr0: 0.002   # Initial learning rate
@@ -82,7 +82,11 @@ training_params:
   patience: 10           # Early stopping patience
   device: '0'            # CUDA device
   max_det: 1             # Max detections per image (post-NMS)
+  num_workers: 8         # DataLoader workers (custom Zarr loader)
+  prefetch_factor: 2     # Prefetched batches per worker (used when num_workers > 0)
   chunk_cache_size: 64
+  persistent_workers: true   # Keep dataloader workers alive across epochs
+  chunk_locality_sampling: true  # Group batches by Zarr frame chunk for read locality
   # Augmentations tuned for single-fish grayscale data
   hsv_h: 0.0
   hsv_s: 0.0

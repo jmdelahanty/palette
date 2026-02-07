@@ -229,7 +229,7 @@ def test_build_merged_manifest_payload_carries_identity_fields(tmp_path: Path) -
                     "dataset_id": "source_dataset",
                     "provenance": {
                         "arena": {"dish_design": "cedar"},
-                        "rig_info": {"canvas_name": "shadow"},
+                        "rig_info": {"canvas_name": "shadow", "rig_id": "omnifin0"},
                     },
                 }
             ],
@@ -250,8 +250,11 @@ def test_build_merged_manifest_payload_carries_identity_fields(tmp_path: Path) -
 
     assert payload["dish_design"] == "cedar"
     assert payload["canvas_name"] == "shadow"
+    assert payload["rig_name"] == "omnifin0"
     assert payload["datasets"][0]["dish_design"] == "cedar"
     assert payload["datasets"][0]["canvas_name"] == "shadow"
+    assert payload["datasets"][0]["rig_id"] == "omnifin0"
     assert payload["merged_export"]["counts"]["source_count"] == 1
     assert payload["merged_export"]["source_datasets"][0]["dish_design"] == "cedar"
     assert payload["merged_export"]["source_datasets"][0]["canvas_name"] == "shadow"
+    assert payload["merged_export"]["source_datasets"][0]["rig_id"] == "omnifin0"

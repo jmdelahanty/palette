@@ -316,30 +316,41 @@ def main(argv: Optional[List[str]] = None) -> int:
             table.add_column("Name", style="magenta")
             table.add_column("Created")
             table.add_column("Datasets", justify="right")
+            table.add_column("Manifest")
+            table.add_column("Config")
             table.add_column("Latest Run")
             table.add_column("Status")
             table.add_column("Run Time")
             table.add_column("ROIs", justify="right")
             table.add_column("Model")
             table.add_column("Metrics")
-            table.add_column("Manifest")
-            table.add_column("Config")
             table.add_column("ONNX")
             table.add_column("TRT")
             for row in rows:
+                run_id = row.run_id or "—"
+                status = row.run_status or "—"
+                if row.run_status == "failed":
+                    run_id = f"[red]{run_id}[/red]"
+                    status = "[red]failed[/red]"
+                elif row.run_status == "in_progress":
+                    run_id = f"[yellow]{run_id}[/yellow]"
+                    status = "[yellow]in_progress[/yellow]"
+                elif row.run_status == "success":
+                    run_id = f"[chartreuse1]{run_id}[/chartreuse1]"
+                    status = "[chartreuse1]success[/chartreuse1]"
                 table.add_row(
                     row.set_id,
                     row.name or "—",
                     _format_time(row.created_utc),
                     str(row.dataset_count) if row.dataset_count is not None else "—",
-                    row.run_id or "—",
-                    row.run_status or "—",
+                    _status_rich(_path_ok(row.manifest_path)),
+                    _status_rich(_path_ok(row.config_path)),
+                    run_id,
+                    status,
                     _format_time(row.run_created_utc),
                     str(row.roi_count) if row.roi_count is not None else "—",
                     _status_rich(_path_ok(row.model_path)),
                     _status_with_details(_path_ok(row.metrics_path), row.metrics_summary, rich=True),
-                    _status_rich(_path_ok(row.manifest_path)),
-                    _status_rich(_path_ok(row.config_path)),
                     _status_rich(_path_ok(row.onnx_path)),
                     _status_rich(_path_ok(row.trt_path)),
                 )
@@ -356,10 +367,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             unlinked.add_column("Manifest")
             unlinked.add_column("Config")
             for run in unlinked_runs:
+                status = run.status or "—"
+                if run.status == "failed":
+                    status = "[red]failed[/red]"
+                elif run.status == "in_progress":
+                    status = "[yellow]in_progress[/yellow]"
+                elif run.status == "success":
+                    status = "[chartreuse1]success[/chartreuse1]"
                 unlinked.add_row(
                     run.run_id,
                     run.set_id or "—",
-                    run.status or "—",
+                    status,
                     _format_time(run.created_utc),
                     _status_rich(_path_ok(run.model_path)),
                     _status_with_details(_path_ok(run.metrics_path), run.metrics_summary, rich=True),

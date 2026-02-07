@@ -174,10 +174,10 @@ For merged-export schema/CLI constraints, see `docs/detection_merged_export_cont
 
 ## One-Command Build (Registry -> Preflight -> Merged Zarr)
 
-Use the registry wrapper with `--export-merged` to run selection + preflight + merged export in one invocation:
+Use the pipeline wrapper to run selection + preflight + merged export in one invocation:
 
 ```bash
-python -m fisheye.utils.prepare_detect_training_from_registry \
+python -m fisheye.utils.run_detect_training_pipeline \
   --registry /nvme1/palette_registry.sqlite \
   --source-type manual \
   --input-format gray \
@@ -195,3 +195,34 @@ python -m fisheye.utils.prepare_detect_training_from_registry \
 Notes:
 - `--export-merged` requires `--out-manifest` (the export step consumes that manifest).
 - `--export-merged` cannot be combined with `--dry-run` because preflight dry-run does not write files.
+- `fisheye.utils.prepare_detect_training_from_registry` is prepare-only and no longer launches merge/train.
+
+## Model Export CLI Choice
+
+Use `fisheye.training.export_detection` as the default export CLI for trained detect runs.
+
+- `export_detection` (preferred):
+  - resolves run artifacts (`weights`, report, manifest) from a run directory
+  - exports ONNX and/or TensorRT
+  - embeds lightweight ONNX `metadata_props` (`run_id`, `set_id`, `manifest_sha256`, `system_hostname`, `torch_version`, `cuda_version`, `exported_at_utc`)
+  - supports registry updates via `--log-registry --registry ...`
+
+- `export_onnx` (low-level/manual):
+  - direct ONNX export from weights (or `--run-dir`)
+  - optional metadata embedding via `--meta-run-id`, `--meta-set-id`, `--meta-manifest-sha256`
+  - useful for manual debugging or custom export experiments
+  - does **not** write export rows to the training registry
+
+Example (preferred, TRT + registry logging):
+
+```bash
+python -m fisheye.training.export_detection \
+  /nvme1/models/detect/<set_id>/<run_id> \
+  --export-trt \
+  --log-registry \
+  --registry /nvme1/palette_registry.sqlite
+```
+
+Artifact note:
+- TensorRT manifest uses `<run_id>_<precision>.tensorrt.manifest.json`.
+- TensorRT manifest `build_env` includes export host/device context (hostname, TensorRT version, torch/cuda versions, plus parsed `trtexec` device details when available: selected device name/id/UUID, compute capability, SMs, memory).

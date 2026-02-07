@@ -11,8 +11,11 @@ Features:
 """
 
 import argparse
+from collections import defaultdict
 import hashlib
+import math
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -25,6 +28,7 @@ from pathlib import Path
 import time
 import platform
 import traceback
+from typing import Optional
 import pandas as pd
 from ultralytics import YOLO, __version__ as ultralytics_version
 from ultralytics.models.yolo.detect import DetectionTrainer, DetectionValidator
@@ -46,12 +50,243 @@ LEGACY_REFINED_DETECT_GROUP = "refined_runs"
 
 # Custom DataLoader to ensure compatibility with Ultralytics YOLO's expected interface
 class YoloCompatibleDataLoader(DataLoader):
+    profile_collector = None
+
     def reset(self):
         pass
+
+    def __iter__(self):
+        iterator = super().__iter__()
+        profiler = self.profile_collector
+        if profiler is None:
+            return iterator
+        return _ProfilingIterator(iterator, profiler)
+
+
+class ChunkAwareBatchSampler:
+    """Batch sampler that groups detect samples by frame chunk for better read locality."""
+
+    def __init__(
+        self,
+        dataset,
+        batch_size: int,
+        *,
+        seed: int = 42,
+        drop_last: bool = False,
+        shuffle: bool = True,
+    ):
+        self.dataset = dataset
+        self.batch_size = int(batch_size)
+        self.seed = int(seed)
+        self.drop_last = bool(drop_last)
+        self.shuffle = bool(shuffle)
+        self._epoch = 0
+        self._buckets = self._build_buckets()
+        self._total_samples = sum(len(bucket) for bucket in self._buckets)
+
+    def _build_buckets(self):
+        buckets = defaultdict(list)
+        frame_index_cache = getattr(self.dataset, "frame_index_cache", {})
+        chunk_len_map = getattr(self.dataset, "detect_frame_chunk_len", {})
+
+        for sample_index, (zarr_path, det_idx) in enumerate(getattr(self.dataset, "indices", [])):
+            frame_indices = frame_index_cache.get(zarr_path)
+            chunk_len = max(1, int(chunk_len_map.get(zarr_path, 1) or 1))
+
+            frame_idx = int(det_idx)
+            if frame_indices is not None and int(det_idx) < len(frame_indices):
+                frame_idx = int(frame_indices[int(det_idx)])
+
+            chunk_id = frame_idx // chunk_len
+            buckets[(zarr_path, chunk_id)].append(sample_index)
+
+        return list(buckets.values())
+
+    def __iter__(self):
+        rng = random.Random(self.seed + self._epoch)
+        self._epoch += 1
+
+        bucket_indices = list(range(len(self._buckets)))
+        if self.shuffle:
+            rng.shuffle(bucket_indices)
+
+        ordered_sample_indices = []
+        for bucket_idx in bucket_indices:
+            bucket = list(self._buckets[bucket_idx])
+            if self.shuffle:
+                rng.shuffle(bucket)
+            ordered_sample_indices.extend(bucket)
+
+        for start in range(0, len(ordered_sample_indices), self.batch_size):
+            batch = ordered_sample_indices[start:start + self.batch_size]
+            if len(batch) < self.batch_size and self.drop_last:
+                continue
+            yield batch
+
+    def __len__(self):
+        if self.batch_size <= 0:
+            return 0
+        if self.drop_last:
+            return self._total_samples // self.batch_size
+        return math.ceil(self._total_samples / self.batch_size)
+
+
+class _ProfilingIterator:
+    def __init__(self, iterator, profiler):
+        self._iterator = iterator
+        self._profiler = profiler
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        wait_start = time.perf_counter()
+        batch = next(self._iterator)
+        self._profiler.record_batch_wait(time.perf_counter() - wait_start, batch)
+        return batch
+
+
+class InputPipelineProfiler:
+    """Collect coarse timing diagnostics for the detect training input pipeline."""
+
+    def __init__(self, enabled: bool = False):
+        self.enabled = bool(enabled)
+        self._seconds = defaultdict(float)
+        self._counts = defaultdict(int)
+
+    def record(self, key: str, seconds: float, count: int = 1) -> None:
+        if not self.enabled:
+            return
+        self._seconds[key] += float(max(0.0, seconds))
+        self._counts[key] += int(max(0, count))
+
+    def record_dataset_sample(self, payload: dict) -> None:
+        if not self.enabled:
+            return
+        self.record("dataset_zarr_read_s", payload.get("zarr_read_s", 0.0), payload.get("samples", 1))
+        self.record(
+            "dataset_augment_preprocess_s",
+            payload.get("augment_preprocess_s", 0.0),
+            payload.get("samples", 1),
+        )
+        self.record("dataset_getitem_total_s", payload.get("getitem_total_s", 0.0), payload.get("samples", 1))
+
+    def record_collate(self, seconds: float, batch_size: int) -> None:
+        if not self.enabled:
+            return
+        self.record("collate_s", seconds, 1)
+        self.record("collate_samples", 0.0, batch_size)
+
+    def record_batch_wait(self, seconds: float, batch) -> None:
+        if not self.enabled:
+            return
+        batch_size = 0
+        if isinstance(batch, dict) and isinstance(batch.get("img"), torch.Tensor):
+            batch_size = int(batch["img"].shape[0])
+        self.record("dataloader_wait_s", seconds, 1)
+        self.record("dataloader_samples", 0.0, batch_size)
+
+    def record_preprocess_to_device(self, seconds: float, batch) -> None:
+        if not self.enabled:
+            return
+        batch_size = 0
+        if isinstance(batch, dict) and isinstance(batch.get("img"), torch.Tensor):
+            batch_size = int(batch["img"].shape[0])
+        self.record("preprocess_to_device_s", seconds, 1)
+        self.record("preprocess_samples", 0.0, batch_size)
+
+    @staticmethod
+    def _avg_ms(total_s: float, count: int) -> float:
+        if count <= 0:
+            return 0.0
+        return (float(total_s) * 1000.0) / float(count)
+
+    def summary(self) -> dict:
+        if not self.enabled:
+            return {"enabled": False}
+        sections = {
+            "dataset_zarr_read": (
+                self._seconds["dataset_zarr_read_s"],
+                self._counts["dataset_zarr_read_s"],
+                self._counts["dataset_getitem_total_s"],
+            ),
+            "dataset_augment_preprocess": (
+                self._seconds["dataset_augment_preprocess_s"],
+                self._counts["dataset_augment_preprocess_s"],
+                self._counts["dataset_getitem_total_s"],
+            ),
+            "dataset_getitem_total": (
+                self._seconds["dataset_getitem_total_s"],
+                self._counts["dataset_getitem_total_s"],
+                self._counts["dataset_getitem_total_s"],
+            ),
+            "collate": (
+                self._seconds["collate_s"],
+                self._counts["collate_s"],
+                self._counts["collate_samples"],
+            ),
+            "dataloader_wait": (
+                self._seconds["dataloader_wait_s"],
+                self._counts["dataloader_wait_s"],
+                self._counts["dataloader_samples"],
+            ),
+            "preprocess_to_device": (
+                self._seconds["preprocess_to_device_s"],
+                self._counts["preprocess_to_device_s"],
+                self._counts["preprocess_samples"],
+            ),
+        }
+        payload = {
+            "enabled": True,
+            "stages": {},
+            "notes": [
+                "Dataset stages are measured inside __getitem__.",
+                "dataloader_wait measures batch fetch latency seen by trainer iteration.",
+                "preprocess_to_device includes Ultralytics preprocess + host-to-device transfer.",
+            ],
+        }
+        for key, (seconds_total, calls, sample_count) in sections.items():
+            payload["stages"][key] = {
+                "total_seconds": float(seconds_total),
+                "calls": int(calls),
+                "samples": int(sample_count),
+                "avg_ms_per_call": self._avg_ms(seconds_total, calls),
+                "avg_ms_per_sample": self._avg_ms(seconds_total, sample_count),
+            }
+        return payload
+
+    def render(self, console: Console) -> None:
+        if not self.enabled:
+            return
+        summary = self.summary()
+        table = Table(title=" Input Pipeline Profile")
+        table.add_column("Stage", style="cyan")
+        table.add_column("Total (s)", style="yellow")
+        table.add_column("Calls", style="yellow")
+        table.add_column("Samples", style="yellow")
+        table.add_column("Avg ms/call", style="yellow")
+        table.add_column("Avg ms/sample", style="yellow")
+        for stage, stats in summary.get("stages", {}).items():
+            table.add_row(
+                stage,
+                f"{stats['total_seconds']:.3f}",
+                str(stats["calls"]),
+                str(stats["samples"]),
+                f"{stats['avg_ms_per_call']:.3f}",
+                f"{stats['avg_ms_per_sample']:.3f}",
+            )
+        console.print(table)
+        for note in summary.get("notes", []):
+            console.print(f"[dim]- {note}[/dim]")
+
+
+_ACTIVE_INPUT_PIPELINE_PROFILER: InputPipelineProfiler | None = None
 
 
 def det_collate_fn(batch):
     """Collate function for detection data."""
+    profiler = _ACTIVE_INPUT_PIPELINE_PROFILER
+    collate_start = time.perf_counter() if profiler is not None and profiler.enabled else 0.0
     images = torch.from_numpy(np.stack([s['img'] for s in batch]))
     im_files = [s['im_file'] for s in batch]
     ori_shapes = [s['ori_shape'] for s in batch]
@@ -66,7 +301,7 @@ def det_collate_fn(batch):
             batch_idx_list.append(torch.full((len(cls_labels),), i, dtype=torch.long))
     
     if not batch_idx_list:
-        return {
+        result = {
             'img': images,
             'batch_idx': torch.empty(0, dtype=torch.long),
             'cls': torch.empty(0, 1, dtype=torch.float32),
@@ -75,16 +310,21 @@ def det_collate_fn(batch):
             'ori_shape': ori_shapes,
             'ratio_pad': ratio_pads
         }
-    
-    return {
-        'img': images,
-        'batch_idx': torch.cat(batch_idx_list, 0),
-        'cls': torch.cat(cls_list, 0),
-        'bboxes': torch.cat(bboxes_list, 0),
-        'im_file': im_files,
-        'ori_shape': ori_shapes,
-        'ratio_pad': ratio_pads
-    }
+    else:
+        result = {
+            'img': images,
+            'batch_idx': torch.cat(batch_idx_list, 0),
+            'cls': torch.cat(cls_list, 0),
+            'bboxes': torch.cat(bboxes_list, 0),
+            'im_file': im_files,
+            'ori_shape': ori_shapes,
+            'ratio_pad': ratio_pads
+        }
+
+    if profiler is not None and profiler.enabled:
+        profiler.record_collate(time.perf_counter() - collate_start, batch_size=len(batch))
+
+    return result
 
 
 class DetValidator(DetectionValidator):
@@ -112,6 +352,8 @@ class DetValidator(DetectionValidator):
 
 
 class DetTrainer(DetectionTrainer):
+    profile_collector = None
+
     def get_validator(self):
         self.loss_names = 'box_loss', 'cls_loss', 'dfl_loss'
         return DetValidator(
@@ -120,6 +362,20 @@ class DetTrainer(DetectionTrainer):
             args=self.args,
             _callbacks=self.callbacks
         )
+
+    def preprocess_batch(self, batch):
+        profiler = self.profile_collector
+        if profiler is None or not profiler.enabled:
+            return super().preprocess_batch(batch)
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        preprocess_start = time.perf_counter()
+        out = super().preprocess_batch(batch)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        profiler.record_preprocess_to_device(time.perf_counter() - preprocess_start, batch)
+        return out
 
 def get_zarr_metadata(zarr_paths, console=None):
     """
@@ -295,7 +551,18 @@ def _apply_zarr_loader_training_param_overrides(training_params: dict) -> tuple[
         key: float(params.get(key, 0.0) or 0.0)
         for key in custom_loader_aug_keys
     }
-    custom_loader_aug["chunk_cache_size"] = int(params.get("chunk_cache_size", 0) or 0)
+    # Loader-only setting: not a valid Ultralytics train() argument.
+    custom_loader_aug["chunk_cache_size"] = int(params.pop("chunk_cache_size", 0) or 0)
+    custom_loader_aug["persistent_workers"] = bool(params.pop("persistent_workers", False))
+    custom_loader_aug["chunk_locality_sampling"] = bool(params.pop("chunk_locality_sampling", False))
+    custom_loader_aug["num_workers"] = max(0, int(params.pop("num_workers", 16) or 0))
+    prefetch_raw = params.pop("prefetch_factor", None)
+    custom_loader_aug["prefetch_factor"] = None if prefetch_raw is None else max(1, int(prefetch_raw))
+    custom_loader_aug["deterministic_val"] = bool(params.pop("deterministic_val", True))
+    val_num_workers_raw = params.pop("val_num_workers", None)
+    custom_loader_aug["val_num_workers"] = (
+        None if val_num_workers_raw is None else max(0, int(val_num_workers_raw or 0))
+    )
 
     # We use a custom Zarr loader, so keep Ultralytics multi-sample augmentation knobs neutral.
     params.setdefault("augment", False)
@@ -306,6 +573,62 @@ def _apply_zarr_loader_training_param_overrides(training_params: dict) -> tuple[
     params.setdefault("close_mosaic", 0)
     params.setdefault("auto_augment", None)
     return params, custom_loader_aug
+
+
+def _shutdown_dataloader_workers(loader) -> bool:
+    """Best-effort shutdown for DataLoader worker processes (persistent workers)."""
+    if loader is None:
+        return False
+    iterator = getattr(loader, "_iterator", None)
+    if iterator is None:
+        return False
+    shutdown = getattr(iterator, "_shutdown_workers", None)
+    if not callable(shutdown):
+        return False
+    shutdown()
+    try:
+        loader._iterator = None  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return True
+
+
+def _cleanup_trainer_dataloaders(model, console: Optional[Console] = None) -> int:
+    """Best-effort shutdown of trainer/validator DataLoader workers before process exit."""
+    trainer = getattr(model, "trainer", None)
+    if trainer is None:
+        return 0
+
+    cleaned = 0
+    seen = set()
+
+    def _try(loader) -> None:
+        nonlocal cleaned
+        if loader is None:
+            return
+        identity = id(loader)
+        if identity in seen:
+            return
+        seen.add(identity)
+        try:
+            if _shutdown_dataloader_workers(loader):
+                cleaned += 1
+        except Exception as exc:
+            if console is not None:
+                console.print(f"[yellow]Warning: DataLoader shutdown failed: {exc}[/yellow]")
+
+    _try(getattr(trainer, "train_loader", None))
+    _try(getattr(trainer, "test_loader", None))
+
+    validator = getattr(trainer, "validator", None)
+    if validator is not None:
+        _try(getattr(validator, "dataloader", None))
+        _try(getattr(validator, "test_loader", None))
+
+    if cleaned and console is not None:
+        console.print(f"[dim]Shut down {cleaned} DataLoader worker pool(s).[/dim]")
+
+    return cleaned
 
 
 def display_zarr_metadata(metadata, console):
@@ -678,6 +1001,29 @@ def _snapshot_training_inputs(
     return written
 
 
+def _write_input_pipeline_profile(
+    *,
+    profiler: InputPipelineProfiler | None,
+    run_dir: Path | None,
+    console: Console,
+) -> dict | None:
+    if profiler is None or not profiler.enabled:
+        return None
+
+    payload = profiler.summary()
+    profiler.render(console)
+    if run_dir is None:
+        return payload
+
+    try:
+        out_path = run_dir / "input_pipeline_profile.json"
+        out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        console.print(f"[cyan]Wrote input pipeline profile:[/cyan] {out_path}")
+    except Exception as exc:
+        console.print(f"[yellow]Warning: failed to write input pipeline profile: {exc}[/yellow]")
+    return payload
+
+
 def _record_registry_training_run(
     *,
     args,
@@ -725,6 +1071,8 @@ def _record_registry_training_run(
                     metadata={
                         "sha256": export_artifacts.get("onnx_sha256"),
                         "manifest_sha256": export_artifacts.get("onnx_manifest_sha256"),
+                        "build_env": export_artifacts.get("onnx_build_env"),
+                        "metadata_props": export_artifacts.get("onnx_metadata_props"),
                         "errors": export_artifacts.get("errors"),
                     },
                 )
@@ -740,6 +1088,8 @@ def _record_registry_training_run(
                     metadata={
                         "sha256": export_artifacts.get("engine_sha256"),
                         "manifest_sha256": export_artifacts.get("engine_manifest_sha256"),
+                        "build_env": export_artifacts.get("build_env"),
+                        "trt_device_info": export_artifacts.get("trt_device_info"),
                         "errors": export_artifacts.get("errors"),
                     },
                 )
@@ -860,15 +1210,92 @@ def _read_trtexec_version(trtexec_path: Path | None) -> tuple[str | None, str | 
     return None, None, raw_output
 
 
-def _collect_export_env(trtexec_path: Path | None) -> dict:
+def _resolve_trtexec_path(explicit_path: str | None) -> Path | None:
+    """Resolve trtexec path from explicit CLI value, module default, or PATH."""
+    candidates: list[Path] = []
+    if explicit_path:
+        candidates.append(Path(explicit_path).expanduser())
+    else:
+        try:
+            from .onnx_to_tensorrt import TRTEXEC_PATH as default_trtexec_path  # type: ignore
+        except Exception:
+            default_trtexec_path = None
+        if default_trtexec_path:
+            candidates.append(Path(str(default_trtexec_path)).expanduser())
+        which_path = shutil.which("trtexec")
+        if which_path:
+            candidates.append(Path(which_path))
+    for candidate in candidates:
+        if candidate.exists():
+            try:
+                return candidate.resolve()
+            except Exception:
+                return candidate
+    return None
+
+
+def _parse_trtexec_device_info_text(raw_text: str) -> dict:
+    if not raw_text:
+        return {}
+    info: dict = {}
+    patterns: list[tuple[str, str, str | None]] = [
+        ("selected_device_name", r"Selected Device:\s*(.+)$", None),
+        ("selected_device_id", r"Selected Device ID:\s*(\d+)$", "int"),
+        ("selected_device_uuid", r"Selected Device UUID:\s*(\S+)$", None),
+        ("compute_capability", r"Compute Capability:\s*([0-9.]+)$", None),
+        ("sm_count", r"SMs:\s*(\d+)$", "int"),
+        ("device_global_memory_mib", r"Device Global Memory:\s*(\d+)\s*MiB", "int"),
+        ("memory_bus_width_bits", r"Memory Bus Width:\s*(\d+)\s*bits", "int"),
+        ("trtexec_reported_version", r"TensorRT version:\s*([0-9.]+)", None),
+    ]
+    for line in raw_text.splitlines():
+        clean = re.sub(r"^\[[^\]]+\]\s+\[I\]\s*", "", line).strip()
+        if not clean:
+            continue
+        for key, pattern, cast in patterns:
+            match = re.search(pattern, clean)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if cast == "int":
+                try:
+                    info[key] = int(value)
+                except ValueError:
+                    info[key] = value
+            else:
+                info[key] = value
+    return info
+
+
+def _parse_trtexec_device_info(log_path: Path | None) -> dict:
+    if not log_path or not log_path.exists():
+        return {}
+    try:
+        raw_text = log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {}
+    return _parse_trtexec_device_info_text(raw_text)
+
+
+def _collect_export_env(trtexec_path: Path | None, trtexec_log_path: Path | None = None) -> dict:
     env = {
         "torch_version": str(torch.__version__),
         "cuda_version": torch.version.cuda,
         "trtexec_path": str(trtexec_path) if trtexec_path else None,
+        "system_hostname": platform.node() or None,
     }
     if torch.cuda.is_available():
         try:
-            env["gpu_name"] = torch.cuda.get_device_name(0)
+            device_id = int(torch.cuda.current_device())
+            props = torch.cuda.get_device_properties(device_id)
+            env["gpu_name"] = torch.cuda.get_device_name(device_id)
+            env["torch_device"] = {
+                "selected_device_id": device_id,
+                "selected_device_name": str(getattr(props, "name", env["gpu_name"])),
+                "compute_capability": f"{int(props.major)}.{int(props.minor)}",
+                "sm_count": int(getattr(props, "multi_processor_count", 0)),
+                "device_global_memory_mib": int(getattr(props, "total_memory", 0) // (1024 * 1024)),
+            }
         except Exception:
             env["gpu_name"] = None
     try:
@@ -883,7 +1310,70 @@ def _collect_export_env(trtexec_path: Path | None) -> dict:
     else:
         env["tensorrt_version"] = trt.__version__
         env["tensorrt_version_source"] = "python"
+    trtexec_runtime = _parse_trtexec_device_info(trtexec_log_path)
+    if trtexec_runtime:
+        env["trtexec_runtime"] = trtexec_runtime
+        if not env.get("tensorrt_version") and trtexec_runtime.get("trtexec_reported_version"):
+            env["tensorrt_version"] = trtexec_runtime.get("trtexec_reported_version")
+            env["tensorrt_version_source"] = "trtexec_log"
     return env
+
+
+def _collect_onnx_output_contract(onnx_path: Path) -> list[dict]:
+    """Collect ONNX output tensor names/shapes/dtypes for export manifests."""
+    try:
+        import onnx  # type: ignore
+        from onnx import TensorProto  # type: ignore
+    except Exception:
+        return []
+
+    try:
+        model = onnx.load(str(onnx_path))
+    except Exception:
+        return []
+
+    outputs: list[dict] = []
+    for value_info in model.graph.output:
+        tensor_type = value_info.type.tensor_type
+        elem_type = int(getattr(tensor_type, "elem_type", 0) or 0)
+        dtype_name = TensorProto.DataType.Name(elem_type) if elem_type > 0 else "UNDEFINED"
+        dims: list = []
+        for dim in tensor_type.shape.dim:
+            if dim.HasField("dim_value"):
+                dims.append(int(dim.dim_value))
+            elif dim.HasField("dim_param"):
+                dims.append(str(dim.dim_param))
+            else:
+                dims.append(None)
+        outputs.append(
+            {
+                "name": str(value_info.name),
+                "shape": dims,
+                "dtype": dtype_name,
+            }
+        )
+    return outputs
+
+
+def _collect_onnx_metadata_props(onnx_path: Path) -> dict[str, str]:
+    """Collect ONNX metadata_props as a flat string map for auditability."""
+    try:
+        import onnx  # type: ignore
+    except Exception:
+        return {}
+
+    try:
+        model = onnx.load(str(onnx_path))
+    except Exception:
+        return {}
+
+    props: dict[str, str] = {}
+    for item in getattr(model, "metadata_props", []) or []:
+        key = str(getattr(item, "key", "") or "").strip()
+        if not key:
+            continue
+        props[key] = str(getattr(item, "value", "") or "")
+    return props
 
 
 def _export_detection_artifacts(
@@ -908,12 +1398,16 @@ def _export_detection_artifacts(
     onnx_dir.mkdir(parents=True, exist_ok=True)
     trt_dir.mkdir(parents=True, exist_ok=True)
 
+    canonical_onnx_path = onnx_dir / f"{run_id}.onnx"
     existing_onnx_path = None
     if getattr(args, "onnx_path", None):
         existing_onnx_path = Path(args.onnx_path).expanduser().resolve()
         if not existing_onnx_path.exists():
             export_info["errors"].append(f"onnx_not_found:{existing_onnx_path}")
             return export_info
+    elif args.export_trt and not args.export_onnx and canonical_onnx_path.exists():
+        # TRT-only flow: reuse canonical ONNX artifact when already present.
+        existing_onnx_path = canonical_onnx_path
 
     if export_imgsz is None:
         img_h, img_w = _normalize_imgsz(training_params.get("imgsz"))
@@ -922,7 +1416,7 @@ def _export_detection_artifacts(
     input_shape = [1, 3, img_h, img_w]
     export_device = _resolve_export_device(training_params.get("device"))
 
-    onnx_path = existing_onnx_path or (onnx_dir / f"{run_id}.onnx")
+    onnx_path = existing_onnx_path or canonical_onnx_path
     onnx_log_path = onnx_dir / f"{run_id}_onnx_export.log"
     onnx_manifest_path = onnx_dir / f"{run_id}.onnx.manifest.json"
     export_info["onnx_path"] = str(onnx_path)
@@ -950,6 +1444,13 @@ def _export_detection_artifacts(
         "--output-path",
         str(onnx_path),
     ]
+    onnx_cmd.extend(["--meta-run-id", str(run_id)])
+    manifest_set_id = str(manifest_summary.get("manifest_set_id") or "").strip()
+    if manifest_set_id:
+        onnx_cmd.extend(["--meta-set-id", manifest_set_id])
+    manifest_sha256 = str(manifest_summary.get("manifest_sha256") or "").strip().lower()
+    if manifest_sha256:
+        onnx_cmd.extend(["--meta-manifest-sha256", manifest_sha256])
     if args.onnx_simplify:
         onnx_cmd.append("--sim")
     export_info["onnx_command"] = onnx_cmd
@@ -969,9 +1470,15 @@ def _export_detection_artifacts(
 
     weights_sha = _sha256_file(weights_path)
     onnx_sha = _sha256_file(onnx_path)
+    onnx_output_contract = _collect_onnx_output_contract(onnx_path)
+    onnx_metadata_props = _collect_onnx_metadata_props(onnx_path)
+    onnx_build_env = _collect_export_env(None, trtexec_log_path=None)
     export_info["weights_sha256"] = weights_sha
     export_info["onnx_sha256"] = onnx_sha
     export_info["onnx_source"] = "existing" if existing_onnx_path else "exported"
+    export_info["onnx_output_contract"] = onnx_output_contract
+    export_info["onnx_metadata_props"] = onnx_metadata_props
+    export_info["onnx_build_env"] = onnx_build_env
 
     onnx_manifest = {
         "schema_version": 1,
@@ -984,6 +1491,8 @@ def _export_detection_artifacts(
         "onnx": {
             "path": str(onnx_path),
             "sha256": onnx_sha,
+            "outputs": onnx_output_contract,
+            "metadata_props": onnx_metadata_props,
         },
         "export": {
             "source": "existing" if existing_onnx_path else "exported",
@@ -1002,6 +1511,7 @@ def _export_detection_artifacts(
         "logs": {
             "onnx_export": str(onnx_log_path) if existing_onnx_path is None else None,
         },
+        "build_env": onnx_build_env,
         "source_manifest": {
             "manifest_path": manifest_summary.get("manifest_path"),
             "manifest_sha256": manifest_summary.get("manifest_sha256"),
@@ -1015,11 +1525,11 @@ def _export_detection_artifacts(
 
     engine_name = f"{run_id}_{args.trt_precision}"
     engine_path = trt_dir / f"{engine_name}.engine"
-    manifest_path = trt_dir / f"{engine_name}.manifest.json"
+    manifest_path = trt_dir / f"{engine_name}.tensorrt.manifest.json"
     trt_log_path = trt_dir / f"{engine_name}_trtexec.log"
     export_info["trt_log_path"] = str(trt_log_path)
 
-    trtexec_path = Path(args.trtexec) if args.trtexec else None
+    trtexec_path = _resolve_trtexec_path(getattr(args, "trtexec", None))
     trt_script = Path(__file__).resolve().parent / "onnx_to_tensorrt.py"
     trt_cmd = [
         sys.executable,
@@ -1031,8 +1541,8 @@ def _export_detection_artifacts(
         "--precision",
         args.trt_precision,
     ]
-    if args.trtexec:
-        trt_cmd.extend(["--trtexec", args.trtexec])
+    if trtexec_path is not None:
+        trt_cmd.extend(["--trtexec", str(trtexec_path)])
     if args.trt_cuda_graph:
         trt_cmd.append("--cuda-graph")
     if args.trt_profiling:
@@ -1064,6 +1574,7 @@ def _export_detection_artifacts(
             "onnx": {
                 "path": str(onnx_path),
                 "sha256": onnx_sha,
+                "outputs": onnx_output_contract,
             },
             "engine": {
                 "path": str(engine_path),
@@ -1094,19 +1605,26 @@ def _export_detection_artifacts(
                 "onnx_export": str(onnx_log_path),
                 "tensorrt_export": str(trt_log_path),
             },
-            "build_env": _collect_export_env(trtexec_path),
+            "build_env": _collect_export_env(trtexec_path, trtexec_log_path=trt_log_path),
             "source_manifest": {
                 "manifest_path": manifest_summary.get("manifest_path"),
                 "manifest_sha256": manifest_summary.get("manifest_sha256"),
                 "manifest_dataset_ids": manifest_summary.get("manifest_dataset_ids"),
             },
         }
-        manifest_path.write_text(json.dumps(engine_manifest, indent=2))
+        manifest_text = json.dumps(engine_manifest, indent=2)
+        manifest_path.write_text(manifest_text)
 
     export_info.update(
         {
             "engine_path": str(engine_path),
             "engine_manifest_path": str(manifest_path),
+            "build_env": engine_manifest.get("build_env") if engine_path.exists() else None,
+            "trt_device_info": (
+                engine_manifest.get("build_env", {}).get("trtexec_runtime")
+                if engine_path.exists()
+                else None
+            ),
             "engine_sha256": _safe_sha256_file(engine_path),
             "engine_manifest_sha256": _safe_sha256_file(manifest_path),
             "onnx_manifest_sha256": _safe_sha256_file(onnx_manifest_path),
@@ -1116,6 +1634,7 @@ def _export_detection_artifacts(
 
 
 def main(args):
+    global _ACTIVE_INPUT_PIPELINE_PROFILER
     console = Console()
     console.print("[bold cyan] Starting YOLO Detection Training[/bold cyan]\n")
     invocation_payload = build_invocation_record(
@@ -1132,6 +1651,8 @@ def main(args):
     )
     effective_run_name = args.run_name or autogenerated_run_name
     registry_run_id = effective_run_name
+    input_profiler = InputPipelineProfiler(enabled=bool(getattr(args, "profile", False)))
+    input_profile_payload = None
 
     try:
         # Load and validate config
@@ -1266,17 +1787,89 @@ def main(args):
         console.print("[dim]  To exclude synthetic rows, use source_type=filtered/detect/manual in dataset config[/dim]\n")
 
     # Setup dataloader
-    def get_zarr_dataloader(self, dataset_path, batch_size=16, **kwargs):
-        mode = kwargs.get('mode', 'train')
+    persistent_workers_flag = False
+    chunk_locality_sampling_flag = False
+    num_workers_value = 16
+    prefetch_factor_value = None
+    profile_mode = bool(getattr(args, "profile", False))
+    if profile_mode:
+        num_workers_value = 0
+        console.print(
+            "[yellow]Profile mode enabled: forcing num_workers=0 for deterministic stage timing.[/yellow]"
+        )
+        _ACTIVE_INPUT_PIPELINE_PROFILER = input_profiler
+        DetTrainer.profile_collector = input_profiler
+        YoloCompatibleDataLoader.profile_collector = input_profiler
+    else:
+        _ACTIVE_INPUT_PIPELINE_PROFILER = None
+        DetTrainer.profile_collector = None
+        YoloCompatibleDataLoader.profile_collector = None
+
+    deterministic_val_flag = True
+    val_num_workers_value = None
+    val_seed_base = int(getattr(full_config, "random_seed", 42))
+
+    def _seed_val_worker(worker_id: int) -> None:
+        worker_seed = (val_seed_base + int(worker_id)) % (2**32)
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
+
+    def get_zarr_dataloader(self, dataset_path, batch_size=16, mode="train", rank=0):
+        mode = str(mode or "train").lower()
+        is_train = mode == "train"
         dataset = create_zarr_dataset(config=config, mode=mode)
+        if profile_mode:
+            dataset._profile_callback = input_profiler.record_dataset_sample
+        if is_train:
+            active_num_workers = num_workers_value
+        elif val_num_workers_value is not None:
+            active_num_workers = val_num_workers_value
+        else:
+            active_num_workers = num_workers_value
+
+        loader_persistent_workers = bool(is_train and persistent_workers_flag and active_num_workers > 0)
+        loader_kwargs = {
+            "num_workers": active_num_workers,
+            "pin_memory": True,
+            "persistent_workers": loader_persistent_workers,
+        }
+        if not is_train and deterministic_val_flag:
+            loader_kwargs["persistent_workers"] = False
+            if active_num_workers > 0:
+                val_generator = torch.Generator()
+                val_generator.manual_seed(val_seed_base)
+                loader_kwargs["worker_init_fn"] = _seed_val_worker
+                loader_kwargs["generator"] = val_generator
+
+        if active_num_workers > 0 and prefetch_factor_value is not None:
+            loader_kwargs["prefetch_factor"] = int(prefetch_factor_value)
+        use_chunk_locality_sampling = bool(
+            is_train
+            and chunk_locality_sampling_flag
+            and getattr(config, "task", "detect") == "detect"
+        )
+        if use_chunk_locality_sampling:
+            batch_sampler = ChunkAwareBatchSampler(
+                dataset=dataset,
+                batch_size=int(batch_size),
+                seed=int(getattr(full_config, "random_seed", 42)),
+                drop_last=False,
+                shuffle=True,
+            )
+            return YoloCompatibleDataLoader(
+                dataset,
+                batch_sampler=batch_sampler,
+                collate_fn=det_collate_fn,
+                **loader_kwargs,
+            )
+
         return YoloCompatibleDataLoader(
             dataset,
             batch_size=batch_size,
-            shuffle=(mode == 'train'),
+            shuffle=is_train,
             collate_fn=det_collate_fn,
-            num_workers=16,
-            pin_memory=True,
-            persistent_workers=False
+            **loader_kwargs,
         )
 
     DetTrainer.get_dataloader = get_zarr_dataloader
@@ -1284,6 +1877,25 @@ def main(args):
     # Get training params
     training_params = full_config.training_params.model_dump(exclude_none=True)
     training_params, custom_loader_augment = _apply_zarr_loader_training_param_overrides(training_params)
+    persistent_workers_flag = bool(custom_loader_augment.get("persistent_workers", False))
+    chunk_locality_sampling_flag = bool(custom_loader_augment.get("chunk_locality_sampling", False))
+    if not profile_mode:
+        num_workers_value = max(0, int(custom_loader_augment.get("num_workers", 16) or 0))
+        prefetch_factor_value = custom_loader_augment.get("prefetch_factor")
+        deterministic_val_flag = bool(custom_loader_augment.get("deterministic_val", True))
+        val_num_workers_raw = custom_loader_augment.get("val_num_workers", None)
+        val_num_workers_value = (
+            None if val_num_workers_raw is None else max(0, int(val_num_workers_raw or 0))
+        )
+    else:
+        requested_prefetch = custom_loader_augment.get("prefetch_factor")
+        custom_loader_augment["num_workers"] = 0
+        custom_loader_augment["prefetch_factor"] = None
+        custom_loader_augment["val_num_workers"] = 0
+        if requested_prefetch is not None:
+            console.print(
+                "[dim]Ignoring prefetch_factor in profile mode because num_workers is forced to 0.[/dim]"
+            )
     if not bool(training_params.get("rect", False)) and _should_enable_rect_for_non_square_inputs(zarr_metadata):
         training_params["rect"] = True
         console.print(
@@ -1318,6 +1930,9 @@ def main(args):
                     "error_message": str(exc),
                 },
             )
+        _ACTIVE_INPUT_PIPELINE_PROFILER = None
+        DetTrainer.profile_collector = None
+        YoloCompatibleDataLoader.profile_collector = None
         raise
 
     # Display hyperparameters
@@ -1374,6 +1989,16 @@ def main(args):
             **training_params
         )
     except Exception as exc:
+        _cleanup_trainer_dataloaders(model, console=console)
+        trainer_obj = getattr(model, "trainer", None)
+        run_dir = None
+        if trainer_obj is not None and getattr(trainer_obj, "save_dir", None):
+            run_dir = Path(trainer_obj.save_dir)
+        input_profile_payload = _write_input_pipeline_profile(
+            profiler=input_profiler,
+            run_dir=run_dir,
+            console=console,
+        )
         console.print(f"[bold red]✗ Training failed:[/bold red] {exc}")
         if args.log_registry:
             _record_registry_training_run(
@@ -1391,10 +2016,14 @@ def main(args):
                     "stage": "model_train",
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
+                    "input_pipeline_profile": input_profile_payload,
                 },
             )
+        _ACTIVE_INPUT_PIPELINE_PROFILER = None
+        DetTrainer.profile_collector = None
+        YoloCompatibleDataLoader.profile_collector = None
         raise
-    
+
     training_duration_seconds = time.time() - training_start_time
     effective_img_h, effective_img_w = _extract_runtime_imgsz(model, training_params.get("imgsz"))
     training_params["imgsz"] = _imgsz_to_config_value(effective_img_h, effective_img_w)
@@ -1412,6 +2041,12 @@ def main(args):
             manifest_summary=manifest_summary,
             console=console,
         )
+
+    input_profile_payload = _write_input_pipeline_profile(
+        profiler=input_profiler,
+        run_dir=Path(results.save_dir),
+        console=console,
+    )
 
     # Log training metadata
     console.print("\n[bold cyan] Logging Training Report...[/bold cyan]")
@@ -1441,6 +2076,7 @@ def main(args):
             'custom_loader_augmentation': custom_loader_augment,
             'effective_imgsz': [int(effective_img_h), int(effective_img_w)],
             'effective_training_params': dict(training_params),
+            'input_pipeline_profile': input_profile_payload,
             'source_type_resolution': {
                 'allow_source_mismatch': bool(allow_source_mismatch),
                 'mismatch_count': len(source_mismatches),
@@ -1498,6 +2134,8 @@ def main(args):
         final_metrics_payload.setdefault("status_detail", "training_complete")
         final_metrics_payload.setdefault("imgsz_h", int(effective_img_h))
         final_metrics_payload.setdefault("imgsz_w", int(effective_img_w))
+        if input_profile_payload is not None:
+            final_metrics_payload.setdefault("input_pipeline_profile", input_profile_payload)
         _record_registry_training_run(
             args=args,
             console=console,
@@ -1513,6 +2151,10 @@ def main(args):
             export_artifacts=export_artifacts,
         )
 
+    _cleanup_trainer_dataloaders(model, console=console)
+    _ACTIVE_INPUT_PIPELINE_PROFILER = None
+    DetTrainer.profile_collector = None
+    YoloCompatibleDataLoader.profile_collector = None
     console.print("\n[bold green]✓ Training Complete![/bold green]")
 
 
@@ -1551,6 +2193,14 @@ if __name__ == '__main__':
         help=(
             "Allow fallback to available crop source type when it differs from "
             "requested dataset source_type; mismatches are recorded in training report."
+        ),
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help=(
+            "Enable input-pipeline profiling for this run. "
+            "Collects per-stage timing breakdown and writes input_pipeline_profile.json."
         ),
     )
     parser.add_argument(

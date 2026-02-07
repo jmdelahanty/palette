@@ -1,13 +1,96 @@
 # onnx_to_tensorrt.py
 
 import argparse
+import json
 import subprocess
 from pathlib import Path
+from typing import Any, Optional
 
 # --- Configuration ---
 # Hardcoded path to your TensorRT executable
 # This should match the version used for real-time inference on the machine you're running your engine on
 TRTEXEC_PATH = "/usr/local/TensorRT-10.0.1.6/bin/trtexec"
+
+
+def _infer_onnx_manifest_path(onnx_path: Path) -> Path:
+    """Return expected sidecar ONNX manifest path for a given ONNX model."""
+    return Path(f"{onnx_path}.manifest.json")
+
+
+def _load_output_contract_from_manifest(manifest_path: Path) -> Optional[list[dict[str, Any]]]:
+    if not manifest_path.exists():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    onnx_block = payload.get("onnx")
+    if not isinstance(onnx_block, dict):
+        return None
+    outputs = onnx_block.get("outputs")
+    if not isinstance(outputs, list) or not outputs:
+        return None
+    normalized: list[dict[str, Any]] = []
+    for item in outputs:
+        if not isinstance(item, dict):
+            continue
+        normalized.append(
+            {
+                "name": str(item.get("name", "?")),
+                "dtype": str(item.get("dtype", "?")),
+                "shape": item.get("shape"),
+            }
+        )
+    return normalized or None
+
+
+def _load_output_contract_from_onnx(onnx_path: Path) -> Optional[list[dict[str, Any]]]:
+    try:
+        import onnx  # type: ignore
+        from onnx import TensorProto  # type: ignore
+    except Exception:
+        return None
+    try:
+        model = onnx.load(str(onnx_path))
+    except Exception:
+        return None
+    outputs: list[dict[str, Any]] = []
+    for value_info in model.graph.output:
+        tensor_type = value_info.type.tensor_type
+        elem_type = int(getattr(tensor_type, "elem_type", 0) or 0)
+        dtype_name = TensorProto.DataType.Name(elem_type) if elem_type > 0 else "UNDEFINED"
+        dims: list[Any] = []
+        for dim in tensor_type.shape.dim:
+            if dim.HasField("dim_value"):
+                dims.append(int(dim.dim_value))
+            elif dim.HasField("dim_param"):
+                dims.append(str(dim.dim_param))
+            else:
+                dims.append(None)
+        outputs.append(
+            {
+                "name": str(value_info.name),
+                "dtype": dtype_name,
+                "shape": dims,
+            }
+        )
+    return outputs or None
+
+
+def _format_output_contract(outputs: Optional[list[dict[str, Any]]]) -> Optional[str]:
+    if not outputs:
+        return None
+    parts: list[str] = []
+    for item in outputs:
+        name = str(item.get("name", "?"))
+        dtype = str(item.get("dtype", "?"))
+        shape = item.get("shape")
+        if isinstance(shape, list):
+            shape_text = "(" + ",".join(str(v) for v in shape) + ")"
+        else:
+            shape_text = "(?)"
+        parts.append(f"{name}[{dtype},{shape_text}]")
+    return ", ".join(parts) if parts else None
 
 def parse_args():
     """Parses command-line arguments for TensorRT conversion."""
@@ -69,6 +152,22 @@ def main(args):
     if not trtexec_path.exists():
         print(f"Error: trtexec not found at {trtexec_path}")
         return
+
+    manifest_path = _infer_onnx_manifest_path(onnx_path)
+    output_contract = _load_output_contract_from_manifest(manifest_path)
+    contract_source = None
+    if output_contract:
+        contract_source = f"manifest: {manifest_path}"
+    else:
+        output_contract = _load_output_contract_from_onnx(onnx_path)
+        if output_contract:
+            contract_source = "onnx_graph"
+
+    contract_text = _format_output_contract(output_contract)
+    if contract_text:
+        print(f"Output contract ({contract_source}): {contract_text}")
+    else:
+        print("Output contract: unavailable")
 
     # Construct the base trtexec command
     command = [

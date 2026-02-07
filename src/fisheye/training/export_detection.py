@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Export ONNX/TensorRT artifacts from an existing detection training run."""
+"""Preferred run-aware detection export CLI.
+
+This command is the recommended export path for trained detection runs:
+- resolves weights/report/manifest from a run directory,
+- applies imgsz/device overrides when requested,
+- exports ONNX and/or TensorRT artifacts,
+- optionally logs exported artifacts to the training registry.
+
+For low-level direct ONNX export from a weights file, use:
+    python -m fisheye.training.export_onnx ...
+"""
 
 from __future__ import annotations
 
@@ -14,6 +24,25 @@ from .train_detection import _export_detection_artifacts, _load_manifest_summary
 from ..registry.db import Registry, RegistryPaths
 
 
+def _format_onnx_outputs_line(output_contract: Any) -> str | None:
+    if not isinstance(output_contract, list) or not output_contract:
+        return None
+    parts: list[str] = []
+    for item in output_contract:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "?")
+        dtype = str(item.get("dtype") or "?")
+        shape = item.get("shape")
+        shape_text = "?"
+        if isinstance(shape, list):
+            shape_text = "(" + ",".join(str(v) for v in shape) + ")"
+        parts.append(f"{name}[{dtype},{shape_text}]")
+    if not parts:
+        return None
+    return ", ".join(parts)
+
+
 def _load_training_report(run_dir: Path) -> Optional[Dict[str, Any]]:
     candidates = sorted(
         run_dir.glob("*_detection_training_report.yaml"),
@@ -22,10 +51,15 @@ def _load_training_report(run_dir: Path) -> Optional[Dict[str, Any]]:
     )
     if not candidates:
         return None
+    text = candidates[0].read_text(encoding="utf-8")
     try:
-        return yaml.safe_load(candidates[0].read_text(encoding="utf-8")) or None
+        return yaml.safe_load(text) or None
     except Exception:
-        return None
+        # Legacy reports may include python/object tags emitted by yaml.dump.
+        try:
+            return yaml.load(text, Loader=yaml.BaseLoader) or None
+        except Exception:
+            return None
 
 
 def _resolve_weights_path(run_dir: Optional[Path], weights_arg: Optional[str]) -> Optional[Path]:
@@ -78,7 +112,11 @@ def _resolve_training_params(report: Optional[Dict[str, Any]], args) -> Dict[str
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Export ONNX/TensorRT artifacts from an existing detection run."
+        description="Export ONNX/TensorRT artifacts from an existing detection run.",
+        epilog=(
+            "Recommended for production use. "
+            "Use --log-registry to record export artifacts in sqlite."
+        ),
     )
     parser.add_argument(
         "run_dir",
@@ -240,6 +278,9 @@ def main() -> None:
         manifest_summary=manifest_summary,
         console=console,
     )
+    outputs_line = _format_onnx_outputs_line(export_artifacts.get("onnx_output_contract"))
+    if outputs_line:
+        console.print(f"[green]ONNX outputs:[/green] {outputs_line}")
 
     if args.log_registry:
         try:
@@ -251,8 +292,14 @@ def main() -> None:
                     run_id=run_id,
                     export_type="onnx",
                     path=Path(onnx_path),
+                    manifest_path=Path(export_artifacts.get("onnx_manifest_path"))
+                    if export_artifacts.get("onnx_manifest_path")
+                    else None,
                     metadata={
                         "sha256": export_artifacts.get("onnx_sha256"),
+                        "manifest_sha256": export_artifacts.get("onnx_manifest_sha256"),
+                        "build_env": export_artifacts.get("onnx_build_env"),
+                        "metadata_props": export_artifacts.get("onnx_metadata_props"),
                         "errors": export_artifacts.get("errors"),
                     },
                 )
@@ -265,7 +312,11 @@ def main() -> None:
                     manifest_path=Path(export_artifacts.get("engine_manifest_path"))
                     if export_artifacts.get("engine_manifest_path")
                     else None,
-                    metadata={"errors": export_artifacts.get("errors")},
+                    metadata={
+                        "build_env": export_artifacts.get("build_env"),
+                        "trt_device_info": export_artifacts.get("trt_device_info"),
+                        "errors": export_artifacts.get("errors"),
+                    },
                 )
             registry.close()
             console.print(f"[green]✓ Registry updated:[/green] {registry_path}")

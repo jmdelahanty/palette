@@ -79,6 +79,51 @@ class TrainingParams(BaseModel):
         ge=0,
         description="Per-worker LRU frame-chunk cache size for Zarr detect loader (0 disables).",
     )
+    persistent_workers: Optional[bool] = Field(
+        None,
+        description=(
+            "Keep DataLoader workers alive across epochs for faster epoch transitions. "
+            "Only applies to custom Zarr detection loader."
+        ),
+    )
+    chunk_locality_sampling: Optional[bool] = Field(
+        None,
+        description=(
+            "Group detect train batches by frame chunk to improve Zarr read locality. "
+            "Only applies to the custom Zarr detection loader."
+        ),
+    )
+    num_workers: Optional[int] = Field(
+        None,
+        ge=0,
+        description=(
+            "Number of DataLoader worker processes for custom Zarr detection loader. "
+            "Only applies to detect training."
+        ),
+    )
+    prefetch_factor: Optional[int] = Field(
+        None,
+        ge=1,
+        description=(
+            "Number of prefetched batches per worker for custom Zarr detection loader "
+            "(only used when num_workers > 0)."
+        ),
+    )
+    deterministic_val: bool = Field(
+        True,
+        description=(
+            "Force validation DataLoader to deterministic settings (no shuffle, "
+            "single-process workers) for stable epoch-to-epoch metrics."
+        ),
+    )
+    val_num_workers: Optional[int] = Field(
+        None,
+        ge=0,
+        description=(
+            "Validation DataLoader worker count when deterministic_val is disabled. "
+            "Only applies to detect training."
+        ),
+    )
     seg_loss: Optional[str] = Field(
         default=None,
         description="Optional segmentation loss override (e.g., 'bce_dice').",

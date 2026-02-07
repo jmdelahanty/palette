@@ -9,13 +9,10 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
-import sys
 from typing import Any, List, Mapping, Optional, Sequence
 
 from fisheye.diagnostics import prepare_detect_training as pdt
 from fisheye.registry.db import Registry, RegistryPaths
-from fisheye.utils import export_detect_training_zarr as export_zarr
 
 
 def _add_arg(argv: List[str], flag: str, value: Optional[object]) -> None:
@@ -32,13 +29,6 @@ def _sanitize_name(value: str) -> str:
         else:
             cleaned.append("_")
     return "".join(cleaned)
-
-
-def _normalize_manifest_stem(value: str) -> str:
-    text = str(value).strip()
-    while text.endswith(".manifest"):
-        text = text[: -len(".manifest")]
-    return text
 
 
 def _resolve_default_dataset_root() -> Path:
@@ -198,99 +188,59 @@ def _resolve_preflight_output_paths(args: argparse.Namespace) -> tuple[Path, Pat
     return config_path, manifest_path
 
 
-def _resolve_merged_training_paths(
-    *,
-    preflight_manifest_path: Path,
-    merge_out_dir: Optional[Path],
-) -> tuple[Path, Path]:
-    payload = json.loads(preflight_manifest_path.read_text(encoding="utf-8"))
-    set_id_source = str(payload.get("set_id")).strip() if payload.get("set_id") else preflight_manifest_path.stem
-    set_id = _normalize_manifest_stem(set_id_source) or "training_set"
-    out_dir = Path(merge_out_dir) if merge_out_dir is not None else (_resolve_default_dataset_root() / set_id)
-    return out_dir / f"{set_id}.yaml", out_dir / f"{set_id}.manifest.json"
-
-
-def _require_manifest_set_id(manifest_path: Path) -> str:
-    try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except Exception as exc:  # pragma: no cover - defensive path
-        raise SystemExit(f"--train requires a readable manifest JSON with set_id: {manifest_path} ({exc})")
-    raw = payload.get("set_id") if isinstance(payload, dict) else None
-    set_id = str(raw).strip() if raw is not None else ""
-    if not set_id:
+def _reject_legacy_orchestration_flags(args: argparse.Namespace) -> None:
+    legacy_flags: list[str] = []
+    if args.train:
+        legacy_flags.append("--train")
+    if args.export_merged:
+        legacy_flags.append("--export-merged")
+    if args.export_onnx:
+        legacy_flags.append("--export-onnx")
+    if args.export_trt:
+        legacy_flags.append("--export-trt")
+    if args.onnx_opset is not None:
+        legacy_flags.append("--onnx-opset")
+    if args.onnx_simplify:
+        legacy_flags.append("--onnx-simplify")
+    if args.onnx_path:
+        legacy_flags.append("--onnx-path")
+    if args.nms_conf is not None:
+        legacy_flags.append("--nms-conf")
+    if args.nms_iou is not None:
+        legacy_flags.append("--nms-iou")
+    if args.nms_topk is not None:
+        legacy_flags.append("--nms-topk")
+    if args.trt_precision is not None:
+        legacy_flags.append("--trt-precision")
+    if args.trtexec:
+        legacy_flags.append("--trtexec")
+    if args.trt_cuda_graph:
+        legacy_flags.append("--trt-cuda-graph")
+    if args.trt_profiling:
+        legacy_flags.append("--trt-profiling")
+    if args.trt_verbose:
+        legacy_flags.append("--trt-verbose")
+    if args.merge_out_zarr is not None:
+        legacy_flags.append("--merge-out-zarr")
+    if args.merge_out_dir is not None:
+        legacy_flags.append("--merge-out-dir")
+    if args.merge_split is not None:
+        legacy_flags.append("--merge-split")
+    if args.merge_seed is not None:
+        legacy_flags.append("--merge-seed")
+    if args.merge_copy_batch_size is not None:
+        legacy_flags.append("--merge-copy-batch-size")
+    if args.merge_include_rgb:
+        legacy_flags.append("--merge-include-rgb")
+    if args.merge_overwrite:
+        legacy_flags.append("--merge-overwrite")
+    if legacy_flags:
+        msg = ", ".join(sorted(set(legacy_flags)))
         raise SystemExit(
-            "--train requires manifest set_id to avoid unlinked runs. "
-            "Use --set-name (recommended) so preflight writes set_id."
+            "prepare_detect_training_from_registry is now prepare-only and does not run merge/train/export. "
+            f"Received orchestration flags: {msg}. "
+            "Use: python -m fisheye.utils.run_detect_training_pipeline ..."
         )
-    return set_id
-
-
-def _run_training(
-    *,
-    config_path: Path,
-    manifest_path: Path,
-    set_id: str,
-    registry_path: Path,
-    run_name: Optional[str],
-    project: Optional[str],
-    allow_source_mismatch: bool,
-    export_onnx: bool,
-    export_trt: bool,
-    onnx_opset: Optional[int],
-    onnx_simplify: bool,
-    onnx_path: Optional[str],
-    nms_conf: Optional[float],
-    nms_iou: Optional[float],
-    nms_topk: Optional[int],
-    trt_precision: Optional[str],
-    trtexec: Optional[str],
-    trt_cuda_graph: bool,
-    trt_profiling: bool,
-    trt_verbose: bool,
-) -> int:
-    if not config_path.exists():
-        raise SystemExit(f"Training config not found: {config_path}")
-    if not manifest_path.exists():
-        raise SystemExit(f"Training manifest not found: {manifest_path}")
-
-    cmd: List[str] = [
-        sys.executable,
-        "-m",
-        "fisheye.training.train_detection",
-        str(config_path),
-        "--manifest",
-        str(manifest_path),
-        "--set-id",
-        str(set_id),
-        "--registry",
-        str(registry_path),
-    ]
-    _add_arg(cmd, "--run-name", run_name)
-    _add_arg(cmd, "--project", project)
-    if allow_source_mismatch:
-        cmd.append("--allow-source-mismatch")
-    if export_onnx:
-        cmd.append("--export-onnx")
-    if export_trt:
-        cmd.append("--export-trt")
-    _add_arg(cmd, "--onnx-opset", onnx_opset)
-    if onnx_simplify:
-        cmd.append("--onnx-simplify")
-    _add_arg(cmd, "--onnx-path", onnx_path)
-    _add_arg(cmd, "--nms-conf", nms_conf)
-    _add_arg(cmd, "--nms-iou", nms_iou)
-    _add_arg(cmd, "--nms-topk", nms_topk)
-    _add_arg(cmd, "--trt-precision", trt_precision)
-    _add_arg(cmd, "--trtexec", trtexec)
-    if trt_cuda_graph:
-        cmd.append("--trt-cuda-graph")
-    if trt_profiling:
-        cmd.append("--trt-profiling")
-    if trt_verbose:
-        cmd.append("--trt-verbose")
-    print("Launching training: " + " ".join(cmd))
-    completed = subprocess.run(cmd, check=False)
-    return int(completed.returncode)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -351,80 +301,39 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--allow-source-mismatch", action="store_true")
     parser.add_argument("--allow-unapproved", action="store_true")
     parser.add_argument("--no-prefer-manual", action="store_true")
-    parser.add_argument("--export-onnx", action="store_true", help="Export ONNX after --train.")
-    parser.add_argument("--export-trt", action="store_true", help="Export TensorRT after --train.")
-    parser.add_argument("--onnx-opset", type=int, help="ONNX opset for export.")
-    parser.add_argument("--onnx-simplify", action="store_true", help="Run ONNX simplification after export.")
-    parser.add_argument("--onnx-path", type=str, help="Optional existing ONNX path to reuse.")
-    parser.add_argument("--nms-conf", type=float, help="NMS confidence threshold for export.")
-    parser.add_argument("--nms-iou", type=float, help="NMS IoU threshold for export.")
-    parser.add_argument("--nms-topk", type=int, help="NMS top-k for export.")
-    parser.add_argument("--trt-precision", choices=["fp16", "int8"], help="TensorRT precision.")
-    parser.add_argument("--trtexec", type=str, help="Optional trtexec binary path.")
-    parser.add_argument("--trt-cuda-graph", action="store_true", help="Enable TensorRT CUDA graph.")
-    parser.add_argument("--trt-profiling", action="store_true", help="Enable TensorRT profiling outputs.")
-    parser.add_argument("--trt-verbose", action="store_true", help="Enable verbose TensorRT build logs.")
+    # Legacy orchestration flags are intentionally hidden and rejected.
+    parser.add_argument("--export-onnx", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--export-trt", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--onnx-opset", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--onnx-simplify", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--onnx-path", type=str, help=argparse.SUPPRESS)
+    parser.add_argument("--nms-conf", type=float, help=argparse.SUPPRESS)
+    parser.add_argument("--nms-iou", type=float, help=argparse.SUPPRESS)
+    parser.add_argument("--nms-topk", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--trt-precision", choices=["fp16", "int8"], help=argparse.SUPPRESS)
+    parser.add_argument("--trtexec", type=str, help=argparse.SUPPRESS)
+    parser.add_argument("--trt-cuda-graph", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--trt-profiling", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--trt-verbose", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument(
-        "--train",
-        action="store_true",
-        help="Run fisheye.training.train_detection after successful preflight/export.",
-    )
+    parser.add_argument("--train", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--register", action="store_true", help="Register datasets in the registry.")
     parser.add_argument(
         "--register-registry",
         type=Path,
         help="Registry path to use when --register is set (defaults to --registry).",
     )
-    parser.add_argument(
-        "--export-merged",
-        action="store_true",
-        help="After preflight manifest generation, export one merged training Zarr.",
-    )
-    parser.add_argument(
-        "--merge-out-zarr",
-        type=Path,
-        help="Output merged .zarr path (passed to export_detect_training_zarr --out-zarr).",
-    )
-    parser.add_argument(
-        "--merge-out-dir",
-        type=Path,
-        help="Output directory for merged config/manifest/summary artifacts.",
-    )
-    parser.add_argument(
-        "--merge-split",
-        type=str,
-        default="0.8/0.2",
-        help="Split ratios for merged export (train/val or train/val/test).",
-    )
-    parser.add_argument(
-        "--merge-seed",
-        type=int,
-        default=42,
-        help="Split seed for merged export.",
-    )
-    parser.add_argument(
-        "--merge-copy-batch-size",
-        type=int,
-        default=128,
-        help="Frame-copy batch size for merged export (passed to export_detect_training_zarr --copy-batch-size).",
-    )
-    parser.add_argument(
-        "--merge-include-rgb",
-        action="store_true",
-        help="Also export images_ds_rgb in merged mode (requires RGB arrays in all sources).",
-    )
-    parser.add_argument(
-        "--merge-overwrite",
-        action="store_true",
-        help="Allow overwrite of an existing merged output Zarr.",
-    )
+    parser.add_argument("--export-merged", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--merge-out-zarr", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--merge-out-dir", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--merge-split", type=str, help=argparse.SUPPRESS)
+    parser.add_argument("--merge-seed", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--merge-copy-batch-size", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--merge-include-rgb", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--merge-overwrite", action="store_true", help=argparse.SUPPRESS)
 
     args = parser.parse_args(argv)
-    if args.export_merged and args.dry_run:
-        raise SystemExit("--export-merged cannot be combined with --dry-run (no manifest is written).")
-    if args.train and args.dry_run:
-        raise SystemExit("--train cannot be combined with --dry-run.")
+    _reject_legacy_orchestration_flags(args)
 
     model_input = args.model_input or args.input_format
     if args.model_input and args.model_input != args.input_format:
@@ -479,7 +388,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.out_manifest is None:
             args.out_manifest = inferred_manifest
             print(f"Auto out-manifest: {args.out_manifest}")
-    elif args.out_manifest is None and (args.export_merged or args.train):
+    elif args.out_manifest is None:
         args.out_manifest = Path(args.out_config).with_suffix(".manifest.json")
         print(f"Auto out-manifest: {args.out_manifest}")
 
@@ -522,84 +431,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             cli.extend(["--registry", str(reg_path)])
 
     pdt.main(cli)
-    if args.export_merged:
-        manifest_path = Path(args.out_manifest)
-        if not manifest_path.exists():
-            raise SystemExit(f"Expected manifest not found after preflight: {manifest_path}")
-        export_cli: List[str] = [
-            "--manifest",
-            str(manifest_path),
-            "--merge",
-            "--split",
-            str(args.merge_split),
-            "--seed",
-            str(args.merge_seed),
-            "--copy-batch-size",
-            str(args.merge_copy_batch_size),
-        ]
-        _add_arg(export_cli, "--registry", registry_path)
-        _add_arg(export_cli, "--out-zarr", args.merge_out_zarr)
-        _add_arg(export_cli, "--out-dir", args.merge_out_dir)
-        if args.merge_include_rgb:
-            export_cli.append("--include-rgb")
-        if args.merge_overwrite:
-            export_cli.append("--overwrite")
-        export_zarr.main(export_cli)
-        if args.train:
-            merged_config, merged_manifest = _resolve_merged_training_paths(
-                preflight_manifest_path=manifest_path,
-                merge_out_dir=args.merge_out_dir,
-            )
-            effective_set_id = _require_manifest_set_id(merged_manifest)
-            train_registry = args.register_registry or registry_path
-            return _run_training(
-                config_path=merged_config,
-                manifest_path=merged_manifest,
-                set_id=effective_set_id,
-                registry_path=Path(train_registry),
-                run_name=args.run_name,
-                project=args.project,
-                allow_source_mismatch=bool(args.allow_source_mismatch),
-                export_onnx=bool(args.export_onnx),
-                export_trt=bool(args.export_trt),
-                onnx_opset=args.onnx_opset,
-                onnx_simplify=bool(args.onnx_simplify),
-                onnx_path=args.onnx_path,
-                nms_conf=args.nms_conf,
-                nms_iou=args.nms_iou,
-                nms_topk=args.nms_topk,
-                trt_precision=args.trt_precision,
-                trtexec=args.trtexec,
-                trt_cuda_graph=bool(args.trt_cuda_graph),
-                trt_profiling=bool(args.trt_profiling),
-                trt_verbose=bool(args.trt_verbose),
-            )
-    elif args.train:
-        train_config, train_manifest = _resolve_preflight_output_paths(args)
-        effective_set_id = _require_manifest_set_id(train_manifest)
-        train_registry = args.register_registry or registry_path
-        return _run_training(
-            config_path=train_config,
-            manifest_path=train_manifest,
-            set_id=effective_set_id,
-            registry_path=Path(train_registry),
-            run_name=args.run_name,
-            project=args.project,
-            allow_source_mismatch=bool(args.allow_source_mismatch),
-            export_onnx=bool(args.export_onnx),
-            export_trt=bool(args.export_trt),
-            onnx_opset=args.onnx_opset,
-            onnx_simplify=bool(args.onnx_simplify),
-            onnx_path=args.onnx_path,
-            nms_conf=args.nms_conf,
-            nms_iou=args.nms_iou,
-            nms_topk=args.nms_topk,
-            trt_precision=args.trt_precision,
-            trtexec=args.trtexec,
-            trt_cuda_graph=bool(args.trt_cuda_graph),
-            trt_profiling=bool(args.trt_profiling),
-            trt_verbose=bool(args.trt_verbose),
-        )
     return 0
 
 

@@ -1278,9 +1278,10 @@ def _build_merged_manifest_payload(
         text = str(value).strip()
         return text or None
 
-    def _extract_identity(dataset_payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    def _extract_identity(dataset_payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         dish = _clean_text(dataset_payload.get("dish_design"))
         canvas = _clean_text(dataset_payload.get("canvas_name"))
+        rig = _clean_text(dataset_payload.get("rig_id"))
         provenance = dataset_payload.get("provenance")
         if isinstance(provenance, dict):
             if not dish:
@@ -1291,7 +1292,11 @@ def _build_merged_manifest_payload(
                 rig_info = provenance.get("rig_info")
                 if isinstance(rig_info, dict):
                     canvas = _clean_text(rig_info.get("canvas_name"))
-        return dish, canvas
+            if not rig:
+                rig_info = provenance.get("rig_info")
+                if isinstance(rig_info, dict):
+                    rig = _clean_text(rig_info.get("rig_id"))
+        return dish, canvas, rig
 
     def _collapse(values: set[str], *, mixed_label: str) -> Optional[str]:
         if len(values) == 1:
@@ -1304,7 +1309,7 @@ def _build_merged_manifest_payload(
     source_rows = payload.get("datasets")
     if not isinstance(source_rows, list):
         source_rows = []
-    identity_by_path: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+    identity_by_path: Dict[str, Tuple[Optional[str], Optional[str], Optional[str]]] = {}
     for row in source_rows:
         if not isinstance(row, dict):
             continue
@@ -1316,12 +1321,15 @@ def _build_merged_manifest_payload(
     source_datasets_payload: List[Dict[str, Any]] = []
     dish_values: set[str] = set()
     canvas_values: set[str] = set()
+    rig_values: set[str] = set()
     for spec in merge_result.source_specs:
-        dish, canvas = identity_by_path.get(str(spec.source_zarr), (None, None))
+        dish, canvas, rig = identity_by_path.get(str(spec.source_zarr), (None, None, None))
         if dish:
             dish_values.add(dish)
         if canvas:
             canvas_values.add(canvas)
+        if rig:
+            rig_values.add(rig)
         source_datasets_payload.append(
             {
                 "name": spec.dataset_name,
@@ -1330,11 +1338,13 @@ def _build_merged_manifest_payload(
                 "sample_count": int(spec.sample_count),
                 "dish_design": dish,
                 "canvas_name": canvas,
+                "rig_id": rig,
             }
         )
 
     merged_dish = _collapse(dish_values, mixed_label="mixed_dishes")
     merged_canvas = _collapse(canvas_values, mixed_label="mixed_canvas")
+    merged_rig = _collapse(rig_values, mixed_label="mixed_rigs")
 
     if merge_result.training_input_format == "gray":
         spatial_shape = list(merge_result.source_specs[0].gray_shape or ())
@@ -1348,6 +1358,7 @@ def _build_merged_manifest_payload(
         "session_uuid": None,
         "dish_design": merged_dish,
         "canvas_name": merged_canvas,
+        "rig_id": merged_rig,
         "crop_run": run_name,
         "bbox_array_path": f"crop_runs/{run_name}/bbox_norm_coords",
         "detection_source_type": str(manifest.source_type),
@@ -1393,6 +1404,7 @@ def _build_merged_manifest_payload(
     }
     payload["dish_design"] = merged_dish
     payload["canvas_name"] = merged_canvas
+    payload["rig_name"] = merged_rig
     payload["exported_at_utc"] = _utc_now()
     return payload
 

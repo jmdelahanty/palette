@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cv2
@@ -1170,6 +1171,12 @@ class ZarrYOLODataset(Dataset):
             return {"cls": np.zeros((0,), dtype=np.float32), "bboxes": np.zeros((0, 4), dtype=np.float32)}
     
     def __getitem__(self, index: int) -> Dict:
+        profile_cb = getattr(self, "_profile_callback", None)
+        profile_enabled = callable(profile_cb)
+        getitem_start = time.perf_counter() if profile_enabled else 0.0
+        read_seconds = 0.0
+        augment_seconds = 0.0
+
         zarr_path, det_idx = self.indices[index]
         root = self.zarr_roots[zarr_path]
         metadata = self.metadata_map.get(zarr_path)
@@ -1182,6 +1189,7 @@ class ZarrYOLODataset(Dataset):
             image_source_path = f"crop_runs/{root['crop_runs'].attrs['latest']}/roi_images"
         
         frame_idx = None
+        read_start = time.perf_counter() if profile_enabled else 0.0
         if self.config.task == 'detect':
             frame_array = self.detect_frame_arrays.get(zarr_path)
             if frame_array is None:
@@ -1202,6 +1210,8 @@ class ZarrYOLODataset(Dataset):
                 roi_idx = 0
             else:
                 image = root[image_source_path][roi_idx]
+        if profile_enabled:
+            read_seconds = max(0.0, time.perf_counter() - read_start)
 
         if self.config.task == 'detect' and metadata.input_format == 'rgb' and image.ndim == 3:
             image_3ch = image
@@ -1215,11 +1225,14 @@ class ZarrYOLODataset(Dataset):
         cls_arr = label_info.get('cls', np.zeros((0,), dtype=np.float32)).astype(np.float32)
         bboxes_arr = label_info.get('bboxes', np.zeros((0, 4), dtype=np.float32)).astype(np.float32)
         if self.config.task == 'detect' and self.mode == 'train':
+            augment_start = time.perf_counter() if profile_enabled else 0.0
             image_3ch, cls_arr, bboxes_arr = self._augment_detect_train_sample(
                 image=image_3ch,
                 cls=cls_arr,
                 bboxes_xywhn=bboxes_arr,
             )
+            if profile_enabled:
+                augment_seconds = max(0.0, time.perf_counter() - augment_start)
 
         ori_shape = (image_3ch.shape[0], image_3ch.shape[1])
         
@@ -1227,7 +1240,7 @@ class ZarrYOLODataset(Dataset):
                          if self.config.task == 'detect'
                          else f"{Path(zarr_path).stem}_roi_{det_idx}")
 
-        return {
+        sample = {
             "img": image_3ch.transpose(2, 0, 1),
             "cls": cls_arr,
             "bboxes": bboxes_arr,
@@ -1237,6 +1250,22 @@ class ZarrYOLODataset(Dataset):
             "ratio_pad": ((1.0, 1.0), (0.0, 0.0)),
             "segments": np.zeros((0, 0), dtype=np.float32)
         }
+
+        if profile_enabled:
+            try:
+                profile_cb(
+                    {
+                        "samples": 1,
+                        "zarr_read_s": float(read_seconds),
+                        "augment_preprocess_s": float(augment_seconds),
+                        "getitem_total_s": float(max(0.0, time.perf_counter() - getitem_start)),
+                    }
+                )
+            except Exception:
+                # Profiling must never disrupt training.
+                pass
+
+        return sample
 
 
 def create_zarr_dataset(config: Union[ZarrDatasetConfig, Dict], mode: str) -> ZarrYOLODataset:
