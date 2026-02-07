@@ -74,18 +74,16 @@ training_params:
   # Core hyperparameters
   epochs: 100  # Number of training epochs
   batch: 128    # Batch size for training
-  imgsz: 2304   # Input image size for training
-  rect: true           # Enable rectangular training batches to reduce padding
+  imgsz: 640   # Input image size for training
+  rect: false           # Enable rectangular training batches to reduce padding
   lr0: 0.002   # Initial learning rate
   momentum: 0.9          # Momentum factor
   weight_decay: 0.0005   # Weight decay (L2 penalty)
   patience: 10           # Early stopping patience
   device: '0'            # CUDA device
   max_det: 1             # Max detections per image (post-NMS)
+  chunk_cache_size: 64
   # Augmentations tuned for single-fish grayscale data
-  mosaic: 0.0
-  close_mosaic: 0
-  auto_augment: null
   hsv_h: 0.0
   hsv_s: 0.0
   hsv_v: 0.15
@@ -97,9 +95,6 @@ training_params:
   fliplr: 0.5
   flipud: 0.0
   erasing: 0.0
-  mixup: 0.0
-  copy_paste: 0.0
-  cutmix: 0.0
 
 # ================================================================================
 # TRAINING HISTORY & METADATA

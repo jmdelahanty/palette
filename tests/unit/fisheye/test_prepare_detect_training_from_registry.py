@@ -340,6 +340,99 @@ def test_train_after_merged_export_uses_merged_outputs(tmp_path: Path, monkeypat
     assert str(registry_path) in train_cmd
 
 
+def test_train_forwards_export_flags_to_train_detection(tmp_path: Path, monkeypatch) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    db = Registry(registry_path)
+    db.upsert_dataset(
+        "dataset_1",
+        session_uuid="dataset_1",
+        zarr_path=tmp_path / "dataset_1.zarr",
+    )
+    db.upsert_provenance(
+        "dataset_1",
+        provenance={},
+        context={},
+        protocol_name=None,
+        protocol_hash=None,
+        acquisition={
+            "has_images_ds": True,
+            "has_images_ds_rgb": False,
+            "downsample_formats_json": '["gray"]',
+        },
+        zarr_purpose=None,
+    )
+    db.close()
+
+    out_config = tmp_path / "prep" / "detect.yaml"
+    out_manifest = tmp_path / "prep" / "detect.manifest.json"
+    calls: dict[str, list[str]] = {}
+
+    def fake_prepare(cli: list[str]) -> None:
+        calls["prepare"] = list(cli)
+        out_config.parent.mkdir(parents=True, exist_ok=True)
+        out_manifest.parent.mkdir(parents=True, exist_ok=True)
+        out_config.write_text("task: detect\n", encoding="utf-8")
+        out_manifest.write_text('{"set_id":"detect_smoke_v001"}', encoding="utf-8")
+
+    def fake_run(cmd: list[str], check: bool = False):
+        calls["train"] = list(cmd)
+
+        class _Result:
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(wrapper.pdt, "main", fake_prepare)
+    monkeypatch.setattr(wrapper.subprocess, "run", fake_run)
+
+    rc = wrapper.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--out-config",
+            str(out_config),
+            "--out-manifest",
+            str(out_manifest),
+            "--train",
+            "--export-onnx",
+            "--export-trt",
+            "--onnx-opset",
+            "13",
+            "--onnx-simplify",
+            "--onnx-path",
+            str(tmp_path / "existing.onnx"),
+            "--nms-conf",
+            "0.75",
+            "--nms-iou",
+            "0.6",
+            "--nms-topk",
+            "2",
+            "--trt-precision",
+            "int8",
+            "--trtexec",
+            "/usr/bin/trtexec",
+            "--trt-cuda-graph",
+            "--trt-profiling",
+            "--trt-verbose",
+        ]
+    )
+    assert rc == 0
+    train_cmd = calls["train"]
+    assert "--export-onnx" in train_cmd
+    assert "--export-trt" in train_cmd
+    assert "--onnx-opset" in train_cmd and "13" in train_cmd
+    assert "--onnx-simplify" in train_cmd
+    assert "--onnx-path" in train_cmd and str(tmp_path / "existing.onnx") in train_cmd
+    assert "--nms-conf" in train_cmd and "0.75" in train_cmd
+    assert "--nms-iou" in train_cmd and "0.6" in train_cmd
+    assert "--nms-topk" in train_cmd and "2" in train_cmd
+    assert "--trt-precision" in train_cmd and "int8" in train_cmd
+    assert "--trtexec" in train_cmd and "/usr/bin/trtexec" in train_cmd
+    assert "--trt-cuda-graph" in train_cmd
+    assert "--trt-profiling" in train_cmd
+    assert "--trt-verbose" in train_cmd
+
+
 def test_train_cannot_be_combined_with_dry_run(tmp_path: Path) -> None:
     registry_path = tmp_path / "registry.sqlite"
     db = Registry(registry_path)

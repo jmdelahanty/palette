@@ -10,8 +10,12 @@ import zarr
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.training.train_detection import (
+    _apply_zarr_loader_training_param_overrides,
     _build_default_run_name,
+    _extract_runtime_imgsz,
     _infer_set_slug,
+    _imgsz_to_config_value,
+    _should_enable_rect_for_non_square_inputs,
     get_zarr_metadata,
     _snapshot_training_inputs,
     _strip_manifest_suffixes,
@@ -55,15 +59,18 @@ def test_snapshot_training_inputs_copies_config_manifest_and_invocation(tmp_path
 def test_build_default_run_name_uses_manifest_hints() -> None:
     run_name = _build_default_run_name(
         manifest_summary={
+            "manifest_rig_name": "omnifin0",
             "manifest_dish_design": "cedar dish",
             "manifest_canvas_name": "DefaultScreen",
+            "manifest_set_id": "detect_cedar_shadow_v005",
             "manifest_task": "detect",
+            "manifest_sha256": "12345678abcdef00112233445566778899aabbccddeeff001122334455667788",
         },
         task_fallback="detect",
         timestamp="20260206-200000",
         pid=1234,
     )
-    assert run_name == "cedar_dish_defaultscreen_detect_20260206-200000_1234"
+    assert run_name == "omnifin0_cedar_dish_defaultscreen_v005_detect_20260206-200000_12345678"
 
 
 def test_build_default_run_name_falls_back_to_set_slug_when_identity_missing() -> None:
@@ -71,12 +78,13 @@ def test_build_default_run_name_falls_back_to_set_slug_when_identity_missing() -
         manifest_summary={
             "manifest_set_slug": "detect_cedar_shadow_v001",
             "manifest_task": "detect",
+            "manifest_sha256": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
         },
         task_fallback="detect",
         timestamp="20260206-200000",
         pid=1234,
     )
-    assert run_name == "detect_cedar_shadow_v001_detect_20260206-200000_1234"
+    assert run_name == "unknown_rig_cedar_shadow_v001_detect_20260206-200000_abcdef12"
 
 
 def test_get_zarr_metadata_reads_merged_layout_counts(tmp_path: Path) -> None:
@@ -98,5 +106,80 @@ def test_get_zarr_metadata_reads_merged_layout_counts(tmp_path: Path) -> None:
     entry = metadata[zarr_path.name]
 
     assert entry["video_frames"] == 5
+    assert entry["frame_height"] == 8
+    assert entry["frame_width"] == 8
     assert entry["crop_info"]["total_rois"] == 5
     assert entry["crop_info"]["source_type"] == "manual"
+
+
+def test_should_enable_rect_for_non_square_inputs() -> None:
+    metadata = {
+        "square.zarr": {"frame_height": 640, "frame_width": 640},
+        "rect.zarr": {"frame_height": 640, "frame_width": 1024},
+    }
+    assert _should_enable_rect_for_non_square_inputs(metadata) is True
+
+
+def test_should_not_enable_rect_for_all_square_inputs() -> None:
+    metadata = {
+        "a.zarr": {"frame_height": 640, "frame_width": 640},
+        "b.zarr": {"frame_height": 512, "frame_width": 512},
+    }
+    assert _should_enable_rect_for_non_square_inputs(metadata) is False
+
+
+def test_apply_zarr_loader_training_param_overrides_sets_neutral_builtin_aug() -> None:
+    params, custom = _apply_zarr_loader_training_param_overrides(
+        {
+            "model": "yolo11n.pt",
+            "epochs": 10,
+            "batch": 16,
+            "imgsz": 640,
+            "lr0": 0.001,
+            "momentum": 0.9,
+            "weight_decay": 0.0005,
+            "patience": 5,
+            "device": "0",
+            "hsv_v": 0.15,
+            "degrees": 5.0,
+            "fliplr": 0.5,
+        }
+    )
+    assert params["mosaic"] == 0.0
+    assert params["mixup"] == 0.0
+    assert params["cutmix"] == 0.0
+    assert params["copy_paste"] == 0.0
+    assert params["close_mosaic"] == 0
+    assert params["augment"] is False
+    assert "auto_augment" in params and params["auto_augment"] is None
+    assert custom["hsv_v"] == 0.15
+    assert custom["degrees"] == 5.0
+    assert custom["fliplr"] == 0.5
+
+
+def test_imgsz_to_config_value_returns_scalar_for_square() -> None:
+    assert _imgsz_to_config_value(640, 640) == 640
+
+
+def test_imgsz_to_config_value_returns_list_for_rectangular() -> None:
+    assert _imgsz_to_config_value(640, 1024) == [640, 1024]
+
+
+def test_extract_runtime_imgsz_reads_trainer_args() -> None:
+    class _Args:
+        imgsz = [512, 768]
+
+    class _Trainer:
+        args = _Args()
+
+    class _Model:
+        trainer = _Trainer()
+
+    assert _extract_runtime_imgsz(_Model(), 640) == (512, 768)
+
+
+def test_extract_runtime_imgsz_falls_back_when_trainer_missing() -> None:
+    class _Model:
+        trainer = None
+
+    assert _extract_runtime_imgsz(_Model(), [320, 640]) == (320, 640)

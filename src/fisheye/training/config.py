@@ -63,6 +63,22 @@ class TrainingParams(BaseModel):
     project: Optional[str] = None
     max_det: Optional[int] = Field(None, ge=1)
     conf: Optional[float] = Field(None, ge=0.0, le=1.0)
+    hsv_h: Optional[float] = Field(None, ge=0.0, le=1.0)
+    hsv_s: Optional[float] = Field(None, ge=0.0, le=1.0)
+    hsv_v: Optional[float] = Field(None, ge=0.0, le=1.0)
+    degrees: Optional[float] = None
+    translate: Optional[float] = Field(None, ge=0.0, le=1.0)
+    scale: Optional[float] = Field(None, ge=0.0)
+    shear: Optional[float] = None
+    perspective: Optional[float] = Field(None, ge=0.0, le=0.001)
+    fliplr: Optional[float] = Field(None, ge=0.0, le=1.0)
+    flipud: Optional[float] = Field(None, ge=0.0, le=1.0)
+    erasing: Optional[float] = Field(None, ge=0.0, le=1.0)
+    chunk_cache_size: Optional[int] = Field(
+        None,
+        ge=0,
+        description="Per-worker LRU frame-chunk cache size for Zarr detect loader (0 disables).",
+    )
     seg_loss: Optional[str] = Field(
         default=None,
         description="Optional segmentation loss override (e.g., 'bce_dice').",

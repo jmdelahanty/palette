@@ -151,11 +151,23 @@ def get_zarr_metadata(zarr_paths, console=None):
             if 'raw_video' in root:
                 raw_video = root['raw_video']
                 if 'images_full' in raw_video:
-                    zarr_meta['video_frames'] = int(raw_video['images_full'].shape[0])
+                    arr = raw_video['images_full']
+                    zarr_meta['video_frames'] = int(arr.shape[0])
+                    if len(arr.shape) >= 3:
+                        zarr_meta['frame_height'] = int(arr.shape[1])
+                        zarr_meta['frame_width'] = int(arr.shape[2])
                 elif 'images_ds' in raw_video:
-                    zarr_meta['video_frames'] = int(raw_video['images_ds'].shape[0])
+                    arr = raw_video['images_ds']
+                    zarr_meta['video_frames'] = int(arr.shape[0])
+                    if len(arr.shape) >= 3:
+                        zarr_meta['frame_height'] = int(arr.shape[1])
+                        zarr_meta['frame_width'] = int(arr.shape[2])
                 elif 'images_ds_rgb' in raw_video:
-                    zarr_meta['video_frames'] = int(raw_video['images_ds_rgb'].shape[0])
+                    arr = raw_video['images_ds_rgb']
+                    zarr_meta['video_frames'] = int(arr.shape[0])
+                    if len(arr.shape) >= 3:
+                        zarr_meta['frame_height'] = int(arr.shape[1])
+                        zarr_meta['frame_width'] = int(arr.shape[2])
                 zarr_meta['fps'] = raw_video.attrs.get('fps', 'N/A')
             
             # Get detection info
@@ -249,6 +261,51 @@ def get_zarr_metadata(zarr_paths, console=None):
                 console.print(f"[yellow]Warning: Could not read metadata from {path_name}: {e}[/yellow]")
     
     return metadata
+
+
+def _should_enable_rect_for_non_square_inputs(zarr_metadata: dict) -> bool:
+    """Return True when at least one dataset has non-square frame dimensions."""
+    for meta in zarr_metadata.values():
+        if not isinstance(meta, dict) or 'error' in meta:
+            continue
+        h = meta.get('frame_height')
+        w = meta.get('frame_width')
+        if isinstance(h, int) and isinstance(w, int) and h > 0 and w > 0 and h != w:
+            return True
+    return False
+
+
+def _apply_zarr_loader_training_param_overrides(training_params: dict) -> tuple[dict, dict]:
+    """Normalize args passed to Ultralytics and return custom-loader augmentation summary."""
+    params = dict(training_params)
+    custom_loader_aug_keys = (
+        "hsv_h",
+        "hsv_s",
+        "hsv_v",
+        "degrees",
+        "translate",
+        "scale",
+        "shear",
+        "perspective",
+        "fliplr",
+        "flipud",
+        "erasing",
+    )
+    custom_loader_aug = {
+        key: float(params.get(key, 0.0) or 0.0)
+        for key in custom_loader_aug_keys
+    }
+    custom_loader_aug["chunk_cache_size"] = int(params.get("chunk_cache_size", 0) or 0)
+
+    # We use a custom Zarr loader, so keep Ultralytics multi-sample augmentation knobs neutral.
+    params.setdefault("augment", False)
+    params.setdefault("mosaic", 0.0)
+    params.setdefault("mixup", 0.0)
+    params.setdefault("cutmix", 0.0)
+    params.setdefault("copy_paste", 0.0)
+    params.setdefault("close_mosaic", 0)
+    params.setdefault("auto_augment", None)
+    return params, custom_loader_aug
 
 
 def display_zarr_metadata(metadata, console):
@@ -414,6 +471,12 @@ def _load_manifest_summary(manifest_path: str | None) -> dict:
             or first_dataset.get("dish_design")
             or arena.get("dish_design")
         )
+        manifest_rig = (
+            (payload.get("rig_name") if isinstance(payload, dict) else None)
+            or query_filter.get("rig_id")
+            or first_dataset.get("rig_id")
+            or rig_info.get("rig_id")
+        )
         return {
             "manifest_path": str(path),
             "manifest_sha256": digest,
@@ -422,6 +485,7 @@ def _load_manifest_summary(manifest_path: str | None) -> dict:
             "manifest_set_id": manifest_set_id,
             "manifest_set_slug": set_slug,
             "manifest_task": payload.get("task") if isinstance(payload, dict) else None,
+            "manifest_rig_name": manifest_rig,
             "manifest_dish_design": manifest_dish,
             "manifest_canvas_name": manifest_canvas,
         }
@@ -462,6 +526,65 @@ def _sanitize_run_component(value: str | None, fallback: str) -> str:
     return text or fallback
 
 
+def _resolve_manifest_version_token(manifest_summary: dict) -> str:
+    for key in ("manifest_set_id", "manifest_set_slug"):
+        raw = str(manifest_summary.get(key) or "").strip().lower()
+        if not raw:
+            continue
+        match = re.search(r"_v(?P<num>\d+)$", raw)
+        if not match:
+            continue
+        try:
+            version_num = int(match.group("num"))
+        except Exception:
+            continue
+        if version_num >= 0:
+            return f"v{version_num:03d}"
+    return "v001"
+
+
+def _resolve_run_hash(
+    *,
+    manifest_summary: dict,
+    task: str,
+    stamp: str,
+    pid: int,
+) -> str:
+    manifest_sha = str(manifest_summary.get("manifest_sha256") or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{8,}", manifest_sha):
+        return manifest_sha[:8]
+
+    seed = "|".join(
+        [
+            str(manifest_summary.get("manifest_set_id") or ""),
+            str(manifest_summary.get("manifest_set_slug") or ""),
+            str(manifest_summary.get("manifest_rig_name") or ""),
+            str(manifest_summary.get("manifest_dish_design") or ""),
+            str(manifest_summary.get("manifest_canvas_name") or ""),
+            task,
+            stamp,
+            str(pid),
+        ]
+    )
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8]
+
+
+def _infer_dish_canvas_from_set_slug(manifest_summary: dict) -> tuple[str | None, str | None]:
+    raw = str(manifest_summary.get("manifest_set_slug") or manifest_summary.get("manifest_set_id") or "").strip()
+    if not raw:
+        return None, None
+    slug = _sanitize_run_component(raw, "")
+    if not slug:
+        return None, None
+    slug = re.sub(r"_v\d+$", "", slug)
+    if slug.startswith("detect_"):
+        slug = slug[len("detect_") :]
+    parts = [part for part in slug.split("_") if part]
+    if len(parts) < 2:
+        return None, None
+    return parts[0], parts[1]
+
+
 def _build_default_run_name(
     *,
     manifest_summary: dict,
@@ -469,19 +592,24 @@ def _build_default_run_name(
     timestamp: str | None = None,
     pid: int | None = None,
 ) -> str:
-    raw_dish = manifest_summary.get("manifest_dish_design")
-    raw_canvas = manifest_summary.get("manifest_canvas_name")
-    if raw_dish and raw_canvas:
-        prefix = (
-            f"{_sanitize_run_component(raw_dish, 'unknown_dish')}_"
-            f"{_sanitize_run_component(raw_canvas, 'unknown_canvas')}"
-        )
-    else:
-        prefix = _sanitize_run_component(manifest_summary.get("manifest_set_slug"), "training_set")
+    fallback_dish, fallback_canvas = _infer_dish_canvas_from_set_slug(manifest_summary)
+    rig = _sanitize_run_component(manifest_summary.get("manifest_rig_name"), "unknown_rig")
+    dish = _sanitize_run_component(manifest_summary.get("manifest_dish_design") or fallback_dish, "unknown_dish")
+    canvas = _sanitize_run_component(
+        manifest_summary.get("manifest_canvas_name") or fallback_canvas,
+        "unknown_canvas",
+    )
+    version = _resolve_manifest_version_token(manifest_summary)
     task = _sanitize_run_component(manifest_summary.get("manifest_task") or task_fallback, task_fallback)
     stamp = timestamp or time.strftime("%Y%m%d-%H%M%S")
     process_id = int(os.getpid() if pid is None else pid)
-    return f"{prefix}_{task}_{stamp}_{process_id}"
+    short_hash = _resolve_run_hash(
+        manifest_summary=manifest_summary,
+        task=task,
+        stamp=stamp,
+        pid=process_id,
+    )
+    return f"{rig}_{dish}_{canvas}_{version}_{task}_{stamp}_{short_hash}"
 
 
 def _infer_set_slug(set_id: str | None, config_path: Path | None) -> str:
@@ -640,6 +768,24 @@ def _normalize_imgsz(value) -> tuple[int, int]:
     return size, size
 
 
+def _imgsz_to_config_value(img_h: int, img_w: int) -> int | list[int]:
+    h = int(img_h)
+    w = int(img_w)
+    return h if h == w else [h, w]
+
+
+def _extract_runtime_imgsz(model, fallback_imgsz) -> tuple[int, int]:
+    """Read imgsz from Ultralytics trainer args after training; fallback when unavailable."""
+    fallback = _normalize_imgsz(fallback_imgsz)
+    trainer = getattr(model, "trainer", None)
+    if trainer is None:
+        return fallback
+    trainer_args = getattr(trainer, "args", None)
+    if trainer_args is None:
+        return fallback
+    return _normalize_imgsz(getattr(trainer_args, "imgsz", fallback))
+
+
 def _resolve_export_device(value) -> str:
     if isinstance(value, str) and value:
         if value.isdigit():
@@ -746,6 +892,7 @@ def _export_detection_artifacts(
     run_id: str,
     weights_path: Path,
     training_params: dict,
+    export_imgsz: tuple[int, int] | None,
     args,
     manifest_summary: dict,
     console: Console,
@@ -768,7 +915,10 @@ def _export_detection_artifacts(
             export_info["errors"].append(f"onnx_not_found:{existing_onnx_path}")
             return export_info
 
-    img_h, img_w = _normalize_imgsz(training_params.get("imgsz"))
+    if export_imgsz is None:
+        img_h, img_w = _normalize_imgsz(training_params.get("imgsz"))
+    else:
+        img_h, img_w = int(export_imgsz[0]), int(export_imgsz[1])
     input_shape = [1, 3, img_h, img_w]
     export_device = _resolve_export_device(training_params.get("device"))
 
@@ -989,6 +1139,7 @@ def main(args):
         allow_source_mismatch = bool(full_config.allow_source_mismatch or args.allow_source_mismatch)
         
         # Extract dataset config fields from flat structure
+        tp = full_config.training_params
         zarr_config_dict = {
             'datasets': full_config.datasets,
             'task': full_config.task,
@@ -996,6 +1147,20 @@ def main(args):
             'sampling_strategy': full_config.sampling_strategy,
             'dataset_weights': full_config.dataset_weights,
             'allow_source_mismatch': allow_source_mismatch,
+            'chunk_cache_size': int(tp.chunk_cache_size or 0),
+            'augmentation': {
+                'hsv_h': float(tp.hsv_h or 0.0),
+                'hsv_s': float(tp.hsv_s or 0.0),
+                'hsv_v': float(tp.hsv_v or 0.0),
+                'degrees': float(tp.degrees or 0.0),
+                'translate': float(tp.translate or 0.0),
+                'scale': float(tp.scale or 0.0),
+                'shear': float(tp.shear or 0.0),
+                'perspective': float(tp.perspective or 0.0),
+                'fliplr': float(tp.fliplr or 0.0),
+                'flipud': float(tp.flipud or 0.0),
+                'erasing': float(tp.erasing or 0.0),
+            },
         }
         config = ZarrDatasetConfig(**zarr_config_dict)
         console.print(f"[bold green]✓ Loaded config:[/bold green] {args.config_path}\n")
@@ -1118,6 +1283,12 @@ def main(args):
 
     # Get training params
     training_params = full_config.training_params.model_dump(exclude_none=True)
+    training_params, custom_loader_augment = _apply_zarr_loader_training_param_overrides(training_params)
+    if not bool(training_params.get("rect", False)) and _should_enable_rect_for_non_square_inputs(zarr_metadata):
+        training_params["rect"] = True
+        console.print(
+            "[yellow]Auto-enabled rect=True because non-square input frames were detected.[/yellow]"
+        )
     _resolve_project_dir(
         args=args,
         training_params=training_params,
@@ -1151,6 +1322,18 @@ def main(args):
 
     # Display hyperparameters
     params_str = json.dumps(training_params, indent=2)
+    custom_loader_aug_str = json.dumps(custom_loader_augment, indent=2)
+    console.print(
+        Panel(
+            custom_loader_aug_str,
+            title="[bold cyan]Custom Loader Augmentations[/bold cyan]",
+            expand=False,
+        )
+    )
+    console.print(
+        "[dim]Ultralytics built-in mosaic/mixup/cutmix/copy_paste/auto_augment are held neutral for Zarr loader runs.[/dim]"
+    )
+    console.print()
     console.print(Panel(
         params_str,
         title="[bold yellow]Training Hyperparameters[/bold yellow]",
@@ -1213,6 +1396,8 @@ def main(args):
         raise
     
     training_duration_seconds = time.time() - training_start_time
+    effective_img_h, effective_img_w = _extract_runtime_imgsz(model, training_params.get("imgsz"))
+    training_params["imgsz"] = _imgsz_to_config_value(effective_img_h, effective_img_w)
 
     export_artifacts = {}
     if args.export_onnx or args.export_trt:
@@ -1222,6 +1407,7 @@ def main(args):
             run_id=results.save_dir.name,
             weights_path=weights_path,
             training_params=training_params,
+            export_imgsz=(effective_img_h, effective_img_w),
             args=args,
             manifest_summary=manifest_summary,
             console=console,
@@ -1248,8 +1434,13 @@ def main(args):
         
         # Build comprehensive training report
         final_report = full_config.model_dump()
+        if isinstance(final_report.get("training_params"), dict):
+            final_report["training_params"]["imgsz"] = _imgsz_to_config_value(effective_img_h, effective_img_w)
         final_report['training_history'] = {
             'source_zarr_metadata': zarr_metadata,
+            'custom_loader_augmentation': custom_loader_augment,
+            'effective_imgsz': [int(effective_img_h), int(effective_img_w)],
+            'effective_training_params': dict(training_params),
             'source_type_resolution': {
                 'allow_source_mismatch': bool(allow_source_mismatch),
                 'mismatch_count': len(source_mismatches),
@@ -1305,6 +1496,8 @@ def main(args):
         final_metrics_payload = dict(final_validation_metrics or {})
         final_metrics_payload.setdefault("stage", "completed")
         final_metrics_payload.setdefault("status_detail", "training_complete")
+        final_metrics_payload.setdefault("imgsz_h", int(effective_img_h))
+        final_metrics_payload.setdefault("imgsz_w", int(effective_img_w))
         _record_registry_training_run(
             args=args,
             console=console,

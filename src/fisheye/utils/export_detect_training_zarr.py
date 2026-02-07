@@ -643,19 +643,40 @@ def _copy_indexed_frames(
     dest_array: zarr.Array,
     dest_start: int,
     *,
-    batch_size: int = 32,
+    batch_size: int = 128,
     on_copied: Optional[Callable[[int], None]] = None,
 ) -> None:
     if frame_indices.size == 0:
         return
+    batch_size = max(1, int(batch_size))
     total = int(frame_indices.shape[0])
+
+    # Fast path: fully contiguous source slice can be copied in one operation.
+    if total > 0:
+        first = int(frame_indices[0])
+        expected = np.arange(first, first + total, dtype=np.int64)
+        if np.array_equal(frame_indices.astype(np.int64, copy=False), expected):
+            dest_array[dest_start : dest_start + total] = src_array[first : first + total]
+            if on_copied is not None:
+                on_copied(total)
+            return
+
     for start in range(0, total, batch_size):
         stop = min(start + batch_size, total)
         selection = frame_indices[start:stop]
-        try:
-            batch = src_array.vindex[selection, ...]
-        except Exception:
-            batch = np.stack([src_array[int(idx)] for idx in selection], axis=0)
+        if selection.size == 0:
+            continue
+
+        # Secondary fast path: batch itself is contiguous.
+        if selection.size > 1 and np.all(np.diff(selection.astype(np.int64, copy=False)) == 1):
+            batch_first = int(selection[0])
+            batch_last = int(selection[-1]) + 1
+            batch = src_array[batch_first:batch_last, ...]
+        else:
+            try:
+                batch = src_array.vindex[selection, ...]
+            except Exception:
+                batch = np.stack([src_array[int(idx)] for idx in selection], axis=0)
         dest_array[dest_start + start : dest_start + stop] = batch
         if on_copied is not None:
             on_copied(stop - start)
@@ -902,6 +923,7 @@ def _export_merged(
     test_ratio: float,
     seed: int,
     include_rgb: bool,
+    copy_batch_size: int,
     invocation: Dict[str, Any],
 ) -> MergeResult:
     train_input_format = str(manifest.input_format).strip().lower()
@@ -1050,6 +1072,7 @@ def _export_merged(
                     src_frame_indices,
                     gray_dest,
                     offset,
+                    batch_size=copy_batch_size,
                     on_copied=_advance_copy,
                 )
 
@@ -1069,6 +1092,7 @@ def _export_merged(
                     src_frame_indices,
                     rgb_dest,
                     offset,
+                    batch_size=copy_batch_size,
                     on_copied=_advance_copy,
                 )
 
@@ -1512,6 +1536,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Random seed for merged split generation.",
     )
     parser.add_argument(
+        "--copy-batch-size",
+        type=int,
+        default=128,
+        help="Frame-copy batch size for merged export (higher can improve throughput).",
+    )
+    parser.add_argument(
         "--include-rgb",
         action="store_true",
         help="In merged mode, also export raw_video/images_ds_rgb (requires RGB arrays in all sources).",
@@ -1563,6 +1593,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Merged output: {merged_zarr}")
         print(f"Datasets: {len(manifest.datasets)}")
         print(f"Split: train={train_ratio:.3f} val={val_ratio:.3f} test={test_ratio:.3f} seed={args.seed}")
+        print(f"Copy batch size: {int(args.copy_batch_size)}")
         print(f"Training input format: {manifest.input_format}")
         print(f"Also export RGB array: {bool(args.include_rgb)}")
         for dataset in manifest.datasets:
@@ -1588,6 +1619,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             test_ratio=test_ratio,
             seed=int(args.seed),
             include_rgb=bool(args.include_rgb),
+            copy_batch_size=int(args.copy_batch_size),
             invocation=invocation,
         )
 

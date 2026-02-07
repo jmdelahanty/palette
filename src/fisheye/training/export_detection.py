@@ -57,7 +57,15 @@ def _resolve_manifest_path(
 def _resolve_training_params(report: Optional[Dict[str, Any]], args) -> Dict[str, Any]:
     params: Dict[str, Any] = {}
     if report:
-        params = report.get("training_params") or {}
+        history = report.get("training_history") or {}
+        if isinstance(history, dict):
+            effective = history.get("effective_training_params")
+            if isinstance(effective, dict):
+                params = dict(effective)
+            else:
+                params = report.get("training_params") or {}
+        else:
+            params = report.get("training_params") or {}
     if args.imgsz:
         if len(args.imgsz) == 1:
             params["imgsz"] = args.imgsz[0]
@@ -227,6 +235,7 @@ def main() -> None:
         run_id=run_id,
         weights_path=weights_path,
         training_params=training_params,
+        export_imgsz=None,
         args=args,
         manifest_summary=manifest_summary,
         console=console,

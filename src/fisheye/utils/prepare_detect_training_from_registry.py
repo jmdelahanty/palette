@@ -234,6 +234,19 @@ def _run_training(
     run_name: Optional[str],
     project: Optional[str],
     allow_source_mismatch: bool,
+    export_onnx: bool,
+    export_trt: bool,
+    onnx_opset: Optional[int],
+    onnx_simplify: bool,
+    onnx_path: Optional[str],
+    nms_conf: Optional[float],
+    nms_iou: Optional[float],
+    nms_topk: Optional[int],
+    trt_precision: Optional[str],
+    trtexec: Optional[str],
+    trt_cuda_graph: bool,
+    trt_profiling: bool,
+    trt_verbose: bool,
 ) -> int:
     if not config_path.exists():
         raise SystemExit(f"Training config not found: {config_path}")
@@ -256,6 +269,25 @@ def _run_training(
     _add_arg(cmd, "--project", project)
     if allow_source_mismatch:
         cmd.append("--allow-source-mismatch")
+    if export_onnx:
+        cmd.append("--export-onnx")
+    if export_trt:
+        cmd.append("--export-trt")
+    _add_arg(cmd, "--onnx-opset", onnx_opset)
+    if onnx_simplify:
+        cmd.append("--onnx-simplify")
+    _add_arg(cmd, "--onnx-path", onnx_path)
+    _add_arg(cmd, "--nms-conf", nms_conf)
+    _add_arg(cmd, "--nms-iou", nms_iou)
+    _add_arg(cmd, "--nms-topk", nms_topk)
+    _add_arg(cmd, "--trt-precision", trt_precision)
+    _add_arg(cmd, "--trtexec", trtexec)
+    if trt_cuda_graph:
+        cmd.append("--trt-cuda-graph")
+    if trt_profiling:
+        cmd.append("--trt-profiling")
+    if trt_verbose:
+        cmd.append("--trt-verbose")
     print("Launching training: " + " ".join(cmd))
     completed = subprocess.run(cmd, check=False)
     return int(completed.returncode)
@@ -319,6 +351,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--allow-source-mismatch", action="store_true")
     parser.add_argument("--allow-unapproved", action="store_true")
     parser.add_argument("--no-prefer-manual", action="store_true")
+    parser.add_argument("--export-onnx", action="store_true", help="Export ONNX after --train.")
+    parser.add_argument("--export-trt", action="store_true", help="Export TensorRT after --train.")
+    parser.add_argument("--onnx-opset", type=int, help="ONNX opset for export.")
+    parser.add_argument("--onnx-simplify", action="store_true", help="Run ONNX simplification after export.")
+    parser.add_argument("--onnx-path", type=str, help="Optional existing ONNX path to reuse.")
+    parser.add_argument("--nms-conf", type=float, help="NMS confidence threshold for export.")
+    parser.add_argument("--nms-iou", type=float, help="NMS IoU threshold for export.")
+    parser.add_argument("--nms-topk", type=int, help="NMS top-k for export.")
+    parser.add_argument("--trt-precision", choices=["fp16", "int8"], help="TensorRT precision.")
+    parser.add_argument("--trtexec", type=str, help="Optional trtexec binary path.")
+    parser.add_argument("--trt-cuda-graph", action="store_true", help="Enable TensorRT CUDA graph.")
+    parser.add_argument("--trt-profiling", action="store_true", help="Enable TensorRT profiling outputs.")
+    parser.add_argument("--trt-verbose", action="store_true", help="Enable verbose TensorRT build logs.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--train",
@@ -357,6 +402,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         type=int,
         default=42,
         help="Split seed for merged export.",
+    )
+    parser.add_argument(
+        "--merge-copy-batch-size",
+        type=int,
+        default=128,
+        help="Frame-copy batch size for merged export (passed to export_detect_training_zarr --copy-batch-size).",
     )
     parser.add_argument(
         "--merge-include-rgb",
@@ -483,6 +534,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             str(args.merge_split),
             "--seed",
             str(args.merge_seed),
+            "--copy-batch-size",
+            str(args.merge_copy_batch_size),
         ]
         _add_arg(export_cli, "--registry", registry_path)
         _add_arg(export_cli, "--out-zarr", args.merge_out_zarr)
@@ -507,6 +560,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                 run_name=args.run_name,
                 project=args.project,
                 allow_source_mismatch=bool(args.allow_source_mismatch),
+                export_onnx=bool(args.export_onnx),
+                export_trt=bool(args.export_trt),
+                onnx_opset=args.onnx_opset,
+                onnx_simplify=bool(args.onnx_simplify),
+                onnx_path=args.onnx_path,
+                nms_conf=args.nms_conf,
+                nms_iou=args.nms_iou,
+                nms_topk=args.nms_topk,
+                trt_precision=args.trt_precision,
+                trtexec=args.trtexec,
+                trt_cuda_graph=bool(args.trt_cuda_graph),
+                trt_profiling=bool(args.trt_profiling),
+                trt_verbose=bool(args.trt_verbose),
             )
     elif args.train:
         train_config, train_manifest = _resolve_preflight_output_paths(args)
@@ -520,6 +586,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             run_name=args.run_name,
             project=args.project,
             allow_source_mismatch=bool(args.allow_source_mismatch),
+            export_onnx=bool(args.export_onnx),
+            export_trt=bool(args.export_trt),
+            onnx_opset=args.onnx_opset,
+            onnx_simplify=bool(args.onnx_simplify),
+            onnx_path=args.onnx_path,
+            nms_conf=args.nms_conf,
+            nms_iou=args.nms_iou,
+            nms_topk=args.nms_topk,
+            trt_precision=args.trt_precision,
+            trtexec=args.trtexec,
+            trt_cuda_graph=bool(args.trt_cuda_graph),
+            trt_profiling=bool(args.trt_profiling),
+            trt_verbose=bool(args.trt_verbose),
         )
     return 0
 

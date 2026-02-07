@@ -1,17 +1,19 @@
 # zarr_yolo_dataset_loader.py
 
-import zarr
-import torch
-import numpy as np
-from torch.utils.data import Dataset
-from typing import List, Dict, Tuple, Optional
-from pathlib import Path
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field
-from enum import Enum
-import yaml
-from typing import Union, Any
 from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import cv2
+import numpy as np
+import torch
+import yaml
+import zarr
+from torch.utils.data import Dataset
 
 from ..utils.zarr_metadata import get_downsample_array_path, get_downsample_formats
 
@@ -36,6 +38,36 @@ class SingleDatasetConfig:
     split: Optional[Dict[str, float]] = None  # {'train': 0.8, 'val': 0.2}
     keypoint_run: Optional[str] = None  # Optional specific keypoints run
 
+
+@dataclass
+class DetectAugmentConfig:
+    """Single-sample augmentations applied in train mode for detection."""
+
+    hsv_h: float = 0.0
+    hsv_s: float = 0.0
+    hsv_v: float = 0.0
+    degrees: float = 0.0
+    translate: float = 0.0
+    scale: float = 0.0
+    shear: float = 0.0
+    perspective: float = 0.0
+    fliplr: float = 0.0
+    flipud: float = 0.0
+    erasing: float = 0.0
+
+    def uses_affine(self) -> bool:
+        return any(
+            value > 0.0
+            for value in (
+                self.degrees,
+                self.translate,
+                self.scale,
+                self.shear,
+                self.perspective,
+            )
+        )
+
+
 @dataclass
 class ZarrDatasetConfig:
     """Configuration for the Zarr dataset loader - supports both old and new formats."""
@@ -55,6 +87,8 @@ class ZarrDatasetConfig:
     target_size: Optional[int] = None
     min_confidence: float = 0.0
     filter_interpolated: bool = False  # DEPRECATED: Use source_type instead
+    chunk_cache_size: int = 0
+    augmentation: DetectAugmentConfig = field(default_factory=DetectAugmentConfig)
 
     def __post_init__(self):
         """Convert enum strings and validate configuration."""
@@ -89,6 +123,12 @@ class ZarrDatasetConfig:
             for name, config in self.datasets.items():
                 if isinstance(config, dict):
                     self.datasets[name] = SingleDatasetConfig(**config)
+
+        if isinstance(self.augmentation, dict):
+            self.augmentation = DetectAugmentConfig(**self.augmentation)
+        elif self.augmentation is None:
+            self.augmentation = DetectAugmentConfig()
+        self.chunk_cache_size = max(0, int(self.chunk_cache_size or 0))
     
     def get_zarr_paths(self) -> List[str]:
         """Get list of all zarr paths from datasets."""
@@ -729,6 +769,9 @@ class ZarrYOLODataset(Dataset):
         else:
             self.keypoint_labels = []
         self.zarr_roots = {path: zarr.open(path, mode='r') for path in config.get_zarr_paths()}
+        self.chunk_cache_size = max(0, int(self.config.chunk_cache_size or 0))
+        self._chunk_cache_hits = 0
+        self._chunk_cache_misses = 0
 
         self.target_size = self.config.target_size or (640 if self.config.task == 'detect' else 256)
 
@@ -743,6 +786,9 @@ class ZarrYOLODataset(Dataset):
         self.kp_bbox_cache = {}
         self.kp_flat_cache = {}
         self.roi_size_cache = {}
+        self.detect_frame_arrays = {}
+        self.detect_frame_chunk_len = {}
+        self.detect_frame_chunk_cache = OrderedDict()
         if self.config.task == 'detect':
             for zarr_path, root in self.zarr_roots.items():
                 metadata = self.metadata_map.get(zarr_path)
@@ -776,9 +822,19 @@ class ZarrYOLODataset(Dataset):
                         frame_indices = np.arange(frame_count, dtype=np.int64)
 
                 self.frame_index_cache[zarr_path] = frame_indices
+                frame_array = root[metadata.frame_array_path]
+                self.detect_frame_arrays[zarr_path] = frame_array
+                chunk_len = 1
+                if frame_array.chunks and len(frame_array.chunks) > 0:
+                    chunk_len = int(frame_array.chunks[0] or 1)
+                self.detect_frame_chunk_len[zarr_path] = max(1, chunk_len)
                 source_label = "crop_runs" if metadata.uses_crop_data else "detect_runs"
                 logger.info(
                     f"  Cached {self.bbox_cache[zarr_path].shape[0]} bboxes from {Path(zarr_path).name} ({source_label})."
+                )
+            if self.chunk_cache_size > 0:
+                logger.info(
+                    f"  Enabled per-worker LRU chunk cache (chunk_cache_size={self.chunk_cache_size})."
                 )
         else:
             for zarr_path in self.zarr_roots.keys():
@@ -850,6 +906,224 @@ class ZarrYOLODataset(Dataset):
     def __len__(self) -> int:
         return len(self.indices)
 
+    def get_chunk_cache_stats(self) -> Dict[str, int]:
+        """Expose per-worker cache stats for diagnostics/tests."""
+        return {
+            "chunk_cache_size": int(self.chunk_cache_size),
+            "chunk_cache_hits": int(self._chunk_cache_hits),
+            "chunk_cache_misses": int(self._chunk_cache_misses),
+        }
+
+    def _get_detect_frame(self, zarr_path: str, image_source_path: str, frame_idx: int) -> np.ndarray:
+        frame_array = self.detect_frame_arrays.get(zarr_path)
+        if frame_array is None:
+            frame_array = self.zarr_roots[zarr_path][image_source_path]
+            self.detect_frame_arrays[zarr_path] = frame_array
+            chunk_len = 1
+            if frame_array.chunks and len(frame_array.chunks) > 0:
+                chunk_len = int(frame_array.chunks[0] or 1)
+            self.detect_frame_chunk_len[zarr_path] = max(1, chunk_len)
+
+        if self.chunk_cache_size <= 0:
+            return frame_array[frame_idx]
+
+        cache = self.detect_frame_chunk_cache
+        chunk_len = self.detect_frame_chunk_len[zarr_path]
+        chunk_start = (int(frame_idx) // chunk_len) * chunk_len
+        cache_key = (zarr_path, chunk_start)
+        chunk = cache.get(cache_key)
+
+        if chunk is None:
+            chunk_end = min(chunk_start + chunk_len, int(frame_array.shape[0]))
+            chunk = np.asarray(frame_array[chunk_start:chunk_end])
+            cache[cache_key] = chunk
+            self._chunk_cache_misses += 1
+            if len(cache) > self.chunk_cache_size:
+                cache.popitem(last=False)
+        else:
+            cache.move_to_end(cache_key)
+            self._chunk_cache_hits += 1
+
+        local_idx = int(frame_idx) - chunk_start
+        return chunk[local_idx]
+
+    @staticmethod
+    def _xywhn_to_xyxy(boxes: np.ndarray, width: int, height: int) -> np.ndarray:
+        if boxes.size == 0:
+            return np.zeros((0, 4), dtype=np.float32)
+        x, y, w, h = boxes.T
+        x1 = (x - w / 2.0) * float(width)
+        y1 = (y - h / 2.0) * float(height)
+        x2 = (x + w / 2.0) * float(width)
+        y2 = (y + h / 2.0) * float(height)
+        return np.stack((x1, y1, x2, y2), axis=1).astype(np.float32)
+
+    @staticmethod
+    def _xyxy_to_xywhn(boxes: np.ndarray, width: int, height: int) -> np.ndarray:
+        if boxes.size == 0:
+            return np.zeros((0, 4), dtype=np.float32)
+        x1, y1, x2, y2 = boxes.T
+        cx = ((x1 + x2) / 2.0) / float(width)
+        cy = ((y1 + y2) / 2.0) / float(height)
+        bw = (x2 - x1) / float(width)
+        bh = (y2 - y1) / float(height)
+        out = np.stack((cx, cy, bw, bh), axis=1).astype(np.float32)
+        np.clip(out, 0.0, 1.0, out=out)
+        return out
+
+    @staticmethod
+    def _apply_hsv_jitter(image: np.ndarray, aug: DetectAugmentConfig) -> np.ndarray:
+        if image.ndim != 3 or image.shape[2] != 3:
+            return image
+        if aug.hsv_h <= 0.0 and aug.hsv_s <= 0.0 and aug.hsv_v <= 0.0:
+            return image
+
+        dtype = image.dtype
+        gains = np.random.uniform(-1.0, 1.0, 3) * np.array([aug.hsv_h, aug.hsv_s, aug.hsv_v], dtype=np.float32)
+        x = np.arange(0, 256, dtype=np.float32)
+        lut_h = ((x + gains[0] * 180.0) % 180.0).astype(np.uint8)
+        lut_s = np.clip(x * (1.0 + gains[1]), 0, 255).astype(np.uint8)
+        lut_v = np.clip(x * (1.0 + gains[2]), 0, 255).astype(np.uint8)
+        lut_s[0] = 0
+
+        hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+        h, s, v = cv2.split(hsv)
+        hsv_aug = cv2.merge((cv2.LUT(h, lut_h), cv2.LUT(s, lut_s), cv2.LUT(v, lut_v)))
+        out = cv2.cvtColor(hsv_aug, cv2.COLOR_HSV2RGB)
+        return out.astype(dtype, copy=False)
+
+    @staticmethod
+    def _random_affine_matrix(image_h: int, image_w: int, aug: DetectAugmentConfig) -> np.ndarray:
+        center = np.eye(3, dtype=np.float32)
+        center[0, 2] = -image_w / 2.0
+        center[1, 2] = -image_h / 2.0
+
+        perspective = np.eye(3, dtype=np.float32)
+        perspective[2, 0] = np.random.uniform(-aug.perspective, aug.perspective)
+        perspective[2, 1] = np.random.uniform(-aug.perspective, aug.perspective)
+
+        rotation = np.eye(3, dtype=np.float32)
+        angle = np.random.uniform(-aug.degrees, aug.degrees)
+        scale = np.random.uniform(1.0 - aug.scale, 1.0 + aug.scale)
+        rotation[:2] = cv2.getRotationMatrix2D((0, 0), angle, scale)
+
+        shear = np.eye(3, dtype=np.float32)
+        shear[0, 1] = np.tan(np.deg2rad(np.random.uniform(-aug.shear, aug.shear)))
+        shear[1, 0] = np.tan(np.deg2rad(np.random.uniform(-aug.shear, aug.shear)))
+
+        translate = np.eye(3, dtype=np.float32)
+        translate[0, 2] = np.random.uniform(0.5 - aug.translate, 0.5 + aug.translate) * image_w
+        translate[1, 2] = np.random.uniform(0.5 - aug.translate, 0.5 + aug.translate) * image_h
+
+        return translate @ shear @ rotation @ perspective @ center
+
+    @staticmethod
+    def _transform_boxes_xyxy(
+        boxes_xyxy: np.ndarray,
+        matrix: np.ndarray,
+        image_w: int,
+        image_h: int,
+        use_perspective: bool,
+    ) -> np.ndarray:
+        n = int(boxes_xyxy.shape[0])
+        if n == 0:
+            return boxes_xyxy
+
+        corners = np.ones((n * 4, 3), dtype=np.float32)
+        corners[:, :2] = boxes_xyxy[:, [0, 1, 2, 3, 0, 3, 2, 1]].reshape(n * 4, 2)
+        warped = corners @ matrix.T
+        if use_perspective:
+            warped = warped[:, :2] / warped[:, 2:3]
+        else:
+            warped = warped[:, :2]
+        warped = warped.reshape(n, 8)
+        x = warped[:, [0, 2, 4, 6]]
+        y = warped[:, [1, 3, 5, 7]]
+        out = np.stack((x.min(1), y.min(1), x.max(1), y.max(1)), axis=1).astype(np.float32)
+        out[:, [0, 2]] = out[:, [0, 2]].clip(0, float(image_w))
+        out[:, [1, 3]] = out[:, [1, 3]].clip(0, float(image_h))
+        return out
+
+    @staticmethod
+    def _box_candidates(original_xyxy: np.ndarray, warped_xyxy: np.ndarray) -> np.ndarray:
+        if original_xyxy.size == 0:
+            return np.zeros((0,), dtype=bool)
+        w1 = original_xyxy[:, 2] - original_xyxy[:, 0]
+        h1 = original_xyxy[:, 3] - original_xyxy[:, 1]
+        w2 = warped_xyxy[:, 2] - warped_xyxy[:, 0]
+        h2 = warped_xyxy[:, 3] - warped_xyxy[:, 1]
+        aspect = np.maximum(w2 / (h2 + 1e-16), h2 / (w2 + 1e-16))
+        return (w2 > 2.0) & (h2 > 2.0) & ((w2 * h2) / (w1 * h1 + 1e-16) > 0.10) & (aspect < 100.0)
+
+    @staticmethod
+    def _apply_random_erasing(image: np.ndarray, prob: float) -> np.ndarray:
+        if prob <= 0.0 or np.random.random() >= prob:
+            return image
+        h, w = image.shape[:2]
+        image_area = h * w
+        for _ in range(10):
+            target_area = np.random.uniform(0.02, 0.2) * image_area
+            aspect = np.random.uniform(0.3, 3.3)
+            erase_h = int(round(np.sqrt(target_area / aspect)))
+            erase_w = int(round(np.sqrt(target_area * aspect)))
+            if erase_h <= 0 or erase_w <= 0 or erase_h >= h or erase_w >= w:
+                continue
+            y0 = np.random.randint(0, h - erase_h + 1)
+            x0 = np.random.randint(0, w - erase_w + 1)
+            if image.ndim == 3:
+                image[y0:y0 + erase_h, x0:x0 + erase_w, :] = 114
+            else:
+                image[y0:y0 + erase_h, x0:x0 + erase_w] = 114
+            break
+        return image
+
+    def _augment_detect_train_sample(
+        self,
+        image: np.ndarray,
+        cls: np.ndarray,
+        bboxes_xywhn: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        aug = self.config.augmentation
+        if aug is None:
+            return image, cls, bboxes_xywhn
+
+        out_img = np.ascontiguousarray(image.copy())
+        out_cls = cls.astype(np.float32, copy=True)
+        out_boxes = bboxes_xywhn.astype(np.float32, copy=True)
+        image_h, image_w = out_img.shape[:2]
+
+        if aug.uses_affine():
+            matrix = self._random_affine_matrix(image_h, image_w, aug)
+            use_perspective = aug.perspective > 0.0
+            if use_perspective:
+                out_img = cv2.warpPerspective(out_img, matrix, dsize=(image_w, image_h), borderValue=(114, 114, 114))
+            else:
+                out_img = cv2.warpAffine(out_img, matrix[:2], dsize=(image_w, image_h), borderValue=(114, 114, 114))
+                if out_img.ndim == 2:
+                    out_img = out_img[..., None]
+
+            boxes_xyxy = self._xywhn_to_xyxy(out_boxes, image_w, image_h)
+            warped_xyxy = self._transform_boxes_xyxy(boxes_xyxy, matrix, image_w, image_h, use_perspective)
+            keep = self._box_candidates(boxes_xyxy, warped_xyxy)
+            out_cls = out_cls[keep]
+            warped_xyxy = warped_xyxy[keep]
+            out_boxes = self._xyxy_to_xywhn(warped_xyxy, image_w, image_h)
+
+        if aug.fliplr > 0.0 and np.random.random() < aug.fliplr:
+            out_img = np.ascontiguousarray(np.fliplr(out_img))
+            if out_boxes.size > 0:
+                out_boxes[:, 0] = 1.0 - out_boxes[:, 0]
+
+        if aug.flipud > 0.0 and np.random.random() < aug.flipud:
+            out_img = np.ascontiguousarray(np.flipud(out_img))
+            if out_boxes.size > 0:
+                out_boxes[:, 1] = 1.0 - out_boxes[:, 1]
+
+        out_img = self._apply_hsv_jitter(out_img, aug)
+        out_img = self._apply_random_erasing(out_img, aug.erasing)
+
+        return out_img, out_cls, out_boxes
+
     def _get_bbox_data(self, zarr_path: str, det_idx: int) -> Dict:
         bbox_coords = self.bbox_cache.get(zarr_path)
         
@@ -909,14 +1183,18 @@ class ZarrYOLODataset(Dataset):
         
         frame_idx = None
         if self.config.task == 'detect':
+            frame_array = self.detect_frame_arrays.get(zarr_path)
+            if frame_array is None:
+                frame_array = root[image_source_path]
+                self.detect_frame_arrays[zarr_path] = frame_array
             frame_indices = self.frame_index_cache[zarr_path]
             frame_idx = int(frame_indices[det_idx]) if det_idx < len(frame_indices) else None
-            if frame_idx is None or frame_idx >= root[image_source_path].shape[0]:
+            if frame_idx is None or frame_idx >= frame_array.shape[0]:
                 # fallback: skip label/image mismatch
                 frame_idx = 0
-                image = np.zeros_like(root[image_source_path][0])
+                image = np.zeros_like(frame_array[0])
             else:
-                image = root[image_source_path][frame_idx]
+                image = self._get_detect_frame(zarr_path, image_source_path, frame_idx)
         else:
             roi_idx = det_idx
             if roi_idx >= root[image_source_path].shape[0]:
@@ -934,6 +1212,15 @@ class ZarrYOLODataset(Dataset):
                 image_3ch = image
         
         label_info = self.labels[index]
+        cls_arr = label_info.get('cls', np.zeros((0,), dtype=np.float32)).astype(np.float32)
+        bboxes_arr = label_info.get('bboxes', np.zeros((0, 4), dtype=np.float32)).astype(np.float32)
+        if self.config.task == 'detect' and self.mode == 'train':
+            image_3ch, cls_arr, bboxes_arr = self._augment_detect_train_sample(
+                image=image_3ch,
+                cls=cls_arr,
+                bboxes_xywhn=bboxes_arr,
+            )
+
         ori_shape = (image_3ch.shape[0], image_3ch.shape[1])
         
         im_identifier = (f"{Path(zarr_path).stem}_frame_{frame_idx}"
@@ -942,8 +1229,8 @@ class ZarrYOLODataset(Dataset):
 
         return {
             "img": image_3ch.transpose(2, 0, 1),
-            "cls": label_info.get('cls', np.zeros((0,), dtype=np.float32)).astype(np.float32),
-            "bboxes": label_info.get('bboxes', np.zeros((0, 4), dtype=np.float32)).astype(np.float32),
+            "cls": cls_arr,
+            "bboxes": bboxes_arr,
             "keypoints": label_info.get('keypoints', np.zeros((0, 9), dtype=np.float32)).astype(np.float32),
             "im_file": im_identifier,
             "ori_shape": ori_shape,

@@ -25,6 +25,13 @@ class FailedRunCandidate:
     created_utc: Optional[str]
 
 
+@dataclass(frozen=True)
+class EmptyTrainingSetCandidate:
+    set_id: str
+    name: Optional[str]
+    created_utc: Optional[str]
+
+
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Registry maintenance (reconcile, prune invalid rows, optional VACUUM).",
@@ -52,6 +59,11 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         "--prune-failed-runs",
         action="store_true",
         help="Prune training_runs rows with failed statuses.",
+    )
+    parser.add_argument(
+        "--prune-empty-sets",
+        action="store_true",
+        help="Prune training_sets rows that have no linked training_runs.",
     )
     parser.add_argument(
         "--failed-status",
@@ -224,6 +236,36 @@ def _delete_training_run_ids(registry: Registry, run_ids: Sequence[str], *, dry_
     return len(run_ids)
 
 
+def _collect_empty_training_set_candidates(registry: Registry) -> List[EmptyTrainingSetCandidate]:
+    rows = registry.conn.execute(
+        """
+        SELECT ts.set_id, ts.name, ts.created_utc
+        FROM training_sets ts
+        LEFT JOIN training_runs tr ON tr.set_id = ts.set_id
+        GROUP BY ts.set_id, ts.name, ts.created_utc
+        HAVING COUNT(tr.run_id) = 0
+        ORDER BY ts.created_utc DESC, ts.set_id DESC;
+        """
+    ).fetchall()
+    return [
+        EmptyTrainingSetCandidate(
+            set_id=str(row["set_id"]),
+            name=row["name"],
+            created_utc=row["created_utc"],
+        )
+        for row in rows
+    ]
+
+
+def _delete_training_set_ids(registry: Registry, set_ids: Sequence[str], *, dry_run: bool) -> int:
+    if dry_run or not set_ids:
+        return 0
+    with registry.conn:
+        for set_id in set_ids:
+            registry.conn.execute("DELETE FROM training_sets WHERE set_id = ?;", (set_id,))
+    return len(set_ids)
+
+
 def _print_candidates(candidates: Sequence[InvalidDatasetCandidate], *, list_limit: int) -> None:
     if not candidates:
         print("No invalid dataset rows found.")
@@ -255,6 +297,25 @@ def _print_failed_run_candidates(candidates: Sequence[FailedRunCandidate], *, li
         print(f" ... {len(candidates) - limit} more rows omitted (use --list-limit 0 to show all).")
 
 
+def _print_empty_training_set_candidates(
+    candidates: Sequence[EmptyTrainingSetCandidate],
+    *,
+    list_limit: int,
+) -> None:
+    if not candidates:
+        print("No empty training sets found.")
+        return
+
+    print(f"Empty training sets (no linked runs): {len(candidates)}")
+    limit = len(candidates) if list_limit == 0 else min(len(candidates), list_limit)
+    for candidate in candidates[:limit]:
+        name = candidate.name or "—"
+        created_utc = candidate.created_utc or "—"
+        print(f" - {candidate.set_id} [name={name} created={created_utc}]")
+    if limit < len(candidates):
+        print(f" ... {len(candidates) - limit} more rows omitted (use --list-limit 0 to show all).")
+
+
 def _summarize_reconcile(stats: Dict[str, int]) -> None:
     checked = int(stats.get("checked", 0))
     marked_missing = int(stats.get("marked_missing", 0))
@@ -263,9 +324,9 @@ def _summarize_reconcile(stats: Dict[str, int]) -> None:
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
     args = _parse_args(argv)
-    if not args.prune_invalid and not args.prune_failed_runs and not args.vacuum:
+    if not args.prune_invalid and not args.prune_failed_runs and not args.prune_empty_sets and not args.vacuum:
         raise SystemExit(
-            "No action selected. Use --prune-invalid, --prune-failed-runs, and/or --vacuum."
+            "No action selected. Use --prune-invalid, --prune-failed-runs, --prune-empty-sets, and/or --vacuum."
         )
 
     registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
@@ -310,6 +371,16 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             else:
                 deleted = _delete_training_run_ids(registry, run_ids, dry_run=False)
                 print(f"Deleted {deleted} training run row(s) with status in [{status_list}].")
+
+        if args.prune_empty_sets:
+            empty_set_candidates = _collect_empty_training_set_candidates(registry)
+            _print_empty_training_set_candidates(empty_set_candidates, list_limit=args.list_limit)
+            set_ids = [candidate.set_id for candidate in empty_set_candidates]
+            if args.dry_run:
+                print(f"Dry run: would delete {len(set_ids)} training set row(s) with no linked runs.")
+            else:
+                deleted = _delete_training_set_ids(registry, set_ids, dry_run=False)
+                print(f"Deleted {deleted} training set row(s) with no linked runs.")
 
         if args.vacuum:
             if args.dry_run:
