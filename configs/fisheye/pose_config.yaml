@@ -34,4 +34,3 @@ training_params:
   num_workers: 24
   
   device: '0'
-  project: runs/pose

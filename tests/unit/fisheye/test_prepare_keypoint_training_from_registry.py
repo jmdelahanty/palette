@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 import yaml
 import zarr
 
@@ -69,14 +70,26 @@ def _write_base_pose_config(path: Path) -> None:
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
 
-def _create_minimal_pose_zarr(path: Path) -> None:
+def _create_minimal_pose_zarr(
+    path: Path,
+    *,
+    keypoints_rows: int = 4,
+    roi_rows: int = 4,
+    success_rows: int = 4,
+    include_success_rate: bool = True,
+    include_source_crop_run: bool = True,
+    create_refined_run: bool = False,
+    refined_usable_rows: int = 0,
+    review_state: str | None = None,
+    review_intended_use: str | None = None,
+) -> None:
     root = zarr.open_group(str(path), mode="w")
     root.attrs["session_uuid"] = "session_pose_001"
 
     raw = root.create_group("raw_video")
     raw.create_array(
         "images_ds",
-        data=np.zeros((4, 16, 16), dtype=np.uint8),
+        data=np.zeros((keypoints_rows, 16, 16), dtype=np.uint8),
         chunks=(1, 16, 16),
     )
 
@@ -86,7 +99,7 @@ def _create_minimal_pose_zarr(path: Path) -> None:
     crop_group.attrs["detection_source_type"] = "filtered"
     crop_group.create_array(
         "roi_images",
-        data=np.zeros((4, 64, 64), dtype=np.uint8),
+        data=np.zeros((roi_rows, 64, 64), dtype=np.uint8),
         chunks=(1, 64, 64),
     )
 
@@ -95,30 +108,48 @@ def _create_minimal_pose_zarr(path: Path) -> None:
     kp_group = kp_parent.create_group("kp_pose_001")
     kp_group.attrs["method"] = "traditional_pose"
     kp_group.attrs["keypoints_timestamp_utc"] = "2026-02-06T00:00:00+00:00"
-    kp_group.attrs["source_crop_run"] = "crop_pose_001"
-    kp_group.attrs["success_rate"] = 0.75
-    kp_group.attrs["keypoints_processed"] = 4
+    if include_source_crop_run:
+        kp_group.attrs["source_crop_run"] = "crop_pose_001"
+    if include_success_rate:
+        kp_group.attrs["success_rate"] = 0.75
+    kp_group.attrs["keypoints_processed"] = keypoints_rows
     kp_group.create_array(
         "keypoints_roi",
-        data=np.zeros((4, 3, 2), dtype=np.float32),
+        data=np.zeros((keypoints_rows, 3, 2), dtype=np.float32),
         chunks=(1, 3, 2),
     )
     kp_group.create_array(
         "detection_success",
-        data=np.array([True, True, True, False], dtype=np.bool_),
-        chunks=(4,),
+        data=np.array([True] * max(success_rows - 1, 0) + [False], dtype=np.bool_),
+        chunks=(max(success_rows, 1),),
     )
+
+    if create_refined_run:
+        refined_parent = root.create_group("refined_keypoints_runs")
+        refined_parent.attrs["latest"] = "refined_pose_001"
+        refined_group = refined_parent.create_group("refined_pose_001")
+        refined_group.attrs["source_keypoints_run"] = "kp_pose_001"
+        refined_group.attrs["created_utc"] = "2026-02-07T00:00:00+00:00"
+        if review_state is not None or review_intended_use is not None:
+            refined_group.attrs["keypoint_review_status"] = {
+                "state": review_state or "approved",
+                "intended_use": review_intended_use or "training",
+                "timestamp": "2026-02-07T00:00:00+00:00",
+            }
+        usable = np.array(
+            [True] * max(refined_usable_rows, 0) + [False] * max(keypoints_rows - refined_usable_rows, 0),
+            dtype=np.bool_,
+        )
+        refined_group.create_array("usable_keypoints", data=usable, chunks=(max(keypoints_rows, 1),))
 
 
 def _seed_registry(registry_path: Path, zarr_path: Path) -> None:
     db = Registry(registry_path)
-    db.upsert_dataset(
-        "dataset_pose_001",
-        session_uuid="session_pose_001",
-        zarr_path=zarr_path,
-    )
+    root = zarr.open_group(str(zarr_path), mode="r")
+    db.register_from_root(root, zarr_path)
+    # Keep deterministic provenance values used by assertions.
     db.upsert_provenance(
-        "dataset_pose_001",
+        "session_pose_001",
         provenance={},
         context={"canvas_name": "DefaultScreen"},
         protocol_name=None,
@@ -192,7 +223,7 @@ def test_prepare_keypoint_from_registry_writes_outputs_and_registers_set(monkeyp
     db.close()
     assert row is not None
     assert row["set_id"] == "pose_pose_smoke_set_v001"
-    assert json.loads(row["dataset_ids_json"]) == ["dataset_pose_001"]
+    assert json.loads(row["dataset_ids_json"]) == ["session_pose_001"]
 
 
 def test_prepare_keypoint_from_registry_dry_run_prints_generated_artifacts(capsys, monkeypatch, tmp_path: Path) -> None:
@@ -268,3 +299,506 @@ def test_prepare_keypoint_from_registry_auto_set_name_when_omitted(monkeypatch, 
     ).fetchone()
     db.close()
     assert row is not None
+
+
+def test_prepare_keypoint_from_registry_requires_source_crop_run(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "pose_sample.zarr"
+    _create_minimal_pose_zarr(zarr_path, include_source_crop_run=False)
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_path)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    with pytest.raises(ValueError, match="missing source_crop_run"):
+        wrapper.main(
+            [
+                "--registry",
+                str(registry_path),
+                "--base-config",
+                str(base_config_path),
+                "--source-type",
+                "filtered",
+                "--input-format",
+                "gray",
+                "--dry-run",
+            ]
+        )
+
+
+def test_prepare_keypoint_from_registry_fails_on_roi_keypoint_row_mismatch(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "pose_sample.zarr"
+    _create_minimal_pose_zarr(zarr_path, keypoints_rows=4, roi_rows=3)
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_path)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    with pytest.raises(ValueError, match="roi/keypoint row mismatch"):
+        wrapper.main(
+            [
+                "--registry",
+                str(registry_path),
+                "--base-config",
+                str(base_config_path),
+                "--source-type",
+                "filtered",
+                "--input-format",
+                "gray",
+                "--dry-run",
+            ]
+        )
+
+
+def test_prepare_keypoint_from_registry_fails_on_detection_success_row_mismatch(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "pose_sample.zarr"
+    _create_minimal_pose_zarr(
+        zarr_path,
+        keypoints_rows=4,
+        roi_rows=4,
+        success_rows=3,
+        include_success_rate=False,
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_path)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    with pytest.raises(ValueError, match="detection_success row mismatch"):
+        wrapper.main(
+            [
+                "--registry",
+                str(registry_path),
+                "--base-config",
+                str(base_config_path),
+                "--source-type",
+                "filtered",
+                "--input-format",
+                "gray",
+                "--dry-run",
+            ]
+        )
+
+
+def test_prepare_keypoint_from_registry_enforces_review_status_and_quality(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "pose_sample.zarr"
+    _create_minimal_pose_zarr(
+        zarr_path,
+        keypoints_rows=4,
+        roi_rows=4,
+        success_rows=4,
+        include_success_rate=True,
+        create_refined_run=True,
+        refined_usable_rows=3,
+        review_state="approved",
+        review_intended_use="training",
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_path)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    rc = wrapper.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--base-config",
+            str(base_config_path),
+            "--source-type",
+            "manual",
+            "--input-format",
+            "gray",
+            "--min-usable-keypoints-rate",
+            "0.70",
+            "--require-review-state",
+            "approved",
+            "--require-review-intended-use",
+            "training",
+            "--dry-run",
+        ]
+    )
+    assert rc == 0
+
+
+def test_prepare_keypoint_from_registry_fails_when_review_status_missing(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "pose_sample.zarr"
+    _create_minimal_pose_zarr(
+        zarr_path,
+        keypoints_rows=4,
+        roi_rows=4,
+        success_rows=4,
+        include_success_rate=True,
+        create_refined_run=True,
+        refined_usable_rows=3,
+        review_state=None,
+        review_intended_use=None,
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_path)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    with pytest.raises(SystemExit, match="No datasets remain after keypoint quality filtering"):
+        wrapper.main(
+            [
+                "--registry",
+                str(registry_path),
+                "--base-config",
+                str(base_config_path),
+                "--source-type",
+                "manual",
+                "--input-format",
+                "gray",
+                "--require-review-state",
+                "approved",
+                "--dry-run",
+            ]
+        )
+
+
+def test_prepare_keypoint_from_registry_exclusion_is_nonfatal(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "pose_sample.zarr"
+    _create_minimal_pose_zarr(
+        zarr_path,
+        keypoints_rows=4,
+        roi_rows=4,
+        success_rows=4,
+        include_success_rate=True,
+        create_refined_run=True,
+        refined_usable_rows=3,
+        review_state=None,
+        review_intended_use=None,
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_path)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    with pytest.raises(SystemExit, match="No datasets remain after keypoint quality filtering"):
+        wrapper.main(
+            [
+                "--registry",
+                str(registry_path),
+                "--base-config",
+                str(base_config_path),
+                "--source-type",
+                "manual",
+                "--input-format",
+                "gray",
+                "--require-review-state",
+                "approved",
+                "--dry-run",
+            ]
+        )
+
+
+def test_prepare_keypoint_from_registry_review_gate_falls_back_to_reviewed_source_run(
+    monkeypatch, tmp_path: Path
+) -> None:
+    zarr_path = tmp_path / "pose_sample.zarr"
+    _create_minimal_pose_zarr(
+        zarr_path,
+        keypoints_rows=4,
+        roi_rows=4,
+        success_rows=4,
+        include_success_rate=True,
+        create_refined_run=True,
+        refined_usable_rows=3,
+        review_state="approved",
+        review_intended_use="training",
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    kp_parent = root["keypoints_runs"]
+    kp_parent["kp_pose_001"].attrs["method"] = "yolo_pose"
+
+    kp_group = kp_parent.create_group("kp_pose_002")
+    kp_group.attrs["method"] = "traditional_pose"
+    kp_group.attrs["keypoints_timestamp_utc"] = "2026-02-08T00:00:00+00:00"
+    kp_group.attrs["source_crop_run"] = "crop_pose_001"
+    kp_group.attrs["success_rate"] = 1.0
+    kp_group.attrs["keypoints_processed"] = 4
+    kp_group.create_array(
+        "keypoints_roi",
+        data=np.zeros((4, 3, 2), dtype=np.float32),
+        chunks=(1, 3, 2),
+    )
+    kp_group.create_array(
+        "detection_success",
+        data=np.array([True, True, True, True], dtype=np.bool_),
+        chunks=(4,),
+    )
+    kp_parent.attrs["latest"] = "kp_pose_002"
+
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_path)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    out_config = tmp_path / "pose_config.yaml"
+    out_manifest = tmp_path / "pose_manifest.json"
+    rc = wrapper.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--base-config",
+            str(base_config_path),
+            "--source-type",
+            "manual",
+            "--input-format",
+            "gray",
+            "--keypoint-run",
+            "latest_traditional",
+            "--require-review-state",
+            "approved",
+            "--require-review-intended-use",
+            "training",
+            "--allow-cross-method-review-fallback",
+            "--out-config",
+            str(out_config),
+            "--out-manifest",
+            str(out_manifest),
+        ]
+    )
+    assert rc == 0
+
+    manifest = json.loads(out_manifest.read_text(encoding="utf-8"))
+    dataset = manifest["datasets"][0]
+    assert dataset["keypoint_run_selector"] == "latest_traditional_quality"
+    assert dataset["keypoint_run_resolved"] == "kp_pose_001"
+    assert any("cross-method fallback" in warning for warning in dataset["warnings"])
+
+
+def test_prepare_keypoint_from_registry_review_gate_is_strict_without_fallback_flag(
+    monkeypatch, tmp_path: Path
+) -> None:
+    zarr_path = tmp_path / "pose_sample.zarr"
+    _create_minimal_pose_zarr(
+        zarr_path,
+        keypoints_rows=4,
+        roi_rows=4,
+        success_rows=4,
+        include_success_rate=True,
+        create_refined_run=True,
+        refined_usable_rows=3,
+        review_state="approved",
+        review_intended_use="training",
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    kp_parent = root["keypoints_runs"]
+    kp_parent["kp_pose_001"].attrs["method"] = "yolo_pose"
+
+    kp_group = kp_parent.create_group("kp_pose_002")
+    kp_group.attrs["method"] = "traditional_pose"
+    kp_group.attrs["keypoints_timestamp_utc"] = "2026-02-08T00:00:00+00:00"
+    kp_group.attrs["source_crop_run"] = "crop_pose_001"
+    kp_group.attrs["success_rate"] = 1.0
+    kp_group.attrs["keypoints_processed"] = 4
+    kp_group.create_array(
+        "keypoints_roi",
+        data=np.zeros((4, 3, 2), dtype=np.float32),
+        chunks=(1, 3, 2),
+    )
+    kp_group.create_array(
+        "detection_success",
+        data=np.array([True, True, True, True], dtype=np.bool_),
+        chunks=(4,),
+    )
+    kp_parent.attrs["latest"] = "kp_pose_002"
+
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_path)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    with pytest.raises(SystemExit, match="No datasets remain after keypoint quality filtering"):
+        wrapper.main(
+            [
+                "--registry",
+                str(registry_path),
+                "--base-config",
+                str(base_config_path),
+                "--source-type",
+                "manual",
+                "--input-format",
+                "gray",
+                "--keypoint-run",
+                "latest_traditional",
+                "--require-review-state",
+                "approved",
+                "--require-review-intended-use",
+                "training",
+                "--dry-run",
+            ]
+        )
+
+
+def test_prepare_keypoint_from_registry_accepts_legacy_refined_group_name(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "pose_sample.zarr"
+    _create_minimal_pose_zarr(
+        zarr_path,
+        keypoints_rows=4,
+        roi_rows=4,
+        success_rows=4,
+        include_success_rate=True,
+        create_refined_run=False,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    legacy_parent = root.create_group("keypoints_refined_runs")
+    legacy_parent.attrs["latest"] = "refined_pose_legacy_001"
+    refined = legacy_parent.create_group("refined_pose_legacy_001")
+    refined.attrs["source_keypoints_run"] = "kp_pose_001"
+    refined.attrs["created_utc"] = "2026-02-08T00:00:00+00:00"
+    refined.attrs["keypoint_review_status"] = {
+        "state": "approved",
+        "intended_use": "training",
+        "timestamp": "2026-02-08T00:00:00+00:00",
+    }
+    refined.create_array(
+        "usable_keypoints",
+        data=np.array([True, True, True, False], dtype=np.bool_),
+        chunks=(4,),
+    )
+
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_path)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    rc = wrapper.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--base-config",
+            str(base_config_path),
+            "--source-type",
+            "manual",
+            "--input-format",
+            "gray",
+            "--require-review-state",
+            "approved",
+            "--require-review-intended-use",
+            "training",
+            "--min-usable-keypoints-rate",
+            "0.70",
+            "--dry-run",
+        ]
+    )
+    assert rc == 0
+
+
+def test_prepare_keypoint_from_registry_fails_closed_on_stale_quality_row(
+    monkeypatch, tmp_path: Path
+) -> None:
+    zarr_path = tmp_path / "pose_sample.zarr"
+    _create_minimal_pose_zarr(
+        zarr_path,
+        keypoints_rows=4,
+        roi_rows=4,
+        success_rows=4,
+        include_success_rate=True,
+        create_refined_run=True,
+        refined_usable_rows=3,
+        review_state="approved",
+        review_intended_use="training",
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_path)
+    db = Registry(registry_path)
+    db.conn.execute("UPDATE keypoint_quality SET zarr_mtime_ns = zarr_mtime_ns - 1;")
+    db.conn.commit()
+    db.close()
+
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    with pytest.raises(ValueError, match="filesystem mtime"):
+        wrapper.main(
+            [
+                "--registry",
+                str(registry_path),
+                "--base-config",
+                str(base_config_path),
+                "--source-type",
+                "manual",
+                "--input-format",
+                "gray",
+                "--require-review-state",
+                "approved",
+                "--require-review-intended-use",
+                "training",
+                "--min-usable-keypoints-rate",
+                "0.70",
+                "--dry-run",
+            ]
+        )
+
+
+def test_prepare_keypoint_from_registry_fails_closed_on_quality_divergence(
+    monkeypatch, tmp_path: Path
+) -> None:
+    zarr_path = tmp_path / "pose_sample.zarr"
+    _create_minimal_pose_zarr(
+        zarr_path,
+        keypoints_rows=4,
+        roi_rows=4,
+        success_rows=4,
+        include_success_rate=True,
+        create_refined_run=True,
+        refined_usable_rows=3,
+        review_state="approved",
+        review_intended_use="training",
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_path)
+    db = Registry(registry_path)
+    db.conn.execute("UPDATE keypoint_quality SET review_state = 'pending';")
+    db.conn.commit()
+    db.close()
+
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    with pytest.raises(ValueError, match="review metadata divergence"):
+        wrapper.main(
+            [
+                "--registry",
+                str(registry_path),
+                "--base-config",
+                str(base_config_path),
+                "--source-type",
+                "manual",
+                "--input-format",
+                "gray",
+                "--require-review-state",
+                "approved",
+                "--require-review-intended-use",
+                "training",
+                "--min-usable-keypoints-rate",
+                "0.70",
+                "--dry-run",
+            ]
+        )

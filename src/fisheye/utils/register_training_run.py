@@ -89,6 +89,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         set_id=args.set_id,
         config_path=config_path,
         manifest_path=manifest_path,
+        skeleton_id=None,
         model_path=model_path,
         metrics_path=metrics_path,
         config_sha256=_safe_sha256_file(config_path),

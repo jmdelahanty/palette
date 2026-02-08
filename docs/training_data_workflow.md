@@ -172,7 +172,7 @@ python src/fisheye/utils/list_training_versions.py --name detect_base
 For broader registry/provenance context, see `docs/detection_training_plan.md`.
 For merged-export schema/CLI constraints, see `docs/detection_merged_export_contract.md`.
 
-## One-Command Build (Registry -> Preflight -> Merged Zarr)
+## One-Command Build (Detect: Registry -> Preflight -> Merged Zarr)
 
 Use the pipeline wrapper to run selection + preflight + merged export in one invocation:
 
@@ -196,6 +196,46 @@ Notes:
 - `--export-merged` requires `--out-manifest` (the export step consumes that manifest).
 - `--export-merged` cannot be combined with `--dry-run` because preflight dry-run does not write files.
 - `fisheye.utils.prepare_detect_training_from_registry` is prepare-only and no longer launches merge/train.
+
+## One-Command Build (Pose: Registry -> Preflight -> Optional Train)
+
+Use the keypoint pipeline wrapper to run selection + preflight and optionally launch training:
+
+```bash
+python -m fisheye.utils.run_keypoint_training_pipeline \
+  --registry /nvme1/palette_registry.sqlite \
+  --dish-design cedar \
+  --source-type filtered \
+  --input-format gray \
+  --model-input gray \
+  --keypoint-run latest_traditional \
+  --set-name cedar_shadow_pose \
+  --export-merged \
+  --merge-split 0.8/0.2 \
+  --merge-seed 42 \
+  --merge-overwrite \
+  --register \
+  --train
+```
+
+Dry-run preflight (no files written):
+
+```bash
+python -m fisheye.utils.run_keypoint_training_pipeline \
+  --registry /nvme1/palette_registry.sqlite \
+  --dish-design cedar \
+  --source-type filtered \
+  --input-format gray \
+  --model-input gray \
+  --keypoint-run latest_traditional \
+  --dry-run
+```
+
+Notes:
+- `--train` requires a manifest with non-empty `set_id` to avoid unlinked runs.
+- `--set-name` is recommended when using `--train` so `set_id` is generated deterministically.
+- `--train` cannot be combined with `--dry-run`.
+- `--export-merged` requires a written preflight manifest and cannot be combined with `--dry-run`.
 
 ## Model Export CLI Choice
 

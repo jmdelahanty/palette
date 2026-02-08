@@ -322,14 +322,16 @@ class GlobalIndexManager:
                     uses_crop_data = True
 
                 detect_parent = root.get('detect_runs')
-                frame_array_rel = get_downsample_array_path(root, format_hint=requested_input_format)
-                if frame_array_rel is None:
-                    available_formats = get_downsample_formats(root)
-                    raise KeyError(
-                        f"Downsampled frames for format '{requested_input_format}' not found in {Path(path_str).name}. "
-                        f"Available formats: {available_formats or 'none'}."
-                    )
-                frame_array_path = frame_array_rel
+                frame_array_path: Optional[str] = None
+                if self.config.task == 'detect':
+                    frame_array_rel = get_downsample_array_path(root, format_hint=requested_input_format)
+                    if frame_array_rel is None:
+                        available_formats = get_downsample_formats(root)
+                        raise KeyError(
+                            f"Downsampled frames for format '{requested_input_format}' not found in {Path(path_str).name}. "
+                            f"Available formats: {available_formats or 'none'}."
+                        )
+                    frame_array_path = frame_array_rel
 
                 # Tracking setup
                 column_names: List[str] = []
@@ -357,6 +359,7 @@ class GlobalIndexManager:
                     roi_shape = crop_group['roi_images'].shape[1:3] if 'roi_images' in crop_group else (0, 0)
                     total_frames = crop_group['roi_images'].shape[0] if 'roi_images' in crop_group else crop_group['bbox_norm_coords'].shape[0]
                     bbox_array_path = f"crop_runs/{latest_crop}/bbox_norm_coords"
+                    frame_array_path = f"crop_runs/{latest_crop}/roi_images"
                     if 'frame_indices' in crop_group:
                         frame_indices_path = f"crop_runs/{latest_crop}/frame_indices"
                     detection_source_path = f"crop_runs/{latest_crop}/detection_source" if 'detection_source' in crop_group else None
@@ -447,6 +450,8 @@ class GlobalIndexManager:
 
                 if not bbox_array_path:
                     raise KeyError(f"Unable to determine bbox source for {Path(path_str).name}.")
+                if not frame_array_path:
+                    raise KeyError(f"Unable to determine frame image source for {Path(path_str).name}.")
 
                 source_coords = root[bbox_array_path][:]
                 valid_mask = np.zeros(source_coords.shape[0], dtype=bool) if source_coords.size == 0 else ~np.isnan(source_coords[:, 0])
@@ -456,6 +461,10 @@ class GlobalIndexManager:
                     real_mask = (detection_source == 0)
                     valid_mask = valid_mask & real_mask
 
+                if self.config.task == 'pose' and success_arr is not None:
+                    kp_row_gate_applied = bool(kp_group.attrs.get("row_gate_applied", False)) if self.config.task == 'pose' else False
+                    if kp_row_gate_applied and str(kp_group.attrs.get("method", "")).strip().lower() == "merged_export":
+                        success_arr = None
                 if self.config.task == 'pose' and success_arr is not None:
                     valid_mask = valid_mask & success_arr
 
@@ -528,6 +537,10 @@ class GlobalIndexManager:
             if kp_run is None:
                 raise KeyError("Unable to determine keypoint run for pose dataset.")
             kp_group = root[f'keypoints_runs/{kp_run}']
+            if bool(kp_group.attrs.get("row_gate_applied", False)) and str(
+                kp_group.attrs.get("method", "")
+            ).strip().lower() == "merged_export":
+                return np.where(valid_mask)[0]
             if 'detection_success' not in kp_group:
                 raise KeyError(f"Keypoint run '{kp_run}' missing 'detection_success' array.")
             success_mask = kp_group['detection_success'][:]

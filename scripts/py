@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec "$HOME/miniconda3/envs/palette-py311/bin/python" "$@"

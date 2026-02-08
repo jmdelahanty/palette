@@ -27,9 +27,10 @@ Purpose: define the minimum and target parity between detection and keypoints (p
 
 | Workflow step | Detect (current) | Keypoints/Pose (target) | Status |
 | --- | --- | --- | --- |
-| Registry preflight wrapper | `fisheye.utils.prepare_detect_training_from_registry` | `fisheye.utils.prepare_keypoint_training_from_registry` | missing for keypoints |
-| Dataset exporter | `fisheye.utils.export_detect_training_zarr` | `fisheye.utils.export_keypoint_training_zarr` | missing for keypoints |
-| Export validator | `fisheye.utils.validate_detect_training_zarr` | `fisheye.utils.validate_keypoint_training_zarr` | missing for keypoints |
+| Registry preflight wrapper | `fisheye.utils.prepare_detect_training_from_registry` | `fisheye.utils.prepare_keypoint_training_from_registry` | present |
+| One-command pipeline wrapper | `fisheye.utils.run_detect_training_pipeline` | `fisheye.utils.run_keypoint_training_pipeline` | present |
+| Dataset exporter | `fisheye.utils.export_detect_training_zarr` | `fisheye.utils.export_keypoint_training_zarr` | present |
+| Export validator | `fisheye.utils.validate_detect_training_zarr` | `fisheye.utils.validate_keypoint_training_zarr` | present |
 | Trainer | `fisheye.training.train_detection` | `fisheye.training.train_keypoints` | present (partial parity) |
 
 ## Shared CLI Contract
@@ -121,13 +122,14 @@ Persist task-specific query context in `training_sets.query_filter`:
 - [x] Keypoints trainer supports registry lifecycle status writes.
 - [x] Keypoints trainer supports default `/nvme1/models/pose/<set_slug>` project root.
 - [x] `keypoint_run` passthrough in pose config plumbing.
-- [ ] Add keypoints registry preflight wrapper (`prepare_keypoint_training_from_registry`).
+- [x] Add keypoints registry preflight wrapper (`prepare_keypoint_training_from_registry`).
+- [x] Add keypoints one-command pipeline wrapper (`run_keypoint_training_pipeline`).
 
 ### Phase 2: Data Build Parity
 
-- [ ] Add keypoints merged exporter (`export_keypoint_training_zarr`).
-- [ ] Add keypoints merged validator (`validate_keypoint_training_zarr`).
-- [ ] Ensure pose exporter writes split arrays and source traceability similar to detect.
+- [x] Add keypoints merged exporter (`export_keypoint_training_zarr`).
+- [x] Add keypoints merged validator (`validate_keypoint_training_zarr`).
+- [x] Ensure pose exporter writes split arrays and source traceability similar to detect.
 
 ### Phase 3: Loader Correctness and Guardrails
 
@@ -142,4 +144,3 @@ Persist task-specific query context in `training_sets.query_filter`:
 - [ ] Registry status can be used to monitor long runs without log tailing.
 - [ ] Pose training cannot mix keypoints from one run with ROI images from another crop run.
 - [ ] Validation CLIs fail on malformed merged datasets before training starts.
-

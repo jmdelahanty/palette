@@ -185,6 +185,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--allow-source-mismatch", action="store_true")
     parser.add_argument("--allow-unapproved", action="store_true")
     parser.add_argument("--no-prefer-manual", action="store_true")
+    parser.add_argument(
+        "--require-review-state",
+        choices=["approved", "pending", "rejected", "needs_review"],
+        help="Require refined detect review state via detect_quality_current.",
+    )
+    parser.add_argument(
+        "--require-review-intended-use",
+        choices=["training", "full_recording"],
+        help="Require refined detect review intended_use via detect_quality_current.",
+    )
+    parser.add_argument(
+        "--max-interpolated-detections-rate",
+        type=float,
+        help="Require interpolated_detections_rate <= threshold (0-1) via detect_quality_current.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--train",
@@ -268,6 +283,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     model_input = args.model_input or args.input_format
     if args.model_input and args.model_input != args.input_format:
         raise SystemExit("--model-input must match --input-format for detection training selection.")
+    if args.max_interpolated_detections_rate is not None and not (0.0 <= args.max_interpolated_detections_rate <= 1.0):
+        raise ValueError("--max-interpolated-detections-rate must be between 0 and 1.")
 
     registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
     registry = Registry(registry_path)
@@ -302,11 +319,192 @@ def main(argv: Optional[List[str]] = None) -> int:
         path_contains=args.path_contains,
         limit=args.limit,
     )
-    registry.close()
+    non_training_rows: List[dict] = []
+    skipped_training_rows = 0
+    for row in rows:
+        purpose = prepare_from_registry._decode_attr(row["zarr_purpose"])
+        zarr_path = Path(str(row["zarr_path"]))
+        if str(purpose or "").lower() == "training" and prepare_from_registry._looks_like_training_artifact_path(zarr_path):
+            skipped_training_rows += 1
+            continue
+        non_training_rows.append(row)
+    rows = non_training_rows
+    if skipped_training_rows:
+        print(
+            f"Skipped {skipped_training_rows} training-purpose dataset(s) "
+            "(non-source artifacts) before detect selection."
+        )
+    if not rows:
+        raise SystemExit("No source datasets remain after prefiltering.")
+
+    quality_gate_active = (
+        args.require_review_state is not None
+        or args.require_review_intended_use is not None
+        or args.max_interpolated_detections_rate is not None
+    )
+    selected_quality_rows_by_dataset = {}
+    quality_exclusions = []
+    if quality_gate_active:
+        dataset_ids_all = [str(row["dataset_id"]) for row in rows if row["dataset_id"]]
+        selected_quality_rows = registry.query_detect_quality_current(
+            dataset_ids=dataset_ids_all,
+            review_state=args.require_review_state,
+            review_intended_use=args.require_review_intended_use,
+            max_interpolated_detections_rate=args.max_interpolated_detections_rate,
+        )
+        selected_quality_rows_by_dataset = {
+            str(row["dataset_id"]): dict(row) for row in selected_quality_rows if row["dataset_id"]
+        }
+        all_quality_rows = registry.query_detect_quality_current(dataset_ids=dataset_ids_all)
+        all_quality_by_dataset = {}
+        for quality_row in all_quality_rows:
+            dataset_id = str(quality_row["dataset_id"])
+            all_quality_by_dataset.setdefault(dataset_id, []).append(dict(quality_row))
+
+        filtered_rows = []
+        for row in rows:
+            dataset_id = str(row["dataset_id"])
+            if dataset_id in selected_quality_rows_by_dataset:
+                filtered_rows.append(row)
+                continue
+            zarr_path = str(row["zarr_path"])
+            candidate_rows = all_quality_by_dataset.get(dataset_id, [])
+            if not candidate_rows:
+                quality_exclusions.append(
+                    {"dataset_id": dataset_id, "zarr_path": zarr_path, "reason": "missing_quality_row"}
+                )
+                continue
+            candidate = candidate_rows[0]
+            review_state = prepare_from_registry._decode_attr(candidate.get("review_state"))
+            review_use = prepare_from_registry._decode_attr(candidate.get("review_intended_use"))
+            interp_rate = prepare_from_registry._as_float(candidate.get("interpolated_detections_rate"))
+            if args.require_review_state is not None and review_state != args.require_review_state:
+                quality_exclusions.append(
+                    {
+                        "dataset_id": dataset_id,
+                        "zarr_path": zarr_path,
+                        "reason": f"review_state_mismatch:{review_state or 'missing'}!={args.require_review_state}",
+                    }
+                )
+            elif (
+                args.require_review_intended_use is not None
+                and review_use != args.require_review_intended_use
+            ):
+                quality_exclusions.append(
+                    {
+                        "dataset_id": dataset_id,
+                        "zarr_path": zarr_path,
+                        "reason": (
+                            f"review_use_mismatch:{review_use or 'missing'}"
+                            f"!={args.require_review_intended_use}"
+                        ),
+                    }
+                )
+            elif args.max_interpolated_detections_rate is not None and interp_rate is None:
+                quality_exclusions.append(
+                    {
+                        "dataset_id": dataset_id,
+                        "zarr_path": zarr_path,
+                        "reason": "missing_interpolated_detections_rate",
+                    }
+                )
+            elif (
+                args.max_interpolated_detections_rate is not None
+                and interp_rate is not None
+                and float(interp_rate) > float(args.max_interpolated_detections_rate)
+            ):
+                quality_exclusions.append(
+                    {
+                        "dataset_id": dataset_id,
+                        "zarr_path": zarr_path,
+                        "reason": (
+                            "interpolated_rate_above_threshold:"
+                            f"{interp_rate:.6f}>{args.max_interpolated_detections_rate:.6f}"
+                        ),
+                    }
+                )
+            else:
+                quality_exclusions.append(
+                    {
+                        "dataset_id": dataset_id,
+                        "zarr_path": zarr_path,
+                        "reason": "excluded_by_quality_filters",
+                    }
+                )
+        rows = filtered_rows
+
+        if quality_exclusions:
+            print(f"Detect quality SQL filter excluded {len(quality_exclusions)} dataset(s):")
+            for exclusion in quality_exclusions[:20]:
+                print(f"  - {exclusion['dataset_id']} [{exclusion['reason']}] {exclusion['zarr_path']}")
+            if len(quality_exclusions) > 20:
+                print(f"  ... {len(quality_exclusions) - 20} more exclusion(s) omitted.")
+
+    if not rows:
+        raise SystemExit("No datasets remain after detect quality filtering.")
 
     zarr_paths = [Path(row["zarr_path"]) for row in rows]
-    if not zarr_paths:
-        raise SystemExit("Registry query returned no datasets.")
+
+    if quality_gate_active:
+        for row in rows:
+            dataset_id = str(row["dataset_id"])
+            zarr_path = Path(str(row["zarr_path"]))
+            quality_row = selected_quality_rows_by_dataset.get(dataset_id)
+            if quality_row is None:
+                raise ValueError(
+                    f"{zarr_path.name}: missing detect_quality row after SQL selection for dataset_id '{dataset_id}'."
+                )
+            expected_refined_run = prepare_from_registry._decode_attr(quality_row["refined_run"])
+            if expected_refined_run is None:
+                raise ValueError(f"{zarr_path.name}: detect_quality row missing refined_run.")
+            observed = prepare_from_registry._resolve_detect_quality_from_zarr(
+                zarr_path,
+                expected_refined_run=expected_refined_run,
+            )
+            expected_source_run = prepare_from_registry._decode_attr(quality_row.get("source_detect_run"))
+            if observed["source_detect_run"] != expected_source_run:
+                raise ValueError(
+                    f"{zarr_path.name}: source_detect_run divergence for refined run '{expected_refined_run}' "
+                    f"(registry={expected_source_run}, zarr={observed['source_detect_run']})."
+                )
+            expected_state = prepare_from_registry._decode_attr(quality_row.get("review_state"))
+            expected_use = prepare_from_registry._decode_attr(quality_row.get("review_intended_use"))
+            if observed["review_state"] != expected_state or observed["review_intended_use"] != expected_use:
+                raise ValueError(
+                    f"{zarr_path.name}: review metadata divergence for refined run '{expected_refined_run}' "
+                    f"(registry={expected_state}/{expected_use}, "
+                    f"zarr={observed['review_state']}/{observed['review_intended_use']})."
+                )
+            expected_resolved_group = prepare_from_registry._decode_attr(quality_row.get("review_resolved_group"))
+            if (
+                expected_resolved_group is not None
+                and observed["review_resolved_group"] != expected_resolved_group
+            ):
+                raise ValueError(
+                    f"{zarr_path.name}: resolved detect group divergence for refined run '{expected_refined_run}' "
+                    f"(registry={expected_resolved_group}, zarr={observed['review_resolved_group']})."
+                )
+            for field in ("total_detections", "real_detections", "interpolated_detections"):
+                expected_value = prepare_from_registry._as_int(quality_row.get(field))
+                if expected_value is not None and prepare_from_registry._as_int(observed.get(field)) != expected_value:
+                    raise ValueError(
+                        f"{zarr_path.name}: {field} divergence for refined run '{expected_refined_run}' "
+                        f"(registry={expected_value}, zarr={prepare_from_registry._as_int(observed.get(field))})."
+                    )
+            expected_interp_rate = prepare_from_registry._as_float(quality_row.get("interpolated_detections_rate"))
+            observed_interp_rate = prepare_from_registry._as_float(observed.get("interpolated_detections_rate"))
+            if not prepare_from_registry._rate_matches(expected_interp_rate, observed_interp_rate):
+                raise ValueError(
+                    f"{zarr_path.name}: interpolated_detections_rate divergence for refined run "
+                    f"'{expected_refined_run}' (registry={expected_interp_rate}, zarr={observed_interp_rate})."
+                )
+            expected_mtime_ns = prepare_from_registry._as_int(quality_row.get("zarr_mtime_ns"))
+            if expected_mtime_ns is not None and observed["zarr_mtime_ns"] != expected_mtime_ns:
+                raise ValueError(
+                    f"{zarr_path.name}: detect_quality row is stale for filesystem mtime "
+                    f"(registry={expected_mtime_ns}, actual={observed['zarr_mtime_ns']})."
+                )
+    registry.close()
 
     if args.set_name is None and args.out_config is None:
         args.set_name = prepare_from_registry._default_set_name(args, rows, model_input=model_input)

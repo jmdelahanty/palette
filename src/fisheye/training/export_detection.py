@@ -298,8 +298,13 @@ def main() -> None:
                     metadata={
                         "sha256": export_artifacts.get("onnx_sha256"),
                         "manifest_sha256": export_artifacts.get("onnx_manifest_sha256"),
+                        "manifest_path": export_artifacts.get("onnx_manifest_path"),
+                        "output_contract": export_artifacts.get("onnx_output_contract"),
                         "build_env": export_artifacts.get("onnx_build_env"),
                         "metadata_props": export_artifacts.get("onnx_metadata_props"),
+                        "requires_plugins": export_artifacts.get("onnx_requires_plugins"),
+                        "plugin_ops": export_artifacts.get("onnx_plugin_ops"),
+                        "plugin_versions": export_artifacts.get("onnx_plugin_versions"),
                         "errors": export_artifacts.get("errors"),
                     },
                 )
@@ -313,6 +318,13 @@ def main() -> None:
                     if export_artifacts.get("engine_manifest_path")
                     else None,
                     metadata={
+                        "sha256": export_artifacts.get("engine_sha256"),
+                        "manifest_sha256": export_artifacts.get("engine_manifest_sha256"),
+                        "precision": export_artifacts.get("engine_precision"),
+                        "output_contract": export_artifacts.get("onnx_output_contract"),
+                        "requires_plugins": export_artifacts.get("onnx_requires_plugins"),
+                        "plugin_ops": export_artifacts.get("onnx_plugin_ops"),
+                        "plugin_versions": export_artifacts.get("onnx_plugin_versions"),
                         "build_env": export_artifacts.get("build_env"),
                         "trt_device_info": export_artifacts.get("trt_device_info"),
                         "errors": export_artifacts.get("errors"),

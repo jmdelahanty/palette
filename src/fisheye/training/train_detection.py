@@ -14,12 +14,9 @@ import argparse
 from collections import defaultdict
 import hashlib
 import math
-import os
 import random
 import shutil
-import subprocess
 import sys
-import re
 import numpy as np
 # Import NumPy before Torch to avoid MKL/libgomp threading-layer conflicts in some conda envs.
 import torch
@@ -28,21 +25,43 @@ from pathlib import Path
 import time
 import platform
 import traceback
-from typing import Optional
+from typing import Any, Optional
 import pandas as pd
 from ultralytics import YOLO, __version__ as ultralytics_version
 from ultralytics.models.yolo.detect import DetectionTrainer, DetectionValidator
 from torch.utils.data import DataLoader
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
 import json
 import zarr
 
 from .config import DetectConfig, DatasetConfig
+from .export_shared import (
+    collect_export_env as _shared_collect_export_env,
+    resolve_trtexec_path as _shared_resolve_trtexec_path,
+    run_subprocess_streaming as _shared_run_subprocess_streaming,
+)
+from .training_run_shared import (
+    record_registry_training_run as _shared_record_registry_training_run,
+    safe_sha256_file as _shared_safe_sha256_file,
+    snapshot_training_inputs as _shared_snapshot_training_inputs,
+)
+from .training_naming_shared import (
+    build_default_detect_run_name as _shared_build_default_detect_run_name,
+    infer_set_slug as _shared_infer_set_slug,
+    resolve_project_dir as _shared_resolve_project_dir,
+    sanitize_run_component as _shared_sanitize_run_component,
+    strip_manifest_suffixes as _shared_strip_manifest_suffixes,
+)
+from .training_console import (
+    print_dataset_details,
+    print_section_header,
+    print_training_banner,
+    print_training_hyperparameters,
+    print_training_start,
+)
 from .zarr_yolo_dataset_loader import create_zarr_dataset, ZarrDatasetConfig
 from ..utils.system import get_git_info, build_invocation_record
-from ..registry.db import Registry, RegistryPaths
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
@@ -632,69 +651,8 @@ def _cleanup_trainer_dataloaders(model, console: Optional[Console] = None) -> in
 
 
 def display_zarr_metadata(metadata, console):
-    """Display zarr metadata in a nice table."""
-    printed_tables = 0
-    for zarr_name, meta in metadata.items():
-        if 'error' in meta:
-            console.print(f"[red]✗ {zarr_name}: {meta['error']}[/red]")
-            continue
-        
-        # Create info table
-        table = Table(title=f"📦 {zarr_name}", show_header=True)
-        table.add_column("Metric", style="cyan")
-        table.add_column("Value", style="yellow")
-        
-        # Video info
-        table.add_row("Video Frames", str(meta.get('video_frames', 'N/A')))
-        table.add_row("FPS", str(meta.get('fps', 'N/A')))
-        
-        # Detection info
-        if meta.get('detection_info'):
-            det_info = meta['detection_info']
-            table.add_row("Total Detections", f"{det_info.get('total_detections', 0):,}")
-            table.add_row("Detection Rate", f"{det_info.get('detection_rate', 0):.1f}%")
-        
-        # Crop info with source
-        if meta.get('crop_info'):
-            crop_info = meta['crop_info']
-            source_type = crop_info.get('source_type', 'unknown')
-            
-            # Color code the source
-            if source_type == 'detect':
-                source_display = f"[cyan]{source_type}[/cyan] (original)"
-            elif source_type == 'filtered':
-                source_display = f"[yellow]{source_type}[/yellow] (jumps removed)"
-            elif source_type == 'interpolated':
-                source_display = f"[magenta]{source_type}[/magenta] (gaps filled)"
-            elif source_type == 'manual':
-                source_display = f"[green]{source_type}[/green] (manual review)"
-            else:
-                source_display = source_type
-            
-            table.add_row("Crop Source", source_display)
-            table.add_row("Total ROIs", f"{crop_info.get('total_rois', 0):,}")
-            
-            # If interpolated, show breakdown
-            if crop_info.get('includes_interpolated'):
-                n_real = crop_info.get('n_real', 0)
-                n_interp = crop_info.get('n_interpolated', 0)
-                table.add_row("  └─ Real ROIs", f"{n_real:,}")
-                table.add_row("  └─ Interpolated ROIs", f"{n_interp:,}")
-        
-        # Data quality info
-        if meta.get('data_quality', {}).get('has_refinement'):
-            quality = meta['data_quality']
-            if 'jumps_removed' in quality:
-                table.add_row("Jumps Removed", str(quality['jumps_removed']))
-            if 'gaps_filled' in quality:
-                table.add_row("Gaps Filled", str(quality['gaps_filled']))
-
-        console.print(table)
-        console.print()
-        printed_tables += 1
-
-    if printed_tables == 0 and metadata:
-        console.print("[yellow]No valid dataset metadata tables to display.[/yellow]")
+    """Display zarr metadata using shared training console renderer."""
+    print_dataset_details(console, metadata, task="detect")
 
 
 def _normalize_source_type(value, default: str = "detect") -> str:
@@ -825,87 +783,15 @@ def _sha256_file(path: Path) -> str:
 
 
 def _safe_sha256_file(path: Path | None) -> str | None:
-    if path is None:
-        return None
-    if not path.exists() or not path.is_file():
-        return None
-    try:
-        return _sha256_file(path)
-    except Exception:
-        return None
+    return _shared_safe_sha256_file(path)
 
 
 def _strip_manifest_suffixes(value: str) -> str:
-    text = str(value).strip()
-    while text.endswith(".manifest"):
-        text = text[: -len(".manifest")]
-    return text
+    return _shared_strip_manifest_suffixes(value)
 
 
 def _sanitize_run_component(value: str | None, fallback: str) -> str:
-    text = str(value or "").strip().lower()
-    text = re.sub(r"[^a-z0-9]+", "_", text)
-    text = text.strip("_")
-    return text or fallback
-
-
-def _resolve_manifest_version_token(manifest_summary: dict) -> str:
-    for key in ("manifest_set_id", "manifest_set_slug"):
-        raw = str(manifest_summary.get(key) or "").strip().lower()
-        if not raw:
-            continue
-        match = re.search(r"_v(?P<num>\d+)$", raw)
-        if not match:
-            continue
-        try:
-            version_num = int(match.group("num"))
-        except Exception:
-            continue
-        if version_num >= 0:
-            return f"v{version_num:03d}"
-    return "v001"
-
-
-def _resolve_run_hash(
-    *,
-    manifest_summary: dict,
-    task: str,
-    stamp: str,
-    pid: int,
-) -> str:
-    manifest_sha = str(manifest_summary.get("manifest_sha256") or "").strip().lower()
-    if re.fullmatch(r"[0-9a-f]{8,}", manifest_sha):
-        return manifest_sha[:8]
-
-    seed = "|".join(
-        [
-            str(manifest_summary.get("manifest_set_id") or ""),
-            str(manifest_summary.get("manifest_set_slug") or ""),
-            str(manifest_summary.get("manifest_rig_name") or ""),
-            str(manifest_summary.get("manifest_dish_design") or ""),
-            str(manifest_summary.get("manifest_canvas_name") or ""),
-            task,
-            stamp,
-            str(pid),
-        ]
-    )
-    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8]
-
-
-def _infer_dish_canvas_from_set_slug(manifest_summary: dict) -> tuple[str | None, str | None]:
-    raw = str(manifest_summary.get("manifest_set_slug") or manifest_summary.get("manifest_set_id") or "").strip()
-    if not raw:
-        return None, None
-    slug = _sanitize_run_component(raw, "")
-    if not slug:
-        return None, None
-    slug = re.sub(r"_v\d+$", "", slug)
-    if slug.startswith("detect_"):
-        slug = slug[len("detect_") :]
-    parts = [part for part in slug.split("_") if part]
-    if len(parts) < 2:
-        return None, None
-    return parts[0], parts[1]
+    return _shared_sanitize_run_component(value, fallback)
 
 
 def _build_default_run_name(
@@ -915,34 +801,16 @@ def _build_default_run_name(
     timestamp: str | None = None,
     pid: int | None = None,
 ) -> str:
-    fallback_dish, fallback_canvas = _infer_dish_canvas_from_set_slug(manifest_summary)
-    rig = _sanitize_run_component(manifest_summary.get("manifest_rig_name"), "unknown_rig")
-    dish = _sanitize_run_component(manifest_summary.get("manifest_dish_design") or fallback_dish, "unknown_dish")
-    canvas = _sanitize_run_component(
-        manifest_summary.get("manifest_canvas_name") or fallback_canvas,
-        "unknown_canvas",
-    )
-    version = _resolve_manifest_version_token(manifest_summary)
-    task = _sanitize_run_component(manifest_summary.get("manifest_task") or task_fallback, task_fallback)
-    stamp = timestamp or time.strftime("%Y%m%d-%H%M%S")
-    process_id = int(os.getpid() if pid is None else pid)
-    short_hash = _resolve_run_hash(
+    return _shared_build_default_detect_run_name(
         manifest_summary=manifest_summary,
-        task=task,
-        stamp=stamp,
-        pid=process_id,
+        task_fallback=task_fallback,
+        timestamp=timestamp,
+        pid=pid,
     )
-    return f"{rig}_{dish}_{canvas}_{version}_{task}_{stamp}_{short_hash}"
 
 
 def _infer_set_slug(set_id: str | None, config_path: Path | None) -> str:
-    if set_id:
-        slug = _strip_manifest_suffixes(set_id)
-        return slug or "detect_training"
-    if config_path is not None:
-        stem = _strip_manifest_suffixes(config_path.stem)
-        return stem or "detect_training"
-    return "detect_training"
+    return _shared_infer_set_slug(set_id, config_path, "detect_training")
 
 
 def _resolve_project_dir(
@@ -953,24 +821,15 @@ def _resolve_project_dir(
     config_path: Path | None,
     console: Console,
 ) -> None:
-    if args.project:
-        training_params["project"] = str(Path(args.project).expanduser().resolve())
-        return
-
-    configured_project = training_params.get("project")
-    if isinstance(configured_project, str) and configured_project.strip():
-        training_params["project"] = str(Path(configured_project).expanduser().resolve())
-        return
-
-    nvme_root = Path("/nvme1")
-    if not nvme_root.exists():
-        return
-
-    slug = _infer_set_slug(set_id, config_path)
-    project_dir = (nvme_root / "models" / "detect" / slug).resolve()
-    project_dir.mkdir(parents=True, exist_ok=True)
-    training_params["project"] = str(project_dir)
-    console.print(f"[cyan]Using default model output directory:[/cyan] {project_dir}")
+    _shared_resolve_project_dir(
+        args=args,
+        training_params=training_params,
+        set_id=set_id,
+        config_path=config_path,
+        task_subdir="detect",
+        default_slug="detect_training",
+        console=console,
+    )
 
 
 def _snapshot_training_inputs(
@@ -980,25 +839,12 @@ def _snapshot_training_inputs(
     manifest_path: Path | None,
     invocation_payload: dict | None,
 ) -> list[Path]:
-    """Copy immutable run inputs into run_dir/inputs for reproducibility."""
-    inputs_dir = run_dir / "inputs"
-    inputs_dir.mkdir(parents=True, exist_ok=True)
-    written: list[Path] = []
-
-    if config_path is not None and config_path.exists():
-        dest = inputs_dir / config_path.name
-        shutil.copy2(config_path, dest)
-        written.append(dest)
-    if manifest_path is not None and manifest_path.exists():
-        dest = inputs_dir / manifest_path.name
-        shutil.copy2(manifest_path, dest)
-        written.append(dest)
-    if invocation_payload:
-        dest = inputs_dir / "train_invocation.json"
-        dest.write_text(json.dumps(invocation_payload, indent=2), encoding="utf-8")
-        written.append(dest)
-
-    return written
+    return _shared_snapshot_training_inputs(
+        run_dir=run_dir,
+        config_path=config_path,
+        manifest_path=manifest_path,
+        invocation_payload=invocation_payload,
+    )
 
 
 def _write_input_pipeline_profile(
@@ -1039,69 +885,20 @@ def _record_registry_training_run(
     final_metrics: dict | None,
     export_artifacts: dict | None = None,
 ) -> None:
-    registry = None
-    try:
-        registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
-        registry = Registry(registry_path)
-        registry.record_training_run(
-            run_id=run_id,
-            set_id=set_id,
-            config_path=config_path,
-            manifest_path=manifest_path,
-            model_path=model_path,
-            metrics_path=metrics_path,
-            config_sha256=_safe_sha256_file(config_path),
-            manifest_sha256=_safe_sha256_file(manifest_path),
-            model_sha256=_safe_sha256_file(model_path),
-            metrics_sha256=_safe_sha256_file(metrics_path),
-            status=status,
-            final_metrics=final_metrics,
-            invocation=invocation_payload,
-        )
-        if status == "success" and export_artifacts:
-            onnx_path = export_artifacts.get("onnx_path")
-            if onnx_path:
-                registry.record_model_export(
-                    run_id=run_id,
-                    export_type="onnx",
-                    path=Path(onnx_path),
-                    manifest_path=Path(export_artifacts.get("onnx_manifest_path"))
-                    if export_artifacts.get("onnx_manifest_path")
-                    else None,
-                    metadata={
-                        "sha256": export_artifacts.get("onnx_sha256"),
-                        "manifest_sha256": export_artifacts.get("onnx_manifest_sha256"),
-                        "build_env": export_artifacts.get("onnx_build_env"),
-                        "metadata_props": export_artifacts.get("onnx_metadata_props"),
-                        "errors": export_artifacts.get("errors"),
-                    },
-                )
-            engine_path = export_artifacts.get("engine_path")
-            if engine_path:
-                registry.record_model_export(
-                    run_id=run_id,
-                    export_type="tensorrt",
-                    path=Path(engine_path),
-                    manifest_path=Path(export_artifacts.get("engine_manifest_path"))
-                    if export_artifacts.get("engine_manifest_path")
-                    else None,
-                    metadata={
-                        "sha256": export_artifacts.get("engine_sha256"),
-                        "manifest_sha256": export_artifacts.get("engine_manifest_sha256"),
-                        "build_env": export_artifacts.get("build_env"),
-                        "trt_device_info": export_artifacts.get("trt_device_info"),
-                        "errors": export_artifacts.get("errors"),
-                    },
-                )
-        console.print(f"[green]✓ Registry updated:[/green] {registry_path}")
-    except Exception as exc:
-        console.print(f"[yellow]Registry update skipped:[/yellow] {exc}")
-    finally:
-        if registry is not None:
-            try:
-                registry.close()
-            except Exception:
-                pass
+    _shared_record_registry_training_run(
+        args=args,
+        console=console,
+        invocation_payload=invocation_payload,
+        run_id=run_id,
+        set_id=set_id,
+        config_path=config_path,
+        manifest_path=manifest_path,
+        model_path=model_path,
+        metrics_path=metrics_path,
+        status=status,
+        final_metrics=final_metrics,
+        export_artifacts=export_artifacts,
+    )
 
 
 def _normalize_imgsz(value) -> tuple[int, int]:
@@ -1151,172 +948,20 @@ def _run_subprocess(
     label: str,
     log_path: Path | None = None,
 ) -> bool:
-    console.print(f"[dim]Running {label}:[/dim] {' '.join(command)}")
-    log_handle = None
-    if log_path:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_handle = log_path.open("w", encoding="utf-8")
-    try:
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        if process.stdout:
-            for line in process.stdout:
-                if log_handle:
-                    log_handle.write(line)
-                console.print(line.rstrip(), markup=False)
-        process.wait()
-        if process.returncode != 0:
-            console.print(f"[red]✗ {label} failed with code {process.returncode}[/red]")
-            return False
-        return True
-    except Exception as exc:
-        console.print(f"[red]✗ {label} failed:[/red] {exc}")
-        return False
-    finally:
-        if log_handle:
-            log_handle.close()
-
-
-def _read_trtexec_version(trtexec_path: Path | None) -> tuple[str | None, str | None, str | None]:
-    if not trtexec_path:
-        return None, None, None
-    raw_output = None
-    try:
-        result = subprocess.run(
-            [str(trtexec_path), "--version"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        raw_output = "\n".join(
-            [part for part in [result.stdout.strip(), result.stderr.strip()] if part]
-        ).strip()
-        if raw_output:
-            dotted = re.search(r"TensorRT\\s+Version[:\\s]+(\\d+\\.\\d+\\.\\d+\\.\\d+)", raw_output)
-            if dotted:
-                return dotted.group(1), "trtexec", raw_output
-            dotted = re.search(r"TensorRT\\s*v?(\\d+\\.\\d+\\.\\d+\\.\\d+)", raw_output)
-            if dotted:
-                return dotted.group(1), "trtexec", raw_output
-    except Exception:
-        raw_output = None
-    path_match = re.search(r"TensorRT-(\\d+\\.\\d+\\.\\d+\\.\\d+)", str(trtexec_path))
-    if path_match:
-        return path_match.group(1), "path", raw_output
-    return None, None, raw_output
+    return _shared_run_subprocess_streaming(
+        command=command,
+        console=console,
+        label=label,
+        log_path=log_path,
+    )
 
 
 def _resolve_trtexec_path(explicit_path: str | None) -> Path | None:
-    """Resolve trtexec path from explicit CLI value, module default, or PATH."""
-    candidates: list[Path] = []
-    if explicit_path:
-        candidates.append(Path(explicit_path).expanduser())
-    else:
-        try:
-            from .onnx_to_tensorrt import TRTEXEC_PATH as default_trtexec_path  # type: ignore
-        except Exception:
-            default_trtexec_path = None
-        if default_trtexec_path:
-            candidates.append(Path(str(default_trtexec_path)).expanduser())
-        which_path = shutil.which("trtexec")
-        if which_path:
-            candidates.append(Path(which_path))
-    for candidate in candidates:
-        if candidate.exists():
-            try:
-                return candidate.resolve()
-            except Exception:
-                return candidate
-    return None
-
-
-def _parse_trtexec_device_info_text(raw_text: str) -> dict:
-    if not raw_text:
-        return {}
-    info: dict = {}
-    patterns: list[tuple[str, str, str | None]] = [
-        ("selected_device_name", r"Selected Device:\s*(.+)$", None),
-        ("selected_device_id", r"Selected Device ID:\s*(\d+)$", "int"),
-        ("selected_device_uuid", r"Selected Device UUID:\s*(\S+)$", None),
-        ("compute_capability", r"Compute Capability:\s*([0-9.]+)$", None),
-        ("sm_count", r"SMs:\s*(\d+)$", "int"),
-        ("device_global_memory_mib", r"Device Global Memory:\s*(\d+)\s*MiB", "int"),
-        ("memory_bus_width_bits", r"Memory Bus Width:\s*(\d+)\s*bits", "int"),
-        ("trtexec_reported_version", r"TensorRT version:\s*([0-9.]+)", None),
-    ]
-    for line in raw_text.splitlines():
-        clean = re.sub(r"^\[[^\]]+\]\s+\[I\]\s*", "", line).strip()
-        if not clean:
-            continue
-        for key, pattern, cast in patterns:
-            match = re.search(pattern, clean)
-            if not match:
-                continue
-            value = match.group(1).strip()
-            if cast == "int":
-                try:
-                    info[key] = int(value)
-                except ValueError:
-                    info[key] = value
-            else:
-                info[key] = value
-    return info
-
-
-def _parse_trtexec_device_info(log_path: Path | None) -> dict:
-    if not log_path or not log_path.exists():
-        return {}
-    try:
-        raw_text = log_path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return {}
-    return _parse_trtexec_device_info_text(raw_text)
+    return _shared_resolve_trtexec_path(explicit_path)
 
 
 def _collect_export_env(trtexec_path: Path | None, trtexec_log_path: Path | None = None) -> dict:
-    env = {
-        "torch_version": str(torch.__version__),
-        "cuda_version": torch.version.cuda,
-        "trtexec_path": str(trtexec_path) if trtexec_path else None,
-        "system_hostname": platform.node() or None,
-    }
-    if torch.cuda.is_available():
-        try:
-            device_id = int(torch.cuda.current_device())
-            props = torch.cuda.get_device_properties(device_id)
-            env["gpu_name"] = torch.cuda.get_device_name(device_id)
-            env["torch_device"] = {
-                "selected_device_id": device_id,
-                "selected_device_name": str(getattr(props, "name", env["gpu_name"])),
-                "compute_capability": f"{int(props.major)}.{int(props.minor)}",
-                "sm_count": int(getattr(props, "multi_processor_count", 0)),
-                "device_global_memory_mib": int(getattr(props, "total_memory", 0) // (1024 * 1024)),
-            }
-        except Exception:
-            env["gpu_name"] = None
-    try:
-        import tensorrt as trt  # type: ignore
-    except Exception:
-        version, source, raw_output = _read_trtexec_version(trtexec_path)
-        env["tensorrt_version"] = version
-        if source:
-            env["tensorrt_version_source"] = source
-        if raw_output:
-            env["trtexec_version_output"] = raw_output
-    else:
-        env["tensorrt_version"] = trt.__version__
-        env["tensorrt_version_source"] = "python"
-    trtexec_runtime = _parse_trtexec_device_info(trtexec_log_path)
-    if trtexec_runtime:
-        env["trtexec_runtime"] = trtexec_runtime
-        if not env.get("tensorrt_version") and trtexec_runtime.get("trtexec_reported_version"):
-            env["tensorrt_version"] = trtexec_runtime.get("trtexec_reported_version")
-            env["tensorrt_version_source"] = "trtexec_log"
-    return env
+    return _shared_collect_export_env(trtexec_path, trtexec_log_path=trtexec_log_path)
 
 
 def _collect_onnx_output_contract(onnx_path: Path) -> list[dict]:
@@ -1376,6 +1021,66 @@ def _collect_onnx_metadata_props(onnx_path: Path) -> dict[str, str]:
     return props
 
 
+def _collect_onnx_plugin_contract(onnx_path: Path) -> dict[str, Any]:
+    """Collect ONNX custom/plugin op contract for deployment compatibility checks."""
+    try:
+        import onnx  # type: ignore
+    except Exception:
+        return {
+            "requires_plugins": False,
+            "plugin_ops": [],
+            "plugin_versions": {},
+        }
+
+    try:
+        model = onnx.load(str(onnx_path))
+    except Exception:
+        return {
+            "requires_plugins": False,
+            "plugin_ops": [],
+            "plugin_versions": {},
+        }
+
+    standard_domains = {"", "ai.onnx", "ai.onnx.ml", "ai.onnx.training", "ai.onnx.preview.training"}
+    plugin_ops: list[str] = []
+    plugin_versions: dict[str, str] = {}
+
+    for node in getattr(model.graph, "node", []) or []:
+        domain = str(getattr(node, "domain", "") or "")
+        op_type = str(getattr(node, "op_type", "") or "")
+        if not op_type:
+            continue
+        if domain in standard_domains:
+            continue
+
+        op_key = f"{domain}::{op_type}" if domain else op_type
+        plugin_ops.append(op_key)
+
+        for attr in getattr(node, "attribute", []) or []:
+            if str(getattr(attr, "name", "") or "") != "plugin_version":
+                continue
+            version_value = None
+            attr_type = int(getattr(attr, "type", 0) or 0)
+            if attr_type == 3:  # STRING
+                try:
+                    version_value = bytes(getattr(attr, "s", b"")).decode("utf-8")
+                except Exception:
+                    version_value = str(getattr(attr, "s", b""))
+            elif attr_type == 2:  # INT
+                version_value = str(int(getattr(attr, "i", 0)))
+
+            if version_value:
+                plugin_versions[op_key] = str(version_value)
+            break
+
+    plugin_ops_sorted = sorted(set(plugin_ops))
+    return {
+        "requires_plugins": bool(plugin_ops_sorted),
+        "plugin_ops": plugin_ops_sorted,
+        "plugin_versions": plugin_versions,
+    }
+
+
 def _export_detection_artifacts(
     *,
     run_dir: Path,
@@ -1426,6 +1131,7 @@ def _export_detection_artifacts(
     export_script = Path(__file__).resolve().parent / "export_onnx.py"
     onnx_cmd = [
         sys.executable,
+        "-u",
         str(export_script),
         "-w",
         str(weights_path),
@@ -1472,12 +1178,16 @@ def _export_detection_artifacts(
     onnx_sha = _sha256_file(onnx_path)
     onnx_output_contract = _collect_onnx_output_contract(onnx_path)
     onnx_metadata_props = _collect_onnx_metadata_props(onnx_path)
+    onnx_plugin_contract = _collect_onnx_plugin_contract(onnx_path)
     onnx_build_env = _collect_export_env(None, trtexec_log_path=None)
     export_info["weights_sha256"] = weights_sha
     export_info["onnx_sha256"] = onnx_sha
     export_info["onnx_source"] = "existing" if existing_onnx_path else "exported"
     export_info["onnx_output_contract"] = onnx_output_contract
     export_info["onnx_metadata_props"] = onnx_metadata_props
+    export_info["onnx_requires_plugins"] = bool(onnx_plugin_contract.get("requires_plugins"))
+    export_info["onnx_plugin_ops"] = onnx_plugin_contract.get("plugin_ops") or []
+    export_info["onnx_plugin_versions"] = onnx_plugin_contract.get("plugin_versions") or {}
     export_info["onnx_build_env"] = onnx_build_env
 
     onnx_manifest = {
@@ -1493,6 +1203,7 @@ def _export_detection_artifacts(
             "sha256": onnx_sha,
             "outputs": onnx_output_contract,
             "metadata_props": onnx_metadata_props,
+            "plugin_contract": onnx_plugin_contract,
         },
         "export": {
             "source": "existing" if existing_onnx_path else "exported",
@@ -1519,6 +1230,7 @@ def _export_detection_artifacts(
         },
     }
     onnx_manifest_path.write_text(json.dumps(onnx_manifest, indent=2))
+    export_info["onnx_manifest_sha256"] = _safe_sha256_file(onnx_manifest_path)
 
     if not args.export_trt:
         return export_info
@@ -1533,6 +1245,7 @@ def _export_detection_artifacts(
     trt_script = Path(__file__).resolve().parent / "onnx_to_tensorrt.py"
     trt_cmd = [
         sys.executable,
+        "-u",
         str(trt_script),
         "--onnx",
         str(onnx_path),
@@ -1575,6 +1288,7 @@ def _export_detection_artifacts(
                 "path": str(onnx_path),
                 "sha256": onnx_sha,
                 "outputs": onnx_output_contract,
+                "plugin_contract": onnx_plugin_contract,
             },
             "engine": {
                 "path": str(engine_path),
@@ -1619,6 +1333,7 @@ def _export_detection_artifacts(
         {
             "engine_path": str(engine_path),
             "engine_manifest_path": str(manifest_path),
+            "engine_precision": str(args.trt_precision),
             "build_env": engine_manifest.get("build_env") if engine_path.exists() else None,
             "trt_device_info": (
                 engine_manifest.get("build_env", {}).get("trtexec_runtime")
@@ -1636,7 +1351,7 @@ def _export_detection_artifacts(
 def main(args):
     global _ACTIVE_INPUT_PIPELINE_PROFILER
     console = Console()
-    console.print("[bold cyan] Starting YOLO Detection Training[/bold cyan]\n")
+    print_training_banner(console, "Detection")
     invocation_payload = build_invocation_record(
         tool="fisheye.training.train_detection",
         args=args,
@@ -1726,7 +1441,8 @@ def main(args):
         )
 
     # Get comprehensive zarr metadata
-    console.print("[bold cyan] Analyzing Zarr Files...[/bold cyan]\n")
+    print_section_header(console, "Dataset Information")
+    console.print("[dim]Analyzing Zarr files...[/dim]\n")
     zarr_metadata = get_zarr_metadata(config.get_zarr_paths(), console)
     display_zarr_metadata(zarr_metadata, console)
 
@@ -1936,28 +1652,15 @@ def main(args):
         raise
 
     # Display hyperparameters
-    params_str = json.dumps(training_params, indent=2)
-    custom_loader_aug_str = json.dumps(custom_loader_augment, indent=2)
-    console.print(
-        Panel(
-            custom_loader_aug_str,
-            title="[bold cyan]Custom Loader Augmentations[/bold cyan]",
-            expand=False,
-        )
+    print_training_hyperparameters(
+        console,
+        training_params=training_params,
+        loader_overrides=custom_loader_augment,
+        include_loader_note=True,
     )
-    console.print(
-        "[dim]Ultralytics built-in mosaic/mixup/cutmix/copy_paste/auto_augment are held neutral for Zarr loader runs.[/dim]"
-    )
-    console.print()
-    console.print(Panel(
-        params_str,
-        title="[bold yellow]Training Hyperparameters[/bold yellow]",
-        expand=False
-    ))
-    console.print()
 
     # Start training
-    console.print("[bold green] Starting Training...[/bold green]\n")
+    print_training_start(console)
     training_start_time = time.time()
 
     snapshot_state = {"done": False}

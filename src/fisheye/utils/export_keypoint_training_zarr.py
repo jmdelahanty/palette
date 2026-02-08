@@ -1,0 +1,1696 @@
+#!/usr/bin/env python3
+"""Export keypoint-training Zarr datasets from a training manifest.
+
+Merged mode is the initial supported mode:
+- one merged Zarr for the full training set
+- fixed split arrays (train/val/test)
+- source-index traceability arrays
+- merged config/manifest emission for train_keypoints
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from hashlib import sha256
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import yaml
+import zarr
+
+from fisheye.registry.db import Registry
+from fisheye.utils import prepare_keypoint_training_from_registry as prepare_pose
+from fisheye.utils.system import build_invocation_record
+
+try:
+    from rich.console import Console
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        TaskProgressColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+except Exception:  # pragma: no cover - rich is optional
+    Console = None  # type: ignore
+    Progress = None  # type: ignore
+    TextColumn = None  # type: ignore
+    BarColumn = None  # type: ignore
+    TaskProgressColumn = None  # type: ignore
+    TimeElapsedColumn = None  # type: ignore
+    TimeRemainingColumn = None  # type: ignore
+
+
+@dataclass
+class PoseMergeSourceSpec:
+    ordinal: int
+    dataset_name: str
+    dataset_id: str
+    source_zarr: Path
+    source_crop_run: str
+    keypoint_run: str
+    source_type_resolved: str
+    source_sample_count: int
+    sample_count: int
+    selected_indices: np.ndarray
+    row_gate_policy: str
+    row_gate_refined_run: Optional[str]
+    row_gate_selected: int
+    row_gate_total: int
+    row_gate_raw_success_true: int
+    row_gate_usable_true: Optional[int]
+    roi_path: str
+    bbox_path: str
+    keypoints_path: str
+    success_path: str
+    frame_indices_path: Optional[str]
+    detection_source_path: Optional[str]
+    roi_shape: Tuple[int, ...]
+    roi_dtype: np.dtype
+    roi_chunks: Optional[Tuple[int, ...]]
+    keypoint_shape: Tuple[int, ...]
+    keypoint_dtype: np.dtype
+    keypoint_labels: List[str]
+    dish_design: Optional[str]
+    canvas_name: Optional[str]
+    rig_id: Optional[str]
+
+
+@dataclass
+class PoseMergeResult:
+    run_name: str
+    total_samples: int
+    total_successful: int
+    total_failed: int
+    detection_source_counts: Dict[str, int]
+    train_indices: np.ndarray
+    val_indices: np.ndarray
+    test_indices: np.ndarray
+    source_specs: List[PoseMergeSourceSpec]
+    input_format: str
+    source_type: str
+    keypoint_shape: Tuple[int, ...]
+    keypoint_labels: List[str]
+    row_gate_policy: str
+    row_gate_counts: Dict[str, int]
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _sha256(path: Path) -> str:
+    hasher = sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _normalize_manifest_stem(value: str) -> str:
+    text = str(value).strip()
+    while text.endswith(".manifest"):
+        text = text[: -len(".manifest")]
+    return text
+
+
+def _ensure_suffix(value: str, suffix: str) -> str:
+    text = str(value).strip()
+    return text if text.endswith(suffix) else f"{text}{suffix}"
+
+
+def _as_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8", "ignore")
+        except Exception:
+            return None
+    text = str(value).strip()
+    return text or None
+
+
+def _clean_slug(value: Optional[str], fallback: str) -> str:
+    text = _as_text(value) or fallback
+    cleaned = "".join(ch if ch.isalnum() or ch in ("_", "-", ".") else "_" for ch in text.strip())
+    return cleaned or fallback
+
+
+def _parse_split_spec(spec: str) -> Tuple[float, float, float]:
+    parts = [part.strip() for part in str(spec).split("/") if part.strip()]
+    if len(parts) not in {2, 3}:
+        raise ValueError(f"Invalid --split '{spec}'. Use train/val or train/val/test (e.g. 0.8/0.2).")
+    values = [float(part) for part in parts]
+    if any(value < 0.0 for value in values):
+        raise ValueError(f"Invalid --split '{spec}': ratios must be non-negative.")
+    total = sum(values)
+    if not np.isclose(total, 1.0, atol=1e-6):
+        raise ValueError(f"Invalid --split '{spec}': ratios must sum to 1.0 (got {total:.6f}).")
+    if len(values) == 2:
+        return values[0], values[1], 0.0
+    return values[0], values[1], values[2]
+
+
+def _compute_split_indices(
+    total: int,
+    *,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if total < 0:
+        raise ValueError(f"Invalid sample count: {total}")
+    order = np.arange(total, dtype=np.int64)
+    rng = np.random.default_rng(seed)
+    rng.shuffle(order)
+
+    if total == 0:
+        return order.copy(), order.copy(), order.copy()
+
+    train_count = int(round(total * train_ratio))
+    val_count = int(round(total * val_ratio))
+    train_count = max(0, min(train_count, total))
+    val_count = max(0, min(val_count, total - train_count))
+    test_count = total - train_count - val_count
+    if test_ratio <= 0.0:
+        val_count = total - train_count
+        test_count = 0
+
+    train_idx = order[:train_count]
+    val_idx = order[train_count : train_count + val_count]
+    test_idx = order[train_count + val_count : train_count + val_count + test_count]
+    return train_idx, val_idx, test_idx
+
+
+def _normalize_chunks(chunks: Optional[Tuple[int, ...]], shape: Tuple[int, ...]) -> Tuple[int, ...]:
+    if not shape:
+        return ()
+    if chunks is None:
+        first = 32 if shape[0] >= 32 else max(1, shape[0])
+        return (first, *shape[1:])
+    normalized: List[int] = []
+    for idx, dim in enumerate(shape):
+        if idx < len(chunks) and chunks[idx]:
+            value = int(chunks[idx])
+        else:
+            value = int(dim)
+        value = max(1, min(value, int(dim)))
+        normalized.append(value)
+    return tuple(normalized)
+
+
+def _copy_progress(total: int) -> Optional["Progress"]:
+    if total <= 0 or Progress is None:
+        return None
+    return Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("{task.completed}/{task.total} samples"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=Console() if Console is not None else None,
+    )
+
+
+def _copy_rows(
+    src_array: zarr.Array,
+    dest_array: zarr.Array,
+    dest_start: int,
+    count: int,
+    *,
+    batch_size: int = 128,
+    on_copied: Optional[Callable[[int], None]] = None,
+) -> None:
+    if count <= 0:
+        return
+    batch_size = max(1, int(batch_size))
+    for start in range(0, count, batch_size):
+        stop = min(start + batch_size, count)
+        dest_array[dest_start + start : dest_start + stop] = src_array[start:stop]
+        if on_copied is not None:
+            on_copied(stop - start)
+
+
+def _copy_rows_indexed(
+    src_array: zarr.Array,
+    dest_array: zarr.Array,
+    dest_start: int,
+    indices: np.ndarray,
+    *,
+    batch_size: int = 128,
+    on_copied: Optional[Callable[[int], None]] = None,
+) -> None:
+    if indices.size <= 0:
+        return
+    batch_size = max(1, int(batch_size))
+    for start in range(0, int(indices.size), batch_size):
+        stop = min(start + batch_size, int(indices.size))
+        idx_batch = indices[start:stop]
+        dest_array[dest_start + start : dest_start + stop] = src_array[idx_batch]
+        if on_copied is not None:
+            on_copied(stop - start)
+
+
+def _write_string_array(group: zarr.Group, name: str, values: Sequence[str]) -> None:
+    max_len = max((len(value) for value in values), default=1)
+    data = np.asarray(list(values), dtype=f"<U{max_len}")
+    arr = group.require_array(
+        name,
+        shape=data.shape,
+        dtype=data.dtype,
+        chunks=(max(1, min(1024, len(values))),),
+        overwrite=True,
+    )
+    arr[:] = data
+
+
+def _json_list(raw: Any) -> List[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(item) for item in raw if item]
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "ignore")
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return []
+        if isinstance(payload, list):
+            return [str(item) for item in payload if item]
+    return []
+
+
+def _json_dict(raw: Any) -> Optional[Dict[str, Any]]:
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "ignore")
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return None
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _extract_identity(dataset_payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    def _clean_text(value: Any) -> Optional[str]:
+        text = _as_text(value)
+        return text if text else None
+
+    dish = _clean_text(dataset_payload.get("dish_design"))
+    canvas = _clean_text(dataset_payload.get("canvas_name"))
+    rig = _clean_text(dataset_payload.get("rig_id"))
+
+    provenance = dataset_payload.get("provenance")
+    if isinstance(provenance, dict):
+        if not dish:
+            arena = provenance.get("arena")
+            if isinstance(arena, dict):
+                dish = _clean_text(arena.get("dish_design"))
+        rig_info = provenance.get("rig_info")
+        if isinstance(rig_info, dict):
+            if not canvas:
+                canvas = _clean_text(rig_info.get("canvas_name"))
+            if not rig:
+                rig = _clean_text(rig_info.get("rig_id"))
+    return dish, canvas, rig
+
+
+def _resolve_row_gate_selection(
+    *,
+    root: zarr.Group,
+    dataset_payload: Dict[str, Any],
+    keypoint_run: str,
+    sample_count: int,
+    success_arr: zarr.Array,
+    row_gate_policy: str,
+    source_zarr: Path,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    policy = str(row_gate_policy).strip().lower()
+    if policy not in {"auto", "refined_usable", "raw_success"}:
+        raise ValueError(f"Unsupported row gate policy '{row_gate_policy}'.")
+
+    raw_success = np.asarray(success_arr[:], dtype=np.bool_)
+    if int(raw_success.shape[0]) != int(sample_count):
+        raise ValueError(
+            f"{source_zarr}: detection_success/roi row mismatch "
+            f"({raw_success.shape[0]} != {sample_count})."
+        )
+
+    refined_parent = root.get("refined_keypoints_runs") or root.get("keypoints_refined_runs")
+    refined_candidates: List[Tuple[str, str, zarr.Group]] = []
+    if refined_parent is not None:
+        requested_refined = _as_text(
+            dataset_payload.get("refined_keypoint_run")
+            or dataset_payload.get("quality_registry_refined_run")
+        )
+        if requested_refined and requested_refined in refined_parent:
+            refined_group = refined_parent[requested_refined]
+            source_run = _as_text(
+                refined_group.attrs.get("source_keypoints_run") or refined_group.attrs.get("source_keypoint_run")
+            )
+            if source_run == keypoint_run:
+                ts = _as_text(refined_group.attrs.get("created_utc") or refined_group.attrs.get("timestamp_utc")) or ""
+                refined_candidates.append((ts, requested_refined, refined_group))
+
+        if not refined_candidates:
+            for run_name in refined_parent.group_keys():
+                refined_group = refined_parent[run_name]
+                source_run = _as_text(
+                    refined_group.attrs.get("source_keypoints_run") or refined_group.attrs.get("source_keypoint_run")
+                )
+                if source_run != keypoint_run:
+                    continue
+                ts = _as_text(refined_group.attrs.get("created_utc") or refined_group.attrs.get("timestamp_utc")) or ""
+                refined_candidates.append((ts, str(run_name), refined_group))
+            refined_candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+    selected_policy = "raw_success"
+    selected_refined_run = None
+    selected_mask = raw_success.copy()
+    usable_true = None
+
+    if policy in {"auto", "refined_usable"}:
+        for _ts, refined_run, refined_group in refined_candidates:
+            usable_arr = refined_group.get("usable_keypoints")
+            if usable_arr is None:
+                continue
+            usable_mask = np.asarray(usable_arr[:], dtype=np.bool_)
+            if int(usable_mask.shape[0]) != int(sample_count):
+                raise ValueError(
+                    f"{source_zarr}: refined run '{refined_run}' usable_keypoints length mismatch "
+                    f"({usable_mask.shape[0]} != {sample_count})."
+                )
+            selected_policy = "refined_usable"
+            selected_refined_run = refined_run
+            selected_mask = usable_mask
+            usable_true = int(np.sum(usable_mask))
+            break
+
+        if policy == "refined_usable" and selected_policy != "refined_usable":
+            raise ValueError(
+                f"{source_zarr}: row_gate_policy=refined_usable requested but no compatible "
+                "refined usable_keypoints mask was found for the selected keypoint run."
+            )
+
+    selected_indices = np.where(selected_mask)[0].astype(np.int64, copy=False)
+    stats = {
+        "policy": selected_policy,
+        "refined_run": selected_refined_run,
+        "selected": int(selected_indices.shape[0]),
+        "total": int(sample_count),
+        "raw_success_true": int(np.sum(raw_success)),
+        "usable_true": usable_true,
+    }
+    return selected_indices, stats
+
+
+def _discover_merge_sources(
+    manifest_payload: Dict[str, Any],
+    *,
+    expected_input_format: str,
+    row_gate_policy: str,
+) -> Tuple[List[PoseMergeSourceSpec], Dict[str, Any]]:
+    datasets = manifest_payload.get("datasets")
+    if not isinstance(datasets, list) or not datasets:
+        raise ValueError("Manifest has no datasets.")
+
+    specs: List[PoseMergeSourceSpec] = []
+    roi_shape: Optional[Tuple[int, ...]] = None
+    roi_dtype: Optional[np.dtype] = None
+    roi_chunks: Optional[Tuple[int, ...]] = None
+    keypoint_shape: Optional[Tuple[int, ...]] = None
+    keypoint_dtype: Optional[np.dtype] = None
+    keypoint_labels: Optional[List[str]] = None
+
+    for ordinal, dataset in enumerate(datasets):
+        if not isinstance(dataset, dict):
+            raise ValueError(f"datasets[{ordinal}] is not an object.")
+
+        zarr_path_raw = dataset.get("zarr_path")
+        if not zarr_path_raw:
+            raise ValueError(f"datasets[{ordinal}] is missing zarr_path.")
+        source_zarr = Path(str(zarr_path_raw))
+        root = zarr.open_group(str(source_zarr), mode="r")
+
+        kp_parent = root.get("keypoints_runs")
+        if kp_parent is None:
+            raise ValueError(f"{source_zarr}: missing keypoints_runs group.")
+
+        keypoint_run = _as_text(dataset.get("keypoint_run_resolved") or dataset.get("keypoint_run"))
+        if not keypoint_run:
+            latest = _as_text(kp_parent.attrs.get("latest"))
+            if latest:
+                keypoint_run = latest
+        if not keypoint_run:
+            raise ValueError(f"{source_zarr}: unable to resolve keypoint run.")
+        if keypoint_run not in kp_parent:
+            raise ValueError(f"{source_zarr}: keypoint run '{keypoint_run}' not found.")
+        kp_group = kp_parent[keypoint_run]
+
+        source_crop_run = _as_text(dataset.get("source_crop_run"))
+        if not source_crop_run:
+            source_crop_run = _as_text(kp_group.attrs.get("source_crop_run"))
+        if not source_crop_run:
+            raise ValueError(
+                f"{source_zarr}: keypoint run '{keypoint_run}' missing source_crop_run; "
+                "refusing ambiguous crop fallback."
+            )
+
+        crop_parent = root.get("crop_runs")
+        if crop_parent is None or source_crop_run not in crop_parent:
+            raise ValueError(f"{source_zarr}: crop run '{source_crop_run}' not found in crop_runs.")
+        crop_group = crop_parent[source_crop_run]
+
+        if "roi_images" not in crop_group:
+            raise ValueError(f"{source_zarr}: crop run '{source_crop_run}' missing roi_images.")
+        if "bbox_norm_coords" not in crop_group:
+            raise ValueError(f"{source_zarr}: crop run '{source_crop_run}' missing bbox_norm_coords.")
+        if "keypoints_roi" not in kp_group:
+            raise ValueError(f"{source_zarr}: keypoint run '{keypoint_run}' missing keypoints_roi.")
+        if "detection_success" not in kp_group:
+            raise ValueError(f"{source_zarr}: keypoint run '{keypoint_run}' missing detection_success.")
+
+        roi_arr = crop_group["roi_images"]
+        bbox_arr = crop_group["bbox_norm_coords"]
+        keypoints_arr = kp_group["keypoints_roi"]
+        success_arr = kp_group["detection_success"]
+
+        source_sample_count = int(roi_arr.shape[0])
+        if int(bbox_arr.shape[0]) != source_sample_count:
+            raise ValueError(
+                f"{source_zarr}: bbox/roi row mismatch "
+                f"({bbox_arr.shape[0]} != {source_sample_count})."
+            )
+        if int(keypoints_arr.shape[0]) != source_sample_count:
+            raise ValueError(
+                f"{source_zarr}: keypoints/roi row mismatch "
+                f"({keypoints_arr.shape[0]} != {source_sample_count})."
+            )
+        if int(success_arr.shape[0]) != source_sample_count:
+            raise ValueError(
+                f"{source_zarr}: detection_success/roi row mismatch "
+                f"({success_arr.shape[0]} != {source_sample_count})."
+            )
+
+        if len(keypoints_arr.shape) != 3 or int(keypoints_arr.shape[2]) != 2:
+            raise ValueError(
+                f"{source_zarr}: keypoints_roi must have shape (N, K, 2), got {tuple(keypoints_arr.shape)}."
+            )
+
+        dataset_input_format = str(dataset.get("input_format") or expected_input_format).strip().lower()
+        if dataset_input_format != expected_input_format:
+            raise ValueError(
+                f"{source_zarr}: input_format mismatch ({dataset_input_format} != {expected_input_format})."
+            )
+
+        dataset_roi_shape = tuple(int(v) for v in roi_arr.shape[1:])
+        dataset_roi_dtype = np.dtype(roi_arr.dtype)
+        dataset_roi_chunks = tuple(int(v) for v in roi_arr.chunks) if roi_arr.chunks else None
+        dataset_keypoint_shape = tuple(int(v) for v in keypoints_arr.shape[1:])
+        dataset_keypoint_dtype = np.dtype(keypoints_arr.dtype)
+
+        selected_indices, gate_stats = _resolve_row_gate_selection(
+            root=root,
+            dataset_payload=dataset,
+            keypoint_run=keypoint_run,
+            sample_count=source_sample_count,
+            success_arr=success_arr,
+            row_gate_policy=row_gate_policy,
+            source_zarr=source_zarr,
+        )
+
+        if roi_shape is None:
+            roi_shape = dataset_roi_shape
+            roi_dtype = dataset_roi_dtype
+            roi_chunks = dataset_roi_chunks
+        else:
+            if dataset_roi_shape != roi_shape:
+                raise ValueError(f"{source_zarr}: roi shape mismatch {dataset_roi_shape} != {roi_shape}.")
+            if dataset_roi_dtype != roi_dtype:
+                raise ValueError(f"{source_zarr}: roi dtype mismatch {dataset_roi_dtype} != {roi_dtype}.")
+
+        if keypoint_shape is None:
+            keypoint_shape = dataset_keypoint_shape
+            keypoint_dtype = dataset_keypoint_dtype
+        else:
+            if dataset_keypoint_shape != keypoint_shape:
+                raise ValueError(
+                    f"{source_zarr}: keypoint shape mismatch {dataset_keypoint_shape} != {keypoint_shape}."
+                )
+            if dataset_keypoint_dtype != keypoint_dtype:
+                raise ValueError(
+                    f"{source_zarr}: keypoint dtype mismatch {dataset_keypoint_dtype} != {keypoint_dtype}."
+                )
+
+        labels = kp_group.attrs.get("keypoint_labels")
+        normalized_labels = [str(item) for item in labels] if isinstance(labels, list) else []
+        if keypoint_labels is None:
+            keypoint_labels = normalized_labels or ["bladder", "eye_left", "eye_right"]
+
+        frame_indices_path = (
+            f"crop_runs/{source_crop_run}/frame_indices" if "frame_indices" in crop_group else None
+        )
+        detection_source_path = (
+            f"crop_runs/{source_crop_run}/detection_source" if "detection_source" in crop_group else None
+        )
+        source_type_resolved = (
+            _as_text(dataset.get("source_type_resolved"))
+            or _as_text(crop_group.attrs.get("detection_source_type"))
+            or _as_text(manifest_payload.get("source_type"))
+            or "filtered"
+        )
+
+        dish_design, canvas_name, rig_id = _extract_identity(dataset)
+        dataset_id = (
+            _as_text(dataset.get("dataset_id"))
+            or _as_text(dataset.get("session_uuid"))
+            or f"{_clean_slug(str(dataset.get('name') or source_zarr.stem), 'dataset')}_{ordinal}"
+        )
+
+        specs.append(
+            PoseMergeSourceSpec(
+                ordinal=ordinal,
+                dataset_name=str(dataset.get("name") or source_zarr.stem),
+                dataset_id=dataset_id,
+                source_zarr=source_zarr,
+                source_crop_run=source_crop_run,
+                keypoint_run=keypoint_run,
+                source_type_resolved=str(source_type_resolved),
+                source_sample_count=source_sample_count,
+                sample_count=int(selected_indices.shape[0]),
+                selected_indices=selected_indices,
+                row_gate_policy=str(gate_stats["policy"]),
+                row_gate_refined_run=(
+                    str(gate_stats["refined_run"]) if gate_stats.get("refined_run") is not None else None
+                ),
+                row_gate_selected=int(gate_stats["selected"]),
+                row_gate_total=int(gate_stats["total"]),
+                row_gate_raw_success_true=int(gate_stats["raw_success_true"]),
+                row_gate_usable_true=(
+                    int(gate_stats["usable_true"]) if gate_stats.get("usable_true") is not None else None
+                ),
+                roi_path=f"crop_runs/{source_crop_run}/roi_images",
+                bbox_path=f"crop_runs/{source_crop_run}/bbox_norm_coords",
+                keypoints_path=f"keypoints_runs/{keypoint_run}/keypoints_roi",
+                success_path=f"keypoints_runs/{keypoint_run}/detection_success",
+                frame_indices_path=frame_indices_path,
+                detection_source_path=detection_source_path,
+                roi_shape=dataset_roi_shape,
+                roi_dtype=dataset_roi_dtype,
+                roi_chunks=dataset_roi_chunks,
+                keypoint_shape=dataset_keypoint_shape,
+                keypoint_dtype=dataset_keypoint_dtype,
+                keypoint_labels=normalized_labels or (keypoint_labels or ["bladder", "eye_left", "eye_right"]),
+                dish_design=dish_design,
+                canvas_name=canvas_name,
+                rig_id=rig_id,
+            )
+        )
+
+    if roi_shape is None or roi_dtype is None or keypoint_shape is None or keypoint_dtype is None:
+        raise ValueError("Failed to resolve merged keypoint layout from manifest datasets.")
+
+    return specs, {
+        "roi_shape": roi_shape,
+        "roi_dtype": roi_dtype,
+        "roi_chunks": roi_chunks,
+        "keypoint_shape": keypoint_shape,
+        "keypoint_dtype": keypoint_dtype,
+        "keypoint_labels": keypoint_labels or ["bladder", "eye_left", "eye_right"],
+    }
+
+
+def _ensure_writable_destination(path: Path, *, overwrite: bool) -> None:
+    if path.exists():
+        if not overwrite:
+            raise FileExistsError(f"Destination exists: {path}")
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _export_merged(
+    *,
+    manifest_payload: Dict[str, Any],
+    manifest_path: Path,
+    out_zarr: Path,
+    merged_dataset_id: Optional[str],
+    overwrite: bool,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+    copy_batch_size: int,
+    row_gate_policy: str,
+    invocation: Dict[str, Any],
+) -> PoseMergeResult:
+    input_format = str(manifest_payload.get("input_format") or "gray").strip().lower()
+    if input_format not in {"gray", "rgb"}:
+        raise ValueError(f"Unsupported manifest.input_format '{input_format}'. Expected gray or rgb.")
+    source_type = str(manifest_payload.get("source_type") or "filtered").strip().lower()
+
+    source_specs, layout = _discover_merge_sources(
+        manifest_payload,
+        expected_input_format=input_format,
+        row_gate_policy=row_gate_policy,
+    )
+    total_samples = int(sum(spec.sample_count for spec in source_specs))
+    row_gate_counts: Dict[str, int] = {}
+
+    _ensure_writable_destination(out_zarr, overwrite=overwrite)
+    out_root = zarr.open_group(str(out_zarr), mode="w")
+    crop_parent = out_root.require_group("crop_runs")
+    keypoint_parent = out_root.require_group("keypoints_runs")
+    split_group = out_root.require_group("splits")
+    source_index_group = out_root.require_group("source_index")
+
+    run_name = f"merged_export_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    crop_parent.attrs["latest"] = run_name
+    keypoint_parent.attrs["latest"] = run_name
+    crop_group = crop_parent.require_group(run_name)
+    keypoint_group = keypoint_parent.require_group(run_name)
+
+    roi_shape = tuple(layout["roi_shape"])
+    roi_dtype = np.dtype(layout["roi_dtype"])
+    roi_chunks = _normalize_chunks(layout["roi_chunks"], (total_samples, *roi_shape))
+    keypoint_shape = tuple(layout["keypoint_shape"])
+    keypoint_dtype = np.dtype(layout["keypoint_dtype"])
+    keypoint_labels = list(layout["keypoint_labels"])
+
+    vector_chunks = (max(1, min(8192, total_samples)),)
+    bbox_chunks = (max(1, min(8192, total_samples)), 4)
+
+    roi_dest = crop_group.require_array(
+        "roi_images",
+        shape=(total_samples, *roi_shape),
+        dtype=roi_dtype,
+        chunks=roi_chunks,
+        overwrite=True,
+    )
+    bbox_dest = crop_group.require_array(
+        "bbox_norm_coords",
+        shape=(total_samples, 4),
+        dtype=np.float32,
+        chunks=bbox_chunks,
+        overwrite=True,
+    )
+    frame_idx_dest = crop_group.require_array(
+        "frame_indices",
+        shape=(total_samples,),
+        dtype=np.int64,
+        chunks=vector_chunks,
+        overwrite=True,
+    )
+    det_source_dest = crop_group.require_array(
+        "detection_source",
+        shape=(total_samples,),
+        dtype=np.int8,
+        chunks=vector_chunks,
+        overwrite=True,
+    )
+    keypoints_dest = keypoint_group.require_array(
+        "keypoints_roi",
+        shape=(total_samples, *keypoint_shape),
+        dtype=keypoint_dtype,
+        chunks=_normalize_chunks(None, (total_samples, *keypoint_shape)),
+        overwrite=True,
+    )
+    success_dest = keypoint_group.require_array(
+        "detection_success",
+        shape=(total_samples,),
+        dtype=np.bool_,
+        chunks=vector_chunks,
+        overwrite=True,
+    )
+    src_dataset_idx_dest = source_index_group.require_array(
+        "source_dataset_idx",
+        shape=(total_samples,),
+        dtype=np.int32,
+        chunks=vector_chunks,
+        overwrite=True,
+    )
+    src_frame_idx_dest = source_index_group.require_array(
+        "source_frame_idx",
+        shape=(total_samples,),
+        dtype=np.int64,
+        chunks=vector_chunks,
+        overwrite=True,
+    )
+
+    copy_total = total_samples * 2  # roi + keypoints arrays
+    copy_progress = _copy_progress(copy_total)
+    copy_task_id: Optional[int] = None
+    if copy_progress is not None:
+        copy_progress.start()
+        copy_task_id = copy_progress.add_task("Copying merged pose samples", total=copy_total)
+
+    def _advance_copy(count: int) -> None:
+        if copy_progress is not None and copy_task_id is not None:
+            copy_progress.advance(copy_task_id, count)
+
+    total_successful = 0
+    detection_source_counts: Dict[str, int] = {}
+    offset = 0
+    try:
+        for spec in source_specs:
+            if copy_progress is not None and copy_task_id is not None:
+                copy_progress.update(copy_task_id, description=f"Copying {spec.dataset_name}")
+
+            root = zarr.open_group(str(spec.source_zarr), mode="r")
+            roi_src = root[spec.roi_path]
+            selected = np.asarray(spec.selected_indices, dtype=np.int64)
+            bbox_all = np.asarray(root[spec.bbox_path][:], dtype=np.float32)
+            keypoints_all = np.asarray(root[spec.keypoints_path][:], dtype=keypoint_dtype)
+            success_all = np.asarray(root[spec.success_path][:], dtype=np.bool_)
+            bbox = bbox_all[selected]
+            keypoints = keypoints_all[selected]
+            success = success_all[selected]
+            local_total = int(spec.sample_count)
+
+            if spec.frame_indices_path:
+                source_frame_idx = np.asarray(root[spec.frame_indices_path][:], dtype=np.int64)
+            else:
+                source_frame_idx = np.arange(spec.source_sample_count, dtype=np.int64)
+            if source_frame_idx.shape[0] != int(spec.source_sample_count):
+                raise ValueError(
+                    f"{spec.source_zarr}: frame_indices length mismatch "
+                    f"({source_frame_idx.shape[0]} != {spec.source_sample_count})."
+                )
+            source_frame_idx = source_frame_idx[selected]
+
+            if spec.detection_source_path:
+                detection_source = np.asarray(root[spec.detection_source_path][:], dtype=np.int8)
+                if detection_source.shape[0] != int(spec.source_sample_count):
+                    raise ValueError(
+                        f"{spec.source_zarr}: detection_source length mismatch "
+                        f"({detection_source.shape[0]} != {spec.source_sample_count})."
+                    )
+                detection_source = detection_source[selected]
+            else:
+                detection_source = np.zeros(local_total, dtype=np.int8)
+
+            _copy_rows_indexed(
+                roi_src,
+                roi_dest,
+                offset,
+                selected,
+                batch_size=copy_batch_size,
+                on_copied=_advance_copy,
+            )
+            keypoints_dest[offset : offset + local_total] = keypoints
+            _advance_copy(local_total)
+            bbox_dest[offset : offset + local_total] = bbox
+            success_dest[offset : offset + local_total] = success
+            frame_idx_dest[offset : offset + local_total] = np.arange(offset, offset + local_total, dtype=np.int64)
+            det_source_dest[offset : offset + local_total] = detection_source
+            src_dataset_idx_dest[offset : offset + local_total] = int(spec.ordinal)
+            src_frame_idx_dest[offset : offset + local_total] = source_frame_idx
+
+            total_successful += int(success.sum())
+            uniques, counts = np.unique(detection_source, return_counts=True)
+            for value, count in zip(uniques.tolist(), counts.tolist()):
+                key = str(int(value))
+                detection_source_counts[key] = detection_source_counts.get(key, 0) + int(count)
+            row_gate_counts[spec.row_gate_policy] = row_gate_counts.get(spec.row_gate_policy, 0) + int(local_total)
+
+            offset += local_total
+    finally:
+        if copy_progress is not None:
+            copy_progress.stop()
+
+    total_failed = int(total_samples - total_successful)
+    train_idx, val_idx, test_idx = _compute_split_indices(
+        total_samples,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=seed,
+    )
+
+    split_group.require_array(
+        "train_indices",
+        shape=train_idx.shape,
+        dtype=train_idx.dtype,
+        chunks=(max(1, min(8192, train_idx.shape[0] or 1)),),
+        overwrite=True,
+    )[:] = train_idx
+    split_group.require_array(
+        "val_indices",
+        shape=val_idx.shape,
+        dtype=val_idx.dtype,
+        chunks=(max(1, min(8192, val_idx.shape[0] or 1)),),
+        overwrite=True,
+    )[:] = val_idx
+    if test_idx.size > 0:
+        split_group.require_array(
+            "test_indices",
+            shape=test_idx.shape,
+            dtype=test_idx.dtype,
+            chunks=(max(1, min(8192, test_idx.shape[0])),),
+            overwrite=True,
+        )[:] = test_idx
+
+    _write_string_array(source_index_group, "source_dataset_id", [spec.dataset_id for spec in source_specs])
+    _write_string_array(source_index_group, "source_zarr_path", [str(spec.source_zarr) for spec in source_specs])
+    source_index_group.attrs.update({"mapping_version": 1, "source_count": int(len(source_specs))})
+
+    crop_group.attrs.update(
+        {
+            "detection_source_type": source_type,
+            "includes_interpolated": bool(np.sum(det_source_dest[:] != 0) > 0),
+            "n_real_detections": int(np.sum(det_source_dest[:] == 0)),
+            "n_interpolated_detections": int(np.sum(det_source_dest[:] != 0)),
+            "source_count": int(len(source_specs)),
+        }
+    )
+    keypoint_group.attrs.update(
+        {
+            "method": "merged_export",
+            "source_crop_run": run_name,
+            "keypoint_labels": keypoint_labels,
+            "keypoints_processed": int(total_samples),
+            "success_rate": (float(total_successful) / float(total_samples)) if total_samples > 0 else 0.0,
+            "row_gate_policy": (
+                next(iter(row_gate_counts.keys())) if len(row_gate_counts) == 1 else "mixed"
+            ),
+            "row_gate_applied": True,
+            "row_gate_counts": dict(row_gate_counts),
+        }
+    )
+
+    training_export = {
+        "schema_version": "1.0.0",
+        "task": "pose",
+        "set_id": manifest_payload.get("set_id"),
+        "set_name": manifest_payload.get("set_name"),
+        "set_version": manifest_payload.get("set_version"),
+        "source_type_requested": source_type,
+        "input_format": input_format,
+        "created_at_utc": _utc_now(),
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": _sha256(manifest_path),
+        "query_filter": manifest_payload.get("query_filter"),
+        "invocation": invocation,
+        "source_dataset_ids": [spec.dataset_id for spec in source_specs],
+        "source_zarr_paths": [str(spec.source_zarr) for spec in source_specs],
+        "row_gate": {
+            "requested_policy": row_gate_policy,
+            "applied_policy": next(iter(row_gate_counts.keys())) if len(row_gate_counts) == 1 else "mixed",
+            "per_policy_counts": dict(row_gate_counts),
+        },
+        "split": {
+            "train_ratio": float(train_ratio),
+            "val_ratio": float(val_ratio),
+            "test_ratio": float(test_ratio) if test_ratio > 0.0 else None,
+            "seed": int(seed),
+            "strategy": "global_random",
+        },
+    }
+    out_root.attrs.update(
+        {
+            "zarr_purpose": "training",
+            "training_export": training_export,
+            **(
+                {
+                    "session_uuid": str(merged_dataset_id),
+                    "session_id": str(merged_dataset_id),
+                }
+                if merged_dataset_id
+                else {}
+            ),
+        }
+    )
+
+    split_group.attrs.update(
+        {
+            "split_mode": "fixed_indices",
+            "train_ratio": float(train_ratio),
+            "val_ratio": float(val_ratio),
+            "test_ratio": float(test_ratio) if test_ratio > 0.0 else None,
+            "seed": int(seed),
+            "strategy": "global_random",
+            "created_at_utc": _utc_now(),
+        }
+    )
+
+    return PoseMergeResult(
+        run_name=run_name,
+        total_samples=total_samples,
+        total_successful=total_successful,
+        total_failed=total_failed,
+        detection_source_counts=detection_source_counts,
+        train_indices=train_idx,
+        val_indices=val_idx,
+        test_indices=test_idx,
+        source_specs=source_specs,
+        input_format=input_format,
+        source_type=source_type,
+        keypoint_shape=keypoint_shape,
+        keypoint_labels=keypoint_labels,
+        row_gate_policy=next(iter(row_gate_counts.keys())) if len(row_gate_counts) == 1 else "mixed",
+        row_gate_counts=row_gate_counts,
+    )
+
+
+def validate_merged_keypoint_training_zarr(
+    zarr_path: Path,
+    *,
+    expected_input_format: Optional[str] = None,
+    expected_total_samples: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Validate merged keypoint-training Zarr layout and trainer-facing invariants."""
+    root = zarr.open_group(str(zarr_path), mode="r")
+    errors: List[str] = []
+
+    if str(root.attrs.get("zarr_purpose", "")).strip().lower() != "training":
+        errors.append("root attr zarr_purpose must be 'training'.")
+    for group_name in ("crop_runs", "keypoints_runs", "splits", "source_index"):
+        if group_name not in root:
+            errors.append(f"missing group {group_name}.")
+    if errors:
+        raise ValueError("Merged keypoint zarr validation failed:\n- " + "\n- ".join(errors))
+
+    crop_parent = root["crop_runs"]
+    keypoint_parent = root["keypoints_runs"]
+
+    crop_latest = _as_text(crop_parent.attrs.get("latest"))
+    keypoint_latest = _as_text(keypoint_parent.attrs.get("latest"))
+    if not crop_latest or crop_latest not in crop_parent:
+        errors.append("crop_runs/latest missing or points to a non-existent run.")
+    if not keypoint_latest or keypoint_latest not in keypoint_parent:
+        errors.append("keypoints_runs/latest missing or points to a non-existent run.")
+    if errors:
+        raise ValueError("Merged keypoint zarr validation failed:\n- " + "\n- ".join(errors))
+
+    crop = crop_parent[str(crop_latest)]
+    kp = keypoint_parent[str(keypoint_latest)]
+    required_crop_arrays = ("roi_images", "bbox_norm_coords", "frame_indices", "detection_source")
+    for name in required_crop_arrays:
+        if name not in crop:
+            errors.append(f"missing required array crop_runs/{crop_latest}/{name}.")
+    required_kp_arrays = ("keypoints_roi", "detection_success")
+    for name in required_kp_arrays:
+        if name not in kp:
+            errors.append(f"missing required array keypoints_runs/{keypoint_latest}/{name}.")
+    if errors:
+        raise ValueError("Merged keypoint zarr validation failed:\n- " + "\n- ".join(errors))
+
+    roi = np.asarray(crop["roi_images"][:])
+    bbox = np.asarray(crop["bbox_norm_coords"][:])
+    frame_indices = np.asarray(crop["frame_indices"][:])
+    detection_source = np.asarray(crop["detection_source"][:])
+    keypoints = np.asarray(kp["keypoints_roi"][:])
+    detection_success = np.asarray(kp["detection_success"][:])
+
+    if roi.ndim < 3:
+        errors.append(f"roi_images must have shape (N, ...), got {tuple(roi.shape)}.")
+    total_samples = int(roi.shape[0]) if roi.ndim >= 1 else 0
+
+    train_input_format = expected_input_format
+    if train_input_format is None:
+        training_export = root.attrs.get("training_export")
+        if isinstance(training_export, dict):
+            train_input_format = _as_text(training_export.get("input_format"))
+    if train_input_format:
+        train_input_format = train_input_format.strip().lower()
+        if train_input_format not in {"gray", "rgb"}:
+            errors.append(f"Unsupported expected input format '{train_input_format}'.")
+        elif train_input_format == "rgb":
+            if roi.ndim != 4 or int(roi.shape[-1]) != 3:
+                errors.append("roi_images must be (N,H,W,3) for rgb input format.")
+        elif train_input_format == "gray":
+            if roi.ndim == 4 and int(roi.shape[-1]) == 3:
+                errors.append("roi_images appears rgb but expected gray input format.")
+
+    if bbox.ndim != 2 or int(bbox.shape[1]) != 4:
+        errors.append(f"bbox_norm_coords must have shape (N,4), got {tuple(bbox.shape)}.")
+    if bbox.ndim == 2 and int(bbox.shape[0]) != total_samples:
+        errors.append(f"bbox_norm_coords length mismatch ({bbox.shape[0]} != {total_samples}).")
+
+    if keypoints.ndim != 3 or int(keypoints.shape[2]) != 2:
+        errors.append(f"keypoints_roi must have shape (N,K,2), got {tuple(keypoints.shape)}.")
+    if keypoints.ndim == 3 and int(keypoints.shape[0]) != total_samples:
+        errors.append(f"keypoints_roi length mismatch ({keypoints.shape[0]} != {total_samples}).")
+
+    if detection_success.ndim != 1:
+        errors.append(f"detection_success must be 1D, got ndim={detection_success.ndim}.")
+    if detection_success.ndim == 1 and int(detection_success.shape[0]) != total_samples:
+        errors.append(f"detection_success length mismatch ({detection_success.shape[0]} != {total_samples}).")
+
+    if frame_indices.ndim != 1:
+        errors.append(f"frame_indices must be 1D, got ndim={frame_indices.ndim}.")
+    if frame_indices.ndim == 1 and int(frame_indices.shape[0]) != total_samples:
+        errors.append(f"frame_indices length mismatch ({frame_indices.shape[0]} != {total_samples}).")
+    if frame_indices.ndim == 1 and np.issubdtype(frame_indices.dtype, np.integer):
+        expected_local = np.arange(total_samples, dtype=np.int64)
+        if not np.array_equal(frame_indices.astype(np.int64, copy=False), expected_local):
+            errors.append("frame_indices must be local 0..N-1 indexing.")
+    elif frame_indices.ndim == 1:
+        errors.append(f"frame_indices must be integer dtype, got {frame_indices.dtype}.")
+
+    if detection_source.ndim != 1:
+        errors.append(f"detection_source must be 1D, got ndim={detection_source.ndim}.")
+    if detection_source.ndim == 1 and int(detection_source.shape[0]) != total_samples:
+        errors.append(f"detection_source length mismatch ({detection_source.shape[0]} != {total_samples}).")
+    if detection_source.ndim == 1 and np.issubdtype(detection_source.dtype, np.integer):
+        unique_codes = np.unique(detection_source.astype(np.int64, copy=False))
+        invalid_codes = [int(code) for code in unique_codes.tolist() if int(code) not in (0, 1)]
+        if invalid_codes:
+            errors.append(f"detection_source contains invalid codes: {sorted(set(invalid_codes))}.")
+    elif detection_source.ndim == 1:
+        errors.append(f"detection_source must be integer dtype, got {detection_source.dtype}.")
+
+    if expected_total_samples is not None and int(expected_total_samples) != total_samples:
+        errors.append(f"total sample mismatch ({total_samples} != expected {int(expected_total_samples)}).")
+
+    split_arrays: Dict[str, np.ndarray] = {}
+    for name in ("train_indices", "val_indices", "test_indices"):
+        path = f"splits/{name}"
+        if name == "test_indices" and path not in root:
+            split_arrays[name] = np.empty(0, dtype=np.int64)
+            continue
+        if path not in root:
+            errors.append(f"missing required array {path}.")
+            continue
+        arr = np.asarray(root[path][:])
+        if arr.ndim != 1:
+            errors.append(f"{path} must be 1D, got ndim={arr.ndim}.")
+            continue
+        if not np.issubdtype(arr.dtype, np.integer):
+            errors.append(f"{path} must be integer dtype, got {arr.dtype}.")
+            continue
+        arr_i64 = arr.astype(np.int64, copy=False)
+        if arr_i64.size > 0:
+            min_idx = int(arr_i64.min())
+            max_idx = int(arr_i64.max())
+            if min_idx < 0 or max_idx >= total_samples:
+                errors.append(
+                    f"{path} indices out of bounds (min={min_idx}, max={max_idx}, total_samples={total_samples})."
+                )
+            if np.unique(arr_i64).size != arr_i64.size:
+                errors.append(f"{path} contains duplicate indices.")
+        split_arrays[name] = arr_i64
+
+    train_idx = split_arrays.get("train_indices", np.empty(0, dtype=np.int64))
+    val_idx = split_arrays.get("val_indices", np.empty(0, dtype=np.int64))
+    test_idx = split_arrays.get("test_indices", np.empty(0, dtype=np.int64))
+    if np.intersect1d(train_idx, val_idx).size > 0:
+        errors.append("splits/train_indices overlaps with splits/val_indices.")
+    if np.intersect1d(train_idx, test_idx).size > 0:
+        errors.append("splits/train_indices overlaps with splits/test_indices.")
+    if np.intersect1d(val_idx, test_idx).size > 0:
+        errors.append("splits/val_indices overlaps with splits/test_indices.")
+    combined = np.concatenate([train_idx, val_idx, test_idx]) if total_samples > 0 else np.empty(0, dtype=np.int64)
+    if total_samples > 0:
+        if combined.size != total_samples:
+            errors.append(
+                "split coverage mismatch "
+                f"(train+val+test={combined.size} but total_samples={total_samples})."
+            )
+        elif np.unique(combined).size != total_samples:
+            errors.append("split coverage must be exact and non-duplicated across split arrays.")
+
+    src_dataset_idx_path = "source_index/source_dataset_idx"
+    src_frame_idx_path = "source_index/source_frame_idx"
+    src_dataset_id_path = "source_index/source_dataset_id"
+    src_zarr_path_path = "source_index/source_zarr_path"
+    for path in (src_dataset_idx_path, src_frame_idx_path, src_dataset_id_path, src_zarr_path_path):
+        if path not in root:
+            errors.append(f"missing required array {path}.")
+
+    if not errors:
+        source_dataset_idx = np.asarray(root[src_dataset_idx_path][:])
+        source_frame_idx = np.asarray(root[src_frame_idx_path][:])
+        source_dataset_id = np.asarray(root[src_dataset_id_path][:])
+        source_zarr_path = np.asarray(root[src_zarr_path_path][:])
+
+        if source_dataset_idx.ndim != 1 or source_dataset_idx.shape[0] != total_samples:
+            errors.append(
+                f"{src_dataset_idx_path} must be 1D length N ({total_samples}), got {source_dataset_idx.shape}."
+            )
+        if source_frame_idx.ndim != 1 or source_frame_idx.shape[0] != total_samples:
+            errors.append(
+                f"{src_frame_idx_path} must be 1D length N ({total_samples}), got {source_frame_idx.shape}."
+            )
+        if source_dataset_id.ndim != 1 or source_zarr_path.ndim != 1:
+            errors.append("source_index/source_dataset_id and source_index/source_zarr_path must be 1D arrays.")
+        elif source_dataset_id.shape[0] != source_zarr_path.shape[0]:
+            errors.append(
+                "source_index/source_dataset_id and source_index/source_zarr_path length mismatch "
+                f"({source_dataset_id.shape[0]} != {source_zarr_path.shape[0]})."
+            )
+        elif total_samples > 0 and source_dataset_id.shape[0] == 0:
+            errors.append("source index mapping arrays are empty but dataset has samples.")
+
+        if source_dataset_idx.ndim == 1 and np.issubdtype(source_dataset_idx.dtype, np.integer):
+            source_dataset_idx_i64 = source_dataset_idx.astype(np.int64, copy=False)
+            if source_dataset_idx_i64.size > 0 and int(source_dataset_idx_i64.min()) < 0:
+                errors.append(f"{src_dataset_idx_path} contains negative indices.")
+            if source_dataset_id.ndim == 1 and source_dataset_id.shape[0] > 0 and source_dataset_idx_i64.size > 0:
+                max_idx = int(source_dataset_idx_i64.max())
+                if max_idx >= int(source_dataset_id.shape[0]):
+                    errors.append(
+                        f"{src_dataset_idx_path} has value {max_idx} outside mapping length {source_dataset_id.shape[0]}."
+                    )
+        else:
+            errors.append(f"{src_dataset_idx_path} must be integer dtype.")
+
+        if source_frame_idx.ndim == 1 and np.issubdtype(source_frame_idx.dtype, np.integer):
+            source_frame_idx_i64 = source_frame_idx.astype(np.int64, copy=False)
+            if source_frame_idx_i64.size > 0 and int(source_frame_idx_i64.min()) < 0:
+                errors.append(f"{src_frame_idx_path} contains negative indices.")
+        else:
+            errors.append(f"{src_frame_idx_path} must be integer dtype.")
+
+    if errors:
+        raise ValueError("Merged keypoint zarr validation failed:\n- " + "\n- ".join(errors))
+
+    success_count = int(np.asarray(kp["detection_success"][:], dtype=np.bool_).sum())
+    return {
+        "zarr_path": str(zarr_path),
+        "run_name": str(crop_latest),
+        "training_input_format": train_input_format,
+        "total_samples": int(total_samples),
+        "success_count": int(success_count),
+        "failure_count": int(total_samples - success_count),
+        "split_counts": {
+            "train": int(train_idx.shape[0]),
+            "val": int(val_idx.shape[0]),
+            "test": int(test_idx.shape[0]),
+        },
+        "source_count": int(np.asarray(root[src_dataset_id_path][:]).shape[0]),
+    }
+
+
+def _register_merged_dataset_in_registry(
+    *,
+    registry_path: Path,
+    merged_zarr: Path,
+    set_id: Optional[str],
+    set_name: Optional[str],
+    source_dataset_ids: Sequence[str],
+    query_filter: Optional[Dict[str, Any]],
+    invocation: Optional[Dict[str, Any]],
+) -> Tuple[str, bool]:
+    """Register merged zarr and update training-set linkage.
+
+    Returns (merged_dataset_id, training_set_link_updated).
+    """
+    registry = Registry(registry_path)
+    try:
+        dataset_id = registry.scan_zarr(merged_zarr)
+        if not dataset_id:
+            raise RuntimeError(f"Failed to register merged zarr: {merged_zarr}")
+
+        linked = False
+        if set_id:
+            existing = registry.conn.execute(
+                "SELECT name, query_filter, dataset_ids_json, invocation_json FROM training_sets WHERE set_id = ?",
+                (set_id,),
+            ).fetchone()
+            existing_ids = _json_list(existing["dataset_ids_json"]) if existing else []
+            merged_ids = sorted(
+                {
+                    *(str(item) for item in source_dataset_ids if item),
+                    *existing_ids,
+                    str(dataset_id),
+                }
+            )
+            existing_query_filter = _json_dict(existing["query_filter"]) if existing else None
+            existing_invocation = _json_dict(existing["invocation_json"]) if existing else None
+            registry.upsert_training_set(
+                set_id=set_id,
+                name=set_name or (existing["name"] if existing else None),
+                query_filter=query_filter or existing_query_filter,
+                dataset_ids=merged_ids,
+                invocation=invocation or existing_invocation,
+            )
+            linked = True
+        return str(dataset_id), linked
+    finally:
+        registry.close()
+
+
+def _build_merged_manifest_payload(
+    *,
+    manifest_payload: Dict[str, Any],
+    merged_zarr: Path,
+    merged_dataset_id: str,
+    merged_dataset_name: str,
+    run_name: str,
+    out_manifest: Path,
+    out_config: Path,
+    merge_result: PoseMergeResult,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+) -> Dict[str, Any]:
+    def _collapse(values: set[str], *, mixed_label: str) -> Optional[str]:
+        if len(values) == 1:
+            return next(iter(values))
+        if len(values) > 1:
+            return mixed_label
+        return None
+
+    source_datasets_payload: List[Dict[str, Any]] = []
+    dish_values: set[str] = set()
+    canvas_values: set[str] = set()
+    rig_values: set[str] = set()
+    for spec in merge_result.source_specs:
+        if spec.dish_design:
+            dish_values.add(spec.dish_design)
+        if spec.canvas_name:
+            canvas_values.add(spec.canvas_name)
+        if spec.rig_id:
+            rig_values.add(spec.rig_id)
+        source_datasets_payload.append(
+            {
+                "name": spec.dataset_name,
+                "dataset_id": spec.dataset_id,
+                "zarr_path": str(spec.source_zarr),
+                "sample_count": int(spec.sample_count),
+                "source_sample_count": int(spec.source_sample_count),
+                "row_gate_policy": spec.row_gate_policy,
+                "row_gate_refined_run": spec.row_gate_refined_run,
+                "row_gate_selected": int(spec.row_gate_selected),
+                "row_gate_total": int(spec.row_gate_total),
+                "row_gate_raw_success_true": int(spec.row_gate_raw_success_true),
+                "row_gate_usable_true": spec.row_gate_usable_true,
+                "source_crop_run": spec.source_crop_run,
+                "keypoint_run": spec.keypoint_run,
+                "dish_design": spec.dish_design,
+                "canvas_name": spec.canvas_name,
+                "rig_id": spec.rig_id,
+            }
+        )
+
+    merged_dish = _collapse(dish_values, mixed_label="mixed_dishes")
+    merged_canvas = _collapse(canvas_values, mixed_label="mixed_canvas")
+    merged_rig = _collapse(rig_values, mixed_label="mixed_rigs")
+
+    merged_dataset = {
+        "name": merged_dataset_name,
+        "zarr_path": str(merged_zarr),
+        "dataset_id": merged_dataset_id,
+        "session_uuid": None,
+        "dish_design": merged_dish,
+        "canvas_name": merged_canvas,
+        "rig_id": merged_rig,
+        "source_type_requested": merge_result.source_type,
+        "source_type_resolved": merge_result.source_type,
+        "source_crop_run": run_name,
+        "input_format": merge_result.input_format,
+        "keypoint_run_requested": "merged_export",
+        "keypoint_run_resolved": run_name,
+        "row_gate_policy": merge_result.row_gate_policy,
+        "keypoints_array_path": f"keypoints_runs/{run_name}/keypoints_roi",
+        "detection_success_path": f"keypoints_runs/{run_name}/detection_success",
+        "keypoints_total": int(merge_result.total_samples),
+        "keypoints_successful": int(merge_result.total_successful),
+        "keypoints_success_rate": (
+            float(merge_result.total_successful) / float(merge_result.total_samples)
+            if merge_result.total_samples > 0
+            else 0.0
+        ),
+        "warnings": [],
+    }
+
+    payload = dict(manifest_payload)
+    payload["datasets"] = [merged_dataset]
+    payload["output_manifest_path"] = str(out_manifest)
+    payload["output_config_path"] = str(out_config)
+    payload["dish_design"] = merged_dish
+    payload["canvas_name"] = merged_canvas
+    payload["rig_name"] = merged_rig
+    payload["exported_at_utc"] = _utc_now()
+    payload["merged_export"] = {
+        "enabled": True,
+        "zarr_path": str(merged_zarr),
+        "run_name": run_name,
+        "input_format": merge_result.input_format,
+        "source_type": merge_result.source_type,
+        "row_gate_policy": merge_result.row_gate_policy,
+        "row_gate_counts": dict(merge_result.row_gate_counts),
+        "keypoint_shape": list(merge_result.keypoint_shape),
+        "keypoint_labels": list(merge_result.keypoint_labels),
+        "split": {
+            "train_ratio": float(train_ratio),
+            "val_ratio": float(val_ratio),
+            "test_ratio": float(test_ratio) if test_ratio > 0.0 else None,
+            "seed": int(seed),
+        },
+        "counts": {
+            "total_samples": int(merge_result.total_samples),
+            "successful": int(merge_result.total_successful),
+            "failed": int(merge_result.total_failed),
+            "train": int(merge_result.train_indices.shape[0]),
+            "val": int(merge_result.val_indices.shape[0]),
+            "test": int(merge_result.test_indices.shape[0]),
+            "source_count": int(len(merge_result.source_specs)),
+            "row_gate_policy": merge_result.row_gate_policy,
+            "row_gate_counts": dict(merge_result.row_gate_counts),
+        },
+        "source_datasets": source_datasets_payload,
+    }
+    return payload
+
+
+def _resolve_source_config_path(manifest_payload: Dict[str, Any]) -> Optional[Path]:
+    output_config_path = _as_text(manifest_payload.get("output_config_path"))
+    if output_config_path:
+        candidate = Path(output_config_path)
+        if candidate.exists():
+            return candidate
+    base_config_path = _as_text(manifest_payload.get("base_config_path"))
+    if base_config_path:
+        candidate = Path(base_config_path)
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _write_merged_config(
+    *,
+    source_config_path: Optional[Path],
+    out_config: Path,
+    merged_zarr: Path,
+    dataset_name: str,
+    source_type: str,
+    input_format: str,
+    keypoint_run: str,
+    train_ratio: float,
+    val_ratio: float,
+    random_seed: int,
+) -> None:
+    cfg: Dict[str, Any] = {}
+    if source_config_path and source_config_path.exists():
+        loaded = yaml.safe_load(source_config_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            cfg = loaded
+
+    cfg["datasets"] = {
+        dataset_name: {
+            "zarr_path": str(merged_zarr),
+            "source_type": source_type,
+            "input_format": input_format,
+            "keypoint_run": keypoint_run,
+            "split": {
+                "train": float(train_ratio),
+                "val": float(val_ratio),
+            },
+        }
+    }
+    cfg["random_seed"] = int(random_seed)
+    out_config.parent.mkdir(parents=True, exist_ok=True)
+    out_config.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+
+def _write_merge_summary(
+    *,
+    summary_path: Path,
+    out_zarr: Path,
+    merge_result: PoseMergeResult,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+) -> None:
+    payload = {
+        "created_at_utc": _utc_now(),
+        "zarr_path": str(out_zarr),
+        "input_format": merge_result.input_format,
+        "source_type": merge_result.source_type,
+        "row_gate_policy": merge_result.row_gate_policy,
+        "row_gate_counts": dict(merge_result.row_gate_counts),
+        "keypoint_shape": list(merge_result.keypoint_shape),
+        "keypoint_labels": list(merge_result.keypoint_labels),
+        "counts": {
+            "total_samples": int(merge_result.total_samples),
+            "successful": int(merge_result.total_successful),
+            "failed": int(merge_result.total_failed),
+            "detection_source_counts": merge_result.detection_source_counts,
+            "train": int(merge_result.train_indices.shape[0]),
+            "val": int(merge_result.val_indices.shape[0]),
+            "test": int(merge_result.test_indices.shape[0]),
+        },
+        "split": {
+            "train_ratio": float(train_ratio),
+            "val_ratio": float(val_ratio),
+            "test_ratio": float(test_ratio) if test_ratio > 0.0 else None,
+            "seed": int(seed),
+        },
+        "sources": [
+            {
+                "dataset_name": spec.dataset_name,
+                "dataset_id": spec.dataset_id,
+                "zarr_path": str(spec.source_zarr),
+                "sample_count": int(spec.sample_count),
+                "source_sample_count": int(spec.source_sample_count),
+                "row_gate_policy": spec.row_gate_policy,
+                "row_gate_refined_run": spec.row_gate_refined_run,
+                "row_gate_selected": int(spec.row_gate_selected),
+                "row_gate_total": int(spec.row_gate_total),
+                "row_gate_raw_success_true": int(spec.row_gate_raw_success_true),
+                "row_gate_usable_true": spec.row_gate_usable_true,
+                "source_crop_run": spec.source_crop_run,
+                "keypoint_run": spec.keypoint_run,
+                "dish_design": spec.dish_design,
+                "canvas_name": spec.canvas_name,
+                "rig_id": spec.rig_id,
+            }
+            for spec in merge_result.source_specs
+        ],
+    }
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest", type=Path, required=True, help="Training manifest JSON.")
+    parser.add_argument("--out-dir", type=Path, help="Output directory for merged artifacts.")
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="Merged mode (current supported mode).",
+    )
+    parser.add_argument(
+        "--out-zarr",
+        type=Path,
+        help="Output path for merged Zarr.",
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="0.8/0.2",
+        help="Split ratios: train/val or train/val/test.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for merged split generation.",
+    )
+    parser.add_argument(
+        "--copy-batch-size",
+        type=int,
+        default=128,
+        help="Row-copy batch size for merged export.",
+    )
+    parser.add_argument(
+        "--row-gate-policy",
+        choices=["auto", "refined_usable", "raw_success"],
+        default="auto",
+        help=(
+            "Row-level inclusion policy for merged export: "
+            "auto prefers refined usable_keypoints when available, otherwise raw detection_success."
+        ),
+    )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help="Optional registry SQLite path. Registers merged dataset and updates training_set linkage.",
+    )
+    parser.add_argument(
+        "--skip-validate",
+        action="store_true",
+        help="Skip merged-zarr post-export validation checks.",
+    )
+    args = parser.parse_args(argv)
+
+    if not args.merge:
+        raise SystemExit("Only merged export mode is supported. Re-run with --merge.")
+
+    manifest_payload = json.loads(args.manifest.read_text(encoding="utf-8"))
+    if not isinstance(manifest_payload, dict):
+        raise ValueError(f"Manifest root must be an object: {args.manifest}")
+    if not isinstance(manifest_payload.get("datasets"), list) or not manifest_payload.get("datasets"):
+        raise ValueError(f"Manifest has no datasets: {args.manifest}")
+
+    set_id_source = _as_text(manifest_payload.get("set_id")) or args.manifest.stem
+    set_id = _normalize_manifest_stem(set_id_source)
+    if not set_id:
+        set_id = "training_set"
+    out_dir = args.out_dir or (prepare_pose._resolve_dataset_root("pose") / set_id)
+    out_manifest = out_dir / f"{set_id}.manifest.json"
+    out_config = out_dir / f"{set_id}.yaml"
+    merged_zarr = args.out_zarr or (out_dir / "zarr" / f"{set_id}_merged.zarr")
+    merged_dataset_id = _ensure_suffix(set_id, "_merged")
+    merged_dataset_name = _ensure_suffix(str(manifest_payload.get("set_name") or "merged"), "_merged")
+
+    train_ratio, val_ratio, test_ratio = _parse_split_spec(args.split)
+    if train_ratio + val_ratio <= 0.0:
+        raise ValueError(f"Invalid --split '{args.split}': train+val must be > 0 for training config generation.")
+    config_train_ratio = train_ratio / (train_ratio + val_ratio)
+    config_val_ratio = val_ratio / (train_ratio + val_ratio)
+
+    invocation = build_invocation_record(
+        tool="fisheye.utils.export_keypoint_training_zarr",
+        args=args,
+    )
+
+    print(f"Manifest: {args.manifest}")
+    print(f"Merged output: {merged_zarr}")
+    print(f"Datasets: {len(manifest_payload['datasets'])}")
+    print(f"Split: train={train_ratio:.3f} val={val_ratio:.3f} test={test_ratio:.3f} seed={args.seed}")
+    print(f"Copy batch size: {int(args.copy_batch_size)}")
+    print(f"Row gate policy: {args.row_gate_policy}")
+    print(f"Training input format: {manifest_payload.get('input_format', 'gray')}")
+    for entry in manifest_payload["datasets"]:
+        if isinstance(entry, dict):
+            print(f"- {entry.get('name')}: {entry.get('zarr_path')}")
+
+    if args.dry_run:
+        _discover_merge_sources(
+            manifest_payload,
+            expected_input_format=str(manifest_payload.get("input_format") or "gray").strip().lower(),
+            row_gate_policy=str(args.row_gate_policy),
+        )
+        print("Dry run: validation passed, no files written.")
+        return 0
+
+    merge_result = _export_merged(
+        manifest_payload=manifest_payload,
+        manifest_path=args.manifest,
+        out_zarr=merged_zarr,
+        merged_dataset_id=merged_dataset_id,
+        overwrite=bool(args.overwrite),
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=int(args.seed),
+        copy_batch_size=int(args.copy_batch_size),
+        row_gate_policy=str(args.row_gate_policy),
+        invocation=invocation,
+    )
+
+    if not args.skip_validate:
+        validation_summary = validate_merged_keypoint_training_zarr(
+            merged_zarr,
+            expected_input_format=merge_result.input_format,
+            expected_total_samples=merge_result.total_samples,
+        )
+        split_counts = validation_summary["split_counts"]
+        print(
+            "Validated merged zarr: "
+            f"samples={validation_summary['total_samples']} "
+            f"train={split_counts['train']} "
+            f"val={split_counts['val']} "
+            f"test={split_counts['test']} "
+            f"sources={validation_summary['source_count']}"
+        )
+
+    if args.registry:
+        try:
+            merged_dataset_id, linked = _register_merged_dataset_in_registry(
+                registry_path=Path(args.registry),
+                merged_zarr=merged_zarr,
+                set_id=_as_text(manifest_payload.get("set_id")),
+                set_name=_as_text(manifest_payload.get("set_name")),
+                source_dataset_ids=[spec.dataset_id for spec in merge_result.source_specs],
+                query_filter=manifest_payload.get("query_filter"),
+                invocation=manifest_payload.get("invocation"),
+            )
+            print(f"Registered merged dataset in registry: {merged_dataset_id}")
+            if linked and manifest_payload.get("set_id"):
+                print(f"Updated training_set dataset_ids linkage: {manifest_payload['set_id']}")
+        except Exception as exc:
+            print(f"Warning: merged dataset registry update skipped: {exc}")
+
+    summary_path = merged_zarr.with_suffix(".summary.json")
+    _write_merge_summary(
+        summary_path=summary_path,
+        out_zarr=merged_zarr,
+        merge_result=merge_result,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=int(args.seed),
+    )
+
+    merged_manifest_payload = _build_merged_manifest_payload(
+        manifest_payload=manifest_payload,
+        merged_zarr=merged_zarr,
+        merged_dataset_id=merged_dataset_id,
+        merged_dataset_name=merged_dataset_name,
+        run_name=merge_result.run_name,
+        out_manifest=out_manifest,
+        out_config=out_config,
+        merge_result=merge_result,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=int(args.seed),
+    )
+    out_manifest.parent.mkdir(parents=True, exist_ok=True)
+    out_manifest.write_text(json.dumps(merged_manifest_payload, indent=2), encoding="utf-8")
+
+    _write_merged_config(
+        source_config_path=_resolve_source_config_path(manifest_payload),
+        out_config=out_config,
+        merged_zarr=merged_zarr,
+        dataset_name=merged_dataset_name,
+        source_type=merge_result.source_type,
+        input_format=merge_result.input_format,
+        keypoint_run=merge_result.run_name,
+        train_ratio=config_train_ratio,
+        val_ratio=config_val_ratio,
+        random_seed=int(args.seed),
+    )
+
+    print(f"\nWrote merged zarr: {merged_zarr}")
+    print(f"Wrote summary: {summary_path}")
+    print(f"Wrote manifest: {out_manifest}")
+    print(f"Wrote config: {out_config}")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

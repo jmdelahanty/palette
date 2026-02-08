@@ -123,7 +123,8 @@ def test_prepare_detect_training_persists_invocation_metadata(monkeypatch, tmp_p
     ]
     prepare_detect_training.main(argv)
 
-    manifest_path = tmp_path / "runs" / "manifests" / "detect" / "smoke_set_v001.manifest.json"
+    config_path = tmp_path / "runs" / "configs" / "detect" / "smoke_set_v001.yaml"
+    manifest_path = config_path.with_suffix(".manifest.json")
     assert manifest_path.exists()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     invocation = manifest.get("invocation")
@@ -268,3 +269,207 @@ def test_registry_record_training_run_status_transitions(tmp_path: Path) -> None
     assert row is not None
     assert row[0] == "success"
     assert json.loads(row[1]) == {"precision": 0.9}
+
+
+def test_registry_record_training_run_dual_writes_detection_models(tmp_path: Path) -> None:
+    registry_path = tmp_path / "palette_registry.sqlite"
+    registry = Registry(registry_path)
+    config_path = tmp_path / "config.yaml"
+    metrics_path = tmp_path / "results.csv"
+    model_path = tmp_path / "best.pt"
+    config_path.write_text("abc", encoding="utf-8")
+    metrics_path.write_text("epoch,loss\n1,0.1\n", encoding="utf-8")
+    model_path.write_text("weights", encoding="utf-8")
+
+    run_id = "run_detection_model_001"
+    set_id = "detect_smoke_set_v001"
+    registry.record_training_run(
+        run_id=run_id,
+        set_id=set_id,
+        config_path=config_path,
+        manifest_path=None,
+        model_path=model_path,
+        metrics_path=metrics_path,
+        model_sha256="sha_model",
+        metrics_sha256="sha_metrics",
+        status="success",
+        final_metrics={"mAP50": 0.9},
+    )
+    registry.close()
+
+    with sqlite3.connect(registry_path) as conn:
+        row = conn.execute(
+            """
+            SELECT set_id, model_path, model_sha256, metrics_path, metrics_sha256, status, final_metrics_json
+            FROM detection_models
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == set_id
+    assert row[1] == str(model_path)
+    assert row[2] == "sha_model"
+    assert row[3] == str(metrics_path)
+    assert row[4] == "sha_metrics"
+    assert row[5] == "success"
+    assert json.loads(row[6]) == {"mAP50": 0.9}
+
+
+def test_registry_record_model_export_dual_writes_format_tables(tmp_path: Path) -> None:
+    registry_path = tmp_path / "palette_registry.sqlite"
+    registry = Registry(registry_path)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("abc", encoding="utf-8")
+
+    run_id = "run_export_model_001"
+    set_id = "detect_smoke_set_v001"
+    registry.record_training_run(
+        run_id=run_id,
+        set_id=set_id,
+        config_path=config_path,
+        manifest_path=None,
+        model_path=None,
+        metrics_path=None,
+        status="in_progress",
+        final_metrics={"stage": "start"},
+    )
+
+    onnx_path = tmp_path / "best.onnx"
+    onnx_manifest = tmp_path / "best.onnx.manifest.json"
+    trt_path = tmp_path / "best_fp16.engine"
+    trt_manifest = tmp_path / "best_fp16.tensorrt.manifest.json"
+    onnx_path.write_text("onnx", encoding="utf-8")
+    onnx_manifest.write_text(
+        json.dumps(
+            {
+                "export": {
+                    "opset": 11,
+                    "input_shape": [1, 3, 640, 640],
+                    "imgsz": [640, 640],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    trt_path.write_text("engine", encoding="utf-8")
+    trt_manifest.write_text(
+        json.dumps(
+            {
+                "export": {
+                    "input_shape": [1, 3, 640, 640],
+                    "imgsz": [640, 640],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry.record_model_export(
+        run_id=run_id,
+        export_type="onnx",
+        path=onnx_path,
+        manifest_path=onnx_manifest,
+        metadata={
+            "sha256": "onnx_sha",
+            "manifest_sha256": "onnx_manifest_sha",
+            "build_env": {
+                "torch_version": "2.6.0+cu124",
+                "cuda_version": "12.4",
+                "system_hostname": "hostA",
+            },
+            "requires_plugins": True,
+            "plugin_ops": ["TRT::EfficientNMS_TRT"],
+            "plugin_versions": {"TRT::EfficientNMS_TRT": "1"},
+        },
+    )
+    registry.record_model_export(
+        run_id=run_id,
+        export_type="tensorrt",
+        path=trt_path,
+        manifest_path=trt_manifest,
+        metadata={
+            "sha256": "trt_sha",
+            "manifest_sha256": "trt_manifest_sha",
+            "precision": "fp16",
+            "build_env": {
+                "tensorrt_version": "10.0.1",
+                "cuda_version": "12.4",
+                "system_hostname": "hostA",
+                "gpu_name": "NVIDIA RTX A6000",
+                "torch_device": {"compute_capability": "8.6"},
+            },
+            "trt_device_info": {
+                "selected_device_name": "NVIDIA RTX A6000",
+                "selected_device_uuid": "GPU-abc",
+                "compute_capability": "8.6",
+            },
+        },
+    )
+    registry.close()
+
+    with sqlite3.connect(registry_path) as conn:
+        onnx_row = conn.execute(
+            """
+            SELECT set_id, path, sha256, manifest_path, manifest_sha256,
+                   opset, input_shape, img_h, img_w, max_batch, dynamic_shapes, file_size_bytes,
+                   exporter_torch_version, exporter_cuda_version, exporter_hostname,
+                   requires_plugins, plugin_ops_json, plugin_versions_json
+            FROM onnx_models
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        trt_row = conn.execute(
+            """
+            SELECT set_id, precision, path, sha256, manifest_path, manifest_sha256,
+                   input_shape, img_h, img_w, max_batch, dynamic_shapes, file_size_bytes,
+                   trt_version, cuda_version, compute_capability, gpu_name, gpu_uuid, system_hostname,
+                   requires_plugins, plugin_ops_json, plugin_versions_json
+            FROM tensorrt_models
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+    assert onnx_row is not None
+    assert onnx_row[0] == set_id
+    assert onnx_row[1] == str(onnx_path)
+    assert onnx_row[2] == "onnx_sha"
+    assert onnx_row[3] == str(onnx_manifest)
+    assert onnx_row[4] == "onnx_manifest_sha"
+    assert onnx_row[5] == 11
+    assert onnx_row[6] == "[1, 3, 640, 640]"
+    assert onnx_row[7] == 640
+    assert onnx_row[8] == 640
+    assert onnx_row[9] == 1
+    assert onnx_row[10] == 0
+    assert onnx_row[11] == onnx_path.stat().st_size
+    assert onnx_row[12] == "2.6.0+cu124"
+    assert onnx_row[13] == "12.4"
+    assert onnx_row[14] == "hostA"
+    assert onnx_row[15] == 1
+    assert json.loads(onnx_row[16]) == ["TRT::EfficientNMS_TRT"]
+    assert json.loads(onnx_row[17]) == {"TRT::EfficientNMS_TRT": "1"}
+
+    assert trt_row is not None
+    assert trt_row[0] == set_id
+    assert trt_row[1] == "fp16"
+    assert trt_row[2] == str(trt_path)
+    assert trt_row[3] == "trt_sha"
+    assert trt_row[4] == str(trt_manifest)
+    assert trt_row[5] == "trt_manifest_sha"
+    assert trt_row[6] == "[1, 3, 640, 640]"
+    assert trt_row[7] == 640
+    assert trt_row[8] == 640
+    assert trt_row[9] == 1
+    assert trt_row[10] == 0
+    assert trt_row[11] == trt_path.stat().st_size
+    assert trt_row[12] == "10.0.1"
+    assert trt_row[13] == "12.4"
+    assert trt_row[14] == "8.6"
+    assert trt_row[15] == "NVIDIA RTX A6000"
+    assert trt_row[16] == "GPU-abc"
+    assert trt_row[17] == "hostA"
+    assert trt_row[18] == 1
+    assert json.loads(trt_row[19]) == ["TRT::EfficientNMS_TRT"]
+    assert json.loads(trt_row[20]) == {"TRT::EfficientNMS_TRT": "1"}

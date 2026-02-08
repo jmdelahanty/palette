@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import yaml
@@ -78,6 +78,10 @@ def _json_dumps(value: Any) -> Optional[str]:
     return json.dumps(value, sort_keys=True)
 
 
+def _canonical_json_text(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
 def _json_loads(value: Any) -> Optional[Dict[str, Any]]:
     if value is None:
         return None
@@ -116,6 +120,262 @@ def _as_int(value: Any) -> Optional[int]:
         return int(value)
     except Exception:
         return None
+
+
+def _decode_attr(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        text = value.decode("utf-8", "ignore").strip()
+    else:
+        text = str(value).strip()
+    return text or None
+
+
+def _coerce_mapping(value: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, (bytes, bytearray)):
+        text = value.decode("utf-8", "ignore").strip()
+    elif isinstance(value, str):
+        text = value.strip()
+    else:
+        return None
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return None
+    if isinstance(parsed, Mapping):
+        return dict(parsed)
+    return None
+
+
+def _format_ratio(numerator: Optional[int], denominator: Optional[int]) -> Optional[float]:
+    if numerator is None or denominator is None:
+        return None
+    if denominator <= 0:
+        return None
+    return float(numerator) / float(denominator)
+
+
+def _extract_refined_parent(root: zarr.Group) -> Optional[zarr.Group]:
+    refined_parent = root.get("refined_keypoints_runs")
+    if refined_parent is not None:
+        return refined_parent
+    return root.get("keypoints_refined_runs")
+
+
+def _extract_refined_detect_parent(root: zarr.Group) -> Optional[zarr.Group]:
+    refined_parent = root.get("refined_detect_runs")
+    if refined_parent is not None:
+        return refined_parent
+    return root.get("refined_runs")
+
+
+def _extract_keypoint_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List[Dict[str, Any]]:
+    keypoints_parent = root.get("keypoints_runs")
+    refined_parent = _extract_refined_parent(root)
+    if keypoints_parent is None or refined_parent is None:
+        return []
+
+    try:
+        zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    except Exception:
+        zarr_mtime_ns = None
+    quality_updated_utc = _utc_now()
+
+    rows: List[Dict[str, Any]] = []
+    for refined_run in refined_parent.group_keys():
+        refined_group = refined_parent[refined_run]
+        source_keypoint_run = _decode_attr(refined_group.attrs.get("source_keypoints_run"))
+        if not source_keypoint_run or source_keypoint_run not in keypoints_parent:
+            continue
+
+        source_group = keypoints_parent[source_keypoint_run]
+        keypoint_method = _decode_attr(source_group.attrs.get("method"))
+        review_status = _coerce_mapping(refined_group.attrs.get("keypoint_review_status"))
+        review_state = _decode_attr(review_status.get("state")) if review_status else None
+        review_intended_use = _decode_attr(review_status.get("intended_use")) if review_status else None
+        review_reviewer = _decode_attr(review_status.get("reviewer")) if review_status else None
+        review_timestamp_utc = (
+            _decode_attr(review_status.get("timestamp_utc"))
+            or _decode_attr(review_status.get("timestamp"))
+            or _decode_attr(review_status.get("reviewed_at_utc"))
+            or _decode_attr(review_status.get("reviewed_at"))
+            if review_status
+            else None
+        )
+
+        total_keypoints: Optional[int] = None
+        usable_keypoints: Optional[int] = None
+        usable_keypoints_rate: Optional[float] = None
+        if "usable_keypoints" in refined_group:
+            usable_arr = refined_group["usable_keypoints"]
+            total_keypoints = int(usable_arr.shape[0])
+            usable_keypoints = int(np.asarray(usable_arr[:]).sum())
+            usable_keypoints_rate = _format_ratio(usable_keypoints, total_keypoints)
+
+        summary_stats = refined_group.attrs.get("summary_statistics")
+        if isinstance(summary_stats, Mapping):
+            postprocess = summary_stats.get("postprocess")
+            for candidate in (postprocess, summary_stats):
+                if not isinstance(candidate, Mapping):
+                    continue
+                if usable_keypoints is None:
+                    usable_keypoints = _as_int(candidate.get("usable_keypoints"))
+                if total_keypoints is None:
+                    total_keypoints = _as_int(candidate.get("total_rois"))
+                if usable_keypoints_rate is None:
+                    usable_keypoints_rate = _format_ratio(usable_keypoints, total_keypoints)
+
+        keypoint_rows = int(source_group["keypoints_roi"].shape[0]) if "keypoints_roi" in source_group else None
+        raw_keypoints_success_rate = _as_float(source_group.attrs.get("success_rate"))
+        raw_keypoints_successful: Optional[int] = None
+        if raw_keypoints_success_rate is not None and keypoint_rows is not None:
+            raw_keypoints_successful = int(round(raw_keypoints_success_rate * float(keypoint_rows)))
+        elif "detection_success" in source_group:
+            success_arr = source_group["detection_success"]
+            raw_keypoints_successful = int(np.asarray(success_arr[:]).sum())
+            raw_keypoints_success_rate = _format_ratio(raw_keypoints_successful, int(success_arr.shape[0]))
+
+        rows.append(
+            {
+                "refined_run": str(refined_run),
+                "refined_created_utc": _decode_attr(
+                    refined_group.attrs.get("created_utc") or refined_group.attrs.get("timestamp_utc")
+                ),
+                "source_keypoint_run": source_keypoint_run,
+                "keypoint_method": keypoint_method,
+                "review_state": review_state,
+                "review_intended_use": review_intended_use,
+                "review_reviewer": review_reviewer,
+                "review_timestamp_utc": review_timestamp_utc,
+                "usable_keypoints": usable_keypoints,
+                "total_keypoints": total_keypoints,
+                "usable_keypoints_rate": usable_keypoints_rate,
+                "raw_keypoints_success_rate": raw_keypoints_success_rate,
+                "raw_keypoints_successful": raw_keypoints_successful,
+                "quality_updated_utc": quality_updated_utc,
+                "zarr_mtime_ns": zarr_mtime_ns,
+            }
+        )
+    return rows
+
+
+def _extract_detect_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List[Dict[str, Any]]:
+    refined_parent = _extract_refined_detect_parent(root)
+    if refined_parent is None:
+        return []
+
+    detect_runs_parent = root.get("detect_runs")
+    try:
+        zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    except Exception:
+        zarr_mtime_ns = None
+    quality_updated_utc = _utc_now()
+
+    try:
+        refined_run_names = list(refined_parent.group_keys())
+    except Exception:
+        refined_run_names = [name for name in refined_parent.keys() if isinstance(name, str)]
+
+    rows: List[Dict[str, Any]] = []
+    for refined_run in refined_run_names:
+        if refined_run not in refined_parent:
+            continue
+        refined_group = refined_parent[refined_run]
+        source_detect_run = _decode_attr(refined_group.attrs.get("source_detect_run"))
+        if not source_detect_run:
+            continue
+
+        detect_method = None
+        if detect_runs_parent is not None and source_detect_run in detect_runs_parent:
+            source_group = detect_runs_parent[source_detect_run]
+            detect_method = _decode_attr(
+                source_group.attrs.get("method")
+                or source_group.attrs.get("detection_method")
+            )
+
+        review_status = _coerce_mapping(refined_group.attrs.get("detect_review_status"))
+        review_state = _decode_attr(review_status.get("state")) if review_status else None
+        review_intended_use = _decode_attr(review_status.get("intended_use")) if review_status else None
+        review_reviewer = _decode_attr(review_status.get("reviewer")) if review_status else None
+        review_timestamp_utc = (
+            _decode_attr(review_status.get("timestamp_utc"))
+            or _decode_attr(review_status.get("timestamp"))
+            or _decode_attr(review_status.get("reviewed_at_utc"))
+            or _decode_attr(review_status.get("reviewed_at"))
+            if review_status
+            else None
+        )
+
+        resolved_group = _decode_attr(review_status.get("resolved_group")) if review_status else None
+        if not resolved_group:
+            manual_latest = _decode_attr(refined_group.attrs.get("manual_review_latest"))
+            if manual_latest and manual_latest in refined_group:
+                resolved_group = manual_latest
+            elif "interpolated" in refined_group:
+                resolved_group = "interpolated"
+            elif "filtered" in refined_group:
+                resolved_group = "filtered"
+            else:
+                resolved_group = "raw"
+
+        resolved = refined_group.get(resolved_group) if resolved_group else None
+        total_detections: Optional[int] = None
+        real_detections: Optional[int] = None
+        interpolated_detections: Optional[int] = None
+        interpolated_detections_rate: Optional[float] = None
+
+        if resolved is not None and "bbox_norm_coords" in resolved:
+            total_detections = int(resolved["bbox_norm_coords"].shape[0])
+
+        if resolved is not None and "detection_source" in resolved:
+            source_arr = np.asarray(resolved["detection_source"][:], dtype=np.int64)
+            real_detections = int(np.sum(source_arr == 0))
+            interpolated_detections = int(np.sum(source_arr != 0))
+            total_detections = int(source_arr.shape[0])
+        elif resolved is not None:
+            if total_detections is None:
+                total_detections = _as_int(resolved.attrs.get("total_detections"))
+            interpolated_detections = _as_int(resolved.attrs.get("interpolated_detections"))
+            if interpolated_detections is None and _decode_attr(resolved_group) == "filtered":
+                interpolated_detections = 0
+            real_detections = _as_int(resolved.attrs.get("original_detections"))
+            if real_detections is None and total_detections is not None and interpolated_detections is not None:
+                real_detections = int(total_detections) - int(interpolated_detections)
+
+        if total_detections is None and real_detections is not None and interpolated_detections is not None:
+            total_detections = int(real_detections) + int(interpolated_detections)
+        if total_detections is not None and interpolated_detections is not None and int(total_detections) > 0:
+            interpolated_detections_rate = float(interpolated_detections) / float(total_detections)
+
+        rows.append(
+            {
+                "refined_run": str(refined_run),
+                "refined_created_utc": _decode_attr(
+                    refined_group.attrs.get("refinement_timestamp")
+                    or refined_group.attrs.get("created_utc")
+                    or refined_group.attrs.get("timestamp_utc")
+                ),
+                "source_detect_run": source_detect_run,
+                "detect_method": detect_method,
+                "review_state": review_state,
+                "review_intended_use": review_intended_use,
+                "review_reviewer": review_reviewer,
+                "review_timestamp_utc": review_timestamp_utc,
+                "review_resolved_group": resolved_group,
+                "total_detections": total_detections,
+                "real_detections": real_detections,
+                "interpolated_detections": interpolated_detections,
+                "interpolated_detections_rate": interpolated_detections_rate,
+                "quality_updated_utc": quality_updated_utc,
+                "zarr_mtime_ns": zarr_mtime_ns,
+            }
+        )
+    return rows
 
 
 def _first_value(payload: Dict[str, Any], keys: Iterable[str]) -> Optional[Any]:
@@ -721,13 +981,77 @@ class Registry:
         )
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS keypoint_quality (
+                dataset_id TEXT NOT NULL,
+                refined_run TEXT NOT NULL,
+                refined_created_utc TEXT,
+                source_keypoint_run TEXT NOT NULL,
+                keypoint_method TEXT,
+                review_state TEXT,
+                review_intended_use TEXT,
+                review_reviewer TEXT,
+                review_timestamp_utc TEXT,
+                usable_keypoints INTEGER,
+                total_keypoints INTEGER,
+                usable_keypoints_rate REAL,
+                raw_keypoints_success_rate REAL,
+                raw_keypoints_successful INTEGER,
+                quality_updated_utc TEXT,
+                zarr_mtime_ns INTEGER,
+                PRIMARY KEY (dataset_id, refined_run),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS detect_quality (
+                dataset_id TEXT NOT NULL,
+                refined_run TEXT NOT NULL,
+                refined_created_utc TEXT,
+                source_detect_run TEXT NOT NULL,
+                detect_method TEXT,
+                review_state TEXT,
+                review_intended_use TEXT,
+                review_reviewer TEXT,
+                review_timestamp_utc TEXT,
+                review_resolved_group TEXT,
+                total_detections INTEGER,
+                real_detections INTEGER,
+                interpolated_detections INTEGER,
+                interpolated_detections_rate REAL,
+                quality_updated_utc TEXT,
+                zarr_mtime_ns INTEGER,
+                PRIMARY KEY (dataset_id, refined_run),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pose_skeleton_specs (
+                skeleton_id TEXT PRIMARY KEY,
+                spec_sha256 TEXT NOT NULL UNIQUE,
+                name TEXT,
+                kpt_shape_json TEXT,
+                keypoint_labels_json TEXT,
+                edges_json TEXT,
+                spec_json TEXT,
+                created_utc TEXT
+            );
+            """
+        )
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS training_sets (
                 set_id TEXT PRIMARY KEY,
                 name TEXT,
                 query_filter TEXT,
                 dataset_ids_json TEXT,
+                skeleton_id TEXT,
                 invocation_json TEXT,
-                created_utc TEXT
+                created_utc TEXT,
+                FOREIGN KEY(skeleton_id) REFERENCES pose_skeleton_specs(skeleton_id)
             );
             """
         )
@@ -738,6 +1062,7 @@ class Registry:
                 set_id TEXT,
                 config_path TEXT,
                 manifest_path TEXT,
+                skeleton_id TEXT,
                 model_path TEXT,
                 metrics_path TEXT,
                 config_sha256 TEXT,
@@ -747,7 +1072,8 @@ class Registry:
                 status TEXT,
                 final_metrics_json TEXT,
                 invocation_json TEXT,
-                created_utc TEXT
+                created_utc TEXT,
+                FOREIGN KEY(skeleton_id) REFERENCES pose_skeleton_specs(skeleton_id)
             );
             """
         )
@@ -763,6 +1089,218 @@ class Registry:
                 PRIMARY KEY (run_id, export_type),
                 FOREIGN KEY(run_id) REFERENCES training_runs(run_id) ON DELETE CASCADE
             );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS detection_models (
+                run_id TEXT PRIMARY KEY,
+                set_id TEXT,
+                model_path TEXT,
+                model_sha256 TEXT,
+                metrics_path TEXT,
+                metrics_sha256 TEXT,
+                status TEXT,
+                final_metrics_json TEXT,
+                metadata_json TEXT,
+                created_utc TEXT,
+                FOREIGN KEY(run_id) REFERENCES training_runs(run_id) ON DELETE CASCADE
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS onnx_models (
+                run_id TEXT PRIMARY KEY,
+                set_id TEXT,
+                skeleton_id TEXT,
+                detection_model_run_id TEXT,
+                path TEXT,
+                sha256 TEXT,
+                manifest_path TEXT,
+                manifest_sha256 TEXT,
+                opset INTEGER,
+                input_shape TEXT,
+                img_h INTEGER,
+                img_w INTEGER,
+                max_batch INTEGER,
+                dynamic_shapes INTEGER,
+                file_size_bytes INTEGER,
+                exporter_torch_version TEXT,
+                exporter_cuda_version TEXT,
+                exporter_hostname TEXT,
+                requires_plugins INTEGER,
+                plugin_ops_json TEXT,
+                plugin_versions_json TEXT,
+                metadata_json TEXT,
+                created_utc TEXT,
+                FOREIGN KEY(skeleton_id) REFERENCES pose_skeleton_specs(skeleton_id),
+                FOREIGN KEY(run_id) REFERENCES training_runs(run_id) ON DELETE CASCADE
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tensorrt_models (
+                run_id TEXT NOT NULL,
+                set_id TEXT,
+                skeleton_id TEXT,
+                detection_model_run_id TEXT,
+                onnx_run_id TEXT,
+                precision TEXT NOT NULL,
+                path TEXT,
+                sha256 TEXT,
+                manifest_path TEXT,
+                manifest_sha256 TEXT,
+                input_shape TEXT,
+                img_h INTEGER,
+                img_w INTEGER,
+                max_batch INTEGER,
+                dynamic_shapes INTEGER,
+                file_size_bytes INTEGER,
+                trt_version TEXT,
+                cuda_version TEXT,
+                compute_capability TEXT,
+                gpu_name TEXT,
+                gpu_uuid TEXT,
+                system_hostname TEXT,
+                requires_plugins INTEGER,
+                plugin_ops_json TEXT,
+                plugin_versions_json TEXT,
+                metadata_json TEXT,
+                created_utc TEXT,
+                PRIMARY KEY (run_id, precision),
+                FOREIGN KEY(skeleton_id) REFERENCES pose_skeleton_specs(skeleton_id),
+                FOREIGN KEY(run_id) REFERENCES training_runs(run_id) ON DELETE CASCADE
+            );
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_detection_models_set_id ON detection_models(set_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_onnx_models_set_id ON onnx_models(set_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tensorrt_models_set_id ON tensorrt_models(set_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_keypoint_quality_dataset_id ON keypoint_quality(dataset_id);"
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_keypoint_quality_gate
+            ON keypoint_quality(review_state, review_intended_use, keypoint_method, usable_keypoints_rate);
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_detect_quality_dataset_id ON detect_quality(dataset_id);"
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_detect_quality_gate
+            ON detect_quality(review_state, review_intended_use, detect_method, interpolated_detections_rate);
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS keypoint_quality_current;")
+        cur.execute(
+            """
+            CREATE VIEW keypoint_quality_current AS
+            WITH ranked AS (
+                SELECT
+                    kq.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY kq.dataset_id, COALESCE(kq.keypoint_method, '')
+                        ORDER BY
+                            COALESCE(kq.review_timestamp_utc, kq.refined_created_utc, kq.quality_updated_utc) DESC,
+                            COALESCE(kq.refined_created_utc, '') DESC,
+                            kq.refined_run DESC
+                    ) AS _rn
+                FROM keypoint_quality kq
+            )
+            SELECT
+                dataset_id,
+                refined_run,
+                refined_created_utc,
+                source_keypoint_run,
+                keypoint_method,
+                review_state,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                usable_keypoints,
+                total_keypoints,
+                usable_keypoints_rate,
+                raw_keypoints_success_rate,
+                raw_keypoints_successful,
+                quality_updated_utc,
+                zarr_mtime_ns
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS keypoint_quality_overview;")
+        cur.execute(
+            """
+            CREATE VIEW keypoint_quality_overview AS
+            SELECT
+                kqc.dataset_id AS dataset_id,
+                d.zarr_path AS zarr_path,
+                p.zarr_purpose AS zarr_purpose,
+                kqc.keypoint_method AS keypoint_method,
+                kqc.source_keypoint_run AS source_keypoint_run,
+                kqc.refined_run AS refined_run,
+                kqc.review_state AS review_state,
+                kqc.review_intended_use AS review_intended_use,
+                kqc.usable_keypoints AS usable_keypoints,
+                kqc.total_keypoints AS total_keypoints,
+                kqc.usable_keypoints_rate AS usable_keypoints_rate,
+                kqc.quality_updated_utc AS quality_updated_utc,
+                kqc.zarr_mtime_ns AS zarr_mtime_ns,
+                CASE
+                    WHEN kqc.zarr_mtime_ns IS NULL THEN 1
+                    ELSE 0
+                END AS quality_stale
+            FROM keypoint_quality_current kqc
+            LEFT JOIN datasets d ON d.dataset_id = kqc.dataset_id
+            LEFT JOIN provenance p ON p.dataset_id = kqc.dataset_id;
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS detect_quality_current;")
+        cur.execute(
+            """
+            CREATE VIEW detect_quality_current AS
+            WITH ranked AS (
+                SELECT
+                    dq.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY dq.dataset_id, COALESCE(dq.detect_method, '')
+                        ORDER BY
+                            COALESCE(dq.review_timestamp_utc, dq.refined_created_utc, dq.quality_updated_utc) DESC,
+                            COALESCE(dq.refined_created_utc, '') DESC,
+                            dq.refined_run DESC
+                    ) AS _rn
+                FROM detect_quality dq
+            )
+            SELECT
+                dataset_id,
+                refined_run,
+                refined_created_utc,
+                source_detect_run,
+                detect_method,
+                review_state,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                review_resolved_group,
+                total_detections,
+                real_detections,
+                interpolated_detections,
+                interpolated_detections_rate,
+                quality_updated_utc,
+                zarr_mtime_ns
+            FROM ranked
+            WHERE _rn = 1;
             """
         )
         self.conn.commit()
@@ -814,17 +1352,128 @@ class Registry:
                 "downsample_formats_json": "TEXT",
             },
         )
-        self._ensure_columns("training_sets", {"invocation_json": "TEXT"})
+        self._ensure_columns(
+            "detect_quality",
+            {
+                "refined_created_utc": "TEXT",
+                "source_detect_run": "TEXT",
+                "detect_method": "TEXT",
+                "review_state": "TEXT",
+                "review_intended_use": "TEXT",
+                "review_reviewer": "TEXT",
+                "review_timestamp_utc": "TEXT",
+                "review_resolved_group": "TEXT",
+                "total_detections": "INTEGER",
+                "real_detections": "INTEGER",
+                "interpolated_detections": "INTEGER",
+                "interpolated_detections_rate": "REAL",
+                "quality_updated_utc": "TEXT",
+                "zarr_mtime_ns": "INTEGER",
+            },
+        )
+        self._ensure_columns(
+            "keypoint_quality",
+            {
+                "refined_created_utc": "TEXT",
+                "source_keypoint_run": "TEXT",
+                "keypoint_method": "TEXT",
+                "review_state": "TEXT",
+                "review_intended_use": "TEXT",
+                "review_reviewer": "TEXT",
+                "review_timestamp_utc": "TEXT",
+                "usable_keypoints": "INTEGER",
+                "total_keypoints": "INTEGER",
+                "usable_keypoints_rate": "REAL",
+                "raw_keypoints_success_rate": "REAL",
+                "raw_keypoints_successful": "INTEGER",
+                "quality_updated_utc": "TEXT",
+                "zarr_mtime_ns": "INTEGER",
+            },
+        )
+        self._ensure_columns("training_sets", {"invocation_json": "TEXT", "skeleton_id": "TEXT"})
         self._ensure_columns(
             "training_runs",
             {
                 "invocation_json": "TEXT",
+                "skeleton_id": "TEXT",
                 "config_sha256": "TEXT",
                 "manifest_sha256": "TEXT",
                 "model_sha256": "TEXT",
                 "metrics_sha256": "TEXT",
                 "status": "TEXT",
                 "final_metrics_json": "TEXT",
+            },
+        )
+        self._ensure_columns(
+            "detection_models",
+            {
+                "set_id": "TEXT",
+                "model_path": "TEXT",
+                "model_sha256": "TEXT",
+                "metrics_path": "TEXT",
+                "metrics_sha256": "TEXT",
+                "status": "TEXT",
+                "final_metrics_json": "TEXT",
+                "metadata_json": "TEXT",
+                "created_utc": "TEXT",
+            },
+        )
+        self._ensure_columns(
+            "onnx_models",
+            {
+                "set_id": "TEXT",
+                "skeleton_id": "TEXT",
+                "detection_model_run_id": "TEXT",
+                "path": "TEXT",
+                "sha256": "TEXT",
+                "manifest_path": "TEXT",
+                "manifest_sha256": "TEXT",
+                "opset": "INTEGER",
+                "input_shape": "TEXT",
+                "img_h": "INTEGER",
+                "img_w": "INTEGER",
+                "max_batch": "INTEGER",
+                "dynamic_shapes": "INTEGER",
+                "file_size_bytes": "INTEGER",
+                "exporter_torch_version": "TEXT",
+                "exporter_cuda_version": "TEXT",
+                "exporter_hostname": "TEXT",
+                "requires_plugins": "INTEGER",
+                "plugin_ops_json": "TEXT",
+                "plugin_versions_json": "TEXT",
+                "metadata_json": "TEXT",
+                "created_utc": "TEXT",
+            },
+        )
+        self._ensure_columns(
+            "tensorrt_models",
+            {
+                "set_id": "TEXT",
+                "skeleton_id": "TEXT",
+                "detection_model_run_id": "TEXT",
+                "onnx_run_id": "TEXT",
+                "precision": "TEXT",
+                "path": "TEXT",
+                "sha256": "TEXT",
+                "manifest_path": "TEXT",
+                "manifest_sha256": "TEXT",
+                "input_shape": "TEXT",
+                "img_h": "INTEGER",
+                "img_w": "INTEGER",
+                "max_batch": "INTEGER",
+                "dynamic_shapes": "INTEGER",
+                "file_size_bytes": "INTEGER",
+                "trt_version": "TEXT",
+                "cuda_version": "TEXT",
+                "compute_capability": "TEXT",
+                "gpu_name": "TEXT",
+                "gpu_uuid": "TEXT",
+                "system_hostname": "TEXT",
+                "requires_plugins": "INTEGER",
+                "plugin_ops_json": "TEXT",
+                "plugin_versions_json": "TEXT",
+                "metadata_json": "TEXT",
+                "created_utc": "TEXT",
             },
         )
 
@@ -838,6 +1487,120 @@ class Registry:
                 continue
             self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl};")
         self.conn.commit()
+
+    def _normalize_pose_schema(
+        self,
+        *,
+        kpt_shape: Optional[Sequence[Any]] = None,
+        keypoint_labels: Optional[Sequence[Any]] = None,
+        edges: Optional[Sequence[Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        shape_norm: Optional[List[int]] = None
+        if isinstance(kpt_shape, (list, tuple)):
+            values: List[int] = []
+            for item in kpt_shape:
+                val = _as_int(item)
+                if val is None:
+                    continue
+                values.append(int(val))
+            if values:
+                shape_norm = values
+
+        labels_norm: Optional[List[str]] = None
+        if isinstance(keypoint_labels, (list, tuple)):
+            labels = [str(item).strip() for item in keypoint_labels if str(item).strip()]
+            if labels:
+                labels_norm = labels
+
+        edges_norm: Optional[List[List[int]]] = None
+        if isinstance(edges, (list, tuple)):
+            pairs: List[List[int]] = []
+            for edge in edges:
+                if not isinstance(edge, (list, tuple)) or len(edge) < 2:
+                    continue
+                src = _as_int(edge[0])
+                dst = _as_int(edge[1])
+                if src is None or dst is None:
+                    continue
+                pairs.append([int(src), int(dst)])
+            if pairs:
+                edges_norm = pairs
+
+        if shape_norm is None and labels_norm is None and edges_norm is None:
+            return None
+        return {
+            "kpt_shape": shape_norm,
+            "keypoint_labels": labels_norm,
+            "skeleton_edges": edges_norm,
+        }
+
+    def upsert_pose_skeleton_spec(
+        self,
+        *,
+        kpt_shape: Optional[Sequence[Any]] = None,
+        keypoint_labels: Optional[Sequence[Any]] = None,
+        edges: Optional[Sequence[Any]] = None,
+        name: Optional[str] = None,
+    ) -> Optional[str]:
+        spec = self._normalize_pose_schema(
+            kpt_shape=kpt_shape,
+            keypoint_labels=keypoint_labels,
+            edges=edges,
+        )
+        if spec is None:
+            return None
+
+        spec_text = _canonical_json_text(spec)
+        spec_sha256 = sha256(spec_text.encode("utf-8")).hexdigest()
+        existing = self.conn.execute(
+            "SELECT skeleton_id FROM pose_skeleton_specs WHERE spec_sha256 = ?;",
+            (spec_sha256,),
+        ).fetchone()
+        if existing and existing["skeleton_id"]:
+            return str(existing["skeleton_id"])
+
+        skeleton_id = f"pose_skel_{spec_sha256[:12]}"
+        payload = {
+            "skeleton_id": skeleton_id,
+            "spec_sha256": spec_sha256,
+            "name": str(name).strip() if isinstance(name, str) and str(name).strip() else None,
+            "kpt_shape_json": _json_dumps(spec.get("kpt_shape")),
+            "keypoint_labels_json": _json_dumps(spec.get("keypoint_labels")),
+            "edges_json": _json_dumps(spec.get("skeleton_edges")),
+            "spec_json": spec_text,
+            "created_utc": _utc_now(),
+        }
+        self.conn.execute(
+            """
+            INSERT INTO pose_skeleton_specs (
+                skeleton_id, spec_sha256, name, kpt_shape_json, keypoint_labels_json,
+                edges_json, spec_json, created_utc
+            )
+            VALUES (
+                :skeleton_id, :spec_sha256, :name, :kpt_shape_json, :keypoint_labels_json,
+                :edges_json, :spec_json, :created_utc
+            )
+            ON CONFLICT(spec_sha256) DO UPDATE SET
+                name=COALESCE(excluded.name, pose_skeleton_specs.name),
+                kpt_shape_json=excluded.kpt_shape_json,
+                keypoint_labels_json=excluded.keypoint_labels_json,
+                edges_json=excluded.edges_json,
+                spec_json=excluded.spec_json,
+                created_utc=excluded.created_utc;
+            """,
+            payload,
+        )
+        self.conn.commit()
+        return skeleton_id
+
+    def _resolve_run_skeleton_id(self, run_id: str) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT skeleton_id FROM training_runs WHERE run_id = ?;",
+            (run_id,),
+        ).fetchone()
+        if row and row["skeleton_id"]:
+            return str(row["skeleton_id"])
+        return None
 
     def upsert_dataset(self, dataset_id: str, *, session_uuid: Optional[str], zarr_path: Path) -> None:
         now = _utc_now()
@@ -1053,6 +1816,295 @@ class Registry:
                     payload,
                 )
 
+    def upsert_keypoint_quality(
+        self,
+        *,
+        dataset_id: str,
+        refined_run: str,
+        refined_created_utc: Optional[str],
+        source_keypoint_run: str,
+        keypoint_method: Optional[str],
+        review_state: Optional[str],
+        review_intended_use: Optional[str],
+        review_reviewer: Optional[str],
+        review_timestamp_utc: Optional[str],
+        usable_keypoints: Optional[int],
+        total_keypoints: Optional[int],
+        usable_keypoints_rate: Optional[float],
+        raw_keypoints_success_rate: Optional[float],
+        raw_keypoints_successful: Optional[int],
+        quality_updated_utc: Optional[str] = None,
+        zarr_mtime_ns: Optional[int] = None,
+    ) -> None:
+        payload = {
+            "dataset_id": str(dataset_id),
+            "refined_run": str(refined_run),
+            "refined_created_utc": refined_created_utc,
+            "source_keypoint_run": str(source_keypoint_run),
+            "keypoint_method": keypoint_method,
+            "review_state": review_state,
+            "review_intended_use": review_intended_use,
+            "review_reviewer": review_reviewer,
+            "review_timestamp_utc": review_timestamp_utc,
+            "usable_keypoints": usable_keypoints,
+            "total_keypoints": total_keypoints,
+            "usable_keypoints_rate": usable_keypoints_rate,
+            "raw_keypoints_success_rate": raw_keypoints_success_rate,
+            "raw_keypoints_successful": raw_keypoints_successful,
+            "quality_updated_utc": quality_updated_utc or _utc_now(),
+            "zarr_mtime_ns": zarr_mtime_ns,
+        }
+        self.conn.execute(
+            """
+            INSERT INTO keypoint_quality (
+                dataset_id, refined_run, refined_created_utc, source_keypoint_run, keypoint_method,
+                review_state, review_intended_use, review_reviewer, review_timestamp_utc,
+                usable_keypoints, total_keypoints, usable_keypoints_rate,
+                raw_keypoints_success_rate, raw_keypoints_successful,
+                quality_updated_utc, zarr_mtime_ns
+            )
+            VALUES (
+                :dataset_id, :refined_run, :refined_created_utc, :source_keypoint_run, :keypoint_method,
+                :review_state, :review_intended_use, :review_reviewer, :review_timestamp_utc,
+                :usable_keypoints, :total_keypoints, :usable_keypoints_rate,
+                :raw_keypoints_success_rate, :raw_keypoints_successful,
+                :quality_updated_utc, :zarr_mtime_ns
+            )
+            ON CONFLICT(dataset_id, refined_run) DO UPDATE SET
+                refined_created_utc=excluded.refined_created_utc,
+                source_keypoint_run=excluded.source_keypoint_run,
+                keypoint_method=excluded.keypoint_method,
+                review_state=excluded.review_state,
+                review_intended_use=excluded.review_intended_use,
+                review_reviewer=excluded.review_reviewer,
+                review_timestamp_utc=excluded.review_timestamp_utc,
+                usable_keypoints=excluded.usable_keypoints,
+                total_keypoints=excluded.total_keypoints,
+                usable_keypoints_rate=excluded.usable_keypoints_rate,
+                raw_keypoints_success_rate=excluded.raw_keypoints_success_rate,
+                raw_keypoints_successful=excluded.raw_keypoints_successful,
+                quality_updated_utc=excluded.quality_updated_utc,
+                zarr_mtime_ns=excluded.zarr_mtime_ns;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
+    def upsert_detect_quality(
+        self,
+        *,
+        dataset_id: str,
+        refined_run: str,
+        refined_created_utc: Optional[str],
+        source_detect_run: str,
+        detect_method: Optional[str],
+        review_state: Optional[str],
+        review_intended_use: Optional[str],
+        review_reviewer: Optional[str],
+        review_timestamp_utc: Optional[str],
+        review_resolved_group: Optional[str],
+        total_detections: Optional[int],
+        real_detections: Optional[int],
+        interpolated_detections: Optional[int],
+        interpolated_detections_rate: Optional[float],
+        quality_updated_utc: Optional[str] = None,
+        zarr_mtime_ns: Optional[int] = None,
+    ) -> None:
+        payload = {
+            "dataset_id": str(dataset_id),
+            "refined_run": str(refined_run),
+            "refined_created_utc": refined_created_utc,
+            "source_detect_run": str(source_detect_run),
+            "detect_method": detect_method,
+            "review_state": review_state,
+            "review_intended_use": review_intended_use,
+            "review_reviewer": review_reviewer,
+            "review_timestamp_utc": review_timestamp_utc,
+            "review_resolved_group": review_resolved_group,
+            "total_detections": total_detections,
+            "real_detections": real_detections,
+            "interpolated_detections": interpolated_detections,
+            "interpolated_detections_rate": interpolated_detections_rate,
+            "quality_updated_utc": quality_updated_utc or _utc_now(),
+            "zarr_mtime_ns": zarr_mtime_ns,
+        }
+        self.conn.execute(
+            """
+            INSERT INTO detect_quality (
+                dataset_id, refined_run, refined_created_utc, source_detect_run, detect_method,
+                review_state, review_intended_use, review_reviewer, review_timestamp_utc, review_resolved_group,
+                total_detections, real_detections, interpolated_detections, interpolated_detections_rate,
+                quality_updated_utc, zarr_mtime_ns
+            )
+            VALUES (
+                :dataset_id, :refined_run, :refined_created_utc, :source_detect_run, :detect_method,
+                :review_state, :review_intended_use, :review_reviewer, :review_timestamp_utc, :review_resolved_group,
+                :total_detections, :real_detections, :interpolated_detections, :interpolated_detections_rate,
+                :quality_updated_utc, :zarr_mtime_ns
+            )
+            ON CONFLICT(dataset_id, refined_run) DO UPDATE SET
+                refined_created_utc=excluded.refined_created_utc,
+                source_detect_run=excluded.source_detect_run,
+                detect_method=excluded.detect_method,
+                review_state=excluded.review_state,
+                review_intended_use=excluded.review_intended_use,
+                review_reviewer=excluded.review_reviewer,
+                review_timestamp_utc=excluded.review_timestamp_utc,
+                review_resolved_group=excluded.review_resolved_group,
+                total_detections=excluded.total_detections,
+                real_detections=excluded.real_detections,
+                interpolated_detections=excluded.interpolated_detections,
+                interpolated_detections_rate=excluded.interpolated_detections_rate,
+                quality_updated_utc=excluded.quality_updated_utc,
+                zarr_mtime_ns=excluded.zarr_mtime_ns;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
+    def replace_detect_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM detect_quality WHERE dataset_id = ?;", (str(dataset_id),))
+            for record in records:
+                payload = dict(record)
+                payload["dataset_id"] = str(dataset_id)
+                payload.setdefault("quality_updated_utc", _utc_now())
+                self.conn.execute(
+                    """
+                    INSERT INTO detect_quality (
+                        dataset_id, refined_run, refined_created_utc, source_detect_run, detect_method,
+                        review_state, review_intended_use, review_reviewer, review_timestamp_utc, review_resolved_group,
+                        total_detections, real_detections, interpolated_detections, interpolated_detections_rate,
+                        quality_updated_utc, zarr_mtime_ns
+                    )
+                    VALUES (
+                        :dataset_id, :refined_run, :refined_created_utc, :source_detect_run, :detect_method,
+                        :review_state, :review_intended_use, :review_reviewer, :review_timestamp_utc, :review_resolved_group,
+                        :total_detections, :real_detections, :interpolated_detections, :interpolated_detections_rate,
+                        :quality_updated_utc, :zarr_mtime_ns
+                    );
+                    """,
+                    payload,
+                )
+
+    def refresh_detect_quality_for_dataset(self, dataset_id: str, *, zarr_path: Path) -> int:
+        zarr = _import_zarr()
+        try:
+            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+        except TypeError:
+            root = zarr.open_group(str(zarr_path), mode="r")
+        rows = _extract_detect_quality_rows(root, zarr_path=zarr_path)
+        self.replace_detect_quality(dataset_id, rows)
+        return len(rows)
+
+    def replace_keypoint_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM keypoint_quality WHERE dataset_id = ?;", (str(dataset_id),))
+            for record in records:
+                payload = dict(record)
+                payload["dataset_id"] = str(dataset_id)
+                payload.setdefault("quality_updated_utc", _utc_now())
+                self.conn.execute(
+                    """
+                    INSERT INTO keypoint_quality (
+                        dataset_id, refined_run, refined_created_utc, source_keypoint_run, keypoint_method,
+                        review_state, review_intended_use, review_reviewer, review_timestamp_utc,
+                        usable_keypoints, total_keypoints, usable_keypoints_rate,
+                        raw_keypoints_success_rate, raw_keypoints_successful,
+                        quality_updated_utc, zarr_mtime_ns
+                    )
+                    VALUES (
+                        :dataset_id, :refined_run, :refined_created_utc, :source_keypoint_run, :keypoint_method,
+                        :review_state, :review_intended_use, :review_reviewer, :review_timestamp_utc,
+                        :usable_keypoints, :total_keypoints, :usable_keypoints_rate,
+                        :raw_keypoints_success_rate, :raw_keypoints_successful,
+                        :quality_updated_utc, :zarr_mtime_ns
+                    );
+                    """,
+                    payload,
+                )
+
+    def refresh_keypoint_quality_for_dataset(self, dataset_id: str, *, zarr_path: Path) -> int:
+        zarr = _import_zarr()
+        try:
+            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+        except TypeError:
+            root = zarr.open_group(str(zarr_path), mode="r")
+        rows = _extract_keypoint_quality_rows(root, zarr_path=zarr_path)
+        self.replace_keypoint_quality(dataset_id, rows)
+        return len(rows)
+
+    def query_keypoint_quality_current(
+        self,
+        *,
+        dataset_ids: Optional[Sequence[str]] = None,
+        keypoint_method: Optional[str] = None,
+        review_state: Optional[str] = None,
+        review_intended_use: Optional[str] = None,
+        min_usable_keypoints_rate: Optional[float] = None,
+    ) -> List[sqlite3.Row]:
+        sql = ["SELECT * FROM keypoint_quality_current WHERE 1=1"]
+        params: List[Any] = []
+
+        if dataset_ids:
+            normalized_ids = [str(dataset_id) for dataset_id in dataset_ids if dataset_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND dataset_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if keypoint_method is not None:
+            sql.append("AND keypoint_method = ?")
+            params.append(str(keypoint_method))
+        if review_state is not None:
+            sql.append("AND review_state = ?")
+            params.append(str(review_state))
+        if review_intended_use is not None:
+            sql.append("AND review_intended_use = ?")
+            params.append(str(review_intended_use))
+        if min_usable_keypoints_rate is not None:
+            sql.append("AND usable_keypoints_rate IS NOT NULL AND usable_keypoints_rate >= ?")
+            params.append(float(min_usable_keypoints_rate))
+        sql.append("ORDER BY dataset_id, keypoint_method")
+        return list(self.conn.execute(" ".join(sql), params).fetchall())
+
+    def query_detect_quality_current(
+        self,
+        *,
+        dataset_ids: Optional[Sequence[str]] = None,
+        detect_method: Optional[str] = None,
+        review_state: Optional[str] = None,
+        review_intended_use: Optional[str] = None,
+        max_interpolated_detections_rate: Optional[float] = None,
+    ) -> List[sqlite3.Row]:
+        sql = ["SELECT * FROM detect_quality_current WHERE 1=1"]
+        params: List[Any] = []
+
+        if dataset_ids:
+            normalized_ids = [str(dataset_id) for dataset_id in dataset_ids if dataset_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND dataset_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if detect_method is not None:
+            sql.append("AND detect_method = ?")
+            params.append(str(detect_method))
+        if review_state is not None:
+            sql.append("AND review_state = ?")
+            params.append(str(review_state))
+        if review_intended_use is not None:
+            sql.append("AND review_intended_use = ?")
+            params.append(str(review_intended_use))
+        if max_interpolated_detections_rate is not None:
+            sql.append(
+                "AND interpolated_detections_rate IS NOT NULL "
+                "AND interpolated_detections_rate <= ?"
+            )
+            params.append(float(max_interpolated_detections_rate))
+        sql.append("ORDER BY dataset_id, detect_method")
+        return list(self.conn.execute(" ".join(sql), params).fetchall())
+
     def register_from_root(self, root: zarr.Group, zarr_path: Path) -> str:
         dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
         self.upsert_dataset(dataset_id, session_uuid=session_uuid, zarr_path=zarr_path)
@@ -1074,6 +2126,10 @@ class Registry:
         )
         detection_records = _build_detection_source_records(root)
         self.replace_detection_sources(dataset_id, detection_records)
+        detect_quality_rows = _extract_detect_quality_rows(root, zarr_path=zarr_path)
+        self.replace_detect_quality(dataset_id, detect_quality_rows)
+        keypoint_quality_rows = _extract_keypoint_quality_rows(root, zarr_path=zarr_path)
+        self.replace_keypoint_quality(dataset_id, keypoint_quality_rows)
         return dataset_id
 
     def record_training_run(
@@ -1083,6 +2139,7 @@ class Registry:
         set_id: Optional[str],
         config_path: Optional[Path],
         manifest_path: Optional[Path],
+        skeleton_id: Optional[str],
         model_path: Optional[Path],
         metrics_path: Optional[Path],
         config_sha256: Optional[str] = None,
@@ -1098,6 +2155,7 @@ class Registry:
             "set_id": set_id,
             "config_path": str(config_path) if config_path else None,
             "manifest_path": str(manifest_path) if manifest_path else None,
+            "skeleton_id": str(skeleton_id) if skeleton_id else None,
             "model_path": str(model_path) if model_path else None,
             "metrics_path": str(metrics_path) if metrics_path else None,
             "config_sha256": config_sha256,
@@ -1112,13 +2170,13 @@ class Registry:
         self.conn.execute(
             """
             INSERT INTO training_runs (
-                run_id, set_id, config_path, manifest_path, model_path, metrics_path,
+                run_id, set_id, config_path, manifest_path, skeleton_id, model_path, metrics_path,
                 config_sha256, manifest_sha256, model_sha256, metrics_sha256,
                 status, final_metrics_json,
                 invocation_json, created_utc
             )
             VALUES (
-                :run_id, :set_id, :config_path, :manifest_path, :model_path, :metrics_path,
+                :run_id, :set_id, :config_path, :manifest_path, :skeleton_id, :model_path, :metrics_path,
                 :config_sha256, :manifest_sha256, :model_sha256, :metrics_sha256,
                 :status, :final_metrics_json,
                 :invocation_json, :created_utc
@@ -1127,6 +2185,7 @@ class Registry:
                 set_id=excluded.set_id,
                 config_path=excluded.config_path,
                 manifest_path=excluded.manifest_path,
+                skeleton_id=excluded.skeleton_id,
                 model_path=excluded.model_path,
                 metrics_path=excluded.metrics_path,
                 config_sha256=excluded.config_sha256,
@@ -1140,7 +2199,27 @@ class Registry:
             """,
             payload,
         )
+        if set_id and skeleton_id:
+            self.conn.execute(
+                """
+                UPDATE training_sets
+                SET skeleton_id = ?
+                WHERE set_id = ?;
+                """,
+                (str(skeleton_id), str(set_id)),
+            )
         self.conn.commit()
+        self.record_detection_model(
+            run_id=run_id,
+            set_id=set_id,
+            model_path=model_path,
+            model_sha256=model_sha256,
+            metrics_path=metrics_path,
+            metrics_sha256=metrics_sha256,
+            status=status,
+            final_metrics=final_metrics,
+            metadata={"source": "training_runs"},
+        )
 
     def upsert_training_set(
         self,
@@ -1149,6 +2228,7 @@ class Registry:
         name: Optional[str],
         query_filter: Optional[Dict[str, Any]],
         dataset_ids: Iterable[str],
+        skeleton_id: Optional[str] = None,
         invocation: Optional[Dict[str, Any]] = None,
     ) -> None:
         dataset_ids_norm = sorted({str(dataset_id) for dataset_id in dataset_ids if dataset_id})
@@ -1157,21 +2237,23 @@ class Registry:
             "name": name,
             "query_filter": _json_dumps(query_filter),
             "dataset_ids_json": _json_dumps(dataset_ids_norm),
+            "skeleton_id": str(skeleton_id) if skeleton_id else None,
             "invocation_json": _json_dumps(invocation),
             "created_utc": _utc_now(),
         }
         self.conn.execute(
             """
             INSERT INTO training_sets (
-                set_id, name, query_filter, dataset_ids_json, invocation_json, created_utc
+                set_id, name, query_filter, dataset_ids_json, skeleton_id, invocation_json, created_utc
             )
             VALUES (
-                :set_id, :name, :query_filter, :dataset_ids_json, :invocation_json, :created_utc
+                :set_id, :name, :query_filter, :dataset_ids_json, :skeleton_id, :invocation_json, :created_utc
             )
             ON CONFLICT(set_id) DO UPDATE SET
                 name=excluded.name,
                 query_filter=excluded.query_filter,
                 dataset_ids_json=excluded.dataset_ids_json,
+                skeleton_id=excluded.skeleton_id,
                 invocation_json=excluded.invocation_json,
                 created_utc=excluded.created_utc;
             """,
@@ -1188,21 +2270,760 @@ class Registry:
         manifest_path: Optional[Path] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
+        # Migration state: new format-specific tables are the source of truth.
+        self._record_export_model_row(
+            run_id=run_id,
+            export_type=export_type,
+            path=path,
+            manifest_path=manifest_path,
+            metadata=metadata,
+        )
+
+    def _resolve_run_set_id(self, run_id: str) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT set_id FROM training_runs WHERE run_id = ?;",
+            (run_id,),
+        ).fetchone()
+        if not row:
+            return None
+        set_id = row["set_id"]
+        return str(set_id) if set_id else None
+
+    def _infer_tensorrt_precision(
+        self,
+        *,
+        path: Optional[Path],
+        metadata: Optional[Dict[str, Any]],
+    ) -> str:
+        if metadata:
+            for key in ("precision",):
+                value = metadata.get(key)
+                if value:
+                    return str(value).strip().lower()
+            trt_meta = metadata.get("trt")
+            if isinstance(trt_meta, dict):
+                value = trt_meta.get("precision")
+                if value:
+                    return str(value).strip().lower()
+        if path:
+            stem = path.stem.lower()
+            if stem.endswith("_fp16"):
+                return "fp16"
+            if stem.endswith("_int8"):
+                return "int8"
+        return "fp16"
+
+    def _read_json_path(self, path: Optional[Path]) -> Dict[str, Any]:
+        if path is None or not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _int_or_none(self, value: Any) -> Optional[int]:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            if value.is_integer():
+                return int(value)
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except Exception:
+            return None
+
+    def _shape_to_list(self, input_shape: Any) -> Optional[List[Any]]:
+        if isinstance(input_shape, (list, tuple)):
+            return list(input_shape)
+        if isinstance(input_shape, str):
+            text = input_shape.strip()
+            if not text:
+                return None
+            try:
+                payload = json.loads(text)
+            except Exception:
+                return None
+            if isinstance(payload, list):
+                return payload
+        return None
+
+    def _resolve_shape_fields(
+        self,
+        *,
+        input_shape: Any,
+        imgsz: Any,
+    ) -> Tuple[Optional[str], Optional[int], Optional[int], Optional[int], Optional[int]]:
+        shape_list = self._shape_to_list(input_shape)
+        input_shape_text = _json_dumps(shape_list) if shape_list else None
+
+        max_batch = None
+        img_h = None
+        img_w = None
+        dynamic_shapes = None
+
+        if shape_list:
+            max_batch = self._int_or_none(shape_list[0]) if len(shape_list) >= 1 else None
+            img_h = self._int_or_none(shape_list[2]) if len(shape_list) >= 3 else None
+            img_w = self._int_or_none(shape_list[3]) if len(shape_list) >= 4 else None
+            dynamic_shapes = int(
+                any(self._int_or_none(dimension) is None for dimension in shape_list)
+            )
+
+        if (img_h is None or img_w is None) and isinstance(imgsz, (list, tuple)):
+            if len(imgsz) >= 2:
+                img_h = img_h if img_h is not None else self._int_or_none(imgsz[0])
+                img_w = img_w if img_w is not None else self._int_or_none(imgsz[1])
+            elif len(imgsz) == 1:
+                val = self._int_or_none(imgsz[0])
+                if img_h is None:
+                    img_h = val
+                if img_w is None:
+                    img_w = val
+        elif (img_h is None or img_w is None) and imgsz is not None:
+            val = self._int_or_none(imgsz)
+            if img_h is None:
+                img_h = val
+            if img_w is None:
+                img_w = val
+
+        return input_shape_text, img_h, img_w, max_batch, dynamic_shapes
+
+    def _file_size_bytes(self, path: Optional[Path]) -> Optional[int]:
+        if path is None:
+            return None
+        try:
+            return int(path.stat().st_size)
+        except Exception:
+            return None
+
+    def _record_export_model_row(
+        self,
+        *,
+        run_id: str,
+        export_type: str,
+        path: Optional[Path],
+        manifest_path: Optional[Path],
+        metadata: Optional[Dict[str, Any]],
+    ) -> None:
+        export_type_norm = str(export_type).strip().lower()
+        set_id = self._resolve_run_set_id(run_id)
+        run_skeleton_id = self._resolve_run_skeleton_id(run_id)
+        if export_type_norm == "onnx":
+            plugin_ops = None
+            plugin_versions = None
+            requires_plugins = None
+            onnx_opset = None
+            input_shape_text = None
+            img_h = None
+            img_w = None
+            max_batch = None
+            dynamic_shapes = None
+            file_size_bytes = self._file_size_bytes(path)
+            exporter_torch_version = None
+            exporter_cuda_version = None
+            exporter_hostname = None
+            skeleton_id = run_skeleton_id
+            if metadata:
+                raw_skeleton_id = metadata.get("skeleton_id")
+                if raw_skeleton_id:
+                    skeleton_id = str(raw_skeleton_id)
+                pose_schema = metadata.get("pose_schema")
+                if isinstance(pose_schema, dict):
+                    schema_skeleton_id = self.upsert_pose_skeleton_spec(
+                        kpt_shape=pose_schema.get("kpt_shape"),
+                        keypoint_labels=pose_schema.get("keypoint_labels"),
+                        edges=pose_schema.get("skeleton"),
+                        name="pose_schema",
+                    )
+                    if schema_skeleton_id:
+                        skeleton_id = schema_skeleton_id
+                raw_ops = metadata.get("plugin_ops")
+                if isinstance(raw_ops, (list, tuple)):
+                    plugin_ops = [str(item) for item in raw_ops if item]
+
+                raw_versions = metadata.get("plugin_versions")
+                if isinstance(raw_versions, dict):
+                    plugin_versions = {
+                        str(key): str(value)
+                        for key, value in raw_versions.items()
+                        if key and value is not None
+                    }
+
+                raw_requires = metadata.get("requires_plugins")
+                if raw_requires is not None:
+                    if isinstance(raw_requires, str):
+                        requires_plugins = raw_requires.strip().lower() in {
+                            "1",
+                            "true",
+                            "yes",
+                            "y",
+                            "on",
+                        }
+                    else:
+                        requires_plugins = bool(raw_requires)
+
+                build_env = metadata.get("build_env")
+                if isinstance(build_env, dict):
+                    exporter_torch_version = (
+                        str(build_env.get("torch_version")) if build_env.get("torch_version") else None
+                    )
+                    exporter_cuda_version = (
+                        str(build_env.get("cuda_version")) if build_env.get("cuda_version") else None
+                    )
+                    exporter_hostname = (
+                        str(build_env.get("system_hostname"))
+                        if build_env.get("system_hostname")
+                        else None
+                    )
+
+            manifest_payload = self._read_json_path(manifest_path)
+            export_payload = manifest_payload.get("export") if isinstance(manifest_payload, dict) else {}
+            if not isinstance(export_payload, dict):
+                export_payload = {}
+            onnx_opset = self._int_or_none(export_payload.get("opset"))
+            (
+                input_shape_text,
+                img_h,
+                img_w,
+                max_batch,
+                dynamic_shapes,
+            ) = self._resolve_shape_fields(
+                input_shape=export_payload.get("input_shape"),
+                imgsz=export_payload.get("imgsz"),
+            )
+            if metadata:
+                if onnx_opset is None:
+                    onnx_opset = self._int_or_none(metadata.get("opset"))
+                if onnx_opset is None:
+                    meta_props = metadata.get("metadata_props")
+                    if isinstance(meta_props, dict):
+                        onnx_opset = self._int_or_none(meta_props.get("opset"))
+                if input_shape_text is None:
+                    (
+                        input_shape_text,
+                        img_h,
+                        img_w,
+                        max_batch,
+                        dynamic_shapes,
+                    ) = self._resolve_shape_fields(
+                        input_shape=metadata.get("input_shape"),
+                        imgsz=metadata.get("imgsz"),
+                    )
+
+            if requires_plugins is None:
+                if plugin_ops:
+                    requires_plugins = True
+                elif plugin_versions:
+                    requires_plugins = True
+
+            self.record_onnx_model(
+                run_id=run_id,
+                set_id=set_id,
+                skeleton_id=skeleton_id,
+                detection_model_run_id=run_id,
+                path=path,
+                sha256=str(metadata.get("sha256")) if metadata and metadata.get("sha256") else None,
+                manifest_path=manifest_path,
+                manifest_sha256=(
+                    str(metadata.get("manifest_sha256"))
+                    if metadata and metadata.get("manifest_sha256")
+                    else None
+                ),
+                opset=onnx_opset,
+                input_shape=input_shape_text,
+                img_h=img_h,
+                img_w=img_w,
+                max_batch=max_batch,
+                dynamic_shapes=(bool(dynamic_shapes) if dynamic_shapes is not None else None),
+                file_size_bytes=file_size_bytes,
+                exporter_torch_version=exporter_torch_version,
+                exporter_cuda_version=exporter_cuda_version,
+                exporter_hostname=exporter_hostname,
+                requires_plugins=requires_plugins,
+                plugin_ops=plugin_ops,
+                plugin_versions=plugin_versions,
+                metadata=metadata,
+            )
+            return
+
+        if export_type_norm in {"tensorrt", "trt"}:
+            input_shape_text = None
+            img_h = None
+            img_w = None
+            max_batch = None
+            dynamic_shapes = None
+            file_size_bytes = self._file_size_bytes(path)
+            trt_version = None
+            cuda_version = None
+            compute_capability = None
+            gpu_name = None
+            gpu_uuid = None
+            system_hostname = None
+            plugin_ops = None
+            plugin_versions = None
+            requires_plugins = None
+            skeleton_id = run_skeleton_id
+            if metadata:
+                raw_skeleton_id = metadata.get("skeleton_id")
+                if raw_skeleton_id:
+                    skeleton_id = str(raw_skeleton_id)
+                pose_schema = metadata.get("pose_schema")
+                if isinstance(pose_schema, dict):
+                    schema_skeleton_id = self.upsert_pose_skeleton_spec(
+                        kpt_shape=pose_schema.get("kpt_shape"),
+                        keypoint_labels=pose_schema.get("keypoint_labels"),
+                        edges=pose_schema.get("skeleton"),
+                        name="pose_schema",
+                    )
+                    if schema_skeleton_id:
+                        skeleton_id = schema_skeleton_id
+                build_env = metadata.get("build_env")
+                if isinstance(build_env, dict):
+                    trt_version = (
+                        str(build_env.get("tensorrt_version"))
+                        if build_env.get("tensorrt_version")
+                        else None
+                    )
+                    cuda_version = (
+                        str(build_env.get("cuda_version")) if build_env.get("cuda_version") else None
+                    )
+                    system_hostname = (
+                        str(build_env.get("system_hostname"))
+                        if build_env.get("system_hostname")
+                        else None
+                    )
+                    gpu_name = (
+                        str(build_env.get("gpu_name")) if build_env.get("gpu_name") else None
+                    )
+                    torch_device = build_env.get("torch_device")
+                    if isinstance(torch_device, dict):
+                        compute_capability = (
+                            str(torch_device.get("compute_capability"))
+                            if torch_device.get("compute_capability")
+                            else compute_capability
+                        )
+                        if not gpu_name and torch_device.get("selected_device_name"):
+                            gpu_name = str(torch_device.get("selected_device_name"))
+                trt_device = metadata.get("trt_device_info")
+                if isinstance(trt_device, dict):
+                    if trt_device.get("selected_device_name"):
+                        gpu_name = str(trt_device.get("selected_device_name"))
+                    if trt_device.get("selected_device_uuid"):
+                        gpu_uuid = str(trt_device.get("selected_device_uuid"))
+                    if trt_device.get("compute_capability"):
+                        compute_capability = str(trt_device.get("compute_capability"))
+
+                raw_ops = metadata.get("plugin_ops")
+                if isinstance(raw_ops, (list, tuple)):
+                    plugin_ops = [str(item) for item in raw_ops if item]
+
+                raw_versions = metadata.get("plugin_versions")
+                if isinstance(raw_versions, dict):
+                    plugin_versions = {
+                        str(key): str(value)
+                        for key, value in raw_versions.items()
+                        if key and value is not None
+                    }
+
+                raw_requires = metadata.get("requires_plugins")
+                if raw_requires is not None:
+                    if isinstance(raw_requires, str):
+                        requires_plugins = raw_requires.strip().lower() in {
+                            "1",
+                            "true",
+                            "yes",
+                            "y",
+                            "on",
+                        }
+                    else:
+                        requires_plugins = bool(raw_requires)
+
+            manifest_payload = self._read_json_path(manifest_path)
+            export_payload = manifest_payload.get("export") if isinstance(manifest_payload, dict) else {}
+            if not isinstance(export_payload, dict):
+                export_payload = {}
+            (
+                input_shape_text,
+                img_h,
+                img_w,
+                max_batch,
+                dynamic_shapes,
+            ) = self._resolve_shape_fields(
+                input_shape=export_payload.get("input_shape"),
+                imgsz=export_payload.get("imgsz"),
+            )
+            if metadata and input_shape_text is None:
+                (
+                    input_shape_text,
+                    img_h,
+                    img_w,
+                    max_batch,
+                    dynamic_shapes,
+                ) = self._resolve_shape_fields(
+                    input_shape=metadata.get("input_shape"),
+                    imgsz=metadata.get("imgsz"),
+                )
+
+            if (plugin_ops is None and plugin_versions is None and requires_plugins is None):
+                onnx_ref = metadata.get("onnx_run_id") if isinstance(metadata, dict) else None
+                onnx_run_id = str(onnx_ref or run_id)
+                onnx_row = self.conn.execute(
+                    """
+                    SELECT requires_plugins, plugin_ops_json, plugin_versions_json
+                    FROM onnx_models
+                    WHERE run_id = ?;
+                    """,
+                    (onnx_run_id,),
+                ).fetchone()
+                if onnx_row:
+                    raw_requires = onnx_row["requires_plugins"]
+                    if raw_requires is not None:
+                        requires_plugins = bool(raw_requires)
+                    raw_ops_json = onnx_row["plugin_ops_json"]
+                    if raw_ops_json:
+                        try:
+                            parsed_ops = json.loads(str(raw_ops_json))
+                            if isinstance(parsed_ops, list):
+                                plugin_ops = [str(item) for item in parsed_ops if item]
+                        except Exception:
+                            plugin_ops = None
+                    raw_versions_json = onnx_row["plugin_versions_json"]
+                    if raw_versions_json:
+                        try:
+                            parsed_versions = json.loads(str(raw_versions_json))
+                            if isinstance(parsed_versions, dict):
+                                plugin_versions = {
+                                    str(key): str(value)
+                                    for key, value in parsed_versions.items()
+                                    if key and value is not None
+                                }
+                        except Exception:
+                            plugin_versions = None
+
+            if requires_plugins is None:
+                if plugin_ops:
+                    requires_plugins = True
+                elif plugin_versions:
+                    requires_plugins = True
+
+            onnx_run_ref = (
+                str(metadata.get("onnx_run_id"))
+                if isinstance(metadata, dict) and metadata.get("onnx_run_id")
+                else str(run_id)
+            )
+
+            self.record_tensorrt_model(
+                run_id=run_id,
+                set_id=set_id,
+                skeleton_id=skeleton_id,
+                detection_model_run_id=run_id,
+                onnx_run_id=onnx_run_ref,
+                precision=self._infer_tensorrt_precision(path=path, metadata=metadata),
+                path=path,
+                sha256=str(metadata.get("sha256")) if metadata and metadata.get("sha256") else None,
+                manifest_path=manifest_path,
+                manifest_sha256=(
+                    str(metadata.get("manifest_sha256"))
+                    if metadata and metadata.get("manifest_sha256")
+                    else None
+                ),
+                input_shape=input_shape_text,
+                img_h=img_h,
+                img_w=img_w,
+                max_batch=max_batch,
+                dynamic_shapes=(bool(dynamic_shapes) if dynamic_shapes is not None else None),
+                file_size_bytes=file_size_bytes,
+                trt_version=trt_version,
+                cuda_version=cuda_version,
+                compute_capability=compute_capability,
+                gpu_name=gpu_name,
+                gpu_uuid=gpu_uuid,
+                system_hostname=system_hostname,
+                requires_plugins=requires_plugins,
+                plugin_ops=plugin_ops,
+                plugin_versions=plugin_versions,
+                metadata=metadata,
+            )
+
+    def record_detection_model(
+        self,
+        *,
+        run_id: str,
+        set_id: Optional[str],
+        model_path: Optional[Path],
+        model_sha256: Optional[str],
+        metrics_path: Optional[Path],
+        metrics_sha256: Optional[str],
+        status: Optional[str],
+        final_metrics: Optional[Dict[str, Any]],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
         payload = {
-            "run_id": run_id,
-            "export_type": export_type,
-            "path": str(path) if path else None,
-            "manifest_path": str(manifest_path) if manifest_path else None,
+            "run_id": str(run_id),
+            "set_id": str(set_id) if set_id else None,
+            "model_path": str(model_path) if model_path else None,
+            "model_sha256": model_sha256,
+            "metrics_path": str(metrics_path) if metrics_path else None,
+            "metrics_sha256": metrics_sha256,
+            "status": status,
+            "final_metrics_json": _json_dumps(final_metrics),
             "metadata_json": _json_dumps(metadata),
             "created_utc": _utc_now(),
         }
         self.conn.execute(
             """
-            INSERT INTO model_exports (run_id, export_type, path, manifest_path, metadata_json, created_utc)
-            VALUES (:run_id, :export_type, :path, :manifest_path, :metadata_json, :created_utc)
-            ON CONFLICT(run_id, export_type) DO UPDATE SET
+            INSERT INTO detection_models (
+                run_id, set_id, model_path, model_sha256, metrics_path, metrics_sha256,
+                status, final_metrics_json, metadata_json, created_utc
+            )
+            VALUES (
+                :run_id, :set_id, :model_path, :model_sha256, :metrics_path, :metrics_sha256,
+                :status, :final_metrics_json, :metadata_json, :created_utc
+            )
+            ON CONFLICT(run_id) DO UPDATE SET
+                set_id=excluded.set_id,
+                model_path=excluded.model_path,
+                model_sha256=excluded.model_sha256,
+                metrics_path=excluded.metrics_path,
+                metrics_sha256=excluded.metrics_sha256,
+                status=excluded.status,
+                final_metrics_json=excluded.final_metrics_json,
+                metadata_json=excluded.metadata_json,
+                created_utc=excluded.created_utc;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
+    def record_onnx_model(
+        self,
+        *,
+        run_id: str,
+        set_id: Optional[str],
+        skeleton_id: Optional[str],
+        detection_model_run_id: Optional[str],
+        path: Optional[Path],
+        sha256: Optional[str],
+        manifest_path: Optional[Path],
+        manifest_sha256: Optional[str],
+        opset: Optional[int] = None,
+        input_shape: Optional[str] = None,
+        img_h: Optional[int] = None,
+        img_w: Optional[int] = None,
+        max_batch: Optional[int] = None,
+        dynamic_shapes: Optional[bool] = None,
+        file_size_bytes: Optional[int] = None,
+        exporter_torch_version: Optional[str] = None,
+        exporter_cuda_version: Optional[str] = None,
+        exporter_hostname: Optional[str] = None,
+        requires_plugins: Optional[bool] = None,
+        plugin_ops: Optional[List[str]] = None,
+        plugin_versions: Optional[Dict[str, str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        plugin_ops_norm = [str(item) for item in (plugin_ops or []) if item]
+        plugin_versions_norm = {
+            str(key): str(value)
+            for key, value in (plugin_versions or {}).items()
+            if key and value is not None
+        }
+        requires_plugins_norm = (
+            int(bool(requires_plugins)) if requires_plugins is not None else None
+        )
+        payload = {
+            "run_id": str(run_id),
+            "set_id": str(set_id) if set_id else None,
+            "skeleton_id": str(skeleton_id) if skeleton_id else None,
+            "detection_model_run_id": str(detection_model_run_id) if detection_model_run_id else None,
+            "path": str(path) if path else None,
+            "sha256": sha256,
+            "manifest_path": str(manifest_path) if manifest_path else None,
+            "manifest_sha256": manifest_sha256,
+            "opset": self._int_or_none(opset),
+            "input_shape": str(input_shape) if input_shape else None,
+            "img_h": self._int_or_none(img_h),
+            "img_w": self._int_or_none(img_w),
+            "max_batch": self._int_or_none(max_batch),
+            "dynamic_shapes": (
+                int(bool(dynamic_shapes)) if dynamic_shapes is not None else None
+            ),
+            "file_size_bytes": self._int_or_none(file_size_bytes),
+            "exporter_torch_version": (
+                str(exporter_torch_version) if exporter_torch_version else None
+            ),
+            "exporter_cuda_version": (
+                str(exporter_cuda_version) if exporter_cuda_version else None
+            ),
+            "exporter_hostname": str(exporter_hostname) if exporter_hostname else None,
+            "requires_plugins": requires_plugins_norm,
+            "plugin_ops_json": _json_dumps(plugin_ops_norm) if plugin_ops_norm else None,
+            "plugin_versions_json": (
+                _json_dumps(plugin_versions_norm) if plugin_versions_norm else None
+            ),
+            "metadata_json": _json_dumps(metadata),
+            "created_utc": _utc_now(),
+        }
+        self.conn.execute(
+            """
+            INSERT INTO onnx_models (
+                run_id, set_id, skeleton_id, detection_model_run_id, path, sha256, manifest_path,
+                manifest_sha256, opset, input_shape, img_h, img_w, max_batch, dynamic_shapes,
+                file_size_bytes, exporter_torch_version, exporter_cuda_version, exporter_hostname,
+                requires_plugins, plugin_ops_json, plugin_versions_json, metadata_json, created_utc
+            )
+            VALUES (
+                :run_id, :set_id, :skeleton_id, :detection_model_run_id, :path, :sha256, :manifest_path,
+                :manifest_sha256, :opset, :input_shape, :img_h, :img_w, :max_batch, :dynamic_shapes,
+                :file_size_bytes, :exporter_torch_version, :exporter_cuda_version, :exporter_hostname,
+                :requires_plugins, :plugin_ops_json, :plugin_versions_json, :metadata_json, :created_utc
+            )
+            ON CONFLICT(run_id) DO UPDATE SET
+                set_id=excluded.set_id,
+                skeleton_id=excluded.skeleton_id,
+                detection_model_run_id=excluded.detection_model_run_id,
                 path=excluded.path,
+                sha256=excluded.sha256,
                 manifest_path=excluded.manifest_path,
+                manifest_sha256=excluded.manifest_sha256,
+                opset=excluded.opset,
+                input_shape=excluded.input_shape,
+                img_h=excluded.img_h,
+                img_w=excluded.img_w,
+                max_batch=excluded.max_batch,
+                dynamic_shapes=excluded.dynamic_shapes,
+                file_size_bytes=excluded.file_size_bytes,
+                exporter_torch_version=excluded.exporter_torch_version,
+                exporter_cuda_version=excluded.exporter_cuda_version,
+                exporter_hostname=excluded.exporter_hostname,
+                requires_plugins=excluded.requires_plugins,
+                plugin_ops_json=excluded.plugin_ops_json,
+                plugin_versions_json=excluded.plugin_versions_json,
+                metadata_json=excluded.metadata_json,
+                created_utc=excluded.created_utc;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
+    def record_tensorrt_model(
+        self,
+        *,
+        run_id: str,
+        set_id: Optional[str],
+        skeleton_id: Optional[str],
+        detection_model_run_id: Optional[str],
+        onnx_run_id: Optional[str],
+        precision: str,
+        path: Optional[Path],
+        sha256: Optional[str],
+        manifest_path: Optional[Path],
+        manifest_sha256: Optional[str],
+        input_shape: Optional[str] = None,
+        img_h: Optional[int] = None,
+        img_w: Optional[int] = None,
+        max_batch: Optional[int] = None,
+        dynamic_shapes: Optional[bool] = None,
+        file_size_bytes: Optional[int] = None,
+        trt_version: Optional[str] = None,
+        cuda_version: Optional[str] = None,
+        compute_capability: Optional[str] = None,
+        gpu_name: Optional[str] = None,
+        gpu_uuid: Optional[str] = None,
+        system_hostname: Optional[str] = None,
+        requires_plugins: Optional[bool] = None,
+        plugin_ops: Optional[List[str]] = None,
+        plugin_versions: Optional[Dict[str, str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        plugin_ops_norm = [str(item) for item in (plugin_ops or []) if item]
+        plugin_versions_norm = {
+            str(key): str(value)
+            for key, value in (plugin_versions or {}).items()
+            if key and value is not None
+        }
+        requires_plugins_norm = (
+            int(bool(requires_plugins)) if requires_plugins is not None else None
+        )
+        payload = {
+            "run_id": str(run_id),
+            "set_id": str(set_id) if set_id else None,
+            "skeleton_id": str(skeleton_id) if skeleton_id else None,
+            "detection_model_run_id": str(detection_model_run_id) if detection_model_run_id else None,
+            "onnx_run_id": str(onnx_run_id) if onnx_run_id else None,
+            "precision": str(precision).strip().lower() if precision else "fp16",
+            "path": str(path) if path else None,
+            "sha256": sha256,
+            "manifest_path": str(manifest_path) if manifest_path else None,
+            "manifest_sha256": manifest_sha256,
+            "input_shape": str(input_shape) if input_shape else None,
+            "img_h": self._int_or_none(img_h),
+            "img_w": self._int_or_none(img_w),
+            "max_batch": self._int_or_none(max_batch),
+            "dynamic_shapes": (
+                int(bool(dynamic_shapes)) if dynamic_shapes is not None else None
+            ),
+            "file_size_bytes": self._int_or_none(file_size_bytes),
+            "trt_version": str(trt_version) if trt_version else None,
+            "cuda_version": str(cuda_version) if cuda_version else None,
+            "compute_capability": str(compute_capability) if compute_capability else None,
+            "gpu_name": str(gpu_name) if gpu_name else None,
+            "gpu_uuid": str(gpu_uuid) if gpu_uuid else None,
+            "system_hostname": str(system_hostname) if system_hostname else None,
+            "requires_plugins": requires_plugins_norm,
+            "plugin_ops_json": _json_dumps(plugin_ops_norm) if plugin_ops_norm else None,
+            "plugin_versions_json": (
+                _json_dumps(plugin_versions_norm) if plugin_versions_norm else None
+            ),
+            "metadata_json": _json_dumps(metadata),
+            "created_utc": _utc_now(),
+        }
+        self.conn.execute(
+            """
+            INSERT INTO tensorrt_models (
+                run_id, set_id, skeleton_id, detection_model_run_id, onnx_run_id, precision, path, sha256,
+                manifest_path, manifest_sha256, input_shape, img_h, img_w, max_batch,
+                dynamic_shapes, file_size_bytes, trt_version, cuda_version, compute_capability,
+                gpu_name, gpu_uuid, system_hostname, requires_plugins, plugin_ops_json,
+                plugin_versions_json, metadata_json, created_utc
+            )
+            VALUES (
+                :run_id, :set_id, :skeleton_id, :detection_model_run_id, :onnx_run_id, :precision, :path, :sha256,
+                :manifest_path, :manifest_sha256, :input_shape, :img_h, :img_w, :max_batch,
+                :dynamic_shapes, :file_size_bytes, :trt_version, :cuda_version, :compute_capability,
+                :gpu_name, :gpu_uuid, :system_hostname, :requires_plugins, :plugin_ops_json,
+                :plugin_versions_json, :metadata_json, :created_utc
+            )
+            ON CONFLICT(run_id, precision) DO UPDATE SET
+                set_id=excluded.set_id,
+                skeleton_id=excluded.skeleton_id,
+                detection_model_run_id=excluded.detection_model_run_id,
+                onnx_run_id=excluded.onnx_run_id,
+                path=excluded.path,
+                sha256=excluded.sha256,
+                manifest_path=excluded.manifest_path,
+                manifest_sha256=excluded.manifest_sha256,
+                input_shape=excluded.input_shape,
+                img_h=excluded.img_h,
+                img_w=excluded.img_w,
+                max_batch=excluded.max_batch,
+                dynamic_shapes=excluded.dynamic_shapes,
+                file_size_bytes=excluded.file_size_bytes,
+                trt_version=excluded.trt_version,
+                cuda_version=excluded.cuda_version,
+                compute_capability=excluded.compute_capability,
+                gpu_name=excluded.gpu_name,
+                gpu_uuid=excluded.gpu_uuid,
+                system_hostname=excluded.system_hostname,
+                requires_plugins=excluded.requires_plugins,
+                plugin_ops_json=excluded.plugin_ops_json,
+                plugin_versions_json=excluded.plugin_versions_json,
                 metadata_json=excluded.metadata_json,
                 created_utc=excluded.created_utc;
             """,

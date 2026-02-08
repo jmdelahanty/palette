@@ -414,6 +414,43 @@ def test_collect_onnx_output_contract_reads_names_shapes_and_dtypes(tmp_path: Pa
     assert contract[1]["dtype"] == "FLOAT"
 
 
+def test_collect_onnx_plugin_contract_reads_custom_domain_and_version(tmp_path: Path) -> None:
+    try:
+        import onnx
+        from onnx import TensorProto, helper
+    except Exception:
+        return
+
+    node = helper.make_node(
+        "EfficientNMS_TRT",
+        inputs=["boxes", "scores"],
+        outputs=["num_dets", "bboxes", "scores_out", "labels"],
+        domain="TRT",
+        plugin_version="1",
+    )
+    boxes = helper.make_tensor_value_info("boxes", TensorProto.FLOAT, [1, 1, 4])
+    scores = helper.make_tensor_value_info("scores", TensorProto.FLOAT, [1, 1, 1])
+    out0 = helper.make_tensor_value_info("num_dets", TensorProto.INT32, [1, 1])
+    out1 = helper.make_tensor_value_info("bboxes", TensorProto.FLOAT, [1, 1, 4])
+    out2 = helper.make_tensor_value_info("scores_out", TensorProto.FLOAT, [1, 1])
+    out3 = helper.make_tensor_value_info("labels", TensorProto.INT32, [1, 1])
+    graph = helper.make_graph(
+        nodes=[node],
+        name="g",
+        inputs=[boxes, scores],
+        outputs=[out0, out1, out2, out3],
+        initializer=[],
+    )
+    model = helper.make_model(graph)
+    onnx_path = tmp_path / "plugin.onnx"
+    onnx.save(model, str(onnx_path))
+
+    contract = td._collect_onnx_plugin_contract(onnx_path)
+    assert contract["requires_plugins"] is True
+    assert contract["plugin_ops"] == ["TRT::EfficientNMS_TRT"]
+    assert contract["plugin_versions"] == {"TRT::EfficientNMS_TRT": "1"}
+
+
 def test_parse_trtexec_device_info_text_extracts_structured_fields() -> None:
     raw = "\n".join(
         [
