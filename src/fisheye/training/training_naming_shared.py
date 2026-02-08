@@ -119,6 +119,8 @@ def _infer_dish_canvas_from_set_slug(manifest_summary: dict) -> tuple[Optional[s
     slug = re.sub(r"_v\d+$", "", slug)
     if slug.startswith("detect_"):
         slug = slug[len("detect_") :]
+    elif slug.startswith("pose_"):
+        slug = slug[len("pose_") :]
     parts = [part for part in slug.split("_") if part]
     if len(parts) < 2:
         return None, None
@@ -159,9 +161,18 @@ def build_default_pose_run_name(
     timestamp: Optional[str] = None,
     pid: Optional[int] = None,
 ) -> str:
-    dish = sanitize_run_component(manifest_hints.get("dish_design"), "unknown_dish")
-    canvas = sanitize_run_component(manifest_hints.get("canvas_name"), "unknown_canvas")
-    task = sanitize_run_component(manifest_hints.get("task") or task_fallback, task_fallback)
-    stamp = timestamp or time.strftime("%Y%m%d-%H%M%S")
-    process_id = int(os.getpid() if pid is None else pid)
-    return f"{dish}_{canvas}_{task}_{stamp}_{process_id}"
+    manifest_summary = {
+        "manifest_set_id": manifest_hints.get("set_id"),
+        "manifest_set_slug": manifest_hints.get("set_slug") or manifest_hints.get("set_id"),
+        "manifest_task": manifest_hints.get("task"),
+        "manifest_rig_name": manifest_hints.get("rig_name"),
+        "manifest_dish_design": manifest_hints.get("dish_design"),
+        "manifest_canvas_name": manifest_hints.get("canvas_name"),
+        "manifest_sha256": manifest_hints.get("manifest_sha256"),
+    }
+    return build_default_detect_run_name(
+        manifest_summary=manifest_summary,
+        task_fallback=task_fallback,
+        timestamp=timestamp,
+        pid=pid,
+    )

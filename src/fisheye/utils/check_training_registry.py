@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -203,10 +204,14 @@ def _sum_manifest_rois(path: Optional[str]) -> Optional[int]:
     for item in datasets:
         if not isinstance(item, dict):
             continue
-        value = item.get("total_bboxes")
-        if isinstance(value, (int, float)):
-            total += int(value)
-            found = True
+        # Detect manifests store dataset sample totals as total_bboxes.
+        # Pose manifests store dataset sample totals as keypoints_total.
+        for key in ("total_bboxes", "keypoints_total", "total_keypoints", "total_rois"):
+            value = item.get(key)
+            if isinstance(value, (int, float)):
+                total += int(value)
+                found = True
+                break
     return total if found else None
 
 
@@ -646,6 +651,33 @@ def _format_time(value: Optional[str]) -> str:
         return value
 
 
+_RUN_ID_HASH_RE = re.compile(r"^[0-9a-f]{8}$")
+_RUN_ID_STAMP_RE = re.compile(r"^\d{8}-\d{6}$")
+_RUN_ID_VER_RE = re.compile(r"^v\d{3,}$")
+
+
+def _run_id_style(run_id: Optional[str]) -> str:
+    text = str(run_id or "").strip()
+    if not text:
+        return "legacy"
+    parts = text.split("_")
+    if len(parts) < 7:
+        return "legacy"
+    hash_token = parts[-1]
+    stamp_token = parts[-2]
+    task_token = parts[-3]
+    version_token = parts[-4]
+    if task_token not in {"detect", "pose"}:
+        return "legacy"
+    if _RUN_ID_HASH_RE.fullmatch(hash_token) is None:
+        return "legacy"
+    if _RUN_ID_STAMP_RE.fullmatch(stamp_token) is None:
+        return "legacy"
+    if _RUN_ID_VER_RE.fullmatch(version_token) is None:
+        return "legacy"
+    return "contract"
+
+
 def _dataset_ids_for_set(registry: Registry, set_id: Optional[str]) -> Optional[List[str]]:
     if not set_id:
         return None
@@ -856,6 +888,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if show_models:
             table = Table(title="Training Runs / Models", show_lines=False)
             table.add_column("Run ID", style="cyan")
+            table.add_column("ID Style")
             table.add_column("Set ID")
             table.add_column("Name", style="magenta")
             table.add_column("Status")
@@ -880,6 +913,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     status = "[chartreuse1]success[/chartreuse1]"
                 table.add_row(
                     run_id,
+                    _run_id_style(row.run_id),
                     row.set_id or "—",
                     row.set_name or "—",
                     status,
@@ -1053,6 +1087,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if show_models:
             for row in model_rows:
                 print(row.run_id)
+                print(f"  id_style: {_run_id_style(row.run_id)}")
                 print(f"  set_id: {row.set_id or '—'}")
                 print(f"  name: {row.set_name or '—'}")
                 print(f"  status: {row.run_status or '—'}")

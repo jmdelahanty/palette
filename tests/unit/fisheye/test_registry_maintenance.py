@@ -20,6 +20,16 @@ from fisheye.registry.maintenance import (
     _delete_training_run_ids,
     _delete_dataset_ids,
     _is_nested_zarr_subpath,
+    _normalize_set_ids,
+    _collect_set_delete_candidates,
+    _collect_run_ids_for_set_ids,
+    _collect_set_artifact_paths,
+    _build_file_delete_plan,
+    _collect_run_artifact_paths,
+    _delete_paths,
+    _is_safe_artifact_path,
+    _normalize_run_ids,
+    _resolve_existing_run_ids,
     _normalize_status_values,
 )
 
@@ -191,6 +201,167 @@ def test_collect_and_delete_failed_training_runs(tmp_path: Path) -> None:
     ).fetchall()
     assert [row["run_id"] for row in export_rows] == ["run_success"]
     registry.close()
+
+
+def test_normalize_run_ids_supports_repeat_and_comma_input() -> None:
+    assert _normalize_run_ids(["run_a, run_b", "run_c", "run_b"]) == ("run_a", "run_b", "run_c")
+    assert _normalize_run_ids(None) == ()
+
+
+def test_resolve_existing_run_ids_splits_existing_and_missing(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.record_training_run(
+        run_id="run_exists",
+        set_id="set_a",
+        config_path=None,
+        manifest_path=None,
+        skeleton_id=None,
+        model_path=None,
+        metrics_path=None,
+        status="success",
+    )
+    existing, missing = _resolve_existing_run_ids(registry, ["run_exists", "run_missing"])
+    assert existing == ["run_exists"]
+    assert missing == ["run_missing"]
+    registry.close()
+
+
+def test_normalize_set_ids_supports_repeat_and_comma_input() -> None:
+    assert _normalize_set_ids(["set_a, set_b", "set_c", "set_b"]) == ("set_a", "set_b", "set_c")
+    assert _normalize_set_ids(None) == ()
+
+
+def test_collect_set_delete_candidates_and_linked_runs(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_training_set(
+        set_id="set_empty",
+        name="empty",
+        query_filter=None,
+        dataset_ids=[],
+    )
+    registry.upsert_training_set(
+        set_id="set_linked",
+        name="linked",
+        query_filter=None,
+        dataset_ids=[],
+    )
+    registry.record_training_run(
+        run_id="run_1",
+        set_id="set_linked",
+        config_path=None,
+        manifest_path=None,
+        skeleton_id=None,
+        model_path=None,
+        metrics_path=None,
+        status="success",
+    )
+    registry.record_training_run(
+        run_id="run_2",
+        set_id="set_linked",
+        config_path=None,
+        manifest_path=None,
+        skeleton_id=None,
+        model_path=None,
+        metrics_path=None,
+        status="failed",
+    )
+
+    candidates = _collect_set_delete_candidates(registry, ["set_empty", "set_linked", "set_missing"])
+    by_id = {candidate.set_id: candidate for candidate in candidates}
+    assert by_id["set_empty"].exists is True
+    assert by_id["set_empty"].run_count == 0
+    assert by_id["set_linked"].exists is True
+    assert by_id["set_linked"].run_count == 2
+    assert by_id["set_missing"].exists is False
+    assert by_id["set_missing"].run_count == 0
+
+    run_ids = _collect_run_ids_for_set_ids(registry, ["set_linked"])
+    assert run_ids == ["run_2", "run_1"]
+    registry.close()
+
+
+def test_is_safe_artifact_path_blocks_recordings_and_outside(tmp_path: Path) -> None:
+    root = tmp_path / "training"
+    root.mkdir()
+    safe_path = (root / "set_a" / "file.txt").resolve()
+    safe_path.parent.mkdir(parents=True)
+    safe_path.write_text("x", encoding="utf-8")
+    ok, reason = _is_safe_artifact_path(safe_path, [root.resolve()])
+    assert ok is True
+    assert reason == "ok"
+
+    outside_path = (tmp_path / "other" / "file.txt").resolve()
+    outside_path.parent.mkdir(parents=True)
+    outside_path.write_text("y", encoding="utf-8")
+    ok, reason = _is_safe_artifact_path(outside_path, [root.resolve()])
+    assert ok is False
+    assert reason == "outside_training_artifact_roots"
+
+    recordings_path = Path("/nvme1/recordings/example.zarr")
+    ok, reason = _is_safe_artifact_path(recordings_path, [Path("/nvme1").resolve()])
+    assert ok is False
+    assert reason == "recordings_path_blocked"
+
+
+def test_collect_run_artifact_paths_and_delete_plan(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    run_id = "run_cleanup"
+    run_dir = tmp_path / "models" / run_id
+    weights_dir = run_dir / "weights"
+    weights_dir.mkdir(parents=True)
+    model_path = weights_dir / "best.pt"
+    metrics_path = run_dir / "results.csv"
+    onnx_path = run_dir / "exports" / "onnx" / f"{run_id}.onnx"
+    onnx_path.parent.mkdir(parents=True)
+    model_path.write_text("model", encoding="utf-8")
+    metrics_path.write_text("metrics", encoding="utf-8")
+    onnx_path.write_text("onnx", encoding="utf-8")
+
+    registry.record_training_run(
+        run_id=run_id,
+        set_id="set_a",
+        config_path=None,
+        manifest_path=None,
+        skeleton_id=None,
+        model_path=model_path,
+        metrics_path=metrics_path,
+        status="success",
+    )
+    registry.record_onnx_model(
+        run_id=run_id,
+        set_id="set_a",
+        skeleton_id=None,
+        detection_model_run_id=run_id,
+        path=onnx_path,
+        sha256=None,
+        manifest_path=None,
+        manifest_sha256=None,
+        metadata=None,
+    )
+
+    candidates = _collect_run_artifact_paths(registry, [run_id])
+    assert run_dir.resolve() in candidates
+    plan = _build_file_delete_plan(candidates, artifact_roots=[(tmp_path / "models").resolve()])
+    assert run_dir.resolve() in plan.existing_paths
+    assert plan.existing_bytes > 0
+
+    deleted = _delete_paths(plan.existing_paths, dry_run=False)
+    assert deleted >= 1
+    assert not run_dir.exists()
+    registry.close()
+
+
+def test_collect_set_artifact_paths_includes_model_task_subdirs(tmp_path: Path) -> None:
+    roots = [
+        (tmp_path / "datasets").resolve(),
+        (tmp_path / "models").resolve(),
+    ]
+    set_id = "detect_cedar_shadow_v005"
+    paths = _collect_set_artifact_paths([set_id], roots)
+    path_set = {path.resolve() for path in paths}
+    assert (roots[0] / set_id).resolve() in path_set
+    assert (roots[1] / "detect" / set_id).resolve() in path_set
+    assert (roots[1] / "pose" / set_id).resolve() in path_set
 
 
 def test_collect_and_delete_empty_training_sets(tmp_path: Path) -> None:

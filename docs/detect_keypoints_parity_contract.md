@@ -79,6 +79,34 @@ Default model output roots:
 - detect: `/nvme1/models/detect/<set_id>/<run_id>/...`
 - pose: `/nvme1/models/pose/<set_id>/<run_id>/...`
 
+## Run ID Naming Contract
+
+Default `run_id` generation must be shared between detect and pose (implemented in `fisheye.training.training_naming_shared`).
+
+Canonical default pattern:
+
+- `<rig>_<dish>_<canvas>_<version>_<task>_<timestamp>_<hash8>`
+
+Field rules:
+
+- `rig`: manifest/query hint (`rig_id`) when available, else `unknown_rig`.
+- `dish`: manifest/query hint (`dish_design`) when available, else `unknown_dish`.
+- `canvas`: manifest/provenance hint when available, else `unknown_canvas`.
+- `version`: derived from `set_id`/set slug suffix (`_v###`), else `v001`.
+- `task`: `detect` or `pose`.
+- `timestamp`: `YYYYMMDD-HHMMSS`.
+- `hash8`: first 8 chars of `manifest_sha256` when available; otherwise deterministic fallback hash.
+
+Examples:
+
+- detect: `omnifin0_cedar_shadow_defaultscreen_v007_detect_20260206-235656_25f3fbcb`
+- pose: `omnifin0_cedar_shadow_defaultscreen_v007_pose_20260208-030800_505915ab`
+
+Notes:
+
+- `--run-name` still overrides default generation.
+- Existing historical run IDs remain valid; this contract applies to new default-generated runs.
+
 ## Registry Lifecycle Contract
 
 `training_runs.status` semantics must match between tasks:

@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import shutil
 import sys
 import numpy as np
@@ -799,23 +800,36 @@ def _load_manifest_set_id(manifest_path: Optional[str]) -> Optional[str]:
 def _load_manifest_run_hints(manifest_path: Optional[str]) -> Dict[str, Optional[str]]:
     hints: Dict[str, Optional[str]] = {
         "set_id": None,
+        "set_slug": None,
+        "manifest_sha256": None,
+        "rig_name": None,
         "dish_design": None,
         "canvas_name": None,
         "task": None,
     }
     if not manifest_path:
         return hints
+    manifest_raw = None
     try:
-        payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        manifest_raw = Path(manifest_path).read_text(encoding="utf-8")
+        payload = json.loads(manifest_raw)
     except Exception:
         return hints
 
     if not isinstance(payload, dict):
         return hints
 
+    if manifest_raw is not None:
+        try:
+            hints["manifest_sha256"] = hashlib.sha256(manifest_raw.encode("utf-8")).hexdigest()
+        except Exception:
+            pass
+
     set_id = payload.get("set_id")
     if isinstance(set_id, str) and set_id.strip():
-        hints["set_id"] = set_id.strip()
+        cleaned_set_id = set_id.strip()
+        hints["set_id"] = cleaned_set_id
+        hints["set_slug"] = _strip_manifest_suffixes(cleaned_set_id)
 
     query_filter = payload.get("query_filter")
     if not isinstance(query_filter, dict):
@@ -844,6 +858,11 @@ def _load_manifest_run_hints(manifest_path: Optional[str]) -> Dict[str, Optional
         query_filter.get("dish_design")
         or first_dataset.get("dish_design")
         or arena.get("dish_design")
+    )
+    hints["rig_name"] = (
+        query_filter.get("rig_id")
+        or first_dataset.get("rig_id")
+        or rig_info.get("rig_id")
     )
     task = payload.get("task")
     if isinstance(task, str) and task.strip():
@@ -1037,6 +1056,9 @@ def main(args) -> int:
             dataset_weights=full_config.dataset_weights,
             split_ratio=default_split
         )
+        # Seed schema from config so registry in_progress rows can carry skeleton_id
+        # before dataset metadata is loaded.
+        pose_schema = _infer_pose_schema(tuple(full_config.kpt_shape), {})
         console.print(f"[bold green]✓ Loaded configuration:[/bold green] {args.config_path}\n")
     except Exception as e:
         console.print(f"[bold red]✗ Error loading config:[/bold red] {e}")
@@ -1205,6 +1227,28 @@ def main(args) -> int:
             name=effective_run_name,
             **training_params
         )
+    except KeyboardInterrupt as e:
+        console.print("\n[bold yellow]Training interrupted by user (Ctrl-C).[/bold yellow]")
+        if args.log_registry:
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=registry_run_id,
+                set_id=effective_set_id,
+                config_path=config_path,
+                manifest_path=manifest_path,
+                model_path=None,
+                metrics_path=None,
+                status="failed",
+                final_metrics={
+                    "stage": "model_train",
+                    "error_type": type(e).__name__,
+                    "error_message": "training_interrupted_by_user",
+                },
+                pose_schema=pose_schema,
+            )
+        return 130
     except Exception as e:
         console.print(f"\n[bold red]✗ Training failed:[/bold red] {e}")
         traceback.print_exc()

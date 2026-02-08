@@ -1077,7 +1077,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         selected_paths=args.zarr_paths,
     )
 
-    if registry is not None and set_id:
+    if registry is not None and should_write_training_set and set_id:
         dataset_ids = [item.dataset_id for item in manifests if item.dataset_id]
         phase_started = perf_counter()
         registry.upsert_training_set(

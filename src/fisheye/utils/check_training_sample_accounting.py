@@ -10,6 +10,8 @@ from typing import Any, Dict
 
 import numpy as np
 import zarr
+from rich.console import Console
+from rich.table import Table
 
 from fisheye.training.zarr_yolo_dataset_loader import GlobalIndexManager, ZarrDatasetConfig
 
@@ -123,33 +125,34 @@ def main() -> int:
     train_counts = _count_by_path(train_indices)
     val_counts = _count_by_path(val_indices)
 
+    console = Console()
     task = str(cfg.task).lower()
-    print(f"Task: {task}")
-    print(f"Sampling strategy: {cfg.sampling_strategy.value}")
-    print(f"Datasets: {len(manager.metadata_list)}")
-    print(f"Global sampled indices: {len(manager.global_indices)}")
-    print(f"Split counts: train={len(train_indices)} val={len(val_indices)}")
-    print()
+    summary_table = Table(title="Training Sample Accounting", title_style="bold magenta")
+    summary_table.add_column("Field", style="cyan")
+    summary_table.add_column("Value", style="yellow")
+    summary_table.add_row("Task", task)
+    summary_table.add_row("Sampling strategy", str(cfg.sampling_strategy.value))
+    summary_table.add_row("Datasets", str(len(manager.metadata_list)))
+    summary_table.add_row("Global sampled indices", str(len(manager.global_indices)))
+    summary_table.add_row("Split counts", f"train={len(train_indices)} val={len(val_indices)}")
+    console.print(summary_table)
 
-    header = [
-        "dataset",
-        "requested_source",
-        "selected_keypoint_run",
-        "row_gate_policy",
-        "row_gate_applied",
-        "total_frames",
-        "keypoint_rows",
-        "keypoint_success_true",
-        "bbox_valid",
-        "source_real",
-        "pose_success",
-        "final_valid",
-        "sampled",
-        "train",
-        "val",
-        "sampled/final_valid",
-    ]
-    print("\t".join(header))
+    details_table = Table(title="Per-Dataset Accounting", title_style="bold magenta")
+    details_table.add_column("Dataset", style="cyan")
+    details_table.add_column("Source")
+    details_table.add_column("Keypoint Run")
+    details_table.add_column("Gate Policy")
+    details_table.add_column("Gate", justify="right")
+    details_table.add_column("Frames", justify="right")
+    details_table.add_column("KP Rows", justify="right")
+    details_table.add_column("BBox Valid", justify="right")
+    details_table.add_column("Source Real", justify="right")
+    details_table.add_column("Pose Success", justify="right")
+    details_table.add_column("Final Valid", justify="right")
+    details_table.add_column("Sampled", justify="right")
+    details_table.add_column("Train", justify="right")
+    details_table.add_column("Val", justify="right")
+    details_table.add_column("Sampled/Final", justify="right")
 
     total_keypoint_rows = 0
     total_final_valid = 0
@@ -174,15 +177,14 @@ def main() -> int:
         total_train += train_n
         total_val += val_n
 
-        row = [
-            metadata.name,
+        details_table.add_row(
+            str(metadata.name),
             str(metadata.requested_source_type),
             str(metadata.keypoint_run or "-"),
             str(stats.get("row_gate_policy") or "-"),
             str(int(bool(stats.get("row_gate_applied", False)))),
             str(metadata.total_frames),
             str(stats["keypoint_rows"] if stats["keypoint_rows"] is not None else "-"),
-            str(stats["keypoint_success_true"] if stats["keypoint_success_true"] is not None else "-"),
             str(stats["bbox_valid"]),
             str(stats["source_real"]),
             str(stats["pose_success"] if stats["pose_success"] is not None else "-"),
@@ -191,18 +193,23 @@ def main() -> int:
             str(train_n),
             str(val_n),
             f"{_safe_ratio(sampled, final_valid):.3f}" if final_valid > 0 else "-",
-        ]
-        print("\t".join(row))
+        )
 
-    print()
-    print("Totals")
-    print(f"  keypoint_rows={total_keypoint_rows}")
-    print(f"  final_valid={total_final_valid}")
-    print(f"  sampled={total_sampled}")
-    print(f"  train={total_train}")
-    print(f"  val={total_val}")
-    if total_final_valid > 0:
-        print(f"  sampled/final_valid={_safe_ratio(total_sampled, total_final_valid):.3f}")
+    console.print(details_table)
+
+    totals_table = Table(title="Totals", title_style="bold magenta")
+    totals_table.add_column("Metric", style="cyan")
+    totals_table.add_column("Value", style="yellow", justify="right")
+    totals_table.add_row("keypoint_rows", str(total_keypoint_rows))
+    totals_table.add_row("final_valid", str(total_final_valid))
+    totals_table.add_row("sampled", str(total_sampled))
+    totals_table.add_row("train", str(total_train))
+    totals_table.add_row("val", str(total_val))
+    totals_table.add_row(
+        "sampled/final_valid",
+        f"{_safe_ratio(total_sampled, total_final_valid):.3f}" if total_final_valid > 0 else "-",
+    )
+    console.print(totals_table)
     return 0
 
 

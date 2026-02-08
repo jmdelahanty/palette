@@ -457,6 +457,11 @@ def _discover_merge_sources(
         kp_parent = root.get("keypoints_runs")
         if kp_parent is None:
             raise ValueError(f"{source_zarr}: missing keypoints_runs group.")
+        refined_parent_name: Optional[str] = None
+        if "refined_keypoints_runs" in root:
+            refined_parent_name = "refined_keypoints_runs"
+        elif "keypoints_refined_runs" in root:
+            refined_parent_name = "keypoints_refined_runs"
 
         keypoint_run = _as_text(dataset.get("keypoint_run_resolved") or dataset.get("keypoint_run"))
         if not keypoint_run:
@@ -589,6 +594,42 @@ def _discover_merge_sources(
             or f"{_clean_slug(str(dataset.get('name') or source_zarr.stem), 'dataset')}_{ordinal}"
         )
 
+        keypoints_path = f"keypoints_runs/{keypoint_run}/keypoints_roi"
+        success_path = f"keypoints_runs/{keypoint_run}/detection_success"
+        if (
+            str(gate_stats.get("policy") or "").strip().lower() == "refined_usable"
+            and gate_stats.get("refined_run")
+            and refined_parent_name is not None
+        ):
+            refined_run_name = str(gate_stats["refined_run"])
+            refined_group = root[f"{refined_parent_name}/{refined_run_name}"]
+            if "keypoints_roi" in refined_group:
+                refined_keypoints_arr = refined_group["keypoints_roi"]
+                if int(refined_keypoints_arr.shape[0]) != source_sample_count:
+                    raise ValueError(
+                        f"{source_zarr}: refined keypoints/roi row mismatch "
+                        f"({refined_keypoints_arr.shape[0]} != {source_sample_count})."
+                    )
+                keypoints_path = f"{refined_parent_name}/{refined_run_name}/keypoints_roi"
+                dataset_keypoint_shape = tuple(int(v) for v in refined_keypoints_arr.shape[1:])
+                dataset_keypoint_dtype = np.dtype(refined_keypoints_arr.dtype)
+            if "usable_keypoints" in refined_group:
+                refined_success_arr = refined_group["usable_keypoints"]
+                if int(refined_success_arr.shape[0]) != source_sample_count:
+                    raise ValueError(
+                        f"{source_zarr}: refined usable_keypoints/roi row mismatch "
+                        f"({refined_success_arr.shape[0]} != {source_sample_count})."
+                    )
+                success_path = f"{refined_parent_name}/{refined_run_name}/usable_keypoints"
+            elif "refined_success" in refined_group:
+                refined_success_arr = refined_group["refined_success"]
+                if int(refined_success_arr.shape[0]) != source_sample_count:
+                    raise ValueError(
+                        f"{source_zarr}: refined refined_success/roi row mismatch "
+                        f"({refined_success_arr.shape[0]} != {source_sample_count})."
+                    )
+                success_path = f"{refined_parent_name}/{refined_run_name}/refined_success"
+
         specs.append(
             PoseMergeSourceSpec(
                 ordinal=ordinal,
@@ -613,8 +654,8 @@ def _discover_merge_sources(
                 ),
                 roi_path=f"crop_runs/{source_crop_run}/roi_images",
                 bbox_path=f"crop_runs/{source_crop_run}/bbox_norm_coords",
-                keypoints_path=f"keypoints_runs/{keypoint_run}/keypoints_roi",
-                success_path=f"keypoints_runs/{keypoint_run}/detection_success",
+                keypoints_path=keypoints_path,
+                success_path=success_path,
                 frame_indices_path=frame_indices_path,
                 detection_source_path=detection_source_path,
                 roi_shape=dataset_roi_shape,
@@ -651,6 +692,32 @@ def _ensure_writable_destination(path: Path, *, overwrite: bool) -> None:
         else:
             path.unlink()
     path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _pose_bbox_from_keypoints_px(keypoints_px: np.ndarray, *, roi_h: int, roi_w: int) -> np.ndarray:
+    """Compute pose-training bbox (xywhn) from keypoints in ROI pixel coordinates."""
+    if keypoints_px.ndim != 3 or int(keypoints_px.shape[2]) != 2:
+        raise ValueError(f"keypoints_px must have shape (N,K,2), got {tuple(keypoints_px.shape)}.")
+    if roi_h <= 0 or roi_w <= 0:
+        raise ValueError(f"Invalid ROI dimensions for bbox normalization: h={roi_h}, w={roi_w}.")
+
+    keypoints_norm = keypoints_px.astype(np.float32, copy=True)
+    keypoints_norm[..., 0] /= float(roi_w)
+    keypoints_norm[..., 1] /= float(roi_h)
+    keypoints_norm = np.clip(keypoints_norm, 0.0, 1.0)
+
+    finite_mask = np.isfinite(keypoints_norm).all(axis=(1, 2))
+    if not np.all(finite_mask):
+        bad = int(np.sum(~finite_mask))
+        raise ValueError(f"Cannot compute pose bbox: {bad} row(s) contain non-finite keypoints.")
+
+    min_xy = np.nanmin(keypoints_norm, axis=1)
+    max_xy = np.nanmax(keypoints_norm, axis=1)
+    span = max_xy - min_xy
+    margin = span * 0.5
+    center = np.clip((min_xy + max_xy) / 2.0, 0.0, 1.0)
+    bbox_wh = np.clip(span + margin, 1e-6, 1.0)
+    return np.concatenate([center, bbox_wh], axis=1).astype(np.float32)
 
 
 def _export_merged(
@@ -718,6 +785,13 @@ def _export_merged(
         chunks=bbox_chunks,
         overwrite=True,
     )
+    crop_bbox_dest = crop_group.require_array(
+        "crop_bbox_norm_coords",
+        shape=(total_samples, 4),
+        dtype=np.float32,
+        chunks=bbox_chunks,
+        overwrite=True,
+    )
     frame_idx_dest = crop_group.require_array(
         "frame_indices",
         shape=(total_samples,),
@@ -772,6 +846,8 @@ def _export_merged(
         if copy_progress is not None and copy_task_id is not None:
             copy_progress.advance(copy_task_id, count)
 
+    roi_h = int(roi_shape[0])
+    roi_w = int(roi_shape[1])
     total_successful = 0
     detection_source_counts: Dict[str, int] = {}
     offset = 0
@@ -786,9 +862,10 @@ def _export_merged(
             bbox_all = np.asarray(root[spec.bbox_path][:], dtype=np.float32)
             keypoints_all = np.asarray(root[spec.keypoints_path][:], dtype=keypoint_dtype)
             success_all = np.asarray(root[spec.success_path][:], dtype=np.bool_)
-            bbox = bbox_all[selected]
             keypoints = keypoints_all[selected]
             success = success_all[selected]
+            crop_bbox = bbox_all[selected]
+            pose_bbox = _pose_bbox_from_keypoints_px(keypoints, roi_h=roi_h, roi_w=roi_w)
             local_total = int(spec.sample_count)
 
             if spec.frame_indices_path:
@@ -823,7 +900,10 @@ def _export_merged(
             )
             keypoints_dest[offset : offset + local_total] = keypoints
             _advance_copy(local_total)
-            bbox_dest[offset : offset + local_total] = bbox
+            # Canonical pose bbox for training semantics.
+            bbox_dest[offset : offset + local_total] = pose_bbox
+            # Crop-stage bbox provenance for audit/debug.
+            crop_bbox_dest[offset : offset + local_total] = crop_bbox
             success_dest[offset : offset + local_total] = success
             frame_idx_dest[offset : offset + local_total] = np.arange(offset, offset + local_total, dtype=np.int64)
             det_source_dest[offset : offset + local_total] = detection_source
@@ -885,6 +965,8 @@ def _export_merged(
             "n_real_detections": int(np.sum(det_source_dest[:] == 0)),
             "n_interpolated_detections": int(np.sum(det_source_dest[:] != 0)),
             "source_count": int(len(source_specs)),
+            "bbox_norm_coords_semantics": "pose_from_keypoints_xywhn",
+            "crop_bbox_norm_coords_semantics": "crop_stage_provenance_xywhn",
         }
     )
     keypoint_group.attrs.update(
@@ -1008,7 +1090,13 @@ def validate_merged_keypoint_training_zarr(
 
     crop = crop_parent[str(crop_latest)]
     kp = keypoint_parent[str(keypoint_latest)]
-    required_crop_arrays = ("roi_images", "bbox_norm_coords", "frame_indices", "detection_source")
+    required_crop_arrays = (
+        "roi_images",
+        "bbox_norm_coords",
+        "crop_bbox_norm_coords",
+        "frame_indices",
+        "detection_source",
+    )
     for name in required_crop_arrays:
         if name not in crop:
             errors.append(f"missing required array crop_runs/{crop_latest}/{name}.")
@@ -1021,6 +1109,7 @@ def validate_merged_keypoint_training_zarr(
 
     roi = np.asarray(crop["roi_images"][:])
     bbox = np.asarray(crop["bbox_norm_coords"][:])
+    crop_bbox = np.asarray(crop["crop_bbox_norm_coords"][:])
     frame_indices = np.asarray(crop["frame_indices"][:])
     detection_source = np.asarray(crop["detection_source"][:])
     keypoints = np.asarray(kp["keypoints_roi"][:])
@@ -1050,6 +1139,10 @@ def validate_merged_keypoint_training_zarr(
         errors.append(f"bbox_norm_coords must have shape (N,4), got {tuple(bbox.shape)}.")
     if bbox.ndim == 2 and int(bbox.shape[0]) != total_samples:
         errors.append(f"bbox_norm_coords length mismatch ({bbox.shape[0]} != {total_samples}).")
+    if crop_bbox.ndim != 2 or int(crop_bbox.shape[1]) != 4:
+        errors.append(f"crop_bbox_norm_coords must have shape (N,4), got {tuple(crop_bbox.shape)}.")
+    if crop_bbox.ndim == 2 and int(crop_bbox.shape[0]) != total_samples:
+        errors.append(f"crop_bbox_norm_coords length mismatch ({crop_bbox.shape[0]} != {total_samples}).")
 
     if keypoints.ndim != 3 or int(keypoints.shape[2]) != 2:
         errors.append(f"keypoints_roi must have shape (N,K,2), got {tuple(keypoints.shape)}.")

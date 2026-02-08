@@ -12,6 +12,8 @@ from fisheye.utils.check_training_registry import (
     _keypoint_exclusion_reason,
     _metrics_summary_from_json,
     _onnx_plugin_details,
+    _run_id_style,
+    _sum_manifest_rois,
     _status_with_details,
     _summarize_keypoint_quality_rows,
 )
@@ -243,3 +245,27 @@ def test_keypoint_exclusion_reason_precedence() -> None:
         )
         == "missing rate"
     )
+
+
+def test_run_id_style_contract_and_legacy() -> None:
+    assert (
+        _run_id_style("omnifin0_cedar_shadow_v007_detect_20260206-235656_25f3fbcb")
+        == "contract"
+    )
+    assert _run_id_style("cedar_shadow_pose_20260208-030800_505915") == "legacy"
+
+
+def test_sum_manifest_rois_supports_detect_and_pose_fields(tmp_path: Path) -> None:
+    detect_manifest = tmp_path / "detect.manifest.json"
+    detect_manifest.write_text(
+        '{"datasets":[{"total_bboxes":10},{"total_bboxes":5}]}',
+        encoding="utf-8",
+    )
+    assert _sum_manifest_rois(str(detect_manifest)) == 15
+
+    pose_manifest = tmp_path / "pose.manifest.json"
+    pose_manifest.write_text(
+        '{"datasets":[{"keypoints_total":7},{"keypoints_total":4}]}',
+        encoding="utf-8",
+    )
+    assert _sum_manifest_rois(str(pose_manifest)) == 11

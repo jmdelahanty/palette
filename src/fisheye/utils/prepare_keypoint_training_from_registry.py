@@ -1298,6 +1298,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 "zarr_path": str(zarr_path),
                 "dataset_id": row["dataset_id"],
                 "session_uuid": row["session_uuid"],
+                "rig_id": row["rig_id"],
                 "dish_design": row["dish_design"],
                 "canvas_name": row["canvas_name"],
                 "source_type_requested": args.source_type,

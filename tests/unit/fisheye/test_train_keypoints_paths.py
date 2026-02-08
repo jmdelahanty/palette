@@ -164,13 +164,15 @@ def test_snapshot_training_inputs_copies_config_manifest_and_invocation(tmp_path
 def test_build_default_run_name_uses_manifest_hints() -> None:
     run_name = _build_default_run_name(
         manifest_hints={
+            "rig_name": "omnifin0",
             "dish_design": "cedar dish",
             "canvas_name": "Feeding",
             "task": "pose",
             "set_id": "pose_cedar_v001",
+            "manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         },
         task_fallback="pose",
         timestamp="20260206-200000",
         pid=999,
     )
-    assert run_name == "cedar_dish_feeding_pose_20260206-200000_999"
+    assert run_name == "omnifin0_cedar_dish_feeding_v001_pose_20260206-200000_01234567"

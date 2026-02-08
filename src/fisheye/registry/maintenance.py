@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from pathlib import PurePosixPath
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .db import (
     Registry,
@@ -46,6 +49,21 @@ class IntegrityIssue:
     detail: str
 
 
+@dataclass(frozen=True)
+class SetDeleteCandidate:
+    set_id: str
+    exists: bool
+    run_count: int
+
+
+@dataclass(frozen=True)
+class FileDeletePlan:
+    eligible_paths: Tuple[Path, ...]
+    skipped_paths: Tuple[Tuple[Path, str], ...]
+    existing_paths: Tuple[Path, ...]
+    existing_bytes: int
+
+
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Registry maintenance (reconcile, prune invalid rows, optional VACUUM).",
@@ -73,6 +91,38 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         "--prune-failed-runs",
         action="store_true",
         help="Prune training_runs rows with failed statuses.",
+    )
+    parser.add_argument(
+        "--delete-run-id",
+        action="append",
+        help=(
+            "Delete a specific training run_id (repeatable or comma-separated). "
+            "Cascades to dependent model/export rows."
+        ),
+    )
+    parser.add_argument(
+        "--delete-set-id",
+        action="append",
+        help=(
+            "Delete a specific training set_id (repeatable or comma-separated). "
+            "By default refuses sets that still have linked runs."
+        ),
+    )
+    parser.add_argument(
+        "--delete-set-with-runs",
+        action="store_true",
+        help=(
+            "Allow --delete-set-id to also delete linked training_runs first "
+            "(and their cascaded model/export rows)."
+        ),
+    )
+    parser.add_argument(
+        "--delete-files",
+        action="store_true",
+        help=(
+            "Also delete on-disk training artifacts for explicit --delete-run-id/--delete-set-id targets. "
+            "Never deletes source recordings."
+        ),
     )
     parser.add_argument(
         "--prune-empty-sets",
@@ -249,6 +299,270 @@ def _normalize_status_values(values: Optional[Sequence[str]]) -> tuple[str, ...]
     if not normalized:
         normalized.add("failed")
     return tuple(sorted(normalized))
+
+
+def _normalize_run_ids(values: Optional[Sequence[str]]) -> tuple[str, ...]:
+    normalized: set[str] = set()
+    for value in values or ():
+        for token in str(value).split(","):
+            run_id = token.strip()
+            if run_id:
+                normalized.add(run_id)
+    return tuple(sorted(normalized))
+
+
+def _resolve_existing_run_ids(registry: Registry, run_ids: Sequence[str]) -> tuple[List[str], List[str]]:
+    existing: List[str] = []
+    missing: List[str] = []
+    for run_id in run_ids:
+        row = registry.conn.execute(
+            "SELECT 1 FROM training_runs WHERE run_id = ? LIMIT 1;",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            missing.append(run_id)
+        else:
+            existing.append(run_id)
+    return existing, missing
+
+
+def _normalize_set_ids(values: Optional[Sequence[str]]) -> tuple[str, ...]:
+    normalized: set[str] = set()
+    for value in values or ():
+        for token in str(value).split(","):
+            set_id = token.strip()
+            if set_id:
+                normalized.add(set_id)
+    return tuple(sorted(normalized))
+
+
+def _resolve_training_artifact_roots() -> List[Path]:
+    roots: List[Path] = []
+    env_dataset_root = os.environ.get("PALETTE_TRAINING_DATASETS_ROOT")
+    if env_dataset_root:
+        roots.append(Path(env_dataset_root).expanduser())
+    roots.append(Path("/nvme1/training/datasets"))
+    roots.append(Path("/nvme1/models"))
+    roots.append((Path.cwd() / "datasets"))
+    resolved: List[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            normalized = root.resolve()
+        except Exception:
+            normalized = root.absolute()
+        key = str(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(normalized)
+    return resolved
+
+
+def _path_under_any_root(path: Path, roots: Sequence[Path]) -> bool:
+    for root in roots:
+        if path == root:
+            return True
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _looks_like_recordings_path(path: Path) -> bool:
+    normalized = PurePosixPath(str(path).replace("\\", "/").lower())
+    parts = normalized.parts
+    return "recordings" in parts or "/nvme1/recordings" in str(normalized)
+
+
+def _is_safe_artifact_path(path: Path, roots: Sequence[Path]) -> tuple[bool, str]:
+    if _looks_like_recordings_path(path):
+        return False, "recordings_path_blocked"
+    if not _path_under_any_root(path, roots):
+        return False, "outside_training_artifact_roots"
+    return True, "ok"
+
+
+def _coerce_path(path_text: Optional[str]) -> Optional[Path]:
+    if not path_text:
+        return None
+    text = str(path_text).strip()
+    if not text:
+        return None
+    candidate = Path(text).expanduser()
+    try:
+        return candidate.resolve()
+    except Exception:
+        return candidate.absolute()
+
+
+def _infer_run_dir_for_run_id(path: Path, run_id: str) -> Optional[Path]:
+    current = path
+    for ancestor in [current] + list(current.parents):
+        if ancestor.name == run_id:
+            return ancestor
+    return None
+
+
+def _collect_run_artifact_paths(registry: Registry, run_ids: Sequence[str]) -> List[Path]:
+    paths: set[Path] = set()
+    for run_id in run_ids:
+        rows = registry.conn.execute(
+            """
+            SELECT
+                tr.run_id,
+                tr.config_path AS tr_config_path,
+                tr.manifest_path AS tr_manifest_path,
+                tr.model_path AS tr_model_path,
+                tr.metrics_path AS tr_metrics_path,
+                dm.model_path AS dm_model_path,
+                dm.metrics_path AS dm_metrics_path,
+                om.path AS onnx_path,
+                om.manifest_path AS onnx_manifest_path,
+                tm.path AS trt_path,
+                tm.manifest_path AS trt_manifest_path,
+                me.path AS legacy_export_path,
+                me.manifest_path AS legacy_export_manifest_path
+            FROM training_runs tr
+            LEFT JOIN detection_models dm ON dm.run_id = tr.run_id
+            LEFT JOIN onnx_models om ON om.run_id = tr.run_id
+            LEFT JOIN tensorrt_models tm ON tm.run_id = tr.run_id
+            LEFT JOIN model_exports me ON me.run_id = tr.run_id
+            WHERE tr.run_id = ?;
+            """,
+            (run_id,),
+        ).fetchall()
+        for row in rows:
+            for key in (
+                "tr_config_path",
+                "tr_manifest_path",
+                "tr_model_path",
+                "tr_metrics_path",
+                "dm_model_path",
+                "dm_metrics_path",
+                "onnx_path",
+                "onnx_manifest_path",
+                "trt_path",
+                "trt_manifest_path",
+                "legacy_export_path",
+                "legacy_export_manifest_path",
+            ):
+                candidate = _coerce_path(row[key])
+                if candidate is None:
+                    continue
+                paths.add(candidate)
+                inferred_run_dir = _infer_run_dir_for_run_id(candidate, run_id)
+                if inferred_run_dir is not None:
+                    paths.add(inferred_run_dir)
+    return sorted(paths)
+
+
+def _collect_set_artifact_paths(set_ids: Sequence[str], artifact_roots: Sequence[Path]) -> List[Path]:
+    paths: List[Path] = []
+    for set_id in set_ids:
+        for root in artifact_roots:
+            paths.append(root / set_id)
+            # Model artifacts are namespaced by task under /.../models/{detect,pose}/<set_id>.
+            paths.append(root / "detect" / set_id)
+            paths.append(root / "pose" / set_id)
+    return paths
+
+
+def _path_size_bytes(path: Path) -> int:
+    try:
+        if path.is_file():
+            return int(path.stat().st_size)
+        if path.is_dir():
+            total = 0
+            for sub in path.rglob("*"):
+                if sub.is_file():
+                    total += int(sub.stat().st_size)
+            return total
+    except Exception:
+        return 0
+    return 0
+
+
+def _build_file_delete_plan(paths: Sequence[Path], *, artifact_roots: Sequence[Path]) -> FileDeletePlan:
+    eligible: List[Path] = []
+    skipped: List[Tuple[Path, str]] = []
+    seen: set[Path] = set()
+    for candidate in paths:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        ok, reason = _is_safe_artifact_path(candidate, artifact_roots)
+        if not ok:
+            skipped.append((candidate, reason))
+            continue
+        eligible.append(candidate)
+    existing = [path for path in eligible if path.exists()]
+    existing_sorted = sorted(existing, key=lambda path: len(path.parts), reverse=True)
+    bytes_total = sum(_path_size_bytes(path) for path in existing_sorted)
+    return FileDeletePlan(
+        eligible_paths=tuple(sorted(eligible)),
+        skipped_paths=tuple(sorted(skipped, key=lambda item: str(item[0]))),
+        existing_paths=tuple(existing_sorted),
+        existing_bytes=int(bytes_total),
+    )
+
+
+def _delete_paths(paths: Sequence[Path], *, dry_run: bool) -> int:
+    if dry_run:
+        return 0
+    deleted = 0
+    for path in paths:
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+                deleted += 1
+            elif path.is_file():
+                path.unlink()
+                deleted += 1
+        except FileNotFoundError:
+            continue
+    return deleted
+
+
+def _collect_set_delete_candidates(registry: Registry, set_ids: Sequence[str]) -> List[SetDeleteCandidate]:
+    candidates: List[SetDeleteCandidate] = []
+    for set_id in set_ids:
+        set_row = registry.conn.execute(
+            "SELECT 1 FROM training_sets WHERE set_id = ? LIMIT 1;",
+            (set_id,),
+        ).fetchone()
+        run_count = int(
+            registry.conn.execute(
+                "SELECT COUNT(*) FROM training_runs WHERE set_id = ?;",
+                (set_id,),
+            ).fetchone()[0]
+        )
+        candidates.append(
+            SetDeleteCandidate(
+                set_id=set_id,
+                exists=set_row is not None,
+                run_count=run_count,
+            )
+        )
+    return candidates
+
+
+def _collect_run_ids_for_set_ids(registry: Registry, set_ids: Sequence[str]) -> List[str]:
+    run_ids: List[str] = []
+    for set_id in set_ids:
+        rows = registry.conn.execute(
+            """
+            SELECT run_id
+            FROM training_runs
+            WHERE set_id = ?
+            ORDER BY created_utc DESC, run_id DESC;
+            """,
+            (set_id,),
+        ).fetchall()
+        run_ids.extend(str(row["run_id"]) for row in rows if row["run_id"] is not None)
+    return run_ids
 
 
 def _collect_failed_run_candidates(
@@ -1133,6 +1447,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     if (
         not args.prune_invalid
         and not args.prune_failed_runs
+        and not args.delete_run_id
+        and not args.delete_set_id
         and not args.prune_empty_sets
         and not args.backfill_model_tables
         and not args.backfill_keypoint_quality
@@ -1143,7 +1459,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.vacuum
     ):
         raise SystemExit(
-            "No action selected. Use --prune-invalid, --prune-failed-runs, "
+            "No action selected. Use --prune-invalid, --prune-failed-runs, --delete-run-id, --delete-set-id, "
             "--prune-empty-sets, --backfill-model-tables, --backfill-keypoint-quality, "
             "--backfill-detect-quality, --refresh-keypoint-quality, --refresh-detect-quality, "
             "--check-integrity, and/or --vacuum."
@@ -1191,6 +1507,170 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             else:
                 deleted = _delete_training_run_ids(registry, run_ids, dry_run=False)
                 print(f"Deleted {deleted} training run row(s) with status in [{status_list}].")
+
+        if args.delete_run_id:
+            requested_run_ids = _normalize_run_ids(args.delete_run_id)
+            existing_run_ids, missing_run_ids = _resolve_existing_run_ids(registry, requested_run_ids)
+            file_plan: Optional[FileDeletePlan] = None
+            if args.delete_files and existing_run_ids:
+                artifact_roots = _resolve_training_artifact_roots()
+                candidate_paths = _collect_run_artifact_paths(registry, existing_run_ids)
+                file_plan = _build_file_delete_plan(candidate_paths, artifact_roots=artifact_roots)
+            print(
+                "Delete run-id request: "
+                f"requested={len(requested_run_ids)} existing={len(existing_run_ids)} missing={len(missing_run_ids)}"
+            )
+            if existing_run_ids:
+                limit = len(existing_run_ids) if args.list_limit == 0 else min(len(existing_run_ids), args.list_limit)
+                print("Target run_ids:")
+                for run_id in existing_run_ids[:limit]:
+                    print(f" - {run_id}")
+                if limit < len(existing_run_ids):
+                    print(
+                        f" ... {len(existing_run_ids) - limit} more run_id(s) omitted "
+                        "(use --list-limit 0 to show all)."
+                    )
+            if missing_run_ids:
+                limit = len(missing_run_ids) if args.list_limit == 0 else min(len(missing_run_ids), args.list_limit)
+                print("Missing run_ids (no-op):")
+                for run_id in missing_run_ids[:limit]:
+                    print(f" - {run_id}")
+                if limit < len(missing_run_ids):
+                    print(
+                        f" ... {len(missing_run_ids) - limit} more run_id(s) omitted "
+                        "(use --list-limit 0 to show all)."
+                    )
+            if args.dry_run:
+                print(f"Dry run: would delete {len(existing_run_ids)} training run row(s) by explicit run_id.")
+            else:
+                deleted = _delete_training_run_ids(registry, existing_run_ids, dry_run=False)
+                print(f"Deleted {deleted} training run row(s) by explicit run_id.")
+            if args.delete_files and file_plan is not None:
+                print(
+                    "File delete plan (run targets): "
+                    f"eligible={len(file_plan.eligible_paths)} "
+                    f"existing={len(file_plan.existing_paths)} "
+                    f"bytes={file_plan.existing_bytes}"
+                )
+                if file_plan.skipped_paths:
+                    limit = len(file_plan.skipped_paths) if args.list_limit == 0 else min(len(file_plan.skipped_paths), args.list_limit)
+                    print("Skipped unsafe paths:")
+                    for path, reason in file_plan.skipped_paths[:limit]:
+                        print(f" - {path} [{reason}]")
+                    if limit < len(file_plan.skipped_paths):
+                        print(
+                            f" ... {len(file_plan.skipped_paths) - limit} more skipped path(s) omitted "
+                            "(use --list-limit 0 to show all)."
+                        )
+                if args.dry_run:
+                    print(f"Dry run: would delete {len(file_plan.existing_paths)} file/dir path(s) for run targets.")
+                else:
+                    deleted_paths = _delete_paths(file_plan.existing_paths, dry_run=False)
+                    print(f"Deleted {deleted_paths} file/dir path(s) for run targets.")
+
+        if args.delete_set_id:
+            requested_set_ids = _normalize_set_ids(args.delete_set_id)
+            candidates = _collect_set_delete_candidates(registry, requested_set_ids)
+            existing = [candidate for candidate in candidates if candidate.exists]
+            missing = [candidate for candidate in candidates if not candidate.exists]
+            blocked = [candidate for candidate in existing if candidate.run_count > 0]
+            safe_sets = [candidate.set_id for candidate in existing if candidate.run_count == 0]
+            file_plan: Optional[FileDeletePlan] = None
+            print(
+                "Delete set-id request: "
+                f"requested={len(requested_set_ids)} "
+                f"existing={len(existing)} "
+                f"missing={len(missing)} "
+                f"blocked_with_runs={len(blocked)}"
+            )
+            if existing:
+                limit = len(existing) if args.list_limit == 0 else min(len(existing), args.list_limit)
+                print("Existing set_ids:")
+                for candidate in existing[:limit]:
+                    print(f" - {candidate.set_id} [linked_runs={candidate.run_count}]")
+                if limit < len(existing):
+                    print(
+                        f" ... {len(existing) - limit} more set_id(s) omitted "
+                        "(use --list-limit 0 to show all)."
+                    )
+            if missing:
+                limit = len(missing) if args.list_limit == 0 else min(len(missing), args.list_limit)
+                print("Missing set_ids (no-op):")
+                for candidate in missing[:limit]:
+                    print(f" - {candidate.set_id}")
+                if limit < len(missing):
+                    print(
+                        f" ... {len(missing) - limit} more set_id(s) omitted "
+                        "(use --list-limit 0 to show all)."
+                    )
+
+            if blocked and not args.delete_set_with_runs:
+                blocked_set_text = ", ".join(candidate.set_id for candidate in blocked)
+                raise SystemExit(
+                    "Refusing --delete-set-id for set(s) with linked runs: "
+                    f"{blocked_set_text}. "
+                    "Re-run with --delete-set-with-runs to delete linked training runs first."
+                )
+
+            delete_run_ids: List[str] = []
+            if args.delete_set_with_runs and blocked:
+                delete_run_ids = _collect_run_ids_for_set_ids(registry, [candidate.set_id for candidate in blocked])
+                print(
+                    "Linked runs targeted due to --delete-set-with-runs: "
+                    f"{len(delete_run_ids)}"
+                )
+                if delete_run_ids:
+                    limit = len(delete_run_ids) if args.list_limit == 0 else min(len(delete_run_ids), args.list_limit)
+                    for run_id in delete_run_ids[:limit]:
+                        print(f" - run {run_id}")
+                    if limit < len(delete_run_ids):
+                        print(
+                            f" ... {len(delete_run_ids) - limit} more run_id(s) omitted "
+                            "(use --list-limit 0 to show all)."
+                        )
+
+            delete_set_ids = safe_sets + [candidate.set_id for candidate in blocked]
+            if args.delete_files and delete_set_ids:
+                artifact_roots = _resolve_training_artifact_roots()
+                candidate_paths = _collect_set_artifact_paths(delete_set_ids, artifact_roots)
+                if delete_run_ids:
+                    candidate_paths.extend(_collect_run_artifact_paths(registry, delete_run_ids))
+                file_plan = _build_file_delete_plan(candidate_paths, artifact_roots=artifact_roots)
+            if args.dry_run:
+                if delete_run_ids:
+                    print(
+                        f"Dry run: would delete {len(delete_run_ids)} linked training run row(s) "
+                        "for requested set_id(s)."
+                    )
+                print(f"Dry run: would delete {len(delete_set_ids)} training set row(s) by explicit set_id.")
+            else:
+                if delete_run_ids:
+                    deleted_runs = _delete_training_run_ids(registry, delete_run_ids, dry_run=False)
+                    print(f"Deleted {deleted_runs} linked training run row(s) for requested set_id(s).")
+                deleted_sets = _delete_training_set_ids(registry, delete_set_ids, dry_run=False)
+                print(f"Deleted {deleted_sets} training set row(s) by explicit set_id.")
+            if args.delete_files and file_plan is not None:
+                print(
+                    "File delete plan (set targets): "
+                    f"eligible={len(file_plan.eligible_paths)} "
+                    f"existing={len(file_plan.existing_paths)} "
+                    f"bytes={file_plan.existing_bytes}"
+                )
+                if file_plan.skipped_paths:
+                    limit = len(file_plan.skipped_paths) if args.list_limit == 0 else min(len(file_plan.skipped_paths), args.list_limit)
+                    print("Skipped unsafe paths:")
+                    for path, reason in file_plan.skipped_paths[:limit]:
+                        print(f" - {path} [{reason}]")
+                    if limit < len(file_plan.skipped_paths):
+                        print(
+                            f" ... {len(file_plan.skipped_paths) - limit} more skipped path(s) omitted "
+                            "(use --list-limit 0 to show all)."
+                        )
+                if args.dry_run:
+                    print(f"Dry run: would delete {len(file_plan.existing_paths)} file/dir path(s) for set targets.")
+                else:
+                    deleted_paths = _delete_paths(file_plan.existing_paths, dry_run=False)
+                    print(f"Deleted {deleted_paths} file/dir path(s) for set targets.")
 
         if args.prune_empty_sets:
             empty_set_candidates = _collect_empty_training_set_candidates(registry)

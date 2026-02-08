@@ -1691,6 +1691,41 @@ def main(args):
             name=effective_run_name,
             **training_params
         )
+    except KeyboardInterrupt as exc:
+        _cleanup_trainer_dataloaders(model, console=console)
+        trainer_obj = getattr(model, "trainer", None)
+        run_dir = None
+        if trainer_obj is not None and getattr(trainer_obj, "save_dir", None):
+            run_dir = Path(trainer_obj.save_dir)
+        input_profile_payload = _write_input_pipeline_profile(
+            profiler=input_profiler,
+            run_dir=run_dir,
+            console=console,
+        )
+        console.print("[bold yellow]Training interrupted by user (Ctrl-C).[/bold yellow]")
+        if args.log_registry:
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=registry_run_id,
+                set_id=effective_set_id,
+                config_path=config_path,
+                manifest_path=manifest_path,
+                model_path=None,
+                metrics_path=None,
+                status="failed",
+                final_metrics={
+                    "stage": "model_train",
+                    "error_type": type(exc).__name__,
+                    "error_message": "training_interrupted_by_user",
+                    "input_pipeline_profile": input_profile_payload,
+                },
+            )
+        _ACTIVE_INPUT_PIPELINE_PROFILER = None
+        DetTrainer.profile_collector = None
+        YoloCompatibleDataLoader.profile_collector = None
+        raise SystemExit(130)
     except Exception as exc:
         _cleanup_trainer_dataloaders(model, console=console)
         trainer_obj = getattr(model, "trainer", None)
@@ -1954,7 +1989,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--nms-conf",
         type=float,
-        default=0.8,
+        default=0.3,
         help="NMS confidence threshold baked into the ONNX export."
     )
     parser.add_argument(
