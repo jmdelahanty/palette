@@ -8,6 +8,12 @@ Key principles:
 - **Refined runs are immutable**: new params => new refined run.
 - **Manual corrections are separate** (detection only): stored under a manual subgroup.
 
+Pipeline context (recording analysis archives):
+- canonical stage order is `import -> detect -> refine -> register`
+- use `fisheye.utils.run_recording_analysis_pipeline` or
+  `fisheye.utils.import_recordings_analysis` when you want orchestration
+- contract reference: `docs/recording_analysis_pipeline_contract.md`
+
 ## Terminology (Zarr layout)
 
 - `detect_runs/<run>`: raw detections (blob or YOLO).
@@ -61,14 +67,14 @@ Key principles:
    - Crop runs created with `--crop-source preferred`/`auto` resolve the group
      using this review status and store a snapshot on the crop run.
 
-5) **Manual corrections**
+6) **Manual corrections**
    ```bash
    python -m fisheye.tune.detect_review /path/to/zarr
    ```
    - Writes `refined_detect_runs/<latest>/<manual_group>` (default: `manual`).
    - Leaves raw detections untouched.
 
-6) **Downstream stages**
+7) **Downstream stages**
    - Crop and later stages will prefer the **manual subgroup** when present.
    - Otherwise they use `interpolated` (or `filtered`) from the refined run.
    - `--crop-source preferred`/`auto` uses `detect_review_status` plus a policy

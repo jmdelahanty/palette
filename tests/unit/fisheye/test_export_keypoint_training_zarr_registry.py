@@ -48,6 +48,20 @@ def test_register_merged_keypoint_dataset_updates_training_set_linkage(tmp_path:
     )
 
     registry = Registry(registry_path)
+    registry.upsert_dataset(
+        "source_a",
+        session_uuid="source_a",
+        zarr_path=tmp_path / "source_a.zarr",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_dataset(
+        "source_b",
+        session_uuid="source_b",
+        zarr_path=tmp_path / "source_b.zarr",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
     registry.upsert_training_set(
         set_id="pose_my_set_v001",
         name="my_set",

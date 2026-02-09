@@ -9,6 +9,37 @@ This document describes a practical, repeatable workflow for building YOLO train
 - **Refinement + QC** is a first-class step before training updates.
 - **Iteration**: train → run detect on more videos → refine → curate → retrain.
 
+## Recording Analysis Stage Contract
+
+For recording analysis archives, the canonical stage order is:
+
+1. import/create analysis archive + metadata/stimulus
+2. detect
+3. refine (optional)
+4. registry rescan (optional)
+
+Single recording wrapper:
+
+```bash
+scripts/py -m fisheye.utils.run_recording_analysis_pipeline \
+  --recording-dir "$REC" \
+  --model-source registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --apply
+```
+
+Batch wrapper:
+
+```bash
+scripts/py -m fisheye.utils.import_recordings_analysis /nvme1/recordings \
+  --recursive \
+  --model-source registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --apply
+```
+
+Contract reference: `docs/recording_analysis_pipeline_contract.md`.
+
 ## Recommended Workflow
 
 ### 1) Sampled import for training frames (full + downsampled)

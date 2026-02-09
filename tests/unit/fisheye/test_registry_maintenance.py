@@ -1047,7 +1047,7 @@ def test_integrity_accepts_source_protocol_and_subject_count_consistent(tmp_path
             recording_subtype, behavior_mode, artifact_schema_id, protocol_name, dish_design,
             created_utc, updated_utc
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
         """,
         (
             "rec_a",

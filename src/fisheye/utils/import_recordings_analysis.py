@@ -2,8 +2,8 @@
 """Batch-create analysis Zarrs from recordings without training imports.
 
 Workflow per recording:
-1) Run YOLO detection directly on cams/*.mp4 into zarr/<recording>_analysis.zarr
-2) Import stimulus metadata from raw/*.h5 into analysis/stimulus_runs
+1) Import/create analysis archive + metadata/stimulus
+2) Run YOLO detection (explicit model or registry-resolved)
 3) Optionally run refine_detect
 4) Optionally register/rescan into the registry
 
@@ -16,17 +16,23 @@ import argparse
 import json
 import os
 import re
-import subprocess
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import h5py
-import zarr
 
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.utils.import_recording_analysis import (
+    RecordingImportOptions,
+    RecordingAnalysisPlan as SingleRecordingPlan,
+    stimulus_runs_present,
+)
+from fisheye.utils.run_recording_analysis_pipeline import (
+    RecordingPipelineOptions,
+    process_recording_analysis_pipeline,
+)
 
 
 DEFAULT_RECORDINGS_ROOT = Path("/nvme1/recordings")
@@ -128,23 +134,6 @@ def _select_cam_video(recording_dir: Path, camera_id: Optional[str]) -> Tuple[Op
     return None, "multiple camera videos in recording; multi-camera analysis import is not yet supported by this command"
 
 
-def _stimulus_runs_present(zarr_path: Path) -> bool:
-    try:
-        root = zarr.open(str(zarr_path), mode="r")
-    except Exception:
-        return False
-    analysis = root.get("analysis")
-    if analysis is None:
-        return False
-    stim = analysis.get("stimulus_runs")
-    if stim is None:
-        return False
-    try:
-        return len(list(stim.group_keys())) > 0
-    except Exception:
-        return False
-
-
 def _build_plans(
     root: Path,
     recursive: bool,
@@ -213,7 +202,7 @@ def _build_plans(
 
         stimulus_present: Optional[bool] = None
         if check_stimulus and zarr_path.exists():
-            stimulus_present = _stimulus_runs_present(zarr_path)
+            stimulus_present = stimulus_runs_present(zarr_path)
 
         plans.append(
             AnalysisPlan(
@@ -251,79 +240,6 @@ def _print_plan(plans: List[AnalysisPlan]) -> None:
     print(f"  ok: {counts.get('ok', 0)}")
     print(f"  skipped: {counts.get('skipped', 0)}")
     print(f"  missing: {counts.get('missing', 0)}")
-
-
-def _run_detect_yolo(plan: AnalysisPlan, args: argparse.Namespace) -> Tuple[bool, int, List[str]]:
-    assert plan.cam_video is not None
-    plan.zarr_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        sys.executable,
-        "-m",
-        "fisheye.detection.detect_yolo",
-        str(plan.cam_video),
-        "--output",
-        str(plan.zarr_path),
-        "--write-raw-video-metadata",
-    ]
-    if args.model is not None:
-        cmd.extend(["--model", str(args.model)])
-    if args.detect_config is not None:
-        cmd.extend(["--config", str(args.detect_config)])
-    if args.conf is not None:
-        cmd.extend(["--conf", str(args.conf)])
-    if args.iou is not None:
-        cmd.extend(["--iou", str(args.iou)])
-    if args.max_det is not None:
-        cmd.extend(["--max-det", str(args.max_det)])
-    if args.batch_size is not None:
-        cmd.extend(["--batch-size", str(args.batch_size)])
-    if args.cpu:
-        cmd.append("--cpu")
-    print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, check=False)
-    return result.returncode == 0, result.returncode, cmd
-
-
-def _run_stimulus_import(plan: AnalysisPlan, args: argparse.Namespace) -> Tuple[bool, int, List[str]]:
-    cmd = [
-        sys.executable,
-        "-m",
-        "fisheye.analysis.import_stimulus_to_zarr",
-        str(plan.h5_path),
-        str(plan.zarr_path),
-    ]
-    if args.stimulus_run_name:
-        cmd.extend(["--run-name", args.stimulus_run_name])
-    if args.stimulus_overwrite:
-        cmd.append("--overwrite")
-    if args.stimulus_quiet:
-        cmd.append("--quiet")
-    print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, check=False)
-    return result.returncode == 0, result.returncode, cmd
-
-
-def _run_refine_detect(plan: AnalysisPlan, args: argparse.Namespace) -> Tuple[bool, int, List[str]]:
-    cmd = [
-        sys.executable,
-        "-m",
-        "fisheye.refinement.refine_detect",
-        str(plan.zarr_path),
-    ]
-    if args.refine_config is not None:
-        cmd.extend(["--config", str(args.refine_config)])
-    if args.refine_max_gap is not None:
-        cmd.extend(["--max-gap", str(args.refine_max_gap)])
-    print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, check=False)
-    return result.returncode == 0, result.returncode, cmd
-
-
-def _set_analysis_purpose(zarr_path: Path) -> None:
-    root = zarr.open_group(str(zarr_path), mode="a")
-    attrs = dict(root.attrs)
-    attrs["zarr_purpose"] = "analysis"
-    root.attrs.put(attrs)
 
 
 def _resolve_root(arg_root: Optional[Path]) -> Path:
@@ -370,12 +286,35 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     parser.add_argument("--model", type=Path, help="YOLO model path (.pt).")
+    parser.add_argument(
+        "--model-source",
+        choices=("explicit", "registry"),
+        default="explicit",
+        help="Model resolution source: explicit path/config or per-recording registry resolver.",
+    )
     parser.add_argument("--detect-config", type=Path, help="YOLO detect config YAML.")
     parser.add_argument("--conf", type=float, help="YOLO confidence threshold override.")
     parser.add_argument("--iou", type=float, help="YOLO IoU threshold override.")
     parser.add_argument("--max-det", type=int, help="YOLO max detections per frame override.")
     parser.add_argument("--batch-size", type=int, help="YOLO batch size override.")
     parser.add_argument("--cpu", action="store_true", help="Force CPU for YOLO detect.")
+    parser.add_argument("--set-id", type=str, help="Optional detect set filter when --model-source=registry.")
+    parser.add_argument(
+        "--require-unique",
+        action="store_true",
+        help="Fail detect step when top registry candidates are score-tied.",
+    )
+    parser.add_argument(
+        "--include-non-success",
+        action="store_true",
+        help="Allow non-success training runs as candidates for registry model resolution.",
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=5,
+        help="Number of model candidates to persist in detect run provenance (registry mode).",
+    )
 
     parser.add_argument(
         "--import-stimulus",
@@ -438,6 +377,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     skip_existing = not args.overwrite and not args.no_skip_existing
 
+    registry_path = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
+    if args.model_source == "registry" and not registry_path.exists():
+        print(f"Registry not found for --model-source=registry: {registry_path}")
+        return 1
+
     logger: Optional[JsonLogger] = None
     run_id = _run_id()
     if not args.no_log:
@@ -456,10 +400,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             overwrite=bool(args.overwrite),
             model=str(args.model) if args.model else None,
             detect_config=str(args.detect_config) if args.detect_config else None,
+            model_source=str(args.model_source),
             import_stimulus=bool(args.import_stimulus),
             refine_detect=bool(args.refine_detect),
             register=bool(args.register),
-            registry=str(args.registry) if args.registry else None,
+            registry=str(registry_path),
+            set_id=str(args.set_id) if args.set_id else None,
+            require_unique=bool(args.require_unique),
+            include_non_success=bool(args.include_non_success),
+            top_k=int(args.top_k) if args.top_k is not None else None,
         )
 
     plans = _build_plans(
@@ -491,9 +440,37 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     registry: Optional[Registry] = None
     if args.register:
-        registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
         registry = Registry(registry_path)
         print(f"Registry: {registry_path}")
+
+    pipeline_opts = RecordingPipelineOptions(
+        model_source=str(args.model_source),
+        model=args.model,
+        detect_config=args.detect_config,
+        conf=args.conf,
+        iou=args.iou,
+        max_det=args.max_det,
+        batch_size=args.batch_size,
+        cpu=bool(args.cpu),
+        set_id=args.set_id,
+        require_unique=bool(args.require_unique),
+        include_non_success=bool(args.include_non_success),
+        top_k=int(args.top_k),
+        refine_detect=bool(args.refine_detect),
+        refine_config=args.refine_config,
+        refine_max_gap=args.refine_max_gap,
+        register=bool(args.register),
+        registry_path=registry_path,
+        import_opts=RecordingImportOptions(
+            import_video_metadata=True,
+            video_metadata_overwrite=False,
+            import_stimulus=bool(args.import_stimulus),
+            stimulus_always=bool(args.stimulus_always),
+            stimulus_run_name=args.stimulus_run_name,
+            stimulus_overwrite=bool(args.stimulus_overwrite),
+            stimulus_quiet=bool(args.stimulus_quiet),
+        ),
+    )
 
     ok = 0
     failed = 0
@@ -535,116 +512,33 @@ def main(argv: Optional[List[str]] = None) -> int:
                 zarr_path=str(plan.zarr_path),
             )
 
-        detect_ok, detect_rc, detect_cmd = _run_detect_yolo(plan, args)
-        if logger is not None:
-            logger.log(
-                "detect_result",
-                recording_dir=str(plan.recording_dir),
-                zarr_path=str(plan.zarr_path),
-                returncode=int(detect_rc),
-                cmd=detect_cmd,
-            )
-        if not detect_ok:
+        assert plan.cam_video is not None
+        result = process_recording_analysis_pipeline(
+            SingleRecordingPlan(
+                recording_dir=plan.recording_dir,
+                h5_path=plan.h5_path,
+                cam_video=plan.cam_video,
+                zarr_path=plan.zarr_path,
+            ),
+            pipeline_opts,
+            registry=registry,
+            logger=(logger.log if logger is not None else None),
+        )
+        if not result.ok:
             failed += 1
-            print(f"YOLO detect failed for {plan.zarr_path}")
+            step = result.failed_step or "unknown_step"
+            message = result.error or "step failed"
+            print(f"{step} failed for {plan.zarr_path}: {message}")
             if logger is not None:
                 logger.log(
                     "recording_failed",
                     recording_dir=str(plan.recording_dir),
                     zarr_path=str(plan.zarr_path),
-                    step="detect_yolo",
-                    returncode=int(detect_rc),
+                    step=step,
+                    error=result.error,
+                    returncode=result.returncode,
                 )
             continue
-
-        try:
-            _set_analysis_purpose(plan.zarr_path)
-        except Exception as exc:
-            failed += 1
-            print(f"Failed setting zarr_purpose=analysis for {plan.zarr_path}: {exc}")
-            if logger is not None:
-                logger.log(
-                    "recording_failed",
-                    recording_dir=str(plan.recording_dir),
-                    zarr_path=str(plan.zarr_path),
-                    step="set_zarr_purpose",
-                    error=str(exc),
-                )
-            continue
-
-        if args.import_stimulus:
-            stim_present = _stimulus_runs_present(plan.zarr_path)
-            if stim_present and not args.stimulus_always:
-                print(f"Skipping stimulus import (already present): {plan.zarr_path}")
-                if logger is not None:
-                    logger.log(
-                        "stimulus_skipped",
-                        recording_dir=str(plan.recording_dir),
-                        zarr_path=str(plan.zarr_path),
-                        reason="stimulus_runs already present",
-                    )
-            else:
-                stim_ok, stim_rc, stim_cmd = _run_stimulus_import(plan, args)
-                if logger is not None:
-                    logger.log(
-                        "stimulus_result",
-                        recording_dir=str(plan.recording_dir),
-                        zarr_path=str(plan.zarr_path),
-                        returncode=int(stim_rc),
-                        cmd=stim_cmd,
-                    )
-                if not stim_ok:
-                    failed += 1
-                    print(f"Stimulus import failed for {plan.zarr_path}")
-                    if logger is not None:
-                        logger.log(
-                            "recording_failed",
-                            recording_dir=str(plan.recording_dir),
-                            zarr_path=str(plan.zarr_path),
-                            step="import_stimulus_to_zarr",
-                            returncode=int(stim_rc),
-                        )
-                    continue
-
-        if args.refine_detect:
-            refine_ok, refine_rc, refine_cmd = _run_refine_detect(plan, args)
-            if logger is not None:
-                logger.log(
-                    "refine_result",
-                    recording_dir=str(plan.recording_dir),
-                    zarr_path=str(plan.zarr_path),
-                    returncode=int(refine_rc),
-                    cmd=refine_cmd,
-                )
-            if not refine_ok:
-                failed += 1
-                print(f"Refine detect failed for {plan.zarr_path}")
-                if logger is not None:
-                    logger.log(
-                        "recording_failed",
-                        recording_dir=str(plan.recording_dir),
-                        zarr_path=str(plan.zarr_path),
-                        step="refine_detect",
-                        returncode=int(refine_rc),
-                    )
-                continue
-
-        dataset_id = None
-        if registry is not None:
-            try:
-                dataset_id = registry.scan_zarr(plan.zarr_path)
-            except Exception as exc:
-                failed += 1
-                print(f"Registry rescan failed for {plan.zarr_path}: {exc}")
-                if logger is not None:
-                    logger.log(
-                        "recording_failed",
-                        recording_dir=str(plan.recording_dir),
-                        zarr_path=str(plan.zarr_path),
-                        step="registry_rescan",
-                        error=str(exc),
-                    )
-                continue
 
         ok += 1
         if logger is not None:
@@ -652,7 +546,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "recording_ok",
                 recording_dir=str(plan.recording_dir),
                 zarr_path=str(plan.zarr_path),
-                dataset_id=dataset_id,
+                dataset_id=result.dataset_id,
             )
 
     if registry is not None:

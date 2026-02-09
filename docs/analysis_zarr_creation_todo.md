@@ -69,7 +69,7 @@ Purpose: track the implementation steps to split analysis archive creation/prove
 - [x] Add standalone registry model resolver helper.
   - File: `src/fisheye/utils/resolve_detect_model.py`
   - Current behavior: ranks models by recording metadata similarity and defaults to `--task detect`.
-- [ ] Add orchestrator option for model selection source.
+- [x] Add orchestrator option for model selection source.
   - `--model-source explicit|registry`
 - [ ] For `registry` mode, add deterministic selection policy.
   - recommend required selector: `--set-id`
@@ -78,9 +78,11 @@ Purpose: track the implementation steps to split analysis archive creation/prove
 
 ## Phase F: Documentation and runbooks
 
-- [ ] Update workflow docs to reflect split architecture.
+- [x] Update workflow docs to reflect split architecture.
   - `docs/training_data_workflow.md`
   - `docs/detection_refinement_workflow.md`
+- [x] Add explicit stage-orchestration workflow contract.
+  - `docs/recording_analysis_pipeline_contract.md`
 - [ ] Track and resolve spec/runtime drift items listed in:
   - `docs/zarr_spec_runtime_drift_todo.md`
 - [x] Add operator runbook snippet:
@@ -89,9 +91,17 @@ Purpose: track the implementation steps to split analysis archive creation/prove
 ## Testing checklist
 
 - [x] Unit: creation planner (single camera, missing inputs, ambiguity cases).
-- [ ] Unit: dry-run does not mutate filesystem/registry.
+- [x] Unit: dry-run does not mutate filesystem/registry.
+  - Filesystem no-mutation tests:
+    - `fisheye.utils.import_recording_analysis` (default dry-run path)
+    - `fisheye.utils.run_recording_analysis_pipeline` (default dry-run path)
+  - Registry no-mutation guards:
+    - `fisheye.utils.run_recording_analysis_pipeline --register` (dry-run)
+    - `fisheye.utils.import_recordings_analysis --register` (dry-run)
 - [x] Unit: purpose attr enforcement.
-- [ ] Unit: orchestrator propagation of step failures.
+- [x] Unit: orchestrator propagation of step failures.
+  - single-recording pipeline returns `failed_step`/`returncode` on detect failure
+  - batch orchestrator logs `recording_failed` with step + return code and returns non-zero
 - [ ] Integration: end-to-end single recording happy path.
 - [ ] Regression: existing `detect_yolo` CLI behavior remains supported during migration.
 - [x] Unit: multi-camera/multi-H5 fail-closed behavior for analysis import planner.
