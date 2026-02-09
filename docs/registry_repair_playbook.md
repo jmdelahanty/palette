@@ -1,0 +1,590 @@
+# Registry Repair Playbook
+
+This playbook covers recovery after source recording Zarr path/name changes
+(for example, renaming to `*_training.zarr`) when lineage or set membership
+breaks.
+
+## 1) Backup First
+
+```bash
+sqlite3 /path/to/palette_registry.sqlite ".backup /path/to/palette_registry.backup.sqlite"
+```
+
+## 2) Rename Source Recording Zarrs (Optional, if not already done)
+
+```bash
+scripts/py -m fisheye.utils.rename_recording_zarrs_to_training \
+  /nvme1/recordings \
+  --recursive \
+  --apply \
+  --list-limit 100
+```
+
+## 3) Rescan Registry Paths
+
+```bash
+scripts/py -m fisheye.utils.registry_rescan \
+  --registry /nvme1/palette_registry.sqlite \
+  /nvme1/recordings \
+  --recursive
+```
+
+## 4) Remap Training Set Membership IDs
+
+If source `dataset_id` values changed (for example to `session_uuid:z<hash>`),
+remap `training_sets.dataset_ids_json` by session UUID:
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  --registry /nvme1/palette_registry.sqlite \
+  --remap-training-set-dataset-ids \
+  --dry-run
+```
+
+Then apply:
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  --registry /nvme1/palette_registry.sqlite \
+  --remap-training-set-dataset-ids
+```
+
+## 5) Rebuild Dataset Lineage
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  --registry /nvme1/palette_registry.sqlite \
+  --backfill-dataset-lineage
+```
+
+## 6) Validate Integrity
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  --registry /nvme1/palette_registry.sqlite \
+  --check-integrity \
+  --list-limit 100
+```
+
+Expected result:
+- `Integrity check passed: no issues found.`
+
+## 7) Phase 2 Subject/Dish/Cross Backfill (Optional)
+
+Preview without writes:
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  --registry /nvme1/palette_registry.sqlite \
+  --backfill-subject-dish-cross \
+  --dry-run
+```
+
+Then apply:
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  --registry /nvme1/palette_registry.sqlite \
+  --backfill-subject-dish-cross
+```
+
+## 8) Phase 6 Subjects Backfill + Query View (Optional)
+
+Preview without writes:
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  --registry /nvme1/palette_registry.sqlite \
+  --backfill-subjects \
+  --dry-run
+```
+
+Then apply:
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  --registry /nvme1/palette_registry.sqlite \
+  --backfill-subjects
+```
+
+Verify normalized query view (cross/genotype + DPF filters):
+
+```bash
+sqlite3 -header -column /nvme1/palette_registry.sqlite "
+  SELECT DISTINCT recording_id
+  FROM recording_subject_overview
+  WHERE cross_id = :cross_id;
+"
+```
+
+```bash
+sqlite3 -header -column /nvme1/palette_registry.sqlite "
+  SELECT DISTINCT recording_id
+  FROM recording_subject_overview
+  WHERE dpf_at_acquisition = :dpf
+    AND genotype = :genotype;
+"
+```
+
+## Useful Diagnostics
+
+```bash
+sqlite3 -header -column /nvme1/palette_registry.sqlite \
+  "SELECT COUNT(*) AS lineage_edges FROM dataset_lineage_current;"
+```
+
+```bash
+sqlite3 -header -column /nvme1/palette_registry.sqlite \
+  "SELECT set_id, dataset_ids_json FROM training_sets ORDER BY set_id;"
+```
+
+```bash
+sqlite3 -header -column /nvme1/palette_registry.sqlite \
+  "SELECT dataset_id, session_uuid, artifact_kind, zarr_path
+   FROM datasets
+   WHERE artifact_kind='source_recording'
+   ORDER BY session_uuid, dataset_id
+   LIMIT 100;"
+```
+
+## Dataset ID Re-key Runbook (Phases A-D)
+
+Use this when `dataset_id` values must be decoupled from `session_uuid`
+(for example, to support multiple source Zarrs per recording).
+
+Set your registry path once:
+
+```bash
+REG=/nvme1/palette_registry.sqlite
+```
+
+### Dry-run checklist (no writes)
+
+Run this checklist before any mutation:
+
+```bash
+# 1) Confirm current integrity baseline
+scripts/py -m fisheye.registry.maintenance \
+  --registry "$REG" \
+  --check-integrity \
+  --list-limit 100
+
+# 2) Snapshot high-level dataset identity state
+sqlite3 -header -column "$REG" "
+  SELECT COUNT(*) AS datasets_total FROM datasets;
+  SELECT artifact_kind, COUNT(*) AS n
+  FROM datasets
+  GROUP BY artifact_kind
+  ORDER BY artifact_kind;
+  SELECT COUNT(*) AS ids_equal_session_uuid
+  FROM datasets
+  WHERE session_uuid IS NOT NULL AND dataset_id=session_uuid;
+"
+
+# 3) Confirm no unresolved training-set members right now
+sqlite3 -header -column "$REG" "
+  WITH ids AS (
+    SELECT ts.set_id, je.value AS id_value
+    FROM training_sets ts, json_each(ts.dataset_ids_json) je
+  ),
+  src_map AS (
+    SELECT session_uuid, MIN(dataset_id) AS dataset_id
+    FROM datasets
+    WHERE artifact_kind='source_recording' AND session_uuid IS NOT NULL
+    GROUP BY session_uuid
+  )
+  SELECT COUNT(*) AS unresolved_training_set_members
+  FROM ids i
+  LEFT JOIN datasets d ON d.dataset_id=i.id_value
+  LEFT JOIN src_map s ON s.session_uuid=i.id_value
+  WHERE d.dataset_id IS NULL AND s.dataset_id IS NULL;
+"
+
+# 4) Preview JSON remap behavior (read-only)
+scripts/py -m fisheye.registry.maintenance \
+  --registry "$REG" \
+  --remap-training-set-dataset-ids \
+  --dry-run
+```
+
+Proceed to Phase A only if:
+- integrity passes,
+- unresolved training-set members = 0 (or you understand/accept known exceptions),
+- dry-run remap output matches expected dataset ID migration behavior.
+
+Optional: capture dry-run evidence to timestamped logs:
+
+```bash
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+LOG_DIR="/tmp/registry_rekey_preflight_${TS}"
+mkdir -p "$LOG_DIR"
+
+scripts/py -m fisheye.registry.maintenance \
+  --registry "$REG" \
+  --check-integrity \
+  --list-limit 100 | tee "$LOG_DIR/01_check_integrity.txt"
+
+sqlite3 -header -column "$REG" "
+  SELECT COUNT(*) AS datasets_total FROM datasets;
+  SELECT artifact_kind, COUNT(*) AS n
+  FROM datasets
+  GROUP BY artifact_kind
+  ORDER BY artifact_kind;
+  SELECT COUNT(*) AS ids_equal_session_uuid
+  FROM datasets
+  WHERE session_uuid IS NOT NULL AND dataset_id=session_uuid;
+" | tee "$LOG_DIR/02_dataset_identity_snapshot.txt"
+
+sqlite3 -header -column "$REG" "
+  WITH ids AS (
+    SELECT ts.set_id, je.value AS id_value
+    FROM training_sets ts, json_each(ts.dataset_ids_json) je
+  ),
+  src_map AS (
+    SELECT session_uuid, MIN(dataset_id) AS dataset_id
+    FROM datasets
+    WHERE artifact_kind='source_recording' AND session_uuid IS NOT NULL
+    GROUP BY session_uuid
+  )
+  SELECT COUNT(*) AS unresolved_training_set_members
+  FROM ids i
+  LEFT JOIN datasets d ON d.dataset_id=i.id_value
+  LEFT JOIN src_map s ON s.session_uuid=i.id_value
+  WHERE d.dataset_id IS NULL AND s.dataset_id IS NULL;
+" | tee "$LOG_DIR/03_unresolved_members.txt"
+
+scripts/py -m fisheye.registry.maintenance \
+  --registry "$REG" \
+  --remap-training-set-dataset-ids \
+  --dry-run | tee "$LOG_DIR/04_remap_dry_run.txt"
+
+echo "Saved preflight logs to: $LOG_DIR"
+```
+
+### Phase A: Preflight + safety snapshot
+
+```bash
+sqlite3 "$REG" ".backup ${REG%.sqlite}.pre_rekey.sqlite"
+```
+
+```bash
+sqlite3 -header -column "$REG" "
+  SELECT COUNT(*) AS datasets_total FROM datasets;
+  SELECT artifact_kind, COUNT(*) AS n
+  FROM datasets
+  GROUP BY artifact_kind
+  ORDER BY artifact_kind;
+  SELECT COUNT(*) AS ids_equal_session_uuid
+  FROM datasets
+  WHERE session_uuid IS NOT NULL AND dataset_id=session_uuid;
+"
+```
+
+```bash
+sqlite3 -header -column "$REG" "
+  WITH ids AS (
+    SELECT ts.set_id, je.value AS id_value
+    FROM training_sets ts, json_each(ts.dataset_ids_json) je
+  ),
+  src_map AS (
+    SELECT session_uuid, MIN(dataset_id) AS dataset_id
+    FROM datasets
+    WHERE artifact_kind='source_recording' AND session_uuid IS NOT NULL
+    GROUP BY session_uuid
+  )
+  SELECT COUNT(*) AS unresolved_training_set_members
+  FROM ids i
+  LEFT JOIN datasets d ON d.dataset_id=i.id_value
+  LEFT JOIN src_map s ON s.session_uuid=i.id_value
+  WHERE d.dataset_id IS NULL AND s.dataset_id IS NULL;
+"
+```
+
+### Phase B: Build deterministic remap table
+
+```bash
+sqlite3 "$REG" "
+  CREATE TABLE IF NOT EXISTS dataset_id_remap (
+    old_dataset_id TEXT PRIMARY KEY,
+    new_dataset_id TEXT NOT NULL UNIQUE,
+    reason TEXT,
+    created_utc TEXT NOT NULL
+  );
+  DELETE FROM dataset_id_remap;
+  INSERT INTO dataset_id_remap(old_dataset_id, new_dataset_id, reason, created_utc)
+  SELECT
+    d.dataset_id,
+    d.session_uuid || ':z' || substr(d.path_hash, 1, 12),
+    'source_recording_rekey',
+    datetime('now')
+  FROM datasets d
+  WHERE d.artifact_kind='source_recording'
+    AND d.session_uuid IS NOT NULL
+    AND d.dataset_id=d.session_uuid;
+"
+```
+
+```bash
+sqlite3 -header -column "$REG" "
+  SELECT COUNT(*) AS remap_rows FROM dataset_id_remap;
+  SELECT COUNT(*) AS duplicate_new_ids
+  FROM (
+    SELECT new_dataset_id, COUNT(*) AS n
+    FROM dataset_id_remap
+    GROUP BY new_dataset_id
+    HAVING COUNT(*) > 1
+  );
+  SELECT old_dataset_id, new_dataset_id
+  FROM dataset_id_remap
+  ORDER BY old_dataset_id
+  LIMIT 20;
+"
+```
+
+### Phase C: Transaction-safe FK rewrite
+
+Notes:
+- Run only the table updates that exist in your DB.
+- If `training_set_datasets` is absent in your schema, skip that update.
+
+```bash
+sqlite3 -header -column "$REG" "
+  SELECT name
+  FROM sqlite_master
+  WHERE type='table'
+    AND name IN (
+      'provenance',
+      'training_set_datasets',
+      'keypoint_quality',
+      'detect_quality',
+      'dataset_lineage'
+    )
+  ORDER BY name;
+"
+```
+
+```bash
+sqlite3 "$REG" "
+  PRAGMA foreign_keys=OFF;
+  BEGIN;
+
+  UPDATE datasets
+  SET dataset_id = (
+    SELECT r.new_dataset_id
+    FROM dataset_id_remap r
+    WHERE r.old_dataset_id = datasets.dataset_id
+  )
+  WHERE dataset_id IN (SELECT old_dataset_id FROM dataset_id_remap);
+
+  UPDATE provenance
+  SET dataset_id = (
+    SELECT r.new_dataset_id
+    FROM dataset_id_remap r
+    WHERE r.old_dataset_id = provenance.dataset_id
+  )
+  WHERE dataset_id IN (SELECT old_dataset_id FROM dataset_id_remap);
+
+  UPDATE keypoint_quality
+  SET dataset_id = (
+    SELECT r.new_dataset_id
+    FROM dataset_id_remap r
+    WHERE r.old_dataset_id = keypoint_quality.dataset_id
+  )
+  WHERE dataset_id IN (SELECT old_dataset_id FROM dataset_id_remap);
+
+  UPDATE detect_quality
+  SET dataset_id = (
+    SELECT r.new_dataset_id
+    FROM dataset_id_remap r
+    WHERE r.old_dataset_id = detect_quality.dataset_id
+  )
+  WHERE dataset_id IN (SELECT old_dataset_id FROM dataset_id_remap);
+
+  UPDATE dataset_lineage
+  SET parent_dataset_id = (
+    SELECT r.new_dataset_id
+    FROM dataset_id_remap r
+    WHERE r.old_dataset_id = dataset_lineage.parent_dataset_id
+  )
+  WHERE parent_dataset_id IN (SELECT old_dataset_id FROM dataset_id_remap);
+
+  UPDATE dataset_lineage
+  SET child_dataset_id = (
+    SELECT r.new_dataset_id
+    FROM dataset_id_remap r
+    WHERE r.old_dataset_id = dataset_lineage.child_dataset_id
+  )
+  WHERE child_dataset_id IN (SELECT old_dataset_id FROM dataset_id_remap);
+
+  COMMIT;
+  PRAGMA foreign_keys=ON;
+"
+```
+
+```bash
+sqlite3 -header -column "$REG" "PRAGMA foreign_key_check;"
+```
+
+### Phase D: Rewrite `training_sets.dataset_ids_json`
+
+Preferred (built-in helper):
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  --registry "$REG" \
+  --remap-training-set-dataset-ids \
+  --dry-run
+```
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  --registry "$REG" \
+  --remap-training-set-dataset-ids
+```
+
+SQL equivalent:
+
+```bash
+sqlite3 "$REG" "
+  BEGIN;
+  WITH mapped AS (
+    SELECT
+      ts.set_id,
+      CAST(je.key AS INTEGER) AS ord,
+      COALESCE(r.new_dataset_id, je.value) AS new_id
+    FROM training_sets ts
+    JOIN json_each(ts.dataset_ids_json) je
+    LEFT JOIN dataset_id_remap r ON r.old_dataset_id = je.value
+  ),
+  rebuilt AS (
+    SELECT
+      set_id,
+      json_group_array(new_id) AS new_dataset_ids_json
+    FROM (
+      SELECT set_id, ord, new_id
+      FROM mapped
+      ORDER BY set_id, ord
+    )
+    GROUP BY set_id
+  )
+  UPDATE training_sets
+  SET dataset_ids_json = (
+    SELECT r.new_dataset_ids_json
+    FROM rebuilt r
+    WHERE r.set_id = training_sets.set_id
+  );
+  COMMIT;
+"
+```
+
+Final validation:
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  --registry "$REG" \
+  --backfill-dataset-lineage
+```
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  --registry "$REG" \
+  --check-integrity \
+  --list-limit 100
+```
+
+## Operator Checklist: First Real Migration After Bootstrap
+
+Use this when introducing the first non-noop schema migration after the current
+baseline (`v1` initial schema, `v2` reserved noop).
+
+### Preflight (required)
+
+```bash
+REG=/nvme1/palette_registry.sqlite
+```
+
+```bash
+# 1) Back up DB
+sqlite3 "$REG" ".backup ${REG%.sqlite}.pre_migration.sqlite"
+
+# 2) Verify baseline integrity
+scripts/py -m fisheye.registry.maintenance \
+  --registry "$REG" \
+  --check-integrity \
+  --list-limit 100
+
+# 3) Record current schema versions
+sqlite3 -header -column "$REG" "SELECT version, name, applied_utc FROM schema_version ORDER BY version;"
+sqlite3 -header -column "$REG" "PRAGMA user_version;"
+```
+
+Go/no-go:
+- Proceed only if integrity passes.
+- Proceed only if backup exists and is readable.
+
+### Apply migration
+
+Migration application is automatic on registry open.
+Run any registry command that opens the DB:
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  --registry "$REG" \
+  --check-integrity \
+  --list-limit 100
+```
+
+### Post-apply validation
+
+```bash
+# 1) Confirm schema_version advanced exactly as expected
+sqlite3 -header -column "$REG" "SELECT version, name, applied_utc FROM schema_version ORDER BY version;"
+sqlite3 -header -column "$REG" "PRAGMA user_version;"
+
+# 2) Confirm integrity still passes
+scripts/py -m fisheye.registry.maintenance \
+  --registry "$REG" \
+  --check-integrity \
+  --list-limit 100
+
+# 3) Optional smoke checks for key views
+scripts/py -m fisheye.utils.check_training_registry \
+  --registry "$REG" \
+  --all \
+  --limit 5
+```
+
+### Rollback
+
+If migration fails or integrity regresses:
+
+```bash
+cp "${REG%.sqlite}.pre_migration.sqlite" "$REG"
+scripts/py -m fisheye.registry.maintenance \
+  --registry "$REG" \
+  --check-integrity \
+  --list-limit 100
+```
+
+Expected rollback result:
+- DB returns to pre-migration state.
+- Integrity matches preflight baseline.
+
+## Completion Note (2026-02-09)
+
+This runbook was executed end-to-end on live registry:
+
+- Registry backup created before mutation:
+  - `/nvme1/palette_registry.pre_drop_legacy_ids_20260209T065013Z.sqlite`
+- Legacy duplicate source rows were remapped and removed.
+- Post-migration checks:
+  - `legacy_dupe_rows = 0` for `artifact_kind='source_recording' AND dataset_id=session_uuid`
+  - no active duplicate `zarr_path` rows
+  - `scripts/py -m fisheye.registry.maintenance --check-integrity` passed
+  - `scripts/py -m fisheye.utils.registry_query --zarr-use training` returned deduplicated results
+
+Follow-up guardrail applied in code:
+
+- `Registry._resolve_effective_dataset_id()` now prefers canonical source IDs
+  (`{session_uuid}:z<path-hash>`) for recording-source artifacts.
+- Verified by rescanning `/nvme1/recordings`: no legacy IDs were recreated.

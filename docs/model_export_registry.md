@@ -3,7 +3,7 @@
 ## Why this exists
 We already record:
 - training runs in `training_runs`
-- trained detector artifacts in `detection_models`
+- trained detector artifacts in `training_models`
 - ONNX exports in `onnx_models`
 - TensorRT exports in `tensorrt_models`
 
@@ -20,7 +20,7 @@ typed columns for fast filtering.
 
 ## Current registry shape (canonical)
 - `training_runs`: run lifecycle + config/manifest/model/metrics links.
-- `detection_models`: one row per detector training run (`run_id` primary key).
+- `training_models`: one row per detector training run (`run_id` primary key).
 - `onnx_models`: one row per run's ONNX artifact (`run_id` primary key).
 - `tensorrt_models`: one row per `(run_id, precision)`.
 
@@ -30,7 +30,7 @@ Legacy:
 
 
 ## Design principles
-- Keep normalized artifact tables (`detection_models`, `onnx_models`, `tensorrt_models`).
+- Keep normalized artifact tables (`training_models`, `onnx_models`, `tensorrt_models`).
 - Keep `metadata_json` and manifest files as full audit records.
 - Promote only fields needed for high-frequency deployment filters.
 - Make new columns nullable to preserve backward compatibility.

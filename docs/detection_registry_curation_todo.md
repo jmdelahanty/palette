@@ -109,9 +109,10 @@ Purpose: track the concrete follow-up work from the detection dataset and SQLite
     - Run registry rescan.
     - Verify coverage metrics.
 
-- [ ] Normalize/retire legacy path-hash dataset IDs where possible.
-  - Current observation: at least one legacy row uses `path-<hash>` with sparse provenance.
-  - Goal: migrate to session UUID-backed IDs when possible and preserve lineage.
+- [x] Normalize/retire legacy source dataset IDs and prevent reintroduction.
+  - Source recording rows now use canonical IDs: `{session_uuid}:z<path-hash>`.
+  - Live cleanup completed; duplicate legacy source IDs were remapped and removed.
+  - Guard added in registry identity resolution so rescans do not recreate `dataset_id=session_uuid`.
 
 ## Validation Checklist (after implementation)
 

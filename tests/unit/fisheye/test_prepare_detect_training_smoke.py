@@ -271,7 +271,7 @@ def test_registry_record_training_run_status_transitions(tmp_path: Path) -> None
     assert json.loads(row[1]) == {"precision": 0.9}
 
 
-def test_registry_record_training_run_dual_writes_detection_models(tmp_path: Path) -> None:
+def test_registry_record_training_run_dual_writes_training_models(tmp_path: Path) -> None:
     registry_path = tmp_path / "palette_registry.sqlite"
     registry = Registry(registry_path)
     config_path = tmp_path / "config.yaml"
@@ -301,7 +301,7 @@ def test_registry_record_training_run_dual_writes_detection_models(tmp_path: Pat
         row = conn.execute(
             """
             SELECT set_id, model_path, model_sha256, metrics_path, metrics_sha256, status, final_metrics_json
-            FROM detection_models
+            FROM training_models
             WHERE run_id = ?
             """,
             (run_id,),

@@ -1,21 +1,31 @@
 """Unit tests for registry maintenance helpers."""
 
+import json
 from pathlib import Path
+import sqlite3
 import sys
 
 import numpy as np
+import pytest
 import zarr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
 from fisheye.registry.maintenance import (
+    _backfill_dataset_lineage,
+    _backfill_recording_entities,
+    _backfill_subject_dish_cross_entities,
+    _backfill_subjects,
     _backfill_keypoint_quality,
     _backfill_model_tables,
+    _remap_training_set_dataset_ids,
     _check_registry_integrity,
+    _summarize_dataset_lineage_audit,
     _collect_empty_training_set_candidates,
     _collect_failed_run_candidates,
     _collect_invalid_dataset_candidates,
+    _collect_missing_dataset_candidates,
     _delete_training_set_ids,
     _delete_training_run_ids,
     _delete_dataset_ids,
@@ -71,6 +81,1202 @@ def test_is_nested_zarr_subpath() -> None:
     assert _is_nested_zarr_subpath("/data/a/session.zarr/detect_runs/run_01")
     assert not _is_nested_zarr_subpath("/data/a/session.zarr")
     assert not _is_nested_zarr_subpath("/data/a/session.zarr/subset.zarr")
+
+
+def test_schema_has_fk_indexes_for_skeleton_columns(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    expected_indexes = {
+        "idx_training_sets_skeleton_id",
+        "idx_training_runs_skeleton_id",
+        "idx_onnx_models_skeleton_id",
+        "idx_tensorrt_models_skeleton_id",
+    }
+    rows = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'index' AND name IN (?, ?, ?, ?)
+        ORDER BY name;
+        """,
+        tuple(sorted(expected_indexes)),
+    ).fetchall()
+    found = {str(row["name"]) for row in rows}
+    assert found == expected_indexes
+    registry.close()
+
+
+def test_schema_has_training_task_type_columns_and_indexes(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+
+    set_cols = {
+        str(row["name"])
+        for row in registry.conn.execute("PRAGMA table_info(training_sets);").fetchall()
+    }
+    run_cols = {
+        str(row["name"])
+        for row in registry.conn.execute("PRAGMA table_info(training_runs);").fetchall()
+    }
+    assert "task_type" in set_cols
+    assert "task_type" in run_cols
+
+    idx_rows = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type='index'
+          AND name IN ('idx_training_sets_task_type', 'idx_training_runs_task_type');
+        """
+    ).fetchall()
+    idx_names = {str(row["name"]) for row in idx_rows}
+    assert idx_names == {"idx_training_sets_task_type", "idx_training_runs_task_type"}
+    registry.close()
+
+
+def test_training_task_type_inferred_and_backfilled(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+
+    registry.upsert_training_set(
+        set_id="detect_example_v001",
+        name="detect example",
+        query_filter={"task": "detect"},
+        dataset_ids=[],
+    )
+    registry.record_training_run(
+        run_id="host_detect_example_v001_detect_20260209-000000_deadbeef",
+        set_id="detect_example_v001",
+        config_path=None,
+        manifest_path=None,
+        model_path=None,
+        metrics_path=None,
+        status="success",
+    )
+
+    set_row = registry.conn.execute(
+        "SELECT task_type FROM training_sets WHERE set_id = 'detect_example_v001';"
+    ).fetchone()
+    run_row = registry.conn.execute(
+        "SELECT task_type FROM training_runs WHERE run_id = 'host_detect_example_v001_detect_20260209-000000_deadbeef';"
+    ).fetchone()
+    assert set_row is not None and str(set_row["task_type"]) == "detect"
+    assert run_row is not None and str(run_row["task_type"]) == "detect"
+
+    registry.conn.execute("UPDATE training_sets SET task_type = NULL WHERE set_id = 'detect_example_v001';")
+    registry.conn.execute(
+        "UPDATE training_runs SET task_type = NULL WHERE run_id = 'host_detect_example_v001_detect_20260209-000000_deadbeef';"
+    )
+    registry.conn.commit()
+
+    registry._migration_009_training_task_type_columns()  # noqa: SLF001
+
+    set_row2 = registry.conn.execute(
+        "SELECT task_type FROM training_sets WHERE set_id = 'detect_example_v001';"
+    ).fetchone()
+    run_row2 = registry.conn.execute(
+        "SELECT task_type FROM training_runs WHERE run_id = 'host_detect_example_v001_detect_20260209-000000_deadbeef';"
+    ).fetchone()
+    assert set_row2 is not None and str(set_row2["task_type"]) == "detect"
+    assert run_row2 is not None and str(run_row2["task_type"]) == "detect"
+    registry.close()
+
+
+def test_schema_has_phase2_subject_dish_cross_tables(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    expected_tables = {
+        "crosses",
+        "dishes",
+        "recording_subjects",
+    }
+    rows = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name IN (?, ?, ?)
+        ORDER BY name;
+        """,
+        tuple(sorted(expected_tables)),
+    ).fetchall()
+    found = {str(row["name"]) for row in rows}
+    assert found == expected_tables
+    registry.close()
+
+
+def test_schema_has_phase6_subject_indexes(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    expected_indexes = {
+        "idx_crosses_genotype",
+        "idx_subjects_dish_id",
+        "idx_recording_subjects_subject_dpf",
+        "idx_recording_subjects_recording_id",
+    }
+    rows = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'index' AND name IN (?, ?, ?, ?)
+        ORDER BY name;
+        """,
+        tuple(sorted(expected_indexes)),
+    ).fetchall()
+    found = {str(row["name"]) for row in rows}
+    assert found == expected_indexes
+    registry.close()
+
+
+def test_schema_has_recording_subject_overview_view(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    rows = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'view' AND name = 'recording_subject_overview';
+        """
+    ).fetchall()
+    assert len(rows) == 1
+    assert str(rows[0]["name"]) == "recording_subject_overview"
+    registry.close()
+
+
+def test_recording_subject_overview_exposes_genotype_and_dpf(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, protocol_name,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_a",
+            "recording_a",
+            "recording_a",
+            str(tmp_path / "recordings" / "recording_a"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+            "protocol_a",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO crosses (
+            cross_id, genotype, line_strain, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("cross_a", "genotype_y", "line_a"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO dishes (
+            dish_id, cross_id, species, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("dish_a", "cross_a", "danio_rerio"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO subjects (
+            subject_id, dish_id, species, sex, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("subject_a", "dish_a", "danio_rerio", "unknown"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_subjects (
+            recording_id, subject_id, dish_id, cross_id, dpf_at_acquisition, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("recording_a", "subject_a", None, None, 8),
+    )
+    registry.conn.commit()
+
+    row = registry.conn.execute(
+        """
+        SELECT
+            recording_id, subject_id, dish_id, cross_id, genotype, dpf_at_acquisition,
+            protocol_name, recording_type
+        FROM recording_subject_overview
+        WHERE recording_id = ? AND subject_id = ?;
+        """,
+        ("recording_a", "subject_a"),
+    ).fetchone()
+    assert row is not None
+    assert row["dish_id"] == "dish_a"
+    assert row["cross_id"] == "cross_a"
+    assert row["genotype"] == "genotype_y"
+    assert int(row["dpf_at_acquisition"]) == 8
+    assert row["protocol_name"] == "protocol_a"
+    assert row["recording_type"] == "behavior"
+    registry.close()
+
+
+def test_backfill_recording_entities_and_integrity_for_behavior_manifest(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    recording_dir = (
+        tmp_path
+        / "recordings"
+        / "2026-01-28T19-22-28Z_arena_1_DefaultScreen"
+    )
+    zarr_path = recording_dir / "zarr" / "2026-01-28T19-22-28Z_arena_1_DefaultScreen.zarr"
+    zarr_path.mkdir(parents=True)
+
+    # Minimal required artifact files for behavior_v1.
+    h5_path = recording_dir / "raw" / "session_data.h5"
+    h5_path.parent.mkdir(parents=True, exist_ok=True)
+    h5_path.write_bytes(b"h5")
+    timing_path = recording_dir / "raw" / "session_update_timing.csv"
+    timing_path.write_text("t,dt\n0,0\n", encoding="utf-8")
+    cam_video_path = recording_dir / "cams" / "cam0.mp4"
+    cam_video_path.parent.mkdir(parents=True, exist_ok=True)
+    cam_video_path.write_bytes(b"mp4")
+    cam_meta_path = recording_dir / "cams" / "cam0.csv"
+    cam_meta_path.write_text("frame,time\n0,0\n", encoding="utf-8")
+
+    manifest_path = recording_dir / "recording_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "session_uuid": "2026-01-28T19-22-28Z_arena_1",
+                "recording_type": "behavior",
+                "recording_subtype": "free",
+                "behavior_mode": "free",
+                "artifact_schema_id": "behavior_v1",
+                "rig_id": "omnifin0",
+                "arena_id": "arena_1",
+                "camera_id": "2010093",
+                "files": {
+                    "raw": [
+                        "raw/session_data.h5",
+                        "raw/session_update_timing.csv",
+                    ],
+                    "cams": [
+                        "cams/cam0.mp4",
+                        "cams/cam0.csv",
+                    ],
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    registry.upsert_dataset(
+        dataset_id="2026-01-28T19-22-28Z_arena_1",
+        session_uuid="2026-01-28T19-22-28Z_arena_1",
+        zarr_path=zarr_path,
+    )
+
+    summary = _backfill_recording_entities(registry, dry_run=False)
+    assert summary["recordings_scanned"] == 1
+    assert summary["manifests_missing"] == 0
+    assert summary["recordings_upserted"] == 1
+    assert summary["datasets_linked"] in {0, 1}
+    assert summary["artifacts_seen"] == 4
+    assert summary["artifacts_upserted"] == 4
+
+    dataset_row = registry.conn.execute(
+        """
+        SELECT recording_id, artifact_kind
+        FROM datasets
+        WHERE dataset_id = ?;
+        """,
+        ("2026-01-28T19-22-28Z_arena_1",),
+    ).fetchone()
+    assert dataset_row is not None
+    assert dataset_row["recording_id"] == "2026-01-28T19-22-28Z_arena_1"
+    assert dataset_row["artifact_kind"] == "source_recording"
+
+    recording_row = registry.conn.execute(
+        """
+        SELECT recording_type, recording_subtype, behavior_mode, artifact_schema_id
+        FROM recordings
+        WHERE recording_id = ?;
+        """,
+        ("2026-01-28T19-22-28Z_arena_1",),
+    ).fetchone()
+    assert recording_row is not None
+    assert recording_row["recording_type"] == "behavior"
+    assert recording_row["recording_subtype"] == "free"
+    assert recording_row["behavior_mode"] == "free"
+    assert recording_row["artifact_schema_id"] == "behavior_v1"
+
+    issues = _check_registry_integrity(registry)
+    recording_issue_codes = [issue.code for issue in issues if issue.code.startswith("recording_")]
+    assert recording_issue_codes == []
+    registry.close()
+
+
+def test_backfill_subject_dish_cross_entities_from_source_provenance(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "session_a" / "zarr" / "session_a_training.zarr"
+    registry.upsert_dataset(
+        dataset_id="session_a:z111",
+        session_uuid="session_a",
+        zarr_path=zarr_path,
+        recording_id="session_a",
+        artifact_kind="source_recording",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "session_a",
+            "session_a",
+            "session_a",
+            str(tmp_path / "recordings" / "session_a"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO provenance (
+            dataset_id, fish_id, dish_id, cross_id, line_strain, genotype, species,
+            sex, dpf_at_acquisition, parents_json, subject_count, snapshot_status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "session_a:z111",
+            "fish-uuid-1",
+            "dish-001",
+            "cross-001",
+            "line_a",
+            "wt",
+            "danio_rerio",
+            "unknown",
+            6,
+            json.dumps([{"identifier": "p1", "sex": "F"}]),
+            1,
+            "complete",
+        ),
+    )
+    registry.conn.commit()
+
+    dry_summary = _backfill_subject_dish_cross_entities(registry, dry_run=True)
+    assert dry_summary["source_rows_scanned"] == 1
+    assert dry_summary["crosses_unique_seen"] == 1
+    assert dry_summary["crosses_would_insert"] == 1
+    assert dry_summary["crosses_upserted"] == 1
+    assert dry_summary["dishes_unique_seen"] == 1
+    assert dry_summary["dishes_would_insert"] == 1
+    assert dry_summary["dishes_upserted"] == 1
+    assert dry_summary["recording_subjects_unique_seen"] == 1
+    assert dry_summary["recording_subjects_would_insert"] == 1
+    assert dry_summary["recording_subjects_upserted"] == 1
+    assert registry.conn.execute("SELECT COUNT(*) FROM crosses;").fetchone()[0] == 0
+    assert registry.conn.execute("SELECT COUNT(*) FROM dishes;").fetchone()[0] == 0
+    assert registry.conn.execute("SELECT COUNT(*) FROM recording_subjects;").fetchone()[0] == 0
+
+    apply_summary = _backfill_subject_dish_cross_entities(registry, dry_run=False)
+    assert apply_summary["source_rows_scanned"] == 1
+    assert apply_summary["crosses_unique_seen"] == 1
+    assert apply_summary["crosses_would_insert"] == 1
+    assert apply_summary["crosses_upserted"] == 1
+    assert apply_summary["dishes_unique_seen"] == 1
+    assert apply_summary["dishes_would_insert"] == 1
+    assert apply_summary["dishes_upserted"] == 1
+    assert apply_summary["recording_subjects_unique_seen"] == 1
+    assert apply_summary["recording_subjects_would_insert"] == 1
+    assert apply_summary["recording_subjects_upserted"] == 1
+
+    cross_row = registry.conn.execute(
+        "SELECT cross_id, line_strain, genotype FROM crosses WHERE cross_id = ?;",
+        ("cross-001",),
+    ).fetchone()
+    assert cross_row is not None
+    assert cross_row["line_strain"] == "line_a"
+    assert cross_row["genotype"] == "wt"
+
+    dish_row = registry.conn.execute(
+        "SELECT dish_id, cross_id, species FROM dishes WHERE dish_id = ?;",
+        ("dish-001",),
+    ).fetchone()
+    assert dish_row is not None
+    assert dish_row["cross_id"] == "cross-001"
+    assert dish_row["species"] == "danio_rerio"
+
+    subject_row = registry.conn.execute(
+        """
+        SELECT recording_id, subject_id, dataset_id, dish_id, cross_id, dpf_at_acquisition
+        FROM recording_subjects
+        WHERE recording_id = ? AND subject_id = ?;
+        """,
+        ("session_a", "fish-uuid-1"),
+    ).fetchone()
+    assert subject_row is not None
+    assert subject_row["dataset_id"] == "session_a:z111"
+    assert subject_row["dish_id"] == "dish-001"
+    assert subject_row["cross_id"] == "cross-001"
+    assert int(subject_row["dpf_at_acquisition"]) == 6
+    registry.close()
+
+
+def test_backfill_subjects_from_recording_subjects(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "session_a" / "zarr" / "session_a_training.zarr"
+    registry.upsert_dataset(
+        dataset_id="session_a:z111",
+        session_uuid="session_a",
+        zarr_path=zarr_path,
+        recording_id="session_a",
+        artifact_kind="source_recording",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "session_a",
+            "session_a",
+            "session_a",
+            str(tmp_path / "recordings" / "session_a"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO provenance (
+            dataset_id, fish_id, dish_id, cross_id, line_strain, genotype, species,
+            sex, dpf_at_acquisition, subject_count, snapshot_status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "session_a:z111",
+            "fish-uuid-1",
+            "dish-001",
+            "cross-001",
+            "line_a",
+            "wt",
+            "danio_rerio",
+            "unknown",
+            6,
+            1,
+            "complete",
+        ),
+    )
+    registry.conn.commit()
+
+    _backfill_subject_dish_cross_entities(registry, dry_run=False)
+    dry_summary = _backfill_subjects(registry, dry_run=True)
+    assert dry_summary["subject_rows_scanned"] == 1
+    assert dry_summary["subject_ids_unique_seen"] == 1
+    assert dry_summary["subjects_would_insert"] == 1
+    assert dry_summary["subjects_would_enrich"] == 0
+    assert dry_summary["subjects_conflict_dish_id"] == 0
+    assert dry_summary["subjects_conflict_species"] == 0
+    assert dry_summary["subjects_conflict_sex"] == 0
+    assert registry.conn.execute("SELECT COUNT(*) FROM subjects;").fetchone()[0] == 0
+
+    apply_summary = _backfill_subjects(registry, dry_run=False)
+    assert apply_summary["subject_rows_scanned"] == 1
+    assert apply_summary["subject_ids_unique_seen"] == 1
+    assert apply_summary["subjects_would_insert"] == 1
+
+    subject_row = registry.conn.execute(
+        """
+        SELECT subject_id, dish_id, species, sex
+        FROM subjects
+        WHERE subject_id = ?;
+        """,
+        ("fish-uuid-1",),
+    ).fetchone()
+    assert subject_row is not None
+    assert subject_row["dish_id"] == "dish-001"
+    assert subject_row["species"] == "danio_rerio"
+    assert subject_row["sex"] == "unknown"
+    registry.close()
+
+
+def test_backfill_subjects_reports_dish_conflict(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    for index, dish_id in enumerate(("dish-001", "dish-002"), start=1):
+        dataset_id = f"session_a:z11{index}"
+        recording_id = f"session_{index}"
+        zarr_path = tmp_path / "recordings" / recording_id / "zarr" / f"{recording_id}_training.zarr"
+        registry.upsert_dataset(
+            dataset_id=dataset_id,
+            session_uuid=recording_id,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            artifact_kind="source_recording",
+        )
+        registry.conn.execute(
+            """
+            INSERT INTO recordings (
+                recording_id, session_uuid, recording_name, recording_path, recording_type,
+                recording_subtype, behavior_mode, artifact_schema_id, created_utc, updated_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+            """,
+            (
+                recording_id,
+                recording_id,
+                recording_id,
+                str(tmp_path / "recordings" / recording_id),
+                "behavior",
+                "free",
+                "free",
+                "behavior_v1",
+            ),
+        )
+        registry.conn.execute(
+            """
+            INSERT INTO provenance (
+                dataset_id, fish_id, dish_id, cross_id, line_strain, genotype, species,
+                sex, dpf_at_acquisition, subject_count, snapshot_status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            (
+                dataset_id,
+                "fish-uuid-1",
+                dish_id,
+                "cross-001",
+                "line_a",
+                "wt",
+                "danio_rerio",
+                "unknown",
+                6,
+                1,
+                "complete",
+            ),
+        )
+    registry.conn.commit()
+
+    _backfill_subject_dish_cross_entities(registry, dry_run=False)
+    summary = _backfill_subjects(registry, dry_run=True)
+    assert summary["subject_rows_scanned"] == 2
+    assert summary["subject_ids_unique_seen"] == 1
+    assert summary["subjects_conflict_dish_id"] == 1
+    registry.close()
+
+
+def test_register_from_root_disambiguates_dataset_id_for_same_session_uuid(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_a = tmp_path / "recordings" / "session_a" / "zarr" / "a.zarr"
+    zarr_b = tmp_path / "recordings" / "session_a" / "zarr" / "b.zarr"
+    zarr_a.parent.mkdir(parents=True, exist_ok=True)
+    zarr_b.parent.mkdir(parents=True, exist_ok=True)
+
+    root_a = zarr.open_group(str(zarr_a), mode="w")
+    root_a.attrs["session_uuid"] = "session_a"
+    root_b = zarr.open_group(str(zarr_b), mode="w")
+    root_b.attrs["session_uuid"] = "session_a"
+
+    dataset_a = registry.register_from_root(zarr.open_group(str(zarr_a), mode="r"), zarr_a)
+    dataset_b = registry.register_from_root(zarr.open_group(str(zarr_b), mode="r"), zarr_b)
+
+    assert dataset_a.startswith("session_a:z")
+    assert dataset_b != dataset_a
+    assert dataset_b.startswith("session_a:z")
+
+    rows = registry.conn.execute(
+        """
+        SELECT dataset_id, session_uuid
+        FROM datasets
+        ORDER BY dataset_id;
+        """
+    ).fetchall()
+    assert len(rows) == 2
+    assert {str(row["session_uuid"]) for row in rows} == {"session_a"}
+    registry.close()
+
+
+def test_register_from_root_maps_days_post_fertilization_to_dpf(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "session_dpf" / "zarr" / "session_dpf_training.zarr"
+    zarr_path.parent.mkdir(parents=True, exist_ok=True)
+    root = zarr.open_group(str(zarr_path), mode="w")
+    root.attrs["session_uuid"] = "session_dpf"
+    analysis_meta = root.create_group("analysis_metadata")
+    analysis_meta.attrs["subject_metadata"] = json.dumps(
+        {
+            "fish_id": "fish-dpf-1",
+            "dish_id": "dish-dpf-1",
+            "cross_id": "cross-dpf-1",
+            "days_post_fertilization": "12",
+            "genotype": "genotype_dpf",
+            "line_strain": "line_dpf",
+            "species": "Danio rerio",
+            "sex": "unknown",
+            "subject_count": "1",
+        }
+    )
+
+    dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
+    row = registry.conn.execute(
+        """
+        SELECT fish_id, dish_id, cross_id, dpf_at_acquisition
+        FROM provenance
+        WHERE dataset_id = ?;
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert row is not None
+    assert row["fish_id"] == "fish-dpf-1"
+    assert row["dish_id"] == "dish-dpf-1"
+    assert row["cross_id"] == "cross-dpf-1"
+    assert int(row["dpf_at_acquisition"]) == 12
+    registry.close()
+
+
+def test_backfill_dataset_lineage_from_training_set_membership(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    source_a = tmp_path / "recording_a.zarr"
+    source_b = tmp_path / "recording_b.zarr"
+    merged = tmp_path / "training" / "datasets" / "detect_set_v001" / "zarr" / "detect_set_v001_merged.zarr"
+    registry.upsert_dataset("source_a", session_uuid="source_a", zarr_path=source_a)
+    registry.upsert_dataset("source_b", session_uuid="source_b", zarr_path=source_b)
+    registry.upsert_dataset("detect_set_v001_merged", session_uuid="detect_set_v001_merged", zarr_path=merged)
+    registry.upsert_training_set(
+        set_id="detect_set_v001",
+        name="detect_set",
+        query_filter=None,
+        dataset_ids=["source_a", "source_b", "detect_set_v001_merged"],
+    )
+
+    summary = _backfill_dataset_lineage(registry, dry_run=False)
+    assert summary["sets_scanned"] == 1
+    assert summary["merged_scanned"] == 1
+    assert summary["relationships_changed"] == 1
+
+    rows = registry.conn.execute(
+        """
+        SELECT parent_dataset_id
+        FROM dataset_lineage_current
+        WHERE child_dataset_id = ? AND relationship_type = 'training_merge_source'
+        ORDER BY parent_dataset_id;
+        """,
+        ("detect_set_v001_merged",),
+    ).fetchall()
+    assert [str(row["parent_dataset_id"]) for row in rows] == ["source_a", "source_b"]
+    registry.close()
+
+
+def test_integrity_flags_merged_dataset_missing_lineage(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    merged = tmp_path / "training" / "datasets" / "pose_set_v001" / "zarr" / "pose_set_v001_merged.zarr"
+    registry.upsert_dataset("pose_set_v001_merged", session_uuid="pose_set_v001_merged", zarr_path=merged)
+
+    issues = _check_registry_integrity(registry)
+    codes = {issue.code for issue in issues}
+    assert "merged_dataset_missing_lineage" in codes
+    registry.close()
+
+
+def test_integrity_flags_dataset_lineage_cycle(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    dataset_a = tmp_path / "a.zarr"
+    dataset_b = tmp_path / "b.zarr"
+    registry.upsert_dataset("dataset_a", session_uuid="dataset_a", zarr_path=dataset_a)
+    registry.upsert_dataset("dataset_b", session_uuid="dataset_b", zarr_path=dataset_b)
+    registry.replace_dataset_lineage(
+        child_dataset_id="dataset_a",
+        parent_dataset_ids=["dataset_b"],
+        relationship_type="training_merge_source",
+    )
+    registry.replace_dataset_lineage(
+        child_dataset_id="dataset_b",
+        parent_dataset_ids=["dataset_a"],
+        relationship_type="training_merge_source",
+    )
+
+    issues = _check_registry_integrity(registry)
+    cycle_codes = [issue.code for issue in issues if issue.code == "dataset_lineage_cycle"]
+    assert cycle_codes
+    registry.close()
+
+
+def test_integrity_flags_derived_dataset_missing_recording_id_single_parent(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    source = tmp_path / "source.zarr"
+    child = tmp_path / "derived.zarr"
+    registry.upsert_dataset(
+        "source_a",
+        session_uuid="source_a",
+        zarr_path=source,
+        recording_id="rec_a",
+        artifact_kind="source_recording",
+    )
+    registry.upsert_dataset(
+        "derived_a",
+        session_uuid="derived_a",
+        zarr_path=child,
+        recording_id=None,
+        artifact_kind="derived_analysis",
+    )
+    registry.replace_dataset_lineage(
+        child_dataset_id="derived_a",
+        parent_dataset_ids=["source_a"],
+        relationship_type="analysis_source",
+    )
+
+    issues = _check_registry_integrity(registry)
+    codes = {issue.code for issue in issues}
+    assert "derived_dataset_missing_recording_id_single_parent" in codes
+    registry.close()
+
+
+def test_integrity_flags_derived_dataset_non_null_recording_id_multi_parent(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    source_a = tmp_path / "source_a.zarr"
+    source_b = tmp_path / "source_b.zarr"
+    child = tmp_path / "derived.zarr"
+    registry.upsert_dataset(
+        "source_a",
+        session_uuid="source_a",
+        zarr_path=source_a,
+        recording_id="rec_a",
+        artifact_kind="source_recording",
+    )
+    registry.upsert_dataset(
+        "source_b",
+        session_uuid="source_b",
+        zarr_path=source_b,
+        recording_id="rec_b",
+        artifact_kind="source_recording",
+    )
+    registry.upsert_dataset(
+        "derived_multi",
+        session_uuid="derived_multi",
+        zarr_path=child,
+        recording_id="rec_a",
+        artifact_kind="derived_analysis",
+    )
+    registry.replace_dataset_lineage(
+        child_dataset_id="derived_multi",
+        parent_dataset_ids=["source_a", "source_b"],
+        relationship_type="analysis_source",
+    )
+
+    issues = _check_registry_integrity(registry)
+    codes = {issue.code for issue in issues}
+    assert "derived_dataset_recording_id_non_null_multi_parent" in codes
+    registry.close()
+
+
+def test_integrity_accepts_derived_dataset_single_parent_matching_recording_id(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    source = tmp_path / "source.zarr"
+    child = tmp_path / "derived.zarr"
+    registry.upsert_dataset(
+        "source_a",
+        session_uuid="source_a",
+        zarr_path=source,
+        recording_id="rec_a",
+        artifact_kind="source_recording",
+    )
+    registry.upsert_dataset(
+        "derived_ok",
+        session_uuid="derived_ok",
+        zarr_path=child,
+        recording_id="rec_a",
+        artifact_kind="derived_analysis",
+    )
+    registry.replace_dataset_lineage(
+        child_dataset_id="derived_ok",
+        parent_dataset_ids=["source_a"],
+        relationship_type="analysis_source",
+    )
+
+    issues = _check_registry_integrity(registry)
+    codes = {issue.code for issue in issues}
+    assert "derived_dataset_missing_recording_id_single_parent" not in codes
+    assert "derived_dataset_recording_id_mismatch_single_parent" not in codes
+    assert "derived_dataset_recording_id_non_null_multi_parent" not in codes
+    registry.close()
+
+
+def test_integrity_flags_source_protocol_name_mismatch(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    source = tmp_path / "source.zarr"
+    registry.upsert_dataset(
+        "source_a",
+        session_uuid="source_a",
+        zarr_path=source,
+        recording_id="rec_a",
+        artifact_kind="source_recording",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, protocol_name,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("rec_a", "source_a", "rec_a", str(tmp_path), "behavior", "free", "free", "behavior_v1", "ProtocolA"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO provenance (dataset_id, protocol_name, subject_count)
+        VALUES (?, ?, ?);
+        """,
+        ("source_a", "ProtocolB", 1),
+    )
+    registry.conn.commit()
+
+    issues = _check_registry_integrity(registry)
+    codes = {issue.code for issue in issues}
+    assert "source_protocol_name_mismatch" in codes
+    registry.close()
+
+
+def test_integrity_flags_source_subject_count_invalid(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    source = tmp_path / "source.zarr"
+    registry.upsert_dataset(
+        "source_a",
+        session_uuid="source_a",
+        zarr_path=source,
+        recording_id="rec_a",
+        artifact_kind="source_recording",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, protocol_name,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("rec_a", "source_a", "rec_a", str(tmp_path), "behavior", "free", "free", "behavior_v1", "ProtocolA"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO provenance (dataset_id, protocol_name, subject_count)
+        VALUES (?, ?, ?);
+        """,
+        ("source_a", "ProtocolA", 0),
+    )
+    registry.conn.commit()
+
+    issues = _check_registry_integrity(registry)
+    codes = {issue.code for issue in issues}
+    assert "source_subject_count_invalid" in codes
+    registry.close()
+
+
+def test_integrity_flags_source_dish_design_mismatch(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    source = tmp_path / "source.zarr"
+    registry.upsert_dataset(
+        "source_a",
+        session_uuid="source_a",
+        zarr_path=source,
+        recording_id="rec_a",
+        artifact_kind="source_recording",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, protocol_name, dish_design,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "rec_a",
+            "source_a",
+            "rec_a",
+            str(tmp_path),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+            "ProtocolA",
+            "6_well_plate",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO provenance (dataset_id, protocol_name, dish_design, subject_count)
+        VALUES (?, ?, ?, ?);
+        """,
+        ("source_a", "ProtocolA", "12_well_plate", 1),
+    )
+    registry.conn.commit()
+
+    issues = _check_registry_integrity(registry)
+    codes = {issue.code for issue in issues}
+    assert "source_dish_design_mismatch" in codes
+    registry.close()
+
+
+def test_integrity_accepts_source_protocol_and_subject_count_consistent(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    source = tmp_path / "source.zarr"
+    registry.upsert_dataset(
+        "source_a",
+        session_uuid="source_a",
+        zarr_path=source,
+        recording_id="rec_a",
+        artifact_kind="source_recording",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, protocol_name, dish_design,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "rec_a",
+            "source_a",
+            "rec_a",
+            str(tmp_path),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+            "ProtocolA",
+            "6_well_plate",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO provenance (dataset_id, protocol_name, dish_design, subject_count)
+        VALUES (?, ?, ?, ?);
+        """,
+        ("source_a", "ProtocolA", "6_well_plate", 1),
+    )
+    registry.conn.commit()
+
+    issues = _check_registry_integrity(registry)
+    codes = {issue.code for issue in issues}
+    assert "source_protocol_name_mismatch" not in codes
+    assert "source_dish_design_mismatch" not in codes
+    assert "source_subject_count_invalid" not in codes
+    registry.close()
+
+
+def test_integrity_flags_required_view_missing(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.conn.execute("DROP VIEW IF EXISTS recording_overview;")
+    registry.conn.commit()
+
+    issues = _check_registry_integrity(registry)
+    issue_codes = {(issue.code, issue.run_id) for issue in issues}
+    assert ("required_view_missing", "recording_overview") in issue_codes
+    registry.close()
+
+
+def test_integrity_flags_required_view_query_error(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.conn.execute("DROP VIEW IF EXISTS recording_overview;")
+    registry.conn.execute(
+        """
+        CREATE VIEW recording_overview AS
+        SELECT * FROM does_not_exist_table;
+        """
+    )
+    registry.conn.commit()
+
+    issues = _check_registry_integrity(registry)
+    issue_codes = {(issue.code, issue.run_id) for issue in issues}
+    assert ("required_view_query_error", "recording_overview") in issue_codes
+    registry.close()
+
+
+def test_integrity_flags_required_view_missing_recording_subject_overview(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.conn.execute("DROP VIEW IF EXISTS recording_subject_overview;")
+    registry.conn.commit()
+
+    issues = _check_registry_integrity(registry)
+    issue_codes = {(issue.code, issue.run_id) for issue in issues}
+    assert ("required_view_missing", "recording_subject_overview") in issue_codes
+    registry.close()
+
+
+def test_integrity_flags_recording_subject_missing_subject(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_a",
+            "recording_a",
+            "recording_a",
+            str(tmp_path / "recordings" / "recording_a"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO crosses (cross_id, genotype, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("cross_a", "wt"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO dishes (dish_id, cross_id, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("dish_a", "cross_a"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_subjects (
+            recording_id, subject_id, dish_id, cross_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("recording_a", "subject_missing", "dish_a", "cross_a"),
+    )
+    registry.conn.commit()
+
+    issues = _check_registry_integrity(registry)
+    codes = {issue.code for issue in issues}
+    assert "recording_subject_missing_subject" in codes
+    registry.close()
+
+
+def test_dataset_lineage_self_edge_rejected_by_db_trigger(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    dataset_a = tmp_path / "a.zarr"
+    registry.upsert_dataset("dataset_a", session_uuid="dataset_a", zarr_path=dataset_a)
+    with pytest.raises(sqlite3.IntegrityError, match="self-edge"):
+        registry.conn.execute(
+            """
+            INSERT INTO dataset_lineage (
+                child_dataset_id, parent_dataset_id, relationship_type, created_utc, updated_utc
+            )
+            VALUES (?, ?, ?, datetime('now'), datetime('now'));
+            """,
+            ("dataset_a", "dataset_a", "training_merge_source"),
+        )
+    registry.close()
+
+
+def test_dataset_lineage_audit_summary_counts(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    source_a = tmp_path / "recording_a.zarr"
+    merged = tmp_path / "training" / "datasets" / "pose_set_v001" / "zarr" / "pose_set_v001_merged.zarr"
+    registry.upsert_dataset("source_a", session_uuid="source_a", zarr_path=source_a)
+    registry.upsert_dataset("pose_set_v001_merged", session_uuid="pose_set_v001_merged", zarr_path=merged)
+    registry.upsert_training_set(
+        set_id="pose_set_v001",
+        name="pose_set",
+        query_filter=None,
+        dataset_ids=["source_a", "pose_set_v001_merged"],
+    )
+
+    before = _summarize_dataset_lineage_audit(registry)
+    assert before.edge_count == 0
+    assert before.merged_dataset_count == 1
+    assert before.merged_missing_lineage_count == 1
+    assert before.training_set_lineage_mismatch_count == 1
+
+    _backfill_dataset_lineage(registry, dry_run=False)
+    after = _summarize_dataset_lineage_audit(registry)
+    assert after.edge_count == 1
+    assert after.merged_dataset_count == 1
+    assert after.merged_missing_lineage_count == 0
+    assert after.training_set_lineage_mismatch_count == 0
+    registry.close()
+
+
+def test_remap_training_set_dataset_ids_maps_legacy_source_ids(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    source_a = tmp_path / "recording_a_training.zarr"
+    source_b = tmp_path / "recording_b_training.zarr"
+    merged = tmp_path / "training" / "datasets" / "detect_set_v001" / "zarr" / "detect_set_v001_merged.zarr"
+    registry.upsert_dataset(
+        "session_a:z111",
+        session_uuid="session_a",
+        zarr_path=source_a,
+        artifact_kind="source_recording",
+    )
+    registry.upsert_dataset(
+        "session_b:z222",
+        session_uuid="session_b",
+        zarr_path=source_b,
+        artifact_kind="source_recording",
+    )
+    registry.upsert_dataset(
+        "detect_set_v001_merged",
+        session_uuid="detect_set_v001_merged",
+        zarr_path=merged,
+        artifact_kind="derived_training_merge",
+    )
+    registry.upsert_training_set(
+        set_id="detect_set_v001",
+        name="detect_set",
+        query_filter=None,
+        dataset_ids=["session_a", "session_b", "detect_set_v001_merged"],
+    )
+
+    dry_summary = _remap_training_set_dataset_ids(registry, dry_run=True)
+    assert dry_summary["sets_scanned"] == 1
+    assert dry_summary["sets_changed"] == 1
+    assert dry_summary["ids_remapped"] == 2
+    assert dry_summary["ids_unresolved"] == 0
+    original_json = registry.conn.execute(
+        "SELECT dataset_ids_json FROM training_sets WHERE set_id = ?;",
+        ("detect_set_v001",),
+    ).fetchone()
+    assert original_json is not None
+    assert json.loads(str(original_json["dataset_ids_json"])) == [
+        "detect_set_v001_merged",
+        "session_a",
+        "session_b",
+    ]
+
+    apply_summary = _remap_training_set_dataset_ids(registry, dry_run=False)
+    assert apply_summary["sets_scanned"] == 1
+    assert apply_summary["sets_changed"] == 1
+    assert apply_summary["ids_remapped"] == 2
+    assert apply_summary["ids_unresolved"] == 0
+    remapped_json = registry.conn.execute(
+        "SELECT dataset_ids_json FROM training_sets WHERE set_id = ?;",
+        ("detect_set_v001",),
+    ).fetchone()
+    assert remapped_json is not None
+    assert json.loads(str(remapped_json["dataset_ids_json"])) == [
+        "detect_set_v001_merged",
+        "session_a:z111",
+        "session_b:z222",
+    ]
+    registry.close()
 
 
 def test_collect_and_delete_invalid_candidates(tmp_path: Path) -> None:
@@ -134,6 +1340,30 @@ def test_collect_candidates_can_infer_missing_without_status(tmp_path: Path) -> 
     registry.close()
 
 
+def test_collect_missing_dataset_candidates_excludes_nested_only(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset("missing_active", session_uuid=None, zarr_path=tmp_path / "not_there.zarr")
+    nested_path = tmp_path / "recording.zarr" / "detect_runs"
+    nested_path.mkdir(parents=True)
+    (nested_path / "zarr.json").write_text('{"zarr_format": 3, "node_type": "group"}', encoding="utf-8")
+    registry.upsert_dataset("nested_active", session_uuid=None, zarr_path=nested_path)
+
+    inferred = _collect_missing_dataset_candidates(
+        registry,
+        include_missing_scan=True,
+    )
+    by_id = {candidate.dataset_id: candidate for candidate in inferred}
+    assert set(by_id) == {"missing_active"}
+    assert by_id["missing_active"].reasons == ("status_missing",)
+
+    registry.conn.execute("UPDATE datasets SET status = 'missing' WHERE dataset_id = 'nested_active';")
+    registry.conn.commit()
+    status_only = _collect_missing_dataset_candidates(registry)
+    by_id = {candidate.dataset_id: candidate for candidate in status_only}
+    assert set(by_id) == {"nested_active"}
+    registry.close()
+
+
 def test_collect_and_delete_failed_training_runs(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     registry.record_training_run(
@@ -141,6 +1371,7 @@ def test_collect_and_delete_failed_training_runs(tmp_path: Path) -> None:
         set_id="set_a",
         config_path=None,
         manifest_path=None,
+        skeleton_id=None,
         model_path=None,
         metrics_path=None,
         status="failed",
@@ -150,6 +1381,7 @@ def test_collect_and_delete_failed_training_runs(tmp_path: Path) -> None:
         set_id="set_a",
         config_path=None,
         manifest_path=None,
+        skeleton_id=None,
         model_path=None,
         metrics_path=None,
         status="FAILED",
@@ -159,6 +1391,7 @@ def test_collect_and_delete_failed_training_runs(tmp_path: Path) -> None:
         set_id="set_a",
         config_path=None,
         manifest_path=None,
+        skeleton_id=None,
         model_path=None,
         metrics_path=None,
         status="success",
@@ -168,6 +1401,7 @@ def test_collect_and_delete_failed_training_runs(tmp_path: Path) -> None:
         set_id="set_a",
         config_path=None,
         manifest_path=None,
+        skeleton_id=None,
         model_path=None,
         metrics_path=None,
         status="in_progress",
@@ -389,6 +1623,7 @@ def test_collect_and_delete_empty_training_sets(tmp_path: Path) -> None:
         set_id="set_linked",
         config_path=None,
         manifest_path=None,
+        skeleton_id=None,
         model_path=None,
         metrics_path=None,
         status="success",
@@ -398,6 +1633,7 @@ def test_collect_and_delete_empty_training_sets(tmp_path: Path) -> None:
         set_id=None,
         config_path=None,
         manifest_path=None,
+        skeleton_id=None,
         model_path=None,
         metrics_path=None,
         status="success",
@@ -442,6 +1678,7 @@ def test_backfill_model_tables_from_legacy_rows(tmp_path: Path) -> None:
         set_id="set_a",
         config_path=config,
         manifest_path=None,
+        skeleton_id=None,
         model_path=model,
         metrics_path=metrics,
         status="success",
@@ -465,7 +1702,7 @@ def test_backfill_model_tables_from_legacy_rows(tmp_path: Path) -> None:
     registry.conn.commit()
 
     # Simulate pre-migration registry by removing new tables.
-    registry.conn.execute("DELETE FROM detection_models;")
+    registry.conn.execute("DELETE FROM training_models;")
     registry.conn.execute("DELETE FROM onnx_models;")
     registry.conn.execute("DELETE FROM tensorrt_models;")
     registry.conn.commit()
@@ -483,7 +1720,7 @@ def test_backfill_model_tables_from_legacy_rows(tmp_path: Path) -> None:
     assert applied["onnx_inserted"] == 1
     assert applied["tensorrt_inserted"] == 1
 
-    detection_count = registry.conn.execute("SELECT COUNT(*) AS n FROM detection_models;").fetchone()["n"]
+    detection_count = registry.conn.execute("SELECT COUNT(*) AS n FROM training_models;").fetchone()["n"]
     onnx_count = registry.conn.execute("SELECT COUNT(*) AS n FROM onnx_models;").fetchone()["n"]
     trt_count = registry.conn.execute("SELECT COUNT(*) AS n FROM tensorrt_models;").fetchone()["n"]
     assert detection_count == 1
@@ -589,6 +1826,7 @@ def test_check_registry_integrity_passes_for_valid_rows(tmp_path: Path) -> None:
         set_id="set_ok",
         config_path=cfg,
         manifest_path=None,
+        skeleton_id=None,
         model_path=model,
         metrics_path=metrics,
         status="success",
@@ -623,13 +1861,14 @@ def test_check_registry_integrity_reports_missing_detection_model_rows(tmp_path:
         set_id="set_a",
         config_path=cfg,
         manifest_path=None,
+        skeleton_id=None,
         model_path=None,
         metrics_path=None,
         status="in_progress",
         final_metrics={"stage": "start"},
     )
     # Simulate inconsistent state.
-    registry.conn.execute("DELETE FROM detection_models WHERE run_id = 'run_missing_dm';")
+    registry.conn.execute("DELETE FROM training_models WHERE run_id = 'run_missing_dm';")
     registry.conn.commit()
 
     issues = _check_registry_integrity(registry)
@@ -651,6 +1890,7 @@ def test_check_registry_integrity_reports_missing_artifact_files(tmp_path: Path)
         set_id="set_missing",
         config_path=cfg,
         manifest_path=None,
+        skeleton_id=None,
         model_path=model,
         metrics_path=metrics,
         status="success",
@@ -700,6 +1940,7 @@ def test_check_registry_integrity_reports_trt_plugin_contract_mismatch(tmp_path:
         set_id="set_ok",
         config_path=cfg,
         manifest_path=None,
+        skeleton_id=None,
         model_path=model,
         metrics_path=metrics,
         status="success",
@@ -737,3 +1978,62 @@ def test_check_registry_integrity_reports_trt_plugin_contract_mismatch(tmp_path:
     assert "trt_plugins_missing_ops" in codes
     assert "trt_plugin_contract_mismatch" in codes
     registry.close()
+
+
+def test_registry_schema_version_initialized(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    latest_version = max(version for version, _name, _fn in registry._schema_migrations())
+    row = registry.conn.execute("SELECT MAX(version) AS version FROM schema_version;").fetchone()
+    assert row is not None
+    assert int(row["version"]) == latest_version
+    pragma_row = registry.conn.execute("PRAGMA user_version;").fetchone()
+    assert pragma_row is not None
+    assert int(pragma_row[0]) == latest_version
+    registry.close()
+
+
+def test_registry_schema_version_bootstrap_for_existing_registry(tmp_path: Path) -> None:
+    path = tmp_path / "registry.sqlite"
+    registry = Registry(path)
+    latest_version = max(version for version, _name, _fn in registry._schema_migrations())
+    registry.close()
+
+    with sqlite3.connect(str(path)) as conn:
+        conn.execute("DROP TABLE schema_version;")
+        conn.commit()
+
+    reopened = Registry(path)
+    row = reopened.conn.execute("SELECT MAX(version) AS version FROM schema_version;").fetchone()
+    assert row is not None
+    assert int(row["version"]) == latest_version
+    reopened.close()
+
+
+class _FailingMigrationRegistry(Registry):
+    def _schema_migrations(self):
+        migrations = list(super()._schema_migrations())
+        next_version = max(version for version, _name, _fn in migrations) + 1
+        migrations.append((next_version, "intentional_failure_for_test", self._migration_002_fail))
+        return migrations
+
+    def _migration_002_fail(self) -> None:
+        self.conn.execute("CREATE TABLE should_rollback (id INTEGER PRIMARY KEY);")
+        raise RuntimeError("boom")
+
+
+def test_registry_migration_failure_does_not_advance_version(tmp_path: Path) -> None:
+    path = tmp_path / "registry.sqlite"
+    base = Registry(path)
+    latest_version = max(version for version, _name, _fn in base._schema_migrations())
+    base.close()
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _FailingMigrationRegistry(path)
+
+    with sqlite3.connect(str(path)) as conn:
+        version = conn.execute("SELECT MAX(version) FROM schema_version;").fetchone()[0]
+        assert int(version) == latest_version
+        table_row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='should_rollback';"
+        ).fetchone()
+        assert table_row is None

@@ -31,6 +31,11 @@ def _write_detect_zarr(path: Path, *, num_frames: int = 2, frame_chunk: int = 1)
     crop.attrs["detection_source_type"] = "manual"
     crop.attrs["includes_interpolated"] = False
     crop.create_array(
+        "roi_images",
+        data=np.stack(images, axis=0),
+        chunks=(max(1, frame_chunk), 32, 32),
+    )
+    crop.create_array(
         "bbox_norm_coords",
         data=np.stack(
             [

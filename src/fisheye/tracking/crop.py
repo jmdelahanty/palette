@@ -59,6 +59,20 @@ except ImportError:
     _TORCH_AVAILABLE = False
 
 try:
+    import cupy as cp
+    _CUPY_AVAILABLE = True
+except ImportError:
+    _CUPY_AVAILABLE = False
+
+try:
+    import kvikio
+    import kvikio.defaults as kvikio_defaults
+    import kvikio.zarr
+    _KVIKIO_AVAILABLE = True
+except ImportError:
+    _KVIKIO_AVAILABLE = False
+
+try:
     import decord
     from decord import VideoReader, cpu, gpu
     _DECORD_AVAILABLE = True
@@ -383,13 +397,14 @@ def crop_batch_cpu(
     bbox_coords: np.ndarray,
     roi_sz: Tuple[int, int],
     video_shape: Tuple[int, int]
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
     """
     Crop a batch of detections using CPU (OpenCV).
     """
     cap = cv2.VideoCapture(str(video_path))
     
     # Get unique frames and decode
+    decode_start = time.perf_counter()
     unique_frames = np.unique(frame_indices)
     frame_cache = {}
     
@@ -399,7 +414,8 @@ def crop_batch_cpu(
         if ret:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             frame_cache[int(frame_idx)] = gray
-    
+    decode_seconds = time.perf_counter() - decode_start
+
     cap.release()
     
     # Extract crops
@@ -410,6 +426,7 @@ def crop_batch_cpu(
     crops = np.zeros((num_crops, roi_h, roi_w), dtype=np.uint8)
     coords = np.zeros((num_crops, 2), dtype=np.int32)
     
+    compute_start = time.perf_counter()
     for i, (frame_idx, bbox) in enumerate(zip(frame_indices, bbox_coords)):
         frame = frame_cache.get(int(frame_idx))
         if frame is None:
@@ -439,8 +456,12 @@ def crop_batch_cpu(
                 px2 = px1 + (vx2 - vx1)
                 
                 crops[i, py1:py2, px1:px2] = frame[vy1:vy2, vx1:vx2]
-    
-    return crops, coords
+    compute_seconds = time.perf_counter() - compute_start
+
+    return crops, coords, {
+        "decode_seconds": float(decode_seconds),
+        "compute_seconds": float(compute_seconds),
+    }
 
 
 def _process_chunk_gpu(
@@ -450,11 +471,14 @@ def _process_chunk_gpu(
     frame_to_det: Dict[int, List[int]],
     bbox_coords: np.ndarray,
     roi_sz: Tuple[int, int],
-    video_shape: Tuple[int, int]
-) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray, float]:
+    video_shape: Tuple[int, int],
+    *,
+    return_device: bool = False,
+) -> Tuple[int, np.ndarray, Any, np.ndarray, float]:
     """Process a contiguous chunk of frames on GPU and return crops/co-ordinates."""
     start = time.perf_counter()
-    frames_gray = frames_gpu.to(torch.float32).mean(dim=-1).to(torch.uint8)
+    # Keep conversion in fp16 to reduce transient GPU memory on high-res frames.
+    frames_gray = frames_gpu.to(torch.float16).mean(dim=-1).to(torch.uint8)
     H, W = video_shape
 
     chunk_det_indices: List[int] = []
@@ -497,6 +521,14 @@ def _process_chunk_gpu(
     chunk_time = time.perf_counter() - start
 
     if not chunk_rois:
+        if return_device:
+            return (
+                chunk_idx,
+                np.array([], dtype=np.int64),
+                torch.empty((0, roi_sz[0], roi_sz[1]), dtype=torch.uint8, device=frames_gray.device),
+                np.empty((0, 2), dtype=np.int32),
+                chunk_time
+            )
         return (
             chunk_idx,
             np.array([], dtype=np.int64),
@@ -506,11 +538,29 @@ def _process_chunk_gpu(
         )
 
     crops_gpu = torch.stack(chunk_rois, dim=0)
-    crops_cpu = crops_gpu.cpu().numpy()
     coords_full_cpu = np.array(chunk_coords_full, dtype=np.int32)
     det_indices_np = np.array(chunk_det_indices, dtype=np.int64)
+    if return_device:
+        return chunk_idx, det_indices_np, crops_gpu, coords_full_cpu, chunk_time
+
+    crops_cpu = crops_gpu.cpu().numpy()
 
     return chunk_idx, det_indices_np, crops_cpu, coords_full_cpu, chunk_time
+
+
+def _contiguous_detection_slice(det_ids: np.ndarray) -> Optional[slice]:
+    """Return contiguous slice if det_ids form [start, start+1, ..., end-1]."""
+    if det_ids.size == 0:
+        return None
+    start = int(det_ids[0])
+    stop = int(det_ids[-1]) + 1
+    if stop <= start:
+        return None
+    if (stop - start) != int(det_ids.size):
+        return None
+    if not np.all(det_ids == np.arange(start, stop, dtype=det_ids.dtype)):
+        return None
+    return slice(start, stop)
 
 
 def crop_from_external_video(
@@ -523,6 +573,13 @@ def crop_from_external_video(
     roi_sz: Tuple[int, int],
     use_gpu: bool,
     console: Console,
+    preferred_policy: Optional[str] = None,
+    external_write_backend: str = "standard",
+    external_roi_storage: str = "compressed",
+    external_use_sharding: bool = False,
+    external_roi_chunk_size: int = 1024,
+    external_roi_shard_size: Optional[int] = None,
+    external_gpu_chunk_frames: int = 96,
     verbose: bool = False
 ) -> Dict[str, Any]:
     """
@@ -530,7 +587,35 @@ def crop_from_external_video(
     """
     start_time = time.perf_counter()
     
-    root = zarr.open(zarr_path, mode='a')
+    use_kvikio_writes = False
+    backend_norm = str(external_write_backend or "standard").strip().lower()
+    roi_storage_norm = str(external_roi_storage or "compressed").strip().lower()
+    if roi_storage_norm not in {"compressed", "uncompressed"}:
+        roi_storage_norm = "compressed"
+
+    if backend_norm == "kvikio":
+        if not use_gpu:
+            console.print("[yellow]kvikio writes requested but GPU mode disabled; falling back to standard writes[/yellow]")
+        elif not _KVIKIO_AVAILABLE:
+            console.print("[yellow]kvikio writes requested but kvikio is unavailable; falling back to standard writes[/yellow]")
+        elif not _CUPY_AVAILABLE:
+            console.print("[yellow]kvikio writes requested but cupy is unavailable; falling back to standard writes[/yellow]")
+        else:
+            kvikio_defaults.set(
+                {
+                    "num_threads": 8,
+                    "task_size": 32 * 1024 * 1024,
+                    "bounce_buffer_size": 64 * 1024 * 1024,
+                    "gds_threshold": 1024,
+                }
+            )
+            zarr.config.enable_gpu()
+            store = kvikio.zarr.GDSStore(str(zarr_path))
+            root = zarr.open_group(store=store, mode='a')
+            use_kvikio_writes = True
+            console.print("[green]✓ External crop writes using kvikIO GDSStore[/green]")
+    if not use_kvikio_writes:
+        root = zarr.open(zarr_path, mode='a')
     
     video_reader = None
     crop_group: Optional[zarr.Group] = None
@@ -538,6 +623,9 @@ def crop_from_external_video(
     success = False
     error_message: Optional[str] = None
     started_at = datetime.now(timezone.utc).isoformat()
+    decode_seconds = 0.0
+    compute_seconds = 0.0
+    write_seconds = 0.0
     
     actual_use_gpu = use_gpu
     try:
@@ -565,15 +653,30 @@ def crop_from_external_video(
         crop_group, run_name = get_run_group(root, 'crop', console)
         
         # Create output arrays
-        compressor = BloscCodec(typesize=1, cname='lz4', clevel=1, shuffle="bitshuffle")
-        
+        roi_chunk_len = max(1, min(int(external_roi_chunk_size), total_detections))
+        if external_roi_shard_size is None:
+            roi_shard_len = max(roi_chunk_len, roi_chunk_len * 8)
+        else:
+            roi_shard_len = max(roi_chunk_len, int(external_roi_shard_size))
+        roi_shard_len = min(roi_shard_len, total_detections)
+        roi_compressor = (
+            BloscCodec(typesize=1, cname='lz4', clevel=1, shuffle="bitshuffle")
+            if roi_storage_norm == "compressed"
+            else None
+        )
+
+        roi_create_kwargs: Dict[str, Any] = {
+            "shape": (total_detections, *roi_sz),
+            "chunks": (roi_chunk_len, roi_sz[0], roi_sz[1]),
+            "dtype": "uint8",
+            "overwrite": True,
+            "compressors": roi_compressor,
+        }
+        if bool(external_use_sharding):
+            roi_create_kwargs["shards"] = (roi_shard_len, roi_sz[0], roi_sz[1])
         crop_group.create_array(
             'roi_images',
-            shape=(total_detections, *roi_sz),
-            chunks=(min(1024, total_detections), roi_sz[0], roi_sz[1]),
-            dtype='uint8',
-            overwrite=True,
-            compressors=compressor
+            **roi_create_kwargs,
         )
         
         crop_group.create_array(
@@ -666,6 +769,12 @@ def crop_from_external_video(
         if preferred_policy:
             crop_group.attrs['detection_preferred_policy'] = preferred_policy
         crop_group.attrs['crop_signature'] = _build_crop_signature(crop_group.attrs)
+        crop_group.attrs['write_backend'] = 'kvikio_gds' if use_kvikio_writes else 'standard_zarr'
+        crop_group.attrs['roi_storage'] = roi_storage_norm
+        crop_group.attrs['roi_chunk_len'] = int(roi_chunk_len)
+        crop_group.attrs['roi_use_sharding'] = bool(external_use_sharding)
+        if bool(external_use_sharding):
+            crop_group.attrs['roi_shard_len'] = int(roi_shard_len)
 
         # Add detailed GPU info if using GPU
         if actual_use_gpu and env_info['gpu']['available'] and env_info['gpu'].get('devices'):
@@ -708,9 +817,9 @@ def crop_from_external_video(
         
         total_processed = 0
         batch_times: List[float] = []
-
         if actual_use_gpu:
-            chunk_size = 96
+            chunk_size = max(1, int(external_gpu_chunk_frames))
+            console.print(f"[dim]  GPU frame chunk size: {chunk_size}[/dim]")
             frame_to_det: Dict[int, List[int]] = {}
             for det_idx, frame_idx in enumerate(frame_indices):
                 frame_to_det.setdefault(int(frame_idx), []).append(int(det_idx))
@@ -752,24 +861,45 @@ def crop_from_external_video(
                             f"[debug] Chunk {chunk_idx + 1}/{total_chunks}: frames {chunk_frames[0]}-{chunk_frames[-1]} ({len(chunk_frames)} frames)"
                         )
 
-                    chunk_start_time = time.perf_counter()
+                    decode_start = time.perf_counter()
                     frames_gpu = video_reader.get_batch(chunk_frames)
-                    _, det_ids, crops_cpu, coords_full_cpu, chunk_time = _process_chunk_gpu(
+                    decode_seconds += time.perf_counter() - decode_start
+                    compute_start = time.perf_counter()
+                    _, det_ids, crops_buf, coords_full_cpu, chunk_time = _process_chunk_gpu(
                         chunk_idx,
                         chunk_frames,
                         frames_gpu,
                         frame_to_det,
                         bbox_coords,
                         roi_sz,
-                        (video_height, video_width)
+                        (video_height, video_width),
+                        return_device=use_kvikio_writes,
                     )
+                    compute_seconds += time.perf_counter() - compute_start
                     del frames_gpu
                     batch_times.append(chunk_time)
 
                     processed = int(det_ids.size)
                     if processed:
-                        crop_group['roi_images'][det_ids] = crops_cpu
-                        crop_group['roi_coordinates_full'][det_ids] = coords_full_cpu
+                        write_start = time.perf_counter()
+                        if use_kvikio_writes:
+                            det_slice = _contiguous_detection_slice(det_ids)
+                            if det_slice is not None:
+                                cupy_crops = cp.from_dlpack(crops_buf.contiguous())
+                                crop_group['roi_images'][det_slice] = cupy_crops
+                                crop_group['roi_coordinates_full'][det_slice] = coords_full_cpu
+                                cp.cuda.Stream.null.synchronize()
+                                del cupy_crops
+                            else:
+                                # Fallback for sparse/non-contiguous indices: CPU path is safer.
+                                crops_cpu_fallback = crops_buf.cpu().numpy()
+                                crop_group['roi_images'][det_ids] = crops_cpu_fallback
+                                crop_group['roi_coordinates_full'][det_ids] = coords_full_cpu
+                                del crops_cpu_fallback
+                        else:
+                            crop_group['roi_images'][det_ids] = crops_buf
+                            crop_group['roi_coordinates_full'][det_ids] = coords_full_cpu
+                        write_seconds += time.perf_counter() - write_start
                         total_processed += processed
 
                     if verbose:
@@ -797,13 +927,17 @@ def crop_from_external_video(
                 batch_frames = frame_indices[det_indices]
                 batch_bboxes = bbox_coords[det_indices]
 
-                crops, coords = crop_batch_cpu(
+                crops, coords, batch_profile = crop_batch_cpu(
                     video_path, batch_frames, batch_bboxes,
                     roi_sz, video_shape
                 )
+                decode_seconds += float(batch_profile.get("decode_seconds", 0.0))
+                compute_seconds += float(batch_profile.get("compute_seconds", 0.0))
 
+                write_start = time.perf_counter()
                 crop_group['roi_images'][det_indices] = crops
                 crop_group['roi_coordinates_full'][det_indices] = coords
+                write_seconds += time.perf_counter() - write_start
 
                 batch_time = time.perf_counter() - batch_start
                 batch_times.append(batch_time)
@@ -837,6 +971,19 @@ def crop_from_external_video(
         }
         crop_group.attrs['duration_seconds'] = duration
         crop_group.attrs['avg_batch_ms'] = float(np.mean(batch_times)) if batch_times else 0.0
+        profile_total = duration if duration > 0 else 1.0
+        profile_other = max(0.0, duration - (decode_seconds + compute_seconds + write_seconds))
+        crop_group.attrs['timing_profile'] = {
+            'decode_seconds': float(decode_seconds),
+            'compute_seconds': float(compute_seconds),
+            'zarr_write_seconds': float(write_seconds),
+            'other_seconds': float(profile_other),
+            'decode_percent': float((decode_seconds / profile_total) * 100.0),
+            'compute_percent': float((compute_seconds / profile_total) * 100.0),
+            'zarr_write_percent': float((write_seconds / profile_total) * 100.0),
+            'other_percent': float((profile_other / profile_total) * 100.0),
+            'complete': True,
+        }
 
         if verbose:
             avg_batch = (np.mean(batch_times) * 1000) if batch_times else 0.0
@@ -858,6 +1005,13 @@ def crop_from_external_video(
         console.print(f"[green]✓[/green] Cropping complete")
         console.print(f"[cyan]  Time: {duration:.1f}s[/cyan]")
         console.print(f"[cyan]  Rate: {total_detections/duration:.1f} crops/s[/cyan]")
+        console.print(
+            "[cyan]  Profile:[/cyan] "
+            f"decode={decode_seconds:.1f}s ({(decode_seconds/profile_total)*100.0:.1f}%), "
+            f"compute={compute_seconds:.1f}s ({(compute_seconds/profile_total)*100.0:.1f}%), "
+            f"write={write_seconds:.1f}s ({(write_seconds/profile_total)*100.0:.1f}%), "
+            f"other={profile_other:.1f}s ({(profile_other/profile_total)*100.0:.1f}%)"
+        )
         console.print("[dim]Finalizing crop metadata...[/dim]")
 
         success = True
@@ -890,7 +1044,27 @@ def crop_from_external_video(
                 if verbose:
                     console.print("[debug] CUDA cache cleared")
 
+        if use_kvikio_writes:
+            try:
+                root.store.close()
+            except Exception:
+                pass
+
         if crop_group is not None:
+            elapsed = time.perf_counter() - start_time
+            profile_total = elapsed if elapsed > 0 else 1.0
+            profile_other = max(0.0, elapsed - (decode_seconds + compute_seconds + write_seconds))
+            crop_group.attrs['timing_profile'] = {
+                'decode_seconds': float(decode_seconds),
+                'compute_seconds': float(compute_seconds),
+                'zarr_write_seconds': float(write_seconds),
+                'other_seconds': float(profile_other),
+                'decode_percent': float((decode_seconds / profile_total) * 100.0),
+                'compute_percent': float((compute_seconds / profile_total) * 100.0),
+                'zarr_write_percent': float((write_seconds / profile_total) * 100.0),
+                'other_percent': float((profile_other / profile_total) * 100.0),
+                'complete': bool(success),
+            }
             timestamp = datetime.now(timezone.utc).isoformat()
             if success:
                 crop_group.attrs['status'] = 'completed'
@@ -1385,6 +1559,12 @@ def crop_detections(
     num_workers: Optional[int] = None,
     console: Optional[Console] = None,
     acceleration: Optional[str] = None,
+    external_write_backend: Optional[str] = None,
+    external_roi_storage: Optional[str] = None,
+    external_use_sharding: Optional[bool] = None,
+    external_roi_chunk_size: Optional[int] = None,
+    external_roi_shard_size: Optional[int] = None,
+    external_gpu_chunk_frames: Optional[int] = None,
     use_gpu_allowed: bool = True,
     force_cpu: bool = False,
     verbose: bool = False
@@ -1405,8 +1585,13 @@ def crop_detections(
         scheduler: Dask scheduler ('processes', 'threads', or 'distributed')
         num_workers: Number of workers (None = auto)
         console: Optional Rich console for output
-
         acceleration: 'auto', 'gpu', or 'cpu' to override external video mode selection
+        external_write_backend: External video write backend ('standard' or 'kvikio')
+        external_roi_storage: ROI array storage mode ('compressed' or 'uncompressed')
+        external_use_sharding: Whether to shard ROI writes
+        external_roi_chunk_size: Detection-axis chunk length for ROI arrays
+        external_roi_shard_size: Detection-axis shard length for ROI arrays
+        external_gpu_chunk_frames: Number of decoded frames per GPU crop chunk
         use_gpu_allowed: Whether GPU usage is permitted globally
         force_cpu: Force CPU processing regardless of availability
         verbose: Enable additional logging and disable progress bars
@@ -1488,7 +1673,36 @@ def crop_detections(
             console.print(f"[cyan]Using CPU ({decision_note})[/cyan]")
             if accel_choice == 'gpu' and not force_cpu and use_gpu_allowed and not gpu_available:
                 console.print(f"[yellow]Warning: GPU requested but unavailable ({gpu_reason})[/yellow]")
-        
+
+        cfg_backend = str(crop_params_cfg.get('external_write_backend', 'standard')).strip().lower()
+        cfg_storage = str(crop_params_cfg.get('external_roi_storage', 'compressed')).strip().lower()
+        cfg_use_sharding = bool(crop_params_cfg.get('external_use_sharding', False))
+        cfg_chunk = int(crop_params_cfg.get('external_roi_chunk_size', 1024))
+        cfg_shard = crop_params_cfg.get('external_roi_shard_size')
+        cfg_gpu_chunk_frames = int(crop_params_cfg.get('external_gpu_chunk_frames', 24))
+        cfg_shard = int(cfg_shard) if cfg_shard is not None else None
+
+        backend = (external_write_backend or cfg_backend).strip().lower()
+        storage = (external_roi_storage or cfg_storage).strip().lower()
+        use_sharding_value = cfg_use_sharding if external_use_sharding is None else bool(external_use_sharding)
+        chunk_len = cfg_chunk if external_roi_chunk_size is None else int(external_roi_chunk_size)
+        shard_len = cfg_shard if external_roi_shard_size is None else int(external_roi_shard_size)
+        gpu_chunk_frames = cfg_gpu_chunk_frames if external_gpu_chunk_frames is None else int(external_gpu_chunk_frames)
+        if backend not in {"standard", "kvikio"}:
+            backend = "standard"
+        if storage not in {"compressed", "uncompressed"}:
+            storage = "compressed"
+        chunk_len = max(1, chunk_len)
+        gpu_chunk_frames = max(1, gpu_chunk_frames)
+        if shard_len is not None:
+            shard_len = max(chunk_len, shard_len)
+
+        console.print(
+            f"[dim]  Write backend={backend}, roi_storage={storage}, "
+            f"sharding={use_sharding_value}, chunk={chunk_len}, shard={shard_len or '-'}, "
+            f"gpu_frames={gpu_chunk_frames}[/dim]"
+        )
+
         # Use external video cropping
         return crop_from_external_video(
             zarr_path=zarr_path,
@@ -1500,6 +1714,13 @@ def crop_detections(
             roi_sz=roi_sz,
             use_gpu=use_gpu,
             console=console,
+            preferred_policy=preferred_policy,
+            external_write_backend=backend,
+            external_roi_storage=storage,
+            external_use_sharding=use_sharding_value,
+            external_roi_chunk_size=chunk_len,
+            external_roi_shard_size=shard_len,
+            external_gpu_chunk_frames=gpu_chunk_frames,
             verbose=verbose
         )
     
@@ -1927,6 +2148,48 @@ def main():
     parser.add_argument("--acceleration", type=str, default=None,
                        choices=['auto', 'gpu', 'cpu'],
                        help="Acceleration mode for external video cropping")
+    parser.add_argument(
+        "--external-write-backend",
+        type=str,
+        default=None,
+        choices=["standard", "kvikio"],
+        help="Write backend for external-video crop runs.",
+    )
+    parser.add_argument(
+        "--external-roi-storage",
+        type=str,
+        default=None,
+        choices=["compressed", "uncompressed"],
+        help="ROI image storage mode for external-video crop runs.",
+    )
+    parser.add_argument(
+        "--external-use-sharding",
+        action="store_true",
+        help="Enable sharding for external-video ROI image writes.",
+    )
+    parser.add_argument(
+        "--no-external-use-sharding",
+        action="store_true",
+        help="Disable sharding for external-video ROI image writes.",
+    )
+    parser.add_argument(
+        "--external-roi-chunk-size",
+        type=int,
+        default=None,
+        help="Detection-axis chunk length for external-video ROI writes.",
+    )
+    parser.add_argument(
+        "--external-roi-shard-size",
+        type=int,
+        default=None,
+        help="Detection-axis shard length for external-video ROI writes.",
+    )
+    parser.add_argument(
+        "--external-gpu-chunk-frames",
+        type=int,
+        default=None,
+        help="Frame count decoded per GPU crop chunk (external-video mode).",
+    )
     parser.add_argument("--no-gpu", action="store_true",
                        help="Disable GPU acceleration")
     parser.add_argument("--force-cpu", action="store_true",
@@ -1964,6 +2227,13 @@ def main():
     resolved_source_type = infer_detection_source_type(source_path, raw_source_type)
 
     preferred_policy = args.preferred_policy or crop_params.get('preferred_policy')
+    external_use_sharding = None
+    if args.external_use_sharding and args.no_external_use_sharding:
+        raise SystemExit("Choose either --external-use-sharding or --no-external-use-sharding, not both.")
+    if args.external_use_sharding:
+        external_use_sharding = True
+    elif args.no_external_use_sharding:
+        external_use_sharding = False
 
     try:
         results = crop_detections(
@@ -1976,6 +2246,12 @@ def main():
             num_workers=args.num_workers,
             console=console,
             acceleration=args.acceleration,
+            external_write_backend=args.external_write_backend,
+            external_roi_storage=args.external_roi_storage,
+            external_use_sharding=external_use_sharding,
+            external_roi_chunk_size=args.external_roi_chunk_size,
+            external_roi_shard_size=args.external_roi_shard_size,
+            external_gpu_chunk_frames=args.external_gpu_chunk_frames,
             use_gpu_allowed=not args.no_gpu,
             force_cpu=args.force_cpu,
             verbose=args.verbose

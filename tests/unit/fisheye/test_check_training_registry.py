@@ -8,8 +8,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 from fisheye.registry.db import Registry
 from fisheye.utils.check_training_registry import (
     KEYPOINT_GATE_MIN_RATE,
+    RecordingVocabRow,
     _fetch_exports,
+    _format_recording_vocab_inline,
+    _group_recording_vocab_rows,
     _keypoint_exclusion_reason,
+    main as check_training_registry_main,
     _metrics_summary_from_json,
     _onnx_plugin_details,
     _run_id_style,
@@ -51,6 +55,7 @@ def test_fetch_exports_prefers_new_format_tables(tmp_path: Path) -> None:
         set_id="detect_set_v001",
         config_path=config_path,
         manifest_path=None,
+        skeleton_id=None,
         model_path=None,
         metrics_path=None,
         status="in_progress",
@@ -64,6 +69,7 @@ def test_fetch_exports_prefers_new_format_tables(tmp_path: Path) -> None:
     registry.record_onnx_model(
         run_id=run_id,
         set_id="detect_set_v001",
+        skeleton_id=None,
         detection_model_run_id=run_id,
         path=onnx_new,
         sha256=None,
@@ -77,6 +83,7 @@ def test_fetch_exports_prefers_new_format_tables(tmp_path: Path) -> None:
     registry.record_tensorrt_model(
         run_id=run_id,
         set_id="detect_set_v001",
+        skeleton_id=None,
         detection_model_run_id=run_id,
         onnx_run_id=run_id,
         precision="fp16",
@@ -121,6 +128,7 @@ def test_fetch_exports_does_not_fallback_to_legacy_sources(tmp_path: Path) -> No
         set_id="detect_set_v001",
         config_path=config_path,
         manifest_path=None,
+        skeleton_id=None,
         model_path=None,
         metrics_path=None,
         status="in_progress",
@@ -132,6 +140,7 @@ def test_fetch_exports_does_not_fallback_to_legacy_sources(tmp_path: Path) -> No
     registry.record_onnx_model(
         run_id=run_id,
         set_id="detect_set_v001",
+        skeleton_id=None,
         detection_model_run_id=run_id,
         path=onnx_new,
         sha256=None,
@@ -269,3 +278,94 @@ def test_sum_manifest_rois_supports_detect_and_pose_fields(tmp_path: Path) -> No
         encoding="utf-8",
     )
     assert _sum_manifest_rois(str(pose_manifest)) == 11
+
+
+def test_group_and_format_recording_vocab_rows_filters_empty_and_no_brackets() -> None:
+    grouped = _group_recording_vocab_rows(
+        [
+            RecordingVocabRow(recording_type="behavior", recording_subtype="free"),
+            RecordingVocabRow(recording_type="behavior", recording_subtype="embedded"),
+            RecordingVocabRow(recording_type="behavior", recording_subtype="free"),
+            RecordingVocabRow(recording_type=" ", recording_subtype="free"),
+            RecordingVocabRow(recording_type="histology", recording_subtype="section"),
+        ]
+    )
+    assert grouped == {
+        "behavior": ["embedded", "free"],
+        "histology": ["section"],
+    }
+    inline = _format_recording_vocab_inline(grouped)
+    assert inline == "behavior:embedded,free; histology:section"
+    assert "[" not in inline
+    assert "]" not in inline
+
+
+def test_recording_summary_mode_does_not_require_training_sets(tmp_path: Path, capsys) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, created_utc, updated_utc
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "rec_001",
+            "session_001",
+            "rec_001",
+            str(tmp_path / "recordings" / "rec_001"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+        ),
+    )
+    registry.conn.commit()
+    registry.close()
+
+    rc = check_training_registry_main(
+        ["--registry", str(tmp_path / "registry.sqlite"), "--recording-summary", "--no-rich"]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Recording Type/Subtype Summary" in out
+    assert "behavior / free: 1" in out
+
+
+def test_recording_overview_view_works_without_training_sets(tmp_path: Path, capsys) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, created_utc, updated_utc
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "rec_ov_001",
+            "session_ov_001",
+            "rec_ov_001",
+            str(tmp_path / "recordings" / "rec_ov_001"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+        ),
+    )
+    registry.upsert_dataset(
+        "session_ov_001:zabc",
+        session_uuid="session_ov_001",
+        zarr_path=tmp_path / "recordings" / "rec_ov_001" / "zarr" / "rec_ov_001_training.zarr",
+        recording_id="rec_ov_001",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.close()
+
+    rc = check_training_registry_main(
+        ["--registry", str(tmp_path / "registry.sqlite"), "--view", "recording-overview", "--no-rich"]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Recording Overview" in out
+    assert "rec_ov_001" in out

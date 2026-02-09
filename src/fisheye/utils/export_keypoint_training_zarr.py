@@ -1338,11 +1338,19 @@ def _register_merged_dataset_in_registry(
             registry.upsert_training_set(
                 set_id=set_id,
                 name=set_name or (existing["name"] if existing else None),
+                task_type="pose",
                 query_filter=query_filter or existing_query_filter,
                 dataset_ids=merged_ids,
                 invocation=invocation or existing_invocation,
             )
             linked = True
+        registry.replace_dataset_lineage(
+            child_dataset_id=str(dataset_id),
+            parent_dataset_ids=[str(item) for item in source_dataset_ids if item],
+            relationship_type="training_merge_source",
+            source_set_id=set_id,
+            metadata={"producer": "export_keypoint_training_zarr"},
+        )
         return str(dataset_id), linked
     finally:
         registry.close()

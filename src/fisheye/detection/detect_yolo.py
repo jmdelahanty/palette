@@ -41,6 +41,7 @@ from rich.markup import escape
 from ultralytics import YOLO
 
 from fisheye.shared.zarr.schema import get_run_group
+from fisheye.utils.import_video_metadata import write_video_metadata
 from fisheye.utils.system import get_environment_info, get_git_info
 
 
@@ -244,50 +245,6 @@ def get_video_metadata(video_path: Path, cap: Optional[cv2.VideoCapture], width:
     if cap_owner and cap is not None:
         cap.release()
     return meta
-
-
-def _set_attr(attrs: Any, key: str, value: Any, *, overwrite: bool) -> bool:
-    if value is None:
-        return False
-    if overwrite or key not in attrs or attrs.get(key) in (None, ""):
-        attrs[key] = value
-        return True
-    return False
-
-
-def _write_raw_video_metadata(
-    root: zarr.Group,
-    vid_meta: Dict[str, Any],
-    *,
-    overwrite: bool = False,
-    import_purpose: str = "production",
-) -> Dict[str, Any]:
-    raw = root.require_group("raw_video")
-    has_arrays = any(name in raw for name in ("images_full", "images_ds", "images_ds_rgb"))
-    now = datetime.now(timezone.utc).isoformat()
-
-    updates: Dict[str, Any] = {}
-    payload = {
-        "import_method": "metadata_only",
-        "import_mode": "metadata_only",
-        "import_stage": "metadata_only",
-        "import_timestamp": now,
-        "import_purpose": import_purpose,
-        "downsampled": False,
-        "fps": vid_meta.get("fps"),
-        "total_frames": vid_meta.get("total_frames"),
-        "source_video": vid_meta.get("source_video"),
-        "source_path": vid_meta.get("source_path"),
-        "original_resolution": (vid_meta.get("height"), vid_meta.get("width")),
-        "video_codec": vid_meta.get("codec"),
-        "video_pix_fmt": vid_meta.get("pix_fmt"),
-        "has_full_resolution": has_arrays and "images_full" in raw,
-        "has_downsampled": has_arrays and ("images_ds" in raw or "images_ds_rgb" in raw),
-    }
-    for key, value in payload.items():
-        if _set_attr(raw.attrs, key, value, overwrite=overwrite):
-            updates[key] = value
-    return updates
 
 
 def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
@@ -718,14 +675,19 @@ def detect_yolo(
         root.attrs['source_zarr_path'] = str(source_zarr_path)
 
     if write_raw_video_metadata:
-        updates = _write_raw_video_metadata(
+        updates = write_video_metadata(
             root,
             vid_meta,
             overwrite=overwrite_raw_video_metadata,
             import_purpose="production",
         )
-        if updates:
-            console.print(f"[green]✓[/green] Wrote metadata-only raw_video attrs ({len(updates)} fields)")
+        raw_updates = updates.get("raw_video", {})
+        root_updates = updates.get("root", {})
+        if raw_updates or root_updates:
+            console.print(
+                "[green]✓[/green] Wrote metadata-only attrs "
+                f"(root={len(root_updates)}, raw_video={len(raw_updates)})"
+            )
     
     detect_group, run_name = get_run_group(root, 'detect', console, create_new=True)
     console.print(f"[green]✓[/green] Writing detections to detect_runs/{run_name}")

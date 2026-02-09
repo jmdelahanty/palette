@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import yaml
@@ -130,6 +130,72 @@ def _decode_attr(value: Any) -> Optional[str]:
     else:
         text = str(value).strip()
     return text or None
+
+
+def _normalize_task_type(value: Any) -> Optional[str]:
+    text = _decode_attr(value)
+    if not text:
+        return None
+    norm = text.lower()
+    alias = {
+        "detect": "detect",
+        "detection": "detect",
+        "pose": "pose",
+        "keypoint": "pose",
+        "keypoints": "pose",
+    }
+    return alias.get(norm)
+
+
+def _infer_task_type_from_text(value: Any) -> Optional[str]:
+    text = _decode_attr(value)
+    if not text:
+        return None
+    norm = text.lower()
+    if norm.startswith("detect_") or "_detect_" in norm or "/detect/" in norm:
+        return "detect"
+    if norm.startswith("pose_") or "_pose_" in norm or "/pose/" in norm:
+        return "pose"
+    if norm.startswith("keypoint_") or norm.startswith("keypoints_") or "keypoint" in norm:
+        return "pose"
+    return None
+
+
+def _infer_task_type(
+    *,
+    explicit: Any = None,
+    set_id: Any = None,
+    run_id: Any = None,
+    config_path: Any = None,
+    manifest_path: Any = None,
+    model_path: Any = None,
+    invocation: Optional[Mapping[str, Any]] = None,
+    query_filter: Optional[Mapping[str, Any]] = None,
+) -> Optional[str]:
+    direct = _normalize_task_type(explicit)
+    if direct:
+        return direct
+
+    for candidate in (set_id, run_id, config_path, manifest_path, model_path):
+        inferred = _infer_task_type_from_text(candidate)
+        if inferred:
+            return inferred
+
+    for payload in (invocation, query_filter):
+        if not isinstance(payload, Mapping):
+            continue
+        for key in ("task_type", "task"):
+            inferred = _normalize_task_type(payload.get(key))
+            if inferred:
+                return inferred
+        args_payload = payload.get("args")
+        if isinstance(args_payload, Mapping):
+            for key in ("task_type", "task"):
+                inferred = _normalize_task_type(args_payload.get(key))
+                if inferred:
+                    return inferred
+
+    return None
 
 
 def _coerce_mapping(value: Any) -> Optional[Dict[str, Any]]:
@@ -447,6 +513,23 @@ def resolve_dataset_id(root: zarr.Group, zarr_path: Path) -> Tuple[str, Optional
     return dataset_id, session_uuid
 
 
+def _infer_dataset_artifact_kind(
+    *,
+    zarr_path: Path,
+    dataset_id: str,
+    session_uuid: Optional[str],
+) -> str:
+    normalized = str(zarr_path).replace("\\", "/").lower()
+    is_recording_path = "/recordings/" in normalized
+    if is_recording_path and session_uuid:
+        return "source_recording"
+    if "/training/datasets/" in normalized or dataset_id.endswith("_merged"):
+        return "derived_training_merge"
+    if is_recording_path:
+        return "source_recording"
+    return "derived_analysis"
+
+
 def _extract_protocol(root: zarr.Group) -> Tuple[Optional[str], Optional[str]]:
     stim_parent = None
     if "analysis" in root and "stimulus_runs" in root["analysis"]:
@@ -699,7 +782,8 @@ def _extract_provenance(snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "parents": _normalize_parents(cross.get("parents") or dish.get("parents")),
         "species": dish.get("species"),
         "sex": dish.get("sex"),
-        "dpf_at_acquisition": snapshot.get("dpf_at_acquisition"),
+        # Canonical source field in current subject metadata payloads.
+        "dpf_at_acquisition": _as_int(snapshot.get("days_post_fertilization")),
         "snapshot_status": snapshot.get("status"),
         "snapshot_missing": snapshot.get("missing"),
     }
@@ -712,6 +796,73 @@ def _extract_zarr_purpose(root: zarr.Group) -> Optional[str]:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
+
+
+def _normalize_zarr_origin(value: Any) -> Optional[str]:
+    text = _as_text(value)
+    if text is None:
+        return None
+    norm = text.lower()
+    if norm in {"source", "derived", "imported"}:
+        return norm
+    return None
+
+
+def _normalize_zarr_use(value: Any) -> Optional[str]:
+    text = _as_text(value)
+    if text is None:
+        return None
+    norm = text.lower()
+    if norm in {"training", "analysis", "inference", "export", "archive"}:
+        return norm
+    if norm in {"production"}:
+        return "analysis"
+    if norm in {"source_training", "training_merged", "derived_training"}:
+        return "training"
+    if norm in {"source_analysis", "derived_analysis"}:
+        return "analysis"
+    if norm in {"inference_output"}:
+        return "inference"
+    if norm in {"model_input_export"}:
+        return "export"
+    return None
+
+
+def _infer_zarr_origin_use(
+    *,
+    artifact_kind: Optional[str],
+    zarr_purpose: Optional[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    kind = _as_text(artifact_kind)
+    kind_norm = kind.lower() if kind else None
+    purpose_origin = None
+    purpose_text = _as_text(zarr_purpose)
+    if purpose_text:
+        purpose_norm = purpose_text.lower()
+        if purpose_norm.startswith("source_"):
+            purpose_origin = "source"
+        elif purpose_norm.startswith("derived_"):
+            purpose_origin = "derived"
+    if kind_norm == "source_recording":
+        kind_origin = "source"
+    elif kind_norm in {"derived_analysis", "derived_training_merge", "model_input_export"}:
+        kind_origin = "derived"
+    else:
+        kind_origin = None
+    zarr_origin = _normalize_zarr_origin(kind_origin or purpose_origin)
+
+    if kind_norm == "derived_training_merge":
+        kind_use = "training"
+    elif kind_norm == "model_input_export":
+        kind_use = "export"
+    elif kind_norm == "source_recording":
+        kind_use = None
+    elif kind_norm == "derived_analysis":
+        kind_use = "analysis"
+    else:
+        kind_use = None
+    zarr_use = _normalize_zarr_use(zarr_purpose) or _normalize_zarr_use(kind_use)
+    return zarr_origin, zarr_use
 
 
 def _as_text(value: Any) -> Optional[str]:
@@ -886,9 +1037,102 @@ class Registry:
         self.conn.close()
 
     def _init_schema(self) -> None:
+        self.conn.execute("PRAGMA foreign_keys = ON;")
+        self._ensure_schema_version_table()
+        self._apply_schema_migrations()
+
+    def _schema_migrations(self) -> List[Tuple[int, str, Callable[[], None]]]:
+        return [
+            (1, "initial_registry_schema", self._migration_001_initial_schema),
+            # Reserved template migration to make the ordered migration pattern explicit.
+            # Future schema changes should append new versions rather than modifying old ones.
+            (2, "reserved_noop_template", self._migration_002_reserved_noop),
+            (3, "recording_columns_reconcile", self._migration_003_recording_columns_reconcile),
+            (4, "recording_overview_refresh", self._migration_004_recording_overview_refresh),
+            (5, "drop_provenance_zarr_purpose", self._migration_005_drop_provenance_zarr_purpose),
+            (6, "subject_dish_cross_entities", self._migration_006_subject_dish_cross_entities),
+            (7, "subjects_entities_and_query_indexes", self._migration_007_subjects_entities_and_query_indexes),
+            (8, "recording_subject_overview_view", self._migration_008_recording_subject_overview_view),
+            (9, "training_task_type_columns", self._migration_009_training_task_type_columns),
+        ]
+
+    def _ensure_schema_version_table(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_utc TEXT NOT NULL
+            );
+            """
+        )
+        self.conn.commit()
+
+    def _current_schema_version(self) -> Optional[int]:
+        row = self.conn.execute("SELECT MAX(version) AS version FROM schema_version;").fetchone()
+        if row is None:
+            return None
+        value = row["version"]
+        if value is None:
+            return None
+        return int(value)
+
+    def _has_legacy_schema(self) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type='table' AND name='datasets'
+            LIMIT 1;
+            """
+        ).fetchone()
+        return row is not None
+
+    def _record_schema_version(self, *, version: int, name: str) -> None:
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO schema_version (version, name, applied_utc)
+            VALUES (?, ?, ?);
+            """,
+            (int(version), str(name), _utc_now()),
+        )
+
+    def _apply_schema_migrations(self) -> None:
+        migrations = sorted(self._schema_migrations(), key=lambda item: item[0])
+        if not migrations:
+            return
+        latest = migrations[-1][0]
+        current = self._current_schema_version()
+        if current is None:
+            if self._has_legacy_schema():
+                # Existing registry predates schema_version tracking.
+                self.conn.execute("BEGIN IMMEDIATE;")
+                try:
+                    self._record_schema_version(version=latest, name="legacy_bootstrap")
+                    self.conn.execute(f"PRAGMA user_version = {int(latest)};")
+                    self.conn.commit()
+                except Exception:
+                    self.conn.rollback()
+                    raise
+                return
+            current = 0
+
+        for version, name, apply_fn in migrations:
+            if version <= current:
+                continue
+            self.conn.execute("BEGIN IMMEDIATE;")
+            try:
+                apply_fn()
+                self._record_schema_version(version=version, name=name)
+                self.conn.execute(f"PRAGMA user_version = {int(version)};")
+                self.conn.commit()
+                current = version
+            except Exception:
+                self.conn.rollback()
+                raise
+
+    def _migration_001_initial_schema(self) -> None:
         cur = self.conn.cursor()
-        cur.execute("PRAGMA foreign_keys = ON;")
-        cur.execute("PRAGMA user_version = 1;")
 
         cur.execute(
             """
@@ -896,10 +1140,168 @@ class Registry:
                 dataset_id TEXT PRIMARY KEY,
                 session_uuid TEXT,
                 zarr_path TEXT NOT NULL,
+                recording_id TEXT,
+                artifact_kind TEXT,
+                zarr_origin TEXT,
+                zarr_use TEXT,
                 path_hash TEXT,
                 created_utc TEXT,
                 last_seen_utc TEXT,
                 status TEXT
+            );
+            """
+        )
+        # Existing registries may predate these columns; add them before creating
+        # any index/view that references the new fields.
+        self._ensure_columns(
+            "datasets",
+            {
+                "recording_id": "TEXT",
+                "artifact_kind": "TEXT",
+                "zarr_origin": "TEXT",
+                "zarr_use": "TEXT",
+            },
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recordings (
+                recording_id TEXT PRIMARY KEY,
+                session_uuid TEXT,
+                recording_name TEXT,
+                recording_path TEXT,
+                started_utc TEXT,
+                recording_type TEXT,
+                recording_subtype TEXT,
+                behavior_mode TEXT,
+                artifact_schema_id TEXT,
+                rig_id TEXT,
+                arena_id TEXT,
+                camera_id TEXT,
+                canvas_name TEXT,
+                protocol_name TEXT,
+                dish_design TEXT,
+                created_utc TEXT,
+                updated_utc TEXT
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_type_vocab (
+                recording_type TEXT PRIMARY KEY,
+                active INTEGER NOT NULL DEFAULT 1,
+                description TEXT
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_subtype_vocab (
+                recording_type TEXT NOT NULL,
+                recording_subtype TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                description TEXT,
+                PRIMARY KEY (recording_type, recording_subtype),
+                FOREIGN KEY(recording_type) REFERENCES recording_type_vocab(recording_type) ON DELETE CASCADE
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS zarr_origin_vocab (
+                zarr_origin TEXT PRIMARY KEY,
+                active INTEGER NOT NULL DEFAULT 1,
+                description TEXT
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS zarr_use_vocab (
+                zarr_use TEXT PRIMARY KEY,
+                active INTEGER NOT NULL DEFAULT 1,
+                description TEXT
+            );
+            """
+        )
+        # Existing registries may predate recording_subtype.
+        # Add it before creating indexes that reference this column.
+        self._ensure_columns(
+            "recordings",
+            {
+                "recording_subtype": "TEXT",
+                "behavior_mode": "TEXT",
+                "dish_design": "TEXT",
+            },
+        )
+        cur.executemany(
+            """
+            INSERT OR IGNORE INTO recording_type_vocab (recording_type, active, description)
+            VALUES (?, 1, ?);
+            """,
+            [
+                ("behavior", "Behavior recordings"),
+                ("microscopy", "Microscopy recordings"),
+                ("histology", "Histology recordings"),
+            ],
+        )
+        cur.executemany(
+            """
+            INSERT OR IGNORE INTO recording_subtype_vocab (
+                recording_type, recording_subtype, active, description
+            )
+            VALUES (?, ?, 1, ?);
+            """,
+            [
+                ("behavior", "free", "Freely swimming behavior"),
+                ("behavior", "embedded", "Embedded behavior"),
+                ("microscopy", "lightsheet", "Light-sheet microscopy"),
+                ("microscopy", "confocal", "Confocal microscopy"),
+                ("microscopy", "2p", "Two-photon microscopy"),
+                ("histology", "section", "Section histology"),
+                ("histology", "wholemount", "Whole-mount histology"),
+            ],
+        )
+        cur.executemany(
+            """
+            INSERT OR IGNORE INTO zarr_origin_vocab (zarr_origin, active, description)
+            VALUES (?, 1, ?);
+            """,
+            [
+                ("source", "Source recording artifact"),
+                ("derived", "Derived artifact produced from other artifacts"),
+                ("imported", "Imported external artifact"),
+            ],
+        )
+        cur.executemany(
+            """
+            INSERT OR IGNORE INTO zarr_use_vocab (zarr_use, active, description)
+            VALUES (?, 1, ?);
+            """,
+            [
+                ("training", "Used for model training"),
+                ("analysis", "Used for analysis"),
+                ("inference", "Inference outputs"),
+                ("export", "Exported model/input artifact"),
+                ("archive", "Archived/cold artifact"),
+            ],
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                recording_id TEXT NOT NULL,
+                artifact_type TEXT NOT NULL,
+                artifact_group TEXT,
+                relpath TEXT,
+                path TEXT NOT NULL,
+                file_ext TEXT,
+                status TEXT,
+                size_bytes INTEGER,
+                metadata_json TEXT,
+                created_utc TEXT,
+                updated_utc TEXT,
+                FOREIGN KEY(recording_id) REFERENCES recordings(recording_id) ON DELETE CASCADE
             );
             """
         )
@@ -957,7 +1359,6 @@ class Registry:
                 has_images_ds INTEGER,
                 has_images_ds_rgb INTEGER,
                 downsample_formats_json TEXT,
-                zarr_purpose TEXT,
                 protocol_name TEXT,
                 protocol_hash TEXT,
                 snapshot_status TEXT,
@@ -977,6 +1378,44 @@ class Registry:
                 PRIMARY KEY (dataset_id, refined_run, source_type),
                 FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
             );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dataset_lineage (
+                child_dataset_id TEXT NOT NULL,
+                parent_dataset_id TEXT NOT NULL,
+                relationship_type TEXT NOT NULL,
+                source_set_id TEXT,
+                metadata_json TEXT,
+                created_utc TEXT,
+                updated_utc TEXT,
+                PRIMARY KEY (child_dataset_id, parent_dataset_id, relationship_type),
+                FOREIGN KEY(child_dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE,
+                FOREIGN KEY(parent_dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_dataset_lineage_no_self_insert
+            BEFORE INSERT ON dataset_lineage
+            FOR EACH ROW
+            WHEN NEW.child_dataset_id = NEW.parent_dataset_id
+            BEGIN
+                SELECT RAISE(ABORT, 'dataset_lineage self-edge is not allowed');
+            END;
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_dataset_lineage_no_self_update
+            BEFORE UPDATE ON dataset_lineage
+            FOR EACH ROW
+            WHEN NEW.child_dataset_id = NEW.parent_dataset_id
+            BEGIN
+                SELECT RAISE(ABORT, 'dataset_lineage self-edge is not allowed');
+            END;
             """
         )
         cur.execute(
@@ -1046,6 +1485,7 @@ class Registry:
             CREATE TABLE IF NOT EXISTS training_sets (
                 set_id TEXT PRIMARY KEY,
                 name TEXT,
+                task_type TEXT,
                 query_filter TEXT,
                 dataset_ids_json TEXT,
                 skeleton_id TEXT,
@@ -1060,6 +1500,7 @@ class Registry:
             CREATE TABLE IF NOT EXISTS training_runs (
                 run_id TEXT PRIMARY KEY,
                 set_id TEXT,
+                task_type TEXT,
                 config_path TEXT,
                 manifest_path TEXT,
                 skeleton_id TEXT,
@@ -1093,7 +1534,7 @@ class Registry:
         )
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS detection_models (
+            CREATE TABLE IF NOT EXISTS training_models (
                 run_id TEXT PRIMARY KEY,
                 set_id TEXT,
                 model_path TEXT,
@@ -1176,14 +1617,83 @@ class Registry:
             """
         )
         cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_detection_models_set_id ON detection_models(set_id);"
+            "CREATE INDEX IF NOT EXISTS idx_training_models_set_id ON training_models(set_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_sets_skeleton_id ON training_sets(skeleton_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_sets_task_type ON training_sets(task_type);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_runs_skeleton_id ON training_runs(skeleton_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_runs_task_type ON training_runs(task_type);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_datasets_recording_id ON datasets(recording_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_datasets_artifact_kind ON datasets(artifact_kind);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_datasets_origin_use ON datasets(zarr_origin, zarr_use);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recordings_session_uuid ON recordings(session_uuid);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recordings_type_subtype ON recordings(recording_type, recording_subtype);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recordings_behavior_mode ON recordings(behavior_mode);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_subtype_vocab_type_active ON recording_subtype_vocab(recording_type, active);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_artifacts_recording_id ON recording_artifacts(recording_id);"
+        )
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_recording_artifacts_recording_path ON recording_artifacts(recording_id, path);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dataset_lineage_child_rel ON dataset_lineage(child_dataset_id, relationship_type);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dataset_lineage_parent_rel ON dataset_lineage(parent_dataset_id, relationship_type);"
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_onnx_models_set_id ON onnx_models(set_id);"
         )
         cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_onnx_models_skeleton_id ON onnx_models(skeleton_id);"
+        )
+        cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_tensorrt_models_set_id ON tensorrt_models(set_id);"
         )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tensorrt_models_skeleton_id ON tensorrt_models(skeleton_id);"
+        )
+        # Migrate legacy detection_models rows into training_models.
+        legacy_detection_models = cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='detection_models';"
+        ).fetchone()
+        if legacy_detection_models is not None:
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO training_models (
+                    run_id, set_id, model_path, model_sha256, metrics_path, metrics_sha256,
+                    status, final_metrics_json, metadata_json, created_utc
+                )
+                SELECT
+                    run_id, set_id, model_path, model_sha256, metrics_path, metrics_sha256,
+                    status, final_metrics_json, metadata_json, created_utc
+                FROM detection_models
+                """
+            )
+            cur.execute("DROP TABLE detection_models;")
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_keypoint_quality_dataset_id ON keypoint_quality(dataset_id);"
         )
@@ -1246,7 +1756,9 @@ class Registry:
             SELECT
                 kqc.dataset_id AS dataset_id,
                 d.zarr_path AS zarr_path,
-                p.zarr_purpose AS zarr_purpose,
+                d.zarr_origin AS zarr_origin,
+                d.zarr_use AS zarr_use,
+                d.zarr_use AS zarr_purpose,
                 kqc.keypoint_method AS keypoint_method,
                 kqc.source_keypoint_run AS source_keypoint_run,
                 kqc.refined_run AS refined_run,
@@ -1262,8 +1774,7 @@ class Registry:
                     ELSE 0
                 END AS quality_stale
             FROM keypoint_quality_current kqc
-            LEFT JOIN datasets d ON d.dataset_id = kqc.dataset_id
-            LEFT JOIN provenance p ON p.dataset_id = kqc.dataset_id;
+            LEFT JOIN datasets d ON d.dataset_id = kqc.dataset_id;
             """
         )
         cur.execute("DROP VIEW IF EXISTS detect_quality_current;")
@@ -1303,13 +1814,116 @@ class Registry:
             WHERE _rn = 1;
             """
         )
-        self.conn.commit()
+        cur.execute("DROP VIEW IF EXISTS merged_training_datasets;")
+        cur.execute(
+            """
+            CREATE VIEW merged_training_datasets AS
+            SELECT
+                d.dataset_id,
+                d.recording_id,
+                d.session_uuid,
+                d.zarr_path,
+                d.status,
+                d.artifact_kind,
+                d.zarr_origin,
+                d.zarr_use,
+                d.zarr_use AS zarr_purpose,
+                d.last_seen_utc
+            FROM datasets d
+            WHERE
+                d.artifact_kind = 'derived_training_merge'
+                OR d.dataset_id LIKE '%_merged';
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS recording_overview;")
+        cur.execute(
+            """
+            CREATE VIEW recording_overview AS
+            SELECT
+                r.recording_id AS recording_id,
+                r.session_uuid AS session_uuid,
+                r.recording_name AS recording_name,
+                r.recording_path AS recording_path,
+                r.started_utc AS started_utc,
+                r.recording_type AS recording_type,
+                r.recording_subtype AS recording_subtype,
+                r.behavior_mode AS behavior_mode,
+                r.artifact_schema_id AS artifact_schema_id,
+                COALESCE(
+                    NULLIF(TRIM(r.dish_design), ''),
+                    GROUP_CONCAT(DISTINCT NULLIF(TRIM(p.dish_design), ''))
+                ) AS dish_design,
+                r.rig_id AS rig_id,
+                r.arena_id AS arena_id,
+                r.camera_id AS camera_id,
+                r.protocol_name AS protocol_name,
+                COUNT(DISTINCT d.dataset_id) AS dataset_count,
+                SUM(CASE WHEN d.zarr_use = 'training' THEN 1 ELSE 0 END) AS training_dataset_count,
+                SUM(CASE WHEN d.zarr_use = 'analysis' THEN 1 ELSE 0 END) AS analysis_dataset_count,
+                SUM(CASE WHEN d.zarr_use = 'inference' THEN 1 ELSE 0 END) AS inference_dataset_count,
+                SUM(CASE WHEN d.zarr_use = 'export' THEN 1 ELSE 0 END) AS export_dataset_count,
+                SUM(CASE WHEN lower(COALESCE(d.status, 'active')) = 'active' THEN 1 ELSE 0 END) AS active_dataset_count,
+                SUM(CASE WHEN lower(COALESCE(d.status, '')) = 'missing' THEN 1 ELSE 0 END) AS missing_dataset_count,
+                COALESCE(MAX(d.last_seen_utc), r.updated_utc, r.created_utc) AS last_seen_utc
+            FROM recordings r
+            LEFT JOIN datasets d ON d.recording_id = r.recording_id
+            LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
+            GROUP BY
+                r.recording_id,
+                r.session_uuid,
+                r.recording_name,
+                r.recording_path,
+                r.started_utc,
+                r.recording_type,
+                r.recording_subtype,
+                r.behavior_mode,
+                r.artifact_schema_id,
+                r.dish_design,
+                r.rig_id,
+                r.arena_id,
+                r.camera_id,
+                r.protocol_name;
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS dataset_lineage_current;")
+        cur.execute(
+            """
+            CREATE VIEW dataset_lineage_current AS
+            WITH ranked AS (
+                SELECT
+                    dl.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY dl.child_dataset_id, dl.parent_dataset_id, dl.relationship_type
+                        ORDER BY COALESCE(dl.updated_utc, dl.created_utc) DESC
+                    ) AS _rn
+                FROM dataset_lineage dl
+            )
+            SELECT
+                child_dataset_id,
+                parent_dataset_id,
+                relationship_type,
+                source_set_id,
+                metadata_json,
+                created_utc,
+                updated_utc
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+        self._ensure_columns(
+            "datasets",
+            {
+                "recording_id": "TEXT",
+                "artifact_kind": "TEXT",
+                "zarr_origin": "TEXT",
+                "zarr_use": "TEXT",
+            },
+        )
         self._ensure_columns(
             "provenance",
             {
                 "fish_id": "TEXT",
                 "subject_count": "INTEGER",
-                "zarr_purpose": "TEXT",
                 "rig_id": "TEXT",
                 "arena_id": "TEXT",
                 "camera_id": "TEXT",
@@ -1352,6 +1966,30 @@ class Registry:
                 "downsample_formats_json": "TEXT",
             },
         )
+        # Backfill normalized zarr origin/use for legacy registries.
+        self.conn.execute(
+            """
+            UPDATE datasets
+            SET zarr_origin = CASE
+                WHEN artifact_kind = 'source_recording' THEN 'source'
+                WHEN artifact_kind IN ('derived_analysis', 'derived_training_merge', 'model_input_export') THEN 'derived'
+                ELSE zarr_origin
+            END
+            WHERE zarr_origin IS NULL;
+            """
+        )
+        self.conn.execute(
+            """
+            UPDATE datasets
+            SET zarr_use = CASE
+                WHEN artifact_kind = 'derived_training_merge' THEN 'training'
+                WHEN artifact_kind = 'derived_analysis' THEN 'analysis'
+                WHEN artifact_kind = 'model_input_export' THEN 'export'
+                ELSE zarr_use
+            END
+            WHERE zarr_use IS NULL;
+            """
+        )
         self._ensure_columns(
             "detect_quality",
             {
@@ -1390,12 +2028,16 @@ class Registry:
                 "zarr_mtime_ns": "INTEGER",
             },
         )
-        self._ensure_columns("training_sets", {"invocation_json": "TEXT", "skeleton_id": "TEXT"})
+        self._ensure_columns(
+            "training_sets",
+            {"invocation_json": "TEXT", "skeleton_id": "TEXT", "task_type": "TEXT"},
+        )
         self._ensure_columns(
             "training_runs",
             {
                 "invocation_json": "TEXT",
                 "skeleton_id": "TEXT",
+                "task_type": "TEXT",
                 "config_sha256": "TEXT",
                 "manifest_sha256": "TEXT",
                 "model_sha256": "TEXT",
@@ -1405,7 +2047,7 @@ class Registry:
             },
         )
         self._ensure_columns(
-            "detection_models",
+            "training_models",
             {
                 "set_id": "TEXT",
                 "model_path": "TEXT",
@@ -1477,6 +2119,334 @@ class Registry:
             },
         )
 
+    def _migration_002_reserved_noop(self) -> None:
+        # Intentionally no-op. Serves as a stable template slot for future append-only migrations.
+        return
+
+    def _migration_003_recording_columns_reconcile(self) -> None:
+        # Legacy bootstrapped registries can skip migration_001 execution.
+        # Reconcile additive recording columns needed by current maintenance flows.
+        self._ensure_columns(
+            "recordings",
+            {
+                "recording_subtype": "TEXT",
+                "behavior_mode": "TEXT",
+                "dish_design": "TEXT",
+            },
+        )
+        cur = self.conn.cursor()
+        cur.execute("DROP VIEW IF EXISTS recording_overview;")
+        cur.execute(
+            """
+            CREATE VIEW recording_overview AS
+            SELECT
+                r.recording_id AS recording_id,
+                r.session_uuid AS session_uuid,
+                r.recording_name AS recording_name,
+                r.recording_path AS recording_path,
+                r.started_utc AS started_utc,
+                r.recording_type AS recording_type,
+                r.recording_subtype AS recording_subtype,
+                r.behavior_mode AS behavior_mode,
+                r.artifact_schema_id AS artifact_schema_id,
+                COALESCE(
+                    NULLIF(TRIM(r.dish_design), ''),
+                    GROUP_CONCAT(DISTINCT NULLIF(TRIM(p.dish_design), ''))
+                ) AS dish_design,
+                r.rig_id AS rig_id,
+                r.arena_id AS arena_id,
+                r.camera_id AS camera_id,
+                r.protocol_name AS protocol_name,
+                COUNT(DISTINCT d.dataset_id) AS dataset_count,
+                SUM(CASE WHEN d.zarr_use = 'training' THEN 1 ELSE 0 END) AS training_dataset_count,
+                SUM(CASE WHEN d.zarr_use = 'analysis' THEN 1 ELSE 0 END) AS analysis_dataset_count,
+                SUM(CASE WHEN d.zarr_use = 'inference' THEN 1 ELSE 0 END) AS inference_dataset_count,
+                SUM(CASE WHEN d.zarr_use = 'export' THEN 1 ELSE 0 END) AS export_dataset_count,
+                SUM(CASE WHEN lower(COALESCE(d.status, 'active')) = 'active' THEN 1 ELSE 0 END) AS active_dataset_count,
+                SUM(CASE WHEN lower(COALESCE(d.status, '')) = 'missing' THEN 1 ELSE 0 END) AS missing_dataset_count,
+                COALESCE(MAX(d.last_seen_utc), r.updated_utc, r.created_utc) AS last_seen_utc
+            FROM recordings r
+            LEFT JOIN datasets d ON d.recording_id = r.recording_id
+            LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
+            GROUP BY
+                r.recording_id,
+                r.session_uuid,
+                r.recording_name,
+                r.recording_path,
+                r.started_utc,
+                r.recording_type,
+                r.recording_subtype,
+                r.behavior_mode,
+                r.artifact_schema_id,
+                r.dish_design,
+                r.rig_id,
+                r.arena_id,
+                r.camera_id,
+                r.protocol_name;
+            """
+        )
+
+    def _migration_004_recording_overview_refresh(self) -> None:
+        # Refresh view definition for registries that already applied v3.
+        self._migration_003_recording_columns_reconcile()
+
+    def _migration_005_drop_provenance_zarr_purpose(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DROP VIEW IF EXISTS keypoint_quality_overview;")
+        cur.execute("DROP VIEW IF EXISTS merged_training_datasets;")
+
+        provenance_cols = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(provenance);").fetchall()
+            if row["name"] is not None
+        }
+        if "zarr_purpose" in provenance_cols:
+            cur.execute("ALTER TABLE provenance DROP COLUMN zarr_purpose;")
+
+        cur.execute(
+            """
+            CREATE VIEW keypoint_quality_overview AS
+            SELECT
+                kqc.dataset_id AS dataset_id,
+                d.zarr_path AS zarr_path,
+                d.zarr_origin AS zarr_origin,
+                d.zarr_use AS zarr_use,
+                d.zarr_use AS zarr_purpose,
+                kqc.keypoint_method AS keypoint_method,
+                kqc.source_keypoint_run AS source_keypoint_run,
+                kqc.refined_run AS refined_run,
+                kqc.review_state AS review_state,
+                kqc.review_intended_use AS review_intended_use,
+                kqc.usable_keypoints AS usable_keypoints,
+                kqc.total_keypoints AS total_keypoints,
+                kqc.usable_keypoints_rate AS usable_keypoints_rate,
+                kqc.quality_updated_utc AS quality_updated_utc,
+                kqc.zarr_mtime_ns AS zarr_mtime_ns,
+                CASE
+                    WHEN kqc.zarr_mtime_ns IS NULL THEN 1
+                    ELSE 0
+                END AS quality_stale
+            FROM keypoint_quality_current kqc
+            LEFT JOIN datasets d ON d.dataset_id = kqc.dataset_id;
+            """
+        )
+        cur.execute(
+            """
+            CREATE VIEW merged_training_datasets AS
+            SELECT
+                d.dataset_id,
+                d.recording_id,
+                d.session_uuid,
+                d.zarr_path,
+                d.status,
+                d.artifact_kind,
+                d.zarr_origin,
+                d.zarr_use,
+                d.zarr_use AS zarr_purpose,
+                d.last_seen_utc
+            FROM datasets d
+            WHERE
+                d.artifact_kind = 'derived_training_merge'
+                OR d.dataset_id LIKE '%_merged';
+            """
+        )
+
+    def _migration_006_subject_dish_cross_entities(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crosses (
+                cross_id TEXT PRIMARY KEY,
+                line_strain TEXT,
+                genotype TEXT,
+                parents_json TEXT,
+                metadata_json TEXT,
+                created_utc TEXT,
+                updated_utc TEXT
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dishes (
+                dish_id TEXT PRIMARY KEY,
+                cross_id TEXT,
+                species TEXT,
+                metadata_json TEXT,
+                created_utc TEXT,
+                updated_utc TEXT,
+                FOREIGN KEY(cross_id) REFERENCES crosses(cross_id)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_subjects (
+                recording_id TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                dataset_id TEXT,
+                dish_id TEXT,
+                cross_id TEXT,
+                dpf_at_acquisition INTEGER,
+                species TEXT,
+                sex TEXT,
+                genotype TEXT,
+                line_strain TEXT,
+                metadata_json TEXT,
+                created_utc TEXT,
+                updated_utc TEXT,
+                PRIMARY KEY (recording_id, subject_id),
+                FOREIGN KEY(recording_id) REFERENCES recordings(recording_id) ON DELETE CASCADE,
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE SET NULL,
+                FOREIGN KEY(dish_id) REFERENCES dishes(dish_id),
+                FOREIGN KEY(cross_id) REFERENCES crosses(cross_id)
+            );
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dishes_cross_id ON dishes(cross_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_subjects_dataset_id ON recording_subjects(dataset_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_subjects_dish_id ON recording_subjects(dish_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_subjects_cross_id ON recording_subjects(cross_id);"
+        )
+
+    def _migration_007_subjects_entities_and_query_indexes(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subjects (
+                subject_id TEXT PRIMARY KEY,
+                dish_id TEXT,
+                species TEXT,
+                sex TEXT,
+                metadata_json TEXT,
+                created_utc TEXT,
+                updated_utc TEXT,
+                FOREIGN KEY(dish_id) REFERENCES dishes(dish_id)
+            );
+            """
+        )
+        # Common query path: recording_subjects -> subjects -> dishes -> crosses(genotype).
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_crosses_genotype ON crosses(genotype);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_subjects_dish_id ON subjects(dish_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_subjects_subject_dpf ON recording_subjects(subject_id, dpf_at_acquisition);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recording_subjects_recording_id ON recording_subjects(recording_id);"
+        )
+
+    def _migration_008_recording_subject_overview_view(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DROP VIEW IF EXISTS recording_subject_overview;")
+        cur.execute(
+            """
+            CREATE VIEW recording_subject_overview AS
+            SELECT
+                rs.recording_id AS recording_id,
+                rs.subject_id AS subject_id,
+                rs.dataset_id AS dataset_id,
+                COALESCE(rs.dish_id, s.dish_id) AS dish_id,
+                COALESCE(rs.cross_id, d.cross_id) AS cross_id,
+                c.genotype AS genotype,
+                c.line_strain AS line_strain,
+                rs.dpf_at_acquisition AS dpf_at_acquisition,
+                COALESCE(rs.species, s.species, d.species) AS species,
+                COALESCE(rs.sex, s.sex) AS sex,
+                r.started_utc AS recording_started_utc,
+                r.recording_type AS recording_type,
+                r.recording_subtype AS recording_subtype,
+                r.behavior_mode AS behavior_mode,
+                r.protocol_name AS protocol_name,
+                r.rig_id AS rig_id,
+                r.arena_id AS arena_id,
+                r.camera_id AS camera_id
+            FROM recording_subjects rs
+            LEFT JOIN subjects s
+              ON s.subject_id = rs.subject_id
+            LEFT JOIN dishes d
+              ON d.dish_id = COALESCE(rs.dish_id, s.dish_id)
+            LEFT JOIN crosses c
+              ON c.cross_id = COALESCE(rs.cross_id, d.cross_id)
+            LEFT JOIN recordings r
+              ON r.recording_id = rs.recording_id;
+            """
+        )
+
+    def _migration_009_training_task_type_columns(self) -> None:
+        self._ensure_columns("training_sets", {"task_type": "TEXT"})
+        self._ensure_columns("training_runs", {"task_type": "TEXT"})
+        cur = self.conn.cursor()
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_sets_task_type ON training_sets(task_type);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_runs_task_type ON training_runs(task_type);"
+        )
+
+        set_rows = self.conn.execute(
+            "SELECT set_id, task_type, query_filter, invocation_json FROM training_sets;"
+        ).fetchall()
+        for row in set_rows:
+            if _normalize_task_type(row["task_type"]):
+                continue
+            query_filter = _json_loads(row["query_filter"])
+            invocation = _json_loads(row["invocation_json"])
+            inferred = _infer_task_type(
+                set_id=row["set_id"],
+                query_filter=query_filter,
+                invocation=invocation,
+            )
+            if inferred:
+                self.conn.execute(
+                    "UPDATE training_sets SET task_type = ? WHERE set_id = ?;",
+                    (inferred, str(row["set_id"])),
+                )
+
+        run_rows = self.conn.execute(
+            """
+            SELECT
+                tr.run_id,
+                tr.set_id,
+                tr.task_type,
+                tr.config_path,
+                tr.manifest_path,
+                tr.model_path,
+                tr.invocation_json,
+                ts.task_type AS set_task_type
+            FROM training_runs tr
+            LEFT JOIN training_sets ts ON ts.set_id = tr.set_id;
+            """
+        ).fetchall()
+        for row in run_rows:
+            if _normalize_task_type(row["task_type"]):
+                continue
+            invocation = _json_loads(row["invocation_json"])
+            inferred = _infer_task_type(
+                set_id=row["set_id"],
+                run_id=row["run_id"],
+                config_path=row["config_path"],
+                manifest_path=row["manifest_path"],
+                model_path=row["model_path"],
+                invocation=invocation,
+                explicit=row["set_task_type"],
+            )
+            if inferred:
+                self.conn.execute(
+                    "UPDATE training_runs SET task_type = ? WHERE run_id = ?;",
+                    (inferred, str(row["run_id"])),
+                )
+
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
         existing = {
             row["name"]
@@ -1486,7 +2456,6 @@ class Registry:
             if name in existing:
                 continue
             self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl};")
-        self.conn.commit()
 
     def _normalize_pose_schema(
         self,
@@ -1602,12 +2571,41 @@ class Registry:
             return str(row["skeleton_id"])
         return None
 
-    def upsert_dataset(self, dataset_id: str, *, session_uuid: Optional[str], zarr_path: Path) -> None:
+    def upsert_dataset(
+        self,
+        dataset_id: str,
+        *,
+        session_uuid: Optional[str],
+        zarr_path: Path,
+        recording_id: Optional[str] = None,
+        artifact_kind: Optional[str] = None,
+        zarr_purpose: Optional[str] = None,
+        zarr_origin: Optional[str] = None,
+        zarr_use: Optional[str] = None,
+    ) -> None:
         now = _utc_now()
+        resolved_recording_id = recording_id
+        if resolved_recording_id is None and session_uuid:
+            path_text = str(zarr_path).replace("\\", "/").lower()
+            if "/recordings/" in path_text:
+                resolved_recording_id = session_uuid
+        resolved_artifact_kind = artifact_kind or _infer_dataset_artifact_kind(
+            zarr_path=zarr_path,
+            dataset_id=dataset_id,
+            session_uuid=session_uuid,
+        )
+        inferred_origin, inferred_use = _infer_zarr_origin_use(
+            artifact_kind=resolved_artifact_kind,
+            zarr_purpose=zarr_purpose,
+        )
         payload = {
             "dataset_id": dataset_id,
             "session_uuid": session_uuid,
             "zarr_path": str(zarr_path),
+            "recording_id": resolved_recording_id,
+            "artifact_kind": resolved_artifact_kind,
+            "zarr_origin": _normalize_zarr_origin(zarr_origin) or inferred_origin,
+            "zarr_use": _normalize_zarr_use(zarr_use) or inferred_use,
             "path_hash": _compute_path_hash(zarr_path),
             "created_utc": now,
             "last_seen_utc": now,
@@ -1615,11 +2613,21 @@ class Registry:
         }
         self.conn.execute(
             """
-            INSERT INTO datasets (dataset_id, session_uuid, zarr_path, path_hash, created_utc, last_seen_utc, status)
-            VALUES (:dataset_id, :session_uuid, :zarr_path, :path_hash, :created_utc, :last_seen_utc, :status)
+            INSERT INTO datasets (
+                dataset_id, session_uuid, zarr_path, recording_id, artifact_kind, zarr_origin, zarr_use,
+                path_hash, created_utc, last_seen_utc, status
+            )
+            VALUES (
+                :dataset_id, :session_uuid, :zarr_path, :recording_id, :artifact_kind, :zarr_origin, :zarr_use,
+                :path_hash, :created_utc, :last_seen_utc, :status
+            )
             ON CONFLICT(dataset_id) DO UPDATE SET
                 session_uuid=excluded.session_uuid,
                 zarr_path=excluded.zarr_path,
+                recording_id=COALESCE(excluded.recording_id, datasets.recording_id),
+                artifact_kind=COALESCE(excluded.artifact_kind, datasets.artifact_kind),
+                zarr_origin=COALESCE(excluded.zarr_origin, datasets.zarr_origin),
+                zarr_use=COALESCE(excluded.zarr_use, datasets.zarr_use),
                 path_hash=excluded.path_hash,
                 last_seen_utc=excluded.last_seen_utc,
                 status=excluded.status;
@@ -1692,7 +2700,6 @@ class Registry:
             "has_images_ds": acquisition.get("has_images_ds"),
             "has_images_ds_rgb": acquisition.get("has_images_ds_rgb"),
             "downsample_formats_json": acquisition.get("downsample_formats_json"),
-            "zarr_purpose": zarr_purpose,
             "protocol_name": protocol_name,
             "protocol_hash": protocol_hash,
             "snapshot_status": provenance.get("snapshot_status"),
@@ -1710,7 +2717,7 @@ class Registry:
                 source_video, compression_name, compression_level,
                 exposure, exposure_unit, gain, frame_rate, pixel_format, binning, adc, camera_model, camera_serial,
                 camera_metadata_json, has_images_ds, has_images_ds_rgb, downsample_formats_json,
-                zarr_purpose, protocol_name, protocol_hash, snapshot_status, snapshot_missing_json
+                protocol_name, protocol_hash, snapshot_status, snapshot_missing_json
             )
             VALUES (
                 :dataset_id, :fish_id, :subject_count, :dish_id, :dish_design, :cross_id, :line_strain, :genotype, :parents_json,
@@ -1722,7 +2729,7 @@ class Registry:
                 :source_video, :compression_name, :compression_level,
                 :exposure, :exposure_unit, :gain, :frame_rate, :pixel_format, :binning, :adc, :camera_model, :camera_serial,
                 :camera_metadata_json, :has_images_ds, :has_images_ds_rgb, :downsample_formats_json,
-                :zarr_purpose, :protocol_name, :protocol_hash, :snapshot_status, :snapshot_missing_json
+                :protocol_name, :protocol_hash, :snapshot_status, :snapshot_missing_json
             )
             ON CONFLICT(dataset_id) DO UPDATE SET
                 fish_id=excluded.fish_id,
@@ -1775,7 +2782,6 @@ class Registry:
                 has_images_ds=excluded.has_images_ds,
                 has_images_ds_rgb=excluded.has_images_ds_rgb,
                 downsample_formats_json=excluded.downsample_formats_json,
-                zarr_purpose=excluded.zarr_purpose,
                 protocol_name=excluded.protocol_name,
                 protocol_hash=excluded.protocol_hash,
                 snapshot_status=excluded.snapshot_status,
@@ -1812,6 +2818,60 @@ class Registry:
                     ON CONFLICT(dataset_id, refined_run, source_type) DO UPDATE SET
                         counts_json=excluded.counts_json,
                         created_utc=excluded.created_utc;
+                    """,
+                    payload,
+                )
+
+    def replace_dataset_lineage(
+        self,
+        *,
+        child_dataset_id: str,
+        parent_dataset_ids: Iterable[str],
+        relationship_type: str,
+        source_set_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Replace lineage edges for one child + relationship_type."""
+        child = str(child_dataset_id)
+        rel = str(relationship_type).strip()
+        if not rel:
+            raise ValueError("relationship_type must be non-empty")
+        parents = sorted({str(parent_id) for parent_id in parent_dataset_ids if parent_id})
+        if child in parents:
+            raise ValueError("dataset_lineage self-edge is not allowed")
+        now = _utc_now()
+        with self.conn:
+            self.conn.execute(
+                """
+                DELETE FROM dataset_lineage
+                WHERE child_dataset_id = ? AND relationship_type = ?;
+                """,
+                (child, rel),
+            )
+            for parent in parents:
+                payload = {
+                    "child_dataset_id": child,
+                    "parent_dataset_id": parent,
+                    "relationship_type": rel,
+                    "source_set_id": str(source_set_id) if source_set_id else None,
+                    "metadata_json": _json_dumps(metadata),
+                    "created_utc": now,
+                    "updated_utc": now,
+                }
+                self.conn.execute(
+                    """
+                    INSERT INTO dataset_lineage (
+                        child_dataset_id, parent_dataset_id, relationship_type,
+                        source_set_id, metadata_json, created_utc, updated_utc
+                    )
+                    VALUES (
+                        :child_dataset_id, :parent_dataset_id, :relationship_type,
+                        :source_set_id, :metadata_json, :created_utc, :updated_utc
+                    )
+                    ON CONFLICT(child_dataset_id, parent_dataset_id, relationship_type) DO UPDATE SET
+                        source_set_id=excluded.source_set_id,
+                        metadata_json=excluded.metadata_json,
+                        updated_utc=excluded.updated_utc;
                     """,
                     payload,
                 )
@@ -2105,16 +3165,75 @@ class Registry:
         sql.append("ORDER BY dataset_id, detect_method")
         return list(self.conn.execute(" ".join(sql), params).fetchall())
 
+    def _resolve_effective_dataset_id(
+        self,
+        *,
+        base_dataset_id: str,
+        session_uuid: Optional[str],
+        zarr_path: Path,
+    ) -> str:
+        """
+        Resolve dataset identity for registration without breaking legacy IDs.
+
+        Behavior:
+        - If base dataset_id is unused, keep it.
+        - If base dataset_id already points to the same path_hash, keep it.
+        - If base dataset_id collides with a different path and a session UUID is present,
+          deterministically suffix with the current path hash so multiple datasets can
+          coexist per recording/session.
+        """
+        current_hash = _compute_path_hash(zarr_path)
+        row = self.conn.execute(
+            "SELECT path_hash FROM datasets WHERE dataset_id = ?;",
+            (base_dataset_id,),
+        ).fetchone()
+        existing_hash = str(row["path_hash"]) if row and row["path_hash"] is not None else ""
+        if row is not None and existing_hash == current_hash:
+            return base_dataset_id
+
+        is_source_recording = bool(session_uuid) and "/recordings/" in str(zarr_path).replace("\\", "/").lower()
+        if not is_source_recording:
+            # For non-recording artifacts, preserve caller-provided IDs.
+            return base_dataset_id
+
+        # For source recordings, prefer canonical dataset IDs derived from path hash.
+        # This prevents reintroducing legacy dataset_id=session_uuid rows during rescans.
+        assert session_uuid is not None  # for type checkers
+        candidate = f"{session_uuid}:z{current_hash[:12]}"
+        for extra in ("", current_hash[12:16], current_hash[16:20], current_hash[20:24]):
+            resolved = candidate if not extra else f"{candidate}{extra}"
+            existing = self.conn.execute(
+                "SELECT path_hash FROM datasets WHERE dataset_id = ?;",
+                (resolved,),
+            ).fetchone()
+            if existing is None:
+                return resolved
+            if str(existing["path_hash"] or "") == current_hash:
+                return resolved
+
+        # Extremely unlikely fallback: use full hash to guarantee uniqueness.
+        return f"{session_uuid}:z{current_hash}"
+
     def register_from_root(self, root: zarr.Group, zarr_path: Path) -> str:
-        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
-        self.upsert_dataset(dataset_id, session_uuid=session_uuid, zarr_path=zarr_path)
+        base_dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
+        zarr_purpose = _extract_zarr_purpose(root)
+        dataset_id = self._resolve_effective_dataset_id(
+            base_dataset_id=base_dataset_id,
+            session_uuid=session_uuid,
+            zarr_path=zarr_path,
+        )
+        self.upsert_dataset(
+            dataset_id,
+            session_uuid=session_uuid,
+            zarr_path=zarr_path,
+            zarr_purpose=zarr_purpose,
+        )
 
         protocol_name, protocol_hash = _extract_protocol(root)
         snapshot, _ = _extract_snapshot(root)
         provenance = _extract_provenance(snapshot)
         context = _extract_session_context(root)
         acquisition = _extract_acquisition(root)
-        zarr_purpose = _extract_zarr_purpose(root)
         self.upsert_provenance(
             dataset_id,
             provenance=provenance,
@@ -2137,9 +3256,10 @@ class Registry:
         *,
         run_id: str,
         set_id: Optional[str],
+        task_type: Optional[str] = None,
         config_path: Optional[Path],
         manifest_path: Optional[Path],
-        skeleton_id: Optional[str],
+        skeleton_id: Optional[str] = None,
         model_path: Optional[Path],
         metrics_path: Optional[Path],
         config_sha256: Optional[str] = None,
@@ -2150,9 +3270,19 @@ class Registry:
         final_metrics: Optional[Dict[str, Any]] = None,
         invocation: Optional[Dict[str, Any]] = None,
     ) -> None:
+        inferred_task_type = _infer_task_type(
+            explicit=task_type,
+            set_id=set_id,
+            run_id=run_id,
+            config_path=config_path,
+            manifest_path=manifest_path,
+            model_path=model_path,
+            invocation=invocation,
+        )
         payload = {
             "run_id": run_id,
             "set_id": set_id,
+            "task_type": inferred_task_type,
             "config_path": str(config_path) if config_path else None,
             "manifest_path": str(manifest_path) if manifest_path else None,
             "skeleton_id": str(skeleton_id) if skeleton_id else None,
@@ -2170,19 +3300,20 @@ class Registry:
         self.conn.execute(
             """
             INSERT INTO training_runs (
-                run_id, set_id, config_path, manifest_path, skeleton_id, model_path, metrics_path,
+                run_id, set_id, task_type, config_path, manifest_path, skeleton_id, model_path, metrics_path,
                 config_sha256, manifest_sha256, model_sha256, metrics_sha256,
                 status, final_metrics_json,
                 invocation_json, created_utc
             )
             VALUES (
-                :run_id, :set_id, :config_path, :manifest_path, :skeleton_id, :model_path, :metrics_path,
+                :run_id, :set_id, :task_type, :config_path, :manifest_path, :skeleton_id, :model_path, :metrics_path,
                 :config_sha256, :manifest_sha256, :model_sha256, :metrics_sha256,
                 :status, :final_metrics_json,
                 :invocation_json, :created_utc
             )
             ON CONFLICT(run_id) DO UPDATE SET
                 set_id=excluded.set_id,
+                task_type=excluded.task_type,
                 config_path=excluded.config_path,
                 manifest_path=excluded.manifest_path,
                 skeleton_id=excluded.skeleton_id,
@@ -2199,17 +3330,22 @@ class Registry:
             """,
             payload,
         )
-        if set_id and skeleton_id:
+        if set_id and (skeleton_id or inferred_task_type):
             self.conn.execute(
                 """
                 UPDATE training_sets
-                SET skeleton_id = ?
+                SET skeleton_id = COALESCE(?, skeleton_id),
+                    task_type = COALESCE(?, task_type)
                 WHERE set_id = ?;
                 """,
-                (str(skeleton_id), str(set_id)),
+                (
+                    (str(skeleton_id) if skeleton_id else None),
+                    inferred_task_type,
+                    str(set_id),
+                ),
             )
         self.conn.commit()
-        self.record_detection_model(
+        self.record_training_model(
             run_id=run_id,
             set_id=set_id,
             model_path=model_path,
@@ -2226,15 +3362,23 @@ class Registry:
         *,
         set_id: str,
         name: Optional[str],
+        task_type: Optional[str] = None,
         query_filter: Optional[Dict[str, Any]],
         dataset_ids: Iterable[str],
         skeleton_id: Optional[str] = None,
         invocation: Optional[Dict[str, Any]] = None,
     ) -> None:
         dataset_ids_norm = sorted({str(dataset_id) for dataset_id in dataset_ids if dataset_id})
+        inferred_task_type = _infer_task_type(
+            explicit=task_type,
+            set_id=set_id,
+            query_filter=query_filter,
+            invocation=invocation,
+        )
         payload = {
             "set_id": str(set_id),
             "name": name,
+            "task_type": inferred_task_type,
             "query_filter": _json_dumps(query_filter),
             "dataset_ids_json": _json_dumps(dataset_ids_norm),
             "skeleton_id": str(skeleton_id) if skeleton_id else None,
@@ -2244,13 +3388,14 @@ class Registry:
         self.conn.execute(
             """
             INSERT INTO training_sets (
-                set_id, name, query_filter, dataset_ids_json, skeleton_id, invocation_json, created_utc
+                set_id, name, task_type, query_filter, dataset_ids_json, skeleton_id, invocation_json, created_utc
             )
             VALUES (
-                :set_id, :name, :query_filter, :dataset_ids_json, :skeleton_id, :invocation_json, :created_utc
+                :set_id, :name, :task_type, :query_filter, :dataset_ids_json, :skeleton_id, :invocation_json, :created_utc
             )
             ON CONFLICT(set_id) DO UPDATE SET
                 name=excluded.name,
+                task_type=excluded.task_type,
                 query_filter=excluded.query_filter,
                 dataset_ids_json=excluded.dataset_ids_json,
                 skeleton_id=excluded.skeleton_id,
@@ -2752,7 +3897,7 @@ class Registry:
                 metadata=metadata,
             )
 
-    def record_detection_model(
+    def record_training_model(
         self,
         *,
         run_id: str,
@@ -2779,7 +3924,7 @@ class Registry:
         }
         self.conn.execute(
             """
-            INSERT INTO detection_models (
+            INSERT INTO training_models (
                 run_id, set_id, model_path, model_sha256, metrics_path, metrics_sha256,
                 status, final_metrics_json, metadata_json, created_utc
             )
@@ -2802,12 +3947,38 @@ class Registry:
         )
         self.conn.commit()
 
+    # Backward-compatible alias while callers migrate to the new name.
+    def record_detection_model(
+        self,
+        *,
+        run_id: str,
+        set_id: Optional[str],
+        model_path: Optional[Path],
+        model_sha256: Optional[str],
+        metrics_path: Optional[Path],
+        metrics_sha256: Optional[str],
+        status: Optional[str],
+        final_metrics: Optional[Dict[str, Any]],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.record_training_model(
+            run_id=run_id,
+            set_id=set_id,
+            model_path=model_path,
+            model_sha256=model_sha256,
+            metrics_path=metrics_path,
+            metrics_sha256=metrics_sha256,
+            status=status,
+            final_metrics=final_metrics,
+            metadata=metadata,
+        )
+
     def record_onnx_model(
         self,
         *,
         run_id: str,
         set_id: Optional[str],
-        skeleton_id: Optional[str],
+        skeleton_id: Optional[str] = None,
         detection_model_run_id: Optional[str],
         path: Optional[Path],
         sha256: Optional[str],
@@ -2917,7 +4088,7 @@ class Registry:
         *,
         run_id: str,
         set_id: Optional[str],
-        skeleton_id: Optional[str],
+        skeleton_id: Optional[str] = None,
         detection_model_run_id: Optional[str],
         onnx_run_id: Optional[str],
         precision: str,
@@ -3076,7 +4247,8 @@ class Registry:
         fish_id: Optional[str] = None,
         subject_count_min: Optional[int] = None,
         subject_count_max: Optional[int] = None,
-        zarr_purpose: Optional[str] = None,
+        zarr_origin: Optional[str] = None,
+        zarr_use: Optional[str] = None,
         fps_min: Optional[float] = None,
         fps_max: Optional[float] = None,
         exposure_min: Optional[float] = None,
@@ -3107,7 +4279,8 @@ class Registry:
     ) -> List[sqlite3.Row]:
         sql = [
             "SELECT d.dataset_id, d.session_uuid, d.zarr_path,",
-            "p.dish_design, p.fish_id, p.subject_count, p.zarr_purpose, p.fps, p.exposure, p.exposure_unit, p.frame_rate, p.gain,",
+            "d.zarr_origin, d.zarr_use,",
+            "p.dish_design, p.fish_id, p.subject_count, p.fps, p.exposure, p.exposure_unit, p.frame_rate, p.gain,",
             "p.video_codec, p.video_pix_fmt, p.format_title, p.format_comment, p.format_encoder,",
             "p.encoder_name, p.encoder_codec, p.encoder_preset, p.encoder_tuning, p.encoder_rc,",
             "p.encoder_bpp, p.encoder_target_bps, p.encoder_res, p.encoder_res_width, p.encoder_res_height,",
@@ -3134,7 +4307,8 @@ class Registry:
         add_clause("AND p.fish_id = ?", fish_id)
         add_clause("AND p.subject_count >= ?", subject_count_min)
         add_clause("AND p.subject_count <= ?", subject_count_max)
-        add_clause("AND p.zarr_purpose = ?", zarr_purpose)
+        add_clause("AND d.zarr_origin = ?", _normalize_zarr_origin(zarr_origin))
+        add_clause("AND d.zarr_use = ?", _normalize_zarr_use(zarr_use))
         add_clause("AND p.fps >= ?", fps_min)
         add_clause("AND p.fps <= ?", fps_max)
         add_clause("AND p.exposure >= ?", exposure_min)

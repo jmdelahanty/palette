@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from hashlib import sha256
 from pathlib import PurePosixPath
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .db import (
     Registry,
@@ -18,6 +19,18 @@ from .db import (
     _extract_keypoint_quality_rows,
     _import_zarr,
 )
+
+DEFAULT_ALLOWED_RECORDING_TYPES = {
+    "behavior",
+    "microscopy",
+    "histology",
+}
+DEFAULT_ALLOWED_RECORDING_SUBTYPES_BY_TYPE = {
+    "behavior": {"free", "embedded"},
+    "microscopy": {"lightsheet", "confocal", "2p"},
+    "histology": {"section", "wholemount"},
+}
+ALLOWED_BEHAVIOR_MODES = {"free", "embedded", "none"}
 
 
 @dataclass(frozen=True)
@@ -47,6 +60,14 @@ class IntegrityIssue:
     code: str
     run_id: Optional[str]
     detail: str
+
+
+@dataclass(frozen=True)
+class DatasetLineageAuditSummary:
+    edge_count: int
+    merged_dataset_count: int
+    merged_missing_lineage_count: int
+    training_set_lineage_mismatch_count: int
 
 
 @dataclass(frozen=True)
@@ -80,11 +101,27 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Optional path to the registry SQLite file.",
     )
     parser.add_argument(
+        "--reconcile-registry",
+        action="store_true",
+        help=(
+            "Run registry reconciliation workflow: reconcile missing dataset statuses, "
+            "delete missing dataset rows, then run integrity checks."
+        ),
+    )
+    parser.add_argument(
         "--prune-invalid",
         action="store_true",
         help=(
             "Reconcile missing rows, then prune invalid datasets "
             "(status=missing or paths that point inside a Zarr store)."
+        ),
+    )
+    parser.add_argument(
+        "--prune-missing-datasets",
+        action="store_true",
+        help=(
+            "Reconcile missing rows, then prune dataset rows with missing on-disk Zarr paths "
+            "(status=missing)."
         ),
     )
     parser.add_argument(
@@ -133,8 +170,48 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         "--backfill-model-tables",
         action="store_true",
         help=(
-            "Backfill detection_models/onnx_models/tensorrt_models from "
+            "Backfill training_models/onnx_models/tensorrt_models from "
             "existing training_runs/model_exports rows."
+        ),
+    )
+    parser.add_argument(
+        "--backfill-dataset-lineage",
+        action="store_true",
+        help=(
+            "Backfill dataset_lineage rows for merged training datasets "
+            "using training_sets.dataset_ids_json membership."
+        ),
+    )
+    parser.add_argument(
+        "--remap-training-set-dataset-ids",
+        action="store_true",
+        help=(
+            "Remap legacy source dataset IDs in training_sets.dataset_ids_json "
+            "to current datasets.dataset_id values using datasets.session_uuid."
+        ),
+    )
+    parser.add_argument(
+        "--backfill-recording-entities",
+        action="store_true",
+        help=(
+            "Backfill recordings + recording_artifacts and link source datasets "
+            "to recording_id/artifact_kind from recording manifests."
+        ),
+    )
+    parser.add_argument(
+        "--backfill-subject-dish-cross",
+        action="store_true",
+        help=(
+            "Backfill crosses, dishes, and recording_subjects from source recording "
+            "dataset provenance fields."
+        ),
+    )
+    parser.add_argument(
+        "--backfill-subjects",
+        action="store_true",
+        help=(
+            "Backfill subjects from recording_subjects/provenance using normalized "
+            "dish lineage (subjects.dish_id -> dishes.dish_id)."
         ),
     )
     parser.add_argument(
@@ -213,6 +290,18 @@ def _normalize_scope_paths(scope_paths: Optional[Sequence[Path]]) -> List[Path]:
     return normalized
 
 
+def _json_text_list(raw: object) -> List[str]:
+    if raw is None:
+        return []
+    try:
+        payload = json.loads(str(raw))
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [str(item) for item in payload if item]
+
+
 def _matches_scope(path: str, scope_roots: Sequence[Path]) -> bool:
     if not scope_roots:
         return True
@@ -280,6 +369,44 @@ def _collect_invalid_dataset_candidates(
     return candidates
 
 
+def _collect_missing_dataset_candidates(
+    registry: Registry,
+    *,
+    scope_paths: Optional[Sequence[Path]] = None,
+    include_missing_scan: bool = False,
+) -> List[InvalidDatasetCandidate]:
+    """Collect dataset rows that are (or would be) marked missing."""
+    scope_roots = _normalize_scope_paths(scope_paths)
+    rows = registry.conn.execute(
+        "SELECT dataset_id, zarr_path, status FROM datasets ORDER BY dataset_id;"
+    ).fetchall()
+
+    candidates: List[InvalidDatasetCandidate] = []
+    for row in rows:
+        dataset_id = str(row["dataset_id"])
+        zarr_path = str(row["zarr_path"])
+        if not _matches_scope(zarr_path, scope_roots):
+            continue
+
+        reasons: List[str] = []
+        if row["status"] == "missing":
+            reasons.append("status_missing")
+        elif include_missing_scan:
+            candidate = Path(zarr_path).expanduser()
+            if not _is_zarr_root_path(candidate):
+                reasons.append("status_missing")
+
+        if reasons:
+            candidates.append(
+                InvalidDatasetCandidate(
+                    dataset_id=dataset_id,
+                    zarr_path=zarr_path,
+                    reasons=tuple(sorted(reasons)),
+                )
+            )
+    return candidates
+
+
 def _delete_dataset_ids(registry: Registry, dataset_ids: Sequence[str], *, dry_run: bool) -> int:
     if dry_run or not dataset_ids:
         return 0
@@ -287,6 +414,715 @@ def _delete_dataset_ids(registry: Registry, dataset_ids: Sequence[str], *, dry_r
         for dataset_id in dataset_ids:
             registry.conn.execute("DELETE FROM datasets WHERE dataset_id = ?;", (dataset_id,))
     return len(dataset_ids)
+
+
+def _normalize_recording_id(*, session_uuid: Optional[str], recording_dir: Path) -> str:
+    if session_uuid and str(session_uuid).strip():
+        return str(session_uuid).strip()
+    digest = sha256(str(recording_dir).encode("utf-8")).hexdigest()[:12]
+    return f"path-{digest}"
+
+
+def _infer_artifact_type(artifact_group: str, relpath: str) -> str:
+    rel = relpath.strip()
+    rel_lower = rel.lower()
+    ext = Path(rel).suffix.lower()
+    if artifact_group == "raw":
+        if ext == ".h5":
+            return "h5_log"
+        if ext == ".mp4":
+            return "render_video"
+        if ext == ".csv":
+            if rel_lower.endswith("_update_timing.csv"):
+                return "timing_profile_csv"
+            return "raw_csv"
+    if artifact_group == "cams":
+        if ext == ".mp4":
+            return "camera_video"
+        if ext == ".csv":
+            return "camera_metadata_csv"
+    if artifact_group == "derived":
+        if ext == ".png":
+            return "derived_calibration_image"
+        if ext:
+            return f"derived_{ext.lstrip('.')}"
+    if ext:
+        return f"file_{ext.lstrip('.')}"
+    return "file"
+
+
+def _iter_manifest_artifacts(payload: Dict[str, Any]) -> List[Tuple[str, str]]:
+    files = payload.get("files")
+    if not isinstance(files, dict):
+        return []
+    out: List[Tuple[str, str]] = []
+    for group in ("raw", "cams", "derived"):
+        entries = files.get(group) or []
+        if not isinstance(entries, list):
+            continue
+        for item in entries:
+            rel = str(item).strip()
+            if not rel:
+                continue
+            out.append((group, rel))
+    return out
+
+
+def _backfill_recording_entities(
+    registry: Registry,
+    *,
+    dry_run: bool,
+    scope_paths: Optional[Sequence[Path]] = None,
+) -> Dict[str, int]:
+    scope_roots = _normalize_scope_paths(scope_paths)
+    rows = registry.conn.execute(
+        "SELECT dataset_id, session_uuid, zarr_path, recording_id, artifact_kind FROM datasets ORDER BY dataset_id;"
+    ).fetchall()
+
+    recordings_scanned = 0
+    manifests_missing = 0
+    recordings_upserted = 0
+    datasets_linked = 0
+    artifacts_seen = 0
+    artifacts_upserted = 0
+    derived_kind_backfilled = 0
+
+    for row in rows:
+        dataset_id = str(row["dataset_id"])
+        session_uuid = row["session_uuid"]
+        zarr_path = Path(str(row["zarr_path"])).expanduser()
+        if scope_roots and not _matches_scope(str(zarr_path), scope_roots):
+            continue
+        normalized = str(zarr_path).replace("\\", "/").lower()
+        is_recordings_dataset = "/recordings/" in normalized
+
+        # Backfill artifact kind for non-recording datasets when missing.
+        if not is_recordings_dataset and not row["artifact_kind"]:
+            inferred_kind = "derived_training_merge" if dataset_id.endswith("_merged") else "derived_analysis"
+            derived_kind_backfilled += 1
+            if not dry_run:
+                registry.conn.execute(
+                    "UPDATE datasets SET artifact_kind = ? WHERE dataset_id = ?;",
+                    (inferred_kind, dataset_id),
+                )
+            continue
+
+        if not is_recordings_dataset:
+            continue
+
+        recordings_scanned += 1
+        try:
+            recording_dir = zarr_path.parent.parent
+        except Exception:
+            manifests_missing += 1
+            continue
+        manifest_path = recording_dir / "recording_manifest.json"
+        if not manifest_path.exists():
+            manifests_missing += 1
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifests_missing += 1
+            continue
+
+        manifest_session_uuid = manifest.get("session_uuid")
+        recording_id = _normalize_recording_id(
+            session_uuid=str(manifest_session_uuid or session_uuid or "").strip() or None,
+            recording_dir=recording_dir,
+        )
+        now = registry.conn.execute("SELECT datetime('now') AS now;").fetchone()["now"]
+        recording_name = manifest.get("recording_name") or recording_dir.name
+        started_utc = manifest.get("session_start_iso8601_utc")
+        rig_id = manifest.get("rig_id")
+        arena_id = manifest.get("arena_id")
+        camera_id = manifest.get("camera_id")
+        canvas_name = manifest.get("canvas_name")
+        protocol_name = manifest.get("protocol_name_from_definition")
+        manifest_dish_design = manifest.get("dish_design")
+        provenance_dish_design_row = registry.conn.execute(
+            "SELECT dish_design FROM provenance WHERE dataset_id = ? LIMIT 1;",
+            (dataset_id,),
+        ).fetchone()
+        provenance_dish_design = (
+            str(provenance_dish_design_row["dish_design"]).strip()
+            if provenance_dish_design_row is not None and provenance_dish_design_row["dish_design"] is not None
+            else None
+        )
+        dish_design = (
+            str(manifest_dish_design).strip()
+            if manifest_dish_design is not None and str(manifest_dish_design).strip()
+            else provenance_dish_design
+        )
+        recording_type = manifest.get("recording_type") or "behavior"
+        recording_subtype = manifest.get("recording_subtype")
+        if recording_subtype is None and recording_type == "behavior":
+            recording_subtype = "free"
+        behavior_mode = manifest.get("behavior_mode")
+        if behavior_mode is None:
+            if recording_type == "behavior" and str(recording_subtype or "").strip() in {"free", "embedded"}:
+                behavior_mode = str(recording_subtype)
+            else:
+                behavior_mode = "none"
+        artifact_schema_id = manifest.get("artifact_schema_id") or "behavior_v1"
+
+        existing_recording = registry.conn.execute(
+            "SELECT 1 FROM recordings WHERE recording_id = ? LIMIT 1;",
+            (recording_id,),
+        ).fetchone()
+        if existing_recording is None:
+            recordings_upserted += 1
+
+        if not dry_run:
+            registry.conn.execute(
+                """
+                INSERT INTO recordings (
+                    recording_id, session_uuid, recording_name, recording_path, started_utc,
+                    recording_type, recording_subtype, behavior_mode, artifact_schema_id, rig_id, arena_id, camera_id, canvas_name,
+                    protocol_name, dish_design, created_utc, updated_utc
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                ON CONFLICT(recording_id) DO UPDATE SET
+                    session_uuid=excluded.session_uuid,
+                    recording_name=excluded.recording_name,
+                    recording_path=excluded.recording_path,
+                    started_utc=COALESCE(excluded.started_utc, recordings.started_utc),
+                    recording_type=COALESCE(excluded.recording_type, recordings.recording_type),
+                    recording_subtype=COALESCE(excluded.recording_subtype, recordings.recording_subtype),
+                    behavior_mode=COALESCE(excluded.behavior_mode, recordings.behavior_mode),
+                    artifact_schema_id=COALESCE(excluded.artifact_schema_id, recordings.artifact_schema_id),
+                    rig_id=COALESCE(excluded.rig_id, recordings.rig_id),
+                    arena_id=COALESCE(excluded.arena_id, recordings.arena_id),
+                    camera_id=COALESCE(excluded.camera_id, recordings.camera_id),
+                    canvas_name=COALESCE(excluded.canvas_name, recordings.canvas_name),
+                    protocol_name=COALESCE(excluded.protocol_name, recordings.protocol_name),
+                    dish_design=COALESCE(excluded.dish_design, recordings.dish_design),
+                    updated_utc=excluded.updated_utc;
+                """,
+                (
+                    recording_id,
+                    str(manifest_session_uuid) if manifest_session_uuid else (str(session_uuid) if session_uuid else None),
+                    str(recording_name),
+                    str(recording_dir),
+                    str(started_utc) if started_utc else None,
+                    str(recording_type),
+                    str(recording_subtype) if recording_subtype else None,
+                    str(behavior_mode) if behavior_mode else None,
+                    str(artifact_schema_id),
+                    str(rig_id) if rig_id else None,
+                    str(arena_id) if arena_id else None,
+                    str(camera_id) if camera_id else None,
+                    str(canvas_name) if canvas_name else None,
+                    str(protocol_name) if protocol_name else None,
+                    dish_design,
+                    now,
+                    now,
+                ),
+            )
+
+        current_recording_id = row["recording_id"]
+        current_artifact_kind = row["artifact_kind"]
+        if current_recording_id != recording_id or current_artifact_kind != "source_recording":
+            datasets_linked += 1
+            if not dry_run:
+                registry.conn.execute(
+                    "UPDATE datasets SET recording_id = ?, artifact_kind = 'source_recording' WHERE dataset_id = ?;",
+                    (recording_id, dataset_id),
+                )
+
+        artifact_rows = _iter_manifest_artifacts(manifest)
+        artifacts_seen += len(artifact_rows)
+        for artifact_group, relpath in artifact_rows:
+            artifact_path = recording_dir / relpath
+            artifact_type = _infer_artifact_type(artifact_group, relpath)
+            file_ext = artifact_path.suffix.lower() if artifact_path.suffix else None
+            status = "present" if artifact_path.exists() else "missing"
+            size_bytes: Optional[int] = None
+            if artifact_path.exists() and artifact_path.is_file():
+                try:
+                    size_bytes = int(artifact_path.stat().st_size)
+                except Exception:
+                    size_bytes = None
+            existing_artifact = registry.conn.execute(
+                "SELECT 1 FROM recording_artifacts WHERE recording_id = ? AND path = ? LIMIT 1;",
+                (recording_id, str(artifact_path)),
+            ).fetchone()
+            if existing_artifact is None:
+                artifacts_upserted += 1
+            if not dry_run:
+                artifact_id = sha256(f"{recording_id}::{artifact_path}".encode("utf-8")).hexdigest()[:16]
+                registry.conn.execute(
+                    """
+                    INSERT INTO recording_artifacts (
+                        artifact_id, recording_id, artifact_type, artifact_group, relpath, path,
+                        file_ext, status, size_bytes, metadata_json, created_utc, updated_utc
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(artifact_id) DO UPDATE SET
+                        artifact_type=excluded.artifact_type,
+                        artifact_group=excluded.artifact_group,
+                        relpath=excluded.relpath,
+                        path=excluded.path,
+                        file_ext=excluded.file_ext,
+                        status=excluded.status,
+                        size_bytes=excluded.size_bytes,
+                        metadata_json=excluded.metadata_json,
+                        updated_utc=excluded.updated_utc;
+                    """,
+                    (
+                        artifact_id,
+                        recording_id,
+                        artifact_type,
+                        artifact_group,
+                        relpath,
+                        str(artifact_path),
+                        file_ext,
+                        status,
+                        size_bytes,
+                        None,
+                        now,
+                        now,
+                    ),
+                )
+
+    if not dry_run:
+        registry.conn.commit()
+
+    return {
+        "recordings_scanned": recordings_scanned,
+        "manifests_missing": manifests_missing,
+        "recordings_upserted": recordings_upserted,
+        "datasets_linked": datasets_linked,
+        "artifacts_seen": artifacts_seen,
+        "artifacts_upserted": artifacts_upserted,
+        "derived_kind_backfilled": derived_kind_backfilled,
+    }
+
+
+def _backfill_subject_dish_cross_entities(
+    registry: Registry,
+    *,
+    dry_run: bool,
+    scope_paths: Optional[Sequence[Path]] = None,
+) -> Dict[str, int]:
+    scope_roots = _normalize_scope_paths(scope_paths)
+    rows = registry.conn.execute(
+        """
+        SELECT
+            d.dataset_id,
+            d.zarr_path,
+            d.recording_id,
+            p.fish_id,
+            p.dish_id,
+            p.cross_id,
+            p.species,
+            p.sex,
+            p.genotype,
+            p.line_strain,
+            p.parents_json,
+            p.dpf_at_acquisition,
+            p.subject_count,
+            p.snapshot_status,
+            p.snapshot_missing_json
+        FROM datasets d
+        LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
+        WHERE d.artifact_kind = 'source_recording'
+        ORDER BY d.dataset_id;
+        """
+    ).fetchall()
+    now = registry.conn.execute("SELECT datetime('now') AS now;").fetchone()["now"]
+    summary = {
+        "source_rows_scanned": 0,
+        "crosses_seen": 0,
+        "crosses_unique_seen": 0,
+        "crosses_would_insert": 0,
+        "crosses_upserted": 0,
+        "dishes_seen": 0,
+        "dishes_unique_seen": 0,
+        "dishes_would_insert": 0,
+        "dishes_upserted": 0,
+        "recording_subject_rows_seen": 0,
+        "recording_subjects_unique_seen": 0,
+        "recording_subjects_would_insert": 0,
+        "recording_subjects_upserted": 0,
+        "rows_skipped_missing_recording_id": 0,
+        "rows_skipped_missing_subject_id": 0,
+    }
+    seen_cross_ids: Set[str] = set()
+    seen_dish_ids: Set[str] = set()
+    seen_recording_subject_keys: Set[Tuple[str, str]] = set()
+    for row in rows:
+        dataset_id = str(row["dataset_id"])
+        zarr_path = str(row["zarr_path"])
+        if scope_roots and not _matches_scope(zarr_path, scope_roots):
+            continue
+        summary["source_rows_scanned"] += 1
+        cross_id = str(row["cross_id"]).strip() if row["cross_id"] is not None else ""
+        dish_id = str(row["dish_id"]).strip() if row["dish_id"] is not None else ""
+        recording_id = str(row["recording_id"]).strip() if row["recording_id"] is not None else ""
+        subject_id = str(row["fish_id"]).strip() if row["fish_id"] is not None else ""
+        species = str(row["species"]).strip() if row["species"] is not None else None
+        sex = str(row["sex"]).strip() if row["sex"] is not None else None
+        genotype = str(row["genotype"]).strip() if row["genotype"] is not None else None
+        line_strain = str(row["line_strain"]).strip() if row["line_strain"] is not None else None
+        parents_json = str(row["parents_json"]) if row["parents_json"] is not None else None
+        dpf_at_acquisition = row["dpf_at_acquisition"]
+
+        if cross_id:
+            summary["crosses_seen"] += 1
+            if cross_id not in seen_cross_ids:
+                seen_cross_ids.add(cross_id)
+                summary["crosses_unique_seen"] += 1
+                existing = registry.conn.execute(
+                    "SELECT 1 FROM crosses WHERE cross_id = ? LIMIT 1;",
+                    (cross_id,),
+                ).fetchone()
+                if existing is None:
+                    summary["crosses_would_insert"] += 1
+                    summary["crosses_upserted"] += 1
+            if not dry_run:
+                registry.conn.execute(
+                    """
+                    INSERT INTO crosses (
+                        cross_id, line_strain, genotype, parents_json, metadata_json, created_utc, updated_utc
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(cross_id) DO UPDATE SET
+                        line_strain=COALESCE(excluded.line_strain, crosses.line_strain),
+                        genotype=COALESCE(excluded.genotype, crosses.genotype),
+                        parents_json=COALESCE(excluded.parents_json, crosses.parents_json),
+                        metadata_json=COALESCE(excluded.metadata_json, crosses.metadata_json),
+                        updated_utc=excluded.updated_utc;
+                    """,
+                    (
+                        cross_id,
+                        line_strain or None,
+                        genotype or None,
+                        parents_json,
+                        json.dumps(
+                            {
+                                "source": "provenance",
+                                "dataset_id": dataset_id,
+                            },
+                            sort_keys=True,
+                        ),
+                        now,
+                        now,
+                    ),
+                )
+
+        if dish_id:
+            summary["dishes_seen"] += 1
+            if dish_id not in seen_dish_ids:
+                seen_dish_ids.add(dish_id)
+                summary["dishes_unique_seen"] += 1
+                existing = registry.conn.execute(
+                    "SELECT 1 FROM dishes WHERE dish_id = ? LIMIT 1;",
+                    (dish_id,),
+                ).fetchone()
+                if existing is None:
+                    summary["dishes_would_insert"] += 1
+                    summary["dishes_upserted"] += 1
+            if not dry_run:
+                registry.conn.execute(
+                    """
+                    INSERT INTO dishes (
+                        dish_id, cross_id, species, metadata_json, created_utc, updated_utc
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(dish_id) DO UPDATE SET
+                        cross_id=COALESCE(excluded.cross_id, dishes.cross_id),
+                        species=COALESCE(excluded.species, dishes.species),
+                        metadata_json=COALESCE(excluded.metadata_json, dishes.metadata_json),
+                        updated_utc=excluded.updated_utc;
+                    """,
+                    (
+                        dish_id,
+                        cross_id or None,
+                        species,
+                        json.dumps(
+                            {
+                                "source": "provenance",
+                                "dataset_id": dataset_id,
+                            },
+                            sort_keys=True,
+                        ),
+                        now,
+                        now,
+                    ),
+                )
+
+        if not recording_id:
+            summary["rows_skipped_missing_recording_id"] += 1
+            continue
+        if not subject_id:
+            summary["rows_skipped_missing_subject_id"] += 1
+            continue
+        summary["recording_subject_rows_seen"] += 1
+        subject_key = (recording_id, subject_id)
+        if subject_key not in seen_recording_subject_keys:
+            seen_recording_subject_keys.add(subject_key)
+            summary["recording_subjects_unique_seen"] += 1
+            existing = registry.conn.execute(
+                """
+                SELECT 1
+                FROM recording_subjects
+                WHERE recording_id = ? AND subject_id = ?
+                LIMIT 1;
+                """,
+                (recording_id, subject_id),
+            ).fetchone()
+            if existing is None:
+                summary["recording_subjects_would_insert"] += 1
+                summary["recording_subjects_upserted"] += 1
+        if dry_run:
+            continue
+        snapshot_missing_payload = None
+        if row["snapshot_missing_json"] is not None:
+            try:
+                snapshot_missing_payload = json.loads(str(row["snapshot_missing_json"]))
+            except Exception:
+                snapshot_missing_payload = row["snapshot_missing_json"]
+        metadata = {
+            "source": "provenance",
+            "dataset_id": dataset_id,
+            "subject_count": row["subject_count"],
+            "snapshot_status": row["snapshot_status"],
+            "snapshot_missing": snapshot_missing_payload,
+        }
+        registry.conn.execute(
+            """
+            INSERT INTO recording_subjects (
+                recording_id, subject_id, dataset_id, dish_id, cross_id, dpf_at_acquisition,
+                species, sex, genotype, line_strain, metadata_json, created_utc, updated_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(recording_id, subject_id) DO UPDATE SET
+                dataset_id=COALESCE(excluded.dataset_id, recording_subjects.dataset_id),
+                dish_id=COALESCE(excluded.dish_id, recording_subjects.dish_id),
+                cross_id=COALESCE(excluded.cross_id, recording_subjects.cross_id),
+                dpf_at_acquisition=COALESCE(excluded.dpf_at_acquisition, recording_subjects.dpf_at_acquisition),
+                species=COALESCE(excluded.species, recording_subjects.species),
+                sex=COALESCE(excluded.sex, recording_subjects.sex),
+                genotype=COALESCE(excluded.genotype, recording_subjects.genotype),
+                line_strain=COALESCE(excluded.line_strain, recording_subjects.line_strain),
+                metadata_json=COALESCE(excluded.metadata_json, recording_subjects.metadata_json),
+                updated_utc=excluded.updated_utc;
+            """,
+            (
+                recording_id,
+                subject_id,
+                dataset_id,
+                dish_id or None,
+                cross_id or None,
+                dpf_at_acquisition,
+                species,
+                sex,
+                genotype,
+                line_strain,
+                json.dumps(metadata, sort_keys=True),
+                now,
+                now,
+            ),
+        )
+    if not dry_run:
+        registry.conn.commit()
+    return summary
+
+
+def _backfill_subjects(
+    registry: Registry,
+    *,
+    dry_run: bool,
+    scope_paths: Optional[Sequence[Path]] = None,
+) -> Dict[str, int]:
+    scope_roots = _normalize_scope_paths(scope_paths)
+    rows = registry.conn.execute(
+        """
+        SELECT
+            rs.recording_id,
+            rs.subject_id,
+            rs.dataset_id,
+            rs.dish_id AS rs_dish_id,
+            rs.species AS rs_species,
+            rs.sex AS rs_sex,
+            d.zarr_path,
+            p.dish_id AS p_dish_id,
+            p.species AS p_species,
+            p.sex AS p_sex
+        FROM recording_subjects rs
+        LEFT JOIN datasets d ON d.dataset_id = rs.dataset_id
+        LEFT JOIN provenance p ON p.dataset_id = rs.dataset_id
+        ORDER BY rs.subject_id, rs.recording_id;
+        """
+    ).fetchall()
+    existing_rows = registry.conn.execute(
+        """
+        SELECT subject_id, dish_id, species, sex
+        FROM subjects
+        ORDER BY subject_id;
+        """
+    ).fetchall()
+    existing_by_subject: Dict[str, Dict[str, Optional[str]]] = {}
+    for row in existing_rows:
+        subject_id = str(row["subject_id"]) if row["subject_id"] is not None else ""
+        if not subject_id:
+            continue
+        existing_by_subject[subject_id] = {
+            "dish_id": str(row["dish_id"]).strip() if row["dish_id"] is not None else None,
+            "species": str(row["species"]).strip() if row["species"] is not None else None,
+            "sex": str(row["sex"]).strip() if row["sex"] is not None else None,
+        }
+
+    observations: Dict[str, Dict[str, Any]] = {}
+    summary = {
+        "subject_rows_scanned": 0,
+        "rows_skipped_out_of_scope": 0,
+        "rows_skipped_missing_subject_id": 0,
+        "subject_ids_unique_seen": 0,
+        "subjects_existing": 0,
+        "subjects_would_insert": 0,
+        "subjects_would_enrich": 0,
+        "subjects_upserted": 0,
+        "subjects_conflict_dish_id": 0,
+        "subjects_conflict_species": 0,
+        "subjects_conflict_sex": 0,
+    }
+
+    for row in rows:
+        zarr_path = str(row["zarr_path"]).strip() if row["zarr_path"] is not None else ""
+        if scope_roots:
+            if not zarr_path or not _matches_scope(zarr_path, scope_roots):
+                summary["rows_skipped_out_of_scope"] += 1
+                continue
+        summary["subject_rows_scanned"] += 1
+        subject_id = str(row["subject_id"]).strip() if row["subject_id"] is not None else ""
+        if not subject_id:
+            summary["rows_skipped_missing_subject_id"] += 1
+            continue
+
+        dish_id = (
+            str(row["rs_dish_id"]).strip() if row["rs_dish_id"] is not None else ""
+        ) or (
+            str(row["p_dish_id"]).strip() if row["p_dish_id"] is not None else ""
+        )
+        species = (
+            str(row["rs_species"]).strip() if row["rs_species"] is not None else ""
+        ) or (
+            str(row["p_species"]).strip() if row["p_species"] is not None else ""
+        )
+        sex = (
+            str(row["rs_sex"]).strip() if row["rs_sex"] is not None else ""
+        ) or (
+            str(row["p_sex"]).strip() if row["p_sex"] is not None else ""
+        )
+
+        record = observations.setdefault(
+            subject_id,
+            {
+                "dish_ids": set(),
+                "species_values": set(),
+                "sex_values": set(),
+                "row_count": 0,
+                "recording_ids": set(),
+            },
+        )
+        record["row_count"] += 1
+        recording_id = str(row["recording_id"]).strip() if row["recording_id"] is not None else ""
+        if recording_id:
+            record["recording_ids"].add(recording_id)
+        if dish_id:
+            record["dish_ids"].add(dish_id)
+        if species:
+            record["species_values"].add(species)
+        if sex:
+            record["sex_values"].add(sex)
+
+    summary["subject_ids_unique_seen"] = len(observations)
+    now = registry.conn.execute("SELECT datetime('now') AS now;").fetchone()["now"]
+    for subject_id in sorted(observations.keys()):
+        observed = observations[subject_id]
+        observed_dish_ids = sorted(str(item) for item in observed["dish_ids"] if item)
+        observed_species = sorted(str(item) for item in observed["species_values"] if item)
+        observed_sex = sorted(str(item) for item in observed["sex_values"] if item)
+
+        existing = existing_by_subject.get(subject_id, {})
+        existing_dish_id = str(existing.get("dish_id") or "").strip()
+        existing_species = str(existing.get("species") or "").strip()
+        existing_sex = str(existing.get("sex") or "").strip()
+
+        if existing:
+            summary["subjects_existing"] += 1
+        else:
+            summary["subjects_would_insert"] += 1
+            summary["subjects_upserted"] += 1
+
+        chosen_dish_id = existing_dish_id or (observed_dish_ids[0] if observed_dish_ids else "")
+        chosen_species = existing_species or (observed_species[0] if observed_species else "")
+        chosen_sex = existing_sex or (observed_sex[0] if observed_sex else "")
+
+        if existing:
+            would_enrich = (
+                (not existing_dish_id and bool(chosen_dish_id))
+                or (not existing_species and bool(chosen_species))
+                or (not existing_sex and bool(chosen_sex))
+            )
+            if would_enrich:
+                summary["subjects_would_enrich"] += 1
+
+        if len(observed_dish_ids) > 1 or (
+            existing_dish_id and observed_dish_ids and existing_dish_id not in observed_dish_ids
+        ):
+            summary["subjects_conflict_dish_id"] += 1
+        if len(observed_species) > 1 or (
+            existing_species and observed_species and existing_species not in observed_species
+        ):
+            summary["subjects_conflict_species"] += 1
+        if len(observed_sex) > 1 or (
+            existing_sex and observed_sex and existing_sex not in observed_sex
+        ):
+            summary["subjects_conflict_sex"] += 1
+
+        if dry_run:
+            continue
+
+        metadata_payload = {
+            "source": "recording_subjects+provenance",
+            "row_count": int(observed["row_count"]),
+            "recording_ids": sorted(str(item) for item in observed["recording_ids"] if item),
+            "observed_dish_ids": observed_dish_ids,
+            "observed_species": observed_species,
+            "observed_sex": observed_sex,
+        }
+        registry.conn.execute(
+            """
+            INSERT INTO subjects (
+                subject_id, dish_id, species, sex, metadata_json, created_utc, updated_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(subject_id) DO UPDATE SET
+                dish_id=COALESCE(subjects.dish_id, excluded.dish_id),
+                species=COALESCE(subjects.species, excluded.species),
+                sex=COALESCE(subjects.sex, excluded.sex),
+                metadata_json=COALESCE(subjects.metadata_json, excluded.metadata_json),
+                updated_utc=excluded.updated_utc;
+            """,
+            (
+                subject_id,
+                chosen_dish_id or None,
+                chosen_species or None,
+                chosen_sex or None,
+                json.dumps(metadata_payload, sort_keys=True),
+                now,
+                now,
+            ),
+        )
+
+    if not dry_run:
+        registry.conn.commit()
+    return summary
 
 
 def _normalize_status_values(values: Optional[Sequence[str]]) -> tuple[str, ...]:
@@ -426,7 +1262,7 @@ def _collect_run_artifact_paths(registry: Registry, run_ids: Sequence[str]) -> L
                 me.path AS legacy_export_path,
                 me.manifest_path AS legacy_export_manifest_path
             FROM training_runs tr
-            LEFT JOIN detection_models dm ON dm.run_id = tr.run_id
+            LEFT JOIN training_models dm ON dm.run_id = tr.run_id
             LEFT JOIN onnx_models om ON om.run_id = tr.run_id
             LEFT JOIN tensorrt_models tm ON tm.run_id = tr.run_id
             LEFT JOIN model_exports me ON me.run_id = tr.run_id
@@ -644,7 +1480,7 @@ def _backfill_model_tables(registry: Registry, *, dry_run: bool) -> Dict[str, in
             """
             SELECT COUNT(*)
             FROM training_runs tr
-            LEFT JOIN detection_models dm ON dm.run_id = tr.run_id
+            LEFT JOIN training_models dm ON dm.run_id = tr.run_id
             WHERE dm.run_id IS NULL;
             """
         ).fetchone()[0]
@@ -697,7 +1533,7 @@ def _backfill_model_tables(registry: Registry, *, dry_run: bool) -> Dict[str, in
 
     registry.conn.execute(
         """
-        INSERT INTO detection_models (
+        INSERT INTO training_models (
             run_id, set_id, model_path, model_sha256, metrics_path, metrics_sha256,
             status, final_metrics_json, metadata_json, created_utc
         )
@@ -713,7 +1549,7 @@ def _backfill_model_tables(registry: Registry, *, dry_run: bool) -> Dict[str, in
             json_object('source', 'backfill_training_runs'),
             tr.created_utc
         FROM training_runs tr
-        LEFT JOIN detection_models dm ON dm.run_id = tr.run_id
+        LEFT JOIN training_models dm ON dm.run_id = tr.run_id
         WHERE dm.run_id IS NULL;
         """
     )
@@ -807,6 +1643,169 @@ def _backfill_model_tables(registry: Registry, *, dry_run: bool) -> Dict[str, in
         "onnx_inserted": onnx_inserted,
         "tensorrt_inserted": tensorrt_inserted,
     }
+
+
+def _backfill_dataset_lineage(registry: Registry, *, dry_run: bool) -> Dict[str, int]:
+    relationship_type = "training_merge_source"
+    dataset_rows = registry.conn.execute(
+        """
+        SELECT dataset_id, artifact_kind
+        FROM datasets;
+        """
+    ).fetchall()
+    dataset_kind: Dict[str, str] = {
+        str(row["dataset_id"]): str(row["artifact_kind"] or "")
+        for row in dataset_rows
+        if row["dataset_id"] is not None
+    }
+    set_rows = registry.conn.execute(
+        """
+        SELECT set_id, dataset_ids_json
+        FROM training_sets
+        ORDER BY created_utc DESC, set_id DESC;
+        """
+    ).fetchall()
+
+    summary = {
+        "sets_scanned": 0,
+        "merged_scanned": 0,
+        "relationships_changed": 0,
+        "rows_inserted": 0,
+        "rows_deleted": 0,
+        "rows_unchanged": 0,
+    }
+    for set_row in set_rows:
+        summary["sets_scanned"] += 1
+        set_id = str(set_row["set_id"])
+        dataset_ids = sorted(set(_json_text_list(set_row["dataset_ids_json"])))
+        merged_ids = [
+            dataset_id
+            for dataset_id in dataset_ids
+            if dataset_id in dataset_kind
+            and (
+                dataset_kind.get(dataset_id) == "derived_training_merge"
+                or dataset_id.endswith("_merged")
+            )
+        ]
+        if not merged_ids:
+            continue
+        parent_ids = [
+            dataset_id
+            for dataset_id in dataset_ids
+            if dataset_id in dataset_kind and dataset_id not in merged_ids
+        ]
+        for child_dataset_id in merged_ids:
+            summary["merged_scanned"] += 1
+            desired_parents: Set[str] = {
+                parent_id
+                for parent_id in parent_ids
+                if parent_id and parent_id != child_dataset_id
+            }
+            existing_rows = registry.conn.execute(
+                """
+                SELECT parent_dataset_id
+                FROM dataset_lineage
+                WHERE child_dataset_id = ? AND relationship_type = ?;
+                """,
+                (child_dataset_id, relationship_type),
+            ).fetchall()
+            existing_parents = {
+                str(row["parent_dataset_id"])
+                for row in existing_rows
+                if row["parent_dataset_id"] is not None
+            }
+            if existing_parents == desired_parents:
+                summary["rows_unchanged"] += 1
+                continue
+            summary["relationships_changed"] += 1
+            summary["rows_inserted"] += len(desired_parents - existing_parents)
+            summary["rows_deleted"] += len(existing_parents - desired_parents)
+            if not dry_run:
+                registry.replace_dataset_lineage(
+                    child_dataset_id=child_dataset_id,
+                    parent_dataset_ids=sorted(desired_parents),
+                    relationship_type=relationship_type,
+                    source_set_id=set_id,
+                    metadata={"producer": "registry.maintenance"},
+                )
+    return summary
+
+
+def _remap_training_set_dataset_ids(registry: Registry, *, dry_run: bool) -> Dict[str, int]:
+    dataset_rows = registry.conn.execute(
+        """
+        SELECT dataset_id, session_uuid, artifact_kind
+        FROM datasets;
+        """
+    ).fetchall()
+    known_dataset_ids: Set[str] = {
+        str(row["dataset_id"])
+        for row in dataset_rows
+        if row["dataset_id"] is not None
+    }
+    source_by_session_uuid: Dict[str, str] = {}
+    for row in dataset_rows:
+        if str(row["artifact_kind"] or "") != "source_recording":
+            continue
+        session_uuid_raw = row["session_uuid"]
+        dataset_id_raw = row["dataset_id"]
+        if session_uuid_raw is None or dataset_id_raw is None:
+            continue
+        session_uuid = str(session_uuid_raw)
+        dataset_id = str(dataset_id_raw)
+        current = source_by_session_uuid.get(session_uuid)
+        if current is None or dataset_id < current:
+            source_by_session_uuid[session_uuid] = dataset_id
+
+    set_rows = registry.conn.execute(
+        """
+        SELECT set_id, dataset_ids_json
+        FROM training_sets
+        ORDER BY created_utc DESC, set_id DESC;
+        """
+    ).fetchall()
+
+    summary = {
+        "sets_scanned": 0,
+        "sets_changed": 0,
+        "ids_remapped": 0,
+        "ids_unresolved": 0,
+    }
+    updates: List[Tuple[str, str]] = []
+    for row in set_rows:
+        summary["sets_scanned"] += 1
+        set_id = str(row["set_id"])
+        dataset_ids = _json_text_list(row["dataset_ids_json"])
+        remapped_ids: List[str] = []
+        changed = False
+        for dataset_id in dataset_ids:
+            if dataset_id in known_dataset_ids:
+                remapped_ids.append(dataset_id)
+                continue
+            mapped_id = source_by_session_uuid.get(dataset_id)
+            if mapped_id:
+                remapped_ids.append(mapped_id)
+                changed = True
+                summary["ids_remapped"] += 1
+            else:
+                remapped_ids.append(dataset_id)
+                summary["ids_unresolved"] += 1
+        if changed:
+            summary["sets_changed"] += 1
+            updates.append((set_id, json.dumps(remapped_ids, ensure_ascii=False)))
+
+    if not dry_run and updates:
+        with registry.conn:
+            for set_id, dataset_ids_json in updates:
+                registry.conn.execute(
+                    """
+                    UPDATE training_sets
+                    SET dataset_ids_json = ?
+                    WHERE set_id = ?;
+                    """,
+                    (dataset_ids_json, set_id),
+                )
+    return summary
 
 
 def _quality_row_signature(row: Dict[str, object]) -> tuple[object, ...]:
@@ -1073,8 +2072,59 @@ def _backfill_detect_quality(
     return summary
 
 
+def _load_recording_type_subtype_vocab(
+    registry: Registry,
+) -> tuple[set[str], dict[str, set[str]]]:
+    """Load active recording vocab from DB, with hardcoded fallback."""
+    type_rows = registry.conn.execute(
+        """
+        SELECT recording_type
+        FROM recording_type_vocab
+        WHERE active = 1;
+        """
+    ).fetchall()
+    subtype_rows = registry.conn.execute(
+        """
+        SELECT recording_type, recording_subtype
+        FROM recording_subtype_vocab
+        WHERE active = 1;
+        """
+    ).fetchall()
+
+    allowed_types = {
+        str(row["recording_type"]).strip()
+        for row in type_rows
+        if row["recording_type"] is not None and str(row["recording_type"]).strip()
+    }
+    allowed_subtypes_by_type: dict[str, set[str]] = {}
+    for row in subtype_rows:
+        recording_type = str(row["recording_type"]).strip() if row["recording_type"] is not None else ""
+        recording_subtype = (
+            str(row["recording_subtype"]).strip() if row["recording_subtype"] is not None else ""
+        )
+        if not recording_type or not recording_subtype:
+            continue
+        allowed_subtypes_by_type.setdefault(recording_type, set()).add(recording_subtype)
+
+    if not allowed_types:
+        allowed_types = set(DEFAULT_ALLOWED_RECORDING_TYPES)
+    if not allowed_subtypes_by_type:
+        allowed_subtypes_by_type = {
+            key: set(values) for key, values in DEFAULT_ALLOWED_RECORDING_SUBTYPES_BY_TYPE.items()
+        }
+
+    return allowed_types, allowed_subtypes_by_type
+
+
 def _check_registry_integrity(registry: Registry) -> List[IntegrityIssue]:
     issues: List[IntegrityIssue] = []
+    behavior_v1_required_artifacts = {
+        "h5_log",
+        "camera_video",
+        "camera_metadata_csv",
+        "timing_profile_csv",
+    }
+    allowed_recording_types, allowed_subtypes_by_type = _load_recording_type_subtype_vocab(registry)
 
     def _json_list(raw: object) -> set[str]:
         if raw is None:
@@ -1102,12 +2152,106 @@ def _check_registry_integrity(registry: Registry) -> List[IntegrityIssue]:
             if key and value is not None
         }
 
-    # Every training run should have a detection_models row after migration.
+    dataset_rows = registry.conn.execute(
+        """
+        SELECT dataset_id, artifact_kind
+        FROM datasets;
+        """
+    ).fetchall()
+    dataset_kind: Dict[str, str] = {
+        str(row["dataset_id"]): str(row["artifact_kind"] or "")
+        for row in dataset_rows
+        if row["dataset_id"] is not None
+    }
+
+    required_views = (
+        "dataset_lineage_current",
+        "merged_training_datasets",
+        "recording_overview",
+        "recording_subject_overview",
+        "keypoint_quality_current",
+        "detect_quality_current",
+    )
+    view_ok: Dict[str, bool] = {}
+    for view_name in required_views:
+        exists_row = registry.conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'view' AND name = ?
+            LIMIT 1;
+            """,
+            (view_name,),
+        ).fetchone()
+        if exists_row is None:
+            issues.append(
+                IntegrityIssue(
+                    code="required_view_missing",
+                    run_id=view_name,
+                    detail=f"required view is missing: {view_name}",
+                )
+            )
+            view_ok[view_name] = False
+            continue
+        try:
+            registry.conn.execute(f"SELECT COUNT(*) FROM {view_name};").fetchone()
+            view_ok[view_name] = True
+        except Exception as exc:
+            issues.append(
+                IntegrityIssue(
+                    code="required_view_query_error",
+                    run_id=view_name,
+                    detail=f"required view query failed: {view_name} ({exc})",
+                )
+            )
+            view_ok[view_name] = False
+
+    required_tables = (
+        "crosses",
+        "dishes",
+        "recording_subjects",
+        "subjects",
+    )
+    table_ok: Dict[str, bool] = {}
+    for table_name in required_tables:
+        exists_row = registry.conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = ?
+            LIMIT 1;
+            """,
+            (table_name,),
+        ).fetchone()
+        if exists_row is None:
+            issues.append(
+                IntegrityIssue(
+                    code="required_table_missing",
+                    run_id=table_name,
+                    detail=f"required table is missing: {table_name}",
+                )
+            )
+            table_ok[table_name] = False
+            continue
+        try:
+            registry.conn.execute(f"SELECT COUNT(*) FROM {table_name};").fetchone()
+            table_ok[table_name] = True
+        except Exception as exc:
+            issues.append(
+                IntegrityIssue(
+                    code="required_table_query_error",
+                    run_id=table_name,
+                    detail=f"required table query failed: {table_name} ({exc})",
+                )
+            )
+            table_ok[table_name] = False
+
+    # Every training run should have a training_models row after migration.
     missing_dm_rows = registry.conn.execute(
         """
         SELECT tr.run_id
         FROM training_runs tr
-        LEFT JOIN detection_models dm ON dm.run_id = tr.run_id
+        LEFT JOIN training_models dm ON dm.run_id = tr.run_id
         WHERE dm.run_id IS NULL
         ORDER BY tr.created_utc DESC, tr.run_id DESC;
         """
@@ -1117,7 +2261,7 @@ def _check_registry_integrity(registry: Registry) -> List[IntegrityIssue]:
             IntegrityIssue(
                 code="missing_detection_model_row",
                 run_id=str(row["run_id"]),
-                detail="training_runs row has no detection_models row",
+                detail="training_runs row has no training_models row",
             )
         )
 
@@ -1125,7 +2269,7 @@ def _check_registry_integrity(registry: Registry) -> List[IntegrityIssue]:
     success_rows = registry.conn.execute(
         """
         SELECT run_id, model_path, metrics_path
-        FROM detection_models
+        FROM training_models
         WHERE lower(COALESCE(status, '')) = 'success'
         ORDER BY created_utc DESC, run_id DESC;
         """
@@ -1139,7 +2283,7 @@ def _check_registry_integrity(registry: Registry) -> List[IntegrityIssue]:
                 IntegrityIssue(
                     code="success_missing_model_path",
                     run_id=run_id,
-                    detail="detection_models.status=success but model_path is NULL/empty",
+                    detail="training_models.status=success but model_path is NULL/empty",
                 )
             )
         elif not Path(str(model_path)).exists():
@@ -1290,100 +2434,757 @@ def _check_registry_integrity(registry: Registry) -> List[IntegrityIssue]:
                 )
             )
 
-    # Keypoint quality rows should be fresh and consistent with current Zarr metadata.
-    quality_rows = registry.conn.execute(
-        """
-        SELECT
-            kqc.dataset_id,
-            d.zarr_path,
-            kqc.refined_run,
-            kqc.source_keypoint_run,
-            kqc.keypoint_method,
-            kqc.review_state,
-            kqc.review_intended_use,
-            kqc.usable_keypoints,
-            kqc.total_keypoints,
-            kqc.usable_keypoints_rate,
-            kqc.zarr_mtime_ns
-        FROM keypoint_quality_current kqc
-        JOIN datasets d ON d.dataset_id = kqc.dataset_id
-        ORDER BY kqc.dataset_id;
-        """
-    ).fetchall()
-    zarr = _import_zarr()
-    extracted_cache: dict[str, dict[str, dict[str, object]]] = {}
-    for row in quality_rows:
-        dataset_id = str(row["dataset_id"])
-        zarr_path = Path(str(row["zarr_path"]))
-        refined_run = str(row["refined_run"])
-        recorded_mtime = row["zarr_mtime_ns"]
-        try:
-            actual_mtime = int(zarr_path.stat().st_mtime_ns)
-        except Exception:
-            actual_mtime = None
-        if recorded_mtime is None:
+    lineage_rows: List[Any] = []
+    if view_ok.get("dataset_lineage_current", False):
+        lineage_rows = registry.conn.execute(
+            """
+            SELECT child_dataset_id, parent_dataset_id, relationship_type
+            FROM dataset_lineage_current
+            ORDER BY child_dataset_id, parent_dataset_id;
+            """
+        ).fetchall()
+    for row in lineage_rows:
+        child_dataset_id = str(row["child_dataset_id"])
+        parent_dataset_id = str(row["parent_dataset_id"])
+        relationship_type = str(row["relationship_type"] or "")
+        if child_dataset_id == parent_dataset_id:
             issues.append(
                 IntegrityIssue(
-                    code="keypoint_quality_missing_mtime",
-                    run_id=dataset_id,
-                    detail=f"dataset_id={dataset_id} refined_run={refined_run}",
-                )
-            )
-        elif actual_mtime is not None and int(recorded_mtime) != int(actual_mtime):
-            issues.append(
-                IntegrityIssue(
-                    code="keypoint_quality_stale",
-                    run_id=dataset_id,
-                    detail=f"dataset_id={dataset_id} refined_run={refined_run}",
-                )
-            )
-        cache_key = str(zarr_path)
-        if cache_key not in extracted_cache:
-            try:
-                try:
-                    root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-                except TypeError:
-                    root = zarr.open_group(str(zarr_path), mode="r")
-                extracted = _extract_keypoint_quality_rows(root, zarr_path=zarr_path)
-                extracted_cache[cache_key] = {str(item["refined_run"]): item for item in extracted}
-            except Exception:
-                issues.append(
-                    IntegrityIssue(
-                        code="keypoint_quality_read_error",
-                        run_id=dataset_id,
-                        detail=f"dataset_id={dataset_id} zarr_path={zarr_path}",
-                    )
-                )
-                extracted_cache[cache_key] = {}
-        extracted_row = extracted_cache[cache_key].get(refined_run)
-        if extracted_row is None:
-            issues.append(
-                IntegrityIssue(
-                    code="keypoint_quality_refined_run_missing",
-                    run_id=dataset_id,
-                    detail=f"dataset_id={dataset_id} refined_run={refined_run}",
-                )
-            )
-            continue
-        if (
-            str(extracted_row.get("source_keypoint_run")) != str(row["source_keypoint_run"])
-            or str(extracted_row.get("keypoint_method") or "") != str(row["keypoint_method"] or "")
-            or str(extracted_row.get("review_state") or "") != str(row["review_state"] or "")
-            or str(extracted_row.get("review_intended_use") or "") != str(row["review_intended_use"] or "")
-            or int(extracted_row.get("usable_keypoints") or -1) != int(row["usable_keypoints"] or -1)
-            or int(extracted_row.get("total_keypoints") or -1) != int(row["total_keypoints"] or -1)
-            or float(extracted_row.get("usable_keypoints_rate") or -1.0)
-            != float(row["usable_keypoints_rate"] or -1.0)
-        ):
-            issues.append(
-                IntegrityIssue(
-                    code="keypoint_quality_divergent",
-                    run_id=dataset_id,
-                    detail=f"dataset_id={dataset_id} refined_run={refined_run}",
+                    code="dataset_lineage_self_edge",
+                    run_id=child_dataset_id,
+                    detail=f"relationship_type={relationship_type}",
                 )
             )
 
+    # Detect lineage cycles in child->parent graph.
+    adjacency: Dict[str, Set[str]] = {}
+    for row in lineage_rows:
+        child_dataset_id = str(row["child_dataset_id"])
+        parent_dataset_id = str(row["parent_dataset_id"])
+        adjacency.setdefault(child_dataset_id, set()).add(parent_dataset_id)
+        adjacency.setdefault(parent_dataset_id, set())
+
+    visited: Set[str] = set()
+    active_stack: List[str] = []
+    active_set: Set[str] = set()
+    cycle_signatures: Set[str] = set()
+
+    def _dfs(node: str) -> None:
+        visited.add(node)
+        active_stack.append(node)
+        active_set.add(node)
+        for neighbor in sorted(adjacency.get(node, set())):
+            if neighbor in active_set:
+                start_idx = active_stack.index(neighbor)
+                cycle_nodes = active_stack[start_idx:] + [neighbor]
+                signature = "->".join(cycle_nodes)
+                if signature not in cycle_signatures:
+                    cycle_signatures.add(signature)
+                    issues.append(
+                        IntegrityIssue(
+                            code="dataset_lineage_cycle",
+                            run_id=node,
+                            detail=f"cycle={signature}",
+                        )
+                    )
+                continue
+            if neighbor not in visited:
+                _dfs(neighbor)
+        active_stack.pop()
+        active_set.remove(node)
+
+    for node in sorted(adjacency.keys()):
+        if node not in visited:
+            _dfs(node)
+
+    merged_dataset_ids = [
+        dataset_id
+        for dataset_id, artifact_kind in dataset_kind.items()
+        if artifact_kind == "derived_training_merge" or dataset_id.endswith("_merged")
+    ]
+    for dataset_id in merged_dataset_ids:
+        parent_count = int(
+            registry.conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM dataset_lineage_current
+                WHERE child_dataset_id = ? AND relationship_type = 'training_merge_source';
+                """,
+                (dataset_id,),
+            ).fetchone()[0]
+        )
+        if parent_count == 0:
+            issues.append(
+                IntegrityIssue(
+                    code="merged_dataset_missing_lineage",
+                    run_id=dataset_id,
+                    detail=f"dataset_id={dataset_id} has no training_merge_source parents",
+                )
+            )
+
+    training_set_rows = registry.conn.execute(
+        """
+        SELECT set_id, dataset_ids_json
+        FROM training_sets;
+        """
+    ).fetchall()
+    for row in training_set_rows:
+        set_id = str(row["set_id"])
+        dataset_ids = sorted(set(_json_text_list(row["dataset_ids_json"])))
+        merged_ids = [
+            dataset_id
+            for dataset_id in dataset_ids
+            if dataset_id in dataset_kind
+            and (
+                dataset_kind.get(dataset_id) == "derived_training_merge"
+                or dataset_id.endswith("_merged")
+            )
+        ]
+        if not merged_ids:
+            continue
+        expected_parents = {
+            dataset_id
+            for dataset_id in dataset_ids
+            if dataset_id in dataset_kind and dataset_id not in merged_ids
+        }
+        for child_dataset_id in merged_ids:
+            expected = {item for item in expected_parents if item != child_dataset_id}
+            actual_rows = registry.conn.execute(
+                """
+                SELECT parent_dataset_id
+                FROM dataset_lineage_current
+                WHERE child_dataset_id = ? AND relationship_type = 'training_merge_source';
+                """,
+                (child_dataset_id,),
+            ).fetchall()
+            actual = {
+                str(item["parent_dataset_id"])
+                for item in actual_rows
+                if item["parent_dataset_id"] is not None
+            }
+            if expected and actual != expected:
+                issues.append(
+                    IntegrityIssue(
+                        code="training_set_lineage_mismatch",
+                        run_id=child_dataset_id,
+                        detail=(
+                            f"set_id={set_id} expected={','.join(sorted(expected))} "
+                            f"actual={','.join(sorted(actual))}"
+                        ),
+                    )
+                )
+
+    # Keypoint quality rows should be fresh and consistent with current Zarr metadata.
+    if view_ok.get("keypoint_quality_current", False):
+        quality_rows = registry.conn.execute(
+            """
+            SELECT
+                kqc.dataset_id,
+                d.zarr_path,
+                kqc.refined_run,
+                kqc.source_keypoint_run,
+                kqc.keypoint_method,
+                kqc.review_state,
+                kqc.review_intended_use,
+                kqc.usable_keypoints,
+                kqc.total_keypoints,
+                kqc.usable_keypoints_rate,
+                kqc.zarr_mtime_ns
+            FROM keypoint_quality_current kqc
+            JOIN datasets d ON d.dataset_id = kqc.dataset_id
+            ORDER BY kqc.dataset_id;
+            """
+        ).fetchall()
+        zarr = _import_zarr()
+        extracted_cache: dict[str, dict[str, dict[str, object]]] = {}
+        for row in quality_rows:
+            dataset_id = str(row["dataset_id"])
+            zarr_path = Path(str(row["zarr_path"]))
+            refined_run = str(row["refined_run"])
+            recorded_mtime = row["zarr_mtime_ns"]
+            try:
+                actual_mtime = int(zarr_path.stat().st_mtime_ns)
+            except Exception:
+                actual_mtime = None
+            if recorded_mtime is None:
+                issues.append(
+                    IntegrityIssue(
+                        code="keypoint_quality_missing_mtime",
+                        run_id=dataset_id,
+                        detail=f"dataset_id={dataset_id} refined_run={refined_run}",
+                    )
+                )
+            elif actual_mtime is not None and int(recorded_mtime) != int(actual_mtime):
+                issues.append(
+                    IntegrityIssue(
+                        code="keypoint_quality_stale",
+                        run_id=dataset_id,
+                        detail=f"dataset_id={dataset_id} refined_run={refined_run}",
+                    )
+                )
+            cache_key = str(zarr_path)
+            if cache_key not in extracted_cache:
+                try:
+                    try:
+                        root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+                    except TypeError:
+                        root = zarr.open_group(str(zarr_path), mode="r")
+                    extracted = _extract_keypoint_quality_rows(root, zarr_path=zarr_path)
+                    extracted_cache[cache_key] = {str(item["refined_run"]): item for item in extracted}
+                except Exception:
+                    issues.append(
+                        IntegrityIssue(
+                            code="keypoint_quality_read_error",
+                            run_id=dataset_id,
+                            detail=f"dataset_id={dataset_id} zarr_path={zarr_path}",
+                        )
+                    )
+                    extracted_cache[cache_key] = {}
+            extracted_row = extracted_cache[cache_key].get(refined_run)
+            if extracted_row is None:
+                issues.append(
+                    IntegrityIssue(
+                        code="keypoint_quality_refined_run_missing",
+                        run_id=dataset_id,
+                        detail=f"dataset_id={dataset_id} refined_run={refined_run}",
+                    )
+                )
+                continue
+            if (
+                str(extracted_row.get("source_keypoint_run")) != str(row["source_keypoint_run"])
+                or str(extracted_row.get("keypoint_method") or "") != str(row["keypoint_method"] or "")
+                or str(extracted_row.get("review_state") or "") != str(row["review_state"] or "")
+                or str(extracted_row.get("review_intended_use") or "") != str(row["review_intended_use"] or "")
+                or int(extracted_row.get("usable_keypoints") or -1) != int(row["usable_keypoints"] or -1)
+                or int(extracted_row.get("total_keypoints") or -1) != int(row["total_keypoints"] or -1)
+                or float(extracted_row.get("usable_keypoints_rate") or -1.0)
+                != float(row["usable_keypoints_rate"] or -1.0)
+            ):
+                issues.append(
+                    IntegrityIssue(
+                        code="keypoint_quality_divergent",
+                        run_id=dataset_id,
+                        detail=f"dataset_id={dataset_id} refined_run={refined_run}",
+                    )
+                )
+
+    # Source recording datasets should link to an existing recording.
+    source_rows = registry.conn.execute(
+        """
+        SELECT d.dataset_id, d.recording_id
+        FROM datasets d
+        WHERE d.artifact_kind = 'source_recording'
+        ORDER BY d.dataset_id;
+        """
+    ).fetchall()
+    for row in source_rows:
+        dataset_id = str(row["dataset_id"])
+        recording_id = row["recording_id"]
+        if not recording_id:
+            issues.append(
+                IntegrityIssue(
+                    code="source_dataset_missing_recording_id",
+                    run_id=dataset_id,
+                    detail=f"dataset_id={dataset_id} has artifact_kind=source_recording but recording_id is NULL/empty",
+                )
+            )
+            continue
+        exists = registry.conn.execute(
+            "SELECT 1 FROM recordings WHERE recording_id = ? LIMIT 1;",
+            (str(recording_id),),
+        ).fetchone()
+        if exists is None:
+            issues.append(
+                IntegrityIssue(
+                    code="source_dataset_recording_missing",
+                    run_id=dataset_id,
+                    detail=f"dataset_id={dataset_id} references missing recording_id={recording_id}",
+                )
+            )
+
+    # Subject/protocol consistency for source recordings (current schema).
+    source_consistency_rows = registry.conn.execute(
+        """
+        SELECT
+            d.dataset_id,
+            r.protocol_name AS recording_protocol_name,
+            p.protocol_name AS provenance_protocol_name,
+            r.dish_design AS recording_dish_design,
+            p.dish_design AS provenance_dish_design,
+            p.subject_count
+        FROM datasets d
+        LEFT JOIN recordings r ON r.recording_id = d.recording_id
+        LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
+        WHERE d.artifact_kind = 'source_recording'
+        ORDER BY d.dataset_id;
+        """
+    ).fetchall()
+    for row in source_consistency_rows:
+        dataset_id = str(row["dataset_id"])
+        recording_protocol = (
+            str(row["recording_protocol_name"]).strip()
+            if row["recording_protocol_name"] is not None
+            else ""
+        )
+        provenance_protocol = (
+            str(row["provenance_protocol_name"]).strip()
+            if row["provenance_protocol_name"] is not None
+            else ""
+        )
+        if recording_protocol and provenance_protocol and recording_protocol != provenance_protocol:
+            issues.append(
+                IntegrityIssue(
+                    code="source_protocol_name_mismatch",
+                    run_id=dataset_id,
+                    detail=(
+                        f"dataset_id={dataset_id} recording.protocol_name={recording_protocol} "
+                        f"!= provenance.protocol_name={provenance_protocol}"
+                    ),
+                )
+            )
+        recording_dish_design = (
+            str(row["recording_dish_design"]).strip()
+            if row["recording_dish_design"] is not None
+            else ""
+        )
+        provenance_dish_design = (
+            str(row["provenance_dish_design"]).strip()
+            if row["provenance_dish_design"] is not None
+            else ""
+        )
+        if (
+            recording_dish_design
+            and provenance_dish_design
+            and recording_dish_design != provenance_dish_design
+        ):
+            issues.append(
+                IntegrityIssue(
+                    code="source_dish_design_mismatch",
+                    run_id=dataset_id,
+                    detail=(
+                        f"dataset_id={dataset_id} recording.dish_design={recording_dish_design} "
+                        f"!= provenance.dish_design={provenance_dish_design}"
+                    ),
+                )
+            )
+        subject_count = row["subject_count"]
+        if subject_count is not None:
+            try:
+                subject_count_int = int(subject_count)
+            except Exception:
+                issues.append(
+                    IntegrityIssue(
+                        code="source_subject_count_invalid",
+                        run_id=dataset_id,
+                        detail=f"dataset_id={dataset_id} subject_count={subject_count} is non-integer",
+                    )
+                )
+                continue
+            if subject_count_int < 1:
+                issues.append(
+                    IntegrityIssue(
+                        code="source_subject_count_invalid",
+                        run_id=dataset_id,
+                        detail=f"dataset_id={dataset_id} subject_count={subject_count_int} must be >= 1",
+                    )
+                )
+
+    if (
+        table_ok.get("recording_subjects", False)
+        and table_ok.get("subjects", False)
+        and table_ok.get("dishes", False)
+    ):
+        missing_subject_rows = registry.conn.execute(
+            """
+            SELECT rs.recording_id, rs.subject_id
+            FROM recording_subjects rs
+            LEFT JOIN subjects s ON s.subject_id = rs.subject_id
+            WHERE s.subject_id IS NULL
+            ORDER BY rs.recording_id, rs.subject_id;
+            """
+        ).fetchall()
+        for row in missing_subject_rows:
+            recording_id = str(row["recording_id"] or "")
+            subject_id = str(row["subject_id"] or "")
+            issues.append(
+                IntegrityIssue(
+                    code="recording_subject_missing_subject",
+                    run_id=recording_id or None,
+                    detail=(
+                        f"recording_id={recording_id} subject_id={subject_id} "
+                        "exists in recording_subjects but not in subjects"
+                    ),
+                )
+            )
+
+        subject_missing_dish_rows = registry.conn.execute(
+            """
+            SELECT s.subject_id, s.dish_id
+            FROM subjects s
+            LEFT JOIN dishes d ON d.dish_id = s.dish_id
+            WHERE s.dish_id IS NOT NULL AND d.dish_id IS NULL
+            ORDER BY s.subject_id;
+            """
+        ).fetchall()
+        for row in subject_missing_dish_rows:
+            subject_id = str(row["subject_id"] or "")
+            dish_id = str(row["dish_id"] or "")
+            issues.append(
+                IntegrityIssue(
+                    code="subject_missing_dish",
+                    run_id=subject_id or None,
+                    detail=f"subject_id={subject_id} references missing dish_id={dish_id}",
+                )
+            )
+
+        subject_dish_mismatch_rows = registry.conn.execute(
+            """
+            SELECT rs.recording_id, rs.subject_id, rs.dish_id AS rs_dish_id, s.dish_id AS subject_dish_id
+            FROM recording_subjects rs
+            JOIN subjects s ON s.subject_id = rs.subject_id
+            WHERE rs.dish_id IS NOT NULL
+              AND s.dish_id IS NOT NULL
+              AND rs.dish_id != s.dish_id
+            ORDER BY rs.recording_id, rs.subject_id;
+            """
+        ).fetchall()
+        for row in subject_dish_mismatch_rows:
+            recording_id = str(row["recording_id"] or "")
+            subject_id = str(row["subject_id"] or "")
+            rs_dish_id = str(row["rs_dish_id"] or "")
+            subject_dish_id = str(row["subject_dish_id"] or "")
+            issues.append(
+                IntegrityIssue(
+                    code="recording_subject_dish_mismatch_subject",
+                    run_id=recording_id or None,
+                    detail=(
+                        f"recording_id={recording_id} subject_id={subject_id} "
+                        f"recording_subjects.dish_id={rs_dish_id} subjects.dish_id={subject_dish_id}"
+                    ),
+                )
+            )
+
+        cross_mismatch_rows = registry.conn.execute(
+            """
+            SELECT rs.recording_id, rs.subject_id, rs.cross_id, d.cross_id AS dish_cross_id
+            FROM recording_subjects rs
+            LEFT JOIN dishes d ON d.dish_id = rs.dish_id
+            WHERE rs.cross_id IS NOT NULL
+              AND d.cross_id IS NOT NULL
+              AND rs.cross_id != d.cross_id
+            ORDER BY rs.recording_id, rs.subject_id;
+            """
+        ).fetchall()
+        for row in cross_mismatch_rows:
+            recording_id = str(row["recording_id"] or "")
+            subject_id = str(row["subject_id"] or "")
+            rs_cross_id = str(row["cross_id"] or "")
+            dish_cross_id = str(row["dish_cross_id"] or "")
+            issues.append(
+                IntegrityIssue(
+                    code="recording_subject_cross_mismatch_dish",
+                    run_id=recording_id or None,
+                    detail=(
+                        f"recording_id={recording_id} subject_id={subject_id} "
+                        f"recording_subjects.cross_id={rs_cross_id} dishes.cross_id={dish_cross_id}"
+                    ),
+                )
+            )
+
+    # Derived datasets should have recording linkage consistent with lineage parents.
+    derived_rows = registry.conn.execute(
+        """
+        SELECT d.dataset_id, d.recording_id
+        FROM datasets d
+        WHERE COALESCE(d.artifact_kind, '') <> 'source_recording'
+        ORDER BY d.dataset_id;
+        """
+    ).fetchall()
+    for row in derived_rows:
+        dataset_id = str(row["dataset_id"])
+        child_recording_id = str(row["recording_id"]).strip() if row["recording_id"] is not None else ""
+        parent_rows = registry.conn.execute(
+            """
+            SELECT DISTINCT pd.recording_id
+            FROM dataset_lineage_current dl
+            JOIN datasets pd ON pd.dataset_id = dl.parent_dataset_id
+            WHERE dl.child_dataset_id = ?;
+            """,
+            (dataset_id,),
+        ).fetchall()
+        parent_recording_ids = sorted(
+            {
+                str(item["recording_id"]).strip()
+                for item in parent_rows
+                if item["recording_id"] is not None and str(item["recording_id"]).strip()
+            }
+        )
+        if not parent_recording_ids:
+            continue
+        if len(parent_recording_ids) == 1:
+            expected = parent_recording_ids[0]
+            if not child_recording_id:
+                issues.append(
+                    IntegrityIssue(
+                        code="derived_dataset_missing_recording_id_single_parent",
+                        run_id=dataset_id,
+                        detail=(
+                            f"dataset_id={dataset_id} has one parent recording_id={expected} "
+                            "but child recording_id is NULL/empty"
+                        ),
+                    )
+                )
+            elif child_recording_id != expected:
+                issues.append(
+                    IntegrityIssue(
+                        code="derived_dataset_recording_id_mismatch_single_parent",
+                        run_id=dataset_id,
+                        detail=(
+                            f"dataset_id={dataset_id} child recording_id={child_recording_id} "
+                            f"expected={expected}"
+                        ),
+                    )
+                )
+        else:
+            if child_recording_id:
+                issues.append(
+                    IntegrityIssue(
+                        code="derived_dataset_recording_id_non_null_multi_parent",
+                        run_id=dataset_id,
+                        detail=(
+                            f"dataset_id={dataset_id} has multiple parent recording_ids="
+                            f"{','.join(parent_recording_ids)} but child recording_id={child_recording_id}"
+                        ),
+                    )
+                )
+
+    # Recordings should declare type/schema for downstream validation.
+    recording_rows = registry.conn.execute(
+        """
+        SELECT recording_id, recording_type, recording_subtype, behavior_mode, artifact_schema_id
+        FROM recordings
+        ORDER BY recording_id;
+        """
+    ).fetchall()
+    for row in recording_rows:
+        recording_id = str(row["recording_id"])
+        recording_type = (str(row["recording_type"]).strip() if row["recording_type"] is not None else "")
+        recording_subtype = (
+            str(row["recording_subtype"]).strip() if row["recording_subtype"] is not None else ""
+        )
+        behavior_mode = (str(row["behavior_mode"]).strip() if row["behavior_mode"] is not None else "")
+        artifact_schema_id = (
+            str(row["artifact_schema_id"]).strip() if row["artifact_schema_id"] is not None else ""
+        )
+        if not recording_type:
+            issues.append(
+                IntegrityIssue(
+                    code="recording_missing_type",
+                    run_id=recording_id,
+                    detail=f"recording_id={recording_id} has NULL/empty recording_type",
+                )
+            )
+        elif recording_type not in allowed_recording_types:
+            issues.append(
+                IntegrityIssue(
+                    code="recording_invalid_type",
+                    run_id=recording_id,
+                    detail=(
+                        f"recording_id={recording_id} recording_type={recording_type} "
+                        f"not in allowed={','.join(sorted(allowed_recording_types))}"
+                    ),
+                )
+            )
+        allowed_subtypes = allowed_subtypes_by_type.get(recording_type)
+        if allowed_subtypes is not None:
+            if not recording_subtype:
+                issues.append(
+                    IntegrityIssue(
+                        code="recording_missing_subtype",
+                        run_id=recording_id,
+                        detail=(
+                            f"recording_id={recording_id} recording_type={recording_type} "
+                            "has NULL/empty recording_subtype"
+                        ),
+                    )
+                )
+            elif recording_subtype not in allowed_subtypes:
+                issues.append(
+                    IntegrityIssue(
+                        code="recording_invalid_subtype",
+                        run_id=recording_id,
+                        detail=(
+                            f"recording_id={recording_id} recording_type={recording_type} "
+                            f"recording_subtype={recording_subtype} "
+                            f"not in allowed={','.join(sorted(allowed_subtypes))}"
+                        ),
+                    )
+                )
+        if not behavior_mode:
+            issues.append(
+                IntegrityIssue(
+                    code="recording_missing_behavior_mode",
+                    run_id=recording_id,
+                    detail=f"recording_id={recording_id} has NULL/empty behavior_mode",
+                )
+            )
+        elif behavior_mode not in ALLOWED_BEHAVIOR_MODES:
+            issues.append(
+                IntegrityIssue(
+                    code="recording_invalid_behavior_mode",
+                    run_id=recording_id,
+                    detail=(
+                        f"recording_id={recording_id} behavior_mode={behavior_mode} "
+                        f"not in allowed={','.join(sorted(ALLOWED_BEHAVIOR_MODES))}"
+                    ),
+                )
+            )
+        if recording_type == "behavior" and recording_subtype and behavior_mode:
+            if recording_subtype != behavior_mode:
+                issues.append(
+                    IntegrityIssue(
+                        code="recording_behavior_mode_mismatch",
+                        run_id=recording_id,
+                        detail=(
+                            f"recording_id={recording_id} recording_type=behavior "
+                            f"requires recording_subtype==behavior_mode, got "
+                            f"{recording_subtype}!={behavior_mode}"
+                        ),
+                    )
+                )
+        if not artifact_schema_id:
+            issues.append(
+                IntegrityIssue(
+                    code="recording_missing_artifact_schema",
+                    run_id=recording_id,
+                    detail=f"recording_id={recording_id} has NULL/empty artifact_schema_id",
+                )
+            )
+            continue
+
+        # behavior_v1: validate required artifact types are present.
+        if artifact_schema_id == "behavior_v1":
+            artifact_rows = registry.conn.execute(
+                """
+                SELECT artifact_type, status
+                FROM recording_artifacts
+                WHERE recording_id = ?;
+                """,
+                (recording_id,),
+            ).fetchall()
+            present_types = {
+                str(item["artifact_type"])
+                for item in artifact_rows
+                if str(item["status"] or "").lower() != "missing"
+            }
+            missing_types = sorted(behavior_v1_required_artifacts - present_types)
+            if missing_types:
+                issues.append(
+                    IntegrityIssue(
+                        code="recording_artifact_schema_missing_required",
+                        run_id=recording_id,
+                        detail=(
+                            f"recording_id={recording_id} artifact_schema_id=behavior_v1 "
+                            f"missing={','.join(missing_types)}"
+                        ),
+                    )
+                )
+
     return issues
+
+
+def _summarize_dataset_lineage_audit(registry: Registry) -> DatasetLineageAuditSummary:
+    edge_count = int(
+        registry.conn.execute(
+            "SELECT COUNT(*) FROM dataset_lineage_current;"
+        ).fetchone()[0]
+    )
+    merged_dataset_count = int(
+        registry.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM datasets
+            WHERE artifact_kind = 'derived_training_merge' OR dataset_id LIKE '%_merged';
+            """
+        ).fetchone()[0]
+    )
+    merged_missing_lineage_count = int(
+        registry.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM datasets d
+            WHERE
+                (d.artifact_kind = 'derived_training_merge' OR d.dataset_id LIKE '%_merged')
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM dataset_lineage_current dl
+                    WHERE dl.child_dataset_id = d.dataset_id
+                      AND dl.relationship_type = 'training_merge_source'
+                );
+            """
+        ).fetchone()[0]
+    )
+    training_set_lineage_mismatch_count = 0
+    set_rows = registry.conn.execute(
+        """
+        SELECT set_id, dataset_ids_json
+        FROM training_sets;
+        """
+    ).fetchall()
+    dataset_rows = registry.conn.execute(
+        """
+        SELECT dataset_id, artifact_kind
+        FROM datasets;
+        """
+    ).fetchall()
+    dataset_kind: Dict[str, str] = {
+        str(row["dataset_id"]): str(row["artifact_kind"] or "")
+        for row in dataset_rows
+        if row["dataset_id"] is not None
+    }
+    for row in set_rows:
+        dataset_ids = sorted(set(_json_text_list(row["dataset_ids_json"])))
+        merged_ids = [
+            dataset_id
+            for dataset_id in dataset_ids
+            if dataset_id in dataset_kind
+            and (
+                dataset_kind.get(dataset_id) == "derived_training_merge"
+                or dataset_id.endswith("_merged")
+            )
+        ]
+        if not merged_ids:
+            continue
+        expected_parents = {
+            dataset_id
+            for dataset_id in dataset_ids
+            if dataset_id in dataset_kind and dataset_id not in merged_ids
+        }
+        for child_dataset_id in merged_ids:
+            expected = {item for item in expected_parents if item != child_dataset_id}
+            if not expected:
+                continue
+            actual_rows = registry.conn.execute(
+                """
+                SELECT parent_dataset_id
+                FROM dataset_lineage_current
+                WHERE child_dataset_id = ? AND relationship_type = 'training_merge_source';
+                """,
+                (child_dataset_id,),
+            ).fetchall()
+            actual = {
+                str(item["parent_dataset_id"])
+                for item in actual_rows
+                if item["parent_dataset_id"] is not None
+            }
+            if actual != expected:
+                training_set_lineage_mismatch_count += 1
+    return DatasetLineageAuditSummary(
+        edge_count=edge_count,
+        merged_dataset_count=merged_dataset_count,
+        merged_missing_lineage_count=merged_missing_lineage_count,
+        training_set_lineage_mismatch_count=training_set_lineage_mismatch_count,
+    )
 
 
 def _print_candidates(candidates: Sequence[InvalidDatasetCandidate], *, list_limit: int) -> None:
@@ -1442,15 +3243,71 @@ def _summarize_reconcile(stats: Dict[str, int]) -> None:
     print(f"Reconcile missing: checked={checked}, marked_missing={marked_missing}")
 
 
+def _run_reconcile_registry(
+    registry: Registry,
+    *,
+    dry_run: bool,
+    scope_paths: Optional[Sequence[Path]],
+    list_limit: int,
+) -> None:
+    if dry_run:
+        print("Dry run: reconcile step is simulated (no status fields are updated).")
+        missing_candidates = _collect_missing_dataset_candidates(
+            registry,
+            scope_paths=scope_paths,
+            include_missing_scan=True,
+        )
+    else:
+        stats = registry.reconcile_missing_datasets(scope_paths=scope_paths or None)
+        _summarize_reconcile(stats)
+        missing_candidates = _collect_missing_dataset_candidates(
+            registry,
+            scope_paths=scope_paths,
+            include_missing_scan=False,
+        )
+
+    _print_candidates(missing_candidates, list_limit=list_limit)
+    dataset_ids = [candidate.dataset_id for candidate in missing_candidates]
+    if dry_run:
+        print(f"Dry run: would delete {len(dataset_ids)} missing dataset row(s).")
+    else:
+        deleted = _delete_dataset_ids(registry, dataset_ids, dry_run=False)
+        print(f"Deleted {deleted} missing dataset row(s).")
+
+    issues = _check_registry_integrity(registry)
+    if not issues:
+        print("Integrity check passed: no issues found.")
+        return
+
+    print(f"Integrity check failed: {len(issues)} issue(s) found.")
+    limit = len(issues) if list_limit == 0 else min(len(issues), list_limit)
+    for issue in issues[:limit]:
+        run_id = issue.run_id or "—"
+        print(f" - [{issue.code}] run={run_id} :: {issue.detail}")
+    if limit < len(issues):
+        print(
+            f" ... {len(issues) - limit} more issues omitted "
+            "(use --list-limit 0 to show all)."
+        )
+    raise SystemExit(2)
+
+
 def main(argv: Optional[Iterable[str]] = None) -> None:
     args = _parse_args(argv)
     if (
-        not args.prune_invalid
+        not args.reconcile_registry
+        and not args.prune_invalid
+        and not args.prune_missing_datasets
         and not args.prune_failed_runs
         and not args.delete_run_id
         and not args.delete_set_id
         and not args.prune_empty_sets
+        and not args.backfill_recording_entities
+        and not args.backfill_subject_dish_cross
+        and not args.backfill_subjects
         and not args.backfill_model_tables
+        and not args.remap_training_set_dataset_ids
+        and not args.backfill_dataset_lineage
         and not args.backfill_keypoint_quality
         and not args.backfill_detect_quality
         and not args.refresh_keypoint_quality
@@ -1459,8 +3316,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.vacuum
     ):
         raise SystemExit(
-            "No action selected. Use --prune-invalid, --prune-failed-runs, --delete-run-id, --delete-set-id, "
-            "--prune-empty-sets, --backfill-model-tables, --backfill-keypoint-quality, "
+            "No action selected. Use --reconcile-registry, --prune-invalid, --prune-missing-datasets, "
+            "--prune-failed-runs, --delete-run-id, --delete-set-id, "
+            "--prune-empty-sets, --backfill-recording-entities, --backfill-subject-dish-cross, "
+            "--backfill-subjects, "
+            "--backfill-model-tables, --backfill-keypoint-quality, "
+            "--remap-training-set-dataset-ids, "
+            "--backfill-dataset-lineage, "
             "--backfill-detect-quality, --refresh-keypoint-quality, --refresh-detect-quality, "
             "--check-integrity, and/or --vacuum."
         )
@@ -1470,6 +3332,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
     registry = Registry(registry_path)
     try:
+        if args.reconcile_registry:
+            _run_reconcile_registry(
+                registry,
+                dry_run=bool(args.dry_run),
+                scope_paths=scope_paths or None,
+                list_limit=int(args.list_limit),
+            )
+
         if args.prune_invalid:
             if args.dry_run:
                 print("Dry run: reconcile step is simulated (no status fields are updated).")
@@ -1489,6 +3359,30 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             else:
                 deleted = _delete_dataset_ids(registry, dataset_ids, dry_run=False)
                 print(f"Deleted {deleted} dataset row(s).")
+
+        if args.prune_missing_datasets:
+            if args.dry_run:
+                print("Dry run: reconcile step is simulated (no status fields are updated).")
+                candidates = _collect_missing_dataset_candidates(
+                    registry,
+                    scope_paths=scope_paths or None,
+                    include_missing_scan=True,
+                )
+            else:
+                stats = registry.reconcile_missing_datasets(scope_paths=scope_paths or None)
+                _summarize_reconcile(stats)
+                candidates = _collect_missing_dataset_candidates(
+                    registry,
+                    scope_paths=scope_paths or None,
+                    include_missing_scan=False,
+                )
+            _print_candidates(candidates, list_limit=args.list_limit)
+            dataset_ids = [candidate.dataset_id for candidate in candidates]
+            if args.dry_run:
+                print(f"Dry run: would delete {len(dataset_ids)} missing dataset row(s).")
+            else:
+                deleted = _delete_dataset_ids(registry, dataset_ids, dry_run=False)
+                print(f"Deleted {deleted} missing dataset row(s).")
 
         if args.prune_failed_runs:
             status_values = _normalize_status_values(args.failed_status)
@@ -1682,6 +3576,73 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 deleted = _delete_training_set_ids(registry, set_ids, dry_run=False)
                 print(f"Deleted {deleted} training set row(s) with no linked runs.")
 
+        if args.backfill_recording_entities:
+            summary = _backfill_recording_entities(
+                registry,
+                dry_run=bool(args.dry_run),
+                scope_paths=scope_paths or None,
+            )
+            print(
+                "Recording entities backfill: "
+                f"scanned={summary['recordings_scanned']} "
+                f"manifests_missing={summary['manifests_missing']} "
+                f"recordings_upserted={summary['recordings_upserted']} "
+                f"datasets_linked={summary['datasets_linked']} "
+                f"artifacts_seen={summary['artifacts_seen']} "
+                f"artifacts_upserted={summary['artifacts_upserted']} "
+                f"derived_kind_backfilled={summary['derived_kind_backfilled']}"
+            )
+
+        if args.backfill_subject_dish_cross:
+            summary = _backfill_subject_dish_cross_entities(
+                registry,
+                dry_run=bool(args.dry_run),
+                scope_paths=scope_paths or None,
+            )
+            print(
+                "Subject/dish/cross backfill: "
+                f"source_rows_scanned={summary['source_rows_scanned']} "
+                f"crosses_seen={summary['crosses_seen']} "
+                f"crosses_unique_seen={summary['crosses_unique_seen']} "
+                f"crosses_would_insert={summary['crosses_would_insert']} "
+                f"crosses_upserted={summary['crosses_upserted']} "
+                f"dishes_seen={summary['dishes_seen']} "
+                f"dishes_unique_seen={summary['dishes_unique_seen']} "
+                f"dishes_would_insert={summary['dishes_would_insert']} "
+                f"dishes_upserted={summary['dishes_upserted']} "
+                f"recording_subject_rows_seen={summary['recording_subject_rows_seen']} "
+                f"recording_subjects_unique_seen={summary['recording_subjects_unique_seen']} "
+                f"recording_subjects_would_insert={summary['recording_subjects_would_insert']} "
+                f"recording_subjects_upserted={summary['recording_subjects_upserted']} "
+                f"rows_skipped_missing_recording_id={summary['rows_skipped_missing_recording_id']} "
+                f"rows_skipped_missing_subject_id={summary['rows_skipped_missing_subject_id']}"
+            )
+            if args.dry_run:
+                print("Dry run: no crosses/dishes/recording_subjects rows were updated.")
+
+        if args.backfill_subjects:
+            summary = _backfill_subjects(
+                registry,
+                dry_run=bool(args.dry_run),
+                scope_paths=scope_paths or None,
+            )
+            print(
+                "Subjects backfill: "
+                f"subject_rows_scanned={summary['subject_rows_scanned']} "
+                f"rows_skipped_out_of_scope={summary['rows_skipped_out_of_scope']} "
+                f"rows_skipped_missing_subject_id={summary['rows_skipped_missing_subject_id']} "
+                f"subject_ids_unique_seen={summary['subject_ids_unique_seen']} "
+                f"subjects_existing={summary['subjects_existing']} "
+                f"subjects_would_insert={summary['subjects_would_insert']} "
+                f"subjects_would_enrich={summary['subjects_would_enrich']} "
+                f"subjects_upserted={summary['subjects_upserted']} "
+                f"subjects_conflict_dish_id={summary['subjects_conflict_dish_id']} "
+                f"subjects_conflict_species={summary['subjects_conflict_species']} "
+                f"subjects_conflict_sex={summary['subjects_conflict_sex']}"
+            )
+            if args.dry_run:
+                print("Dry run: no subjects rows were updated.")
+
         if args.backfill_model_tables:
             summary = _backfill_model_tables(registry, dry_run=bool(args.dry_run))
             print(
@@ -1693,16 +3654,53 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             if args.dry_run:
                 print(
                     "Dry run: would insert "
-                    f"{summary['detection_missing']} detection_models row(s), "
+                    f"{summary['detection_missing']} training_models row(s), "
                     f"{summary['onnx_missing']} onnx_models row(s), "
                     f"{summary['tensorrt_missing']} tensorrt_models row(s)."
                 )
             else:
                 print(
                     "Inserted "
-                    f"{summary['detection_inserted']} detection_models row(s), "
+                    f"{summary['detection_inserted']} training_models row(s), "
                     f"{summary['onnx_inserted']} onnx_models row(s), "
                     f"{summary['tensorrt_inserted']} tensorrt_models row(s)."
+                )
+
+        if args.remap_training_set_dataset_ids:
+            summary = _remap_training_set_dataset_ids(registry, dry_run=bool(args.dry_run))
+            print(
+                "Training set dataset_id remap: "
+                f"sets_scanned={summary['sets_scanned']} "
+                f"sets_changed={summary['sets_changed']} "
+                f"ids_remapped={summary['ids_remapped']} "
+                f"ids_unresolved={summary['ids_unresolved']}"
+            )
+            if args.dry_run:
+                print("Dry run: no training_sets rows were updated.")
+            else:
+                print(f"Applied updates to {summary['sets_changed']} training_set row(s).")
+
+        if args.backfill_dataset_lineage:
+            summary = _backfill_dataset_lineage(registry, dry_run=bool(args.dry_run))
+            print(
+                "Dataset lineage backfill: "
+                f"sets_scanned={summary['sets_scanned']} "
+                f"merged_scanned={summary['merged_scanned']} "
+                f"relationships_changed={summary['relationships_changed']}"
+            )
+            if args.dry_run:
+                print(
+                    "Dry run: would apply "
+                    f"inserted={summary['rows_inserted']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_unchanged']} relationship(s)."
+                )
+            else:
+                print(
+                    "Applied "
+                    f"inserted={summary['rows_inserted']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_unchanged']} relationship(s)."
                 )
 
         if args.backfill_keypoint_quality or args.refresh_keypoint_quality:
@@ -1772,6 +3770,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 )
 
         if args.check_integrity:
+            lineage_summary = _summarize_dataset_lineage_audit(registry)
+            print(
+                "Dataset lineage audit: "
+                f"edges={lineage_summary.edge_count} "
+                f"merged_datasets={lineage_summary.merged_dataset_count} "
+                f"merged_missing_lineage={lineage_summary.merged_missing_lineage_count} "
+                f"set_lineage_mismatch={lineage_summary.training_set_lineage_mismatch_count}"
+            )
             issues = _check_registry_integrity(registry)
             if not issues:
                 print("Integrity check passed: no issues found.")

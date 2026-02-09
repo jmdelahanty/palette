@@ -208,6 +208,22 @@ def _write_metadata(root: zarr.Group, meta: Dict[str, Any], *, overwrite: bool, 
     return {"raw_video": raw_updates, "root": root_updates}
 
 
+def probe_video_metadata(video_path: Path) -> Dict[str, Any]:
+    """Public wrapper for probing source-video metadata."""
+    return _probe_video(video_path)
+
+
+def write_video_metadata(
+    root: zarr.Group,
+    meta: Dict[str, Any],
+    *,
+    overwrite: bool,
+    import_purpose: str,
+) -> Dict[str, Any]:
+    """Public wrapper for writing normalized video metadata onto a Zarr root."""
+    return _write_metadata(root, meta, overwrite=overwrite, import_purpose=import_purpose)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("video_path", type=Path)

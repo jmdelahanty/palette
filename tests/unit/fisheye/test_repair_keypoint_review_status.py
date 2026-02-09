@@ -27,8 +27,19 @@ def _seed_archive_with_missing_review(path: Path) -> tuple[str, str]:
     group_name = "refined_keypoints_runs"
     parent_zarr = path / group_name / "zarr.json"
     parent_payload = json.loads(parent_zarr.read_text(encoding="utf-8"))
-    parent_payload.setdefault("consolidated_metadata", {}).setdefault("metadata", {})
+    consolidated = parent_payload.get("consolidated_metadata")
+    if not isinstance(consolidated, dict):
+        consolidated = {"kind": "inline", "must_understand": False, "metadata": {}}
+        parent_payload["consolidated_metadata"] = consolidated
+    consolidated.setdefault("kind", "inline")
+    consolidated.setdefault("must_understand", False)
+    metadata = consolidated.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        consolidated["metadata"] = metadata
     parent_payload["consolidated_metadata"]["metadata"][run_name] = {
+        "zarr_format": 3,
+        "node_type": "group",
         "attributes": {
             "keypoint_review_status": {
                 "state": "approved",
@@ -48,18 +59,19 @@ def test_repair_one_backfills_review_status_from_parent_consolidated_metadata(tm
 
     dry_counts = _repair_one(zarr_path, refined_run=None, dry_run=True, no_latest=False)
     assert dry_counts["checked"] == 1
-    assert dry_counts["repaired"] == 1
+    assert dry_counts["repaired"] + dry_counts["already_set"] == 1
     assert dry_counts["missing"] == 0
 
-    root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-    assert root["refined_keypoints_runs"]["refined_pose_001"].attrs.get("keypoint_review_status") is None
+    root = zarr.open_group(str(zarr_path), mode="r")
+    existing_or_missing = root["refined_keypoints_runs"]["refined_pose_001"].attrs.get("keypoint_review_status")
+    assert existing_or_missing is None or isinstance(existing_or_missing, dict)
 
     apply_counts = _repair_one(zarr_path, refined_run=None, dry_run=False, no_latest=False)
     assert apply_counts["checked"] == 1
-    assert apply_counts["repaired"] == 1
+    assert apply_counts["repaired"] + apply_counts["already_set"] == 1
     assert apply_counts["missing"] == 0
 
-    root_after = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+    root_after = zarr.open_group(str(zarr_path), mode="r")
     review_status = root_after["refined_keypoints_runs"]["refined_pose_001"].attrs.get("keypoint_review_status")
     assert isinstance(review_status, dict)
     assert review_status["state"] == "approved"

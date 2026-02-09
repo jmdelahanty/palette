@@ -794,14 +794,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     non_training_rows: List[Mapping[str, Any]] = []
     skipped_training_rows: List[Tuple[str, str, str]] = []
     for row in rows:
-        purpose = _decode_attr(row["zarr_purpose"])
+        purpose = _decode_attr(row["zarr_use"])
         zarr_path = Path(str(row["zarr_path"]))
         if str(purpose or "").lower() == "training" and _looks_like_training_artifact_path(zarr_path):
             skipped_training_rows.append(
                 (
                     str(row["dataset_id"]),
                     str(zarr_path),
-                    "zarr_purpose=training and path looks like merged/training artifact",
+                    "zarr_use=training and path looks like merged/training artifact",
                 )
             )
             continue
@@ -1442,6 +1442,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             register_registry.upsert_training_set(
                 set_id=set_id,
                 name=resolved_set_name,
+                task_type="pose",
                 query_filter=query_filter_payload,
                 dataset_ids=dataset_ids,
                 skeleton_id=skeleton_id,

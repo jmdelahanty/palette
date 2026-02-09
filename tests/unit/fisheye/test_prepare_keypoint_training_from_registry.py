@@ -773,7 +773,7 @@ def test_prepare_keypoint_from_registry_fails_closed_on_quality_divergence(
     registry_path = tmp_path / "registry.sqlite"
     _seed_registry(registry_path, zarr_path)
     db = Registry(registry_path)
-    db.conn.execute("UPDATE keypoint_quality SET review_state = 'pending';")
+    db.conn.execute("UPDATE keypoint_quality SET usable_keypoints = usable_keypoints - 1;")
     db.conn.commit()
     db.close()
 
@@ -782,7 +782,7 @@ def test_prepare_keypoint_from_registry_fails_closed_on_quality_divergence(
     _mock_invocation_sources(monkeypatch)
     monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
 
-    with pytest.raises(ValueError, match="review metadata divergence"):
+    with pytest.raises(ValueError, match="usable_keypoints divergence"):
         wrapper.main(
             [
                 "--registry",

@@ -5,7 +5,7 @@ These lightweight utilities help read metadata fields consistently across
 the pipeline, following the unified metadata specification.
 """
 
-from typing import Optional
+from typing import Dict, Optional
 import zarr
 
 

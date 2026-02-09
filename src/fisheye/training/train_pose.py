@@ -34,7 +34,7 @@ from rich.console import Console
 from rich.table import Table
 import json
 import zarr
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
 
 from .config import PoseConfig
 from .export_shared import (
@@ -600,6 +600,7 @@ def _export_pose_onnx_artifacts(
     manifest_path: Optional[Path],
     manifest_hints: Dict[str, Optional[str]],
     console: Console,
+    checkpoint_cb: Optional[Callable[[str, Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     export_onnx = bool(args.export_onnx or args.export_trt)
     export_info: Dict[str, Any] = {"enabled": export_onnx, "errors": []}
@@ -695,6 +696,8 @@ def _export_pose_onnx_artifacts(
     }
     onnx_manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     export_info["onnx_manifest_sha256"] = _safe_sha256_file(onnx_manifest_path)
+    if checkpoint_cb is not None and export_info.get("onnx_path"):
+        checkpoint_cb("onnx", dict(export_info))
     if not args.export_trt:
         return export_info
 
@@ -790,6 +793,8 @@ def _export_pose_onnx_artifacts(
             "trt_device_info": trt_device_info if isinstance(trt_device_info, dict) else None,
         }
     )
+    if checkpoint_cb is not None and export_info.get("engine_path"):
+        checkpoint_cb("tensorrt", dict(export_info))
     return export_info
 
 
@@ -1357,6 +1362,55 @@ def main(args) -> int:
 
     export_artifacts: Optional[Dict[str, Any]] = None
     model_path = results.save_dir / "weights" / "best.pt"
+    if args.log_registry:
+        metrics_path = results.save_dir / "results.csv"
+        trained_metrics_payload = dict(final_validation_metrics or {})
+        trained_metrics_payload["stage"] = "trained"
+        trained_metrics_payload["status_detail"] = "model_checkpoint_ready"
+        _record_registry_training_run(
+            args=args,
+            console=console,
+            invocation_payload=invocation_payload,
+            run_id=registry_run_id,
+            set_id=effective_set_id,
+            config_path=config_path,
+            manifest_path=manifest_path,
+            model_path=model_path if model_path.exists() else None,
+            metrics_path=metrics_path if metrics_path.exists() else None,
+            status="in_progress",
+            final_metrics=trained_metrics_payload,
+            pose_schema=pose_schema,
+        )
+
+    def _export_checkpoint(stage_name: str, artifacts: Dict[str, Any]) -> None:
+        if not args.log_registry:
+            return
+        metrics_path = results.save_dir / "results.csv"
+        checkpoint_metrics_payload = dict(final_validation_metrics or {})
+        checkpoint_metrics_payload["stage"] = stage_name
+        checkpoint_metrics_payload["status_detail"] = f"{stage_name}_complete"
+        if artifacts.get("errors"):
+            checkpoint_metrics_payload["export_errors"] = artifacts.get("errors")
+        if artifacts.get("onnx_path"):
+            checkpoint_metrics_payload["onnx_path"] = artifacts.get("onnx_path")
+        if artifacts.get("engine_path"):
+            checkpoint_metrics_payload["engine_path"] = artifacts.get("engine_path")
+        _record_registry_training_run(
+            args=args,
+            console=console,
+            invocation_payload=invocation_payload,
+            run_id=registry_run_id,
+            set_id=effective_set_id,
+            config_path=config_path,
+            manifest_path=manifest_path,
+            model_path=model_path if model_path.exists() else None,
+            metrics_path=metrics_path if metrics_path.exists() else None,
+            status="in_progress",
+            final_metrics=checkpoint_metrics_payload,
+            pose_schema=pose_schema,
+            export_artifacts=artifacts,
+        )
+
     if (args.export_onnx or args.export_trt) and model_path.exists():
         export_artifacts = _export_pose_onnx_artifacts(
             run_dir=results.save_dir,
@@ -1368,6 +1422,7 @@ def main(args) -> int:
             manifest_path=manifest_path,
             manifest_hints=manifest_hints,
             console=console,
+            checkpoint_cb=_export_checkpoint,
         )
         export_errors = export_artifacts.get("errors") if isinstance(export_artifacts, dict) else None
         if export_errors:

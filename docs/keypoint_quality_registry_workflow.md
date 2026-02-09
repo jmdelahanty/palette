@@ -35,6 +35,21 @@ scripts/py -m fisheye.registry.maintenance --registry /path/to/palette_registry.
 
 Keypoint quality checks include stale `zarr_mtime_ns`, missing refined runs, and row divergence.
 
+## 3.1 Registry hygiene one-liner (recommended)
+
+Use the maintenance orchestrator to reconcile missing dataset paths, delete dangling
+dataset rows, and run integrity checks in one command:
+
+```bash
+scripts/py -m fisheye.registry.maintenance --registry /path/to/palette_registry.sqlite --reconcile-registry
+```
+
+Dry-run preview:
+
+```bash
+scripts/py -m fisheye.registry.maintenance --registry /path/to/palette_registry.sqlite --reconcile-registry --dry-run
+```
+
 Quick operator report (summary + optional details):
 
 ```bash

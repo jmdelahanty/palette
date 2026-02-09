@@ -2,6 +2,14 @@
 """Backward-compatible alias for fisheye.training.train_pose."""
 
 from fisheye.training.train_pose import *  # noqa: F401,F403
+from fisheye.training.train_pose import (  # noqa: F401
+    _build_default_run_name,
+    _infer_set_slug,
+    _load_manifest_set_id,
+    _record_registry_training_run,
+    _snapshot_training_inputs,
+    _strip_manifest_suffixes,
+)
 
 
 if __name__ == "__main__":

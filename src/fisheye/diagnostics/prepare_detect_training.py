@@ -1083,6 +1083,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         registry.upsert_training_set(
             set_id=set_id,
             name=resolved_set_name,
+            task_type="detect",
             query_filter=query_filter_payload,
             dataset_ids=dataset_ids,
             invocation=invocation_payload,

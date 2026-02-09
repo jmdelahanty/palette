@@ -37,6 +37,7 @@ import zarr
 
 from .config import DetectConfig, DatasetConfig
 from .export_shared import (
+    _parse_trtexec_device_info_text as _shared_parse_trtexec_device_info_text,
     collect_export_env as _shared_collect_export_env,
     resolve_trtexec_path as _shared_resolve_trtexec_path,
     run_subprocess_streaming as _shared_run_subprocess_streaming,
@@ -65,6 +66,11 @@ from ..utils.system import get_git_info, build_invocation_record
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
+
+
+def _parse_trtexec_device_info_text(raw_text: str) -> dict:
+    """Backward-compatible shim; use shared parser implementation."""
+    return _shared_parse_trtexec_device_info_text(raw_text)
 
 
 # Custom DataLoader to ensure compatibility with Ultralytics YOLO's expected interface

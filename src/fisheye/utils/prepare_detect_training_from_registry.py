@@ -536,14 +536,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     non_training_rows: List[Mapping[str, Any]] = []
     skipped_training_rows: List[tuple[str, str, str]] = []
     for row in rows:
-        purpose = _decode_attr(row["zarr_purpose"])
+        purpose = _decode_attr(row["zarr_use"])
         zarr_path = Path(str(row["zarr_path"]))
         if str(purpose or "").lower() == "training" and _looks_like_training_artifact_path(zarr_path):
             skipped_training_rows.append(
                 (
                     str(row["dataset_id"]),
                     str(zarr_path),
-                    "zarr_purpose=training and path looks like merged/training artifact",
+                    "zarr_use=training and path looks like merged/training artifact",
                 )
             )
             continue

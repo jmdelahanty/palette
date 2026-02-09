@@ -164,6 +164,26 @@ python src/fisheye/utils/list_training_versions.py --name detect_base
   - Register explicitly with `--register` (batch import) or `python -m fisheye.registry.scan`.
   - Rich provenance requires stimulus metadata (see `import_stimulus_to_zarr`).
 
+## Registry Hygiene (Before Training)
+
+Run this before kicking off new training jobs:
+
+```bash
+scripts/py -m fisheye.registry.maintenance --registry /nvme1/palette_registry.sqlite --reconcile-registry
+```
+
+Inspect current registry state:
+
+```bash
+scripts/py -m fisheye.utils.check_training_registry --registry /nvme1/palette_registry.sqlite --all --limit 100
+```
+
+Dry-run safety check:
+
+```bash
+scripts/py -m fisheye.registry.maintenance --registry /nvme1/palette_registry.sqlite --reconcile-registry --dry-run
+```
+
 ## When to Use Full Imports
 - You need **all frames** for downstream analyses that cannot be reconstructed from detection outputs.
 - You need **full-resolution, frame-by-frame** features that are not derivable from raw video + detections.

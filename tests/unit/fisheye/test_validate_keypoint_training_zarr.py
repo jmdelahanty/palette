@@ -31,6 +31,11 @@ def _write_valid_merged_pose_zarr(path: Path) -> None:
         chunks=(4, 4),
     )
     crop.create_array(
+        "crop_bbox_norm_coords",
+        data=np.zeros((4, 4), dtype=np.float32),
+        chunks=(4, 4),
+    )
+    crop.create_array(
         "frame_indices",
         data=np.arange(4, dtype=np.int64),
         chunks=(4,),

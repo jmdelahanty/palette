@@ -114,9 +114,106 @@ class KeypointQualitySummary:
     exclusion_reasons: Dict[str, int]
 
 
+@dataclass
+class DatasetRow:
+    dataset_id: str
+    session_uuid: Optional[str]
+    recording_id: Optional[str]
+    artifact_kind: Optional[str]
+    status: Optional[str]
+    zarr_path: Optional[str]
+    zarr_origin: Optional[str]
+    zarr_use: Optional[str]
+    rig_id: Optional[str]
+    arena_id: Optional[str]
+    camera_id: Optional[str]
+    parent_count: int
+    child_count: int
+    last_seen_utc: Optional[str]
+
+
+@dataclass
+class RecordingRow:
+    recording_id: str
+    session_uuid: Optional[str]
+    recording_name: Optional[str]
+    recording_path: Optional[str]
+    started_utc: Optional[str]
+    recording_type: Optional[str]
+    recording_subtype: Optional[str]
+    behavior_mode: Optional[str]
+    artifact_schema_id: Optional[str]
+    rig_id: Optional[str]
+    arena_id: Optional[str]
+    camera_id: Optional[str]
+    canvas_name: Optional[str]
+    protocol_name: Optional[str]
+    dish_design: Optional[str]
+    updated_utc: Optional[str]
+    artifact_count: int
+    missing_required_artifacts: List[str]
+
+
+@dataclass
+class RecordingSummaryRow:
+    recording_type: Optional[str]
+    recording_subtype: Optional[str]
+    count: int
+
+
+@dataclass
+class RecordingOverviewRow:
+    recording_id: str
+    recording_type: Optional[str]
+    recording_subtype: Optional[str]
+    behavior_mode: Optional[str]
+    dish_design: Optional[str]
+    rig_id: Optional[str]
+    arena_id: Optional[str]
+    camera_id: Optional[str]
+    dataset_count: int
+    training_dataset_count: int
+    analysis_dataset_count: int
+    inference_dataset_count: int
+    export_dataset_count: int
+    active_dataset_count: int
+    missing_dataset_count: int
+    last_seen_utc: Optional[str]
+
+
+@dataclass
+class RecordingVocabRow:
+    recording_type: str
+    recording_subtype: str
+
+
+@dataclass
+class DatasetLineageRow:
+    child_dataset_id: str
+    parent_dataset_id: str
+    relationship_type: str
+    source_set_id: Optional[str]
+    updated_utc: Optional[str]
+
+
+@dataclass
+class DatasetLineageSummary:
+    edge_count: int
+    merged_dataset_count: int
+    merged_missing_lineage_count: int
+    set_lineage_mismatch_count: int
+    relationship_type_counts: Dict[str, int]
+
+
 KEYPOINT_GATE_REVIEW_STATE = "approved"
 KEYPOINT_GATE_REVIEW_INTENDED_USE = "training"
 KEYPOINT_GATE_MIN_RATE = 0.70
+BEHAVIOR_V1_REQUIRED_ARTIFACT_TYPES = {
+    "h5_log",
+    "camera_video",
+    "camera_metadata_csv",
+    "timing_profile_csv",
+}
 
 
 def _status_text(value: Optional[bool]) -> str:
@@ -187,6 +284,18 @@ def _parse_count(payload: Optional[str]) -> Optional[int]:
     except Exception:
         return None
     return None
+
+
+def _json_text_list(payload: Optional[str]) -> List[str]:
+    if not payload:
+        return []
+    try:
+        data = json.loads(payload)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item) for item in data if item is not None]
 
 
 def _sum_manifest_rois(path: Optional[str]) -> Optional[int]:
@@ -276,7 +385,7 @@ def _fetch_latest_run(registry: Registry, set_id: str) -> Dict[str, Optional[str
             dm.final_metrics_json AS final_metrics_json,
             CASE WHEN dm.run_id IS NOT NULL THEN 'new' ELSE NULL END AS model_source
         FROM training_runs tr
-        LEFT JOIN detection_models dm ON dm.run_id = tr.run_id
+        LEFT JOIN training_models dm ON dm.run_id = tr.run_id
         WHERE tr.set_id = ?
         ORDER BY tr.created_utc DESC, tr.run_id DESC
         LIMIT 1;
@@ -591,7 +700,7 @@ def _load_model_rows(
         "COALESCE(dm.final_metrics_json, tr.final_metrics_json) AS final_metrics_json,",
         "CASE WHEN dm.run_id IS NOT NULL THEN 'new' ELSE NULL END AS model_source",
         "FROM training_runs tr",
-        "LEFT JOIN detection_models dm ON dm.run_id = tr.run_id",
+        "LEFT JOIN training_models dm ON dm.run_id = tr.run_id",
         "LEFT JOIN training_sets ts ON ts.set_id = tr.set_id",
     ]
     params: List[Any] = []
@@ -696,6 +805,263 @@ def _dataset_ids_for_set(registry: Registry, set_id: Optional[str]) -> Optional[
     return [str(item) for item in payload if item is not None]
 
 
+def _load_dataset_rows(
+    registry: Registry,
+    *,
+    set_filter: Optional[str],
+    limit: Optional[int] = None,
+) -> List[DatasetRow]:
+    sql = [
+        "SELECT",
+        "d.dataset_id,",
+        "d.session_uuid,",
+        "d.recording_id,",
+        "d.artifact_kind,",
+        "d.status,",
+        "d.zarr_path,",
+        "d.zarr_origin,",
+        "d.zarr_use,",
+        "d.last_seen_utc,",
+        "p.rig_id,",
+        "p.arena_id,",
+        "p.camera_id,",
+        "COALESCE(lp.parent_count, 0) AS parent_count,",
+        "COALESCE(lc.child_count, 0) AS child_count",
+        "FROM datasets d",
+        "LEFT JOIN provenance p ON p.dataset_id = d.dataset_id",
+        "LEFT JOIN (",
+        "  SELECT child_dataset_id, COUNT(*) AS parent_count",
+        "  FROM dataset_lineage_current",
+        "  GROUP BY child_dataset_id",
+        ") lp ON lp.child_dataset_id = d.dataset_id",
+        "LEFT JOIN (",
+        "  SELECT parent_dataset_id, COUNT(*) AS child_count",
+        "  FROM dataset_lineage_current",
+        "  GROUP BY parent_dataset_id",
+        ") lc ON lc.parent_dataset_id = d.dataset_id",
+        "WHERE 1=1",
+    ]
+    params: List[Any] = []
+    dataset_ids = _dataset_ids_for_set(registry, set_filter)
+    if dataset_ids is not None:
+        if not dataset_ids:
+            return []
+        placeholders = ", ".join("?" for _ in dataset_ids)
+        sql.append(f"AND d.dataset_id IN ({placeholders})")
+        params.extend(dataset_ids)
+    sql.append("ORDER BY COALESCE(d.last_seen_utc, '') DESC, d.dataset_id ASC")
+    if limit and limit > 0:
+        sql.append("LIMIT ?")
+        params.append(int(limit))
+    rows = registry.conn.execute(" ".join(sql), params).fetchall()
+    return [
+        DatasetRow(
+            dataset_id=row["dataset_id"],
+            session_uuid=row["session_uuid"],
+            recording_id=row["recording_id"],
+            artifact_kind=row["artifact_kind"],
+            status=row["status"],
+            zarr_path=row["zarr_path"],
+            zarr_origin=row["zarr_origin"],
+            zarr_use=row["zarr_use"],
+            rig_id=row["rig_id"],
+            arena_id=row["arena_id"],
+            camera_id=row["camera_id"],
+            parent_count=int(row["parent_count"] or 0),
+            child_count=int(row["child_count"] or 0),
+            last_seen_utc=row["last_seen_utc"],
+        )
+        for row in rows
+    ]
+
+
+def _load_dataset_lineage_rows(
+    registry: Registry,
+    *,
+    set_filter: Optional[str],
+    limit: Optional[int] = None,
+) -> List[DatasetLineageRow]:
+    sql = [
+        "SELECT",
+        "child_dataset_id,",
+        "parent_dataset_id,",
+        "relationship_type,",
+        "source_set_id,",
+        "updated_utc",
+        "FROM dataset_lineage_current",
+        "WHERE 1=1",
+    ]
+    params: List[Any] = []
+    dataset_ids = _dataset_ids_for_set(registry, set_filter)
+    if dataset_ids is not None:
+        if not dataset_ids:
+            return []
+        placeholders = ", ".join("?" for _ in dataset_ids)
+        sql.append(
+            f"AND (child_dataset_id IN ({placeholders}) OR parent_dataset_id IN ({placeholders}))"
+        )
+        params.extend(dataset_ids)
+        params.extend(dataset_ids)
+    sql.append("ORDER BY child_dataset_id, relationship_type, parent_dataset_id")
+    if limit and limit > 0:
+        sql.append("LIMIT ?")
+        params.append(int(limit))
+    rows = registry.conn.execute(" ".join(sql), params).fetchall()
+    return [
+        DatasetLineageRow(
+            child_dataset_id=str(row["child_dataset_id"]),
+            parent_dataset_id=str(row["parent_dataset_id"]),
+            relationship_type=str(row["relationship_type"]),
+            source_set_id=row["source_set_id"],
+            updated_utc=row["updated_utc"],
+        )
+        for row in rows
+    ]
+
+
+def _summarize_dataset_lineage(
+    registry: Registry,
+    *,
+    set_filter: Optional[str],
+) -> DatasetLineageSummary:
+    dataset_ids = _dataset_ids_for_set(registry, set_filter)
+    params: List[Any] = []
+    if dataset_ids is None:
+        edge_count_sql = "SELECT COUNT(*) FROM dataset_lineage_current;"
+        rel_count_sql = (
+            "SELECT relationship_type, COUNT(*) AS n "
+            "FROM dataset_lineage_current GROUP BY relationship_type ORDER BY n DESC, relationship_type ASC;"
+        )
+        merged_count_sql = (
+            "SELECT COUNT(*) FROM datasets WHERE artifact_kind='derived_training_merge' OR dataset_id LIKE '%_merged';"
+        )
+        merged_missing_sql = (
+            "SELECT COUNT(*) "
+            "FROM datasets d "
+            "WHERE (d.artifact_kind='derived_training_merge' OR d.dataset_id LIKE '%_merged') "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM dataset_lineage_current dl "
+            "  WHERE dl.child_dataset_id=d.dataset_id "
+            "    AND dl.relationship_type='training_merge_source'"
+            ");"
+        )
+    else:
+        if not dataset_ids:
+            return DatasetLineageSummary(
+                edge_count=0,
+                merged_dataset_count=0,
+                merged_missing_lineage_count=0,
+                set_lineage_mismatch_count=0,
+                relationship_type_counts={},
+            )
+        placeholders = ", ".join("?" for _ in dataset_ids)
+        edge_count_sql = (
+            "SELECT COUNT(*) "
+            "FROM dataset_lineage_current "
+            f"WHERE child_dataset_id IN ({placeholders}) OR parent_dataset_id IN ({placeholders});"
+        )
+        rel_count_sql = (
+            "SELECT relationship_type, COUNT(*) AS n "
+            "FROM dataset_lineage_current "
+            f"WHERE child_dataset_id IN ({placeholders}) OR parent_dataset_id IN ({placeholders}) "
+            "GROUP BY relationship_type ORDER BY n DESC, relationship_type ASC;"
+        )
+        merged_count_sql = (
+            "SELECT COUNT(*) FROM datasets "
+            f"WHERE dataset_id IN ({placeholders}) "
+            "AND (artifact_kind='derived_training_merge' OR dataset_id LIKE '%_merged');"
+        )
+        merged_missing_sql = (
+            "SELECT COUNT(*) "
+            "FROM datasets d "
+            f"WHERE d.dataset_id IN ({placeholders}) "
+            "AND (d.artifact_kind='derived_training_merge' OR d.dataset_id LIKE '%_merged') "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM dataset_lineage_current dl "
+            "  WHERE dl.child_dataset_id=d.dataset_id "
+            "    AND dl.relationship_type='training_merge_source'"
+            ");"
+        )
+        params = list(dataset_ids)
+
+    if dataset_ids is None:
+        edge_count = int(registry.conn.execute(edge_count_sql).fetchone()[0])
+        rel_rows = registry.conn.execute(rel_count_sql).fetchall()
+        merged_dataset_count = int(registry.conn.execute(merged_count_sql).fetchone()[0])
+        merged_missing_lineage_count = int(registry.conn.execute(merged_missing_sql).fetchone()[0])
+    else:
+        edge_count = int(registry.conn.execute(edge_count_sql, params + params).fetchone()[0])
+        rel_rows = registry.conn.execute(rel_count_sql, params + params).fetchall()
+        merged_dataset_count = int(registry.conn.execute(merged_count_sql, params).fetchone()[0])
+        merged_missing_lineage_count = int(registry.conn.execute(merged_missing_sql, params).fetchone()[0])
+
+    rel_counts: Dict[str, int] = {}
+    for row in rel_rows:
+        rel = str(row["relationship_type"] or "").strip()
+        if not rel:
+            rel = "—"
+        rel_counts[rel] = int(row["n"] or 0)
+
+    set_lineage_mismatch_count = 0
+    set_rows = registry.conn.execute(
+        "SELECT set_id, dataset_ids_json FROM training_sets;"
+    ).fetchall()
+
+    dataset_rows = registry.conn.execute(
+        "SELECT dataset_id, artifact_kind FROM datasets;"
+    ).fetchall()
+    dataset_kind: Dict[str, str] = {
+        str(row["dataset_id"]): str(row["artifact_kind"] or "")
+        for row in dataset_rows
+        if row["dataset_id"] is not None
+    }
+    dataset_scope = set(dataset_ids) if dataset_ids is not None else None
+    for row in set_rows:
+        ids = sorted(set(_json_text_list(row["dataset_ids_json"])))
+        if dataset_scope is not None:
+            ids = [item for item in ids if item in dataset_scope]
+        merged_ids = [
+            dataset_id
+            for dataset_id in ids
+            if dataset_id in dataset_kind
+            and (dataset_kind.get(dataset_id) == "derived_training_merge" or dataset_id.endswith("_merged"))
+        ]
+        if not merged_ids:
+            continue
+        expected_parents = {
+            dataset_id
+            for dataset_id in ids
+            if dataset_id in dataset_kind and dataset_id not in merged_ids
+        }
+        for child_dataset_id in merged_ids:
+            expected = {item for item in expected_parents if item != child_dataset_id}
+            if not expected:
+                continue
+            actual_rows = registry.conn.execute(
+                """
+                SELECT parent_dataset_id
+                FROM dataset_lineage_current
+                WHERE child_dataset_id = ? AND relationship_type = 'training_merge_source';
+                """,
+                (child_dataset_id,),
+            ).fetchall()
+            actual = {
+                str(item["parent_dataset_id"])
+                for item in actual_rows
+                if item["parent_dataset_id"] is not None
+            }
+            if actual != expected:
+                set_lineage_mismatch_count += 1
+
+    return DatasetLineageSummary(
+        edge_count=edge_count,
+        merged_dataset_count=merged_dataset_count,
+        merged_missing_lineage_count=merged_missing_lineage_count,
+        set_lineage_mismatch_count=set_lineage_mismatch_count,
+        relationship_type_counts=rel_counts,
+    )
+
+
 def _load_keypoint_quality_rows(
     registry: Registry,
     *,
@@ -717,6 +1083,254 @@ def _load_keypoint_quality_rows(
         params.append(int(limit))
     rows = registry.conn.execute(" ".join(sql), params).fetchall()
     return [dict(row) for row in rows]
+
+
+def _load_recording_rows(
+    registry: Registry,
+    *,
+    set_filter: Optional[str],
+    limit: Optional[int] = None,
+) -> List[RecordingRow]:
+    sql = [
+        "SELECT",
+        "r.recording_id,",
+        "r.session_uuid,",
+        "r.recording_name,",
+        "r.recording_path,",
+        "r.started_utc,",
+        "r.recording_type,",
+        "r.recording_subtype,",
+        "r.behavior_mode,",
+        "r.artifact_schema_id,",
+        "r.rig_id,",
+        "r.arena_id,",
+        "r.camera_id,",
+        "r.canvas_name,",
+        "r.protocol_name,",
+        "COALESCE(NULLIF(TRIM(r.dish_design), ''), COALESCE(pd.dish_design_csv, '')) AS dish_design_csv,",
+        "r.updated_utc,",
+        "COALESCE(a.artifact_count, 0) AS artifact_count,",
+        "COALESCE(a.artifact_types_csv, '') AS artifact_types_csv",
+        "FROM recordings r",
+        "LEFT JOIN (",
+        "  SELECT",
+        "    d.recording_id,",
+        "    GROUP_CONCAT(DISTINCT NULLIF(TRIM(p.dish_design), '')) AS dish_design_csv",
+        "  FROM datasets d",
+        "  LEFT JOIN provenance p ON p.dataset_id = d.dataset_id",
+        "  GROUP BY d.recording_id",
+        ") pd ON pd.recording_id = r.recording_id",
+        "LEFT JOIN (",
+        "  SELECT",
+        "    recording_id,",
+        "    COUNT(*) AS artifact_count,",
+        "    GROUP_CONCAT(DISTINCT artifact_type) AS artifact_types_csv",
+        "  FROM recording_artifacts",
+        "  GROUP BY recording_id",
+        ") a ON a.recording_id = r.recording_id",
+        "WHERE 1=1",
+    ]
+    params: List[Any] = []
+    dataset_ids = _dataset_ids_for_set(registry, set_filter)
+    if dataset_ids is not None:
+        if not dataset_ids:
+            return []
+        placeholders = ", ".join("?" for _ in dataset_ids)
+        sql.append(
+            "AND r.recording_id IN ("
+            "SELECT DISTINCT recording_id FROM datasets "
+            f"WHERE dataset_id IN ({placeholders}) AND recording_id IS NOT NULL AND TRIM(recording_id) <> ''"
+            ")"
+        )
+        params.extend(dataset_ids)
+    sql.append(
+        "ORDER BY COALESCE(r.started_utc, r.updated_utc, r.created_utc, '') DESC, r.recording_id DESC"
+    )
+    if limit and limit > 0:
+        sql.append("LIMIT ?")
+        params.append(int(limit))
+    rows = registry.conn.execute(" ".join(sql), params).fetchall()
+
+    result: List[RecordingRow] = []
+    for row in rows:
+        artifact_types = {
+            item.strip()
+            for item in str(row["artifact_types_csv"] or "").split(",")
+            if item and item.strip()
+        }
+        missing_required: List[str] = []
+        if row["artifact_schema_id"] == "behavior_v1":
+            missing_required = sorted(BEHAVIOR_V1_REQUIRED_ARTIFACT_TYPES - artifact_types)
+        result.append(
+            RecordingRow(
+                recording_id=row["recording_id"],
+                session_uuid=row["session_uuid"],
+                recording_name=row["recording_name"],
+                recording_path=row["recording_path"],
+                started_utc=row["started_utc"],
+                recording_type=row["recording_type"],
+                recording_subtype=row["recording_subtype"],
+                behavior_mode=row["behavior_mode"],
+                artifact_schema_id=row["artifact_schema_id"],
+                rig_id=row["rig_id"],
+                arena_id=row["arena_id"],
+                camera_id=row["camera_id"],
+                canvas_name=row["canvas_name"],
+                protocol_name=row["protocol_name"],
+                dish_design=row["dish_design_csv"] or None,
+                updated_utc=row["updated_utc"],
+                artifact_count=int(row["artifact_count"] or 0),
+                missing_required_artifacts=missing_required,
+            )
+        )
+    return result
+
+
+def _load_recording_summary_rows(registry: Registry) -> List[RecordingSummaryRow]:
+    rows = registry.conn.execute(
+        """
+        SELECT
+            recording_type,
+            recording_subtype,
+            COUNT(*) AS n
+        FROM recordings
+        GROUP BY recording_type, recording_subtype
+        ORDER BY recording_type, recording_subtype;
+        """
+    ).fetchall()
+    return [
+        RecordingSummaryRow(
+            recording_type=row["recording_type"],
+            recording_subtype=row["recording_subtype"],
+            count=int(row["n"] or 0),
+        )
+        for row in rows
+    ]
+
+
+def _load_recording_overview_rows(
+    registry: Registry,
+    *,
+    set_filter: Optional[str],
+    limit: Optional[int] = None,
+) -> List[RecordingOverviewRow]:
+    overview_columns = {
+        str(row["name"])
+        for row in registry.conn.execute("PRAGMA table_info(recording_overview);").fetchall()
+        if row["name"] is not None
+    }
+    has_dish_design = "dish_design" in overview_columns
+    sql = [
+        "SELECT",
+        "recording_id,",
+        "recording_type,",
+        "recording_subtype,",
+        "behavior_mode,",
+        ("dish_design," if has_dish_design else "'' AS dish_design,"),
+        "rig_id,",
+        "arena_id,",
+        "camera_id,",
+        "dataset_count,",
+        "training_dataset_count,",
+        "analysis_dataset_count,",
+        "inference_dataset_count,",
+        "export_dataset_count,",
+        "active_dataset_count,",
+        "missing_dataset_count,",
+        "last_seen_utc",
+        "FROM recording_overview",
+        "WHERE 1=1",
+    ]
+    params: List[Any] = []
+    dataset_ids = _dataset_ids_for_set(registry, set_filter)
+    if dataset_ids is not None:
+        if not dataset_ids:
+            return []
+        placeholders = ", ".join("?" for _ in dataset_ids)
+        sql.append(
+            "AND recording_id IN ("
+            "SELECT DISTINCT recording_id FROM datasets "
+            f"WHERE dataset_id IN ({placeholders}) AND recording_id IS NOT NULL AND TRIM(recording_id) <> ''"
+            ")"
+        )
+        params.extend(dataset_ids)
+    sql.append("ORDER BY COALESCE(last_seen_utc, '') DESC, recording_id DESC")
+    if limit and limit > 0:
+        sql.append("LIMIT ?")
+        params.append(int(limit))
+    rows = registry.conn.execute(" ".join(sql), params).fetchall()
+    return [
+        RecordingOverviewRow(
+            recording_id=str(row["recording_id"]),
+            recording_type=row["recording_type"],
+            recording_subtype=row["recording_subtype"],
+            behavior_mode=row["behavior_mode"],
+            dish_design=row["dish_design"],
+            rig_id=row["rig_id"],
+            arena_id=row["arena_id"],
+            camera_id=row["camera_id"],
+            dataset_count=int(row["dataset_count"] or 0),
+            training_dataset_count=int(row["training_dataset_count"] or 0),
+            analysis_dataset_count=int(row["analysis_dataset_count"] or 0),
+            inference_dataset_count=int(row["inference_dataset_count"] or 0),
+            export_dataset_count=int(row["export_dataset_count"] or 0),
+            active_dataset_count=int(row["active_dataset_count"] or 0),
+            missing_dataset_count=int(row["missing_dataset_count"] or 0),
+            last_seen_utc=row["last_seen_utc"],
+        )
+        for row in rows
+    ]
+
+
+def _load_recording_vocab_rows(registry: Registry) -> List[RecordingVocabRow]:
+    rows = registry.conn.execute(
+        """
+        SELECT recording_type, recording_subtype
+        FROM recording_subtype_vocab
+        WHERE active = 1
+        ORDER BY recording_type, recording_subtype;
+        """
+    ).fetchall()
+    results: List[RecordingVocabRow] = []
+    for row in rows:
+        if row["recording_type"] is None or row["recording_subtype"] is None:
+            continue
+        recording_type = str(row["recording_type"]).strip()
+        recording_subtype = str(row["recording_subtype"]).strip()
+        if not recording_type or not recording_subtype:
+            continue
+        results.append(
+            RecordingVocabRow(
+                recording_type=recording_type,
+                recording_subtype=recording_subtype,
+            )
+        )
+    return results
+
+
+def _group_recording_vocab_rows(
+    rows: List[RecordingVocabRow],
+) -> Dict[str, List[str]]:
+    grouped: Dict[str, List[str]] = {}
+    for vocab_row in rows:
+        recording_type = (vocab_row.recording_type or "").strip()
+        recording_subtype = (vocab_row.recording_subtype or "").strip()
+        if not recording_type or not recording_subtype:
+            continue
+        grouped.setdefault(recording_type, [])
+        if recording_subtype not in grouped[recording_type]:
+            grouped[recording_type].append(recording_subtype)
+    for subtypes in grouped.values():
+        subtypes.sort()
+    return dict(sorted(grouped.items(), key=lambda item: item[0]))
+
+
+def _format_recording_vocab_inline(grouped: Dict[str, List[str]]) -> str:
+    return "; ".join(
+        f"{recording_type}:{','.join(subtypes)}"
+        for recording_type, subtypes in grouped.items()
+        if subtypes
+    )
 
 
 def _keypoint_row_passes_default_gate(row: Dict[str, Any]) -> bool:
@@ -772,20 +1386,41 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--set-id", type=str, help="Filter to a specific training set id.")
     parser.add_argument(
         "--view",
-        choices=["sets", "models", "onnx", "tensorrt", "keypoint-quality"],
+        choices=[
+            "sets",
+            "datasets",
+            "recordings",
+            "recording-overview",
+            "models",
+            "onnx",
+            "tensorrt",
+            "keypoint-quality",
+            "lineage",
+        ],
         default="sets",
-        help="Select output view: sets, models, onnx, tensorrt, or keypoint-quality (default: sets).",
+        help=(
+            "Select output view: sets, datasets, recordings, recording-overview, "
+            "models, onnx, tensorrt, keypoint-quality, or lineage (default: sets)."
+        ),
     )
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Show all registry views (sets, models, onnx, tensorrt, and keypoint quality).",
+        help=(
+            "Show all registry views (sets, datasets, recordings, recording-overview, "
+            "models, onnx, tensorrt, lineage, and keypoint quality)."
+        ),
     )
     parser.add_argument("--limit", type=int, default=200)
     parser.add_argument(
         "--show-keypoint-quality",
         action="store_true",
         help="Print detailed keypoint quality rows (summary is always shown).",
+    )
+    parser.add_argument(
+        "--recording-summary",
+        action="store_true",
+        help="Print recording_type/recording_subtype distribution summary.",
     )
     parser.add_argument(
         "--hide-unlinked",
@@ -797,14 +1432,47 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
     registry = Registry(registry_path)
+    summary_only_mode = bool(args.recording_summary and not args.all and args.view == "sets")
     show_sets = args.all or args.view == "sets"
+    show_datasets = args.all or args.view == "datasets"
+    show_recordings = args.all or args.view == "recordings"
+    show_recording_overview = args.all or args.view == "recording-overview"
     show_models = args.all or args.view == "models"
     show_onnx = args.all or args.view == "onnx"
     show_tensorrt = args.all or args.view == "tensorrt"
+    show_lineage = args.all or args.view == "lineage"
     show_keypoint_view = args.view == "keypoint-quality"
     show_keypoint_details = args.show_keypoint_quality or show_keypoint_view
+    if summary_only_mode:
+        show_sets = False
+        show_datasets = False
+        show_recordings = False
+        show_recording_overview = False
+        show_models = False
+        show_onnx = False
+        show_tensorrt = False
+        show_lineage = False
+        show_keypoint_view = False
+        show_keypoint_details = False
 
     set_rows = _load_set_rows(registry, args.set_id, args.limit) if show_sets else []
+    dataset_rows = _load_dataset_rows(
+        registry,
+        set_filter=args.set_id,
+        limit=args.limit,
+    ) if show_datasets else []
+    recording_rows = _load_recording_rows(
+        registry,
+        set_filter=args.set_id,
+        limit=args.limit,
+    ) if show_recordings else []
+    recording_overview_rows = _load_recording_overview_rows(
+        registry,
+        set_filter=args.set_id,
+        limit=args.limit,
+    ) if show_recording_overview else []
+    recording_summary_rows = _load_recording_summary_rows(registry) if args.recording_summary else []
+    recording_vocab_rows = _load_recording_vocab_rows(registry) if args.recording_summary else []
     model_rows = (
         _load_model_rows(
             registry,
@@ -835,6 +1503,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         if show_tensorrt
         else []
     )
+    lineage_rows = (
+        _load_dataset_lineage_rows(
+            registry,
+            set_filter=args.set_id,
+            limit=args.limit,
+        )
+        if show_lineage
+        else []
+    )
     keypoint_quality_limit = args.limit if (show_keypoint_details or show_keypoint_view) else None
     keypoint_quality_rows = _load_keypoint_quality_rows(
         registry,
@@ -842,13 +1519,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         limit=keypoint_quality_limit,
     )
     keypoint_quality_summary = _summarize_keypoint_quality_rows(keypoint_quality_rows)
+    dataset_lineage_summary = _summarize_dataset_lineage(
+        registry,
+        set_filter=args.set_id,
+    ) if (show_lineage or args.all) else None
     registry.close()
 
-    if not args.all and args.view == "sets" and not set_rows:
+    if not summary_only_mode and not args.all and args.view == "sets" and not set_rows:
         print("No training sets found.")
+        return 1
+    if not args.all and args.view == "datasets" and not dataset_rows:
+        print("No dataset rows found.")
         return 1
     if not args.all and args.view == "models" and not model_rows:
         print("No training runs found.")
+        return 1
+    if not args.all and args.view == "recordings" and not recording_rows:
+        print("No recording rows found.")
+        return 1
+    if not args.all and args.view == "recording-overview" and not recording_overview_rows:
+        print("No recording overview rows found.")
         return 1
     if not args.all and args.view == "onnx" and not onnx_rows:
         print("No ONNX rows found.")
@@ -856,9 +1546,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not args.all and args.view == "tensorrt" and not trt_rows:
         print("No TensorRT rows found.")
         return 1
+    if not args.all and args.view == "lineage" and not lineage_rows:
+        print("No dataset lineage rows found.")
+        return 1
     if not args.all and args.view == "keypoint-quality" and not keypoint_quality_rows:
         print("No keypoint quality rows found.")
         return 1
+
+    show_inference_col = any(row.inference_dataset_count > 0 for row in recording_overview_rows)
+    show_export_col = any(row.export_dataset_count > 0 for row in recording_overview_rows)
 
     use_rich = not args.no_rich and Console is not None and Table is not None
     if use_rich:
@@ -885,6 +1581,175 @@ def main(argv: Optional[List[str]] = None) -> int:
                     _status_rich(_path_ok(row.config_path)),
                 )
             console.print(table)
+        if show_datasets:
+            table = Table(title="Datasets", show_lines=False)
+            table.add_column("Dataset ID", style="cyan")
+            table.add_column("Recording ID")
+            table.add_column("Kind")
+            table.add_column("Status")
+            table.add_column("Path")
+            table.add_column("Origin")
+            table.add_column("Use")
+            table.add_column("Rig")
+            table.add_column("Arena")
+            table.add_column("Camera")
+            table.add_column("Parents", justify="right")
+            table.add_column("Children", justify="right")
+            table.add_column("Last Seen")
+            table.add_column("Zarr Path")
+            for row in dataset_rows:
+                table.add_row(
+                    row.dataset_id,
+                    row.recording_id or "—",
+                    row.artifact_kind or "—",
+                    row.status or "—",
+                    _status_rich(_path_ok(row.zarr_path)),
+                    row.zarr_origin or "—",
+                    row.zarr_use or "—",
+                    row.rig_id or "—",
+                    row.arena_id or "—",
+                    row.camera_id or "—",
+                    str(row.parent_count),
+                    str(row.child_count),
+                    _format_time(row.last_seen_utc),
+                    row.zarr_path or "—",
+                )
+            console.print(table)
+        if show_lineage:
+            table = Table(title="Dataset Lineage", show_lines=False)
+            table.add_column("Child Dataset", style="cyan")
+            table.add_column("Parent Dataset")
+            table.add_column("Relationship")
+            table.add_column("Source Set")
+            table.add_column("Updated")
+            for row in lineage_rows:
+                table.add_row(
+                    row.child_dataset_id,
+                    row.parent_dataset_id,
+                    row.relationship_type,
+                    row.source_set_id or "—",
+                    _format_time(row.updated_utc),
+                )
+            console.print(table)
+            if dataset_lineage_summary is not None:
+                console.print("[bold]Dataset Lineage Summary[/bold]")
+                console.print(f"- total edges: {dataset_lineage_summary.edge_count}")
+                console.print(f"- merged datasets: {dataset_lineage_summary.merged_dataset_count}")
+                console.print(
+                    "- merged datasets missing lineage: "
+                    f"{dataset_lineage_summary.merged_missing_lineage_count}"
+                )
+                console.print(
+                    "- training-set lineage mismatches: "
+                    f"{dataset_lineage_summary.set_lineage_mismatch_count}"
+                )
+                if dataset_lineage_summary.relationship_type_counts:
+                    rel_text = ", ".join(
+                        f"{k}={v}"
+                        for k, v in dataset_lineage_summary.relationship_type_counts.items()
+                    )
+                else:
+                    rel_text = "none"
+                console.print(f"- relationship types: {rel_text}")
+        if show_recordings:
+            table = Table(title="Recordings", show_lines=False)
+            table.add_column("Recording ID", style="cyan")
+            table.add_column("Type")
+            table.add_column("Subtype")
+            table.add_column("Behavior")
+            table.add_column("Dish")
+            table.add_column("Schema")
+            table.add_column("Rig")
+            table.add_column("Arena")
+            table.add_column("Camera")
+            table.add_column("Artifacts", justify="right")
+            table.add_column("Required")
+            table.add_column("Started")
+            table.add_column("Path")
+            for row in recording_rows:
+                missing = row.missing_required_artifacts
+                required = (
+                    "[chartreuse1]OK[/chartreuse1]"
+                    if not missing
+                    else "[red]MISS[/red] " + ",".join(missing)
+                )
+                table.add_row(
+                    row.recording_id,
+                    row.recording_type or "—",
+                    row.recording_subtype or "—",
+                    row.behavior_mode or "—",
+                    row.dish_design or "—",
+                    row.artifact_schema_id or "—",
+                    row.rig_id or "—",
+                    row.arena_id or "—",
+                    row.camera_id or "—",
+                    str(row.artifact_count),
+                    required,
+                    _format_time(row.started_utc or row.updated_utc),
+                    row.recording_path or "—",
+                )
+            console.print(table)
+        if show_recording_overview:
+            table = Table(title="Recording Overview", show_lines=False)
+            table.add_column("Recording ID", style="cyan")
+            table.add_column("Type")
+            table.add_column("Subtype")
+            table.add_column("Behavior")
+            table.add_column("Dish")
+            table.add_column("Rig")
+            table.add_column("Arena")
+            table.add_column("Camera")
+            table.add_column("Datasets", justify="right")
+            table.add_column("Train", justify="right")
+            table.add_column("Analysis", justify="right")
+            if show_inference_col:
+                table.add_column("Infer", justify="right")
+            if show_export_col:
+                table.add_column("Export", justify="right")
+            table.add_column("Active", justify="right")
+            table.add_column("Missing", justify="right")
+            table.add_column("Last Seen")
+            for row in recording_overview_rows:
+                cells = [
+                    row.recording_id,
+                    row.recording_type or "—",
+                    row.recording_subtype or "—",
+                    row.behavior_mode or "—",
+                    row.dish_design or "—",
+                    row.rig_id or "—",
+                    row.arena_id or "—",
+                    row.camera_id or "—",
+                    str(row.dataset_count),
+                    str(row.training_dataset_count),
+                    str(row.analysis_dataset_count),
+                    str(row.active_dataset_count),
+                    str(row.missing_dataset_count),
+                    _format_time(row.last_seen_utc),
+                ]
+                if show_inference_col:
+                    cells.insert(10, str(row.inference_dataset_count))
+                if show_export_col:
+                    export_index = 11 if show_inference_col else 10
+                    cells.insert(export_index, str(row.export_dataset_count))
+                table.add_row(*cells)
+            console.print(table)
+        if args.recording_summary:
+            summary_table = Table(title="Recording Type/Subtype Summary", show_lines=False)
+            summary_table.add_column("Type")
+            summary_table.add_column("Subtype")
+            summary_table.add_column("Count", justify="right")
+            for row in recording_summary_rows:
+                summary_table.add_row(
+                    row.recording_type or "—",
+                    row.recording_subtype or "—",
+                    str(row.count),
+                )
+            console.print(summary_table)
+            if recording_vocab_rows:
+                grouped = _group_recording_vocab_rows(recording_vocab_rows)
+                if grouped:
+                    vocab_text = _format_recording_vocab_inline(grouped)
+                    console.print(f"Allowed subtype vocab: {vocab_text}")
         if show_models:
             table = Table(title="Training Runs / Models", show_lines=False)
             table.add_column("Run ID", style="cyan")
@@ -1020,59 +1885,60 @@ def main(argv: Optional[List[str]] = None) -> int:
                     _status_rich(_path_ok(row.onnx_path)),
                 )
             console.print(table)
-        summary_lines = [
-            f"total rows: {keypoint_quality_summary.total_rows}",
-            (
-                "passing rows "
-                f"({KEYPOINT_GATE_REVIEW_STATE}/{KEYPOINT_GATE_REVIEW_INTENDED_USE}, "
-                f"usable_rate>={KEYPOINT_GATE_MIN_RATE:.2f}): {keypoint_quality_summary.passing_rows}"
-            ),
-            f"excluded rows: {keypoint_quality_summary.excluded_rows}",
-        ]
-        if keypoint_quality_summary.exclusion_reasons:
-            reason_text = ", ".join(
-                f"{name}={count}"
-                for name, count in keypoint_quality_summary.exclusion_reasons.items()
-            )
-        else:
-            reason_text = "none"
-        summary_lines.append(f"top exclusion reasons: {reason_text}")
-        summary_lines.append(
-            "quality_stale note: currently flags only rows missing stored zarr_mtime_ns."
-        )
-        console.print("[bold]Keypoint Quality[/bold]")
-        for line in summary_lines:
-            console.print(f"- {line}")
-        if show_keypoint_details and keypoint_quality_rows:
-            kq_table = Table(title="Keypoint Quality Details", show_lines=False)
-            kq_table.add_column("Dataset", style="cyan")
-            kq_table.add_column("Purpose")
-            kq_table.add_column("Method")
-            kq_table.add_column("Review")
-            kq_table.add_column("Usable/Total")
-            kq_table.add_column("Rate")
-            kq_table.add_column("Stale")
-            kq_table.add_column("Gate")
-            kq_table.add_column("Reason")
-            for row in keypoint_quality_rows:
-                passes = _keypoint_row_passes_default_gate(row)
-                reason = _keypoint_exclusion_reason(row) or "—"
-                usable = row.get("usable_keypoints")
-                total = row.get("total_keypoints")
-                rate = row.get("usable_keypoints_rate")
-                review = f"{row.get('review_state') or '—'}/{row.get('review_intended_use') or '—'}"
-                kq_table.add_row(
-                    str(row.get("dataset_id") or "—"),
-                    str(row.get("zarr_purpose") or "—"),
-                    str(row.get("keypoint_method") or "—"),
-                    review,
-                    f"{usable if usable is not None else '—'}/{total if total is not None else '—'}",
-                    f"{float(rate):.3f}" if isinstance(rate, (int, float)) else "—",
-                    "1" if int(row.get("quality_stale") or 0) == 1 else "0",
-                    "[chartreuse1]PASS[/chartreuse1]" if passes else "[red]EXCLUDE[/red]",
-                    reason,
+        if not summary_only_mode:
+            summary_lines = [
+                f"total rows: {keypoint_quality_summary.total_rows}",
+                (
+                    "passing rows "
+                    f"({KEYPOINT_GATE_REVIEW_STATE}/{KEYPOINT_GATE_REVIEW_INTENDED_USE}, "
+                    f"usable_rate>={KEYPOINT_GATE_MIN_RATE:.2f}): {keypoint_quality_summary.passing_rows}"
+                ),
+                f"excluded rows: {keypoint_quality_summary.excluded_rows}",
+            ]
+            if keypoint_quality_summary.exclusion_reasons:
+                reason_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in keypoint_quality_summary.exclusion_reasons.items()
                 )
-            console.print(kq_table)
+            else:
+                reason_text = "none"
+            summary_lines.append(f"top exclusion reasons: {reason_text}")
+            summary_lines.append(
+                "quality_stale note: currently flags only rows missing stored zarr_mtime_ns."
+            )
+            console.print("[bold]Keypoint Quality[/bold]")
+            for line in summary_lines:
+                console.print(f"- {line}")
+            if show_keypoint_details and keypoint_quality_rows:
+                kq_table = Table(title="Keypoint Quality Details", show_lines=False)
+                kq_table.add_column("Dataset", style="cyan")
+                kq_table.add_column("Use")
+                kq_table.add_column("Method")
+                kq_table.add_column("Review")
+                kq_table.add_column("Usable/Total")
+                kq_table.add_column("Rate")
+                kq_table.add_column("Stale")
+                kq_table.add_column("Gate")
+                kq_table.add_column("Reason")
+                for row in keypoint_quality_rows:
+                    passes = _keypoint_row_passes_default_gate(row)
+                    reason = _keypoint_exclusion_reason(row) or "—"
+                    usable = row.get("usable_keypoints")
+                    total = row.get("total_keypoints")
+                    rate = row.get("usable_keypoints_rate")
+                    review = f"{row.get('review_state') or '—'}/{row.get('review_intended_use') or '—'}"
+                    kq_table.add_row(
+                        str(row.get("dataset_id") or "—"),
+                        str(row.get("zarr_use") or "—"),
+                        str(row.get("keypoint_method") or "—"),
+                        review,
+                        f"{usable if usable is not None else '—'}/{total if total is not None else '—'}",
+                        f"{float(rate):.3f}" if isinstance(rate, (int, float)) else "—",
+                        "1" if int(row.get("quality_stale") or 0) == 1 else "0",
+                        "[chartreuse1]PASS[/chartreuse1]" if passes else "[red]EXCLUDE[/red]",
+                        reason,
+                    )
+                console.print(kq_table)
     else:
         if show_sets:
             for row in set_rows:
@@ -1084,6 +1950,126 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"  skeleton: {row.skeleton_id or '—'}")
                 print(f"  manifest: {_status_text(_path_ok(row.manifest_path))}")
                 print(f"  config: {_status_text(_path_ok(row.config_path))}")
+        if show_datasets:
+            for row in dataset_rows:
+                print(row.dataset_id)
+                print(f"  recording_id: {row.recording_id or '—'}")
+                print(f"  kind: {row.artifact_kind or '—'}")
+                print(f"  status: {row.status or '—'}")
+                print(f"  path: {_status_text(_path_ok(row.zarr_path))}")
+                print(f"  origin: {row.zarr_origin or '—'}")
+                print(f"  use: {row.zarr_use or '—'}")
+                print(f"  rig: {row.rig_id or '—'}")
+                print(f"  arena: {row.arena_id or '—'}")
+                print(f"  camera: {row.camera_id or '—'}")
+                print(f"  parents: {row.parent_count}")
+                print(f"  children: {row.child_count}")
+                print(f"  last_seen: {_format_time(row.last_seen_utc)}")
+                print(f"  zarr_path: {row.zarr_path or '—'}")
+        if show_lineage:
+            for row in lineage_rows:
+                print(row.child_dataset_id)
+                print(f"  parent_dataset_id: {row.parent_dataset_id}")
+                print(f"  relationship: {row.relationship_type}")
+                print(f"  source_set_id: {row.source_set_id or '—'}")
+                print(f"  updated: {_format_time(row.updated_utc)}")
+            if dataset_lineage_summary is not None:
+                print("Dataset Lineage Summary")
+                print(f"  total edges: {dataset_lineage_summary.edge_count}")
+                print(f"  merged datasets: {dataset_lineage_summary.merged_dataset_count}")
+                print(
+                    "  merged datasets missing lineage: "
+                    f"{dataset_lineage_summary.merged_missing_lineage_count}"
+                )
+                print(
+                    "  training-set lineage mismatches: "
+                    f"{dataset_lineage_summary.set_lineage_mismatch_count}"
+                )
+                if dataset_lineage_summary.relationship_type_counts:
+                    rel_text = ", ".join(
+                        f"{k}={v}"
+                        for k, v in dataset_lineage_summary.relationship_type_counts.items()
+                    )
+                else:
+                    rel_text = "none"
+                print(f"  relationship types: {rel_text}")
+        if show_recordings:
+            for row in recording_rows:
+                print(row.recording_id)
+                print(f"  type: {row.recording_type or '—'}")
+                print(f"  subtype: {row.recording_subtype or '—'}")
+                print(f"  behavior_mode: {row.behavior_mode or '—'}")
+                print(f"  dish_design: {row.dish_design or '—'}")
+                print(f"  schema: {row.artifact_schema_id or '—'}")
+                print(f"  rig: {row.rig_id or '—'}")
+                print(f"  arena: {row.arena_id or '—'}")
+                print(f"  camera: {row.camera_id or '—'}")
+                print(f"  artifacts: {row.artifact_count}")
+                if row.missing_required_artifacts:
+                    print("  required: MISS " + ",".join(row.missing_required_artifacts))
+                else:
+                    print("  required: OK")
+                print(f"  started: {_format_time(row.started_utc or row.updated_utc)}")
+                print(f"  path: {row.recording_path or '—'}")
+        if show_recording_overview:
+            print("Recording Overview")
+            header = [
+                "recording_id",
+                "type",
+                "subtype",
+                "behavior",
+                "dish",
+                "rig",
+                "arena",
+                "camera",
+                "datasets",
+                "training",
+                "analysis",
+            ]
+            if show_inference_col:
+                header.append("inference")
+            if show_export_col:
+                header.append("export")
+            header.extend(["active", "missing", "last_seen"])
+            print("\t".join(header))
+            for row in recording_overview_rows:
+                cells = [
+                    row.recording_id,
+                    row.recording_type or "—",
+                    row.recording_subtype or "—",
+                    row.behavior_mode or "—",
+                    row.dish_design or "—",
+                    row.rig_id or "—",
+                    row.arena_id or "—",
+                    row.camera_id or "—",
+                    str(row.dataset_count),
+                    str(row.training_dataset_count),
+                    str(row.analysis_dataset_count),
+                ]
+                if show_inference_col:
+                    cells.append(str(row.inference_dataset_count))
+                if show_export_col:
+                    cells.append(str(row.export_dataset_count))
+                cells.extend(
+                    [
+                        str(row.active_dataset_count),
+                        str(row.missing_dataset_count),
+                        _format_time(row.last_seen_utc),
+                    ]
+                )
+                print("\t".join(cells))
+        if args.recording_summary:
+            print("Recording Type/Subtype Summary")
+            for row in recording_summary_rows:
+                print(
+                    f"  {row.recording_type or '—'} / {row.recording_subtype or '—'}: {row.count}"
+                )
+            if recording_vocab_rows:
+                grouped = _group_recording_vocab_rows(recording_vocab_rows)
+                if grouped:
+                    print("  allowed subtype vocab:")
+                    for rtype, subtypes in grouped.items():
+                        print(f"    {rtype}: {', '.join(subtypes)}")
         if show_models:
             for row in model_rows:
                 print(row.run_id)
@@ -1178,42 +2164,43 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"  cc: {row.compute_capability or '—'}")
                 print(f"  host: {row.system_hostname or '—'}")
                 print(f"  onnx: {_status_text(_path_ok(row.onnx_path))}")
-        print("Keypoint Quality")
-        print(f"  total rows: {keypoint_quality_summary.total_rows}")
-        print(
-            "  passing rows "
-            f"({KEYPOINT_GATE_REVIEW_STATE}/{KEYPOINT_GATE_REVIEW_INTENDED_USE}, "
-            f"usable_rate>={KEYPOINT_GATE_MIN_RATE:.2f}): {keypoint_quality_summary.passing_rows}"
-        )
-        print(f"  excluded rows: {keypoint_quality_summary.excluded_rows}")
-        if keypoint_quality_summary.exclusion_reasons:
-            reason_text = ", ".join(
-                f"{name}={count}"
-                for name, count in keypoint_quality_summary.exclusion_reasons.items()
+        if not summary_only_mode:
+            print("Keypoint Quality")
+            print(f"  total rows: {keypoint_quality_summary.total_rows}")
+            print(
+                "  passing rows "
+                f"({KEYPOINT_GATE_REVIEW_STATE}/{KEYPOINT_GATE_REVIEW_INTENDED_USE}, "
+                f"usable_rate>={KEYPOINT_GATE_MIN_RATE:.2f}): {keypoint_quality_summary.passing_rows}"
             )
-        else:
-            reason_text = "none"
-        print(f"  top exclusion reasons: {reason_text}")
-        print("  quality_stale note: currently flags only rows missing stored zarr_mtime_ns.")
-        if show_keypoint_details and keypoint_quality_rows:
-            print("  details:")
-            for row in keypoint_quality_rows:
-                reason = _keypoint_exclusion_reason(row)
-                usable = row.get("usable_keypoints")
-                total = row.get("total_keypoints")
-                rate = row.get("usable_keypoints_rate")
-                print(f"    {row.get('dataset_id')}")
-                print(f"      purpose: {row.get('zarr_purpose') or '—'}")
-                print(f"      method: {row.get('keypoint_method') or '—'}")
-                print(
-                    "      review: "
-                    f"{row.get('review_state') or '—'}/{row.get('review_intended_use') or '—'}"
+            print(f"  excluded rows: {keypoint_quality_summary.excluded_rows}")
+            if keypoint_quality_summary.exclusion_reasons:
+                reason_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in keypoint_quality_summary.exclusion_reasons.items()
                 )
-                print(f"      usable/total: {usable if usable is not None else '—'}/{total if total is not None else '—'}")
-                print(f"      usable_rate: {float(rate):.3f}" if isinstance(rate, (int, float)) else "      usable_rate: —")
-                print(f"      quality_stale: {int(row.get('quality_stale') or 0)}")
-                print(f"      gate: {'PASS' if reason is None else 'EXCLUDE'}")
-                print(f"      reason: {reason or '—'}")
+            else:
+                reason_text = "none"
+            print(f"  top exclusion reasons: {reason_text}")
+            print("  quality_stale note: currently flags only rows missing stored zarr_mtime_ns.")
+            if show_keypoint_details and keypoint_quality_rows:
+                print("  details:")
+                for row in keypoint_quality_rows:
+                    reason = _keypoint_exclusion_reason(row)
+                    usable = row.get("usable_keypoints")
+                    total = row.get("total_keypoints")
+                    rate = row.get("usable_keypoints_rate")
+                    print(f"    {row.get('dataset_id')}")
+                    print(f"      use: {row.get('zarr_use') or '—'}")
+                    print(f"      method: {row.get('keypoint_method') or '—'}")
+                    print(
+                        "      review: "
+                        f"{row.get('review_state') or '—'}/{row.get('review_intended_use') or '—'}"
+                    )
+                    print(f"      usable/total: {usable if usable is not None else '—'}/{total if total is not None else '—'}")
+                    print(f"      usable_rate: {float(rate):.3f}" if isinstance(rate, (int, float)) else "      usable_rate: —")
+                    print(f"      quality_stale: {int(row.get('quality_stale') or 0)}")
+                    print(f"      gate: {'PASS' if reason is None else 'EXCLUDE'}")
+                    print(f"      reason: {reason or '—'}")
     return 0
 
 

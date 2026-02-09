@@ -11,7 +11,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 # Only test if dependencies are available
 cv2 = pytest.importorskip("cv2", reason="OpenCV not installed")
-decord = pytest.importorskip("decord", reason="Decord not installed")
+try:
+    decord = pytest.importorskip("decord", reason="Decord not installed")
+except Exception as exc:  # pragma: no cover - environment-specific shared lib issues
+    pytest.skip(f"Decord import failed at runtime: {exc}", allow_module_level=True)
 torch = pytest.importorskip("torch", reason="PyTorch not installed")
 
 from fisheye.capture.import_video import (

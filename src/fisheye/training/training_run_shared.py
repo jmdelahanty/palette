@@ -98,7 +98,7 @@ def record_registry_training_run(
             final_metrics=final_metrics,
             invocation=invocation_payload,
         )
-        if status == "success" and export_artifacts:
+        if export_artifacts:
             if skeleton_id:
                 export_artifacts["skeleton_id"] = skeleton_id
             if isinstance(pose_schema, dict):

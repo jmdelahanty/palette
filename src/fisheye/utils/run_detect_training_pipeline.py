@@ -322,7 +322,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     non_training_rows: List[dict] = []
     skipped_training_rows = 0
     for row in rows:
-        purpose = prepare_from_registry._decode_attr(row["zarr_purpose"])
+        purpose = prepare_from_registry._decode_attr(row["zarr_use"])
         zarr_path = Path(str(row["zarr_path"]))
         if str(purpose or "").lower() == "training" and prepare_from_registry._looks_like_training_artifact_path(zarr_path):
             skipped_training_rows += 1
