@@ -24,6 +24,7 @@ Palette repo:
 - `src/fisheye/docs/zarr_structure.md`
 - `docs/zarr_split_policy.md`
 - `docs/analysis_zarr_creation_contract.md`
+- `docs/crimson_refined_detect_manual_contract.md`
 - `src/fisheye/analysis/create_analysis_zarr.py`
 - `src/fisheye/utils/import_video_metadata.py`
 - `src/fisheye/detection/detect_yolo.py`
@@ -85,6 +86,7 @@ Crimson repo:
 | Pre-detect analysis archives | Valid archive may exist before `detect_runs` exists | Load path expects `detect_runs` | Early archive cannot open in Crimson loader mode | Graceful "video/stimulus-only" mode when `detect_runs` missing |
 | Doc/spec drift | Palette spec evolved | Crimson spec copy is stale | Implementers can code against wrong schema | Sync `crimson/zarr_structure.md` from Palette authoritative doc |
 | Registry-aware selection | Dataset intent stored as `zarr_use` etc. | No registry integration | Cannot choose best archive per recording intent | Optional phase: registry-backed archive choice |
+| Manual refined detect edits | Palette expects `manual_review_latest` + `detect_review_status` + manual subgroup arrays | No explicit Crimson write contract yet | Manual edits may not become active source for crop/registry | Implement manual-write contract in `docs/crimson_refined_detect_manual_contract.md` |
 
 ## Implementation Plan For Crimson Agent
 
@@ -127,6 +129,21 @@ Crimson repo:
 1. Add optional resolver that can use registry metadata (`zarr_use=analysis`).
 - This can be a separate utility first; not required for initial compatibility fix.
 
+### Phase 5: Manual Refined-Detect Writes
+
+1. Implement Crimson-side writer for manual refined detections.
+- Use contract in `docs/crimson_refined_detect_manual_contract.md`.
+- Write/overwrite `refined_detect_runs/<latest>/<manual_group>` arrays + attrs.
+
+2. Update run-level pointers/status after manual writes.
+- Set `manual_review_latest` on refined run.
+- Set `detect_review_status` on refined run.
+- Set parent `detect_review_status_latest`.
+
+3. Keep manual edits isolated.
+- Never overwrite `detect_runs/<run>` raw outputs.
+- Manual/retune edits must live only under `refined_detect_runs/<run>/<manual_group>`.
+
 ## Validation Checklist
 
 Use one real recording directory containing both training + analysis archives:
@@ -147,6 +164,10 @@ Use one real recording directory containing both training + analysis archives:
 
 5. Spec/docs
 - `crimson/zarr_structure.md` matches current Palette authoritative spec snapshot.
+
+6. Manual edit activation
+- After Crimson manual edit write, Palette resolution picks manual subgroup as active.
+- Crop with preferred/auto resolves to manual source (not interpolated/filtered).
 
 ## Notes For Safe Rollout
 
