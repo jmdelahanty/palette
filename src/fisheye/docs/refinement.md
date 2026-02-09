@@ -120,6 +120,7 @@ Directory Structure
       scores              # (N_filtered,) float32
       n_detections        # (total_frames,) int32
       frame_mapping       # (N_filtered,) int32
+      reason              # (N_filtered,) utf8 (currently "clean")
       
       @total_detections
       @dropped_detections
@@ -131,6 +132,7 @@ Directory Structure
       n_detections        # (total_frames,) int32
       frame_mapping       # (N_interpolated,) int32
       detection_source    # (N_interpolated,) int8
+      reason              # (N_interpolated,) utf8 ("clean"/"interpolated")
       
       @total_detections
       @original_detections
@@ -177,6 +179,7 @@ bbox_norm_coords
 Shape: (N_interpolated, 4)
 Type: float64
 Description: Bounding boxes including interpolated detections
+Format: [center_x, center_y, width, height] normalized to frame dimensions
 Note: N_interpolated = N_filtered + N_synthetic
 
 scores
@@ -208,6 +211,16 @@ Values:
 
 0 = Original clean detection
 1 = Interpolated (synthetic)
+
+reason
+
+Shape: (N_interpolated,)
+Type: UTF-8 string
+Description: Per-detection label that mirrors `detection_source`
+Values:
+
+"clean" = original clean detection
+"interpolated" = synthetic detection filled during gap interpolation
 
 
 

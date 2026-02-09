@@ -86,7 +86,7 @@ Outputs from blob/YOLO detection stages.
 | `frame_indices` | `(n_detections,)` | `int32` | Corresponding frame per detection |
 | `frame_counts` | `(n_frames,)` | `int32` | Number of detections per frame |
 | `n_detections` | `(n_frames,)` | `int32` | Alias of `frame_counts` (kept for legacy consumers) |
-| `bbox_norm_coords` | `(n_detections, 4)` | `float32` | Normalized `[x, y, w, h]` |
+| `bbox_norm_coords` | `(n_detections, 4)` | `float32` | Normalized `[cx, cy, w, h]` |
 | `scores` | `(n_detections,)` | `float32` | Confidence scores |
 | `class_ids` *(optional)* | `(n_detections,)` | `int32` | Detector class labels |
 | `centers_px` *(optional)* | `(n_detections, 2)` | `float32` | Pixel centers (blob) |
@@ -112,7 +112,7 @@ ROIs back to frames.
 | `roi_images` | `(n_rois, h, w)` | `uint8` | Cropped grayscale patches |
 | `roi_coordinates_full` | `(n_rois, 2)` | `int32` | Top-left (x, y) in full-res pixels |
 | `roi_coordinates_ds` | `(n_rois, 2)` | `int32` | Same offsets in downsampled space |
-| `bbox_norm_coords` | `(n_rois, 4)` | `float32` | Normalized ROI bounding boxes |
+| `bbox_norm_coords` | `(n_rois, 4)` | `float32` | Normalized ROI bounding boxes (`[cx, cy, w, h]`) |
 | `frame_indices` | `(n_rois,)` | `int32` | Frame index per ROI |
 | `frame_counts` | `(n_frames,)` | `int32` | Count of ROIs per frame |
 | `detection_source` *(optional)* | `(n_rois,)` | `int8` | 0 = real detection, 1 = interpolated (copied from refined runs) |
@@ -247,10 +247,11 @@ Parent attrs on `refined_detect_runs/`:
 | `frame_indices` | `(n_detections,)` | Frame index per detection |
 | `frame_counts` | `(n_frames,)` | Detections per frame |
 | `n_detections` | `(n_frames,)` | Alias of `frame_counts` |
-| `bbox_norm_coords` | `(n_detections, 4)` | Normalized boxes |
+| `bbox_norm_coords` | `(n_detections, 4)` | Normalized boxes (`[cx, cy, w, h]`) |
 | `scores` | `(n_detections,)` | Scores (or placeholder for blob) |
 | `class_ids` | `(n_detections,)` | Class labels |
 | `frame_mapping` | `(n_detections,)` | Legacy alias of `frame_indices` |
+| `reason` | `(n_detections,)` | UTF-8 tags (currently `clean`) |
 
 Attrs: `total_detections`, `dropped_detections`, `drop_reasons`, `column_fields`,
 `storage_layout`, `field_names`.
@@ -262,6 +263,7 @@ Same arrays as `filtered/`, plus:
 | Array | Shape | Notes |
 | ----- | ----- | ----- |
 | `detection_source` | `(n_detections,)` | 0 = real, 1 = interpolated |
+| `reason` | `(n_detections,)` | UTF-8 tags (`clean` or `interpolated`) |
 
 Attrs: `original_detections`, `interpolated_detections`, `gaps_filled`,
 `interpolation_stats`, plus columnar metadata.

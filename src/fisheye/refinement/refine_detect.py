@@ -17,6 +17,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, Any
 from rich.console import Console
+from zarr.core.dtype import VariableLengthUTF8
 
 from ..utils.metadata import get_total_frames, get_detection_method
 from ..utils.system import get_environment_info, get_git_info
@@ -366,6 +367,29 @@ def interpolate_detections(
         detection_source,
         stats,
     )
+
+
+def _build_filtered_reason_labels(total_detections: int) -> np.ndarray:
+    """Build per-detection reason labels for filtered detections."""
+    return np.full(int(total_detections), "clean", dtype=object)
+
+
+def _build_interpolated_reason_labels(detection_source: np.ndarray) -> np.ndarray:
+    """Build per-detection reason labels for interpolated detections."""
+    source = np.asarray(detection_source, dtype=np.int8)
+    return np.where(source == 1, "interpolated", "clean").astype(object)
+
+
+def _write_reason_array(group: zarr.Group, reason: np.ndarray, chunk_size: int) -> None:
+    """Write UTF-8 reason labels to a run subgroup."""
+    reason_arr = group.create_array(
+        "reason",
+        shape=(int(reason.shape[0]),),
+        chunks=(max(1, int(chunk_size)),),
+        dtype=VariableLengthUTF8(),
+        fill_value="",
+    )
+    reason_arr[:] = np.asarray(reason, dtype=str)
 
 
 def get_refinement_parameters(
@@ -749,7 +773,9 @@ def create_refined_run(
     filtered_grp.create_array('frame_counts', data=filtered_counts, chunks=(10000,))
     filtered_grp.create_array('n_detections', data=filtered_counts, chunks=(10000,))
     filtered_grp.create_array('frame_mapping', data=filtered_frame_indices, chunks=(1000,))
-    filtered_column_fields = ['frame_indices', 'bbox_norm_coords', 'scores', 'class_ids']
+    filtered_reason = _build_filtered_reason_labels(len(filtered_bboxes))
+    _write_reason_array(filtered_grp, filtered_reason, 1000)
+    filtered_column_fields = ['frame_indices', 'bbox_norm_coords', 'scores', 'class_ids', 'reason']
     filtered_grp.attrs['storage_layout'] = 'columnar'
     filtered_grp.attrs['column_fields'] = filtered_column_fields
     filtered_grp.attrs['field_names'] = filtered_column_fields
@@ -768,7 +794,9 @@ def create_refined_run(
     interp_grp.create_array('n_detections', data=interp_counts, chunks=(10000,))
     interp_grp.create_array('frame_mapping', data=interp_frame_indices, chunks=(1000,))
     interp_grp.create_array('detection_source', data=detection_source, chunks=(1000,))
-    interpolated_column_fields = ['frame_indices', 'bbox_norm_coords', 'scores', 'class_ids', 'detection_source']
+    interp_reason = _build_interpolated_reason_labels(detection_source)
+    _write_reason_array(interp_grp, interp_reason, 1000)
+    interpolated_column_fields = ['frame_indices', 'bbox_norm_coords', 'scores', 'class_ids', 'detection_source', 'reason']
     interp_grp.attrs['storage_layout'] = 'columnar'
     interp_grp.attrs['column_fields'] = interpolated_column_fields
     interp_grp.attrs['field_names'] = interpolated_column_fields
