@@ -46,7 +46,7 @@ Compatibility requirements:
     attrs:
       latest                   "<run_id>"
     <run_id>/
-      bbox_norm_coords         (N, 4) float32
+      bbox_norm_coords         (N, 4) float32      # normalized [cx, cy, w, h]
       frame_indices            (N,) int64
       detection_source         (N,) int8             # 0 real, 1 interpolated
       attrs:

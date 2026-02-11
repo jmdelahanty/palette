@@ -306,6 +306,14 @@ def _derive_camera_id(ipc_source_name: object) -> Optional[str]:
     return digits[-1] if digits else None
 
 
+def _resolve_stimulus_video_path(stimulus_h5: Path) -> Optional[Path]:
+    """Return the rendered stimulus video path next to H5 when present."""
+    rendered = stimulus_h5.with_suffix(".mp4")
+    if rendered.exists() and rendered.is_file():
+        return rendered.resolve()
+    return None
+
+
 def _read_h5_session_context(h5: h5py.File) -> Optional[Dict[str, object]]:
     root_attrs = h5.attrs
     keys = [
@@ -825,22 +833,40 @@ def import_stimulus_to_zarr(
 
         if repair_chaser_gaps and stats and stats.missing_frames:
             _log(console, "[cyan]Detected chaser stimulus gaps; interpolating chaser states...[/cyan]")
-            interpolate_run(
-                zarr_path=zarr_path,
-                run_name=run_name,
-                update_metadata=False,
-                update_chaser=True,
-                verbose=False,
-                console=console,
-            )
+            try:
+                interpolate_run(
+                    zarr_path=zarr_path,
+                    run_name=run_name,
+                    update_metadata=False,
+                    update_chaser=True,
+                    verbose=False,
+                    console=console,
+                )
+            except KeyError as exc:
+                # Some recordings legitimately lack tracking_data/chaser_states.
+                # In that case we keep imported metadata and skip chaser-gap repair.
+                msg = str(exc)
+                if "tracking_data/chaser_states" in msg or "lacks tracking_data group" in msg:
+                    reason = "missing tracking_data/chaser_states"
+                    run_group.attrs["chaser_interpolation_skipped"] = True
+                    run_group.attrs["chaser_interpolation_skipped_reason"] = reason
+                    _log(
+                        console,
+                        "[yellow]Skipping chaser interpolation repair:[/yellow] "
+                        "run lacks tracking_data/chaser_states",
+                    )
+                else:
+                    raise
 
-    run_group.attrs.update(
-        {
-            "created_at_utc": datetime.now(timezone.utc).isoformat(),
-            "source_h5": str(resolved_h5),
-            "import_version": "1.0.0",
-        }
-    )
+    run_attrs = {
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "source_h5": str(resolved_h5),
+        "import_version": "1.0.0",
+    }
+    rendered_video = _resolve_stimulus_video_path(resolved_h5)
+    if rendered_video is not None:
+        run_attrs["source_stimulus_video_path"] = str(rendered_video)
+    run_group.attrs.update(run_attrs)
 
     runs_parent.attrs["latest"] = run_name
     _log(console, f"\n[bold green] Imported stimulus data to analysis/stimulus_runs/{run_name}[/bold green]")

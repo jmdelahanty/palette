@@ -444,6 +444,276 @@ def _extract_detect_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List[D
     return rows
 
 
+def _crop_run_names(crop_parent: zarr.Group) -> List[str]:
+    try:
+        names = list(crop_parent.group_keys())
+    except Exception:
+        names = [name for name in crop_parent.keys() if isinstance(name, str)]
+    return sorted(str(name) for name in names)
+
+
+def _extract_crop_quality_rows(
+    root: zarr.Group,
+    *,
+    zarr_path: Path,
+    recording_id: Optional[str],
+    zarr_use: Optional[str],
+) -> List[Dict[str, Any]]:
+    crop_parent = root.get("crop_runs")
+    if crop_parent is None:
+        return []
+
+    try:
+        zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    except Exception:
+        zarr_mtime_ns = None
+    updated_utc = _utc_now()
+
+    rows: List[Dict[str, Any]] = []
+    for crop_run in _crop_run_names(crop_parent):
+        if crop_run not in crop_parent:
+            continue
+        crop_group = crop_parent[crop_run]
+        summary = _coerce_mapping(crop_group.attrs.get("summary_statistics")) or {}
+        review_status = _coerce_mapping(crop_group.attrs.get("crop_review_status")) or {}
+
+        crop_created_utc = (
+            _decode_attr(crop_group.attrs.get("created_at_utc"))
+            or _decode_attr(crop_group.attrs.get("started_at_utc"))
+            or _decode_attr(crop_group.attrs.get("created_utc"))
+            or _decode_attr(crop_group.attrs.get("timestamp_utc"))
+        )
+        source_detect_run = _decode_attr(crop_group.attrs.get("source_detect_run"))
+        source_refined_run = _decode_attr(crop_group.attrs.get("source_refined_run"))
+        detection_source_type = _decode_attr(crop_group.attrs.get("detection_source_type"))
+        detection_source_path = _normalize_path_text(crop_group.attrs.get("detection_source_path"))
+
+        total_rois = _as_int(summary.get("total_rois_cropped"))
+        if total_rois is None and "roi_images" in crop_group:
+            total_rois = int(crop_group["roi_images"].shape[0])
+        if total_rois is None and "bbox_norm_coords" in crop_group:
+            total_rois = int(crop_group["bbox_norm_coords"].shape[0])
+
+        total_frames = _as_int(summary.get("total_frames"))
+        if total_frames is None and "frame_counts" in crop_group:
+            total_frames = int(crop_group["frame_counts"].shape[0])
+
+        frames_with_crops = _as_int(summary.get("frames_with_crops"))
+        if frames_with_crops is None and "frame_counts" in crop_group:
+            try:
+                frame_counts = np.asarray(crop_group["frame_counts"][:], dtype=np.int64).reshape(-1)
+                frames_with_crops = int(np.sum(frame_counts > 0))
+                if total_frames is None:
+                    total_frames = int(frame_counts.shape[0])
+            except Exception:
+                frames_with_crops = None
+
+        percent_frames_with_crops = _as_float(summary.get("percent_frames_with_crops"))
+        if (
+            percent_frames_with_crops is None
+            and frames_with_crops is not None
+            and total_frames is not None
+            and int(total_frames) > 0
+        ):
+            percent_frames_with_crops = float(frames_with_crops) / float(total_frames) * 100.0
+
+        n_real = _as_int(crop_group.attrs.get("n_real_detections"))
+        n_interpolated = _as_int(crop_group.attrs.get("n_interpolated_detections"))
+        if (n_real is None or n_interpolated is None) and "detection_source" in crop_group:
+            try:
+                source_codes = np.asarray(crop_group["detection_source"][:], dtype=np.int64).reshape(-1)
+                if n_real is None:
+                    n_real = int(np.sum(source_codes == 0))
+                if n_interpolated is None:
+                    n_interpolated = int(np.sum(source_codes != 0))
+                if total_rois is None:
+                    total_rois = int(source_codes.shape[0])
+            except Exception:
+                pass
+        if n_interpolated is None:
+            n_interpolated = 0
+        if n_real is None and total_rois is not None:
+            n_real = max(int(total_rois) - int(n_interpolated), 0)
+
+        includes_interpolated_attr = crop_group.attrs.get("includes_interpolated")
+        if includes_interpolated_attr is None:
+            includes_interpolated = 1 if int(n_interpolated or 0) > 0 else 0
+        else:
+            includes_interpolated = 1 if bool(includes_interpolated_attr) else 0
+
+        review_timestamp_utc = (
+            _decode_attr(review_status.get("timestamp_utc"))
+            or _decode_attr(review_status.get("timestamp"))
+            or _decode_attr(review_status.get("reviewed_at_utc"))
+            or _decode_attr(review_status.get("reviewed_at"))
+        )
+
+        rows.append(
+            {
+                "crop_run": str(crop_run),
+                "recording_id": recording_id,
+                "zarr_use": zarr_use,
+                "crop_created_utc": crop_created_utc,
+                "source_detect_run": source_detect_run,
+                "source_refined_run": source_refined_run,
+                "detection_source_type": detection_source_type,
+                "detection_source_path": detection_source_path,
+                "total_rois": total_rois,
+                "frames_with_crops": frames_with_crops,
+                "total_frames": total_frames,
+                "percent_frames_with_crops": percent_frames_with_crops,
+                "includes_interpolated": includes_interpolated,
+                "n_real_detections": n_real,
+                "n_interpolated_detections": n_interpolated,
+                "review_state": _decode_attr(review_status.get("state")),
+                "review_method": _decode_attr(review_status.get("method")),
+                "review_intended_use": _decode_attr(review_status.get("intended_use")),
+                "review_reviewer": _decode_attr(review_status.get("reviewer")),
+                "review_timestamp_utc": review_timestamp_utc,
+                "review_notes": _decode_attr(review_status.get("notes")),
+                "zarr_mtime_ns": zarr_mtime_ns,
+                "updated_utc": updated_utc,
+            }
+        )
+
+    return rows
+
+
+def _detect_run_names(detect_parent: zarr.Group) -> List[str]:
+    try:
+        names = list(detect_parent.group_keys())
+    except Exception:
+        names = [name for name in detect_parent.keys() if isinstance(name, str)]
+    return sorted(str(name) for name in names)
+
+
+def _extract_detect_coverage_summary(detect_group: zarr.Group) -> Dict[str, Any]:
+    frame_counts = detect_group.get("frame_counts") or detect_group.get("n_detections")
+    if frame_counts is None:
+        return {}
+    try:
+        counts = np.asarray(frame_counts[:], dtype=np.int64).reshape(-1)
+    except Exception:
+        return {}
+    total_frames = int(counts.shape[0])
+    if total_frames <= 0:
+        return {}
+    frames_with_detections = int(np.sum(counts > 0))
+    frames_zero_detections = int(total_frames - frames_with_detections)
+    coverage_percent = float(frames_with_detections) / float(total_frames) * 100.0
+    return {
+        "total_frames": total_frames,
+        "frames_with_detections": frames_with_detections,
+        "frames_zero_detections": frames_zero_detections,
+        "coverage_percent": coverage_percent,
+    }
+
+
+def _extract_detect_performance_rows(
+    root: zarr.Group,
+    *,
+    zarr_path: Path,
+    recording_id: Optional[str],
+    zarr_use: Optional[str],
+) -> List[Dict[str, Any]]:
+    detect_parent = root.get("detect_runs")
+    if detect_parent is None:
+        return []
+
+    try:
+        zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    except Exception:
+        zarr_mtime_ns = None
+    updated_utc = _utc_now()
+
+    rows: List[Dict[str, Any]] = []
+    for detect_run in _detect_run_names(detect_parent):
+        if detect_run not in detect_parent:
+            continue
+        detect_group = detect_parent[detect_run]
+        summary = _coerce_mapping(detect_group.attrs.get("summary_statistics")) or {}
+        parameters = _coerce_mapping(detect_group.attrs.get("parameters")) or {}
+        provenance = _coerce_mapping(detect_group.attrs.get("provenance")) or {}
+        model_resolution = _coerce_mapping(provenance.get("model_resolution")) or {}
+        model_resolution_selected = _coerce_mapping(model_resolution.get("selected")) or {}
+
+        detect_created_utc = (
+            _decode_attr(detect_group.attrs.get("detect_timestamp_utc"))
+            or _decode_attr(detect_group.attrs.get("created_utc"))
+            or _decode_attr(detect_group.attrs.get("timestamp_utc"))
+            or _decode_attr(provenance.get("created_at_utc"))
+        )
+        detect_method = (
+            _decode_attr(detect_group.attrs.get("detection_method"))
+            or _decode_attr(detect_group.attrs.get("method"))
+            or _decode_attr(provenance.get("method"))
+        )
+        model_run_id = (
+            _decode_attr(detect_group.attrs.get("model_resolution_selected_run_id"))
+            or _decode_attr(model_resolution_selected.get("run_id"))
+        )
+        model_set_id = (
+            _decode_attr(detect_group.attrs.get("model_resolution_selected_set_id"))
+            or _decode_attr(model_resolution_selected.get("set_id"))
+        )
+        model_path = (
+            _decode_attr(detect_group.attrs.get("model_path"))
+            or _decode_attr(detect_group.attrs.get("model_resolution_selected_model_path"))
+            or _decode_attr(model_resolution_selected.get("model_path"))
+        )
+        model_name = _decode_attr(detect_group.attrs.get("model_name"))
+        if model_name is None and model_path:
+            model_name = Path(model_path).name
+
+        coverage_percent = _as_float(summary.get("percent_frames_with_detections"))
+        frames_with_detections = _as_int(summary.get("frames_with_detections"))
+        frames_zero_detections = _as_int(summary.get("frames_with_zero_detections"))
+        total_frames = _as_int(summary.get("total_frames"))
+        coverage_fallback = _extract_detect_coverage_summary(detect_group)
+        if coverage_percent is None:
+            coverage_percent = _as_float(coverage_fallback.get("coverage_percent"))
+        if frames_with_detections is None:
+            frames_with_detections = _as_int(coverage_fallback.get("frames_with_detections"))
+        if frames_zero_detections is None:
+            frames_zero_detections = _as_int(coverage_fallback.get("frames_zero_detections"))
+        if total_frames is None:
+            total_frames = _as_int(coverage_fallback.get("total_frames"))
+
+        rows.append(
+            {
+                "detect_run": str(detect_run),
+                "detect_created_utc": detect_created_utc,
+                "recording_id": recording_id,
+                "zarr_use": zarr_use,
+                "detection_method": detect_method,
+                "model_run_id": model_run_id,
+                "model_set_id": model_set_id,
+                "model_path": model_path,
+                "model_name": model_name,
+                "coverage_percent": coverage_percent,
+                "frames_with_detections": frames_with_detections,
+                "frames_zero_detections": frames_zero_detections,
+                "total_frames": total_frames,
+                "mean_confidence": _as_float(summary.get("mean_confidence")),
+                "min_confidence": _as_float(summary.get("min_confidence")),
+                "max_confidence": _as_float(summary.get("max_confidence")),
+                "inference_duration_seconds": _as_float(detect_group.attrs.get("inference_duration_seconds")),
+                "inference_average_fps": _as_float(detect_group.attrs.get("inference_average_fps")),
+                "inference_avg_batch_ms": _as_float(detect_group.attrs.get("inference_avg_batch_ms")),
+                "inference_avg_read_ms": _as_float(detect_group.attrs.get("inference_avg_read_ms")),
+                "conf_threshold": _as_float(parameters.get("conf_threshold")),
+                "iou_threshold": _as_float(parameters.get("iou_threshold")),
+                "batch_size": _as_int(parameters.get("batch_size")),
+                "inference_width": _as_int(detect_group.attrs.get("inference_width")),
+                "inference_height": _as_int(detect_group.attrs.get("inference_height")),
+                "zarr_mtime_ns": zarr_mtime_ns,
+                "updated_utc": updated_utc,
+            }
+        )
+
+    return rows
+
+
 def _first_value(payload: Dict[str, Any], keys: Iterable[str]) -> Optional[Any]:
     for key in keys:
         if key in payload:
@@ -1054,6 +1324,11 @@ class Registry:
             (7, "subjects_entities_and_query_indexes", self._migration_007_subjects_entities_and_query_indexes),
             (8, "recording_subject_overview_view", self._migration_008_recording_subject_overview_view),
             (9, "training_task_type_columns", self._migration_009_training_task_type_columns),
+            (10, "detect_performance_registry", self._migration_010_detect_performance_registry),
+            (11, "detect_model_performance_views", self._migration_011_detect_model_performance_views),
+            (12, "detect_performance_model_identity", self._migration_012_detect_performance_model_identity),
+            (13, "detect_model_performance_summary_views", self._migration_013_detect_model_performance_summary_views),
+            (14, "crop_quality_registry", self._migration_014_crop_quality_registry),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -2447,6 +2722,767 @@ class Registry:
                     (inferred, str(row["run_id"])),
                 )
 
+    def _migration_010_detect_performance_registry(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS detect_performance (
+                dataset_id TEXT NOT NULL,
+                detect_run TEXT NOT NULL,
+                detect_created_utc TEXT,
+                recording_id TEXT,
+                zarr_use TEXT,
+                detection_method TEXT,
+                model_run_id TEXT,
+                model_set_id TEXT,
+                model_path TEXT,
+                model_name TEXT,
+                coverage_percent REAL,
+                frames_with_detections INTEGER,
+                frames_zero_detections INTEGER,
+                total_frames INTEGER,
+                mean_confidence REAL,
+                min_confidence REAL,
+                max_confidence REAL,
+                inference_duration_seconds REAL,
+                inference_average_fps REAL,
+                inference_avg_batch_ms REAL,
+                inference_avg_read_ms REAL,
+                conf_threshold REAL,
+                iou_threshold REAL,
+                batch_size INTEGER,
+                inference_width INTEGER,
+                inference_height INTEGER,
+                zarr_mtime_ns INTEGER,
+                updated_utc TEXT,
+                PRIMARY KEY (dataset_id, detect_run),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        self._ensure_columns(
+            "detect_performance",
+            {
+                "detect_created_utc": "TEXT",
+                "recording_id": "TEXT",
+                "zarr_use": "TEXT",
+                "detection_method": "TEXT",
+                "model_run_id": "TEXT",
+                "model_set_id": "TEXT",
+                "model_path": "TEXT",
+                "model_name": "TEXT",
+                "coverage_percent": "REAL",
+                "frames_with_detections": "INTEGER",
+                "frames_zero_detections": "INTEGER",
+                "total_frames": "INTEGER",
+                "mean_confidence": "REAL",
+                "min_confidence": "REAL",
+                "max_confidence": "REAL",
+                "inference_duration_seconds": "REAL",
+                "inference_average_fps": "REAL",
+                "inference_avg_batch_ms": "REAL",
+                "inference_avg_read_ms": "REAL",
+                "conf_threshold": "REAL",
+                "iou_threshold": "REAL",
+                "batch_size": "INTEGER",
+                "inference_width": "INTEGER",
+                "inference_height": "INTEGER",
+                "zarr_mtime_ns": "INTEGER",
+                "updated_utc": "TEXT",
+            },
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_detect_perf_recording ON detect_performance(recording_id, detect_created_utc DESC);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_detect_perf_coverage ON detect_performance(coverage_percent);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_detect_perf_runtime ON detect_performance(inference_average_fps, inference_avg_read_ms);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_detect_perf_method ON detect_performance(detection_method, model_name);"
+        )
+        cur.execute("DROP VIEW IF EXISTS detect_performance_latest;")
+        cur.execute(
+            """
+            CREATE VIEW detect_performance_latest AS
+            WITH ranked AS (
+                SELECT
+                    dp.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY dp.dataset_id
+                        ORDER BY
+                            COALESCE(dp.detect_created_utc, dp.updated_utc) DESC,
+                            dp.detect_run DESC
+                    ) AS _rn
+                FROM detect_performance dp
+            )
+            SELECT
+                dataset_id,
+                detect_run,
+                detect_created_utc,
+                recording_id,
+                zarr_use,
+                detection_method,
+                model_run_id,
+                model_set_id,
+                model_path,
+                model_name,
+                coverage_percent,
+                frames_with_detections,
+                frames_zero_detections,
+                total_frames,
+                mean_confidence,
+                min_confidence,
+                max_confidence,
+                inference_duration_seconds,
+                inference_average_fps,
+                inference_avg_batch_ms,
+                inference_avg_read_ms,
+                conf_threshold,
+                iou_threshold,
+                batch_size,
+                inference_width,
+                inference_height,
+                zarr_mtime_ns,
+                updated_utc
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS recording_detect_performance_latest;")
+        cur.execute(
+            """
+            CREATE VIEW recording_detect_performance_latest AS
+            WITH ranked AS (
+                SELECT
+                    dpl.*,
+                    d.zarr_path AS zarr_path,
+                    d.artifact_kind AS artifact_kind,
+                    d.status AS dataset_status,
+                    p.rig_id AS rig_id,
+                    p.arena_id AS arena_id,
+                    p.camera_id AS camera_id,
+                    p.canvas_name AS canvas_name,
+                    p.dish_design AS dish_design,
+                    p.protocol_name AS protocol_name,
+                    p.cross_id AS cross_id,
+                    p.genotype AS genotype,
+                    p.dpf_at_acquisition AS dpf_at_acquisition,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY dpl.recording_id
+                        ORDER BY
+                            COALESCE(dpl.detect_created_utc, dpl.updated_utc) DESC,
+                            dpl.detect_run DESC
+                    ) AS _rn
+                FROM detect_performance_latest dpl
+                LEFT JOIN datasets d ON d.dataset_id = dpl.dataset_id
+                LEFT JOIN provenance p ON p.dataset_id = dpl.dataset_id
+                WHERE dpl.recording_id IS NOT NULL
+            )
+            SELECT
+                recording_id,
+                dataset_id,
+                detect_run,
+                detect_created_utc,
+                zarr_use,
+                detection_method,
+                model_run_id,
+                model_set_id,
+                model_path,
+                model_name,
+                coverage_percent,
+                frames_with_detections,
+                frames_zero_detections,
+                total_frames,
+                mean_confidence,
+                min_confidence,
+                max_confidence,
+                inference_duration_seconds,
+                inference_average_fps,
+                inference_avg_batch_ms,
+                inference_avg_read_ms,
+                conf_threshold,
+                iou_threshold,
+                batch_size,
+                inference_width,
+                inference_height,
+                zarr_path,
+                artifact_kind,
+                dataset_status,
+                rig_id,
+                arena_id,
+                camera_id,
+                canvas_name,
+                dish_design,
+                protocol_name,
+                cross_id,
+                genotype,
+                dpf_at_acquisition,
+                zarr_mtime_ns,
+                updated_utc
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+    def _migration_011_detect_model_performance_views(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_detect_perf_model_path ON detect_performance(model_path, model_name, detect_created_utc);"
+        )
+
+        cur.execute("DROP VIEW IF EXISTS detect_model_performance_latest;")
+        cur.execute(
+            """
+            CREATE VIEW detect_model_performance_latest AS
+            WITH model_rows AS (
+                SELECT dp.*
+                FROM detect_performance dp
+                WHERE
+                    trim(COALESCE(dp.model_path, '')) <> ''
+                    OR trim(COALESCE(dp.model_name, '')) <> ''
+            ),
+            ranked AS (
+                SELECT
+                    mr.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY mr.dataset_id
+                        ORDER BY
+                            COALESCE(mr.detect_created_utc, mr.updated_utc) DESC,
+                            mr.detect_run DESC
+                    ) AS _rn
+                FROM model_rows mr
+            )
+            SELECT
+                dataset_id,
+                detect_run,
+                detect_created_utc,
+                recording_id,
+                zarr_use,
+                detection_method,
+                model_run_id,
+                model_set_id,
+                model_path,
+                model_name,
+                coverage_percent,
+                frames_with_detections,
+                frames_zero_detections,
+                total_frames,
+                mean_confidence,
+                min_confidence,
+                max_confidence,
+                inference_duration_seconds,
+                inference_average_fps,
+                inference_avg_batch_ms,
+                inference_avg_read_ms,
+                conf_threshold,
+                iou_threshold,
+                batch_size,
+                inference_width,
+                inference_height,
+                zarr_mtime_ns,
+                updated_utc
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+        cur.execute("DROP VIEW IF EXISTS recording_detect_model_performance_latest;")
+        cur.execute(
+            """
+            CREATE VIEW recording_detect_model_performance_latest AS
+            WITH ranked AS (
+                SELECT
+                    dmpl.*,
+                    d.zarr_path AS zarr_path,
+                    d.artifact_kind AS artifact_kind,
+                    d.status AS dataset_status,
+                    p.rig_id AS rig_id,
+                    p.arena_id AS arena_id,
+                    p.camera_id AS camera_id,
+                    p.canvas_name AS canvas_name,
+                    p.dish_design AS dish_design,
+                    p.protocol_name AS protocol_name,
+                    p.cross_id AS cross_id,
+                    p.genotype AS genotype,
+                    p.dpf_at_acquisition AS dpf_at_acquisition,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY dmpl.recording_id
+                        ORDER BY
+                            COALESCE(dmpl.detect_created_utc, dmpl.updated_utc) DESC,
+                            dmpl.detect_run DESC
+                    ) AS _rn
+                FROM detect_model_performance_latest dmpl
+                LEFT JOIN datasets d ON d.dataset_id = dmpl.dataset_id
+                LEFT JOIN provenance p ON p.dataset_id = dmpl.dataset_id
+                WHERE dmpl.recording_id IS NOT NULL
+            )
+            SELECT
+                recording_id,
+                dataset_id,
+                detect_run,
+                detect_created_utc,
+                zarr_use,
+                detection_method,
+                model_run_id,
+                model_set_id,
+                model_path,
+                model_name,
+                coverage_percent,
+                frames_with_detections,
+                frames_zero_detections,
+                total_frames,
+                mean_confidence,
+                min_confidence,
+                max_confidence,
+                inference_duration_seconds,
+                inference_average_fps,
+                inference_avg_batch_ms,
+                inference_avg_read_ms,
+                conf_threshold,
+                iou_threshold,
+                batch_size,
+                inference_width,
+                inference_height,
+                zarr_path,
+                artifact_kind,
+                dataset_status,
+                rig_id,
+                arena_id,
+                camera_id,
+                canvas_name,
+                dish_design,
+                protocol_name,
+                cross_id,
+                genotype,
+                dpf_at_acquisition,
+                zarr_mtime_ns,
+                updated_utc
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+    def _migration_012_detect_performance_model_identity(self) -> None:
+        # Additive migration: add run/set identity columns and rebuild detect
+        # performance views to project them.
+        self._ensure_columns(
+            "detect_performance",
+            {
+                "model_run_id": "TEXT",
+                "model_set_id": "TEXT",
+            },
+        )
+        self._migration_010_detect_performance_registry()
+        self._migration_011_detect_model_performance_views()
+
+    def _create_detect_model_performance_summary_view(self, *, source_view: str, target_view: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute(f"DROP VIEW IF EXISTS {target_view};")
+        cur.execute(
+            f"""
+            CREATE VIEW {target_view} AS
+            WITH base AS (
+                SELECT
+                    COALESCE(trim(model_run_id), '') AS model_run_id_key,
+                    COALESCE(trim(model_set_id), '') AS model_set_id_key,
+                    COALESCE(trim(model_name), '') AS model_name_key,
+                    COALESCE(trim(model_path), '') AS model_path_key,
+                    NULLIF(trim(model_run_id), '') AS model_run_id,
+                    NULLIF(trim(model_set_id), '') AS model_set_id,
+                    NULLIF(trim(model_name), '') AS model_name,
+                    NULLIF(trim(model_path), '') AS model_path,
+                    NULLIF(trim(detection_method), '') AS detection_method,
+                    dataset_id,
+                    recording_id,
+                    COALESCE(detect_created_utc, updated_utc) AS detect_created_utc,
+                    coverage_percent,
+                    inference_average_fps,
+                    inference_avg_read_ms
+                FROM {source_view}
+            ),
+            grouped AS (
+                SELECT
+                    model_run_id_key,
+                    model_set_id_key,
+                    model_name_key,
+                    model_path_key,
+                    MIN(model_run_id) AS model_run_id,
+                    MIN(model_set_id) AS model_set_id,
+                    MIN(model_name) AS model_name,
+                    MIN(model_path) AS model_path,
+                    GROUP_CONCAT(DISTINCT detection_method) AS detection_methods_csv,
+                    COUNT(*) AS detect_rows,
+                    COUNT(DISTINCT dataset_id) AS dataset_count,
+                    COUNT(DISTINCT recording_id) AS recording_count,
+                    MIN(detect_created_utc) AS first_detect_created_utc,
+                    MAX(detect_created_utc) AS latest_detect_created_utc,
+                    AVG(coverage_percent) AS coverage_avg,
+                    MIN(coverage_percent) AS coverage_min,
+                    MAX(coverage_percent) AS coverage_max,
+                    AVG(inference_average_fps) AS fps_avg,
+                    MIN(inference_average_fps) AS fps_min,
+                    MAX(inference_average_fps) AS fps_max,
+                    AVG(inference_avg_read_ms) AS read_ms_avg,
+                    MIN(inference_avg_read_ms) AS read_ms_min,
+                    MAX(inference_avg_read_ms) AS read_ms_max
+                FROM base
+                GROUP BY
+                    model_run_id_key,
+                    model_set_id_key,
+                    model_name_key,
+                    model_path_key
+            ),
+            coverage_pct AS (
+                SELECT
+                    model_run_id_key,
+                    model_set_id_key,
+                    model_name_key,
+                    model_path_key,
+                    MIN(CASE WHEN coverage_cume >= 0.10 THEN coverage_percent END) AS coverage_p10,
+                    MIN(CASE WHEN coverage_cume >= 0.50 THEN coverage_percent END) AS coverage_p50,
+                    MIN(CASE WHEN coverage_cume >= 0.90 THEN coverage_percent END) AS coverage_p90
+                FROM (
+                    SELECT
+                        model_run_id_key,
+                        model_set_id_key,
+                        model_name_key,
+                        model_path_key,
+                        coverage_percent,
+                        CUME_DIST() OVER (
+                            PARTITION BY
+                                model_run_id_key,
+                                model_set_id_key,
+                                model_name_key,
+                                model_path_key
+                            ORDER BY coverage_percent
+                        ) AS coverage_cume
+                    FROM base
+                    WHERE coverage_percent IS NOT NULL
+                ) ranked
+                GROUP BY
+                    model_run_id_key,
+                    model_set_id_key,
+                    model_name_key,
+                    model_path_key
+            ),
+            fps_pct AS (
+                SELECT
+                    model_run_id_key,
+                    model_set_id_key,
+                    model_name_key,
+                    model_path_key,
+                    MIN(CASE WHEN fps_cume >= 0.10 THEN inference_average_fps END) AS fps_p10,
+                    MIN(CASE WHEN fps_cume >= 0.50 THEN inference_average_fps END) AS fps_p50,
+                    MIN(CASE WHEN fps_cume >= 0.90 THEN inference_average_fps END) AS fps_p90
+                FROM (
+                    SELECT
+                        model_run_id_key,
+                        model_set_id_key,
+                        model_name_key,
+                        model_path_key,
+                        inference_average_fps,
+                        CUME_DIST() OVER (
+                            PARTITION BY
+                                model_run_id_key,
+                                model_set_id_key,
+                                model_name_key,
+                                model_path_key
+                            ORDER BY inference_average_fps
+                        ) AS fps_cume
+                    FROM base
+                    WHERE inference_average_fps IS NOT NULL
+                ) ranked
+                GROUP BY
+                    model_run_id_key,
+                    model_set_id_key,
+                    model_name_key,
+                    model_path_key
+            ),
+            read_pct AS (
+                SELECT
+                    model_run_id_key,
+                    model_set_id_key,
+                    model_name_key,
+                    model_path_key,
+                    MIN(CASE WHEN read_cume >= 0.10 THEN inference_avg_read_ms END) AS read_ms_p10,
+                    MIN(CASE WHEN read_cume >= 0.50 THEN inference_avg_read_ms END) AS read_ms_p50,
+                    MIN(CASE WHEN read_cume >= 0.90 THEN inference_avg_read_ms END) AS read_ms_p90
+                FROM (
+                    SELECT
+                        model_run_id_key,
+                        model_set_id_key,
+                        model_name_key,
+                        model_path_key,
+                        inference_avg_read_ms,
+                        CUME_DIST() OVER (
+                            PARTITION BY
+                                model_run_id_key,
+                                model_set_id_key,
+                                model_name_key,
+                                model_path_key
+                            ORDER BY inference_avg_read_ms
+                        ) AS read_cume
+                    FROM base
+                    WHERE inference_avg_read_ms IS NOT NULL
+                ) ranked
+                GROUP BY
+                    model_run_id_key,
+                    model_set_id_key,
+                    model_name_key,
+                    model_path_key
+            )
+            SELECT
+                g.model_run_id,
+                g.model_set_id,
+                g.model_name,
+                g.model_path,
+                g.detection_methods_csv,
+                g.detect_rows,
+                g.dataset_count,
+                g.recording_count,
+                g.first_detect_created_utc,
+                g.latest_detect_created_utc,
+                g.coverage_avg,
+                g.coverage_min,
+                g.coverage_max,
+                cp.coverage_p10,
+                cp.coverage_p50,
+                cp.coverage_p90,
+                g.fps_avg,
+                g.fps_min,
+                g.fps_max,
+                fp.fps_p10,
+                fp.fps_p50,
+                fp.fps_p90,
+                g.read_ms_avg,
+                g.read_ms_min,
+                g.read_ms_max,
+                rp.read_ms_p10,
+                rp.read_ms_p50,
+                rp.read_ms_p90
+            FROM grouped g
+            LEFT JOIN coverage_pct cp
+                USING (model_run_id_key, model_set_id_key, model_name_key, model_path_key)
+            LEFT JOIN fps_pct fp
+                USING (model_run_id_key, model_set_id_key, model_name_key, model_path_key)
+            LEFT JOIN read_pct rp
+                USING (model_run_id_key, model_set_id_key, model_name_key, model_path_key)
+            ORDER BY
+                g.recording_count DESC,
+                g.dataset_count DESC,
+                g.model_set_id,
+                g.model_run_id,
+                g.model_name,
+                g.model_path;
+            """
+        )
+
+    def _migration_013_detect_model_performance_summary_views(self) -> None:
+        # Build additive summary views over model-backed latest detect performance.
+        self._migration_011_detect_model_performance_views()
+        self._create_detect_model_performance_summary_view(
+            source_view="detect_model_performance_latest",
+            target_view="detect_model_performance_summary",
+        )
+        self._create_detect_model_performance_summary_view(
+            source_view="recording_detect_model_performance_latest",
+            target_view="recording_detect_model_performance_summary",
+        )
+
+    def _migration_014_crop_quality_registry(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crop_quality (
+                dataset_id TEXT NOT NULL,
+                crop_run TEXT NOT NULL,
+                recording_id TEXT,
+                zarr_use TEXT,
+                crop_created_utc TEXT,
+                source_detect_run TEXT,
+                source_refined_run TEXT,
+                detection_source_type TEXT,
+                detection_source_path TEXT,
+                total_rois INTEGER,
+                frames_with_crops INTEGER,
+                total_frames INTEGER,
+                percent_frames_with_crops REAL,
+                includes_interpolated INTEGER,
+                n_real_detections INTEGER,
+                n_interpolated_detections INTEGER,
+                review_state TEXT,
+                review_method TEXT,
+                review_intended_use TEXT,
+                review_reviewer TEXT,
+                review_timestamp_utc TEXT,
+                review_notes TEXT,
+                zarr_mtime_ns INTEGER,
+                updated_utc TEXT,
+                PRIMARY KEY (dataset_id, crop_run),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        self._ensure_columns(
+            "crop_quality",
+            {
+                "recording_id": "TEXT",
+                "zarr_use": "TEXT",
+                "crop_created_utc": "TEXT",
+                "source_detect_run": "TEXT",
+                "source_refined_run": "TEXT",
+                "detection_source_type": "TEXT",
+                "detection_source_path": "TEXT",
+                "total_rois": "INTEGER",
+                "frames_with_crops": "INTEGER",
+                "total_frames": "INTEGER",
+                "percent_frames_with_crops": "REAL",
+                "includes_interpolated": "INTEGER",
+                "n_real_detections": "INTEGER",
+                "n_interpolated_detections": "INTEGER",
+                "review_state": "TEXT",
+                "review_method": "TEXT",
+                "review_intended_use": "TEXT",
+                "review_reviewer": "TEXT",
+                "review_timestamp_utc": "TEXT",
+                "review_notes": "TEXT",
+                "zarr_mtime_ns": "INTEGER",
+                "updated_utc": "TEXT",
+            },
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_crop_quality_dataset_id ON crop_quality(dataset_id);")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_crop_quality_review_gate ON crop_quality(review_state, review_intended_use);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_crop_quality_source ON crop_quality(detection_source_type, source_refined_run);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_crop_quality_recording ON crop_quality(recording_id, crop_created_utc DESC);"
+        )
+
+        cur.execute("DROP VIEW IF EXISTS crop_quality_current;")
+        cur.execute(
+            """
+            CREATE VIEW crop_quality_current AS
+            WITH ranked AS (
+                SELECT
+                    cq.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY cq.dataset_id
+                        ORDER BY
+                            COALESCE(cq.review_timestamp_utc, cq.crop_created_utc, cq.updated_utc) DESC,
+                            COALESCE(cq.crop_created_utc, '') DESC,
+                            cq.crop_run DESC
+                    ) AS _rn
+                FROM crop_quality cq
+            )
+            SELECT
+                dataset_id,
+                crop_run,
+                recording_id,
+                zarr_use,
+                crop_created_utc,
+                source_detect_run,
+                source_refined_run,
+                detection_source_type,
+                detection_source_path,
+                total_rois,
+                frames_with_crops,
+                total_frames,
+                percent_frames_with_crops,
+                includes_interpolated,
+                n_real_detections,
+                n_interpolated_detections,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                review_notes,
+                zarr_mtime_ns,
+                updated_utc
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+        cur.execute("DROP VIEW IF EXISTS recording_crop_quality_current;")
+        cur.execute(
+            """
+            CREATE VIEW recording_crop_quality_current AS
+            WITH ranked AS (
+                SELECT
+                    cqc.*,
+                    d.zarr_path AS zarr_path,
+                    d.artifact_kind AS artifact_kind,
+                    d.status AS dataset_status,
+                    p.rig_id AS rig_id,
+                    p.arena_id AS arena_id,
+                    p.camera_id AS camera_id,
+                    p.canvas_name AS canvas_name,
+                    p.dish_design AS dish_design,
+                    p.protocol_name AS protocol_name,
+                    p.cross_id AS cross_id,
+                    p.genotype AS genotype,
+                    p.dpf_at_acquisition AS dpf_at_acquisition,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY cqc.recording_id
+                        ORDER BY
+                            COALESCE(cqc.review_timestamp_utc, cqc.crop_created_utc, cqc.updated_utc) DESC,
+                            COALESCE(cqc.crop_created_utc, '') DESC,
+                            cqc.crop_run DESC
+                    ) AS _rn
+                FROM crop_quality_current cqc
+                LEFT JOIN datasets d ON d.dataset_id = cqc.dataset_id
+                LEFT JOIN provenance p ON p.dataset_id = cqc.dataset_id
+                WHERE cqc.recording_id IS NOT NULL
+            )
+            SELECT
+                recording_id,
+                dataset_id,
+                crop_run,
+                zarr_use,
+                crop_created_utc,
+                source_detect_run,
+                source_refined_run,
+                detection_source_type,
+                detection_source_path,
+                total_rois,
+                frames_with_crops,
+                total_frames,
+                percent_frames_with_crops,
+                includes_interpolated,
+                n_real_detections,
+                n_interpolated_detections,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                review_notes,
+                zarr_path,
+                artifact_kind,
+                dataset_status,
+                rig_id,
+                arena_id,
+                camera_id,
+                canvas_name,
+                dish_design,
+                protocol_name,
+                cross_id,
+                genotype,
+                dpf_at_acquisition,
+                zarr_mtime_ns,
+                updated_utc
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
         existing = {
             row["name"]
@@ -2950,6 +3986,120 @@ class Registry:
         )
         self.conn.commit()
 
+    def upsert_detect_performance(
+        self,
+        *,
+        dataset_id: str,
+        detect_run: str,
+        detect_created_utc: Optional[str],
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+        detection_method: Optional[str],
+        model_run_id: Optional[str],
+        model_set_id: Optional[str],
+        model_path: Optional[str],
+        model_name: Optional[str],
+        coverage_percent: Optional[float],
+        frames_with_detections: Optional[int],
+        frames_zero_detections: Optional[int],
+        total_frames: Optional[int],
+        mean_confidence: Optional[float],
+        min_confidence: Optional[float],
+        max_confidence: Optional[float],
+        inference_duration_seconds: Optional[float],
+        inference_average_fps: Optional[float],
+        inference_avg_batch_ms: Optional[float],
+        inference_avg_read_ms: Optional[float],
+        conf_threshold: Optional[float],
+        iou_threshold: Optional[float],
+        batch_size: Optional[int],
+        inference_width: Optional[int],
+        inference_height: Optional[int],
+        zarr_mtime_ns: Optional[int] = None,
+        updated_utc: Optional[str] = None,
+    ) -> None:
+        payload = {
+            "dataset_id": str(dataset_id),
+            "detect_run": str(detect_run),
+            "detect_created_utc": detect_created_utc,
+            "recording_id": recording_id,
+            "zarr_use": zarr_use,
+            "detection_method": detection_method,
+            "model_run_id": model_run_id,
+            "model_set_id": model_set_id,
+            "model_path": model_path,
+            "model_name": model_name,
+            "coverage_percent": coverage_percent,
+            "frames_with_detections": frames_with_detections,
+            "frames_zero_detections": frames_zero_detections,
+            "total_frames": total_frames,
+            "mean_confidence": mean_confidence,
+            "min_confidence": min_confidence,
+            "max_confidence": max_confidence,
+            "inference_duration_seconds": inference_duration_seconds,
+            "inference_average_fps": inference_average_fps,
+            "inference_avg_batch_ms": inference_avg_batch_ms,
+            "inference_avg_read_ms": inference_avg_read_ms,
+            "conf_threshold": conf_threshold,
+            "iou_threshold": iou_threshold,
+            "batch_size": batch_size,
+            "inference_width": inference_width,
+            "inference_height": inference_height,
+            "zarr_mtime_ns": zarr_mtime_ns,
+            "updated_utc": updated_utc or _utc_now(),
+        }
+        self.conn.execute(
+            """
+            INSERT INTO detect_performance (
+                dataset_id, detect_run, detect_created_utc, recording_id, zarr_use,
+                detection_method, model_run_id, model_set_id, model_path, model_name,
+                coverage_percent, frames_with_detections, frames_zero_detections, total_frames,
+                mean_confidence, min_confidence, max_confidence,
+                inference_duration_seconds, inference_average_fps, inference_avg_batch_ms, inference_avg_read_ms,
+                conf_threshold, iou_threshold, batch_size, inference_width, inference_height,
+                zarr_mtime_ns, updated_utc
+            )
+            VALUES (
+                :dataset_id, :detect_run, :detect_created_utc, :recording_id, :zarr_use,
+                :detection_method, :model_run_id, :model_set_id, :model_path, :model_name,
+                :coverage_percent, :frames_with_detections, :frames_zero_detections, :total_frames,
+                :mean_confidence, :min_confidence, :max_confidence,
+                :inference_duration_seconds, :inference_average_fps, :inference_avg_batch_ms, :inference_avg_read_ms,
+                :conf_threshold, :iou_threshold, :batch_size, :inference_width, :inference_height,
+                :zarr_mtime_ns, :updated_utc
+            )
+            ON CONFLICT(dataset_id, detect_run) DO UPDATE SET
+                detect_created_utc=excluded.detect_created_utc,
+                recording_id=excluded.recording_id,
+                zarr_use=excluded.zarr_use,
+                detection_method=excluded.detection_method,
+                model_run_id=excluded.model_run_id,
+                model_set_id=excluded.model_set_id,
+                model_path=excluded.model_path,
+                model_name=excluded.model_name,
+                coverage_percent=excluded.coverage_percent,
+                frames_with_detections=excluded.frames_with_detections,
+                frames_zero_detections=excluded.frames_zero_detections,
+                total_frames=excluded.total_frames,
+                mean_confidence=excluded.mean_confidence,
+                min_confidence=excluded.min_confidence,
+                max_confidence=excluded.max_confidence,
+                inference_duration_seconds=excluded.inference_duration_seconds,
+                inference_average_fps=excluded.inference_average_fps,
+                inference_avg_batch_ms=excluded.inference_avg_batch_ms,
+                inference_avg_read_ms=excluded.inference_avg_read_ms,
+                conf_threshold=excluded.conf_threshold,
+                iou_threshold=excluded.iou_threshold,
+                batch_size=excluded.batch_size,
+                inference_width=excluded.inference_width,
+                inference_height=excluded.inference_height,
+                zarr_mtime_ns=excluded.zarr_mtime_ns,
+                updated_utc=excluded.updated_utc;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
     def upsert_detect_quality(
         self,
         *,
@@ -3022,6 +4172,59 @@ class Registry:
         )
         self.conn.commit()
 
+    def replace_detect_performance(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM detect_performance WHERE dataset_id = ?;", (str(dataset_id),))
+            for record in records:
+                payload = dict(record)
+                payload["dataset_id"] = str(dataset_id)
+                payload.setdefault("updated_utc", _utc_now())
+                self.conn.execute(
+                    """
+                    INSERT INTO detect_performance (
+                        dataset_id, detect_run, detect_created_utc, recording_id, zarr_use,
+                        detection_method, model_run_id, model_set_id, model_path, model_name,
+                        coverage_percent, frames_with_detections, frames_zero_detections, total_frames,
+                        mean_confidence, min_confidence, max_confidence,
+                        inference_duration_seconds, inference_average_fps, inference_avg_batch_ms, inference_avg_read_ms,
+                        conf_threshold, iou_threshold, batch_size, inference_width, inference_height,
+                        zarr_mtime_ns, updated_utc
+                    )
+                    VALUES (
+                        :dataset_id, :detect_run, :detect_created_utc, :recording_id, :zarr_use,
+                        :detection_method, :model_run_id, :model_set_id, :model_path, :model_name,
+                        :coverage_percent, :frames_with_detections, :frames_zero_detections, :total_frames,
+                        :mean_confidence, :min_confidence, :max_confidence,
+                        :inference_duration_seconds, :inference_average_fps, :inference_avg_batch_ms, :inference_avg_read_ms,
+                        :conf_threshold, :iou_threshold, :batch_size, :inference_width, :inference_height,
+                        :zarr_mtime_ns, :updated_utc
+                    );
+                    """,
+                    payload,
+                )
+
+    def refresh_detect_performance_for_dataset(
+        self,
+        dataset_id: str,
+        *,
+        zarr_path: Path,
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+    ) -> int:
+        zarr = _import_zarr()
+        try:
+            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+        except TypeError:
+            root = zarr.open_group(str(zarr_path), mode="r")
+        rows = _extract_detect_performance_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_detect_performance(dataset_id, rows)
+        return len(rows)
+
     def replace_detect_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM detect_quality WHERE dataset_id = ?;", (str(dataset_id),))
@@ -3042,6 +4245,35 @@ class Registry:
                         :review_state, :review_intended_use, :review_reviewer, :review_timestamp_utc, :review_resolved_group,
                         :total_detections, :real_detections, :interpolated_detections, :interpolated_detections_rate,
                         :quality_updated_utc, :zarr_mtime_ns
+                    );
+                    """,
+                    payload,
+                )
+
+    def replace_crop_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM crop_quality WHERE dataset_id = ?;", (str(dataset_id),))
+            for record in records:
+                payload = dict(record)
+                payload["dataset_id"] = str(dataset_id)
+                payload.setdefault("updated_utc", _utc_now())
+                self.conn.execute(
+                    """
+                    INSERT INTO crop_quality (
+                        dataset_id, crop_run, recording_id, zarr_use, crop_created_utc,
+                        source_detect_run, source_refined_run, detection_source_type, detection_source_path,
+                        total_rois, frames_with_crops, total_frames, percent_frames_with_crops,
+                        includes_interpolated, n_real_detections, n_interpolated_detections,
+                        review_state, review_method, review_intended_use, review_reviewer,
+                        review_timestamp_utc, review_notes, zarr_mtime_ns, updated_utc
+                    )
+                    VALUES (
+                        :dataset_id, :crop_run, :recording_id, :zarr_use, :crop_created_utc,
+                        :source_detect_run, :source_refined_run, :detection_source_type, :detection_source_path,
+                        :total_rois, :frames_with_crops, :total_frames, :percent_frames_with_crops,
+                        :includes_interpolated, :n_real_detections, :n_interpolated_detections,
+                        :review_state, :review_method, :review_intended_use, :review_reviewer,
+                        :review_timestamp_utc, :review_notes, :zarr_mtime_ns, :updated_utc
                     );
                     """,
                     payload,
@@ -3228,6 +4460,12 @@ class Registry:
             zarr_path=zarr_path,
             zarr_purpose=zarr_purpose,
         )
+        dataset_row = self.conn.execute(
+            "SELECT recording_id, zarr_use FROM datasets WHERE dataset_id = ?;",
+            (dataset_id,),
+        ).fetchone()
+        recording_id = _decode_attr(dataset_row["recording_id"]) if dataset_row is not None else None
+        zarr_use = _decode_attr(dataset_row["zarr_use"]) if dataset_row is not None else None
 
         protocol_name, protocol_hash = _extract_protocol(root)
         snapshot, _ = _extract_snapshot(root)
@@ -3247,6 +4485,20 @@ class Registry:
         self.replace_detection_sources(dataset_id, detection_records)
         detect_quality_rows = _extract_detect_quality_rows(root, zarr_path=zarr_path)
         self.replace_detect_quality(dataset_id, detect_quality_rows)
+        detect_performance_rows = _extract_detect_performance_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_detect_performance(dataset_id, detect_performance_rows)
+        crop_quality_rows = _extract_crop_quality_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_crop_quality(dataset_id, crop_quality_rows)
         keypoint_quality_rows = _extract_keypoint_quality_rows(root, zarr_path=zarr_path)
         self.replace_keypoint_quality(dataset_id, keypoint_quality_rows)
         return dataset_id

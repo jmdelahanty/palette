@@ -21,10 +21,17 @@ Date anchored: 2026-02-09.
     - `fisheye.detection.detect_yolo` (explicit model path/config)
     - `fisheye.utils.run_detect_with_registry_model` (registry model resolution + detect run provenance)
   - Responsibility: append one detect run to analysis Zarr.
-- Stage 3 refine tool:
+- Stage 3 detect-quality tool (required before refine for production):
+  - Module: `fisheye.refinement.detect_quality`
+  - Responsibility: append one quality report under the selected detect run with
+    `quality_flags` and `detection_quality_labels`.
+  - Current behavior note:
+    - blob/traditional detect path writes quality as part of detect.
+    - YOLO detect path requires explicit `detect_quality` stage invocation.
+- Stage 4 refine tool:
   - Module: `fisheye.refinement.refine_detect`
   - Responsibility: append refined detect outputs; keep raw detect immutable.
-- Stage 4 registry tool:
+- Stage 5 registry tool:
   - Module: `fisheye.registry.db.Registry.scan_zarr`
   - Responsibility: rescan/update registry metadata for the resulting analysis Zarr.
 
@@ -35,8 +42,9 @@ Date anchored: 2026-02-09.
   - Required execution order:
     1. import (`process_recording_import`)
     2. detect (`run_detect_yolo` or `run_detect_registry_model`)
-    3. refine (`run_refine_detect`, optional)
-    4. register (optional)
+    3. detect quality (`fisheye.refinement.detect_quality`)
+    4. refine (`run_refine_detect`, optional)
+    5. register (optional)
 - Batch orchestrator:
   - Module: `fisheye.utils.import_recordings_analysis`
   - Behavior: resolve many recording plans, then run single-recording pipeline per plan.
@@ -47,10 +55,30 @@ The required order is:
 
 1. `import_recording_analysis`
 2. detect
-3. refine (optional)
-4. register (optional)
+3. `detect_quality`
+4. refine (optional)
+5. register (optional)
 
-Rationale: detect/refine should run against an archive that already has analysis purpose and imported metadata context.
+Rationale: refine should consume explicit quality labels, not inferred "all clean"
+fallbacks. Detect/refine should also run against an archive that already has
+analysis purpose and imported metadata context.
+
+## Detect Quality Guardrails (Best Practice)
+
+- Always run `detect_quality` after each new detect run and before refine.
+- Auto-run `detect_quality` when missing (or fail closed in strict mode).
+- Treat quality as stale when detect run identity changes:
+  - mismatch between `refined_detect_runs/<run>.attrs["source_detect_run"]` and
+    the detect run you intend to refine.
+  - missing `quality_reports.attrs["latest"]` for that detect run.
+- Persist quality threshold provenance (`jump_threshold`,
+  `blip_gap_threshold`) in quality report attrs for reproducibility.
+- Prefer scaled thresholds for cross-resolution consistency:
+  - `--threshold-mode scaled --threshold 100 --threshold-reference-width 640`
+  - Interpreted as "100 px at 640px width", scaled per recording resolution.
+- Log and surface the quality run ID used by refine (`source_quality_run`).
+- For batch workflows, continue per-recording on failure, but classify failures
+  as `failed_step=detect_quality` when this stage fails.
 
 ## Failure Semantics
 
@@ -73,6 +101,9 @@ Rationale: detect/refine should run against an archive that already has analysis
   - stimulus import defaults to skip when runs already exist unless `--stimulus-always`
 - Detect stage:
   - append-only detect runs; existing runs remain immutable
+- Detect-quality stage:
+  - append-only quality reports under detect runs; existing quality reports
+    remain immutable
 - Refine stage:
   - append-only refined runs/manual groups; source detect runs remain immutable
 - Registry stage:
@@ -101,8 +132,12 @@ Rationale: detect/refine should run against an archive that already has analysis
   - `scripts/py -m fisheye.utils.run_recording_analysis_pipeline --recording-dir "$REC" --dry-run`
 - Single recording apply with registry model + register:
   - `scripts/py -m fisheye.utils.run_recording_analysis_pipeline --recording-dir "$REC" --model-source registry --registry /nvme1/palette_registry.sqlite --register --apply`
+  - If detect path is YOLO and pipeline wrapper does not auto-run quality:
+    - `scripts/py -m fisheye.refinement.detect_quality "$ANALYSIS_ZARR" --save`
 - Batch apply:
   - `scripts/py -m fisheye.utils.import_recordings_analysis /nvme1/recordings --recursive --model-source registry --registry /nvme1/palette_registry.sqlite --apply`
+- Batch detect-quality stage (when needed separately):
+  - `scripts/py -m fisheye.utils.detect_quality_batch /nvme1/recordings --recursive --apply`
 
 ## Out of Scope (Current Contract)
 

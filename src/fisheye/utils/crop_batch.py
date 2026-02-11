@@ -43,6 +43,20 @@ class CropPlan:
     latest_signature: Optional[Dict[str, object]] = None
 
 
+def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
+    purpose = root.attrs.get("zarr_purpose")
+    if purpose is not None:
+        value = str(purpose).strip().lower()
+        if value in {"analysis", "training"}:
+            return value
+    name = zarr_path.name.lower()
+    if name.endswith("_analysis.zarr"):
+        return "analysis"
+    if name.endswith("_training.zarr"):
+        return "training"
+    return None
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -244,7 +258,7 @@ def _build_plan(
         )
 
     crop_params, _ = get_crop_parameters(root, config, console=None)
-    roi_size = tuple(crop_params.get("roi_sz", [256, 256]))
+    roi_size = tuple(crop_params.get("roi_sz", [512, 512]))
 
     desired = {
         "detection_source_path": resolved_path,
@@ -288,6 +302,53 @@ def _build_plan(
     )
 
 
+def _build_plans(
+    zarr_paths: List[Path],
+    config: Dict[str, Any],
+    source_type: str,
+    source_path: Optional[str],
+    preferred_policy: Optional[str],
+    force_new: bool,
+    zarr_use_filter: str,
+) -> List[CropPlan]:
+    plans: List[CropPlan] = []
+    for zarr_path in zarr_paths:
+        if zarr_use_filter != "any":
+            try:
+                root = zarr.open_group(str(zarr_path), mode="r")
+            except Exception as exc:
+                plans.append(
+                    CropPlan(
+                        zarr_path=zarr_path,
+                        status="missing",
+                        reason=f"zarr open failed: {exc}",
+                    )
+                )
+                continue
+            observed_use = _infer_zarr_use(root, zarr_path)
+            if observed_use != zarr_use_filter:
+                plans.append(
+                    CropPlan(
+                        zarr_path=zarr_path,
+                        status="skipped",
+                        reason=f"zarr_use mismatch (wanted={zarr_use_filter}, found={observed_use or 'unknown'})",
+                    )
+                )
+                continue
+
+        plans.append(
+            _build_plan(
+                zarr_path=zarr_path,
+                config=config,
+                source_type=source_type,
+                source_path=source_path,
+                preferred_policy=preferred_policy,
+                force_new=force_new,
+            )
+        )
+    return plans
+
+
 def _resolve_targets(paths: List[Path], recursive: bool) -> List[Path]:
     seen: set[str] = set()
     ordered: List[Path] = []
@@ -306,6 +367,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--file-list", type=Path, help="Text file with zarr paths to process.")
     parser.add_argument("--recursive", action="store_true", help="Search recursively for zarrs.")
     parser.add_argument("--apply", action="store_true", help="Run cropping (default is dry-run).")
+    parser.add_argument(
+        "--zarr-use",
+        choices=["analysis", "training", "any"],
+        default="any",
+        help="Filter zarr archives by purpose (default: any).",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail fast on first missing/error recording during apply.",
+    )
     parser.add_argument("--force-new", action="store_true", help="Always create a new crop run.")
     parser.add_argument(
         "--source-type",
@@ -336,6 +408,51 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--scheduler", choices=["processes", "threads", "distributed"], default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--acceleration", choices=["auto", "gpu", "cpu"], default=None)
+    parser.add_argument(
+        "--external-write-backend",
+        choices=["standard", "kvikio"],
+        default=None,
+        help="Write backend for external-video crop runs.",
+    )
+    parser.add_argument(
+        "--external-roi-storage",
+        choices=["compressed", "uncompressed"],
+        default=None,
+        help="ROI storage mode for external-video crop runs.",
+    )
+    parser.add_argument(
+        "--external-use-sharding",
+        action="store_true",
+        help="Enable sharding for external-video ROI writes.",
+    )
+    parser.add_argument(
+        "--no-external-use-sharding",
+        action="store_true",
+        help="Disable sharding for external-video ROI writes.",
+    )
+    parser.add_argument(
+        "--external-roi-chunk-size",
+        type=int,
+        default=None,
+        help="Detection-axis chunk length for external-video ROI writes.",
+    )
+    parser.add_argument(
+        "--external-roi-shard-size",
+        type=int,
+        default=None,
+        help="Detection-axis shard length for external-video ROI writes.",
+    )
+    parser.add_argument(
+        "--external-gpu-chunk-frames",
+        type=int,
+        default=None,
+        help="Frame count decoded per GPU crop chunk (external-video mode).",
+    )
+    parser.add_argument(
+        "--require-kvikio",
+        action="store_true",
+        help="Fail if kvikIO GDS writes cannot be enabled in external-video mode.",
+    )
     parser.add_argument("--no-gpu", action="store_true")
     parser.add_argument("--force-cpu", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -362,19 +479,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     source_path = _normalize_path(args.source_path or crop_cfg.get("source_path"))
     source_type = infer_detection_source_type(source_path, raw_source_type)
     preferred_policy = args.preferred_policy or crop_cfg.get("preferred_policy")
+    external_use_sharding = None
+    if args.external_use_sharding and args.no_external_use_sharding:
+        raise SystemExit("Choose either --external-use-sharding or --no-external-use-sharding, not both.")
+    if args.external_use_sharding:
+        external_use_sharding = True
+    elif args.no_external_use_sharding:
+        external_use_sharding = False
 
-    plans: List[CropPlan] = []
-    for zarr_path in zarr_paths:
-        plans.append(
-            _build_plan(
-                zarr_path=zarr_path,
-                config=config,
-                source_type=source_type,
-                source_path=source_path,
-                preferred_policy=preferred_policy,
-                force_new=bool(args.force_new),
-            )
-        )
+    plans = _build_plans(
+        zarr_paths=zarr_paths,
+        config=config,
+        source_type=source_type,
+        source_path=source_path,
+        preferred_policy=preferred_policy,
+        force_new=bool(args.force_new),
+        zarr_use_filter=str(args.zarr_use),
+    )
 
     if not args.apply:
         print("Planned crop runs (dry-run):")
@@ -417,17 +538,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     log_path = log_dir / f"crop_batch_{run_id}.jsonl"
     logger = JsonLogger(log_path, run_id)
     print(f"Log file: {log_path}")
-    logger.log("run_start", roots=[str(r) for r in roots], recursive=bool(args.recursive))
+    logger.log(
+        "run_start",
+        roots=[str(r) for r in roots],
+        recursive=bool(args.recursive),
+        zarr_use=str(args.zarr_use),
+        strict=bool(args.strict),
+        external_write_backend=args.external_write_backend,
+        external_roi_storage=args.external_roi_storage,
+        require_kvikio=bool(args.require_kvikio),
+    )
 
     console = Console() if Console else None
     progress = _progress(console, len(plans))
     task_id = progress.add_task("crop_batch", total=len(plans)) if progress else None
 
     ok = skipped = missing = failed = 0
+    strict_abort = False
     for plan in plans:
         if plan.status == "missing":
             missing += 1
             logger.log("recording_missing", zarr=str(plan.zarr_path), reason=plan.reason)
+            if args.strict:
+                failed += 1
+                strict_abort = True
+                logger.log("run_abort_strict", zarr=str(plan.zarr_path), reason=plan.reason, status=plan.status)
         elif plan.status == "skipped":
             skipped += 1
             logger.log(
@@ -457,6 +592,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                     num_workers=args.num_workers,
                     console=console,
                     acceleration=args.acceleration,
+                    external_write_backend=args.external_write_backend,
+                    external_roi_storage=args.external_roi_storage,
+                    external_use_sharding=external_use_sharding,
+                    external_roi_chunk_size=args.external_roi_chunk_size,
+                    external_roi_shard_size=args.external_roi_shard_size,
+                    external_gpu_chunk_frames=args.external_gpu_chunk_frames,
+                    external_require_kvikio=args.require_kvikio,
                     use_gpu_allowed=not args.no_gpu,
                     force_cpu=args.force_cpu,
                     verbose=args.verbose,
@@ -464,6 +606,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             except Exception as exc:
                 failed += 1
                 logger.log("crop_failed", zarr=str(plan.zarr_path), error=str(exc))
+                if args.strict:
+                    strict_abort = True
+                    logger.log("run_abort_strict", zarr=str(plan.zarr_path), reason=str(exc), status="failed")
             else:
                 ok += 1
                 logger.log(
@@ -475,6 +620,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 )
         if progress:
             progress.advance(task_id)
+        if strict_abort:
+            break
 
     if progress:
         progress.stop()

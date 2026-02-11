@@ -127,12 +127,43 @@ def _select_detect_run(root: zarr.Group, requested: Optional[str]) -> Optional[s
     return detect_parent.attrs.get("latest")
 
 
-def _build_plans(roots: List[Path], recursive: bool, detect_run: Optional[str], skip_existing: bool) -> List[RefinePlan]:
+def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
+    purpose = root.attrs.get("zarr_purpose")
+    if purpose is not None:
+        value = str(purpose).strip().lower()
+        if value in {"analysis", "training"}:
+            return value
+    name = zarr_path.name.lower()
+    if name.endswith("_analysis.zarr"):
+        return "analysis"
+    if name.endswith("_training.zarr"):
+        return "training"
+    return None
+
+
+def _build_plans(
+    roots: List[Path],
+    recursive: bool,
+    detect_run: Optional[str],
+    skip_existing: bool,
+    zarr_use_filter: str,
+) -> List[RefinePlan]:
     plans: List[RefinePlan] = []
     for zarr_path in _iter_zarr(roots, recursive):
         if not zarr_path.exists():
             continue
         root = zarr.open_group(str(zarr_path), mode="r")
+        if zarr_use_filter != "any":
+            observed_use = _infer_zarr_use(root, zarr_path)
+            if observed_use != zarr_use_filter:
+                plans.append(
+                    RefinePlan(
+                        zarr_path=zarr_path,
+                        status="skipped",
+                        reason=f"zarr_use mismatch (wanted={zarr_use_filter}, found={observed_use or 'unknown'})",
+                    )
+                )
+                continue
         selected = _select_detect_run(root, detect_run)
         if selected is None:
             plans.append(
@@ -205,6 +236,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("paths", nargs="*", type=Path, help="Recording roots or zarr paths.")
     parser.add_argument("--recursive", action="store_true", help="Search recursively for zarrs.")
     parser.add_argument("--apply", action="store_true", help="Run refinement (default is dry-run).")
+    parser.add_argument(
+        "--zarr-use",
+        choices=["analysis", "training", "any"],
+        default="analysis",
+        help="Filter zarr archives by purpose (default: analysis).",
+    )
     parser.add_argument("--no-skip-existing", action="store_true", help="Do not skip when refined runs already exist.")
     parser.add_argument("--detect-run", help="Detect run name to refine (defaults to latest).")
     parser.add_argument("--quality-run", help="Quality run to use (defaults to latest).")
@@ -225,7 +262,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     roots = _resolve_root(args.paths)
     skip_existing = not args.no_skip_existing
 
-    plans = _build_plans(roots, args.recursive, args.detect_run, skip_existing)
+    plans = _build_plans(roots, args.recursive, args.detect_run, skip_existing, args.zarr_use)
     if not plans:
         print("No zarr files found.")
         return 1
@@ -255,7 +292,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     log_path = log_dir / f"refine_detect_batch_{run_id}.jsonl"
     logger = JsonLogger(log_path, run_id)
     print(f"Log file: {log_path}")
-    logger.log("run_start", roots=[str(r) for r in roots], recursive=bool(args.recursive))
+    logger.log(
+        "run_start",
+        roots=[str(r) for r in roots],
+        recursive=bool(args.recursive),
+        zarr_use=str(args.zarr_use),
+    )
 
     console = Console() if Console else None
     progress = _progress(console, len(plans))

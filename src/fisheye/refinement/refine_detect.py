@@ -17,10 +17,10 @@ import sys
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, Any
 from rich.console import Console
-from zarr.core.dtype import VariableLengthUTF8
 
 from ..utils.metadata import get_total_frames, get_detection_method
 from ..utils.system import get_environment_info, get_git_info
+from ..shared.detect_reason_codec import write_reason_columns
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
@@ -149,7 +149,7 @@ def filter_detections(
 
 def find_gaps_to_interpolate(
     frame_indices: np.ndarray,
-    max_gap: int = 20
+    max_gap: int = 50
 ) -> List[Dict]:
     """
     Find gaps between detections suitable for interpolation.
@@ -235,7 +235,7 @@ def interpolate_detections(
     filtered_frame_indices: np.ndarray,
     filtered_class_ids: np.ndarray,
     num_frames: int,
-    max_gap: int = 20,
+    max_gap: int = 50,
     method: str = 'linear'
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict]:
     """
@@ -381,15 +381,14 @@ def _build_interpolated_reason_labels(detection_source: np.ndarray) -> np.ndarra
 
 
 def _write_reason_array(group: zarr.Group, reason: np.ndarray, chunk_size: int) -> None:
-    """Write UTF-8 reason labels to a run subgroup."""
-    reason_arr = group.create_array(
-        "reason",
-        shape=(int(reason.shape[0]),),
-        chunks=(max(1, int(chunk_size)),),
-        dtype=VariableLengthUTF8(),
-        fill_value="",
+    """Write reason labels in both string and Crimson-compatible byte formats."""
+    write_reason_columns(
+        group,
+        np.asarray(reason, dtype=object),
+        chunk_size,
+        include_reason_text=True,
+        overwrite=False,
     )
-    reason_arr[:] = np.asarray(reason, dtype=str)
 
 
 def get_refinement_parameters(
@@ -409,7 +408,7 @@ def get_refinement_parameters(
     # Start with config defaults
     refine_params = config.get('refine_detect', {}).copy()
     refine_params.setdefault('filters', {'remove_jumps': True, 'remove_blips': False})
-    refine_params.setdefault('max_gap', 20)
+    refine_params.setdefault('max_gap', 50)
     refine_params.setdefault('interpolation_method', 'linear')
     
     # Apply CLI overrides if provided
@@ -773,9 +772,19 @@ def create_refined_run(
     filtered_grp.create_array('frame_counts', data=filtered_counts, chunks=(10000,))
     filtered_grp.create_array('n_detections', data=filtered_counts, chunks=(10000,))
     filtered_grp.create_array('frame_mapping', data=filtered_frame_indices, chunks=(1000,))
+    filtered_detection_source = np.zeros(len(filtered_bboxes), dtype='i1')
+    filtered_grp.create_array('detection_source', data=filtered_detection_source, chunks=(1000,))
     filtered_reason = _build_filtered_reason_labels(len(filtered_bboxes))
     _write_reason_array(filtered_grp, filtered_reason, 1000)
-    filtered_column_fields = ['frame_indices', 'bbox_norm_coords', 'scores', 'class_ids', 'reason']
+    filtered_column_fields = [
+        'frame_indices',
+        'bbox_norm_coords',
+        'scores',
+        'class_ids',
+        'detection_source',
+        'reason_bytes',
+        'reason',
+    ]
     filtered_grp.attrs['storage_layout'] = 'columnar'
     filtered_grp.attrs['column_fields'] = filtered_column_fields
     filtered_grp.attrs['field_names'] = filtered_column_fields
@@ -796,7 +805,15 @@ def create_refined_run(
     interp_grp.create_array('detection_source', data=detection_source, chunks=(1000,))
     interp_reason = _build_interpolated_reason_labels(detection_source)
     _write_reason_array(interp_grp, interp_reason, 1000)
-    interpolated_column_fields = ['frame_indices', 'bbox_norm_coords', 'scores', 'class_ids', 'detection_source', 'reason']
+    interpolated_column_fields = [
+        'frame_indices',
+        'bbox_norm_coords',
+        'scores',
+        'class_ids',
+        'detection_source',
+        'reason_bytes',
+        'reason',
+    ]
     interp_grp.attrs['storage_layout'] = 'columnar'
     interp_grp.attrs['column_fields'] = interpolated_column_fields
     interp_grp.attrs['field_names'] = interpolated_column_fields

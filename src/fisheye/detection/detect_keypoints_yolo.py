@@ -95,6 +95,14 @@ def _create_output_arrays(group: zarr.Group, total_rois: int, chunk_hint: int) -
             fill_value=np.nan,
             overwrite=True,
         ),
+        "keypoint_confidences": group.create_array(
+            "keypoint_confidences",
+            shape=(total_rois, 3),
+            chunks=(chunk_len, 3),
+            dtype="f8",
+            fill_value=np.nan,
+            overwrite=True,
+        ),
         "detection_success": group.create_array(
             "detection_success",
             shape=(total_rois,),
@@ -103,8 +111,16 @@ def _create_output_arrays(group: zarr.Group, total_rois: int, chunk_hint: int) -
             fill_value=False,
             overwrite=True,
         ),
-        "heading_valid": group.create_array(
-            "heading_valid",
+        "heading_finite": group.create_array(
+            "heading_finite",
+            shape=(total_rois,),
+            chunks=scalar_chunk,
+            dtype="bool",
+            fill_value=False,
+            overwrite=True,
+        ),
+        "heading_usable": group.create_array(
+            "heading_usable",
             shape=(total_rois,),
             chunks=scalar_chunk,
             dtype="bool",
@@ -224,6 +240,28 @@ def _select_detection(result) -> Optional[int]:
     return int(conf.argmax())
 
 
+def _extract_keypoint_confidences(keypoints, det_idx: int, *, n_keypoints: int = 3) -> np.ndarray:
+    """Extract per-keypoint confidences for one detection.
+
+    Returns a float array of length ``n_keypoints``. Missing/conf-unavailable
+    values are left as NaN.
+    """
+    out = np.full(n_keypoints, np.nan, dtype=np.float64)
+    kp_conf = getattr(keypoints, "conf", None)
+    if kp_conf is None:
+        return out
+    try:
+        conf_np = kp_conf[det_idx].detach().cpu().numpy()
+    except Exception:
+        return out
+    conf_flat = np.asarray(conf_np, dtype=np.float64).reshape(-1)
+    if conf_flat.size == 0:
+        return out
+    take = min(n_keypoints, conf_flat.size)
+    out[:take] = conf_flat[:take]
+    return out
+
+
 def detect_keypoints_yolo(
     zarr_path: str,
     model_path: str,
@@ -237,6 +275,7 @@ def detect_keypoints_yolo(
     iou: float = 0.5,
     max_det: int = 1,
     verbose: bool = False,
+    mask_threshold: float = 0.5,
     console: Optional[Console] = None,
 ) -> str:
     """Run YOLO pose inference and record outputs in ``keypoints_runs``.
@@ -307,6 +346,7 @@ def detect_keypoints_yolo(
 
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
     run_group.attrs["keypoint_labels"] = ["bladder", "eye_left", "eye_right"]
+    run_group.attrs["keypoint_confidence_labels"] = ["bladder", "eye_left", "eye_right"]
     run_group.attrs["pose_schema"] = {
         "name": TRADITIONAL_POSE_SCHEMA.name,
         "nodes": TRADITIONAL_POSE_SCHEMA.node_names,
@@ -452,6 +492,7 @@ def detect_keypoints_yolo(
             batch_keypoints_norm = np.full_like(batch_keypoints_roi, np.nan)
             batch_heading = np.full(len(rgb_inputs), np.nan, dtype=np.float64)
             batch_conf = np.full(len(rgb_inputs), np.nan, dtype=np.float64)
+            batch_keypoint_conf = np.full((len(rgb_inputs), 3), np.nan, dtype=np.float64)
             batch_success = np.zeros(len(rgb_inputs), dtype=bool)
 
             for i, (res, top_left) in enumerate(zip(results, batch_coords)):
@@ -478,6 +519,7 @@ def detect_keypoints_yolo(
                 batch_keypoints_img[i] = kp_img
                 batch_keypoints_norm[i] = kp_img / norm_factor
                 batch_heading[i] = _compute_heading(kp[0], kp[1], kp[2])
+                batch_keypoint_conf[i] = _extract_keypoint_confidences(keypoints, det_idx, n_keypoints=3)
 
                 boxes = getattr(res, "boxes", None)
                 if boxes is not None and boxes.conf is not None and boxes.conf.numel() > 0:
@@ -496,6 +538,7 @@ def detect_keypoints_yolo(
             arrays["keypoints_norm"][start:end] = batch_keypoints_norm
             arrays["heading"][start:end] = batch_heading
             arrays["confidence"][start:end] = batch_conf
+            arrays["keypoint_confidences"][start:end] = batch_keypoint_conf
             arrays["detection_success"][start:end] = batch_success
             arrays["effective_threshold"][start:end] = np.nan
             arrays["effective_se2_radius"][start:end] = np.nan
@@ -505,7 +548,12 @@ def detect_keypoints_yolo(
             else:
                 source_chunk = np.zeros(end - start, dtype="i1")
             detection_source_dst[start:end] = source_chunk
-            arrays["heading_valid"][start:end] = np.logical_and(batch_success, source_chunk == 0)
+            heading_finite_chunk = np.isfinite(batch_heading)
+            arrays["heading_finite"][start:end] = heading_finite_chunk
+            arrays["heading_usable"][start:end] = np.logical_and(
+                np.logical_and(batch_success, source_chunk == 0),
+                heading_finite_chunk,
+            )
 
             progress.update(task, advance=end - start)
 
@@ -561,6 +609,8 @@ def detect_keypoints_yolo(
             "imgsz": imgsz,
             "batch_size": batch_size,
             "device": model_device,
+            # Maintained for API compatibility with pipeline/batch configs.
+            "mask_threshold": float(mask_threshold),
         },
         "model_names": getattr(model.model, "names", None),
         "summary_statistics": {
@@ -654,7 +704,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
     parser.add_argument("--iou", type=float, default=0.5, help="IoU threshold for NMS")
     parser.add_argument("--max-det", type=int, default=1, help="Maximum detections per ROI")
-    parser.add_argument("--mask-threshold", type=float, default=0.5, help="Mask binarization threshold")
+    parser.add_argument(
+        "--mask-threshold",
+        type=float,
+        default=0.5,
+        help="Compatibility parameter recorded in run metadata (not used for pose decoding).",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output")
     return parser
 
@@ -675,6 +730,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         iou=args.iou,
         max_det=args.max_det,
         verbose=args.verbose,
+        mask_threshold=args.mask_threshold,
     )
 
 

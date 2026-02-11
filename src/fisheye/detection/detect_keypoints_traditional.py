@@ -659,7 +659,15 @@ def detect_keypoints(
         overwrite=True
     )
     keypoint_group.create_array(
-        'heading_valid',
+        'heading_finite',
+        shape=(total_rois,),
+        chunks=scalar_chunk,
+        dtype='bool',
+        fill_value=False,
+        overwrite=True
+    )
+    keypoint_group.create_array(
+        'heading_usable',
         shape=(total_rois,),
         chunks=scalar_chunk,
         dtype='bool',
@@ -816,8 +824,13 @@ def detect_keypoints(
         overwrite=True
     )
 
-    heading_valid = np.logical_and(detection_success, detection_source_values == 0)
-    keypoint_group['heading_valid'][:] = heading_valid
+    heading_finite = np.isfinite(np.asarray(keypoint_group['heading'][:], dtype=np.float64))
+    heading_usable = np.logical_and(
+        np.logical_and(detection_success, detection_source_values == 0),
+        heading_finite,
+    )
+    keypoint_group['heading_finite'][:] = heading_finite
+    keypoint_group['heading_usable'][:] = heading_usable
     frames_with_success = int(np.sum(success_counts > 0))
     
     # Store summary

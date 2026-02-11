@@ -161,7 +161,8 @@ Produced by the keypoint detection stage (traditional or YOLO-based).
 | `effective_se2_radius` | `(n_rois,)` | `float64` | Search radius actually applied |
 | `detection_success` | `(n_rois,)` | `bool` | True if keypoints converged |
 | `detection_source` | `(n_rois,)` | `int8` | 0=real, 1=interpolated (from crop source) |
-| `heading_valid` | `(n_rois,)` | `bool` | True when heading is valid + source is real |
+| `heading_finite` | `(n_rois,)` | `bool` | True when `heading` is finite |
+| `heading_usable` | `(n_rois,)` | `bool` | True when source is real, detection succeeded, and heading is finite |
 | `n_keypoints` | `(n_frames,)` | `int32` | Successful keypoints per frame |
 | `triangle_angles` | `(n_rois, 3)` | `float64` | Triangle angles in canonical order (bladder, left, right) |
 | `triangle_angles_raw` | `(n_rois, 3)` | `float64` | Triangle angles in candidate order (largest -> smallest blob) |
@@ -251,10 +252,13 @@ Parent attrs on `refined_detect_runs/`:
 | `scores` | `(n_detections,)` | Scores (or placeholder for blob) |
 | `class_ids` | `(n_detections,)` | Class labels |
 | `frame_mapping` | `(n_detections,)` | Legacy alias of `frame_indices` |
+| `detection_source` | `(n_detections,)` | 0 = real/clean |
+| `reason_bytes` | `(n_detections, width)` | Null-terminated UTF-8 reason labels (`uint8`) |
 | `reason` | `(n_detections,)` | UTF-8 tags (currently `clean`) |
 
 Attrs: `total_detections`, `dropped_detections`, `drop_reasons`, `column_fields`,
-`storage_layout`, `field_names`.
+`storage_layout`, `field_names`, `reason_encoding`,
+`reason_fallback_order=["reason_bytes","reason","detection_source"]`.
 
 ### `interpolated/`
 
@@ -263,10 +267,12 @@ Same arrays as `filtered/`, plus:
 | Array | Shape | Notes |
 | ----- | ----- | ----- |
 | `detection_source` | `(n_detections,)` | 0 = real, 1 = interpolated |
+| `reason_bytes` | `(n_detections, width)` | Null-terminated UTF-8 reason labels (`uint8`) |
 | `reason` | `(n_detections,)` | UTF-8 tags (`clean` or `interpolated`) |
 
 Attrs: `original_detections`, `interpolated_detections`, `gaps_filled`,
-`interpolation_stats`, plus columnar metadata.
+`interpolation_stats`, plus columnar metadata and
+`reason_fallback_order=["reason_bytes","reason","detection_source"]`.
 
 ### Manual / Retune subgroups (e.g. `manual/`)
 
@@ -276,6 +282,7 @@ These subgroups mirror the detection arrays and may include:
 | Array | Shape | Notes |
 | ----- | ----- | ----- |
 | `retune_id` *(optional)* | `(n_detections,)` | Retune parameter set label (`-1` = none) |
+| `reason_bytes` *(optional)* | `(n_detections, width)` | Null-terminated UTF-8 reason labels (`uint8`) |
 | `reason` *(optional)* | `(n_detections,)` | UTF-8 labels (e.g. `retune`, `manual_correction`) |
 
 Attrs include `detection_source_type` (`manual`/`retune`), `detection_source_path`,
@@ -318,10 +325,12 @@ Outputs from `fisheye.refinement.refine_keypoints`.
 | `refined_success` | `(n_rois,)` | `bool` | Refinement executed successfully |
 | `source_success` | `(n_rois,)` | `bool` | Source keypoint success mask |
 | `flip_corrected` | `(n_rois,)` | `bool` | True if left/right eyes were swapped |
-| `heading_valid` | `(n_rois,)` | `bool` | True when refined + source real |
+| `heading_finite` | `(n_rois,)` | `bool` | True when `heading` is finite |
+| `heading_usable` | `(n_rois,)` | `bool` | True when refined succeeded, source is real, and heading is finite |
 | `confidence_valid` | `(n_rois,)` | `bool` | All per-keypoint confidences >= threshold |
 | `geometry_valid` | `(n_rois,)` | `bool` | Triangle angle/area pass thresholds |
 | `usable_keypoints` | `(n_rois,)` | `bool` | Confidence + geometry valid |
+| `reason_bytes` | `(n_rois, width)` | `uint8` | Null-terminated UTF-8 reason labels (TensorStore-safe primary encoding) |
 | `reason` | `(n_rois,)` | `string` | Pipe-delimited tags (e.g., `flip_corrected|geometry_issue`) |
 | `failure_indices` | `(n_failures,)` | `int32` | ROI indices where source keypoints failed |
 
@@ -329,6 +338,17 @@ Attributes: `source_keypoints_run`, `source_crop_run`, `source_detect_run`,
 refinement parameters (thresholds), `summary_statistics`, `retune_params`,
 `keypoint_signature`, `keypoint_review_status`, `keypoint_review_signature`,
 scheduler config, environment/provenance metadata.
+
+Reason-label attrs on refined keypoint runs:
+
+- `reason_encoding="utf8-null-terminated"`
+- `reason_bytes_width=<int>`
+- `reason_bytes_null_terminated=true`
+- `reason_fallback_order=["reason_bytes","reason","detection_source"]`
+
+Consumers should read reason labels in this order:
+`reason_bytes` -> `reason` -> labels derived from `detection_source`
+(`0=clean`, `1=interpolated`).
 
 `summary_statistics` is a dict with a refine-time snapshot plus optional
 postprocess counts, e.g.:
@@ -479,6 +499,7 @@ Stimulus run data imported from Citrus H5 files. Each run contains:
 **Run Attributes**:
 - `created_at_utc`: Import timestamp
 - `source_h5`: Path to source H5 file
+- `source_stimulus_video_path`: Path to rendered stimulus video next to source H5 (when present; analysis stimulus runs only)
 - `import_version`: Import script version
 - `protocol_json`: Protocol definition (JSON string)
 - `arena_config_json`: Arena/calibration configuration (JSON string)
@@ -767,8 +788,9 @@ Examples:
   reads.  Use `zarr.open_group(path, mode="r")` and slice natively.
 - `fisheye.shared.zarr.schema.get_run_group(root, stage)` resolves the run
   path respecting `attrs["latest"]`.
-- QA-sensitive tooling should filter using the stage-specific `reason` or
-  metrics arrays instead of assuming all records are valid.
+- QA-sensitive tooling should filter using stage-specific reason/metrics arrays.
+  For refined detect/keypoint groups, prefer `reason_bytes`, then `reason`,
+  then `detection_source` as fallback.
 - **For distance calculations**: Always verify you're using the correct
   `pixels_per_mm` value for your coordinate space.
 

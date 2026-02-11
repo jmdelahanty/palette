@@ -191,6 +191,34 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Advance without prompting between recordings.",
     )
+    parser.add_argument(
+        "--review-state",
+        default="approved",
+        choices=["approved", "pending", "rejected", "needs_review"],
+        help="Review state to set when pressing 'a' in the crop viewer (default: approved).",
+    )
+    parser.add_argument(
+        "--review-method",
+        default="manual",
+        choices=["manual", "algorithmic", "hybrid", "spotcheck"],
+        help="Review method label passed to the crop viewer (default: manual).",
+    )
+    parser.add_argument(
+        "--review-intended-use",
+        default="training",
+        choices=["training", "full_recording"],
+        help="Intended use label passed to the crop viewer (default: training).",
+    )
+    parser.add_argument(
+        "--reviewer",
+        type=str,
+        help="Optional reviewer name forwarded to the crop viewer.",
+    )
+    parser.add_argument(
+        "--review-notes",
+        type=str,
+        help="Optional review notes forwarded to the crop viewer.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -245,9 +273,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             "-m",
             "fisheye.visualization.visualize_crops",
             str(plan.zarr_path),
+            "--review-state",
+            args.review_state,
+            "--review-method",
+            args.review_method,
+            "--review-intended-use",
+            args.review_intended_use,
         ]
         if plan.crop_run:
             cmd.extend(["--crop-run", plan.crop_run])
+        if args.reviewer:
+            cmd.extend(["--reviewer", args.reviewer])
+        if args.review_notes:
+            cmd.extend(["--review-notes", args.review_notes])
         subprocess.run(cmd, check=False)
         if idx < end - 1 and not args.no_prompt:
             if not _prompt_continue():

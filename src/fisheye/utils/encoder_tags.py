@@ -6,7 +6,7 @@ import re
 from typing import Any, Dict, Optional
 
 
-_RES_RE = re.compile(r"^(\\d+)x(\\d+)$", re.IGNORECASE)
+_RES_RE = re.compile(r"^(\d+)x(\d+)$", re.IGNORECASE)
 
 
 def _coerce_int(value: Optional[str]) -> Optional[int]:
@@ -40,10 +40,20 @@ def parse_encoder_comment(comment: Optional[str]) -> Dict[str, Any]:
     parts = [part.strip() for part in comment.split(";") if part.strip()]
     raw: Dict[str, Any] = {}
     encoder_name = None
+    known_keys = {"codec", "preset", "tuning", "rc", "res", "fps", "color", "bpp", "target_bps"}
     for part in parts:
         if "=" in part:
             key, value = part.split("=", 1)
-            raw[key.strip().lower()] = value.strip()
+            key_norm = key.strip().lower()
+            # Handle comments like "nvenc codec=hevc" where the encoder name is
+            # prepended to the first key token.
+            if " " in key_norm:
+                prefix, maybe_key = key_norm.split(" ", 1)
+                if maybe_key in known_keys:
+                    if encoder_name is None:
+                        encoder_name = prefix
+                    key_norm = maybe_key
+            raw[key_norm] = value.strip()
         else:
             if encoder_name is None:
                 encoder_name = part.strip()

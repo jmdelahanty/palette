@@ -19,7 +19,6 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import zarr
-from zarr.core.dtype import VariableLengthUTF8
 from matplotlib.patches import Rectangle
 from matplotlib.widgets import RectangleSelector
 from rich.console import Console
@@ -27,6 +26,7 @@ from skimage.measure import label, regionprops
 from skimage.morphology import disk, dilation, erosion
 
 from fisheye.detection.detect_traditional import create_dish_mask, get_detection_parameters
+from fisheye.shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from fisheye.shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
@@ -198,21 +198,29 @@ def _write_manual_group(
     column_fields = ["frame_indices", "bbox_norm_coords", "scores", "class_ids"]
     if retune_id is not None:
         column_fields.append("retune_id")
-    if detection_source is not None:
-        group.create_array("detection_source", data=detection_source, chunks=(det_chunk,), overwrite=True)
-        column_fields.append("detection_source")
+    if detection_source is None:
+        detection_source_arr = np.zeros(frame_indices.shape[0], dtype=np.int8)
+    else:
+        detection_source_arr = np.asarray(detection_source, dtype=np.int8)
+    if detection_source_arr.shape[0] != frame_indices.shape[0]:
+        raise RuntimeError("detection_source length does not match frame_indices length.")
+    group.create_array("detection_source", data=detection_source_arr, chunks=(det_chunk,), overwrite=True)
+    column_fields.append("detection_source")
 
-    if reason is not None:
-        reason_arr = group.create_array(
-            "reason",
-            shape=(reason.shape[0],),
-            chunks=(det_chunk,),
-            dtype=VariableLengthUTF8(),
-            fill_value="",
-            overwrite=True,
-        )
-        reason_arr[:] = np.asarray(reason, dtype=str)
-        column_fields.append("reason")
+    if reason is None:
+        reason_arr = np.where(detection_source_arr == 1, "interpolated", "clean").astype(object)
+    else:
+        reason_arr = np.asarray(reason, dtype=object)
+    if reason_arr.shape[0] != frame_indices.shape[0]:
+        raise RuntimeError("reason length does not match frame_indices length.")
+    written_reason_fields = write_reason_columns(
+        group,
+        reason_arr,
+        det_chunk,
+        include_reason_text=True,
+        overwrite=True,
+    )
+    column_fields.extend(written_reason_fields)
 
     group.attrs["storage_layout"] = "columnar"
     group.attrs["column_fields"] = column_fields
@@ -1005,8 +1013,7 @@ def run_retune_review(
     detection_source_arr = np.asarray(detection_source[:], dtype=np.int8) if detection_source is not None else None
     base_retune_id = base_group.get("retune_id")
     base_retune_id_arr = np.asarray(base_retune_id[:], dtype=np.int32) if base_retune_id is not None else None
-    base_reason = base_group.get("reason")
-    base_reason_arr = np.asarray(base_reason[:], dtype=object) if base_reason is not None else None
+    base_reason_arr = read_reason_labels(base_group)
 
     frames_to_replace = retune_frames
     keep_mask = ~np.isin(frame_indices, frames_to_replace)

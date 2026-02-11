@@ -575,7 +575,7 @@
 # usable = np.asarray(run["usable_keypoints"][:], dtype=bool)
 # print("usable false:", np.sum(~usable))
 
-# for name in ["refined_success", "confidence_valid", "geometry_valid", "heading_valid"]:
+# for name in ["refined_success", "confidence_valid", "geometry_valid", "heading_usable"]:
 #     arr = run.get(name)
 #     if arr is not None:
 #         vals = np.asarray(arr[:], dtype=bool)

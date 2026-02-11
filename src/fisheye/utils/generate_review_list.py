@@ -13,12 +13,15 @@ from typing import Iterable, List, Optional, Dict
 
 import zarr
 
+from fisheye.registry.db import Registry
+
 
 @dataclass
 class ReviewCandidate:
     zarr_path: Path
     status: str
     reason: Optional[str] = None
+    run_status: Optional[str] = None
     review_state: Optional[str] = None
     review_method: Optional[str] = None
     review_intended_use: Optional[str] = None
@@ -78,6 +81,13 @@ def _normalize_state(value: object) -> Optional[str]:
     else:
         text = str(value).strip()
     return text.lower() if text else None
+
+
+def _normalize_text(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text else None
 
 
 def _extract_review_fields(status: Optional[Dict[str, object]]) -> tuple[Optional[str], Optional[str], Optional[str]]:
@@ -146,6 +156,7 @@ def _build_candidates(
             continue
 
         run_group = parent[resolved_run]
+        run_status = _normalize_state(run_group.attrs.get("status"))
         if stage == "crop":
             status_attr = run_group.attrs.get("crop_review_status")
         elif stage == "detect":
@@ -159,6 +170,7 @@ def _build_candidates(
             ReviewCandidate(
                 zarr_path=zarr_path,
                 status="ok",
+                run_status=run_status,
                 review_state=state,
                 review_method=method,
                 review_intended_use=intended,
@@ -168,12 +180,112 @@ def _build_candidates(
     return sorted(candidates, key=lambda item: str(item.zarr_path))
 
 
+def _path_matches_scope(zarr_path: Path, roots: List[Path], recursive: bool) -> bool:
+    if not roots:
+        return True
+    zarr_resolved = zarr_path.expanduser().resolve()
+    for root in roots:
+        root = root.expanduser()
+        if root.suffix == ".zarr" and (root.is_file() or not root.exists()):
+            if zarr_resolved == root.resolve():
+                return True
+            continue
+        try:
+            rel = zarr_resolved.relative_to(root.resolve())
+        except Exception:
+            continue
+        if recursive:
+            return True
+        # Match existing non-recursive behavior:
+        # root/*.zarr and root/*/zarr/*.zarr
+        if len(rel.parts) == 1:
+            return True
+        if len(rel.parts) == 3 and rel.parts[1] == "zarr":
+            return True
+    return False
+
+
+def _resolve_crop_run_status(zarr_path: Path, run_name: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    if not run_name:
+        return None, "missing crop run"
+    try:
+        root = zarr.open_group(str(zarr_path), mode="r")
+    except Exception as exc:
+        return None, str(exc)
+    crop_parent = root.get("crop_runs")
+    if crop_parent is None:
+        return None, "no crop_runs"
+    if run_name not in crop_parent:
+        return None, f"crop run not found: {run_name}"
+    status = _normalize_state(crop_parent[run_name].attrs.get("status"))
+    return status, None
+
+
+def _build_crop_candidates_from_registry(
+    *,
+    registry_path: Path,
+    roots: List[Path],
+    recursive: bool,
+    run_name: Optional[str],
+    crop_run_status_filter: Optional[str],
+) -> List[ReviewCandidate]:
+    candidates: List[ReviewCandidate] = []
+    table_name = "crop_quality" if run_name else "crop_quality_current"
+    sql = [
+        f"SELECT d.zarr_path, cq.crop_run, cq.review_state, cq.review_method, cq.review_intended_use",
+        f"FROM {table_name} cq",
+        "JOIN datasets d ON d.dataset_id = cq.dataset_id",
+        "WHERE d.zarr_path IS NOT NULL AND TRIM(d.zarr_path) <> ''",
+    ]
+    params: List[object] = []
+    if run_name:
+        sql.append("AND cq.crop_run = ?")
+        params.append(str(run_name))
+    sql.append("ORDER BY d.zarr_path")
+
+    registry = Registry(registry_path)
+    try:
+        rows = registry.conn.execute(" ".join(sql), params).fetchall()
+    finally:
+        registry.close()
+
+    for row in rows:
+        zarr_path = Path(str(row["zarr_path"])).expanduser()
+        if not _path_matches_scope(zarr_path, roots, recursive):
+            continue
+        candidate = ReviewCandidate(
+            zarr_path=zarr_path,
+            status="ok",
+            run_name=_normalize_text(row["crop_run"]),
+            review_state=_normalize_state(row["review_state"]),
+            review_method=_normalize_state(row["review_method"]),
+            review_intended_use=_normalize_state(row["review_intended_use"]),
+        )
+        if crop_run_status_filter and crop_run_status_filter != "any":
+            run_status, error_reason = _resolve_crop_run_status(
+                zarr_path=candidate.zarr_path,
+                run_name=candidate.run_name,
+            )
+            candidate.run_status = run_status
+            if error_reason:
+                candidate.reason = error_reason
+        candidates.append(candidate)
+
+    return sorted(candidates, key=lambda item: str(item.zarr_path))
+
+
 def _match_filters(
     candidate: ReviewCandidate,
+    stage: str,
+    crop_run_status_filter: Optional[str],
     state_filters: List[str],
     method_filter: Optional[str],
     intended_filter: Optional[str],
 ) -> bool:
+    if stage == "crop" and crop_run_status_filter and crop_run_status_filter != "any":
+        run_status = candidate.run_status or "missing"
+        if run_status != crop_run_status_filter:
+            return False
     state = candidate.review_state or "missing"
     if "any" not in state_filters and state not in state_filters:
         return False
@@ -240,10 +352,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Filter by intended use (default: no filter).",
     )
     parser.add_argument(
+        "--crop-run-status",
+        choices=["completed", "running", "failed", "missing", "any"],
+        default="completed",
+        help=(
+            "Crop-stage run status filter (default: completed). "
+            "Only applies when --stage crop."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
         help="Output file to write (default: <stage>_review_list.txt in cwd).",
+    )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help="Optional registry SQLite path for crop-stage registry-first candidate discovery.",
     )
     parser.add_argument(
         "--print",
@@ -270,13 +396,37 @@ def main(argv: Optional[List[str]] = None) -> int:
         env_root = os.environ.get("PALETTE_RECORDINGS_ROOT")
         roots = [Path(env_root)] if env_root else [Path("/nvme1/recordings")]
 
-    candidates = _build_candidates(
-        roots=roots,
-        recursive=args.recursive,
-        stage=args.stage,
-        run_name=args.run_name,
-        include_missing_runs=args.include_missing_runs,
+    if args.registry is not None and args.stage != "crop":
+        print("--registry is currently supported for --stage crop only.")
+        return 1
+
+    crop_run_status_filter: Optional[str] = args.crop_run_status if args.stage == "crop" else None
+
+    use_registry_crop = bool(
+        args.stage == "crop"
+        and args.registry is not None
+        and not args.include_missing_runs
     )
+    if use_registry_crop:
+        registry_path = args.registry.expanduser().resolve()
+        if not registry_path.exists():
+            print(f"Registry not found: {registry_path}")
+            return 1
+        candidates = _build_crop_candidates_from_registry(
+            registry_path=registry_path,
+            roots=roots,
+            recursive=args.recursive,
+            run_name=args.run_name,
+            crop_run_status_filter=crop_run_status_filter,
+        )
+    else:
+        candidates = _build_candidates(
+            roots=roots,
+            recursive=args.recursive,
+            stage=args.stage,
+            run_name=args.run_name,
+            include_missing_runs=args.include_missing_runs,
+        )
 
     if args.list:
         print(f"Candidates: {len(candidates)}")
@@ -284,9 +434,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             state = item.review_state or "missing"
             method = item.review_method or "missing"
             intended = item.review_intended_use or "missing"
+            run_status = item.run_status or "missing"
             run = item.run_name or "none"
             reason = f" ({item.reason})" if item.reason else ""
-            print(f"{item.zarr_path} | {args.stage}={run} | {state}/{method}/{intended}{reason}")
+            if args.stage == "crop":
+                print(
+                    f"{item.zarr_path} | {args.stage}={run} | "
+                    f"run_status={run_status} | {state}/{method}/{intended}{reason}"
+                )
+            else:
+                print(f"{item.zarr_path} | {args.stage}={run} | {state}/{method}/{intended}{reason}")
         return 0
 
     state_filters = [state.lower() for state in args.review_state]
@@ -298,7 +455,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         intended_filter = None
 
     matched = [
-        item for item in candidates if _match_filters(item, state_filters, method_filter, intended_filter)
+        item
+        for item in candidates
+        if _match_filters(
+            item,
+            args.stage,
+            crop_run_status_filter,
+            state_filters,
+            method_filter,
+            intended_filter,
+        )
     ]
 
     output_path = args.output or Path.cwd() / f"{args.stage}_review_list.txt"

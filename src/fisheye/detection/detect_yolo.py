@@ -339,7 +339,7 @@ def detect_yolo(
     
     # Get detection parameters with CLI overrides taking precedence
     detect_config = config.get('detection', {})
-    conf_threshold = conf_threshold if conf_threshold is not None else detect_config.get('conf_threshold', 0.25)
+    conf_threshold = conf_threshold if conf_threshold is not None else detect_config.get('conf_threshold', 0.40)
     iou_threshold = iou_threshold if iou_threshold is not None else detect_config.get('iou_threshold', 0.45)
     max_det = max_det if max_det is not None else detect_config.get('max_det', 20)
     batch_size = batch_size if batch_size is not None else detect_config.get('batch_size', 32)

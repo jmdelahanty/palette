@@ -70,6 +70,82 @@ def _get_expected_subject_count(root: zarr.Group) -> Optional[int]:
     return None
 
 
+def _as_positive_int(value: object) -> Optional[int]:
+    try:
+        ivalue = int(value)  # type: ignore[arg-type]
+    except Exception:
+        return None
+    return ivalue if ivalue > 0 else None
+
+
+def _resolve_detect_geometry(
+    root: zarr.Group,
+    detect_group: zarr.Group,
+    frame_indices: np.ndarray,
+) -> Tuple[int, int, int]:
+    """Resolve (width, height, num_frames) without requiring imported raw frames."""
+    raw = root.get("raw_video")
+
+    # Preferred source: imported frame datasets, when present.
+    if raw is not None and "images_ds" in raw:
+        ds_images = raw["images_ds"]
+        return int(ds_images.shape[2]), int(ds_images.shape[1]), int(ds_images.shape[0])
+    if raw is not None and "images_full" in raw:
+        full_images = raw["images_full"]
+        return int(full_images.shape[2]), int(full_images.shape[1]), int(full_images.shape[0])
+
+    # Fallback image geometry from attrs.
+    width = _as_positive_int(root.attrs.get("width")) or 640
+    height = _as_positive_int(root.attrs.get("height")) or 640
+    if raw is not None:
+        ds_res = raw.attrs.get("downsampled_resolution")
+        if isinstance(ds_res, (list, tuple)) and len(ds_res) == 2:
+            ds_h = _as_positive_int(ds_res[0])
+            ds_w = _as_positive_int(ds_res[1])
+            if ds_h and ds_w:
+                height = ds_h
+                width = ds_w
+
+    # Fallback frame universe in order of reliability.
+    num_frames = None
+    if "frame_counts" in detect_group:
+        num_frames = _as_positive_int(detect_group["frame_counts"].shape[0])
+    if num_frames is None:
+        num_frames = _as_positive_int(detect_group.attrs.get("total_frames"))
+    if num_frames is None:
+        num_frames = _as_positive_int(root.attrs.get("total_frames"))
+    if num_frames is None and frame_indices.size:
+        num_frames = int(frame_indices.max()) + 1
+    if num_frames is None:
+        num_frames = 0
+
+    return width, height, int(num_frames)
+
+
+def _effective_jump_threshold_pixels(
+    jump_threshold: float,
+    threshold_mode: str,
+    width: float,
+    height: float,
+    threshold_reference_width: float = 640.0,
+) -> float:
+    """Convert threshold modes to an effective pixel displacement threshold."""
+    if threshold_mode == "pixels":
+        return float(jump_threshold)
+
+    if threshold_mode == "normalized":
+        return float(jump_threshold) * float(min(width, height))
+
+    if threshold_mode == "scaled":
+        ref = float(threshold_reference_width)
+        if ref <= 0:
+            raise ValueError("threshold_reference_width must be > 0 for scaled mode")
+        scale = float(min(width, height)) / ref
+        return float(jump_threshold) * scale
+
+    raise ValueError(f"Unsupported threshold_mode: {threshold_mode}")
+
+
 def identify_temporal_artifacts(
     bbox_coords: np.ndarray,
     frame_indices: np.ndarray,
@@ -375,6 +451,9 @@ def save_quality_report(
     quality_group.attrs["artifact_detection_params"] = {
         "jump_threshold": quality_report["artifacts"]["jump_threshold"],
         "blip_gap_threshold": quality_report["artifacts"].get("blip_gap_threshold", 10),
+        "jump_threshold_mode": quality_report["artifacts"].get("jump_threshold_mode", "pixels"),
+        "jump_threshold_pixels_effective": quality_report["artifacts"].get("jump_threshold_pixels_effective"),
+        "jump_threshold_reference_width": quality_report["artifacts"].get("jump_threshold_reference_width"),
     }
     if "sampling" in quality_report:
         quality_group.attrs["sampling"] = quality_report["sampling"]
@@ -460,6 +539,9 @@ def save_quality_report(
         'source_detect_run': source_run,
         'jump_threshold': quality_report['artifacts']['jump_threshold'],
         'blip_gap_threshold': quality_report['artifacts'].get('blip_gap_threshold'),
+        'jump_threshold_mode': quality_report['artifacts'].get('jump_threshold_mode', 'pixels'),
+        'jump_threshold_pixels_effective': quality_report['artifacts'].get('jump_threshold_pixels_effective'),
+        'jump_threshold_reference_width': quality_report['artifacts'].get('jump_threshold_reference_width'),
     }
     
     # ============================================================================
@@ -517,6 +599,8 @@ def analyze_detect_quality(
     run_name: Optional[str] = None,
     jump_threshold: float = 100.0,
     blip_gap_threshold: int = 10,
+    threshold_mode: str = "pixels",
+    threshold_reference_width: float = 640.0,
 ) -> Dict:
     """
     Comprehensive detection quality analysis.
@@ -525,6 +609,8 @@ def analyze_detect_quality(
         zarr_path: Path to zarr file
         run_name: Specific detect run to analyze (default: latest)
         jump_threshold: Distance threshold for jump detection (pixels)
+        threshold_mode: Threshold interpretation mode (`pixels`, `normalized`, `scaled`)
+        threshold_reference_width: Reference width for `scaled` threshold mode
 
     Returns:
         Complete quality analysis report
@@ -541,15 +627,15 @@ def analyze_detect_quality(
     frame_indices = detect_group["frame_indices"][:]
     bbox_coords = detect_group["bbox_norm_coords"][:]
 
-    # Get image dimensions
-    if "raw_video" in root:
-        ds_images = root["raw_video/images_ds"]
-        height, width = ds_images.shape[1], ds_images.shape[2]
-        num_frames = ds_images.shape[0]
-    else:
-        width = 640
-        height = 640
-        num_frames = int(frame_indices.max() + 1) if frame_indices.size else 0
+    # Resolve image geometry and frame universe (works with and without imported frames).
+    width, height, num_frames = _resolve_detect_geometry(root, detect_group, frame_indices)
+    effective_jump_threshold = _effective_jump_threshold_pixels(
+        jump_threshold=jump_threshold,
+        threshold_mode=threshold_mode,
+        width=width,
+        height=height,
+        threshold_reference_width=threshold_reference_width,
+    )
 
     if "frame_counts" in detect_group:
         frame_counts = detect_group["frame_counts"][:]
@@ -581,6 +667,11 @@ def analyze_detect_quality(
             "frame_gaps": np.array([]),
             "jump_threshold": jump_threshold,
             "blip_gap_threshold": blip_gap_threshold,
+            "jump_threshold_mode": threshold_mode,
+            "jump_threshold_pixels_effective": effective_jump_threshold,
+            "jump_threshold_reference_width": (
+                float(threshold_reference_width) if threshold_mode == "scaled" else None
+            ),
         }
     else:
         artifacts = identify_temporal_artifacts(
@@ -588,8 +679,14 @@ def analyze_detect_quality(
             frame_indices,
             width,
             height,
-            jump_threshold_pixels=jump_threshold,
+            jump_threshold_pixels=effective_jump_threshold,
             blip_gap_threshold=blip_gap_threshold
+        )
+        artifacts["jump_threshold"] = jump_threshold
+        artifacts["jump_threshold_mode"] = threshold_mode
+        artifacts["jump_threshold_pixels_effective"] = effective_jump_threshold
+        artifacts["jump_threshold_reference_width"] = (
+            float(threshold_reference_width) if threshold_mode == "scaled" else None
         )
 
     # Bounding box validation
@@ -675,7 +772,25 @@ Examples:
     parser.add_argument("zarr_path", help="Path to zarr file")
     parser.add_argument("--run", help="Specific detect run to analyze (default: latest)")
     parser.add_argument(
-        "--threshold", type=float, default=100.0, help="Jump threshold in pixels (default: 100)"
+        "--threshold",
+        type=float,
+        default=100.0,
+        help=(
+            "Jump threshold value. In scaled mode (default), interpreted as pixels "
+            "at reference width."
+        ),
+    )
+    parser.add_argument(
+        "--threshold-mode",
+        choices=["scaled", "pixels", "normalized"],
+        default="scaled",
+        help="How to interpret --threshold (default: scaled).",
+    )
+    parser.add_argument(
+        "--threshold-reference-width",
+        type=float,
+        default=640.0,
+        help="Reference width for scaled threshold mode (default: 640).",
     )
     parser.add_argument(
         "--save", action="store_true", default=True, help="Save quality report to zarr (default: True)"
@@ -692,7 +807,13 @@ Examples:
     console.print(f"Zarr: {args.zarr_path}")
     if args.run:
         console.print(f"Run: {args.run}")
-    console.print(f"Jump threshold: {args.threshold} pixels\n")
+    if args.threshold_mode == "scaled":
+        console.print(
+            f"Jump threshold: {args.threshold} px @ {args.threshold_reference_width:.0f}px reference "
+            f"(mode: {args.threshold_mode})\n"
+        )
+    else:
+        console.print(f"Jump threshold: {args.threshold} (mode: {args.threshold_mode})\n")
 
     try:
         # Run analysis
@@ -700,6 +821,8 @@ Examples:
             args.zarr_path,
             run_name=args.run,
             jump_threshold=args.threshold,
+            threshold_mode=args.threshold_mode,
+            threshold_reference_width=args.threshold_reference_width,
         )
 
         # Print detailed summary

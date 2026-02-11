@@ -165,6 +165,38 @@ def infer_detection_source_type(
     return fallback_type or 'detect'
 
 
+def _ensure_numpy_array(
+    array_like: Any,
+    *,
+    dtype: Optional[np.dtype | str] = None,
+    name: str = "array",
+) -> np.ndarray:
+    """
+    Convert array-like values to a NumPy array, handling GPU-backed arrays that
+    require explicit host transfer (e.g., CuPy `.get()`).
+    """
+    arr_obj: Any = array_like
+
+    if not isinstance(arr_obj, np.ndarray):
+        getter = getattr(arr_obj, "get", None)
+        if callable(getter):
+            try:
+                arr_obj = getter()
+            except Exception:
+                # Fall through to generic conversion path.
+                arr_obj = array_like
+
+    if not isinstance(arr_obj, np.ndarray):
+        try:
+            arr_obj = np.asarray(arr_obj)
+        except Exception as exc:  # pragma: no cover - defensive path
+            raise TypeError(f"Failed to convert {name} to NumPy array: {exc}") from exc
+
+    if dtype is not None:
+        arr_obj = arr_obj.astype(dtype, copy=False)
+    return arr_obj
+
+
 def resolve_source_run_info(
     root: zarr.Group,
     source_path: Optional[str]
@@ -580,6 +612,7 @@ def crop_from_external_video(
     external_roi_chunk_size: int = 1024,
     external_roi_shard_size: Optional[int] = None,
     external_gpu_chunk_frames: int = 96,
+    external_require_kvikio: bool = False,
     verbose: bool = False
 ) -> Dict[str, Any]:
     """
@@ -589,16 +622,23 @@ def crop_from_external_video(
     
     use_kvikio_writes = False
     backend_norm = str(external_write_backend or "standard").strip().lower()
+    fallback_reason: Optional[str] = None
     roi_storage_norm = str(external_roi_storage or "compressed").strip().lower()
     if roi_storage_norm not in {"compressed", "uncompressed"}:
         roi_storage_norm = "compressed"
 
+    if external_require_kvikio and backend_norm != "kvikio":
+        raise ValueError("external_require_kvikio requires external_write_backend='kvikio'")
+
     if backend_norm == "kvikio":
         if not use_gpu:
+            fallback_reason = "gpu_mode_disabled"
             console.print("[yellow]kvikio writes requested but GPU mode disabled; falling back to standard writes[/yellow]")
         elif not _KVIKIO_AVAILABLE:
+            fallback_reason = "kvikio_unavailable"
             console.print("[yellow]kvikio writes requested but kvikio is unavailable; falling back to standard writes[/yellow]")
         elif not _CUPY_AVAILABLE:
+            fallback_reason = "cupy_unavailable"
             console.print("[yellow]kvikio writes requested but cupy is unavailable; falling back to standard writes[/yellow]")
         else:
             kvikio_defaults.set(
@@ -614,6 +654,9 @@ def crop_from_external_video(
             root = zarr.open_group(store=store, mode='a')
             use_kvikio_writes = True
             console.print("[green]✓ External crop writes using kvikIO GDSStore[/green]")
+    if external_require_kvikio and not use_kvikio_writes:
+        detail = fallback_reason or "kvikio_write_path_not_available"
+        raise RuntimeError(f"kvikio required for crop writes but unavailable ({detail})")
     if not use_kvikio_writes:
         root = zarr.open(zarr_path, mode='a')
     
@@ -769,7 +812,15 @@ def crop_from_external_video(
         if preferred_policy:
             crop_group.attrs['detection_preferred_policy'] = preferred_policy
         crop_group.attrs['crop_signature'] = _build_crop_signature(crop_group.attrs)
-        crop_group.attrs['write_backend'] = 'kvikio_gds' if use_kvikio_writes else 'standard_zarr'
+        effective_backend = 'kvikio_gds' if use_kvikio_writes else 'standard_zarr'
+        crop_group.attrs['write_backend'] = effective_backend
+        crop_group.attrs['write_backend_requested'] = backend_norm
+        crop_group.attrs['write_backend_effective'] = effective_backend
+        crop_group.attrs['kvikio_required'] = bool(external_require_kvikio)
+        if fallback_reason:
+            crop_group.attrs['write_backend_fallback_reason'] = fallback_reason
+        else:
+            crop_group.attrs.pop('write_backend_fallback_reason', None)
         crop_group.attrs['roi_storage'] = roi_storage_norm
         crop_group.attrs['roi_chunk_len'] = int(roi_chunk_len)
         crop_group.attrs['roi_use_sharding'] = bool(external_use_sharding)
@@ -1105,6 +1156,15 @@ def get_detection_source_info(
         - detection_source_array: Array indicating real (0) vs interpolated (1), or None
         - resolved_source_type: Normalized detection source label
     """
+    def _validate_detection_group(path_label: str, group: zarr.Group) -> None:
+        required = ("frame_indices", "bbox_norm_coords")
+        missing = [name for name in required if name not in group]
+        if missing:
+            missing_text = ", ".join(missing)
+            raise ValueError(
+                f"Detection source '{path_label}' missing required arrays: {missing_text}"
+            )
+
     if source_path_override:
         normalized_path = str(source_path_override).strip().strip('/')
         if not normalized_path:
@@ -1113,16 +1173,25 @@ def get_detection_source_info(
             raise ValueError(f"Detection source '{normalized_path}' not found in zarr file.")
         source_group = root[normalized_path]
         resolved_type = infer_detection_source_type(normalized_path, None)
+        _validate_detection_group(normalized_path, source_group)
         is_refined = normalized_path.startswith(REFINED_DETECT_GROUP) or normalized_path.startswith(LEGACY_REFINED_DETECT_GROUP)
         detection_source = None
         if resolved_type == 'interpolated' and 'detection_source' in source_group:
-            detection_source = source_group['detection_source'][:]
+            detection_source = _ensure_numpy_array(
+                source_group['detection_source'][:],
+                dtype='i1',
+                name=f"{normalized_path}/detection_source",
+            )
         elif resolved_type == 'filtered' and is_refined:
             total = int(source_group['frame_indices'].shape[0])
             detection_source = np.zeros(total, dtype='i1')
         elif resolved_type == 'manual' and is_refined:
             if 'detection_source' in source_group:
-                detection_source = source_group['detection_source'][:]
+                detection_source = _ensure_numpy_array(
+                    source_group['detection_source'][:],
+                    dtype='i1',
+                    name=f"{normalized_path}/detection_source",
+                )
             else:
                 total = int(source_group['frame_indices'].shape[0])
                 detection_source = np.zeros(total, dtype='i1')
@@ -1161,13 +1230,18 @@ def get_detection_source_info(
     ) -> Tuple[str, zarr.Group, Optional[np.ndarray], str]:
         source_group = refined_group[source_key]
         source_path = f"{refined_root.path}/{refined_label}/{source_key}"
+        _validate_detection_group(source_path, source_group)
         detection_source = None
         if source_key == 'filtered':
             total = int(source_group['frame_indices'].shape[0])
             detection_source = np.zeros(total, dtype='i1')
         elif source_key in ('interpolated', 'manual'):
             if 'detection_source' in source_group:
-                detection_source = source_group['detection_source'][:]
+                detection_source = _ensure_numpy_array(
+                    source_group['detection_source'][:],
+                    dtype='i1',
+                    name=f"{source_path}/detection_source",
+                )
             else:
                 total = int(source_group['frame_indices'].shape[0])
                 detection_source = np.zeros(total, dtype='i1')
@@ -1240,11 +1314,28 @@ def get_detection_source_info(
                 raise ValueError(f"Stage '{source_type}' not found in refined detection run {latest_refined}")
 
         if resolved_key not in refined_group:
+            if source_type in ('preferred', 'auto'):
+                if console:
+                    console.print(
+                        f"[yellow]Preferred refined stage '{resolved_key}' not found in "
+                        f"{latest_refined}; falling back to original detections.[/yellow]"
+                    )
+                return _select_detect_run()
             raise ValueError(f"Stage '{resolved_key}' not found in refined detection run {latest_refined}")
 
-        source_path, source_group, detection_source, resolved_type = _build_refined_source(
-            refined_root, refined_group, latest_refined, resolved_key
-        )
+        try:
+            source_path, source_group, detection_source, resolved_type = _build_refined_source(
+                refined_root, refined_group, latest_refined, resolved_key
+            )
+        except ValueError as exc:
+            if source_type in ('preferred', 'auto'):
+                if console:
+                    console.print(
+                        f"[yellow]Preferred refined stage '{resolved_key}' is unusable "
+                        f"({exc}); falling back to original detections.[/yellow]"
+                    )
+                return _select_detect_run()
+            raise
 
         if manual_label and resolved_key == manual_label:
             resolved_source_type = 'manual'
@@ -1256,6 +1347,11 @@ def get_detection_source_info(
         if console:
             console.print(f"[cyan]Using refined detections ({resolved_source_type}):[/cyan] {latest_refined}")
             if detection_source is not None:
+                detection_source = _ensure_numpy_array(
+                    detection_source,
+                    dtype='i1',
+                    name=f"{source_path}/detection_source",
+                )
                 n_real = np.sum(detection_source == 0)
                 n_interp = np.sum(detection_source == 1)
                 console.print(f"  Real detections: {n_real}, Interpolated: {n_interp}")
@@ -1283,7 +1379,7 @@ def get_crop_parameters(
     """
     # Start with config defaults
     crop_params = config.get('crop', {}).copy()
-    crop_params.setdefault('roi_sz', [256, 256])
+    crop_params.setdefault('roi_sz', [512, 512])
     crop_params.setdefault('acceleration', 'auto')
     crop_params.setdefault('gpu_min_detections', 200)
     
@@ -1398,7 +1494,7 @@ def save_crop_metadata(
     
     # Copy detection_source if provided (refined metadata)
     if detection_source is not None:
-        detection_source = np.asarray(detection_source, dtype='i1')
+        detection_source = _ensure_numpy_array(detection_source, dtype='i1', name='detection_source')
         if detection_source.shape[0] != total_detections:
             raise ValueError(
                 f"detection_source length {detection_source.shape[0]} does not match total detections {total_detections}"
@@ -1565,6 +1661,7 @@ def crop_detections(
     external_roi_chunk_size: Optional[int] = None,
     external_roi_shard_size: Optional[int] = None,
     external_gpu_chunk_frames: Optional[int] = None,
+    external_require_kvikio: Optional[bool] = None,
     use_gpu_allowed: bool = True,
     force_cpu: bool = False,
     verbose: bool = False
@@ -1592,6 +1689,7 @@ def crop_detections(
         external_roi_chunk_size: Detection-axis chunk length for ROI arrays
         external_roi_shard_size: Detection-axis shard length for ROI arrays
         external_gpu_chunk_frames: Number of decoded frames per GPU crop chunk
+        external_require_kvikio: Require kvikIO backend for external writes
         use_gpu_allowed: Whether GPU usage is permitted globally
         force_cpu: Force CPU processing regardless of availability
         verbose: Enable additional logging and disable progress bars
@@ -1623,7 +1721,7 @@ def crop_detections(
 
     # Get crop parameters
     crop_params, param_source = get_crop_parameters(root, config, console)
-    roi_sz = tuple(crop_params.get('roi_sz', [256, 256]))
+    roi_sz = tuple(crop_params.get('roi_sz', [512, 512]))
     
     # Determine video source
     video_source_type, video_path = get_video_source(root, console)
@@ -1680,6 +1778,7 @@ def crop_detections(
         cfg_chunk = int(crop_params_cfg.get('external_roi_chunk_size', 1024))
         cfg_shard = crop_params_cfg.get('external_roi_shard_size')
         cfg_gpu_chunk_frames = int(crop_params_cfg.get('external_gpu_chunk_frames', 24))
+        cfg_require_kvikio = bool(crop_params_cfg.get('external_require_kvikio', False))
         cfg_shard = int(cfg_shard) if cfg_shard is not None else None
 
         backend = (external_write_backend or cfg_backend).strip().lower()
@@ -1688,6 +1787,7 @@ def crop_detections(
         chunk_len = cfg_chunk if external_roi_chunk_size is None else int(external_roi_chunk_size)
         shard_len = cfg_shard if external_roi_shard_size is None else int(external_roi_shard_size)
         gpu_chunk_frames = cfg_gpu_chunk_frames if external_gpu_chunk_frames is None else int(external_gpu_chunk_frames)
+        require_kvikio = cfg_require_kvikio if external_require_kvikio is None else bool(external_require_kvikio)
         if backend not in {"standard", "kvikio"}:
             backend = "standard"
         if storage not in {"compressed", "uncompressed"}:
@@ -1700,7 +1800,7 @@ def crop_detections(
         console.print(
             f"[dim]  Write backend={backend}, roi_storage={storage}, "
             f"sharding={use_sharding_value}, chunk={chunk_len}, shard={shard_len or '-'}, "
-            f"gpu_frames={gpu_chunk_frames}[/dim]"
+            f"gpu_frames={gpu_chunk_frames}, require_kvikio={require_kvikio}[/dim]"
         )
 
         # Use external video cropping
@@ -1721,6 +1821,7 @@ def crop_detections(
             external_roi_chunk_size=chunk_len,
             external_roi_shard_size=shard_len,
             external_gpu_chunk_frames=gpu_chunk_frames,
+            external_require_kvikio=require_kvikio,
             verbose=verbose
         )
     
@@ -1735,7 +1836,7 @@ def crop_detections(
     # Determine if we'll use distributed BEFORE building metadata
     use_distributed = (scheduler == "distributed") and HAVE_DISTRIBUTED
     
-    roi_sz = tuple(crop_params.get('roi_sz', [256, 256]))
+    roi_sz = tuple(crop_params.get('roi_sz', [512, 512]))
     chunk_size = config.get('import', {}).get('chunk_size', 32)
 
     console.print(f"ROI size: {roi_sz[0]}×{roi_sz[1]} pixels")
@@ -2190,6 +2291,11 @@ def main():
         default=None,
         help="Frame count decoded per GPU crop chunk (external-video mode).",
     )
+    parser.add_argument(
+        "--require-kvikio",
+        action="store_true",
+        help="Fail if kvikIO GDS writes cannot be enabled in external-video mode.",
+    )
     parser.add_argument("--no-gpu", action="store_true",
                        help="Disable GPU acceleration")
     parser.add_argument("--force-cpu", action="store_true",
@@ -2252,6 +2358,7 @@ def main():
             external_roi_chunk_size=args.external_roi_chunk_size,
             external_roi_shard_size=args.external_roi_shard_size,
             external_gpu_chunk_frames=args.external_gpu_chunk_frames,
+            external_require_kvikio=args.require_kvikio,
             use_gpu_allowed=not args.no_gpu,
             force_cpu=args.force_cpu,
             verbose=args.verbose

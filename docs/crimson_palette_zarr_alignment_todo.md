@@ -24,7 +24,9 @@ Palette repo:
 - `src/fisheye/docs/zarr_structure.md`
 - `docs/zarr_split_policy.md`
 - `docs/analysis_zarr_creation_contract.md`
+- `docs/crimson_detect_bbox_read_contract.md`
 - `docs/crimson_refined_detect_manual_contract.md`
+- `docs/crimson_detect_review_acceptance_contract.md`
 - `src/fisheye/analysis/create_analysis_zarr.py`
 - `src/fisheye/utils/import_video_metadata.py`
 - `src/fisheye/detection/detect_yolo.py`
@@ -77,6 +79,26 @@ Crimson repo:
 4. Loader does support metadata-only `raw_video` attrs and external video playback path.
 - This is good and should be preserved.
 
+5. Refined detect reason labels now include a TensorStore-safe encoding.
+- Preferred array: `reason_bytes` (`uint8[N,width]`, null-terminated UTF-8).
+- Fallbacks: `reason` (string) then `detection_source` (0=clean, 1=interpolated).
+- Read contract: `docs/crimson_detect_bbox_read_contract.md`.
+- Write contract: `docs/crimson_refined_detect_manual_contract.md`.
+
+6. Refined keypoint reason labels follow the same compatibility pattern.
+- Preferred array: `reason_bytes` (`uint8[N,width]`, null-terminated UTF-8).
+- Fallbacks: `reason` (string) then `detection_source` (0=clean, 1=interpolated).
+- Authoritative schema docs:
+  - `src/fisheye/docs/zarr_structure.md`
+  - `src/fisheye/docs/provenance_workflow.md`
+  - `docs/keypoint_review_policy.md`
+
+7. Analysis stimulus provenance now includes optional rendered-video path.
+- Analysis stimulus runs may include:
+  - `analysis/stimulus_runs/<run>.attrs["source_h5"]`
+  - `analysis/stimulus_runs/<run>.attrs["source_stimulus_video_path"]` (when `<source_h5>.mp4` exists)
+- Training Zarrs are not expected to carry this stimulus-run attr.
+
 ## Gap Matrix
 
 | Area | Palette current behavior | Crimson current behavior | Impact | Required change |
@@ -87,6 +109,8 @@ Crimson repo:
 | Doc/spec drift | Palette spec evolved | Crimson spec copy is stale | Implementers can code against wrong schema | Sync `crimson/zarr_structure.md` from Palette authoritative doc |
 | Registry-aware selection | Dataset intent stored as `zarr_use` etc. | No registry integration | Cannot choose best archive per recording intent | Optional phase: registry-backed archive choice |
 | Manual refined detect edits | Palette expects `manual_review_latest` + `detect_review_status` + manual subgroup arrays | No explicit Crimson write contract yet | Manual edits may not become active source for crop/registry | Implement manual-write contract in `docs/crimson_refined_detect_manual_contract.md` |
+| Review acceptance after inspection | Palette status consumers expect structured `detect_review_status` + latest pointer | Acceptance can be ad hoc/manual | Inconsistent review state, poor auditability | Implement acceptance flow per `docs/crimson_detect_review_acceptance_contract.md` |
+| Stimulus rendered-video provenance | Analysis stimulus runs can expose `source_stimulus_video_path` | Loader/spec may only read `source_h5` or ignore stimulus attrs | Missed provenance link to rendered stimulus MP4 | Treat `source_stimulus_video_path` as optional analysis-only hint; do not expect it on training archives |
 
 ## Implementation Plan For Crimson Agent
 
@@ -164,6 +188,8 @@ Use one real recording directory containing both training + analysis archives:
 
 5. Spec/docs
 - `crimson/zarr_structure.md` matches current Palette authoritative spec snapshot.
+- Include analysis-only note for `analysis/stimulus_runs/<run>.attrs["source_stimulus_video_path"]`.
+- Include explicit note that training Zarrs are not expected to have this attr.
 
 6. Manual edit activation
 - After Crimson manual edit write, Palette resolution picks manual subgroup as active.

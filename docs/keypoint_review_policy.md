@@ -7,7 +7,10 @@ frames where a fish is present but no keypoints can be resolved.
 - **Refined runs are the editable copy.**
   - Manual edits and retunes write only to `refined_keypoints_runs/<run>`.
 - **Reason tags are stored per ROI.**
-  - `reason` is a VLenUTF8 array on the refined run.
+  - Primary encoding: `reason_bytes` (`uint8[N,width]`, null-terminated UTF-8).
+  - Secondary/fallback: `reason` string array.
+  - Final fallback: derive labels from `detection_source` (`0=clean`, `1=interpolated`).
+  - Refined runs record `reason_fallback_order=["reason_bytes","reason","detection_source"]`.
   - Common tags:
     - `manual_correction`
     - `fish_present_no_keypoints`
@@ -24,6 +27,7 @@ frames where a fish is present but no keypoints can be resolved.
 - **Manual review UI:**
   - `--manual` reviews keypoints and writes corrections.
   - `--all` iterates all ROIs (otherwise only failures).
+  - Reason columns are synchronized on write (`reason_bytes` + `reason`).
   - Hotkeys:
     - `x`: mark `fish_present_no_keypoints`
     - `d`: mark `detection_issue` (and flag for detection review)

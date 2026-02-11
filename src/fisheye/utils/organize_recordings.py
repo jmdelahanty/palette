@@ -20,6 +20,14 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import h5py
 
+try:
+    from fisheye.utils.hevc_keyframe_flags import check_hevc_keyframe_flags
+except ModuleNotFoundError:
+    _THIS_DIR = Path(__file__).resolve().parent
+    if str(_THIS_DIR) not in sys.path:
+        sys.path.insert(0, str(_THIS_DIR))
+    from hevc_keyframe_flags import check_hevc_keyframe_flags
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -58,6 +66,7 @@ class RecordingPlan:
     camera_id: Optional[str]
     meta: Dict[str, str] = field(default_factory=dict)
     missing: List[str] = field(default_factory=list)
+    keyframe_checks: Dict[str, Dict[str, object]] = field(default_factory=dict)
 
 
 def _normalize_attr(value: object) -> Optional[str]:
@@ -369,6 +378,7 @@ def _write_manifest(
         "camera_id_source": plan.meta.get("camera_id_source"),
         "source_dir": str(plan.source_dir),
         "files": files,
+        "hevc_keyframe_flags": plan.keyframe_checks if plan.keyframe_checks else None,
         "recording_snapshot": f"derived/{snapshot_path.name}" if snapshot_path.exists() else None,
     }
     try:
@@ -435,9 +445,40 @@ def _apply_plan(
     moved: Set[Path] = set()
     planned_destinations: Set[Path] = set()
 
+    def record_video_keyframe_status(
+        *,
+        plan: RecordingPlan,
+        folder_name: str,
+        planned: PlannedFile,
+        dest: Path,
+        session_uuid: Optional[str],
+        logger: Optional[JsonLogger],
+    ) -> None:
+        rel_path = f"{folder_name}/{planned.dest_name}"
+        result: Dict[str, object] = dict(check_hevc_keyframe_flags(dest))
+        result["checked_at_utc"] = _utc_now()
+        try:
+            stat = dest.stat()
+            result["file_size_bytes"] = int(stat.st_size)
+            result["file_mtime_ns"] = int(stat.st_mtime_ns)
+        except OSError as exc:
+            result["fingerprint_error"] = str(exc)
+        plan.keyframe_checks[rel_path] = result
+
+        if logger:
+            logger.log(
+                "hevc_keyframe_check",
+                recording_name=plan.name,
+                session_uuid=session_uuid,
+                path=str(dest),
+                path_rel=rel_path,
+                **result,
+            )
+
     for plan in plans:
         moved_count = 0
         session_uuid = plan.meta.get("session_uuid")
+        plan.keyframe_checks = {}
 
         def record_warning(message: str) -> None:
             warnings.append(message)
@@ -491,6 +532,22 @@ def _apply_plan(
                         source=str(src),
                         dest=str(dest),
                     )
+                if dest.suffix.lower() == ".mp4":
+                    record_video_keyframe_status(
+                        plan=plan,
+                        folder_name=folder_name,
+                        planned=planned,
+                        dest=dest,
+                        session_uuid=session_uuid,
+                        logger=logger,
+                    )
+                    check = plan.keyframe_checks.get(f"{folder_name}/{planned.dest_name}", {})
+                    if bool(check.get("needs_fix", False)):
+                        check_message = str(check.get("message", "")).strip()
+                        record_warning(
+                            f"HEVC keyframe flags issue for {dest}: "
+                            f"{check_message or 'missing stss sync sample table'}"
+                        )
 
         if snapshot is not None:
             warning = _write_snapshot(plan, snapshot, snapshot_mode)

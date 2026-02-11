@@ -12,6 +12,9 @@ This contract is for updating:
 
 It is intentionally aligned with current Palette behavior in `fisheye.tune.detect_review`.
 
+For acceptance/status policy after inspection, see:
+- `docs/crimson_detect_review_acceptance_contract.md`
+
 ## Minimum Required Writes
 
 Given `run_name = refined_detect_runs.attrs["latest"]` and `manual_group` (default `"manual"`):
@@ -31,7 +34,21 @@ Given `run_name = refined_detect_runs.attrs["latest"]` and `manual_group` (defau
 3. Optional arrays (recommended when available):
 - `detection_source` (`int8`, shape `(n_detections,)`)
 - `retune_id` (`int32`, shape `(n_detections,)`, `-1` for non-retuned)
+- `reason_bytes` (`uint8`, shape `(n_detections, width)`, null-terminated UTF-8; preferred cross-tool encoding)
 - `reason` (UTF-8 variable-length string, shape `(n_detections,)`)
+
+`reason` write guidance:
+- If `detection_source` is written, write `reason` as well.
+- Recommended mapping:
+  - `detection_source == 0` -> `reason = "clean"` (or `"manual"` for explicit manual rows)
+  - `detection_source == 1` -> `reason = "interpolated"`
+- Custom labels are allowed (for example `retune`), but lengths must still match
+  `n_detections` and labels must be UTF-8 strings.
+
+`reason_bytes` guidance:
+- Write `reason_bytes` for Crimson/TensorStore compatibility, even if `reason` is also written.
+- Keep row alignment identical to `frame_indices`.
+- Encode each row as UTF-8 bytes with `0x00` terminator and `0x00` padding.
 
 4. Manual subgroup attrs:
 - `storage_layout = "columnar"`
@@ -83,6 +100,8 @@ Recommended payload fields:
 4. Keep array lengths consistent:
 - `len(frame_indices) == len(bbox_norm_coords) == len(scores) == len(class_ids)`
 - `len(frame_counts) == n_frames`
+- if present, `reason_bytes.shape[0] == n_detections`
+- if `reason` exists: `len(reason) == n_detections`
 
 ## Validation Queries / Checks
 
@@ -97,6 +116,8 @@ Run after Crimson writes:
 3. Shape consistency:
 - all detection-level arrays share `n_detections`.
 - `sum(frame_counts) == n_detections`.
+- if present, `reason_bytes.shape[0] == n_detections`.
+- if present, `reason` and `detection_source` lengths match `n_detections`.
 
 4. Resolution check:
 - Palette helper resolution returns manual group as active source.

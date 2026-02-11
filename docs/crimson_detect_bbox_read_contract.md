@@ -3,7 +3,7 @@
 Purpose: define the read-only contract Crimson should use to load detection
 bounding boxes from Palette Zarr archives.
 
-Date anchored: 2026-02-09.
+Date anchored: 2026-02-11.
 
 ## Scope
 
@@ -22,6 +22,14 @@ Date anchored: 2026-02-09.
   - `manual` (or `manual_review_latest` target)
   - `interpolated`
   - `filtered`
+
+## Quick Reference
+
+| Source | Can show boxes | Can show clean/interpolated labels | Can show missing/artifact frame status |
+|---|---|---|---|
+| `detect_runs/<run>` | Yes | No (raw detect does not carry interpolation provenance) | Yes, via `quality_reports/<run>/quality_flags` when present |
+| `refined_detect_runs/<run>/<group>` | Yes | Yes, from `reason_bytes` (`reason`/`detection_source` fallback) | Not directly; use detect-quality frame labels from raw detect run |
+| `detect_runs/<run>/quality_reports/<quality_run>` | No (labels only) | Detection-level labels available via `detection_quality_labels` | Yes, frame-level via `quality_flags` (`-1/0/2/3/4`) |
 
 ## Run Selection Rules
 
@@ -57,9 +65,34 @@ This matches Palette runtime resolution in:
 - `scores` (`float32`, shape `(N,)`)
 - `class_ids` (`int32`, shape `(N,)`)
 - `detection_source` (`int8`, refined groups only: `0=real`, `1=interpolated`)
+- `reason_bytes` (`uint8`, shape `(N, width)`, null-terminated UTF-8 strings; preferred for C++ TensorStore compatibility)
 - `reason` (`string`, refined groups; detect semantics commonly `clean` / `interpolated`, manual/retune may use other labels)
 - `frame_counts` (`int32`, shape `(num_frames,)`)
 - `n_detections` (`int32`, alias of `frame_counts`)
+
+## Reason Array Contract (Refined Detect)
+
+When reading `refined_detect_runs/<run>/<group>`, Crimson should treat reason
+labels as the human-readable source tag for each detection row.
+
+Minimum expected semantics:
+- `clean`: detection comes from observed/kept detection rows
+- `interpolated`: detection was added by interpolation
+
+Possible additional values in manual/retune flows:
+- `manual`
+- `retune`
+- other operator-defined labels
+
+Reader behavior:
+1. If `reason_bytes` exists, decode null-terminated UTF-8 rows and use for UI/status labeling.
+2. If `reason_bytes` is missing but `reason` exists, use `reason`.
+3. If neither reason array exists but `detection_source` exists, derive:
+   - `0 -> clean`
+   - `1 -> interpolated`
+4. If neither exists, default label to `clean` and warn once.
+
+Do not hard-fail on unknown reason strings; display them as-is.
 
 ## Missing / Artifact Reason Codes
 
@@ -134,6 +167,13 @@ Helpful attrs to read when present:
 - root attrs: `source_video_path`, `source_video`, `inference_width`, `inference_height`
 - quality attrs: `quality_reports.attrs["latest"]`,
   `artifact_detection_params`, `detection_quality_summary`
+- analysis stimulus-run attrs (analysis archives only):
+  - `analysis/stimulus_runs/<latest>.attrs["source_h5"]`
+  - `analysis/stimulus_runs/<latest>.attrs["source_stimulus_video_path"]` (optional; rendered stimulus video path when available)
+
+Training archive note:
+- `source_stimulus_video_path` is not expected on training Zarrs.
+- Absence on training archives should not be treated as an error.
 
 ## Expected Failure Modes
 

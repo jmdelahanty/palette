@@ -979,7 +979,8 @@ def run_failure_tuner(
     geometry_valid_arr = refined.get("geometry_valid")
     usable_arr = refined.get("usable_keypoints")
     reason_arr = refined.get("reason")
-    heading_valid_arr = refined.get("heading_valid")
+    heading_finite_arr = refined.get("heading_finite")
+    heading_usable_arr = refined.get("heading_usable")
     detection_source_arr = refined.get("detection_source")
 
     retune_id_arr = _ensure_retune_id_array(
@@ -1219,9 +1220,12 @@ def run_failure_tuner(
                         geometry_valid_arr[roi_idx] = geom_ok
                     if usable_arr is not None:
                         usable_arr[roi_idx] = conf_ok and geom_ok
-                    if heading_valid_arr is not None:
+                    heading_is_finite = bool(np.isfinite(heading_val))
+                    if heading_finite_arr is not None:
+                        heading_finite_arr[roi_idx] = heading_is_finite
+                    if heading_usable_arr is not None:
                         det_src = int(detection_source_arr[roi_idx]) if detection_source_arr is not None else 0
-                        heading_valid_arr[roi_idx] = det_src == 0
+                        heading_usable_arr[roi_idx] = det_src == 0 and heading_is_finite
                     if reason_arr is not None:
                         tags = []
                         if flip_detected:
@@ -1339,8 +1343,10 @@ def run_failure_tuner(
                         geometry_valid_arr[roi_idx] = False
                     if usable_arr is not None:
                         usable_arr[roi_idx] = False
-                    if heading_valid_arr is not None:
-                        heading_valid_arr[roi_idx] = False
+                    if heading_finite_arr is not None:
+                        heading_finite_arr[roi_idx] = False
+                    if heading_usable_arr is not None:
+                        heading_usable_arr[roi_idx] = False
 
                     failure_pos = current_frame - 1
                     failures = np.delete(failures, failure_pos)

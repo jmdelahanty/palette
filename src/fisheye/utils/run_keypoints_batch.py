@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -690,6 +691,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.set_defaults(require_background=True, require_crop=True)
 
     args = parser.parse_args(argv)
+    if args.refine_only:
+        deprecation_msg = (
+            "Deprecation warning: `run_keypoints_batch --refine-only` is deprecated. "
+            "Use `scripts/py -m fisheye.utils.refine_keypoints_batch`."
+        )
+        print(deprecation_msg, file=sys.stderr)
+
     file_list_paths: List[Path] = []
     if args.file_list:
         for path in args.file_list:

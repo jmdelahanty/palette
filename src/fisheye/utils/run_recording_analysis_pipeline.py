@@ -1,0 +1,409 @@
+#!/usr/bin/env python3
+"""Single-recording analysis pipeline wrapper.
+
+Pipeline order:
+1) import_recording_analysis (archive + metadata + stimulus)
+2) detect inference (explicit model or registry-resolved)
+3) refine_detect (optional)
+4) registry scan (optional)
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, List, Optional
+
+from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.utils.import_recording_analysis import (
+    RecordingAnalysisPlan,
+    RecordingImportOptions,
+    process_recording_import,
+    resolve_single_recording_plan,
+)
+
+
+@dataclass
+class RecordingPipelineOptions:
+    model_source: str
+    model: Optional[Path]
+    detect_config: Optional[Path]
+    conf: Optional[float]
+    iou: Optional[float]
+    max_det: Optional[int]
+    batch_size: Optional[int]
+    cpu: bool
+    set_id: Optional[str]
+    require_unique: bool
+    include_non_success: bool
+    top_k: int
+    refine_detect: bool
+    refine_config: Optional[Path]
+    refine_max_gap: Optional[int]
+    register: bool
+    registry_path: Path
+    import_opts: RecordingImportOptions
+
+
+@dataclass
+class RecordingPipelineResult:
+    ok: bool
+    failed_step: Optional[str] = None
+    error: Optional[str] = None
+    returncode: Optional[int] = None
+    dataset_id: Optional[str] = None
+
+
+EventLogger = Callable[[str], None]
+
+
+def _log(logger: Optional[Callable[..., None]], event: str, **fields: object) -> None:
+    if logger is not None:
+        logger(event, **fields)
+
+
+def run_detect_yolo(plan: RecordingAnalysisPlan, opts: RecordingPipelineOptions) -> tuple[bool, int, List[str]]:
+    plan.zarr_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable,
+        "-m",
+        "fisheye.detection.detect_yolo",
+        str(plan.cam_video),
+        "--output",
+        str(plan.zarr_path),
+        "--write-raw-video-metadata",
+    ]
+    if opts.model is not None:
+        cmd.extend(["--model", str(opts.model)])
+    if opts.detect_config is not None:
+        cmd.extend(["--config", str(opts.detect_config)])
+    if opts.conf is not None:
+        cmd.extend(["--conf", str(opts.conf)])
+    if opts.iou is not None:
+        cmd.extend(["--iou", str(opts.iou)])
+    if opts.max_det is not None:
+        cmd.extend(["--max-det", str(opts.max_det)])
+    if opts.batch_size is not None:
+        cmd.extend(["--batch-size", str(opts.batch_size)])
+    if opts.cpu:
+        cmd.append("--cpu")
+    print(f"Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, check=False)
+    return result.returncode == 0, result.returncode, cmd
+
+
+def run_detect_registry_model(plan: RecordingAnalysisPlan, opts: RecordingPipelineOptions) -> tuple[bool, int, List[str]]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "fisheye.utils.run_detect_with_registry_model",
+        "--recording-dir",
+        str(plan.recording_dir),
+        "--output",
+        str(plan.zarr_path),
+        "--registry",
+        str(opts.registry_path),
+        "--write-raw-video-metadata",
+    ]
+    if opts.detect_config is not None:
+        cmd.extend(["--config", str(opts.detect_config)])
+    if opts.conf is not None:
+        cmd.extend(["--conf", str(opts.conf)])
+    if opts.iou is not None:
+        cmd.extend(["--iou", str(opts.iou)])
+    if opts.max_det is not None:
+        cmd.extend(["--max-det", str(opts.max_det)])
+    if opts.batch_size is not None:
+        cmd.extend(["--batch-size", str(opts.batch_size)])
+    if opts.cpu:
+        cmd.append("--cpu")
+    if opts.set_id is not None:
+        cmd.extend(["--set-id", str(opts.set_id)])
+    if opts.require_unique:
+        cmd.append("--require-unique")
+    if opts.include_non_success:
+        cmd.append("--include-non-success")
+    cmd.extend(["--top-k", str(opts.top_k)])
+    print(f"Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, check=False)
+    return result.returncode == 0, result.returncode, cmd
+
+
+def run_refine_detect(plan: RecordingAnalysisPlan, opts: RecordingPipelineOptions) -> tuple[bool, int, List[str]]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "fisheye.refinement.refine_detect",
+        str(plan.zarr_path),
+    ]
+    if opts.refine_config is not None:
+        cmd.extend(["--config", str(opts.refine_config)])
+    if opts.refine_max_gap is not None:
+        cmd.extend(["--max-gap", str(opts.refine_max_gap)])
+    print(f"Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, check=False)
+    return result.returncode == 0, result.returncode, cmd
+
+
+def process_recording_analysis_pipeline(
+    plan: RecordingAnalysisPlan,
+    opts: RecordingPipelineOptions,
+    *,
+    registry: Optional[Registry] = None,
+    logger: Optional[Callable[..., None]] = None,
+) -> RecordingPipelineResult:
+    import_result = process_recording_import(plan, opts.import_opts, logger=logger)
+    if not import_result.ok:
+        return RecordingPipelineResult(
+            ok=False,
+            failed_step=import_result.failed_step,
+            error=import_result.error,
+            returncode=import_result.returncode,
+        )
+
+    if opts.model_source == "registry":
+        detect_ok, detect_rc, detect_cmd = run_detect_registry_model(plan, opts)
+    else:
+        detect_ok, detect_rc, detect_cmd = run_detect_yolo(plan, opts)
+    _log(
+        logger,
+        "detect_result",
+        recording_dir=str(plan.recording_dir),
+        zarr_path=str(plan.zarr_path),
+        returncode=int(detect_rc),
+        cmd=detect_cmd,
+        model_source=str(opts.model_source),
+    )
+    if not detect_ok:
+        return RecordingPipelineResult(
+            ok=False,
+            failed_step="detect_yolo",
+            returncode=int(detect_rc),
+            error="detect step failed",
+        )
+
+    if opts.refine_detect:
+        refine_ok, refine_rc, refine_cmd = run_refine_detect(plan, opts)
+        _log(
+            logger,
+            "refine_result",
+            recording_dir=str(plan.recording_dir),
+            zarr_path=str(plan.zarr_path),
+            returncode=int(refine_rc),
+            cmd=refine_cmd,
+        )
+        if not refine_ok:
+            return RecordingPipelineResult(
+                ok=False,
+                failed_step="refine_detect",
+                returncode=int(refine_rc),
+                error="refine detect failed",
+            )
+
+    dataset_id = None
+    if opts.register:
+        if registry is None:
+            local_registry = Registry(opts.registry_path)
+            try:
+                dataset_id = local_registry.scan_zarr(plan.zarr_path)
+            finally:
+                local_registry.close()
+        else:
+            dataset_id = registry.scan_zarr(plan.zarr_path)
+
+    return RecordingPipelineResult(ok=True, dataset_id=dataset_id)
+
+
+def _build_import_options(args: argparse.Namespace) -> RecordingImportOptions:
+    return RecordingImportOptions(
+        import_video_metadata=bool(args.import_video_metadata),
+        video_metadata_overwrite=bool(args.video_metadata_overwrite),
+        import_stimulus=bool(args.import_stimulus),
+        stimulus_always=bool(args.stimulus_always),
+        stimulus_run_name=args.stimulus_run_name,
+        stimulus_overwrite=bool(args.stimulus_overwrite),
+        stimulus_quiet=bool(args.stimulus_quiet),
+    )
+
+
+def _build_pipeline_options(args: argparse.Namespace, registry_path: Path) -> RecordingPipelineOptions:
+    return RecordingPipelineOptions(
+        model_source=str(args.model_source),
+        model=args.model,
+        detect_config=args.detect_config,
+        conf=args.conf,
+        iou=args.iou,
+        max_det=args.max_det,
+        batch_size=args.batch_size,
+        cpu=bool(args.cpu),
+        set_id=args.set_id,
+        require_unique=bool(args.require_unique),
+        include_non_success=bool(args.include_non_success),
+        top_k=int(args.top_k),
+        refine_detect=bool(args.refine_detect),
+        refine_config=args.refine_config,
+        refine_max_gap=args.refine_max_gap,
+        register=bool(args.register),
+        registry_path=registry_path,
+        import_opts=_build_import_options(args),
+    )
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Run one-recording analysis pipeline: import -> detect -> refine -> register.",
+    )
+    parser.add_argument("--recording-dir", type=Path, required=True, help="Recording directory to process.")
+    parser.add_argument("--video", type=Path, help="Optional explicit camera video path.")
+    parser.add_argument("--h5", type=Path, help="Optional explicit stimulus H5 path.")
+    parser.add_argument("--output", type=Path, help="Optional explicit analysis zarr output path.")
+
+    parser.add_argument("--apply", action="store_true", help="Execute pipeline steps.")
+    parser.add_argument("--dry-run", action="store_true", help="Print resolved plan only.")
+
+    parser.add_argument(
+        "--model-source",
+        choices=("explicit", "registry"),
+        default="explicit",
+        help="Model resolution source: explicit path/config or registry resolver.",
+    )
+    parser.add_argument("--model", type=Path, help="YOLO model path (.pt).")
+    parser.add_argument("--detect-config", type=Path, help="YOLO detect config YAML.")
+    parser.add_argument("--conf", type=float, help="YOLO confidence threshold override.")
+    parser.add_argument("--iou", type=float, help="YOLO IoU threshold override.")
+    parser.add_argument("--max-det", type=int, help="YOLO max detections per frame override.")
+    parser.add_argument("--batch-size", type=int, help="YOLO batch size override.")
+    parser.add_argument("--cpu", action="store_true", help="Force CPU for YOLO detect.")
+    parser.add_argument("--set-id", type=str, help="Optional detect set filter when --model-source=registry.")
+    parser.add_argument("--require-unique", action="store_true", help="Fail detect step when top scores tie.")
+    parser.add_argument(
+        "--include-non-success",
+        action="store_true",
+        help="Allow non-success training runs as candidates for registry model resolution.",
+    )
+    parser.add_argument("--top-k", type=int, default=5, help="Number of detect model candidates to persist.")
+
+    parser.add_argument(
+        "--import-video-metadata",
+        dest="import_video_metadata",
+        action="store_true",
+        help="Import source-video metadata into root/raw_video attrs (default).",
+    )
+    parser.add_argument(
+        "--no-import-video-metadata",
+        dest="import_video_metadata",
+        action="store_false",
+        help="Skip source-video metadata import.",
+    )
+    parser.add_argument(
+        "--video-metadata-overwrite",
+        action="store_true",
+        help="Overwrite existing source-video metadata attrs when importing.",
+    )
+
+    parser.add_argument(
+        "--import-stimulus",
+        dest="import_stimulus",
+        action="store_true",
+        help="Import H5 stimulus metadata into analysis/stimulus_runs (default).",
+    )
+    parser.add_argument(
+        "--no-import-stimulus",
+        dest="import_stimulus",
+        action="store_false",
+        help="Skip stimulus import.",
+    )
+    parser.set_defaults(import_stimulus=True, import_video_metadata=True)
+    parser.add_argument("--stimulus-always", action="store_true", help="Run stimulus import even if runs exist.")
+    parser.add_argument("--stimulus-run-name", type=str, help="Optional stimulus run name.")
+    parser.add_argument("--stimulus-overwrite", action="store_true", help="Overwrite existing stimulus run name.")
+    parser.add_argument("--stimulus-quiet", action="store_true", help="Suppress verbose stimulus import output.")
+
+    parser.add_argument(
+        "--refine-detect",
+        dest="refine_detect",
+        action="store_true",
+        help="Run refine_detect after detect (default).",
+    )
+    parser.add_argument(
+        "--no-refine-detect",
+        dest="refine_detect",
+        action="store_false",
+        help="Skip refine_detect.",
+    )
+    parser.set_defaults(refine_detect=True)
+    parser.add_argument(
+        "--refine-config",
+        type=Path,
+        default=Path("configs/fisheye/default.yaml"),
+        help="Config passed to refine_detect.",
+    )
+    parser.add_argument("--refine-max-gap", type=int, help="Optional max-gap override for refine_detect.")
+
+    parser.add_argument("--register", action="store_true", help="Rescan resulting analysis zarr into registry.")
+    parser.add_argument("--registry", type=Path, help="Optional registry SQLite path.")
+
+    args = parser.parse_args(argv)
+    if not args.apply:
+        args.dry_run = True
+
+    try:
+        plan = resolve_single_recording_plan(
+            recording_dir=args.recording_dir,
+            video=args.video,
+            h5=args.h5,
+            output=args.output,
+        )
+    except ValueError as exc:
+        print(f"Plan resolution failed: {exc}")
+        return 1
+
+    registry_path = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
+    if args.model_source == "registry" and not registry_path.exists():
+        print(f"Registry not found for --model-source=registry: {registry_path}")
+        return 1
+
+    print("Single recording analysis pipeline plan")
+    print(f"  recording_dir: {plan.recording_dir}")
+    print(f"  video: {plan.cam_video}")
+    print(f"  h5: {plan.h5_path}")
+    print(f"  output: {plan.zarr_path}")
+    print(f"  model_source: {args.model_source}")
+    print(f"  import_stimulus: {bool(args.import_stimulus)}")
+    print(f"  refine_detect: {bool(args.refine_detect)}")
+    print(f"  register: {bool(args.register)}")
+    if args.dry_run:
+        print("Dry run: no changes were made.")
+        return 0
+
+    registry: Optional[Registry] = None
+    if args.register:
+        registry = Registry(registry_path)
+        print(f"Registry: {registry_path}")
+
+    try:
+        opts = _build_pipeline_options(args, registry_path)
+        result = process_recording_analysis_pipeline(plan, opts, registry=registry, logger=None)
+    finally:
+        if registry is not None:
+            registry.close()
+
+    if not result.ok:
+        print(
+            f"Failed: step={result.failed_step or 'unknown'}"
+            + (f" returncode={result.returncode}" if result.returncode is not None else "")
+            + (f" error={result.error}" if result.error else "")
+        )
+        return 1
+
+    print("Success: analysis pipeline completed.")
+    if result.dataset_id:
+        print(f"  dataset_id: {result.dataset_id}")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

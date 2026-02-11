@@ -40,3 +40,48 @@
 1. Add exporter control for merged frame chunk depth (for example `--merge-frame-chunk`).
 2. Re-export one dataset with `frame_chunk=16`.
 3. Compare training throughput (`it/s`) and GPU utilization vs current `64`.
+
+## Detect Inference Runtime Note (2026-02-09)
+
+### Observation
+- For full-video detect on `4512x4512` HEVC input with GPU decode + YOLO GPU inference:
+  - average decode/read time per batch was ~`121 ms`
+  - average model inference time per batch was ~`58 ms`
+- Practical implication: decode/read is currently the larger bottleneck than model forward time.
+
+### Design read
+- The current detect path already uses key accelerator features:
+  - fused model
+  - FP16 on CUDA
+  - channels-last tensors
+  - Decord GPU decode path
+- Therefore, adding `torch.compile`/CUDA-graph style optimization may help model time, but likely gives limited end-to-end gain unless decode/read is also improved.
+
+## Decord vs Native Decode Benchmark Plan
+
+### Goal
+- Measure whether native decode paths (for example, Crimson/FFmpeg pipelines) materially outperform current Decord decode in end-to-end detect throughput.
+
+### Backends to compare
+- Decord GPU decode (current production path).
+- Decord CPU decode.
+- OpenCV fallback decode.
+- Crimson/native decode path (if available in benchmark environment).
+
+### Fixed test conditions
+- Same input recording (`.mp4`), same frame range, same sampling policy.
+- Same YOLO model weights and detection parameters (`conf`, `iou`, `max_det`, `batch_size`, `imgsz`).
+- Same GPU, same host load conditions, warmup run before timed run.
+
+### Metrics
+- Decode FPS (decode-only microbenchmark).
+- End-to-end detect FPS (decode + preprocess + model + write).
+- Batch-level timing split:
+  - decode/read ms
+  - inference ms
+  - write ms
+- GPU utilization and VRAM footprint.
+
+### Success criteria
+- Native decode path should show repeatable reduction in decode time and clear end-to-end FPS improvement (not just microbenchmark decode gains).
+- No regression in detection outputs or provenance fields.

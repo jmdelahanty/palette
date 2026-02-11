@@ -6,7 +6,7 @@ This note records recent changes around keypoint retuning so future agents can f
 - Added a failure-retune mode to the existing keypoint tuner to re-run keypoint detection on failed ROIs only.
 - Retuning never touches detections or raw keypoint runs; it only edits the refined run.
 - Retunes write a per-ROI `retune_id` plus a `retune_params` mapping on the refined run for auditability.
-- Reason strings are written with slice-based assignment to avoid VLenUTF8 scalar write errors.
+- Reason labels are written using the shared reason codec (`reason_bytes` primary, `reason` secondary).
 
 ## Files touched
 - `src/fisheye/tune/keypoint_tuner.py`
@@ -15,8 +15,7 @@ This note records recent changes around keypoint retuning so future agents can f
   - Sample-based evaluation (`e`), full evaluation (`E`).
   - UI overlay indicates retune mode.
   - Uses tuned parameters from `analysis_metadata.keypoint_tuning` on startup.
-  - VLenUTF8 reason write fixed with slice assignment.
-  - Sanitizes `reason` array to plain strings before retuning.
+  - Uses shared reason-column writes so labels stay compatible with TensorStore readers.
 - `src/fisheye/refinement/refine_keypoints.py`
   - Added `retune_id` array (int32, default -1) in refined runs.
 - `src/fisheye/docs/zarr_structure.md`
@@ -51,12 +50,15 @@ Legacy entrypoints for retune/manual review have been removed. Use
 - Threads can be slower than processes due to GIL, small ROI overhead, and library oversubscription.
 - Use `--apply-batch-size` and `--apply-workers` to tune throughput.
 
-## VLenUTF8 write fix
-- Zarr VLenUTF8 expects array-like writes, not scalar strings.
-- Use slice assignment:
-  - `reason_arr[idx:idx+1] = np.array([reason], dtype=object)`
-- A sanitize pass converts existing values to plain strings before retuning.
+## Reason Column Compatibility
+- Refined keypoint runs write reason labels as:
+  - `reason_bytes` (`uint8[N,width]`, null-terminated UTF-8, preferred).
+  - `reason` (string array, secondary fallback).
+- Run attrs include:
+  - `reason_encoding="utf8-null-terminated"`
+  - `reason_fallback_order=["reason_bytes","reason","detection_source"]`
+- Readers should follow that fallback order for robust cross-tool behavior.
 
 ## Known follow-ups
-- If reason writes fail elsewhere, apply the same slice-write pattern.
+- If legacy runs are missing `reason_bytes`, run `fisheye.utils.backfill_keypoint_reason_bytes`.
 - Consider a process-based compute option for faster CPU-heavy workloads (still single writer).

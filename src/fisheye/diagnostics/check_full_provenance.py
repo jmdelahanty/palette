@@ -74,8 +74,8 @@ def _load_keypoint_provenance(root: zarr.Group) -> tuple[Optional[str], Optional
     detect_run = group.attrs.get("source_detect_run")
     crop_run = group.attrs.get("source_crop_run")
     det_arr = group.get("detection_source")
-    heading_valid = group.get("heading_valid")
-    return run, detect_run, crop_run, det_arr[:] if det_arr is not None else None, heading_valid[:] if heading_valid is not None else None
+    heading_usable = group.get("heading_usable")
+    return run, detect_run, crop_run, det_arr[:] if det_arr is not None else None, heading_usable[:] if heading_usable is not None else None
 
 
 def _load_eye_mask_provenance(root: zarr.Group) -> tuple[Optional[str], Optional[str], Optional[str], Optional[np.ndarray]]:
@@ -111,7 +111,7 @@ def check_provenance(zarr_path: str, console: Optional[Console] = None) -> int:
 
     detect_run, detect_arr = _load_detection_provenance(root)
     crop_run, crop_detect_attr, crop_detect_path, crop_arr = _load_crop_provenance(root)
-    kp_run, kp_detect_attr, kp_crop_attr, kp_arr, heading_valid = _load_keypoint_provenance(root)
+    kp_run, kp_detect_attr, kp_crop_attr, kp_arr, heading_usable = _load_keypoint_provenance(root)
     eye_run, eye_detect_attr, eye_kp_attr, eye_arr = _load_eye_mask_provenance(root)
 
     summary = Table(title="Provenance Overview")
@@ -176,15 +176,15 @@ def check_provenance(zarr_path: str, console: Optional[Console] = None) -> int:
         console.print("[yellow]Eye mask run missing detection_source array.[/yellow]")
         status = 1
 
-    if heading_valid is not None and kp_arr is not None:
-        invalid = np.sum(np.logical_and(heading_valid, kp_arr == 1))
+    if heading_usable is not None and kp_arr is not None:
+        invalid = np.sum(np.logical_and(heading_usable, kp_arr == 1))
         if invalid:
-            console.print(f"[red]Heading valid includes {invalid} synthetic detections[/red]")
+            console.print(f"[red]Heading usable includes {invalid} synthetic detections[/red]")
             status = 1
         else:
-            console.print("[green]Heading valid excludes synthetic detections.[/green]")
+            console.print("[green]Heading usable excludes synthetic detections.[/green]")
     else:
-        console.print("[yellow]Heading valid array unavailable; skipping heading check.[/yellow]")
+        console.print("[yellow]Heading usable array unavailable; skipping heading check.[/yellow]")
 
     return status
 

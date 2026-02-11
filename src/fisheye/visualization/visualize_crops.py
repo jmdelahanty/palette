@@ -78,6 +78,7 @@ def _format_info(
     frame: int,
     coords_full: Optional[np.ndarray],
     review_label: Optional[str] = None,
+    write_intended_use: Optional[str] = None,
 ) -> str:
     lines = [f"Crop index: {idx}", f"Frame index: {frame}"]
     if coords_full is not None and coords_full.size >= 4:
@@ -87,7 +88,18 @@ def _format_info(
         lines.append(f"Full-frame box: x0={x0:.1f}, y0={y0:.1f}, w={width:.1f}, h={height:.1f}")
     if review_label:
         lines.append(f"Review: {review_label}")
+    if write_intended_use:
+        lines.append(f"Write intended_use: {write_intended_use}")
     return "\n".join(lines)
+
+
+def _cycle_intended_use(current: str) -> str:
+    values = ("training", "full_recording")
+    normalized = str(current or "").strip().lower()
+    if normalized not in values:
+        return values[0]
+    idx = values.index(normalized)
+    return values[(idx + 1) % len(values)]
 
 
 def _hash_parameters(params: object) -> Optional[str]:
@@ -219,6 +231,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     crop_group = root[f"crop_runs/{crop_run}"]
     review_status = crop_group.attrs.get("crop_review_status")
     review_label = _format_review_status(review_status if isinstance(review_status, dict) else None)
+    current_intended_use = str(args.review_intended_use)
 
     roi_images = crop_group["roi_images"]
     frame_indices = crop_group["frame_indices"][:]
@@ -247,6 +260,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             int(frame_indices[0]),
             coords_full[0] if coords_full is not None else None,
             review_label,
+            current_intended_use,
         ),
         va="top",
         ha="left",
@@ -256,6 +270,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     slider_ax = fig.add_axes([0.15, 0.05, 0.75, 0.03])
     slider = Slider(slider_ax, "Crop index", 0, total - 1, valinit=0, valstep=1)
+
+    def _update_title() -> None:
+        title = f"Crop viewer - run {crop_run} | target_use: {current_intended_use}"
+        if review_label:
+            title = f"{title} | review: {review_label}"
+        fig.suptitle(title, fontsize=14, fontweight="bold")
 
     def update(idx_float: float) -> None:
         idx = int(idx_float)
@@ -270,14 +290,16 @@ def main(argv: Optional[list[str]] = None) -> int:
                 int(frame_indices[idx]),
                 coords_full[idx] if coords_full is not None else None,
                 review_label,
+                current_intended_use,
             )
         )
+        _update_title()
         fig.canvas.draw_idle()
 
     slider.on_changed(update)
 
     def on_key(event) -> None:
-        nonlocal review_label
+        nonlocal review_label, current_intended_use
         def apply_state(state: str) -> None:
             nonlocal review_label
             reviewer = args.reviewer or os.environ.get("USER")
@@ -286,7 +308,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 crop_run,
                 state=state,
                 method=args.review_method,
-                intended_use=args.review_intended_use,
+                intended_use=current_intended_use,
                 reviewer=reviewer,
                 notes=args.review_notes,
             )
@@ -327,12 +349,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             except Exception as exc:
                 if not args.quiet:
                     print(f"⚠️ Failed to set crop review: {exc}")
+        elif event.key == "u":
+            current_intended_use = _cycle_intended_use(current_intended_use)
+            if not args.quiet:
+                print(f"↻ Review intended_use set to: {current_intended_use}")
+            update(slider.val)
 
     fig.canvas.mpl_connect("key_press_event", on_key)
-    title = f"Crop viewer – run {crop_run}"
-    if review_label:
-        title = f"{title} | review: {review_label}"
-    fig.suptitle(title, fontsize=14, fontweight="bold")
+    _update_title()
 
     if not args.no_show:
         plt.show()

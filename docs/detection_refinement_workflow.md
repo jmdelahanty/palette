@@ -36,9 +36,21 @@ Pipeline context (recording analysis archives):
      python -m fisheye.detection.detect_yolo /path/to/zarr --model /path/to/model.pt
      ```
 
-2) **Run detection quality (optional but recommended)**
+2) **Run detection quality (required before refinement in production)**
    ```bash
    python -m fisheye.refinement.detect_quality /path/to/zarr
+   ```
+   Defaults:
+   - `--threshold-mode scaled` with `--threshold 100` and `--threshold-reference-width 640`
+   - This means "100 px at 640px width", scaled automatically for other resolutions.
+
+   Why:
+   - writes frame-level and detection-level quality labels used by refinement
+   - avoids fallback behavior where refinement assumes all detections are clean
+
+   Batch option:
+   ```bash
+   scripts/py -m fisheye.utils.detect_quality_batch /nvme1/recordings --recursive --apply
    ```
 
 3) **Refine detections**
@@ -66,6 +78,8 @@ Pipeline context (recording analysis archives):
      on the refined run (and `detect_review_status_latest` on the parent group).
    - Crop runs created with `--crop-source preferred`/`auto` resolve the group
      using this review status and store a snapshot on the crop run.
+   - For Crimson-driven acceptance, follow:
+     - `docs/crimson_detect_review_acceptance_contract.md`
 
 6) **Manual corrections**
    ```bash
@@ -85,11 +99,24 @@ Pipeline context (recording analysis archives):
 Retuning is **not supported** for YOLO runs. If thresholds or models change:
 
 1) Run a **new YOLO detect run** (new `detect_runs/<run>`).
-2) Refine that run.
-3) Manual review if needed.
+2) Run `detect_quality` for that detect run.
+3) Refine that run.
+4) Manual review if needed.
 
 Manual review still applies to YOLO; it simply writes a corrected subgroup under
 the refined run.
+
+## Detect-Quality Guardrails
+
+- Run `detect_quality` after every new detect run and before `refine_detect`.
+- If `quality_reports/latest` is missing for the selected detect run, do not
+  treat refinement as production-grade.
+- Treat quality as stale when the selected detect run differs from the run used
+  to produce the current refined run (`source_detect_run` mismatch).
+- Record and preserve threshold provenance (`jump_threshold`,
+  `blip_gap_threshold`) from the quality run attrs.
+- In automation, classify this as its own stage failure (`detect_quality`) so
+  operators can retry quality without rerunning detect.
 
 ## Versioning rules (important)
 

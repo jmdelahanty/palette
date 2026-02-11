@@ -15,6 +15,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from .db import (
     Registry,
     RegistryPaths,
+    _extract_crop_quality_rows,
+    _extract_detect_performance_rows,
     _extract_detect_quality_rows,
     _extract_keypoint_quality_rows,
     _import_zarr,
@@ -229,6 +231,20 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--backfill-detect-performance",
+        action="store_true",
+        help=(
+            "Backfill detect_performance rows for datasets that currently have no detect performance rows."
+        ),
+    )
+    parser.add_argument(
+        "--backfill-crop-quality",
+        action="store_true",
+        help=(
+            "Backfill crop_quality rows for datasets that currently have no crop quality rows."
+        ),
+    )
+    parser.add_argument(
         "--refresh-keypoint-quality",
         action="store_true",
         help=(
@@ -240,6 +256,36 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Refresh detect_quality rows for all datasets in scope and remove stale rows."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-detect-performance",
+        action="store_true",
+        help=(
+            "Refresh detect_performance rows for all datasets in scope and remove stale rows."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-crop-quality",
+        action="store_true",
+        help=(
+            "Refresh crop_quality rows for all datasets in scope and remove stale rows."
+        ),
+    )
+    parser.add_argument(
+        "--detect-performance-all-datasets",
+        action="store_true",
+        help=(
+            "When backfilling/refreshing detect_performance, include all datasets. "
+            "Default scope is source_recording + analysis datasets only."
+        ),
+    )
+    parser.add_argument(
+        "--crop-quality-all-datasets",
+        action="store_true",
+        help=(
+            "When backfilling/refreshing crop_quality, include all datasets. "
+            "Default scope is source_recording + analysis datasets only."
         ),
     )
     parser.add_argument(
@@ -2072,6 +2118,321 @@ def _backfill_detect_quality(
     return summary
 
 
+def _detect_performance_row_signature(row: Dict[str, object]) -> tuple[object, ...]:
+    return (
+        row.get("detect_created_utc"),
+        row.get("recording_id"),
+        row.get("zarr_use"),
+        row.get("detection_method"),
+        row.get("model_run_id"),
+        row.get("model_set_id"),
+        row.get("model_path"),
+        row.get("model_name"),
+        row.get("coverage_percent"),
+        row.get("frames_with_detections"),
+        row.get("frames_zero_detections"),
+        row.get("total_frames"),
+        row.get("mean_confidence"),
+        row.get("min_confidence"),
+        row.get("max_confidence"),
+        row.get("inference_duration_seconds"),
+        row.get("inference_average_fps"),
+        row.get("inference_avg_batch_ms"),
+        row.get("inference_avg_read_ms"),
+        row.get("conf_threshold"),
+        row.get("iou_threshold"),
+        row.get("batch_size"),
+        row.get("inference_width"),
+        row.get("inference_height"),
+        row.get("zarr_mtime_ns"),
+    )
+
+
+def _crop_quality_row_signature(row: Dict[str, object]) -> tuple[object, ...]:
+    return (
+        row.get("recording_id"),
+        row.get("zarr_use"),
+        row.get("crop_created_utc"),
+        row.get("source_detect_run"),
+        row.get("source_refined_run"),
+        row.get("detection_source_type"),
+        row.get("detection_source_path"),
+        row.get("total_rois"),
+        row.get("frames_with_crops"),
+        row.get("total_frames"),
+        row.get("percent_frames_with_crops"),
+        row.get("includes_interpolated"),
+        row.get("n_real_detections"),
+        row.get("n_interpolated_detections"),
+        row.get("review_state"),
+        row.get("review_method"),
+        row.get("review_intended_use"),
+        row.get("review_reviewer"),
+        row.get("review_timestamp_utc"),
+        row.get("review_notes"),
+        row.get("zarr_mtime_ns"),
+    )
+
+
+def _backfill_crop_quality(
+    registry: Registry,
+    *,
+    dry_run: bool,
+    scope_paths: Optional[Sequence[Path]],
+    refresh: bool,
+    include_all_datasets: bool = False,
+) -> Dict[str, int]:
+    if include_all_datasets:
+        rows = registry.conn.execute(
+            """
+            SELECT dataset_id, zarr_path, recording_id, zarr_use
+            FROM datasets
+            WHERE status IS NULL OR lower(status) != 'missing'
+            ORDER BY dataset_id;
+            """
+        ).fetchall()
+    else:
+        rows = registry.conn.execute(
+            """
+            SELECT dataset_id, zarr_path, recording_id, zarr_use
+            FROM datasets
+            WHERE (status IS NULL OR lower(status) != 'missing')
+              AND lower(COALESCE(artifact_kind, '')) = 'source_recording'
+              AND lower(COALESCE(zarr_use, '')) = 'analysis'
+            ORDER BY dataset_id;
+            """
+        ).fetchall()
+    scope_roots = _normalize_scope_paths(scope_paths)
+    zarr = _import_zarr()
+    summary: Dict[str, int] = {
+        "datasets_scanned": 0,
+        "datasets_skipped_existing": 0,
+        "datasets_missing": 0,
+        "datasets_errors": 0,
+        "datasets_no_quality": 0,
+        "rows_inserted": 0,
+        "rows_updated": 0,
+        "rows_skipped": 0,
+        "rows_deleted": 0,
+    }
+
+    for row in rows:
+        dataset_id = str(row["dataset_id"])
+        zarr_path = Path(str(row["zarr_path"])).expanduser()
+        recording_id = str(row["recording_id"]) if row["recording_id"] else None
+        zarr_use = str(row["zarr_use"]) if row["zarr_use"] else None
+        if not _matches_scope(str(zarr_path), scope_roots):
+            continue
+        summary["datasets_scanned"] += 1
+        if not _is_zarr_root_path(zarr_path):
+            summary["datasets_missing"] += 1
+            continue
+
+        existing_rows = registry.conn.execute(
+            "SELECT * FROM crop_quality WHERE dataset_id = ?;",
+            (dataset_id,),
+        ).fetchall()
+        if not refresh and existing_rows:
+            summary["datasets_skipped_existing"] += 1
+            summary["rows_skipped"] += len(existing_rows)
+            continue
+
+        try:
+            try:
+                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+            except TypeError:
+                root = zarr.open_group(str(zarr_path), mode="r")
+            extracted_rows = _extract_crop_quality_rows(
+                root,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+            )
+        except Exception:
+            summary["datasets_errors"] += 1
+            continue
+
+        if not extracted_rows:
+            summary["datasets_no_quality"] += 1
+
+        existing_by_run: Dict[str, Dict[str, object]] = {
+            str(existing["crop_run"]): {key: existing[key] for key in existing.keys()}
+            for existing in existing_rows
+        }
+        extracted_by_run: Dict[str, Dict[str, object]] = {
+            str(extracted["crop_run"]): extracted for extracted in extracted_rows
+        }
+
+        for crop_run, extracted in extracted_by_run.items():
+            existing = existing_by_run.get(crop_run)
+            if existing is None:
+                summary["rows_inserted"] += 1
+                continue
+            existing_sig = _crop_quality_row_signature(existing)
+            extracted_sig = _crop_quality_row_signature(extracted)
+            if existing_sig == extracted_sig:
+                summary["rows_skipped"] += 1
+            else:
+                summary["rows_updated"] += 1
+
+        if refresh:
+            for crop_run in existing_by_run:
+                if crop_run not in extracted_by_run:
+                    summary["rows_deleted"] += 1
+
+        if dry_run:
+            continue
+        registry.replace_crop_quality(dataset_id, extracted_rows)
+
+    return summary
+
+
+def _backfill_detect_performance(
+    registry: Registry,
+    *,
+    dry_run: bool,
+    scope_paths: Optional[Sequence[Path]],
+    refresh: bool,
+    include_all_datasets: bool = False,
+) -> Dict[str, int]:
+    if include_all_datasets:
+        rows = registry.conn.execute(
+            """
+            SELECT dataset_id, zarr_path, recording_id, zarr_use
+            FROM datasets
+            WHERE status IS NULL OR lower(status) != 'missing'
+            ORDER BY dataset_id;
+            """
+        ).fetchall()
+    else:
+        rows = registry.conn.execute(
+            """
+            SELECT dataset_id, zarr_path, recording_id, zarr_use
+            FROM datasets
+            WHERE (status IS NULL OR lower(status) != 'missing')
+              AND lower(COALESCE(artifact_kind, '')) = 'source_recording'
+              AND lower(COALESCE(zarr_use, '')) = 'analysis'
+            ORDER BY dataset_id;
+            """
+        ).fetchall()
+    scope_roots = _normalize_scope_paths(scope_paths)
+    zarr = _import_zarr()
+    summary: Dict[str, int] = {
+        "datasets_scanned": 0,
+        "datasets_skipped_existing": 0,
+        "datasets_missing": 0,
+        "datasets_errors": 0,
+        "datasets_no_performance": 0,
+        "rows_inserted": 0,
+        "rows_updated": 0,
+        "rows_skipped": 0,
+        "rows_deleted": 0,
+    }
+
+    for row in rows:
+        dataset_id = str(row["dataset_id"])
+        zarr_path = Path(str(row["zarr_path"])).expanduser()
+        recording_id = str(row["recording_id"]) if row["recording_id"] else None
+        zarr_use = str(row["zarr_use"]) if row["zarr_use"] else None
+        if not _matches_scope(str(zarr_path), scope_roots):
+            continue
+        summary["datasets_scanned"] += 1
+        if not _is_zarr_root_path(zarr_path):
+            summary["datasets_missing"] += 1
+            continue
+
+        existing_rows = registry.conn.execute(
+            "SELECT * FROM detect_performance WHERE dataset_id = ?;",
+            (dataset_id,),
+        ).fetchall()
+        if not refresh and existing_rows:
+            summary["datasets_skipped_existing"] += 1
+            summary["rows_skipped"] += len(existing_rows)
+            continue
+
+        try:
+            try:
+                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+            except TypeError:
+                root = zarr.open_group(str(zarr_path), mode="r")
+            extracted_rows = _extract_detect_performance_rows(
+                root,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+            )
+        except Exception:
+            summary["datasets_errors"] += 1
+            continue
+
+        if not extracted_rows:
+            summary["datasets_no_performance"] += 1
+
+        existing_by_run: Dict[str, Dict[str, object]] = {
+            str(existing["detect_run"]): {key: existing[key] for key in existing.keys()}
+            for existing in existing_rows
+        }
+        extracted_by_run: Dict[str, Dict[str, object]] = {
+            str(extracted["detect_run"]): extracted for extracted in extracted_rows
+        }
+
+        for detect_run, extracted in extracted_by_run.items():
+            existing = existing_by_run.get(detect_run)
+            if existing is None:
+                summary["rows_inserted"] += 1
+                continue
+            existing_sig = _detect_performance_row_signature(existing)
+            extracted_sig = _detect_performance_row_signature(extracted)
+            if existing_sig == extracted_sig:
+                summary["rows_skipped"] += 1
+            else:
+                summary["rows_updated"] += 1
+
+        if refresh:
+            for detect_run in existing_by_run:
+                if detect_run not in extracted_by_run:
+                    summary["rows_deleted"] += 1
+
+        if dry_run:
+            continue
+        if refresh:
+            registry.replace_detect_performance(dataset_id, extracted_rows)
+        else:
+            for extracted in extracted_rows:
+                registry.upsert_detect_performance(
+                    dataset_id=dataset_id,
+                    detect_run=str(extracted["detect_run"]),
+                    detect_created_utc=extracted.get("detect_created_utc"),
+                    recording_id=extracted.get("recording_id"),
+                    zarr_use=extracted.get("zarr_use"),
+                    detection_method=extracted.get("detection_method"),
+                    model_run_id=extracted.get("model_run_id"),
+                    model_set_id=extracted.get("model_set_id"),
+                    model_path=extracted.get("model_path"),
+                    model_name=extracted.get("model_name"),
+                    coverage_percent=extracted.get("coverage_percent"),
+                    frames_with_detections=extracted.get("frames_with_detections"),
+                    frames_zero_detections=extracted.get("frames_zero_detections"),
+                    total_frames=extracted.get("total_frames"),
+                    mean_confidence=extracted.get("mean_confidence"),
+                    min_confidence=extracted.get("min_confidence"),
+                    max_confidence=extracted.get("max_confidence"),
+                    inference_duration_seconds=extracted.get("inference_duration_seconds"),
+                    inference_average_fps=extracted.get("inference_average_fps"),
+                    inference_avg_batch_ms=extracted.get("inference_avg_batch_ms"),
+                    inference_avg_read_ms=extracted.get("inference_avg_read_ms"),
+                    conf_threshold=extracted.get("conf_threshold"),
+                    iou_threshold=extracted.get("iou_threshold"),
+                    batch_size=extracted.get("batch_size"),
+                    inference_width=extracted.get("inference_width"),
+                    inference_height=extracted.get("inference_height"),
+                    zarr_mtime_ns=extracted.get("zarr_mtime_ns"),
+                    updated_utc=extracted.get("updated_utc"),
+                )
+
+    return summary
+
+
 def _load_recording_type_subtype_vocab(
     registry: Registry,
 ) -> tuple[set[str], dict[str, set[str]]]:
@@ -3310,8 +3671,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.backfill_dataset_lineage
         and not args.backfill_keypoint_quality
         and not args.backfill_detect_quality
+        and not args.backfill_detect_performance
+        and not args.backfill_crop_quality
         and not args.refresh_keypoint_quality
         and not args.refresh_detect_quality
+        and not args.refresh_detect_performance
+        and not args.refresh_crop_quality
         and not args.check_integrity
         and not args.vacuum
     ):
@@ -3323,7 +3688,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "--backfill-model-tables, --backfill-keypoint-quality, "
             "--remap-training-set-dataset-ids, "
             "--backfill-dataset-lineage, "
-            "--backfill-detect-quality, --refresh-keypoint-quality, --refresh-detect-quality, "
+            "--backfill-detect-quality, --backfill-detect-performance, "
+            "--backfill-crop-quality, "
+            "--refresh-keypoint-quality, --refresh-detect-quality, --refresh-detect-performance, "
+            "--refresh-crop-quality, "
             "--check-integrity, and/or --vacuum."
         )
 
@@ -3746,6 +4114,78 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             mode = "refresh" if args.refresh_detect_quality else "backfill"
             print(
                 f"Detect quality {mode}: "
+                f"scanned={summary['datasets_scanned']} "
+                f"missing={summary['datasets_missing']} "
+                f"errors={summary['datasets_errors']} "
+                f"no_quality={summary['datasets_no_quality']} "
+                f"skipped_existing={summary['datasets_skipped_existing']}"
+            )
+            if args.dry_run:
+                print(
+                    "Dry run: would apply "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+            else:
+                print(
+                    "Applied "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+
+        if args.backfill_detect_performance or args.refresh_detect_performance:
+            summary = _backfill_detect_performance(
+                registry,
+                dry_run=bool(args.dry_run),
+                scope_paths=scope_paths or None,
+                refresh=bool(args.refresh_detect_performance),
+                include_all_datasets=bool(args.detect_performance_all_datasets),
+            )
+            mode = "refresh" if args.refresh_detect_performance else "backfill"
+            scope_label = "all-datasets" if args.detect_performance_all_datasets else "source-analysis-only"
+            print(
+                f"Detect performance {mode}: "
+                f"scope={scope_label} "
+                f"scanned={summary['datasets_scanned']} "
+                f"missing={summary['datasets_missing']} "
+                f"errors={summary['datasets_errors']} "
+                f"no_performance={summary['datasets_no_performance']} "
+                f"skipped_existing={summary['datasets_skipped_existing']}"
+            )
+            if args.dry_run:
+                print(
+                    "Dry run: would apply "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+            else:
+                print(
+                    "Applied "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+
+        if args.backfill_crop_quality or args.refresh_crop_quality:
+            summary = _backfill_crop_quality(
+                registry,
+                dry_run=bool(args.dry_run),
+                scope_paths=scope_paths or None,
+                refresh=bool(args.refresh_crop_quality),
+                include_all_datasets=bool(args.crop_quality_all_datasets),
+            )
+            mode = "refresh" if args.refresh_crop_quality else "backfill"
+            scope_label = "all-datasets" if args.crop_quality_all_datasets else "source-analysis-only"
+            print(
+                f"Crop quality {mode}: "
+                f"scope={scope_label} "
                 f"scanned={summary['datasets_scanned']} "
                 f"missing={summary['datasets_missing']} "
                 f"errors={summary['datasets_errors']} "

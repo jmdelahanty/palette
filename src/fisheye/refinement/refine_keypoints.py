@@ -21,7 +21,6 @@ import zarr
 from rich.console import Console
 import argparse
 import yaml
-from zarr.core.dtype import VariableLengthUTF8
 
 import dask
 from dask import delayed
@@ -36,10 +35,22 @@ except ImportError:
     HAVE_DISTRIBUTED = False
 
 from .keypoint_quality import KeypointGeometryMetrics, compute_geometry_metrics
+from ..shared.detect_reason_codec import write_reason_columns
 from ..utils.system import get_environment_info, get_git_info
 
 REFINED_KEYPOINT_GROUP = "refined_keypoints_runs"
 LEGACY_KEYPOINT_GROUP = "keypoints_refined_runs"
+
+
+def _write_reason_arrays(group: zarr.Group, reason: np.ndarray, chunk_size: int) -> None:
+    """Write reason labels in both text and Crimson-compatible byte formats."""
+    write_reason_columns(
+        group,
+        np.asarray(reason, dtype=object),
+        chunk_size,
+        include_reason_text=True,
+        overwrite=True,
+    )
 
 
 @dataclass
@@ -627,14 +638,8 @@ def create_refined_keypoint_run(
         fill_value=False,
         overwrite=True,
     )
-    reason_dst = kp_refined.create_array(
-        "reason",
-        shape=(total_rois,),
-        chunks=kp_source["heading"].chunks,
-        dtype=VariableLengthUTF8(),
-        fill_value="",
-        overwrite=True,
-    )
+    reason_chunk = int(heading_chunks[0]) if heading_chunks else max(1, min(1024, total_rois))
+    reason_values = np.full(int(total_rois), "", dtype=object)
     source_success = kp_source["detection_success"][:]
     kp_refined.create_array(
         "source_success",
@@ -650,8 +655,16 @@ def create_refined_keypoint_run(
         fill_value=False,
         overwrite=True,
     )
-    heading_valid_dst = kp_refined.create_array(
-        "heading_valid",
+    heading_finite_dst = kp_refined.create_array(
+        "heading_finite",
+        shape=(total_rois,),
+        chunks=heading_chunks,
+        dtype="bool",
+        fill_value=False,
+        overwrite=True,
+    )
+    heading_usable_dst = kp_refined.create_array(
+        "heading_usable",
         shape=(total_rois,),
         chunks=heading_chunks,
         dtype="bool",
@@ -753,7 +766,7 @@ def create_refined_keypoint_run(
         confidence_valid_dst[idx] = result["confidence_valid"]
         geometry_valid_dst[idx] = result["geometry_valid"]
         usable_dst[idx] = result["usable"]
-        reason_dst[idx] = result["reason"]
+        reason_values[idx] = np.asarray(result["reason"], dtype=object)
         flip_dst[idx] = result["flip_flags"]
 
         stats["refined_success"] += result["stats"]["refined_success"]
@@ -763,6 +776,8 @@ def create_refined_keypoint_run(
         stats["geometry_issues"] += result["stats"]["geometry_issues"]
         stats["clean"] += result["stats"]["clean"]
         stats["usable"] += result["stats"]["usable"]
+
+    _write_reason_arrays(kp_refined, reason_values, reason_chunk)
 
     duration = time.perf_counter() - start_time
 
@@ -885,10 +900,14 @@ def create_refined_keypoint_run(
     )
 
     refined_success_values = refined_success_dst[:]
-    heading_valid_values = refined_success_values.astype(bool)
+    heading_values = np.asarray(heading_dst[:], dtype=np.float64)
+    heading_finite_values = np.isfinite(heading_values)
+    heading_usable_values = refined_success_values.astype(bool)
     if detection_source_values.size:
-        heading_valid_values &= (detection_source_values == 0)
-    heading_valid_dst[:] = heading_valid_values
+        heading_usable_values &= (detection_source_values == 0)
+    heading_usable_values &= heading_finite_values
+    heading_finite_dst[:] = heading_finite_values
+    heading_usable_dst[:] = heading_usable_values
 
     report_lines = [
         "[bold]Results[/bold]",

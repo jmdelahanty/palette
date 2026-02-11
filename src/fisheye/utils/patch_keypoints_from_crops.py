@@ -273,12 +273,36 @@ def _update_keypoints_summary(
         keypoints_group.create_array("n_keypoints", data=success_counts, chunks=(chunk_len,), overwrite=True)
 
     detection_source = keypoints_group.get("detection_source")
+    source_is_real = np.ones_like(detection_success, dtype=bool)
     if detection_source is not None:
-        heading_valid = detection_success & (np.asarray(detection_source[:], dtype=np.int8) == 0)
+        source_is_real = np.asarray(detection_source[:], dtype=np.int8) == 0
+    if "heading" in keypoints_group:
+        heading_finite = np.isfinite(np.asarray(keypoints_group["heading"][:], dtype=np.float64))
     else:
-        heading_valid = detection_success
+        heading_finite = np.zeros_like(detection_success, dtype=bool)
+    heading_usable = detection_success & source_is_real & heading_finite
+
+    bool_chunks = keypoints_group["detection_success"].chunks or (max(1, min(1024, detection_success.size)),)
+    if "heading_finite" in keypoints_group:
+        keypoints_group["heading_finite"][:] = heading_finite
+    else:
+        keypoints_group.create_array(
+            "heading_finite",
+            data=heading_finite,
+            chunks=bool_chunks,
+            overwrite=True,
+        )
+    if "heading_usable" in keypoints_group:
+        keypoints_group["heading_usable"][:] = heading_usable
+    else:
+        keypoints_group.create_array(
+            "heading_usable",
+            data=heading_usable,
+            chunks=bool_chunks,
+            overwrite=True,
+        )
     if "heading_valid" in keypoints_group:
-        keypoints_group["heading_valid"][:] = heading_valid
+        del keypoints_group["heading_valid"]
 
     total_rois = int(keypoints_group["keypoints_roi"].shape[0])
     total_success = int(np.sum(detection_success))
@@ -526,10 +550,33 @@ def _patch_refined_keypoints(
 
     detection_source = refined.get("detection_source")
     refined_success = np.asarray(refined["refined_success"][:], dtype=bool)
-    heading_valid = refined_success.copy()
+    source_is_real = np.ones_like(refined_success, dtype=bool)
     if detection_source is not None:
-        heading_valid &= (np.asarray(detection_source[:], dtype=np.int8) == 0)
-    refined["heading_valid"][:] = heading_valid
+        source_is_real = np.asarray(detection_source[:], dtype=np.int8) == 0
+    heading_finite = np.isfinite(np.asarray(refined["heading"][:], dtype=np.float64))
+    heading_usable = refined_success & source_is_real & heading_finite
+
+    bool_chunks = refined["refined_success"].chunks or (max(1, min(1024, refined_success.size)),)
+    if "heading_finite" in refined:
+        refined["heading_finite"][:] = heading_finite
+    else:
+        refined.create_array(
+            "heading_finite",
+            data=heading_finite,
+            chunks=bool_chunks,
+            overwrite=True,
+        )
+    if "heading_usable" in refined:
+        refined["heading_usable"][:] = heading_usable
+    else:
+        refined.create_array(
+            "heading_usable",
+            data=heading_usable,
+            chunks=bool_chunks,
+            overwrite=True,
+        )
+    if "heading_valid" in refined:
+        del refined["heading_valid"]
 
     _update_postprocess_summary(refined, print_summary=False)
 

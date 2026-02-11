@@ -8,7 +8,7 @@ model:
 
 # Detection parameters (these are all implemented and working)
 detection:
-  conf_threshold: 0.80      # Confidence threshold (0.0-1.0)
+  conf_threshold: 0.40      # Confidence threshold (0.0-1.0)
                             # Typical range: 0.2-0.5
                             # Lower = more detections (but more false positives)
                             

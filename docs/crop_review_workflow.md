@@ -3,6 +3,9 @@
 This note captures how to inspect ROI crops and record approvals for training
 data.
 
+Registry-backed crop review/status planning is tracked in:
+`docs/crop_review_registry_todo.md`.
+
 ## Quick review (single recording)
 
 ```
@@ -15,6 +18,7 @@ Keys:
 - `n`: mark `needs_review`
 - `r`: mark `rejected`
 - `p`: mark `pending`
+- `u`: cycle `intended_use` (`training` ↔ `full_recording`) for subsequent writes
 
 ## Batch review
 
@@ -23,6 +27,9 @@ python -m fisheye.utils.review_crops /nvme1/recordings --recursive
 ```
 
 Use `--file-list` to review a specific subset.
+Use `--review-intended-use full_recording` (plus optional `--review-state`,
+`--review-method`, `--reviewer`, `--review-notes`) to forward review defaults to
+each launched viewer.
 
 ## Generating review lists
 
@@ -35,6 +42,10 @@ python -m fisheye.utils.generate_review_list /nvme1/recordings \
   --review-state missing \
   --output crop_review_list.txt
 ```
+
+By default, crop review lists include only crop runs with
+`status=completed`. To include other run states (for example debugging),
+set `--crop-run-status any`.
 
 ## Keypoint review (batch)
 

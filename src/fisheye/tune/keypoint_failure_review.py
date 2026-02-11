@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 
+from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..refinement.keypoint_quality import compute_geometry_metrics
 from ..refinement.refine_keypoints import _compute_heading_from_points
 
@@ -63,13 +64,12 @@ def _load_failure_indices(refined: zarr.Group, include_all: bool = False) -> np.
     else:
         return np.zeros(0, dtype="i4")
 
-    reason_arr = refined.get("reason")
-    if reason_arr is None or failures.size == 0:
+    if failures.size == 0:
         return failures
-    try:
-        reason_vals = np.asarray(reason_arr[:], dtype=object)
-    except Exception:
+    reason_vals = read_reason_labels(refined)
+    if reason_vals is None:
         return failures
+    reason_vals = np.asarray(reason_vals, dtype=object)
     if reason_vals.size == 0:
         return failures
     keep_mask = []
@@ -113,6 +113,21 @@ def _sanitize_reason_array(reason_arr: zarr.Array) -> None:
 
     cleaned = np.array([coerce(v) for v in raw], dtype=object)
     reason_arr[:] = cleaned
+
+
+def _write_reason_labels(refined: zarr.Group, labels: np.ndarray) -> None:
+    heading = refined.get("heading")
+    if heading is not None and heading.chunks:
+        chunk_size = int(heading.chunks[0])
+    else:
+        chunk_size = max(1, min(1024, int(np.asarray(labels).shape[0])))
+    write_reason_columns(
+        refined,
+        np.asarray(labels, dtype=object),
+        chunk_size,
+        include_reason_text=True,
+        overwrite=True,
+    )
 
 
 def _load_frame_flags(path: Path) -> Dict[str, list[Dict[str, Optional[int]]]]:
@@ -382,8 +397,14 @@ def launch_review(
     geometry_valid_arr = refined.get("geometry_valid")
     usable_arr = refined.get("usable_keypoints")
     reason_arr = refined.get("reason")
-    heading_valid_arr = refined.get("heading_valid")
+    heading_finite_arr = refined.get("heading_finite")
+    heading_usable_arr = refined.get("heading_usable")
     detection_source_arr = refined.get("detection_source")
+    if reason_arr is None:
+        reason_labels = read_reason_labels(refined)
+        if reason_labels is not None:
+            _write_reason_labels(refined, np.asarray(reason_labels, dtype=object))
+            reason_arr = refined.get("reason")
     if reason_arr is not None:
         _sanitize_reason_array(reason_arr)
 
@@ -513,9 +534,12 @@ def launch_review(
             geometry_valid_arr[roi_idx] = geom_ok
         if usable_arr is not None:
             usable_arr[roi_idx] = conf_ok and geom_ok
-        if heading_valid_arr is not None:
+        heading_is_finite = bool(np.isfinite(heading_val))
+        if heading_finite_arr is not None:
+            heading_finite_arr[roi_idx] = heading_is_finite
+        if heading_usable_arr is not None:
             det_src = int(detection_source_arr[roi_idx]) if detection_source_arr is not None else 0
-            heading_valid_arr[roi_idx] = refined_success_val and det_src == 0
+            heading_usable_arr[roi_idx] = refined_success_val and det_src == 0 and heading_is_finite
         if reason_arr is not None:
             existing = str(reason_arr[roi_idx]) if reason_arr[roi_idx] is not None else ""
             existing_tags = [tag for tag in existing.split("|") if tag]
@@ -583,8 +607,10 @@ def launch_review(
             geometry_valid_arr[roi_idx] = False
         if usable_arr is not None:
             usable_arr[roi_idx] = False
-        if heading_valid_arr is not None:
-            heading_valid_arr[roi_idx] = False
+        if heading_finite_arr is not None:
+            heading_finite_arr[roi_idx] = False
+        if heading_usable_arr is not None:
+            heading_usable_arr[roi_idx] = False
         if reason_arr is not None:
             existing = str(reason_arr[roi_idx]) if reason_arr[roi_idx] is not None else ""
             reason_value = str(_clean_reason(existing, ["fish_present_no_keypoints"]))
@@ -647,8 +673,10 @@ def launch_review(
             geometry_valid_arr[roi_idx] = False
         if usable_arr is not None:
             usable_arr[roi_idx] = False
-        if heading_valid_arr is not None:
-            heading_valid_arr[roi_idx] = False
+        if heading_finite_arr is not None:
+            heading_finite_arr[roi_idx] = False
+        if heading_usable_arr is not None:
+            heading_usable_arr[roi_idx] = False
         if reason_arr is not None:
             existing = str(reason_arr[roi_idx]) if reason_arr[roi_idx] is not None else ""
             reason_value = str(_clean_reason(existing, ["detection_issue"]))
@@ -777,6 +805,8 @@ def launch_review(
     fig.canvas.mpl_connect("button_press_event", on_click)
     fig.canvas.mpl_connect("key_press_event", on_key)
     plt.show()
+    if reason_arr is not None:
+        _write_reason_labels(refined, np.asarray(reason_arr[:], dtype=object))
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:

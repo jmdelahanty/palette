@@ -19,6 +19,8 @@ from typing import Dict, Iterable, Optional, Sequence
 import numpy as np
 import zarr
 
+from ..shared.detect_reason_codec import read_reason_labels
+
 
 def _get_latest_refined_run(root: zarr.Group) -> str:
     refined_parent = root.get("refined_keypoints_runs")
@@ -37,10 +39,11 @@ def _count_truthy(arr: Optional[zarr.Array]) -> int:
     return int(np.sum(data))
 
 
-def _count_reason_tags(reason_arr: Optional[zarr.Array]) -> Dict[str, int]:
-    if reason_arr is None:
+def _count_reason_tags(refined: zarr.Group) -> Dict[str, int]:
+    reason_labels = read_reason_labels(refined)
+    if reason_labels is None:
         return {}
-    raw = reason_arr[:]
+    raw = np.asarray(reason_labels, dtype=object)
     counts: Counter[str] = Counter()
     for value in raw:
         if value is None:
@@ -145,7 +148,8 @@ def _update_postprocess_summary(
     confidence_valid = _count_truthy(refined.get("confidence_valid"))
     geometry_valid = _count_truthy(refined.get("geometry_valid"))
     flip_corrected = _count_truthy(refined.get("flip_corrected"))
-    heading_valid = _count_truthy(refined.get("heading_valid"))
+    heading_finite = _count_truthy(refined.get("heading_finite"))
+    heading_usable = _count_truthy(refined.get("heading_usable"))
     source_success = _count_truthy(refined.get("source_success"))
 
     remaining_failures = max(0, total_rois - refined_success)
@@ -155,7 +159,7 @@ def _update_postprocess_summary(
     detection_source_counts = _count_ints(refined.get("detection_source"))
     retune_id_counts = _count_ints(refined.get("retune_id"))
     retune_total = int(sum(count for key, count in retune_id_counts.items() if key != "-1"))
-    reason_counts = _count_reason_tags(refined.get("reason"))
+    reason_counts = _count_reason_tags(refined)
     manual_corrections = int(reason_counts.get("manual_correction", 0))
 
     post_stats: Dict[str, object] = {
@@ -168,7 +172,8 @@ def _update_postprocess_summary(
         "confidence_valid": confidence_valid,
         "geometry_valid": geometry_valid,
         "flip_corrected": flip_corrected,
-        "heading_valid": heading_valid,
+        "heading_finite": heading_finite,
+        "heading_usable": heading_usable,
         "detection_source_counts": detection_source_counts,
         "reason_counts": reason_counts,
         "retune_id_counts": retune_id_counts,

@@ -13,7 +13,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
 from fisheye.registry.maintenance import (
+    _backfill_crop_quality,
     _backfill_dataset_lineage,
+    _backfill_detect_performance,
     _backfill_recording_entities,
     _backfill_subject_dish_cross_entities,
     _backfill_subjects,
@@ -74,6 +76,66 @@ def _create_quality_zarr(path: Path) -> None:
         data=np.array([True, True, True, False], dtype=np.bool_),
         chunks=(4,),
     )
+
+
+def _create_detect_performance_zarr(path: Path) -> None:
+    root = zarr.open_group(str(path), mode="w")
+    root.attrs["session_uuid"] = "detect_perf_session"
+    raw = root.create_group("raw_video")
+    raw.create_array("images_ds", data=np.zeros((4, 8, 8), dtype=np.uint8), chunks=(1, 8, 8))
+    detect_parent = root.create_group("detect_runs")
+    detect_parent.attrs["latest"] = "detect_001"
+    detect = detect_parent.create_group("detect_001")
+    detect.attrs["detect_timestamp_utc"] = "2026-02-09T00:00:00+00:00"
+    detect.attrs["detection_method"] = "yolo"
+    detect.attrs["model_path"] = "/tmp/model.pt"
+    detect.attrs["model_name"] = "model.pt"
+    detect.attrs["inference_average_fps"] = 80.0
+    detect.attrs["inference_avg_read_ms"] = 120.0
+    detect.attrs["parameters"] = {"conf_threshold": 0.4, "iou_threshold": 0.8, "batch_size": 16}
+    detect.create_array("frame_counts", data=np.array([1, 0, 1, 0], dtype=np.int32), chunks=(4,))
+
+
+def _create_crop_quality_zarr(path: Path) -> None:
+    root = zarr.open_group(str(path), mode="w")
+    root.attrs["session_uuid"] = "crop_quality_session"
+    raw = root.create_group("raw_video")
+    raw.create_array("images_ds", data=np.zeros((4, 8, 8), dtype=np.uint8), chunks=(1, 8, 8))
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs["latest"] = "crop_001"
+    crop = crop_parent.create_group("crop_001")
+    crop.attrs["created_at_utc"] = "2026-02-10T00:00:00+00:00"
+    crop.attrs["detection_source_type"] = "manual"
+    crop.attrs["detection_source_path"] = "refined_detect_runs/refined_001/manual"
+    crop.attrs["source_detect_run"] = "detect_001"
+    crop.attrs["source_refined_run"] = "refined_001"
+    crop.attrs["includes_interpolated"] = True
+    crop.attrs["n_real_detections"] = 3
+    crop.attrs["n_interpolated_detections"] = 1
+    crop.attrs["summary_statistics"] = {
+        "total_frames": 4,
+        "frames_with_crops": 4,
+        "total_rois_cropped": 4,
+        "percent_frames_with_crops": 100.0,
+    }
+    crop.attrs["crop_review_status"] = {
+        "state": "approved",
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "pytest",
+        "timestamp": "2026-02-10T01:00:00+00:00",
+        "notes": "ok",
+    }
+    crop.create_array("frame_counts", data=np.array([1, 1, 1, 1], dtype=np.int32), chunks=(4,))
+    crop.create_array("bbox_norm_coords", data=np.zeros((4, 4), dtype=np.float32), chunks=(4, 4))
+    crop.create_array("detection_source", data=np.array([0, 1, 0, 0], dtype=np.int8), chunks=(4,))
+
+
+def _create_detectless_zarr(path: Path, *, session_uuid: str = "detectless_session") -> None:
+    root = zarr.open_group(str(path), mode="w")
+    root.attrs["session_uuid"] = session_uuid
+    raw = root.create_group("raw_video")
+    raw.create_array("images_ds", data=np.zeros((4, 8, 8), dtype=np.uint8), chunks=(1, 8, 8))
 
 
 def test_is_nested_zarr_subpath() -> None:
@@ -176,6 +238,65 @@ def test_training_task_type_inferred_and_backfilled(tmp_path: Path) -> None:
     ).fetchone()
     assert set_row2 is not None and str(set_row2["task_type"]) == "detect"
     assert run_row2 is not None and str(run_row2["task_type"]) == "detect"
+    registry.close()
+
+
+def test_schema_has_detect_performance_table_views_and_indexes(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    table = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'detect_performance';
+        """
+    ).fetchone()
+    assert table is not None
+
+    views = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'view' AND name IN (
+            'detect_performance_latest',
+            'recording_detect_performance_latest',
+            'detect_model_performance_latest',
+            'recording_detect_model_performance_latest',
+            'detect_model_performance_summary',
+            'recording_detect_model_performance_summary'
+        );
+        """
+    ).fetchall()
+    view_names = {str(row["name"]) for row in views}
+    assert view_names == {
+        "detect_performance_latest",
+        "recording_detect_performance_latest",
+        "detect_model_performance_latest",
+        "recording_detect_model_performance_latest",
+        "detect_model_performance_summary",
+        "recording_detect_model_performance_summary",
+    }
+
+    idx = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'index' AND name IN (
+            'idx_detect_perf_recording',
+            'idx_detect_perf_coverage',
+            'idx_detect_perf_runtime',
+            'idx_detect_perf_method',
+            'idx_detect_perf_model_path'
+        );
+        """
+    ).fetchall()
+    idx_names = {str(row["name"]) for row in idx}
+    assert idx_names == {
+        "idx_detect_perf_recording",
+        "idx_detect_perf_coverage",
+        "idx_detect_perf_runtime",
+        "idx_detect_perf_method",
+        "idx_detect_perf_model_path",
+    }
     registry.close()
 
 
@@ -1801,6 +1922,306 @@ def test_refresh_keypoint_quality_deletes_stale_rows(tmp_path: Path) -> None:
         (dataset_id,),
     ).fetchone()["n"]
     assert stale == 0
+    registry.close()
+
+
+def test_backfill_detect_performance_dry_run_and_apply(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    _create_detect_performance_zarr(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="r")
+    dataset_id = registry.register_from_root(root, zarr_path)
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
+        (dataset_id,),
+    )
+    registry.conn.execute("DELETE FROM detect_performance WHERE dataset_id = ?;", (dataset_id,))
+    registry.conn.commit()
+
+    dry = _backfill_detect_performance(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert dry["datasets_scanned"] == 1
+    assert dry["rows_inserted"] == 1
+    assert dry["rows_updated"] == 0
+    assert dry["rows_deleted"] == 0
+
+    applied = _backfill_detect_performance(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert applied["rows_inserted"] == 1
+    row = registry.conn.execute(
+        "SELECT detection_method, coverage_percent, inference_average_fps FROM detect_performance_latest WHERE dataset_id = ?;",
+        (dataset_id,),
+    ).fetchone()
+    assert row is not None
+    assert str(row["detection_method"]) == "yolo"
+    assert float(row["coverage_percent"]) == pytest.approx(50.0)
+    assert float(row["inference_average_fps"]) == pytest.approx(80.0)
+    registry.close()
+
+
+def test_backfill_detect_performance_scope_defaults_to_source_analysis(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    analysis_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    training_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_training.zarr"
+    _create_detect_performance_zarr(analysis_path)
+    _create_detect_performance_zarr(training_path)
+
+    analysis_id = registry.register_from_root(zarr.open_group(str(analysis_path), mode="r"), analysis_path)
+    training_id = registry.register_from_root(zarr.open_group(str(training_path), mode="r"), training_path)
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
+        (analysis_id,),
+    )
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'training' WHERE dataset_id = ?;",
+        (training_id,),
+    )
+    registry.conn.execute(
+        "DELETE FROM detect_performance WHERE dataset_id IN (?, ?);",
+        (analysis_id, training_id),
+    )
+    registry.conn.commit()
+
+    dry_default = _backfill_detect_performance(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert dry_default["datasets_scanned"] == 1
+    assert dry_default["rows_inserted"] == 1
+
+    applied_default = _backfill_detect_performance(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert applied_default["rows_inserted"] == 1
+    analysis_rows = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM detect_performance WHERE dataset_id = ?;",
+        (analysis_id,),
+    ).fetchone()
+    training_rows = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM detect_performance WHERE dataset_id = ?;",
+        (training_id,),
+    ).fetchone()
+    assert analysis_rows is not None and int(analysis_rows["n"]) == 1
+    assert training_rows is not None and int(training_rows["n"]) == 0
+
+    registry.conn.execute("DELETE FROM detect_performance;")
+    registry.conn.commit()
+    dry_all = _backfill_detect_performance(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+        include_all_datasets=True,
+    )
+    assert dry_all["datasets_scanned"] == 2
+    assert dry_all["rows_inserted"] == 2
+    registry.close()
+
+
+def test_backfill_crop_quality_dry_run_and_apply(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    _create_crop_quality_zarr(zarr_path)
+    dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
+        (dataset_id,),
+    )
+    registry.conn.execute("DELETE FROM crop_quality WHERE dataset_id = ?;", (dataset_id,))
+    registry.conn.commit()
+
+    dry = _backfill_crop_quality(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert dry["datasets_scanned"] == 1
+    assert dry["rows_inserted"] == 1
+    assert dry["rows_updated"] == 0
+    assert dry["rows_deleted"] == 0
+
+    applied = _backfill_crop_quality(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert applied["rows_inserted"] == 1
+    row = registry.conn.execute(
+        """
+        SELECT review_state, review_intended_use, detection_source_type, percent_frames_with_crops
+        FROM crop_quality_current
+        WHERE dataset_id = ?;
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert row is not None
+    assert str(row["review_state"]) == "approved"
+    assert str(row["review_intended_use"]) == "training"
+    assert str(row["detection_source_type"]) == "manual"
+    assert float(row["percent_frames_with_crops"]) == pytest.approx(100.0)
+    registry.close()
+
+
+def test_backfill_crop_quality_scope_defaults_to_source_analysis(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    analysis_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    training_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_training.zarr"
+    _create_crop_quality_zarr(analysis_path)
+    _create_crop_quality_zarr(training_path)
+
+    analysis_id = registry.register_from_root(zarr.open_group(str(analysis_path), mode="r"), analysis_path)
+    training_id = registry.register_from_root(zarr.open_group(str(training_path), mode="r"), training_path)
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
+        (analysis_id,),
+    )
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'training' WHERE dataset_id = ?;",
+        (training_id,),
+    )
+    registry.conn.execute(
+        "DELETE FROM crop_quality WHERE dataset_id IN (?, ?);",
+        (analysis_id, training_id),
+    )
+    registry.conn.commit()
+
+    dry_default = _backfill_crop_quality(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert dry_default["datasets_scanned"] == 1
+    assert dry_default["rows_inserted"] == 1
+
+    applied_default = _backfill_crop_quality(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert applied_default["rows_inserted"] == 1
+    analysis_rows = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM crop_quality WHERE dataset_id = ?;",
+        (analysis_id,),
+    ).fetchone()
+    training_rows = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM crop_quality WHERE dataset_id = ?;",
+        (training_id,),
+    ).fetchone()
+    assert analysis_rows is not None and int(analysis_rows["n"]) == 1
+    assert training_rows is not None and int(training_rows["n"]) == 0
+
+    registry.conn.execute("DELETE FROM crop_quality;")
+    registry.conn.commit()
+    dry_all = _backfill_crop_quality(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+        include_all_datasets=True,
+    )
+    assert dry_all["datasets_scanned"] == 2
+    assert dry_all["rows_inserted"] == 2
+    registry.close()
+
+
+def test_backfill_detect_performance_handles_with_and_without_detect_runs(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    with_detect_path = tmp_path / "recordings" / "rec_with" / "zarr" / "rec_with_analysis.zarr"
+    without_detect_path = tmp_path / "recordings" / "rec_without" / "zarr" / "rec_without_analysis.zarr"
+    _create_detect_performance_zarr(with_detect_path)
+    _create_detectless_zarr(without_detect_path, session_uuid="detectless_session_b")
+
+    with_detect_id = registry.register_from_root(zarr.open_group(str(with_detect_path), mode="r"), with_detect_path)
+    without_detect_id = registry.register_from_root(
+        zarr.open_group(str(without_detect_path), mode="r"),
+        without_detect_path,
+    )
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id IN (?, ?);",
+        (with_detect_id, without_detect_id),
+    )
+    registry.conn.execute(
+        "DELETE FROM detect_performance WHERE dataset_id IN (?, ?);",
+        (with_detect_id, without_detect_id),
+    )
+    registry.conn.commit()
+
+    dry = _backfill_detect_performance(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert dry["datasets_scanned"] == 2
+    assert dry["rows_inserted"] == 1
+    assert dry["datasets_no_performance"] == 1
+
+    applied = _backfill_detect_performance(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert applied["rows_inserted"] == 1
+    assert applied["datasets_no_performance"] == 1
+
+    repeat = _backfill_detect_performance(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert repeat["datasets_scanned"] == 2
+    assert repeat["datasets_skipped_existing"] == 1
+    assert repeat["datasets_no_performance"] == 1
+    assert repeat["rows_inserted"] == 0
+    assert repeat["rows_updated"] == 0
+    assert repeat["rows_deleted"] == 0
+    assert repeat["rows_skipped"] >= 1
+    registry.close()
+
+
+def test_backfill_detect_performance_refresh_dry_run_is_deterministic(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    _create_detect_performance_zarr(zarr_path)
+    dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
+        (dataset_id,),
+    )
+    registry.conn.commit()
+
+    dry_refresh_1 = _backfill_detect_performance(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=True,
+    )
+    dry_refresh_2 = _backfill_detect_performance(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=True,
+    )
+    assert dry_refresh_1 == dry_refresh_2
     registry.close()
 
 

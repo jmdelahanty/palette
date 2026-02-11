@@ -57,6 +57,14 @@ crop:
   scheduler: distributed
   source_type: preferred           # detect | filtered | interpolated | manual | preferred | auto
   num_workers: 5
+  # External-video crop write path (analysis zarrs without imported raw frames)
+  external_write_backend: kvikio
+  external_roi_storage: uncompressed
+  external_use_sharding: false
+  external_roi_chunk_size: 128
+  external_roi_shard_size: 2048
+  external_gpu_chunk_frames: 8
+  external_require_kvikio: true
 keypoints:
   method: traditional         # 'traditional' or 'yolo'
   scheduler: distributed  # or 'processes', 'threads'

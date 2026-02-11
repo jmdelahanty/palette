@@ -120,6 +120,8 @@ Directory Structure
       scores              # (N_filtered,) float32
       n_detections        # (total_frames,) int32
       frame_mapping       # (N_filtered,) int32
+      detection_source    # (N_filtered,) int8 (always 0 for clean/real rows)
+      reason_bytes        # (N_filtered, width) uint8 null-terminated UTF-8
       reason              # (N_filtered,) utf8 (currently "clean")
       
       @total_detections
@@ -132,6 +134,7 @@ Directory Structure
       n_detections        # (total_frames,) int32
       frame_mapping       # (N_interpolated,) int32
       detection_source    # (N_interpolated,) int8
+      reason_bytes        # (N_interpolated, width) uint8 null-terminated UTF-8
       reason              # (N_interpolated,) utf8 ("clean"/"interpolated")
       
       @total_detections

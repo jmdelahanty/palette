@@ -32,5 +32,14 @@ training_params:
   cls: 0.5
 
   num_workers: 24
-  
+
   device: '0'
+
+# Keypoint batch inference settings (used by src/fisheye/utils/run_keypoints_batch.py)
+keypoints:
+    method: yolo
+    model: /nvme1/models/pose/pose_cedar_shadow_manual_gray_latest_traditional_894ad574_v004/omnifin0_cedar_shadow_v004_pose_20260208-163716_c9dc72f5/weights/best.pt
+    batch_size: 256
+    conf: 0.25
+    iou: 0.5
+    max_det: 1
