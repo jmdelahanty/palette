@@ -80,6 +80,11 @@ Notes:
   - `*_training.zarr` -> `training`
   - `*_analysis.zarr` -> `analysis`
 - `session_uuid` may be shared across both artifacts; `dataset_id` must be unique per artifact path.
+- Stage lineage/provenance attrs are expected in both archive types when stage outputs are present.
+  - This is required for reproducible, versioned training datasets.
+  - Example (eye masks): runs should carry keypoint lineage (`source_keypoints_run`, `source_keypoint_group`) and crop lineage (`source_crop_run`).
+  - Example (refined eye masks): runs should also carry `source_eye_masks_run` and `source_eye_masks_method` when available.
+  - Legacy alias `source_keypoint_run` may still exist in older runs; backfill to canonical `source_keypoints_run` is expected.
 
 ## Example Manifests
 

@@ -16,6 +16,8 @@ import zarr
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
+from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
+from ..shared.row_alignment import assert_row_alignment
 from ..shared.zarr.schema import add_processing_run
 from ..utils.system import get_environment_info, get_git_info
 from .unet import UNetSmall
@@ -69,6 +71,24 @@ def _prepare_run_group(
     )
     resolved_name = run_group.name.rsplit("/", 1)[-1]
     return run_group, resolved_name
+
+
+def _validate_input_row_alignment(
+    *,
+    crop_group: zarr.Group,
+    crop_run: str,
+    total_rois: int,
+) -> None:
+    assert_row_alignment(
+        total_rois,
+        (
+            (f"crop_runs/{crop_run}/roi_images", crop_group["roi_images"]),
+            (f"crop_runs/{crop_run}/frame_indices", crop_group.get("frame_indices")),
+            (f"crop_runs/{crop_run}/detection_indices", crop_group.get("detection_indices")),
+            (f"crop_runs/{crop_run}/detection_source", crop_group.get("detection_source")),
+        ),
+        stage="infer_unet_eye_masks input",
+    )
 
 
 def _resolve_device(device_str: Optional[str]) -> torch.device:
@@ -396,6 +416,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if total_rois == 0:
         raise ValueError("ROI image array is empty; nothing to segment.")
 
+    _validate_input_row_alignment(
+        crop_group=crop_group,
+        crop_run=str(crop_run),
+        total_rois=total_rois,
+    )
+
     env_info = get_environment_info(
         include_all_packages=False,
         disk_path=str(zarr_path),
@@ -525,7 +551,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         latest_keypoints = keypoints_parent.attrs.get("latest")
     resolved_keypoints_run = args.keypoints_run
     if resolved_keypoints_run is None and src_attrs:
-        resolved_keypoints_run = src_attrs.get("source_keypoint_run") or src_attrs.get("source_keypoints_run")
+        resolved_keypoints_run = resolve_source_keypoints_run(src_attrs)
     if resolved_keypoints_run is None:
         resolved_keypoints_run = latest_keypoints
 
@@ -537,7 +563,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "segmenter_label_mode": label_mode,
             "source_eye_masks_run": source_run_name,
             "source_detect_run": crop_group.attrs.get("source_detect_run", "unknown"),
-            "source_keypoint_run": resolved_keypoints_run,
+            **build_source_keypoints_attrs(resolved_keypoints_run, include_legacy_alias=True),
             "source_crop_run": crop_run,
             "detection_source_path": crop_group.attrs.get("detection_source_path"),
             "source_checkpoint": str(checkpoint_path),
@@ -590,8 +616,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     }
     provenance = {k: v for k, v in provenance.items() if v is not None}
     run_group.attrs["provenance"] = provenance
-    if "source_keypoints_run" in run_group.attrs:
-        del run_group.attrs["source_keypoints_run"]
 
     if wrote_binary:
         run_group.attrs["masks_from"] = "threshold(mask_probs_roi, thr=0.5)"

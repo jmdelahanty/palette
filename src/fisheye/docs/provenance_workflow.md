@@ -18,8 +18,8 @@ Relevant provenance attributes:
 | `crop_runs/<run>` | `roi_images` | `detection_source_path`, `detect_review_status_ref`, `detect_review_status` (snapshot), `detection_preferred_policy`, `crop_signature`, `crop_review_status` |
 | `keypoints_runs/<run>` | `heading`, `frame_indices` | `source_crop_run` |
 | `refined_keypoints_runs/<run>` | `heading`, `usable_keypoints`, `reason_bytes`, `reason` | `source_keypoints_run`, `source_crop_run`, `keypoint_signature`, `keypoint_review_status`, `reason_fallback_order` |
-| `eye_masks_runs/<run>` | `masks_roi` | `source_crop_run`, `source_keypoint_group`, `source_keypoint_run` |
-| `refined_eye_masks_runs/<run>` | `masks_roi`, `ellipse_params` | `source_eye_masks_run`, `source_keypoint_group`, `source_keypoint_run` |
+| `eye_masks_runs/<run>` | `masks_roi` | `source_crop_run`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
+| `refined_eye_masks_runs/<run>` | `masks_roi`, `ellipse_params` | `source_eye_masks_run`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
 | `id_assignment_runs/<run>` | `detection_ids` | `source_detect_run`, `source_refined_run` |
 
 `bbox_norm_coords` in detect/refined-detect groups use normalized `[cx, cy, w, h]`.
@@ -69,6 +69,7 @@ After new ROIs exist, rerun stages that depend on them:
    python -m fisheye.tune.eye_mask_review <archive>.zarr --manual
    python -m fisheye.tune.eye_mask_review <archive>.zarr --audit
    ```
+   Full tuning/review checklist: `src/fisheye/docs/eye_mask_tuning_workflow.md`.
 
 3. ID assignment (if IDs align with refined detections):
    ```bash

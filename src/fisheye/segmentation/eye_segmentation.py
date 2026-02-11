@@ -23,6 +23,8 @@ from dask import delayed
 from dask.diagnostics import ProgressBar
 from skimage import filters, measure, morphology
 from skimage.measure import EllipseModel
+from ..shared.provenance_attrs import build_source_keypoints_attrs
+from ..shared.row_alignment import assert_row_alignment
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
 
@@ -126,6 +128,37 @@ def _apply_overrides(cfg: EyeSegmentationConfig, overrides: Optional[Dict[str, A
 def _prepare_run_group(root: zarr.Group, console: Console) -> Tuple[zarr.Group, str]:
     group, name = get_run_group(root, "eye_masks", console=console, create_new=True)
     return group, name
+
+
+def _validate_input_row_alignment(
+    *,
+    crop_group: zarr.Group,
+    crop_run: str,
+    kp_group: zarr.Group,
+    keypoint_group_name: str,
+    keypoint_run: str,
+    success_dataset_name: str,
+    total_rois: int,
+) -> None:
+    keypoints_roi = kp_group.get("keypoints_roi")
+    if keypoints_roi is None:
+        raise ValueError(f"Keypoint run '{keypoint_run}' missing 'keypoints_roi'.")
+    success_arr = kp_group.get(success_dataset_name)
+    if success_arr is None:
+        raise ValueError(f"Keypoint run '{keypoint_run}' missing '{success_dataset_name}'.")
+
+    assert_row_alignment(
+        total_rois,
+        (
+            (f"crop_runs/{crop_run}/roi_images", crop_group["roi_images"]),
+            (f"{keypoint_group_name}/{keypoint_run}/keypoints_roi", keypoints_roi),
+            (f"{keypoint_group_name}/{keypoint_run}/{success_dataset_name}", success_arr),
+            (f"crop_runs/{crop_run}/frame_indices", crop_group.get("frame_indices")),
+            (f"crop_runs/{crop_run}/detection_indices", crop_group.get("detection_indices")),
+            (f"crop_runs/{crop_run}/detection_source", crop_group.get("detection_source")),
+        ),
+        stage="eye_segmentation input",
+    )
 
 
 def _apply_sobel_filter(patch: np.ndarray, strength: float) -> np.ndarray:
@@ -402,18 +435,6 @@ def segment_eye_masks(
     left_total = 0
     right_total = 0
 
-    run_group, run_name = _prepare_run_group(root, console)
-    crop_detection_source = crop_group.get("detection_source")
-    if crop_detection_source is not None and crop_detection_source.shape[0] != total_rois:
-        raise ValueError(
-            f"Crop run detection_source length {crop_detection_source.shape[0]} does not match ROI count {total_rois}"
-        )
-    detection_source = (
-        crop_detection_source[:].astype(np.int8, copy=False)
-        if crop_detection_source is not None
-        else np.zeros(total_rois, dtype=np.int8)
-    )
-
     roi_results: List[Dict[str, Any]] = []
     cfg_dict = asdict(cfg)
     roi_dataset_path = f"crop_runs/{crop_run}/roi_images"
@@ -428,6 +449,24 @@ def segment_eye_masks(
             f"Keypoint run '{keypoint_run}' missing detection/refinement success flags."
         )
     success_dataset_path = f"{keypoint_group_name}/{keypoint_run}/{success_dataset_name}"
+
+    _validate_input_row_alignment(
+        crop_group=crop_group,
+        crop_run=str(crop_run),
+        kp_group=kp_group,
+        keypoint_group_name=keypoint_group_name,
+        keypoint_run=keypoint_run,
+        success_dataset_name=success_dataset_name,
+        total_rois=int(total_rois),
+    )
+
+    crop_detection_source = crop_group.get("detection_source")
+    detection_source = (
+        crop_detection_source[:].astype(np.int8, copy=False)
+        if crop_detection_source is not None
+        else np.zeros(total_rois, dtype=np.int8)
+    )
+    run_group, run_name = _prepare_run_group(root, console)
     if total_rois > 0:
         default_workers = os.cpu_count() or 4
         worker_count = num_workers or min(default_workers, 16)
@@ -682,7 +721,7 @@ def segment_eye_masks(
             "method": "traditional_eye_segmentation",
             "config": cfg.__dict__,
             "source_crop_run": crop_run,
-            "source_keypoint_run": keypoint_run,
+            **build_source_keypoints_attrs(keypoint_run, include_legacy_alias=True),
             "source_keypoint_group": keypoint_group_name,
             "total_rois": total_rois,
             "successful_eyes": int(ellipse_success.sum()),

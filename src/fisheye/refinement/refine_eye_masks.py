@@ -39,6 +39,8 @@ from skimage.measure import EllipseModel
 from collections import Counter
 
 from ..shared.mask_source import load_mask_bundle
+from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
+from ..shared.row_alignment import assert_row_alignment
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
 
@@ -82,7 +84,17 @@ def _resolve_keypoint_group(
     keypoint_run: Optional[str],
     source_keypoint_group: Optional[str],
     source_keypoint_run: Optional[str],
+    *,
+    allow_latest_fallback: bool = False,
 ) -> Tuple[zarr.Group, str, str]:
+    """Resolve keypoint lineage with fail-closed defaults.
+
+    Resolution order:
+    1. Explicit `keypoint_run` argument.
+    2. Source attrs (`source_keypoint_group` + `source_keypoint_run`).
+    3. Source run only (resolved across refined/raw groups; ambiguous matches fail).
+    4. Optional latest fallback only when `allow_latest_fallback=True`.
+    """
     refined = root.get("refined_keypoints_runs")
     raw = root.get("keypoints_runs")
 
@@ -95,8 +107,49 @@ def _resolve_keypoint_group(
 
     if source_keypoint_group and source_keypoint_run:
         group = root.get(source_keypoint_group)
-        if group is not None and source_keypoint_run in group:
-            return group[source_keypoint_run], source_keypoint_run, source_keypoint_group
+        if group is None:
+            raise ValueError(
+                f"Source keypoint group '{source_keypoint_group}' is missing. "
+                "Pass --keypoint-run explicitly or backfill source lineage attrs."
+            )
+        if source_keypoint_run not in group:
+            raise ValueError(
+                f"Source keypoint run '{source_keypoint_run}' not found in group '{source_keypoint_group}'. "
+                "Pass --keypoint-run explicitly or backfill source lineage attrs."
+            )
+        return group[source_keypoint_run], source_keypoint_run, source_keypoint_group
+
+    if source_keypoint_group and not source_keypoint_run:
+        raise ValueError(
+            f"Source keypoint group '{source_keypoint_group}' is present but source keypoint run is missing. "
+            "Pass --keypoint-run explicitly or backfill source lineage attrs."
+        )
+
+    if source_keypoint_run:
+        matches: List[Tuple[zarr.Group, str, str]] = []
+        if refined is not None and source_keypoint_run in refined:
+            matches.append((refined[source_keypoint_run], source_keypoint_run, "refined_keypoints_runs"))
+        if raw is not None and source_keypoint_run in raw:
+            matches.append((raw[source_keypoint_run], source_keypoint_run, "keypoints_runs"))
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(
+                f"Source keypoint run '{source_keypoint_run}' exists in both refined and raw groups. "
+                "Pass --keypoint-run explicitly or set source_keypoint_group."
+            )
+        raise ValueError(
+            f"Source keypoint run '{source_keypoint_run}' not found in refined or raw groups. "
+            "Pass --keypoint-run explicitly or backfill source lineage attrs."
+        )
+
+    if not allow_latest_fallback:
+        raise ValueError(
+            "Missing source keypoint lineage attrs on source eye-mask run "
+            "(expected source_keypoints_run/source_keypoint_run and source_keypoint_group). "
+            "Pass --keypoint-run explicitly or backfill lineage attrs. "
+            "Use --allow-latest-keypoint-fallback only for legacy archives."
+        )
 
     refined_latest = refined.attrs.get("latest") if refined is not None else None
     raw_latest = raw.attrs.get("latest") if raw is not None else None
@@ -106,6 +159,53 @@ def _resolve_keypoint_group(
     if raw is not None and raw_latest in raw:
         return raw[raw_latest], raw_latest, "keypoints_runs"
     raise ValueError("No keypoint runs found; run keypoints stage first.")
+
+
+def _validate_input_row_alignment(
+    *,
+    total_rois: int,
+    src_run: zarr.Group,
+    src_run_name: str,
+    kp_group: zarr.Group,
+    keypoint_group_name: str,
+    keypoint_run_name: str,
+    success_dataset_name: str,
+    binary_data: object,
+    probs_data: object,
+) -> None:
+    keypoints_roi = kp_group.get("keypoints_roi")
+    if keypoints_roi is None:
+        raise ValueError(f"Keypoint run '{keypoint_run_name}' missing 'keypoints_roi'.")
+    heading = kp_group.get("heading")
+    if heading is None:
+        raise ValueError(f"Keypoint run '{keypoint_run_name}' missing 'heading'.")
+    success_arr = kp_group.get(success_dataset_name)
+    if success_arr is None:
+        raise ValueError(f"Keypoint run '{keypoint_run_name}' missing '{success_dataset_name}'.")
+
+    assert_row_alignment(
+        total_rois,
+        (
+            ("loaded_mask_bundle/binary", binary_data),
+            ("loaded_mask_bundle/probs", probs_data),
+            (f"eye_masks_runs/{src_run_name}/masks_roi", src_run.get("masks_roi")),
+            (f"eye_masks_runs/{src_run_name}/mask_probs_roi", src_run.get("mask_probs_roi")),
+            (
+                f"eye_masks_runs/{src_run_name}/mask_probs_roi_refined",
+                src_run.get("mask_probs_roi_refined"),
+            ),
+            (f"{keypoint_group_name}/{keypoint_run_name}/keypoints_roi", keypoints_roi),
+            (f"{keypoint_group_name}/{keypoint_run_name}/heading", heading),
+            (
+                f"{keypoint_group_name}/{keypoint_run_name}/{success_dataset_name}",
+                success_arr,
+            ),
+            (f"eye_masks_runs/{src_run_name}/frame_indices", src_run.get("frame_indices")),
+            (f"eye_masks_runs/{src_run_name}/detection_indices", src_run.get("detection_indices")),
+            (f"eye_masks_runs/{src_run_name}/detection_source", src_run.get("detection_source")),
+        ),
+        stage="refine_eye_masks input",
+    )
 
 
 def _compression_kwargs(array: zarr.Array) -> Dict[str, object]:
@@ -1170,6 +1270,7 @@ def refine_eye_masks(
     area_filter_z: Optional[float] = _AREA_FILTER_Z_DEFAULT,
     area_filter_mode: str = _AREA_FILTER_MODE_DEFAULT,
     force_refine_traditional: bool = False,
+    allow_latest_keypoint_fallback: bool = False,
 ) -> str:
     """Refine an eye-mask run and return the name of the new run."""
 
@@ -1216,7 +1317,8 @@ def refine_eye_masks(
         root,
         keypoint_run,
         src_run.attrs.get("source_keypoint_group"),
-        src_run.attrs.get("source_keypoint_run"),
+        resolve_source_keypoints_run(src_run.attrs),
+        allow_latest_fallback=allow_latest_keypoint_fallback,
     )
 
     success_dataset_name = None
@@ -1354,14 +1456,22 @@ def refine_eye_masks(
 
     has_mask_probs = probs_data is not None and not use_fast_path
 
+    _validate_input_row_alignment(
+        total_rois=total_rois,
+        src_run=src_run,
+        src_run_name=src_run_name,
+        kp_group=kp_group,
+        keypoint_group_name=keypoint_group_name,
+        keypoint_run_name=keypoint_run_name,
+        success_dataset_name=success_dataset_name,
+        binary_data=binary_data,
+        probs_data=probs_data,
+    )
+
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
 
     if "detection_source" in src_run:
         src_detection_source = src_run["detection_source"][:].astype(np.int8, copy=False)
-        if src_detection_source.shape[0] != total_rois:
-            raise ValueError(
-                f"Refined source detection_source length {src_detection_source.shape[0]} does not match ROI count {total_rois}"
-            )
         console.print("[dim]Copied detection_source from source run[/dim]")
     else:
         src_detection_source = np.zeros(total_rois, dtype=np.int8)
@@ -2107,7 +2217,7 @@ def refine_eye_masks(
         "method": "refine_eye_masks",
         "source_eye_masks_run": src_run_name,
         "source_eye_masks_method": source_method,
-        "source_keypoints_run": keypoint_run_name,
+        **build_source_keypoints_attrs(keypoint_run_name, include_legacy_alias=True),
         "source_keypoint_group": keypoint_group_name,
         "source_crop_run": crop_run_name,
         "total_rois": total_rois,
@@ -2163,7 +2273,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--keypoint-run",
-        help="Keypoint run providing headings (default: infer from source or latest).",
+        help=(
+            "Keypoint run providing headings. "
+            "Defaults to source lineage attrs on the eye-mask run (fail-closed if missing)."
+        ),
+    )
+    parser.add_argument(
+        "--allow-latest-keypoint-fallback",
+        action="store_true",
+        help=(
+            "Allow fallback to latest refined/raw keypoint run when source lineage attrs are missing. "
+            "Intended only for legacy archives."
+        ),
     )
     parser.add_argument(
         "--run-name",
@@ -2233,6 +2354,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             area_filter_z=args.area_filter_z,
             area_filter_mode=args.area_filter_mode,
             force_refine_traditional=args.force_refine_traditional,
+            allow_latest_keypoint_fallback=args.allow_latest_keypoint_fallback,
         )
     except Exception as exc:
         console.print(f"[red]✗[/red] Failed to refine eye masks: {exc}")

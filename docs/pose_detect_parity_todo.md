@@ -6,6 +6,8 @@ Bring pose/keypoint workflow parity with detect workflow for:
 - computational argument/runtime tracking
 - registry status/query/selection ergonomics
 
+Related eye-mask parity work is tracked separately in `docs/eye_masks_detect_pose_parity_todo.md`.
+
 ## P0 (Highest Priority)
 
 - [x] Add registry-resolved pose inference wrapper (detect parity).

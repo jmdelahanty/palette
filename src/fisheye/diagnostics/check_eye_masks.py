@@ -17,8 +17,40 @@ import numpy as np
 from rich.console import Console
 from rich.table import Table
 
+from ..shared.provenance_attrs import (
+    CANONICAL_SOURCE_KEYPOINTS_RUN_ATTR,
+    LEGACY_SOURCE_KEYPOINT_RUN_ATTR,
+    resolve_source_keypoints_run,
+)
+
 REQUIRED_MASK_ARRAYS = ("masks_roi",)
 REQUIRED_MAPPING_ARRAYS = ("frame_indices", "frame_counts", "detection_indices")
+
+
+def _check_keypoint_lineage_attrs(
+    attrs: Dict[str, object],
+    *,
+    current_status: str,
+    details: List[str],
+) -> str:
+    """Validate keypoint lineage attrs using canonical+legacy compatibility rules."""
+    has_canonical_kp = CANONICAL_SOURCE_KEYPOINTS_RUN_ATTR in attrs
+    has_legacy_kp = LEGACY_SOURCE_KEYPOINT_RUN_ATTR in attrs
+    source_kp_run = resolve_source_keypoints_run(attrs)
+
+    status = current_status
+    if not has_canonical_kp and not has_legacy_kp:
+        status = "[yellow]incomplete[/yellow]"
+        details.append("missing attr 'source_keypoints_run' (legacy alias: 'source_keypoint_run')")
+    elif source_kp_run is None:
+        status = "[yellow]incomplete[/yellow]"
+        details.append("source keypoint lineage attr present but empty")
+    elif not has_canonical_kp and has_legacy_kp and status == "[green]healthy[/green]":
+        status = "[yellow]legacy[/yellow]"
+        details.append(
+            "legacy attr 'source_keypoint_run' present; backfill canonical 'source_keypoints_run'"
+        )
+    return status
 
 
 def _check_stage(
@@ -85,11 +117,12 @@ def _check_stage(
                 status = "[red]length mismatch[/red]"
                 details.append(f"{arr} len {arr_len} ≠ masks {roi_count}")
 
-        # Check provenance attrs
-        for attr in ("source_crop_run", "source_keypoints_run"):
-            if attr not in group.attrs:
-                status = "[yellow]incomplete[/yellow]"
-                details.append(f"missing attr '{attr}'")
+        # Check provenance attrs (canonical with legacy compatibility)
+        if "source_crop_run" not in group.attrs:
+            status = "[yellow]incomplete[/yellow]"
+            details.append("missing attr 'source_crop_run'")
+
+        status = _check_keypoint_lineage_attrs(dict(group.attrs), current_status=status, details=details)
 
         crop_run = group.attrs.get("source_crop_run")
         det_meta = ""

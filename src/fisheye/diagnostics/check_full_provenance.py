@@ -12,6 +12,8 @@ import zarr
 from rich.console import Console
 from rich.table import Table
 
+from ..shared.provenance_attrs import resolve_source_keypoints_run
+
 
 @dataclass
 class ProvenanceInfo:
@@ -85,7 +87,7 @@ def _load_eye_mask_provenance(root: zarr.Group) -> tuple[Optional[str], Optional
         return None, None, None, None
     group = parent[run]
     detect_run = group.attrs.get("source_detect_run")
-    keypoint_run = group.attrs.get("source_keypoint_run")
+    keypoint_run = resolve_source_keypoints_run(group.attrs)
     arr = group.get("detection_source")
     return run, detect_run, keypoint_run, arr[:] if arr is not None else None
 

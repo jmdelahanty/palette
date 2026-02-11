@@ -22,6 +22,8 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from skimage import measure
 
+from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
+from ..shared.row_alignment import assert_row_alignment
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
 
@@ -50,6 +52,73 @@ def _prepare_run_group(
         console.print(f"Created run group: [cyan]eye_masks_runs/{run_name}[/cyan]")
         return run_group, run_name
     return get_run_group(root, "eye_masks", console=console, create_new=True)
+
+
+def _as_optional_text(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "ignore")
+    return str(value)
+
+
+def _resolve_keypoint_lineage(
+    root: zarr.Group,
+    crop_group: zarr.Group,
+    keypoints_run: Optional[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    refined_parent = root.get("refined_keypoints_runs")
+    raw_parent = root.get("keypoints_runs")
+
+    requested_run = _as_optional_text(keypoints_run)
+    if requested_run:
+        if refined_parent is not None and requested_run in refined_parent:
+            return requested_run, "refined_keypoints_runs"
+        if raw_parent is not None and requested_run in raw_parent:
+            return requested_run, "keypoints_runs"
+        return requested_run, _as_optional_text(crop_group.attrs.get("source_keypoint_group"))
+
+    source_group_name = _as_optional_text(crop_group.attrs.get("source_keypoint_group"))
+    source_run_name = _as_optional_text(resolve_source_keypoints_run(crop_group.attrs))
+
+    if source_group_name and source_run_name:
+        source_parent = root.get(source_group_name)
+        if source_parent is not None and source_run_name in source_parent:
+            return source_run_name, source_group_name
+
+    if source_run_name:
+        if refined_parent is not None and source_run_name in refined_parent:
+            return source_run_name, "refined_keypoints_runs"
+        if raw_parent is not None and source_run_name in raw_parent:
+            return source_run_name, "keypoints_runs"
+        return source_run_name, source_group_name
+
+    refined_latest = _as_optional_text(refined_parent.attrs.get("latest")) if refined_parent is not None else None
+    raw_latest = _as_optional_text(raw_parent.attrs.get("latest")) if raw_parent is not None else None
+
+    if refined_parent is not None and refined_latest in refined_parent:
+        return refined_latest, "refined_keypoints_runs"
+    if raw_parent is not None and raw_latest in raw_parent:
+        return raw_latest, "keypoints_runs"
+    return None, source_group_name
+
+
+def _validate_input_row_alignment(
+    *,
+    crop_group: zarr.Group,
+    crop_run_name: str,
+    total_rois: int,
+) -> None:
+    assert_row_alignment(
+        total_rois,
+        (
+            (f"crop_runs/{crop_run_name}/roi_images", crop_group["roi_images"]),
+            (f"crop_runs/{crop_run_name}/frame_indices", crop_group.get("frame_indices")),
+            (f"crop_runs/{crop_run_name}/detection_indices", crop_group.get("detection_indices")),
+            (f"crop_runs/{crop_run_name}/detection_source", crop_group.get("detection_source")),
+        ),
+        stage="eye_segmentation_yolo input",
+    )
 
 
 _MASK_PROB_CACHE: Deque[torch.Tensor] = deque()
@@ -658,6 +727,12 @@ def segment_eye_masks_yolo(
     else:
         imgsz_resolved = int(imgsz)
 
+    _validate_input_row_alignment(
+        crop_group=crop_group,
+        crop_run_name=str(crop_run_name),
+        total_rois=total_rois,
+    )
+
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
 
     def _copy_metadata_array(array_name: str) -> None:
@@ -1007,63 +1082,61 @@ def segment_eye_masks_yolo(
     total_successful_eyes = int(ellipse_success.sum())
     pair_rate = float(successful_pairs / total_rois) if total_rois > 0 else float("nan")
 
-    keypoints_parent = root.get("keypoints_runs")
-    latest_keypoints = None
-    if keypoints_parent is not None:
-        latest_keypoints = keypoints_parent.attrs.get("latest")
-    resolved_keypoints_run = (
-        keypoints_run
-        or crop_group.attrs.get("source_keypoints_run")
-        or latest_keypoints
+    resolved_keypoints_run, resolved_keypoint_group = _resolve_keypoint_lineage(
+        root,
+        crop_group,
+        keypoints_run,
     )
 
-    run_group.attrs.update(
-        {
-            "method": "yolo_eye_segmentation",
-            "model_path": str(model_path_resolved),
-            "model_device": model_device,
-            "ultralytics_version": ultralytics_version,
-            "config": {
-                "batch_size": batch_size,
-                "imgsz": imgsz_resolved,
-                "conf": conf,
-                "iou": iou,
-                "max_det": max_det,
-                "mask_threshold": mask_threshold,
-                "adaptive_scale": adaptive_scale,
-                "adaptive_cap": adaptive_cap,
-                "use_retina_masks": use_retina_masks,
-                "legacy_masks": bool(legacy_masks),
-                "retina_masks_supported": retina_flag_supported,
-                "prototype_fallback_used": prototype_fallback_used,
-                "native_mask_hook_used": native_cache_used,
-                "proto_upsample_factor": proto_factor,
-            },
-            "source_crop_run": crop_run_name,
-            "source_keypoints_run": resolved_keypoints_run,
-            "total_rois": total_rois,
-            "successful_eyes": total_successful_eyes,
-            "successful_roi_pairs": int(successful_pairs),
-            "successful_roi_pair_rate": pair_rate,
-            "eye_labels": ["eye_0", "eye_1"],
-            "git_commit": git_info.get("commit_hash", "unknown"),
-            "git_branch": git_info.get("branch", "unknown"),
-            "hostname": env_info["platform"].get("hostname", "unknown"),
-            "ellipse_soft_available": bool(soft_rows_written > 0),
-            "ellipse_soft_convention": {
-                "lengths": "4*sqrt(eigvals) from prob-weighted covariance",
-                "angle_ref": "deg CCW from +x, normalized to [-90, 90]",
-            },
-            "probability_stats": {
-                "pmax_mean": pmax_mean,
-                "pmax_p95": pmax_p95,
-                "mid_fraction_mean": mid_frac_mean,
-            },
-            "duration_seconds": float(duration),
-            "ellipse_angle_units": "degrees",
-            "ellipse_angle_ref": "skimage major-axis orientation, deg CCW from +x",
-        }
-    )
+    attrs_payload = {
+        "method": "yolo_eye_segmentation",
+        "model_path": str(model_path_resolved),
+        "model_device": model_device,
+        "ultralytics_version": ultralytics_version,
+        "config": {
+            "batch_size": batch_size,
+            "imgsz": imgsz_resolved,
+            "conf": conf,
+            "iou": iou,
+            "max_det": max_det,
+            "mask_threshold": mask_threshold,
+            "adaptive_scale": adaptive_scale,
+            "adaptive_cap": adaptive_cap,
+            "use_retina_masks": use_retina_masks,
+            "legacy_masks": bool(legacy_masks),
+            "retina_masks_supported": retina_flag_supported,
+            "prototype_fallback_used": prototype_fallback_used,
+            "native_mask_hook_used": native_cache_used,
+            "proto_upsample_factor": proto_factor,
+        },
+        "source_crop_run": crop_run_name,
+        **build_source_keypoints_attrs(resolved_keypoints_run, include_legacy_alias=True),
+        "total_rois": total_rois,
+        "successful_eyes": total_successful_eyes,
+        "successful_roi_pairs": int(successful_pairs),
+        "successful_roi_pair_rate": pair_rate,
+        "eye_labels": ["eye_0", "eye_1"],
+        "git_commit": git_info.get("commit_hash", "unknown"),
+        "git_branch": git_info.get("branch", "unknown"),
+        "hostname": env_info["platform"].get("hostname", "unknown"),
+        "ellipse_soft_available": bool(soft_rows_written > 0),
+        "ellipse_soft_convention": {
+            "lengths": "4*sqrt(eigvals) from prob-weighted covariance",
+            "angle_ref": "deg CCW from +x, normalized to [-90, 90]",
+        },
+        "probability_stats": {
+            "pmax_mean": pmax_mean,
+            "pmax_p95": pmax_p95,
+            "mid_fraction_mean": mid_frac_mean,
+        },
+        "duration_seconds": float(duration),
+        "ellipse_angle_units": "degrees",
+        "ellipse_angle_ref": "skimage major-axis orientation, deg CCW from +x",
+    }
+    if resolved_keypoint_group is not None:
+        attrs_payload["source_keypoint_group"] = resolved_keypoint_group
+
+    run_group.attrs.update(attrs_payload)
     provenance = {
         "stage": "eye_masks",
         "method": "yolo_eye_segmentation",
@@ -1082,6 +1155,7 @@ def segment_eye_masks_yolo(
         "inputs": {
             "source_crop_run": crop_run_name,
             "source_keypoints_run": resolved_keypoints_run,
+            "source_keypoint_group": resolved_keypoint_group,
             "frame_source": crop_group.attrs.get("video_source_type", "zarr"),
             "source_video_path": crop_group.attrs.get("video_source_path"),
         },
