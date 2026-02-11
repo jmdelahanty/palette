@@ -91,7 +91,10 @@ Current `VariableLengthUTF8` writers (already aligned):
 - [x] No runtime code paths create new fixed-width Unicode (`<U...`) arrays for string data (for updated export writers).
 - [x] Reason-label flows consistently emit `reason_bytes` with documented fallback attrs.
 - [x] Audit report shows zero unsupported/legacy string encodings for newly created archives (validated on `/nvme1/recordings` snapshot).
-- [ ] Existing archives remain readable without forced migration.
+- [x] Existing archives remain readable without forced migration.
+  - validated by legacy fixed-unicode read-smoke tests in:
+    `tests/unit/fisheye/test_validate_detect_training_zarr.py`
+    and `tests/unit/fisheye/test_validate_keypoint_training_zarr.py`.
 
 ## Non-Goals (for this TODO)
 

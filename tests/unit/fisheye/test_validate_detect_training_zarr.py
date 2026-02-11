@@ -1,18 +1,20 @@
 """Tests for merged detection-training Zarr validation."""
 
+import warnings
 from pathlib import Path
 import sys
 
 import numpy as np
 import pytest
 import zarr
+from zarr.errors import UnstableSpecificationWarning
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.utils.export_detect_training_zarr import validate_merged_training_zarr
 
 
-def _write_valid_merged_zarr(path: Path) -> None:
+def _write_valid_merged_zarr(path: Path, *, suppress_legacy_string_warning: bool = True) -> None:
     root = zarr.open_group(str(path), mode="w")
     root.attrs["zarr_purpose"] = "training"
     root.attrs["training_export"] = {"input_format": "gray"}
@@ -59,16 +61,30 @@ def _write_valid_merged_zarr(path: Path) -> None:
         data=np.array([10, 11, 20, 21], dtype=np.int64),
         chunks=(4,),
     )
-    source.create_array(
-        "source_dataset_id",
-        data=np.array(["dataset_a", "dataset_b"], dtype="<U16"),
-        chunks=(2,),
-    )
-    source.create_array(
-        "source_zarr_path",
-        data=np.array(["/a.zarr", "/b.zarr"], dtype="<U16"),
-        chunks=(2,),
-    )
+    if suppress_legacy_string_warning:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UnstableSpecificationWarning)
+            source.create_array(
+                "source_dataset_id",
+                data=np.array(["dataset_a", "dataset_b"], dtype="<U16"),
+                chunks=(2,),
+            )
+            source.create_array(
+                "source_zarr_path",
+                data=np.array(["/a.zarr", "/b.zarr"], dtype="<U16"),
+                chunks=(2,),
+            )
+    else:
+        source.create_array(
+            "source_dataset_id",
+            data=np.array(["dataset_a", "dataset_b"], dtype="<U16"),
+            chunks=(2,),
+        )
+        source.create_array(
+            "source_zarr_path",
+            data=np.array(["/a.zarr", "/b.zarr"], dtype="<U16"),
+            chunks=(2,),
+        )
 
 
 def test_validate_merged_training_zarr_passes(tmp_path: Path) -> None:
@@ -99,3 +115,20 @@ def test_validate_merged_training_zarr_rejects_invalid_frame_indices(tmp_path: P
             expected_input_format="gray",
             expected_total_samples=4,
         )
+
+
+def test_validate_legacy_fixed_unicode_source_index_without_backfill(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "merged_legacy_strings_ok.zarr"
+
+    # Legacy fixed-width strings are still accepted by validators.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", UnstableSpecificationWarning)
+        _write_valid_merged_zarr(zarr_path, suppress_legacy_string_warning=False)
+    assert any("FixedLengthUTF32" in str(item.message) for item in caught)
+
+    summary = validate_merged_training_zarr(
+        zarr_path,
+        expected_input_format="gray",
+        expected_total_samples=4,
+    )
+    assert summary["source_count"] == 2
