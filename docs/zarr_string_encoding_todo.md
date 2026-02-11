@@ -76,9 +76,10 @@ Current `VariableLengthUTF8` writers (already aligned):
 - [x] Add an audit utility to scan archives and report text-encoding usage:
   - count arrays by encoding class (`reason_bytes`, vlen utf8, fixed-width unicode, other).
   - output candidate rewrite paths.
-- [ ] Add optional backfill utility for safe rewrites (opt-in, scoped):
+- [x] Add optional backfill utility for safe rewrites (opt-in, scoped):
   - dry-run default, `--apply` required.
   - field/path allowlist only; no broad blind rewrites.
+  - implemented as: `fisheye.utils.backfill_zarr_string_encodings`
 
 ### Phase 4: Contract/Spec Sync
 
