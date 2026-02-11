@@ -5,6 +5,10 @@ bounding boxes from Palette Zarr archives.
 
 Date anchored: 2026-02-11.
 
+String/encoding policy references:
+- `src/fisheye/docs/zarr_structure.md` (authoritative schema + encoding conventions)
+- `docs/zarr_string_encoding_todo.md` (standardization rollout/status)
+
 ## Scope
 
 - Read detection boxes for overlay/inspection.
@@ -93,6 +97,11 @@ Reader behavior:
 4. If neither exists, default label to `clean` and warn once.
 
 Do not hard-fail on unknown reason strings; display them as-is.
+
+Canonical encoding expectation:
+- Prefer `reason_bytes` (`uint8`, null-terminated UTF-8) when available.
+- Treat `reason` as a compatibility mirror/fallback.
+- Fall back to `detection_source` labels only when both reason arrays are absent.
 
 ## Missing / Artifact Reason Codes
 

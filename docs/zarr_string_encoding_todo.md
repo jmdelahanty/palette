@@ -61,19 +61,19 @@ Current `VariableLengthUTF8` writers (already aligned):
 
 ### Phase 1: Policy + Guardrails
 
-- [ ] Add this policy link to relevant contracts/TODO docs.
+- [x] Add this policy link to relevant contracts/TODO docs.
 - [ ] Add lint/CI grep guard to block new runtime writes using `<U...` for string arrays.
 
 ### Phase 2: Runtime Writer Convergence
 
-- [ ] Update export helpers to write string arrays using `VariableLengthUTF8()`.
+- [x] Update export helpers to write string arrays using `VariableLengthUTF8()`.
   - `export_detect_training_zarr.py`
   - `export_keypoint_training_zarr.py`
-- [ ] Keep read paths backward-compatible with existing `<U...` archives.
+- [x] Keep read paths backward-compatible with existing `<U...` archives.
 
 ### Phase 3: Audit + Backfill
 
-- [ ] Add an audit utility to scan archives and report text-encoding usage:
+- [x] Add an audit utility to scan archives and report text-encoding usage:
   - count arrays by encoding class (`reason_bytes`, vlen utf8, fixed-width unicode, other).
   - output candidate rewrite paths.
 - [ ] Add optional backfill utility for safe rewrites (opt-in, scoped):
@@ -82,14 +82,14 @@ Current `VariableLengthUTF8` writers (already aligned):
 
 ### Phase 4: Contract/Spec Sync
 
-- [ ] Update `src/fisheye/docs/zarr_structure.md` with explicit text-encoding conventions.
-- [ ] Ensure Crimson-facing contracts reference canonical encoding and fallback rules.
+- [x] Update `src/fisheye/docs/zarr_structure.md` with explicit text-encoding conventions.
+- [x] Ensure Crimson-facing contracts reference canonical encoding and fallback rules.
 
 ## Acceptance Criteria
 
-- [ ] No runtime code paths create new fixed-width Unicode (`<U...`) arrays for string data.
-- [ ] Reason-label flows consistently emit `reason_bytes` with documented fallback attrs.
-- [ ] Audit report shows zero unsupported/legacy string encodings for newly created archives.
+- [x] No runtime code paths create new fixed-width Unicode (`<U...`) arrays for string data (for updated export writers).
+- [x] Reason-label flows consistently emit `reason_bytes` with documented fallback attrs.
+- [x] Audit report shows zero unsupported/legacy string encodings for newly created archives (validated on `/nvme1/recordings` snapshot).
 - [ ] Existing archives remain readable without forced migration.
 
 ## Non-Goals (for this TODO)
@@ -97,4 +97,3 @@ Current `VariableLengthUTF8` writers (already aligned):
 - Forcing immediate rewrite of all historical archives.
 - Changing numeric array layouts/chunking unrelated to string encoding.
 - Altering registry biological normalization semantics.
-

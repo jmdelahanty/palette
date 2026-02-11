@@ -4,6 +4,10 @@ Purpose: define exactly what Crimson must write so Palette recognizes manual ref
 
 Date anchored: 2026-02-09.
 
+String/encoding policy references:
+- `src/fisheye/docs/zarr_structure.md` (authoritative schema + encoding conventions)
+- `docs/zarr_string_encoding_todo.md` (standardization rollout/status)
+
 ## Scope
 
 This contract is for updating:
@@ -49,6 +53,11 @@ Given `run_name = refined_detect_runs.attrs["latest"]` and `manual_group` (defau
 - Write `reason_bytes` for Crimson/TensorStore compatibility, even if `reason` is also written.
 - Keep row alignment identical to `frame_indices`.
 - Encode each row as UTF-8 bytes with `0x00` terminator and `0x00` padding.
+- Keep fallback metadata aligned with Palette readers:
+  - `reason_encoding="utf8-null-terminated"`
+  - `reason_bytes_width=<int>`
+  - `reason_bytes_null_terminated=true`
+  - `reason_fallback_order=["reason_bytes","reason","detection_source"]`
 
 4. Manual subgroup attrs:
 - `storage_layout = "columnar"`

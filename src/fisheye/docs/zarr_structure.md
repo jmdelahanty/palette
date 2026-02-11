@@ -47,6 +47,32 @@ Every `*_runs` group carries:
 
 ---
 
+## String/Text Encoding Conventions
+
+String-like data should follow these conventions across runtime writers:
+
+1. Reason/status labels that must be TensorStore/C++ compatible:
+- Primary encoding: `reason_bytes` as `uint8[N,width]`, null-terminated UTF-8.
+- Optional mirror: `reason` as variable-length UTF-8 text for Python ergonomics.
+- Required attrs when reason bytes are present:
+  - `reason_encoding="utf8-null-terminated"`
+  - `reason_bytes_width=<int>`
+  - `reason_bytes_null_terminated=true`
+  - `reason_fallback_order=["reason_bytes","reason","detection_source"]`
+
+2. General text columns/arrays:
+- Canonical runtime encoding is variable-length UTF-8.
+- Avoid new fixed-width Unicode writes (`<U...`) in runtime code paths.
+
+3. Read compatibility:
+- Readers should tolerate legacy fixed-width string arrays where they exist.
+- Preferred read order for reason labels remains:
+  `reason_bytes` -> `reason` -> labels derived from `detection_source`.
+
+See also: `docs/zarr_string_encoding_todo.md`.
+
+---
+
 ## `raw_video/`
 
 Arrays written during import (kvikIO or standard path):
@@ -156,7 +182,7 @@ Produced by the keypoint detection stage (traditional or YOLO-based).
 | `keypoints_norm` | `(n_rois, n_keypoints, 2)` | `float64` | Normalized [0,1] |
 | `heading` | `(n_rois,)` | `float64` | Degrees, NaN when unavailable |
 | `confidence` | `(n_rois,)` | `float64` | Overall score |
-| `keypoint_confidences` | `(n_rois, n_keypoints)` | `float64` | Per-keypoint confidences (bladder, left, right) |
+| `keypoint_confidences` | `(n_rois, n_keypoints)` | `float64` | Per-keypoint confidences (swim_bladder, left, right) |
 | `effective_threshold` | `(n_rois,)` | `float64` | Per-ROI threshold used |
 | `effective_se2_radius` | `(n_rois,)` | `float64` | Search radius actually applied |
 | `detection_success` | `(n_rois,)` | `bool` | True if keypoints converged |
@@ -164,7 +190,7 @@ Produced by the keypoint detection stage (traditional or YOLO-based).
 | `heading_finite` | `(n_rois,)` | `bool` | True when `heading` is finite |
 | `heading_usable` | `(n_rois,)` | `bool` | True when source is real, detection succeeded, and heading is finite |
 | `n_keypoints` | `(n_frames,)` | `int32` | Successful keypoints per frame |
-| `triangle_angles` | `(n_rois, 3)` | `float64` | Triangle angles in canonical order (bladder, left, right) |
+| `triangle_angles` | `(n_rois, 3)` | `float64` | Triangle angles in canonical order (swim_bladder, left, right) |
 | `triangle_angles_raw` | `(n_rois, 3)` | `float64` | Triangle angles in candidate order (largest -> smallest blob) |
 | `triangle_area` | `(n_rois,)` | `float64` | Triangle area (pixels^2) |
 
