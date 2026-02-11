@@ -62,7 +62,7 @@ Current `VariableLengthUTF8` writers (already aligned):
 ### Phase 1: Policy + Guardrails
 
 - [x] Add this policy link to relevant contracts/TODO docs.
-- [ ] Add lint/CI grep guard to block new runtime writes using `<U...` for string arrays.
+- [x] Add lint/CI grep guard to block new runtime writes using `<U...` for string arrays.
 
 ### Phase 2: Runtime Writer Convergence
 
