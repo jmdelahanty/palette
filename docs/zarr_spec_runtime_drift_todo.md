@@ -4,6 +4,9 @@ Purpose: track concrete mismatches between the "authoritative" Zarr spec and wha
 
 Date anchored: 2026-02-09.
 
+Cross-cutting string/text encoding policy and migration is tracked separately in:
+`docs/zarr_string_encoding_todo.md`.
+
 ## Why this exists
 
 `src/fisheye/docs/zarr_structure.md` declares an authoritative layout, but multiple runtime entry points create/update archives through different code paths (`create_analysis_zarr`, `detect_yolo`, metadata-only updates). This creates drift risk for operators and downstream consumers.

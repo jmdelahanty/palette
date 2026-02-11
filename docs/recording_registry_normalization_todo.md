@@ -13,6 +13,8 @@ Detect-stage performance registry planning is tracked in:
 `docs/detect_performance_registry_todo.md`.
 Crop-review registry planning is tracked in:
 `docs/crop_review_registry_todo.md`.
+Cross-archive string encoding standardization is tracked in:
+`docs/zarr_string_encoding_todo.md`.
 Status (2026-02-09): detect-performance Phase 2A is complete
 (schema v11, model-only latest views, scoped backfill defaults).
 

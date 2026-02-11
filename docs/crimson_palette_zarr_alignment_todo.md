@@ -27,6 +27,7 @@ Palette repo:
 - `docs/crimson_detect_bbox_read_contract.md`
 - `docs/crimson_refined_detect_manual_contract.md`
 - `docs/crimson_detect_review_acceptance_contract.md`
+- `docs/zarr_string_encoding_todo.md`
 - `src/fisheye/analysis/create_analysis_zarr.py`
 - `src/fisheye/utils/import_video_metadata.py`
 - `src/fisheye/detection/detect_yolo.py`

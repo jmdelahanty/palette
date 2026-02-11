@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import yaml
 import zarr
+from zarr.core.dtype import VariableLengthUTF8
 
 from fisheye.registry.db import Registry
 from fisheye.utils import prepare_keypoint_training_from_registry as prepare_pose
@@ -261,16 +262,17 @@ def _copy_rows_indexed(
 
 
 def _write_string_array(group: zarr.Group, name: str, values: Sequence[str]) -> None:
-    max_len = max((len(value) for value in values), default=1)
-    data = np.asarray(list(values), dtype=f"<U{max_len}")
-    arr = group.require_array(
+    labels = np.asarray([str(value) for value in values], dtype=object)
+    chunk_size = max(1, min(1024, int(labels.shape[0])))
+    arr = group.create_array(
         name,
-        shape=data.shape,
-        dtype=data.dtype,
-        chunks=(max(1, min(1024, len(values))),),
+        shape=(int(labels.shape[0]),),
+        dtype=VariableLengthUTF8(),
+        fill_value="",
+        chunks=(chunk_size,),
         overwrite=True,
     )
-    arr[:] = data
+    arr[:] = labels
 
 
 def _json_list(raw: Any) -> List[str]:
@@ -572,7 +574,7 @@ def _discover_merge_sources(
         labels = kp_group.attrs.get("keypoint_labels")
         normalized_labels = [str(item) for item in labels] if isinstance(labels, list) else []
         if keypoint_labels is None:
-            keypoint_labels = normalized_labels or ["bladder", "eye_left", "eye_right"]
+            keypoint_labels = normalized_labels or ["swim_bladder", "eye_left", "eye_right"]
 
         frame_indices_path = (
             f"crop_runs/{source_crop_run}/frame_indices" if "frame_indices" in crop_group else None
@@ -663,7 +665,7 @@ def _discover_merge_sources(
                 roi_chunks=dataset_roi_chunks,
                 keypoint_shape=dataset_keypoint_shape,
                 keypoint_dtype=dataset_keypoint_dtype,
-                keypoint_labels=normalized_labels or (keypoint_labels or ["bladder", "eye_left", "eye_right"]),
+                keypoint_labels=normalized_labels or (keypoint_labels or ["swim_bladder", "eye_left", "eye_right"]),
                 dish_design=dish_design,
                 canvas_name=canvas_name,
                 rig_id=rig_id,
@@ -679,7 +681,7 @@ def _discover_merge_sources(
         "roi_chunks": roi_chunks,
         "keypoint_shape": keypoint_shape,
         "keypoint_dtype": keypoint_dtype,
-        "keypoint_labels": keypoint_labels or ["bladder", "eye_left", "eye_right"],
+        "keypoint_labels": keypoint_labels or ["swim_bladder", "eye_left", "eye_right"],
     }
 
 

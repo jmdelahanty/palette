@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import numpy as np
 import yaml
 import zarr
+from zarr.core.dtype import VariableLengthUTF8
 
 from fisheye.diagnostics.prepare_detect_training import DatasetManifest, TrainingManifest
 from fisheye.registry.db import Registry
@@ -683,16 +684,17 @@ def _copy_indexed_frames(
 
 
 def _write_string_array(group: zarr.Group, name: str, values: Sequence[str]) -> None:
-    max_len = max((len(value) for value in values), default=1)
-    data = np.asarray(list(values), dtype=f"<U{max_len}")
-    arr = group.require_array(
+    labels = np.asarray([str(value) for value in values], dtype=object)
+    chunk_size = max(1, min(1024, int(labels.shape[0])))
+    arr = group.create_array(
         name,
-        shape=data.shape,
-        dtype=data.dtype,
-        chunks=(max(1, min(1024, len(values))),),
+        shape=(int(labels.shape[0]),),
+        dtype=VariableLengthUTF8(),
+        fill_value="",
+        chunks=(chunk_size,),
         overwrite=True,
     )
-    arr[:] = data
+    arr[:] = labels
 
 
 def _json_list(raw: Any) -> List[str]:
