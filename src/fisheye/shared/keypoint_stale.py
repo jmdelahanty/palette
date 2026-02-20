@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import zarr
 
@@ -41,6 +41,44 @@ def _iter_group_names(parent: zarr.Group) -> List[str]:
     return sorted(str(name) for name in parent.keys())
 
 
+def _matches_source_keypoint_lineage(
+    attrs: Mapping[str, Any],
+    *,
+    source_keypoint_group: str,
+    source_keypoints_run: str,
+) -> bool:
+    run_source = resolve_source_keypoints_run(attrs)
+    if str(run_source) != str(source_keypoints_run):
+        return False
+
+    run_group_name = attrs.get("source_keypoint_group")
+    if run_group_name not in (None, "", source_keypoint_group):
+        return False
+    return True
+
+
+def _iter_matching_eye_mask_runs(
+    root: zarr.Group,
+    *,
+    source_keypoint_group: str,
+    source_keypoints_run: str,
+) -> Iterable[Tuple[str, str, zarr.Group, Dict[str, Any]]]:
+    for parent_name in ("eye_masks_runs", "refined_eye_masks_runs"):
+        parent = root.get(parent_name)
+        if not isinstance(parent, zarr.Group):
+            continue
+        for run_name in _iter_group_names(parent):
+            run_group = parent[run_name]
+            attrs = dict(run_group.attrs)
+            if not _matches_source_keypoint_lineage(
+                attrs,
+                source_keypoint_group=source_keypoint_group,
+                source_keypoints_run=source_keypoints_run,
+            ):
+                continue
+            yield parent_name, run_name, run_group, attrs
+
+
 def mark_downstream_eye_mask_runs_stale(
     root: zarr.Group,
     *,
@@ -67,21 +105,11 @@ def mark_downstream_eye_mask_runs_stale(
     timestamp = datetime.now(timezone.utc).isoformat()
     touched = 0
 
-    for parent_name in ("eye_masks_runs", "refined_eye_masks_runs"):
-        parent = root.get(parent_name)
-        if not isinstance(parent, zarr.Group):
-            continue
-        for run_name in _iter_group_names(parent):
-            run_group = parent[run_name]
-            attrs = dict(run_group.attrs)
-            run_source = resolve_source_keypoints_run(attrs)
-            if str(run_source) != str(source_keypoints_run):
-                continue
-
-            run_group_name = attrs.get("source_keypoint_group")
-            if run_group_name not in (None, "", source_keypoint_group):
-                continue
-
+    for _parent_name, _run_name, run_group, attrs in _iter_matching_eye_mask_runs(
+        root,
+        source_keypoint_group=source_keypoint_group,
+        source_keypoints_run=source_keypoints_run,
+    ):
             existing = attrs.get("source_keypoint_stale")
             payload = dict(existing) if isinstance(existing, dict) else {}
             payload["state"] = "stale"
@@ -97,5 +125,65 @@ def mark_downstream_eye_mask_runs_stale(
 
             run_group.attrs["source_keypoint_stale"] = payload
             touched += 1
+
+    return touched
+
+
+def resolve_downstream_eye_mask_runs_stale(
+    root: zarr.Group,
+    *,
+    source_keypoint_group: str,
+    source_keypoints_run: str,
+    resolution: str,
+    reviewer: Optional[str] = None,
+    notes: Optional[str] = None,
+    extra: Optional[Mapping[str, object]] = None,
+    dry_run: bool = False,
+) -> int:
+    """Resolve stale markers for eye-mask runs tied to a keypoint run.
+
+    This is intended for explicit operator acknowledgment when masks are kept
+    as curated ground truth after keypoint nudges/corrections.
+
+    Returns count of run groups transitioned from stale -> resolved.
+    """
+
+    if not source_keypoint_group or not source_keypoints_run:
+        return 0
+    if not resolution or not str(resolution).strip():
+        return 0
+
+    resolved_at = datetime.now(timezone.utc).isoformat()
+    touched = 0
+
+    for _parent_name, _run_name, run_group, attrs in _iter_matching_eye_mask_runs(
+        root,
+        source_keypoint_group=source_keypoint_group,
+        source_keypoints_run=source_keypoints_run,
+    ):
+        existing = attrs.get("source_keypoint_stale")
+        if not isinstance(existing, dict):
+            continue
+        state = str(existing.get("state") or "").strip().lower()
+        if state != "stale":
+            continue
+
+        payload = dict(existing)
+        if payload.get("timestamp") is not None and payload.get("stale_timestamp_utc") is None:
+            payload["stale_timestamp_utc"] = payload.get("timestamp")
+        payload["state"] = "resolved"
+        payload["resolved_at_utc"] = resolved_at
+        payload["resolution"] = str(resolution).strip()
+        if reviewer:
+            payload["resolved_by"] = str(reviewer).strip()
+        if notes:
+            payload["resolved_notes"] = str(notes).strip()
+        if extra:
+            for key, value in extra.items():
+                payload[key] = value
+
+        if not dry_run:
+            run_group.attrs["source_keypoint_stale"] = payload
+        touched += 1
 
     return touched

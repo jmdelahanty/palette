@@ -117,3 +117,33 @@ Notes:
   as stale until regenerated or manually corrected.
 - Training exports/models generated before correction will not update
   automatically; re-export/retrain is required when corrected rows matter.
+
+## Explicit Stale Resolution Contract (Preserve Masks)
+
+When operators intentionally preserve curated eye masks after small keypoint
+nudges, stale markers can be explicitly resolved instead of regenerating masks.
+
+CLI:
+
+```bash
+scripts/py -m fisheye.utils.resolve_eye_mask_stale <zarr_or_root> \
+  --zarr-use training \
+  --apply \
+  --resolution manual_accept_after_keypoint_nudge_preserve_masks \
+  --reviewer "$USER"
+```
+
+Resolution payload updates (on matching `eye_masks_runs` / `refined_eye_masks_runs`):
+
+- `source_keypoint_stale.state = "resolved"`
+- `source_keypoint_stale.resolved_at_utc`
+- `source_keypoint_stale.resolution`
+- optional: `source_keypoint_stale.resolved_by`, `resolved_notes`
+
+Safety:
+
+- Original stale evidence is preserved (`reason`, `roi_indices`,
+  `frame_indices`, and original stale timestamp copied to
+  `stale_timestamp_utc` when needed).
+- This is an explicit operator acknowledgment path and should be used only when
+  mask geometry is intentionally preserved.
