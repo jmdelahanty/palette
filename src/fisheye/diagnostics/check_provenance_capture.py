@@ -5,12 +5,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import zarr
-import re
+
+from ..shared.stage_provenance import (
+    STAGE_PROVENANCE_CONTRACT_NAME,
+    get_stage_contract,
+    get_stage_git,
+)
 
 
 @dataclass
@@ -30,8 +36,11 @@ STAGES = [
     {"label": "keypoints", "groups": ["keypoints_runs"]},
     {"label": "refined_keypoints", "groups": ["refined_keypoints_runs", "keypoints_refined_runs"]},
     {"label": "eye_masks", "groups": ["eye_masks_runs"]},
+    {"label": "refined_eye_masks", "groups": ["refined_eye_masks_runs"]},
     {"label": "id_assignment", "groups": ["id_assignment_runs"]},
 ]
+
+REFINEMENT_STAGES = {"refined_detect", "refined_keypoints", "refined_eye_masks"}
 
 
 REQUIRED_FIELDS = ["timestamp", "parameters", "inputs"]
@@ -104,14 +113,15 @@ def _has_inputs(prov: Optional[dict], attrs: dict) -> bool:
 
 
 def _has_git(prov: Optional[dict], attrs: dict) -> bool:
-    if isinstance(prov, dict):
-        git = prov.get("git")
-        if isinstance(git, dict) and git:
-            return True
-    for key in attrs.keys():
-        if str(key).startswith("git_") or key in {"git_commit", "git_commit_hash"}:
-            return True
-    return False
+    git_payload = get_stage_git(attrs)
+    return any(
+        value not in (None, "", "unknown", "N/A", "n/a")
+        for value in (
+            git_payload.get("commit"),
+            git_payload.get("short"),
+            git_payload.get("branch"),
+        )
+    )
 
 
 def _has_environment(prov: Optional[dict], attrs: dict) -> bool:
@@ -203,6 +213,7 @@ def _check_group(
     *,
     all_runs: bool,
     require_provenance: bool,
+    strict_contract: bool,
 ) -> List[ProvenanceCheck]:
     if group is None:
         return [ProvenanceCheck(stage, None, "absent", False, REQUIRED_FIELDS.copy(), OPTIONAL_FIELDS.copy())]
@@ -222,24 +233,44 @@ def _check_group(
             continue
         run_group = group[run_name]
         attrs = dict(run_group.attrs)
-        prov = attrs.get("provenance")
+        prov = _json_loads(attrs.get("provenance"))
         has_prov = isinstance(prov, dict)
 
         missing_required: List[str] = []
         missing_optional: List[str] = []
 
         for field in REQUIRED_FIELDS:
-            ok = FIELD_CHECKS[field](prov if isinstance(prov, dict) else None, attrs)
+            ok = FIELD_CHECKS[field](prov, attrs)
             if not ok:
                 missing_required.append(field)
         for field in OPTIONAL_FIELDS:
-            ok = FIELD_CHECKS[field](prov if isinstance(prov, dict) else None, attrs)
+            ok = FIELD_CHECKS[field](prov, attrs)
             if not ok:
                 missing_optional.append(field)
 
         if require_provenance and not has_prov:
             if "provenance" not in missing_required:
                 missing_required.insert(0, "provenance")
+
+        if strict_contract and stage in REFINEMENT_STAGES:
+            if not has_prov:
+                if "provenance" not in missing_required:
+                    missing_required.insert(0, "provenance")
+            else:
+                contract_raw = prov.get("contract")
+                if not isinstance(contract_raw, dict):
+                    missing_required.append("contract")
+                else:
+                    contract = get_stage_contract(attrs)
+                    if contract.get("name") != STAGE_PROVENANCE_CONTRACT_NAME:
+                        missing_required.append("contract.name")
+                    try:
+                        contract_version = int(contract.get("version"))
+                    except (TypeError, ValueError):
+                        missing_required.append("contract.version")
+                    else:
+                        if contract_version < 1:
+                            missing_required.append("contract.version")
 
         if missing_required:
             status = "missing"
@@ -259,6 +290,7 @@ def _check_zarr(
     require_provenance: bool,
     check_consistency: bool,
     check_subject_metadata: bool,
+    strict_contract: bool,
 ) -> tuple[Dict[str, Any], Optional[list[str]], Optional[Dict[str, object]]]:
     root = zarr.open(str(zarr_path), mode="r")
     results: Dict[str, Any] = {}
@@ -269,7 +301,11 @@ def _check_zarr(
                 group = root[group_name]
                 break
         results[stage["label"]] = _check_group(
-            stage["label"], group, all_runs=all_runs, require_provenance=require_provenance
+            stage["label"],
+            group,
+            all_runs=all_runs,
+            require_provenance=require_provenance,
+            strict_contract=strict_contract,
         )
     issues: Optional[list[str]] = None
     lineage: Optional[Dict[str, object]] = None
@@ -333,6 +369,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help="Report whether subject_metadata includes fish_id + subject_count.",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Return non-zero when required provenance checks fail. "
+            "Also enforces refinement-stage contract name/version."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -347,6 +391,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     check_consistency = True if args.check_consistency else not args.no_check_consistency
 
     results_payload: Dict[str, Dict[str, Any]] = {}
+    has_failures = False
     for zarr_path in _iter_zarr(roots, args.recursive):
         checks, issues, lineage = _check_zarr(
             zarr_path,
@@ -354,7 +399,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             require_provenance=args.require_provenance,
             check_consistency=check_consistency,
             check_subject_metadata=args.check_subject_metadata,
+            strict_contract=args.strict,
         )
+        for stage, checks_list in checks.items():
+            if stage == "subject_metadata":
+                continue
+            if any(check.status == "missing" for check in checks_list):
+                has_failures = True
+        if check_consistency and issues:
+            has_failures = True
         payload: Dict[str, Any] = {
             stage: [
                 {
@@ -382,7 +435,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.json:
         print(json.dumps(results_payload, indent=2, sort_keys=True))
-        return 0
+        return 1 if args.strict and has_failures else 0
 
     for zarr_path, stages in results_payload.items():
         print(f"\n{zarr_path}")
@@ -429,7 +482,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 kpt_label = str(kpt) if kpt is not None else "—"
                 print(f"  lineage          source={source} det={det_label} crop={crop_label} kpt={kpt_label}")
 
-    return 0
+    return 1 if args.strict and has_failures else 0
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -36,6 +36,7 @@ except ImportError:
 
 from .keypoint_quality import KeypointGeometryMetrics, compute_geometry_metrics
 from ..shared.detect_reason_codec import write_reason_columns
+from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..utils.system import get_environment_info, get_git_info
 
 REFINED_KEYPOINT_GROUP = "refined_keypoints_runs"
@@ -868,33 +869,32 @@ def create_refined_keypoint_run(
             frame_source = crop_group.attrs.get("video_source_type", frame_source)
             source_video_path = crop_group.attrs.get("video_source_path") or source_video_path
 
-    provenance_record = {
-        "stage": "refine_keypoints",
-        "command": command or "unknown",
-        "created_at_utc": created_timestamp,
-        "version": git_info.get("short_hash") or git_info.get("commit_hash"),
-        "git": {
+    provenance_record = build_stage_provenance(
+        stage="refine_keypoints",
+        command=command or "unknown",
+        created_at_utc=created_timestamp,
+        version=git_info.get("short_hash") or git_info.get("commit_hash"),
+        git={
             "commit": git_info.get("commit_hash"),
             "short": git_info.get("short_hash"),
             "branch": git_info.get("branch"),
             "is_dirty": git_info.get("is_dirty"),
             "remote": git_info.get("remote_url"),
         },
-        "environment": environment_summary,
-        "platform": platform_info,
-        "scheduler": scheduler_info,
-        "parameters": parameters_info,
-        "inputs": {
+        environment=environment_summary,
+        platform=platform_info,
+        scheduler=scheduler_info,
+        parameters=parameters_info,
+        inputs={
             "keypoints_run": keypoint_run,
             "source_crop_run": source_crop_run,
             "frame_source": frame_source,
             "source_video_path": source_video_path,
         },
-        "artifacts": artifact_info,
-    }
-    provenance_record = {k: v for k, v in provenance_record.items() if v is not None}
+        artifacts=artifact_info,
+    )
 
-    kp_refined.attrs["provenance"] = provenance_record
+    write_stage_provenance(kp_refined, provenance_record)
     kp_refined.attrs["keypoint_signature"] = _build_keypoint_signature(
         kp_refined.attrs, parameters_info
     )

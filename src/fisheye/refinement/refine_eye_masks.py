@@ -41,6 +41,7 @@ from collections import Counter
 from ..shared.mask_source import load_mask_bundle
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
 from ..shared.row_alignment import assert_row_alignment
+from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
 
@@ -2193,30 +2194,30 @@ def refine_eye_masks(
     ]
     artifact_info = {key: src_run.attrs[key] for key in artifact_keys if key in src_run.attrs}
 
-    provenance_record = {
-        "stage": "refine_eye_masks",
-        "command": command or "unknown",
-        "created_at_utc": created_at_utc or datetime.now(timezone.utc).isoformat(),
-        "version": git_info.get("short_hash") or git_info.get("commit_hash"),
-        "git": {
+    created_timestamp = created_at_utc or datetime.now(timezone.utc).isoformat()
+    provenance_record = build_stage_provenance(
+        stage="refine_eye_masks",
+        command=command or "unknown",
+        created_at_utc=created_timestamp,
+        version=git_info.get("short_hash") or git_info.get("commit_hash"),
+        git={
             "commit": git_info.get("commit_hash"),
             "short": git_info.get("short_hash"),
             "branch": git_info.get("branch"),
             "is_dirty": git_info.get("is_dirty"),
             "remote": git_info.get("remote_url"),
         },
-        "environment": environment_summary,
-        "platform": platform_info,
-        "scheduler": scheduler_info,
-        "parameters": mask_parameters,
-        "inputs": {
+        environment=environment_summary,
+        platform=platform_info,
+        scheduler=scheduler_info,
+        parameters=mask_parameters,
+        inputs={
             "eye_masks_run": src_run_name,
             "keypoints_run": keypoint_run_name,
             "crop_run": crop_run_name,
         },
-        "artifacts": artifact_info,
-    }
-    provenance_record = {k: v for k, v in provenance_record.items() if v is not None}
+        artifacts=artifact_info,
+    )
 
     attrs_payload: Dict[str, object] = {
         "method": "refine_eye_masks",
@@ -2248,10 +2249,7 @@ def refine_eye_masks(
         "dask_num_workers": int(num_workers) if num_workers is not None else None,
         "dask_chunk_size": chunk_size,
         "dask_version": getattr(dask, "__version__", "unknown"),
-        "git_commit": git_info.get("commit_hash", "unknown"),
-        "git_branch": git_info.get("branch", "unknown"),
         "hostname": env_info["platform"].get("hostname", "unknown"),
-        "provenance": provenance_record,
         "metrics_summary": metrics_summary,
         "summary_statistics": {"refine": stats},
     }
@@ -2261,6 +2259,7 @@ def refine_eye_masks(
         attrs_payload["source_eye_masks_provenance"] = source_provenance
 
     run_group.attrs.update(attrs_payload)
+    write_stage_provenance(run_group, provenance_record)
 
     console.print(
         f"[green]✓[/green] Refined eye masks saved to [cyan]{REFINED_STAGE_NAME}_runs/{resolved_run_name}[/cyan] "

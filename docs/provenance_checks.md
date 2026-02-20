@@ -45,7 +45,15 @@ Stage names:
 - `keypoints`
 - `refined_keypoints`
 - `eye_masks`
+- `refined_eye_masks`
 - `id_assignment`
+
+Strict mode:
+
+- `--strict` returns non-zero when required checks fail.
+- In strict mode, refinement stages additionally require:
+  - `provenance.contract.name == "palette_stage_provenance"`
+  - `provenance.contract.version >= 1`
 
 Subject metadata (optional):
 

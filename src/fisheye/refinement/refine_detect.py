@@ -21,6 +21,7 @@ from rich.console import Console
 from ..utils.metadata import get_total_frames, get_detection_method
 from ..utils.system import get_environment_info, get_git_info
 from ..shared.detect_reason_codec import write_reason_columns
+from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
@@ -737,31 +738,30 @@ def create_refined_run(
     if quality_group is not None and 'artifact_detection_params' in quality_group.attrs:
         artifact_info['quality_detection_params'] = quality_group.attrs['artifact_detection_params']
 
-    provenance_record = {
-        'stage': 'refine_detect',
-        'command': command or ' '.join(sys.argv),
-        'created_at_utc': created_timestamp,
-        'version': git_info.get('short_hash') or git_info.get('commit_hash'),
-        'git': {
+    provenance_record = build_stage_provenance(
+        stage='refine_detect',
+        command=command or ' '.join(sys.argv),
+        created_at_utc=created_timestamp,
+        version=git_info.get('short_hash') or git_info.get('commit_hash'),
+        git={
             'commit': git_info.get('commit_hash'),
             'short': git_info.get('short_hash'),
             'branch': git_info.get('branch'),
             'is_dirty': git_info.get('is_dirty'),
             'remote': git_info.get('remote_url'),
         },
-        'environment': environment_info,
-        'scheduler': scheduler_info,
-        'parameters': parameters_payload,
-        'inputs': {
+        environment=environment_info,
+        scheduler=scheduler_info,
+        parameters=parameters_payload,
+        inputs={
             'detect_run': detect_run,
             'quality_run': quality_run or 'N/A',
             'frame_source': 'zarr' if root.attrs.get('has_raw_video', True) else 'external',
             'source_video_path': root.attrs.get('source_video_path'),
         },
-        'artifacts': artifact_info,
-    }
-    provenance_record = {k: v for k, v in provenance_record.items() if v is not None}
-    refined_group.attrs['provenance'] = provenance_record
+        artifacts=artifact_info,
+    )
+    write_stage_provenance(refined_group, provenance_record)
     
     # Save filtered data
     filtered_grp = refined_group.create_group('filtered')
