@@ -20,3 +20,4 @@ diagnostics_output/
 nvme1/
 runs/
 notes.md
+keypoint_frame_flags.json
