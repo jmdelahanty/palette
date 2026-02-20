@@ -25,6 +25,7 @@ from skimage import filters, measure, morphology
 from skimage.measure import EllipseModel
 from ..shared.provenance_attrs import build_source_keypoints_attrs
 from ..shared.row_alignment import assert_row_alignment
+from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
 
@@ -863,31 +864,37 @@ def segment_eye_masks(
             "reason_counts": reason_counts,
         }
     )
-    provenance = {
-        "stage": "eye_masks",
-        "method": "traditional_eye_segmentation",
-        "command": " ".join(sys.argv),
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "git": git_info,
-        "environment": env_info.get("environment"),
-        "platform": {
+    created_timestamp = datetime.now(timezone.utc).isoformat()
+    provenance_record = build_stage_provenance(
+        stage="eye_masks",
+        command=" ".join(sys.argv),
+        created_at_utc=created_timestamp,
+        version=git_info.get("short_hash") or git_info.get("commit_hash"),
+        git={
+            "commit": git_info.get("commit_hash"),
+            "short": git_info.get("short_hash"),
+            "branch": git_info.get("branch"),
+            "is_dirty": git_info.get("is_dirty"),
+            "remote": git_info.get("remote_url"),
+        },
+        environment=env_info.get("environment"),
+        platform={
             "hostname": platform_info.get("hostname"),
             "system": platform_info.get("system"),
             "release": platform_info.get("release"),
             "python_version": platform_info.get("python_version"),
             "machine": platform_info.get("machine"),
         },
-        "parameters": cfg.__dict__,
-        "inputs": {
+        parameters=dict(cfg.__dict__),
+        inputs={
             "source_crop_run": crop_run,
             "source_keypoints_run": keypoint_run,
             "source_keypoint_group": keypoint_group_name,
             "frame_source": crop_group.attrs.get("video_source_type", "zarr"),
             "source_video_path": crop_group.attrs.get("video_source_path"),
         },
-    }
-    provenance = {k: v for k, v in provenance.items() if v is not None}
-    run_group.attrs["provenance"] = provenance
+    )
+    write_stage_provenance(run_group, provenance_record)
     run_group.attrs["rejected_overlap"] = int(overlap_rejects)
     run_group.attrs["rejected_too_close"] = int(proximity_rejects)
     run_group.attrs["rejected_too_far"] = int(distance_rejects)

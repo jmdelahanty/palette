@@ -18,6 +18,7 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
 from ..shared.row_alignment import assert_row_alignment
+from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr.schema import add_processing_run
 from ..utils.system import get_environment_info, get_git_info
 from .unet import UNetSmall
@@ -583,39 +584,46 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "hostname": env_info["platform"].get("hostname", "unknown"),
         }
     )
-    provenance = {
-        "stage": "eye_masks",
-        "method": "unet_eye_mask_segmenter",
-        "command": " ".join(sys.argv),
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "git": git_info,
-        "environment": env_info.get("environment"),
-        "platform": {
+    created_timestamp = datetime.now(timezone.utc).isoformat()
+    provenance_record = build_stage_provenance(
+        stage="eye_masks",
+        command=" ".join(sys.argv),
+        created_at_utc=created_timestamp,
+        version=git_info.get("short_hash") or git_info.get("commit_hash"),
+        git={
+            "commit": git_info.get("commit_hash"),
+            "short": git_info.get("short_hash"),
+            "branch": git_info.get("branch"),
+            "is_dirty": git_info.get("is_dirty"),
+            "remote": git_info.get("remote_url"),
+        },
+        environment=env_info.get("environment"),
+        platform={
             "hostname": platform_info.get("hostname"),
             "system": platform_info.get("system"),
             "release": platform_info.get("release"),
             "python_version": platform_info.get("python_version"),
             "machine": platform_info.get("machine"),
         },
-        "parameters": {
+        parameters={
             "batch_size": int(args.batch_size),
             "device": str(device),
             "label_mode": label_mode,
+            "write_binary_masks": bool(args.write_binary_masks),
         },
-        "inputs": {
+        inputs={
             "source_eye_masks_run": source_run_name,
             "source_crop_run": crop_run,
             "source_keypoints_run": resolved_keypoints_run,
             "frame_source": crop_group.attrs.get("video_source_type", "zarr"),
             "source_video_path": crop_group.attrs.get("video_source_path"),
         },
-        "artifacts": {
+        artifacts={
             "checkpoint_path": str(checkpoint_path),
             "segmenter": "unet",
         },
-    }
-    provenance = {k: v for k, v in provenance.items() if v is not None}
-    run_group.attrs["provenance"] = provenance
+    )
+    write_stage_provenance(run_group, provenance_record)
 
     if wrote_binary:
         run_group.attrs["masks_from"] = "threshold(mask_probs_roi, thr=0.5)"

@@ -145,3 +145,36 @@ def test_main_strict_does_not_require_contract_for_non_refinement_stage(monkeypa
     rc = mod.main([str(fake_path), "--strict", "--no-check-consistency"])
     assert rc == 0
     capsys.readouterr()
+
+
+def test_check_zarr_accepts_canonical_contract_payload_for_eye_masks_stage(monkeypatch) -> None:
+    payload = build_stage_provenance(
+        stage="eye_masks",
+        created_at_utc="2026-02-20T00:00:00+00:00",
+        parameters={"method": "traditional_eye_segmentation"},
+        inputs={"source_crop_run": "crop_001"},
+        git={"commit": "d" * 40, "branch": "main"},
+        environment={},
+    )
+    root = _build_root_for_stage(
+        "eye_masks_runs",
+        "eye_masks_001",
+        {
+            "method": "traditional_eye_segmentation",
+            "provenance": payload,
+        },
+    )
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: root)
+
+    checks, _, _ = mod._check_zarr(
+        Path("/fake/recording.zarr"),
+        all_runs=False,
+        require_provenance=True,
+        check_consistency=False,
+        check_subject_metadata=False,
+        strict_contract=True,
+    )
+
+    check = checks["eye_masks"][0]
+    assert check.status == "ok"
+    assert check.has_provenance is True

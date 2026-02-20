@@ -4,6 +4,18 @@
 - Make every derived dataset (detect/refine/crop/keypoints/eye masks) auditable and reproducible.
 - Capture enough context to re-run or explain any result without relying on external notes.
 
+## Current next steps (offline dataset focus)
+- Migrate offline non-refinement stage writers to `palette_stage_provenance` contract:
+  - `eye_masks_runs` (first)
+  - `keypoints_runs`, `detect_runs`, `crop_runs`, `id_assignment_runs` (follow-up)
+- Add a generic provenance backfill tool for legacy offline runs:
+  - inject `provenance.contract` when missing
+  - normalize git payload into canonical `provenance.git.commit` shape
+  - keep dry-run and non-destructive defaults
+- Expand diagnostics gating for offline stages after backfill:
+  - add stricter contract checks stage-by-stage in `check_provenance_capture`
+  - preserve compatibility reads during migration window
+
 ## High-priority fixes
 - Add a `provenance` block to each run group with:
   - `git_commit`, `pipeline_version` (if exists), `config_path`, `config_hash`
@@ -31,6 +43,16 @@
   only consolidated metadata and require readers to merge?
 - Standardize `provenance` schema across all run types in `src/fisheye/shared/zarr/schema.py`.
 - Decide which environment details are required vs optional.
+
+## Deferred (online stage)
+- `src/fisheye/refinement/refine_online_detect.py` currently writes an ad-hoc
+  provenance payload (no stage contract block).
+- This migration is intentionally deferred until offline dataset provenance
+  standardization is complete.
+- Follow-up task:
+  - migrate `refine_online_detect` to shared stage helpers
+  - add/extend tests in `tests/unit/fisheye/test_check_provenance_capture.py`
+    for `stage=refine_online_detect` contract coverage.
 
 ## Related docs
 - `src/fisheye/docs/provenance_workflow.md`

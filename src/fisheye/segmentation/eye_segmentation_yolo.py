@@ -24,6 +24,7 @@ from skimage import measure
 
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
 from ..shared.row_alignment import assert_row_alignment
+from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
 
@@ -1137,36 +1138,42 @@ def segment_eye_masks_yolo(
         attrs_payload["source_keypoint_group"] = resolved_keypoint_group
 
     run_group.attrs.update(attrs_payload)
-    provenance = {
-        "stage": "eye_masks",
-        "method": "yolo_eye_segmentation",
-        "command": " ".join(sys.argv),
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "git": git_info,
-        "environment": env_info.get("environment"),
-        "platform": {
+    created_timestamp = datetime.now(timezone.utc).isoformat()
+    provenance_record = build_stage_provenance(
+        stage="eye_masks",
+        command=" ".join(sys.argv),
+        created_at_utc=created_timestamp,
+        version=git_info.get("short_hash") or git_info.get("commit_hash"),
+        git={
+            "commit": git_info.get("commit_hash"),
+            "short": git_info.get("short_hash"),
+            "branch": git_info.get("branch"),
+            "is_dirty": git_info.get("is_dirty"),
+            "remote": git_info.get("remote_url"),
+        },
+        environment=env_info.get("environment"),
+        platform={
             "hostname": platform_info.get("hostname"),
             "system": platform_info.get("system"),
             "release": platform_info.get("release"),
             "python_version": platform_info.get("python_version"),
             "machine": platform_info.get("machine"),
         },
-        "parameters": run_group.attrs.get("config"),
-        "inputs": {
+        parameters=dict(run_group.attrs.get("config") or {}),
+        inputs={
             "source_crop_run": crop_run_name,
             "source_keypoints_run": resolved_keypoints_run,
             "source_keypoint_group": resolved_keypoint_group,
             "frame_source": crop_group.attrs.get("video_source_type", "zarr"),
             "source_video_path": crop_group.attrs.get("video_source_path"),
         },
-        "artifacts": {
+        artifacts={
             "model_path": str(model_path_resolved),
             "model_device": model_device,
             "ultralytics_version": ultralytics_version,
         },
-    }
-    provenance = {k: v for k, v in provenance.items() if v is not None}
-    run_group.attrs["provenance"] = provenance
+    )
+    write_stage_provenance(run_group, provenance_record)
     run_group.attrs["rejected_overlap"] = 0
     run_group.attrs["rejected_too_close"] = 0
     run_group.attrs["rejected_too_far"] = 0

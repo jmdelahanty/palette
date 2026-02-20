@@ -21,6 +21,8 @@ Out of scope:
 
 - raw detect/keypoint/eye-mask inference runs (tracked separately)
 - training/export contracts
+- `refine_online_detect` migration (deferred while offline dataset provenance
+  work is prioritized)
 
 ## Related Docs
 
@@ -153,6 +155,9 @@ In strict mode, diagnostics should additionally require:
    - inject missing `provenance.contract`
    - normalize git fields into `provenance.git.commit` when derivable
    - preserve original attrs; no destructive rewrites
+5. Deferred follow-up:
+   - migrate `src/fisheye/refinement/refine_online_detect.py` from ad-hoc
+     provenance payload to `palette_stage_provenance` helpers.
 
 ## Acceptance Criteria
 
