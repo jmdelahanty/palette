@@ -178,3 +178,36 @@ def test_check_zarr_accepts_canonical_contract_payload_for_eye_masks_stage(monke
     check = checks["eye_masks"][0]
     assert check.status == "ok"
     assert check.has_provenance is True
+
+
+def test_check_zarr_accepts_canonical_contract_payload_for_keypoints_stage(monkeypatch) -> None:
+    payload = build_stage_provenance(
+        stage="keypoints_detect",
+        created_at_utc="2026-02-20T00:00:00+00:00",
+        parameters={"method": "traditional_pose"},
+        inputs={"source_crop_run": "crop_001", "source_detect_run": "detect_001"},
+        git={"commit": "e" * 40, "branch": "main"},
+        environment={},
+    )
+    root = _build_root_for_stage(
+        "keypoints_runs",
+        "keypoints_001",
+        {
+            "method": "traditional_pose",
+            "provenance": payload,
+        },
+    )
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: root)
+
+    checks, _, _ = mod._check_zarr(
+        Path("/fake/recording.zarr"),
+        all_runs=False,
+        require_provenance=True,
+        check_consistency=False,
+        check_subject_metadata=False,
+        strict_contract=True,
+    )
+
+    check = checks["keypoints"][0]
+    assert check.status == "ok"
+    assert check.has_provenance is True

@@ -26,6 +26,7 @@ import dask
 from dask import delayed
 from dask.diagnostics import ProgressBar
 
+from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr.schema import get_run_group
 from ..pose.schema import schema_from_package
 
@@ -866,22 +867,31 @@ def detect_keypoints(
         'git_branch': git_info.get('branch', 'unknown'),
         'hostname': platform_info.get('hostname', 'unknown')
     })
-    provenance = {
-        'stage': 'keypoints_detect',
-        'method': 'traditional_pose',
-        'command': ' '.join(sys.argv),
-        'created_at_utc': metadata_dict.get('keypoints_timestamp_utc'),
-        'git': git_info,
-        'environment': env_info.get('environment'),
-        'platform': {
+    provenance_record = build_stage_provenance(
+        stage='keypoints_detect',
+        command=' '.join(sys.argv),
+        created_at_utc=str(metadata_dict.get('keypoints_timestamp_utc')),
+        version=git_info.get('short_hash') or git_info.get('commit_hash'),
+        git={
+            'commit': git_info.get('commit_hash'),
+            'short': git_info.get('short_hash'),
+            'branch': git_info.get('branch'),
+            'is_dirty': git_info.get('is_dirty'),
+            'remote': git_info.get('remote_url'),
+        },
+        environment=env_info.get('environment'),
+        platform={
             'hostname': platform_info.get('hostname'),
             'system': platform_info.get('system'),
             'release': platform_info.get('release'),
             'python_version': platform_info.get('python_version'),
+            'machine': platform_info.get('machine'),
         },
-        'parameters': keypoints_params,
-        'parameter_source': param_source,
-        'inputs': {
+        parameters={
+            **dict(keypoints_params),
+            'parameter_source': param_source,
+        },
+        inputs={
             'source_crop_run': latest_crop,
             'source_background_run': latest_background,
             'source_detect_run': source_detect_run or 'unknown',
@@ -889,15 +899,14 @@ def detect_keypoints(
             'frame_source': crop_group.attrs.get('video_source_type', 'zarr'),
             'source_video_path': crop_group.attrs.get('video_source_path'),
         },
-        'scheduler': {
+        scheduler={
             'dask_scheduler': scheduler,
             'dask_num_workers': num_workers or os.cpu_count(),
             'threads_per_worker': threads_per_worker if use_distributed else None,
             'memory_limit': memory_limit if use_distributed else None,
         },
-    }
-    provenance = {k: v for k, v in provenance.items() if v is not None}
-    keypoint_group.attrs['provenance'] = provenance
+    )
+    write_stage_provenance(keypoint_group, provenance_record)
     keypoint_group.attrs['pose_schema'] = {
         'name': TRADITIONAL_POSE_SCHEMA.name,
         'nodes': TRADITIONAL_POSE_SCHEMA.node_names,

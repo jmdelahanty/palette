@@ -25,6 +25,7 @@ from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from ultralytics import YOLO, __version__ as ultralytics_version
 
+from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
 from ..pose.schema import schema_from_package
@@ -628,37 +629,42 @@ def detect_keypoints_yolo(
     })
     if source_refined_run:
         run_group.attrs["source_refined_run"] = source_refined_run
-    provenance = {
-        "stage": "keypoints_detect",
-        "method": "yolo_pose",
-        "command": " ".join(sys.argv),
-        "created_at_utc": run_group.attrs.get("keypoints_timestamp_utc"),
-        "git": git_info,
-        "environment": env_info.get("environment"),
-        "platform": {
+    provenance_record = build_stage_provenance(
+        stage="keypoints_detect",
+        command=" ".join(sys.argv),
+        created_at_utc=str(run_group.attrs.get("keypoints_timestamp_utc")),
+        version=git_info.get("short_hash") or git_info.get("commit_hash"),
+        git={
+            "commit": git_info.get("commit_hash"),
+            "short": git_info.get("short_hash"),
+            "branch": git_info.get("branch"),
+            "is_dirty": git_info.get("is_dirty"),
+            "remote": git_info.get("remote_url"),
+        },
+        environment=env_info.get("environment"),
+        platform={
             "hostname": platform_info.get("hostname"),
             "system": platform_info.get("system"),
             "release": platform_info.get("release"),
             "python_version": platform_info.get("python_version"),
             "machine": platform_info.get("machine"),
         },
-        "parameters": run_group.attrs.get("parameters"),
-        "inputs": {
+        parameters=dict(run_group.attrs.get("parameters") or {}),
+        inputs={
             "source_crop_run": latest_crop,
             "source_detect_run": source_detect_run or "unknown",
             "source_refined_run": source_refined_run,
             "frame_source": crop_group.attrs.get("video_source_type", "zarr"),
             "source_video_path": crop_group.attrs.get("video_source_path"),
         },
-        "artifacts": {
+        artifacts={
             "model_path": str(model_path_resolved),
             "model_name": model_path.name,
             "ultralytics_version": ultralytics_version,
             "device": model_device,
         },
-    }
-    provenance = {k: v for k, v in provenance.items() if v is not None}
-    run_group.attrs["provenance"] = provenance
+    )
+    write_stage_provenance(run_group, provenance_record)
     if override_data is not None:
         run_group.attrs["refined_roi_overrides"] = int(override_data["count"])
         run_group.attrs["refined_roi_source"] = override_data["path"]

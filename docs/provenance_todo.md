@@ -6,8 +6,11 @@
 
 ## Current next steps (offline dataset focus)
 - Migrate offline non-refinement stage writers to `palette_stage_provenance` contract:
-  - `eye_masks_runs` (first)
-  - `keypoints_runs`, `detect_runs`, `crop_runs`, `id_assignment_runs` (follow-up)
+  - [x] `eye_masks_runs`
+  - [x] `keypoints_runs`
+  - [ ] `detect_runs`
+  - [ ] `crop_runs`
+  - [ ] `id_assignment_runs`
 - Add a generic provenance backfill tool for legacy offline runs:
   - inject `provenance.contract` when missing
   - normalize git payload into canonical `provenance.git.commit` shape
