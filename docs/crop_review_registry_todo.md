@@ -35,7 +35,7 @@ Do not mirror all crop arrays/metadata into SQLite.
 
 ## Proposed Schema (Additive)
 
-- [ ] Add table: `crop_quality`
+- [x] Add table: `crop_quality`
   - key:
     - `dataset_id TEXT NOT NULL`
     - `crop_run TEXT NOT NULL`
@@ -67,55 +67,55 @@ Do not mirror all crop arrays/metadata into SQLite.
     - `zarr_mtime_ns INTEGER`
     - `updated_utc TEXT`
 
-- [ ] Add indexes:
+- [x] Add indexes:
   - `idx_crop_quality_dataset_id` on `(dataset_id)`
   - `idx_crop_quality_review_gate` on `(review_state, review_intended_use)`
   - `idx_crop_quality_source` on `(detection_source_type, source_refined_run)`
   - `idx_crop_quality_recording` on `(recording_id, crop_created_utc DESC)`
 
-- [ ] Add views:
+- [x] Add views:
   - `crop_quality_current` (latest crop row per dataset)
   - `recording_crop_quality_current` (recording-level latest row with joined dataset/provenance context)
 
 ## Write Path Plan
 
-- [ ] Add crop extraction helper in registry scan path:
+- [x] Add crop extraction helper in registry scan path:
   - parse crop runs and latest run attrs,
   - parse `crop_review_status`,
   - extract summary stats and source linkage.
-- [ ] Add `replace_crop_quality(dataset_id, rows)` in `Registry`.
-- [ ] Write crop rows from `register_from_root`/`scan_zarr`.
-- [ ] Keep write optional when crop runs are absent.
+- [x] Add `replace_crop_quality(dataset_id, rows)` in `Registry`.
+- [x] Write crop rows from `register_from_root`/`scan_zarr`.
+- [x] Keep write optional when crop runs are absent.
 
 ## Maintenance / Backfill Plan
 
-- [ ] Add maintenance actions:
+- [x] Add maintenance actions:
   - `--backfill-crop-quality`
   - `--refresh-crop-quality`
   - both support `--dry-run`.
-- [ ] Default scope should be source-analysis datasets
+- [x] Default scope should be source-analysis datasets
   (`artifact_kind='source_recording' AND zarr_use='analysis'`), with explicit
   opt-in for broader scope if needed.
 
 ## Query / Operator Surface
 
-- [ ] Extend `registry_query` with crop review filters:
+- [x] Extend `registry_query` with crop review filters:
   - `--crop-review-state`
   - `--crop-review-intended-use`
   - `--crop-source-type`
   - optional coverage thresholds.
-- [ ] Add/extend grouped summary mode for crop-review backlog reporting.
-- [ ] Add registry-first mode in list tooling:
+- [x] Add/extend grouped summary mode for crop-review backlog reporting.
+- [x] Add registry-first mode in list tooling:
   - `generate_review_list --stage crop --registry ...` should query registry
     rows first instead of opening all Zarrs.
-- [ ] Optionally add registry-prefer mode in `check_recording_steps` so review
+- [x] Optionally add registry-prefer mode in `check_recording_steps` so review
   columns can come from `crop_quality_current`.
 
 ## Freshness + Fail-Closed Behavior
 
 - [ ] Compare `crop_quality_current.zarr_mtime_ns` to current dataset mtime.
 - [ ] If stale/missing, mark row as stale and avoid false "approved" reports.
-- [ ] Keep optional Zarr fallback for diagnostics and recovery.
+- [x] Keep optional Zarr fallback for diagnostics and recovery.
 
 ## Example Queries (Target)
 
@@ -139,15 +139,15 @@ ORDER BY n DESC;
 
 ## Rollout Phases
 
-- [ ] Phase 1: schema + extraction + scan write path.
-- [ ] Phase 2: maintenance backfill/refresh commands.
-- [ ] Phase 3: query/list/status tooling integration.
+- [x] Phase 1: schema + extraction + scan write path.
+- [x] Phase 2: maintenance backfill/refresh commands.
+- [x] Phase 3: query/list/status tooling integration.
 - [ ] Phase 4: integrity/freshness checks + docs updates.
 
 ## Validation Checklist
 
-- [ ] Backfill/refresh commands are deterministic on repeat runs.
-- [ ] `crop_quality_current` row count matches expected analysis dataset coverage.
-- [ ] Registry queries can return "not approved" crop backlog without full
+- [x] Backfill/refresh commands are deterministic on repeat runs.
+- [x] `crop_quality_current` row count matches expected analysis dataset coverage.
+- [x] Registry queries can return "not approved" crop backlog without full
   filesystem scan.
 - [ ] Stale rows are detectable and do not silently pass as approved.

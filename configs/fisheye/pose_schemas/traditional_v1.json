@@ -2,13 +2,14 @@
   "name": "traditional_v1",
   "description": "3-point fish pose (swim bladder + left/right eye).",
   "nodes": [
-    {"id": 0, "name": "bladder"},
+    {"id": 0, "name": "swim_bladder"},
     {"id": 1, "name": "eye_left"},
     {"id": 2, "name": "eye_right"}
   ],
   "edges": [
     [0, 1],
-    [0, 2]
+    [0, 2],
+    [1, 2]
   ],
   "metadata": {
     "units": "pixels",

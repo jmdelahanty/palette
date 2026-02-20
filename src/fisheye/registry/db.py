@@ -714,6 +714,155 @@ def _extract_detect_performance_rows(
     return rows
 
 
+def _eye_mask_run_names(parent: zarr.Group) -> List[str]:
+    try:
+        names = list(parent.group_keys())
+    except Exception:
+        names = [name for name in parent.keys() if isinstance(name, str)]
+    return sorted(str(name) for name in names)
+
+
+def _resolve_source_keypoints_run(attrs: Mapping[str, Any]) -> Optional[str]:
+    value = _decode_attr(attrs.get("source_keypoints_run"))
+    if value:
+        return value
+    return _decode_attr(attrs.get("source_keypoint_run"))
+
+
+def _extract_eye_mask_performance_rows(
+    root: zarr.Group,
+    *,
+    zarr_path: Path,
+    recording_id: Optional[str],
+    zarr_use: Optional[str],
+) -> List[Dict[str, Any]]:
+    try:
+        zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    except Exception:
+        zarr_mtime_ns = None
+    updated_utc = _utc_now()
+
+    rows: List[Dict[str, Any]] = []
+    for stage_group in ("eye_masks_runs", "refined_eye_masks_runs"):
+        parent = root.get(stage_group)
+        if parent is None:
+            continue
+        for run_name in _eye_mask_run_names(parent):
+            if run_name not in parent:
+                continue
+            run_group = parent[run_name]
+            attrs = dict(run_group.attrs)
+            provenance = _coerce_mapping(attrs.get("provenance")) or {}
+            summary_statistics = _coerce_mapping(attrs.get("summary_statistics"))
+            reason_counts = _coerce_mapping(attrs.get("reason_counts"))
+            review_status = _coerce_mapping(attrs.get("eye_mask_review_status"))
+            source_keypoint_stale = _coerce_mapping(attrs.get("source_keypoint_stale"))
+
+            run_created_utc = (
+                _decode_attr(attrs.get("created_utc"))
+                or _decode_attr(attrs.get("timestamp_utc"))
+                or _decode_attr(provenance.get("created_at_utc"))
+            )
+            method = _decode_attr(attrs.get("method")) or _decode_attr(provenance.get("method"))
+            review_state = _decode_attr(review_status.get("state")) if review_status else None
+            review_method = _decode_attr(review_status.get("method")) if review_status else None
+            review_intended_use = _decode_attr(review_status.get("intended_use")) if review_status else None
+            review_reviewer = _decode_attr(review_status.get("reviewer")) if review_status else None
+            review_timestamp_utc = (
+                _decode_attr(review_status.get("timestamp_utc"))
+                or _decode_attr(review_status.get("timestamp"))
+                or _decode_attr(review_status.get("reviewed_at_utc"))
+                or _decode_attr(review_status.get("reviewed_at"))
+                if review_status
+                else None
+            )
+            source_keypoint_stale_state = (
+                _decode_attr(source_keypoint_stale.get("state")) if source_keypoint_stale else None
+            )
+            source_keypoint_stale_reason = (
+                _decode_attr(source_keypoint_stale.get("reason")) if source_keypoint_stale else None
+            )
+            source_keypoint_stale_timestamp_utc = (
+                _decode_attr(source_keypoint_stale.get("timestamp_utc"))
+                or _decode_attr(source_keypoint_stale.get("timestamp"))
+                or _decode_attr(source_keypoint_stale.get("stale_at_utc"))
+                or _decode_attr(source_keypoint_stale.get("stale_at"))
+                if source_keypoint_stale
+                else None
+            )
+            review_state_norm = str(review_state).strip().lower() if review_state else None
+            source_stale_state_norm = (
+                str(source_keypoint_stale_state).strip().lower() if source_keypoint_stale_state else None
+            )
+            lifecycle_state: Optional[str] = None
+            lifecycle_reason: Optional[str] = None
+            if source_stale_state_norm == "stale":
+                lifecycle_state = "stale"
+                lifecycle_reason = source_keypoint_stale_reason or "source_keypoint_stale"
+            elif review_state_norm in {"pending", "needs_review", "review"}:
+                lifecycle_state = "in_progress"
+                lifecycle_reason = review_state
+            elif review_state_norm in {"approved", "rejected"}:
+                lifecycle_state = review_state_norm
+                lifecycle_reason = review_state
+
+            total_rois = _as_int(attrs.get("total_rois"))
+            successful_eyes = _as_int(attrs.get("successful_eyes"))
+            successful_roi_pairs = _as_int(attrs.get("successful_roi_pairs"))
+            successful_roi_pair_rate = _as_float(attrs.get("successful_roi_pair_rate"))
+            if successful_roi_pair_rate is None:
+                successful_roi_pair_rate = _format_ratio(successful_roi_pairs, total_rois)
+            duration_seconds = _as_float(attrs.get("duration_seconds"))
+            rois_per_second = None
+            if duration_seconds is not None and duration_seconds > 0 and total_rois is not None:
+                rois_per_second = float(total_rois) / float(duration_seconds)
+            inference_duration_seconds = _as_float(attrs.get("inference_duration_seconds"))
+            inference_average_fps = _as_float(attrs.get("inference_average_fps"))
+            if inference_average_fps is None and rois_per_second is not None:
+                inference_average_fps = rois_per_second
+
+            rows.append(
+                {
+                    "stage_group": stage_group,
+                    "run_name": str(run_name),
+                    "run_created_utc": run_created_utc,
+                    "recording_id": recording_id,
+                    "zarr_use": zarr_use,
+                    "method": method,
+                    "source_crop_run": _decode_attr(attrs.get("source_crop_run")),
+                    "source_keypoint_group": _decode_attr(attrs.get("source_keypoint_group")),
+                    "source_keypoints_run": _resolve_source_keypoints_run(attrs),
+                    "source_eye_masks_run": _decode_attr(attrs.get("source_eye_masks_run")),
+                    "source_eye_masks_method": _decode_attr(attrs.get("source_eye_masks_method")),
+                    "total_rois": total_rois,
+                    "successful_eyes": successful_eyes,
+                    "successful_roi_pairs": successful_roi_pairs,
+                    "successful_roi_pair_rate": successful_roi_pair_rate,
+                    "duration_seconds": duration_seconds,
+                    "rois_per_second": rois_per_second,
+                    "inference_duration_seconds": inference_duration_seconds,
+                    "inference_average_fps": inference_average_fps,
+                    "reason_counts_json": _json_dumps(reason_counts),
+                    "summary_statistics_json": _json_dumps(summary_statistics),
+                    "review_state": review_state,
+                    "review_method": review_method,
+                    "review_intended_use": review_intended_use,
+                    "review_reviewer": review_reviewer,
+                    "review_timestamp_utc": review_timestamp_utc,
+                    "source_keypoint_stale_state": source_keypoint_stale_state,
+                    "source_keypoint_stale_reason": source_keypoint_stale_reason,
+                    "source_keypoint_stale_timestamp_utc": source_keypoint_stale_timestamp_utc,
+                    "source_keypoint_stale_json": _json_dumps(source_keypoint_stale),
+                    "lifecycle_state": lifecycle_state,
+                    "lifecycle_reason": lifecycle_reason,
+                    "zarr_mtime_ns": zarr_mtime_ns,
+                    "updated_utc": updated_utc,
+                }
+            )
+
+    return rows
+
+
 def _first_value(payload: Dict[str, Any], keys: Iterable[str]) -> Optional[Any]:
     for key in keys:
         if key in payload:
@@ -1329,6 +1478,13 @@ class Registry:
             (12, "detect_performance_model_identity", self._migration_012_detect_performance_model_identity),
             (13, "detect_model_performance_summary_views", self._migration_013_detect_model_performance_summary_views),
             (14, "crop_quality_registry", self._migration_014_crop_quality_registry),
+            (15, "eye_mask_performance_registry", self._migration_015_eye_mask_performance_registry),
+            (16, "model_export_nms_threshold_columns", self._migration_016_model_export_nms_threshold_columns),
+            (
+                17,
+                "eye_mask_performance_review_stale_columns",
+                self._migration_017_eye_mask_performance_review_stale_columns,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -1836,6 +1992,9 @@ class Registry:
                 manifest_path TEXT,
                 manifest_sha256 TEXT,
                 opset INTEGER,
+                nms_conf REAL,
+                nms_iou REAL,
+                nms_topk INTEGER,
                 input_shape TEXT,
                 img_h INTEGER,
                 img_w INTEGER,
@@ -1864,6 +2023,9 @@ class Registry:
                 detection_model_run_id TEXT,
                 onnx_run_id TEXT,
                 precision TEXT NOT NULL,
+                nms_conf REAL,
+                nms_iou REAL,
+                nms_topk INTEGER,
                 path TEXT,
                 sha256 TEXT,
                 manifest_path TEXT,
@@ -2346,6 +2508,9 @@ class Registry:
                 "manifest_path": "TEXT",
                 "manifest_sha256": "TEXT",
                 "opset": "INTEGER",
+                "nms_conf": "REAL",
+                "nms_iou": "REAL",
+                "nms_topk": "INTEGER",
                 "input_shape": "TEXT",
                 "img_h": "INTEGER",
                 "img_w": "INTEGER",
@@ -2370,6 +2535,9 @@ class Registry:
                 "detection_model_run_id": "TEXT",
                 "onnx_run_id": "TEXT",
                 "precision": "TEXT",
+                "nms_conf": "REAL",
+                "nms_iou": "REAL",
+                "nms_topk": "INTEGER",
                 "path": "TEXT",
                 "sha256": "TEXT",
                 "manifest_path": "TEXT",
@@ -3483,6 +3651,394 @@ class Registry:
             """
         )
 
+    def _migration_015_eye_mask_performance_registry(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS eye_mask_performance (
+                dataset_id TEXT NOT NULL,
+                stage_group TEXT NOT NULL,
+                run_name TEXT NOT NULL,
+                run_created_utc TEXT,
+                recording_id TEXT,
+                zarr_use TEXT,
+                method TEXT,
+                source_crop_run TEXT,
+                source_keypoint_group TEXT,
+                source_keypoints_run TEXT,
+                source_eye_masks_run TEXT,
+                source_eye_masks_method TEXT,
+                total_rois INTEGER,
+                successful_eyes INTEGER,
+                successful_roi_pairs INTEGER,
+                successful_roi_pair_rate REAL,
+                duration_seconds REAL,
+                rois_per_second REAL,
+                inference_duration_seconds REAL,
+                inference_average_fps REAL,
+                reason_counts_json TEXT,
+                summary_statistics_json TEXT,
+                review_state TEXT,
+                review_method TEXT,
+                review_intended_use TEXT,
+                review_reviewer TEXT,
+                review_timestamp_utc TEXT,
+                source_keypoint_stale_state TEXT,
+                source_keypoint_stale_reason TEXT,
+                source_keypoint_stale_timestamp_utc TEXT,
+                source_keypoint_stale_json TEXT,
+                lifecycle_state TEXT,
+                lifecycle_reason TEXT,
+                zarr_mtime_ns INTEGER,
+                updated_utc TEXT,
+                PRIMARY KEY (dataset_id, stage_group, run_name),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        self._ensure_columns(
+            "eye_mask_performance",
+            {
+                "run_created_utc": "TEXT",
+                "recording_id": "TEXT",
+                "zarr_use": "TEXT",
+                "method": "TEXT",
+                "source_crop_run": "TEXT",
+                "source_keypoint_group": "TEXT",
+                "source_keypoints_run": "TEXT",
+                "source_eye_masks_run": "TEXT",
+                "source_eye_masks_method": "TEXT",
+                "total_rois": "INTEGER",
+                "successful_eyes": "INTEGER",
+                "successful_roi_pairs": "INTEGER",
+                "successful_roi_pair_rate": "REAL",
+                "duration_seconds": "REAL",
+                "rois_per_second": "REAL",
+                "inference_duration_seconds": "REAL",
+                "inference_average_fps": "REAL",
+                "reason_counts_json": "TEXT",
+                "summary_statistics_json": "TEXT",
+                "review_state": "TEXT",
+                "review_method": "TEXT",
+                "review_intended_use": "TEXT",
+                "review_reviewer": "TEXT",
+                "review_timestamp_utc": "TEXT",
+                "source_keypoint_stale_state": "TEXT",
+                "source_keypoint_stale_reason": "TEXT",
+                "source_keypoint_stale_timestamp_utc": "TEXT",
+                "source_keypoint_stale_json": "TEXT",
+                "lifecycle_state": "TEXT",
+                "lifecycle_reason": "TEXT",
+                "zarr_mtime_ns": "INTEGER",
+                "updated_utc": "TEXT",
+            },
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_eye_mask_perf_recording ON eye_mask_performance(recording_id, stage_group, run_created_utc DESC);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_eye_mask_perf_stage_method ON eye_mask_performance(stage_group, method);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_eye_mask_perf_runtime ON eye_mask_performance(rois_per_second, duration_seconds);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_eye_mask_perf_source ON eye_mask_performance(source_keypoints_run, source_eye_masks_run);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_eye_mask_perf_review ON eye_mask_performance(review_state, review_intended_use, lifecycle_state);"
+        )
+
+        cur.execute("DROP VIEW IF EXISTS eye_mask_performance_latest;")
+        cur.execute(
+            """
+            CREATE VIEW eye_mask_performance_latest AS
+            WITH ranked AS (
+                SELECT
+                    emp.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY emp.dataset_id, emp.stage_group
+                        ORDER BY
+                            COALESCE(emp.run_created_utc, emp.updated_utc) DESC,
+                            emp.run_name DESC
+                    ) AS _rn
+                FROM eye_mask_performance emp
+            )
+            SELECT
+                dataset_id,
+                stage_group,
+                run_name,
+                run_created_utc,
+                recording_id,
+                zarr_use,
+                method,
+                source_crop_run,
+                source_keypoint_group,
+                source_keypoints_run,
+                source_eye_masks_run,
+                source_eye_masks_method,
+                total_rois,
+                successful_eyes,
+                successful_roi_pairs,
+                successful_roi_pair_rate,
+                duration_seconds,
+                rois_per_second,
+                inference_duration_seconds,
+                inference_average_fps,
+                reason_counts_json,
+                summary_statistics_json,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                source_keypoint_stale_state,
+                source_keypoint_stale_reason,
+                source_keypoint_stale_timestamp_utc,
+                source_keypoint_stale_json,
+                lifecycle_state,
+                lifecycle_reason,
+                zarr_mtime_ns,
+                updated_utc
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+        cur.execute("DROP VIEW IF EXISTS recording_eye_mask_performance_latest;")
+        cur.execute(
+            """
+            CREATE VIEW recording_eye_mask_performance_latest AS
+            WITH ranked AS (
+                SELECT
+                    empl.*,
+                    d.zarr_path AS zarr_path,
+                    d.artifact_kind AS artifact_kind,
+                    d.status AS dataset_status,
+                    p.rig_id AS rig_id,
+                    p.arena_id AS arena_id,
+                    p.camera_id AS camera_id,
+                    p.canvas_name AS canvas_name,
+                    p.dish_design AS dish_design,
+                    p.protocol_name AS protocol_name,
+                    p.cross_id AS cross_id,
+                    p.genotype AS genotype,
+                    p.dpf_at_acquisition AS dpf_at_acquisition,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY empl.recording_id, empl.stage_group
+                        ORDER BY
+                            COALESCE(empl.run_created_utc, empl.updated_utc) DESC,
+                            empl.run_name DESC
+                    ) AS _rn
+                FROM eye_mask_performance_latest empl
+                LEFT JOIN datasets d ON d.dataset_id = empl.dataset_id
+                LEFT JOIN provenance p ON p.dataset_id = empl.dataset_id
+                WHERE empl.recording_id IS NOT NULL
+            )
+            SELECT
+                recording_id,
+                dataset_id,
+                stage_group,
+                run_name,
+                run_created_utc,
+                zarr_use,
+                method,
+                source_crop_run,
+                source_keypoint_group,
+                source_keypoints_run,
+                source_eye_masks_run,
+                source_eye_masks_method,
+                total_rois,
+                successful_eyes,
+                successful_roi_pairs,
+                successful_roi_pair_rate,
+                duration_seconds,
+                rois_per_second,
+                inference_duration_seconds,
+                inference_average_fps,
+                reason_counts_json,
+                summary_statistics_json,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                source_keypoint_stale_state,
+                source_keypoint_stale_reason,
+                source_keypoint_stale_timestamp_utc,
+                source_keypoint_stale_json,
+                lifecycle_state,
+                lifecycle_reason,
+                zarr_path,
+                artifact_kind,
+                dataset_status,
+                rig_id,
+                arena_id,
+                camera_id,
+                canvas_name,
+                dish_design,
+                protocol_name,
+                cross_id,
+                genotype,
+                dpf_at_acquisition,
+                zarr_mtime_ns,
+                updated_utc
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+    def _migration_016_model_export_nms_threshold_columns(self) -> None:
+        self._ensure_columns(
+            "onnx_models",
+            {
+                "nms_conf": "REAL",
+                "nms_iou": "REAL",
+                "nms_topk": "INTEGER",
+            },
+        )
+        self._ensure_columns(
+            "tensorrt_models",
+            {
+                "nms_conf": "REAL",
+                "nms_iou": "REAL",
+                "nms_topk": "INTEGER",
+            },
+        )
+
+        # Fast-path backfill from persisted metadata JSON.
+        self.conn.execute(
+            """
+            UPDATE onnx_models
+            SET
+                nms_conf = COALESCE(
+                    nms_conf,
+                    json_extract(metadata_json, '$.nms.conf'),
+                    json_extract(metadata_json, '$.nms_conf'),
+                    json_extract(metadata_json, '$.conf_threshold')
+                ),
+                nms_iou = COALESCE(
+                    nms_iou,
+                    json_extract(metadata_json, '$.nms.iou'),
+                    json_extract(metadata_json, '$.nms_iou'),
+                    json_extract(metadata_json, '$.iou_threshold')
+                ),
+                nms_topk = COALESCE(
+                    nms_topk,
+                    json_extract(metadata_json, '$.nms.topk'),
+                    json_extract(metadata_json, '$.nms_topk'),
+                    json_extract(metadata_json, '$.topk')
+                )
+            WHERE nms_conf IS NULL OR nms_iou IS NULL OR nms_topk IS NULL;
+            """
+        )
+        self.conn.execute(
+            """
+            UPDATE tensorrt_models
+            SET
+                nms_conf = COALESCE(
+                    nms_conf,
+                    json_extract(metadata_json, '$.nms.conf'),
+                    json_extract(metadata_json, '$.nms_conf'),
+                    json_extract(metadata_json, '$.conf_threshold')
+                ),
+                nms_iou = COALESCE(
+                    nms_iou,
+                    json_extract(metadata_json, '$.nms.iou'),
+                    json_extract(metadata_json, '$.nms_iou'),
+                    json_extract(metadata_json, '$.iou_threshold')
+                ),
+                nms_topk = COALESCE(
+                    nms_topk,
+                    json_extract(metadata_json, '$.nms.topk'),
+                    json_extract(metadata_json, '$.nms_topk'),
+                    json_extract(metadata_json, '$.topk')
+                )
+            WHERE nms_conf IS NULL OR nms_iou IS NULL OR nms_topk IS NULL;
+            """
+        )
+
+        # Slow-path backfill from manifest files when metadata JSON did not include NMS.
+        onnx_rows = self.conn.execute(
+            """
+            SELECT run_id, manifest_path, metadata_json, nms_conf, nms_iou, nms_topk
+            FROM onnx_models;
+            """
+        ).fetchall()
+        for row in onnx_rows:
+            if (
+                row["nms_conf"] is not None
+                and row["nms_iou"] is not None
+                and row["nms_topk"] is not None
+            ):
+                continue
+            metadata = _json_loads(row["metadata_json"])
+            metadata_map = metadata if isinstance(metadata, dict) else None
+            manifest_path_text = row["manifest_path"]
+            manifest_payload = self._read_json_path(Path(str(manifest_path_text))) if manifest_path_text else {}
+            nms_conf, nms_iou, nms_topk = self._extract_nms_thresholds(
+                manifest_payload=manifest_payload,
+                metadata=metadata_map,
+            )
+            if nms_conf is None and nms_iou is None and nms_topk is None:
+                continue
+            self.conn.execute(
+                """
+                UPDATE onnx_models
+                SET
+                    nms_conf = COALESCE(nms_conf, ?),
+                    nms_iou = COALESCE(nms_iou, ?),
+                    nms_topk = COALESCE(nms_topk, ?)
+                WHERE run_id = ?;
+                """,
+                (nms_conf, nms_iou, nms_topk, str(row["run_id"])),
+            )
+
+        trt_rows = self.conn.execute(
+            """
+            SELECT run_id, precision, manifest_path, metadata_json, nms_conf, nms_iou, nms_topk
+            FROM tensorrt_models;
+            """
+        ).fetchall()
+        for row in trt_rows:
+            if (
+                row["nms_conf"] is not None
+                and row["nms_iou"] is not None
+                and row["nms_topk"] is not None
+            ):
+                continue
+            metadata = _json_loads(row["metadata_json"])
+            metadata_map = metadata if isinstance(metadata, dict) else None
+            manifest_path_text = row["manifest_path"]
+            manifest_payload = self._read_json_path(Path(str(manifest_path_text))) if manifest_path_text else {}
+            nms_conf, nms_iou, nms_topk = self._extract_nms_thresholds(
+                manifest_payload=manifest_payload,
+                metadata=metadata_map,
+            )
+            if nms_conf is None and nms_iou is None and nms_topk is None:
+                continue
+            self.conn.execute(
+                """
+                UPDATE tensorrt_models
+                SET
+                    nms_conf = COALESCE(nms_conf, ?),
+                    nms_iou = COALESCE(nms_iou, ?),
+                    nms_topk = COALESCE(nms_topk, ?)
+                WHERE run_id = ? AND precision = ?;
+                """,
+                (
+                    nms_conf,
+                    nms_iou,
+                    nms_topk,
+                    str(row["run_id"]),
+                    str(row["precision"] or "fp16"),
+                ),
+            )
+
+    def _migration_017_eye_mask_performance_review_stale_columns(self) -> None:
+        # Additive refresh of eye-mask performance schema/views for review + stale reconciliation.
+        self._migration_015_eye_mask_performance_registry()
+
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
         existing = {
             row["name"]
@@ -4100,6 +4656,146 @@ class Registry:
         )
         self.conn.commit()
 
+    def upsert_eye_mask_performance(
+        self,
+        *,
+        dataset_id: str,
+        stage_group: str,
+        run_name: str,
+        run_created_utc: Optional[str],
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+        method: Optional[str],
+        source_crop_run: Optional[str],
+        source_keypoint_group: Optional[str],
+        source_keypoints_run: Optional[str],
+        source_eye_masks_run: Optional[str],
+        source_eye_masks_method: Optional[str],
+        total_rois: Optional[int],
+        successful_eyes: Optional[int],
+        successful_roi_pairs: Optional[int],
+        successful_roi_pair_rate: Optional[float],
+        duration_seconds: Optional[float],
+        rois_per_second: Optional[float],
+        inference_duration_seconds: Optional[float],
+        inference_average_fps: Optional[float],
+        reason_counts_json: Optional[str],
+        summary_statistics_json: Optional[str],
+        review_state: Optional[str] = None,
+        review_method: Optional[str] = None,
+        review_intended_use: Optional[str] = None,
+        review_reviewer: Optional[str] = None,
+        review_timestamp_utc: Optional[str] = None,
+        source_keypoint_stale_state: Optional[str] = None,
+        source_keypoint_stale_reason: Optional[str] = None,
+        source_keypoint_stale_timestamp_utc: Optional[str] = None,
+        source_keypoint_stale_json: Optional[str] = None,
+        lifecycle_state: Optional[str] = None,
+        lifecycle_reason: Optional[str] = None,
+        zarr_mtime_ns: Optional[int] = None,
+        updated_utc: Optional[str] = None,
+    ) -> None:
+        payload = {
+            "dataset_id": str(dataset_id),
+            "stage_group": str(stage_group),
+            "run_name": str(run_name),
+            "run_created_utc": run_created_utc,
+            "recording_id": recording_id,
+            "zarr_use": zarr_use,
+            "method": method,
+            "source_crop_run": source_crop_run,
+            "source_keypoint_group": source_keypoint_group,
+            "source_keypoints_run": source_keypoints_run,
+            "source_eye_masks_run": source_eye_masks_run,
+            "source_eye_masks_method": source_eye_masks_method,
+            "total_rois": total_rois,
+            "successful_eyes": successful_eyes,
+            "successful_roi_pairs": successful_roi_pairs,
+            "successful_roi_pair_rate": successful_roi_pair_rate,
+            "duration_seconds": duration_seconds,
+            "rois_per_second": rois_per_second,
+            "inference_duration_seconds": inference_duration_seconds,
+            "inference_average_fps": inference_average_fps,
+            "reason_counts_json": reason_counts_json,
+            "summary_statistics_json": summary_statistics_json,
+            "review_state": review_state,
+            "review_method": review_method,
+            "review_intended_use": review_intended_use,
+            "review_reviewer": review_reviewer,
+            "review_timestamp_utc": review_timestamp_utc,
+            "source_keypoint_stale_state": source_keypoint_stale_state,
+            "source_keypoint_stale_reason": source_keypoint_stale_reason,
+            "source_keypoint_stale_timestamp_utc": source_keypoint_stale_timestamp_utc,
+            "source_keypoint_stale_json": source_keypoint_stale_json,
+            "lifecycle_state": lifecycle_state,
+            "lifecycle_reason": lifecycle_reason,
+            "zarr_mtime_ns": zarr_mtime_ns,
+            "updated_utc": updated_utc or _utc_now(),
+        }
+        self.conn.execute(
+            """
+            INSERT INTO eye_mask_performance (
+                dataset_id, stage_group, run_name, run_created_utc, recording_id, zarr_use,
+                method, source_crop_run, source_keypoint_group, source_keypoints_run,
+                source_eye_masks_run, source_eye_masks_method,
+                total_rois, successful_eyes, successful_roi_pairs, successful_roi_pair_rate,
+                duration_seconds, rois_per_second, inference_duration_seconds, inference_average_fps,
+                reason_counts_json, summary_statistics_json,
+                review_state, review_method, review_intended_use, review_reviewer, review_timestamp_utc,
+                source_keypoint_stale_state, source_keypoint_stale_reason, source_keypoint_stale_timestamp_utc,
+                source_keypoint_stale_json, lifecycle_state, lifecycle_reason,
+                zarr_mtime_ns, updated_utc
+            )
+            VALUES (
+                :dataset_id, :stage_group, :run_name, :run_created_utc, :recording_id, :zarr_use,
+                :method, :source_crop_run, :source_keypoint_group, :source_keypoints_run,
+                :source_eye_masks_run, :source_eye_masks_method,
+                :total_rois, :successful_eyes, :successful_roi_pairs, :successful_roi_pair_rate,
+                :duration_seconds, :rois_per_second, :inference_duration_seconds, :inference_average_fps,
+                :reason_counts_json, :summary_statistics_json,
+                :review_state, :review_method, :review_intended_use, :review_reviewer, :review_timestamp_utc,
+                :source_keypoint_stale_state, :source_keypoint_stale_reason, :source_keypoint_stale_timestamp_utc,
+                :source_keypoint_stale_json, :lifecycle_state, :lifecycle_reason,
+                :zarr_mtime_ns, :updated_utc
+            )
+            ON CONFLICT(dataset_id, stage_group, run_name) DO UPDATE SET
+                run_created_utc=excluded.run_created_utc,
+                recording_id=excluded.recording_id,
+                zarr_use=excluded.zarr_use,
+                method=excluded.method,
+                source_crop_run=excluded.source_crop_run,
+                source_keypoint_group=excluded.source_keypoint_group,
+                source_keypoints_run=excluded.source_keypoints_run,
+                source_eye_masks_run=excluded.source_eye_masks_run,
+                source_eye_masks_method=excluded.source_eye_masks_method,
+                total_rois=excluded.total_rois,
+                successful_eyes=excluded.successful_eyes,
+                successful_roi_pairs=excluded.successful_roi_pairs,
+                successful_roi_pair_rate=excluded.successful_roi_pair_rate,
+                duration_seconds=excluded.duration_seconds,
+                rois_per_second=excluded.rois_per_second,
+                inference_duration_seconds=excluded.inference_duration_seconds,
+                inference_average_fps=excluded.inference_average_fps,
+                reason_counts_json=excluded.reason_counts_json,
+                summary_statistics_json=excluded.summary_statistics_json,
+                review_state=excluded.review_state,
+                review_method=excluded.review_method,
+                review_intended_use=excluded.review_intended_use,
+                review_reviewer=excluded.review_reviewer,
+                review_timestamp_utc=excluded.review_timestamp_utc,
+                source_keypoint_stale_state=excluded.source_keypoint_stale_state,
+                source_keypoint_stale_reason=excluded.source_keypoint_stale_reason,
+                source_keypoint_stale_timestamp_utc=excluded.source_keypoint_stale_timestamp_utc,
+                source_keypoint_stale_json=excluded.source_keypoint_stale_json,
+                lifecycle_state=excluded.lifecycle_state,
+                lifecycle_reason=excluded.lifecycle_reason,
+                zarr_mtime_ns=excluded.zarr_mtime_ns,
+                updated_utc=excluded.updated_utc;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
     def upsert_detect_quality(
         self,
         *,
@@ -4179,6 +4875,20 @@ class Registry:
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
                 payload.setdefault("updated_utc", _utc_now())
+                for key in (
+                    "review_state",
+                    "review_method",
+                    "review_intended_use",
+                    "review_reviewer",
+                    "review_timestamp_utc",
+                    "source_keypoint_stale_state",
+                    "source_keypoint_stale_reason",
+                    "source_keypoint_stale_timestamp_utc",
+                    "source_keypoint_stale_json",
+                    "lifecycle_state",
+                    "lifecycle_reason",
+                ):
+                    payload.setdefault(key, None)
                 self.conn.execute(
                     """
                     INSERT INTO detect_performance (
@@ -4197,6 +4907,43 @@ class Registry:
                         :mean_confidence, :min_confidence, :max_confidence,
                         :inference_duration_seconds, :inference_average_fps, :inference_avg_batch_ms, :inference_avg_read_ms,
                         :conf_threshold, :iou_threshold, :batch_size, :inference_width, :inference_height,
+                        :zarr_mtime_ns, :updated_utc
+                    );
+                    """,
+                    payload,
+                )
+
+    def replace_eye_mask_performance(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM eye_mask_performance WHERE dataset_id = ?;", (str(dataset_id),))
+            for record in records:
+                payload = dict(record)
+                payload["dataset_id"] = str(dataset_id)
+                payload.setdefault("updated_utc", _utc_now())
+                self.conn.execute(
+                    """
+                    INSERT INTO eye_mask_performance (
+                        dataset_id, stage_group, run_name, run_created_utc, recording_id, zarr_use,
+                        method, source_crop_run, source_keypoint_group, source_keypoints_run,
+                        source_eye_masks_run, source_eye_masks_method,
+                        total_rois, successful_eyes, successful_roi_pairs, successful_roi_pair_rate,
+                        duration_seconds, rois_per_second, inference_duration_seconds, inference_average_fps,
+                        reason_counts_json, summary_statistics_json,
+                        review_state, review_method, review_intended_use, review_reviewer, review_timestamp_utc,
+                        source_keypoint_stale_state, source_keypoint_stale_reason, source_keypoint_stale_timestamp_utc,
+                        source_keypoint_stale_json, lifecycle_state, lifecycle_reason,
+                        zarr_mtime_ns, updated_utc
+                    )
+                    VALUES (
+                        :dataset_id, :stage_group, :run_name, :run_created_utc, :recording_id, :zarr_use,
+                        :method, :source_crop_run, :source_keypoint_group, :source_keypoints_run,
+                        :source_eye_masks_run, :source_eye_masks_method,
+                        :total_rois, :successful_eyes, :successful_roi_pairs, :successful_roi_pair_rate,
+                        :duration_seconds, :rois_per_second, :inference_duration_seconds, :inference_average_fps,
+                        :reason_counts_json, :summary_statistics_json,
+                        :review_state, :review_method, :review_intended_use, :review_reviewer, :review_timestamp_utc,
+                        :source_keypoint_stale_state, :source_keypoint_stale_reason, :source_keypoint_stale_timestamp_utc,
+                        :source_keypoint_stale_json, :lifecycle_state, :lifecycle_reason,
                         :zarr_mtime_ns, :updated_utc
                     );
                     """,
@@ -4223,6 +4970,28 @@ class Registry:
             zarr_use=zarr_use,
         )
         self.replace_detect_performance(dataset_id, rows)
+        return len(rows)
+
+    def refresh_eye_mask_performance_for_dataset(
+        self,
+        dataset_id: str,
+        *,
+        zarr_path: Path,
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+    ) -> int:
+        zarr = _import_zarr()
+        try:
+            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+        except TypeError:
+            root = zarr.open_group(str(zarr_path), mode="r")
+        rows = _extract_eye_mask_performance_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_eye_mask_performance(dataset_id, rows)
         return len(rows)
 
     def replace_detect_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
@@ -4501,6 +5270,13 @@ class Registry:
         self.replace_crop_quality(dataset_id, crop_quality_rows)
         keypoint_quality_rows = _extract_keypoint_quality_rows(root, zarr_path=zarr_path)
         self.replace_keypoint_quality(dataset_id, keypoint_quality_rows)
+        eye_mask_performance_rows = _extract_eye_mask_performance_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_eye_mask_performance(dataset_id, eye_mask_performance_rows)
         return dataset_id
 
     def record_training_run(
@@ -4719,6 +5495,53 @@ class Registry:
             return {}
         return payload if isinstance(payload, dict) else {}
 
+    def _extract_nms_thresholds(
+        self,
+        *,
+        manifest_payload: Optional[Dict[str, Any]],
+        metadata: Optional[Dict[str, Any]],
+    ) -> Tuple[Optional[float], Optional[float], Optional[int]]:
+        conf_val: Optional[float] = None
+        iou_val: Optional[float] = None
+        topk_val: Optional[int] = None
+
+        def _apply(mapping: Optional[Mapping[str, Any]]) -> None:
+            nonlocal conf_val, iou_val, topk_val
+            if not isinstance(mapping, Mapping):
+                return
+            nms = _coerce_mapping(mapping.get("nms"))
+            if nms:
+                if conf_val is None:
+                    conf_val = _as_float(nms.get("conf"))
+                if iou_val is None:
+                    iou_val = _as_float(nms.get("iou"))
+                if topk_val is None:
+                    topk_val = self._int_or_none(nms.get("topk"))
+
+            if conf_val is None:
+                conf_val = _as_float(mapping.get("nms_conf"))
+            if conf_val is None:
+                conf_val = _as_float(mapping.get("conf_threshold"))
+            if conf_val is None:
+                conf_val = _as_float(mapping.get("conf"))
+
+            if iou_val is None:
+                iou_val = _as_float(mapping.get("nms_iou"))
+            if iou_val is None:
+                iou_val = _as_float(mapping.get("iou_threshold"))
+            if iou_val is None:
+                iou_val = _as_float(mapping.get("iou"))
+
+            if topk_val is None:
+                topk_val = self._int_or_none(mapping.get("nms_topk"))
+            if topk_val is None:
+                topk_val = self._int_or_none(mapping.get("topk"))
+
+        export_payload = _coerce_mapping((manifest_payload or {}).get("export"))
+        _apply(export_payload)
+        _apply(metadata)
+        return conf_val, iou_val, topk_val
+
     def _int_or_none(self, value: Any) -> Optional[int]:
         if value is None or isinstance(value, bool):
             return None
@@ -4895,6 +5718,10 @@ class Registry:
                 input_shape=export_payload.get("input_shape"),
                 imgsz=export_payload.get("imgsz"),
             )
+            nms_conf, nms_iou, nms_topk = self._extract_nms_thresholds(
+                manifest_payload=manifest_payload if isinstance(manifest_payload, dict) else None,
+                metadata=metadata if isinstance(metadata, dict) else None,
+            )
             if metadata:
                 if onnx_opset is None:
                     onnx_opset = self._int_or_none(metadata.get("opset"))
@@ -4934,6 +5761,9 @@ class Registry:
                     else None
                 ),
                 opset=onnx_opset,
+                nms_conf=nms_conf,
+                nms_iou=nms_iou,
+                nms_topk=nms_topk,
                 input_shape=input_shape_text,
                 img_h=img_h,
                 img_w=img_w,
@@ -5056,6 +5886,10 @@ class Registry:
                 input_shape=export_payload.get("input_shape"),
                 imgsz=export_payload.get("imgsz"),
             )
+            nms_conf, nms_iou, nms_topk = self._extract_nms_thresholds(
+                manifest_payload=manifest_payload if isinstance(manifest_payload, dict) else None,
+                metadata=metadata if isinstance(metadata, dict) else None,
+            )
             if metadata and input_shape_text is None:
                 (
                     input_shape_text,
@@ -5131,6 +5965,9 @@ class Registry:
                     if metadata and metadata.get("manifest_sha256")
                     else None
                 ),
+                nms_conf=nms_conf,
+                nms_iou=nms_iou,
+                nms_topk=nms_topk,
                 input_shape=input_shape_text,
                 img_h=img_h,
                 img_w=img_w,
@@ -5237,6 +6074,9 @@ class Registry:
         manifest_path: Optional[Path],
         manifest_sha256: Optional[str],
         opset: Optional[int] = None,
+        nms_conf: Optional[float] = None,
+        nms_iou: Optional[float] = None,
+        nms_topk: Optional[int] = None,
         input_shape: Optional[str] = None,
         img_h: Optional[int] = None,
         img_w: Optional[int] = None,
@@ -5270,6 +6110,9 @@ class Registry:
             "manifest_path": str(manifest_path) if manifest_path else None,
             "manifest_sha256": manifest_sha256,
             "opset": self._int_or_none(opset),
+            "nms_conf": _as_float(nms_conf),
+            "nms_iou": _as_float(nms_iou),
+            "nms_topk": self._int_or_none(nms_topk),
             "input_shape": str(input_shape) if input_shape else None,
             "img_h": self._int_or_none(img_h),
             "img_w": self._int_or_none(img_w),
@@ -5297,13 +6140,15 @@ class Registry:
             """
             INSERT INTO onnx_models (
                 run_id, set_id, skeleton_id, detection_model_run_id, path, sha256, manifest_path,
-                manifest_sha256, opset, input_shape, img_h, img_w, max_batch, dynamic_shapes,
+                manifest_sha256, opset, nms_conf, nms_iou, nms_topk,
+                input_shape, img_h, img_w, max_batch, dynamic_shapes,
                 file_size_bytes, exporter_torch_version, exporter_cuda_version, exporter_hostname,
                 requires_plugins, plugin_ops_json, plugin_versions_json, metadata_json, created_utc
             )
             VALUES (
                 :run_id, :set_id, :skeleton_id, :detection_model_run_id, :path, :sha256, :manifest_path,
-                :manifest_sha256, :opset, :input_shape, :img_h, :img_w, :max_batch, :dynamic_shapes,
+                :manifest_sha256, :opset, :nms_conf, :nms_iou, :nms_topk,
+                :input_shape, :img_h, :img_w, :max_batch, :dynamic_shapes,
                 :file_size_bytes, :exporter_torch_version, :exporter_cuda_version, :exporter_hostname,
                 :requires_plugins, :plugin_ops_json, :plugin_versions_json, :metadata_json, :created_utc
             )
@@ -5316,6 +6161,9 @@ class Registry:
                 manifest_path=excluded.manifest_path,
                 manifest_sha256=excluded.manifest_sha256,
                 opset=excluded.opset,
+                nms_conf=excluded.nms_conf,
+                nms_iou=excluded.nms_iou,
+                nms_topk=excluded.nms_topk,
                 input_shape=excluded.input_shape,
                 img_h=excluded.img_h,
                 img_w=excluded.img_w,
@@ -5348,6 +6196,9 @@ class Registry:
         sha256: Optional[str],
         manifest_path: Optional[Path],
         manifest_sha256: Optional[str],
+        nms_conf: Optional[float] = None,
+        nms_iou: Optional[float] = None,
+        nms_topk: Optional[int] = None,
         input_shape: Optional[str] = None,
         img_h: Optional[int] = None,
         img_w: Optional[int] = None,
@@ -5385,6 +6236,9 @@ class Registry:
             "sha256": sha256,
             "manifest_path": str(manifest_path) if manifest_path else None,
             "manifest_sha256": manifest_sha256,
+            "nms_conf": _as_float(nms_conf),
+            "nms_iou": _as_float(nms_iou),
+            "nms_topk": self._int_or_none(nms_topk),
             "input_shape": str(input_shape) if input_shape else None,
             "img_h": self._int_or_none(img_h),
             "img_w": self._int_or_none(img_w),
@@ -5411,14 +6265,16 @@ class Registry:
             """
             INSERT INTO tensorrt_models (
                 run_id, set_id, skeleton_id, detection_model_run_id, onnx_run_id, precision, path, sha256,
-                manifest_path, manifest_sha256, input_shape, img_h, img_w, max_batch,
+                manifest_path, manifest_sha256, nms_conf, nms_iou, nms_topk,
+                input_shape, img_h, img_w, max_batch,
                 dynamic_shapes, file_size_bytes, trt_version, cuda_version, compute_capability,
                 gpu_name, gpu_uuid, system_hostname, requires_plugins, plugin_ops_json,
                 plugin_versions_json, metadata_json, created_utc
             )
             VALUES (
                 :run_id, :set_id, :skeleton_id, :detection_model_run_id, :onnx_run_id, :precision, :path, :sha256,
-                :manifest_path, :manifest_sha256, :input_shape, :img_h, :img_w, :max_batch,
+                :manifest_path, :manifest_sha256, :nms_conf, :nms_iou, :nms_topk,
+                :input_shape, :img_h, :img_w, :max_batch,
                 :dynamic_shapes, :file_size_bytes, :trt_version, :cuda_version, :compute_capability,
                 :gpu_name, :gpu_uuid, :system_hostname, :requires_plugins, :plugin_ops_json,
                 :plugin_versions_json, :metadata_json, :created_utc
@@ -5432,6 +6288,9 @@ class Registry:
                 sha256=excluded.sha256,
                 manifest_path=excluded.manifest_path,
                 manifest_sha256=excluded.manifest_sha256,
+                nms_conf=excluded.nms_conf,
+                nms_iou=excluded.nms_iou,
+                nms_topk=excluded.nms_topk,
                 input_shape=excluded.input_shape,
                 img_h=excluded.img_h,
                 img_w=excluded.img_w,

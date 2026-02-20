@@ -74,6 +74,8 @@ class RecordingStatus:
     refined_keypoints_success: Optional[float]
     keypoint_review_status: Optional[Dict[str, object]]
     eye_masks_present: bool
+    refined_eye_masks_present: bool
+    eye_mask_review_status: Optional[Dict[str, object]]
     assign_ids_present: bool
     track_present: bool
     stimulus_runs: int
@@ -741,6 +743,13 @@ def _load_group_attrs(zarr_path: Path, group_path: str) -> Dict[str, object]:
     return {}
 
 
+def _open_root_live(zarr_path: Path) -> zarr.Group:
+    try:
+        return zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    except TypeError:
+        return zarr.open_group(str(zarr_path), mode="r")
+
+
 def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
     if not zarr_path.exists():
         return {
@@ -778,6 +787,8 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
             "refined_keypoints_success": None,
             "keypoint_review_status": None,
             "eye_masks_present": False,
+            "refined_eye_masks_present": False,
+            "eye_mask_review_status": None,
             "assign_ids_present": False,
             "track_present": False,
             "stimulus_runs": 0,
@@ -788,10 +799,7 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
             "tuning_status": {key: "miss" for key in tuning_keys},
         }
 
-    try:
-        root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
-    except TypeError:
-        root = zarr.open_group(str(zarr_path), mode="r")
+    root = _open_root_live(zarr_path)
     pipeline_type = _normalize_attr(root.attrs.get("pipeline_type"))
     zarr_purpose = _normalize_attr(root.attrs.get("zarr_purpose"))
     has_raw_video_attr = root.attrs.get("has_raw_video")
@@ -986,6 +994,41 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
             else:
                 eye_masks_present = len(list(eye_masks_parent.keys())) > 0
 
+    refined_eye_masks_present = False
+    eye_mask_review_status: Optional[Dict[str, object]] = None
+    refined_eye_masks_parent = root.get("refined_eye_masks_runs")
+    if refined_eye_masks_parent is not None:
+        latest_refined_eye_masks = _normalize_attr(refined_eye_masks_parent.attrs.get("latest"))
+        candidate_run = None
+        if latest_refined_eye_masks and latest_refined_eye_masks in refined_eye_masks_parent:
+            candidate_run = latest_refined_eye_masks
+        else:
+            if hasattr(refined_eye_masks_parent, "group_keys"):
+                names = list(refined_eye_masks_parent.group_keys())
+            else:
+                names = list(refined_eye_masks_parent.keys())
+            if names:
+                candidate_run = sorted(names)[-1]
+        if candidate_run:
+            refined_eye_masks_present = True
+            refined_eye_masks_group = refined_eye_masks_parent[candidate_run]
+            eye_mask_review_status = _coerce_mapping(
+                refined_eye_masks_group.attrs.get("eye_mask_review_status")
+            )
+            if not eye_mask_review_status:
+                review_latest = _normalize_attr(
+                    refined_eye_masks_parent.attrs.get("eye_mask_review_status_latest")
+                )
+                if review_latest and review_latest in refined_eye_masks_parent:
+                    eye_mask_review_status = _coerce_mapping(
+                        refined_eye_masks_parent[review_latest].attrs.get("eye_mask_review_status")
+                    )
+        else:
+            if hasattr(refined_eye_masks_parent, "group_keys"):
+                refined_eye_masks_present = len(list(refined_eye_masks_parent.group_keys())) > 0
+            else:
+                refined_eye_masks_present = len(list(refined_eye_masks_parent.keys())) > 0
+
     assign_ids_present = False
     assign_ids_parent = root.get("id_assignment_runs")
     if assign_ids_parent is not None:
@@ -1078,6 +1121,8 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
         "refined_keypoints_success": refined_keypoints_success,
         "keypoint_review_status": keypoint_review_status,
         "eye_masks_present": eye_masks_present,
+        "refined_eye_masks_present": refined_eye_masks_present,
+        "eye_mask_review_status": eye_mask_review_status,
         "assign_ids_present": assign_ids_present,
         "track_present": track_present,
         "stimulus_runs": stim_runs,
@@ -1459,6 +1504,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         refined_keypoints_success=zarr_info["refined_keypoints_success"],
                         keypoint_review_status=zarr_info["keypoint_review_status"],
                         eye_masks_present=zarr_info["eye_masks_present"],
+                        refined_eye_masks_present=zarr_info["refined_eye_masks_present"],
+                        eye_mask_review_status=zarr_info["eye_mask_review_status"],
                         assign_ids_present=zarr_info["assign_ids_present"],
                         track_present=zarr_info["track_present"],
                         stimulus_runs=zarr_info["stimulus_runs"],
@@ -1500,6 +1547,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         table.add_column("Refined Keypoints (analysis/train)")
         table.add_column("Keypoint Review")
         table.add_column("Eye Masks")
+        table.add_column("Refined Eye Masks")
+        table.add_column("Eye Mask Review")
         table.add_column("Assign IDs")
         table.add_column("Track")
         table.add_column("Stimulus")
@@ -1550,6 +1599,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 _keypoint_status_rich(plan.refined_keypoints_success, plan.refined_keypoints_coverage),
                 _review_status_rich(plan.keypoint_review_status),
                 _status_rich(plan.eye_masks_present),
+                _status_rich(plan.refined_eye_masks_present),
+                _review_status_rich(plan.eye_mask_review_status),
                 _status_rich(plan.assign_ids_present),
                 _status_rich(plan.track_present),
                 stimulus_text,
@@ -1606,6 +1657,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             print(f"  keypoint_review_status: {_review_status_text(plan.keypoint_review_status)}")
             print(f"  eye_masks: {_status_text(plan.eye_masks_present)}")
+            print(f"  refined_eye_masks: {_status_text(plan.refined_eye_masks_present)}")
+            print(f"  eye_mask_review_status: {_review_status_text(plan.eye_mask_review_status)}")
             print(f"  assign_ids: {_status_text(plan.assign_ids_present)}")
             print(f"  track: {_status_text(plan.track_present)}")
             print(f"  stimulus_runs: {plan.stimulus_runs} ({_status_text(stimulus_ok)})")

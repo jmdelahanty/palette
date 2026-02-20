@@ -66,8 +66,9 @@ def _count_ints(arr: Optional[zarr.Array]) -> Dict[str, int]:
     return {str(int(v)): int(c) for v, c in zip(vals.tolist(), counts.tolist())}
 
 
-def _coerce_frames(value: object) -> Optional[list[int]]:
+def _coerce_targets(value: object) -> tuple[Optional[list[int]], Optional[list[int]]]:
     frames: list[int] = []
+    roi_indices: list[int] = []
     if isinstance(value, (list, tuple, np.ndarray)):
         items = value
     else:
@@ -79,12 +80,21 @@ def _coerce_frames(value: object) -> Optional[list[int]]:
                 frame_idx = item.get("frame")
             if frame_idx is None:
                 frame_idx = item.get("frame_index")
-            if frame_idx is None:
-                continue
-            try:
-                frames.append(int(frame_idx))
-            except (TypeError, ValueError):
-                continue
+            roi_idx = item.get("roi_idx")
+            if roi_idx is None:
+                roi_idx = item.get("roi")
+            if roi_idx is None:
+                roi_idx = item.get("roi_index")
+            if frame_idx is not None:
+                try:
+                    frames.append(int(frame_idx))
+                except (TypeError, ValueError):
+                    pass
+            if roi_idx is not None:
+                try:
+                    roi_indices.append(int(roi_idx))
+                except (TypeError, ValueError):
+                    pass
             continue
         if isinstance(item, (int, np.integer)):
             frames.append(int(item))
@@ -96,17 +106,20 @@ def _coerce_frames(value: object) -> Optional[list[int]]:
             frames.append(int(token))
         except ValueError:
             continue
-    if not frames:
-        return None
-    return sorted(set(frames))
+    frames_out = sorted(set(frames)) if frames else None
+    roi_out = sorted(set(roi_indices)) if roi_indices else None
+    return frames_out, roi_out
 
 
-def _parse_frames_arg(value: Optional[str], zarr_path: Optional[str]) -> Optional[list[int]]:
+def _parse_targets_arg(
+    value: Optional[str],
+    zarr_path: Optional[str],
+) -> tuple[Optional[list[int]], Optional[list[int]]]:
     if value is None:
-        return None
+        return None, None
     text = value.strip()
     if not text:
-        return None
+        return None, None
     path = Path(text)
     if path.exists():
         raw = path.read_text(encoding="utf-8")
@@ -116,7 +129,7 @@ def _parse_frames_arg(value: Optional[str], zarr_path: Optional[str]) -> Optiona
             data = None
         if isinstance(data, dict):
             if not zarr_path:
-                return None
+                return None, None
             zarr_str = str(zarr_path)
             zarr_resolved = str(Path(zarr_path).resolve())
             frames_val = data.get(zarr_str) or data.get(zarr_resolved)
@@ -128,13 +141,13 @@ def _parse_frames_arg(value: Optional[str], zarr_path: Optional[str]) -> Optiona
                             break
                     except Exception:
                         continue
-            return _coerce_frames(frames_val)
+            return _coerce_targets(frames_val)
         if isinstance(data, list):
-            return _coerce_frames(data)
+            return _coerce_targets(data)
         items = re.split(r"[,\s]+", raw.strip())
-        return _coerce_frames(items)
+        return _coerce_targets(items)
     items = re.split(r"[,\s]+", text)
-    return _coerce_frames(items)
+    return _coerce_targets(items)
 
 
 def _update_postprocess_summary(
@@ -215,6 +228,7 @@ def run_manual_review(
     crop_run: Optional[str] = None,
     include_all: bool = False,
     target_frames: Optional[Sequence[int]] = None,
+    target_roi_indices: Optional[Sequence[int]] = None,
     review_state: str = "approved",
     review_method: str = "manual",
     review_intended_use: str = "training",
@@ -238,6 +252,7 @@ def run_manual_review(
         crop_run=crop_run,
         include_all=include_all,
         target_frames=target_frames,
+        target_roi_indices=target_roi_indices,
         review_state=review_state,
         review_method=review_method,
         review_intended_use=review_intended_use,
@@ -282,7 +297,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         type=str,
         help=(
             "Frame indices to review (manual/retune only). Accepts comma/space-separated "
-            "indices or a path to a JSON/text list. JSON mappings of zarr->frames are supported."
+            "indices or a path to a JSON/text list. JSON mapping values may be frame integers "
+            "or objects with frame_idx/roi_idx for ROI-exact targeting in manual mode."
         ),
     )
     parser.add_argument(
@@ -338,12 +354,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     root = zarr.open_group(str(args.zarr_path), mode="a")
     refined_run = args.refined_run or _get_latest_refined_run(root)
     refined = root[f"refined_keypoints_runs/{refined_run}"]
-    target_frames = _parse_frames_arg(args.frames, str(args.zarr_path))
-    if args.frames and not target_frames:
-        print("No target frames found for this recording; skipping review.")
+    target_frames, target_roi_indices = _parse_targets_arg(args.frames, str(args.zarr_path))
+    if args.frames and not target_frames and not target_roi_indices:
+        print("No target frames/ROIs found for this recording; skipping review.")
         return
 
     if args.retune:
+        if target_roi_indices:
+            print("Warning: ROI-index targets are ignored in retune mode; using frame targets only.")
         if args.all:
             print("Warning: --all is ignored in retune mode.")
         from .keypoint_tuner import run_failure_tuner
@@ -367,6 +385,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             crop_run=args.crop_run,
             include_all=bool(args.all),
             target_frames=target_frames,
+            target_roi_indices=target_roi_indices,
             review_state=args.review_state,
             review_method=args.review_method,
             review_intended_use=args.review_intended_use,

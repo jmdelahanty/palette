@@ -22,6 +22,13 @@ Relevant provenance attributes:
 | `refined_eye_masks_runs/<run>` | `masks_roi`, `ellipse_params` | `source_eye_masks_run`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
 | `id_assignment_runs/<run>` | `detection_ids` | `source_detect_run`, `source_refined_run` |
 
+Eye-mask lineage arrays (`frame_indices`, `detection_indices`, `frame_counts`)
+follow the contract in `docs/eye_mask_row_mapping_contract.md`:
+
+- segmentation writes should anchor lineage to source crop runs;
+- keypoint lineage arrays are used for cross-check/fallback compatibility;
+- refinement copies lineage arrays from the source eye-mask run.
+
 `bbox_norm_coords` in detect/refined-detect groups use normalized `[cx, cy, w, h]`.
 
 For refined detect/keypoint reason labels, use fallback order:

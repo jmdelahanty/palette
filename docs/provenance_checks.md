@@ -6,6 +6,9 @@ This document describes the provenance diagnostics provided by:
 - `python -m fisheye.diagnostics.check_provenance_consistency`
 - `python -m fisheye.diagnostics.check_full_provenance`
 
+Contract reference: `docs/provenance_contract_draft.md`.
+Boundary guidance: `docs/pipeline_metadata_boundaries.md`.
+
 It focuses on what each check reports, how to interpret results, and the
 optional subject metadata validations.
 

@@ -19,11 +19,12 @@ import numpy as np
 import zarr
 
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
+from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
 from ..refinement.keypoint_quality import compute_geometry_metrics
 from ..refinement.refine_keypoints import _compute_heading_from_points
 
 
-_DEFAULT_LABELS = ("bladder", "eye_left", "eye_right")
+_DEFAULT_LABELS = ("swim_bladder", "eye_left", "eye_right")
 _DEFAULT_COLORS = ("#22c55e", "#1a66f3", "#f85151")
 
 
@@ -309,6 +310,7 @@ def launch_review(
     crop_run: Optional[str] = None,
     include_all: bool = False,
     target_frames: Optional[Sequence[int]] = None,
+    target_roi_indices: Optional[Sequence[int]] = None,
     review_state: str = "approved",
     review_method: str = "manual",
     review_intended_use: str = "training",
@@ -347,14 +349,22 @@ def launch_review(
 
     failures = _load_failure_indices(refined, include_all=include_all)
     targeted = False
-    if target_frames:
-        target_frames_arr = np.array(sorted(set(int(f) for f in target_frames)), dtype=np.int64)
-        target_indices = np.where(np.isin(frame_indices, target_frames_arr))[0].astype("i4", copy=False)
+    if target_frames or target_roi_indices:
+        selected: set[int] = set()
+        if target_frames:
+            target_frames_arr = np.array(sorted(set(int(f) for f in target_frames)), dtype=np.int64)
+            frame_hits = np.where(np.isin(frame_indices, target_frames_arr))[0].astype("i4", copy=False)
+            selected.update(int(v) for v in frame_hits.tolist())
+        if target_roi_indices:
+            total_rows = int(frame_indices.shape[0])
+            for roi_idx in sorted(set(int(v) for v in target_roi_indices)):
+                if 0 <= roi_idx < total_rows:
+                    selected.add(int(roi_idx))
         targeted = True
-        failures = target_indices
+        failures = np.array(sorted(selected), dtype="i4")
     if failures.size == 0:
         if targeted:
-            print("No matching keypoints found for requested frames.")
+            print("No matching keypoints found for requested targets.")
             return
         if include_all:
             print("No keypoints found to review.")
@@ -480,6 +490,7 @@ def launch_review(
     def save_current() -> None:
         nonlocal active_idx, idx_pos
         roi_idx = int(failures[idx_pos])
+        frame_idx = int(frame_indices[roi_idx])
         if not np.isfinite(points).all():
             print("Set all three keypoints before saving.")
             return
@@ -564,7 +575,17 @@ def launch_review(
             reason_value = "|".join(unique) if unique else "manual_correction"
             reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
 
+        stale_touched = mark_downstream_eye_mask_runs_stale(
+            root,
+            source_keypoint_group="refined_keypoints_runs",
+            source_keypoints_run=str(refined_run),
+            roi_indices=[roi_idx],
+            frame_indices=[frame_idx],
+            reason="keypoint_manual_correction",
+        )
         print(f"Saved manual correction for ROI {roi_idx}.")
+        if stale_touched:
+            print(f"Marked {stale_touched} downstream eye-mask run(s) stale.")
 
         active_idx = 0
         if idx_pos < len(failures) - 1:
@@ -616,7 +637,17 @@ def launch_review(
             reason_value = str(_clean_reason(existing, ["fish_present_no_keypoints"]))
             reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
 
+        stale_touched = mark_downstream_eye_mask_runs_stale(
+            root,
+            source_keypoint_group="refined_keypoints_runs",
+            source_keypoints_run=str(refined_run),
+            roi_indices=[roi_idx],
+            frame_indices=[frame_idx],
+            reason="keypoint_mark_no_keypoints",
+        )
         print(f"Marked fish-present/no-keypoints for ROI {roi_idx} (frame {frame_idx}).")
+        if stale_touched:
+            print(f"Marked {stale_touched} downstream eye-mask run(s) stale.")
 
         failures = np.delete(failures, idx_pos)
         if failures.size == 0:
@@ -682,7 +713,17 @@ def launch_review(
             reason_value = str(_clean_reason(existing, ["detection_issue"]))
             reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
 
+        stale_touched = mark_downstream_eye_mask_runs_stale(
+            root,
+            source_keypoint_group="refined_keypoints_runs",
+            source_keypoints_run=str(refined_run),
+            roi_indices=[roi_idx],
+            frame_indices=[frame_idx],
+            reason="keypoint_mark_detection_issue",
+        )
         print(f"Marked detection issue for ROI {roi_idx} (frame {frame_idx}).")
+        if stale_touched:
+            print(f"Marked {stale_touched} downstream eye-mask run(s) stale.")
 
         failures = np.delete(failures, idx_pos)
         if failures.size == 0:
@@ -779,7 +820,7 @@ def launch_review(
     print(f"  Refined run: {refined_label}")
     print(f"  Crop run: {crop_run}")
     if targeted:
-        print(f"  ROIs to review (target frames): {len(failures)}")
+        print(f"  ROIs to review (target selection): {len(failures)}")
     elif include_all:
         print(f"  ROIs to review: {len(failures)}")
     else:

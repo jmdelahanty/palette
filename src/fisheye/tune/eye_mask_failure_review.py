@@ -2,10 +2,27 @@
 
 from __future__ import annotations
 
-from collections import Counter
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, Sequence, Tuple, Dict, Any
 
+# Limit threading BEFORE importing numpy/cv2/skimage to avoid saturating all CPU cores.
+os.environ.setdefault("OMP_NUM_THREADS", "2")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")
+os.environ.setdefault("MKL_NUM_THREADS", "2")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "2")
+
 import cv2
+
+# Keep OpenCV from spinning up many worker threads in review UIs.
+try:
+    cv2_threads = max(1, int(os.environ.get("OMP_NUM_THREADS", "2")))
+except (TypeError, ValueError):
+    cv2_threads = 2
+cv2.setNumThreads(cv2_threads)
+
 import numpy as np
 import zarr
 from skimage import measure
@@ -75,10 +92,160 @@ def _load_failure_indices(
     return np.where(~success_mask)[0].astype("i4", copy=False)
 
 
+def _load_frame_flags(path: Path) -> Dict[str, list[Dict[str, Optional[int]]]]:
+    if not path.exists():
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return {}
+        data = json.loads(raw)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load frame flags from {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Frame flag file must contain a JSON object: {path}")
+
+    parsed: Dict[str, list[Dict[str, Optional[int]]]] = {}
+    for key, value in data.items():
+        entries: list[Dict[str, Optional[int]]] = []
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    frame_val = item.get("frame_idx")
+                    roi_val = item.get("roi_idx")
+                    try:
+                        frame_idx = int(frame_val) if frame_val is not None else None
+                    except (TypeError, ValueError):
+                        frame_idx = None
+                    try:
+                        roi_idx = int(roi_val) if roi_val is not None else None
+                    except (TypeError, ValueError):
+                        roi_idx = None
+                    if frame_idx is not None or roi_idx is not None:
+                        entries.append({"frame_idx": frame_idx, "roi_idx": roi_idx})
+                else:
+                    try:
+                        frame_idx = int(item)
+                    except (TypeError, ValueError):
+                        continue
+                    entries.append({"frame_idx": frame_idx, "roi_idx": None})
+        parsed[str(key)] = entries
+    return parsed
+
+
+def _candidate_flag_keys(zarr_path: str) -> list[str]:
+    raw = str(zarr_path)
+    expanded = Path(raw).expanduser()
+    candidates = {raw, str(expanded)}
+    try:
+        candidates.add(str(expanded.resolve(strict=False)))
+    except Exception:
+        pass
+    return list(candidates)
+
+
+def _collect_flagged_roi_indices(
+    *,
+    flag_path: Path,
+    zarr_path: str,
+    total_rois: int,
+    frame_indices: Optional[np.ndarray],
+) -> np.ndarray:
+    payload = _load_frame_flags(flag_path)
+    if not payload:
+        return np.zeros((0,), dtype=np.int32)
+
+    entries: list[Dict[str, Optional[int]]] = []
+    for key in _candidate_flag_keys(zarr_path):
+        value = payload.get(key)
+        if isinstance(value, list):
+            entries.extend(value)
+    if not entries:
+        return np.zeros((0,), dtype=np.int32)
+
+    roi_set: set[int] = set()
+    for entry in entries:
+        roi_idx = entry.get("roi_idx")
+        frame_idx = entry.get("frame_idx")
+
+        if roi_idx is not None and 0 <= int(roi_idx) < int(total_rois):
+            roi_set.add(int(roi_idx))
+        if frame_idx is not None and frame_indices is not None:
+            matches = np.where(frame_indices == int(frame_idx))[0]
+            for idx in matches.tolist():
+                if 0 <= int(idx) < int(total_rois):
+                    roi_set.add(int(idx))
+
+    if not roi_set:
+        return np.zeros((0,), dtype=np.int32)
+    return np.asarray(sorted(roi_set), dtype=np.int32)
+
+
+def _combine_review_indices(
+    failure_indices: np.ndarray,
+    pending_flagged: set[int],
+) -> np.ndarray:
+    if failure_indices.size > 0 and pending_flagged:
+        flagged_arr = np.asarray(sorted(pending_flagged), dtype=np.int32)
+        return np.unique(np.concatenate([failure_indices, flagged_arr])).astype("i4", copy=False)
+    if failure_indices.size > 0:
+        return failure_indices.astype("i4", copy=False)
+    if pending_flagged:
+        return np.asarray(sorted(pending_flagged), dtype=np.int32).astype("i4", copy=False)
+    return np.zeros((0,), dtype=np.int32)
+
+
+def _next_review_position(
+    failures: np.ndarray,
+    previous_roi_idx: int,
+    previous_pos: int,
+) -> int:
+    if failures.size <= 1:
+        return 0
+    matches = np.where(failures == int(previous_roi_idx))[0]
+    if matches.size == 0:
+        # Current ROI was cleared; continue forward in circular order.
+        return int(previous_pos) % int(failures.size)
+    current_idx = int(matches[0])
+    return (current_idx + 1) % int(failures.size)
+
+
 def _merge_reason(existing: str, tags: Sequence[str]) -> str:
     existing_tags = [tag for tag in existing.split("|") if tag]
     merged = sorted(set(existing_tags + list(tags)))
     return "|".join(merged) if merged else "clean"
+
+
+def _apply_review_status(
+    refined_parent: zarr.Group,
+    refined_run: str,
+    refined: zarr.Group,
+    *,
+    state: str,
+    method: str,
+    intended_use: str,
+    reviewer: Optional[str],
+    notes: Optional[str],
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {
+        "state": state,
+        "method": method,
+        "intended_use": intended_use,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if reviewer:
+        payload["reviewer"] = reviewer
+    if notes:
+        payload["notes"] = notes
+
+    for key in ("source_eye_masks_run", "source_keypoints_run", "source_keypoint_group"):
+        value = refined.attrs.get(key)
+        if value is not None:
+            payload[key] = value
+
+    refined.attrs["eye_mask_review_status"] = payload
+    refined_parent.attrs["eye_mask_review_status_latest"] = refined_run
+    return payload
 
 
 def _largest_region(mask: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[Tuple[float, float]]]:
@@ -209,8 +376,14 @@ def launch_review(
     *,
     refined_run: Optional[str] = None,
     crop_run: Optional[str] = None,
+    frame_flag_file: Optional[str] = None,
+    review_state: str = "approved",
+    review_method: str = "manual",
+    review_intended_use: str = "training",
+    reviewer: Optional[str] = None,
+    review_notes: Optional[str] = None,
 ) -> None:
-    root = zarr.open_group(str(zarr_path), mode="a")
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
     refined_parent = root.get("refined_eye_masks_runs")
     if refined_parent is None:
         raise RuntimeError("No refined_eye_masks_runs found.")
@@ -235,9 +408,36 @@ def launch_review(
     reason_arr = metrics_group.get("reason") if isinstance(metrics_group, zarr.Group) else None
 
     min_sep, max_sep = _get_sep_limits(root, refined)
-    failures = _load_failure_indices(refined, min_sep, max_sep)
+    frame_indices = (
+        np.asarray(crop_group["frame_indices"][:], dtype=np.int64)
+        if "frame_indices" in crop_group
+        else None
+    )
+    failure_indices = _load_failure_indices(refined, min_sep, max_sep)
+    flagged_indices = np.zeros((0,), dtype=np.int32)
+    flag_path: Optional[Path] = Path(frame_flag_file).expanduser() if frame_flag_file else None
+    if flag_path is not None:
+        try:
+            flagged_indices = _collect_flagged_roi_indices(
+                flag_path=flag_path,
+                zarr_path=str(zarr_path),
+                total_rois=int(roi_images.shape[0]),
+                frame_indices=frame_indices,
+            )
+        except RuntimeError as exc:
+            print(f"Warning: failed to load frame flags ({exc}).")
+            flagged_indices = np.zeros((0,), dtype=np.int32)
+
+    if failure_indices.size > 0 and flagged_indices.size > 0:
+        failures = np.unique(np.concatenate([failure_indices, flagged_indices])).astype("i4", copy=False)
+    elif failure_indices.size > 0:
+        failures = failure_indices.astype("i4", copy=False)
+    else:
+        failures = flagged_indices.astype("i4", copy=False)
+    pending_flagged: set[int] = {int(idx) for idx in flagged_indices.tolist()}
+
     if failures.size == 0:
-        print("No failures to review.")
+        print("No failures or flagged ROIs to review.")
         return
 
     window_name = "Eye Mask Failure Review"
@@ -499,15 +699,38 @@ def launch_review(
 
     print("\nEye Mask Failure Review")
     print(f"  Refined run: {refined_run}")
-    print(f"  Failures to review: {len(failures)}")
+    print(f"  Failure ROIs: {int(failure_indices.size)}")
+    if flag_path is not None:
+        print(f"  Flagged ROIs ({flag_path.expanduser().resolve(strict=False)}): {int(flagged_indices.size)}")
+    print(f"  Total ROIs to review: {len(failures)}")
     print("Controls:")
     print("  1/2: select left/right eye")
     print("  Mouse: paint (LMB) / erase (RMB) on ROI or mask editor")
     print("  [ / ]: brush size")
-    print("  s: save correction")
+    print("  s: save correction + advance")
     print("  r: reset masks")
     print("  n/p: next/previous failure")
+    print("  a: approve eye masks")
+    print("  N: mark needs_review")
+    print("  R: mark rejected")
+    print("  P: mark pending")
     print("  q/ESC: quit")
+
+    def apply_state(state: str) -> None:
+        payload = _apply_review_status(
+            refined_parent,
+            refined_run,
+            refined,
+            state=state,
+            method=review_method,
+            intended_use=review_intended_use,
+            reviewer=reviewer or os.environ.get("USER") or os.environ.get("USERNAME"),
+            notes=review_notes,
+        )
+        print(
+            f"✓ Eye mask review set: {payload.get('state')} "
+            f"({payload.get('method')}/{payload.get('intended_use')})"
+        )
 
     while True:
         key = cv2.waitKey(30) & 0xFF
@@ -530,13 +753,21 @@ def launch_review(
             edit_masks = [original_masks[0].copy(), original_masks[1].copy()]
             update_display()
         elif key == ord("s"):
+            previous_roi_idx = int(roi_idx)
+            previous_pos = int(current_pos)
             save_current()
-            updated_failures = _load_failure_indices(refined, min_sep, max_sep)
-            if updated_failures.size == 0:
+            pending_flagged.discard(previous_roi_idx)
+            updated_failure_indices = _load_failure_indices(refined, min_sep, max_sep)
+            updated_indices = _combine_review_indices(updated_failure_indices, pending_flagged)
+            if updated_indices.size == 0:
                 print("All failures cleared.")
                 break
-            failures = updated_failures
-            current_pos = min(current_pos, len(failures) - 1)
+            failures = updated_indices
+            current_pos = _next_review_position(
+                failures,
+                previous_roi_idx=previous_roi_idx,
+                previous_pos=previous_pos,
+            )
             load_current_roi()
             update_display()
         elif key == ord("n"):
@@ -549,6 +780,14 @@ def launch_review(
                 current_pos -= 1
                 load_current_roi()
                 update_display()
+        elif key == ord("a"):
+            apply_state(review_state)
+        elif key == ord("R"):
+            apply_state("rejected")
+        elif key == ord("N"):
+            apply_state("needs_review")
+        elif key == ord("P"):
+            apply_state("pending")
 
     cv2.destroyAllWindows()
 

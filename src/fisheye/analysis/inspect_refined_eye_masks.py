@@ -101,7 +101,7 @@ def main(argv: Iterable[str] | None = None) -> None:
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    root = zarr.open(str(args.zarr_path), mode="r")
+    root = zarr.open(str(args.zarr_path), mode="r", use_consolidated=False)
     refined_parent = root.get("refined_eye_masks_runs")
     if refined_parent is None:
         raise SystemExit("Archive does not contain 'refined_eye_masks_runs'. Run refinement first.")

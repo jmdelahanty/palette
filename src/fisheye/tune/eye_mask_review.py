@@ -9,8 +9,15 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 from typing import Dict, Iterable, Optional
+
+# Limit threading BEFORE importing numpy to avoid saturating all CPU cores.
+os.environ.setdefault("OMP_NUM_THREADS", "2")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")
+os.environ.setdefault("MKL_NUM_THREADS", "2")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "2")
 
 import numpy as np
 import zarr
@@ -166,14 +173,32 @@ def run_manual_review(
     zarr_path: str,
     refined_run: Optional[str] = None,
     crop_run: Optional[str] = None,
+    frame_flag_file: Optional[str] = None,
+    review_state: str = "approved",
+    review_method: str = "manual",
+    review_intended_use: str = "training",
+    reviewer: Optional[str] = None,
+    review_notes: Optional[str] = None,
 ) -> Dict[str, object]:
-    root = zarr.open_group(str(zarr_path), mode="a")
+    if not reviewer:
+        reviewer = os.environ.get("USER")
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
     refined_run = refined_run or _get_latest_refined_run(root)
     refined = root[f"refined_eye_masks_runs/{refined_run}"]
 
     from .eye_mask_failure_review import launch_review
 
-    launch_review(str(zarr_path), refined_run=refined_run, crop_run=crop_run)
+    launch_review(
+        str(zarr_path),
+        refined_run=refined_run,
+        crop_run=crop_run,
+        frame_flag_file=frame_flag_file,
+        review_state=review_state,
+        review_method=review_method,
+        review_intended_use=review_intended_use,
+        reviewer=reviewer,
+        review_notes=review_notes,
+    )
     return _update_postprocess_summary(root, refined, print_summary=True)
 
 
@@ -197,6 +222,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         help="Crop run to source ROI images from (manual mode only).",
     )
     parser.add_argument(
+        "--frame-flag-file",
+        default="eye_mask_frame_flags.json",
+        help="JSON file with flagged eye-mask frames/ROIs to include in manual review.",
+    )
+    parser.add_argument(
         "--apply-batch-size",
         type=int,
         default=128,
@@ -208,10 +238,30 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         default=4,
         help="Worker threads for retune apply.",
     )
+    parser.add_argument(
+        "--review-state",
+        default="approved",
+        choices=["approved", "pending", "rejected", "needs_review"],
+        help="Review state to set when approving in manual review.",
+    )
+    parser.add_argument(
+        "--review-method",
+        default="manual",
+        choices=["manual", "algorithmic", "hybrid", "spotcheck"],
+        help="Review method label (default: manual).",
+    )
+    parser.add_argument(
+        "--review-intended-use",
+        default="training",
+        choices=["training", "full_recording"],
+        help="Intended use label (default: training).",
+    )
+    parser.add_argument("--reviewer", help="Reviewer name (defaults to $USER).")
+    parser.add_argument("--review-notes", help="Optional review notes.")
 
     args = parser.parse_args(argv)
 
-    root = zarr.open_group(str(args.zarr_path), mode="a")
+    root = zarr.open_group(str(args.zarr_path), mode="a", use_consolidated=False)
     refined_run = args.refined_run or _get_latest_refined_run(root)
     refined = root[f"refined_eye_masks_runs/{refined_run}"]
 
@@ -227,7 +277,17 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         )
         _update_postprocess_summary(root, refined, print_summary=True)
     elif args.manual:
-        run_manual_review(str(args.zarr_path), refined_run=refined_run, crop_run=args.crop_run)
+        run_manual_review(
+            str(args.zarr_path),
+            refined_run=refined_run,
+            crop_run=args.crop_run,
+            frame_flag_file=args.frame_flag_file,
+            review_state=args.review_state,
+            review_method=args.review_method,
+            review_intended_use=args.review_intended_use,
+            reviewer=args.reviewer,
+            review_notes=args.review_notes,
+        )
     else:
         _update_postprocess_summary(root, refined, print_summary=True)
 

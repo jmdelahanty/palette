@@ -71,6 +71,9 @@ class OnnxRow:
     img_w: Optional[int]
     max_batch: Optional[int]
     dynamic_shapes: Optional[int]
+    nms_conf: Optional[float]
+    nms_iou: Optional[float]
+    nms_topk: Optional[int]
     exporter_torch_version: Optional[str]
     exporter_cuda_version: Optional[str]
     exporter_hostname: Optional[str]
@@ -97,6 +100,9 @@ class TensorRTRow:
     img_w: Optional[int]
     max_batch: Optional[int]
     dynamic_shapes: Optional[int]
+    nms_conf: Optional[float]
+    nms_iou: Optional[float]
+    nms_topk: Optional[int]
     gpu_name: Optional[str]
     gpu_uuid: Optional[str]
     compute_capability: Optional[str]
@@ -492,6 +498,20 @@ def _shape_summary(
     return f"{batch}:{size} ({dyn})"
 
 
+def _nms_summary(
+    *,
+    nms_conf: Optional[float],
+    nms_iou: Optional[float],
+    nms_topk: Optional[int],
+) -> str:
+    if nms_conf is None and nms_iou is None and nms_topk is None:
+        return "—"
+    conf = f"{float(nms_conf):.3f}" if nms_conf is not None else "—"
+    iou = f"{float(nms_iou):.3f}" if nms_iou is not None else "—"
+    topk = str(int(nms_topk)) if nms_topk is not None else "—"
+    return f"c={conf} i={iou} k={topk}"
+
+
 def _load_set_rows(registry: Registry, set_filter: Optional[str], limit: Optional[int]) -> List[SetRow]:
     sql = [
         "SELECT set_id, name, dataset_ids_json, created_utc",
@@ -546,6 +566,9 @@ def _load_onnx_rows(
         "om.img_w,",
         "om.max_batch,",
         "om.dynamic_shapes,",
+        "om.nms_conf,",
+        "om.nms_iou,",
+        "om.nms_topk,",
         "om.exporter_torch_version,",
         "om.exporter_cuda_version,",
         "om.exporter_hostname,",
@@ -585,6 +608,9 @@ def _load_onnx_rows(
             img_w=row["img_w"],
             max_batch=row["max_batch"],
             dynamic_shapes=row["dynamic_shapes"],
+            nms_conf=row["nms_conf"],
+            nms_iou=row["nms_iou"],
+            nms_topk=row["nms_topk"],
             exporter_torch_version=row["exporter_torch_version"],
             exporter_cuda_version=row["exporter_cuda_version"],
             exporter_hostname=row["exporter_hostname"],
@@ -621,6 +647,9 @@ def _load_tensorrt_rows(
         "tm.img_w,",
         "tm.max_batch,",
         "tm.dynamic_shapes,",
+        "tm.nms_conf,",
+        "tm.nms_iou,",
+        "tm.nms_topk,",
         "tm.gpu_name,",
         "tm.gpu_uuid,",
         "tm.compute_capability,",
@@ -666,6 +695,9 @@ def _load_tensorrt_rows(
             img_w=row["img_w"],
             max_batch=row["max_batch"],
             dynamic_shapes=row["dynamic_shapes"],
+            nms_conf=row["nms_conf"],
+            nms_iou=row["nms_iou"],
+            nms_topk=row["nms_topk"],
             gpu_name=row["gpu_name"],
             gpu_uuid=row["gpu_uuid"],
             compute_capability=row["compute_capability"],
@@ -1809,6 +1841,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             table.add_column("Skeleton")
             table.add_column("ONNX")
             table.add_column("Shape")
+            table.add_column("NMS")
             table.add_column("Plugins")
             table.add_column("Opset")
             table.add_column("Torch/CUDA")
@@ -1827,6 +1860,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                         img_w=row.img_w,
                         max_batch=row.max_batch,
                         dynamic_shapes=row.dynamic_shapes,
+                    ),
+                    _nms_summary(
+                        nms_conf=row.nms_conf,
+                        nms_iou=row.nms_iou,
+                        nms_topk=row.nms_topk,
                     ),
                     _onnx_plugin_details(
                         row.requires_plugins,
@@ -1849,6 +1887,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             table.add_column("Skeleton")
             table.add_column("Engine")
             table.add_column("Shape")
+            table.add_column("NMS")
             table.add_column("Plugins")
             table.add_column("Precision")
             table.add_column("TRT/CUDA")
@@ -1870,6 +1909,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                         img_w=row.img_w,
                         max_batch=row.max_batch,
                         dynamic_shapes=row.dynamic_shapes,
+                    ),
+                    _nms_summary(
+                        nms_conf=row.nms_conf,
+                        nms_iou=row.nms_iou,
+                        nms_topk=row.nms_topk,
                     ),
                     _onnx_plugin_details(
                         row.requires_plugins,
@@ -2115,6 +2159,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                         dynamic_shapes=row.dynamic_shapes,
                     )
                 )
+                print(
+                    "  nms: "
+                    + _nms_summary(
+                        nms_conf=row.nms_conf,
+                        nms_iou=row.nms_iou,
+                        nms_topk=row.nms_topk,
+                    )
+                )
                 print(f"  opset: {row.opset if row.opset is not None else '—'}")
                 print(
                     "  plugins: "
@@ -2145,6 +2197,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                         img_w=row.img_w,
                         max_batch=row.max_batch,
                         dynamic_shapes=row.dynamic_shapes,
+                    )
+                )
+                print(
+                    "  nms: "
+                    + _nms_summary(
+                        nms_conf=row.nms_conf,
+                        nms_iou=row.nms_iou,
+                        nms_topk=row.nms_topk,
                     )
                 )
                 print(

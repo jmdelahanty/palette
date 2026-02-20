@@ -36,6 +36,7 @@ class EyeSegmentationConfig:
     pre_threshold: Optional[int] = None
     min_area: int = 15
     max_area: Optional[int] = None
+    min_circularity: Optional[float] = None
     closing_radius: int = 3
     opening_radius: int = 1
     contour_min_points: int = 5
@@ -71,13 +72,15 @@ def _resolve_keypoint_group(
 
 def _set_config_value(cfg: EyeSegmentationConfig, key: str, value: Any) -> None:
     if value is None:
-        if key in {"max_area", "pre_threshold"}:
+        if key in {"max_area", "pre_threshold", "min_circularity"}:
             setattr(cfg, key, None)
         return
     if key in {"roi_padding", "min_area", "closing_radius", "opening_radius", "contour_min_points"}:
         setattr(cfg, key, int(value))
     elif key in {"max_area", "pre_threshold"}:
         setattr(cfg, key, int(value))
+    elif key == "min_circularity":
+        setattr(cfg, key, float(np.clip(value, 0.0, 1.0)))
     elif key == "sobel_strength":
         setattr(cfg, key, float(np.clip(value, 0.0, 1.0)))
     elif key in {"min_eye_separation", "max_eye_separation"}:
@@ -161,6 +164,96 @@ def _validate_input_row_alignment(
     )
 
 
+def _normalize_chunks_for_data(
+    source_chunks: Optional[Tuple[int, ...] | int],
+    data_shape: Tuple[int, ...],
+) -> Tuple[int, ...]:
+    if len(data_shape) == 0:
+        return (1,)
+    if isinstance(source_chunks, int):
+        source_chunks = (source_chunks,)
+    if not source_chunks:
+        return tuple(max(1, min(dim, 1024)) for dim in data_shape)
+    chunk_dims: List[int] = []
+    for axis, dim in enumerate(data_shape):
+        source_chunk = source_chunks[axis] if axis < len(source_chunks) else source_chunks[-1]
+        chunk_dims.append(int(max(1, min(dim, int(source_chunk)))))
+    return tuple(chunk_dims)
+
+
+def _copy_lineage_arrays_from_crop_with_keypoint_fallback(
+    *,
+    run_group: zarr.Group,
+    crop_group: zarr.Group,
+    crop_run: str,
+    kp_group: zarr.Group,
+    keypoint_group_name: str,
+    keypoint_run: str,
+    total_rois: int,
+    console: Console,
+) -> None:
+    for array_name in ("frame_indices", "detection_indices", "frame_counts"):
+        crop_arr = crop_group.get(array_name)
+        kp_arr = kp_group.get(array_name)
+
+        crop_data = np.asarray(crop_arr[:]) if crop_arr is not None else None
+        kp_data = np.asarray(kp_arr[:]) if kp_arr is not None else None
+
+        if crop_data is not None and kp_data is not None:
+            if crop_data.shape != kp_data.shape or not np.array_equal(crop_data, kp_data):
+                raise ValueError(
+                    "eye_masks lineage mismatch for "
+                    f"'{array_name}': crop_runs/{crop_run}/{array_name} and "
+                    f"{keypoint_group_name}/{keypoint_run}/{array_name} differ"
+                )
+
+        chosen_data: Optional[np.ndarray]
+        chosen_chunks: Optional[Tuple[int, ...]]
+        if crop_data is not None:
+            chosen_data = crop_data
+            chosen_chunks = getattr(crop_arr, "chunks", None)
+        elif kp_data is not None:
+            chosen_data = kp_data
+            chosen_chunks = getattr(kp_arr, "chunks", None)
+            console.print(
+                "[yellow]Crop run missing "
+                f"'{array_name}'; falling back to "
+                f"{keypoint_group_name}/{keypoint_run}/{array_name}.[/yellow]"
+            )
+        else:
+            console.print(
+                "[yellow]Missing lineage array "
+                f"'{array_name}' in both crop_runs/{crop_run} and "
+                f"{keypoint_group_name}/{keypoint_run}; skipping.[/yellow]"
+            )
+            continue
+
+        if chosen_data.ndim == 0:
+            raise ValueError(
+                f"eye_masks lineage array '{array_name}' must be 1D, got scalar value"
+            )
+        if array_name in {"frame_indices", "detection_indices"} and int(chosen_data.shape[0]) != int(total_rois):
+            raise ValueError(
+                f"eye_masks lineage array '{array_name}' has {chosen_data.shape[0]} rows, expected {total_rois}"
+            )
+        if array_name == "frame_counts" and int(np.sum(chosen_data, dtype=np.int64)) != int(total_rois):
+            raise ValueError(
+                f"eye_masks lineage array 'frame_counts' sums to "
+                f"{int(np.sum(chosen_data, dtype=np.int64))}, expected {total_rois}"
+            )
+
+        if array_name in run_group:
+            del run_group[array_name]
+        run_group.create_array(
+            array_name,
+            data=chosen_data,
+            chunks=_normalize_chunks_for_data(chosen_chunks, chosen_data.shape),
+            overwrite=True,
+        )
+        if crop_data is not None:
+            console.print(f"[dim]Copied {array_name} from crop run[/dim]")
+
+
 def _apply_sobel_filter(patch: np.ndarray, strength: float) -> np.ndarray:
     if strength <= 0.0:
         return patch
@@ -206,12 +299,25 @@ def _select_region(
     cx, cy = center
     best = None
     best_dist = None
+    area_pass_count = 0
+    circularity_fail_count = 0
+    min_circularity = config.min_circularity
     for region in regions:
         area = region.area
         if area < config.min_area:
             continue
         if config.max_area is not None and area > config.max_area:
             continue
+        area_pass_count += 1
+        if min_circularity is not None:
+            perimeter = float(region.perimeter)
+            if perimeter <= 0.0:
+                circularity_fail_count += 1
+                continue
+            circularity = float((4.0 * np.pi * float(area)) / (perimeter * perimeter))
+            if circularity < min_circularity:
+                circularity_fail_count += 1
+                continue
         rcx, rcy = region.centroid
         dist = (rcx - cy) ** 2 + (rcy - cx) ** 2
         if best is None or dist < best_dist:
@@ -219,11 +325,16 @@ def _select_region(
             best_dist = dist
 
     if best is None:
-        return None, None
+        filtered_non_circular = (
+            min_circularity is not None
+            and area_pass_count > 0
+            and circularity_fail_count == area_pass_count
+        )
+        return None, {"filtered_non_circular": filtered_non_circular}
 
     region_mask = labeled == best.label
 
-    return region_mask, None
+    return region_mask, {"filtered_non_circular": False}
 
 
 def _process_roi_data(
@@ -274,9 +385,12 @@ def _process_roi_data(
             base_mask = filtered_patch < cfg.pre_threshold
             binary = np.logical_and(binary, base_mask)
 
-        region_mask, _ = _select_region(binary, (cx - x0, cy - y0), cfg)
+        region_mask, region_meta = _select_region(binary, (cx - x0, cy - y0), cfg)
         if region_mask is None:
-            reject_reason = reject_reason or "no_region"
+            if region_meta is not None and bool(region_meta.get("filtered_non_circular")):
+                reject_reason = reject_reason or "non_circular"
+            else:
+                reject_reason = reject_reason or "no_region"
             continue
 
         masks[eye_idx][y0:y1, x0:x1][region_mask] = 1
@@ -375,7 +489,7 @@ def _process_roi_chunk(
     cfg_dict: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     cfg_local = EyeSegmentationConfig(**cfg_dict)
-    root = zarr.open(zarr_path, mode="r")
+    root = zarr.open(zarr_path, mode="r", use_consolidated=False)
     roi_ds = root[roi_path]
     kp_ds = root[kp_path]
     success_ds = root[success_path]
@@ -399,7 +513,7 @@ def segment_eye_masks(
     console = console or Console()
     stage_start = time.perf_counter()
 
-    root = zarr.open(zarr_path, mode="a")
+    root = zarr.open(zarr_path, mode="a", use_consolidated=False)
 
     cfg = EyeSegmentationConfig()
     cfg = _apply_tuned_parameters(root, cfg, console)
@@ -663,6 +777,18 @@ def segment_eye_masks(
         console.print("[dim]Copied detection_source from crop run[/dim]")
     else:
         console.print("[yellow]Crop run missing detection_source; defaulting to zeros.[/yellow]")
+
+    _copy_lineage_arrays_from_crop_with_keypoint_fallback(
+        run_group=run_group,
+        crop_group=crop_group,
+        crop_run=str(crop_run),
+        kp_group=kp_group,
+        keypoint_group_name=keypoint_group_name,
+        keypoint_run=str(keypoint_run),
+        total_rois=int(total_rois),
+        console=console,
+    )
+
     run_group.create_array("contour_left_ptr", data=left_ptr, overwrite=True)
     run_group.create_array("contour_left_len", data=left_len, overwrite=True)
     run_group.create_array("contour_right_ptr", data=right_ptr, overwrite=True)

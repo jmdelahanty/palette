@@ -29,7 +29,7 @@ from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
 from ..pose.schema import schema_from_package
 
-# Load the traditional 3-point pose schema (bladder + left/right eyes)
+# Load the traditional 3-point pose schema (swim_bladder + left/right eyes)
 TRADITIONAL_POSE_SCHEMA = schema_from_package("traditional_v1")
 
 
@@ -345,8 +345,8 @@ def detect_keypoints_yolo(
     imgsz = imgsz or max(roi_h, roi_w)
 
     run_group, resolved_run_name = _prepare_run_group(root, run_name, console)
-    run_group.attrs["keypoint_labels"] = ["bladder", "eye_left", "eye_right"]
-    run_group.attrs["keypoint_confidence_labels"] = ["bladder", "eye_left", "eye_right"]
+    run_group.attrs["keypoint_labels"] = ["swim_bladder", "eye_left", "eye_right"]
+    run_group.attrs["keypoint_confidence_labels"] = ["swim_bladder", "eye_left", "eye_right"]
     run_group.attrs["pose_schema"] = {
         "name": TRADITIONAL_POSE_SCHEMA.name,
         "nodes": TRADITIONAL_POSE_SCHEMA.node_names,

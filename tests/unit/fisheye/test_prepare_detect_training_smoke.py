@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 import yaml
 import zarr
 
@@ -347,6 +348,7 @@ def test_registry_record_model_export_dual_writes_format_tables(tmp_path: Path) 
                     "opset": 11,
                     "input_shape": [1, 3, 640, 640],
                     "imgsz": [640, 640],
+                    "nms": {"conf": 0.31, "iou": 0.67, "topk": 2},
                 }
             }
         ),
@@ -359,6 +361,7 @@ def test_registry_record_model_export_dual_writes_format_tables(tmp_path: Path) 
                 "export": {
                     "input_shape": [1, 3, 640, 640],
                     "imgsz": [640, 640],
+                    "nms": {"conf": 0.31, "iou": 0.67, "topk": 2},
                 }
             }
         ),
@@ -412,7 +415,8 @@ def test_registry_record_model_export_dual_writes_format_tables(tmp_path: Path) 
         onnx_row = conn.execute(
             """
             SELECT set_id, path, sha256, manifest_path, manifest_sha256,
-                   opset, input_shape, img_h, img_w, max_batch, dynamic_shapes, file_size_bytes,
+                   opset, nms_conf, nms_iou, nms_topk,
+                   input_shape, img_h, img_w, max_batch, dynamic_shapes, file_size_bytes,
                    exporter_torch_version, exporter_cuda_version, exporter_hostname,
                    requires_plugins, plugin_ops_json, plugin_versions_json
             FROM onnx_models
@@ -423,6 +427,7 @@ def test_registry_record_model_export_dual_writes_format_tables(tmp_path: Path) 
         trt_row = conn.execute(
             """
             SELECT set_id, precision, path, sha256, manifest_path, manifest_sha256,
+                   nms_conf, nms_iou, nms_topk,
                    input_shape, img_h, img_w, max_batch, dynamic_shapes, file_size_bytes,
                    trt_version, cuda_version, compute_capability, gpu_name, gpu_uuid, system_hostname,
                    requires_plugins, plugin_ops_json, plugin_versions_json
@@ -438,18 +443,21 @@ def test_registry_record_model_export_dual_writes_format_tables(tmp_path: Path) 
     assert onnx_row[3] == str(onnx_manifest)
     assert onnx_row[4] == "onnx_manifest_sha"
     assert onnx_row[5] == 11
-    assert onnx_row[6] == "[1, 3, 640, 640]"
-    assert onnx_row[7] == 640
-    assert onnx_row[8] == 640
-    assert onnx_row[9] == 1
-    assert onnx_row[10] == 0
-    assert onnx_row[11] == onnx_path.stat().st_size
-    assert onnx_row[12] == "2.6.0+cu124"
-    assert onnx_row[13] == "12.4"
-    assert onnx_row[14] == "hostA"
-    assert onnx_row[15] == 1
-    assert json.loads(onnx_row[16]) == ["TRT::EfficientNMS_TRT"]
-    assert json.loads(onnx_row[17]) == {"TRT::EfficientNMS_TRT": "1"}
+    assert float(onnx_row[6]) == pytest.approx(0.31)
+    assert float(onnx_row[7]) == pytest.approx(0.67)
+    assert onnx_row[8] == 2
+    assert onnx_row[9] == "[1, 3, 640, 640]"
+    assert onnx_row[10] == 640
+    assert onnx_row[11] == 640
+    assert onnx_row[12] == 1
+    assert onnx_row[13] == 0
+    assert onnx_row[14] == onnx_path.stat().st_size
+    assert onnx_row[15] == "2.6.0+cu124"
+    assert onnx_row[16] == "12.4"
+    assert onnx_row[17] == "hostA"
+    assert onnx_row[18] == 1
+    assert json.loads(onnx_row[19]) == ["TRT::EfficientNMS_TRT"]
+    assert json.loads(onnx_row[20]) == {"TRT::EfficientNMS_TRT": "1"}
 
     assert trt_row is not None
     assert trt_row[0] == set_id
@@ -458,18 +466,21 @@ def test_registry_record_model_export_dual_writes_format_tables(tmp_path: Path) 
     assert trt_row[3] == "trt_sha"
     assert trt_row[4] == str(trt_manifest)
     assert trt_row[5] == "trt_manifest_sha"
-    assert trt_row[6] == "[1, 3, 640, 640]"
-    assert trt_row[7] == 640
-    assert trt_row[8] == 640
-    assert trt_row[9] == 1
-    assert trt_row[10] == 0
-    assert trt_row[11] == trt_path.stat().st_size
-    assert trt_row[12] == "10.0.1"
-    assert trt_row[13] == "12.4"
-    assert trt_row[14] == "8.6"
-    assert trt_row[15] == "NVIDIA RTX A6000"
-    assert trt_row[16] == "GPU-abc"
-    assert trt_row[17] == "hostA"
-    assert trt_row[18] == 1
-    assert json.loads(trt_row[19]) == ["TRT::EfficientNMS_TRT"]
-    assert json.loads(trt_row[20]) == {"TRT::EfficientNMS_TRT": "1"}
+    assert float(trt_row[6]) == pytest.approx(0.31)
+    assert float(trt_row[7]) == pytest.approx(0.67)
+    assert trt_row[8] == 2
+    assert trt_row[9] == "[1, 3, 640, 640]"
+    assert trt_row[10] == 640
+    assert trt_row[11] == 640
+    assert trt_row[12] == 1
+    assert trt_row[13] == 0
+    assert trt_row[14] == trt_path.stat().st_size
+    assert trt_row[15] == "10.0.1"
+    assert trt_row[16] == "12.4"
+    assert trt_row[17] == "8.6"
+    assert trt_row[18] == "NVIDIA RTX A6000"
+    assert trt_row[19] == "GPU-abc"
+    assert trt_row[20] == "hostA"
+    assert trt_row[21] == 1
+    assert json.loads(trt_row[22]) == ["TRT::EfficientNMS_TRT"]
+    assert json.loads(trt_row[23]) == {"TRT::EfficientNMS_TRT": "1"}

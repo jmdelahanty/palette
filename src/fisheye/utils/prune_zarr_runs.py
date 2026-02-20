@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import zarr
+from fisheye.diagnostics.check_eye_mask_lineage import _analyze_run_group
 
 try:
     from rich.console import Console
@@ -32,6 +33,11 @@ RUN_PARENTS = [
     "id_assignment_runs",
     "background_runs",
     "stimulus_runs",
+]
+
+LINEAGE_RUN_PARENTS = [
+    "eye_masks_runs",
+    "refined_eye_masks_runs",
 ]
 
 
@@ -104,7 +110,7 @@ def _progress(console: Optional[Console], total: int):
 def _iter_zarr(roots: List[Path], recursive: bool) -> Iterable[Path]:
     for root in roots:
         root = root.expanduser()
-        if root.is_file() and root.suffix == ".zarr":
+        if root.suffix == ".zarr" and root.exists():
             yield root
             continue
         if not root.exists():
@@ -167,8 +173,29 @@ def _list_runs(root: zarr.Group, parents: List[str]) -> Dict[str, List[str]]:
         group = root.get(parent)
         if group is None:
             continue
-        runs[parent] = list(group.group_keys())
+        if hasattr(group, "group_keys"):
+            runs[parent] = list(group.group_keys())
+        else:
+            names: List[str] = []
+            for name in group.keys():
+                try:
+                    obj = group[name]
+                except Exception:
+                    continue
+                if isinstance(obj, zarr.Group):
+                    names.append(str(name))
+            runs[parent] = names
     return runs
+
+
+def _append_skip(skips: Dict[str, str], parent: str, message: str) -> None:
+    existing = skips.get(parent)
+    if existing is None:
+        skips[parent] = message
+        return
+    if message in existing:
+        return
+    skips[parent] = f"{existing}; {message}"
 
 
 def _build_plan(root: zarr.Group, parents: List[str]) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
@@ -217,13 +244,75 @@ def _build_plan(root: zarr.Group, parents: List[str]) -> Tuple[Dict[str, List[st
     return deletions, skips
 
 
+def _build_lineage_failure_plan(
+    root: zarr.Group,
+    parents: List[str],
+) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
+    deletions: Dict[str, List[str]] = {}
+    skips: Dict[str, str] = {}
+
+    runs = _list_runs(root, parents)
+    for parent, run_names in runs.items():
+        group = root.get(parent)
+        if group is None or not run_names:
+            continue
+
+        latest = group.attrs.get("latest")
+        if not latest or str(latest) not in group:
+            _append_skip(skips, parent, "no latest attr; skipping prune for safety")
+            continue
+        latest_name = str(latest)
+
+        for run_name in sorted(str(name) for name in run_names):
+            run_group = group.get(run_name)
+            if run_group is None:
+                continue
+            report = _analyze_run_group(
+                root=root,
+                stage=parent,
+                run_name=run_name,
+                run_group=run_group,
+            )
+            if not report.has_issues:
+                continue
+            if run_name == latest_name:
+                _append_skip(
+                    skips,
+                    parent,
+                    f"latest run '{run_name}' has lineage issues; not pruning latest",
+                )
+                continue
+            deletions.setdefault(parent, []).append(run_name)
+
+    for parent, names in deletions.items():
+        deletions[parent] = sorted(set(names))
+    return deletions, skips
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Prune unreferenced run groups from Palette Zarr archives.")
     parser.add_argument("paths", nargs="*", type=Path, help="Recording roots or zarr paths.")
     parser.add_argument("--recursive", action="store_true", help="Search recursively for zarrs.")
     parser.add_argument("--apply", action="store_true", help="Delete runs (default is dry-run).")
+    parser.add_argument(
+        "--lineage-failures-only",
+        action="store_true",
+        help=(
+            "Prune only non-latest eye-mask runs that fail lineage checks "
+            "(frame_indices/detection_indices/frame_counts/source_crop_run)."
+        ),
+    )
+    parser.add_argument(
+        "--lineage-stage",
+        choices=["eye_masks_runs", "refined_eye_masks_runs", "both"],
+        default="both",
+        help="When --lineage-failures-only is set, choose which stage(s) to inspect (default: both).",
+    )
     parser.add_argument("--log-dir", type=Path, default=None, help="Directory to store JSONL logs.")
     args = parser.parse_args(argv)
+
+    if args.lineage_stage and not args.lineage_failures_only and args.lineage_stage != "both":
+        raise SystemExit("--lineage-stage requires --lineage-failures-only.")
 
     roots = _resolve_root(args.paths)
     zarr_paths = list(_iter_zarr(roots, args.recursive))
@@ -232,16 +321,32 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     plans: List[RunPrunePlan] = []
+    if args.lineage_failures_only:
+        if args.lineage_stage == "both":
+            lineage_parents = list(LINEAGE_RUN_PARENTS)
+        else:
+            lineage_parents = [str(args.lineage_stage)]
+    else:
+        lineage_parents = []
+
     for zarr_path in zarr_paths:
-        root = zarr.open_group(str(zarr_path), mode="r")
-        deletions, skips = _build_plan(root, RUN_PARENTS)
+        root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+        if args.lineage_failures_only:
+            deletions, skips = _build_lineage_failure_plan(root, lineage_parents)
+        else:
+            deletions, skips = _build_plan(root, RUN_PARENTS)
         plans.append(RunPrunePlan(zarr_path=zarr_path, deletions=deletions, skips=skips))
 
     if not args.apply:
-        print("Planned run pruning (dry-run):")
+        if args.lineage_failures_only:
+            print("Planned lineage-failure run pruning (dry-run):")
+        else:
+            print("Planned run pruning (dry-run):")
+        any_output = False
         for plan in plans:
-            if not plan.deletions:
+            if not plan.deletions and not plan.skips:
                 continue
+            any_output = True
             print(f"{plan.zarr_path}")
             for parent, runs in plan.deletions.items():
                 print(f"  {parent}: {len(runs)} candidate(s)")
@@ -249,6 +354,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print(f"    - {name}")
             for parent, reason in plan.skips.items():
                 print(f"  {parent}: skipped ({reason})")
+        if not any_output:
+            print("No prune candidates found.")
         print("\nUse --apply to delete the candidates listed above.")
         return 0
 
@@ -258,6 +365,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     log_path = log_dir / f"prune_zarr_runs_{run_id}.jsonl"
     logger = JsonLogger(log_path, run_id)
     print(f"Log file: {log_path}")
+    logger.log(
+        "run_start",
+        lineage_failures_only=bool(args.lineage_failures_only),
+        lineage_stage=str(args.lineage_stage),
+    )
 
     console = Console() if Console else None
     progress = _progress(console, len(plans))

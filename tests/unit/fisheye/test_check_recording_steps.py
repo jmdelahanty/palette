@@ -222,3 +222,91 @@ def test_registry_crop_review_status_for_zarr_returns_latest_review_fields(tmp_p
     assert status["intended_use"] == "training"
     assert status["reviewer"] == "alice"
     assert status["timestamp_utc"] == "2026-02-10T10:30:00+00:00"
+
+
+def test_open_root_live_prefers_non_consolidated(monkeypatch) -> None:
+    sentinel = object()
+    calls: list[dict[str, object]] = []
+
+    def _fake_open_group(path: str, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append({"path": path, **kwargs})
+        return sentinel
+
+    monkeypatch.setattr(mod.zarr, "open_group", _fake_open_group)
+
+    out = mod._open_root_live(Path("/tmp/example.zarr"))  # noqa: SLF001
+
+    assert out is sentinel
+    assert len(calls) == 1
+    assert calls[0]["path"] == "/tmp/example.zarr"
+    assert calls[0]["mode"] == "r"
+    assert calls[0]["use_consolidated"] is False
+
+
+def test_open_root_live_falls_back_when_use_consolidated_unsupported(monkeypatch) -> None:
+    sentinel = object()
+    calls: list[dict[str, object]] = []
+
+    def _fake_open_group(path: str, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append({"path": path, **kwargs})
+        if "use_consolidated" in kwargs:
+            raise TypeError("unsupported kwarg")
+        return sentinel
+
+    monkeypatch.setattr(mod.zarr, "open_group", _fake_open_group)
+
+    out = mod._open_root_live(Path("/tmp/example.zarr"))  # noqa: SLF001
+
+    assert out is sentinel
+    assert len(calls) == 2
+    assert calls[0]["mode"] == "r"
+    assert calls[0]["use_consolidated"] is False
+    assert calls[1]["mode"] == "r"
+    assert "use_consolidated" not in calls[1]
+
+
+def test_check_zarr_reads_refined_eye_mask_review_status_from_latest_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "eye_review_latest_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    refined_parent = root.create_group("refined_eye_masks_runs")
+    refined_parent.attrs["latest"] = "refined_eye_masks_001"
+    run = refined_parent.create_group("refined_eye_masks_001")
+    run.attrs["eye_mask_review_status"] = {
+        "state": "approved",
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "alice",
+        "timestamp_utc": "2026-02-12T04:50:00+00:00",
+    }
+
+    info = mod._check_zarr(zarr_path, tuning_keys=[])  # noqa: SLF001
+
+    assert info["refined_eye_masks_present"] is True
+    status = info["eye_mask_review_status"]
+    assert isinstance(status, dict)
+    assert status["state"] == "approved"
+    assert status["method"] == "manual"
+    assert status["intended_use"] == "training"
+
+
+def test_check_zarr_reads_refined_eye_mask_review_status_from_parent_latest_pointer(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "eye_review_pointer_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    refined_parent = root.create_group("refined_eye_masks_runs")
+    refined_parent.attrs["latest"] = "refined_eye_masks_002"
+    refined_parent.attrs["eye_mask_review_status_latest"] = "refined_eye_masks_001"
+    refined_parent.create_group("refined_eye_masks_002")
+    run = refined_parent.create_group("refined_eye_masks_001")
+    run.attrs["eye_mask_review_status"] = {
+        "state": "pending",
+        "method": "spotcheck",
+        "intended_use": "training",
+    }
+
+    info = mod._check_zarr(zarr_path, tuning_keys=[])  # noqa: SLF001
+
+    assert info["refined_eye_masks_present"] is True
+    status = info["eye_mask_review_status"]
+    assert isinstance(status, dict)
+    assert status["state"] == "pending"
+    assert status["method"] == "spotcheck"

@@ -29,7 +29,7 @@ def test_backfill_keypoint_confidences_writes_missing_array(tmp_path) -> None:
         dtype=np.float64,
     )
     np.testing.assert_allclose(got, expected, equal_nan=True)
-    assert run.attrs.get("keypoint_confidence_labels") == ["bladder", "eye_left", "eye_right"]
+    assert run.attrs.get("keypoint_confidence_labels") == ["swim_bladder", "eye_left", "eye_right"]
 
 
 def test_backfill_keypoint_confidences_skips_existing_when_not_overwriting(tmp_path) -> None:

@@ -93,6 +93,62 @@ def _query_crop_quality_map(
     return {str(row["dataset_id"]): dict(row) for row in rows if row["dataset_id"] is not None}
 
 
+def _query_eye_mask_performance_map(
+    registry: Registry,
+    *,
+    dataset_ids: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    if not dataset_ids:
+        return {}
+    placeholders = ",".join("?" for _ in dataset_ids)
+    rows = registry.conn.execute(
+        f"""
+        SELECT
+            dataset_id,
+            stage_group,
+            run_name,
+            run_created_utc,
+            recording_id,
+            zarr_use,
+            method,
+            source_crop_run,
+            source_keypoint_group,
+            source_keypoints_run,
+            source_eye_masks_run,
+            source_eye_masks_method,
+            total_rois,
+            successful_eyes,
+            successful_roi_pairs,
+            successful_roi_pair_rate,
+            duration_seconds,
+            rois_per_second,
+            inference_duration_seconds,
+            inference_average_fps,
+            review_state,
+            review_method,
+            review_intended_use,
+            review_reviewer,
+            review_timestamp_utc,
+            source_keypoint_stale_state,
+            source_keypoint_stale_reason,
+            source_keypoint_stale_timestamp_utc,
+            source_keypoint_stale_json,
+            lifecycle_state,
+            lifecycle_reason
+        FROM eye_mask_performance_latest
+        WHERE dataset_id IN ({placeholders});
+        """,
+        dataset_ids,
+    ).fetchall()
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        dataset_id = row["dataset_id"]
+        if dataset_id is None:
+            continue
+        out.setdefault(str(dataset_id), []).append(dict(row))
+    return out
+
+
 def _normalize_text(value: object) -> Optional[str]:
     if value is None:
         return None
@@ -110,6 +166,28 @@ def _matches_optional_text_filter(value: object, text_filter: Optional[str]) -> 
     if value_norm is None:
         return False
     return value_norm.lower() == filter_norm
+
+
+def _pick_eye_mask_candidate(
+    candidates: list[dict[str, Any]],
+    *,
+    stage_filter: Optional[str],
+) -> dict[str, Any]:
+    if not candidates:
+        raise ValueError("Expected at least one eye-mask candidate.")
+    if stage_filter is not None:
+        ranked = candidates
+    else:
+        refined = [row for row in candidates if str(row.get("stage_group") or "") == "refined_eye_masks_runs"]
+        ranked = refined if refined else candidates
+    ranked = sorted(
+        ranked,
+        key=lambda row: (
+            str(row.get("run_created_utc") or ""),
+            str(row.get("run_name") or ""),
+        ),
+    )
+    return ranked[-1]
 
 
 def _percentile(values: list[float], pct: float) -> Optional[float]:
@@ -373,6 +451,62 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Maximum crop percent_frames_with_crops from crop quality view.",
     )
     parser.add_argument(
+        "--eye-mask-stage",
+        choices=["eye_masks_runs", "refined_eye_masks_runs", "any"],
+        default="any",
+        help="Filter eye-mask performance rows by stage group (default: any).",
+    )
+    parser.add_argument(
+        "--eye-mask-method",
+        type=str,
+        help="Eye-mask method filter from eye-mask performance view (or 'missing').",
+    )
+    parser.add_argument(
+        "--eye-mask-review-state",
+        type=str,
+        help="Eye-mask review state filter (or 'missing').",
+    )
+    parser.add_argument(
+        "--eye-mask-review-intended-use",
+        type=str,
+        help="Eye-mask review intended-use filter (or 'missing').",
+    )
+    parser.add_argument(
+        "--eye-mask-reviewer",
+        type=str,
+        help="Eye-mask reviewer filter (or 'missing').",
+    )
+    parser.add_argument(
+        "--eye-mask-stale-state",
+        type=str,
+        help="Eye-mask source_keypoint_stale.state filter (or 'missing').",
+    )
+    parser.add_argument(
+        "--eye-mask-lifecycle-state",
+        type=str,
+        help="Eye-mask lifecycle state filter (approved/rejected/in_progress/stale or 'missing').",
+    )
+    parser.add_argument(
+        "--eye-mask-source-keypoints-run",
+        type=str,
+        help="Eye-mask source_keypoints_run filter (or 'missing').",
+    )
+    parser.add_argument(
+        "--eye-mask-success-rate-min",
+        type=float,
+        help="Minimum eye-mask successful_roi_pair_rate from eye-mask performance view.",
+    )
+    parser.add_argument(
+        "--eye-mask-rois-per-second-min",
+        type=float,
+        help="Minimum eye-mask rois_per_second from eye-mask performance view.",
+    )
+    parser.add_argument(
+        "--eye-mask-duration-max",
+        type=float,
+        help="Maximum eye-mask duration_seconds from eye-mask performance view.",
+    )
+    parser.add_argument(
         "--detect-model-only",
         action="store_true",
         help="Restrict detect performance matching to model-backed detect runs.",
@@ -478,6 +612,21 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.crop_percent_frames_max,
         )
     )
+    use_eye_mask_filters = any(
+        value is not None
+        for value in (
+            args.eye_mask_method,
+            args.eye_mask_review_state,
+            args.eye_mask_review_intended_use,
+            args.eye_mask_reviewer,
+            args.eye_mask_stale_state,
+            args.eye_mask_lifecycle_state,
+            args.eye_mask_source_keypoints_run,
+            args.eye_mask_success_rate_min,
+            args.eye_mask_rois_per_second_min,
+            args.eye_mask_duration_max,
+        )
+    ) or str(args.eye_mask_stage) != "any"
 
     try:
         rows = registry.query_datasets(
@@ -514,7 +663,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             model_input=args.model_input,
             path_contains=args.path_contains,
             # Apply row limit after lineage/detect/crop filtering.
-            limit=(None if (use_subject_filters or use_detect_filters or use_crop_filters) else args.limit),
+            limit=(None if (use_subject_filters or use_detect_filters or use_crop_filters or use_eye_mask_filters) else args.limit),
         )
         if use_subject_filters:
             try:
@@ -652,6 +801,129 @@ def main(argv: Optional[list[str]] = None) -> int:
                 row["crop_review_reviewer"] = crop.get("review_reviewer")
                 row["crop_review_timestamp_utc"] = crop.get("review_timestamp_utc")
                 row["crop_review_notes"] = crop.get("review_notes")
+                filtered.append(row)
+            result_rows = filtered
+
+        if use_eye_mask_filters:
+            dataset_ids = [str(row["dataset_id"]) for row in result_rows if row.get("dataset_id") is not None]
+            eye_mask_map = _query_eye_mask_performance_map(registry, dataset_ids=dataset_ids)
+            filtered = []
+            stage_filter = None if str(args.eye_mask_stage) == "any" else str(args.eye_mask_stage)
+            method_filter = str(args.eye_mask_method).strip().lower() if args.eye_mask_method else None
+            for row in result_rows:
+                dataset_id = str(row.get("dataset_id") or "")
+                candidates = eye_mask_map.get(dataset_id, [])
+                if stage_filter is not None:
+                    candidates = [
+                        candidate
+                        for candidate in candidates
+                        if str(candidate.get("stage_group") or "") == stage_filter
+                    ]
+                elif any(
+                    value is not None
+                    for value in (
+                        args.eye_mask_review_state,
+                        args.eye_mask_review_intended_use,
+                        args.eye_mask_reviewer,
+                        args.eye_mask_stale_state,
+                        args.eye_mask_lifecycle_state,
+                    )
+                ):
+                    refined_candidates = [
+                        candidate
+                        for candidate in candidates
+                        if str(candidate.get("stage_group") or "") == "refined_eye_masks_runs"
+                    ]
+                    if refined_candidates:
+                        candidates = refined_candidates
+                if not candidates:
+                    continue
+
+                matching_candidates: list[dict[str, Any]] = []
+                for candidate in candidates:
+                    if method_filter is not None:
+                        method_value = str(candidate.get("method") or "").strip().lower()
+                        if method_filter == "missing":
+                            if method_value:
+                                continue
+                        elif method_value != method_filter:
+                            continue
+                    if not _matches_optional_text_filter(candidate.get("review_state"), args.eye_mask_review_state):
+                        continue
+                    if not _matches_optional_text_filter(
+                        candidate.get("review_intended_use"),
+                        args.eye_mask_review_intended_use,
+                    ):
+                        continue
+                    if not _matches_optional_text_filter(candidate.get("review_reviewer"), args.eye_mask_reviewer):
+                        continue
+                    if not _matches_optional_text_filter(
+                        candidate.get("source_keypoint_stale_state"),
+                        args.eye_mask_stale_state,
+                    ):
+                        continue
+                    if not _matches_optional_text_filter(candidate.get("lifecycle_state"), args.eye_mask_lifecycle_state):
+                        continue
+                    if not _matches_optional_text_filter(
+                        candidate.get("source_keypoints_run"),
+                        args.eye_mask_source_keypoints_run,
+                    ):
+                        continue
+
+                    success_rate = _as_float(candidate.get("successful_roi_pair_rate"))
+                    if args.eye_mask_success_rate_min is not None and (
+                        success_rate is None or success_rate < float(args.eye_mask_success_rate_min)
+                    ):
+                        continue
+
+                    rois_per_second = _as_float(candidate.get("rois_per_second"))
+                    if args.eye_mask_rois_per_second_min is not None and (
+                        rois_per_second is None or rois_per_second < float(args.eye_mask_rois_per_second_min)
+                    ):
+                        continue
+
+                    duration_seconds = _as_float(candidate.get("duration_seconds"))
+                    if args.eye_mask_duration_max is not None and (
+                        duration_seconds is None or duration_seconds > float(args.eye_mask_duration_max)
+                    ):
+                        continue
+
+                    matching_candidates.append(candidate)
+
+                if not matching_candidates:
+                    continue
+
+                selected = _pick_eye_mask_candidate(matching_candidates, stage_filter=stage_filter)
+                row["eye_mask_stage_group"] = selected.get("stage_group")
+                row["eye_mask_run"] = selected.get("run_name")
+                row["eye_mask_created_utc"] = selected.get("run_created_utc")
+                row["eye_mask_recording_id"] = selected.get("recording_id")
+                row["eye_mask_method"] = selected.get("method")
+                row["eye_mask_source_crop_run"] = selected.get("source_crop_run")
+                row["eye_mask_source_keypoint_group"] = selected.get("source_keypoint_group")
+                row["eye_mask_source_keypoints_run"] = selected.get("source_keypoints_run")
+                row["eye_mask_source_eye_masks_run"] = selected.get("source_eye_masks_run")
+                row["eye_mask_source_eye_masks_method"] = selected.get("source_eye_masks_method")
+                row["eye_mask_total_rois"] = selected.get("total_rois")
+                row["eye_mask_successful_eyes"] = selected.get("successful_eyes")
+                row["eye_mask_successful_roi_pairs"] = selected.get("successful_roi_pairs")
+                row["eye_mask_successful_roi_pair_rate"] = selected.get("successful_roi_pair_rate")
+                row["eye_mask_duration_seconds"] = selected.get("duration_seconds")
+                row["eye_mask_rois_per_second"] = selected.get("rois_per_second")
+                row["eye_mask_inference_duration_seconds"] = selected.get("inference_duration_seconds")
+                row["eye_mask_inference_average_fps"] = selected.get("inference_average_fps")
+                row["eye_mask_review_state"] = selected.get("review_state")
+                row["eye_mask_review_method"] = selected.get("review_method")
+                row["eye_mask_review_intended_use"] = selected.get("review_intended_use")
+                row["eye_mask_review_reviewer"] = selected.get("review_reviewer")
+                row["eye_mask_review_timestamp_utc"] = selected.get("review_timestamp_utc")
+                row["eye_mask_source_keypoint_stale_state"] = selected.get("source_keypoint_stale_state")
+                row["eye_mask_source_keypoint_stale_reason"] = selected.get("source_keypoint_stale_reason")
+                row["eye_mask_source_keypoint_stale_timestamp_utc"] = selected.get(
+                    "source_keypoint_stale_timestamp_utc"
+                )
+                row["eye_mask_lifecycle_state"] = selected.get("lifecycle_state")
+                row["eye_mask_lifecycle_reason"] = selected.get("lifecycle_reason")
                 filtered.append(row)
             result_rows = filtered
 

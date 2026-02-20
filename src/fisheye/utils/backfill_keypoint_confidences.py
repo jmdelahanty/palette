@@ -114,7 +114,7 @@ def _backfill_run_group(
                 chunks=(chunk_len, 3),
                 overwrite=True,
             )
-        run_group.attrs["keypoint_confidence_labels"] = ["bladder", "eye_left", "eye_right"]
+        run_group.attrs["keypoint_confidence_labels"] = ["swim_bladder", "eye_left", "eye_right"]
     return BackfillResult(status="ok")
 
 

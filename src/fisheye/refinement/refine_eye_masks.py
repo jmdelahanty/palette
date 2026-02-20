@@ -71,7 +71,7 @@ def _get_zarr_array(zarr_path: str, array_path: str) -> zarr.Array:
 
     group = _ZARR_GROUP_CACHE.get(zarr_path)
     if group is None:
-        group = zarr.open(zarr_path, mode="r")
+        group = zarr.open(zarr_path, mode="r", use_consolidated=False)
         _ZARR_GROUP_CACHE[zarr_path] = group
 
     arr = group[array_path]
@@ -556,6 +556,11 @@ def _measure_mask(mask: np.ndarray, min_contour_points: int = 5) -> Tuple[bool, 
     # EllipseModel.params = (xc, yc, a, b, theta)
     # a, b are semi-axes; theta is rotation angle in radians
     xc, yc, a, b, theta = ellipse_model.params
+
+    # Canonicalize ellipse parameters so major >= minor across refined outputs.
+    if a < b:
+        a, b = b, a
+        theta = theta + (math.pi / 2.0)
 
     centroid = np.array([float(xc), float(yc)], dtype=np.float32)
 
@@ -1241,7 +1246,7 @@ def _process_and_write_chunk(
     else:
         probs_chunk_out = None
 
-    root = zarr.open(zarr_path, mode="a")
+    root = zarr.open(zarr_path, mode="a", use_consolidated=False)
     run_group = root[run_group_path]
 
     run_group["masks_roi"][start:stop] = masks_chunk
@@ -1294,7 +1299,7 @@ def refine_eye_masks(
     zarr_path = str(Path(zarr_path))
     console.print(f"Opening Zarr archive: [cyan]{zarr_path}[/cyan]")
 
-    root = zarr.open(zarr_path, mode="a")
+    root = zarr.open(zarr_path, mode="a", use_consolidated=False)
 
     if "eye_masks_runs" not in root:
         raise ValueError("Zarr archive missing eye_masks_runs; run segmentation first.")

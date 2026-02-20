@@ -18,6 +18,7 @@ from .db import (
     _extract_crop_quality_rows,
     _extract_detect_performance_rows,
     _extract_detect_quality_rows,
+    _extract_eye_mask_performance_rows,
     _extract_keypoint_quality_rows,
     _import_zarr,
 )
@@ -245,6 +246,13 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--backfill-eye-mask-performance",
+        action="store_true",
+        help=(
+            "Backfill eye_mask_performance rows for datasets that currently have no eye-mask performance rows."
+        ),
+    )
+    parser.add_argument(
         "--refresh-keypoint-quality",
         action="store_true",
         help=(
@@ -273,6 +281,13 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--refresh-eye-mask-performance",
+        action="store_true",
+        help=(
+            "Refresh eye_mask_performance rows for all datasets in scope and remove stale rows."
+        ),
+    )
+    parser.add_argument(
         "--detect-performance-all-datasets",
         action="store_true",
         help=(
@@ -285,6 +300,14 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "When backfilling/refreshing crop_quality, include all datasets. "
+            "Default scope is source_recording + analysis datasets only."
+        ),
+    )
+    parser.add_argument(
+        "--eye-mask-performance-all-datasets",
+        action="store_true",
+        help=(
+            "When backfilling/refreshing eye_mask_performance, include all datasets. "
             "Default scope is source_recording + analysis datasets only."
         ),
     )
@@ -1605,7 +1628,8 @@ def _backfill_model_tables(registry: Registry, *, dry_run: bool) -> Dict[str, in
         """
         INSERT INTO onnx_models (
             run_id, set_id, detection_model_run_id, path, sha256, manifest_path,
-            manifest_sha256, requires_plugins, plugin_ops_json, plugin_versions_json,
+            manifest_sha256, nms_conf, nms_iou, nms_topk,
+            requires_plugins, plugin_ops_json, plugin_versions_json,
             metadata_json, created_utc
         )
         SELECT
@@ -1616,6 +1640,21 @@ def _backfill_model_tables(registry: Registry, *, dry_run: bool) -> Dict[str, in
             json_extract(me.metadata_json, '$.sha256'),
             me.manifest_path,
             json_extract(me.metadata_json, '$.manifest_sha256'),
+            COALESCE(
+                json_extract(me.metadata_json, '$.nms.conf'),
+                json_extract(me.metadata_json, '$.nms_conf'),
+                json_extract(me.metadata_json, '$.conf_threshold')
+            ),
+            COALESCE(
+                json_extract(me.metadata_json, '$.nms.iou'),
+                json_extract(me.metadata_json, '$.nms_iou'),
+                json_extract(me.metadata_json, '$.iou_threshold')
+            ),
+            COALESCE(
+                json_extract(me.metadata_json, '$.nms.topk'),
+                json_extract(me.metadata_json, '$.nms_topk'),
+                json_extract(me.metadata_json, '$.topk')
+            ),
             json_extract(me.metadata_json, '$.requires_plugins'),
             json_extract(me.metadata_json, '$.plugin_ops'),
             json_extract(me.metadata_json, '$.plugin_versions'),
@@ -1655,7 +1694,8 @@ def _backfill_model_tables(registry: Registry, *, dry_run: bool) -> Dict[str, in
         )
         INSERT INTO tensorrt_models (
             run_id, set_id, detection_model_run_id, onnx_run_id, precision, path, sha256,
-            manifest_path, manifest_sha256, requires_plugins, plugin_ops_json,
+            manifest_path, manifest_sha256, nms_conf, nms_iou, nms_topk,
+            requires_plugins, plugin_ops_json,
             plugin_versions_json, metadata_json, created_utc
         )
         SELECT
@@ -1668,6 +1708,21 @@ def _backfill_model_tables(registry: Registry, *, dry_run: bool) -> Dict[str, in
             te.sha256,
             te.manifest_path,
             te.manifest_sha256,
+            COALESCE(
+                json_extract(te.metadata_json, '$.nms.conf'),
+                json_extract(te.metadata_json, '$.nms_conf'),
+                json_extract(te.metadata_json, '$.conf_threshold')
+            ),
+            COALESCE(
+                json_extract(te.metadata_json, '$.nms.iou'),
+                json_extract(te.metadata_json, '$.nms_iou'),
+                json_extract(te.metadata_json, '$.iou_threshold')
+            ),
+            COALESCE(
+                json_extract(te.metadata_json, '$.nms.topk'),
+                json_extract(te.metadata_json, '$.nms_topk'),
+                json_extract(te.metadata_json, '$.topk')
+            ),
             json_extract(te.metadata_json, '$.requires_plugins'),
             json_extract(te.metadata_json, '$.plugin_ops'),
             json_extract(te.metadata_json, '$.plugin_versions'),
@@ -2323,6 +2378,8 @@ def _backfill_detect_performance(
         "datasets_missing": 0,
         "datasets_errors": 0,
         "datasets_no_performance": 0,
+        "rows_stale": 0,
+        "rows_in_progress": 0,
         "rows_inserted": 0,
         "rows_updated": 0,
         "rows_skipped": 0,
@@ -2426,6 +2483,201 @@ def _backfill_detect_performance(
                     batch_size=extracted.get("batch_size"),
                     inference_width=extracted.get("inference_width"),
                     inference_height=extracted.get("inference_height"),
+                    zarr_mtime_ns=extracted.get("zarr_mtime_ns"),
+                    updated_utc=extracted.get("updated_utc"),
+                )
+
+    return summary
+
+
+def _eye_mask_performance_row_signature(row: Dict[str, object]) -> tuple[object, ...]:
+    return (
+        row.get("run_created_utc"),
+        row.get("recording_id"),
+        row.get("zarr_use"),
+        row.get("method"),
+        row.get("source_crop_run"),
+        row.get("source_keypoint_group"),
+        row.get("source_keypoints_run"),
+        row.get("source_eye_masks_run"),
+        row.get("source_eye_masks_method"),
+        row.get("total_rois"),
+        row.get("successful_eyes"),
+        row.get("successful_roi_pairs"),
+        row.get("successful_roi_pair_rate"),
+        row.get("duration_seconds"),
+        row.get("rois_per_second"),
+        row.get("inference_duration_seconds"),
+        row.get("inference_average_fps"),
+        row.get("reason_counts_json"),
+        row.get("summary_statistics_json"),
+        row.get("review_state"),
+        row.get("review_method"),
+        row.get("review_intended_use"),
+        row.get("review_reviewer"),
+        row.get("review_timestamp_utc"),
+        row.get("source_keypoint_stale_state"),
+        row.get("source_keypoint_stale_reason"),
+        row.get("source_keypoint_stale_timestamp_utc"),
+        row.get("source_keypoint_stale_json"),
+        row.get("lifecycle_state"),
+        row.get("lifecycle_reason"),
+        row.get("zarr_mtime_ns"),
+    )
+
+
+def _backfill_eye_mask_performance(
+    registry: Registry,
+    *,
+    dry_run: bool,
+    scope_paths: Optional[Sequence[Path]],
+    refresh: bool,
+    include_all_datasets: bool = False,
+) -> Dict[str, int]:
+    if include_all_datasets:
+        rows = registry.conn.execute(
+            """
+            SELECT dataset_id, zarr_path, recording_id, zarr_use
+            FROM datasets
+            WHERE status IS NULL OR lower(status) != 'missing'
+            ORDER BY dataset_id;
+            """
+        ).fetchall()
+    else:
+        rows = registry.conn.execute(
+            """
+            SELECT dataset_id, zarr_path, recording_id, zarr_use
+            FROM datasets
+            WHERE (status IS NULL OR lower(status) != 'missing')
+              AND lower(COALESCE(artifact_kind, '')) = 'source_recording'
+              AND lower(COALESCE(zarr_use, '')) = 'analysis'
+            ORDER BY dataset_id;
+            """
+        ).fetchall()
+    scope_roots = _normalize_scope_paths(scope_paths)
+    zarr = _import_zarr()
+    summary: Dict[str, int] = {
+        "datasets_scanned": 0,
+        "datasets_skipped_existing": 0,
+        "datasets_missing": 0,
+        "datasets_errors": 0,
+        "datasets_no_performance": 0,
+        "rows_inserted": 0,
+        "rows_updated": 0,
+        "rows_skipped": 0,
+        "rows_deleted": 0,
+    }
+
+    for row in rows:
+        dataset_id = str(row["dataset_id"])
+        zarr_path = Path(str(row["zarr_path"])).expanduser()
+        recording_id = str(row["recording_id"]) if row["recording_id"] else None
+        zarr_use = str(row["zarr_use"]) if row["zarr_use"] else None
+        if not _matches_scope(str(zarr_path), scope_roots):
+            continue
+        summary["datasets_scanned"] += 1
+        if not _is_zarr_root_path(zarr_path):
+            summary["datasets_missing"] += 1
+            continue
+
+        existing_rows = registry.conn.execute(
+            "SELECT * FROM eye_mask_performance WHERE dataset_id = ?;",
+            (dataset_id,),
+        ).fetchall()
+        if not refresh and existing_rows:
+            summary["datasets_skipped_existing"] += 1
+            summary["rows_skipped"] += len(existing_rows)
+            continue
+
+        try:
+            try:
+                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+            except TypeError:
+                root = zarr.open_group(str(zarr_path), mode="r")
+            extracted_rows = _extract_eye_mask_performance_rows(
+                root,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+            )
+        except Exception:
+            summary["datasets_errors"] += 1
+            continue
+
+        if not extracted_rows:
+            summary["datasets_no_performance"] += 1
+        for extracted in extracted_rows:
+            lifecycle_state = str(extracted.get("lifecycle_state") or "").strip().lower()
+            if lifecycle_state == "stale":
+                summary["rows_stale"] += 1
+            elif lifecycle_state == "in_progress":
+                summary["rows_in_progress"] += 1
+
+        existing_by_key: Dict[tuple[str, str], Dict[str, object]] = {
+            (str(existing["stage_group"]), str(existing["run_name"])): {key: existing[key] for key in existing.keys()}
+            for existing in existing_rows
+        }
+        extracted_by_key: Dict[tuple[str, str], Dict[str, object]] = {
+            (str(extracted["stage_group"]), str(extracted["run_name"])): extracted for extracted in extracted_rows
+        }
+
+        for key, extracted in extracted_by_key.items():
+            existing = existing_by_key.get(key)
+            if existing is None:
+                summary["rows_inserted"] += 1
+                continue
+            existing_sig = _eye_mask_performance_row_signature(existing)
+            extracted_sig = _eye_mask_performance_row_signature(extracted)
+            if existing_sig == extracted_sig:
+                summary["rows_skipped"] += 1
+            else:
+                summary["rows_updated"] += 1
+
+        if refresh:
+            for key in existing_by_key:
+                if key not in extracted_by_key:
+                    summary["rows_deleted"] += 1
+
+        if dry_run:
+            continue
+        if refresh:
+            registry.replace_eye_mask_performance(dataset_id, extracted_rows)
+        else:
+            for extracted in extracted_rows:
+                registry.upsert_eye_mask_performance(
+                    dataset_id=dataset_id,
+                    stage_group=str(extracted["stage_group"]),
+                    run_name=str(extracted["run_name"]),
+                    run_created_utc=extracted.get("run_created_utc"),
+                    recording_id=extracted.get("recording_id"),
+                    zarr_use=extracted.get("zarr_use"),
+                    method=extracted.get("method"),
+                    source_crop_run=extracted.get("source_crop_run"),
+                    source_keypoint_group=extracted.get("source_keypoint_group"),
+                    source_keypoints_run=extracted.get("source_keypoints_run"),
+                    source_eye_masks_run=extracted.get("source_eye_masks_run"),
+                    source_eye_masks_method=extracted.get("source_eye_masks_method"),
+                    total_rois=extracted.get("total_rois"),
+                    successful_eyes=extracted.get("successful_eyes"),
+                    successful_roi_pairs=extracted.get("successful_roi_pairs"),
+                    successful_roi_pair_rate=extracted.get("successful_roi_pair_rate"),
+                    duration_seconds=extracted.get("duration_seconds"),
+                    rois_per_second=extracted.get("rois_per_second"),
+                    inference_duration_seconds=extracted.get("inference_duration_seconds"),
+                    inference_average_fps=extracted.get("inference_average_fps"),
+                    reason_counts_json=extracted.get("reason_counts_json"),
+                    summary_statistics_json=extracted.get("summary_statistics_json"),
+                    review_state=extracted.get("review_state"),
+                    review_method=extracted.get("review_method"),
+                    review_intended_use=extracted.get("review_intended_use"),
+                    review_reviewer=extracted.get("review_reviewer"),
+                    review_timestamp_utc=extracted.get("review_timestamp_utc"),
+                    source_keypoint_stale_state=extracted.get("source_keypoint_stale_state"),
+                    source_keypoint_stale_reason=extracted.get("source_keypoint_stale_reason"),
+                    source_keypoint_stale_timestamp_utc=extracted.get("source_keypoint_stale_timestamp_utc"),
+                    source_keypoint_stale_json=extracted.get("source_keypoint_stale_json"),
+                    lifecycle_state=extracted.get("lifecycle_state"),
+                    lifecycle_reason=extracted.get("lifecycle_reason"),
                     zarr_mtime_ns=extracted.get("zarr_mtime_ns"),
                     updated_utc=extracted.get("updated_utc"),
                 )
@@ -3673,10 +3925,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.backfill_detect_quality
         and not args.backfill_detect_performance
         and not args.backfill_crop_quality
+        and not args.backfill_eye_mask_performance
         and not args.refresh_keypoint_quality
         and not args.refresh_detect_quality
         and not args.refresh_detect_performance
         and not args.refresh_crop_quality
+        and not args.refresh_eye_mask_performance
         and not args.check_integrity
         and not args.vacuum
     ):
@@ -3689,9 +3943,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "--remap-training-set-dataset-ids, "
             "--backfill-dataset-lineage, "
             "--backfill-detect-quality, --backfill-detect-performance, "
-            "--backfill-crop-quality, "
+            "--backfill-crop-quality, --backfill-eye-mask-performance, "
             "--refresh-keypoint-quality, --refresh-detect-quality, --refresh-detect-performance, "
-            "--refresh-crop-quality, "
+            "--refresh-crop-quality, --refresh-eye-mask-performance, "
             "--check-integrity, and/or --vacuum."
         )
 
@@ -4190,6 +4444,44 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 f"missing={summary['datasets_missing']} "
                 f"errors={summary['datasets_errors']} "
                 f"no_quality={summary['datasets_no_quality']} "
+                f"skipped_existing={summary['datasets_skipped_existing']}"
+            )
+            if args.dry_run:
+                print(
+                    "Dry run: would apply "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+            else:
+                print(
+                    "Applied "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+
+        if args.backfill_eye_mask_performance or args.refresh_eye_mask_performance:
+            summary = _backfill_eye_mask_performance(
+                registry,
+                dry_run=bool(args.dry_run),
+                scope_paths=scope_paths or None,
+                refresh=bool(args.refresh_eye_mask_performance),
+                include_all_datasets=bool(args.eye_mask_performance_all_datasets),
+            )
+            mode = "refresh" if args.refresh_eye_mask_performance else "backfill"
+            scope_label = "all-datasets" if args.eye_mask_performance_all_datasets else "source-analysis-only"
+            print(
+                f"Eye-mask performance {mode}: "
+                f"scope={scope_label} "
+                f"scanned={summary['datasets_scanned']} "
+                f"missing={summary['datasets_missing']} "
+                f"errors={summary['datasets_errors']} "
+                f"no_performance={summary['datasets_no_performance']} "
+                f"stale={summary['rows_stale']} "
+                f"in_progress={summary['rows_in_progress']} "
                 f"skipped_existing={summary['datasets_skipped_existing']}"
             )
             if args.dry_run:

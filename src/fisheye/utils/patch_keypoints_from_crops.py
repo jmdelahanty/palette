@@ -14,6 +14,7 @@ import zarr
 
 from ..detection.detect_keypoints_traditional import detect_keypoints_traditional
 from ..refinement.refine_keypoints import _process_refinement_chunk
+from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
 from ..tune.keypoint_review import _update_postprocess_summary
 
 
@@ -35,8 +36,26 @@ def _load_frame_flags(path: Path) -> Dict[str, List[int]]:
     out: Dict[str, List[int]] = {}
     for key, value in data.items():
         if isinstance(value, list):
-            frames = [int(v) for v in value]
-            out[str(key)] = frames
+            frames: List[int] = []
+            for item in value:
+                if isinstance(item, dict):
+                    frame_val = item.get("frame_idx")
+                    if frame_val is None:
+                        frame_val = item.get("frame")
+                    if frame_val is None:
+                        frame_val = item.get("frame_index")
+                    if frame_val is None:
+                        continue
+                    try:
+                        frames.append(int(frame_val))
+                    except (TypeError, ValueError):
+                        continue
+                else:
+                    try:
+                        frames.append(int(item))
+                    except (TypeError, ValueError):
+                        continue
+            out[str(key)] = sorted(set(frames))
     return out
 
 
@@ -467,9 +486,10 @@ def _patch_refined_keypoints(
     force: bool,
     patch_context: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
-    refined_parent = root.get("refined_keypoints_runs") or root.get("keypoints_refined_runs")
+    refined_group_name = "refined_keypoints_runs" if root.get("refined_keypoints_runs") is not None else "keypoints_refined_runs"
+    refined_parent = root.get(refined_group_name)
     if refined_parent is None:
-        return {"patched": 0, "frames": 0}
+        return {"patched": 0, "frames": 0, "refined_group_name": refined_group_name, "refined_run": refined_run}
     if refined_run is None:
         refined_run = refined_parent.attrs.get("latest")
     if not refined_run or refined_run not in refined_parent:
@@ -487,10 +507,15 @@ def _patch_refined_keypoints(
         print(f"  [warn] {msg} Proceeding due to --force.")
 
     if target_indices.size == 0:
-        return {"patched": 0, "frames": 0}
+        return {"patched": 0, "frames": 0, "refined_group_name": refined_group_name, "refined_run": refined_run}
 
     if not apply:
-        return {"patched": int(target_indices.size), "frames": 0}
+        return {
+            "patched": int(target_indices.size),
+            "frames": 0,
+            "refined_group_name": refined_group_name,
+            "refined_run": refined_run,
+        }
 
     params = refined.attrs.get("parameters")
     if not isinstance(params, dict):
@@ -609,6 +634,8 @@ def _patch_refined_keypoints(
     return {
         "patched": int(target_indices.size),
         "frames": int(np.unique(frame_indices[target_indices]).size),
+        "refined_group_name": refined_group_name,
+        "refined_run": refined_run,
     }
 
 
@@ -689,6 +716,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         root = zarr.open_group(str(plan.zarr_path), mode="a")
 
         keypoints_group, keypoints_run = _resolve_keypoints_run(root, args.keypoints_run)
+        frame_indices = keypoints_group["frame_indices"][:].astype(np.int64, copy=False)
+        target_indices = np.where(np.isin(frame_indices, np.array(plan.frames, dtype=np.int64)))[0]
+        target_frames = np.unique(frame_indices[target_indices]) if target_indices.size else np.array([], dtype=np.int64)
         method = keypoints_group.attrs.get("method")
         if method and str(method).lower() not in {"traditional_pose", "traditional"}:
             msg = f"keypoints_run method is '{method}', patching expects traditional_pose."
@@ -740,12 +770,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 f"  frames={keypoint_result['frames']} keypoints={keypoint_result['patched']} "
                 f"success={keypoint_result['success']} failed={keypoint_result['failed']}"
             )
+            if args.apply and int(keypoint_result.get("patched", 0)) > 0:
+                stale_marked = mark_downstream_eye_mask_runs_stale(
+                    root,
+                    source_keypoint_group="keypoints_runs",
+                    source_keypoints_run=str(keypoints_run),
+                    roi_indices=target_indices.tolist(),
+                    frame_indices=target_frames.tolist(),
+                    reason="keypoint_patch_from_crops_raw",
+                )
+                if stale_marked:
+                    print(f"  marked_downstream_eye_masks_stale={stale_marked}")
         else:
             print(f"  keypoints_run={keypoints_run} (raw patch skipped)")
 
         if not args.skip_refined:
-            frame_indices = keypoints_group["frame_indices"][:].astype(np.int64, copy=False)
-            target_indices = np.where(np.isin(frame_indices, np.array(plan.frames, dtype=np.int64)))[0]
             refined_context = dict(patch_context)
             refined_context["refined_run"] = args.refined_run or "latest"
             refined_result = _patch_refined_keypoints(
@@ -763,6 +802,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     f"  refined_keypoints patched={refined_result['patched']} "
                     f"frames={refined_result['frames']}"
                 )
+            if args.apply and int(refined_result.get("patched", 0)) > 0:
+                stale_marked = mark_downstream_eye_mask_runs_stale(
+                    root,
+                    source_keypoint_group=str(refined_result.get("refined_group_name") or "refined_keypoints_runs"),
+                    source_keypoints_run=str(refined_result.get("refined_run") or ""),
+                    roi_indices=target_indices.tolist(),
+                    frame_indices=target_frames.tolist(),
+                    reason="keypoint_patch_from_crops_refined",
+                )
+                if stale_marked:
+                    print(f"  marked_downstream_eye_masks_stale={stale_marked}")
 
         if not args.apply:
             print("  (dry-run) use --apply to write changes")

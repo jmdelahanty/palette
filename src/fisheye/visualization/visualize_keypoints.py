@@ -491,7 +491,7 @@ def main() -> None:
     # Get keypoint labels if available
     keypoint_method = "unknown"
     pose_schema = None
-    labels = ["bladder", "eye_left", "eye_right"]
+    labels = ["swim_bladder", "eye_left", "eye_right"]
     if keypoint_run:
         if keypoint_group is None:
             keypoint_group = root[f"keypoints_runs/{keypoint_run}"]
@@ -507,7 +507,7 @@ def main() -> None:
                             pose_schema = schema_from_package(schema_name)
                         except FileNotFoundError:
                             pose_schema = None
-            default_labels = ["bladder", "eye_left", "eye_right"]
+            default_labels = ["swim_bladder", "eye_left", "eye_right"]
             if pose_schema:
                 labels = pose_schema.node_names
             else:

@@ -10,6 +10,8 @@ from fisheye.utils.check_training_registry import (
     KEYPOINT_GATE_MIN_RATE,
     RecordingVocabRow,
     _fetch_exports,
+    _load_onnx_rows,
+    _load_tensorrt_rows,
     _format_recording_vocab_inline,
     _group_recording_vocab_rows,
     _keypoint_exclusion_reason,
@@ -164,6 +166,143 @@ def test_fetch_exports_does_not_fallback_to_legacy_sources(tmp_path: Path) -> No
     assert exports["trt_path"] is None
     assert exports["trt_source"] is None
     registry.close()
+
+
+def test_onnx_tensorrt_rows_expose_nms_columns(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    config_path = tmp_path / "cfg.yaml"
+    config_path.write_text("cfg", encoding="utf-8")
+    run_id = "run_nms_view_001"
+    registry.record_training_run(
+        run_id=run_id,
+        set_id="detect_set_v001",
+        config_path=config_path,
+        manifest_path=None,
+        skeleton_id=None,
+        model_path=None,
+        metrics_path=None,
+        status="success",
+        final_metrics={"mAP50": 0.9},
+    )
+
+    onnx_new = tmp_path / "nms.onnx"
+    trt_new = tmp_path / "nms_fp16.engine"
+    onnx_new.write_text("onnx", encoding="utf-8")
+    trt_new.write_text("trt", encoding="utf-8")
+
+    registry.record_onnx_model(
+        run_id=run_id,
+        set_id="detect_set_v001",
+        skeleton_id=None,
+        detection_model_run_id=run_id,
+        path=onnx_new,
+        sha256=None,
+        manifest_path=None,
+        manifest_sha256=None,
+        nms_conf=0.81,
+        nms_iou=0.66,
+        nms_topk=2,
+        metadata=None,
+    )
+    registry.record_tensorrt_model(
+        run_id=run_id,
+        set_id="detect_set_v001",
+        skeleton_id=None,
+        detection_model_run_id=run_id,
+        onnx_run_id=run_id,
+        precision="fp16",
+        path=trt_new,
+        sha256=None,
+        manifest_path=None,
+        manifest_sha256=None,
+        nms_conf=0.79,
+        nms_iou=0.64,
+        nms_topk=3,
+        metadata=None,
+    )
+
+    onnx_rows = _load_onnx_rows(registry, set_filter=None, limit=None, hide_unlinked=False)
+    trt_rows = _load_tensorrt_rows(registry, set_filter=None, limit=None, hide_unlinked=False)
+    onnx_row = next((row for row in onnx_rows if row.run_id == run_id), None)
+    trt_row = next((row for row in trt_rows if row.run_id == run_id), None)
+    assert onnx_row is not None
+    assert trt_row is not None
+    assert onnx_row.nms_conf is not None and round(float(onnx_row.nms_conf), 2) == 0.81
+    assert onnx_row.nms_iou is not None and round(float(onnx_row.nms_iou), 2) == 0.66
+    assert onnx_row.nms_topk == 2
+    assert trt_row.nms_conf is not None and round(float(trt_row.nms_conf), 2) == 0.79
+    assert trt_row.nms_iou is not None and round(float(trt_row.nms_iou), 2) == 0.64
+    assert trt_row.nms_topk == 3
+    registry.close()
+
+
+def test_view_outputs_include_nms_summary(tmp_path: Path, capsys) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    config_path = tmp_path / "cfg.yaml"
+    config_path.write_text("cfg", encoding="utf-8")
+    run_id = "run_nms_output_001"
+    registry.record_training_run(
+        run_id=run_id,
+        set_id="detect_set_v001",
+        config_path=config_path,
+        manifest_path=None,
+        skeleton_id=None,
+        model_path=None,
+        metrics_path=None,
+        status="success",
+        final_metrics={"mAP50": 0.9},
+    )
+
+    onnx_path = tmp_path / "output.onnx"
+    trt_path = tmp_path / "output_fp16.engine"
+    onnx_path.write_text("onnx", encoding="utf-8")
+    trt_path.write_text("trt", encoding="utf-8")
+
+    registry.record_onnx_model(
+        run_id=run_id,
+        set_id="detect_set_v001",
+        skeleton_id=None,
+        detection_model_run_id=run_id,
+        path=onnx_path,
+        sha256=None,
+        manifest_path=None,
+        manifest_sha256=None,
+        nms_conf=0.8,
+        nms_iou=0.65,
+        nms_topk=1,
+        metadata=None,
+    )
+    registry.record_tensorrt_model(
+        run_id=run_id,
+        set_id="detect_set_v001",
+        skeleton_id=None,
+        detection_model_run_id=run_id,
+        onnx_run_id=run_id,
+        precision="fp16",
+        path=trt_path,
+        sha256=None,
+        manifest_path=None,
+        manifest_sha256=None,
+        nms_conf=0.8,
+        nms_iou=0.65,
+        nms_topk=1,
+        metadata=None,
+    )
+    registry.close()
+
+    rc_onnx = check_training_registry_main(
+        ["--registry", str(tmp_path / "registry.sqlite"), "--view", "onnx", "--no-rich"]
+    )
+    out_onnx = capsys.readouterr().out
+    assert rc_onnx == 0
+    assert "nms: c=0.800 i=0.650 k=1" in out_onnx
+
+    rc_trt = check_training_registry_main(
+        ["--registry", str(tmp_path / "registry.sqlite"), "--view", "tensorrt", "--no-rich"]
+    )
+    out_trt = capsys.readouterr().out
+    assert rc_trt == 0
+    assert "nms: c=0.800 i=0.650 k=1" in out_trt
 
 
 def test_onnx_plugin_details_formats_ops_and_versions() -> None:

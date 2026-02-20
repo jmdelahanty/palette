@@ -83,10 +83,13 @@ Useful controls in manual UI:
 - `s`: save current ROI correction
 - `r`: reset current ROI to original masks
 - `n`/`p`: next/previous failure
+- `a`: set eye-mask review status using `--review-*` args (default: `approved/manual/training`)
+- `N` / `R` / `P`: mark `needs_review` / `rejected` / `pending`
 
 Writes:
 - per-ROI updates to masks/ellipses/contours
 - `metrics/reason` tags include `manual_correction`
+- run attrs: `eye_mask_review_status` and parent `eye_mask_review_status_latest`
 
 6. Recompute postprocess summary.
 

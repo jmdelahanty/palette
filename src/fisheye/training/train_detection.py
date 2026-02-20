@@ -1133,6 +1133,12 @@ def _export_detection_artifacts(
     export_info["onnx_path"] = str(onnx_path)
     export_info["onnx_log_path"] = str(onnx_log_path) if existing_onnx_path is None else None
     export_info["onnx_manifest_path"] = str(onnx_manifest_path)
+    export_info["onnx_opset"] = args.onnx_opset
+    export_info["nms_conf"] = float(args.nms_conf)
+    export_info["nms_iou"] = float(args.nms_iou)
+    export_info["nms_topk"] = int(args.nms_topk)
+    export_info["input_shape"] = list(input_shape)
+    export_info["imgsz"] = [int(img_h), int(img_w)]
 
     export_script = Path(__file__).resolve().parent / "export_onnx.py"
     onnx_cmd = [

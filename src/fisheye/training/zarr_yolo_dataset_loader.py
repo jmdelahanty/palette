@@ -443,7 +443,7 @@ class GlobalIndexManager:
                         raise KeyError(f"Keypoint run '{keypoint_run_name}' missing 'keypoints_roi' array.")
 
                     total_frames = kp_group['keypoints_roi'].shape[0]
-                    column_names = list(kp_group.attrs.get('keypoint_labels', ['bladder', 'eye_left', 'eye_right']))
+                    column_names = list(kp_group.attrs.get('keypoint_labels', ['swim_bladder', 'eye_left', 'eye_right']))
                     success_arr = kp_group['detection_success'][:]
                     if total_frames > 0:
                         tracking_success_rate = float(np.mean(success_arr) * 100.0)
@@ -778,7 +778,7 @@ class ZarrYOLODataset(Dataset):
         self.metadata_map = {m.path: m for m in index_manager.metadata_list}
         if self.config.task == 'pose':
             first_metadata = index_manager.metadata_list[0] if index_manager.metadata_list else None
-            labels = first_metadata.column_names if first_metadata and first_metadata.column_names else ['bladder', 'eye_left', 'eye_right']
+            labels = first_metadata.column_names if first_metadata and first_metadata.column_names else ['swim_bladder', 'eye_left', 'eye_right']
             self.keypoint_labels = labels
         else:
             self.keypoint_labels = []

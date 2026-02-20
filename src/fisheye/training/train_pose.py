@@ -507,7 +507,7 @@ def _infer_pose_schema(kpt_shape: Optional[tuple], zarr_metadata: dict) -> dict:
     n_keypoints = int(kpt_dims[0]) if kpt_dims and len(kpt_dims) >= 1 else None
 
     if labels is None and n_keypoints == 3:
-        labels = ["bladder", "eye_left", "eye_right"]
+        labels = ["swim_bladder", "eye_left", "eye_right"]
     if skeleton is None and labels and len(labels) == 3:
         skeleton = [[0, 1], [0, 2], [1, 2]]
 

@@ -714,10 +714,10 @@ def detect_keypoints(
         overwrite=True
     )
 
-    keypoint_group.attrs['keypoint_labels'] = ['bladder', 'eye_left', 'eye_right']
-    keypoint_group.attrs['keypoint_confidence_labels'] = ['bladder', 'eye_left', 'eye_right']
+    keypoint_group.attrs['keypoint_labels'] = ['swim_bladder', 'eye_left', 'eye_right']
+    keypoint_group.attrs['keypoint_confidence_labels'] = ['swim_bladder', 'eye_left', 'eye_right']
     keypoint_group.attrs['triangle_angle_order'] = [
-        'angle at bladder',
+        'angle at swim_bladder',
         'angle at eye_left',
         'angle at eye_right'
     ]

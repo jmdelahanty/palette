@@ -86,3 +86,15 @@ refine_detect:
   
   max_gap: 50
   interpolation_method: linear
+refine_eye_masks:
+  enabled: true
+  source_run: null
+  run_name: null
+  keypoint_run: null
+  chunk_size: 512
+  scheduler: processes
+  num_workers: null
+  area_filter_z: 2.0
+  area_filter_mode: either
+  force_refine_traditional: false
+  allow_latest_keypoint_fallback: false

@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import sys
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
@@ -347,6 +349,161 @@ def _seed_registry_for_detect_filters(registry_path: Path) -> None:
             )
         ],
     )
+    registry.close()
+
+
+def _seed_eye_mask_performance_rows(registry_path: Path) -> None:
+    registry = Registry(registry_path)
+
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_a",
+        stage_group="eye_masks_runs",
+        run_name="eye_masks_a",
+        run_created_utc="2026-02-11T00:00:00+00:00",
+        recording_id="recording_a",
+        zarr_use="analysis",
+        method="traditional_eye_segmentation",
+        source_crop_run="crop_a",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="refined_kp_a",
+        source_eye_masks_run=None,
+        source_eye_masks_method=None,
+        total_rois=200,
+        successful_eyes=360,
+        successful_roi_pairs=160,
+        successful_roi_pair_rate=0.8,
+        duration_seconds=100.0,
+        rois_per_second=2.0,
+        inference_duration_seconds=None,
+        inference_average_fps=2.0,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        lifecycle_state=None,
+    )
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_a",
+        stage_group="refined_eye_masks_runs",
+        run_name="refined_eye_masks_a",
+        run_created_utc="2026-02-11T00:10:00+00:00",
+        recording_id="recording_a",
+        zarr_use="analysis",
+        method="refine_eye_masks",
+        source_crop_run="crop_a",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="refined_kp_a",
+        source_eye_masks_run="eye_masks_a",
+        source_eye_masks_method="traditional_eye_segmentation",
+        total_rois=200,
+        successful_eyes=392,
+        successful_roi_pairs=196,
+        successful_roi_pair_rate=0.98,
+        duration_seconds=40.0,
+        rois_per_second=5.0,
+        inference_duration_seconds=None,
+        inference_average_fps=5.0,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="alice",
+        review_timestamp_utc="2026-02-11T00:20:00+00:00",
+        lifecycle_state="approved",
+    )
+
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_b",
+        stage_group="refined_eye_masks_runs",
+        run_name="refined_eye_masks_b",
+        run_created_utc="2026-02-11T01:10:00+00:00",
+        recording_id="recording_b",
+        zarr_use="analysis",
+        method="refine_eye_masks",
+        source_crop_run="crop_b",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="refined_kp_b",
+        source_eye_masks_run="eye_masks_b",
+        source_eye_masks_method="traditional_eye_segmentation",
+        total_rois=180,
+        successful_eyes=320,
+        successful_roi_pairs=150,
+        successful_roi_pair_rate=0.8333,
+        duration_seconds=55.0,
+        rois_per_second=3.2727,
+        inference_duration_seconds=None,
+        inference_average_fps=3.2727,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="needs_review",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="bob",
+        review_timestamp_utc="2026-02-11T01:20:00+00:00",
+        source_keypoint_stale_state="stale",
+        source_keypoint_stale_reason="keypoint_manual_correction",
+        source_keypoint_stale_timestamp_utc="2026-02-11T01:25:00+00:00",
+        source_keypoint_stale_json=json.dumps({"state": "stale", "reason": "keypoint_manual_correction"}),
+        lifecycle_state="stale",
+        lifecycle_reason="keypoint_manual_correction",
+    )
+
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_c",
+        stage_group="eye_masks_runs",
+        run_name="eye_masks_c",
+        run_created_utc="2026-02-11T02:00:00+00:00",
+        recording_id="recording_c",
+        zarr_use="analysis",
+        method="traditional_eye_segmentation",
+        source_crop_run="crop_c",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="refined_kp_c",
+        source_eye_masks_run=None,
+        source_eye_masks_method=None,
+        total_rois=220,
+        successful_eyes=430,
+        successful_roi_pairs=210,
+        successful_roi_pair_rate=0.9545,
+        duration_seconds=70.0,
+        rois_per_second=3.1428,
+        inference_duration_seconds=None,
+        inference_average_fps=3.1428,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        lifecycle_state=None,
+    )
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_c",
+        stage_group="refined_eye_masks_runs",
+        run_name="refined_eye_masks_c",
+        run_created_utc="2026-02-11T02:05:00+00:00",
+        recording_id="recording_c",
+        zarr_use="analysis",
+        method="refine_eye_masks",
+        source_crop_run="crop_c",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="refined_kp_c",
+        source_eye_masks_run="eye_masks_c",
+        source_eye_masks_method="traditional_eye_segmentation",
+        total_rois=220,
+        successful_eyes=410,
+        successful_roi_pairs=200,
+        successful_roi_pair_rate=0.9090,
+        duration_seconds=90.0,
+        rois_per_second=2.4444,
+        inference_duration_seconds=None,
+        inference_average_fps=2.4444,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="pending",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="carol",
+        review_timestamp_utc="2026-02-11T02:10:00+00:00",
+        lifecycle_state="in_progress",
+        lifecycle_reason="pending",
+    )
+
     registry.close()
 
 
@@ -748,3 +905,74 @@ def test_registry_query_filters_by_crop_percent_frames_threshold(tmp_path: Path,
     dataset_ids = {row["dataset_id"] for row in payload}
     assert dataset_ids == {"dataset_a"}
     assert payload[0]["crop_percent_frames_with_crops"] == 95.0
+
+
+def test_registry_query_filters_by_eye_mask_review_state(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_eye_mask_performance_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--eye-mask-review-state",
+            "approved",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in payload} == {"dataset_a"}
+    assert payload[0]["eye_mask_stage_group"] == "refined_eye_masks_runs"
+    assert payload[0]["eye_mask_review_state"] == "approved"
+
+
+def test_registry_query_filters_by_eye_mask_stale_and_lifecycle_state(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_eye_mask_performance_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--eye-mask-stale-state",
+            "stale",
+            "--eye-mask-lifecycle-state",
+            "stale",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in payload} == {"dataset_b"}
+    assert payload[0]["eye_mask_source_keypoint_stale_state"] == "stale"
+    assert payload[0]["eye_mask_lifecycle_state"] == "stale"
+
+
+def test_registry_query_filters_by_eye_mask_stage_and_success_rate(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_eye_mask_performance_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--eye-mask-stage",
+            "eye_masks_runs",
+            "--eye-mask-method",
+            "traditional_eye_segmentation",
+            "--eye-mask-success-rate-min",
+            "0.9",
+            "--eye-mask-rois-per-second-min",
+            "3.0",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in payload} == {"dataset_c"}
+    assert payload[0]["eye_mask_stage_group"] == "eye_masks_runs"
+    assert payload[0]["eye_mask_successful_roi_pair_rate"] == pytest.approx(0.9545)

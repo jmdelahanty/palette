@@ -57,3 +57,7 @@ default behavior (exclude `fish_present_no_keypoints`).
   optionally include these frames with `visibility=0`.
 - Approval decisions should consider the proportion of
   `fish_present_no_keypoints` frames when targeting training use.
+
+## Related Contract
+- Late correction + ROI flagging + downstream stale marking:
+  `docs/keypoint_late_correction_contract.md`

@@ -6,6 +6,12 @@ Scope: prioritize correctness and auditability first, then orchestration and reg
 
 ## P0: Correctness Blockers (Do First)
 
+- [x] Write and adopt the eye-mask row-mapping contract.
+  - Canonical source for `frame_indices`/`detection_indices`/`frame_counts` is
+    the source crop run; keypoint arrays are validation/fallback only.
+  - Covers both `eye_masks_runs` and `refined_eye_masks_runs`.
+  - Contract doc: `docs/eye_mask_row_mapping_contract.md`.
+
 - [x] Canonicalize eye-mask provenance attribute names across all producers/consumers.
   - Today we mix `source_keypoint_run` and `source_keypoints_run` across traditional/YOLO/U-Net/refine paths.
   - Target: canonicalize to `source_keypoints_run`, dual-read during migration, and backfill legacy runs.
@@ -29,30 +35,43 @@ Scope: prioritize correctness and auditability first, then orchestration and reg
 
 ## P1: Pipeline and Orchestration Parity
 
-- [ ] Add first-class `refined_eye_masks` stage wiring in pipeline orchestration.
+- [x] Add first-class `refined_eye_masks` stage wiring in pipeline orchestration.
   - Detect/pose have explicit refine stages in pipeline flow; eye-mask refine should be similarly discoverable and optional.
   - Add stage dependencies, stage completion checks, and configurable enable/disable flags.
   - Primary file: `src/fisheye/core/pipeline.py`.
 
-- [ ] Add eye-mask batch runner parity with detect/pose wrappers.
+- [x] Add eye-mask batch runner parity with detect/pose wrappers.
   - Standardize per-zarr result payloads (run name, method, source runs, duration, failure reason).
   - Emit JSONL suitable for reconciliation/reporting like detect/pose batch utilities.
+  - Primary files:
+    - `src/fisheye/utils/run_eye_masks_batch.py`
+    - `tests/unit/fisheye/test_run_eye_masks_batch.py`
 
-- [ ] Add method-aware prerequisites for eye-mask stages.
+- [x] Add method-aware prerequisites for eye-mask stages.
   - Validate method-specific requirements up front (e.g., model path required for YOLO/U-Net).
   - Keep traditional path behavior unchanged.
+  - Primary files:
+    - `src/fisheye/utils/run_eye_masks_batch.py`
+    - `tests/unit/fisheye/test_run_eye_masks_batch.py`
 
 ## P2: Registry and Query Parity
 
-- [ ] Add eye-mask performance registry table + latest views.
+- [x] Add eye-mask performance registry table + latest views.
   - Track runtime/throughput and quality summary fields from `eye_masks_runs`/`refined_eye_masks_runs`.
   - Add rescan/backfill path to populate historical runs.
+  - Primary files:
+    - `src/fisheye/registry/db.py`
+    - `src/fisheye/registry/maintenance.py`
+    - `tests/unit/fisheye/test_registry_maintenance.py`
 
-- [ ] Add eye-mask review status registry fields and query filters.
+- [x] Add eye-mask review status registry fields and query filters.
   - Mirror detect/pose review ergonomics (`state`, `intended_use`, timestamps, reviewer, source linkage).
   - Extend `registry_query.py` with eye-mask quality/performance slices.
+  - [x] Zarr-level review status contract is in place:
+    - `refined_eye_masks_runs/<run>.attrs["eye_mask_review_status"]`
+    - `refined_eye_masks_runs.attrs["eye_mask_review_status_latest"]`
 
-- [ ] Add stale/in-progress reconciliation for eye-mask review/refinement runs.
+- [x] Add stale/in-progress reconciliation for eye-mask review/refinement runs.
   - Align maintenance behavior with detect/pose failure recovery patterns.
 
 ## P3: Model Resolution and Provenance Parity
@@ -63,6 +82,7 @@ Scope: prioritize correctness and auditability first, then orchestration and reg
 
 - [ ] Standardize provenance payload shape with detect/pose conventions.
   - Align command, git, environment, platform, parameters, inputs, artifacts sections and key naming.
+  - Draft contract: `docs/provenance_contract_draft.md`.
 
 ## P4: Tests, Docs, and Migration Hygiene
 

@@ -33,6 +33,7 @@ SLIDER_MAX_RADIUS = 10
 SLIDER_MAX_PRETHRESH = 255
 SLIDER_MAX_EYE_GAP = 200
 SLIDER_MAX_SOBEL = 100  # maps to strength in range [0, 1]
+SLIDER_MAX_CIRCULARITY = 100  # maps to min_circularity in range [0, 1]
 DEBUG_PANEL_SCALE = 5
 DEBUG_PANEL_MARGIN = 10
 DEBUG_PANEL_SPACING = 20
@@ -43,7 +44,7 @@ def save_eye_mask_params(zarr_path: Path, params: Dict[str, Any]) -> Tuple[bool,
     Persist eye mask tuning parameters into the Zarr's analysis_metadata group.
     """
     try:
-        root = zarr.open(str(zarr_path), mode='a')
+        root = zarr.open(str(zarr_path), mode='a', use_consolidated=False)
         if 'analysis_metadata' not in root:
             root.create_group('analysis_metadata')
         analysis_meta = root['analysis_metadata']
@@ -160,6 +161,7 @@ def select_region(
     center: Tuple[float, float],
     min_area: int,
     max_area: Optional[int],
+    min_circularity: Optional[float],
     closing: int,
     opening: int,
 ) -> Optional[np.ndarray]:
@@ -185,6 +187,13 @@ def select_region(
             continue
         if max_area is not None and area > max_area:
             continue
+        if min_circularity is not None:
+            perimeter = float(region.perimeter)
+            if perimeter <= 0.0:
+                continue
+            circularity = float((4.0 * np.pi * float(area)) / (perimeter * perimeter))
+            if circularity < min_circularity:
+                continue
         rcx, rcy = region.centroid
         dist = (rcx - cy) ** 2 + (rcy - cx) ** 2
         if best is None or dist < best_dist:
@@ -624,6 +633,7 @@ def _build_config_from_params(
     sobel_strength: float,
     min_area: int,
     max_area: Optional[int],
+    min_circularity: Optional[float],
     closing_radius: int,
     opening_radius: int,
     min_eye_separation: Optional[float],
@@ -635,6 +645,7 @@ def _build_config_from_params(
         sobel_strength=float(sobel_strength),
         min_area=int(min_area),
         max_area=int(max_area) if max_area is not None else None,
+        min_circularity=float(min_circularity) if min_circularity is not None else None,
         closing_radius=int(closing_radius),
         opening_radius=int(opening_radius),
         min_eye_separation=float(min_eye_separation) if min_eye_separation is not None else None,
@@ -647,7 +658,7 @@ def run_tuner(args: argparse.Namespace) -> None:
     if not zarr_path.exists():
         raise FileNotFoundError(zarr_path)
 
-    root = zarr.open(str(zarr_path), mode="r")
+    root = zarr.open(str(zarr_path), mode="r", use_consolidated=False)
 
     crop_runs = root.get("crop_runs", None)
     if crop_runs is None or "latest" not in crop_runs.attrs:
@@ -717,6 +728,7 @@ def run_tuner(args: argparse.Namespace) -> None:
     cv2.createTrackbar("Sobel %", main_window, 0, SLIDER_MAX_SOBEL, nothing)
     cv2.createTrackbar("Min Area", main_window, 15, SLIDER_MAX_AREA, nothing)
     cv2.createTrackbar("Max Area", main_window, 0, SLIDER_MAX_AREA, nothing)  # 0 => None
+    cv2.createTrackbar("Min Circ %", main_window, 0, SLIDER_MAX_CIRCULARITY, nothing)  # 0 => None
     cv2.createTrackbar("Closing r", main_window, 3, SLIDER_MAX_RADIUS, nothing)
     cv2.createTrackbar("Opening r", main_window, 1, SLIDER_MAX_RADIUS, nothing)
     cv2.createTrackbar("Min Gap", main_window, 4, SLIDER_MAX_EYE_GAP, nothing)
@@ -736,6 +748,7 @@ def run_tuner(args: argparse.Namespace) -> None:
     print("  q/ESC: Quit")
     print("  Rotate ROI: Align heading to 0° for tuner-only preview")
     print("  Min Gap / Max Gap: enforce eye-center separation bounds (Max Gap=0 disables upper limit)")
+    print("  Min Circ %: reject non-circular connected components (0 disables)")
     print("  Sobel %: Blend Sobel edge subtraction into global thresholding (0=off)")
     print("  Axis colors: Major (cyan), Minor (red)")
     print("  Adjust other sliders to tune parameters\n")
@@ -750,6 +763,12 @@ def run_tuner(args: argparse.Namespace) -> None:
         min_area = cv2.getTrackbarPos("Min Area", main_window)
         max_area_slider = cv2.getTrackbarPos("Max Area", main_window)
         max_area = max_area_slider if max_area_slider > 0 else None
+        min_circularity_slider = cv2.getTrackbarPos("Min Circ %", main_window)
+        min_circularity = (
+            float(min_circularity_slider) / float(SLIDER_MAX_CIRCULARITY)
+            if min_circularity_slider > 0 and SLIDER_MAX_CIRCULARITY > 0
+            else None
+        )
         closing = cv2.getTrackbarPos("Closing r", main_window)
         opening = cv2.getTrackbarPos("Opening r", main_window)
         min_gap_slider = cv2.getTrackbarPos("Min Gap", main_window)
@@ -786,6 +805,9 @@ def run_tuner(args: argparse.Namespace) -> None:
             info_lines.append(f"Gap limits: min≥{min_gap:.1f}px | max=None")
         else:
             info_lines.append(f"Gap limits: min≥{min_gap:.1f}px | max≤{max_gap:.1f}px")
+        info_lines.append(
+            f"Min circularity: {min_circularity:.2f}" if min_circularity is not None else "Min circularity: None"
+        )
 
         # Debug panels list
         debug_panels = []
@@ -828,6 +850,7 @@ def run_tuner(args: argparse.Namespace) -> None:
                     (cx - x0, cy - y0),
                     min_area,
                     max_area,
+                    min_circularity,
                     closing,
                     opening,
                 )
@@ -872,6 +895,14 @@ def run_tuner(args: argparse.Namespace) -> None:
                     f"major={region.major_axis_length:.1f} minor={region.minor_axis_length:.1f} "
                     f"thr={threshold_value:.1f}"
                 )
+                perimeter = float(region.perimeter)
+                circularity = (
+                    float((4.0 * np.pi * float(region.area)) / (perimeter * perimeter))
+                    if perimeter > 0.0
+                    else float("nan")
+                )
+                if np.isfinite(circularity):
+                    info_line += f" circ={circularity:.2f}"
                 info_lines.append(info_line)
 
                 contour = measure.find_contours(region_mask.astype(float), 0.5)
@@ -936,6 +967,7 @@ def run_tuner(args: argparse.Namespace) -> None:
                 'sobel_strength': float(sobel_strength),
                 'min_area': int(min_area),
                 'max_area': int(max_area) if max_area is not None else None,
+                'min_circularity': float(min_circularity) if min_circularity is not None else None,
                 'closing_radius': int(closing),
                 'opening_radius': int(opening),
                 'min_eye_separation': float(min_gap) if min_gap > 0 else None,
@@ -975,7 +1007,7 @@ def run_failure_tuner(
     apply_batch_size: int = 128,
     apply_workers: int = 4,
 ) -> None:
-    root = zarr.open(str(zarr_path), mode="a")
+    root = zarr.open(str(zarr_path), mode="a", use_consolidated=False)
     refined_parent = root.get("refined_eye_masks_runs")
     if refined_parent is None or refined_run not in refined_parent:
         raise RuntimeError(f"Refined eye mask run '{refined_run}' not found.")
@@ -1041,6 +1073,7 @@ def run_failure_tuner(
     sobel_default = float(tuned_params.get("sobel_strength", cfg_defaults.sobel_strength))
     min_area_default = int(tuned_params.get("min_area", cfg_defaults.min_area))
     max_area_default = tuned_params.get("max_area", cfg_defaults.max_area)
+    min_circularity_default = tuned_params.get("min_circularity", cfg_defaults.min_circularity)
     closing_default = int(tuned_params.get("closing_radius", cfg_defaults.closing_radius))
     opening_default = int(tuned_params.get("opening_radius", cfg_defaults.opening_radius))
     min_gap_default = tuned_params.get("min_eye_separation", cfg_defaults.min_eye_separation)
@@ -1066,6 +1099,13 @@ def run_failure_tuner(
     cv2.createTrackbar("Sobel %", window_name, int(sobel_default * SLIDER_MAX_SOBEL), SLIDER_MAX_SOBEL, nothing)
     cv2.createTrackbar("Min Area", window_name, min(min_area_default, SLIDER_MAX_AREA), SLIDER_MAX_AREA, nothing)
     cv2.createTrackbar("Max Area", window_name, int(max_area_default) if max_area_default is not None else 0, SLIDER_MAX_AREA, nothing)
+    cv2.createTrackbar(
+        "Min Circ %",
+        window_name,
+        int(round(float(min_circularity_default) * SLIDER_MAX_CIRCULARITY)) if min_circularity_default is not None else 0,
+        SLIDER_MAX_CIRCULARITY,
+        nothing,
+    )
     cv2.createTrackbar("Closing r", window_name, min(closing_default, SLIDER_MAX_RADIUS), SLIDER_MAX_RADIUS, nothing)
     cv2.createTrackbar("Opening r", window_name, min(opening_default, SLIDER_MAX_RADIUS), SLIDER_MAX_RADIUS, nothing)
     cv2.createTrackbar("Min Gap", window_name, int(min_gap_default) if min_gap_default is not None else 0, SLIDER_MAX_EYE_GAP, nothing)
@@ -1083,6 +1123,7 @@ def run_failure_tuner(
     print("  e: Quick eval on a sample of remaining failures")
     print("  E: Eval all remaining failures (slow)")
     print("  a: Apply params to remaining failures")
+    print("  Min Circ %: reject non-circular components (0 disables)")
     print("  q/ESC: Quit")
 
     def _current_params() -> Dict[str, Any]:
@@ -1094,6 +1135,12 @@ def run_failure_tuner(
         min_area = cv2.getTrackbarPos("Min Area", window_name)
         max_area_slider = cv2.getTrackbarPos("Max Area", window_name)
         max_area = max_area_slider if max_area_slider > 0 else None
+        min_circularity_slider = cv2.getTrackbarPos("Min Circ %", window_name)
+        min_circularity = (
+            float(min_circularity_slider) / float(SLIDER_MAX_CIRCULARITY)
+            if min_circularity_slider > 0 and SLIDER_MAX_CIRCULARITY > 0
+            else None
+        )
         closing = cv2.getTrackbarPos("Closing r", window_name)
         opening = cv2.getTrackbarPos("Opening r", window_name)
         min_gap_slider = cv2.getTrackbarPos("Min Gap", window_name)
@@ -1106,6 +1153,7 @@ def run_failure_tuner(
             "sobel_strength": sobel_strength,
             "min_area": min_area,
             "max_area": max_area,
+            "min_circularity": min_circularity,
             "closing_radius": closing,
             "opening_radius": opening,
             "min_eye_separation": min_gap,
@@ -1235,6 +1283,13 @@ def run_failure_tuner(
         info_lines.append(
             f"PreThresh: {params['pre_threshold'] or 'None'} | Sobel: {params['sobel_strength']:.2f}"
         )
+        info_lines.append(
+            (
+                f"Min circularity: {params['min_circularity']:.2f}"
+                if params["min_circularity"] is not None
+                else "Min circularity: None"
+            )
+        )
 
         if success_flag:
             for eye_idx in (0, 1):
@@ -1263,6 +1318,7 @@ def run_failure_tuner(
                     (cx - x0, cy - y0),
                     cfg.min_area,
                     cfg.max_area,
+                    cfg.min_circularity,
                     cfg.closing_radius,
                     cfg.opening_radius,
                 )

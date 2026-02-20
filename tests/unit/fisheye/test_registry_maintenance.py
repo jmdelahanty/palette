@@ -16,6 +16,7 @@ from fisheye.registry.maintenance import (
     _backfill_crop_quality,
     _backfill_dataset_lineage,
     _backfill_detect_performance,
+    _backfill_eye_mask_performance,
     _backfill_recording_entities,
     _backfill_subject_dish_cross_entities,
     _backfill_subjects,
@@ -129,6 +130,65 @@ def _create_crop_quality_zarr(path: Path) -> None:
     crop.create_array("frame_counts", data=np.array([1, 1, 1, 1], dtype=np.int32), chunks=(4,))
     crop.create_array("bbox_norm_coords", data=np.zeros((4, 4), dtype=np.float32), chunks=(4, 4))
     crop.create_array("detection_source", data=np.array([0, 1, 0, 0], dtype=np.int8), chunks=(4,))
+
+
+def _create_eye_mask_performance_zarr(path: Path) -> None:
+    root = zarr.open_group(str(path), mode="w")
+    root.attrs["session_uuid"] = "eye_mask_perf_session"
+    raw = root.create_group("raw_video")
+    raw.create_array("images_ds", data=np.zeros((4, 8, 8), dtype=np.uint8), chunks=(1, 8, 8))
+
+    eye_parent = root.create_group("eye_masks_runs")
+    eye_parent.attrs["latest"] = "eye_masks_001"
+    eye_run = eye_parent.create_group("eye_masks_001")
+    eye_run.attrs["created_utc"] = "2026-02-11T00:00:00+00:00"
+    eye_run.attrs["method"] = "traditional_eye_segmentation"
+    eye_run.attrs["source_crop_run"] = "crop_001"
+    eye_run.attrs["source_keypoint_group"] = "keypoints_runs"
+    eye_run.attrs["source_keypoints_run"] = "kp_001"
+    eye_run.attrs["total_rois"] = 4
+    eye_run.attrs["successful_eyes"] = 6
+    eye_run.attrs["successful_roi_pairs"] = 3
+    eye_run.attrs["successful_roi_pair_rate"] = 0.75
+    eye_run.attrs["duration_seconds"] = 2.0
+    eye_run.attrs["reason_counts"] = {"clean": 3, "too_close": 1}
+    eye_run.attrs["summary_statistics"] = {"segmenter": {"successful_roi_pairs": 3}}
+
+    refined_parent = root.create_group("refined_eye_masks_runs")
+    refined_parent.attrs["latest"] = "refined_eye_masks_001"
+    refined_run = refined_parent.create_group("refined_eye_masks_001")
+    refined_run.attrs["created_utc"] = "2026-02-11T00:10:00+00:00"
+    refined_run.attrs["method"] = "refine_eye_masks"
+    refined_run.attrs["source_eye_masks_run"] = "eye_masks_001"
+    refined_run.attrs["source_eye_masks_method"] = "traditional_eye_segmentation"
+    refined_run.attrs["source_crop_run"] = "crop_001"
+    refined_run.attrs["source_keypoint_group"] = "keypoints_runs"
+    refined_run.attrs["source_keypoints_run"] = "kp_001"
+    refined_run.attrs["total_rois"] = 4
+    refined_run.attrs["successful_eyes"] = 7
+    refined_run.attrs["successful_roi_pairs"] = 4
+    refined_run.attrs["successful_roi_pair_rate"] = 1.0
+    refined_run.attrs["duration_seconds"] = 1.0
+    refined_run.attrs["eye_mask_review_status"] = {
+        "state": "approved",
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "pytest",
+        "timestamp": "2026-02-11T00:15:00+00:00",
+    }
+    refined_run.attrs["source_keypoint_stale"] = {
+        "state": "stale",
+        "reason": "keypoint_manual_correction",
+        "timestamp": "2026-02-11T00:20:00+00:00",
+        "source_keypoint_group": "keypoints_runs",
+        "source_keypoints_run": "kp_001",
+        "roi_indices": [2],
+        "frame_indices": [10],
+    }
+    refined_run.attrs["summary_statistics"] = {
+        "refine": {"smoothed_rois": 2},
+        "postprocess": {"manual_fix_count": 1},
+    }
 
 
 def _create_detectless_zarr(path: Path, *, session_uuid: str = "detectless_session") -> None:
@@ -296,6 +356,57 @@ def test_schema_has_detect_performance_table_views_and_indexes(tmp_path: Path) -
         "idx_detect_perf_runtime",
         "idx_detect_perf_method",
         "idx_detect_perf_model_path",
+    }
+    registry.close()
+
+
+def test_schema_has_eye_mask_performance_table_views_and_indexes(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    table = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'eye_mask_performance';
+        """
+    ).fetchone()
+    assert table is not None
+
+    views = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'view' AND name IN (
+            'eye_mask_performance_latest',
+            'recording_eye_mask_performance_latest'
+        );
+        """
+    ).fetchall()
+    view_names = {str(row["name"]) for row in views}
+    assert view_names == {
+        "eye_mask_performance_latest",
+        "recording_eye_mask_performance_latest",
+    }
+
+    idx = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'index' AND name IN (
+            'idx_eye_mask_perf_recording',
+            'idx_eye_mask_perf_stage_method',
+            'idx_eye_mask_perf_runtime',
+            'idx_eye_mask_perf_source',
+            'idx_eye_mask_perf_review'
+        );
+        """
+    ).fetchall()
+    idx_names = {str(row["name"]) for row in idx}
+    assert idx_names == {
+        "idx_eye_mask_perf_recording",
+        "idx_eye_mask_perf_stage_method",
+        "idx_eye_mask_perf_runtime",
+        "idx_eye_mask_perf_source",
+        "idx_eye_mask_perf_review",
     }
     registry.close()
 
@@ -1811,14 +1922,22 @@ def test_backfill_model_tables_from_legacy_rows(tmp_path: Path) -> None:
         INSERT INTO model_exports (run_id, export_type, path, manifest_path, metadata_json, created_utc)
         VALUES (?, 'onnx', ?, NULL, ?, datetime('now'));
         """,
-        ("run_a", str(onnx), '{"sha256":"onnx_sha","manifest_sha256":"onnx_manifest_sha"}'),
+        (
+            "run_a",
+            str(onnx),
+            '{"sha256":"onnx_sha","manifest_sha256":"onnx_manifest_sha","nms":{"conf":0.31,"iou":0.67,"topk":2}}',
+        ),
     )
     registry.conn.execute(
         """
         INSERT INTO model_exports (run_id, export_type, path, manifest_path, metadata_json, created_utc)
         VALUES (?, 'tensorrt', ?, NULL, ?, datetime('now'));
         """,
-        ("run_a", str(trt), '{"sha256":"trt_sha","manifest_sha256":"trt_manifest_sha","precision":"fp16"}'),
+        (
+            "run_a",
+            str(trt),
+            '{"sha256":"trt_sha","manifest_sha256":"trt_manifest_sha","precision":"fp16","nms_conf":0.29,"nms_iou":0.63,"nms_topk":4}',
+        ),
     )
     registry.conn.commit()
 
@@ -1847,6 +1966,20 @@ def test_backfill_model_tables_from_legacy_rows(tmp_path: Path) -> None:
     assert detection_count == 1
     assert onnx_count == 1
     assert trt_count == 1
+    onnx_row = registry.conn.execute(
+        "SELECT nms_conf, nms_iou, nms_topk FROM onnx_models WHERE run_id='run_a';"
+    ).fetchone()
+    trt_row = registry.conn.execute(
+        "SELECT nms_conf, nms_iou, nms_topk FROM tensorrt_models WHERE run_id='run_a';"
+    ).fetchone()
+    assert onnx_row is not None
+    assert trt_row is not None
+    assert float(onnx_row["nms_conf"]) == pytest.approx(0.31)
+    assert float(onnx_row["nms_iou"]) == pytest.approx(0.67)
+    assert int(onnx_row["nms_topk"]) == 2
+    assert float(trt_row["nms_conf"]) == pytest.approx(0.29)
+    assert float(trt_row["nms_iou"]) == pytest.approx(0.63)
+    assert int(trt_row["nms_topk"]) == 4
 
     # Idempotent on repeat.
     repeat = _backfill_model_tables(registry, dry_run=False)
@@ -2222,6 +2355,137 @@ def test_backfill_detect_performance_refresh_dry_run_is_deterministic(tmp_path: 
         refresh=True,
     )
     assert dry_refresh_1 == dry_refresh_2
+    registry.close()
+
+
+def test_backfill_eye_mask_performance_dry_run_and_apply(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    _create_eye_mask_performance_zarr(zarr_path)
+    dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
+        (dataset_id,),
+    )
+    registry.conn.execute("DELETE FROM eye_mask_performance WHERE dataset_id = ?;", (dataset_id,))
+    registry.conn.commit()
+
+    dry = _backfill_eye_mask_performance(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert dry["datasets_scanned"] == 1
+    assert dry["rows_inserted"] == 2
+    assert dry["rows_updated"] == 0
+    assert dry["rows_deleted"] == 0
+
+    applied = _backfill_eye_mask_performance(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert applied["rows_inserted"] == 2
+    rows = registry.conn.execute(
+        """
+        SELECT
+            stage_group,
+            run_name,
+            method,
+            total_rois,
+            rois_per_second,
+            review_state,
+            review_intended_use,
+            source_keypoint_stale_state,
+            lifecycle_state
+        FROM eye_mask_performance_latest
+        WHERE dataset_id = ?
+        ORDER BY stage_group;
+        """,
+        (dataset_id,),
+    ).fetchall()
+    assert len(rows) == 2
+    by_stage = {str(row["stage_group"]): row for row in rows}
+    assert str(by_stage["eye_masks_runs"]["run_name"]) == "eye_masks_001"
+    assert str(by_stage["eye_masks_runs"]["method"]) == "traditional_eye_segmentation"
+    assert int(by_stage["eye_masks_runs"]["total_rois"]) == 4
+    assert float(by_stage["eye_masks_runs"]["rois_per_second"]) == pytest.approx(2.0)
+    assert by_stage["eye_masks_runs"]["review_state"] is None
+    assert by_stage["eye_masks_runs"]["source_keypoint_stale_state"] is None
+    assert str(by_stage["refined_eye_masks_runs"]["run_name"]) == "refined_eye_masks_001"
+    assert str(by_stage["refined_eye_masks_runs"]["method"]) == "refine_eye_masks"
+    assert int(by_stage["refined_eye_masks_runs"]["total_rois"]) == 4
+    assert float(by_stage["refined_eye_masks_runs"]["rois_per_second"]) == pytest.approx(4.0)
+    assert str(by_stage["refined_eye_masks_runs"]["review_state"]) == "approved"
+    assert str(by_stage["refined_eye_masks_runs"]["review_intended_use"]) == "training"
+    assert str(by_stage["refined_eye_masks_runs"]["source_keypoint_stale_state"]) == "stale"
+    assert str(by_stage["refined_eye_masks_runs"]["lifecycle_state"]) == "stale"
+    registry.close()
+
+
+def test_backfill_eye_mask_performance_scope_defaults_to_source_analysis(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    analysis_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    training_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_training.zarr"
+    _create_eye_mask_performance_zarr(analysis_path)
+    _create_eye_mask_performance_zarr(training_path)
+
+    analysis_id = registry.register_from_root(zarr.open_group(str(analysis_path), mode="r"), analysis_path)
+    training_id = registry.register_from_root(zarr.open_group(str(training_path), mode="r"), training_path)
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
+        (analysis_id,),
+    )
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'training' WHERE dataset_id = ?;",
+        (training_id,),
+    )
+    registry.conn.execute(
+        "DELETE FROM eye_mask_performance WHERE dataset_id IN (?, ?);",
+        (analysis_id, training_id),
+    )
+    registry.conn.commit()
+
+    dry_default = _backfill_eye_mask_performance(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert dry_default["datasets_scanned"] == 1
+    assert dry_default["rows_inserted"] == 2
+
+    applied_default = _backfill_eye_mask_performance(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert applied_default["rows_inserted"] == 2
+    analysis_rows = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM eye_mask_performance WHERE dataset_id = ?;",
+        (analysis_id,),
+    ).fetchone()
+    training_rows = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM eye_mask_performance WHERE dataset_id = ?;",
+        (training_id,),
+    ).fetchone()
+    assert analysis_rows is not None and int(analysis_rows["n"]) == 2
+    assert training_rows is not None and int(training_rows["n"]) == 0
+
+    registry.conn.execute("DELETE FROM eye_mask_performance;")
+    registry.conn.commit()
+    dry_all = _backfill_eye_mask_performance(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+        include_all_datasets=True,
+    )
+    assert dry_all["datasets_scanned"] == 2
+    assert dry_all["rows_inserted"] == 4
     registry.close()
 
 

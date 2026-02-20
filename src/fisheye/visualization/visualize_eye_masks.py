@@ -11,6 +11,7 @@ inspected alongside the original segmentation.
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -27,7 +28,7 @@ from ..shared.mask_source import load_mask_bundle
 def open_zarr(zarr_path: Path) -> zarr.Group:
     if not zarr_path.exists():
         raise FileNotFoundError(f"Zarr path does not exist: {zarr_path}")
-    return zarr.open_group(str(zarr_path), mode="r")
+    return zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
 
 
 def get_latest_run(root: zarr.Group, run_group: str, explicit: Optional[str]) -> str:
@@ -41,6 +42,69 @@ def get_latest_run(root: zarr.Group, run_group: str, explicit: Optional[str]) ->
     if not latest:
         raise RuntimeError(f"No runs recorded under '{runs_name}'.")
     return latest
+
+
+def _load_frame_flags(path: Path) -> dict[str, list[dict[str, Optional[int]]]]:
+    if not path.exists():
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return {}
+        data = json.loads(raw)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load frame flags from {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Frame flag file must contain a JSON object: {path}")
+    parsed: dict[str, list[dict[str, Optional[int]]]] = {}
+    for key, value in data.items():
+        entries: list[dict[str, Optional[int]]] = []
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    frame_val = item.get("frame_idx")
+                    roi_val = item.get("roi_idx")
+                    try:
+                        frame_idx = int(frame_val) if frame_val is not None else None
+                    except (TypeError, ValueError):
+                        frame_idx = None
+                    try:
+                        roi_idx = int(roi_val) if roi_val is not None else None
+                    except (TypeError, ValueError):
+                        roi_idx = None
+                    if frame_idx is not None:
+                        entries.append({"frame_idx": frame_idx, "roi_idx": roi_idx})
+                else:
+                    try:
+                        frame_idx = int(item)
+                    except (TypeError, ValueError):
+                        continue
+                    entries.append({"frame_idx": frame_idx, "roi_idx": None})
+        parsed[str(key)] = entries
+    return parsed
+
+
+def _append_flagged_frame(
+    flag_path: Path,
+    zarr_path: str,
+    frame_idx: int,
+    roi_idx: Optional[int],
+) -> None:
+    flag_path.parent.mkdir(parents=True, exist_ok=True)
+    data = _load_frame_flags(flag_path)
+    entries = data.get(zarr_path, [])
+    dedupe = {(entry.get("frame_idx"), entry.get("roi_idx")) for entry in entries}
+    key = (int(frame_idx), int(roi_idx) if roi_idx is not None else None)
+    if key in dedupe:
+        return
+    entries.append({"frame_idx": int(frame_idx), "roi_idx": key[1]})
+    entries.sort(key=lambda item: (item.get("frame_idx") or 0, item.get("roi_idx") or -1))
+    data[zarr_path] = entries
+    flag_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _is_refined_variant(group_path: str) -> bool:
+    return str(group_path).startswith("refined_eye_masks_runs/")
 
 
 def normalize_roi(roi: np.ndarray) -> np.ndarray:
@@ -359,6 +423,39 @@ class EyeMaskViewer:
         return {"major": major_pts, "minor": minor_pts}
 
     @staticmethod
+    def _ellipse_curve(
+        cx: float,
+        cy: float,
+        major: float,
+        minor: float,
+        orientation_deg: float,
+        num_points: int = 100,
+    ) -> np.ndarray:
+        if not (
+            np.isfinite(cx)
+            and np.isfinite(cy)
+            and np.isfinite(major)
+            and np.isfinite(minor)
+            and np.isfinite(orientation_deg)
+            and major > 0
+            and minor > 0
+        ):
+            return np.zeros((0, 2), dtype=np.float32)
+
+        theta = np.deg2rad(orientation_deg)
+        t = np.linspace(0.0, 2.0 * np.pi, num=max(16, int(num_points)), endpoint=True)
+        a = major / 2.0
+        b = minor / 2.0
+
+        # y is inverted in image coordinates (imshow), so apply the same
+        # sign convention used by _axis_endpoints.
+        cos_t = np.cos(t)
+        sin_t = np.sin(t)
+        x = cx + (a * cos_t * np.cos(theta)) - (b * sin_t * np.sin(theta))
+        y = cy - ((a * cos_t * np.sin(theta)) + (b * sin_t * np.cos(theta)))
+        return np.column_stack([x, y]).astype(np.float32, copy=False)
+
+    @staticmethod
     def _length_from_segment(segment: np.ndarray) -> Optional[float]:
         if segment is None or segment.shape[0] != 4 or not np.all(np.isfinite(segment)):
             return None
@@ -397,6 +494,7 @@ class EyeMaskViewer:
         np.ndarray,
         str,
         List[dict[str, tuple[tuple[float, float], tuple[float, float]]]],
+        List[np.ndarray],
         Optional[List[np.ndarray]],
         np.ndarray,
         List[np.ndarray],
@@ -432,6 +530,7 @@ class EyeMaskViewer:
 
         mask_list: List[np.ndarray] = []
         axes_data: List[dict[str, tuple[tuple[float, float], tuple[float, float]]]] = []
+        ellipse_curves: List[np.ndarray] = []
         if variant.ellipse_params is not None:
             ellipse_info = np.asarray(variant.ellipse_params[idx])
         else:
@@ -468,11 +567,14 @@ class EyeMaskViewer:
             )
 
             channel_axes: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {}
+            channel_curve = np.zeros((0, 2), dtype=np.float32)
 
             if success:
                 channel_axes = self._axis_endpoints(cx, cy, major_len_raw, minor_len_raw, theta)
+                channel_curve = self._ellipse_curve(cx, cy, major_len_raw, minor_len_raw, theta)
 
             axes_data.append(channel_axes)
+            ellipse_curves.append(channel_curve)
 
             display_name = variant.display_names[ch_idx]
             summary_line = (
@@ -491,7 +593,18 @@ class EyeMaskViewer:
                 np.asarray(variant.mask_probs[idx, ch_idx], dtype=np.float32)
                 for ch_idx in range(variant.channel_count)
             ]
-        return overlay, summary, axes_data, prob_maps, base, mask_list, variant, kp_array, kp_valid
+        return (
+            overlay,
+            summary,
+            axes_data,
+            ellipse_curves,
+            prob_maps,
+            base,
+            mask_list,
+            variant,
+            kp_array,
+            kp_valid,
+        )
 
 
 def create_viewer(
@@ -500,17 +613,31 @@ def create_viewer(
     crop_run: Optional[str],
     keypoint_run: Optional[str],
     refined_runs: Optional[List[str]] = None,
+    frame_flag_file: Optional[str] = None,
 ) -> None:
     root = open_zarr(zarr_path)
     eye_run = get_latest_run(root, "eye_masks", eye_run)
     crop_run = get_latest_run(root, "crop", crop_run)
     keypoint_run = get_latest_run(root, "keypoints", keypoint_run)
 
-    roi_images = root[f"crop_runs/{crop_run}/roi_images"]
+    crop_group = root[f"crop_runs/{crop_run}"]
+    roi_images = crop_group["roi_images"]
+    frame_indices_ds = crop_group.get("frame_indices")
+    frame_indices: Optional[np.ndarray] = None
+    if frame_indices_ds is not None:
+        frame_indices = np.asarray(frame_indices_ds[:], dtype=np.int64)
+        if frame_indices.shape[0] != roi_images.shape[0]:
+            raise ValueError(
+                "crop frame_indices length ({}) does not match roi_images rows ({}).".format(
+                    frame_indices.shape[0], roi_images.shape[0]
+                )
+            )
+
     kp_group = root[f"keypoints_runs/{keypoint_run}"]
     success_flags = np.asarray(kp_group["detection_success"][:])
     keypoints = np.asarray(kp_group["keypoints_roi"][:])
     keypoint_labels = list(kp_group.attrs.get("keypoint_labels", []))
+    flag_path = Path(frame_flag_file).expanduser() if frame_flag_file else None
 
     variants: List[MaskVariant] = []
     base_group_path = f"eye_masks_runs/{eye_run}"
@@ -560,7 +687,18 @@ def create_viewer(
     info_ax.set_ylim(0, 1)
     slider_ax = fig.add_subplot(gs[2, :])
 
-    overlay, summary, axes, probs, base_roi, bin_masks, variant, kp_coords, kp_valid = viewer.make_overlay(0, viewer.variant_index)
+    (
+        overlay,
+        summary,
+        axes,
+        ellipse_curves,
+        probs,
+        base_roi,
+        bin_masks,
+        variant,
+        kp_coords,
+        kp_valid,
+    ) = viewer.make_overlay(0, viewer.variant_index)
     image_artist = ax_overlay.imshow(overlay, interpolation="nearest")
     metadata_artist = info_ax.text(
         0.01,
@@ -584,14 +722,21 @@ def create_viewer(
 
     line_major: List = []
     line_minor: List = []
+    line_ellipse: List = []
     for ch_idx in range(viewer.max_channels):
         if ch_idx < variant.channel_count:
             color = variant.channel_hex[ch_idx]
             axis_entry = axes[ch_idx] if ch_idx < len(axes) else {}
+            curve = (
+                ellipse_curves[ch_idx]
+                if ch_idx < len(ellipse_curves)
+                else np.zeros((0, 2), dtype=np.float32)
+            )
             major_pts = axis_entry.get("major", ((np.nan, np.nan), (np.nan, np.nan)))
             minor_pts = axis_entry.get("minor", ((np.nan, np.nan), (np.nan, np.nan)))
         else:
             color = "#999999"
+            curve = np.zeros((0, 2), dtype=np.float32)
             major_pts = ((np.nan, np.nan), (np.nan, np.nan))
             minor_pts = ((np.nan, np.nan), (np.nan, np.nan))
         (major_line,) = ax_overlay.plot(
@@ -607,8 +752,22 @@ def create_viewer(
             linewidth=1.2,
             linestyle="--",
         )
+        if curve.size > 0:
+            x_curve = curve[:, 0]
+            y_curve = curve[:, 1]
+        else:
+            x_curve = np.array([], dtype=np.float32)
+            y_curve = np.array([], dtype=np.float32)
+        (ellipse_line,) = ax_overlay.plot(
+            x_curve,
+            y_curve,
+            color=color,
+            linewidth=1.0,
+            alpha=0.95,
+        )
         line_major.append(major_line)
         line_minor.append(minor_line)
+        line_ellipse.append(ellipse_line)
 
     keypoint_artists: List = []
     for kp_idx in range(viewer.keypoint_count):
@@ -726,6 +885,7 @@ def create_viewer(
             overlay,
             info,
             axes_data,
+            ellipse_data,
             prob_maps,
             base_img,
             mask_pair,
@@ -756,11 +916,23 @@ def create_viewer(
                     [minor_pts[0][0], minor_pts[1][0]],
                     [minor_pts[0][1], minor_pts[1][1]],
                 )
+                curve = (
+                    ellipse_data[ch_idx]
+                    if ch_idx < len(ellipse_data)
+                    else np.zeros((0, 2), dtype=np.float32)
+                )
+                if curve.size > 0:
+                    line_ellipse[ch_idx].set_data(curve[:, 0], curve[:, 1])
+                    line_ellipse[ch_idx].set_visible(True)
+                else:
+                    line_ellipse[ch_idx].set_data([], [])
+                    line_ellipse[ch_idx].set_visible(False)
                 line_major[ch_idx].set_visible(True)
                 line_minor[ch_idx].set_visible(True)
             else:
                 line_major[ch_idx].set_visible(False)
                 line_minor[ch_idx].set_visible(False)
+                line_ellipse[ch_idx].set_visible(False)
 
         for kp_idx, artist in enumerate(keypoint_artists):
             if kp_idx < kp_array.shape[0] and kp_valid_mask[kp_idx]:
@@ -853,6 +1025,32 @@ def create_viewer(
             step_roi(5)
         elif event.key in {"v", "m"}:
             step_variant(1)
+        elif event.key in {"b"}:
+            if flag_path is None:
+                print("No frame flag file configured. Pass --frame-flag-file to enable cleanup flagging.")
+                return
+            roi_idx = int(round(slider.val))
+            roi_idx = max(0, min(viewer.total - 1, roi_idx))
+            variant_local = viewer.variants[viewer.variant_index]
+            if not _is_refined_variant(variant_local.group_path):
+                print("Frame flagging is for refined variants only. Press 'v' to switch variants.")
+                return
+            if frame_indices is None:
+                print(f"crop_runs/{crop_run} is missing frame_indices; cannot flag cleanup frames.")
+                return
+            frame_idx = int(frame_indices[roi_idx])
+            try:
+                _append_flagged_frame(flag_path, str(zarr_path), frame_idx, roi_idx)
+                print(
+                    "Flagged cleanup frame {frame_idx} (roi {roi_idx}) from {group}".format(
+                        frame_idx=frame_idx,
+                        roi_idx=roi_idx,
+                        group=variant_local.group_path,
+                    )
+                )
+                print(f"Frame flag file: {flag_path.expanduser().resolve(strict=False)}")
+            except Exception as exc:
+                print(f"Failed to flag cleanup frame: {exc}")
 
     fig.canvas.mpl_connect("key_press_event", on_key)
 
@@ -861,7 +1059,7 @@ def create_viewer(
     )
     plt.show()
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Visualize eye mask segmentation results.")
     parser.add_argument("zarr_path", type=Path, help="Path to Palette Zarr store")
     parser.add_argument("--eye-run", help="Specific eye mask run name")
@@ -872,12 +1070,29 @@ def parse_args() -> argparse.Namespace:
         action="append",
         help="Refined eye mask run to include (can be repeated). If omitted, any refined runs referencing the source will be included automatically.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--frame-flag-file",
+        default="eye_mask_frame_flags.json",
+        help="JSON file to append cleanup flags when pressing 'b' (default: eye_mask_frame_flags.json).",
+    )
+    return parser
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = build_parser()
+    return parser.parse_args(argv)
 
 
 def main() -> None:
     args = parse_args()
-    create_viewer(args.zarr_path, args.eye_run, args.crop_run, args.keypoint_run, args.refined_run)
+    create_viewer(
+        args.zarr_path,
+        args.eye_run,
+        args.crop_run,
+        args.keypoint_run,
+        args.refined_run,
+        args.frame_flag_file,
+    )
 
 
 if __name__ == "__main__":
