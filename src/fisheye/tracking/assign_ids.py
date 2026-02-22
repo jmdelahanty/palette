@@ -17,6 +17,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from ..shared.experiment_setup import infer_experiment_setup
+from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info
 
@@ -530,17 +531,50 @@ def assign_ids_spatial(
     assign_group.attrs['summary_statistics'] = summary_stats
     assign_group.attrs['duration_seconds'] = duration
     
-    # Environment info and provenance
+    # Environment info and canonical stage provenance
     env_info = get_environment_info()
-    provenance_record = {
-        'command': ' '.join(sys.argv),
-        'created_at_utc': datetime.now(timezone.utc).isoformat(),
+    provenance_inputs = {
         'source_detect_run': source_detect_run,
-        'assignment_source': assignment_source
+        'assignment_source': assignment_source,
     }
     if refined_run_name:
+        provenance_inputs['source_refined_run'] = refined_run_name
+
+    provenance_record = build_stage_provenance(
+        stage='id_assignment',
+        command=' '.join(sys.argv),
+        created_at_utc=datetime.now(timezone.utc).isoformat(),
+        version=env_info['git'].get('short_hash') or env_info['git'].get('commit_hash'),
+        git={
+            'commit': env_info['git'].get('commit_hash'),
+            'short': env_info['git'].get('short_hash'),
+            'branch': env_info['git'].get('branch'),
+            'is_dirty': env_info['git'].get('is_dirty'),
+            'remote': env_info['git'].get('remote_url'),
+        },
+        environment=env_info.get('environment'),
+        platform={
+            'hostname': env_info['platform'].get('hostname'),
+            'system': env_info['platform'].get('system'),
+            'release': env_info['platform'].get('release'),
+            'python_version': env_info['platform'].get('python_version'),
+            'machine': env_info['platform'].get('machine'),
+        },
+        parameters={
+            'assignment_method': 'spatial',
+            'parameter_source': param_source,
+            'num_masks': len(subdish_masks),
+            'setup_type': setup_type,
+            'experiment_setup': experiment_setup,
+        },
+        inputs=provenance_inputs,
+    )
+    # Preserve legacy top-level provenance keys while adopting contract payload.
+    provenance_record['source_detect_run'] = source_detect_run
+    provenance_record['assignment_source'] = assignment_source
+    if refined_run_name:
         provenance_record['source_refined_run'] = refined_run_name
-    assign_group.attrs['provenance'] = provenance_record
+    write_stage_provenance(assign_group, provenance_record)
     assign_group.attrs.update({
         'git_commit': env_info['git'].get('commit_hash', 'unknown'),
         'git_branch': env_info['git'].get('branch', 'unknown'),

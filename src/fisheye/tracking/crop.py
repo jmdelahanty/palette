@@ -24,7 +24,7 @@ from zarr.codecs import BloscCodec
 import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Mapping
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn, MofNCompleteColumn
@@ -36,6 +36,7 @@ from ..shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
 )
+from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
@@ -125,6 +126,50 @@ def _build_crop_signature(attrs: Dict[str, object]) -> Dict[str, object]:
         "parameter_source": attrs.get("parameter_source"),
         "parameters_hash": _hash_parameters(attrs.get("parameters")),
     }
+
+
+def _build_crop_stage_provenance(
+    *,
+    created_at_utc: str,
+    command: str,
+    env_info: Mapping[str, Any],
+    parameters: Mapping[str, Any],
+    parameter_source: Optional[str],
+    inputs: Mapping[str, Any],
+    detection_source: Optional[Mapping[str, Any]] = None,
+    scheduler: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    git_info = env_info.get("git") or {}
+    platform_info = env_info.get("platform") or {}
+    provenance = build_stage_provenance(
+        stage="crop",
+        command=command,
+        created_at_utc=created_at_utc,
+        version=git_info.get("short_hash") or git_info.get("commit_hash"),
+        git={
+            "commit": git_info.get("commit_hash"),
+            "short": git_info.get("short_hash"),
+            "branch": git_info.get("branch"),
+            "is_dirty": git_info.get("is_dirty"),
+            "remote": git_info.get("remote_url"),
+        },
+        environment=env_info.get("environment"),
+        platform={
+            "hostname": platform_info.get("hostname"),
+            "system": platform_info.get("system"),
+            "release": platform_info.get("release"),
+            "python_version": platform_info.get("python_version"),
+            "machine": platform_info.get("machine"),
+        },
+        parameters=dict(parameters),
+        inputs=dict(inputs),
+        scheduler=dict(scheduler) if scheduler is not None else None,
+    )
+    if parameter_source is not None:
+        provenance["parameter_source"] = parameter_source
+    if detection_source is not None:
+        provenance["detection_source"] = dict(detection_source)
+    return {key: value for key, value in provenance.items() if value is not None}
 
 
 def infer_detection_source_type(
@@ -775,6 +820,7 @@ def crop_from_external_video(
             'device': 'cuda:0' if actual_use_gpu else 'cpu',
             
             # === Git Provenance ===
+            'git_commit': env_info['git'].get('commit_hash', 'unknown'),
             'git_commit_hash': env_info['git'].get('commit_hash', 'unknown'),
             'git_short_hash': env_info['git'].get('short_hash', 'unknown'),
             'git_branch': env_info['git'].get('branch', 'unknown'),
@@ -865,6 +911,36 @@ def crop_from_external_video(
                     decord.bridge.set_bridge('native')
         if not actual_use_gpu:
             console.print("[cyan]Using CPU video decoder...[/cyan]")
+
+        provenance_record = _build_crop_stage_provenance(
+            created_at_utc=str(crop_group.attrs.get("created_at_utc")),
+            command=" ".join(sys.argv),
+            env_info=env_info,
+            parameters={
+                "roi_size": list(roi_sz),
+                "acceleration": crop_group.attrs.get("acceleration"),
+                "write_backend_requested": crop_group.attrs.get("write_backend_requested"),
+                "write_backend_effective": crop_group.attrs.get("write_backend_effective"),
+                "roi_storage": crop_group.attrs.get("roi_storage"),
+                "roi_chunk_len": crop_group.attrs.get("roi_chunk_len"),
+                "roi_use_sharding": crop_group.attrs.get("roi_use_sharding"),
+                "roi_shard_len": crop_group.attrs.get("roi_shard_len"),
+            },
+            parameter_source=str(crop_group.attrs.get("parameter_source") or "config"),
+            inputs={
+                "source_detect_run": detect_run_name,
+                "source_refined_run": refined_run_name,
+                "source_background_run": background_run_name,
+                "frame_source": crop_group.attrs.get("video_source_type", "external"),
+                "source_video_path": crop_group.attrs.get("video_source_path"),
+            },
+            detection_source={
+                "type": source_type,
+                "path": source_path,
+                "method": get_detection_method(source_group),
+            },
+        )
+        write_stage_provenance(crop_group, provenance_record)
         
         total_processed = 0
         batch_times: List[float] = []
@@ -1914,6 +1990,7 @@ def crop_detections(
         'use_distributed': use_distributed,
         
         # === Git Provenance ===
+        'git_commit': env_info['git'].get('commit_hash', 'unknown'),
         'git_commit_hash': env_info['git'].get('commit_hash', 'unknown'),
         'git_short_hash': env_info['git'].get('short_hash', 'unknown'),
         'git_branch': env_info['git'].get('branch', 'unknown'),
@@ -1950,41 +2027,31 @@ def crop_detections(
         crop_group.attrs['detect_review_status'] = review_status
     if preferred_policy:
         crop_group.attrs['detection_preferred_policy'] = preferred_policy
-    provenance = {
-        "stage": "crop",
-        "command": " ".join(sys.argv),
-        "created_at_utc": crop_group.attrs.get("created_at_utc"),
-        "git": env_info.get("git"),
-        "environment": env_info.get("environment"),
-        "platform": {
-            "hostname": env_info["platform"].get("hostname"),
-            "system": env_info["platform"].get("system"),
-            "release": env_info["platform"].get("release"),
-            "python_version": env_info["platform"].get("python_version"),
-            "machine": env_info["platform"].get("machine"),
-        },
-        "parameters": crop_params,
-        "parameter_source": param_source,
-        "inputs": {
+    provenance_record = _build_crop_stage_provenance(
+        created_at_utc=str(crop_group.attrs.get("created_at_utc")),
+        command=" ".join(sys.argv),
+        env_info=env_info,
+        parameters=crop_params,
+        parameter_source=param_source,
+        inputs={
             "source_detect_run": detect_run_name,
             "source_refined_run": refined_run_name,
             "source_background_run": background_run_name,
             "frame_source": crop_group.attrs.get("video_source_type", "zarr"),
             "source_video_path": crop_group.attrs.get("video_source_path"),
         },
-        "detection_source": {
+        detection_source={
             "type": source_type,
             "path": source_path,
             "method": get_detection_method(source_group),
         },
-        "scheduler": {
+        scheduler={
             "dask_scheduler": scheduler,
             "dask_num_workers": num_workers or os.cpu_count(),
             "distributed": use_distributed,
         },
-    }
-    provenance = {k: v for k, v in provenance.items() if v is not None}
-    crop_group.attrs['provenance'] = provenance
+    )
+    write_stage_provenance(crop_group, provenance_record)
     crop_group.attrs['crop_signature'] = _build_crop_signature(crop_group.attrs)
 
     # Add GPU details if available (even though zarr workflow uses CPU)
