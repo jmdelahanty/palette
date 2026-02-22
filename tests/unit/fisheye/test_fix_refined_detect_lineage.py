@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -197,3 +198,69 @@ def test_main_zarr_use_filter_only_modifies_selected_archives(monkeypatch, capsy
     assert isinstance(training_crop, _FakeGroup)
     assert training_crop.attrs["source_refined_run"] == "refined_detect_old"
 
+
+def test_main_writes_json_report_in_dry_run_mode(monkeypatch, capsys, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "rec_analysis.zarr"
+    report_path = tmp_path / "reports" / "lineage_dry_run.json"
+    root = _FakeGroup()
+    root.attrs["zarr_use"] = "analysis"
+    _add_refined_run(root, "refined_detect_old", valid=True)
+    _add_refined_run(root, "refined_detect_new", valid=False)
+    _set_refined_latest(root, "refined_detect_new")
+    _add_crop_run(
+        root,
+        "crop_001",
+        detection_source_path="refined_detect_runs/refined_detect_old/manual",
+        source_refined_run="refined_detect_old",
+        detection_source_type="manual",
+    )
+    _patch_scan(monkeypatch, {zarr_path: root})
+
+    rc = mod.main([str(zarr_path), "--dry-run", "--json-report", str(report_path)])
+    assert rc == 0
+    capsys.readouterr()
+
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["mode"] == "dry-run"
+    assert payload["summary"]["zarr_with_changes"] == 1
+    assert payload["summary"]["planned_repairs"] == 1
+    assert payload["summary"]["applied_repairs"] == 0
+    assert len(payload["repairs"]) == 1
+    repair = payload["repairs"][0]
+    assert repair["zarr_path"] == str(zarr_path)
+    assert repair["target_path"] == "refined_detect_runs"
+    assert repair["field"] == "latest"
+    assert repair["old_value"] == "refined_detect_new"
+    assert repair["new_value"] == "refined_detect_old"
+    assert repair["applied"] is False
+
+
+def test_main_writes_json_report_with_applied_flags(monkeypatch, capsys, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "rec_analysis.zarr"
+    report_path = tmp_path / "reports" / "lineage_apply.json"
+    root = _FakeGroup()
+    root.attrs["zarr_use"] = "analysis"
+    _add_refined_run(root, "refined_detect_old", valid=True)
+    _add_refined_run(root, "refined_detect_new", valid=True)
+    _set_refined_latest(root, "refined_detect_new")
+    _add_crop_run(
+        root,
+        "crop_001",
+        detection_source_path="refined_detect_runs/refined_detect_old/manual",
+        source_refined_run="refined_detect_old",
+        detection_source_type="manual",
+    )
+    _patch_scan(monkeypatch, {zarr_path: root})
+
+    rc = mod.main([str(zarr_path), "--apply", "--json-report", str(report_path)])
+    assert rc == 0
+    capsys.readouterr()
+
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["mode"] == "apply"
+    assert payload["summary"]["planned_repairs"] == 2
+    assert payload["summary"]["applied_repairs"] == 2
+    fields = {repair["field"]: repair for repair in payload["repairs"]}
+    assert set(fields.keys()) == {"detection_source_path", "source_refined_run"}
+    assert fields["detection_source_path"]["applied"] is True
+    assert fields["source_refined_run"]["applied"] is True

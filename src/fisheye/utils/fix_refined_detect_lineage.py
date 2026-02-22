@@ -7,6 +7,7 @@ Default mode is dry-run. Use --apply to write changes.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -376,6 +377,50 @@ def _apply_repairs(repairs: list[PlannedRepair]) -> int:
     return applied
 
 
+def _to_json_compatible(value: Any) -> Any:
+    value = _normalize_scalar(value)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Mapping):
+        return {str(k): _to_json_compatible(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_json_compatible(item) for item in value]
+    if isinstance(value, set):
+        return sorted(_to_json_compatible(item) for item in value)
+    if hasattr(value, "item"):
+        try:
+            scalar = value.item()
+        except Exception:
+            pass
+        else:
+            return _to_json_compatible(scalar)
+    if hasattr(value, "tolist"):
+        try:
+            payload = value.tolist()
+        except Exception:
+            pass
+        else:
+            return _to_json_compatible(payload)
+    return str(value)
+
+
+def _build_repair_report_item(
+    *,
+    zarr_path: Path,
+    repair: PlannedRepair,
+    applied: bool,
+) -> dict[str, Any]:
+    return {
+        "zarr_path": str(zarr_path),
+        "target_path": repair.target_path,
+        "field": repair.field,
+        "old_value": _to_json_compatible(repair.old_value),
+        "new_value": _to_json_compatible(repair.new_value),
+        "reason": repair.reason,
+        "applied": applied,
+    }
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -410,6 +455,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument("--dry-run", action="store_true", help="Print planned changes only (default behavior).")
     parser.add_argument("--apply", action="store_true", help="Write repairs to zarr attrs.")
+    parser.add_argument(
+        "--json-report",
+        type=Path,
+        help=(
+            "Optional path to write an audit JSON report with warnings and "
+            "per-repair planned/applied records."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.apply and args.dry_run:
@@ -424,6 +477,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     applied_total = 0
     errors = 0
     any_zarr = False
+    warning_records: list[dict[str, str]] = []
+    repair_records: list[dict[str, Any]] = []
 
     for zarr_path in _iter_zarr(roots, recursive=bool(args.recursive)):
         any_zarr = True
@@ -453,6 +508,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         for warning in warnings:
             print(f"warn: {zarr_path}: {warning}")
+            warning_records.append({"zarr_path": str(zarr_path), "message": warning})
 
         if not repairs:
             continue
@@ -461,11 +517,27 @@ def main(argv: Optional[list[str]] = None) -> int:
         planned_total += len(repairs)
 
         mode_label = "apply" if apply else "plan"
+        applied_flags: list[bool] = [False] * len(repairs)
+        if apply:
+            for idx, repair in enumerate(repairs):
+                current = _normalize_scalar(repair.target_group.attrs.get(repair.field))
+                desired = _normalize_scalar(repair.new_value)
+                if current != desired:
+                    applied_flags[idx] = True
         for repair in repairs:
             print(
                 f"{mode_label}: {zarr_path}:{repair.target_path} "
                 f"{repair.field} {_format_value(repair.old_value)} -> {_format_value(repair.new_value)} "
                 f"({repair.reason})"
+            )
+
+        for idx, repair in enumerate(repairs):
+            repair_records.append(
+                _build_repair_report_item(
+                    zarr_path=zarr_path,
+                    repair=repair,
+                    applied=applied_flags[idx],
+                )
             )
 
         if apply:
@@ -480,6 +552,24 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"planned_repairs: {planned_total}")
     if apply:
         print(f"applied_repairs: {applied_total}")
+
+    if args.json_report:
+        report_path = args.json_report.expanduser()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_payload = {
+            "mode": "apply" if apply else "dry-run",
+            "summary": {
+                "zarr_scanned": scanned,
+                "zarr_with_changes": zarr_with_changes,
+                "planned_repairs": planned_total,
+                "applied_repairs": applied_total if apply else 0,
+                "errors": errors,
+            },
+            "warnings": warning_records,
+            "repairs": repair_records,
+        }
+        report_path.write_text(json.dumps(report_payload, indent=2, sort_keys=True), encoding="utf-8")
+
     if errors:
         print(f"errors: {errors}")
         return 1
