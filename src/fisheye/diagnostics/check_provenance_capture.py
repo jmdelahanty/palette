@@ -14,7 +14,6 @@ import zarr
 
 from ..shared.stage_provenance import (
     STAGE_PROVENANCE_CONTRACT_NAME,
-    get_stage_contract,
     get_stage_git,
 )
 
@@ -40,7 +39,18 @@ STAGES = [
     {"label": "id_assignment", "groups": ["id_assignment_runs"]},
 ]
 
-REFINEMENT_STAGES = {"refined_detect", "refined_keypoints", "refined_eye_masks"}
+# Strict contract gating is stage-string aware so legacy/non-migrated payloads
+# remain compatible during backfill windows.
+STRICT_CONTRACT_STAGE_ALIASES: Dict[str, set[str]] = {
+    "detect": {"detect"},
+    "refined_detect": {"refined_detect", "refine_detect"},
+    "crop": {"crop"},
+    "keypoints": {"keypoints", "keypoints_detect"},
+    "refined_keypoints": {"refined_keypoints", "refine_keypoints"},
+    "eye_masks": {"eye_masks"},
+    "refined_eye_masks": {"refined_eye_masks", "refine_eye_masks"},
+    "id_assignment": {"id_assignment"},
+}
 
 
 REQUIRED_FIELDS = ["timestamp", "parameters", "inputs"]
@@ -156,6 +166,63 @@ def _json_loads(raw: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _normalize_stage_name(raw: Any) -> Optional[str]:
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "ignore")
+    if not isinstance(raw, str):
+        return None
+    normalized = raw.strip()
+    return normalized if normalized else None
+
+
+def _resolved_stage_name(prov: Optional[Dict[str, Any]], attrs: Dict[str, Any]) -> Optional[str]:
+    if isinstance(prov, dict):
+        stage_name = _normalize_stage_name(prov.get("stage"))
+        if stage_name:
+            return stage_name
+    return _normalize_stage_name(attrs.get("stage"))
+
+
+def _should_enforce_strict_contract(stage_label: str, prov: Optional[Dict[str, Any]], attrs: Dict[str, Any]) -> bool:
+    accepted = STRICT_CONTRACT_STAGE_ALIASES.get(stage_label)
+    if not accepted:
+        return False
+    stage_name = _resolved_stage_name(prov, attrs)
+    if stage_name is None:
+        return False
+    return stage_name in accepted
+
+
+def _append_unique(target: List[str], field: str) -> None:
+    if field not in target:
+        target.append(field)
+
+
+def _collect_missing_contract_fields(prov: Optional[Dict[str, Any]]) -> List[str]:
+    if not isinstance(prov, dict):
+        return ["contract"]
+
+    contract_raw = prov.get("contract")
+    if not isinstance(contract_raw, dict):
+        return ["contract"]
+
+    missing: List[str] = []
+
+    name = contract_raw.get("name")
+    if not isinstance(name, str) or not name.strip() or name != STAGE_PROVENANCE_CONTRACT_NAME:
+        missing.append("contract.name")
+
+    try:
+        version = int(contract_raw.get("version"))
+    except (TypeError, ValueError):
+        missing.append("contract.version")
+    else:
+        if version < 1:
+            missing.append("contract.version")
+
+    return missing
+
+
 _FISH_ID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
@@ -252,25 +319,9 @@ def _check_group(
             if "provenance" not in missing_required:
                 missing_required.insert(0, "provenance")
 
-        if strict_contract and stage in REFINEMENT_STAGES:
-            if not has_prov:
-                if "provenance" not in missing_required:
-                    missing_required.insert(0, "provenance")
-            else:
-                contract_raw = prov.get("contract")
-                if not isinstance(contract_raw, dict):
-                    missing_required.append("contract")
-                else:
-                    contract = get_stage_contract(attrs)
-                    if contract.get("name") != STAGE_PROVENANCE_CONTRACT_NAME:
-                        missing_required.append("contract.name")
-                    try:
-                        contract_version = int(contract.get("version"))
-                    except (TypeError, ValueError):
-                        missing_required.append("contract.version")
-                    else:
-                        if contract_version < 1:
-                            missing_required.append("contract.version")
+        if strict_contract and _should_enforce_strict_contract(stage, prov, attrs):
+            for field in _collect_missing_contract_fields(prov):
+                _append_unique(missing_required, field)
 
         if missing_required:
             status = "missing"
@@ -374,7 +425,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help=(
             "Return non-zero when required provenance checks fail. "
-            "Also enforces refinement-stage contract name/version."
+            "Also enforces migrated offline stage contract name/version."
         ),
     )
 

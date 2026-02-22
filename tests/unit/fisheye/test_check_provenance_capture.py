@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from fisheye.diagnostics import check_provenance_capture as mod
 from fisheye.shared.stage_provenance import (
     STAGE_PROVENANCE_CONTRACT_NAME,
@@ -28,9 +30,61 @@ def _build_root_for_stage(stage_group: str, run_name: str, run_attrs: dict[str, 
     return _FakeGroup({stage_group: parent})
 
 
+def _minimal_provenance(stage_name: str) -> dict[str, Any]:
+    return {
+        "stage": stage_name,
+        "created_at_utc": "2026-02-20T00:00:00+00:00",
+        "parameters": {"alpha": 1},
+        "inputs": {"source_crop_run": "crop_001"},
+        "git": {"commit": "a" * 40, "branch": "main"},
+        "environment": {},
+    }
+
+
 def test_stages_include_refined_eye_masks() -> None:
     labels = {stage["label"] for stage in mod.STAGES}
     assert "refined_eye_masks" in labels
+
+
+@pytest.mark.parametrize(
+    ("stage_group", "stage_label", "run_name", "stage_name"),
+    [
+        ("detect_runs", "detect", "detect_001", "detect"),
+        ("refined_detect_runs", "refined_detect", "refined_detect_001", "refine_detect"),
+        ("crop_runs", "crop", "crop_001", "crop"),
+        ("keypoints_runs", "keypoints", "keypoints_001", "keypoints_detect"),
+        ("refined_keypoints_runs", "refined_keypoints", "refined_keypoints_001", "refine_keypoints"),
+        ("eye_masks_runs", "eye_masks", "eye_masks_001", "eye_masks"),
+        ("refined_eye_masks_runs", "refined_eye_masks", "refined_eye_masks_001", "refine_eye_masks"),
+        ("id_assignment_runs", "id_assignment", "id_assignment_001", "id_assignment"),
+    ],
+)
+def test_check_zarr_strict_contract_requires_contract_for_migrated_offline_stages(
+    monkeypatch,
+    stage_group: str,
+    stage_label: str,
+    run_name: str,
+    stage_name: str,
+) -> None:
+    root = _build_root_for_stage(
+        stage_group,
+        run_name,
+        {"provenance": _minimal_provenance(stage_name)},
+    )
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: root)
+
+    checks, _, _ = mod._check_zarr(
+        Path("/fake/recording.zarr"),
+        all_runs=False,
+        require_provenance=True,
+        check_consistency=False,
+        check_subject_metadata=False,
+        strict_contract=True,
+    )
+
+    check = checks[stage_label][0]
+    assert check.status == "missing"
+    assert "contract" in check.missing_required
 
 
 def test_check_zarr_strict_contract_requires_refinement_contract_block(monkeypatch) -> None:
@@ -64,6 +118,39 @@ def test_check_zarr_strict_contract_requires_refinement_contract_block(monkeypat
     check = refined_checks[0]
     assert check.status == "missing"
     assert "contract" in check.missing_required
+
+
+@pytest.mark.parametrize(
+    ("contract_payload", "expected_field"),
+    [
+        ({"version": 1}, "contract.name"),
+        ({"name": STAGE_PROVENANCE_CONTRACT_NAME}, "contract.version"),
+        ({"name": "wrong_contract", "version": 1}, "contract.name"),
+        ({"name": STAGE_PROVENANCE_CONTRACT_NAME, "version": 0}, "contract.version"),
+    ],
+)
+def test_check_zarr_strict_contract_reports_missing_contract_fields(
+    monkeypatch,
+    contract_payload: dict[str, Any],
+    expected_field: str,
+) -> None:
+    provenance = _minimal_provenance("detect")
+    provenance["contract"] = contract_payload
+    root = _build_root_for_stage("detect_runs", "detect_001", {"provenance": provenance})
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: root)
+
+    checks, _, _ = mod._check_zarr(
+        Path("/fake/recording.zarr"),
+        all_runs=False,
+        require_provenance=True,
+        check_consistency=False,
+        check_subject_metadata=False,
+        strict_contract=True,
+    )
+
+    check = checks["detect"][0]
+    assert check.status == "missing"
+    assert expected_field in check.missing_required
 
 
 def test_check_zarr_strict_contract_accepts_canonical_refinement_contract(monkeypatch) -> None:
@@ -123,7 +210,7 @@ def test_main_strict_returns_nonzero_on_refinement_contract_failure(monkeypatch,
     assert rc_non_strict == 0
 
 
-def test_main_strict_does_not_require_contract_for_non_refinement_stage(monkeypatch, capsys) -> None:
+def test_main_strict_returns_nonzero_on_detect_contract_failure(monkeypatch, capsys) -> None:
     root = _build_root_for_stage(
         "detect_runs",
         "detect_001",
@@ -134,6 +221,30 @@ def test_main_strict_does_not_require_contract_for_non_refinement_stage(monkeypa
                 "parameters": {"method": "yolo"},
                 "inputs": {"source_video_path": "/tmp/video.mp4"},
                 "git": {"commit": "c" * 40, "branch": "main"},
+                "environment": {},
+            }
+        },
+    )
+    fake_path = Path("/fake/recording.zarr")
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: root)
+    monkeypatch.setattr(mod, "_iter_zarr", lambda *_args, **_kwargs: iter([fake_path]))
+
+    rc = mod.main([str(fake_path), "--strict", "--no-check-consistency"])
+    assert rc == 1
+    capsys.readouterr()
+
+
+def test_main_strict_keeps_legacy_stage_compatible_until_backfill(monkeypatch, capsys) -> None:
+    root = _build_root_for_stage(
+        "detect_runs",
+        "detect_legacy_001",
+        {
+            "provenance": {
+                "stage": "detect_legacy",
+                "created_at_utc": "2026-02-20T00:00:00+00:00",
+                "parameters": {"method": "legacy"},
+                "inputs": {"source_video_path": "/tmp/video.mp4"},
+                "git": {"commit": "d" * 40, "branch": "main"},
                 "environment": {},
             }
         },
