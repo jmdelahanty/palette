@@ -16,12 +16,12 @@ Related eye-mask parity work is tracked separately in `docs/eye_masks_detect_pos
   - Write `model_resolution_*` attrs and `provenance.model_resolution` on keypoint runs.
   - Acceptance: pose runs show selected `run_id`, `set_id`, `model_path`, candidate payload in attrs/provenance.
 
-- [ ] Add strict keypoint review acceptance utility.
+- [x] Add strict keypoint review acceptance utility.
   - Add a keypoint equivalent to `accept_detect_review.py` with strict mode guardrails.
   - Enforce required fields in strict mode (at minimum reviewer + intended_use rules).
   - Acceptance: CLI supports dry-run/json and updates `keypoint_review_status_latest` safely.
 
-- [ ] Add keypoint unapproved-list utility.
+- [x] Add keypoint unapproved-list utility.
   - Add a keypoint equivalent to `list_unapproved_analysis_zarrs.py`.
   - Report missing/non-approved keypoint review state for analysis zarrs.
   - Acceptance: produces path list + optional details output for batch workflows.
@@ -63,8 +63,8 @@ Related eye-mask parity work is tracked separately in `docs/eye_masks_detect_pos
 ## Validation/Testing TODO
 
 - [x] Unit tests for new pose registry model resolution wrapper.
-- [ ] Unit tests for strict keypoint accept CLI.
-- [ ] Unit tests for unapproved keypoint lister.
+- [x] Unit tests for strict keypoint accept CLI.
+- [x] Unit tests for unapproved keypoint lister.
 - [ ] Registry migration tests for keypoint performance schema/views.
 - [ ] Registry query tests for new keypoint filters/group summaries.
 - [ ] Batch logging tests to assert richer keypoint result payloads.
