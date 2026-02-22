@@ -39,21 +39,35 @@ def _safe_len(arr: Optional[zarr.Array]) -> Optional[int]:
         return None
 
 
+def _safe_get(group: Optional[zarr.Group], key: str) -> Optional[object]:
+    if group is None:
+        return None
+    try:
+        return group.get(key)
+    except Exception:
+        return None
+
+
 def _group_for_path(root: zarr.Group, path: Optional[str]) -> Optional[zarr.Group]:
     if not path:
         return None
     normalized = path.strip("/")
-    if normalized in root:
-        return root[normalized]
+    try:
+        if normalized in root:
+            return root[normalized]
+    except Exception:
+        return None
     return None
 
 
 def _count_detections(group: Optional[zarr.Group]) -> Optional[int]:
     if group is None:
         return None
+    if hasattr(group, "shape") and not hasattr(group, "get"):
+        return _safe_len(group)  # type: ignore[arg-type]
     if isinstance(group, zarr.Array):
         return _safe_len(group)
-    arr = group.get("bbox_norm_coords") or group.get("bbox_coords") or group.get("bbox")
+    arr = _safe_get(group, "bbox_norm_coords") or _safe_get(group, "bbox_coords") or _safe_get(group, "bbox")
     return _safe_len(arr)
 
 
@@ -76,15 +90,26 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
     detect_parent = root.get("detect_runs")
     detect_latest = _latest(detect_parent)
     detect_group = _first_matching_run(detect_parent, detect_latest)
-    detect_rows = _safe_len(detect_group["bbox_norm_coords"]) if detect_group else None
+    detect_rows = _count_detections(detect_group)
 
-    refined_parent = root.get("refined_detect_runs") or root.get("refined_runs")
+    refined_parent_name = "refined_detect_runs"
+    refined_parent = root.get(refined_parent_name)
+    if refined_parent is None:
+        refined_parent_name = "refined_runs"
+        refined_parent = root.get(refined_parent_name)
     refined_latest = _latest(refined_parent)
     refined_group = _first_matching_run(refined_parent, refined_latest)
     refined_rows = None
     if refined_group is not None:
-        interp = refined_group.get("interpolated")
-        refined_rows = _safe_len(interp["bbox_norm_coords"]) if interp is not None else None
+        interp = _safe_get(refined_group, "interpolated")
+        if interp is not None and hasattr(interp, "get"):
+            refined_rows = _count_detections(interp)
+            if refined_rows is None:
+                issues.append(
+                    f"Refined detect run '{refined_latest}' is missing detection arrays under "
+                    f"{refined_parent_name}/{refined_latest}/interpolated "
+                    "(expected one of: bbox_norm_coords, bbox_coords, bbox)."
+                )
         source_detect = refined_group.attrs.get("source_detect_run")
         if detect_latest and source_detect and detect_latest != source_detect:
             issues.append(
@@ -95,7 +120,7 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
     crop_parent = root.get("crop_runs")
     crop_latest = _latest(crop_parent)
     crop_group = _first_matching_run(crop_parent, crop_latest)
-    crop_rois = _safe_len(crop_group["roi_images"]) if crop_group else None
+    crop_rois = _safe_len(_safe_get(crop_group, "roi_images")) if crop_group else None
     crop_source_rows = None
     crop_source_path = None
     if crop_group is not None:
@@ -145,7 +170,7 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
     keypoint_parent = root.get("refined_keypoints_runs") or root.get("keypoints_runs")
     keypoint_latest = _latest(keypoint_parent)
     keypoint_group = _first_matching_run(keypoint_parent, keypoint_latest)
-    keypoint_rows = _safe_len(keypoint_group["heading"]) if keypoint_group else None
+    keypoint_rows = _safe_len(_safe_get(keypoint_group, "heading")) if keypoint_group else None
     if keypoint_group is not None:
         kp_source_crop = keypoint_group.attrs.get("source_crop_run")
         if crop_latest and kp_source_crop and crop_latest != kp_source_crop:
@@ -156,7 +181,7 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
     id_parent = root.get("id_assignment_runs")
     id_latest = _latest(id_parent)
     id_group = _first_matching_run(id_parent, id_latest)
-    id_rows = _safe_len(id_group["detection_ids"]) if id_group else None
+    id_rows = _safe_len(_safe_get(id_group, "detection_ids")) if id_group else None
     id_source_rows = None
     if id_group is not None:
         id_source_detect = id_group.attrs.get("source_detect_run")
