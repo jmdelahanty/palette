@@ -35,6 +35,21 @@ OFFLINE_RUN_GROUPS = (
     "id_assignment_runs",
 )
 MISSING_STRING_VALUES = {"", "unknown", "n/a", "na", "none", "null"}
+CROP_PARAMETER_ATTR_KEYS = (
+    "roi_size",
+    "parameter_source",
+    "acceleration",
+    "scheduler",
+    "num_workers",
+    "use_distributed",
+    "write_backend",
+    "write_backend_requested",
+    "write_backend_effective",
+    "roi_storage",
+    "roi_chunk_len",
+    "roi_use_sharding",
+    "roi_shard_len",
+)
 
 
 @dataclass(frozen=True)
@@ -44,10 +59,15 @@ class RunBackfillPlan:
     missing_git_commit: bool
     contract_update: Optional[dict[str, Any]]
     git_commit_update: Optional[str]
+    parameters_update: Optional[dict[str, Any]]
 
     @property
     def would_modify(self) -> bool:
-        return self.contract_update is not None or self.git_commit_update is not None
+        return (
+            self.contract_update is not None
+            or self.git_commit_update is not None
+            or self.parameters_update is not None
+        )
 
 
 def _resolve_roots(paths: list[Path]) -> list[Path]:
@@ -178,7 +198,72 @@ def _derive_commit(attrs: Mapping[str, Any]) -> Optional[str]:
     return str(commit)
 
 
-def _build_run_plan(zarr_path: Path, parent_name: str, run_name: str, run_group: zarr.Group) -> RunBackfillPlan:
+def _to_json_compatible(value: Any) -> Any:
+    value = _normalize_scalar(value)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _to_json_compatible(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_json_compatible(item) for item in value]
+    if isinstance(value, set):
+        return sorted(_to_json_compatible(item) for item in value)
+    if hasattr(value, "item"):
+        try:
+            scalar = value.item()
+        except Exception:
+            pass
+        else:
+            return _to_json_compatible(scalar)
+    if hasattr(value, "tolist"):
+        try:
+            as_list = value.tolist()
+        except Exception:
+            pass
+        else:
+            return _to_json_compatible(as_list)
+    return str(value)
+
+
+def _build_crop_parameters_patch(attrs: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    if isinstance(attrs.get("parameters"), Mapping):
+        existing = _as_mapping(attrs.get("parameters"))
+        return existing if existing else None
+
+    patch: dict[str, Any] = {}
+    for key in CROP_PARAMETER_ATTR_KEYS:
+        value = attrs.get(key)
+        if value is None:
+            continue
+        patch[key] = _to_json_compatible(value)
+    if patch:
+        return patch
+
+    crop_signature = _as_mapping(attrs.get("crop_signature"))
+    if crop_signature:
+        signature_patch: dict[str, Any] = {}
+        for key in ("roi_size", "parameter_source"):
+            if key in crop_signature and crop_signature[key] is not None:
+                signature_patch[key] = _to_json_compatible(crop_signature[key])
+        if signature_patch:
+            return signature_patch
+    return None
+
+
+def _build_parameters_patch(parent_name: str, attrs: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    if parent_name == "crop_runs":
+        return _build_crop_parameters_patch(attrs)
+    return None
+
+
+def _build_run_plan(
+    zarr_path: Path,
+    parent_name: str,
+    run_name: str,
+    run_group: zarr.Group,
+    *,
+    backfill_missing_parameters: bool,
+) -> RunBackfillPlan:
     attrs = dict(run_group.attrs)
     provenance = _as_mapping(attrs.get("provenance"))
 
@@ -192,6 +277,9 @@ def _build_run_plan(zarr_path: Path, parent_name: str, run_name: str, run_group:
     git_commit_update: Optional[str] = None
     if missing_git_commit:
         git_commit_update = _derive_commit(attrs)
+    parameters_update: Optional[dict[str, Any]] = None
+    if backfill_missing_parameters and provenance.get("parameters") is None:
+        parameters_update = _build_parameters_patch(parent_name, attrs)
 
     display_path = f"{zarr_path}:{parent_name}/{run_name}"
     return RunBackfillPlan(
@@ -200,6 +288,7 @@ def _build_run_plan(zarr_path: Path, parent_name: str, run_name: str, run_group:
         missing_git_commit=missing_git_commit,
         contract_update=contract_update,
         git_commit_update=git_commit_update,
+        parameters_update=parameters_update,
     )
 
 
@@ -221,6 +310,10 @@ def _apply_run_plan(run_group: zarr.Group, plan: RunBackfillPlan) -> bool:
             git_payload["commit"] = plan.git_commit_update
             provenance["git"] = git_payload
             changed = True
+
+    if plan.parameters_update is not None and provenance.get("parameters") != plan.parameters_update:
+        provenance["parameters"] = plan.parameters_update
+        changed = True
 
     if changed:
         run_group.attrs["provenance"] = provenance
@@ -267,6 +360,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument("--dry-run", action="store_true", help="Print planned changes only (default behavior).")
     parser.add_argument("--apply", action="store_true", help="Write changes to zarr attrs.")
+    parser.add_argument(
+        "--backfill-missing-parameters",
+        action="store_true",
+        help=(
+            "Also backfill missing provenance.parameters when they can be safely derived "
+            "from legacy run attrs (currently crop_runs only)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.apply and args.dry_run:
@@ -298,7 +399,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 continue
 
         for parent_name, run_name, run_group in _iter_runs(root):
-            plan = _build_run_plan(zarr_path, parent_name, run_name, run_group)
+            plan = _build_run_plan(
+                zarr_path,
+                parent_name,
+                run_name,
+                run_group,
+                backfill_missing_parameters=bool(args.backfill_missing_parameters),
+            )
             total_runs_scanned += 1
             if plan.missing_contract:
                 missing_contract += 1

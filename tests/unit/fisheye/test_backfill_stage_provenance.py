@@ -300,3 +300,87 @@ def test_main_apply_includes_refined_group_aliases(
         "version": STAGE_PROVENANCE_CONTRACT_VERSION,
     }
     assert refined_eye_masks_prov["git"]["commit"] == "1" * 40
+
+
+def test_main_apply_does_not_backfill_parameters_without_flag(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    zarr_path = tmp_path / "rec_analysis.zarr"
+    root = _FakeGroup()
+    root.attrs["zarr_purpose"] = "analysis"
+    _create_run(
+        root,
+        "crop_runs",
+        "crop_001",
+        attrs={
+            "provenance": {
+                "stage": "crop",
+                "inputs": {"source_detect_run": "detect_001"},
+                "contract": {
+                    "name": STAGE_PROVENANCE_CONTRACT_NAME,
+                    "version": STAGE_PROVENANCE_CONTRACT_VERSION,
+                },
+                "git": {"commit": "2" * 40, "branch": "main"},
+            },
+            "roi_size": [512, 512],
+            "parameter_source": "config",
+            "acceleration": "cpu",
+        },
+    )
+    _patch_scan(monkeypatch, {zarr_path: root})
+
+    rc = mod.main([str(zarr_path), "--apply"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "updated: 0" in out
+    provenance = root["crop_runs"]["crop_001"].attrs["provenance"]
+    assert "parameters" not in provenance
+
+
+def test_main_apply_backfills_crop_parameters_with_flag(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    zarr_path = tmp_path / "rec_analysis.zarr"
+    root = _FakeGroup()
+    root.attrs["zarr_purpose"] = "analysis"
+    _create_run(
+        root,
+        "crop_runs",
+        "crop_001",
+        attrs={
+            "provenance": {
+                "stage": "crop",
+                "inputs": {"source_detect_run": "detect_001"},
+                "contract": {
+                    "name": STAGE_PROVENANCE_CONTRACT_NAME,
+                    "version": STAGE_PROVENANCE_CONTRACT_VERSION,
+                },
+                "git": {"commit": "3" * 40, "branch": "main"},
+            },
+            "roi_size": [512, 512],
+            "parameter_source": "config",
+            "acceleration": "cpu",
+            "roi_chunk_len": 1024,
+            "roi_storage": "compressed",
+        },
+    )
+    _patch_scan(monkeypatch, {zarr_path: root})
+
+    rc = mod.main([str(zarr_path), "--apply", "--backfill-missing-parameters"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "updated: 1" in out
+    provenance = root["crop_runs"]["crop_001"].attrs["provenance"]
+    assert provenance["parameters"] == {
+        "roi_size": [512, 512],
+        "parameter_source": "config",
+        "acceleration": "cpu",
+        "roi_storage": "compressed",
+        "roi_chunk_len": 1024,
+    }
