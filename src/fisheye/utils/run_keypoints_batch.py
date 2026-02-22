@@ -3,12 +3,14 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import h5py
+import numpy as np
 import yaml
 import zarr
 
@@ -61,6 +63,22 @@ class JsonLogger:
 
     def close(self) -> None:
         self._fh.close()
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "ignore")
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
 
 
 def _normalize_attr(value: object) -> Optional[str]:
@@ -229,20 +247,25 @@ def _has_keypoint_tuning(root: zarr.Group) -> bool:
     return "keypoint_tuning" in analysis.attrs
 
 
-def _latest_keypoints_run(zarr_path: Path) -> Optional[str]:
+def _latest_run(zarr_path: Path, group_name: str) -> Optional[str]:
     try:
-        root = zarr.open(str(zarr_path), mode="r")
+        root = zarr.open(str(zarr_path), mode="r", use_consolidated=False)
     except Exception:
         return None
-    group = root.get("keypoints_runs")
+    group = root.get(group_name)
     if group is None:
         return None
-    return group.attrs.get("latest")
+    latest = group.attrs.get("latest")
+    return str(latest) if latest else None
+
+
+def _latest_keypoints_run(zarr_path: Path) -> Optional[str]:
+    return _latest_run(zarr_path, "keypoints_runs")
 
 
 def _keypoints_total_rois(zarr_path: Path, run_name: Optional[str]) -> Optional[int]:
     try:
-        root = zarr.open(str(zarr_path), mode="r")
+        root = zarr.open(str(zarr_path), mode="r", use_consolidated=False)
     except Exception:
         return None
     group = root.get("keypoints_runs")
@@ -261,6 +284,53 @@ def _keypoints_total_rois(zarr_path: Path, run_name: Optional[str]) -> Optional[
         except (TypeError, ValueError):
             return None
     return None
+
+
+def _decode_source_runs(attrs: Dict[str, Any]) -> Dict[str, Any]:
+    source_runs: Dict[str, Any] = {}
+    for key in (
+        "source_keypoints_run",
+        "source_crop_run",
+        "source_detect_run",
+        "source_refined_run",
+    ):
+        if key in attrs:
+            source_runs[key] = _jsonable(attrs.get(key))
+    return source_runs
+
+
+def _collect_stage_payload(zarr_path: Path, group_name: str, run_name: str) -> Dict[str, Any]:
+    root = zarr.open(str(zarr_path), mode="r", use_consolidated=False)
+    parent = root.get(group_name)
+    if parent is None or run_name not in parent:
+        raise RuntimeError(f"run not found after stage completion: {group_name}/{run_name}")
+    run_group = parent[run_name]
+    attrs = dict(run_group.attrs)
+
+    summary = attrs.get("summary_statistics")
+    summary_stats = summary if isinstance(summary, dict) else {}
+    duration_seconds = attrs.get("duration_seconds")
+    if duration_seconds is None:
+        duration_seconds = attrs.get("inference_duration_seconds")
+    if duration_seconds is None and isinstance(summary_stats, dict):
+        duration_seconds = summary_stats.get("duration_seconds")
+
+    method = _normalize_attr(attrs.get("method"))
+    if not method:
+        method = _normalize_attr(attrs.get("refinement_role"))
+    if not method and group_name == "refined_keypoints_runs":
+        method = "refine_keypoints"
+
+    return {
+        "group": group_name,
+        "run_name": run_name,
+        "method": method,
+        "duration_seconds": _jsonable(duration_seconds),
+        "keypoints_processed": _jsonable(attrs.get("keypoints_processed")),
+        "success_rate": _jsonable(attrs.get("success_rate")),
+        "summary_statistics": _jsonable(summary_stats),
+        "source_runs": _decode_source_runs(attrs),
+    }
 
 
 def _plan_from_zarr(
@@ -566,6 +636,77 @@ def _run_refine(
         console=None,
         command="run_keypoints_batch --refine",
     )
+
+
+def _run_plan(
+    plan: KeypointPlan,
+    *,
+    config: Dict[str, Any],
+    method: str,
+    scheduler: Optional[str],
+    num_workers: Optional[int],
+    quiet: bool,
+    dask_progress: bool,
+    refine: bool,
+    refine_only: bool,
+    json_output: bool,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "recording": str(plan.recording_dir),
+        "zarr": str(plan.zarr_path),
+        "camera_id": plan.camera_id,
+        "method": method,
+        "status": "ok",
+    }
+    stage_start = time.perf_counter()
+
+    if refine_only:
+        source_run = _latest_keypoints_run(plan.zarr_path)
+        payload["source_keypoints_run"] = source_run
+        total_rois = _keypoints_total_rois(plan.zarr_path, source_run)
+        if total_rois is None or total_rois > 0:
+            refined_run = _run_refine(str(plan.zarr_path), config, source_run, quiet=quiet)
+            payload["refined_keypoints"] = _collect_stage_payload(
+                plan.zarr_path,
+                "refined_keypoints_runs",
+                refined_run,
+            )
+        else:
+            payload["refine_skipped_reason"] = "zero_keypoint_rois"
+    else:
+        if method in {"yolo", "yolo_pose"}:
+            run_name = _run_yolo(str(plan.zarr_path), config, quiet=quiet)
+        else:
+            _run_traditional(
+                str(plan.zarr_path),
+                config,
+                scheduler=scheduler,
+                num_workers=num_workers,
+                quiet=quiet,
+                show_progress=dask_progress and not json_output,
+            )
+            run_name = _latest_keypoints_run(plan.zarr_path)
+            if not run_name:
+                raise RuntimeError("keypoints run not found after detection")
+        payload["keypoints"] = _collect_stage_payload(
+            plan.zarr_path,
+            "keypoints_runs",
+            run_name,
+        )
+        if refine:
+            total_rois = _keypoints_total_rois(plan.zarr_path, run_name)
+            if total_rois is None or total_rois > 0:
+                refined_run = _run_refine(str(plan.zarr_path), config, run_name, quiet=quiet)
+                payload["refined_keypoints"] = _collect_stage_payload(
+                    plan.zarr_path,
+                    "refined_keypoints_runs",
+                    refined_run,
+                )
+            else:
+                payload["refine_skipped_reason"] = "zero_keypoint_rois"
+
+    payload["duration_seconds"] = time.perf_counter() - stage_start
+    return payload
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -897,43 +1038,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     quiet = bool(args.quiet or args.json)
     task_label = "Refining keypoints" if args.refine_only else "Running keypoints"
 
-    def _run_plan(plan: KeypointPlan) -> Optional[str]:
-        if args.refine_only:
-            run_name = _latest_keypoints_run(plan.zarr_path)
-            total_rois = _keypoints_total_rois(plan.zarr_path, run_name)
-            if total_rois is None or total_rois > 0:
-                _run_refine(str(plan.zarr_path), config, run_name, quiet=quiet)
-            return run_name
-
-        if method in {"yolo", "yolo_pose"}:
-            run_name = _run_yolo(str(plan.zarr_path), config, quiet=quiet)
-        else:
-            _run_traditional(
-                str(plan.zarr_path),
-                config,
-                scheduler=args.scheduler,
-                num_workers=args.num_workers,
-                quiet=quiet,
-                show_progress=args.dask_progress and not args.quiet and not args.json,
-            )
-            run_name = _latest_keypoints_run(plan.zarr_path)
-        if args.refine:
-            total_rois = _keypoints_total_rois(plan.zarr_path, run_name)
-            if total_rois is None or total_rois > 0:
-                _run_refine(str(plan.zarr_path), config, run_name, quiet=quiet)
-        return run_name
-
     if progress is None:
         for plan in runnable_plans:
             try:
-                _run_plan(plan)
+                result = _run_plan(
+                    plan,
+                    config=config,
+                    method=method,
+                    scheduler=args.scheduler,
+                    num_workers=args.num_workers,
+                    quiet=quiet,
+                    dask_progress=bool(args.dask_progress and not args.quiet and not args.json),
+                    refine=bool(args.refine),
+                    refine_only=bool(args.refine_only),
+                    json_output=bool(args.json),
+                )
                 ok += 1
                 if args.json:
-                    print(json.dumps({"status": "ok", "zarr": str(plan.zarr_path)}))
+                    print(json.dumps(result, sort_keys=True))
                 if logger is not None:
                     logger.log(
                         "keypoints_ok",
                         zarr=str(plan.zarr_path),
+                        results=result,
                     )
             except Exception as exc:
                 failed += 1
@@ -952,14 +1079,26 @@ def main(argv: Optional[List[str]] = None) -> int:
             task = progress.add_task(task_label, total=len(runnable_plans))
             for plan in runnable_plans:
                 try:
-                    _run_plan(plan)
+                    result = _run_plan(
+                        plan,
+                        config=config,
+                        method=method,
+                        scheduler=args.scheduler,
+                        num_workers=args.num_workers,
+                        quiet=quiet,
+                        dask_progress=bool(args.dask_progress and not args.quiet and not args.json),
+                        refine=bool(args.refine),
+                        refine_only=bool(args.refine_only),
+                        json_output=bool(args.json),
+                    )
                     ok += 1
                     if args.json:
-                        print(json.dumps({"status": "ok", "zarr": str(plan.zarr_path)}))
+                        print(json.dumps(result, sort_keys=True))
                     if logger is not None:
                         logger.log(
                             "keypoints_ok",
                             zarr=str(plan.zarr_path),
+                            results=result,
                         )
                 except Exception as exc:
                     failed += 1

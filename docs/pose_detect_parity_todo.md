@@ -38,7 +38,7 @@ Related eye-mask parity work is tracked separately in `docs/eye_masks_detect_pos
   - Add group summaries for keypoint model/method similar to detect summaries.
   - Acceptance: one CLI can query both detect and keypoint status/performance slices.
 
-- [ ] Improve `run_keypoints_batch.py` result logging parity.
+- [x] Improve `run_keypoints_batch.py` result logging parity.
   - Detect batch logs a richer `results` payload; keypoints currently logs minimal success/fail.
   - Include run name, method, optional refine run, and core metrics in JSONL output.
   - Acceptance: keypoint JSONL supports downstream auditing/reconciliation like detect batch logs.
@@ -67,5 +67,5 @@ Related eye-mask parity work is tracked separately in `docs/eye_masks_detect_pos
 - [x] Unit tests for unapproved keypoint lister.
 - [ ] Registry migration tests for keypoint performance schema/views.
 - [ ] Registry query tests for new keypoint filters/group summaries.
-- [ ] Batch logging tests to assert richer keypoint result payloads.
+- [x] Batch logging tests to assert richer keypoint result payloads.
 - [ ] End-to-end smoke test: analysis zarr -> keypoints -> refine_keypoints -> registry scan -> quality/perf query.
