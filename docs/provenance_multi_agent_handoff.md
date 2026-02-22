@@ -15,13 +15,15 @@ Completed provenance contract adoption:
   - `eye_masks_runs`
   - `keypoints_runs`
   - `detect_runs`
+  - `crop_runs`
+  - `id_assignment_runs`
 
 Post-migration follow-up work:
 
-- Add `--zarr-use` filtering to diagnostics scanners where missing
-- Add targeted lineage repair tooling for stale refined-detect pointers
-- Resolve residual consistency mismatches in legacy training archives
-- Keep strict provenance checks enabled for migrated offline stages
+- [x] Add `--zarr-use` filtering to diagnostics scanners where missing
+- [x] Add targeted lineage repair tooling for stale refined-detect pointers
+- [x] Resolve residual consistency mismatches in legacy training archives
+- [x] Keep strict provenance checks enabled for migrated offline stages
 
 ## Canonical TODO IDs (for agent coordination)
 
@@ -29,9 +31,9 @@ T1: crop_runs contract migration (completed)
 T2: id_assignment_runs contract migration (completed)  
 T3: legacy offline provenance backfill utility (completed)  
 T4: offline diagnostics tightening (completed)  
-T5: diagnostics `--zarr-use` filter parity  
-T6: stale refined-detect lineage repair utility  
-T7: residual consistency cleanup + revalidation
+T5: diagnostics `--zarr-use` filter parity (completed)  
+T6: stale refined-detect lineage repair utility (completed)  
+T7: residual consistency cleanup + revalidation (completed)
 
 Deferred:
 

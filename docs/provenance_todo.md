@@ -4,20 +4,25 @@
 - Make every derived dataset (detect/refine/crop/keypoints/eye masks) auditable and reproducible.
 - Capture enough context to re-run or explain any result without relying on external notes.
 
-## Current next steps (offline dataset focus)
+## Current status (offline dataset focus)
 - Migrate offline non-refinement stage writers to `palette_stage_provenance` contract:
   - [x] `eye_masks_runs`
   - [x] `keypoints_runs`
   - [x] `detect_runs`
-  - [ ] `crop_runs`
-  - [ ] `id_assignment_runs`
+  - [x] `crop_runs`
+  - [x] `id_assignment_runs`
 - Add a generic provenance backfill tool for legacy offline runs:
-  - inject `provenance.contract` when missing
-  - normalize git payload into canonical `provenance.git.commit` shape
-  - keep dry-run and non-destructive defaults
+  - [x] inject `provenance.contract` when missing
+  - [x] normalize git payload into canonical `provenance.git.commit` shape
+  - [x] keep dry-run and non-destructive defaults
 - Expand diagnostics gating for offline stages after backfill:
-  - add stricter contract checks stage-by-stage in `check_provenance_capture`
-  - preserve compatibility reads during migration window
+  - [x] add stricter contract checks stage-by-stage in `check_provenance_capture`
+  - [x] preserve compatibility reads during migration window
+- Diagnostics/filtering/lineage follow-ups:
+  - [x] add `--zarr-use` filtering to `check_provenance_capture`
+  - [x] add stale refined-detect lineage repair utility (`fix_refined_detect_lineage`)
+  - [x] add JSON audit reporting for lineage repairs (`--json-report`)
+  - [x] clear known training consistency mismatch via lineage repair + revalidation
 
 ## High-priority fixes
 - Add a `provenance` block to each run group with:
