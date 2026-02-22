@@ -72,6 +72,22 @@ def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
             yield from path.glob("*.zarr")
 
 
+def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> str:
+    for key in ("zarr_use", "zarr_purpose"):
+        purpose = root.attrs.get(key)
+        if purpose is None:
+            continue
+        value = str(purpose).strip().lower()
+        if value in {"analysis", "training"}:
+            return value
+    name = zarr_path.name.lower()
+    if name.endswith("_analysis.zarr"):
+        return "analysis"
+    if name.endswith("_training.zarr"):
+        return "training"
+    return "unknown"
+
+
 def _read_file_list(path: Path) -> List[Path]:
     if not path.exists():
         raise FileNotFoundError(path)
@@ -337,19 +353,20 @@ def _check_group(
 def _check_zarr(
     zarr_path: Path,
     *,
+    root: Optional[zarr.Group] = None,
     all_runs: bool,
     require_provenance: bool,
     check_consistency: bool,
     check_subject_metadata: bool,
     strict_contract: bool,
 ) -> tuple[Dict[str, Any], Optional[list[str]], Optional[Dict[str, object]]]:
-    root = zarr.open(str(zarr_path), mode="r")
+    zarr_root = root or zarr.open(str(zarr_path), mode="r")
     results: Dict[str, Any] = {}
     for stage in STAGES:
         group = None
         for group_name in stage["groups"]:
-            if group_name in root:
-                group = root[group_name]
+            if group_name in zarr_root:
+                group = zarr_root[group_name]
                 break
         results[stage["label"]] = _check_group(
             stage["label"],
@@ -363,7 +380,7 @@ def _check_zarr(
     if check_consistency:
         from .check_provenance_consistency import collect_provenance
 
-        record = collect_provenance(root)
+        record = collect_provenance(zarr_root)
         issues = record.issues
         lineage = {
             "source": record.crop_source_path,
@@ -372,7 +389,7 @@ def _check_zarr(
             "keypoints": record.keypoint_rows,
         }
     if check_subject_metadata:
-        results["subject_metadata"] = _check_subject_metadata(root)  # type: ignore[assignment]
+        results["subject_metadata"] = _check_subject_metadata(zarr_root)  # type: ignore[assignment]
     return results, issues, lineage
 
 
@@ -428,6 +445,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "Also enforces migrated offline stage contract name/version."
         ),
     )
+    parser.add_argument(
+        "--zarr-use",
+        choices=["analysis", "training", "any"],
+        default="any",
+        help="Filter zarr archives by purpose (default: any).",
+    )
 
     args = parser.parse_args(argv)
 
@@ -444,8 +467,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     results_payload: Dict[str, Dict[str, Any]] = {}
     has_failures = False
     for zarr_path in _iter_zarr(roots, args.recursive):
+        root = zarr.open(str(zarr_path), mode="r")
+        if args.zarr_use != "any":
+            observed = _infer_zarr_use(root, zarr_path)
+            if observed != args.zarr_use:
+                continue
         checks, issues, lineage = _check_zarr(
             zarr_path,
+            root=root,
             all_runs=args.all_runs,
             require_provenance=args.require_provenance,
             check_consistency=check_consistency,

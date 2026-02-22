@@ -234,6 +234,46 @@ def test_main_strict_returns_nonzero_on_detect_contract_failure(monkeypatch, cap
     capsys.readouterr()
 
 
+def test_main_zarr_use_filter_runs_checks_only_for_matching_archives(monkeypatch, capsys) -> None:
+    analysis_path = Path("/fake/recording_analysis.zarr")
+    training_path = Path("/fake/recording_training.zarr")
+    analysis_root = _FakeGroup(attrs={"zarr_use": "analysis"})
+    training_root = _FakeGroup(attrs={"zarr_use": "training"})
+    root_lookup = {
+        analysis_path: analysis_root,
+        training_path: training_root,
+    }
+
+    monkeypatch.setattr(mod, "_iter_zarr", lambda *_args, **_kwargs: iter([analysis_path, training_path]))
+    monkeypatch.setattr(mod.zarr, "open", lambda path, mode="r": root_lookup[Path(path)])  # noqa: ARG005
+
+    seen: list[Path] = []
+
+    def _fake_check_zarr(zarr_path: Path, **kwargs: Any):
+        seen.append(zarr_path)
+        assert kwargs["root"] is root_lookup[zarr_path]
+        checks = {
+            stage["label"]: [mod.ProvenanceCheck(stage["label"], "run", "ok", True, [], [])]
+            for stage in mod.STAGES
+        }
+        return checks, None, None
+
+    monkeypatch.setattr(mod, "_check_zarr", _fake_check_zarr)
+
+    rc = mod.main(
+        [
+            str(analysis_path),
+            str(training_path),
+            "--zarr-use",
+            "analysis",
+            "--no-check-consistency",
+        ]
+    )
+    assert rc == 0
+    assert seen == [analysis_path]
+    capsys.readouterr()
+
+
 def test_main_strict_keeps_legacy_stage_compatible_until_backfill(monkeypatch, capsys) -> None:
     root = _build_root_for_stage(
         "detect_runs",
