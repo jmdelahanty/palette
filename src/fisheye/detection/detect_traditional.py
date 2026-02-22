@@ -20,6 +20,7 @@ import dask
 from dask import delayed
 from dask.diagnostics import ProgressBar
 
+from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..utils.system import get_git_info, get_platform_info
 from ..refinement.detect_quality import analyze_detect_quality, save_quality_report
 
@@ -478,17 +479,32 @@ def detect_fish(
                      f"3-5=[cyan]{distribution['frames_with_3_to_5']}[/cyan], "
                      f"6+=[cyan]{distribution['frames_with_6_plus']}[/cyan]")
 
-    detect_group.attrs['provenance'] = {
-        'command': ' '.join(sys.argv),
-        'config_path': config_path,
-        'created_at_utc': datetime.now(timezone.utc).isoformat(),
-        'git': git_info,
-        'platform': platform_info,
-        'inputs': {
+    provenance_record = build_stage_provenance(
+        stage='detect',
+        command=' '.join(sys.argv),
+        created_at_utc=str(detect_group.attrs.get('detect_timestamp_utc') or datetime.now(timezone.utc).isoformat()),
+        version=git_info.get('short_hash') or git_info.get('commit_hash'),
+        git={
+            'commit': git_info.get('commit_hash'),
+            'short': git_info.get('short_hash'),
+            'branch': git_info.get('branch'),
+            'is_dirty': git_info.get('is_dirty'),
+            'remote': git_info.get('remote_url'),
+        },
+        platform=platform_info,
+        parameters={
+            **dict(detect_params),
+            'parameter_source': param_source,
+            'scheduler': scheduler,
+            'config_path': config_path,
+        },
+        inputs={
             'frame_source': 'zarr',
             'source_video_path': root.attrs.get('source_video_path'),
+            'source_background_run': latest_bg_run,
         },
-    }
+    )
+    write_stage_provenance(detect_group, provenance_record)
     
     # Run quality analysis
     console.print("\n[bold]Running detection quality analysis...[/bold]")

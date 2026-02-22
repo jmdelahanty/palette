@@ -40,6 +40,7 @@ from rich.panel import Panel
 from rich.markup import escape
 from ultralytics import YOLO
 
+from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.zarr.schema import get_run_group
 from fisheye.utils.import_video_metadata import write_video_metadata
 from fisheye.utils.system import get_environment_info, get_git_info
@@ -1049,28 +1050,39 @@ def detect_yolo(
     detect_group.attrs['inference_avg_batch_ms'] = float(avg_inference * 1000.0) if inference_times else 0.0
     detect_group.attrs['inference_avg_read_ms'] = float(np.mean(read_times) * 1000.0) if read_times else 0.0
 
-    provenance = {
-        "stage": "detect",
-        "method": "yolo",
-        "command": " ".join(sys.argv),
-        "created_at_utc": detect_group.attrs.get("detect_timestamp_utc"),
-        "git": git_info,
-        "environment": env_info.get("environment"),
-        "platform": {
+    provenance_record = build_stage_provenance(
+        stage="detect",
+        command=" ".join(sys.argv),
+        created_at_utc=str(detect_group.attrs.get("detect_timestamp_utc")),
+        version=git_info.get("short_hash") or git_info.get("commit_hash"),
+        git={
+            "commit": git_info.get("commit_hash"),
+            "short": git_info.get("short_hash"),
+            "branch": git_info.get("branch"),
+            "is_dirty": git_info.get("is_dirty"),
+            "remote": git_info.get("remote_url"),
+        },
+        environment=env_info.get("environment"),
+        platform={
             "hostname": env_info["platform"].get("hostname"),
             "system": env_info["platform"].get("system"),
             "release": env_info["platform"].get("release"),
             "python_version": env_info["platform"].get("python_version"),
+            "machine": env_info["platform"].get("machine"),
         },
-        "parameters": detect_group.attrs.get("parameters"),
-        "inputs": {
+        parameters=dict(detect_group.attrs.get("parameters") or {}),
+        inputs={
             "frame_source": "external",
             "source_video_path": root.attrs.get("source_video_path"),
             "source_zarr_path": detect_group.attrs.get("source_zarr_path"),
         },
-    }
-    provenance = {k: v for k, v in provenance.items() if v is not None}
-    detect_group.attrs["provenance"] = provenance
+        artifacts={
+            "model_path": str(model_path.absolute()),
+            "model_name": model_path.name,
+            "device": "cuda" if use_gpu else "cpu",
+        },
+    )
+    write_stage_provenance(detect_group, provenance_record)
     
     # Mark as latest
     root['detect_runs'].attrs['latest'] = run_name

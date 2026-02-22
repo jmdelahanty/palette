@@ -211,3 +211,36 @@ def test_check_zarr_accepts_canonical_contract_payload_for_keypoints_stage(monke
     check = checks["keypoints"][0]
     assert check.status == "ok"
     assert check.has_provenance is True
+
+
+def test_check_zarr_accepts_canonical_contract_payload_for_detect_stage(monkeypatch) -> None:
+    payload = build_stage_provenance(
+        stage="detect",
+        created_at_utc="2026-02-20T00:00:00+00:00",
+        parameters={"method": "yolo"},
+        inputs={"source_video_path": "/tmp/video.mp4"},
+        git={"commit": "f" * 40, "branch": "main"},
+        environment={},
+    )
+    root = _build_root_for_stage(
+        "detect_runs",
+        "detect_001",
+        {
+            "detection_method": "yolo",
+            "provenance": payload,
+        },
+    )
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: root)
+
+    checks, _, _ = mod._check_zarr(
+        Path("/fake/recording.zarr"),
+        all_runs=False,
+        require_provenance=True,
+        check_consistency=False,
+        check_subject_metadata=False,
+        strict_contract=True,
+    )
+
+    check = checks["detect"][0]
+    assert check.status == "ok"
+    assert check.has_provenance is True
