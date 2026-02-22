@@ -360,6 +360,55 @@ def test_schema_has_detect_performance_table_views_and_indexes(tmp_path: Path) -
     registry.close()
 
 
+def test_schema_has_keypoint_performance_table_views_and_indexes(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    table = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'keypoint_performance';
+        """
+    ).fetchone()
+    assert table is not None
+
+    views = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'view' AND name IN (
+            'keypoint_performance_latest',
+            'recording_keypoint_performance_latest'
+        );
+        """
+    ).fetchall()
+    view_names = {str(row["name"]) for row in views}
+    assert view_names == {
+        "keypoint_performance_latest",
+        "recording_keypoint_performance_latest",
+    }
+
+    idx = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'index' AND name IN (
+            'idx_keypoint_perf_recording',
+            'idx_keypoint_perf_method',
+            'idx_keypoint_perf_runtime',
+            'idx_keypoint_perf_source'
+        );
+        """
+    ).fetchall()
+    idx_names = {str(row["name"]) for row in idx}
+    assert idx_names == {
+        "idx_keypoint_perf_recording",
+        "idx_keypoint_perf_method",
+        "idx_keypoint_perf_runtime",
+        "idx_keypoint_perf_source",
+    }
+    registry.close()
+
+
 def test_schema_has_eye_mask_performance_table_views_and_indexes(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     table = registry.conn.execute(

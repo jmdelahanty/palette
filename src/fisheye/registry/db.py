@@ -714,6 +714,143 @@ def _extract_detect_performance_rows(
     return rows
 
 
+def _keypoint_run_names(parent: zarr.Group) -> List[str]:
+    try:
+        names = list(parent.group_keys())
+    except Exception:
+        names = [name for name in parent.keys() if isinstance(name, str)]
+    return sorted(str(name) for name in names)
+
+
+def _extract_keypoint_performance_rows(
+    root: zarr.Group,
+    *,
+    zarr_path: Path,
+    recording_id: Optional[str],
+    zarr_use: Optional[str],
+) -> List[Dict[str, Any]]:
+    keypoints_parent = root.get("keypoints_runs")
+    if keypoints_parent is None:
+        return []
+
+    try:
+        zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    except Exception:
+        zarr_mtime_ns = None
+    updated_utc = _utc_now()
+
+    rows: List[Dict[str, Any]] = []
+    for keypoint_run in _keypoint_run_names(keypoints_parent):
+        if keypoint_run not in keypoints_parent:
+            continue
+        keypoint_group = keypoints_parent[keypoint_run]
+        attrs = dict(keypoint_group.attrs)
+        summary = _coerce_mapping(attrs.get("summary_statistics")) or {}
+        parameters = _coerce_mapping(attrs.get("parameters")) or {}
+        provenance = _coerce_mapping(attrs.get("provenance")) or {}
+        model_resolution = _coerce_mapping(provenance.get("model_resolution")) or {}
+        model_resolution_selected = _coerce_mapping(model_resolution.get("selected")) or {}
+
+        keypoint_created_utc = (
+            _decode_attr(attrs.get("keypoints_timestamp_utc"))
+            or _decode_attr(attrs.get("created_utc"))
+            or _decode_attr(attrs.get("timestamp_utc"))
+            or _decode_attr(provenance.get("created_at_utc"))
+        )
+        keypoint_method = (
+            _decode_attr(attrs.get("method"))
+            or _decode_attr(provenance.get("method"))
+        )
+        model_run_id = (
+            _decode_attr(attrs.get("model_resolution_selected_run_id"))
+            or _decode_attr(model_resolution_selected.get("run_id"))
+        )
+        model_set_id = (
+            _decode_attr(attrs.get("model_resolution_selected_set_id"))
+            or _decode_attr(model_resolution_selected.get("set_id"))
+        )
+        model_path = (
+            _decode_attr(attrs.get("model_path"))
+            or _decode_attr(attrs.get("model_resolution_selected_model_path"))
+            or _decode_attr(model_resolution_selected.get("model_path"))
+        )
+        model_name = _decode_attr(attrs.get("model_name"))
+        if model_name is None and model_path:
+            model_name = Path(model_path).name
+
+        total_rois = _as_int(summary.get("total_rois"))
+        if total_rois is None and "keypoints_roi" in keypoint_group:
+            try:
+                total_rois = int(keypoint_group["keypoints_roi"].shape[0])
+            except Exception:
+                total_rois = None
+        successful_detections = _as_int(summary.get("successful_detections"))
+        if successful_detections is None:
+            successful_detections = _as_int(summary.get("successful_keypoint_detections"))
+        failed_detections = _as_int(summary.get("failed_detections"))
+        if failed_detections is None:
+            failed_detections = _as_int(summary.get("failed_keypoint_detections"))
+        success_rate_percent = _as_float(summary.get("success_rate_percent"))
+        if success_rate_percent is None:
+            success_rate_percent = _as_float(attrs.get("success_rate"))
+
+        duration_seconds = _as_float(attrs.get("duration_seconds"))
+        inference_duration_seconds = _as_float(attrs.get("inference_duration_seconds"))
+        if duration_seconds is None:
+            duration_seconds = inference_duration_seconds
+        keypoints_processed = _as_int(attrs.get("keypoints_processed"))
+        if keypoints_processed is None:
+            keypoints_processed = total_rois
+
+        inference_average_fps = _as_float(attrs.get("inference_average_fps"))
+        keypoints_per_second = _as_float(attrs.get("inference_poses_per_second"))
+        if keypoints_per_second is None and inference_average_fps is not None:
+            keypoints_per_second = inference_average_fps
+        if keypoints_per_second is None and duration_seconds and duration_seconds > 0 and keypoints_processed is not None:
+            keypoints_per_second = float(keypoints_processed) / float(duration_seconds)
+
+        conf_threshold = _as_float(parameters.get("confidence_threshold"))
+        if conf_threshold is None:
+            conf_threshold = _as_float(parameters.get("conf_threshold"))
+        iou_threshold = _as_float(parameters.get("iou_threshold"))
+
+        rows.append(
+            {
+                "keypoint_run": str(keypoint_run),
+                "keypoint_created_utc": keypoint_created_utc,
+                "recording_id": recording_id,
+                "zarr_use": zarr_use,
+                "keypoint_method": keypoint_method,
+                "model_run_id": model_run_id,
+                "model_set_id": model_set_id,
+                "model_path": model_path,
+                "model_name": model_name,
+                "source_crop_run": _decode_attr(attrs.get("source_crop_run")),
+                "source_detect_run": _decode_attr(attrs.get("source_detect_run")),
+                "source_refined_run": _decode_attr(attrs.get("source_refined_run")),
+                "total_rois": total_rois,
+                "successful_detections": successful_detections,
+                "failed_detections": failed_detections,
+                "success_rate_percent": success_rate_percent,
+                "frames_with_keypoints": _as_int(summary.get("frames_with_keypoints")),
+                "mean_confidence": _as_float(summary.get("mean_confidence")),
+                "duration_seconds": duration_seconds,
+                "inference_duration_seconds": inference_duration_seconds,
+                "keypoints_per_second": keypoints_per_second,
+                "inference_average_fps": inference_average_fps,
+                "batch_size": _as_int(parameters.get("batch_size")),
+                "imgsz": _decode_attr(parameters.get("imgsz")),
+                "conf_threshold": conf_threshold,
+                "iou_threshold": iou_threshold,
+                "summary_statistics_json": _json_dumps(summary) if summary else None,
+                "zarr_mtime_ns": zarr_mtime_ns,
+                "updated_utc": updated_utc,
+            }
+        )
+
+    return rows
+
+
 def _eye_mask_run_names(parent: zarr.Group) -> List[str]:
     try:
         names = list(parent.group_keys())
@@ -1485,6 +1622,7 @@ class Registry:
                 "eye_mask_performance_review_stale_columns",
                 self._migration_017_eye_mask_performance_review_stale_columns,
             ),
+            (18, "keypoint_performance_registry", self._migration_018_keypoint_performance_registry),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -4039,6 +4177,221 @@ class Registry:
         # Additive refresh of eye-mask performance schema/views for review + stale reconciliation.
         self._migration_015_eye_mask_performance_registry()
 
+    def _migration_018_keypoint_performance_registry(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS keypoint_performance (
+                dataset_id TEXT NOT NULL,
+                keypoint_run TEXT NOT NULL,
+                keypoint_created_utc TEXT,
+                recording_id TEXT,
+                zarr_use TEXT,
+                keypoint_method TEXT,
+                model_run_id TEXT,
+                model_set_id TEXT,
+                model_path TEXT,
+                model_name TEXT,
+                source_crop_run TEXT,
+                source_detect_run TEXT,
+                source_refined_run TEXT,
+                total_rois INTEGER,
+                successful_detections INTEGER,
+                failed_detections INTEGER,
+                success_rate_percent REAL,
+                frames_with_keypoints INTEGER,
+                mean_confidence REAL,
+                duration_seconds REAL,
+                inference_duration_seconds REAL,
+                keypoints_per_second REAL,
+                inference_average_fps REAL,
+                batch_size INTEGER,
+                imgsz TEXT,
+                conf_threshold REAL,
+                iou_threshold REAL,
+                summary_statistics_json TEXT,
+                zarr_mtime_ns INTEGER,
+                updated_utc TEXT,
+                PRIMARY KEY (dataset_id, keypoint_run),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        self._ensure_columns(
+            "keypoint_performance",
+            {
+                "keypoint_created_utc": "TEXT",
+                "recording_id": "TEXT",
+                "zarr_use": "TEXT",
+                "keypoint_method": "TEXT",
+                "model_run_id": "TEXT",
+                "model_set_id": "TEXT",
+                "model_path": "TEXT",
+                "model_name": "TEXT",
+                "source_crop_run": "TEXT",
+                "source_detect_run": "TEXT",
+                "source_refined_run": "TEXT",
+                "total_rois": "INTEGER",
+                "successful_detections": "INTEGER",
+                "failed_detections": "INTEGER",
+                "success_rate_percent": "REAL",
+                "frames_with_keypoints": "INTEGER",
+                "mean_confidence": "REAL",
+                "duration_seconds": "REAL",
+                "inference_duration_seconds": "REAL",
+                "keypoints_per_second": "REAL",
+                "inference_average_fps": "REAL",
+                "batch_size": "INTEGER",
+                "imgsz": "TEXT",
+                "conf_threshold": "REAL",
+                "iou_threshold": "REAL",
+                "summary_statistics_json": "TEXT",
+                "zarr_mtime_ns": "INTEGER",
+                "updated_utc": "TEXT",
+            },
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_keypoint_perf_recording ON keypoint_performance(recording_id, keypoint_created_utc DESC);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_keypoint_perf_method ON keypoint_performance(keypoint_method, model_name);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_keypoint_perf_runtime ON keypoint_performance(keypoints_per_second, duration_seconds);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_keypoint_perf_source ON keypoint_performance(source_crop_run, source_detect_run, source_refined_run);"
+        )
+
+        cur.execute("DROP VIEW IF EXISTS keypoint_performance_latest;")
+        cur.execute(
+            """
+            CREATE VIEW keypoint_performance_latest AS
+            WITH ranked AS (
+                SELECT
+                    kp.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY kp.dataset_id
+                        ORDER BY
+                            COALESCE(kp.keypoint_created_utc, kp.updated_utc) DESC,
+                            kp.keypoint_run DESC
+                    ) AS _rn
+                FROM keypoint_performance kp
+            )
+            SELECT
+                dataset_id,
+                keypoint_run,
+                keypoint_created_utc,
+                recording_id,
+                zarr_use,
+                keypoint_method,
+                model_run_id,
+                model_set_id,
+                model_path,
+                model_name,
+                source_crop_run,
+                source_detect_run,
+                source_refined_run,
+                total_rois,
+                successful_detections,
+                failed_detections,
+                success_rate_percent,
+                frames_with_keypoints,
+                mean_confidence,
+                duration_seconds,
+                inference_duration_seconds,
+                keypoints_per_second,
+                inference_average_fps,
+                batch_size,
+                imgsz,
+                conf_threshold,
+                iou_threshold,
+                summary_statistics_json,
+                zarr_mtime_ns,
+                updated_utc
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+        cur.execute("DROP VIEW IF EXISTS recording_keypoint_performance_latest;")
+        cur.execute(
+            """
+            CREATE VIEW recording_keypoint_performance_latest AS
+            WITH ranked AS (
+                SELECT
+                    kpl.*,
+                    d.zarr_path AS zarr_path,
+                    d.artifact_kind AS artifact_kind,
+                    d.status AS dataset_status,
+                    p.rig_id AS rig_id,
+                    p.arena_id AS arena_id,
+                    p.camera_id AS camera_id,
+                    p.canvas_name AS canvas_name,
+                    p.dish_design AS dish_design,
+                    p.protocol_name AS protocol_name,
+                    p.cross_id AS cross_id,
+                    p.genotype AS genotype,
+                    p.dpf_at_acquisition AS dpf_at_acquisition,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY kpl.recording_id
+                        ORDER BY
+                            COALESCE(kpl.keypoint_created_utc, kpl.updated_utc) DESC,
+                            kpl.keypoint_run DESC
+                    ) AS _rn
+                FROM keypoint_performance_latest kpl
+                LEFT JOIN datasets d ON d.dataset_id = kpl.dataset_id
+                LEFT JOIN provenance p ON p.dataset_id = kpl.dataset_id
+                WHERE kpl.recording_id IS NOT NULL
+            )
+            SELECT
+                recording_id,
+                dataset_id,
+                keypoint_run,
+                keypoint_created_utc,
+                zarr_use,
+                keypoint_method,
+                model_run_id,
+                model_set_id,
+                model_path,
+                model_name,
+                source_crop_run,
+                source_detect_run,
+                source_refined_run,
+                total_rois,
+                successful_detections,
+                failed_detections,
+                success_rate_percent,
+                frames_with_keypoints,
+                mean_confidence,
+                duration_seconds,
+                inference_duration_seconds,
+                keypoints_per_second,
+                inference_average_fps,
+                batch_size,
+                imgsz,
+                conf_threshold,
+                iou_threshold,
+                summary_statistics_json,
+                zarr_path,
+                artifact_kind,
+                dataset_status,
+                rig_id,
+                arena_id,
+                camera_id,
+                canvas_name,
+                dish_design,
+                protocol_name,
+                cross_id,
+                genotype,
+                dpf_at_acquisition,
+                zarr_mtime_ns,
+                updated_utc
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
         existing = {
             row["name"]
@@ -4656,6 +5009,128 @@ class Registry:
         )
         self.conn.commit()
 
+    def upsert_keypoint_performance(
+        self,
+        *,
+        dataset_id: str,
+        keypoint_run: str,
+        keypoint_created_utc: Optional[str],
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+        keypoint_method: Optional[str],
+        model_run_id: Optional[str],
+        model_set_id: Optional[str],
+        model_path: Optional[str],
+        model_name: Optional[str],
+        source_crop_run: Optional[str],
+        source_detect_run: Optional[str],
+        source_refined_run: Optional[str],
+        total_rois: Optional[int],
+        successful_detections: Optional[int],
+        failed_detections: Optional[int],
+        success_rate_percent: Optional[float],
+        frames_with_keypoints: Optional[int],
+        mean_confidence: Optional[float],
+        duration_seconds: Optional[float],
+        inference_duration_seconds: Optional[float],
+        keypoints_per_second: Optional[float],
+        inference_average_fps: Optional[float],
+        batch_size: Optional[int],
+        imgsz: Optional[str],
+        conf_threshold: Optional[float],
+        iou_threshold: Optional[float],
+        summary_statistics_json: Optional[str],
+        zarr_mtime_ns: Optional[int] = None,
+        updated_utc: Optional[str] = None,
+    ) -> None:
+        payload = {
+            "dataset_id": str(dataset_id),
+            "keypoint_run": str(keypoint_run),
+            "keypoint_created_utc": keypoint_created_utc,
+            "recording_id": recording_id,
+            "zarr_use": zarr_use,
+            "keypoint_method": keypoint_method,
+            "model_run_id": model_run_id,
+            "model_set_id": model_set_id,
+            "model_path": model_path,
+            "model_name": model_name,
+            "source_crop_run": source_crop_run,
+            "source_detect_run": source_detect_run,
+            "source_refined_run": source_refined_run,
+            "total_rois": total_rois,
+            "successful_detections": successful_detections,
+            "failed_detections": failed_detections,
+            "success_rate_percent": success_rate_percent,
+            "frames_with_keypoints": frames_with_keypoints,
+            "mean_confidence": mean_confidence,
+            "duration_seconds": duration_seconds,
+            "inference_duration_seconds": inference_duration_seconds,
+            "keypoints_per_second": keypoints_per_second,
+            "inference_average_fps": inference_average_fps,
+            "batch_size": batch_size,
+            "imgsz": imgsz,
+            "conf_threshold": conf_threshold,
+            "iou_threshold": iou_threshold,
+            "summary_statistics_json": summary_statistics_json,
+            "zarr_mtime_ns": zarr_mtime_ns,
+            "updated_utc": updated_utc or _utc_now(),
+        }
+        self.conn.execute(
+            """
+            INSERT INTO keypoint_performance (
+                dataset_id, keypoint_run, keypoint_created_utc, recording_id, zarr_use,
+                keypoint_method, model_run_id, model_set_id, model_path, model_name,
+                source_crop_run, source_detect_run, source_refined_run,
+                total_rois, successful_detections, failed_detections, success_rate_percent,
+                frames_with_keypoints, mean_confidence,
+                duration_seconds, inference_duration_seconds, keypoints_per_second, inference_average_fps,
+                batch_size, imgsz, conf_threshold, iou_threshold, summary_statistics_json,
+                zarr_mtime_ns, updated_utc
+            )
+            VALUES (
+                :dataset_id, :keypoint_run, :keypoint_created_utc, :recording_id, :zarr_use,
+                :keypoint_method, :model_run_id, :model_set_id, :model_path, :model_name,
+                :source_crop_run, :source_detect_run, :source_refined_run,
+                :total_rois, :successful_detections, :failed_detections, :success_rate_percent,
+                :frames_with_keypoints, :mean_confidence,
+                :duration_seconds, :inference_duration_seconds, :keypoints_per_second, :inference_average_fps,
+                :batch_size, :imgsz, :conf_threshold, :iou_threshold, :summary_statistics_json,
+                :zarr_mtime_ns, :updated_utc
+            )
+            ON CONFLICT(dataset_id, keypoint_run) DO UPDATE SET
+                keypoint_created_utc=excluded.keypoint_created_utc,
+                recording_id=excluded.recording_id,
+                zarr_use=excluded.zarr_use,
+                keypoint_method=excluded.keypoint_method,
+                model_run_id=excluded.model_run_id,
+                model_set_id=excluded.model_set_id,
+                model_path=excluded.model_path,
+                model_name=excluded.model_name,
+                source_crop_run=excluded.source_crop_run,
+                source_detect_run=excluded.source_detect_run,
+                source_refined_run=excluded.source_refined_run,
+                total_rois=excluded.total_rois,
+                successful_detections=excluded.successful_detections,
+                failed_detections=excluded.failed_detections,
+                success_rate_percent=excluded.success_rate_percent,
+                frames_with_keypoints=excluded.frames_with_keypoints,
+                mean_confidence=excluded.mean_confidence,
+                duration_seconds=excluded.duration_seconds,
+                inference_duration_seconds=excluded.inference_duration_seconds,
+                keypoints_per_second=excluded.keypoints_per_second,
+                inference_average_fps=excluded.inference_average_fps,
+                batch_size=excluded.batch_size,
+                imgsz=excluded.imgsz,
+                conf_threshold=excluded.conf_threshold,
+                iou_threshold=excluded.iou_threshold,
+                summary_statistics_json=excluded.summary_statistics_json,
+                zarr_mtime_ns=excluded.zarr_mtime_ns,
+                updated_utc=excluded.updated_utc;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
     def upsert_eye_mask_performance(
         self,
         *,
@@ -4913,6 +5388,39 @@ class Registry:
                     payload,
                 )
 
+    def replace_keypoint_performance(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM keypoint_performance WHERE dataset_id = ?;", (str(dataset_id),))
+            for record in records:
+                payload = dict(record)
+                payload["dataset_id"] = str(dataset_id)
+                payload.setdefault("updated_utc", _utc_now())
+                self.conn.execute(
+                    """
+                    INSERT INTO keypoint_performance (
+                        dataset_id, keypoint_run, keypoint_created_utc, recording_id, zarr_use,
+                        keypoint_method, model_run_id, model_set_id, model_path, model_name,
+                        source_crop_run, source_detect_run, source_refined_run,
+                        total_rois, successful_detections, failed_detections, success_rate_percent,
+                        frames_with_keypoints, mean_confidence,
+                        duration_seconds, inference_duration_seconds, keypoints_per_second, inference_average_fps,
+                        batch_size, imgsz, conf_threshold, iou_threshold, summary_statistics_json,
+                        zarr_mtime_ns, updated_utc
+                    )
+                    VALUES (
+                        :dataset_id, :keypoint_run, :keypoint_created_utc, :recording_id, :zarr_use,
+                        :keypoint_method, :model_run_id, :model_set_id, :model_path, :model_name,
+                        :source_crop_run, :source_detect_run, :source_refined_run,
+                        :total_rois, :successful_detections, :failed_detections, :success_rate_percent,
+                        :frames_with_keypoints, :mean_confidence,
+                        :duration_seconds, :inference_duration_seconds, :keypoints_per_second, :inference_average_fps,
+                        :batch_size, :imgsz, :conf_threshold, :iou_threshold, :summary_statistics_json,
+                        :zarr_mtime_ns, :updated_utc
+                    );
+                    """,
+                    payload,
+                )
+
     def replace_eye_mask_performance(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM eye_mask_performance WHERE dataset_id = ?;", (str(dataset_id),))
@@ -4970,6 +5478,28 @@ class Registry:
             zarr_use=zarr_use,
         )
         self.replace_detect_performance(dataset_id, rows)
+        return len(rows)
+
+    def refresh_keypoint_performance_for_dataset(
+        self,
+        dataset_id: str,
+        *,
+        zarr_path: Path,
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+    ) -> int:
+        zarr = _import_zarr()
+        try:
+            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+        except TypeError:
+            root = zarr.open_group(str(zarr_path), mode="r")
+        rows = _extract_keypoint_performance_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_keypoint_performance(dataset_id, rows)
         return len(rows)
 
     def refresh_eye_mask_performance_for_dataset(
@@ -5270,6 +5800,13 @@ class Registry:
         self.replace_crop_quality(dataset_id, crop_quality_rows)
         keypoint_quality_rows = _extract_keypoint_quality_rows(root, zarr_path=zarr_path)
         self.replace_keypoint_quality(dataset_id, keypoint_quality_rows)
+        keypoint_performance_rows = _extract_keypoint_performance_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_keypoint_performance(dataset_id, keypoint_performance_rows)
         eye_mask_performance_rows = _extract_eye_mask_performance_rows(
             root,
             zarr_path=zarr_path,

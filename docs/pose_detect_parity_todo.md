@@ -28,7 +28,7 @@ Related eye-mask parity work is tracked separately in `docs/eye_masks_detect_pos
 
 ## P1 (High Priority)
 
-- [ ] Add keypoint performance registry table + latest views.
+- [x] Add keypoint performance registry table + latest views.
   - Detect has `detect_performance`; add analogous `keypoint_performance`.
   - Track runtime and throughput metrics from keypoint runs (both traditional and YOLO).
   - Acceptance: registry migrations create table/views; rescan populates rows.
@@ -65,7 +65,7 @@ Related eye-mask parity work is tracked separately in `docs/eye_masks_detect_pos
 - [x] Unit tests for new pose registry model resolution wrapper.
 - [x] Unit tests for strict keypoint accept CLI.
 - [x] Unit tests for unapproved keypoint lister.
-- [ ] Registry migration tests for keypoint performance schema/views.
+- [x] Registry migration tests for keypoint performance schema/views.
 - [ ] Registry query tests for new keypoint filters/group summaries.
 - [x] Batch logging tests to assert richer keypoint result payloads.
 - [ ] End-to-end smoke test: analysis zarr -> keypoints -> refine_keypoints -> registry scan -> quality/perf query.
