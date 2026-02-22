@@ -24,9 +24,14 @@ from fisheye.shared.stage_provenance import (
 
 OFFLINE_RUN_GROUPS = (
     "detect_runs",
+    "refined_detect_runs",
+    "refined_runs",
     "crop_runs",
     "keypoints_runs",
+    "refined_keypoints_runs",
+    "keypoints_refined_runs",
     "eye_masks_runs",
+    "refined_eye_masks_runs",
     "id_assignment_runs",
 )
 MISSING_STRING_VALUES = {"", "unknown", "n/a", "na", "none", "null"}

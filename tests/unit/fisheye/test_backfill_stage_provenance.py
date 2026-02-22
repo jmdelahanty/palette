@@ -216,3 +216,87 @@ def test_main_apply_preserves_valid_contract_and_respects_zarr_use_filter(
     training_prov = training_root["crop_runs"]["crop_001"].attrs["provenance"]
     assert "contract" not in training_prov
     assert "commit" not in training_prov["git"]
+
+
+def test_main_apply_includes_refined_group_aliases(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    zarr_path = tmp_path / "rec_analysis.zarr"
+    root = _FakeGroup()
+    root.attrs["zarr_purpose"] = "analysis"
+
+    _create_run(
+        root,
+        "refined_runs",
+        "refined_detect_legacy_001",
+        attrs={
+            "provenance": {
+                "stage": "refine_detect",
+                "parameters": {"threshold": 0.5},
+                "inputs": {"source_detect_run": "detect_001"},
+                "git": {"branch": "main"},
+            },
+            "git_commit": "e" * 40,
+        },
+    )
+    _create_run(
+        root,
+        "keypoints_refined_runs",
+        "refined_keypoints_legacy_001",
+        attrs={
+            "provenance": {
+                "stage": "refine_keypoints",
+                "parameters": {"model": "pose"},
+                "inputs": {"source_keypoints_run": "keypoints_001"},
+                "git": {"branch": "main"},
+            },
+            "git_commit": "f" * 40,
+        },
+    )
+    _create_run(
+        root,
+        "refined_eye_masks_runs",
+        "refined_eye_masks_001",
+        attrs={
+            "provenance": {
+                "stage": "refine_eye_masks",
+                "parameters": {"method": "segment"},
+                "inputs": {"source_eye_masks_run": "eye_masks_001"},
+                "git": {"branch": "main"},
+            },
+            "git_commit": "1" * 40,
+        },
+    )
+    _patch_scan(monkeypatch, {zarr_path: root})
+
+    rc = mod.main([str(zarr_path), "--apply"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "total_runs_scanned: 3" in out
+    assert "missing_contract: 3" in out
+    assert "missing_git_commit: 3" in out
+    assert "updated: 3" in out
+
+    refined_detect_prov = root["refined_runs"]["refined_detect_legacy_001"].attrs["provenance"]
+    assert refined_detect_prov["contract"] == {
+        "name": STAGE_PROVENANCE_CONTRACT_NAME,
+        "version": STAGE_PROVENANCE_CONTRACT_VERSION,
+    }
+    assert refined_detect_prov["git"]["commit"] == "e" * 40
+
+    refined_keypoints_prov = root["keypoints_refined_runs"]["refined_keypoints_legacy_001"].attrs["provenance"]
+    assert refined_keypoints_prov["contract"] == {
+        "name": STAGE_PROVENANCE_CONTRACT_NAME,
+        "version": STAGE_PROVENANCE_CONTRACT_VERSION,
+    }
+    assert refined_keypoints_prov["git"]["commit"] == "f" * 40
+
+    refined_eye_masks_prov = root["refined_eye_masks_runs"]["refined_eye_masks_001"].attrs["provenance"]
+    assert refined_eye_masks_prov["contract"] == {
+        "name": STAGE_PROVENANCE_CONTRACT_NAME,
+        "version": STAGE_PROVENANCE_CONTRACT_VERSION,
+    }
+    assert refined_eye_masks_prov["git"]["commit"] == "1" * 40
