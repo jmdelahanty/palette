@@ -23,6 +23,13 @@ Remaining provenance migration work:
 - Generic legacy backfill utility for offline stages
 - Stage-by-stage diagnostics tightening in `check_provenance_capture`
 
+## Canonical TODO IDs (for agent coordination)
+
+T1: crop_runs contract migration  
+T2: id_assignment_runs contract migration  
+T3: legacy offline provenance backfill utility  
+T4: offline diagnostics tightening (post-migration gating)
+
 Deferred:
 
 - `refine_online_detect` contract migration (explicitly deferred until offline
@@ -57,7 +64,49 @@ Compatibility policy:
 - Keep existing top-level convenience attrs (`git_commit`, `git_branch`) for
   shell visibility and legacy readers.
 
+## Definition of Done (Contract Migration)
+
+A stage migration is complete when:
+
+1. `attrs["provenance"]["contract"]["name"] == "palette_stage_provenance"`
+2. `attrs["provenance"]["contract"]["version"] >= 1`
+3. Top-level `git_commit` and `git_branch` attrs remain present
+4. Existing lineage fields (`source_*_run`) remain intact
+5. `tests/unit/fisheye/test_check_provenance_capture.py` passes
+
+## Canonical Stage Strings
+
+All offline stage writers must use the following `stage` values in provenance:
+
+- `detect_runs` -> `stage="detect"`
+- `refined_detect_runs` -> `stage="refined_detect"`
+- `crop_runs` -> `stage="crop"`
+- `keypoints_runs` -> `stage="keypoints"`
+- `refined_keypoints_runs` -> `stage="refined_keypoints"`
+- `eye_masks_runs` -> `stage="eye_masks"`
+- `refined_eye_masks_runs` -> `stage="refined_eye_masks"`
+- `id_assignment_runs` -> `stage="id_assignment"`
+
+These values must match what `check_provenance_capture` expects.
+
 ## Parallel Agent Tasks
+
+### File Ownership Rules (Strict)
+
+To prevent merge conflicts during parallel execution:
+
+- T1 (crop migration) may modify:
+  - `src/fisheye/tracking/crop.py` only
+- T2 (id_assignment migration) may modify:
+  - `src/fisheye/tracking/assign_ids.py` only
+- T3 (backfill utility) may modify:
+  - `src/fisheye/utils/backfill_stage_provenance.py`
+  - its new unit tests only
+- T4 (diagnostics tightening) may modify:
+  - `src/fisheye/diagnostics/check_provenance_capture.py`
+  - `tests/unit/fisheye/test_check_provenance_capture.py` only
+
+No other files may be modified without parent-agent approval.
 
 ### Agent A: Crop Runs Migration
 
@@ -66,7 +115,6 @@ Goal: migrate `crop_runs` writer provenance to shared stage contract.
 Primary files:
 
 - `src/fisheye/tracking/crop.py`
-- `tests/unit/fisheye/test_check_provenance_capture.py`
 
 Implementation notes:
 
@@ -80,6 +128,8 @@ Validation:
 
 - `scripts/py -m pytest -q tests/unit/fisheye/test_check_provenance_capture.py`
 - Existing crop-related tests impacted by provenance writes.
+- If test updates are required, route them to T4/parent-agent approval per
+  ownership rules.
 
 ### Agent B: ID Assignment Migration
 
@@ -88,7 +138,6 @@ Goal: migrate `id_assignment_runs` provenance to shared stage contract.
 Primary files:
 
 - `src/fisheye/tracking/assign_ids.py`
-- `tests/unit/fisheye/test_check_provenance_capture.py`
 
 Implementation notes:
 
@@ -100,6 +149,8 @@ Validation:
 
 - `scripts/py -m pytest -q tests/unit/fisheye/test_check_provenance_capture.py`
 - Relevant ID-assignment unit tests.
+- If test updates are required, route them to T4/parent-agent approval per
+  ownership rules.
 
 ### Agent C: Legacy Backfill Utility
 
@@ -109,13 +160,17 @@ Suggested file:
 
 - `src/fisheye/utils/backfill_stage_provenance.py`
 
-Expected behavior:
+Expected behavior (deterministic):
 
-- Scan zarrs (`--recursive`, `--zarr-use` support).
-- Inject `provenance.contract` when missing.
-- Normalize git payload (`provenance.git.commit` with legacy fallbacks).
-- Avoid destructive rewrites.
-- Emit summary counts and clear dry-run/apply output.
+- `--dry-run` prints:
+  - total runs scanned
+  - count missing contract
+  - count missing `git.commit`
+  - first 5 paths that would be modified
+- `--apply` performs minimal in-place updates only to:
+  - `provenance.contract`
+  - `provenance.git.commit`
+- Never rewrite existing valid contract blocks.
 
 Validation:
 
