@@ -22,12 +22,14 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 from matplotlib.widgets import Button, Slider
+
+from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
 
 
 DEFAULT_LEFT_COLOR = np.array([0.90, 0.23, 0.31], dtype=np.float32)   # reddish
@@ -51,6 +53,14 @@ def _get_latest(root: zarr.Group, base: str, explicit: Optional[str]) -> str:
     if runs_group not in root or "latest" not in root[runs_group].attrs:
         raise RuntimeError(f"No '{runs_group}' group or latest attribute found.")
     return root[runs_group].attrs["latest"]
+
+
+def _resolve_keypoint_run_name(
+    *,
+    explicit_keypoint_run: Optional[str],
+    run_attrs: Mapping[str, object],
+) -> Optional[str]:
+    return explicit_keypoint_run or resolve_source_keypoints_run(run_attrs)
 
 
 def _normalize_image(image: np.ndarray) -> np.ndarray:
@@ -644,7 +654,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise RuntimeError("Could not determine refined eye mask run; pass --refined-eye-run.")
     refined_run = _get_latest(root, "refined_eye_masks", refined_run) if refined_run == "latest" else refined_run
 
-    keypoint_run = args.keypoint_run or run_group.attrs.get("source_keypoint_run")
+    keypoint_run = _resolve_keypoint_run_name(
+        explicit_keypoint_run=args.keypoint_run,
+        run_attrs=run_group.attrs,
+    )
     if not keypoint_run:
         raise RuntimeError("Could not determine keypoint run; pass --keypoint-run.")
     keypoint_run = _get_latest(root, "keypoints", keypoint_run) if keypoint_run == "latest" else keypoint_run

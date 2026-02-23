@@ -110,9 +110,18 @@ Scope: prioritize correctness and auditability first, then orchestration and reg
 
 ## Acceptance Criteria
 
-- [ ] Eye-mask runs and refined-eye-mask runs use a consistent, queryable provenance contract.
-- [ ] Eye-mask lineage attrs are present and queryable in both `_analysis.zarr` and `_training.zarr` archives.
-- [ ] Refinement never silently binds to the wrong keypoint run.
-- [ ] Pipeline/orchestration can run eye-mask segmentation and refinement with detect/pose-like ergonomics.
-- [ ] Registry query surfaces eye-mask quality/performance status alongside detect/pose.
-- [ ] Unit tests cover cross-method provenance and migration compatibility.
+- [x] Eye-mask runs and refined-eye-mask runs use a consistent, queryable provenance contract.
+- [x] Eye-mask lineage attrs are present and queryable in both `_analysis.zarr` and `_training.zarr` archives.
+- [x] Refinement never silently binds to the wrong keypoint run.
+- [x] Pipeline/orchestration can run eye-mask segmentation and refinement with detect/pose-like ergonomics.
+- [x] Registry query surfaces eye-mask quality/performance status alongside detect/pose.
+- [x] Unit tests cover cross-method provenance and migration compatibility.
+
+Validation evidence (2026-02-22/23):
+- `scripts/validate_recording_step_status_registry.sh` passed for a scoped real recording (`status=PASS`).
+  - Artifact: `/tmp/recording_step_status_validate_20260222_214840`
+- `scripts/validate_recording_step_status_registry_batch.sh --skip-backfill` passed across training recordings.
+  - Artifact: `/tmp/recording_step_status_batch_20260222_215442`
+  - Summary: `passed=52 failed=0 skipped_missing_zarr=1`
+- `scripts/py -m fisheye.utils.backfill_eye_mask_lineage_attrs /nvme1/recordings --recursive --apply`
+  confirmed canonical lineage attrs already present (`updated=0 already_canonical=102`).

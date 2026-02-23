@@ -21,6 +21,10 @@ import numpy as np
 import zarr
 from rich.console import Console
 
+from fisheye.shared.provenance_attrs import (
+    build_source_keypoints_attrs,
+    resolve_source_keypoints_run,
+)
 from fisheye.utils.metadata import get_fps
 from fisheye.utils.system import get_git_info
 
@@ -506,6 +510,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_keypoint_run_name(
+    *,
+    explicit_keypoint_run: Optional[str],
+    refined_attrs: Dict[str, object],
+    parent_latest: Optional[str],
+) -> Optional[str]:
+    """Resolve refined-keypoints run from explicit, canonical, legacy, then latest."""
+    return (
+        explicit_keypoint_run
+        or resolve_source_keypoints_run(refined_attrs)
+        or parent_latest
+    )
+
+
 def run(args: argparse.Namespace) -> None:
     console = Console()
     mode = "a"
@@ -521,10 +539,10 @@ def run(args: argparse.Namespace) -> None:
     refined_group = refined_parent[refined_run_name]
 
     kp_parent = root.require_group("refined_keypoints_runs")
-    keypoint_run_name = (
-        args.keypoint_run
-        or refined_group.attrs.get("source_keypoints_run")
-        or kp_parent.attrs.get("latest")
+    keypoint_run_name = _resolve_keypoint_run_name(
+        explicit_keypoint_run=args.keypoint_run,
+        refined_attrs=dict(refined_group.attrs),
+        parent_latest=kp_parent.attrs.get("latest"),
     )
     if not keypoint_run_name or keypoint_run_name not in kp_parent:
         raise ValueError("Refined keypoint run not found; specify --keypoint-run.")
@@ -536,7 +554,7 @@ def run(args: argparse.Namespace) -> None:
             raise ValueError(f"Refined run '{refined_run_name}' missing dataset '{dataset}'.")
 
     # Refined keypoints runs may not have all datasets; fall back to source keypoints run
-    source_kp_run_name = kp_group.attrs.get("source_keypoints_run")
+    source_kp_run_name = resolve_source_keypoints_run(kp_group.attrs)
     source_kp_group = None
     if source_kp_run_name:
         source_kp_parent = root.get("keypoints_runs")
@@ -1174,7 +1192,7 @@ def run(args: argparse.Namespace) -> None:
             "report_version": "1.4",
             "reason_code_map": REASON_CODE_MAP,
             "source_refined_eye_run": refined_run_name,
-            "source_keypoint_run": keypoint_run_name,
+            **build_source_keypoints_attrs(keypoint_run_name, include_legacy_alias=True),
             "fps": float(fps) if fps else None,
             "num_detections": int(total_detections),
             "num_frames": int(num_frames),
