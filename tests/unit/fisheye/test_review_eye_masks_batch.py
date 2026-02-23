@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 
 import numpy as np
 import zarr
@@ -80,3 +81,97 @@ def test_build_plans_marks_missing_when_no_refined_runs(tmp_path: Path) -> None:
     assert len(plans) == 1
     assert plans[0].status == "missing"
     assert "no refined_eye_masks_runs" in str(plans[0].reason)
+
+
+def test_build_plans_from_registry_filters_missing_review_status(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    recordings_root = tmp_path / "recordings"
+    a_path = recordings_root / "a_training.zarr"
+    b_path = recordings_root / "b_training.zarr"
+    c_path = recordings_root / "c_analysis.zarr"
+
+    with sqlite3.connect(str(registry_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE recording_eye_mask_performance_latest (
+                zarr_path TEXT,
+                run_name TEXT,
+                review_state TEXT,
+                zarr_use TEXT,
+                stage_group TEXT
+            );
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO recording_eye_mask_performance_latest
+                (zarr_path, run_name, review_state, zarr_use, stage_group)
+            VALUES (?, ?, ?, ?, ?);
+            """,
+            [
+                (str(a_path), "refined_a", None, "training", "refined_eye_masks_runs"),
+                (str(b_path), "refined_b", "approved", "training", "refined_eye_masks_runs"),
+                (str(c_path), "refined_c", None, "analysis", "refined_eye_masks_runs"),
+                (str(a_path), "eye_masks_a", None, "training", "eye_masks_runs"),
+            ],
+        )
+
+    plans = mod._build_plans_from_registry(
+        registry_path,
+        roots=[recordings_root],
+        refined_run=None,
+        status_filter="missing",
+        zarr_use="training",
+    )
+    ok = [plan for plan in plans if plan.status == "ok"]
+    assert len(ok) == 1
+    assert ok[0].zarr_path == a_path
+    assert ok[0].refined_run == "refined_a"
+    assert ok[0].review_state is None
+
+
+def test_build_plans_from_registry_honors_explicit_refined_run(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    target_path = tmp_path / "recordings" / "target_training.zarr"
+
+    with sqlite3.connect(str(registry_path)) as conn:
+        conn.execute("CREATE TABLE datasets (dataset_id TEXT, zarr_path TEXT, status TEXT);")
+        conn.execute(
+            """
+            CREATE TABLE eye_mask_performance (
+                dataset_id TEXT,
+                stage_group TEXT,
+                run_name TEXT,
+                review_state TEXT,
+                zarr_use TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO datasets (dataset_id, zarr_path, status) VALUES (?, ?, ?);",
+            ("ds_target", str(target_path), None),
+        )
+        conn.executemany(
+            """
+            INSERT INTO eye_mask_performance
+                (dataset_id, stage_group, run_name, review_state, zarr_use)
+            VALUES (?, ?, ?, ?, ?);
+            """,
+            [
+                ("ds_target", "refined_eye_masks_runs", "refined_target", None, "training"),
+                ("ds_target", "refined_eye_masks_runs", "refined_other", "approved", "training"),
+                ("ds_target", "eye_masks_runs", "eye_masks_target", None, "training"),
+            ],
+        )
+
+    plans = mod._build_plans_from_registry(
+        registry_path,
+        roots=[tmp_path / "recordings"],
+        refined_run="refined_target",
+        status_filter="missing",
+        zarr_use="training",
+    )
+    ok = [plan for plan in plans if plan.status == "ok"]
+    assert len(ok) == 1
+    assert ok[0].zarr_path == target_path
+    assert ok[0].refined_run == "refined_target"

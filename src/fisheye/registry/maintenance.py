@@ -20,6 +20,7 @@ from .db import (
     _extract_detect_performance_rows,
     _extract_detect_quality_rows,
     _extract_eye_mask_performance_rows,
+    _extract_keypoint_performance_rows,
     _extract_keypoint_quality_rows,
     _import_zarr,
 )
@@ -303,6 +304,13 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--backfill-keypoint-performance",
+        action="store_true",
+        help=(
+            "Backfill keypoint_performance rows for datasets that currently have no keypoint performance rows."
+        ),
+    )
+    parser.add_argument(
         "--backfill-crop-quality",
         action="store_true",
         help=(
@@ -363,6 +371,13 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--refresh-keypoint-performance",
+        action="store_true",
+        help=(
+            "Refresh keypoint_performance rows for all datasets in scope and remove stale rows."
+        ),
+    )
+    parser.add_argument(
         "--refresh-crop-quality",
         action="store_true",
         help=(
@@ -381,6 +396,14 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "When backfilling/refreshing detect_performance, include all datasets. "
+            "Default scope is source_recording + analysis datasets only."
+        ),
+    )
+    parser.add_argument(
+        "--keypoint-performance-all-datasets",
+        action="store_true",
+        help=(
+            "When backfilling/refreshing keypoint_performance, include all datasets. "
             "Default scope is source_recording + analysis datasets only."
         ),
     )
@@ -2465,6 +2488,186 @@ def _backfill_detect_quality(
     return summary
 
 
+def _keypoint_performance_row_signature(row: Dict[str, object]) -> tuple[object, ...]:
+    return (
+        row.get("keypoint_created_utc"),
+        row.get("recording_id"),
+        row.get("zarr_use"),
+        row.get("keypoint_method"),
+        row.get("model_run_id"),
+        row.get("model_set_id"),
+        row.get("model_path"),
+        row.get("model_name"),
+        row.get("source_crop_run"),
+        row.get("source_detect_run"),
+        row.get("source_refined_run"),
+        row.get("total_rois"),
+        row.get("successful_detections"),
+        row.get("failed_detections"),
+        row.get("success_rate_percent"),
+        row.get("frames_with_keypoints"),
+        row.get("mean_confidence"),
+        row.get("duration_seconds"),
+        row.get("inference_duration_seconds"),
+        row.get("keypoints_per_second"),
+        row.get("inference_average_fps"),
+        row.get("batch_size"),
+        row.get("imgsz"),
+        row.get("conf_threshold"),
+        row.get("iou_threshold"),
+        row.get("summary_statistics_json"),
+        row.get("zarr_mtime_ns"),
+    )
+
+
+def _backfill_keypoint_performance(
+    registry: Registry,
+    *,
+    dry_run: bool,
+    scope_paths: Optional[Sequence[Path]],
+    refresh: bool,
+    include_all_datasets: bool = False,
+) -> Dict[str, int]:
+    if include_all_datasets:
+        rows = registry.conn.execute(
+            """
+            SELECT dataset_id, zarr_path, recording_id, zarr_use
+            FROM datasets
+            WHERE status IS NULL OR lower(status) != 'missing'
+            ORDER BY dataset_id;
+            """
+        ).fetchall()
+    else:
+        rows = registry.conn.execute(
+            """
+            SELECT dataset_id, zarr_path, recording_id, zarr_use
+            FROM datasets
+            WHERE (status IS NULL OR lower(status) != 'missing')
+              AND lower(COALESCE(artifact_kind, '')) = 'source_recording'
+              AND lower(COALESCE(zarr_use, '')) = 'analysis'
+            ORDER BY dataset_id;
+            """
+        ).fetchall()
+    scope_roots = _normalize_scope_paths(scope_paths)
+    zarr = _import_zarr()
+    summary: Dict[str, int] = {
+        "datasets_scanned": 0,
+        "datasets_skipped_existing": 0,
+        "datasets_missing": 0,
+        "datasets_errors": 0,
+        "datasets_no_performance": 0,
+        "rows_inserted": 0,
+        "rows_updated": 0,
+        "rows_skipped": 0,
+        "rows_deleted": 0,
+    }
+
+    for row in rows:
+        dataset_id = str(row["dataset_id"])
+        zarr_path = Path(str(row["zarr_path"])).expanduser()
+        recording_id = str(row["recording_id"]) if row["recording_id"] else None
+        zarr_use = str(row["zarr_use"]) if row["zarr_use"] else None
+        if not _matches_scope(str(zarr_path), scope_roots):
+            continue
+        summary["datasets_scanned"] += 1
+        if not _is_zarr_root_path(zarr_path):
+            summary["datasets_missing"] += 1
+            continue
+
+        existing_rows = registry.conn.execute(
+            "SELECT * FROM keypoint_performance WHERE dataset_id = ?;",
+            (dataset_id,),
+        ).fetchall()
+        if not refresh and existing_rows:
+            summary["datasets_skipped_existing"] += 1
+            summary["rows_skipped"] += len(existing_rows)
+            continue
+
+        try:
+            try:
+                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+            except TypeError:
+                root = zarr.open_group(str(zarr_path), mode="r")
+            extracted_rows = _extract_keypoint_performance_rows(
+                root,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+            )
+        except Exception:
+            summary["datasets_errors"] += 1
+            continue
+
+        if not extracted_rows:
+            summary["datasets_no_performance"] += 1
+
+        existing_by_run: Dict[str, Dict[str, object]] = {
+            str(existing["keypoint_run"]): {key: existing[key] for key in existing.keys()}
+            for existing in existing_rows
+        }
+        extracted_by_run: Dict[str, Dict[str, object]] = {
+            str(extracted["keypoint_run"]): extracted for extracted in extracted_rows
+        }
+
+        for keypoint_run, extracted in extracted_by_run.items():
+            existing = existing_by_run.get(keypoint_run)
+            if existing is None:
+                summary["rows_inserted"] += 1
+                continue
+            existing_sig = _keypoint_performance_row_signature(existing)
+            extracted_sig = _keypoint_performance_row_signature(extracted)
+            if existing_sig == extracted_sig:
+                summary["rows_skipped"] += 1
+            else:
+                summary["rows_updated"] += 1
+
+        if refresh:
+            for keypoint_run in existing_by_run:
+                if keypoint_run not in extracted_by_run:
+                    summary["rows_deleted"] += 1
+
+        if dry_run:
+            continue
+        if refresh:
+            registry.replace_keypoint_performance(dataset_id, extracted_rows)
+        else:
+            for extracted in extracted_rows:
+                registry.upsert_keypoint_performance(
+                    dataset_id=dataset_id,
+                    keypoint_run=str(extracted["keypoint_run"]),
+                    keypoint_created_utc=extracted.get("keypoint_created_utc"),
+                    recording_id=extracted.get("recording_id"),
+                    zarr_use=extracted.get("zarr_use"),
+                    keypoint_method=extracted.get("keypoint_method"),
+                    model_run_id=extracted.get("model_run_id"),
+                    model_set_id=extracted.get("model_set_id"),
+                    model_path=extracted.get("model_path"),
+                    model_name=extracted.get("model_name"),
+                    source_crop_run=extracted.get("source_crop_run"),
+                    source_detect_run=extracted.get("source_detect_run"),
+                    source_refined_run=extracted.get("source_refined_run"),
+                    total_rois=extracted.get("total_rois"),
+                    successful_detections=extracted.get("successful_detections"),
+                    failed_detections=extracted.get("failed_detections"),
+                    success_rate_percent=extracted.get("success_rate_percent"),
+                    frames_with_keypoints=extracted.get("frames_with_keypoints"),
+                    mean_confidence=extracted.get("mean_confidence"),
+                    duration_seconds=extracted.get("duration_seconds"),
+                    inference_duration_seconds=extracted.get("inference_duration_seconds"),
+                    keypoints_per_second=extracted.get("keypoints_per_second"),
+                    inference_average_fps=extracted.get("inference_average_fps"),
+                    batch_size=extracted.get("batch_size"),
+                    imgsz=extracted.get("imgsz"),
+                    conf_threshold=extracted.get("conf_threshold"),
+                    iou_threshold=extracted.get("iou_threshold"),
+                    summary_statistics_json=extracted.get("summary_statistics_json"),
+                    zarr_mtime_ns=extracted.get("zarr_mtime_ns"),
+                    updated_utc=extracted.get("updated_utc"),
+                )
+
+    return summary
+
+
 def _detect_performance_row_signature(row: Dict[str, object]) -> tuple[object, ...]:
     return (
         row.get("detect_created_utc"),
@@ -2854,6 +3057,8 @@ def _backfill_eye_mask_performance(
         "datasets_missing": 0,
         "datasets_errors": 0,
         "datasets_no_performance": 0,
+        "rows_stale": 0,
+        "rows_in_progress": 0,
         "rows_inserted": 0,
         "rows_updated": 0,
         "rows_skipped": 0,
@@ -5450,12 +5655,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.backfill_keypoint_quality
         and not args.backfill_detect_quality
         and not args.backfill_detect_performance
+        and not args.backfill_keypoint_performance
         and not args.backfill_crop_quality
         and not args.backfill_eye_mask_performance
         and not args.backfill_recording_step_status
         and not args.refresh_keypoint_quality
         and not args.refresh_detect_quality
         and not args.refresh_detect_performance
+        and not args.refresh_keypoint_performance
         and not args.refresh_crop_quality
         and not args.refresh_eye_mask_performance
         and not args.check_integrity
@@ -5469,10 +5676,11 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "--backfill-model-tables, --backfill-keypoint-quality, "
             "--remap-training-set-dataset-ids, "
             "--backfill-dataset-lineage, "
-            "--backfill-detect-quality, --backfill-detect-performance, "
+            "--backfill-detect-quality, --backfill-detect-performance, --backfill-keypoint-performance, "
             "--backfill-crop-quality, --backfill-eye-mask-performance, "
             "--backfill-recording-step-status, "
             "--refresh-keypoint-quality, --refresh-detect-quality, --refresh-detect-performance, "
+            "--refresh-keypoint-performance, "
             "--refresh-crop-quality, --refresh-eye-mask-performance, "
             "--check-integrity, and/or --vacuum."
         )
@@ -5965,6 +6173,42 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             scope_label = "all-datasets" if args.detect_performance_all_datasets else "source-analysis-only"
             print(
                 f"Detect performance {mode}: "
+                f"scope={scope_label} "
+                f"scanned={summary['datasets_scanned']} "
+                f"missing={summary['datasets_missing']} "
+                f"errors={summary['datasets_errors']} "
+                f"no_performance={summary['datasets_no_performance']} "
+                f"skipped_existing={summary['datasets_skipped_existing']}"
+            )
+            if args.dry_run:
+                print(
+                    "Dry run: would apply "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+            else:
+                print(
+                    "Applied "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+
+        if args.backfill_keypoint_performance or args.refresh_keypoint_performance:
+            summary = _backfill_keypoint_performance(
+                registry,
+                dry_run=bool(args.dry_run),
+                scope_paths=scope_paths or None,
+                refresh=bool(args.refresh_keypoint_performance),
+                include_all_datasets=bool(args.keypoint_performance_all_datasets),
+            )
+            mode = "refresh" if args.refresh_keypoint_performance else "backfill"
+            scope_label = "all-datasets" if args.keypoint_performance_all_datasets else "source-analysis-only"
+            print(
+                f"Keypoint performance {mode}: "
                 f"scope={scope_label} "
                 f"scanned={summary['datasets_scanned']} "
                 f"missing={summary['datasets_missing']} "

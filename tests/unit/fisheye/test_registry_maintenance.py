@@ -19,6 +19,7 @@ from fisheye.registry.maintenance import (
     _backfill_dataset_lineage,
     _backfill_detect_performance,
     _backfill_eye_mask_performance,
+    _backfill_keypoint_performance,
     _backfill_recording_step_status,
     _backfill_recording_entities,
     _backfill_subject_dish_cross_entities,
@@ -100,6 +101,42 @@ def _create_detect_performance_zarr(path: Path) -> None:
     detect.attrs["inference_avg_read_ms"] = 120.0
     detect.attrs["parameters"] = {"conf_threshold": 0.4, "iou_threshold": 0.8, "batch_size": 16}
     detect.create_array("frame_counts", data=np.array([1, 0, 1, 0], dtype=np.int32), chunks=(4,))
+
+
+def _create_keypoint_performance_zarr(path: Path) -> None:
+    root = zarr.open_group(str(path), mode="w")
+    root.attrs["session_uuid"] = "keypoint_perf_session"
+    raw = root.create_group("raw_video")
+    raw.create_array("images_ds", data=np.zeros((4, 8, 8), dtype=np.uint8), chunks=(1, 8, 8))
+
+    kp_parent = root.create_group("keypoints_runs")
+    kp_parent.attrs["latest"] = "keypoints_001"
+    kp = kp_parent.create_group("keypoints_001")
+    kp.attrs["keypoints_timestamp_utc"] = "2026-02-09T01:00:00+00:00"
+    kp.attrs["method"] = "yolo_pose"
+    kp.attrs["model_path"] = "/tmp/pose.pt"
+    kp.attrs["source_crop_run"] = "crop_001"
+    kp.attrs["source_detect_run"] = "detect_001"
+    kp.attrs["source_refined_run"] = "refined_001"
+    kp.attrs["duration_seconds"] = 2.0
+    kp.attrs["inference_duration_seconds"] = 1.5
+    kp.attrs["inference_poses_per_second"] = 2.0
+    kp.attrs["inference_average_fps"] = 5.0
+    kp.attrs["parameters"] = {
+        "batch_size": 16,
+        "imgsz": 640,
+        "conf_threshold": 0.3,
+        "iou_threshold": 0.7,
+    }
+    kp.attrs["summary_statistics"] = {
+        "total_rois": 4,
+        "successful_detections": 3,
+        "failed_detections": 1,
+        "success_rate_percent": 75.0,
+        "frames_with_keypoints": 3,
+        "mean_confidence": 0.91,
+    }
+    kp.create_array("keypoints_roi", data=np.zeros((4, 3, 2), dtype=np.float32), chunks=(1, 3, 2))
 
 
 def _create_crop_quality_zarr(path: Path) -> None:
@@ -2899,6 +2936,116 @@ def test_refresh_keypoint_quality_deletes_stale_rows(tmp_path: Path) -> None:
     registry.close()
 
 
+def test_backfill_keypoint_performance_dry_run_and_apply(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    _create_keypoint_performance_zarr(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="r")
+    dataset_id = registry.register_from_root(root, zarr_path)
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
+        (dataset_id,),
+    )
+    registry.conn.execute("DELETE FROM keypoint_performance WHERE dataset_id = ?;", (dataset_id,))
+    registry.conn.commit()
+
+    dry = _backfill_keypoint_performance(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert dry["datasets_scanned"] == 1
+    assert dry["rows_inserted"] == 1
+    assert dry["rows_updated"] == 0
+    assert dry["rows_deleted"] == 0
+
+    applied = _backfill_keypoint_performance(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert applied["rows_inserted"] == 1
+    row = registry.conn.execute(
+        """
+        SELECT keypoint_method, success_rate_percent, keypoints_per_second
+        FROM keypoint_performance_latest
+        WHERE dataset_id = ?;
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert row is not None
+    assert str(row["keypoint_method"]) == "yolo_pose"
+    assert float(row["success_rate_percent"]) == pytest.approx(75.0)
+    assert float(row["keypoints_per_second"]) == pytest.approx(2.0)
+    registry.close()
+
+
+def test_backfill_keypoint_performance_scope_defaults_to_source_analysis(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    analysis_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    training_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_training.zarr"
+    _create_keypoint_performance_zarr(analysis_path)
+    _create_keypoint_performance_zarr(training_path)
+
+    analysis_id = registry.register_from_root(zarr.open_group(str(analysis_path), mode="r"), analysis_path)
+    training_id = registry.register_from_root(zarr.open_group(str(training_path), mode="r"), training_path)
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
+        (analysis_id,),
+    )
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'training' WHERE dataset_id = ?;",
+        (training_id,),
+    )
+    registry.conn.execute(
+        "DELETE FROM keypoint_performance WHERE dataset_id IN (?, ?);",
+        (analysis_id, training_id),
+    )
+    registry.conn.commit()
+
+    dry_default = _backfill_keypoint_performance(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert dry_default["datasets_scanned"] == 1
+    assert dry_default["rows_inserted"] == 1
+
+    applied_default = _backfill_keypoint_performance(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert applied_default["rows_inserted"] == 1
+    analysis_rows = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM keypoint_performance WHERE dataset_id = ?;",
+        (analysis_id,),
+    ).fetchone()
+    training_rows = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM keypoint_performance WHERE dataset_id = ?;",
+        (training_id,),
+    ).fetchone()
+    assert analysis_rows is not None and int(analysis_rows["n"]) == 1
+    assert training_rows is not None and int(training_rows["n"]) == 0
+
+    registry.conn.execute("DELETE FROM keypoint_performance;")
+    registry.conn.commit()
+    dry_all = _backfill_keypoint_performance(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+        include_all_datasets=True,
+    )
+    assert dry_all["datasets_scanned"] == 2
+    assert dry_all["rows_inserted"] == 2
+    registry.close()
+
+
 def test_backfill_detect_performance_dry_run_and_apply(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
@@ -3263,6 +3410,34 @@ def test_backfill_eye_mask_performance_dry_run_and_apply(tmp_path: Path) -> None
     assert str(by_stage["refined_eye_masks_runs"]["review_intended_use"]) == "training"
     assert str(by_stage["refined_eye_masks_runs"]["source_keypoint_stale_state"]) == "stale"
     assert str(by_stage["refined_eye_masks_runs"]["lifecycle_state"]) == "stale"
+    registry.close()
+
+
+def test_backfill_eye_mask_performance_summary_includes_stale_counters_when_zero(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
+    _create_eye_mask_performance_zarr(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root["refined_eye_masks_runs"]["refined_eye_masks_001"].attrs.pop("source_keypoint_stale", None)
+
+    dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
+        (dataset_id,),
+    )
+    registry.conn.execute("DELETE FROM eye_mask_performance WHERE dataset_id = ?;", (dataset_id,))
+    registry.conn.commit()
+
+    dry = _backfill_eye_mask_performance(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=True,
+    )
+    assert dry["datasets_scanned"] == 1
+    assert dry["rows_inserted"] == 2
+    assert dry["rows_stale"] == 0
+    assert dry["rows_in_progress"] == 0
     registry.close()
 
 

@@ -8,6 +8,7 @@ Opens visualize_eye_mask_patches per selected Zarr/refined run.
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -75,12 +76,14 @@ def _latest_run(parent: zarr.Group) -> Optional[str]:
 
 
 def _normalize_review_state(raw: object) -> Optional[str]:
-    if not isinstance(raw, dict):
+    state = raw.get("state") if isinstance(raw, dict) else raw
+    return _normalize_optional_text(state)
+
+
+def _normalize_optional_text(raw: object) -> Optional[str]:
+    if raw is None:
         return None
-    state = raw.get("state")
-    if state is None:
-        return None
-    text = str(state).strip().lower()
+    text = str(raw).strip().lower()
     if not text:
         return None
     return text
@@ -108,6 +111,155 @@ def _status_matches_filter(review_state: Optional[str], status_filter: str) -> b
     if status_filter == "missing":
         return review_state is None
     return review_state == status_filter
+
+
+def _normalize_scope_roots(paths: List[Path]) -> List[Path]:
+    roots: List[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        normalized = path.expanduser().resolve(strict=False)
+        key = str(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(normalized)
+    return roots
+
+
+def _is_in_scope(target: Path, scope_roots: List[Path]) -> bool:
+    if not scope_roots:
+        return True
+    normalized_target = target.expanduser().resolve(strict=False)
+    for root in scope_roots:
+        if root.suffix == ".zarr":
+            if normalized_target == root:
+                return True
+            continue
+        try:
+            normalized_target.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _build_plans_from_registry(
+    registry_path: Path,
+    roots: List[Path],
+    refined_run: Optional[str],
+    status_filter: str,
+    zarr_use: str,
+) -> List[ReviewPlan]:
+    scope_roots = _normalize_scope_roots(roots)
+    plans: List[ReviewPlan] = []
+    try:
+        with sqlite3.connect(str(registry_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            if refined_run:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        d.zarr_path AS zarr_path,
+                        emp.run_name AS run_name,
+                        emp.review_state AS review_state,
+                        emp.zarr_use AS zarr_use
+                    FROM eye_mask_performance emp
+                    JOIN datasets d ON d.dataset_id = emp.dataset_id
+                    WHERE emp.stage_group = 'refined_eye_masks_runs'
+                      AND emp.run_name = ?
+                      AND (d.status IS NULL OR lower(d.status) != 'missing');
+                    """,
+                    (refined_run,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        zarr_path,
+                        run_name,
+                        review_state,
+                        zarr_use
+                    FROM recording_eye_mask_performance_latest
+                    WHERE stage_group = 'refined_eye_masks_runs';
+                    """
+                ).fetchall()
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"Failed to query registry eye-mask performance rows: {exc}") from exc
+
+    for row in rows:
+        raw_zarr_path = row["zarr_path"]
+        raw_run_name = row["run_name"]
+        if raw_zarr_path is None:
+            plans.append(
+                ReviewPlan(
+                    zarr_path=Path("<unknown>"),
+                    refined_run=str(raw_run_name) if raw_run_name is not None else None,
+                    review_state=_normalize_review_state(row["review_state"]),
+                    status="error",
+                    reason="missing zarr_path in registry row",
+                )
+            )
+            continue
+        if raw_run_name is None:
+            plans.append(
+                ReviewPlan(
+                    zarr_path=Path(str(raw_zarr_path)).expanduser(),
+                    refined_run=None,
+                    review_state=_normalize_review_state(row["review_state"]),
+                    status="error",
+                    reason="missing run_name in registry row",
+                )
+            )
+            continue
+        zarr_path = Path(str(raw_zarr_path)).expanduser()
+        if not _is_in_scope(zarr_path, scope_roots):
+            plans.append(
+                ReviewPlan(
+                    zarr_path=zarr_path,
+                    refined_run=str(raw_run_name),
+                    review_state=_normalize_review_state(row["review_state"]),
+                    status="filtered",
+                    reason="outside requested scope",
+                )
+            )
+            continue
+
+        observed_use = _normalize_optional_text(row["zarr_use"])
+        if zarr_use != "any" and observed_use != zarr_use:
+            plans.append(
+                ReviewPlan(
+                    zarr_path=zarr_path,
+                    refined_run=str(raw_run_name),
+                    review_state=_normalize_review_state(row["review_state"]),
+                    status="filtered",
+                    reason=f"zarr_use={observed_use or 'unknown'}",
+                )
+            )
+            continue
+
+        review_state = _normalize_review_state(row["review_state"])
+        if not _status_matches_filter(review_state, status_filter):
+            plans.append(
+                ReviewPlan(
+                    zarr_path=zarr_path,
+                    refined_run=str(raw_run_name),
+                    review_state=review_state,
+                    status="filtered",
+                    reason=f"review_state={review_state or 'missing'}",
+                )
+            )
+            continue
+
+        plans.append(
+            ReviewPlan(
+                zarr_path=zarr_path,
+                refined_run=str(raw_run_name),
+                review_state=review_state,
+                status="ok",
+            )
+        )
+
+    return sorted(plans, key=lambda p: str(p.zarr_path))
 
 
 def _build_plans(
@@ -261,6 +413,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         description="Batch review eye-mask patches by launching visualize_eye_mask_patches per recording."
     )
     parser.add_argument("paths", nargs="*", type=Path, help="Recording roots or zarr paths to scan.")
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help=(
+            "Optional registry sqlite path. When provided, candidates are selected from "
+            "registry views (no zarr filesystem scan)."
+        ),
+    )
     parser.add_argument("--recursive", action="store_true", help="Recursively scan for zarrs.")
     parser.add_argument(
         "--file-list",
@@ -327,13 +487,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not explicit_paths:
         explicit_paths = [Path("/nvme1/recordings")]
 
-    plans = _build_plans(
-        explicit_paths,
-        recursive=bool(args.recursive),
-        refined_run=args.refined_run,
-        status_filter=str(args.status),
-        zarr_use=str(args.zarr_use),
-    )
+    if args.registry:
+        plans = _build_plans_from_registry(
+            Path(args.registry),
+            roots=explicit_paths,
+            refined_run=args.refined_run,
+            status_filter=str(args.status),
+            zarr_use=str(args.zarr_use),
+        )
+    else:
+        plans = _build_plans(
+            explicit_paths,
+            recursive=bool(args.recursive),
+            refined_run=args.refined_run,
+            status_filter=str(args.status),
+            zarr_use=str(args.zarr_use),
+        )
     counts = _plan_counts(plans)
     selected = [plan for plan in plans if plan.status == "ok"]
 

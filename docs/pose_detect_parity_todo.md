@@ -89,3 +89,15 @@ Parallel execution contract for current P2 + validation tasks:
   - [x] Added operator runner script: `scripts/validate_pose_detect_parity_smoke.sh`.
   - [x] Execute on real registry recording and capture artifact output.
     - Artifact: `/tmp/pose_parity_smoke_20260222_233222` (`Smoke test passed.`).
+
+## Post-Completion Follow-Ups (2026-02-23 Parity Audit)
+
+- [x] Add keypoint-performance maintenance parity with detect/eye-mask.
+  - Add maintenance flags for keypoint performance refresh/backfill (dry-run + apply).
+  - Suggested flags:
+    - `--backfill-keypoint-performance`
+    - `--refresh-keypoint-performance`
+    - `--keypoint-performance-all-datasets`.
+  - Acceptance:
+    - historical keypoint-performance rows can be reconciled without relying on full re-register scans,
+    - maintenance output reports deterministic inserted/updated/deleted/unchanged counts.
