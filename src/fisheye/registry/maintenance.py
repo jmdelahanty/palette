@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import PurePosixPath
 import shutil
@@ -49,6 +50,18 @@ class FailedRunCandidate:
     set_id: Optional[str]
     status: Optional[str]
     created_utc: Optional[str]
+
+
+@dataclass(frozen=True)
+class StaleInProgressRunCandidate:
+    run_id: str
+    set_id: Optional[str]
+    task_type: Optional[str]
+    run_status: Optional[str]
+    model_status: Optional[str]
+    effective_status: Optional[str]
+    created_utc: Optional[str]
+    age_hours: Optional[float]
 
 
 @dataclass(frozen=True)
@@ -131,6 +144,32 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         "--prune-failed-runs",
         action="store_true",
         help="Prune training_runs rows with failed statuses.",
+    )
+    parser.add_argument(
+        "--reconcile-in-progress-runs",
+        action="store_true",
+        help=(
+            "Mark stale in_progress training runs as failed. "
+            "Uses training_runs.created_utc as the latest lifecycle timestamp."
+        ),
+    )
+    parser.add_argument(
+        "--in-progress-max-age-hours",
+        type=float,
+        default=24.0,
+        help=(
+            "Minimum age (hours) required to treat an in_progress run as stale "
+            "when using --reconcile-in-progress-runs (default: 24)."
+        ),
+    )
+    parser.add_argument(
+        "--in-progress-task",
+        choices=("all", "detect", "pose"),
+        default="all",
+        help=(
+            "Task scope for --reconcile-in-progress-runs. "
+            "Uses training_runs.task_type when available with run/set-name fallback (default: all)."
+        ),
     )
     parser.add_argument(
         "--delete-run-id",
@@ -1502,6 +1541,199 @@ def _collect_failed_run_candidates(
             )
         )
     return candidates
+
+
+def _parse_utc_datetime(value: object) -> Optional[datetime]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _infer_training_run_task(
+    *,
+    task_type: Optional[str],
+    set_id: Optional[str],
+    run_id: Optional[str],
+) -> Optional[str]:
+    explicit = str(task_type or "").strip().lower()
+    if explicit in {"detect", "pose"}:
+        return explicit
+
+    set_text = str(set_id or "").strip().lower()
+    run_text = str(run_id or "").strip().lower()
+    if "_pose_" in run_text or run_text.startswith("pose_") or run_text.endswith("_pose"):
+        return "pose"
+    if "_detect_" in run_text or run_text.startswith("detect_") or run_text.endswith("_detect"):
+        return "detect"
+    if "_pose_" in set_text or set_text.startswith("pose_"):
+        return "pose"
+    if "_detect_" in set_text or set_text.startswith("detect_"):
+        return "detect"
+    return None
+
+
+def _collect_stale_in_progress_run_candidates(
+    registry: Registry,
+    *,
+    max_age_hours: float,
+    task_filter: str,
+    now_utc: Optional[datetime] = None,
+) -> List[StaleInProgressRunCandidate]:
+    now = now_utc or datetime.now(timezone.utc)
+    threshold_hours = float(max_age_hours)
+    if threshold_hours < 0:
+        raise ValueError("max_age_hours must be non-negative")
+    filter_norm = str(task_filter or "all").strip().lower()
+    if filter_norm not in {"all", "detect", "pose"}:
+        raise ValueError("task_filter must be one of: all, detect, pose")
+
+    rows = registry.conn.execute(
+        """
+        SELECT
+            tr.run_id,
+            tr.set_id,
+            tr.task_type,
+            tr.status AS run_status,
+            dm.status AS model_status,
+            tr.created_utc
+        FROM training_runs tr
+        LEFT JOIN training_models dm ON dm.run_id = tr.run_id
+        ORDER BY tr.created_utc DESC, tr.run_id DESC;
+        """
+    ).fetchall()
+
+    candidates: List[StaleInProgressRunCandidate] = []
+    for row in rows:
+        run_status = str(row["run_status"]).strip() if row["run_status"] is not None else None
+        model_status = str(row["model_status"]).strip() if row["model_status"] is not None else None
+        effective_status_raw = model_status or run_status
+        effective_status = str(effective_status_raw or "").strip().lower()
+        if effective_status != "in_progress":
+            continue
+
+        inferred_task = _infer_training_run_task(
+            task_type=(str(row["task_type"]) if row["task_type"] is not None else None),
+            set_id=(str(row["set_id"]) if row["set_id"] is not None else None),
+            run_id=(str(row["run_id"]) if row["run_id"] is not None else None),
+        )
+        if filter_norm != "all" and inferred_task != filter_norm:
+            continue
+
+        created_utc = str(row["created_utc"]).strip() if row["created_utc"] is not None else None
+        created_dt = _parse_utc_datetime(created_utc)
+        if created_dt is None:
+            continue
+        age_hours = (now - created_dt).total_seconds() / 3600.0
+        if age_hours < threshold_hours:
+            continue
+
+        candidates.append(
+            StaleInProgressRunCandidate(
+                run_id=str(row["run_id"]),
+                set_id=(str(row["set_id"]) if row["set_id"] is not None else None),
+                task_type=inferred_task,
+                run_status=run_status,
+                model_status=model_status,
+                effective_status=effective_status,
+                created_utc=created_utc,
+                age_hours=age_hours,
+            )
+        )
+
+    return candidates
+
+
+def _json_dict(raw: object) -> Dict[str, Any]:
+    if raw is None:
+        return {}
+    try:
+        payload = json.loads(str(raw))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _reconcile_stale_in_progress_runs(
+    registry: Registry,
+    *,
+    candidates: Sequence[StaleInProgressRunCandidate],
+    max_age_hours: float,
+    task_filter: str,
+    dry_run: bool,
+    now_utc: Optional[datetime] = None,
+) -> int:
+    if dry_run or not candidates:
+        return 0
+
+    now = now_utc or datetime.now(timezone.utc)
+    reconciled_at = now.isoformat()
+    threshold_hours = float(max_age_hours)
+    filter_norm = str(task_filter or "all").strip().lower()
+
+    with registry.conn:
+        for candidate in candidates:
+            run_row = registry.conn.execute(
+                "SELECT final_metrics_json FROM training_runs WHERE run_id = ?;",
+                (candidate.run_id,),
+            ).fetchone()
+            model_row = registry.conn.execute(
+                "SELECT final_metrics_json FROM training_models WHERE run_id = ?;",
+                (candidate.run_id,),
+            ).fetchone()
+            merged_metrics = _json_dict(run_row["final_metrics_json"] if run_row is not None else None)
+            if not merged_metrics:
+                merged_metrics = _json_dict(model_row["final_metrics_json"] if model_row is not None else None)
+
+            merged_metrics["stage"] = "maintenance_reconcile"
+            merged_metrics["status_detail"] = "stale_in_progress_reconciled"
+            merged_metrics["error_type"] = "StaleInProgressRun"
+            merged_metrics["error_message"] = (
+                f"in_progress status older than {threshold_hours:g}h"
+            )
+            merged_metrics["reconciled_by"] = "fisheye.registry.maintenance"
+            merged_metrics["reconciled_at_utc"] = reconciled_at
+            merged_metrics["reconcile_policy"] = {
+                "max_age_hours": threshold_hours,
+                "task_filter": filter_norm,
+            }
+            if candidate.created_utc:
+                merged_metrics["in_progress_since_utc"] = candidate.created_utc
+            if candidate.age_hours is not None:
+                merged_metrics["in_progress_age_hours"] = round(float(candidate.age_hours), 3)
+            if candidate.run_status:
+                merged_metrics["previous_run_status"] = candidate.run_status
+            if candidate.model_status:
+                merged_metrics["previous_model_status"] = candidate.model_status
+
+            payload_json = json.dumps(merged_metrics, sort_keys=True)
+            registry.conn.execute(
+                """
+                UPDATE training_runs
+                SET status = ?, final_metrics_json = ?
+                WHERE run_id = ?;
+                """,
+                ("failed", payload_json, candidate.run_id),
+            )
+            registry.conn.execute(
+                """
+                UPDATE training_models
+                SET status = ?, final_metrics_json = ?
+                WHERE run_id = ?;
+                """,
+                ("failed", payload_json, candidate.run_id),
+            )
+    return len(candidates)
 
 
 def _delete_training_run_ids(registry: Registry, run_ids: Sequence[str], *, dry_run: bool) -> int:
@@ -3831,6 +4063,40 @@ def _print_failed_run_candidates(candidates: Sequence[FailedRunCandidate], *, li
         print(f" ... {len(candidates) - limit} more rows omitted (use --list-limit 0 to show all).")
 
 
+def _print_stale_in_progress_run_candidates(
+    candidates: Sequence[StaleInProgressRunCandidate],
+    *,
+    list_limit: int,
+) -> None:
+    if not candidates:
+        print("No stale in_progress training runs found.")
+        return
+
+    print(f"Stale in_progress training runs: {len(candidates)}")
+    limit = len(candidates) if list_limit == 0 else min(len(candidates), list_limit)
+    for candidate in candidates[:limit]:
+        set_id = candidate.set_id or "—"
+        task_type = candidate.task_type or "unknown"
+        run_status = candidate.run_status or "—"
+        model_status = candidate.model_status or "—"
+        created_utc = candidate.created_utc or "—"
+        age_text = "—" if candidate.age_hours is None else f"{candidate.age_hours:.2f}h"
+        print(
+            " - {run_id} [set={set_id} task={task} age={age} created={created} "
+            "run_status={run_status} model_status={model_status}]".format(
+                run_id=candidate.run_id,
+                set_id=set_id,
+                task=task_type,
+                age=age_text,
+                created=created_utc,
+                run_status=run_status,
+                model_status=model_status,
+            )
+        )
+    if limit < len(candidates):
+        print(f" ... {len(candidates) - limit} more rows omitted (use --list-limit 0 to show all).")
+
+
 def _print_empty_training_set_candidates(
     candidates: Sequence[EmptyTrainingSetCandidate],
     *,
@@ -3912,6 +4178,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.prune_invalid
         and not args.prune_missing_datasets
         and not args.prune_failed_runs
+        and not args.reconcile_in_progress_runs
         and not args.delete_run_id
         and not args.delete_set_id
         and not args.prune_empty_sets
@@ -3936,7 +4203,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     ):
         raise SystemExit(
             "No action selected. Use --reconcile-registry, --prune-invalid, --prune-missing-datasets, "
-            "--prune-failed-runs, --delete-run-id, --delete-set-id, "
+            "--prune-failed-runs, --reconcile-in-progress-runs, --delete-run-id, --delete-set-id, "
             "--prune-empty-sets, --backfill-recording-entities, --backfill-subject-dish-cross, "
             "--backfill-subjects, "
             "--backfill-model-tables, --backfill-keypoint-quality, "
@@ -4023,6 +4290,40 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             else:
                 deleted = _delete_training_run_ids(registry, run_ids, dry_run=False)
                 print(f"Deleted {deleted} training run row(s) with status in [{status_list}].")
+
+        if args.reconcile_in_progress_runs:
+            max_age_hours = float(args.in_progress_max_age_hours)
+            if max_age_hours < 0:
+                raise SystemExit("--in-progress-max-age-hours must be non-negative.")
+            task_filter = str(args.in_progress_task or "all")
+            stale_candidates = _collect_stale_in_progress_run_candidates(
+                registry,
+                max_age_hours=max_age_hours,
+                task_filter=task_filter,
+            )
+            _print_stale_in_progress_run_candidates(
+                stale_candidates,
+                list_limit=args.list_limit,
+            )
+            if args.dry_run:
+                print(
+                    "Dry run: would mark "
+                    f"{len(stale_candidates)} stale in_progress run(s) as failed "
+                    f"(max_age_hours={max_age_hours:g}, task_filter={task_filter})."
+                )
+            else:
+                reconciled = _reconcile_stale_in_progress_runs(
+                    registry,
+                    candidates=stale_candidates,
+                    max_age_hours=max_age_hours,
+                    task_filter=task_filter,
+                    dry_run=False,
+                )
+                print(
+                    "Reconciled "
+                    f"{reconciled} stale in_progress run(s) to failed "
+                    f"(max_age_hours={max_age_hours:g}, task_filter={task_filter})."
+                )
 
         if args.delete_run_id:
             requested_run_ids = _normalize_run_ids(args.delete_run_id)

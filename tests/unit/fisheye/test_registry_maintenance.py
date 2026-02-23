@@ -1,5 +1,6 @@
 """Unit tests for registry maintenance helpers."""
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -29,6 +30,7 @@ from fisheye.registry.maintenance import (
     _collect_failed_run_candidates,
     _collect_invalid_dataset_candidates,
     _collect_missing_dataset_candidates,
+    _collect_stale_in_progress_run_candidates,
     _delete_training_set_ids,
     _delete_training_run_ids,
     _delete_dataset_ids,
@@ -43,6 +45,7 @@ from fisheye.registry.maintenance import (
     _is_safe_artifact_path,
     _normalize_run_ids,
     _resolve_existing_run_ids,
+    _reconcile_stale_in_progress_runs,
     _normalize_status_values,
 )
 
@@ -1715,6 +1718,175 @@ def test_collect_and_delete_failed_training_runs(tmp_path: Path) -> None:
         "SELECT run_id FROM onnx_models ORDER BY run_id;"
     ).fetchall()
     assert [row["run_id"] for row in export_rows] == ["run_success"]
+    registry.close()
+
+
+def test_collect_stale_in_progress_run_candidates_filters_by_age_and_task(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.record_training_run(
+        run_id="run_pose_stale",
+        set_id="pose_set_v001",
+        task_type="pose",
+        config_path=None,
+        manifest_path=None,
+        skeleton_id=None,
+        model_path=None,
+        metrics_path=None,
+        status="in_progress",
+        final_metrics={"stage": "preflight_and_training", "status_detail": "training_started"},
+    )
+    registry.record_training_run(
+        run_id="run_pose_fresh",
+        set_id="pose_set_v001",
+        task_type="pose",
+        config_path=None,
+        manifest_path=None,
+        skeleton_id=None,
+        model_path=None,
+        metrics_path=None,
+        status="in_progress",
+        final_metrics={"stage": "preflight_and_training", "status_detail": "training_started"},
+    )
+    registry.record_training_run(
+        run_id="run_detect_stale",
+        set_id="detect_set_v001",
+        task_type="detect",
+        config_path=None,
+        manifest_path=None,
+        skeleton_id=None,
+        model_path=None,
+        metrics_path=None,
+        status="in_progress",
+        final_metrics={"stage": "preflight_and_training", "status_detail": "training_started"},
+    )
+    registry.record_training_run(
+        run_id="run_success",
+        set_id="pose_set_v001",
+        task_type="pose",
+        config_path=None,
+        manifest_path=None,
+        skeleton_id=None,
+        model_path=None,
+        metrics_path=None,
+        status="success",
+        final_metrics={"stage": "completed", "status_detail": "training_complete"},
+    )
+    registry.conn.execute(
+        "UPDATE training_runs SET created_utc = ? WHERE run_id = ?;",
+        ("2026-02-20T00:00:00+00:00", "run_pose_stale"),
+    )
+    registry.conn.execute(
+        "UPDATE training_runs SET created_utc = ? WHERE run_id = ?;",
+        ("2026-02-22T23:00:00+00:00", "run_pose_fresh"),
+    )
+    registry.conn.execute(
+        "UPDATE training_runs SET created_utc = ? WHERE run_id = ?;",
+        ("2026-02-20T00:00:00+00:00", "run_detect_stale"),
+    )
+    registry.conn.commit()
+
+    now_utc = datetime(2026, 2, 23, 0, 0, tzinfo=timezone.utc)
+
+    pose_candidates = _collect_stale_in_progress_run_candidates(
+        registry,
+        max_age_hours=24.0,
+        task_filter="pose",
+        now_utc=now_utc,
+    )
+    assert {candidate.run_id for candidate in pose_candidates} == {"run_pose_stale"}
+
+    all_candidates = _collect_stale_in_progress_run_candidates(
+        registry,
+        max_age_hours=24.0,
+        task_filter="all",
+        now_utc=now_utc,
+    )
+    assert {candidate.run_id for candidate in all_candidates} == {
+        "run_pose_stale",
+        "run_detect_stale",
+    }
+    registry.close()
+
+
+def test_reconcile_stale_in_progress_runs_marks_failed_with_audit_payload(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    run_id = "run_pose_stale"
+    registry.record_training_run(
+        run_id=run_id,
+        set_id="pose_set_v001",
+        task_type="pose",
+        config_path=None,
+        manifest_path=None,
+        skeleton_id=None,
+        model_path=None,
+        metrics_path=None,
+        status="in_progress",
+        final_metrics={"stage": "preflight_and_training", "status_detail": "training_started"},
+    )
+    registry.conn.execute(
+        "UPDATE training_runs SET created_utc = ? WHERE run_id = ?;",
+        ("2026-02-20T00:00:00+00:00", run_id),
+    )
+    registry.conn.commit()
+
+    now_utc = datetime(2026, 2, 23, 0, 0, tzinfo=timezone.utc)
+    candidates = _collect_stale_in_progress_run_candidates(
+        registry,
+        max_age_hours=24.0,
+        task_filter="pose",
+        now_utc=now_utc,
+    )
+    assert {candidate.run_id for candidate in candidates} == {run_id}
+
+    dry_run_reconciled = _reconcile_stale_in_progress_runs(
+        registry,
+        candidates=candidates,
+        max_age_hours=24.0,
+        task_filter="pose",
+        dry_run=True,
+        now_utc=now_utc,
+    )
+    assert dry_run_reconciled == 0
+    status_before = registry.conn.execute(
+        "SELECT status FROM training_runs WHERE run_id = ?;",
+        (run_id,),
+    ).fetchone()
+    assert status_before is not None
+    assert status_before["status"] == "in_progress"
+
+    reconciled = _reconcile_stale_in_progress_runs(
+        registry,
+        candidates=candidates,
+        max_age_hours=24.0,
+        task_filter="pose",
+        dry_run=False,
+        now_utc=now_utc,
+    )
+    assert reconciled == 1
+
+    run_row = registry.conn.execute(
+        "SELECT status, final_metrics_json FROM training_runs WHERE run_id = ?;",
+        (run_id,),
+    ).fetchone()
+    assert run_row is not None
+    assert run_row["status"] == "failed"
+    final_metrics = json.loads(str(run_row["final_metrics_json"] or "{}"))
+    assert final_metrics["stage"] == "maintenance_reconcile"
+    assert final_metrics["status_detail"] == "stale_in_progress_reconciled"
+    assert final_metrics["error_type"] == "StaleInProgressRun"
+    assert "older than 24h" in str(final_metrics["error_message"])
+    assert final_metrics["reconciled_by"] == "fisheye.registry.maintenance"
+    assert final_metrics["previous_run_status"] == "in_progress"
+    assert final_metrics["in_progress_since_utc"] == "2026-02-20T00:00:00+00:00"
+
+    model_row = registry.conn.execute(
+        "SELECT status, final_metrics_json FROM training_models WHERE run_id = ?;",
+        (run_id,),
+    ).fetchone()
+    assert model_row is not None
+    assert model_row["status"] == "failed"
+    model_metrics = json.loads(str(model_row["final_metrics_json"] or "{}"))
+    assert model_metrics["status_detail"] == "stale_in_progress_reconciled"
     registry.close()
 
 
