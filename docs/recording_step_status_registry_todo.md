@@ -178,6 +178,17 @@ scripts/validate_recording_step_status_registry.sh \
   --zarr-use training
 ```
 
+Batch run example:
+
+```bash
+scripts/validate_recording_step_status_registry_batch.sh \
+  --recordings-root /nvme1/recordings \
+  --registry /nvme1/palette_registry.sqlite \
+  --zarr-use training \
+  --jobs 8 \
+  --skip-backfill
+```
+
 ## Task Dependencies
 
 - RS1 must land before RS2/RS5/RS6.
