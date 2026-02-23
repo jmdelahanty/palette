@@ -749,7 +749,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--require-background",
         action="store_true",
-        help="Require a background run to exist before running keypoints (default).",
+        help="Require a background run to exist before running keypoints (default for traditional).",
     )
     parser.add_argument(
         "--no-require-background",
@@ -829,7 +829,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Disable JSONL logging.",
     )
-    parser.set_defaults(require_background=True, require_crop=True)
+    parser.set_defaults(require_crop=True)
 
     args = parser.parse_args(argv)
     if args.refine_only:
@@ -869,6 +869,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         log_roots = [_infer_recording_dir(explicit_zarrs[0]).parent]
     skip_existing = not args.overwrite
 
+    config = _load_config(args.config)
+    method = _resolve_method(config, args.method)
+    explicit_background_pref = bool(args.require_background) or bool(args.no_require_background)
+    if explicit_background_pref:
+        require_background = bool(args.require_background) and not bool(args.no_require_background)
+    else:
+        require_background = method not in {"yolo", "yolo_pose"}
+    require_crop = bool(args.require_crop) and not bool(args.no_require_crop)
+
     logger: Optional[JsonLogger] = None
     log_path: Optional[Path] = None
     run_id = _run_id()
@@ -887,8 +896,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             apply=bool(args.apply),
             dry_run=not bool(args.apply),
             overwrite=bool(args.overwrite),
-            require_background=bool(args.require_background) and not bool(args.no_require_background),
-            require_crop=bool(args.require_crop) and not bool(args.no_require_crop),
+            require_background=require_background,
+            require_crop=require_crop,
             require_tuning=bool(args.require_tuning),
             config=args.config,
             method=args.method,
@@ -900,11 +909,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             dask_progress=bool(args.dask_progress),
             json=bool(args.json),
         )
-
-    config = _load_config(args.config)
-    method = _resolve_method(config, args.method)
-    require_background = bool(args.require_background) and not bool(args.no_require_background)
-    require_crop = bool(args.require_crop) and not bool(args.no_require_crop)
 
     plans: List[KeypointPlan] = []
     if roots:

@@ -9,6 +9,38 @@ import zarr
 from fisheye.utils import run_keypoints_batch as mod
 
 
+def _plan_from_presence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    crop_present: bool,
+    background_present: bool,
+    require_background: bool,
+) -> mod.KeypointPlan:
+    zarr_path = tmp_path / "recording_training.zarr"
+    zarr_path.touch()
+    recording_dir = tmp_path / "recording"
+    h5_path = recording_dir / "raw" / "recording.h5"
+
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(mod, "_has_crop", lambda _root: crop_present)
+    monkeypatch.setattr(mod, "_has_background", lambda _root: background_present)
+    monkeypatch.setattr(mod, "_has_keypoints", lambda _root: False)
+    monkeypatch.setattr(mod, "_has_keypoint_tuning", lambda _root: False)
+
+    return mod._plan_from_zarr(
+        zarr_path=zarr_path,
+        recording_dir=recording_dir,
+        h5_path=h5_path,
+        camera_id="1",
+        skip_existing=True,
+        require_crop=True,
+        require_background=require_background,
+        require_tuning=False,
+        refine_only=False,
+    )
+
+
 def test_collect_stage_payload_reads_live_run_when_consolidated_is_stale(tmp_path: Path) -> None:
     zarr_path = tmp_path / "recording_training.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
@@ -40,6 +72,74 @@ def test_collect_stage_payload_reads_live_run_when_consolidated_is_stale(tmp_pat
     assert payload["source_runs"]["source_crop_run"] == "crop_001"
     assert payload["source_runs"]["source_detect_run"] == "refined_detect_001"
     assert payload["summary_statistics"]["total_rois"] == 12
+
+
+def test_plan_from_zarr_marks_missing_when_background_required(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan = _plan_from_presence(
+        monkeypatch,
+        tmp_path,
+        crop_present=True,
+        background_present=False,
+        require_background=True,
+    )
+
+    assert plan.status == "missing"
+    assert plan.reason == "background missing"
+    assert plan.crop_present is True
+    assert plan.background_present is False
+
+
+def test_plan_from_zarr_allows_missing_background_when_not_required(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan = _plan_from_presence(
+        monkeypatch,
+        tmp_path,
+        crop_present=True,
+        background_present=False,
+        require_background=False,
+    )
+
+    assert plan.status == "ok"
+    assert plan.reason is None
+    assert plan.crop_present is True
+    assert plan.background_present is False
+
+
+@pytest.mark.parametrize(
+    ("config_method", "cli_flags", "expected_require_background"),
+    [
+        ("traditional", [], True),
+        ("yolo", [], False),
+        ("yolo", ["--require-background"], True),
+        ("traditional", ["--no-require-background"], False),
+    ],
+)
+def test_main_background_requirement_defaults_by_method_and_honors_cli_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    config_method: str,
+    cli_flags: list[str],
+    expected_require_background: bool,
+) -> None:
+    captured: dict[str, bool] = {}
+
+    def _capture_build_plans(*_args, **kwargs):  # noqa: ANN002, ANN003
+        captured["require_background"] = kwargs["require_background"]
+        return []
+
+    monkeypatch.setattr(mod, "_resolve_root", lambda _paths: [tmp_path])
+    monkeypatch.setattr(mod, "_load_config", lambda _path: {"keypoints": {"method": config_method}})
+    monkeypatch.setattr(mod, "_build_plans", _capture_build_plans)
+    monkeypatch.setattr(mod, "_build_plans_from_zarr", lambda *args, **kwargs: [])  # noqa: ARG005
+
+    rc = mod.main([*cli_flags, "--no-log", str(tmp_path)])
+    assert rc == 0
+    assert captured["require_background"] is expected_require_background
 
 
 def test_run_plan_returns_rich_payload_with_optional_refine(

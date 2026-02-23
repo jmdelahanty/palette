@@ -47,7 +47,7 @@ Parallel execution contract for current P2 + validation tasks:
 
 ## P2 (Medium Priority)
 
-- [ ] Make keypoint prerequisite gating method-aware by default.
+- [x] Make keypoint prerequisite gating method-aware by default.
   - For YOLO pose, background should not be required unless explicitly requested.
   - Keep traditional behavior unchanged.
   - Acceptance: default gates match actual method dependencies.
