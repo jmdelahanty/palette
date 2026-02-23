@@ -70,6 +70,7 @@ Parallel execution contract for current P2 + validation tasks:
 - [x] Registry migration tests for keypoint performance schema/views.
 - [x] Registry query tests for new keypoint filters/group summaries.
 - [x] Batch logging tests to assert richer keypoint result payloads.
+- [x] Unit tests for optional keypoints/refine_keypoints orchestration in analysis pipeline wrappers.
 - [ ] End-to-end smoke test: analysis zarr -> keypoints -> refine_keypoints -> registry scan -> quality/perf query.
   - [x] Added operator runner script: `scripts/validate_pose_detect_parity_smoke.sh`.
   - [ ] Execute on real registry recording and capture artifact output.
