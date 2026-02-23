@@ -5,7 +5,9 @@ Workflow per recording:
 1) Import/create analysis archive + metadata/stimulus
 2) Run YOLO detection (explicit model or registry-resolved)
 3) Optionally run refine_detect
-4) Optionally register/rescan into the registry
+4) Optionally run keypoints
+5) Optionally run refine_keypoints
+6) Optionally register/rescan into the registry
 
 Default mode is dry-run. Use --apply to execute.
 """
@@ -267,7 +269,7 @@ def _run_id() -> str:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Create analysis Zarrs from recordings using YOLO detect + stimulus import.",
+        description="Create analysis Zarrs from recordings using import + detect + optional refine/keypoints/refine_keypoints + optional registry scan.",
     )
     parser.add_argument(
         "recordings_root",
@@ -354,6 +356,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Config passed to refine_detect.",
     )
     parser.add_argument("--refine-max-gap", type=int, help="Optional max-gap override for refine_detect.")
+    parser.add_argument("--keypoints", action="store_true", help="Run keypoints after detect/refine_detect.")
+    parser.add_argument(
+        "--refine-keypoints",
+        action="store_true",
+        help="Run refine_keypoints after keypoints (or existing keypoints if --keypoints is omitted).",
+    )
+    parser.add_argument(
+        "--keypoints-config",
+        type=Path,
+        default=Path("configs/fisheye/default.yaml"),
+        help="Config passed to keypoints/refine_keypoints stages.",
+    )
 
     parser.add_argument("--register", action="store_true", help="Rescan resulting analysis zarr into registry.")
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path.")
@@ -403,12 +417,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             model_source=str(args.model_source),
             import_stimulus=bool(args.import_stimulus),
             refine_detect=bool(args.refine_detect),
+            keypoints=bool(args.keypoints),
+            refine_keypoints=bool(args.refine_keypoints),
             register=bool(args.register),
             registry=str(registry_path),
             set_id=str(args.set_id) if args.set_id else None,
             require_unique=bool(args.require_unique),
             include_non_success=bool(args.include_non_success),
             top_k=int(args.top_k) if args.top_k is not None else None,
+            keypoints_config=str(args.keypoints_config) if args.keypoints_config else None,
         )
 
     plans = _build_plans(
@@ -461,6 +478,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         refine_max_gap=args.refine_max_gap,
         register=bool(args.register),
         registry_path=registry_path,
+        run_keypoints=bool(args.keypoints),
+        refine_keypoints=bool(args.refine_keypoints),
+        keypoints_config=args.keypoints_config,
         import_opts=RecordingImportOptions(
             import_video_metadata=True,
             video_metadata_overwrite=False,

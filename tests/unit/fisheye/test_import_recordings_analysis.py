@@ -176,3 +176,46 @@ def test_main_dry_run_with_register_does_not_open_registry(monkeypatch, tmp_path
     )
 
     assert rc == 0
+
+
+def test_main_forwards_keypoint_stage_toggles_to_pipeline(monkeypatch, tmp_path: Path) -> None:
+    recording_dir = tmp_path / "2026-01-28T21-47-47Z_arena_1_DefaultScreen"
+    h5_path = recording_dir / "raw" / "session.h5"
+    _write_h5(h5_path, camera_id="2010093")
+    cams = recording_dir / "cams"
+    cams.mkdir(parents=True, exist_ok=True)
+    (cams / "Cam2010093_foo.mp4").touch()
+
+    captured: dict[str, object] = {}
+
+    def _fake_process(_plan, opts, **_kwargs):
+        captured["run_keypoints"] = opts.run_keypoints
+        captured["refine_keypoints"] = opts.refine_keypoints
+        captured["keypoints_config"] = opts.keypoints_config
+        return SimpleNamespace(
+            ok=True,
+            failed_step=None,
+            error=None,
+            returncode=0,
+            dataset_id=None,
+        )
+
+    monkeypatch.setattr(analysis_import, "process_recording_analysis_pipeline", _fake_process)
+
+    rc = analysis_import.main(
+        [
+            str(tmp_path),
+            "--recursive",
+            "--apply",
+            "--no-log",
+            "--keypoints",
+            "--refine-keypoints",
+            "--keypoints-config",
+            "configs/fisheye/default.yaml",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["run_keypoints"] is True
+    assert captured["refine_keypoints"] is True
+    assert captured["keypoints_config"] == Path("configs/fisheye/default.yaml")

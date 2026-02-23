@@ -52,7 +52,7 @@ Parallel execution contract for current P2 + validation tasks:
   - Keep traditional behavior unchanged.
   - Acceptance: default gates match actual method dependencies.
 
-- [ ] Add optional pose stage orchestration in analysis pipeline wrappers.
+- [x] Add optional pose stage orchestration in analysis pipeline wrappers.
   - Current recording analysis pipeline orchestrates import -> detect -> refine_detect -> register.
   - Add optional keypoint + refine_keypoints stage toggles with logging.
   - Acceptance: one pipeline command can run full analysis stack when requested.

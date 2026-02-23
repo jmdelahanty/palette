@@ -5,7 +5,9 @@ Pipeline order:
 1) import_recording_analysis (archive + metadata + stimulus)
 2) detect inference (explicit model or registry-resolved)
 3) refine_detect (optional)
-4) registry scan (optional)
+4) keypoints (optional)
+5) refine_keypoints (optional)
+6) registry scan (optional)
 """
 
 from __future__ import annotations
@@ -46,6 +48,9 @@ class RecordingPipelineOptions:
     register: bool
     registry_path: Path
     import_opts: RecordingImportOptions
+    run_keypoints: bool = False
+    refine_keypoints: bool = False
+    keypoints_config: Optional[Path] = None
 
 
 @dataclass
@@ -148,6 +153,37 @@ def run_refine_detect(plan: RecordingAnalysisPlan, opts: RecordingPipelineOption
     return result.returncode == 0, result.returncode, cmd
 
 
+def run_keypoints_batch(plan: RecordingAnalysisPlan, opts: RecordingPipelineOptions) -> tuple[bool, int, List[str]]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "fisheye.utils.run_keypoints_batch",
+        "--apply",
+        "--quiet",
+        "--no-log",
+        str(plan.zarr_path),
+    ]
+    if opts.keypoints_config is not None:
+        cmd.extend(["--config", str(opts.keypoints_config)])
+    print(f"Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, check=False)
+    return result.returncode == 0, result.returncode, cmd
+
+
+def run_refine_keypoints(plan: RecordingAnalysisPlan, opts: RecordingPipelineOptions) -> tuple[bool, int, List[str]]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "fisheye.refinement.refine_keypoints",
+        str(plan.zarr_path),
+    ]
+    if opts.keypoints_config is not None:
+        cmd.extend(["--config", str(opts.keypoints_config)])
+    print(f"Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, check=False)
+    return result.returncode == 0, result.returncode, cmd
+
+
 def process_recording_analysis_pipeline(
     plan: RecordingAnalysisPlan,
     opts: RecordingPipelineOptions,
@@ -203,6 +239,42 @@ def process_recording_analysis_pipeline(
                 error="refine detect failed",
             )
 
+    if opts.run_keypoints:
+        keypoints_ok, keypoints_rc, keypoints_cmd = run_keypoints_batch(plan, opts)
+        _log(
+            logger,
+            "keypoints_result",
+            recording_dir=str(plan.recording_dir),
+            zarr_path=str(plan.zarr_path),
+            returncode=int(keypoints_rc),
+            cmd=keypoints_cmd,
+        )
+        if not keypoints_ok:
+            return RecordingPipelineResult(
+                ok=False,
+                failed_step="keypoints",
+                returncode=int(keypoints_rc),
+                error="keypoints step failed",
+            )
+
+    if opts.refine_keypoints:
+        refine_kp_ok, refine_kp_rc, refine_kp_cmd = run_refine_keypoints(plan, opts)
+        _log(
+            logger,
+            "refine_keypoints_result",
+            recording_dir=str(plan.recording_dir),
+            zarr_path=str(plan.zarr_path),
+            returncode=int(refine_kp_rc),
+            cmd=refine_kp_cmd,
+        )
+        if not refine_kp_ok:
+            return RecordingPipelineResult(
+                ok=False,
+                failed_step="refine_keypoints",
+                returncode=int(refine_kp_rc),
+                error="refine keypoints failed",
+            )
+
     dataset_id = None
     if opts.register:
         if registry is None:
@@ -249,12 +321,15 @@ def _build_pipeline_options(args: argparse.Namespace, registry_path: Path) -> Re
         register=bool(args.register),
         registry_path=registry_path,
         import_opts=_build_import_options(args),
+        run_keypoints=bool(args.keypoints),
+        refine_keypoints=bool(args.refine_keypoints),
+        keypoints_config=args.keypoints_config,
     )
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run one-recording analysis pipeline: import -> detect -> refine -> register.",
+        description="Run one-recording analysis pipeline: import -> detect -> refine_detect -> keypoints -> refine_keypoints -> register.",
     )
     parser.add_argument("--recording-dir", type=Path, required=True, help="Recording directory to process.")
     parser.add_argument("--video", type=Path, help="Optional explicit camera video path.")
@@ -342,6 +417,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Config passed to refine_detect.",
     )
     parser.add_argument("--refine-max-gap", type=int, help="Optional max-gap override for refine_detect.")
+    parser.add_argument("--keypoints", action="store_true", help="Run keypoints after detect/refine_detect.")
+    parser.add_argument(
+        "--refine-keypoints",
+        action="store_true",
+        help="Run refine_keypoints after keypoints (or existing keypoints if --keypoints is omitted).",
+    )
+    parser.add_argument(
+        "--keypoints-config",
+        type=Path,
+        default=Path("configs/fisheye/default.yaml"),
+        help="Config passed to keypoints/refine_keypoints stages.",
+    )
 
     parser.add_argument("--register", action="store_true", help="Rescan resulting analysis zarr into registry.")
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path.")
@@ -374,6 +461,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  model_source: {args.model_source}")
     print(f"  import_stimulus: {bool(args.import_stimulus)}")
     print(f"  refine_detect: {bool(args.refine_detect)}")
+    print(f"  keypoints: {bool(args.keypoints)}")
+    print(f"  refine_keypoints: {bool(args.refine_keypoints)}")
     print(f"  register: {bool(args.register)}")
     if args.dry_run:
         print("Dry run: no changes were made.")
