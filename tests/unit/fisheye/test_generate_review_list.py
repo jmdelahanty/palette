@@ -71,7 +71,7 @@ def _seed_crop_registry(registry_path: Path, rows: list[dict[str, object]]) -> N
                     "review_reviewer": "tester",
                     "review_timestamp_utc": "2026-02-10T00:10:00+00:00",
                     "review_notes": None,
-                    "zarr_mtime_ns": 12345,
+                    "zarr_mtime_ns": int(row.get("zarr_mtime_ns", zarr_path.stat().st_mtime_ns)),
                     "updated_utc": "2026-02-10T00:10:00+00:00",
                 }
             ],
@@ -235,3 +235,60 @@ def test_generate_review_list_crop_registry_mode_any_status_includes_running(tmp
 
     lines = [line.strip() for line in output.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert lines == sorted([str(zarr_a.resolve()), str(zarr_b.resolve())])
+
+
+def test_generate_review_list_crop_registry_mode_treats_stale_reviews_as_missing(tmp_path: Path) -> None:
+    rec_root = tmp_path / "recordings"
+    rec_root.mkdir()
+    zarr_fresh = rec_root / "fresh_analysis.zarr"
+    zarr_stale = rec_root / "stale_analysis.zarr"
+    _make_crop_zarr(zarr_fresh, run_status="completed", review_state="approved")
+    _make_crop_zarr(zarr_stale, run_status="completed", review_state="approved")
+
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_crop_registry(
+        registry_path,
+        rows=[
+            {
+                "dataset_id": "dataset_fresh",
+                "zarr_path": zarr_fresh,
+                "recording_id": "recording_fresh",
+                "crop_run": "crop_2026-02-10_10-00-00",
+                "review_state": "approved",
+                "review_intended_use": "training",
+            },
+            {
+                "dataset_id": "dataset_stale",
+                "zarr_path": zarr_stale,
+                "recording_id": "recording_stale",
+                "crop_run": "crop_2026-02-10_10-00-00",
+                "review_state": "approved",
+                "review_intended_use": "training",
+                "zarr_mtime_ns": int(zarr_stale.stat().st_mtime_ns + 1),
+            },
+        ],
+    )
+
+    output = tmp_path / "crop_review_list_registry_stale.txt"
+    rc = mod.main(
+        [
+            str(rec_root),
+            "--recursive",
+            "--stage",
+            "crop",
+            "--registry",
+            str(registry_path),
+            "--review-state",
+            "approved",
+            "--review-method",
+            "manual",
+            "--review-intended-use",
+            "training",
+            "--output",
+            str(output),
+        ]
+    )
+    assert rc == 0
+
+    lines = [line.strip() for line in output.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert lines == [str(zarr_fresh.resolve())]

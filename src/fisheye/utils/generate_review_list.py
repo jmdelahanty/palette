@@ -14,6 +14,7 @@ from typing import Iterable, List, Optional, Dict
 import zarr
 
 from fisheye.registry.db import Registry
+from fisheye.utils.crop_quality_freshness import is_crop_quality_row_fresh
 
 
 @dataclass
@@ -232,7 +233,7 @@ def _build_crop_candidates_from_registry(
     candidates: List[ReviewCandidate] = []
     table_name = "crop_quality" if run_name else "crop_quality_current"
     sql = [
-        f"SELECT d.zarr_path, cq.crop_run, cq.review_state, cq.review_method, cq.review_intended_use",
+        f"SELECT d.zarr_path, cq.crop_run, cq.review_state, cq.review_method, cq.review_intended_use, cq.zarr_mtime_ns",
         f"FROM {table_name} cq",
         "JOIN datasets d ON d.dataset_id = cq.dataset_id",
         "WHERE d.zarr_path IS NOT NULL AND TRIM(d.zarr_path) <> ''",
@@ -253,13 +254,18 @@ def _build_crop_candidates_from_registry(
         zarr_path = Path(str(row["zarr_path"])).expanduser()
         if not _path_matches_scope(zarr_path, roots, recursive):
             continue
+        is_fresh, stale_reason = is_crop_quality_row_fresh(
+            zarr_path=zarr_path,
+            zarr_mtime_ns=row["zarr_mtime_ns"],
+        )
         candidate = ReviewCandidate(
             zarr_path=zarr_path,
-            status="ok",
+            status="ok" if is_fresh else "stale",
+            reason=None if is_fresh else stale_reason,
             run_name=_normalize_text(row["crop_run"]),
-            review_state=_normalize_state(row["review_state"]),
-            review_method=_normalize_state(row["review_method"]),
-            review_intended_use=_normalize_state(row["review_intended_use"]),
+            review_state=_normalize_state(row["review_state"]) if is_fresh else None,
+            review_method=_normalize_state(row["review_method"]) if is_fresh else None,
+            review_intended_use=_normalize_state(row["review_intended_use"]) if is_fresh else None,
         )
         if crop_run_status_filter and crop_run_status_filter != "any":
             run_status, error_reason = _resolve_crop_run_status(

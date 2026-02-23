@@ -113,8 +113,8 @@ Do not mirror all crop arrays/metadata into SQLite.
 
 ## Freshness + Fail-Closed Behavior
 
-- [ ] Compare `crop_quality_current.zarr_mtime_ns` to current dataset mtime.
-- [ ] If stale/missing, mark row as stale and avoid false "approved" reports.
+- [x] Compare `crop_quality_current.zarr_mtime_ns` to current dataset mtime.
+- [x] If stale/missing, mark row as stale and avoid false "approved" reports.
 - [x] Keep optional Zarr fallback for diagnostics and recovery.
 
 ## Example Queries (Target)
@@ -142,7 +142,7 @@ ORDER BY n DESC;
 - [x] Phase 1: schema + extraction + scan write path.
 - [x] Phase 2: maintenance backfill/refresh commands.
 - [x] Phase 3: query/list/status tooling integration.
-- [ ] Phase 4: integrity/freshness checks + docs updates.
+- [x] Phase 4: integrity/freshness checks + docs updates.
 
 ## Validation Checklist
 
@@ -150,4 +150,4 @@ ORDER BY n DESC;
 - [x] `crop_quality_current` row count matches expected analysis dataset coverage.
 - [x] Registry queries can return "not approved" crop backlog without full
   filesystem scan.
-- [ ] Stale rows are detectable and do not silently pass as approved.
+- [x] Stale rows are detectable and do not silently pass as approved.

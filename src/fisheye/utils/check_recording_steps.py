@@ -15,6 +15,7 @@ from fisheye.shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
 )
+from fisheye.utils.crop_quality_freshness import is_crop_quality_row_fresh
 try:
     from rich.console import Console
     from rich.table import Table
@@ -1211,7 +1212,8 @@ def _registry_crop_review_status_for_zarr(
             cqc.review_intended_use,
             cqc.review_reviewer,
             cqc.review_timestamp_utc,
-            cqc.review_notes
+            cqc.review_notes,
+            cqc.zarr_mtime_ns
         FROM crop_quality_current cqc
         JOIN datasets d ON d.dataset_id = cqc.dataset_id
         WHERE d.zarr_path = ?
@@ -1226,6 +1228,12 @@ def _registry_crop_review_status_for_zarr(
     if not rows:
         return None
     row = rows[0]
+    is_fresh, _stale_reason = is_crop_quality_row_fresh(
+        zarr_path=zarr_path,
+        zarr_mtime_ns=row["zarr_mtime_ns"],
+    )
+    if not is_fresh:
+        return None
 
     status: Dict[str, object] = {}
     state = _normalize_attr(row["review_state"])

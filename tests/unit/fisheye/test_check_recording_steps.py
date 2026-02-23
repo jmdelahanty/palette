@@ -209,7 +209,7 @@ def test_registry_crop_review_status_for_zarr_returns_latest_review_fields(tmp_p
                 "review_reviewer": "alice",
                 "review_timestamp_utc": "2026-02-10T10:30:00+00:00",
                 "review_notes": "looks good",
-                "zarr_mtime_ns": 12345,
+                "zarr_mtime_ns": int(zarr_path.stat().st_mtime_ns),
                 "updated_utc": "2026-02-10T10:30:00+00:00",
             }
         ],
@@ -230,6 +230,69 @@ def test_registry_crop_review_status_for_zarr_returns_latest_review_fields(tmp_p
     assert status["intended_use"] == "training"
     assert status["reviewer"] == "alice"
     assert status["timestamp_utc"] == "2026-02-10T10:30:00+00:00"
+
+
+def test_registry_crop_review_status_for_zarr_returns_none_when_row_is_stale(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "a_analysis.zarr"
+    zarr.open_group(str(zarr_path), mode="w")
+
+    registry_path = tmp_path / "registry.sqlite"
+    registry = Registry(registry_path)
+    registry.upsert_dataset(
+        "dataset_a",
+        session_uuid="session_a",
+        zarr_path=zarr_path,
+        recording_id="recording_a",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_provenance(
+        "dataset_a",
+        provenance={},
+        context={},
+        protocol_name=None,
+        protocol_hash=None,
+        acquisition={},
+        zarr_purpose="analysis",
+    )
+    registry.replace_crop_quality(
+        "dataset_a",
+        [
+            {
+                "crop_run": "crop_2026-02-10_10-00-00",
+                "recording_id": "recording_a",
+                "zarr_use": "analysis",
+                "crop_created_utc": "2026-02-10T10:00:00+00:00",
+                "source_detect_run": None,
+                "source_refined_run": None,
+                "detection_source_type": "manual",
+                "detection_source_path": "manual",
+                "total_rois": 100,
+                "frames_with_crops": 90,
+                "total_frames": 100,
+                "percent_frames_with_crops": 90.0,
+                "includes_interpolated": 0,
+                "n_real_detections": 100,
+                "n_interpolated_detections": 0,
+                "review_state": "approved",
+                "review_method": "manual",
+                "review_intended_use": "training",
+                "review_reviewer": "alice",
+                "review_timestamp_utc": "2026-02-10T10:30:00+00:00",
+                "review_notes": "looks good",
+                "zarr_mtime_ns": int(zarr_path.stat().st_mtime_ns + 1),
+                "updated_utc": "2026-02-10T10:30:00+00:00",
+            }
+        ],
+    )
+
+    payload = mod._registry_crop_review_status_for_zarr(
+        registry=registry,
+        zarr_path=zarr_path,
+    )
+    registry.close()
+
+    assert payload is None
 
 
 def test_open_root_live_prefers_non_consolidated(monkeypatch) -> None:

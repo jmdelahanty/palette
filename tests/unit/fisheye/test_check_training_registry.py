@@ -768,3 +768,73 @@ def test_recording_steps_wide_view_outputs_rows(tmp_path: Path, capsys) -> None:
     assert "OK (73.6%, registry, blob)" in out
     assert "100% (passthrough)" in out
     assert "4/5" in out
+
+
+def test_recording_steps_wide_view_respects_zarr_use_filter(tmp_path: Path, capsys) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_steps_wide_training",
+        session_uuid="session_steps_wide_training",
+        zarr_path=tmp_path / "recordings" / "rec_steps_wide_training" / "zarr" / "rec_steps_wide_training.zarr",
+        recording_id="rec_steps_wide_training",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_dataset(
+        "dataset_steps_wide_analysis",
+        session_uuid="session_steps_wide_analysis",
+        zarr_path=tmp_path / "recordings" / "rec_steps_wide_analysis" / "zarr" / "rec_steps_wide_analysis.zarr",
+        recording_id="rec_steps_wide_analysis",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id, recording_id, step_name, status, run_name, method, coverage_pct, source, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        [
+            (
+                "dataset_steps_wide_training",
+                "rec_steps_wide_training",
+                "detect",
+                "ok",
+                "detect_training",
+                "blob",
+                80.0,
+                "unit_test",
+                "2026-02-22T03:00:00+00:00",
+            ),
+            (
+                "dataset_steps_wide_analysis",
+                "rec_steps_wide_analysis",
+                "detect",
+                "ok",
+                "detect_analysis",
+                "blob",
+                70.0,
+                "unit_test",
+                "2026-02-22T03:00:01+00:00",
+            ),
+        ],
+    )
+    registry.conn.commit()
+    registry.close()
+
+    rc = check_training_registry_main(
+        [
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--view",
+            "recording-steps-wide",
+            "--zarr-use",
+            "training",
+            "--no-rich",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "rec_steps_wide_training" in out
+    assert "rec_steps_wide_analysis" not in out

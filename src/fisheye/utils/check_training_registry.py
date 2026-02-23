@@ -1476,6 +1476,7 @@ def _load_recording_step_detail_rows(
     registry: Registry,
     *,
     set_filter: Optional[str],
+    zarr_use_filter: str = "all",
     limit: Optional[int] = None,
 ) -> List[RecordingStepDetailRow]:
     if not _view_exists(registry, "recording_step_status_latest"):
@@ -1503,6 +1504,9 @@ def _load_recording_step_detail_rows(
         placeholders = ", ".join("?" for _ in dataset_ids)
         sql.append(f"AND dataset_id IN ({placeholders})")
         params.extend(dataset_ids)
+    if zarr_use_filter != "all":
+        sql.append("AND lower(COALESCE(zarr_use, '')) = ?")
+        params.append(zarr_use_filter.lower())
     sql.append("ORDER BY COALESCE(updated_utc, '') DESC, recording_id ASC, dataset_id ASC, step_name ASC")
     if limit and limit > 0:
         sql.append("LIMIT ?")
@@ -1529,6 +1533,7 @@ def _load_recording_step_wide_rows(
     registry: Registry,
     *,
     set_filter: Optional[str],
+    zarr_use_filter: str = "all",
     limit: Optional[int] = None,
 ) -> Tuple[List[str], List[Dict[str, str]]]:
     if not _view_exists(registry, "recording_step_status_wide"):
@@ -1558,6 +1563,9 @@ def _load_recording_step_wide_rows(
             ")"
         )
         params.extend(dataset_ids)
+    if zarr_use_filter != "all":
+        sql.append("AND lower(COALESCE([Use], '')) = ?")
+        params.append(zarr_use_filter.lower())
     sql.append("ORDER BY [Recording] DESC, [Camera] ASC")
     if limit and limit > 0:
         sql.append("LIMIT ?")
@@ -1727,6 +1735,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Show step-detail rows from recording_step_status_latest (recording-steps view).",
     )
     parser.add_argument(
+        "--zarr-use",
+        choices=["all", "training", "analysis"],
+        default="all",
+        help=(
+            "Filter recording-step rows by zarr_use for recording-steps detail rows "
+            "and recording-steps-wide view (default: all)."
+        ),
+    )
+    parser.add_argument(
         "--hide-unlinked",
         action="store_true",
         help="Hide rows with no matching training_set row (applies to models/onnx/tensorrt views).",
@@ -1789,11 +1806,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     recording_step_detail_rows = _load_recording_step_detail_rows(
         registry,
         set_filter=args.set_id,
+        zarr_use_filter=args.zarr_use,
         limit=args.limit,
     ) if show_recording_step_details else []
     recording_step_wide_columns, recording_step_wide_rows = _load_recording_step_wide_rows(
         registry,
         set_filter=args.set_id,
+        zarr_use_filter=args.zarr_use,
         limit=args.limit,
     ) if show_recording_steps_wide else ([], [])
     recording_summary_rows = _load_recording_summary_rows(registry) if args.recording_summary else []
