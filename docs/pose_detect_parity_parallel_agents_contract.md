@@ -4,6 +4,9 @@ Purpose: define a conflict-free parallel execution plan for the current
 Pose/Detect parity P2 tasks so multiple agents can work simultaneously and
 land compatible changes.
 
+For the next review-status unification phase, use:
+`docs/review_status_schema_unification_contract.md`.
+
 ## Scope
 
 In scope:
