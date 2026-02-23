@@ -81,16 +81,16 @@ Keypoint-specific refinement control:
 
 ### Phase 5: Integration Cleanup
 
-- [ ] Optionally make `run_keypoints_batch --refine-only` delegate to the new
+- [x] Optionally make `run_keypoints_batch --refine-only` delegate to the new
       `refine_keypoints_batch` implementation.
-- [ ] Keep `run_keypoints_batch --refine` for convenience orchestration.
+- [x] Keep `run_keypoints_batch --refine` for convenience orchestration.
 - [x] Mark `run_keypoints_batch --refine-only` as deprecated (warn users and
       point to `refine_keypoints_batch`).
 
 ## Testing Plan
 
 - [x] Add `tests/unit/fisheye/test_refine_keypoints_batch.py`.
-- [ ] Cover:
+- [x] Cover:
   - plan building for missing/skipped/ok,
   - `--zarr-use` filtering,
   - explicit `--keypoint-run` resolution,
@@ -99,12 +99,12 @@ Keypoint-specific refinement control:
 
 ## Acceptance Criteria
 
-- [ ] Operators can rerun keypoint refinement in bulk without relying on
+- [x] Operators can rerun keypoint refinement in bulk without relying on
       H5-derived zarr naming.
-- [ ] CLI scope and lifecycle controls match detect refine batch expectations.
-- [ ] Repeated dry-runs produce stable counts and planned targets.
-- [ ] Apply mode is auditable via JSONL logs and per-recording return status.
-- [ ] Existing `run_keypoints_batch` user workflows remain functional.
+- [x] CLI scope and lifecycle controls match detect refine batch expectations.
+- [x] Repeated dry-runs produce stable counts and planned targets.
+- [x] Apply mode is auditable via JSONL logs and per-recording return status.
+- [x] Existing `run_keypoints_batch` user workflows remain functional.
 
 ## Open Decisions
 

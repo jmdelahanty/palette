@@ -111,9 +111,11 @@ def _iter_zarr(roots: List[Path], recursive: bool) -> Iterable[Path]:
         if not root.exists():
             continue
         if recursive:
-            yield from root.rglob("zarr/*.zarr")
+            for candidate in sorted(root.rglob("zarr/*.zarr")):
+                yield candidate
         else:
-            yield from root.glob("*/zarr/*.zarr")
+            for candidate in sorted(root.glob("*/zarr/*.zarr")):
+                yield candidate
 
 
 def _has_refined(root: zarr.Group) -> bool:
@@ -260,6 +262,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--num-workers", type=int, default=None, help="Refinement worker count override.")
     parser.add_argument("--memory-limit", default=None, help="Refinement worker memory limit override.")
     parser.add_argument("--log-dir", type=Path, default=None, help="Directory to store JSONL logs.")
+    parser.add_argument("--no-log", action="store_true", help="Disable JSONL logging in apply mode.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON lines for plans/results.")
 
     args = parser.parse_args(argv)
 
@@ -277,37 +281,54 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     if not args.apply:
-        print("Planned keypoint refinement (dry-run):")
-        for plan in plans:
-            print(f"{plan.zarr_path}")
-            print(f"  status: {plan.status}")
-            if plan.keypoint_run:
-                print(f"  keypoint_run: {plan.keypoint_run}")
-            if plan.reason:
-                print(f"  reason: {plan.reason}")
         counts = {"ok": 0, "skipped": 0, "missing": 0}
         for plan in plans:
             counts[plan.status] = counts.get(plan.status, 0) + 1
-        print("\nSummary:")
-        print(f"  ok: {counts.get('ok', 0)}")
-        print(f"  skipped: {counts.get('skipped', 0)}")
-        print(f"  missing: {counts.get('missing', 0)}")
-        print("\nUse --apply to run refinement.")
+        if args.json:
+            for plan in plans:
+                print(
+                    json.dumps(
+                        {
+                            "zarr": str(plan.zarr_path),
+                            "status": plan.status,
+                            "reason": plan.reason,
+                            "keypoint_run": plan.keypoint_run,
+                            "refined_present": bool(plan.refined_present),
+                        },
+                        sort_keys=True,
+                    )
+                )
+        else:
+            print("Planned keypoint refinement (dry-run):")
+            for plan in plans:
+                print(f"{plan.zarr_path}")
+                print(f"  status: {plan.status}")
+                if plan.keypoint_run:
+                    print(f"  keypoint_run: {plan.keypoint_run}")
+                if plan.reason:
+                    print(f"  reason: {plan.reason}")
+            print("\nSummary:")
+            print(f"  ok: {counts.get('ok', 0)}")
+            print(f"  skipped: {counts.get('skipped', 0)}")
+            print(f"  missing: {counts.get('missing', 0)}")
+            print("\nUse --apply to run refinement.")
         return 0
 
-    log_dir = _resolve_log_dir(args.log_dir, roots)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    run_id = _run_id()
-    log_path = log_dir / f"refine_keypoints_batch_{run_id}.jsonl"
-    logger = JsonLogger(log_path, run_id)
-    print(f"Log file: {log_path}")
-    logger.log(
-        "run_start",
-        roots=[str(r) for r in roots],
-        file_list=[str(p) for p in (args.file_list or [])],
-        recursive=bool(args.recursive),
-        zarr_use=str(args.zarr_use),
-    )
+    logger: Optional[JsonLogger] = None
+    if not args.no_log:
+        log_dir = _resolve_log_dir(args.log_dir, roots)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        run_id = _run_id()
+        log_path = log_dir / f"refine_keypoints_batch_{run_id}.jsonl"
+        logger = JsonLogger(log_path, run_id)
+        print(f"Log file: {log_path}")
+        logger.log(
+            "run_start",
+            roots=[str(r) for r in roots],
+            file_list=[str(p) for p in (args.file_list or [])],
+            recursive=bool(args.recursive),
+            zarr_use=str(args.zarr_use),
+        )
 
     console = Console() if Console else None
     progress = _progress(console, len(plans))
@@ -317,35 +338,71 @@ def main(argv: Optional[List[str]] = None) -> int:
     for plan in plans:
         if plan.status == "missing":
             missing += 1
-            logger.log("recording_missing", zarr=str(plan.zarr_path), reason=plan.reason)
+            if args.json:
+                print(json.dumps({"status": "missing", "zarr": str(plan.zarr_path), "reason": plan.reason}))
+            if logger is not None:
+                logger.log("recording_missing", zarr=str(plan.zarr_path), reason=plan.reason)
         elif plan.status == "skipped":
             skipped += 1
-            logger.log("recording_skipped", zarr=str(plan.zarr_path), reason=plan.reason)
+            if args.json:
+                print(json.dumps({"status": "skipped", "zarr": str(plan.zarr_path), "reason": plan.reason}))
+            if logger is not None:
+                logger.log("recording_skipped", zarr=str(plan.zarr_path), reason=plan.reason)
         else:
             cmd = _build_cmd(args, plan.zarr_path, plan.keypoint_run)
-            logger.log("refine_start", zarr=str(plan.zarr_path), cmd=cmd, keypoint_run=plan.keypoint_run)
-            print(f"Running: {' '.join(cmd)}")
+            if logger is not None:
+                logger.log("refine_start", zarr=str(plan.zarr_path), cmd=cmd, keypoint_run=plan.keypoint_run)
+            if not args.json:
+                print(f"Running: {' '.join(cmd)}")
             result = subprocess.run(cmd, check=False)
             if result.returncode == 0:
                 ok += 1
-                logger.log("refine_success", zarr=str(plan.zarr_path), returncode=result.returncode)
+                if args.json:
+                    print(
+                        json.dumps(
+                            {
+                                "status": "ok",
+                                "zarr": str(plan.zarr_path),
+                                "returncode": int(result.returncode),
+                                "keypoint_run": plan.keypoint_run,
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                if logger is not None:
+                    logger.log("refine_success", zarr=str(plan.zarr_path), returncode=result.returncode)
             else:
                 failed += 1
-                logger.log("refine_failed", zarr=str(plan.zarr_path), returncode=result.returncode)
+                if args.json:
+                    print(
+                        json.dumps(
+                            {
+                                "status": "failed",
+                                "zarr": str(plan.zarr_path),
+                                "returncode": int(result.returncode),
+                                "keypoint_run": plan.keypoint_run,
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                if logger is not None:
+                    logger.log("refine_failed", zarr=str(plan.zarr_path), returncode=result.returncode)
         if progress:
             progress.advance(task_id)
 
     if progress:
         progress.stop()
 
-    logger.log("run_end", ok=ok, skipped=skipped, missing=missing, failed=failed)
-    logger.close()
+    if logger is not None:
+        logger.log("run_end", ok=ok, skipped=skipped, missing=missing, failed=failed)
+        logger.close()
 
-    print("\nSummary:")
-    print(f"  ok: {ok}")
-    print(f"  skipped: {skipped}")
-    print(f"  missing: {missing}")
-    print(f"  failed: {failed}")
+    if not args.json:
+        print("\nSummary:")
+        print(f"  ok: {ok}")
+        print(f"  skipped: {skipped}")
+        print(f"  missing: {missing}")
+        print(f"  failed: {failed}")
 
     return 0 if failed == 0 else 1
 

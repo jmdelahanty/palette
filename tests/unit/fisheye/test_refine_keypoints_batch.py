@@ -1,7 +1,11 @@
 from pathlib import Path
+import json
+import subprocess
 
+import pytest
 import zarr
 
+from fisheye.utils import refine_keypoints_batch as mod
 from fisheye.utils.refine_keypoints_batch import _build_plans
 
 
@@ -153,3 +157,64 @@ def test_build_plans_marks_missing_when_requested_run_not_found(tmp_path: Path) 
 
     assert by_name[zarr_path.name].status == "missing"
     assert by_name[zarr_path.name].reason == "keypoint_run not found"
+
+
+def test_main_dry_run_json_is_deterministic(monkeypatch, tmp_path: Path, capsys) -> None:
+    plans = [
+        mod.RefinePlan(zarr_path=tmp_path / "b.zarr", status="ok", keypoint_run="kp_b"),
+        mod.RefinePlan(zarr_path=tmp_path / "a.zarr", status="skipped", reason="existing"),
+    ]
+    monkeypatch.setattr(mod, "_resolve_root", lambda _paths: [tmp_path])
+    monkeypatch.setattr(mod, "_build_plans", lambda *args, **kwargs: plans)  # noqa: ARG005
+
+    rc_1 = mod.main([str(tmp_path), "--recursive", "--zarr-use", "analysis", "--json"])
+    out_1 = capsys.readouterr().out.strip().splitlines()
+    rc_2 = mod.main([str(tmp_path), "--recursive", "--zarr-use", "analysis", "--json"])
+    out_2 = capsys.readouterr().out.strip().splitlines()
+
+    assert rc_1 == 0
+    assert rc_2 == 0
+    assert out_1 == out_2
+    records = [json.loads(line) for line in out_1 if line.strip()]
+    assert [Path(record["zarr"]).name for record in records] == ["b.zarr", "a.zarr"]
+    assert [record["status"] for record in records] == ["ok", "skipped"]
+
+
+def test_main_apply_json_reports_subprocess_results_and_failure_accounting(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    plans = [
+        mod.RefinePlan(zarr_path=tmp_path / "rec_a_analysis.zarr", status="ok", keypoint_run="kp_a"),
+        mod.RefinePlan(zarr_path=tmp_path / "rec_b_analysis.zarr", status="ok", keypoint_run="kp_b"),
+    ]
+    monkeypatch.setattr(mod, "_resolve_root", lambda _paths: [tmp_path])
+    monkeypatch.setattr(mod, "_build_plans", lambda *args, **kwargs: plans)  # noqa: ARG005
+
+    outcomes = iter([0, 7])
+
+    def _fake_run(cmd, check=False):  # noqa: ANN001, ARG001
+        return subprocess.CompletedProcess(args=cmd, returncode=next(outcomes))
+
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+
+    rc = mod.main(
+        [
+            str(tmp_path),
+            "--recursive",
+            "--zarr-use",
+            "analysis",
+            "--apply",
+            "--json",
+            "--no-log",
+        ]
+    )
+    out = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines() if line.strip()]
+
+    assert rc == 1
+    statuses = {Path(row["zarr"]).name: row["status"] for row in out}
+    assert statuses == {
+        "rec_a_analysis.zarr": "ok",
+        "rec_b_analysis.zarr": "failed",
+    }

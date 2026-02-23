@@ -288,3 +288,55 @@ def test_main_logs_rich_keypoint_results_to_jsonl(
     assert len(keypoints_ok) == 1
     assert keypoints_ok[0]["results"]["keypoints"]["run_name"] == "keypoints_001"
     assert keypoints_ok[0]["results"]["refined_keypoints"]["run_name"] == "refined_keypoints_001"
+
+
+def test_main_refine_only_delegates_to_refine_keypoints_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, list[str]] = {}
+
+    def _delegate(argv: list[str]) -> int:
+        captured["argv"] = list(argv)
+        return 0
+
+    monkeypatch.setattr(mod.refine_keypoints_batch_mod, "main", _delegate)
+
+    file_list = tmp_path / "targets.txt"
+    file_list.write_text("# test\n", encoding="utf-8")
+    rc = mod.main(
+        [
+            "--refine-only",
+            "--recursive",
+            "--apply",
+            "--scheduler",
+            "single-threaded",
+            "--num-workers",
+            "3",
+            "--no-log",
+            "--json",
+            "--file-list",
+            str(file_list),
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    stderr = capsys.readouterr().err
+    assert "deprecated" in stderr.lower()
+    assert "single-threaded" in stderr
+
+    argv = captured["argv"]
+    assert str(tmp_path) in argv
+    assert "--file-list" in argv
+    assert str(file_list) in argv
+    assert "--recursive" in argv
+    assert "--apply" in argv
+    assert "--zarr-use" in argv
+    assert "any" in argv
+    assert "--no-skip-existing" in argv
+    assert "--num-workers" in argv
+    assert "3" in argv
+    assert "--no-log" in argv
+    assert "--json" in argv
+    assert "--scheduler" not in argv

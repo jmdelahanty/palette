@@ -17,6 +17,7 @@ import zarr
 from fisheye.detection.detect_keypoints_traditional import detect_keypoints
 from fisheye.detection.detect_keypoints_yolo import detect_keypoints_yolo
 from fisheye.refinement.refine_keypoints import create_refined_keypoint_run
+from fisheye.utils import refine_keypoints_batch as refine_keypoints_batch_mod
 
 try:
     from rich.console import Console
@@ -709,6 +710,37 @@ def _run_plan(
     return payload
 
 
+def _delegate_refine_only(args: argparse.Namespace) -> int:
+    delegate_argv: List[str] = []
+    delegate_argv.extend(str(path) for path in args.paths)
+    for file_list in args.file_list or []:
+        delegate_argv.extend(["--file-list", str(file_list)])
+    if args.recursive:
+        delegate_argv.append("--recursive")
+    if args.apply:
+        delegate_argv.append("--apply")
+    # Preserve historical refine-only behavior from run_keypoints_batch:
+    # do not skip when refined runs already exist.
+    delegate_argv.extend(["--zarr-use", "any", "--no-skip-existing"])
+    delegate_argv.extend(["--config", str(args.config)])
+    if args.scheduler in {"processes", "threads", "distributed"}:
+        delegate_argv.extend(["--scheduler", str(args.scheduler)])
+    elif args.scheduler == "single-threaded":
+        print(
+            "Warning: --scheduler=single-threaded is not supported by refine_keypoints_batch; ignoring.",
+            file=sys.stderr,
+        )
+    if args.num_workers is not None:
+        delegate_argv.extend(["--num-workers", str(args.num_workers)])
+    if args.log_dir is not None:
+        delegate_argv.extend(["--log-dir", str(args.log_dir)])
+    if args.no_log:
+        delegate_argv.append("--no-log")
+    if args.json:
+        delegate_argv.append("--json")
+    return int(refine_keypoints_batch_mod.main(delegate_argv))
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Batch run keypoint detection on recordings.",
@@ -838,6 +870,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "Use `scripts/py -m fisheye.utils.refine_keypoints_batch`."
         )
         print(deprecation_msg, file=sys.stderr)
+        return _delegate_refine_only(args)
 
     file_list_paths: List[Path] = []
     if args.file_list:
