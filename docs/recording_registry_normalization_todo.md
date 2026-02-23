@@ -72,11 +72,17 @@ SQLite `ATTACH` is available as an escape hatch for zebrobot-only fields if need
   - Implemented by preferring canonical source IDs (`{session_uuid}:z<path-hash>`) in
     `_resolve_effective_dataset_id()` for recording-source artifacts.
   - Verified on live DB: rescan updates did not recreate `dataset_id=session_uuid` rows.
-- [ ] Keep CI wiring for the targeted registry migration/integrity test subset.
-  - Operational follow-up; not blocking Phase 1 completion.
-- [ ] Execute registry-backed recording step/status plan.
+- [x] Keep CI wiring for the targeted registry migration/integrity test subset.
+  - CI entrypoint script: `scripts/ci_registry_migration_integrity_subset.sh`
+  - Supports full run and fast `--smoke` precheck mode.
+- [x] Execute registry-backed recording step/status plan.
   - See: `docs/recording_step_status_registry_todo.md`
   - Goal: make recording health/status queryable from registry (not filesystem traversal).
+  - Implemented with runtime status hooks, status ledger views, and validation harness:
+    - `scripts/validate_recording_step_status_registry.sh`
+    - `scripts/validate_recording_step_status_registry_batch.sh`
+  - Latest operator batch validation: `passed=52 failed=0 skipped_missing_zarr=1`
+    (skipped non-recording path: `/nvme1/recordings/logs`).
 
 ## Glossary
 
