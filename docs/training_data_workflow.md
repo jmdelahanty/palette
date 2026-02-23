@@ -228,7 +228,7 @@ For merged-export schema/CLI constraints, see `docs/detection_merged_export_cont
 Use the pipeline wrapper to run selection + preflight + merged export in one invocation:
 
 ```bash
-python -m fisheye.utils.run_detect_training_pipeline \
+scripts/py -m fisheye.utils.run_detect_training_pipeline \
   --registry /nvme1/palette_registry.sqlite \
   --source-type manual \
   --input-format gray \
@@ -253,7 +253,7 @@ Notes:
 Use the keypoint pipeline wrapper to run selection + preflight and optionally launch training:
 
 ```bash
-python -m fisheye.utils.run_keypoint_training_pipeline \
+scripts/py -m fisheye.utils.run_keypoint_training_pipeline \
   --registry /nvme1/palette_registry.sqlite \
   --dish-design cedar \
   --source-type filtered \
@@ -272,7 +272,7 @@ python -m fisheye.utils.run_keypoint_training_pipeline \
 Dry-run preflight (no files written):
 
 ```bash
-python -m fisheye.utils.run_keypoint_training_pipeline \
+scripts/py -m fisheye.utils.run_keypoint_training_pipeline \
   --registry /nvme1/palette_registry.sqlite \
   --dish-design cedar \
   --source-type filtered \
@@ -287,6 +287,12 @@ Notes:
 - `--set-name` is recommended when using `--train` so `set_id` is generated deterministically.
 - `--train` cannot be combined with `--dry-run`.
 - `--export-merged` requires a written preflight manifest and cannot be combined with `--dry-run`.
+- `--model-input` defaults to `--input-format` if omitted.
+- `--merge-row-gate-policy` defaults to `auto` in pose merged export.
+- `--register-registry` defaults to `--registry` when `--register` is set.
+
+For a pose/keypoint-focused operator runbook (query -> prepare -> pipeline -> validate),
+see `docs/keypoint_training_workflow.md`.
 
 ## Model Export CLI Choice
 
@@ -307,7 +313,7 @@ Use `fisheye.training.export_detection` as the default export CLI for trained de
 Example (preferred, TRT + registry logging):
 
 ```bash
-python -m fisheye.training.export_detection \
+scripts/py -m fisheye.training.export_detection \
   /nvme1/models/detect/<set_id>/<run_id> \
   --export-trt \
   --log-registry \

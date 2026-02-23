@@ -45,9 +45,10 @@ Scope: prioritize correctness and auditability first, then UX/orchestration, the
   - Prevent unlinked training runs.
   - Use manifest `set_id` contract consistently.
 
-- [ ] Align keypoint wrapper flags with detect wrapper where meaningful.
+- [x] Align keypoint wrapper flags with detect wrapper where meaningful.
   - Common: `--registry`, `--set-name`, `--set-version`, `--run-name`, `--project`, `--train`, `--register`.
   - Keypoint-specific selectors remain task-specific (for example `--keypoint-run`).
+  - Status: implemented; wrappers share core orchestration surface, with task-specific flags retained intentionally.
 
 ## Current Command-Surface Differences (Detect vs Keypoint)
 
@@ -73,47 +74,55 @@ Scope: prioritize correctness and auditability first, then UX/orchestration, the
 
 ## P3: Export and Deployment Parity
 
-- [ ] Decide and implement keypoint export pathway (ONNX/TRT) with same audit semantics as detect.
+- [x] Decide and implement keypoint export pathway (ONNX/TRT) with same audit semantics as detect.
   - Run-aware export entrypoint.
   - Registry writes with build metadata and artifact hashes.
   - Manifested model I/O contract and plugin requirements (if any).
+  - Status: implemented in `train_pose` + shared export registry writers; wrapper supports `--export-onnx`/`--export-trt`.
 
-- [ ] Define pose-specific model table strategy in registry.
+- [x] Define pose-specific model table strategy in registry.
   - Reuse existing model tables if schema is task-agnostic enough, or add pose-specific model tables.
   - Keep one clear canonical read path for registry views.
+  - Status: resolved by reusing shared tables (`training_runs`/`training_models`/`onnx_models`/`tensorrt_models`) with pose skeleton/task metadata.
 
 ## P4: Registry and Monitoring Parity
 
-- [ ] Implement SQL-level keypoint quality gating in registry and use it in keypoint selection.
+- [x] Implement SQL-level keypoint quality gating in registry and use it in keypoint selection.
   - Track reviewed refined quality (`review_state`, `review_intended_use`, `usable_keypoints_rate`) as first-class registry fields.
   - Keep build-time fail-closed checks for stale/divergent records.
   - Detailed plan: `docs/keypoint_quality_registry_todo.md`.
+  - Status: implemented and completed per `docs/keypoint_quality_registry_todo.md`.
 
-- [ ] Extend `check_training_registry` views to cleanly surface pose set/run/export status.
+- [x] Extend `check_training_registry` views to cleanly surface pose set/run/export status.
   - Keep set view focused on set artifacts and latest run summary.
   - Keep run/model/export details in run/model-specific views.
+  - Status: models/onnx/tensorrt/keypoint-quality views surface pose run/export artifacts and statuses.
 
-- [ ] Add stale `in_progress` reconciliation for pose runs (same policy as detect).
-  - Optional maintenance command support for stale run cleanup or status repair.
+- [x] Add stale `in_progress` reconciliation for pose runs (same policy as detect).
+  - Implemented maintenance command support in `fisheye.registry.maintenance`:
+    `--reconcile-in-progress-runs` with `--in-progress-task` and `--in-progress-max-age-hours`.
 
 ## P5: Docs and Migration Hygiene
 
 - [x] Update stale status in `docs/detect_keypoints_parity_contract.md`.
   - The keypoint preflight wrapper already exists; document should reflect current reality.
 
-- [ ] Add a keypoint workflow doc mirroring detect workflow structure.
+- [x] Add a keypoint workflow doc mirroring detect workflow structure.
   - Registry query examples.
   - Prepare-only flow.
   - One-command pipeline flow once implemented.
+  - Status: documented in `docs/keypoint_training_workflow.md`.
 
-- [ ] Add backfill guidance for any new registry tables/fields.
+- [x] Add backfill guidance for any new registry tables/fields.
   - Dry-run first.
   - Integrity-check command sequence.
+  - Status: documented in keypoint quality registry workflow and maintenance runbooks.
 
 ## Acceptance Criteria
 
 - [x] Keypoint training cannot silently mix keypoints with ROI images from a different crop source.
 - [x] A keypoint merged dataset can be exported, validated, and trained from a single wrapper command.
-- [ ] Registry clearly shows pose set status, run status, and model/export artifacts.
-- [ ] Failure states are terminal and auditable (`failed` with stage/error metadata).
-- [ ] Docs reflect real command behavior and defaults.
+- [x] Registry clearly shows pose set status, run status, and model/export artifacts.
+- [x] Failure states are terminal and auditable (`failed` with stage/error metadata).
+- [x] Docs reflect real command behavior and defaults.
+  - Status: workflow/default behavior captured in `docs/keypoint_training_workflow.md` and `docs/training_data_workflow.md`.
