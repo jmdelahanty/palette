@@ -137,11 +137,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 raise RuntimeError("--notes is required for rejected state in strict mode.")
 
         intended_use = args.intended_use or "training"
+        timestamp_utc = datetime.now(timezone.utc).isoformat()
         payload: dict[str, object] = {
             "state": args.state,
             "method": args.method,
             "intended_use": intended_use,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp_utc": timestamp_utc,
+            "timestamp": timestamp_utc,
             "resolved_group": resolved_group,
             "target_group": args.target_group or None,
             "preference_chain": list(DEFAULT_DETECT_GROUP_PREFERENCE),

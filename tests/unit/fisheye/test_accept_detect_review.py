@@ -42,6 +42,8 @@ def test_accept_detect_review_writes_status_and_latest(tmp_path: Path) -> None:
     assert status["state"] == "approved"
     assert status["method"] == "manual"
     assert status["intended_use"] == "training"
+    assert "timestamp_utc" in status
+    assert status["timestamp"] == status["timestamp_utc"]
     assert status["resolved_group"] == "interpolated"
     assert parent.attrs["detect_review_status_latest"] == "refined_1"
 

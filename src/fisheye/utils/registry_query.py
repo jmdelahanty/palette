@@ -11,6 +11,31 @@ from typing import Any, Dict, Optional
 from fisheye.registry.db import Registry, RegistryPaths
 
 
+_SHARED_REVIEW_FIELDS: tuple[str, ...] = (
+    "review_state",
+    "review_method",
+    "review_intended_use",
+    "review_reviewer",
+    "review_notes",
+    "review_timestamp_utc",
+)
+
+_SHARED_REVIEW_FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "review_state": ("review_state",),
+    "review_method": ("review_method",),
+    "review_intended_use": ("review_intended_use",),
+    "review_reviewer": ("review_reviewer",),
+    "review_notes": ("review_notes",),
+    "review_timestamp_utc": (
+        "review_timestamp_utc",
+        "timestamp_utc",
+        "timestamp",
+        "reviewed_at_utc",
+        "reviewed_at",
+    ),
+}
+
+
 def _as_float(value: Optional[str]) -> Optional[float]:
     if value is None:
         return None
@@ -51,6 +76,113 @@ def _query_detect_performance_map(
         dataset_ids,
     ).fetchall()
     return {str(row["dataset_id"]): dict(row) for row in rows if row["dataset_id"] is not None}
+
+
+def _view_column_names(registry: Registry, *, view_name: str) -> set[str]:
+    try:
+        rows = registry.conn.execute(f"PRAGMA table_info({view_name});").fetchall()
+    except Exception:
+        return set()
+    names: set[str] = set()
+    for row in rows:
+        name = row["name"]
+        if name is None:
+            continue
+        names.add(str(name))
+    return names
+
+
+def _optional_select_exprs(*, available_columns: set[str], column_names: tuple[str, ...]) -> list[str]:
+    exprs: list[str] = []
+    for column_name in column_names:
+        if column_name in available_columns:
+            exprs.append(column_name)
+        else:
+            exprs.append(f"NULL AS {column_name}")
+    return exprs
+
+
+def _shared_review_select_exprs(*, available_columns: set[str]) -> list[str]:
+    exprs: list[str] = []
+    for alias in _SHARED_REVIEW_FIELDS:
+        candidates = _SHARED_REVIEW_FIELD_CANDIDATES.get(alias, ())
+        source_column = next((name for name in candidates if name in available_columns), None)
+        if source_column is None:
+            exprs.append(f"NULL AS {alias}")
+        elif source_column == alias:
+            exprs.append(alias)
+        else:
+            exprs.append(f"{source_column} AS {alias}")
+    return exprs
+
+
+def _query_quality_rows(
+    registry: Registry,
+    *,
+    view_name: str,
+    dataset_ids: list[str],
+    fixed_columns: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    if not dataset_ids:
+        return []
+    available_columns = _view_column_names(registry, view_name=view_name)
+    if "dataset_id" not in available_columns:
+        return []
+
+    select_exprs: list[str] = ["dataset_id"]
+    select_exprs.extend(
+        _optional_select_exprs(
+            available_columns=available_columns,
+            column_names=fixed_columns,
+        )
+    )
+    select_exprs.extend(_shared_review_select_exprs(available_columns=available_columns))
+
+    placeholders = ",".join("?" for _ in dataset_ids)
+    try:
+        rows = registry.conn.execute(
+            f"""
+            SELECT
+                {", ".join(select_exprs)}
+            FROM {view_name}
+            WHERE dataset_id IN ({placeholders});
+            """,
+            dataset_ids,
+        ).fetchall()
+    except Exception:
+        return []
+    return [dict(row) for row in rows if row["dataset_id"] is not None]
+
+
+def _query_detect_quality_map(
+    registry: Registry,
+    *,
+    dataset_ids: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    rows = _query_quality_rows(
+        registry,
+        view_name="detect_quality_current",
+        dataset_ids=dataset_ids,
+        fixed_columns=(
+            "refined_run",
+            "refined_created_utc",
+            "source_detect_run",
+            "detect_method",
+            "review_resolved_group",
+            "total_detections",
+            "real_detections",
+            "interpolated_detections",
+            "interpolated_detections_rate",
+            "quality_updated_utc",
+        ),
+    )
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        dataset_id = row["dataset_id"]
+        if dataset_id is None:
+            continue
+        out.setdefault(str(dataset_id), []).append(row)
+    return out
 
 
 def _query_crop_quality_map(
@@ -98,32 +230,23 @@ def _query_keypoint_quality_map(
     *,
     dataset_ids: list[str],
 ) -> dict[str, list[dict[str, Any]]]:
-    if not dataset_ids:
-        return {}
-    placeholders = ",".join("?" for _ in dataset_ids)
-    rows = registry.conn.execute(
-        f"""
-        SELECT
-            dataset_id,
-            refined_run,
-            refined_created_utc,
-            source_keypoint_run,
-            keypoint_method,
-            review_state,
-            review_intended_use,
-            review_reviewer,
-            review_timestamp_utc,
-            usable_keypoints,
-            total_keypoints,
-            usable_keypoints_rate,
-            raw_keypoints_success_rate,
-            raw_keypoints_successful,
-            quality_updated_utc
-        FROM keypoint_quality_current
-        WHERE dataset_id IN ({placeholders});
-        """,
-        dataset_ids,
-    ).fetchall()
+    rows = _query_quality_rows(
+        registry,
+        view_name="keypoint_quality_current",
+        dataset_ids=dataset_ids,
+        fixed_columns=(
+            "refined_run",
+            "refined_created_utc",
+            "source_keypoint_run",
+            "keypoint_method",
+            "usable_keypoints",
+            "total_keypoints",
+            "usable_keypoints_rate",
+            "raw_keypoints_success_rate",
+            "raw_keypoints_successful",
+            "quality_updated_utc",
+        ),
+    )
     out: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         dataset_id = row["dataset_id"]
@@ -310,6 +433,16 @@ def _matches_optional_text_filter(value: object, text_filter: Optional[str]) -> 
     return value_norm.lower() == filter_norm
 
 
+def _apply_shared_review_fields(
+    row: dict[str, Any],
+    source: dict[str, Any],
+    *,
+    prefix: str,
+) -> None:
+    for field_name in _SHARED_REVIEW_FIELDS:
+        row[f"{prefix}_{field_name}"] = source.get(field_name)
+
+
 def _pick_eye_mask_candidate(
     candidates: list[dict[str, Any]],
     *,
@@ -332,13 +465,27 @@ def _pick_eye_mask_candidate(
     return ranked[-1]
 
 
+def _pick_detect_quality_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    if not candidates:
+        raise ValueError("Expected at least one detect-quality candidate.")
+    ranked = sorted(
+        candidates,
+        key=lambda row: (
+            str(row.get("review_timestamp_utc") or row.get("refined_created_utc") or row.get("quality_updated_utc") or ""),
+            str(row.get("refined_run") or ""),
+            str(row.get("detect_method") or ""),
+        ),
+    )
+    return ranked[-1]
+
+
 def _pick_keypoint_quality_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any]:
     if not candidates:
         raise ValueError("Expected at least one keypoint-quality candidate.")
     ranked = sorted(
         candidates,
         key=lambda row: (
-            str(row.get("review_timestamp_utc") or row.get("refined_created_utc") or ""),
+            str(row.get("review_timestamp_utc") or row.get("refined_created_utc") or row.get("quality_updated_utc") or ""),
             str(row.get("refined_run") or ""),
             str(row.get("keypoint_method") or ""),
         ),
@@ -1082,6 +1229,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 dataset_ids=dataset_ids,
                 model_only=model_only_view,
             )
+            detect_quality_map = _query_detect_quality_map(registry, dataset_ids=dataset_ids)
             method_filter = (str(args.detect_method).strip().lower() if args.detect_method else None)
             model_like_filter = (str(args.detect_model_like).strip().lower() if args.detect_model_like else None)
             filtered: list[dict[str, Any]] = []
@@ -1103,6 +1251,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     )
                 ) and detect is None:
                     continue
+                detect_method = None
                 if detect is not None:
                     detect_method = str(detect.get("detection_method") or "").strip().lower()
                     model_name = str(detect.get("model_name") or "").strip()
@@ -1135,6 +1284,31 @@ def main(argv: Optional[list[str]] = None) -> int:
                     row["detect_coverage_percent"] = detect.get("coverage_percent")
                     row["detect_inference_average_fps"] = detect.get("inference_average_fps")
                     row["detect_inference_avg_read_ms"] = detect.get("inference_avg_read_ms")
+
+                quality_candidates = detect_quality_map.get(dataset_id, [])
+                if detect_method:
+                    aligned_quality = [
+                        candidate
+                        for candidate in quality_candidates
+                        if str(candidate.get("detect_method") or "").strip().lower() == detect_method
+                    ]
+                    if aligned_quality:
+                        quality_candidates = aligned_quality
+                if quality_candidates:
+                    selected_quality = _pick_detect_quality_candidate(quality_candidates)
+                    row["detect_quality_refined_run"] = selected_quality.get("refined_run")
+                    row["detect_quality_refined_created_utc"] = selected_quality.get("refined_created_utc")
+                    row["detect_quality_source_detect_run"] = selected_quality.get("source_detect_run")
+                    row["detect_quality_method"] = selected_quality.get("detect_method")
+                    row["detect_quality_total_detections"] = selected_quality.get("total_detections")
+                    row["detect_quality_real_detections"] = selected_quality.get("real_detections")
+                    row["detect_quality_interpolated_detections"] = selected_quality.get("interpolated_detections")
+                    row["detect_quality_interpolated_detections_rate"] = selected_quality.get(
+                        "interpolated_detections_rate"
+                    )
+                    row["detect_quality_updated_utc"] = selected_quality.get("quality_updated_utc")
+                    row["detect_review_resolved_group"] = selected_quality.get("review_resolved_group")
+                    _apply_shared_review_fields(row, selected_quality, prefix="detect")
                 filtered.append(row)
             result_rows = filtered
 
@@ -1436,10 +1610,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     row["keypoint_quality_refined_created_utc"] = selected_quality.get("refined_created_utc")
                     row["keypoint_quality_source_keypoint_run"] = selected_quality.get("source_keypoint_run")
                     row["keypoint_quality_method"] = selected_quality.get("keypoint_method")
-                    row["keypoint_review_state"] = selected_quality.get("review_state")
-                    row["keypoint_review_intended_use"] = selected_quality.get("review_intended_use")
-                    row["keypoint_review_reviewer"] = selected_quality.get("review_reviewer")
-                    row["keypoint_review_timestamp_utc"] = selected_quality.get("review_timestamp_utc")
+                    _apply_shared_review_fields(row, selected_quality, prefix="keypoint")
                     row["keypoint_usable_keypoints"] = selected_quality.get("usable_keypoints")
                     row["keypoint_total_keypoints"] = selected_quality.get("total_keypoints")
                     row["keypoint_usable_keypoints_rate"] = selected_quality.get("usable_keypoints_rate")

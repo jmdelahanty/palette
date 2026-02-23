@@ -713,6 +713,166 @@ def _seed_keypoint_quality_and_performance_rows(registry_path: Path) -> None:
     registry.close()
 
 
+def _seed_detect_quality_rows(registry_path: Path) -> None:
+    registry = Registry(registry_path)
+    registry.replace_detect_quality(
+        "dataset_a",
+        [
+            {
+                "refined_run": "refined_detect_a_yolo",
+                "refined_created_utc": "2026-02-11T00:20:00+00:00",
+                "source_detect_run": "detect_a",
+                "detect_method": "yolo",
+                "review_state": "approved",
+                "review_intended_use": "training",
+                "review_reviewer": "alice",
+                "review_timestamp_utc": "2026-02-11T00:30:00+00:00",
+                "review_resolved_group": "manual",
+                "total_detections": 1000,
+                "real_detections": 960,
+                "interpolated_detections": 40,
+                "interpolated_detections_rate": 0.04,
+                "quality_updated_utc": "2026-02-11T00:31:00+00:00",
+                "zarr_mtime_ns": 123456789,
+            },
+            {
+                "refined_run": "refined_detect_a_trad",
+                "refined_created_utc": "2026-02-11T00:40:00+00:00",
+                "source_detect_run": "detect_a",
+                "detect_method": "traditional",
+                "review_state": "rejected",
+                "review_intended_use": "full_recording",
+                "review_reviewer": "bob",
+                "review_timestamp_utc": "2026-02-11T00:50:00+00:00",
+                "review_resolved_group": "auto",
+                "total_detections": 1000,
+                "real_detections": 700,
+                "interpolated_detections": 300,
+                "interpolated_detections_rate": 0.3,
+                "quality_updated_utc": "2026-02-11T00:51:00+00:00",
+                "zarr_mtime_ns": 123456789,
+            },
+        ],
+    )
+    registry.close()
+
+
+def _rewrite_detect_quality_current_view(
+    registry_path: Path,
+    *,
+    include_shared_review_columns: bool,
+    use_legacy_timestamp_column: bool,
+) -> None:
+    registry = Registry(registry_path)
+    select_columns = [
+        "dataset_id",
+        "refined_run",
+        "refined_created_utc",
+        "source_detect_run",
+        "detect_method",
+        "review_state",
+        "review_intended_use",
+        "review_reviewer",
+        "review_timestamp_utc AS timestamp" if use_legacy_timestamp_column else "review_timestamp_utc",
+        "review_resolved_group",
+        "total_detections",
+        "real_detections",
+        "interpolated_detections",
+        "interpolated_detections_rate",
+        "quality_updated_utc",
+        "zarr_mtime_ns",
+    ]
+    if include_shared_review_columns:
+        select_columns.extend(
+            [
+                "'manual' AS review_method",
+                "'detect-shared-note' AS review_notes",
+            ]
+        )
+    registry.conn.execute("DROP VIEW IF EXISTS detect_quality_current;")
+    registry.conn.execute(
+        f"""
+        CREATE VIEW detect_quality_current AS
+        WITH ranked AS (
+            SELECT
+                dq.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY dq.dataset_id, COALESCE(dq.detect_method, '')
+                    ORDER BY
+                        COALESCE(dq.review_timestamp_utc, dq.refined_created_utc, dq.quality_updated_utc) DESC,
+                        COALESCE(dq.refined_created_utc, '') DESC,
+                        dq.refined_run DESC
+                ) AS _rn
+            FROM detect_quality dq
+        )
+        SELECT
+            {", ".join(select_columns)}
+        FROM ranked
+        WHERE _rn = 1;
+        """
+    )
+    registry.conn.commit()
+    registry.close()
+
+
+def _rewrite_keypoint_quality_current_view(
+    registry_path: Path,
+    *,
+    include_shared_review_columns: bool,
+    use_legacy_timestamp_column: bool,
+) -> None:
+    registry = Registry(registry_path)
+    select_columns = [
+        "dataset_id",
+        "refined_run",
+        "refined_created_utc",
+        "source_keypoint_run",
+        "keypoint_method",
+        "review_state",
+        "review_intended_use",
+        "review_reviewer",
+        "review_timestamp_utc AS timestamp" if use_legacy_timestamp_column else "review_timestamp_utc",
+        "usable_keypoints",
+        "total_keypoints",
+        "usable_keypoints_rate",
+        "raw_keypoints_success_rate",
+        "raw_keypoints_successful",
+        "quality_updated_utc",
+        "zarr_mtime_ns",
+    ]
+    if include_shared_review_columns:
+        select_columns.extend(
+            [
+                "'hybrid' AS review_method",
+                "'keypoint-shared-note' AS review_notes",
+            ]
+        )
+    registry.conn.execute("DROP VIEW IF EXISTS keypoint_quality_current;")
+    registry.conn.execute(
+        f"""
+        CREATE VIEW keypoint_quality_current AS
+        WITH ranked AS (
+            SELECT
+                kq.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY kq.dataset_id, COALESCE(kq.keypoint_method, '')
+                    ORDER BY
+                        COALESCE(kq.review_timestamp_utc, kq.refined_created_utc, kq.quality_updated_utc) DESC,
+                        COALESCE(kq.refined_created_utc, '') DESC,
+                        kq.refined_run DESC
+                ) AS _rn
+            FROM keypoint_quality kq
+        )
+        SELECT
+            {", ".join(select_columns)}
+        FROM ranked
+        WHERE _rn = 1;
+        """
+    )
+    registry.conn.commit()
+    registry.close()
+
+
 def _seed_recording_step_status_rows(registry_path: Path) -> None:
     registry = Registry(registry_path)
     registry.conn.executemany(
@@ -1313,6 +1473,118 @@ def test_registry_query_filters_by_keypoint_missing_review_state(tmp_path: Path,
     payload = json.loads(capsys.readouterr().out)
     assert {row["dataset_id"] for row in payload} == {"dataset_b"}
     assert payload[0]["keypoint_review_state"] is None
+
+
+def test_registry_query_detect_and_keypoint_shared_review_fields_when_available(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_detect_quality_rows(registry_path)
+    _seed_keypoint_quality_and_performance_rows(registry_path)
+    _rewrite_detect_quality_current_view(
+        registry_path,
+        include_shared_review_columns=True,
+        use_legacy_timestamp_column=False,
+    )
+    _rewrite_keypoint_quality_current_view(
+        registry_path,
+        include_shared_review_columns=True,
+        use_legacy_timestamp_column=False,
+    )
+
+    rc_detect = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--detect-coverage-min",
+            "90",
+            "--json",
+        ]
+    )
+    assert rc_detect == 0
+    detect_payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in detect_payload} == {"dataset_a"}
+    detect_row = detect_payload[0]
+    assert detect_row["detect_quality_method"] == "yolo"
+    assert detect_row["detect_review_state"] == "approved"
+    assert detect_row["detect_review_intended_use"] == "training"
+    assert detect_row["detect_review_method"] == "manual"
+    assert detect_row["detect_review_notes"] == "detect-shared-note"
+    assert detect_row["detect_review_timestamp_utc"] == "2026-02-11T00:30:00+00:00"
+
+    rc_keypoint = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--keypoint-method",
+            "yolo_pose",
+            "--keypoint-review-state",
+            "approved",
+            "--json",
+        ]
+    )
+    assert rc_keypoint == 0
+    keypoint_payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in keypoint_payload} == {"dataset_c"}
+    keypoint_row = keypoint_payload[0]
+    assert keypoint_row["keypoint_review_state"] == "approved"
+    assert keypoint_row["keypoint_review_intended_use"] == "training"
+    assert keypoint_row["keypoint_review_method"] == "hybrid"
+    assert keypoint_row["keypoint_review_notes"] == "keypoint-shared-note"
+    assert keypoint_row["keypoint_review_timestamp_utc"] == "2026-02-11T02:35:00+00:00"
+
+
+def test_registry_query_detect_and_keypoint_review_field_legacy_fallback(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_detect_quality_rows(registry_path)
+    _seed_keypoint_quality_and_performance_rows(registry_path)
+    _rewrite_detect_quality_current_view(
+        registry_path,
+        include_shared_review_columns=False,
+        use_legacy_timestamp_column=True,
+    )
+    _rewrite_keypoint_quality_current_view(
+        registry_path,
+        include_shared_review_columns=False,
+        use_legacy_timestamp_column=True,
+    )
+
+    rc_detect = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--detect-coverage-min",
+            "90",
+            "--json",
+        ]
+    )
+    assert rc_detect == 0
+    detect_payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in detect_payload} == {"dataset_a"}
+    detect_row = detect_payload[0]
+    assert detect_row["detect_quality_method"] == "yolo"
+    assert detect_row["detect_review_timestamp_utc"] == "2026-02-11T00:30:00+00:00"
+    assert detect_row["detect_review_method"] is None
+    assert detect_row["detect_review_notes"] is None
+
+    rc_keypoint = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--keypoint-method",
+            "yolo_pose",
+            "--keypoint-review-state",
+            "approved",
+            "--json",
+        ]
+    )
+    assert rc_keypoint == 0
+    keypoint_payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in keypoint_payload} == {"dataset_c"}
+    keypoint_row = keypoint_payload[0]
+    assert keypoint_row["keypoint_review_timestamp_utc"] == "2026-02-11T02:35:00+00:00"
+    assert keypoint_row["keypoint_review_method"] is None
+    assert keypoint_row["keypoint_review_notes"] is None
 
 
 def test_registry_query_filters_by_keypoint_runtime_and_model_like(tmp_path: Path, capsys) -> None:

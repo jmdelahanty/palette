@@ -57,7 +57,7 @@ Parallel execution contract for current P2 + validation tasks:
   - Add optional keypoint + refine_keypoints stage toggles with logging.
   - Acceptance: one pipeline command can run full analysis stack when requested.
 
-- [ ] Unify review-status schema shape across detect/keypoint where practical.
+- [x] Unify review-status schema shape across detect/keypoint where practical.
   - Canonical contract/spec: `docs/review_status_schema_unification_contract.md`.
   - Write canonical `timestamp_utc` in detect/keypoint review writers.
   - Keep backward-read compatibility for legacy timestamp keys (`timestamp`, `reviewed_at_utc`, `reviewed_at`).
@@ -69,9 +69,9 @@ Parallel execution contract for current P2 + validation tasks:
     - Query/consumer code can read aligned fields without ad hoc per-modality parsing.
 
   Subtasks:
-  - [ ] Writer normalization pass (`accept_detect_review.py`, `accept_keypoint_review.py`, `set_keypoint_review_status.py`).
-  - [ ] Registry schema/view alignment pass (`detect_quality`/`keypoint_quality` extraction + upsert + current views).
-  - [ ] Consumer/query alignment pass (`registry_query.py` and related reporting/selection paths).
+  - [x] Writer normalization pass (`accept_detect_review.py`, `accept_keypoint_review.py`, `set_keypoint_review_status.py`).
+  - [x] Registry schema/view alignment pass (`detect_quality`/`keypoint_quality` extraction + upsert + current views).
+  - [x] Consumer/query alignment pass (`registry_query.py` and related reporting/selection paths).
 
 ## Validation/Testing TODO
 
@@ -82,9 +82,9 @@ Parallel execution contract for current P2 + validation tasks:
 - [x] Registry query tests for new keypoint filters/group summaries.
 - [x] Batch logging tests to assert richer keypoint result payloads.
 - [x] Unit tests for optional keypoints/refine_keypoints orchestration in analysis pipeline wrappers.
-- [ ] Unit tests for canonical review payload writing (`timestamp_utc`) in detect/keypoint review CLIs.
-- [ ] Registry tests for detect/keypoint shared review-column parity in quality views.
-- [ ] Query/consumer tests for aligned detect/keypoint review-field access.
+- [x] Unit tests for canonical review payload writing (`timestamp_utc`) in detect/keypoint review CLIs.
+- [x] Registry tests for detect/keypoint shared review-column parity in quality views.
+- [x] Query/consumer tests for aligned detect/keypoint review-field access.
 - [ ] End-to-end smoke test: analysis zarr -> keypoints -> refine_keypoints -> registry scan -> quality/perf query.
   - [x] Added operator runner script: `scripts/validate_pose_detect_parity_smoke.sh`.
   - [ ] Execute on real registry recording and capture artifact output.

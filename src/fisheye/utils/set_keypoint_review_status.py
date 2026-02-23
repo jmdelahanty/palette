@@ -111,11 +111,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     refined_run_name = _select_refined_run(refined_parent, args.refined_run)
     refined_run = refined_parent[refined_run_name]
 
+    timestamp_utc = datetime.now(timezone.utc).isoformat()
     payload: dict[str, object] = {
         "state": args.state,
         "method": args.method,
         "intended_use": args.intended_use,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp_utc": timestamp_utc,
+        "timestamp": timestamp_utc,
     }
     if args.reviewer:
         payload["reviewer"] = args.reviewer

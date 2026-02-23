@@ -40,6 +40,8 @@ def test_accept_keypoint_review_writes_status_and_latest(tmp_path: Path) -> None
     assert status["state"] == "approved"
     assert status["method"] == "manual"
     assert status["intended_use"] == "training"
+    assert "timestamp_utc" in status
+    assert status["timestamp"] == status["timestamp_utc"]
     assert parent.attrs["keypoint_review_status_latest"] == "refined_1"
     assert "keypoint_review_signature" in run.attrs
 

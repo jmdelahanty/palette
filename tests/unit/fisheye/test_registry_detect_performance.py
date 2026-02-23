@@ -8,7 +8,7 @@ import zarr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from fisheye.registry.db import Registry
+from fisheye.registry.db import Registry, _extract_detect_quality_rows
 
 
 def _create_detect_archive(path: Path, *, session_uuid: str) -> None:
@@ -51,6 +51,132 @@ def _create_detectless_archive(path: Path, *, session_uuid: str) -> None:
     root.attrs["session_uuid"] = session_uuid
     raw = root.create_group("raw_video")
     raw.create_array("images_ds", data=np.zeros((4, 8, 8), dtype=np.uint8), chunks=(1, 8, 8))
+
+
+class _FakeArray:
+    def __init__(self, data: np.ndarray) -> None:
+        self._data = np.asarray(data)
+        self.shape = self._data.shape
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+
+class _FakeGroup:
+    def __init__(self, *, attrs: dict[str, object] | None = None) -> None:
+        self.attrs: dict[str, object] = dict(attrs or {})
+        self._children: dict[str, object] = {}
+
+    def add_group(self, name: str, *, attrs: dict[str, object] | None = None) -> "_FakeGroup":
+        group = _FakeGroup(attrs=attrs)
+        self._children[name] = group
+        return group
+
+    def add_array(self, name: str, data: np.ndarray) -> _FakeArray:
+        arr = _FakeArray(np.asarray(data))
+        self._children[name] = arr
+        return arr
+
+    def get(self, key: str):
+        return self._children.get(key)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._children
+
+    def __getitem__(self, key: str):
+        return self._children[key]
+
+    def keys(self):
+        return self._children.keys()
+
+    def group_keys(self):
+        return [name for name, value in self._children.items() if isinstance(value, _FakeGroup)]
+
+
+def _build_fake_detect_quality_root(*, timestamp_key: str = "timestamp_utc") -> _FakeGroup:
+    root = _FakeGroup()
+    detect_parent = root.add_group("detect_runs")
+    detect_parent.add_group("detect_001", attrs={"detection_method": "yolo"})
+
+    refined_parent = root.add_group("refined_detect_runs")
+    refined = refined_parent.add_group(
+        "refined_001",
+        attrs={
+            "source_detect_run": "detect_001",
+            "created_utc": "2026-02-10T00:00:00+00:00",
+            "detect_review_status": {
+                "state": "approved",
+                "method": "manual",
+                "intended_use": "training",
+                "reviewer": "reviewer_detect",
+                "notes": "checked",
+                "resolved_group": "filtered",
+                timestamp_key: "2026-02-10T00:01:00+00:00",
+            },
+        },
+    )
+    filtered = refined.add_group("filtered")
+    filtered.add_array("bbox_norm_coords", np.zeros((4, 4), dtype=np.float32))
+    filtered.add_array("detection_source", np.array([0, 0, 1, 0], dtype=np.int8))
+    return root
+
+
+def test_extract_detect_quality_rows_populates_shared_review_fields(tmp_path: Path) -> None:
+    rows = _extract_detect_quality_rows(_build_fake_detect_quality_root(), zarr_path=tmp_path)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["review_state"] == "approved"
+    assert row["review_method"] == "manual"
+    assert row["review_intended_use"] == "training"
+    assert row["review_reviewer"] == "reviewer_detect"
+    assert row["review_notes"] == "checked"
+    assert row["review_timestamp_utc"] == "2026-02-10T00:01:00+00:00"
+    assert row["review_resolved_group"] == "filtered"
+    assert row["interpolated_detections_rate"] == 0.25
+
+
+def test_detect_quality_legacy_timestamp_alias_maps_to_review_timestamp_utc(tmp_path: Path) -> None:
+    rows = _extract_detect_quality_rows(
+        _build_fake_detect_quality_root(timestamp_key="reviewed_at_utc"),
+        zarr_path=tmp_path,
+    )
+    assert len(rows) == 1
+    assert rows[0]["review_timestamp_utc"] == "2026-02-10T00:01:00+00:00"
+
+
+def test_upsert_detect_quality_writes_shared_review_fields_to_current_view(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset("dataset_detect", session_uuid="dataset_detect", zarr_path=tmp_path / "detect.zarr")
+    registry.upsert_detect_quality(
+        dataset_id="dataset_detect",
+        refined_run="refined_001",
+        refined_created_utc="2026-02-10T00:00:00+00:00",
+        source_detect_run="detect_001",
+        detect_method="yolo",
+        review_state="approved",
+        review_intended_use="training",
+        review_reviewer="reviewer_detect",
+        review_timestamp_utc="2026-02-10T00:01:00+00:00",
+        review_resolved_group="filtered",
+        total_detections=4,
+        real_detections=3,
+        interpolated_detections=1,
+        interpolated_detections_rate=0.25,
+        review_method="hybrid",
+        review_notes="validated",
+    )
+    row = registry.query_detect_quality_current(
+        dataset_ids=["dataset_detect"],
+        detect_method="yolo",
+    )[0]
+    assert str(row["review_state"]) == "approved"
+    assert str(row["review_method"]) == "hybrid"
+    assert str(row["review_intended_use"]) == "training"
+    assert str(row["review_reviewer"]) == "reviewer_detect"
+    assert str(row["review_notes"]) == "validated"
+    assert str(row["review_timestamp_utc"]) == "2026-02-10T00:01:00+00:00"
+    assert str(row["review_resolved_group"]) == "filtered"
+    registry.close()
 
 
 def test_register_from_root_populates_detect_performance_all_runs_and_latest(tmp_path: Path) -> None:

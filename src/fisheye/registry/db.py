@@ -263,8 +263,10 @@ def _extract_keypoint_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List
         keypoint_method = _decode_attr(source_group.attrs.get("method"))
         review_status = _coerce_mapping(refined_group.attrs.get("keypoint_review_status"))
         review_state = _decode_attr(review_status.get("state")) if review_status else None
+        review_method = _decode_attr(review_status.get("method")) if review_status else None
         review_intended_use = _decode_attr(review_status.get("intended_use")) if review_status else None
         review_reviewer = _decode_attr(review_status.get("reviewer")) if review_status else None
+        review_notes = _decode_attr(review_status.get("notes")) if review_status else None
         review_timestamp_utc = (
             _decode_attr(review_status.get("timestamp_utc"))
             or _decode_attr(review_status.get("timestamp"))
@@ -315,8 +317,10 @@ def _extract_keypoint_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List
                 "source_keypoint_run": source_keypoint_run,
                 "keypoint_method": keypoint_method,
                 "review_state": review_state,
+                "review_method": review_method,
                 "review_intended_use": review_intended_use,
                 "review_reviewer": review_reviewer,
+                "review_notes": review_notes,
                 "review_timestamp_utc": review_timestamp_utc,
                 "usable_keypoints": usable_keypoints,
                 "total_keypoints": total_keypoints,
@@ -366,8 +370,10 @@ def _extract_detect_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List[D
 
         review_status = _coerce_mapping(refined_group.attrs.get("detect_review_status"))
         review_state = _decode_attr(review_status.get("state")) if review_status else None
+        review_method = _decode_attr(review_status.get("method")) if review_status else None
         review_intended_use = _decode_attr(review_status.get("intended_use")) if review_status else None
         review_reviewer = _decode_attr(review_status.get("reviewer")) if review_status else None
+        review_notes = _decode_attr(review_status.get("notes")) if review_status else None
         review_timestamp_utc = (
             _decode_attr(review_status.get("timestamp_utc"))
             or _decode_attr(review_status.get("timestamp"))
@@ -429,8 +435,10 @@ def _extract_detect_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List[D
                 "source_detect_run": source_detect_run,
                 "detect_method": detect_method,
                 "review_state": review_state,
+                "review_method": review_method,
                 "review_intended_use": review_intended_use,
                 "review_reviewer": review_reviewer,
+                "review_notes": review_notes,
                 "review_timestamp_utc": review_timestamp_utc,
                 "review_resolved_group": resolved_group,
                 "total_detections": total_detections,
@@ -1998,8 +2006,10 @@ class Registry:
                 source_keypoint_run TEXT NOT NULL,
                 keypoint_method TEXT,
                 review_state TEXT,
+                review_method TEXT,
                 review_intended_use TEXT,
                 review_reviewer TEXT,
+                review_notes TEXT,
                 review_timestamp_utc TEXT,
                 usable_keypoints INTEGER,
                 total_keypoints INTEGER,
@@ -2022,8 +2032,10 @@ class Registry:
                 source_detect_run TEXT NOT NULL,
                 detect_method TEXT,
                 review_state TEXT,
+                review_method TEXT,
                 review_intended_use TEXT,
                 review_reviewer TEXT,
+                review_notes TEXT,
                 review_timestamp_utc TEXT,
                 review_resolved_group TEXT,
                 total_detections INTEGER,
@@ -2289,6 +2301,21 @@ class Registry:
             ON detect_quality(review_state, review_intended_use, detect_method, interpolated_detections_rate);
             """
         )
+        # Ensure additive review columns exist before refreshing views on legacy registries.
+        self._ensure_columns(
+            "keypoint_quality",
+            {
+                "review_method": "TEXT",
+                "review_notes": "TEXT",
+            },
+        )
+        self._ensure_columns(
+            "detect_quality",
+            {
+                "review_method": "TEXT",
+                "review_notes": "TEXT",
+            },
+        )
         cur.execute("DROP VIEW IF EXISTS keypoint_quality_current;")
         cur.execute(
             """
@@ -2312,8 +2339,10 @@ class Registry:
                 source_keypoint_run,
                 keypoint_method,
                 review_state,
+                review_method,
                 review_intended_use,
                 review_reviewer,
+                review_notes,
                 review_timestamp_utc,
                 usable_keypoints,
                 total_keypoints,
@@ -2377,8 +2406,10 @@ class Registry:
                 source_detect_run,
                 detect_method,
                 review_state,
+                review_method,
                 review_intended_use,
                 review_reviewer,
+                review_notes,
                 review_timestamp_utc,
                 review_resolved_group,
                 total_detections,
@@ -2574,8 +2605,10 @@ class Registry:
                 "source_detect_run": "TEXT",
                 "detect_method": "TEXT",
                 "review_state": "TEXT",
+                "review_method": "TEXT",
                 "review_intended_use": "TEXT",
                 "review_reviewer": "TEXT",
+                "review_notes": "TEXT",
                 "review_timestamp_utc": "TEXT",
                 "review_resolved_group": "TEXT",
                 "total_detections": "INTEGER",
@@ -2593,8 +2626,10 @@ class Registry:
                 "source_keypoint_run": "TEXT",
                 "keypoint_method": "TEXT",
                 "review_state": "TEXT",
+                "review_method": "TEXT",
                 "review_intended_use": "TEXT",
                 "review_reviewer": "TEXT",
+                "review_notes": "TEXT",
                 "review_timestamp_utc": "TEXT",
                 "usable_keypoints": "INTEGER",
                 "total_keypoints": "INTEGER",
@@ -5697,6 +5732,8 @@ class Registry:
         usable_keypoints_rate: Optional[float],
         raw_keypoints_success_rate: Optional[float],
         raw_keypoints_successful: Optional[int],
+        review_method: Optional[str] = None,
+        review_notes: Optional[str] = None,
         quality_updated_utc: Optional[str] = None,
         zarr_mtime_ns: Optional[int] = None,
     ) -> None:
@@ -5707,8 +5744,10 @@ class Registry:
             "source_keypoint_run": str(source_keypoint_run),
             "keypoint_method": keypoint_method,
             "review_state": review_state,
+            "review_method": review_method,
             "review_intended_use": review_intended_use,
             "review_reviewer": review_reviewer,
+            "review_notes": review_notes,
             "review_timestamp_utc": review_timestamp_utc,
             "usable_keypoints": usable_keypoints,
             "total_keypoints": total_keypoints,
@@ -5722,14 +5761,14 @@ class Registry:
             """
             INSERT INTO keypoint_quality (
                 dataset_id, refined_run, refined_created_utc, source_keypoint_run, keypoint_method,
-                review_state, review_intended_use, review_reviewer, review_timestamp_utc,
+                review_state, review_method, review_intended_use, review_reviewer, review_notes, review_timestamp_utc,
                 usable_keypoints, total_keypoints, usable_keypoints_rate,
                 raw_keypoints_success_rate, raw_keypoints_successful,
                 quality_updated_utc, zarr_mtime_ns
             )
             VALUES (
                 :dataset_id, :refined_run, :refined_created_utc, :source_keypoint_run, :keypoint_method,
-                :review_state, :review_intended_use, :review_reviewer, :review_timestamp_utc,
+                :review_state, :review_method, :review_intended_use, :review_reviewer, :review_notes, :review_timestamp_utc,
                 :usable_keypoints, :total_keypoints, :usable_keypoints_rate,
                 :raw_keypoints_success_rate, :raw_keypoints_successful,
                 :quality_updated_utc, :zarr_mtime_ns
@@ -5739,8 +5778,10 @@ class Registry:
                 source_keypoint_run=excluded.source_keypoint_run,
                 keypoint_method=excluded.keypoint_method,
                 review_state=excluded.review_state,
+                review_method=excluded.review_method,
                 review_intended_use=excluded.review_intended_use,
                 review_reviewer=excluded.review_reviewer,
+                review_notes=excluded.review_notes,
                 review_timestamp_utc=excluded.review_timestamp_utc,
                 usable_keypoints=excluded.usable_keypoints,
                 total_keypoints=excluded.total_keypoints,
@@ -6147,6 +6188,8 @@ class Registry:
         real_detections: Optional[int],
         interpolated_detections: Optional[int],
         interpolated_detections_rate: Optional[float],
+        review_method: Optional[str] = None,
+        review_notes: Optional[str] = None,
         quality_updated_utc: Optional[str] = None,
         zarr_mtime_ns: Optional[int] = None,
     ) -> None:
@@ -6157,8 +6200,10 @@ class Registry:
             "source_detect_run": str(source_detect_run),
             "detect_method": detect_method,
             "review_state": review_state,
+            "review_method": review_method,
             "review_intended_use": review_intended_use,
             "review_reviewer": review_reviewer,
+            "review_notes": review_notes,
             "review_timestamp_utc": review_timestamp_utc,
             "review_resolved_group": review_resolved_group,
             "total_detections": total_detections,
@@ -6172,13 +6217,15 @@ class Registry:
             """
             INSERT INTO detect_quality (
                 dataset_id, refined_run, refined_created_utc, source_detect_run, detect_method,
-                review_state, review_intended_use, review_reviewer, review_timestamp_utc, review_resolved_group,
+                review_state, review_method, review_intended_use, review_reviewer, review_notes,
+                review_timestamp_utc, review_resolved_group,
                 total_detections, real_detections, interpolated_detections, interpolated_detections_rate,
                 quality_updated_utc, zarr_mtime_ns
             )
             VALUES (
                 :dataset_id, :refined_run, :refined_created_utc, :source_detect_run, :detect_method,
-                :review_state, :review_intended_use, :review_reviewer, :review_timestamp_utc, :review_resolved_group,
+                :review_state, :review_method, :review_intended_use, :review_reviewer, :review_notes,
+                :review_timestamp_utc, :review_resolved_group,
                 :total_detections, :real_detections, :interpolated_detections, :interpolated_detections_rate,
                 :quality_updated_utc, :zarr_mtime_ns
             )
@@ -6187,8 +6234,10 @@ class Registry:
                 source_detect_run=excluded.source_detect_run,
                 detect_method=excluded.detect_method,
                 review_state=excluded.review_state,
+                review_method=excluded.review_method,
                 review_intended_use=excluded.review_intended_use,
                 review_reviewer=excluded.review_reviewer,
+                review_notes=excluded.review_notes,
                 review_timestamp_utc=excluded.review_timestamp_utc,
                 review_resolved_group=excluded.review_resolved_group,
                 total_detections=excluded.total_detections,
@@ -6390,17 +6439,21 @@ class Registry:
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
                 payload.setdefault("quality_updated_utc", _utc_now())
+                payload.setdefault("review_method", None)
+                payload.setdefault("review_notes", None)
                 self.conn.execute(
                     """
                     INSERT INTO detect_quality (
                         dataset_id, refined_run, refined_created_utc, source_detect_run, detect_method,
-                        review_state, review_intended_use, review_reviewer, review_timestamp_utc, review_resolved_group,
+                        review_state, review_method, review_intended_use, review_reviewer, review_notes,
+                        review_timestamp_utc, review_resolved_group,
                         total_detections, real_detections, interpolated_detections, interpolated_detections_rate,
                         quality_updated_utc, zarr_mtime_ns
                     )
                     VALUES (
                         :dataset_id, :refined_run, :refined_created_utc, :source_detect_run, :detect_method,
-                        :review_state, :review_intended_use, :review_reviewer, :review_timestamp_utc, :review_resolved_group,
+                        :review_state, :review_method, :review_intended_use, :review_reviewer, :review_notes,
+                        :review_timestamp_utc, :review_resolved_group,
                         :total_detections, :real_detections, :interpolated_detections, :interpolated_detections_rate,
                         :quality_updated_utc, :zarr_mtime_ns
                     );
@@ -6454,18 +6507,20 @@ class Registry:
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
                 payload.setdefault("quality_updated_utc", _utc_now())
+                payload.setdefault("review_method", None)
+                payload.setdefault("review_notes", None)
                 self.conn.execute(
                     """
                     INSERT INTO keypoint_quality (
                         dataset_id, refined_run, refined_created_utc, source_keypoint_run, keypoint_method,
-                        review_state, review_intended_use, review_reviewer, review_timestamp_utc,
+                        review_state, review_method, review_intended_use, review_reviewer, review_notes, review_timestamp_utc,
                         usable_keypoints, total_keypoints, usable_keypoints_rate,
                         raw_keypoints_success_rate, raw_keypoints_successful,
                         quality_updated_utc, zarr_mtime_ns
                     )
                     VALUES (
                         :dataset_id, :refined_run, :refined_created_utc, :source_keypoint_run, :keypoint_method,
-                        :review_state, :review_intended_use, :review_reviewer, :review_timestamp_utc,
+                        :review_state, :review_method, :review_intended_use, :review_reviewer, :review_notes, :review_timestamp_utc,
                         :usable_keypoints, :total_keypoints, :usable_keypoints_rate,
                         :raw_keypoints_success_rate, :raw_keypoints_successful,
                         :quality_updated_utc, :zarr_mtime_ns
