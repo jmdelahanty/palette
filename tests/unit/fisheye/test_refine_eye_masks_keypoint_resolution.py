@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from fisheye.refinement.refine_eye_masks import _resolve_keypoint_group
+from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
 
 
 class _FakeGroup(dict):
@@ -107,3 +108,36 @@ def test_resolve_keypoint_group_rejects_group_without_run() -> None:
             source_keypoint_run=None,
         )
 
+
+def test_resolve_keypoint_group_accepts_legacy_source_attr_name() -> None:
+    root = _build_root()
+    source_attrs = {
+        "source_keypoint_group": "keypoints_runs",
+        "source_keypoint_run": "kp_raw_only",
+    }
+    grp, run_name, group_name = _resolve_keypoint_group(
+        root,
+        keypoint_run=None,
+        source_keypoint_group=source_attrs["source_keypoint_group"],
+        source_keypoint_run=resolve_source_keypoints_run(source_attrs),
+    )
+    assert run_name == "kp_raw_only"
+    assert group_name == "keypoints_runs"
+    assert grp is root["keypoints_runs"]["kp_raw_only"]
+
+
+def test_resolve_keypoint_group_prefers_canonical_source_attr_when_both_present() -> None:
+    root = _build_root()
+    source_attrs = {
+        "source_keypoints_run": "kp_raw_only",
+        "source_keypoint_run": "kp_shared",
+    }
+    grp, run_name, group_name = _resolve_keypoint_group(
+        root,
+        keypoint_run=None,
+        source_keypoint_group=None,
+        source_keypoint_run=resolve_source_keypoints_run(source_attrs),
+    )
+    assert run_name == "kp_raw_only"
+    assert group_name == "keypoints_runs"
+    assert grp is root["keypoints_runs"]["kp_raw_only"]

@@ -92,19 +92,19 @@ Scope: prioritize correctness and auditability first, then orchestration and reg
 
 ## P4: Tests, Docs, and Migration Hygiene
 
-- [ ] Add unit tests for provenance attr compatibility and strict source resolution.
+- [x] Add unit tests for provenance attr compatibility and strict source resolution.
   - Cover traditional, YOLO, U-Net, and refine flows.
   - Cover both legacy and canonical attr names during migration window.
 
-- [ ] Add diagnostics tests for `check_eye_masks` and full-provenance checks.
+- [x] Add diagnostics tests for `check_eye_masks` and full-provenance checks.
   - Ensure both tools agree on required attrs and resolution rules.
 
-- [ ] Update docs to match implemented canonical behavior.
+- [x] Update docs to match implemented canonical behavior.
   - `src/fisheye/docs/provenance_workflow.md`
   - `src/fisheye/docs/zarr_structure.md`
   - `src/fisheye/docs/refinement.md`
 
-- [ ] Add a backfill utility for legacy eye-mask attrs with dry-run support.
+- [x] Add a backfill utility for legacy eye-mask attrs with dry-run support.
   - Default scope should include both `_analysis.zarr` and `_training.zarr` archives.
   - Include an opt-out flag when operators intentionally want analysis-only runs.
 

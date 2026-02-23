@@ -22,6 +22,14 @@ Relevant provenance attributes:
 | `refined_eye_masks_runs/<run>` | `masks_roi`, `ellipse_params` | `source_eye_masks_run`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
 | `id_assignment_runs/<run>` | `detection_ids` | `source_detect_run`, `source_refined_run` |
 
+Keypoint-lineage attribute contract for eye-mask stages:
+
+- Canonical attr is `source_keypoints_run`.
+- `source_keypoint_run` is a legacy compatibility alias and should not be used as the primary key in new tooling.
+- Writers for new eye-mask/refined-eye-mask runs should write canonical lineage (and may mirror the legacy alias during migration).
+- Readers/diagnostics resolve canonical first, then legacy alias fallback.
+- `check_eye_masks` reports legacy-only lineage as `legacy` (warning) and missing/empty lineage as `incomplete`.
+
 Eye-mask lineage arrays (`frame_indices`, `detection_indices`, `frame_counts`)
 follow the contract in `docs/eye_mask_row_mapping_contract.md`:
 
@@ -70,6 +78,9 @@ After new ROIs exist, rerun stages that depend on them:
    python -m fisheye.segmentation.eye_segmentation <archive>.zarr
    python -m fisheye.refinement.refine_eye_masks <archive>.zarr
    ```
+   `refine_eye_masks` source keypoint resolution is strict by default:
+   `--keypoint-run` override -> source lineage attrs (`source_keypoint_group` + canonical/legacy keypoint run attr) -> error.
+   Use `--allow-latest-keypoint-fallback` only for temporary legacy recovery.
    Optional review/audit:
    ```bash
    python -m fisheye.tune.eye_mask_review <archive>.zarr --retune

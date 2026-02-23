@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timezone
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -90,6 +90,21 @@ def _validate_input_row_alignment(
         ),
         stage="infer_unet_eye_masks input",
     )
+
+
+def _resolve_source_keypoints_run_for_unet(
+    *,
+    explicit_keypoints_run: Optional[str],
+    source_attrs: Optional[Mapping[str, object]],
+    latest_keypoints_run: Optional[str],
+) -> Optional[str]:
+    if explicit_keypoints_run is not None:
+        return explicit_keypoints_run
+    if source_attrs:
+        resolved_from_source = resolve_source_keypoints_run(source_attrs)
+        if resolved_from_source is not None:
+            return resolved_from_source
+    return latest_keypoints_run
 
 
 def _resolve_device(device_str: Optional[str]) -> torch.device:
@@ -550,11 +565,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     latest_keypoints = None
     if keypoints_parent is not None:
         latest_keypoints = keypoints_parent.attrs.get("latest")
-    resolved_keypoints_run = args.keypoints_run
-    if resolved_keypoints_run is None and src_attrs:
-        resolved_keypoints_run = resolve_source_keypoints_run(src_attrs)
-    if resolved_keypoints_run is None:
-        resolved_keypoints_run = latest_keypoints
+    resolved_keypoints_run = _resolve_source_keypoints_run_for_unet(
+        explicit_keypoints_run=args.keypoints_run,
+        source_attrs=src_attrs,
+        latest_keypoints_run=latest_keypoints,
+    )
 
     run_group.attrs.update(src_attrs)
     run_group.attrs.update(

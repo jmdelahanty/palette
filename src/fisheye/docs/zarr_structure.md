@@ -228,9 +228,18 @@ Row lineage (`frame_indices`, `detection_indices`, `frame_counts`) follows:
 | `contours_right` | `(n_points, 2)` | `float32` | Concatenated right eye contours (x, y) |
 | `reason` *(optional)* | `(n_rois,)` | `string` | Per-ROI labels (`clean`, `keypoint_fail`, `no_region`, `overlap`, `too_close`, `too_far`, `incomplete`) |
 
-Attributes: `source_crop_run`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)*, `source_keypoint_group` (defaults to `refined_keypoints_runs` when present), `method`, model info,
-thresholds, separation limits, `successful_eyes`, `successful_roi_pairs`, `reason_counts`,
-`ellipse_angle_units`, `ellipse_fit_method`, `eye_labels`, `duration_seconds`.
+Attributes: `source_crop_run`, canonical `source_keypoints_run` *(legacy alias:
+`source_keypoint_run` may be present for migration compatibility)*,
+`source_keypoint_group` (defaults to `refined_keypoints_runs` when present), `method`,
+model info, thresholds, separation limits, `successful_eyes`,
+`successful_roi_pairs`, `reason_counts`, `ellipse_angle_units`,
+`ellipse_fit_method`, `eye_labels`, `duration_seconds`.
+
+Lineage compatibility policy for eye-mask runs:
+
+- New runs should treat `source_keypoints_run` as required canonical lineage.
+- Legacy `source_keypoint_run` is read-compatible fallback only.
+- Diagnostics/readers resolve canonical first, then legacy fallback.
 
 ---
 
@@ -422,13 +431,21 @@ from `source_eye_masks_run`; see `docs/eye_mask_row_mapping_contract.md`.
   `smoothing_flags`, `pixels_reassigned`, `reason` (tags include
   `refined`, `copied_original`, `filtered_*`, `retuned`, `manual_correction`).
 
-Attributes expose `metrics_summary`, configuration snapshots,
-per-eye filter thresholds, `summary_statistics`, `retune_params`, and links to
-source runs (`source_eye_masks_run`, `source_eye_masks_method`,
-`source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)*, `source_crop_run`).
+Attributes expose `metrics_summary`, configuration snapshots, per-eye filter
+thresholds, `summary_statistics`, `retune_params`, and links to source runs
+(`source_eye_masks_run`, `source_eye_masks_method`, `source_keypoint_group`,
+canonical `source_keypoints_run` with optional legacy alias
+`source_keypoint_run`, `source_crop_run`).
 `traditional_fast_path=true` indicates masks/ellipses were copied from the
 source (used for traditional segmentation unless
 `force_refine_traditional=true`).
+
+Refinement keypoint-source binding is strict by default:
+
+- Resolution order is `--keypoint-run` -> source lineage attrs on source eye-mask run
+  (`source_keypoint_group` + canonical/legacy keypoint-run attr) -> error.
+- `--allow-latest-keypoint-fallback` enables legacy compatibility fallback and
+  should be treated as temporary recovery behavior.
 
 `summary_statistics` mirrors refined keypoints: the `refine` snapshot is written
 by `refine_eye_masks`, and `postprocess` is updated by the review tooling
