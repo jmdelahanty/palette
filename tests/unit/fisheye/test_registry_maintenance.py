@@ -520,6 +520,187 @@ def test_schema_has_recording_subject_overview_view(tmp_path: Path) -> None:
     registry.close()
 
 
+def test_schema_has_recording_step_status_tables_and_views(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    table_rows = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name IN ('recording_step_status', 'recording_step_status_history')
+        ORDER BY name;
+        """
+    ).fetchall()
+    assert {str(row["name"]) for row in table_rows} == {
+        "recording_step_status",
+        "recording_step_status_history",
+    }
+
+    view_rows = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'view' AND name IN ('recording_step_status_latest', 'recording_step_overview')
+        ORDER BY name;
+        """
+    ).fetchall()
+    assert {str(row["name"]) for row in view_rows} == {
+        "recording_step_overview",
+        "recording_step_status_latest",
+    }
+
+    index_rows = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'index' AND name IN (
+            'idx_recording_step_status_recording_step',
+            'idx_recording_step_status_dataset_step',
+            'idx_recording_step_status_status'
+        )
+        ORDER BY name;
+        """
+    ).fetchall()
+    assert {str(row["name"]) for row in index_rows} == {
+        "idx_recording_step_status_dataset_step",
+        "idx_recording_step_status_recording_step",
+        "idx_recording_step_status_status",
+    }
+    registry.close()
+
+
+def test_recording_step_status_latest_view_includes_dataset_context(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    dataset_path = tmp_path / "recording_a_training.zarr"
+    registry.upsert_dataset(
+        dataset_id="dataset_a",
+        session_uuid="session_a",
+        zarr_path=dataset_path,
+        recording_id="recording_a",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_provenance(
+        "dataset_a",
+        provenance={},
+        context={"rig_id": "rig_1", "arena_id": "arena_1", "camera_id": "cam_1"},
+        protocol_name="DefaultScreen",
+        protocol_hash=None,
+        acquisition={"dish_design": "cedar"},
+        zarr_purpose="training",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id, recording_id, step_name, status, run_name, method, coverage_pct,
+            source, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_a",
+            "recording_a",
+            "detect",
+            "ok",
+            "detect_2026-02-22_00-00-00",
+            "yolo",
+            99.5,
+            "unit_test",
+            "2026-02-22T00:00:00+00:00",
+        ),
+    )
+    registry.conn.commit()
+
+    row = registry.conn.execute(
+        """
+        SELECT recording_id, dataset_id, zarr_use, rig_id, arena_id, camera_id, step_name, status
+        FROM recording_step_status_latest
+        WHERE dataset_id = ? AND step_name = ?;
+        """,
+        ("dataset_a", "detect"),
+    ).fetchone()
+    assert row is not None
+    assert row["recording_id"] == "recording_a"
+    assert row["zarr_use"] == "training"
+    assert row["rig_id"] == "rig_1"
+    assert row["arena_id"] == "arena_1"
+    assert row["camera_id"] == "cam_1"
+    assert row["step_name"] == "detect"
+    assert row["status"] == "ok"
+    registry.close()
+
+
+def test_recording_step_overview_reports_non_ok_steps(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_a",
+        session_uuid="session_a",
+        zarr_path=tmp_path / "a.zarr",
+        recording_id="recording_a",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_dataset(
+        dataset_id="dataset_b",
+        session_uuid="session_b",
+        zarr_path=tmp_path / "b.zarr",
+        recording_id="recording_a",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id, recording_id, step_name, status, run_name, source, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+        """,
+        [
+            ("dataset_a", "recording_a", "detect", "ok", "detect_a", "unit_test", "2026-02-22T00:00:00+00:00"),
+            ("dataset_b", "recording_a", "detect", "ok", "detect_b", "unit_test", "2026-02-22T00:00:01+00:00"),
+            ("dataset_a", "recording_a", "keypoints", "missing", None, "unit_test", "2026-02-22T00:00:02+00:00"),
+            ("dataset_b", "recording_a", "keypoints", "ok", "keypoints_b", "unit_test", "2026-02-22T00:00:03+00:00"),
+            ("dataset_a", "recording_a", "crop", "ok", "crop_a", "unit_test", "2026-02-22T00:00:04+00:00"),
+            ("dataset_b", "recording_a", "crop", "missing", None, "unit_test", "2026-02-22T00:00:05+00:00"),
+        ],
+    )
+    registry.conn.commit()
+
+    row = registry.conn.execute(
+        """
+        SELECT
+            recording_id,
+            dataset_count,
+            step_rows_total,
+            missing_rows,
+            detect_ok_count,
+            detect_non_ok_count,
+            keypoints_ok_count,
+            keypoints_non_ok_count,
+            crop_ok_count,
+            crop_non_ok_count,
+            blocking_steps_csv
+        FROM recording_step_overview
+        WHERE recording_id = ?;
+        """,
+        ("recording_a",),
+    ).fetchone()
+    assert row is not None
+    assert row["recording_id"] == "recording_a"
+    assert int(row["dataset_count"]) == 2
+    assert int(row["step_rows_total"]) == 6
+    assert int(row["missing_rows"]) == 2
+    assert int(row["detect_ok_count"]) == 2
+    assert int(row["detect_non_ok_count"]) == 0
+    assert int(row["keypoints_ok_count"]) == 1
+    assert int(row["keypoints_non_ok_count"]) == 1
+    assert int(row["crop_ok_count"]) == 1
+    assert int(row["crop_non_ok_count"]) == 1
+    blocking = str(row["blocking_steps_csv"] or "")
+    assert "crop" in blocking
+    assert "keypoints" in blocking
+    registry.close()
+
+
 def test_recording_subject_overview_exposes_genotype_and_dpf(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     registry.conn.execute(

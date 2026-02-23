@@ -1623,6 +1623,7 @@ class Registry:
                 self._migration_017_eye_mask_performance_review_stale_columns,
             ),
             (18, "keypoint_performance_registry", self._migration_018_keypoint_performance_registry),
+            (19, "recording_step_status_registry", self._migration_019_recording_step_status_registry),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -4389,6 +4390,292 @@ class Registry:
                 updated_utc
             FROM ranked
             WHERE _rn = 1;
+            """
+        )
+
+    def _migration_019_recording_step_status_registry(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_step_status (
+                dataset_id TEXT NOT NULL,
+                recording_id TEXT,
+                step_name TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('ok', 'missing', 'absent', 'na', 'error')),
+                run_name TEXT,
+                method TEXT,
+                coverage_pct REAL,
+                review_status_json TEXT,
+                details_json TEXT,
+                source TEXT,
+                zarr_mtime_ns INTEGER,
+                updated_utc TEXT NOT NULL,
+                PRIMARY KEY (dataset_id, step_name),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        self._ensure_columns(
+            "recording_step_status",
+            {
+                "recording_id": "TEXT",
+                "run_name": "TEXT",
+                "method": "TEXT",
+                "coverage_pct": "REAL",
+                "review_status_json": "TEXT",
+                "details_json": "TEXT",
+                "source": "TEXT",
+                "zarr_mtime_ns": "INTEGER",
+                "updated_utc": "TEXT",
+            },
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recording_step_status_history (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dataset_id TEXT NOT NULL,
+                recording_id TEXT,
+                step_name TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('ok', 'missing', 'absent', 'na', 'error')),
+                run_name TEXT,
+                method TEXT,
+                coverage_pct REAL,
+                review_status_json TEXT,
+                details_json TEXT,
+                source TEXT,
+                zarr_mtime_ns INTEGER,
+                updated_utc TEXT NOT NULL,
+                recorded_utc TEXT NOT NULL,
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        self._ensure_columns(
+            "recording_step_status_history",
+            {
+                "recording_id": "TEXT",
+                "run_name": "TEXT",
+                "method": "TEXT",
+                "coverage_pct": "REAL",
+                "review_status_json": "TEXT",
+                "details_json": "TEXT",
+                "source": "TEXT",
+                "zarr_mtime_ns": "INTEGER",
+                "updated_utc": "TEXT",
+                "recorded_utc": "TEXT",
+            },
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_step_status_recording_step
+            ON recording_step_status(recording_id, step_name);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_step_status_dataset_step
+            ON recording_step_status(dataset_id, step_name);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_step_status_status
+            ON recording_step_status(status);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_step_status_history_recording_step
+            ON recording_step_status_history(recording_id, step_name, recorded_utc DESC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recording_step_status_history_dataset_step
+            ON recording_step_status_history(dataset_id, step_name, recorded_utc DESC);
+            """
+        )
+
+        cur.execute("DROP VIEW IF EXISTS recording_step_status_latest;")
+        cur.execute(
+            """
+            CREATE VIEW recording_step_status_latest AS
+            SELECT
+                COALESCE(NULLIF(trim(rss.recording_id), ''), d.recording_id) AS recording_id,
+                rss.dataset_id,
+                d.session_uuid AS session_uuid,
+                d.zarr_path AS zarr_path,
+                d.zarr_use AS zarr_use,
+                d.artifact_kind AS artifact_kind,
+                d.status AS dataset_status,
+                p.rig_id AS rig_id,
+                p.arena_id AS arena_id,
+                p.camera_id AS camera_id,
+                p.canvas_name AS canvas_name,
+                p.dish_design AS dish_design,
+                p.protocol_name AS protocol_name,
+                p.cross_id AS cross_id,
+                p.genotype AS genotype,
+                p.dpf_at_acquisition AS dpf_at_acquisition,
+                rss.step_name,
+                rss.status,
+                rss.run_name,
+                rss.method,
+                rss.coverage_pct,
+                rss.review_status_json,
+                rss.details_json,
+                rss.source,
+                rss.zarr_mtime_ns,
+                rss.updated_utc
+            FROM recording_step_status rss
+            LEFT JOIN datasets d ON d.dataset_id = rss.dataset_id
+            LEFT JOIN provenance p ON p.dataset_id = rss.dataset_id;
+            """
+        )
+
+        cur.execute("DROP VIEW IF EXISTS recording_step_overview;")
+        cur.execute(
+            """
+            CREATE VIEW recording_step_overview AS
+            WITH base AS (
+                SELECT
+                    recording_id,
+                    dataset_id,
+                    lower(step_name) AS step_name,
+                    status,
+                    updated_utc
+                FROM recording_step_status_latest
+                WHERE recording_id IS NOT NULL AND trim(recording_id) <> ''
+            ),
+            dataset_counts AS (
+                SELECT
+                    recording_id,
+                    COUNT(DISTINCT dataset_id) AS dataset_count,
+                    COUNT(*) AS step_rows_total,
+                    MAX(updated_utc) AS latest_step_update_utc
+                FROM base
+                GROUP BY recording_id
+            ),
+            status_counts AS (
+                SELECT
+                    recording_id,
+                    SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) AS ok_rows,
+                    SUM(CASE WHEN status = 'missing' THEN 1 ELSE 0 END) AS missing_rows,
+                    SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) AS absent_rows,
+                    SUM(CASE WHEN status = 'na' THEN 1 ELSE 0 END) AS na_rows,
+                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS error_rows,
+                    GROUP_CONCAT(DISTINCT CASE WHEN status IN ('missing', 'absent', 'error') THEN step_name END)
+                        AS blocking_steps_csv,
+                    GROUP_CONCAT(DISTINCT CASE WHEN status = 'ok' THEN step_name END)
+                        AS ok_steps_csv
+                FROM base
+                GROUP BY recording_id
+            ),
+            per_step AS (
+                SELECT
+                    recording_id,
+                    SUM(CASE WHEN step_name = 'raw' AND status = 'ok' THEN 1 ELSE 0 END) AS raw_ok_count,
+                    SUM(CASE WHEN step_name = 'raw' AND status != 'ok' THEN 1 ELSE 0 END) AS raw_non_ok_count,
+                    SUM(CASE WHEN step_name = 'background' AND status = 'ok' THEN 1 ELSE 0 END) AS background_ok_count,
+                    SUM(CASE WHEN step_name = 'background' AND status != 'ok' THEN 1 ELSE 0 END) AS background_non_ok_count,
+                    SUM(CASE WHEN step_name = 'detect' AND status = 'ok' THEN 1 ELSE 0 END) AS detect_ok_count,
+                    SUM(CASE WHEN step_name = 'detect' AND status != 'ok' THEN 1 ELSE 0 END) AS detect_non_ok_count,
+                    SUM(CASE WHEN step_name = 'refined_detect' AND status = 'ok' THEN 1 ELSE 0 END) AS refined_detect_ok_count,
+                    SUM(CASE WHEN step_name = 'refined_detect' AND status != 'ok' THEN 1 ELSE 0 END) AS refined_detect_non_ok_count,
+                    SUM(CASE WHEN step_name = 'crop' AND status = 'ok' THEN 1 ELSE 0 END) AS crop_ok_count,
+                    SUM(CASE WHEN step_name = 'crop' AND status != 'ok' THEN 1 ELSE 0 END) AS crop_non_ok_count,
+                    SUM(CASE WHEN step_name = 'keypoints' AND status = 'ok' THEN 1 ELSE 0 END) AS keypoints_ok_count,
+                    SUM(CASE WHEN step_name = 'keypoints' AND status != 'ok' THEN 1 ELSE 0 END) AS keypoints_non_ok_count,
+                    SUM(CASE WHEN step_name = 'refined_keypoints' AND status = 'ok' THEN 1 ELSE 0 END) AS refined_keypoints_ok_count,
+                    SUM(CASE WHEN step_name = 'refined_keypoints' AND status != 'ok' THEN 1 ELSE 0 END) AS refined_keypoints_non_ok_count,
+                    SUM(CASE WHEN step_name = 'eye_masks' AND status = 'ok' THEN 1 ELSE 0 END) AS eye_masks_ok_count,
+                    SUM(CASE WHEN step_name = 'eye_masks' AND status != 'ok' THEN 1 ELSE 0 END) AS eye_masks_non_ok_count,
+                    SUM(CASE WHEN step_name = 'refined_eye_masks' AND status = 'ok' THEN 1 ELSE 0 END) AS refined_eye_masks_ok_count,
+                    SUM(CASE WHEN step_name = 'refined_eye_masks' AND status != 'ok' THEN 1 ELSE 0 END)
+                        AS refined_eye_masks_non_ok_count,
+                    SUM(CASE WHEN step_name = 'id_assignment' AND status = 'ok' THEN 1 ELSE 0 END) AS id_assignment_ok_count,
+                    SUM(CASE WHEN step_name = 'id_assignment' AND status != 'ok' THEN 1 ELSE 0 END)
+                        AS id_assignment_non_ok_count,
+                    SUM(CASE WHEN step_name = 'tracks' AND status = 'ok' THEN 1 ELSE 0 END) AS tracks_ok_count,
+                    SUM(CASE WHEN step_name = 'tracks' AND status != 'ok' THEN 1 ELSE 0 END) AS tracks_non_ok_count,
+                    SUM(CASE WHEN step_name = 'stimulus' AND status = 'ok' THEN 1 ELSE 0 END) AS stimulus_ok_count,
+                    SUM(CASE WHEN step_name = 'stimulus' AND status != 'ok' THEN 1 ELSE 0 END) AS stimulus_non_ok_count,
+                    SUM(CASE WHEN step_name = 'calibration' AND status = 'ok' THEN 1 ELSE 0 END) AS calibration_ok_count,
+                    SUM(CASE WHEN step_name = 'calibration' AND status != 'ok' THEN 1 ELSE 0 END) AS calibration_non_ok_count,
+                    SUM(CASE WHEN step_name = 'dish_mask' AND status = 'ok' THEN 1 ELSE 0 END) AS dish_mask_ok_count,
+                    SUM(CASE WHEN step_name = 'dish_mask' AND status != 'ok' THEN 1 ELSE 0 END) AS dish_mask_non_ok_count,
+                    SUM(CASE WHEN step_name = 'detection_tuning' AND status = 'ok' THEN 1 ELSE 0 END)
+                        AS detection_tuning_ok_count,
+                    SUM(CASE WHEN step_name = 'detection_tuning' AND status != 'ok' THEN 1 ELSE 0 END)
+                        AS detection_tuning_non_ok_count,
+                    SUM(CASE WHEN step_name = 'keypoint_tuning' AND status = 'ok' THEN 1 ELSE 0 END)
+                        AS keypoint_tuning_ok_count,
+                    SUM(CASE WHEN step_name = 'keypoint_tuning' AND status != 'ok' THEN 1 ELSE 0 END)
+                        AS keypoint_tuning_non_ok_count,
+                    SUM(CASE WHEN step_name = 'eye_mask_tuning' AND status = 'ok' THEN 1 ELSE 0 END)
+                        AS eye_mask_tuning_ok_count,
+                    SUM(CASE WHEN step_name = 'eye_mask_tuning' AND status != 'ok' THEN 1 ELSE 0 END)
+                        AS eye_mask_tuning_non_ok_count,
+                    SUM(CASE WHEN step_name = 'subdish_mask_tuning' AND status = 'ok' THEN 1 ELSE 0 END)
+                        AS subdish_mask_tuning_ok_count,
+                    SUM(CASE WHEN step_name = 'subdish_mask_tuning' AND status != 'ok' THEN 1 ELSE 0 END)
+                        AS subdish_mask_tuning_non_ok_count
+                FROM base
+                GROUP BY recording_id
+            )
+            SELECT
+                dc.recording_id,
+                dc.dataset_count,
+                dc.step_rows_total,
+                dc.latest_step_update_utc,
+                sc.ok_rows,
+                sc.missing_rows,
+                sc.absent_rows,
+                sc.na_rows,
+                sc.error_rows,
+                sc.blocking_steps_csv,
+                sc.ok_steps_csv,
+                ps.raw_ok_count,
+                ps.raw_non_ok_count,
+                ps.background_ok_count,
+                ps.background_non_ok_count,
+                ps.detect_ok_count,
+                ps.detect_non_ok_count,
+                ps.refined_detect_ok_count,
+                ps.refined_detect_non_ok_count,
+                ps.crop_ok_count,
+                ps.crop_non_ok_count,
+                ps.keypoints_ok_count,
+                ps.keypoints_non_ok_count,
+                ps.refined_keypoints_ok_count,
+                ps.refined_keypoints_non_ok_count,
+                ps.eye_masks_ok_count,
+                ps.eye_masks_non_ok_count,
+                ps.refined_eye_masks_ok_count,
+                ps.refined_eye_masks_non_ok_count,
+                ps.id_assignment_ok_count,
+                ps.id_assignment_non_ok_count,
+                ps.tracks_ok_count,
+                ps.tracks_non_ok_count,
+                ps.stimulus_ok_count,
+                ps.stimulus_non_ok_count,
+                ps.calibration_ok_count,
+                ps.calibration_non_ok_count,
+                ps.dish_mask_ok_count,
+                ps.dish_mask_non_ok_count,
+                ps.detection_tuning_ok_count,
+                ps.detection_tuning_non_ok_count,
+                ps.keypoint_tuning_ok_count,
+                ps.keypoint_tuning_non_ok_count,
+                ps.eye_mask_tuning_ok_count,
+                ps.eye_mask_tuning_non_ok_count,
+                ps.subdish_mask_tuning_ok_count,
+                ps.subdish_mask_tuning_non_ok_count
+            FROM dataset_counts dc
+            LEFT JOIN status_counts sc ON sc.recording_id = dc.recording_id
+            LEFT JOIN per_step ps ON ps.recording_id = dc.recording_id;
             """
         )
 

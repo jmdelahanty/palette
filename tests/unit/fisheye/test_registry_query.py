@@ -507,6 +507,234 @@ def _seed_eye_mask_performance_rows(registry_path: Path) -> None:
     registry.close()
 
 
+def _seed_keypoint_quality_and_performance_rows(registry_path: Path) -> None:
+    registry = Registry(registry_path)
+
+    def _quality_record(
+        *,
+        refined_run: str,
+        refined_created_utc: str,
+        source_keypoint_run: str,
+        keypoint_method: str,
+        review_state: str | None,
+        review_intended_use: str | None,
+        review_reviewer: str | None,
+        review_timestamp_utc: str | None,
+        usable_rate: float | None,
+        usable_count: int,
+        total_count: int,
+        raw_success_rate: float,
+        raw_successful: int,
+    ) -> dict[str, object]:
+        return {
+            "refined_run": refined_run,
+            "refined_created_utc": refined_created_utc,
+            "source_keypoint_run": source_keypoint_run,
+            "keypoint_method": keypoint_method,
+            "review_state": review_state,
+            "review_intended_use": review_intended_use,
+            "review_reviewer": review_reviewer,
+            "review_timestamp_utc": review_timestamp_utc,
+            "usable_keypoints": usable_count,
+            "total_keypoints": total_count,
+            "usable_keypoints_rate": usable_rate,
+            "raw_keypoints_success_rate": raw_success_rate,
+            "raw_keypoints_successful": raw_successful,
+            "quality_updated_utc": "2026-02-11T03:00:00+00:00",
+            "zarr_mtime_ns": 123456789,
+        }
+
+    registry.replace_keypoint_quality(
+        "dataset_a",
+        [
+            _quality_record(
+                refined_run="refined_kp_a_trad",
+                refined_created_utc="2026-02-11T00:30:00+00:00",
+                source_keypoint_run="keypoints_a_trad",
+                keypoint_method="traditional_pose",
+                review_state="approved",
+                review_intended_use="training",
+                review_reviewer="alice",
+                review_timestamp_utc="2026-02-11T00:45:00+00:00",
+                usable_rate=0.95,
+                usable_count=95,
+                total_count=100,
+                raw_success_rate=0.97,
+                raw_successful=97,
+            ),
+            _quality_record(
+                refined_run="refined_kp_a_yolo",
+                refined_created_utc="2026-02-11T00:50:00+00:00",
+                source_keypoint_run="keypoints_a_yolo",
+                keypoint_method="yolo_pose",
+                review_state="needs_review",
+                review_intended_use="training",
+                review_reviewer="alice",
+                review_timestamp_utc="2026-02-11T00:55:00+00:00",
+                usable_rate=0.82,
+                usable_count=82,
+                total_count=100,
+                raw_success_rate=0.9,
+                raw_successful=90,
+            ),
+        ],
+    )
+    registry.replace_keypoint_quality(
+        "dataset_b",
+        [
+            _quality_record(
+                refined_run="refined_kp_b_trad",
+                refined_created_utc="2026-02-11T01:30:00+00:00",
+                source_keypoint_run="keypoints_b_trad",
+                keypoint_method="traditional_pose",
+                review_state=None,
+                review_intended_use=None,
+                review_reviewer=None,
+                review_timestamp_utc=None,
+                usable_rate=0.65,
+                usable_count=65,
+                total_count=100,
+                raw_success_rate=0.7,
+                raw_successful=70,
+            ),
+        ],
+    )
+    registry.replace_keypoint_quality(
+        "dataset_c",
+        [
+            _quality_record(
+                refined_run="refined_kp_c_yolo",
+                refined_created_utc="2026-02-11T02:30:00+00:00",
+                source_keypoint_run="keypoints_c_yolo",
+                keypoint_method="yolo_pose",
+                review_state="approved",
+                review_intended_use="training",
+                review_reviewer="carol",
+                review_timestamp_utc="2026-02-11T02:35:00+00:00",
+                usable_rate=0.91,
+                usable_count=91,
+                total_count=100,
+                raw_success_rate=0.92,
+                raw_successful=92,
+            ),
+        ],
+    )
+
+    registry.upsert_keypoint_performance(
+        dataset_id="dataset_a",
+        keypoint_run="keypoints_2026-02-11_00-10-00",
+        keypoint_created_utc="2026-02-11T00:10:00+00:00",
+        recording_id="recording_a",
+        zarr_use="analysis",
+        keypoint_method="yolo_pose",
+        model_run_id="run_pose_model_v1",
+        model_set_id="pose_set_v1",
+        model_path="/models/pose_model_v1.pt",
+        model_name="pose_model_v1.pt",
+        source_crop_run="crop_a",
+        source_detect_run="detect_a",
+        source_refined_run="refined_detect_a",
+        total_rois=100,
+        successful_detections=96,
+        failed_detections=4,
+        success_rate_percent=96.0,
+        frames_with_keypoints=95,
+        mean_confidence=0.92,
+        duration_seconds=20.0,
+        inference_duration_seconds=18.0,
+        keypoints_per_second=240.0,
+        inference_average_fps=220.0,
+        batch_size=16,
+        imgsz="[256,256]",
+        conf_threshold=0.25,
+        iou_threshold=0.7,
+        summary_statistics_json=None,
+    )
+    registry.upsert_keypoint_performance(
+        dataset_id="dataset_b",
+        keypoint_run="keypoints_2026-02-11_01-10-00",
+        keypoint_created_utc="2026-02-11T01:10:00+00:00",
+        recording_id="recording_b",
+        zarr_use="analysis",
+        keypoint_method="traditional_pose",
+        model_run_id=None,
+        model_set_id=None,
+        model_path=None,
+        model_name=None,
+        source_crop_run="crop_b",
+        source_detect_run="detect_b",
+        source_refined_run="refined_detect_b",
+        total_rois=100,
+        successful_detections=72,
+        failed_detections=28,
+        success_rate_percent=72.0,
+        frames_with_keypoints=70,
+        mean_confidence=0.74,
+        duration_seconds=45.0,
+        inference_duration_seconds=45.0,
+        keypoints_per_second=120.0,
+        inference_average_fps=115.0,
+        batch_size=16,
+        imgsz="[256,256]",
+        conf_threshold=None,
+        iou_threshold=None,
+        summary_statistics_json=None,
+    )
+    registry.upsert_keypoint_performance(
+        dataset_id="dataset_c",
+        keypoint_run="keypoints_2026-02-11_02-10-00",
+        keypoint_created_utc="2026-02-11T02:10:00+00:00",
+        recording_id="recording_c",
+        zarr_use="analysis",
+        keypoint_method="yolo_pose",
+        model_run_id="run_pose_model_v2",
+        model_set_id="pose_set_v2",
+        model_path="/models/pose_model_v2.pt",
+        model_name="pose_model_v2.pt",
+        source_crop_run="crop_c",
+        source_detect_run="detect_c",
+        source_refined_run="refined_detect_c",
+        total_rois=100,
+        successful_detections=88,
+        failed_detections=12,
+        success_rate_percent=88.0,
+        frames_with_keypoints=86,
+        mean_confidence=0.89,
+        duration_seconds=30.0,
+        inference_duration_seconds=28.0,
+        keypoints_per_second=180.0,
+        inference_average_fps=175.0,
+        batch_size=16,
+        imgsz="[256,256]",
+        conf_threshold=0.25,
+        iou_threshold=0.7,
+        summary_statistics_json=None,
+    )
+    registry.close()
+
+
+def _seed_recording_step_status_rows(registry_path: Path) -> None:
+    registry = Registry(registry_path)
+    registry.conn.executemany(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id, recording_id, step_name, status, run_name, source, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+        """,
+        [
+            ("dataset_a", "recording_a", "detect", "ok", "detect_a", "unit_test", "2026-02-11T00:00:00+00:00"),
+            ("dataset_a", "recording_a", "keypoints", "missing", None, "unit_test", "2026-02-11T00:10:00+00:00"),
+            ("dataset_b", "recording_b", "detect", "missing", None, "unit_test", "2026-02-11T01:00:00+00:00"),
+            ("dataset_b", "recording_b", "keypoints", "ok", "keypoints_b", "unit_test", "2026-02-11T01:10:00+00:00"),
+            ("dataset_c", "recording_c", "detect", "ok", "detect_c", "unit_test", "2026-02-11T02:00:00+00:00"),
+            ("dataset_c", "recording_c", "keypoints", "ok", "keypoints_c", "unit_test", "2026-02-11T02:10:00+00:00"),
+        ],
+    )
+    registry.conn.commit()
+    registry.close()
+
+
 def test_registry_query_filters_by_cross_id(tmp_path: Path, capsys) -> None:
     registry_path = tmp_path / "registry.sqlite"
     _seed_registry_for_subject_filters(registry_path)
@@ -611,6 +839,67 @@ def test_registry_query_filters_by_detect_coverage_min(tmp_path: Path, capsys) -
     payload = json.loads(out)
     dataset_ids = {row["dataset_id"] for row in payload}
     assert dataset_ids == {"dataset_a"}
+
+
+def test_registry_query_filters_by_step_name_and_status(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_recording_step_status_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--step-name",
+            "keypoints",
+            "--step-status",
+            "missing",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in payload} == {"dataset_a"}
+    assert payload[0]["recording_step_name"] == "keypoints"
+    assert payload[0]["recording_step_status"] == "missing"
+
+
+def test_registry_query_filters_by_non_ok_step_status(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_recording_step_status_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--step-status",
+            "non-ok",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in payload} == {"dataset_a", "dataset_b"}
+    statuses = {row["recording_step_status"] for row in payload}
+    assert statuses == {"missing"}
+
+
+def test_registry_query_rejects_invalid_step_status(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_recording_step_status_rows(registry_path)
+
+    with pytest.raises(SystemExit, match="--step-status must be one of"):
+        registry_query_main(
+            [
+                "--registry",
+                str(registry_path),
+                "--step-status",
+                "broken",
+                "--json",
+            ]
+        )
 
 
 def test_registry_query_detect_model_only_and_model_like(tmp_path: Path, capsys) -> None:
@@ -976,3 +1265,165 @@ def test_registry_query_filters_by_eye_mask_stage_and_success_rate(tmp_path: Pat
     assert {row["dataset_id"] for row in payload} == {"dataset_c"}
     assert payload[0]["eye_mask_stage_group"] == "eye_masks_runs"
     assert payload[0]["eye_mask_successful_roi_pair_rate"] == pytest.approx(0.9545)
+
+
+def test_registry_query_filters_by_keypoint_review_and_usable_rate(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_keypoint_quality_and_performance_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--keypoint-method",
+            "yolo_pose",
+            "--keypoint-review-state",
+            "approved",
+            "--keypoint-review-intended-use",
+            "training",
+            "--keypoint-usable-rate-min",
+            "0.9",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in payload} == {"dataset_c"}
+    assert payload[0]["keypoint_review_state"] == "approved"
+    assert payload[0]["keypoint_usable_keypoints_rate"] == pytest.approx(0.91)
+    assert payload[0]["keypoint_method"] == "yolo_pose"
+
+
+def test_registry_query_filters_by_keypoint_missing_review_state(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_keypoint_quality_and_performance_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--keypoint-review-state",
+            "missing",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in payload} == {"dataset_b"}
+    assert payload[0]["keypoint_review_state"] is None
+
+
+def test_registry_query_filters_by_keypoint_runtime_and_model_like(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_keypoint_quality_and_performance_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--keypoint-success-rate-min",
+            "90",
+            "--keypoint-kps-min",
+            "200",
+            "--keypoint-duration-max",
+            "25",
+            "--keypoint-model-like",
+            "v1",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in payload} == {"dataset_a"}
+    assert payload[0]["keypoint_model_run_id"] == "run_pose_model_v1"
+    assert payload[0]["keypoint_success_rate_percent"] == pytest.approx(96.0)
+    assert payload[0]["keypoint_keypoints_per_second"] == pytest.approx(240.0)
+
+
+def test_registry_query_keypoint_group_by_method_json_includes_percentiles(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_keypoint_quality_and_performance_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--keypoint-group-by",
+            "method",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload) == 2
+    by_method = {row["group_value"]: row for row in payload}
+    assert set(by_method.keys()) == {"traditional_pose", "yolo_pose"}
+
+    yolo = by_method["yolo_pose"]
+    assert yolo["datasets"] == 2
+    assert yolo["recordings"] == 2
+    assert yolo["success_rate_p50"] == pytest.approx(92.0)
+    assert yolo["kps_p50"] == pytest.approx(210.0)
+    assert yolo["duration_p50"] == pytest.approx(25.0)
+    for key in (
+        "success_rate_p10",
+        "success_rate_p50",
+        "success_rate_p90",
+        "kps_p10",
+        "kps_p50",
+        "kps_p90",
+        "duration_p10",
+        "duration_p50",
+        "duration_p90",
+    ):
+        assert key in yolo
+
+
+def test_registry_query_keypoint_group_by_model_with_model_only(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_keypoint_quality_and_performance_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--keypoint-group-by",
+            "model",
+            "--keypoint-model-only",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload) == 2
+    names = {row["model_name"] for row in payload}
+    assert names == {"pose_model_v1.pt", "pose_model_v2.pt"}
+    run_ids = {row["model_run_id"] for row in payload}
+    assert run_ids == {"run_pose_model_v1", "run_pose_model_v2"}
+
+
+def test_registry_query_rejects_detect_and_keypoint_group_by_conflict(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_keypoint_quality_and_performance_rows(registry_path)
+
+    try:
+        registry_query_main(
+            [
+                "--registry",
+                str(registry_path),
+                "--group-by",
+                "rig",
+                "--keypoint-group-by",
+                "method",
+            ]
+        )
+    except SystemExit as exc:
+        assert "--group-by cannot be combined with --keypoint-group-by." in str(exc)
+    else:  # pragma: no cover - defensive branch
+        raise AssertionError("Expected SystemExit for detect/keypoint summary conflict.")
