@@ -83,6 +83,8 @@ SQLite `ATTACH` is available as an escape hatch for zebrobot-only fields if need
     - `scripts/validate_recording_step_status_registry_batch.sh`
   - Latest operator batch validation: `passed=52 failed=0 skipped_missing_zarr=1`
     (skipped non-recording path: `/nvme1/recordings/logs`).
+  - Periodic smoke is scheduled via cron (nightly `02:30`), logging to:
+    `/tmp/palette_recording_step_status_smoke_cron.log`.
 
 ## Glossary
 

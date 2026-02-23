@@ -189,6 +189,13 @@ scripts/validate_recording_step_status_registry_batch.sh \
   --skip-backfill
 ```
 
+Periodic smoke schedule (active):
+
+- Cron runs nightly at `02:30`:
+  `scripts/validate_recording_step_status_registry_batch.sh --recordings-root /nvme1/recordings --registry /nvme1/palette_registry.sqlite --zarr-use training --jobs 8 --skip-backfill`
+- Cron log path:
+  `/tmp/palette_recording_step_status_smoke_cron.log`
+
 ## Task Dependencies
 
 - RS1 must land before RS2/RS5/RS6.
