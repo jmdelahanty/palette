@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import zarr
 
 from fisheye.utils import run_keypoints_with_registry_model as mod
 
@@ -37,12 +36,30 @@ def test_pick_best_candidate_enforces_unique_when_tied() -> None:
         mod._pick_best_candidate(candidates, require_unique=True)  # noqa: SLF001
 
 
-def test_write_model_resolution_provenance_updates_keypoint_run_attrs(tmp_path: Path) -> None:
-    zarr_path = tmp_path / "sample_analysis.zarr"
-    root = zarr.open_group(str(zarr_path), mode="w")
-    keypoint_parent = root.require_group("keypoints_runs")
-    keypoint_run = keypoint_parent.require_group("keypoints_20260209_000000")
+def test_write_model_resolution_provenance_updates_keypoint_run_attrs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class _Attrs(dict):
+        def put(self, mapping: dict[str, object]) -> None:
+            self.clear()
+            self.update(mapping)
+
+    class _Group(dict):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attrs = _Attrs()
+
+        def get(self, key: str, default: object = None) -> object:  # noqa: A003
+            return super().get(key, default)
+
+    root = _Group()
+    keypoint_parent = _Group()
+    keypoint_run = _Group()
     keypoint_run.attrs["provenance"] = {"stage": "keypoints_detect"}
+    keypoint_parent["keypoints_20260209_000000"] = keypoint_run
+    root["keypoints_runs"] = keypoint_parent
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: root)
 
     payload = {
         "mode": "registry",
@@ -61,18 +78,16 @@ def test_write_model_resolution_provenance_updates_keypoint_run_attrs(tmp_path: 
     }
 
     mod._write_model_resolution_provenance(  # noqa: SLF001
-        zarr_path=zarr_path,
+        zarr_path=tmp_path / "sample_analysis.zarr",
         run_name="keypoints_20260209_000000",
         payload=payload,
     )
 
-    root2 = zarr.open_group(str(zarr_path), mode="r")
-    keypoints2 = root2["keypoints_runs"]["keypoints_20260209_000000"]
-    assert keypoints2.attrs.get("model_resolution_mode") == "registry"
-    assert keypoints2.attrs.get("model_resolution_task") == "pose"
-    assert keypoints2.attrs.get("model_resolution_selected_run_id") == "pose_run_001"
-    assert keypoints2.attrs.get("model_resolution_selected_set_id") == "pose_set_001"
-    provenance = keypoints2.attrs.get("provenance")
+    assert keypoint_run.attrs.get("model_resolution_mode") == "registry"
+    assert keypoint_run.attrs.get("model_resolution_task") == "pose"
+    assert keypoint_run.attrs.get("model_resolution_selected_run_id") == "pose_run_001"
+    assert keypoint_run.attrs.get("model_resolution_selected_set_id") == "pose_set_001"
+    provenance = keypoint_run.attrs.get("provenance")
     assert isinstance(provenance, dict)
     assert "model_resolution" in provenance
 
@@ -185,3 +200,5 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     payload = calls.get("write_payload")
     assert isinstance(payload, dict)
     assert payload.get("task") == "pose"
+    for key in ("contract", "command", "git", "environment", "platform", "parameters", "inputs", "artifacts"):
+        assert key in payload

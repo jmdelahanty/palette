@@ -81,9 +81,14 @@ Scope: prioritize correctness and auditability first, then orchestration and reg
   - Write `model_resolution_*` attrs and `provenance.model_resolution` on resulting runs.
   - Added: `src/fisheye/utils/run_eye_masks_with_registry_model.py`.
 
-- [ ] Standardize provenance payload shape with detect/pose conventions.
+- [x] Standardize provenance payload shape with detect/pose conventions.
   - Align command, git, environment, platform, parameters, inputs, artifacts sections and key naming.
   - Draft contract: `docs/provenance_contract_draft.md`.
+  - Added shared builder: `src/fisheye/utils/model_resolution_provenance.py`.
+  - Adopted in wrappers:
+    - `src/fisheye/utils/run_detect_with_registry_model.py`
+    - `src/fisheye/utils/run_keypoints_with_registry_model.py`
+    - `src/fisheye/utils/run_eye_masks_with_registry_model.py`
 
 ## P4: Tests, Docs, and Migration Hygiene
 

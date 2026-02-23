@@ -206,3 +206,5 @@ def test_main_runs_eye_mask_resolution_and_writes_provenance(
     assert isinstance(payload, dict)
     assert payload.get("task") == "eye_masks"
     assert payload.get("method") == "yolo"
+    for key in ("contract", "command", "git", "environment", "platform", "parameters", "inputs", "artifacts"):
+        assert key in payload

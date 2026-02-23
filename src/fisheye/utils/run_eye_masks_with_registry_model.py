@@ -6,19 +6,15 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import asdict
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import zarr
 
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils.resolve_detect_model import Candidate, TargetProfile
 from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _resolve_output(recording_dir: Path, explicit_output: Optional[Path]) -> Path:
@@ -39,6 +35,10 @@ def _pick_best_candidate(candidates: list[Candidate], *, require_unique: bool) -
 
 def _resolution_payload(
     *,
+    args: argparse.Namespace,
+    argv: Optional[list[str]],
+    recording_dir: Path,
+    output_path: Path,
     registry_path: Path,
     recording_id: str,
     target: TargetProfile,
@@ -47,40 +47,74 @@ def _resolution_payload(
     top_k: int,
     method: str,
 ) -> dict[str, Any]:
-    return {
-        "mode": "registry",
-        "task": "eye_masks",
-        "method": method,
-        "registry_path": str(registry_path),
-        "recording_id": recording_id,
-        "resolved_at_utc": _utc_now(),
-        "target": asdict(target),
-        "selected": {
-            "run_id": selected.run_id,
-            "set_id": selected.set_id,
-            "model_path": selected.model_path,
-            "score": selected.weighted_score,
-            "created_utc": selected.created_utc,
-            "status": selected.status,
-            "dataset_count": selected.dataset_count,
-            "feature_match_counts": selected.feature_match_counts,
-            "feature_weights_used": selected.feature_weights_used,
+    target_payload = asdict(target)
+
+    def _candidate_payload(item: Candidate) -> dict[str, Any]:
+        return {
+            "run_id": item.run_id,
+            "set_id": item.set_id,
+            "model_path": item.model_path,
+            "score": item.weighted_score,
+            "created_utc": item.created_utc,
+            "status": item.status,
+            "dataset_count": item.dataset_count,
+            "feature_match_counts": item.feature_match_counts,
+            "feature_weights_used": item.feature_weights_used,
+        }
+
+    selected_payload = _candidate_payload(selected)
+    candidate_payloads = [_candidate_payload(item) for item in candidates[: max(0, int(top_k))]]
+
+    return build_model_resolution_payload(
+        tool="fisheye.utils.run_eye_masks_with_registry_model",
+        args=args,
+        argv=argv,
+        task="eye_masks",
+        method=method,
+        registry_path=registry_path,
+        recording_id=recording_id,
+        target=target_payload,
+        selected=selected_payload,
+        candidates=candidate_payloads,
+        parameters={
+            "set_id_filter": args.set_id,
+            "require_unique": bool(args.require_unique),
+            "top_k": int(args.top_k),
+            "include_non_success": bool(args.include_non_success),
+            "dry_run": bool(args.dry_run),
+            "method": args.method,
+            "run_name": args.run_name,
+            "crop_run": args.crop_run,
+            "keypoints_run": args.keypoints_run,
+            "batch_size": args.batch_size,
+            "device": args.device,
+            "imgsz": args.imgsz,
+            "conf": args.conf,
+            "iou": args.iou,
+            "max_det": args.max_det,
+            "mask_threshold": args.mask_threshold,
+            "adaptive_scale": args.adaptive_scale,
+            "adaptive_cap": args.adaptive_cap,
+            "no_retina_masks": bool(args.no_retina_masks),
+            "proto_upsample_factor": args.proto_upsample_factor,
+            "legacy_masks": bool(args.legacy_masks),
+            "verbose": bool(args.verbose),
+            "label_mode": args.label_mode,
+            "write_binary_masks": bool(args.write_binary_masks),
+            "no_use_crop": bool(args.no_use_crop),
         },
-        "candidates": [
-            {
-                "run_id": item.run_id,
-                "set_id": item.set_id,
-                "model_path": item.model_path,
-                "score": item.weighted_score,
-                "created_utc": item.created_utc,
-                "status": item.status,
-                "dataset_count": item.dataset_count,
-                "feature_match_counts": item.feature_match_counts,
-                "feature_weights_used": item.feature_weights_used,
-            }
-            for item in candidates[: max(0, int(top_k))]
-        ],
-    }
+        inputs={
+            "recording_dir": str(recording_dir),
+            "output_zarr": str(output_path),
+            "recording_id": recording_id,
+            "target": target_payload,
+        },
+        artifacts={
+            "selected_model": selected_payload,
+            "candidate_models": candidate_payloads,
+            "output_zarr": str(output_path),
+        },
+    )
 
 
 def _write_model_resolution_provenance(
@@ -261,6 +295,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     best = _pick_best_candidate(candidates, require_unique=bool(args.require_unique))
     payload = _resolution_payload(
+        args=args,
+        argv=argv,
+        recording_dir=recording_dir,
+        output_path=output_path,
         registry_path=registry_path,
         recording_id=recording_id,
         target=target,
