@@ -2,12 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import h5py
 import numpy as np
 import pytest
 import zarr
 
 from fisheye.registry.db import Registry
 from fisheye.utils import check_recording_steps as mod
+
+
+def _write_minimal_h5(path: Path, *, session_uuid: str, camera_id: str = "cam_1") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as h5:
+        h5.attrs["session_uuid"] = session_uuid
+        h5.attrs["camera_id"] = camera_id
 
 
 def test_check_zarr_reports_detect_coverage_full_basis(tmp_path: Path) -> None:
@@ -310,3 +318,179 @@ def test_check_zarr_reads_refined_eye_mask_review_status_from_parent_latest_poin
     assert isinstance(status, dict)
     assert status["state"] == "pending"
     assert status["method"] == "spotcheck"
+
+
+def test_main_status_source_registry_requires_registry(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "recordings"
+    root.mkdir(parents=True)
+
+    rc = mod.main([str(root), "--status-source", "registry", "--no-rich"])
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "--status-source registry requires --registry." in out
+
+
+def test_main_status_source_registry_uses_registry_views(tmp_path: Path, monkeypatch, capsys) -> None:
+    recordings_root = tmp_path / "recordings"
+    h5_path = recordings_root / "rec_registry" / "raw" / "capture.h5"
+    _write_minimal_h5(h5_path, session_uuid="rec_registry", camera_id="cam_9")
+
+    zarr_path = recordings_root / "rec_registry" / "zarr" / "rec_registry_analysis.zarr"
+
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_registry_a",
+        session_uuid="rec_registry",
+        zarr_path=zarr_path,
+        recording_id="rec_registry",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id, recording_id, step_name, status, run_name, method, coverage_pct, source, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_registry_a",
+            "rec_registry",
+            "detect",
+            "ok",
+            "detect_001",
+            "yolo",
+            99.0,
+            "unit_test",
+            "2026-02-22T00:00:00+00:00",
+        ),
+    )
+    registry.conn.commit()
+    registry.close()
+
+    def _fail_check_zarr(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("filesystem zarr traversal should not run in registry mode")
+
+    monkeypatch.setattr(mod, "_check_zarr", _fail_check_zarr)
+
+    rc = mod.main(
+        [
+            str(recordings_root),
+            "--status-source",
+            "registry",
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--no-rich",
+        ]
+    )
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "rec_registry" in out
+    assert "detect: OK" in out
+
+
+def test_main_status_source_compare_outputs_mismatches(tmp_path: Path, capsys) -> None:
+    recordings_root = tmp_path / "recordings"
+    h5_path = recordings_root / "rec_compare" / "raw" / "capture.h5"
+    _write_minimal_h5(h5_path, session_uuid="rec_compare", camera_id="cam_2")
+
+    zarr_path = recordings_root / "rec_compare" / "zarr" / "rec_compare_analysis.zarr"
+
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_compare_a",
+        session_uuid="rec_compare",
+        zarr_path=zarr_path,
+        recording_id="rec_compare",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id, recording_id, step_name, status, run_name, source, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_compare_a",
+            "rec_compare",
+            "detect",
+            "ok",
+            "detect_compare",
+            "unit_test",
+            "2026-02-22T00:00:00+00:00",
+        ),
+    )
+    registry.conn.commit()
+    registry.close()
+
+    rc = mod.main(
+        [
+            str(recordings_root),
+            "--status-source",
+            "compare",
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--no-rich",
+        ]
+    )
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "Recording Step Status Mismatches" in out
+    assert "field: detect" in out
+
+
+def test_registry_status_payload_filters_rows_to_matching_recording_id(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "shared_training.zarr"
+    zarr.open_group(str(zarr_path), mode="w")
+
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_good",
+        session_uuid="session_good",
+        zarr_path=zarr_path,
+        recording_id="rec_target",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_dataset(
+        "dataset_ghost",
+        session_uuid="session_ghost",
+        zarr_path=zarr_path,
+        recording_id=None,
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id, recording_id, step_name, status, source, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?);
+        """,
+        [
+            ("dataset_good", "rec_target", "eye_masks", "ok", "unit_test", "2026-02-23T01:00:00+00:00"),
+            ("dataset_good", "rec_target", "refined_eye_masks", "ok", "unit_test", "2026-02-23T01:00:00+00:00"),
+            ("dataset_good", "rec_target", "eye_mask_tuning", "ok", "unit_test", "2026-02-23T01:00:00+00:00"),
+            ("dataset_ghost", None, "eye_masks", "missing", "unit_test", "2026-02-23T02:00:00+00:00"),
+            ("dataset_ghost", None, "refined_eye_masks", "missing", "unit_test", "2026-02-23T02:00:00+00:00"),
+            ("dataset_ghost", None, "eye_mask_tuning", "missing", "unit_test", "2026-02-23T02:00:00+00:00"),
+        ],
+    )
+    registry.conn.commit()
+
+    payload = mod._registry_status_payload(  # noqa: SLF001
+        registry=registry,
+        zarr_path=zarr_path,
+        recording_id="rec_target",
+        tuning_keys=["eye_mask_tuning"],
+    )
+    registry.close()
+
+    assert payload["eye_masks_present"] is True
+    assert payload["refined_eye_masks_present"] is True
+    assert payload["tuning_status"]["eye_mask_tuning"] == "ok"  # type: ignore[index]

@@ -15,6 +15,8 @@ Crop-review registry planning is tracked in:
 `docs/crop_review_registry_todo.md`.
 Cross-archive string encoding standardization is tracked in:
 `docs/zarr_string_encoding_todo.md`.
+Registry-backed recording step/status migration is tracked in:
+`docs/recording_step_status_registry_todo.md`.
 Status (2026-02-09): detect-performance Phase 2A is complete
 (schema v11, model-only latest views, scoped backfill defaults).
 
@@ -72,6 +74,9 @@ SQLite `ATTACH` is available as an escape hatch for zebrobot-only fields if need
   - Verified on live DB: rescan updates did not recreate `dataset_id=session_uuid` rows.
 - [ ] Keep CI wiring for the targeted registry migration/integrity test subset.
   - Operational follow-up; not blocking Phase 1 completion.
+- [ ] Execute registry-backed recording step/status plan.
+  - See: `docs/recording_step_status_registry_todo.md`
+  - Goal: make recording health/status queryable from registry (not filesystem traversal).
 
 ## Glossary
 

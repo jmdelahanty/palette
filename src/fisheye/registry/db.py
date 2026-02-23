@@ -1624,6 +1624,7 @@ class Registry:
             ),
             (18, "keypoint_performance_registry", self._migration_018_keypoint_performance_registry),
             (19, "recording_step_status_registry", self._migration_019_recording_step_status_registry),
+            (20, "recording_step_status_wide_view", self._migration_020_recording_step_status_wide_view),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -4676,6 +4677,577 @@ class Registry:
             FROM dataset_counts dc
             LEFT JOIN status_counts sc ON sc.recording_id = dc.recording_id
             LEFT JOIN per_step ps ON ps.recording_id = dc.recording_id;
+            """
+        )
+
+    def _migration_020_recording_step_status_wide_view(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DROP VIEW IF EXISTS recording_step_status_wide;")
+        cur.execute(
+            """
+            CREATE VIEW recording_step_status_wide AS
+            WITH step_rows AS (
+                SELECT
+                    dataset_id,
+                    COALESCE(NULLIF(trim(recording_id), ''), '') AS recording_id,
+                    COALESCE(camera_id, 'unknown') AS camera_id,
+                    zarr_path,
+                    zarr_use,
+                    dataset_status,
+                    lower(step_name) AS step_name,
+                    lower(status) AS status,
+                    run_name,
+                    method,
+                    coverage_pct,
+                    review_status_json,
+                    details_json
+                FROM recording_step_status_latest
+            ),
+            pivot AS (
+                SELECT
+                    dataset_id,
+                    MAX(NULLIF(recording_id, '')) AS recording_id,
+                    MAX(camera_id) AS camera_id,
+                    MAX(zarr_path) AS zarr_path,
+                    MAX(zarr_use) AS zarr_use,
+                    MAX(dataset_status) AS dataset_status,
+                    MAX(CASE WHEN step_name = 'raw' THEN status END) AS raw_status,
+                    MAX(CASE WHEN step_name = 'raw' THEN details_json END) AS raw_details_json,
+                    MAX(CASE WHEN step_name = 'background' THEN status END) AS background_status,
+                    MAX(CASE WHEN step_name = 'background' THEN details_json END) AS background_details_json,
+                    MAX(CASE WHEN step_name = 'detect' THEN status END) AS detect_status,
+                    MAX(CASE WHEN step_name = 'detect' THEN method END) AS detect_method,
+                    MAX(CASE WHEN step_name = 'detect' THEN coverage_pct END) AS detect_coverage_pct,
+                    MAX(CASE WHEN step_name = 'detect' THEN details_json END) AS detect_details_json,
+                    MAX(CASE WHEN step_name = 'refined_detect' THEN status END) AS refined_detect_status,
+                    MAX(CASE WHEN step_name = 'refined_detect' THEN method END) AS refined_detect_method,
+                    MAX(CASE WHEN step_name = 'refined_detect' THEN coverage_pct END) AS refined_detect_coverage_pct,
+                    MAX(CASE WHEN step_name = 'refined_detect' THEN review_status_json END) AS refined_detect_review_json,
+                    MAX(CASE WHEN step_name = 'refined_detect' THEN details_json END) AS refined_detect_details_json,
+                    MAX(CASE WHEN step_name = 'crop' THEN status END) AS crop_status,
+                    MAX(CASE WHEN step_name = 'crop' THEN review_status_json END) AS crop_review_json,
+                    MAX(CASE WHEN step_name = 'crop' THEN details_json END) AS crop_details_json,
+                    MAX(CASE WHEN step_name = 'keypoints' THEN status END) AS keypoints_status,
+                    MAX(CASE WHEN step_name = 'keypoints' THEN details_json END) AS keypoints_details_json,
+                    MAX(CASE WHEN step_name = 'refined_keypoints' THEN status END) AS refined_keypoints_status,
+                    MAX(CASE WHEN step_name = 'refined_keypoints' THEN coverage_pct END) AS refined_keypoints_coverage_pct,
+                    MAX(CASE WHEN step_name = 'refined_keypoints' THEN review_status_json END) AS refined_keypoints_review_json,
+                    MAX(CASE WHEN step_name = 'refined_keypoints' THEN details_json END) AS refined_keypoints_details_json,
+                    MAX(CASE WHEN step_name = 'eye_masks' THEN status END) AS eye_masks_status,
+                    MAX(CASE WHEN step_name = 'eye_masks' THEN review_status_json END) AS eye_masks_review_json,
+                    MAX(CASE WHEN step_name = 'eye_masks' THEN details_json END) AS eye_masks_details_json,
+                    MAX(CASE WHEN step_name = 'refined_eye_masks' THEN status END) AS refined_eye_masks_status,
+                    MAX(CASE WHEN step_name = 'refined_eye_masks' THEN review_status_json END) AS refined_eye_masks_review_json,
+                    MAX(CASE WHEN step_name = 'refined_eye_masks' THEN details_json END) AS refined_eye_masks_details_json,
+                    MAX(CASE WHEN step_name = 'id_assignment' THEN status END) AS id_assignment_status,
+                    MAX(CASE WHEN step_name = 'tracks' THEN status END) AS tracks_status,
+                    MAX(CASE WHEN step_name = 'stimulus' THEN status END) AS stimulus_status,
+                    MAX(CASE WHEN step_name = 'stimulus' THEN details_json END) AS stimulus_details_json,
+                    MAX(CASE WHEN step_name = 'calibration' THEN status END) AS calibration_status,
+                    MAX(CASE WHEN step_name = 'dish_mask' THEN status END) AS dish_mask_status,
+                    MAX(CASE WHEN step_name = 'detection_tuning' THEN status END) AS detection_tuning_status,
+                    MAX(CASE WHEN step_name = 'keypoint_tuning' THEN status END) AS keypoint_tuning_status,
+                    MAX(CASE WHEN step_name = 'eye_mask_tuning' THEN status END) AS eye_mask_tuning_status,
+                    MAX(CASE WHEN step_name = 'subdish_mask_tuning' THEN status END) AS subdish_mask_tuning_status
+                FROM step_rows
+                GROUP BY dataset_id
+            ),
+            derived AS (
+                SELECT
+                    p.*,
+                    COALESCE(
+                        json_extract(p.raw_details_json, '$.pipeline_type'),
+                        json_extract(p.background_details_json, '$.pipeline_type'),
+                        json_extract(p.detect_details_json, '$.pipeline_type'),
+                        json_extract(p.refined_detect_details_json, '$.pipeline_type'),
+                        json_extract(p.crop_details_json, '$.pipeline_type'),
+                        json_extract(p.keypoints_details_json, '$.pipeline_type'),
+                        json_extract(p.refined_keypoints_details_json, '$.pipeline_type'),
+                        json_extract(p.eye_masks_details_json, '$.pipeline_type'),
+                        json_extract(p.refined_eye_masks_details_json, '$.pipeline_type')
+                    ) AS pipeline_type,
+                    COALESCE(
+                        json_extract(p.raw_details_json, '$.zarr_purpose'),
+                        json_extract(p.background_details_json, '$.zarr_purpose'),
+                        json_extract(p.detect_details_json, '$.zarr_purpose'),
+                        json_extract(p.refined_detect_details_json, '$.zarr_purpose'),
+                        json_extract(p.crop_details_json, '$.zarr_purpose'),
+                        json_extract(p.keypoints_details_json, '$.zarr_purpose'),
+                        json_extract(p.refined_keypoints_details_json, '$.zarr_purpose'),
+                        json_extract(p.eye_masks_details_json, '$.zarr_purpose'),
+                        json_extract(p.refined_eye_masks_details_json, '$.zarr_purpose')
+                    ) AS zarr_purpose,
+                    COALESCE(
+                        json_extract(p.raw_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.background_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.detect_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.refined_detect_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.crop_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.keypoints_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.refined_keypoints_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.eye_masks_details_json, '$.has_raw_video_attr'),
+                        json_extract(p.refined_eye_masks_details_json, '$.has_raw_video_attr')
+                    ) AS has_raw_video_attr,
+                    CASE
+                        WHEN COALESCE(
+                            json_extract(p.raw_details_json, '$.raw_present'),
+                            CASE WHEN p.raw_status = 'ok' THEN 1 ELSE 0 END
+                        ) = 1 THEN 1 ELSE 0
+                    END AS raw_present,
+                    CASE
+                        WHEN COALESCE(
+                            json_extract(p.raw_details_json, '$.full_present'),
+                            CASE WHEN p.raw_status = 'ok' THEN 1 ELSE 0 END
+                        ) = 1 THEN 1 ELSE 0
+                    END AS full_present,
+                    CASE
+                        WHEN COALESCE(
+                            json_extract(p.raw_details_json, '$.ds_present'),
+                            CASE WHEN p.raw_status = 'ok' THEN 1 ELSE 0 END
+                        ) = 1 THEN 1 ELSE 0
+                    END AS ds_present,
+                    CASE
+                        WHEN COALESCE(
+                            json_extract(p.background_details_json, '$.full_present'),
+                            CASE WHEN p.background_status = 'ok' THEN 1 ELSE 0 END
+                        ) = 1 THEN 1 ELSE 0
+                    END AS background_full_present,
+                    CASE
+                        WHEN COALESCE(
+                            json_extract(p.background_details_json, '$.ds_present'),
+                            CASE WHEN p.background_status = 'ok' THEN 1 ELSE 0 END
+                        ) = 1 THEN 1 ELSE 0
+                    END AS background_ds_present,
+                    CASE WHEN p.detect_status = 'ok' THEN 1 ELSE 0 END AS detect_present,
+                    CASE
+                        WHEN p.refined_detect_status = 'ok' AND p.refined_detect_coverage_pct IS NULL THEN 100.0
+                        ELSE p.refined_detect_coverage_pct
+                    END AS refined_detect_coverage_effective,
+                    CASE WHEN p.keypoints_status = 'ok' THEN 1 ELSE 0 END AS keypoints_present,
+                    CASE WHEN p.refined_keypoints_status = 'ok' THEN 1 ELSE 0 END AS refined_keypoints_present,
+                    CASE
+                        WHEN p.refined_keypoints_status = 'ok' AND p.refined_keypoints_coverage_pct IS NULL THEN 100.0
+                        ELSE p.refined_keypoints_coverage_pct
+                    END AS refined_keypoints_success_effective,
+                    CASE WHEN p.eye_masks_status = 'ok' THEN 1 ELSE 0 END AS eye_masks_present,
+                    CASE WHEN p.refined_eye_masks_status = 'ok' THEN 1 ELSE 0 END AS refined_eye_masks_present,
+                    CASE WHEN p.id_assignment_status = 'ok' THEN 1 ELSE 0 END AS assign_ids_present,
+                    CASE WHEN p.tracks_status = 'ok' THEN 1 ELSE 0 END AS track_present,
+                    CASE WHEN p.calibration_status = 'ok' THEN 1 ELSE 0 END AS calibration_present,
+                    CAST(
+                        COALESCE(
+                            json_extract(p.stimulus_details_json, '$.stimulus_runs'),
+                            CASE WHEN p.stimulus_status = 'ok' THEN 1 ELSE 0 END,
+                            0
+                        ) AS INTEGER
+                    ) AS stimulus_runs,
+                    COALESCE(
+                        NULLIF(TRIM(CAST(json_extract(p.crop_details_json, '$.run_state') AS TEXT)), ''),
+                        NULL
+                    ) AS crop_run_state,
+                    CAST(
+                        COALESCE(
+                            json_extract(p.refined_keypoints_details_json, '$.usable_keypoints_pct'),
+                            json_extract(p.refined_keypoints_details_json, '$.usable_percent'),
+                            json_extract(p.refined_keypoints_details_json, '$.train_usable_pct')
+                        ) AS REAL
+                    ) AS refined_keypoints_train_usable_pct,
+                    COALESCE(
+                        CAST(json_extract(p.detect_details_json, '$.detect_quality_grade') AS TEXT),
+                        CAST(json_extract(p.detect_details_json, '$.grade') AS TEXT)
+                    ) AS detect_quality_grade,
+                    CAST(
+                        COALESCE(
+                            json_extract(p.detect_details_json, '$.detect_quality_score'),
+                            json_extract(p.detect_details_json, '$.score')
+                        ) AS REAL
+                    ) AS detect_quality_score,
+                    CAST(
+                        COALESCE(
+                            json_extract(p.detect_details_json, '$.detect_quality_clean_percent'),
+                            json_extract(p.detect_details_json, '$.clean_percent'),
+                            json_extract(p.detect_details_json, '$.clean_percentage')
+                        ) AS REAL
+                    ) AS detect_quality_clean_percent,
+                    CAST(
+                        COALESCE(
+                            json_extract(p.detect_details_json, '$.detect_quality_artifacts'),
+                            json_extract(p.detect_details_json, '$.artifact_count')
+                        ) AS INTEGER
+                    ) AS detect_quality_artifacts,
+                    COALESCE(p.refined_eye_masks_review_json, p.eye_masks_review_json) AS eye_mask_review_json
+                FROM pivot p
+            ),
+            render AS (
+                SELECT
+                    d.*,
+                    CASE
+                        WHEN lower(COALESCE(CAST(d.zarr_purpose AS TEXT), '')) = 'production' THEN 1
+                        WHEN lower(COALESCE(CAST(d.pipeline_type AS TEXT), '')) = 'yolo_inference' THEN 1
+                        WHEN d.has_raw_video_attr = 0 AND NOT (d.full_present = 1 OR d.ds_present = 1) THEN 1
+                        ELSE 0
+                    END AS is_production,
+                    (
+                        CASE WHEN d.dish_mask_status = 'ok' THEN 1 ELSE 0 END
+                        + CASE WHEN d.detection_tuning_status = 'ok' THEN 1 ELSE 0 END
+                        + CASE WHEN d.keypoint_tuning_status = 'ok' THEN 1 ELSE 0 END
+                        + CASE WHEN d.eye_mask_tuning_status = 'ok' THEN 1 ELSE 0 END
+                        + CASE WHEN d.subdish_mask_tuning_status = 'ok' THEN 1 ELSE 0 END
+                    ) AS tuning_ok_count,
+                    5 AS tuning_total,
+                    NULLIF(TRIM(CAST(json_extract(d.refined_detect_review_json, '$.state') AS TEXT)), '') AS detect_review_state,
+                    NULLIF(TRIM(CAST(json_extract(d.refined_detect_review_json, '$.method') AS TEXT)), '') AS detect_review_method,
+                    NULLIF(TRIM(CAST(json_extract(d.refined_detect_review_json, '$.intended_use') AS TEXT)), '') AS detect_review_use,
+                    NULLIF(TRIM(CAST(json_extract(d.refined_detect_review_json, '$.resolved_group') AS TEXT)), '') AS detect_review_group,
+                    COALESCE(
+                        NULLIF(TRIM(CAST(json_extract(d.refined_detect_review_json, '$.resolved_group') AS TEXT)), ''),
+                        NULLIF(TRIM(CAST(json_extract(d.refined_detect_details_json, '$.resolved_group') AS TEXT)), '')
+                    ) AS detect_group,
+                    NULLIF(TRIM(CAST(json_extract(d.crop_review_json, '$.state') AS TEXT)), '') AS crop_review_state,
+                    NULLIF(TRIM(CAST(json_extract(d.crop_review_json, '$.method') AS TEXT)), '') AS crop_review_method,
+                    NULLIF(TRIM(CAST(json_extract(d.crop_review_json, '$.intended_use') AS TEXT)), '') AS crop_review_use,
+                    NULLIF(TRIM(CAST(json_extract(d.crop_review_json, '$.resolved_group') AS TEXT)), '') AS crop_review_group,
+                    NULLIF(TRIM(CAST(json_extract(d.refined_keypoints_review_json, '$.state') AS TEXT)), '') AS keypoint_review_state,
+                    NULLIF(TRIM(CAST(json_extract(d.refined_keypoints_review_json, '$.method') AS TEXT)), '') AS keypoint_review_method,
+                    NULLIF(TRIM(CAST(json_extract(d.refined_keypoints_review_json, '$.intended_use') AS TEXT)), '') AS keypoint_review_use,
+                    NULLIF(TRIM(CAST(json_extract(d.refined_keypoints_review_json, '$.resolved_group') AS TEXT)), '') AS keypoint_review_group,
+                    NULLIF(TRIM(CAST(json_extract(d.eye_mask_review_json, '$.state') AS TEXT)), '') AS eye_review_state,
+                    NULLIF(TRIM(CAST(json_extract(d.eye_mask_review_json, '$.method') AS TEXT)), '') AS eye_review_method,
+                    NULLIF(TRIM(CAST(json_extract(d.eye_mask_review_json, '$.intended_use') AS TEXT)), '') AS eye_review_use,
+                    NULLIF(TRIM(CAST(json_extract(d.eye_mask_review_json, '$.resolved_group') AS TEXT)), '') AS eye_review_group,
+                    CASE
+                        WHEN d.detect_quality_grade IS NOT NULL AND d.detect_quality_score IS NOT NULL
+                            THEN d.detect_quality_grade || ' ' || printf('%.1f', d.detect_quality_score)
+                        WHEN d.detect_quality_grade IS NOT NULL
+                            THEN d.detect_quality_grade
+                        WHEN d.detect_quality_score IS NOT NULL
+                            THEN printf('%.1f', d.detect_quality_score)
+                        ELSE ''
+                    END AS detect_quality_head
+                FROM derived d
+            )
+            SELECT
+                COALESCE(r.recording_id, r.dataset_id) AS "Recording",
+                COALESCE(r.camera_id, 'unknown') AS "Camera",
+                CASE
+                    WHEN lower(COALESCE(CAST(r.dataset_status AS TEXT), '')) = 'missing' THEN 'MISS'
+                    ELSE 'OK'
+                END AS "Zarr",
+                COALESCE(NULLIF(CAST(r.zarr_use AS TEXT), ''), '—') AS "Use",
+                COALESCE(NULLIF(CAST(r.zarr_purpose AS TEXT), ''), '—') AS "Purpose",
+                CASE
+                    WHEN r.is_production = 1 THEN 'N/A'
+                    WHEN r.raw_present = 1 AND (r.full_present = 1 OR r.ds_present = 1) THEN 'OK'
+                    ELSE 'MISS'
+                END AS "Import",
+                CASE
+                    WHEN r.is_production = 1 THEN 'N/A'
+                    WHEN r.background_full_present = 1 THEN 'OK'
+                    ELSE 'MISS'
+                END AS "BG Full",
+                CASE
+                    WHEN r.is_production = 1 THEN 'N/A'
+                    WHEN r.background_ds_present = 1 THEN 'OK'
+                    ELSE 'MISS'
+                END AS "BG DS",
+                CASE
+                    WHEN r.detect_present != 1 THEN 'MISS'
+                    WHEN r.detect_coverage_pct IS NULL AND r.detect_method IS NOT NULL THEN 'OK (' || r.detect_method || ')'
+                    WHEN r.detect_coverage_pct IS NULL THEN 'OK'
+                    WHEN r.detect_method IS NOT NULL THEN
+                        'OK ('
+                        || CASE
+                            WHEN r.detect_coverage_pct >= 99.999 THEN '100%'
+                            ELSE printf('%.1f%%', r.detect_coverage_pct)
+                        END
+                        || ', registry, '
+                        || r.detect_method
+                        || ')'
+                    ELSE
+                        'OK ('
+                        || CASE
+                            WHEN r.detect_coverage_pct >= 99.999 THEN '100%'
+                            ELSE printf('%.1f%%', r.detect_coverage_pct)
+                        END
+                        || ', registry)'
+                END AS "Detect",
+                CASE
+                    WHEN r.detect_quality_head = '' AND r.detect_quality_clean_percent IS NULL AND r.detect_quality_artifacts IS NULL
+                        THEN 'MISS'
+                    ELSE
+                        CASE
+                            WHEN (
+                                r.detect_quality_head
+                                || CASE
+                                    WHEN r.detect_quality_clean_percent IS NOT NULL THEN
+                                        CASE WHEN r.detect_quality_head <> '' THEN ', ' ELSE '' END
+                                        || 'clean '
+                                        || printf('%.1f%%', r.detect_quality_clean_percent)
+                                    ELSE ''
+                                END
+                                || CASE
+                                    WHEN r.detect_quality_artifacts IS NOT NULL THEN
+                                        CASE
+                                            WHEN r.detect_quality_head <> '' OR r.detect_quality_clean_percent IS NOT NULL THEN ', '
+                                            ELSE ''
+                                        END
+                                        || 'art '
+                                        || CAST(r.detect_quality_artifacts AS TEXT)
+                                    ELSE ''
+                                END
+                            ) = '' THEN 'OK'
+                            ELSE
+                                'OK ('
+                                || (
+                                    r.detect_quality_head
+                                    || CASE
+                                        WHEN r.detect_quality_clean_percent IS NOT NULL THEN
+                                            CASE WHEN r.detect_quality_head <> '' THEN ', ' ELSE '' END
+                                            || 'clean '
+                                            || printf('%.1f%%', r.detect_quality_clean_percent)
+                                        ELSE ''
+                                    END
+                                    || CASE
+                                        WHEN r.detect_quality_artifacts IS NOT NULL THEN
+                                            CASE
+                                                WHEN r.detect_quality_head <> '' OR r.detect_quality_clean_percent IS NOT NULL THEN ', '
+                                                ELSE ''
+                                            END
+                                            || 'art '
+                                            || CAST(r.detect_quality_artifacts AS TEXT)
+                                        ELSE ''
+                                    END
+                                )
+                                || ')'
+                        END
+                END AS "Detect Quality",
+                CASE
+                    WHEN r.refined_detect_coverage_effective IS NULL THEN 'MISS'
+                    WHEN r.refined_detect_method IS NOT NULL THEN
+                        CASE
+                            WHEN r.refined_detect_coverage_effective >= 99.999 THEN '100%'
+                            ELSE printf('%.1f%%', r.refined_detect_coverage_effective)
+                        END
+                        || ' ('
+                        || r.refined_detect_method
+                        || ')'
+                    ELSE
+                        CASE
+                            WHEN r.refined_detect_coverage_effective >= 99.999 THEN '100%'
+                            ELSE printf('%.1f%%', r.refined_detect_coverage_effective)
+                        END
+                END AS "Refine Detect",
+                COALESCE(r.detect_group, '—') AS "Detect Group",
+                CASE
+                    WHEN r.detect_review_state IS NULL
+                        AND r.detect_review_method IS NULL
+                        AND r.detect_review_use IS NULL
+                        AND r.detect_review_group IS NULL
+                        THEN '—'
+                    WHEN COALESCE(r.detect_review_method, '') <> ''
+                        OR COALESCE(r.detect_review_use, '') <> ''
+                        OR COALESCE(r.detect_review_group, '') <> ''
+                        THEN
+                            COALESCE(r.detect_review_state, 'review')
+                            || ' ('
+                            || CASE WHEN COALESCE(r.detect_review_method, '') <> '' THEN r.detect_review_method ELSE '' END
+                            || CASE
+                                WHEN COALESCE(r.detect_review_use, '') <> '' THEN
+                                    CASE WHEN COALESCE(r.detect_review_method, '') <> '' THEN ', ' ELSE '' END
+                                    || r.detect_review_use
+                                ELSE ''
+                            END
+                            || CASE
+                                WHEN COALESCE(r.detect_review_group, '') <> '' THEN
+                                    CASE
+                                        WHEN COALESCE(r.detect_review_method, '') <> '' OR COALESCE(r.detect_review_use, '') <> ''
+                                            THEN ', '
+                                        ELSE ''
+                                    END
+                                    || 'group='
+                                    || r.detect_review_group
+                                ELSE ''
+                            END
+                            || ')'
+                    WHEN r.detect_review_state IS NOT NULL THEN r.detect_review_state
+                    ELSE '—'
+                END AS "Detect Review",
+                CASE
+                    WHEN r.crop_status = 'ok'
+                        THEN COALESCE(NULLIF(lower(COALESCE(r.crop_run_state, '')), ''), 'OK')
+                    WHEN r.crop_status = 'error' THEN 'failed'
+                    WHEN r.crop_status = 'na' THEN 'na'
+                    ELSE 'MISS'
+                END AS "Crop",
+                CASE
+                    WHEN r.crop_review_state IS NULL
+                        AND r.crop_review_method IS NULL
+                        AND r.crop_review_use IS NULL
+                        AND r.crop_review_group IS NULL
+                        THEN '—'
+                    WHEN COALESCE(r.crop_review_method, '') <> ''
+                        OR COALESCE(r.crop_review_use, '') <> ''
+                        OR COALESCE(r.crop_review_group, '') <> ''
+                        THEN
+                            COALESCE(r.crop_review_state, 'review')
+                            || ' ('
+                            || CASE WHEN COALESCE(r.crop_review_method, '') <> '' THEN r.crop_review_method ELSE '' END
+                            || CASE
+                                WHEN COALESCE(r.crop_review_use, '') <> '' THEN
+                                    CASE WHEN COALESCE(r.crop_review_method, '') <> '' THEN ', ' ELSE '' END
+                                    || r.crop_review_use
+                                ELSE ''
+                            END
+                            || CASE
+                                WHEN COALESCE(r.crop_review_group, '') <> '' THEN
+                                    CASE
+                                        WHEN COALESCE(r.crop_review_method, '') <> '' OR COALESCE(r.crop_review_use, '') <> ''
+                                            THEN ', '
+                                        ELSE ''
+                                    END
+                                    || 'group='
+                                    || r.crop_review_group
+                                ELSE ''
+                            END
+                            || ')'
+                    WHEN r.crop_review_state IS NOT NULL THEN r.crop_review_state
+                    ELSE '—'
+                END AS "Crop Review",
+                CASE WHEN r.keypoints_present = 1 THEN 'OK' ELSE 'MISS' END AS "Keypoints",
+                CASE
+                    WHEN r.refined_keypoints_success_effective IS NULL
+                        AND r.refined_keypoints_train_usable_pct IS NULL
+                        THEN 'MISS'
+                    ELSE
+                        COALESCE(
+                            CASE
+                                WHEN r.refined_keypoints_success_effective >= 99.999 THEN '100%'
+                                WHEN r.refined_keypoints_success_effective IS NOT NULL
+                                    THEN printf('%.1f%%', r.refined_keypoints_success_effective)
+                                ELSE NULL
+                            END,
+                            '—'
+                        )
+                        || CASE
+                            WHEN r.refined_keypoints_train_usable_pct IS NOT NULL THEN
+                                ' (train '
+                                || CASE
+                                    WHEN r.refined_keypoints_train_usable_pct >= 99.999 THEN '100%'
+                                    ELSE printf('%.1f%%', r.refined_keypoints_train_usable_pct)
+                                END
+                                || ')'
+                            ELSE ''
+                        END
+                END AS "Refined Keypoints (analysis/train)",
+                CASE
+                    WHEN r.keypoint_review_state IS NULL
+                        AND r.keypoint_review_method IS NULL
+                        AND r.keypoint_review_use IS NULL
+                        AND r.keypoint_review_group IS NULL
+                        THEN '—'
+                    WHEN COALESCE(r.keypoint_review_method, '') <> ''
+                        OR COALESCE(r.keypoint_review_use, '') <> ''
+                        OR COALESCE(r.keypoint_review_group, '') <> ''
+                        THEN
+                            COALESCE(r.keypoint_review_state, 'review')
+                            || ' ('
+                            || CASE WHEN COALESCE(r.keypoint_review_method, '') <> '' THEN r.keypoint_review_method ELSE '' END
+                            || CASE
+                                WHEN COALESCE(r.keypoint_review_use, '') <> '' THEN
+                                    CASE WHEN COALESCE(r.keypoint_review_method, '') <> '' THEN ', ' ELSE '' END
+                                    || r.keypoint_review_use
+                                ELSE ''
+                            END
+                            || CASE
+                                WHEN COALESCE(r.keypoint_review_group, '') <> '' THEN
+                                    CASE
+                                        WHEN COALESCE(r.keypoint_review_method, '') <> '' OR COALESCE(r.keypoint_review_use, '') <> ''
+                                            THEN ', '
+                                        ELSE ''
+                                    END
+                                    || 'group='
+                                    || r.keypoint_review_group
+                                ELSE ''
+                            END
+                            || ')'
+                    WHEN r.keypoint_review_state IS NOT NULL THEN r.keypoint_review_state
+                    ELSE '—'
+                END AS "Keypoint Review",
+                CASE WHEN r.eye_masks_present = 1 THEN 'OK' ELSE 'MISS' END AS "Eye Masks",
+                CASE WHEN r.refined_eye_masks_present = 1 THEN 'OK' ELSE 'MISS' END AS "Refined Eye Masks",
+                CASE
+                    WHEN r.eye_review_state IS NULL
+                        AND r.eye_review_method IS NULL
+                        AND r.eye_review_use IS NULL
+                        AND r.eye_review_group IS NULL
+                        THEN '—'
+                    WHEN COALESCE(r.eye_review_method, '') <> ''
+                        OR COALESCE(r.eye_review_use, '') <> ''
+                        OR COALESCE(r.eye_review_group, '') <> ''
+                        THEN
+                            COALESCE(r.eye_review_state, 'review')
+                            || ' ('
+                            || CASE WHEN COALESCE(r.eye_review_method, '') <> '' THEN r.eye_review_method ELSE '' END
+                            || CASE
+                                WHEN COALESCE(r.eye_review_use, '') <> '' THEN
+                                    CASE WHEN COALESCE(r.eye_review_method, '') <> '' THEN ', ' ELSE '' END
+                                    || r.eye_review_use
+                                ELSE ''
+                            END
+                            || CASE
+                                WHEN COALESCE(r.eye_review_group, '') <> '' THEN
+                                    CASE
+                                        WHEN COALESCE(r.eye_review_method, '') <> '' OR COALESCE(r.eye_review_use, '') <> ''
+                                            THEN ', '
+                                        ELSE ''
+                                    END
+                                    || 'group='
+                                    || r.eye_review_group
+                                ELSE ''
+                            END
+                            || ')'
+                    WHEN r.eye_review_state IS NOT NULL THEN r.eye_review_state
+                    ELSE '—'
+                END AS "Eye Mask Review",
+                CASE WHEN r.assign_ids_present = 1 THEN 'OK' ELSE 'MISS' END AS "Assign IDs",
+                CASE WHEN r.track_present = 1 THEN 'OK' ELSE 'MISS' END AS "Track",
+                CAST(r.stimulus_runs AS TEXT) || ' (' || CASE WHEN r.stimulus_runs > 0 THEN 'OK' ELSE 'MISS' END || ')' AS "Stimulus",
+                CASE WHEN r.calibration_present = 1 THEN 'OK' ELSE 'MISS' END AS "Calib",
+                CASE
+                    WHEN r.is_production = 1 THEN 'N/A'
+                    ELSE CAST(r.tuning_ok_count AS TEXT) || '/' || CAST(r.tuning_total AS TEXT)
+                END AS "Tuning",
+                CASE
+                    WHEN r.is_production = 1 THEN 'N/A'
+                    WHEN r.dish_mask_status = 'ok' THEN 'OK'
+                    WHEN r.dish_mask_status = 'na' THEN 'N/A'
+                    ELSE 'MISS'
+                END AS "dish_mask",
+                CASE
+                    WHEN r.is_production = 1 THEN 'N/A'
+                    WHEN r.detection_tuning_status = 'ok' THEN 'OK'
+                    WHEN r.detection_tuning_status = 'na' THEN 'N/A'
+                    ELSE 'MISS'
+                END AS "detection_tuning",
+                CASE
+                    WHEN r.is_production = 1 THEN 'N/A'
+                    WHEN r.keypoint_tuning_status = 'ok' THEN 'OK'
+                    WHEN r.keypoint_tuning_status = 'na' THEN 'N/A'
+                    ELSE 'MISS'
+                END AS "keypoint_tuning",
+                CASE
+                    WHEN r.is_production = 1 THEN 'N/A'
+                    WHEN r.eye_mask_tuning_status = 'ok' THEN 'OK'
+                    WHEN r.eye_mask_tuning_status = 'na' THEN 'N/A'
+                    ELSE 'MISS'
+                END AS "eye_mask_tuning",
+                CASE
+                    WHEN r.is_production = 1 THEN 'N/A'
+                    WHEN r.subdish_mask_tuning_status = 'ok' THEN 'OK'
+                    WHEN r.subdish_mask_tuning_status = 'na' THEN 'N/A'
+                    ELSE 'MISS'
+                END AS "subdish_mask_tuning"
+            FROM render r;
             """
         )
 

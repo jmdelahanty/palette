@@ -23,6 +23,7 @@ from .db import (
     _extract_keypoint_quality_rows,
     _import_zarr,
 )
+from fisheye.shared.experiment_setup import subdish_required
 
 DEFAULT_ALLOWED_RECORDING_TYPES = {
     "behavior",
@@ -35,6 +36,30 @@ DEFAULT_ALLOWED_RECORDING_SUBTYPES_BY_TYPE = {
     "histology": {"section", "wholemount"},
 }
 ALLOWED_BEHAVIOR_MODES = {"free", "embedded", "none"}
+RECORDING_TUNING_STEP_NAMES: tuple[str, ...] = (
+    "dish_mask",
+    "detection_tuning",
+    "keypoint_tuning",
+    "eye_mask_tuning",
+    "subdish_mask_tuning",
+)
+RECORDING_STEP_NAMES: tuple[str, ...] = (
+    "raw",
+    "background",
+    "detect",
+    "refined_detect",
+    "crop",
+    "keypoints",
+    "refined_keypoints",
+    "eye_masks",
+    "refined_eye_masks",
+    "id_assignment",
+    "tracks",
+    "stimulus",
+    "calibration",
+    *RECORDING_TUNING_STEP_NAMES,
+)
+RECORDING_STEP_STATUS_VALUES: tuple[str, ...] = ("ok", "missing", "absent", "na", "error")
 
 
 @dataclass(frozen=True)
@@ -289,6 +314,31 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Backfill eye_mask_performance rows for datasets that currently have no eye-mask performance rows."
+        ),
+    )
+    parser.add_argument(
+        "--backfill-recording-step-status",
+        action="store_true",
+        help=(
+            "Backfill recording_step_status rows from existing Zarrs and append changed rows "
+            "to recording_step_status_history."
+        ),
+    )
+    parser.add_argument(
+        "--recording-step-recording-id",
+        action="append",
+        help=(
+            "Optional recording_id filter for --backfill-recording-step-status "
+            "(repeatable or comma-separated)."
+        ),
+    )
+    parser.add_argument(
+        "--recording-step-zarr-use",
+        choices=("all", "training", "analysis"),
+        default="all",
+        help=(
+            "Optional zarr_use filter for --backfill-recording-step-status "
+            "(default: all)."
         ),
     )
     parser.add_argument(
@@ -1242,6 +1292,16 @@ def _normalize_status_values(values: Optional[Sequence[str]]) -> tuple[str, ...]
                 normalized.add(status)
     if not normalized:
         normalized.add("failed")
+    return tuple(sorted(normalized))
+
+
+def _normalize_recording_ids(values: Optional[Sequence[str]]) -> tuple[str, ...]:
+    normalized: set[str] = set()
+    for value in values or ():
+        for token in str(value).split(","):
+            recording_id = token.strip()
+            if recording_id:
+                normalized.add(recording_id)
     return tuple(sorted(normalized))
 
 
@@ -2917,6 +2977,1205 @@ def _backfill_eye_mask_performance(
     return summary
 
 
+def _decode_text(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        text = value.decode("utf-8", "ignore").strip()
+    else:
+        text = str(value).strip()
+    return text or None
+
+
+def _coerce_float_value(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    if parsed != parsed:  # NaN
+        return None
+    return parsed
+
+
+def _coerce_int_value(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except Exception:
+        return None
+    return parsed
+
+
+def _coerce_mapping_value(value: object) -> Optional[Dict[str, object]]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        text = value.decode("utf-8", "ignore").strip()
+    elif isinstance(value, str):
+        text = value.strip()
+    else:
+        return None
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _canonical_json_text(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _resolve_latest_group(parent: object) -> tuple[Optional[str], Optional[object], str]:
+    if parent is None:
+        return None, None, "none"
+
+    latest = None
+    if hasattr(parent, "attrs"):
+        try:
+            latest = _decode_text(parent.attrs.get("latest"))  # type: ignore[attr-defined]
+        except Exception:
+            latest = None
+    if latest:
+        try:
+            if latest in parent:  # type: ignore[operator]
+                return latest, parent[latest], "latest_attr"  # type: ignore[index]
+        except Exception:
+            pass
+
+    names: List[str] = []
+    try:
+        if hasattr(parent, "group_keys"):
+            names = [str(name) for name in parent.group_keys()]  # type: ignore[attr-defined]
+        else:
+            names = [str(name) for name in parent.keys()]  # type: ignore[attr-defined]
+    except Exception:
+        names = []
+    names = sorted(name for name in names if name)
+    if not names:
+        return None, None, "none"
+
+    fallback = names[-1]
+    try:
+        return fallback, parent[fallback], "sorted_fallback"  # type: ignore[index]
+    except Exception:
+        return fallback, None, "sorted_fallback_error"
+
+
+def _extract_coverage_pct(group: object) -> Optional[float]:
+    if group is None or not hasattr(group, "get"):
+        return None
+    for key in ("frame_counts", "n_detections"):
+        try:
+            counts_arr = group.get(key)  # type: ignore[attr-defined]
+        except Exception:
+            counts_arr = None
+        if counts_arr is None:
+            continue
+        try:
+            values = counts_arr[:]
+        except Exception:
+            continue
+        try:
+            total = int(values.shape[0])  # type: ignore[attr-defined]
+        except Exception:
+            try:
+                total = len(values)  # type: ignore[arg-type]
+            except Exception:
+                total = 0
+        if total <= 0:
+            continue
+        try:
+            present = int((values > 0).sum())  # type: ignore[operator]
+        except Exception:
+            try:
+                present = 0
+                for item in values:  # type: ignore[assignment]
+                    if _coerce_float_value(item) and float(item) > 0.0:
+                        present += 1
+            except Exception:
+                continue
+        return float(present) / float(total) * 100.0
+    return None
+
+
+def _extract_detect_method(detect_group: object) -> Optional[str]:
+    if detect_group is None or not hasattr(detect_group, "attrs"):
+        return None
+    method = _decode_text(detect_group.attrs.get("detection_method"))  # type: ignore[attr-defined]
+    if method:
+        return method
+    method = _decode_text(detect_group.attrs.get("method"))  # type: ignore[attr-defined]
+    if method:
+        return method
+    provenance = _coerce_mapping_value(detect_group.attrs.get("provenance"))  # type: ignore[attr-defined]
+    if provenance is None:
+        return None
+    return _decode_text(provenance.get("method"))
+
+
+def _extract_detect_quality_details(detect_group: object) -> Dict[str, object]:
+    if detect_group is None or not hasattr(detect_group, "get"):
+        return {}
+    try:
+        quality_parent = detect_group.get("quality_reports")  # type: ignore[attr-defined]
+    except Exception:
+        quality_parent = None
+    if quality_parent is None:
+        return {}
+
+    quality_run, quality_group, _ = _resolve_latest_group(quality_parent)
+    if quality_group is None or not hasattr(quality_group, "attrs"):
+        return {"detect_quality_run": quality_run} if quality_run else {}
+
+    quality_score = _coerce_mapping_value(quality_group.attrs.get("quality_score")) or {}  # type: ignore[attr-defined]
+    quality_summary = _coerce_mapping_value(
+        quality_group.attrs.get("detection_quality_summary")  # type: ignore[attr-defined]
+    ) or {}
+    blip = _coerce_int_value(quality_summary.get("blip_detections"))
+    jump = _coerce_int_value(quality_summary.get("jump_detections"))
+    multi = _coerce_int_value(quality_summary.get("multi_detections"))
+    detect_quality_artifacts: Optional[int] = None
+    if blip is not None or jump is not None or multi is not None:
+        detect_quality_artifacts = int((blip or 0) + (jump or 0) + (multi or 0))
+
+    return {
+        "detect_quality_run": quality_run,
+        "detect_quality_grade": _decode_text(quality_score.get("grade")),
+        "detect_quality_score": _coerce_float_value(quality_score.get("overall_score")),
+        "detect_quality_clean_percent": _coerce_float_value(quality_summary.get("clean_percentage")),
+        "detect_quality_artifacts": detect_quality_artifacts,
+    }
+
+
+def _extract_refined_detect_coverage_pct(refined_group: object) -> Optional[float]:
+    if refined_group is None:
+        return None
+    direct = _coerce_float_value(
+        refined_group.attrs.get("coverage_percent")  # type: ignore[attr-defined]
+    )
+    if direct is not None:
+        return direct
+
+    manual_latest = _decode_text(
+        refined_group.attrs.get("manual_review_latest")  # type: ignore[attr-defined]
+    )
+    if manual_latest:
+        try:
+            manual_group = refined_group[manual_latest]  # type: ignore[index]
+            manual_cov = _extract_coverage_pct(manual_group)
+            if manual_cov is not None:
+                return manual_cov
+        except Exception:
+            pass
+
+    comparison = _coerce_mapping_value(
+        refined_group.attrs.get("coverage_comparison")  # type: ignore[attr-defined]
+    )
+    if comparison is not None:
+        for section in ("interpolated", "original", "filtered"):
+            payload = comparison.get(section)
+            if isinstance(payload, dict):
+                cov = _coerce_float_value(payload.get("coverage_percent"))
+                if cov is not None:
+                    return cov
+
+    stats = _coerce_mapping_value(
+        refined_group.attrs.get("coverage_stats")  # type: ignore[attr-defined]
+    )
+    if stats is not None:
+        for section in ("final", "clean"):
+            payload = stats.get(section)
+            if isinstance(payload, dict):
+                cov = _coerce_float_value(payload.get("coverage_percent"))
+                if cov is not None:
+                    return cov
+
+    for child_name in ("interpolated", "filtered"):
+        try:
+            child = refined_group.get(child_name)  # type: ignore[attr-defined]
+        except Exception:
+            child = None
+        if child is None:
+            continue
+        cov_attr = _coerce_float_value(child.attrs.get("coverage_percent"))  # type: ignore[attr-defined]
+        if cov_attr is not None:
+            return cov_attr
+        cov_counts = _extract_coverage_pct(child)
+        if cov_counts is not None:
+            return cov_counts
+
+    return _extract_coverage_pct(refined_group)
+
+
+def _extract_refined_keypoints_coverage_pct(refined_group: object) -> Optional[float]:
+    if refined_group is None or not hasattr(refined_group, "attrs"):
+        return None
+    summary = _coerce_mapping_value(refined_group.attrs.get("summary_statistics"))  # type: ignore[attr-defined]
+    blocks: List[Dict[str, object]] = []
+    if summary is not None:
+        post = summary.get("postprocess")
+        if isinstance(post, dict):
+            blocks.append(post)
+        refine = summary.get("refine")
+        if isinstance(refine, dict):
+            blocks.append(refine)
+        blocks.append(summary)
+    for block in blocks:
+        for key in ("success_rate_percent", "pass_rate_percent", "usable_keypoints_rate"):
+            value = _coerce_float_value(block.get(key))
+            if value is not None:
+                return value
+        usable = _coerce_float_value(block.get("usable_keypoints")) or _coerce_float_value(block.get("usable"))
+        total = _coerce_float_value(block.get("total_rois")) or _coerce_float_value(block.get("total"))
+        if usable is not None and total is not None and total > 0:
+            return float(usable) / float(total) * 100.0
+
+    try:
+        usable_arr = refined_group.get("usable_keypoints")  # type: ignore[attr-defined]
+    except Exception:
+        usable_arr = None
+    if usable_arr is None:
+        return None
+    try:
+        values = usable_arr[:]
+        total = int(values.shape[0])  # type: ignore[attr-defined]
+        if total <= 0:
+            return None
+        usable = int(values.sum())  # type: ignore[attr-defined]
+        return float(usable) / float(total) * 100.0
+    except Exception:
+        return None
+
+
+def _extract_updated_utc(group: object, *, fallback: str) -> str:
+    if group is None or not hasattr(group, "attrs"):
+        return fallback
+    for key in (
+        "updated_utc",
+        "created_utc",
+        "created_at_utc",
+        "timestamp_utc",
+        "detect_timestamp_utc",
+        "timestamp",
+        "created_at",
+    ):
+        try:
+            value = _decode_text(group.attrs.get(key))  # type: ignore[attr-defined]
+        except Exception:
+            value = None
+        if value:
+            return value
+    return fallback
+
+
+def _mtime_ns_to_utc_text(mtime_ns: Optional[int]) -> str:
+    if mtime_ns is None:
+        return "1970-01-01T00:00:00+00:00"
+    return datetime.fromtimestamp(float(mtime_ns) / 1_000_000_000.0, tz=timezone.utc).isoformat()
+
+
+def _step_status_from_presence(
+    *,
+    present: bool,
+    is_production: bool,
+    prerequisite_statuses: Sequence[str],
+) -> tuple[str, str]:
+    if present:
+        return "ok", "present"
+    if is_production:
+        return "na", "production_dataset"
+    if not prerequisite_statuses:
+        return "missing", "run_missing"
+    if any(status == "ok" for status in prerequisite_statuses):
+        return "missing", "run_missing"
+    if any(status == "error" for status in prerequisite_statuses):
+        return "error", "upstream_error"
+    if all(status == "na" for status in prerequisite_statuses):
+        return "na", "upstream_na"
+    return "absent", "upstream_missing"
+
+
+def _make_recording_step_row(
+    *,
+    dataset_id: str,
+    recording_id: str,
+    step_name: str,
+    status: str,
+    run_name: Optional[str],
+    method: Optional[str],
+    coverage_pct: Optional[float],
+    review_status: Optional[Dict[str, object]],
+    details: Dict[str, object],
+    source: str,
+    zarr_mtime_ns: Optional[int],
+    updated_utc: str,
+) -> Dict[str, object]:
+    safe_details = {key: value for key, value in details.items() if value is not None}
+    return {
+        "dataset_id": dataset_id,
+        "recording_id": recording_id,
+        "step_name": step_name,
+        "status": status,
+        "run_name": run_name,
+        "method": method,
+        "coverage_pct": _coerce_float_value(coverage_pct),
+        "review_status_json": _canonical_json_text(review_status) if review_status else None,
+        "details_json": _canonical_json_text(safe_details) if safe_details else None,
+        "source": source,
+        "zarr_mtime_ns": zarr_mtime_ns,
+        "updated_utc": updated_utc,
+    }
+
+
+def _build_recording_step_error_rows(
+    *,
+    dataset_id: str,
+    recording_id: str,
+    zarr_mtime_ns: Optional[int],
+    error_detail: str,
+    source: str,
+) -> List[Dict[str, object]]:
+    updated_utc = _mtime_ns_to_utc_text(zarr_mtime_ns)
+    rows: List[Dict[str, object]] = []
+    for step_name in RECORDING_STEP_NAMES:
+        rows.append(
+            _make_recording_step_row(
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                step_name=step_name,
+                status="error",
+                run_name=None,
+                method=None,
+                coverage_pct=None,
+                review_status=None,
+                details={"reason": "zarr_open_error", "error": error_detail},
+                source=source,
+                zarr_mtime_ns=zarr_mtime_ns,
+                updated_utc=updated_utc,
+            )
+        )
+    return rows
+
+
+def _build_recording_step_rows_from_root(
+    *,
+    root: object,
+    dataset_id: str,
+    recording_id: str,
+    zarr_use: Optional[str],
+    zarr_mtime_ns: Optional[int],
+    source: str,
+) -> List[Dict[str, object]]:
+    fallback_updated_utc = _mtime_ns_to_utc_text(zarr_mtime_ns)
+
+    pipeline_type = _decode_text(root.attrs.get("pipeline_type"))  # type: ignore[attr-defined]
+    zarr_purpose = _decode_text(root.attrs.get("zarr_purpose"))  # type: ignore[attr-defined]
+    has_raw_video_attr = root.attrs.get("has_raw_video")  # type: ignore[attr-defined]
+    if isinstance(has_raw_video_attr, (bytes, bytearray)):
+        has_raw_video_attr = has_raw_video_attr.decode("utf-8", "ignore")
+    if isinstance(has_raw_video_attr, str):
+        lowered = has_raw_video_attr.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            has_raw_video_attr = True
+        elif lowered in {"false", "0", "no"}:
+            has_raw_video_attr = False
+        else:
+            has_raw_video_attr = None
+
+    raw_group = root.get("raw_video")  # type: ignore[attr-defined]
+    raw_present = bool(raw_group is not None)
+    full_present = bool(raw_group is not None and "images_full" in raw_group)
+    ds_present = bool(raw_group is not None and "images_ds" in raw_group)
+    sampled_present = bool(raw_group is not None and "original_frame_indices" in raw_group)
+    is_production = bool(
+        zarr_purpose == "production"
+        or pipeline_type == "yolo_inference"
+        or (has_raw_video_attr is False and not (full_present or ds_present))
+    )
+    raw_status, raw_reason = _step_status_from_presence(
+        present=full_present or ds_present,
+        is_production=is_production,
+        prerequisite_statuses=(),
+    )
+
+    background_full_present = False
+    background_ds_present = False
+    background_run: Optional[str] = None
+    background_group: Optional[object] = None
+    background_selection = "none"
+    background_parent = root.get("background_runs")  # type: ignore[attr-defined]
+    if background_parent is not None:
+        background_run, background_group, background_selection = _resolve_latest_group(background_parent)
+        if background_group is not None:
+            background_full_present = bool("background_full" in background_group)
+            background_ds_present = bool("background_ds" in background_group)
+    if not (background_full_present and background_ds_present):
+        legacy_background = root.get("background")  # type: ignore[attr-defined]
+        if legacy_background is not None:
+            background_group = legacy_background
+            background_run = background_run or "legacy_background"
+            if background_selection == "none":
+                background_selection = "legacy_group"
+            background_full_present = bool("background_full" in legacy_background)
+            background_ds_present = bool("background_ds" in legacy_background)
+    background_status, background_reason = _step_status_from_presence(
+        present=background_full_present and background_ds_present,
+        is_production=is_production,
+        prerequisite_statuses=(raw_status,),
+    )
+    background_method = (
+        _decode_text(background_group.attrs.get("method"))  # type: ignore[union-attr]
+        if background_group is not None and hasattr(background_group, "attrs")
+        else None
+    )
+
+    detect_parent = root.get("detect_runs")  # type: ignore[attr-defined]
+    detect_run, detect_group, detect_selection = _resolve_latest_group(detect_parent)
+    detect_status, detect_reason = _step_status_from_presence(
+        present=detect_group is not None,
+        is_production=is_production,
+        prerequisite_statuses=(),
+    )
+    detect_method = _extract_detect_method(detect_group)
+    detect_coverage = _extract_coverage_pct(detect_group)
+    detect_quality_details = _extract_detect_quality_details(detect_group)
+
+    refined_detect_parent = root.get("refined_detect_runs") or root.get("refined_runs")  # type: ignore[attr-defined]
+    refined_detect_run, refined_detect_group, refined_detect_selection = _resolve_latest_group(refined_detect_parent)
+    refined_detect_status, refined_detect_reason = _step_status_from_presence(
+        present=refined_detect_group is not None,
+        is_production=is_production,
+        prerequisite_statuses=(detect_status,),
+    )
+    refined_detect_method = _decode_text(
+        refined_detect_group.attrs.get("method")  # type: ignore[union-attr]
+    ) if refined_detect_group is not None else None
+    if not refined_detect_method and refined_detect_group is not None:
+        parameters = _coerce_mapping_value(refined_detect_group.attrs.get("parameters"))  # type: ignore[attr-defined]
+        if parameters is not None:
+            refined_detect_method = _decode_text(parameters.get("refine_mode"))
+    refined_detect_coverage = _extract_refined_detect_coverage_pct(refined_detect_group)
+    detect_review_status = (
+        _coerce_mapping_value(refined_detect_group.attrs.get("detect_review_status"))  # type: ignore[attr-defined]
+        if refined_detect_group is not None
+        else None
+    )
+
+    crop_parent = root.get("crop_runs")  # type: ignore[attr-defined]
+    crop_run, crop_group, crop_selection = _resolve_latest_group(crop_parent)
+    crop_status, crop_reason = _step_status_from_presence(
+        present=crop_group is not None,
+        is_production=is_production,
+        prerequisite_statuses=(refined_detect_status, detect_status),
+    )
+    crop_method = _decode_text(
+        crop_group.attrs.get("detection_source_type")  # type: ignore[union-attr]
+    ) if crop_group is not None else None
+    if not crop_method and crop_group is not None:
+        crop_method = _decode_text(crop_group.attrs.get("method"))  # type: ignore[attr-defined]
+    crop_review_status = (
+        _coerce_mapping_value(crop_group.attrs.get("crop_review_status"))  # type: ignore[attr-defined]
+        if crop_group is not None
+        else None
+    )
+    crop_run_state = (
+        _decode_text(crop_group.attrs.get("status"))  # type: ignore[attr-defined]
+        if crop_group is not None
+        else None
+    )
+    if crop_group is not None and crop_run_state:
+        run_state = crop_run_state.lower()
+        if run_state in {"failed", "error"}:
+            crop_status = "error"
+            crop_reason = "run_failed"
+        elif run_state in {"running", "in_progress", "started", "pending"}:
+            crop_status = "missing"
+            crop_reason = "run_in_progress"
+
+    keypoints_parent = root.get("keypoints_runs")  # type: ignore[attr-defined]
+    keypoints_run, keypoints_group, keypoints_selection = _resolve_latest_group(keypoints_parent)
+    keypoints_status, keypoints_reason = _step_status_from_presence(
+        present=keypoints_group is not None,
+        is_production=is_production,
+        prerequisite_statuses=(crop_status,),
+    )
+    keypoints_method = _decode_text(
+        keypoints_group.attrs.get("method")  # type: ignore[union-attr]
+    ) if keypoints_group is not None else None
+
+    refined_keypoints_parent = root.get("refined_keypoints_runs") or root.get("keypoints_refined_runs")  # type: ignore[attr-defined]
+    refined_keypoints_run, refined_keypoints_group, refined_keypoints_selection = _resolve_latest_group(
+        refined_keypoints_parent
+    )
+    refined_keypoints_status, refined_keypoints_reason = _step_status_from_presence(
+        present=refined_keypoints_group is not None,
+        is_production=is_production,
+        prerequisite_statuses=(keypoints_status,),
+    )
+    refined_keypoints_method = _decode_text(
+        refined_keypoints_group.attrs.get("method")  # type: ignore[union-attr]
+    ) if refined_keypoints_group is not None else None
+    if not refined_keypoints_method and refined_keypoints_group is not None:
+        refined_keypoints_method = "refine_keypoints"
+    refined_keypoints_coverage = _extract_refined_keypoints_coverage_pct(refined_keypoints_group)
+    keypoint_review_status = (
+        _coerce_mapping_value(refined_keypoints_group.attrs.get("keypoint_review_status"))  # type: ignore[attr-defined]
+        if refined_keypoints_group is not None
+        else None
+    )
+
+    eye_masks_parent = root.get("eye_masks_runs")  # type: ignore[attr-defined]
+    eye_masks_run, eye_masks_group, eye_masks_selection = _resolve_latest_group(eye_masks_parent)
+    eye_masks_status, eye_masks_reason = _step_status_from_presence(
+        present=eye_masks_group is not None,
+        is_production=is_production,
+        prerequisite_statuses=(refined_keypoints_status, keypoints_status),
+    )
+    eye_masks_method = _decode_text(
+        eye_masks_group.attrs.get("method")  # type: ignore[union-attr]
+    ) if eye_masks_group is not None else None
+    eye_masks_coverage = None
+    if eye_masks_group is not None:
+        rate = _coerce_float_value(eye_masks_group.attrs.get("successful_roi_pair_rate"))  # type: ignore[attr-defined]
+        if rate is not None:
+            eye_masks_coverage = float(rate) * 100.0 if rate <= 1.0 else float(rate)
+
+    refined_eye_masks_parent = root.get("refined_eye_masks_runs")  # type: ignore[attr-defined]
+    refined_eye_masks_run, refined_eye_masks_group, refined_eye_masks_selection = _resolve_latest_group(
+        refined_eye_masks_parent
+    )
+    refined_eye_masks_status, refined_eye_masks_reason = _step_status_from_presence(
+        present=refined_eye_masks_group is not None,
+        is_production=is_production,
+        prerequisite_statuses=(eye_masks_status,),
+    )
+    refined_eye_masks_method = _decode_text(
+        refined_eye_masks_group.attrs.get("method")  # type: ignore[union-attr]
+    ) if refined_eye_masks_group is not None else None
+    refined_eye_masks_review_status = (
+        _coerce_mapping_value(refined_eye_masks_group.attrs.get("eye_mask_review_status"))  # type: ignore[attr-defined]
+        if refined_eye_masks_group is not None
+        else None
+    )
+    refined_eye_masks_coverage = None
+    if refined_eye_masks_group is not None:
+        rate = _coerce_float_value(
+            refined_eye_masks_group.attrs.get("successful_roi_pair_rate")  # type: ignore[attr-defined]
+        )
+        if rate is not None:
+            refined_eye_masks_coverage = float(rate) * 100.0 if rate <= 1.0 else float(rate)
+
+    id_assignment_parent = root.get("id_assignment_runs")  # type: ignore[attr-defined]
+    id_assignment_run, id_assignment_group, id_assignment_selection = _resolve_latest_group(id_assignment_parent)
+    id_assignment_status, id_assignment_reason = _step_status_from_presence(
+        present=id_assignment_group is not None,
+        is_production=is_production,
+        prerequisite_statuses=(refined_keypoints_status, keypoints_status),
+    )
+    id_assignment_method = _decode_text(
+        id_assignment_group.attrs.get("method")  # type: ignore[union-attr]
+    ) if id_assignment_group is not None else None
+
+    tracks_parent = root.get("tracking_runs")  # type: ignore[attr-defined]
+    tracks_run, tracks_group, tracks_selection = _resolve_latest_group(tracks_parent)
+    tracks_status, tracks_reason = _step_status_from_presence(
+        present=tracks_group is not None,
+        is_production=is_production,
+        prerequisite_statuses=(id_assignment_status,),
+    )
+    tracks_method = _decode_text(
+        tracks_group.attrs.get("method")  # type: ignore[union-attr]
+    ) if tracks_group is not None else None
+
+    stimulus_runs = 0
+    stimulus_run: Optional[str] = None
+    stimulus_group: Optional[object] = None
+    stimulus_selection = "none"
+    analysis_group = root.get("analysis")  # type: ignore[attr-defined]
+    if analysis_group is not None and "stimulus_runs" in analysis_group:
+        stimulus_parent = analysis_group["stimulus_runs"]
+        stimulus_run, stimulus_group, stimulus_selection = _resolve_latest_group(stimulus_parent)
+        if hasattr(stimulus_parent, "group_keys"):
+            stimulus_runs = len(list(stimulus_parent.group_keys()))  # type: ignore[attr-defined]
+        else:
+            try:
+                stimulus_runs = len(list(stimulus_parent.keys()))  # type: ignore[attr-defined]
+            except Exception:
+                stimulus_runs = 0
+    stimulus_status = "ok" if stimulus_runs > 0 else "missing"
+    stimulus_reason = "present" if stimulus_runs > 0 else "run_missing"
+
+    calibration_group = root.get("calibration")  # type: ignore[attr-defined]
+    calibration_present = calibration_group is not None
+    calibration_status = "ok" if calibration_present else "missing"
+    calibration_reason = "present" if calibration_present else "missing"
+
+    analysis_meta = root.get("analysis_metadata")  # type: ignore[attr-defined]
+    analysis_meta_attrs = analysis_meta.attrs if analysis_meta is not None and hasattr(analysis_meta, "attrs") else {}
+    subdish_needed = subdish_required(root.attrs)  # type: ignore[attr-defined]
+    tuning_step_statuses: Dict[str, tuple[str, str]] = {}
+    for tuning_key in RECORDING_TUNING_STEP_NAMES:
+        if tuning_key in analysis_meta_attrs:
+            tuning_step_statuses[tuning_key] = ("ok", "present")
+            continue
+        if tuning_key == "subdish_mask_tuning" and not subdish_needed:
+            tuning_step_statuses[tuning_key] = ("na", "subdish_not_required")
+            continue
+        tuning_step_statuses[tuning_key] = ("missing", "metadata_missing")
+
+    common_details = {
+        "is_production": is_production,
+        "has_raw_video_attr": has_raw_video_attr,
+        "zarr_use": zarr_use,
+        "zarr_purpose": zarr_purpose,
+        "pipeline_type": pipeline_type,
+    }
+
+    rows: List[Dict[str, object]] = [
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="raw",
+            status=raw_status,
+            run_name=None,
+            method=None,
+            coverage_pct=None,
+            review_status=None,
+            details={
+                **common_details,
+                "reason": raw_reason,
+                "raw_present": raw_present,
+                "full_present": full_present,
+                "ds_present": ds_present,
+                "sampled_present": sampled_present,
+            },
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(raw_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="background",
+            status=background_status,
+            run_name=background_run,
+            method=background_method,
+            coverage_pct=None,
+            review_status=None,
+            details={
+                **common_details,
+                "reason": background_reason,
+                "latest_selector": background_selection,
+                "full_present": background_full_present,
+                "ds_present": background_ds_present,
+                "upstream": {"raw": raw_status},
+            },
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(background_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="detect",
+            status=detect_status,
+            run_name=detect_run,
+            method=detect_method,
+            coverage_pct=detect_coverage,
+            review_status=None,
+            details={
+                **common_details,
+                "reason": detect_reason,
+                "latest_selector": detect_selection,
+                **detect_quality_details,
+            },
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(detect_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="refined_detect",
+            status=refined_detect_status,
+            run_name=refined_detect_run,
+            method=refined_detect_method,
+            coverage_pct=refined_detect_coverage,
+            review_status=detect_review_status,
+            details={
+                **common_details,
+                "reason": refined_detect_reason,
+                "latest_selector": refined_detect_selection,
+                "upstream": {"detect": detect_status},
+            },
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(refined_detect_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="crop",
+            status=crop_status,
+            run_name=crop_run,
+            method=crop_method,
+            coverage_pct=_extract_coverage_pct(crop_group),
+            review_status=crop_review_status,
+            details={
+                **common_details,
+                "reason": crop_reason,
+                "latest_selector": crop_selection,
+                "run_state": crop_run_state,
+                "upstream": {"detect": detect_status, "refined_detect": refined_detect_status},
+            },
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(crop_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="keypoints",
+            status=keypoints_status,
+            run_name=keypoints_run,
+            method=keypoints_method,
+            coverage_pct=None,
+            review_status=None,
+            details={
+                **common_details,
+                "reason": keypoints_reason,
+                "latest_selector": keypoints_selection,
+                "upstream": {"crop": crop_status},
+            },
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(keypoints_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="refined_keypoints",
+            status=refined_keypoints_status,
+            run_name=refined_keypoints_run,
+            method=refined_keypoints_method,
+            coverage_pct=refined_keypoints_coverage,
+            review_status=keypoint_review_status,
+            details={
+                **common_details,
+                "reason": refined_keypoints_reason,
+                "latest_selector": refined_keypoints_selection,
+                "upstream": {"keypoints": keypoints_status},
+            },
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(refined_keypoints_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="eye_masks",
+            status=eye_masks_status,
+            run_name=eye_masks_run,
+            method=eye_masks_method,
+            coverage_pct=eye_masks_coverage,
+            review_status=None,
+            details={
+                **common_details,
+                "reason": eye_masks_reason,
+                "latest_selector": eye_masks_selection,
+                "upstream": {
+                    "keypoints": keypoints_status,
+                    "refined_keypoints": refined_keypoints_status,
+                },
+            },
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(eye_masks_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="refined_eye_masks",
+            status=refined_eye_masks_status,
+            run_name=refined_eye_masks_run,
+            method=refined_eye_masks_method,
+            coverage_pct=refined_eye_masks_coverage,
+            review_status=refined_eye_masks_review_status,
+            details={
+                **common_details,
+                "reason": refined_eye_masks_reason,
+                "latest_selector": refined_eye_masks_selection,
+                "upstream": {"eye_masks": eye_masks_status},
+            },
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(refined_eye_masks_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="id_assignment",
+            status=id_assignment_status,
+            run_name=id_assignment_run,
+            method=id_assignment_method,
+            coverage_pct=None,
+            review_status=None,
+            details={
+                **common_details,
+                "reason": id_assignment_reason,
+                "latest_selector": id_assignment_selection,
+                "upstream": {
+                    "keypoints": keypoints_status,
+                    "refined_keypoints": refined_keypoints_status,
+                },
+            },
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(id_assignment_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="tracks",
+            status=tracks_status,
+            run_name=tracks_run,
+            method=tracks_method,
+            coverage_pct=None,
+            review_status=None,
+            details={
+                **common_details,
+                "reason": tracks_reason,
+                "latest_selector": tracks_selection,
+                "upstream": {"id_assignment": id_assignment_status},
+            },
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(tracks_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="stimulus",
+            status=stimulus_status,
+            run_name=stimulus_run,
+            method=None,
+            coverage_pct=None,
+            review_status=None,
+            details={
+                **common_details,
+                "reason": stimulus_reason,
+                "stimulus_runs": stimulus_runs,
+                "latest_selector": stimulus_selection,
+            },
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(stimulus_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="calibration",
+            status=calibration_status,
+            run_name=None,
+            method=None,
+            coverage_pct=None,
+            review_status=None,
+            details={**common_details, "reason": calibration_reason},
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(calibration_group, fallback=fallback_updated_utc),
+        ),
+        *[
+            _make_recording_step_row(
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                step_name=tuning_key,
+                status=tuning_step_statuses[tuning_key][0],
+                run_name=None,
+                method=None,
+                coverage_pct=None,
+                review_status=None,
+                details={
+                    **common_details,
+                    "reason": tuning_step_statuses[tuning_key][1],
+                    "upstream": {"calibration": calibration_status},
+                },
+                source=source,
+                zarr_mtime_ns=zarr_mtime_ns,
+                updated_utc=_extract_updated_utc(analysis_meta, fallback=fallback_updated_utc),
+            )
+            for tuning_key in RECORDING_TUNING_STEP_NAMES
+        ],
+    ]
+    return rows
+
+
+def _recording_step_row_signature(row: Dict[str, object]) -> tuple[object, ...]:
+    zarr_mtime = row.get("zarr_mtime_ns")
+    zarr_mtime_norm: Optional[int] = None
+    if zarr_mtime is not None:
+        try:
+            zarr_mtime_norm = int(zarr_mtime)
+        except Exception:
+            zarr_mtime_norm = None
+    return (
+        _decode_text(row.get("recording_id")),
+        _decode_text(row.get("status")),
+        _decode_text(row.get("run_name")),
+        _decode_text(row.get("method")),
+        _coerce_float_value(row.get("coverage_pct")),
+        _decode_text(row.get("review_status_json")),
+        _decode_text(row.get("details_json")),
+        _decode_text(row.get("source")),
+        zarr_mtime_norm,
+        _decode_text(row.get("updated_utc")),
+    )
+
+
+def _backfill_recording_step_status(
+    registry: Registry,
+    *,
+    dry_run: bool,
+    scope_paths: Optional[Sequence[Path]],
+    recording_ids: Optional[Sequence[str]],
+    zarr_use_filter: str,
+) -> Dict[str, object]:
+    rows = registry.conn.execute(
+        """
+        SELECT dataset_id, zarr_path, recording_id, zarr_use
+        FROM datasets
+        WHERE status IS NULL OR lower(status) != 'missing'
+        ORDER BY dataset_id;
+        """
+    ).fetchall()
+    scope_roots = _normalize_scope_paths(scope_paths)
+    zarr = _import_zarr()
+    recording_id_filter = set(_normalize_recording_ids(recording_ids))
+    zarr_use_norm = str(zarr_use_filter or "all").strip().lower()
+    if zarr_use_norm not in {"all", "analysis", "training"}:
+        raise ValueError("zarr_use_filter must be one of: all, analysis, training")
+
+    summary: Dict[str, object] = {
+        "datasets_scanned": 0,
+        "datasets_in_scope": 0,
+        "datasets_skipped_path": 0,
+        "datasets_skipped_missing_recording_id": 0,
+        "datasets_skipped_recording_filter": 0,
+        "datasets_skipped_zarr_use_filter": 0,
+        "datasets_missing_zarr": 0,
+        "datasets_errors": 0,
+        "rows_evaluated": 0,
+        "rows_inserted": 0,
+        "rows_updated": 0,
+        "rows_skipped": 0,
+        "history_rows_inserted": 0,
+        "rows_by_status": {status: 0 for status in RECORDING_STEP_STATUS_VALUES},
+        "rows_by_step": {step_name: 0 for step_name in RECORDING_STEP_NAMES},
+        "filters": {
+            "recording_ids": sorted(recording_id_filter),
+            "zarr_use": zarr_use_norm,
+            "scope_paths": [str(path) for path in scope_roots],
+        },
+    }
+
+    current_upserts: List[Dict[str, object]] = []
+    history_inserts: List[Dict[str, object]] = []
+    source = "maintenance_backfill_recording_step_status"
+
+    for row in rows:
+        summary["datasets_scanned"] = int(summary["datasets_scanned"]) + 1
+        dataset_id = str(row["dataset_id"])
+        zarr_path = Path(str(row["zarr_path"])).expanduser()
+        if not _matches_scope(str(zarr_path), scope_roots):
+            summary["datasets_skipped_path"] = int(summary["datasets_skipped_path"]) + 1
+            continue
+        summary["datasets_in_scope"] = int(summary["datasets_in_scope"]) + 1
+
+        recording_id = _decode_text(row["recording_id"])
+        if not recording_id:
+            summary["datasets_skipped_missing_recording_id"] = int(summary["datasets_skipped_missing_recording_id"]) + 1
+            continue
+        if recording_id_filter and recording_id not in recording_id_filter:
+            summary["datasets_skipped_recording_filter"] = int(summary["datasets_skipped_recording_filter"]) + 1
+            continue
+
+        row_zarr_use = _decode_text(row["zarr_use"])
+        row_zarr_use_norm = (row_zarr_use or "").lower()
+        if zarr_use_norm != "all" and row_zarr_use_norm != zarr_use_norm:
+            summary["datasets_skipped_zarr_use_filter"] = int(summary["datasets_skipped_zarr_use_filter"]) + 1
+            continue
+
+        if not _is_zarr_root_path(zarr_path):
+            summary["datasets_missing_zarr"] = int(summary["datasets_missing_zarr"]) + 1
+            continue
+
+        try:
+            zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+        except Exception:
+            zarr_mtime_ns = None
+
+        extracted_rows: List[Dict[str, object]]
+        try:
+            try:
+                root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+            except TypeError:
+                try:
+                    root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+                except TypeError:
+                    root = zarr.open_group(str(zarr_path), mode="r")
+            extracted_rows = _build_recording_step_rows_from_root(
+                root=root,
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                zarr_use=row_zarr_use,
+                zarr_mtime_ns=zarr_mtime_ns,
+                source=source,
+            )
+        except Exception as exc:
+            summary["datasets_errors"] = int(summary["datasets_errors"]) + 1
+            extracted_rows = _build_recording_step_error_rows(
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                zarr_mtime_ns=zarr_mtime_ns,
+                error_detail=str(exc),
+                source=source,
+            )
+
+        existing_rows = registry.conn.execute(
+            "SELECT * FROM recording_step_status WHERE dataset_id = ?;",
+            (dataset_id,),
+        ).fetchall()
+        existing_by_step: Dict[str, Dict[str, object]] = {
+            str(existing["step_name"]): {key: existing[key] for key in existing.keys()}
+            for existing in existing_rows
+            if existing["step_name"] is not None
+        }
+
+        for extracted in extracted_rows:
+            step_name = str(extracted["step_name"])
+            status = str(extracted["status"])
+            summary["rows_evaluated"] = int(summary["rows_evaluated"]) + 1
+            rows_by_status = summary["rows_by_status"]
+            if isinstance(rows_by_status, dict) and status in rows_by_status:
+                rows_by_status[status] = int(rows_by_status[status]) + 1
+            rows_by_step = summary["rows_by_step"]
+            if isinstance(rows_by_step, dict) and step_name in rows_by_step:
+                rows_by_step[step_name] = int(rows_by_step[step_name]) + 1
+
+            existing = existing_by_step.get(step_name)
+            if existing is None:
+                summary["rows_inserted"] = int(summary["rows_inserted"]) + 1
+                if not dry_run:
+                    current_upserts.append(extracted)
+                    history_inserts.append(extracted)
+                continue
+
+            if _recording_step_row_signature(existing) == _recording_step_row_signature(extracted):
+                summary["rows_skipped"] = int(summary["rows_skipped"]) + 1
+                continue
+
+            summary["rows_updated"] = int(summary["rows_updated"]) + 1
+            if not dry_run:
+                current_upserts.append(extracted)
+                history_inserts.append(extracted)
+
+    if not dry_run and current_upserts:
+        recorded_utc = datetime.now(timezone.utc).isoformat()
+        with registry.conn:
+            for payload in current_upserts:
+                registry.conn.execute(
+                    """
+                    INSERT INTO recording_step_status (
+                        dataset_id,
+                        recording_id,
+                        step_name,
+                        status,
+                        run_name,
+                        method,
+                        coverage_pct,
+                        review_status_json,
+                        details_json,
+                        source,
+                        zarr_mtime_ns,
+                        updated_utc
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(dataset_id, step_name) DO UPDATE SET
+                        recording_id=excluded.recording_id,
+                        status=excluded.status,
+                        run_name=excluded.run_name,
+                        method=excluded.method,
+                        coverage_pct=excluded.coverage_pct,
+                        review_status_json=excluded.review_status_json,
+                        details_json=excluded.details_json,
+                        source=excluded.source,
+                        zarr_mtime_ns=excluded.zarr_mtime_ns,
+                        updated_utc=excluded.updated_utc;
+                    """,
+                    (
+                        payload.get("dataset_id"),
+                        payload.get("recording_id"),
+                        payload.get("step_name"),
+                        payload.get("status"),
+                        payload.get("run_name"),
+                        payload.get("method"),
+                        payload.get("coverage_pct"),
+                        payload.get("review_status_json"),
+                        payload.get("details_json"),
+                        payload.get("source"),
+                        payload.get("zarr_mtime_ns"),
+                        payload.get("updated_utc"),
+                    ),
+                )
+            for payload in history_inserts:
+                registry.conn.execute(
+                    """
+                    INSERT INTO recording_step_status_history (
+                        dataset_id,
+                        recording_id,
+                        step_name,
+                        status,
+                        run_name,
+                        method,
+                        coverage_pct,
+                        review_status_json,
+                        details_json,
+                        source,
+                        zarr_mtime_ns,
+                        updated_utc,
+                        recorded_utc
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        payload.get("dataset_id"),
+                        payload.get("recording_id"),
+                        payload.get("step_name"),
+                        payload.get("status"),
+                        payload.get("run_name"),
+                        payload.get("method"),
+                        payload.get("coverage_pct"),
+                        payload.get("review_status_json"),
+                        payload.get("details_json"),
+                        payload.get("source"),
+                        payload.get("zarr_mtime_ns"),
+                        payload.get("updated_utc"),
+                        recorded_utc,
+                    ),
+                )
+        summary["history_rows_inserted"] = len(history_inserts)
+
+    return summary
+
+
 def _load_recording_type_subtype_vocab(
     registry: Registry,
 ) -> tuple[set[str], dict[str, set[str]]]:
@@ -4193,6 +5452,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.backfill_detect_performance
         and not args.backfill_crop_quality
         and not args.backfill_eye_mask_performance
+        and not args.backfill_recording_step_status
         and not args.refresh_keypoint_quality
         and not args.refresh_detect_quality
         and not args.refresh_detect_performance
@@ -4211,6 +5471,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "--backfill-dataset-lineage, "
             "--backfill-detect-quality, --backfill-detect-performance, "
             "--backfill-crop-quality, --backfill-eye-mask-performance, "
+            "--backfill-recording-step-status, "
             "--refresh-keypoint-quality, --refresh-detect-quality, --refresh-detect-performance, "
             "--refresh-crop-quality, --refresh-eye-mask-performance, "
             "--check-integrity, and/or --vacuum."
@@ -4801,6 +6062,37 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     f"deleted={summary['rows_deleted']} "
                     f"unchanged={summary['rows_skipped']} row(s)."
                 )
+
+        if args.backfill_recording_step_status:
+            recording_id_filter = _normalize_recording_ids(args.recording_step_recording_id)
+            summary = _backfill_recording_step_status(
+                registry,
+                dry_run=bool(args.dry_run),
+                scope_paths=scope_paths or None,
+                recording_ids=recording_id_filter or None,
+                zarr_use_filter=str(args.recording_step_zarr_use or "all"),
+            )
+            rows_by_status = summary.get("rows_by_status", {})
+            status_counts = ""
+            if isinstance(rows_by_status, dict):
+                status_counts = " ".join(
+                    f"{status_name}={int(rows_by_status.get(status_name, 0))}"
+                    for status_name in RECORDING_STEP_STATUS_VALUES
+                )
+            print(
+                "Recording step status backfill: "
+                f"scanned={int(summary.get('datasets_scanned', 0))} "
+                f"in_scope={int(summary.get('datasets_in_scope', 0))} "
+                f"missing_zarr={int(summary.get('datasets_missing_zarr', 0))} "
+                f"errors={int(summary.get('datasets_errors', 0))} "
+                f"inserted={int(summary.get('rows_inserted', 0))} "
+                f"updated={int(summary.get('rows_updated', 0))} "
+                f"unchanged={int(summary.get('rows_skipped', 0))} "
+                f"history_rows={int(summary.get('history_rows_inserted', 0))}"
+            )
+            if status_counts:
+                print(f"Recording step status counts: {status_counts}")
+            print(f"Recording step status summary JSON: {json.dumps(summary, sort_keys=True)}")
 
         if args.check_integrity:
             lineage_summary = _summarize_dataset_lineage_audit(registry)

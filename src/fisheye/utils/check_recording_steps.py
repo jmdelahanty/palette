@@ -32,6 +32,52 @@ DEFAULT_TUNING_KEYS = [
 ]
 
 
+_STEP_STATUS_ALLOWED = {"ok", "missing", "absent", "na", "error"}
+_STEP_STATUS_PRIORITY = {"error": 4, "missing": 3, "absent": 2, "na": 1, "ok": 0}
+_STEP_NAME_ALIASES = {
+    "raw": "raw",
+    "background": "background",
+    "detect": "detect",
+    "refined_detect": "refined_detect",
+    "crop": "crop",
+    "keypoints": "keypoints",
+    "refined_keypoints": "refined_keypoints",
+    "eye_masks": "eye_masks",
+    "refined_eye_masks": "refined_eye_masks",
+    "id_assignment": "id_assignment",
+    "assign_ids": "id_assignment",
+    "tracks": "tracks",
+    "track": "tracks",
+    "stimulus": "stimulus",
+    "calibration": "calibration",
+    "dish_mask": "dish_mask",
+    "detection_tuning": "detection_tuning",
+    "keypoint_tuning": "keypoint_tuning",
+    "eye_mask_tuning": "eye_mask_tuning",
+    "subdish_mask_tuning": "subdish_mask_tuning",
+}
+_OVERVIEW_STEP_PREFIX = {
+    "raw": "raw",
+    "background": "background",
+    "detect": "detect",
+    "refined_detect": "refined_detect",
+    "crop": "crop",
+    "keypoints": "keypoints",
+    "refined_keypoints": "refined_keypoints",
+    "eye_masks": "eye_masks",
+    "refined_eye_masks": "refined_eye_masks",
+    "id_assignment": "id_assignment",
+    "tracks": "tracks",
+    "stimulus": "stimulus",
+    "calibration": "calibration",
+    "dish_mask": "dish_mask",
+    "detection_tuning": "detection_tuning",
+    "keypoint_tuning": "keypoint_tuning",
+    "eye_mask_tuning": "eye_mask_tuning",
+    "subdish_mask_tuning": "subdish_mask_tuning",
+}
+
+
 @dataclass
 class RecordingStatus:
     recording_dir: Path
@@ -156,6 +202,30 @@ def _coerce_int(value: object) -> Optional[int]:
         return None
 
 
+def _coerce_bool(value: object) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, np.integer)):
+        return bool(int(value))
+    if isinstance(value, (float, np.floating)):
+        if np.isnan(value):
+            return None
+        return bool(int(value))
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", "ignore").strip().lower()
+    elif isinstance(value, str):
+        text = value.strip().lower()
+    else:
+        text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y", "on"}:
+        return True
+    if text in {"false", "0", "no", "n", "off"}:
+        return False
+    return None
+
+
 def _coerce_mapping(value: object) -> Optional[Dict[str, object]]:
     if isinstance(value, np.ndarray):
         if value.shape == ():
@@ -203,6 +273,490 @@ def _coerce_mapping(value: object) -> Optional[Dict[str, object]]:
         except Exception:
             return None
     return None
+
+
+def _base_status_payload(*, tuning_keys: List[str], zarr_exists: bool) -> Dict[str, object]:
+    return {
+        "zarr_exists": zarr_exists,
+        "pipeline_type": None,
+        "zarr_purpose": None,
+        "has_raw_video_attr": None,
+        "raw_present": False,
+        "full_present": False,
+        "ds_present": False,
+        "sampled_present": False,
+        "background_full_present": False,
+        "background_ds_present": False,
+        "detect_present": False,
+        "detect_method": None,
+        "detect_coverage": None,
+        "detect_coverage_basis": None,
+        "detect_quality_present": False,
+        "detect_quality_run": None,
+        "detect_quality_grade": None,
+        "detect_quality_score": None,
+        "detect_quality_clean_percent": None,
+        "detect_quality_artifacts": None,
+        "refined_detect_present": False,
+        "refined_detect_coverage": None,
+        "refined_detect_method": None,
+        "refined_detect_resolved_group": None,
+        "detect_review_status": None,
+        "crop_present": False,
+        "crop_status": None,
+        "crop_review_status": None,
+        "keypoints_present": False,
+        "refined_keypoints_present": False,
+        "refined_keypoints_coverage": None,
+        "refined_keypoints_success": None,
+        "keypoint_review_status": None,
+        "eye_masks_present": False,
+        "refined_eye_masks_present": False,
+        "eye_mask_review_status": None,
+        "assign_ids_present": False,
+        "track_present": False,
+        "stimulus_runs": 0,
+        "calibration_present": False,
+        "tuning_present": 0,
+        "tuning_total": len(tuning_keys),
+        "tuning_missing": list(tuning_keys),
+        "tuning_status": {key: "miss" for key in tuning_keys},
+    }
+
+
+def _normalize_step_status(value: object) -> Optional[str]:
+    normalized = _normalize_attr(value)
+    if normalized is None:
+        return None
+    lowered = normalized.strip().lower()
+    if lowered not in _STEP_STATUS_ALLOWED:
+        return None
+    return lowered
+
+
+def _step_row_status_ok(row: Optional[Dict[str, object]]) -> bool:
+    return _normalize_step_status(row.get("status") if row else None) == "ok"
+
+
+def _parse_step_json(value: object) -> Optional[Dict[str, object]]:
+    mapping = _coerce_mapping(value)
+    if mapping:
+        return mapping
+    return None
+
+
+def _select_step_row(rows: List[Dict[str, object]]) -> Optional[Dict[str, object]]:
+    if not rows:
+        return None
+
+    def _key(row: Dict[str, object]) -> tuple[int, str, str, str]:
+        status = _normalize_step_status(row.get("status"))
+        priority = _STEP_STATUS_PRIORITY.get(status or "", -1)
+        return (
+            str(row.get("updated_utc") or ""),
+            priority,
+            str(row.get("run_name") or ""),
+            str(row.get("dataset_id") or ""),
+        )
+
+    return sorted(rows, key=_key, reverse=True)[0]
+
+
+def _overview_step_status(overview_row: Dict[str, object], prefix: str) -> Optional[str]:
+    ok_count = _coerce_int(overview_row.get(f"{prefix}_ok_count")) or 0
+    non_ok_count = _coerce_int(overview_row.get(f"{prefix}_non_ok_count")) or 0
+    if non_ok_count > 0:
+        return "missing"
+    if ok_count > 0:
+        return "ok"
+    return "absent"
+
+
+def _registry_step_rows_for_zarr(
+    registry: Registry,
+    zarr_path: Path,
+    *,
+    recording_id: Optional[str],
+) -> List[Dict[str, object]]:
+    try:
+        rows = registry.conn.execute(
+            """
+            SELECT
+                recording_id,
+                dataset_id,
+                zarr_use,
+                step_name,
+                status,
+                run_name,
+                method,
+                coverage_pct,
+                review_status_json,
+                details_json,
+                source,
+                updated_utc
+            FROM recording_step_status_latest
+            WHERE zarr_path = ?
+            ORDER BY COALESCE(updated_utc, '') DESC, dataset_id, step_name;
+            """,
+            (str(zarr_path),),
+        ).fetchall()
+    except Exception:
+        return []
+    normalized_rows = [dict(row) for row in rows]
+    wanted_recording_id = _normalize_attr(recording_id)
+    if wanted_recording_id is None:
+        return normalized_rows
+    return [
+        row
+        for row in normalized_rows
+        if _normalize_attr(row.get("recording_id")) == wanted_recording_id
+    ]
+
+
+def _registry_step_overview_for_recording(
+    registry: Registry,
+    recording_id: Optional[str],
+) -> Optional[Dict[str, object]]:
+    if not recording_id:
+        return None
+    try:
+        row = registry.conn.execute(
+            """
+            SELECT *
+            FROM recording_step_overview
+            WHERE recording_id = ?;
+            """,
+            (recording_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    return dict(row) if row is not None else None
+
+
+def _registry_status_payload(
+    *,
+    registry: Registry,
+    zarr_path: Path,
+    recording_id: Optional[str],
+    tuning_keys: List[str],
+) -> Dict[str, object]:
+    payload = _base_status_payload(tuning_keys=tuning_keys, zarr_exists=zarr_path.exists())
+    step_rows = _registry_step_rows_for_zarr(
+        registry,
+        zarr_path,
+        recording_id=recording_id,
+    )
+
+    selected: Dict[str, List[Dict[str, object]]] = {}
+    for row in step_rows:
+        step_name = _normalize_attr(row.get("step_name"))
+        if not step_name:
+            continue
+        canonical = _STEP_NAME_ALIASES.get(step_name.strip().lower())
+        if not canonical:
+            continue
+        selected.setdefault(canonical, [])
+        selected[canonical].append(row)
+
+    selected_rows: Dict[str, Dict[str, object]] = {}
+    for canonical, rows in selected.items():
+        row = _select_step_row(rows)
+        if row is not None:
+            selected_rows[canonical] = row
+
+    if not selected_rows:
+        overview = _registry_step_overview_for_recording(registry, recording_id)
+        if overview is not None:
+            for canonical, prefix in _OVERVIEW_STEP_PREFIX.items():
+                status = _overview_step_status(overview, prefix)
+                if status is None:
+                    continue
+                selected_rows[canonical] = {"status": status}
+
+    for row in selected_rows.values():
+        details = _parse_step_json(row.get("details_json")) or {}
+        if not details:
+            continue
+        if payload["pipeline_type"] is None:
+            payload["pipeline_type"] = _normalize_attr(details.get("pipeline_type"))
+        if payload["zarr_purpose"] is None:
+            payload["zarr_purpose"] = _normalize_attr(details.get("zarr_purpose"))
+        if payload["has_raw_video_attr"] is None:
+            payload["has_raw_video_attr"] = _coerce_bool(details.get("has_raw_video_attr"))
+        if (
+            payload["pipeline_type"] is not None
+            and payload["zarr_purpose"] is not None
+            and payload["has_raw_video_attr"] is not None
+        ):
+            break
+
+    raw_row = selected_rows.get("raw")
+    raw_ok = _step_row_status_ok(raw_row)
+    raw_details = _parse_step_json(raw_row.get("details_json") if raw_row else None) or {}
+    raw_present_flag = _coerce_bool(raw_details.get("raw_present"))
+    full_present_flag = _coerce_bool(raw_details.get("full_present"))
+    ds_present_flag = _coerce_bool(raw_details.get("ds_present"))
+    sampled_present_flag = _coerce_bool(raw_details.get("sampled_present"))
+    payload["raw_present"] = raw_ok if raw_present_flag is None else raw_present_flag
+    payload["full_present"] = raw_ok if full_present_flag is None else full_present_flag
+    payload["ds_present"] = raw_ok if ds_present_flag is None else ds_present_flag
+    payload["sampled_present"] = False if sampled_present_flag is None else sampled_present_flag
+
+    background_row = selected_rows.get("background")
+    background_ok = _step_row_status_ok(background_row)
+    background_details = _parse_step_json(background_row.get("details_json") if background_row else None) or {}
+    bg_full_present = _coerce_bool(background_details.get("full_present"))
+    bg_ds_present = _coerce_bool(background_details.get("ds_present"))
+    payload["background_full_present"] = background_ok if bg_full_present is None else bg_full_present
+    payload["background_ds_present"] = background_ok if bg_ds_present is None else bg_ds_present
+
+    detect_row = selected_rows.get("detect")
+    detect_ok = _step_row_status_ok(detect_row)
+    payload["detect_present"] = detect_ok
+    payload["detect_method"] = _normalize_attr(detect_row.get("method") if detect_row else None)
+    payload["detect_coverage"] = _coerce_float(detect_row.get("coverage_pct") if detect_row else None)
+    payload["detect_coverage_basis"] = "registry" if detect_ok else None
+
+    detect_details = _parse_step_json(detect_row.get("details_json") if detect_row else None) or {}
+    detect_grade = _normalize_attr(
+        detect_details.get("detect_quality_grade") or detect_details.get("grade")
+    )
+    detect_score = _coerce_float(
+        detect_details.get("detect_quality_score") or detect_details.get("score")
+    )
+    detect_clean = _coerce_float(
+        detect_details.get("detect_quality_clean_percent")
+        or detect_details.get("clean_percent")
+        or detect_details.get("clean_percentage")
+    )
+    detect_artifacts = _coerce_int(
+        detect_details.get("detect_quality_artifacts")
+        or detect_details.get("artifact_count")
+    )
+    payload["detect_quality_grade"] = detect_grade
+    payload["detect_quality_score"] = detect_score
+    payload["detect_quality_clean_percent"] = detect_clean
+    payload["detect_quality_artifacts"] = detect_artifacts
+    payload["detect_quality_present"] = any(
+        value is not None for value in (detect_grade, detect_score, detect_clean, detect_artifacts)
+    )
+    payload["detect_quality_run"] = (
+        _normalize_attr(detect_row.get("run_name") if detect_row else None)
+        if payload["detect_quality_present"]
+        else None
+    )
+
+    refined_detect_row = selected_rows.get("refined_detect")
+    refined_detect_ok = _step_row_status_ok(refined_detect_row)
+    refined_detect_coverage = _coerce_float(
+        refined_detect_row.get("coverage_pct") if refined_detect_row else None
+    )
+    if refined_detect_ok and refined_detect_coverage is None:
+        refined_detect_coverage = 100.0
+    payload["refined_detect_present"] = refined_detect_ok
+    payload["refined_detect_coverage"] = refined_detect_coverage
+    payload["refined_detect_method"] = _normalize_attr(
+        refined_detect_row.get("method") if refined_detect_row else None
+    )
+    refined_detect_review = _parse_step_json(
+        refined_detect_row.get("review_status_json") if refined_detect_row else None
+    )
+    payload["detect_review_status"] = refined_detect_review
+    resolved_group = _normalize_attr(
+        (refined_detect_review or {}).get("resolved_group")
+    )
+    if not resolved_group:
+        refined_detect_details = _parse_step_json(
+            refined_detect_row.get("details_json") if refined_detect_row else None
+        ) or {}
+        resolved_group = _normalize_attr(refined_detect_details.get("resolved_group"))
+    payload["refined_detect_resolved_group"] = resolved_group
+
+    crop_row = selected_rows.get("crop")
+    crop_status = _normalize_step_status(crop_row.get("status") if crop_row else None)
+    crop_details = _parse_step_json(crop_row.get("details_json") if crop_row else None) or {}
+    crop_run_state = _normalize_attr(crop_details.get("run_state"))
+    if crop_status == "ok":
+        payload["crop_present"] = True
+        payload["crop_status"] = crop_run_state
+    elif crop_status == "error":
+        payload["crop_present"] = True
+        payload["crop_status"] = "failed"
+    elif crop_status == "na":
+        payload["crop_present"] = True
+        payload["crop_status"] = "na"
+    else:
+        payload["crop_present"] = False
+        payload["crop_status"] = None
+    payload["crop_review_status"] = _parse_step_json(
+        crop_row.get("review_status_json") if crop_row else None
+    )
+
+    keypoints_row = selected_rows.get("keypoints")
+    payload["keypoints_present"] = _step_row_status_ok(keypoints_row)
+
+    refined_keypoints_row = selected_rows.get("refined_keypoints")
+    refined_keypoints_ok = _step_row_status_ok(refined_keypoints_row)
+    refined_keypoints_success = _coerce_float(
+        refined_keypoints_row.get("coverage_pct") if refined_keypoints_row else None
+    )
+    refined_keypoints_details = _parse_step_json(
+        refined_keypoints_row.get("details_json") if refined_keypoints_row else None
+    ) or {}
+    refined_keypoints_usable = _coerce_float(
+        refined_keypoints_details.get("usable_keypoints_pct")
+        or refined_keypoints_details.get("usable_percent")
+        or refined_keypoints_details.get("train_usable_pct")
+    )
+    if refined_keypoints_ok and refined_keypoints_success is None:
+        refined_keypoints_success = 100.0
+    payload["refined_keypoints_present"] = refined_keypoints_ok
+    payload["refined_keypoints_success"] = refined_keypoints_success
+    payload["refined_keypoints_coverage"] = refined_keypoints_usable
+    payload["keypoint_review_status"] = _parse_step_json(
+        refined_keypoints_row.get("review_status_json") if refined_keypoints_row else None
+    )
+
+    eye_masks_row = selected_rows.get("eye_masks")
+    payload["eye_masks_present"] = _step_row_status_ok(eye_masks_row)
+
+    refined_eye_masks_row = selected_rows.get("refined_eye_masks")
+    payload["refined_eye_masks_present"] = _step_row_status_ok(refined_eye_masks_row)
+    payload["eye_mask_review_status"] = _parse_step_json(
+        refined_eye_masks_row.get("review_status_json") if refined_eye_masks_row else None
+    ) or _parse_step_json(
+        eye_masks_row.get("review_status_json") if eye_masks_row else None
+    )
+
+    payload["assign_ids_present"] = _step_row_status_ok(selected_rows.get("id_assignment"))
+    payload["track_present"] = _step_row_status_ok(selected_rows.get("tracks"))
+    stimulus_row = selected_rows.get("stimulus")
+    stimulus_details = _parse_step_json(stimulus_row.get("details_json") if stimulus_row else None) or {}
+    stimulus_runs = _coerce_int(stimulus_details.get("stimulus_runs"))
+    if stimulus_runs is None:
+        stimulus_runs = 1 if _step_row_status_ok(stimulus_row) else 0
+    payload["stimulus_runs"] = max(0, int(stimulus_runs))
+    payload["calibration_present"] = _step_row_status_ok(selected_rows.get("calibration"))
+
+    tuning_present = 0
+    tuning_total = 0
+    tuning_missing: List[str] = []
+    tuning_status: Dict[str, str] = {}
+    for key in tuning_keys:
+        status = _normalize_step_status(selected_rows.get(key, {}).get("status"))
+        if status == "ok":
+            tuning_present += 1
+            tuning_total += 1
+            tuning_status[key] = "ok"
+        elif status in {"na", "absent"}:
+            tuning_status[key] = "na"
+        else:
+            tuning_total += 1
+            tuning_status[key] = "miss"
+            tuning_missing.append(key)
+    payload["tuning_present"] = tuning_present
+    payload["tuning_total"] = tuning_total
+    payload["tuning_missing"] = tuning_missing
+    payload["tuning_status"] = tuning_status
+
+    return payload
+
+
+def _build_recording_status(
+    *,
+    recording_dir: Path,
+    h5_path: Path,
+    camera_id: Optional[str],
+    recording_id: Optional[str],
+    zarr_path: Path,
+    zarr_use: Optional[str],
+    zarr_info: Dict[str, object],
+) -> RecordingStatus:
+    return RecordingStatus(
+        recording_dir=recording_dir,
+        h5_path=h5_path,
+        camera_id=camera_id,
+        recording_id=recording_id,
+        zarr_path=zarr_path,
+        zarr_use=zarr_use,
+        zarr_exists=bool(zarr_info["zarr_exists"]),
+        pipeline_type=zarr_info["pipeline_type"],  # type: ignore[arg-type]
+        zarr_purpose=zarr_info["zarr_purpose"],  # type: ignore[arg-type]
+        has_raw_video_attr=zarr_info["has_raw_video_attr"],  # type: ignore[arg-type]
+        raw_present=bool(zarr_info["raw_present"]),
+        full_present=bool(zarr_info["full_present"]),
+        ds_present=bool(zarr_info["ds_present"]),
+        sampled_present=bool(zarr_info["sampled_present"]),
+        background_full_present=bool(zarr_info["background_full_present"]),
+        background_ds_present=bool(zarr_info["background_ds_present"]),
+        detect_present=bool(zarr_info["detect_present"]),
+        detect_method=zarr_info["detect_method"],  # type: ignore[arg-type]
+        detect_coverage=zarr_info["detect_coverage"],  # type: ignore[arg-type]
+        detect_coverage_basis=zarr_info["detect_coverage_basis"],  # type: ignore[arg-type]
+        detect_quality_present=bool(zarr_info["detect_quality_present"]),
+        detect_quality_run=zarr_info["detect_quality_run"],  # type: ignore[arg-type]
+        detect_quality_grade=zarr_info["detect_quality_grade"],  # type: ignore[arg-type]
+        detect_quality_score=zarr_info["detect_quality_score"],  # type: ignore[arg-type]
+        detect_quality_clean_percent=zarr_info["detect_quality_clean_percent"],  # type: ignore[arg-type]
+        detect_quality_artifacts=zarr_info["detect_quality_artifacts"],  # type: ignore[arg-type]
+        refined_detect_present=bool(zarr_info["refined_detect_present"]),
+        refined_detect_coverage=zarr_info["refined_detect_coverage"],  # type: ignore[arg-type]
+        refined_detect_method=zarr_info["refined_detect_method"],  # type: ignore[arg-type]
+        refined_detect_resolved_group=zarr_info["refined_detect_resolved_group"],  # type: ignore[arg-type]
+        detect_review_status=zarr_info["detect_review_status"],  # type: ignore[arg-type]
+        crop_present=bool(zarr_info["crop_present"]),
+        crop_status=zarr_info["crop_status"],  # type: ignore[arg-type]
+        crop_review_status=zarr_info["crop_review_status"],  # type: ignore[arg-type]
+        keypoints_present=bool(zarr_info["keypoints_present"]),
+        refined_keypoints_present=bool(zarr_info["refined_keypoints_present"]),
+        refined_keypoints_coverage=zarr_info["refined_keypoints_coverage"],  # type: ignore[arg-type]
+        refined_keypoints_success=zarr_info["refined_keypoints_success"],  # type: ignore[arg-type]
+        keypoint_review_status=zarr_info["keypoint_review_status"],  # type: ignore[arg-type]
+        eye_masks_present=bool(zarr_info["eye_masks_present"]),
+        refined_eye_masks_present=bool(zarr_info["refined_eye_masks_present"]),
+        eye_mask_review_status=zarr_info["eye_mask_review_status"],  # type: ignore[arg-type]
+        assign_ids_present=bool(zarr_info["assign_ids_present"]),
+        track_present=bool(zarr_info["track_present"]),
+        stimulus_runs=int(zarr_info["stimulus_runs"]),
+        calibration_present=bool(zarr_info["calibration_present"]),
+        tuning_present=int(zarr_info["tuning_present"]),
+        tuning_total=int(zarr_info["tuning_total"]),
+        tuning_missing=list(zarr_info["tuning_missing"]),  # type: ignore[arg-type]
+        tuning_status=dict(zarr_info["tuning_status"]),  # type: ignore[arg-type]
+    )
+
+
+def _plan_compare_snapshot(plan: RecordingStatus, tuning_keys: List[str]) -> Dict[str, str]:
+    is_production = (
+        (plan.zarr_purpose == "production")
+        or (plan.pipeline_type == "yolo_inference")
+        or (plan.has_raw_video_attr is False and not (plan.full_present or plan.ds_present))
+    )
+    import_ok = None if is_production else (plan.raw_present and (plan.full_present or plan.ds_present))
+    background_full_ok = None if is_production else plan.background_full_present
+    background_ds_ok = None if is_production else plan.background_ds_present
+    snapshot = {
+        "zarr": _status_text(plan.zarr_exists),
+        "import": _status_text(import_ok),
+        "bg_full": _status_text(background_full_ok),
+        "bg_ds": _status_text(background_ds_ok),
+        "detect": _status_text(plan.detect_present),
+        "refined_detect": _status_text(plan.refined_detect_coverage is not None),
+        "crop": _crop_status_text(plan.crop_present, plan.crop_status),
+        "keypoints": _status_text(plan.keypoints_present),
+        "refined_keypoints": _status_text(plan.refined_keypoints_present),
+        "eye_masks": _status_text(plan.eye_masks_present),
+        "refined_eye_masks": _status_text(plan.refined_eye_masks_present),
+        "assign_ids": _status_text(plan.assign_ids_present),
+        "track": _status_text(plan.track_present),
+        "stimulus": _status_text(plan.stimulus_runs > 0),
+        "calibration": _status_text(plan.calibration_present),
+        "tuning": "N/A" if is_production else f"{plan.tuning_present}/{plan.tuning_total}",
+    }
+    for key in tuning_keys:
+        status = "na" if is_production else plan.tuning_status.get(key, "miss")
+        snapshot[f"tuning:{key}"] = _tuning_status_text(status)
+    return snapshot
 
 
 def _extract_coverage_from_group(group: zarr.Group) -> Optional[float]:
@@ -752,52 +1306,7 @@ def _open_root_live(zarr_path: Path) -> zarr.Group:
 
 def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
     if not zarr_path.exists():
-        return {
-            "zarr_exists": False,
-            "pipeline_type": None,
-            "zarr_purpose": None,
-            "has_raw_video_attr": None,
-            "raw_present": False,
-            "full_present": False,
-            "ds_present": False,
-            "sampled_present": False,
-            "background_full_present": False,
-            "background_ds_present": False,
-            "detect_present": False,
-            "detect_method": None,
-            "detect_coverage": None,
-            "detect_coverage_basis": None,
-            "detect_quality_present": False,
-            "detect_quality_run": None,
-            "detect_quality_grade": None,
-            "detect_quality_score": None,
-            "detect_quality_clean_percent": None,
-            "detect_quality_artifacts": None,
-            "refined_detect_present": False,
-            "refined_detect_coverage": None,
-            "refined_detect_method": None,
-            "refined_detect_resolved_group": None,
-            "detect_review_status": None,
-            "crop_present": False,
-            "crop_status": None,
-            "crop_review_status": None,
-            "keypoints_present": False,
-            "refined_keypoints_present": False,
-            "refined_keypoints_coverage": None,
-            "refined_keypoints_success": None,
-            "keypoint_review_status": None,
-            "eye_masks_present": False,
-            "refined_eye_masks_present": False,
-            "eye_mask_review_status": None,
-            "assign_ids_present": False,
-            "track_present": False,
-            "stimulus_runs": 0,
-            "calibration_present": False,
-            "tuning_present": 0,
-            "tuning_total": len(tuning_keys),
-            "tuning_missing": tuning_keys,
-            "tuning_status": {key: "miss" for key in tuning_keys},
-        }
+        return _base_status_payload(tuning_keys=tuning_keys, zarr_exists=False)
 
     root = _open_root_live(zarr_path)
     pipeline_type = _normalize_attr(root.attrs.get("pipeline_type"))
@@ -1411,6 +1920,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Filter status rows by zarr use type (default: all).",
     )
     parser.add_argument(
+        "--status-source",
+        choices=("filesystem", "registry", "compare"),
+        default="filesystem",
+        help="Status source: filesystem (default), registry, or compare.",
+    )
+    parser.add_argument(
         "--registry",
         type=Path,
         help="Optional registry SQLite path to resolve recording zarr artifacts.",
@@ -1438,8 +1953,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.registry_prefer_crop_review and registry is None:
         print("--registry-prefer-crop-review requires --registry.")
         return 1
+    if args.status_source in {"registry", "compare"} and registry is None:
+        print(f"--status-source {args.status_source} requires --registry.")
+        return 1
 
     plans: List[RecordingStatus] = []
+    compare_rows: List[Dict[str, object]] = []
+    compare_checked = 0
     try:
         for h5_path in _iter_h5(roots, args.recursive):
             recording_dir = h5_path.parent.parent
@@ -1452,73 +1972,126 @@ def main(argv: Optional[List[str]] = None) -> int:
                 registry=registry,
             )
             for zarr_path, zarr_use in zarr_candidates:
-                zarr_info = _check_zarr(zarr_path, tuning_keys)
-                if args.registry_prefer_crop_review and registry is not None:
-                    crop_registry = _registry_crop_review_status_for_zarr(
-                        registry=registry,
-                        zarr_path=zarr_path,
-                    )
-                    if crop_registry is not None:
-                        zarr_info["crop_present"] = True
-                        if crop_registry.get("crop_review_status") is not None:
-                            zarr_info["crop_review_status"] = crop_registry["crop_review_status"]
-                plans.append(
-                    RecordingStatus(
+                if args.status_source == "compare":
+                    compare_checked += 1
+                    fs_info = _check_zarr(zarr_path, tuning_keys)
+                    fs_plan = _build_recording_status(
                         recording_dir=recording_dir,
                         h5_path=h5_path,
                         camera_id=camera_id,
                         recording_id=recording_id,
                         zarr_path=zarr_path,
                         zarr_use=zarr_use,
-                        zarr_exists=zarr_info["zarr_exists"],
-                        pipeline_type=zarr_info["pipeline_type"],
-                        zarr_purpose=zarr_info["zarr_purpose"],
-                        has_raw_video_attr=zarr_info["has_raw_video_attr"],
-                        raw_present=zarr_info["raw_present"],
-                        full_present=zarr_info["full_present"],
-                        ds_present=zarr_info["ds_present"],
-                        sampled_present=zarr_info["sampled_present"],
-                        background_full_present=zarr_info["background_full_present"],
-                        background_ds_present=zarr_info["background_ds_present"],
-                        detect_present=zarr_info["detect_present"],
-                        detect_method=zarr_info["detect_method"],
-                        detect_coverage=zarr_info["detect_coverage"],
-                        detect_coverage_basis=zarr_info["detect_coverage_basis"],
-                        detect_quality_present=zarr_info["detect_quality_present"],
-                        detect_quality_run=zarr_info["detect_quality_run"],
-                        detect_quality_grade=zarr_info["detect_quality_grade"],
-                        detect_quality_score=zarr_info["detect_quality_score"],
-                        detect_quality_clean_percent=zarr_info["detect_quality_clean_percent"],
-                        detect_quality_artifacts=zarr_info["detect_quality_artifacts"],
-                        refined_detect_present=zarr_info["refined_detect_present"],
-                        refined_detect_coverage=zarr_info["refined_detect_coverage"],
-                        refined_detect_method=zarr_info["refined_detect_method"],
-                        refined_detect_resolved_group=zarr_info["refined_detect_resolved_group"],
-                        detect_review_status=zarr_info["detect_review_status"],
-                        crop_present=zarr_info["crop_present"],
-                        crop_status=zarr_info["crop_status"],
-                        crop_review_status=zarr_info["crop_review_status"],
-                        keypoints_present=zarr_info["keypoints_present"],
-                        refined_keypoints_present=zarr_info["refined_keypoints_present"],
-                        refined_keypoints_coverage=zarr_info["refined_keypoints_coverage"],
-                        refined_keypoints_success=zarr_info["refined_keypoints_success"],
-                        keypoint_review_status=zarr_info["keypoint_review_status"],
-                        eye_masks_present=zarr_info["eye_masks_present"],
-                        refined_eye_masks_present=zarr_info["refined_eye_masks_present"],
-                        eye_mask_review_status=zarr_info["eye_mask_review_status"],
-                        assign_ids_present=zarr_info["assign_ids_present"],
-                        track_present=zarr_info["track_present"],
-                        stimulus_runs=zarr_info["stimulus_runs"],
-                        calibration_present=zarr_info["calibration_present"],
-                        tuning_present=zarr_info["tuning_present"],
-                        tuning_total=zarr_info["tuning_total"],
-                        tuning_missing=zarr_info["tuning_missing"],
-                        tuning_status=zarr_info["tuning_status"],
+                        zarr_info=fs_info,
+                    )
+                    reg_info = _registry_status_payload(
+                        registry=registry,  # type: ignore[arg-type]
+                        zarr_path=zarr_path,
+                        recording_id=recording_id,
+                        tuning_keys=tuning_keys,
+                    )
+                    reg_plan = _build_recording_status(
+                        recording_dir=recording_dir,
+                        h5_path=h5_path,
+                        camera_id=camera_id,
+                        recording_id=recording_id,
+                        zarr_path=zarr_path,
+                        zarr_use=zarr_use,
+                        zarr_info=reg_info,
+                    )
+                    fs_snapshot = _plan_compare_snapshot(fs_plan, tuning_keys)
+                    reg_snapshot = _plan_compare_snapshot(reg_plan, tuning_keys)
+                    for field in sorted(set(fs_snapshot) | set(reg_snapshot)):
+                        fs_value = fs_snapshot.get(field, "—")
+                        reg_value = reg_snapshot.get(field, "—")
+                        if fs_value == reg_value:
+                            continue
+                        compare_rows.append(
+                            {
+                                "recording": recording_dir.name,
+                                "camera_id": camera_id or "unknown",
+                                "zarr_path": str(zarr_path),
+                                "zarr_use": zarr_use or "—",
+                                "field": field,
+                                "filesystem": fs_value,
+                                "registry": reg_value,
+                            }
+                        )
+                    continue
+
+                if args.status_source == "registry":
+                    zarr_info = _registry_status_payload(
+                        registry=registry,  # type: ignore[arg-type]
+                        zarr_path=zarr_path,
+                        recording_id=recording_id,
+                        tuning_keys=tuning_keys,
+                    )
+                else:
+                    zarr_info = _check_zarr(zarr_path, tuning_keys)
+                    if args.registry_prefer_crop_review and registry is not None:
+                        crop_registry = _registry_crop_review_status_for_zarr(
+                            registry=registry,
+                            zarr_path=zarr_path,
+                        )
+                        if crop_registry is not None:
+                            zarr_info["crop_present"] = True
+                            if crop_registry.get("crop_review_status") is not None:
+                                zarr_info["crop_review_status"] = crop_registry["crop_review_status"]
+                plans.append(
+                    _build_recording_status(
+                        recording_dir=recording_dir,
+                        h5_path=h5_path,
+                        camera_id=camera_id,
+                        recording_id=recording_id,
+                        zarr_path=zarr_path,
+                        zarr_use=zarr_use,
+                        zarr_info=zarr_info,
                     )
                 )
     finally:
         if registry is not None:
             registry.close()
+
+    if args.status_source == "compare":
+        if compare_checked == 0:
+            print("No recordings found.")
+            return 1
+        if not compare_rows:
+            print("No status mismatches found.")
+            return 0
+        use_rich = not args.no_rich and Console is not None and Table is not None
+        if use_rich:
+            console = Console()
+            table = Table(title="Recording Step Status Mismatches", show_lines=False)
+            table.add_column("Recording", style="cyan")
+            table.add_column("Camera", style="magenta")
+            table.add_column("Use")
+            table.add_column("Field")
+            table.add_column("Filesystem")
+            table.add_column("Registry")
+            table.add_column("Zarr Path", style="dim")
+            for row in compare_rows:
+                table.add_row(
+                    str(row["recording"]),
+                    str(row["camera_id"]),
+                    str(row["zarr_use"]),
+                    str(row["field"]),
+                    str(row["filesystem"]),
+                    str(row["registry"]),
+                    str(row["zarr_path"]),
+                )
+            console.print(table)
+        else:
+            print("Recording Step Status Mismatches")
+            for row in compare_rows:
+                print(str(row["recording"]))
+                print(f"  camera_id: {row['camera_id']}")
+                print(f"  use: {row['zarr_use']}")
+                print(f"  field: {row['field']}")
+                print(f"  filesystem: {row['filesystem']}")
+                print(f"  registry: {row['registry']}")
+                print(f"  zarr_path: {row['zarr_path']}")
+        return 0
 
     if not plans:
         print("No recordings found.")

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sqlite3
 import sys
+from typing import Dict, Optional
 
 import numpy as np
 import pytest
@@ -18,6 +19,7 @@ from fisheye.registry.maintenance import (
     _backfill_dataset_lineage,
     _backfill_detect_performance,
     _backfill_eye_mask_performance,
+    _backfill_recording_step_status,
     _backfill_recording_entities,
     _backfill_subject_dish_cross_entities,
     _backfill_subjects,
@@ -192,6 +194,210 @@ def _create_eye_mask_performance_zarr(path: Path) -> None:
         "refine": {"smoothed_rois": 2},
         "postprocess": {"manual_fix_count": 1},
     }
+
+
+class _FakeArray:
+    def __init__(self, data: np.ndarray) -> None:
+        self._data = np.asarray(data)
+        self.shape = self._data.shape
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+
+class _FakeGroup:
+    def __init__(self, *, attrs: Optional[Dict[str, object]] = None) -> None:
+        self.attrs: Dict[str, object] = dict(attrs or {})
+        self._children: Dict[str, object] = {}
+
+    def add_group(self, name: str, *, attrs: Optional[Dict[str, object]] = None) -> "_FakeGroup":
+        group = _FakeGroup(attrs=attrs)
+        self._children[name] = group
+        return group
+
+    def add_array(self, name: str, data: np.ndarray) -> _FakeArray:
+        arr = _FakeArray(np.asarray(data))
+        self._children[name] = arr
+        return arr
+
+    def get(self, key: str):
+        return self._children.get(key)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._children
+
+    def __getitem__(self, key: str):
+        return self._children[key]
+
+    def keys(self):
+        return self._children.keys()
+
+    def group_keys(self):
+        return [name for name, value in self._children.items() if isinstance(value, _FakeGroup)]
+
+
+class _FakeZarrModule:
+    def __init__(self, roots_by_path: Dict[str, _FakeGroup]) -> None:
+        self._roots_by_path = roots_by_path
+
+    def open_group(self, path: str, mode: str = "r", consolidated: Optional[bool] = None) -> _FakeGroup:
+        _ = mode, consolidated
+        return self._roots_by_path[str(path)]
+
+
+def _create_fake_zarr_store(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "zarr.json").write_text("{}", encoding="utf-8")
+
+
+def _create_recording_step_status_zarr(path: Path) -> _FakeGroup:
+    _create_fake_zarr_store(path)
+
+    root = _FakeGroup(attrs={"session_uuid": "recording_step_session", "zarr_purpose": "analysis"})
+    raw = root.add_group("raw_video")
+    raw.add_array("images_ds", np.zeros((4, 8, 8), dtype=np.uint8))
+
+    background_parent = root.add_group("background_runs", attrs={"latest": "background_001"})
+    background = background_parent.add_group(
+        "background_001",
+        attrs={"created_utc": "2026-02-15T00:00:00+00:00", "method": "running_mean"},
+    )
+    background.add_array("background_full", np.zeros((8, 8), dtype=np.float32))
+    background.add_array("background_ds", np.zeros((8, 8), dtype=np.float32))
+
+    detect_parent = root.add_group("detect_runs", attrs={"latest": "detect_001"})
+    detect = detect_parent.add_group(
+        "detect_001",
+        attrs={"detect_timestamp_utc": "2026-02-15T00:00:00+00:00", "detection_method": "yolo"},
+    )
+    detect.add_array("frame_counts", np.array([1, 0, 1, 1], dtype=np.int32))
+    detect_quality_parent = detect.add_group("quality_reports", attrs={"latest": "detect_quality_001"})
+    detect_quality_parent.add_group(
+        "detect_quality_001",
+        attrs={
+            "quality_score": {"grade": "A", "overall_score": 98.4},
+            "detection_quality_summary": {
+                "clean_percentage": 97.0,
+                "blip_detections": 1,
+                "jump_detections": 1,
+                "multi_detections": 1,
+            },
+        },
+    )
+
+    refined_detect_parent = root.add_group("refined_detect_runs", attrs={"latest": "refined_detect_001"})
+    refined_detect_parent.add_group(
+        "refined_detect_001",
+        attrs={
+            "created_utc": "2026-02-15T00:05:00+00:00",
+            "source_detect_run": "detect_001",
+            "parameters": {"refine_mode": "interpolated"},
+            "coverage_comparison": {"interpolated": {"coverage_percent": 75.0}},
+            "detect_review_status": {
+                "state": "approved",
+                "method": "manual",
+                "reviewer": "pytest",
+                "timestamp_utc": "2026-02-15T00:06:00+00:00",
+            },
+        },
+    )
+
+    crop_parent = root.add_group("crop_runs", attrs={"latest": "crop_001"})
+    crop = crop_parent.add_group(
+        "crop_001",
+        attrs={
+            "created_at_utc": "2026-02-15T00:10:00+00:00",
+            "status": "completed",
+            "detection_source_type": "manual",
+            "crop_review_status": {
+                "state": "approved",
+                "intended_use": "training",
+                "reviewer": "pytest",
+                "timestamp_utc": "2026-02-15T00:11:00+00:00",
+            },
+        },
+    )
+    crop.add_array("frame_counts", np.array([1, 1, 1, 1], dtype=np.int32))
+
+    keypoints_parent = root.add_group("keypoints_runs", attrs={"latest": "kp_001"})
+    keypoints_parent.add_group(
+        "kp_001",
+        attrs={"created_utc": "2026-02-15T00:20:00+00:00", "method": "traditional_pose"},
+    )
+
+    refined_keypoints_parent = root.add_group("refined_keypoints_runs", attrs={"latest": "refined_kp_001"})
+    refined_keypoints_parent.add_group(
+        "refined_kp_001",
+        attrs={
+            "created_utc": "2026-02-15T00:30:00+00:00",
+            "method": "refine_keypoints",
+            "summary_statistics": {"postprocess": {"total_rois": 4, "usable_keypoints": 3}},
+            "keypoint_review_status": {
+                "state": "approved",
+                "intended_use": "training",
+                "reviewer": "pytest",
+                "timestamp_utc": "2026-02-15T00:31:00+00:00",
+            },
+        },
+    )
+
+    eye_masks_parent = root.add_group("eye_masks_runs", attrs={"latest": "eye_masks_001"})
+    eye_masks_parent.add_group(
+        "eye_masks_001",
+        attrs={
+            "created_utc": "2026-02-15T00:40:00+00:00",
+            "method": "traditional_eye_segmentation",
+            "successful_roi_pair_rate": 0.75,
+        },
+    )
+
+    refined_eye_masks_parent = root.add_group("refined_eye_masks_runs", attrs={"latest": "refined_eye_masks_001"})
+    refined_eye_masks_parent.add_group(
+        "refined_eye_masks_001",
+        attrs={
+            "created_utc": "2026-02-15T00:45:00+00:00",
+            "method": "refine_eye_masks",
+            "successful_roi_pair_rate": 1.0,
+            "eye_mask_review_status": {
+                "state": "approved",
+                "intended_use": "training",
+                "reviewer": "pytest",
+                "timestamp_utc": "2026-02-15T00:46:00+00:00",
+            },
+        },
+    )
+
+    id_parent = root.add_group("id_assignment_runs", attrs={"latest": "id_assign_001"})
+    id_parent.add_group(
+        "id_assign_001",
+        attrs={"created_utc": "2026-02-15T00:50:00+00:00", "method": "hungarian"},
+    )
+
+    tracks_parent = root.add_group("tracking_runs", attrs={"latest": "tracks_001"})
+    tracks_parent.add_group(
+        "tracks_001",
+        attrs={"created_utc": "2026-02-15T00:55:00+00:00", "method": "trackpy"},
+    )
+
+    analysis = root.add_group("analysis")
+    stimulus_parent = analysis.add_group("stimulus_runs", attrs={"latest": "stimulus_001"})
+    stimulus_parent.add_group(
+        "stimulus_001",
+        attrs={"created_utc": "2026-02-15T00:56:00+00:00"},
+    )
+
+    root.add_group("calibration", attrs={"created_utc": "2026-02-15T00:57:00+00:00"})
+    analysis_meta = root.add_group("analysis_metadata")
+    analysis_meta.attrs.update(
+        {
+            "dish_mask": {"ready": True},
+            "detection_tuning": {"ready": True},
+            "keypoint_tuning": {"ready": True},
+            "eye_mask_tuning": {"ready": True},
+            "subdish_mask_tuning": {"ready": True},
+        }
+    )
+    return root
 
 
 def _create_detectless_zarr(path: Path, *, session_uuid: str = "detectless_session") -> None:
@@ -539,13 +745,18 @@ def test_schema_has_recording_step_status_tables_and_views(tmp_path: Path) -> No
         """
         SELECT name
         FROM sqlite_master
-        WHERE type = 'view' AND name IN ('recording_step_status_latest', 'recording_step_overview')
+        WHERE type = 'view' AND name IN (
+            'recording_step_status_latest',
+            'recording_step_overview',
+            'recording_step_status_wide'
+        )
         ORDER BY name;
         """
     ).fetchall()
     assert {str(row["name"]) for row in view_rows} == {
         "recording_step_overview",
         "recording_step_status_latest",
+        "recording_step_status_wide",
     }
 
     index_rows = registry.conn.execute(
@@ -698,6 +909,234 @@ def test_recording_step_overview_reports_non_ok_steps(tmp_path: Path) -> None:
     blocking = str(row["blocking_steps_csv"] or "")
     assert "crop" in blocking
     assert "keypoints" in blocking
+    registry.close()
+
+
+def test_recording_step_status_wide_view_formats_check_recording_steps_columns(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_a",
+        session_uuid="session_a",
+        zarr_path=tmp_path / "recording_a_training.zarr",
+        recording_id="recording_a",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_provenance(
+        "dataset_a",
+        provenance={},
+        context={"camera_id": "cam_1"},
+        protocol_name="DefaultScreen",
+        protocol_hash=None,
+        acquisition={},
+        zarr_purpose="training",
+    )
+
+    def _json_text(payload: Optional[Dict[str, object]]) -> Optional[str]:
+        if payload is None:
+            return None
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+    rows = [
+        (
+            "dataset_a",
+            "recording_a",
+            "raw",
+            "ok",
+            None,
+            None,
+            None,
+            None,
+            _json_text(
+                {
+                    "raw_present": True,
+                    "full_present": True,
+                    "ds_present": True,
+                    "sampled_present": False,
+                    "pipeline_type": "analysis",
+                    "zarr_purpose": "analysis",
+                    "has_raw_video_attr": True,
+                }
+            ),
+            "unit_test",
+            "2026-02-23T01:00:00+00:00",
+        ),
+        (
+            "dataset_a",
+            "recording_a",
+            "background",
+            "ok",
+            "background_001",
+            None,
+            None,
+            None,
+            _json_text({"full_present": True, "ds_present": True}),
+            "unit_test",
+            "2026-02-23T01:00:01+00:00",
+        ),
+        (
+            "dataset_a",
+            "recording_a",
+            "detect",
+            "ok",
+            "detect_001",
+            "yolo",
+            75.0,
+            None,
+            _json_text(
+                {
+                    "detect_quality_grade": "A",
+                    "detect_quality_score": 98.4,
+                    "detect_quality_clean_percent": 97.0,
+                    "detect_quality_artifacts": 3,
+                }
+            ),
+            "unit_test",
+            "2026-02-23T01:00:02+00:00",
+        ),
+        (
+            "dataset_a",
+            "recording_a",
+            "refined_detect",
+            "ok",
+            "refined_detect_001",
+            "passthrough",
+            80.0,
+            _json_text(
+                {
+                    "state": "approved",
+                    "method": "manual",
+                    "intended_use": "training",
+                    "resolved_group": "refined_detect_runs/refined_detect_001",
+                }
+            ),
+            None,
+            "unit_test",
+            "2026-02-23T01:00:03+00:00",
+        ),
+        (
+            "dataset_a",
+            "recording_a",
+            "crop",
+            "ok",
+            "crop_001",
+            None,
+            None,
+            _json_text({"state": "pending", "method": "manual", "intended_use": "training"}),
+            _json_text({"run_state": "completed"}),
+            "unit_test",
+            "2026-02-23T01:00:04+00:00",
+        ),
+        ("dataset_a", "recording_a", "keypoints", "ok", "kp_001", None, None, None, None, "unit_test", "2026-02-23T01:00:05+00:00"),
+        (
+            "dataset_a",
+            "recording_a",
+            "refined_keypoints",
+            "ok",
+            "refined_kp_001",
+            None,
+            90.0,
+            _json_text({"state": "approved", "method": "manual", "intended_use": "training"}),
+            _json_text({"usable_keypoints_pct": 85.0}),
+            "unit_test",
+            "2026-02-23T01:00:06+00:00",
+        ),
+        ("dataset_a", "recording_a", "eye_masks", "ok", "eye_001", None, None, None, None, "unit_test", "2026-02-23T01:00:07+00:00"),
+        (
+            "dataset_a",
+            "recording_a",
+            "refined_eye_masks",
+            "ok",
+            "refined_eye_001",
+            None,
+            None,
+            _json_text({"state": "approved", "method": "manual", "intended_use": "training"}),
+            None,
+            "unit_test",
+            "2026-02-23T01:00:08+00:00",
+        ),
+        ("dataset_a", "recording_a", "id_assignment", "missing", None, None, None, None, None, "unit_test", "2026-02-23T01:00:09+00:00"),
+        ("dataset_a", "recording_a", "tracks", "absent", None, None, None, None, None, "unit_test", "2026-02-23T01:00:10+00:00"),
+        (
+            "dataset_a",
+            "recording_a",
+            "stimulus",
+            "ok",
+            None,
+            None,
+            None,
+            None,
+            _json_text({"stimulus_runs": 3}),
+            "unit_test",
+            "2026-02-23T01:00:11+00:00",
+        ),
+        ("dataset_a", "recording_a", "calibration", "ok", None, None, None, None, None, "unit_test", "2026-02-23T01:00:12+00:00"),
+        ("dataset_a", "recording_a", "dish_mask", "ok", None, None, None, None, None, "unit_test", "2026-02-23T01:00:13+00:00"),
+        ("dataset_a", "recording_a", "detection_tuning", "missing", None, None, None, None, None, "unit_test", "2026-02-23T01:00:14+00:00"),
+        ("dataset_a", "recording_a", "keypoint_tuning", "ok", None, None, None, None, None, "unit_test", "2026-02-23T01:00:15+00:00"),
+        ("dataset_a", "recording_a", "eye_mask_tuning", "ok", None, None, None, None, None, "unit_test", "2026-02-23T01:00:16+00:00"),
+        ("dataset_a", "recording_a", "subdish_mask_tuning", "na", None, None, None, None, None, "unit_test", "2026-02-23T01:00:17+00:00"),
+    ]
+    registry.conn.executemany(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id,
+            recording_id,
+            step_name,
+            status,
+            run_name,
+            method,
+            coverage_pct,
+            review_status_json,
+            details_json,
+            source,
+            updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        rows,
+    )
+    registry.conn.commit()
+
+    row = registry.conn.execute(
+        """
+        SELECT *
+        FROM recording_step_status_wide
+        WHERE "Recording" = ?;
+        """,
+        ("recording_a",),
+    ).fetchone()
+    assert row is not None
+    assert row["Camera"] == "cam_1"
+    assert row["Zarr"] == "OK"
+    assert row["Use"] == "training"
+    assert row["Purpose"] == "analysis"
+    assert row["Import"] == "OK"
+    assert row["BG Full"] == "OK"
+    assert row["BG DS"] == "OK"
+    assert row["Detect"] == "OK (75.0%, registry, yolo)"
+    assert row["Detect Quality"] == "OK (A 98.4, clean 97.0%, art 3)"
+    assert row["Refine Detect"] == "80.0% (passthrough)"
+    assert row["Detect Group"] == "refined_detect_runs/refined_detect_001"
+    assert row["Detect Review"] == "approved (manual, training, group=refined_detect_runs/refined_detect_001)"
+    assert row["Crop"] == "completed"
+    assert row["Crop Review"] == "pending (manual, training)"
+    assert row["Keypoints"] == "OK"
+    assert row["Refined Keypoints (analysis/train)"] == "90.0% (train 85.0%)"
+    assert row["Keypoint Review"] == "approved (manual, training)"
+    assert row["Eye Masks"] == "OK"
+    assert row["Refined Eye Masks"] == "OK"
+    assert row["Eye Mask Review"] == "approved (manual, training)"
+    assert row["Assign IDs"] == "MISS"
+    assert row["Track"] == "MISS"
+    assert row["Stimulus"] == "3 (OK)"
+    assert row["Calib"] == "OK"
+    assert row["Tuning"] == "3/5"
+    assert row["dish_mask"] == "OK"
+    assert row["detection_tuning"] == "MISS"
+    assert row["keypoint_tuning"] == "OK"
+    assert row["eye_mask_tuning"] == "OK"
+    assert row["subdish_mask_tuning"] == "N/A"
     registry.close()
 
 
@@ -2888,6 +3327,233 @@ def test_backfill_eye_mask_performance_scope_defaults_to_source_analysis(tmp_pat
     )
     assert dry_all["datasets_scanned"] == 2
     assert dry_all["rows_inserted"] == 4
+    registry.close()
+
+
+def test_backfill_recording_step_status_dry_run_no_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_step_a" / "zarr" / "rec_step_a_analysis.zarr"
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_step_a",
+        session_uuid="session_step_a",
+        zarr_path=zarr_path,
+        recording_id="recording_step_a",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    summary = _backfill_recording_step_status(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+    assert summary["datasets_scanned"] == 1
+    assert summary["rows_inserted"] == 18
+    assert summary["rows_updated"] == 0
+    assert summary["rows_skipped"] == 0
+
+    rows_by_status = summary["rows_by_status"]
+    assert isinstance(rows_by_status, dict)
+    assert int(rows_by_status["ok"]) == 18
+    assert int(rows_by_status["missing"]) == 0
+    assert int(rows_by_status["absent"]) == 0
+    assert int(rows_by_status["na"]) == 0
+    assert int(rows_by_status["error"]) == 0
+
+    current_count = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM recording_step_status;"
+    ).fetchone()
+    history_count = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM recording_step_status_history;"
+    ).fetchone()
+    assert current_count is not None and int(current_count["n"]) == 0
+    assert history_count is not None and int(history_count["n"]) == 0
+    registry.close()
+
+
+def test_backfill_recording_step_status_apply_and_convergent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_step_a" / "zarr" / "rec_step_a_analysis.zarr"
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_step_a",
+        session_uuid="session_step_a",
+        zarr_path=zarr_path,
+        recording_id="recording_step_a",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    applied = _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+    assert applied["rows_inserted"] == 18
+    assert applied["rows_updated"] == 0
+    assert applied["rows_skipped"] == 0
+    assert applied["history_rows_inserted"] == 18
+
+    rows = registry.conn.execute(
+        """
+        SELECT step_name, status, run_name, method, coverage_pct
+        FROM recording_step_status
+        WHERE dataset_id = ?
+        ORDER BY step_name;
+        """,
+        ("dataset_step_a",),
+    ).fetchall()
+    assert len(rows) == 18
+    by_step = {str(row["step_name"]): row for row in rows}
+    assert set(by_step.keys()) == {
+        "background",
+        "calibration",
+        "crop",
+        "detect",
+        "detection_tuning",
+        "dish_mask",
+        "eye_masks",
+        "eye_mask_tuning",
+        "id_assignment",
+        "keypoints",
+        "keypoint_tuning",
+        "raw",
+        "refined_detect",
+        "refined_eye_masks",
+        "refined_keypoints",
+        "stimulus",
+        "subdish_mask_tuning",
+        "tracks",
+    }
+    assert all(str(row["status"]) == "ok" for row in rows)
+    assert str(by_step["detect"]["run_name"]) == "detect_001"
+    assert str(by_step["detect"]["method"]) == "yolo"
+    assert float(by_step["detect"]["coverage_pct"]) == pytest.approx(75.0)
+    detect_details_row = registry.conn.execute(
+        """
+        SELECT details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'detect';
+        """,
+        ("dataset_step_a",),
+    ).fetchone()
+    assert detect_details_row is not None
+    detect_details = json.loads(str(detect_details_row["details_json"]))
+    assert detect_details["detect_quality_run"] == "detect_quality_001"
+    assert detect_details["detect_quality_grade"] == "A"
+    assert float(detect_details["detect_quality_score"]) == pytest.approx(98.4)
+    assert float(detect_details["detect_quality_clean_percent"]) == pytest.approx(97.0)
+    assert int(detect_details["detect_quality_artifacts"]) == 3
+    assert str(by_step["id_assignment"]["run_name"]) == "id_assign_001"
+    assert str(by_step["stimulus"]["run_name"]) == "stimulus_001"
+    assert str(by_step["tracks"]["run_name"]) == "tracks_001"
+
+    repeat = _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+    assert repeat["rows_inserted"] == 0
+    assert repeat["rows_updated"] == 0
+    assert repeat["rows_skipped"] == 18
+    assert repeat["history_rows_inserted"] == 0
+
+    history_count = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM recording_step_status_history WHERE dataset_id = ?;",
+        ("dataset_step_a",),
+    ).fetchone()
+    assert history_count is not None and int(history_count["n"]) == 18
+    registry.close()
+
+
+def test_backfill_recording_step_status_scoped_filters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_a = tmp_path / "recordings" / "scope_a" / "zarr" / "scope_a_analysis.zarr"
+    zarr_b = tmp_path / "recordings" / "scope_b" / "zarr" / "scope_b_training.zarr"
+    fake_root_a = _create_recording_step_status_zarr(zarr_a)
+    fake_root_b = _create_recording_step_status_zarr(zarr_b)
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_a): fake_root_a, str(zarr_b): fake_root_b}),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_scope_a",
+        session_uuid="session_scope_a",
+        zarr_path=zarr_a,
+        recording_id="recording_scope_a",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_dataset(
+        dataset_id="dataset_scope_b",
+        session_uuid="session_scope_b",
+        zarr_path=zarr_b,
+        recording_id="recording_scope_b",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+
+    by_recording = _backfill_recording_step_status(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        recording_ids=("recording_scope_a",),
+        zarr_use_filter="all",
+    )
+    assert by_recording["rows_inserted"] == 18
+    assert by_recording["datasets_skipped_recording_filter"] == 1
+
+    by_use = _backfill_recording_step_status(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="analysis",
+    )
+    assert by_use["rows_inserted"] == 18
+    assert by_use["datasets_skipped_zarr_use_filter"] == 1
+
+    by_scope = _backfill_recording_step_status(
+        registry,
+        dry_run=True,
+        scope_paths=[tmp_path / "recordings" / "scope_a"],
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+    assert by_scope["rows_inserted"] == 18
+    assert by_scope["datasets_skipped_path"] == 1
+
+    current_count = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM recording_step_status;"
+    ).fetchone()
+    assert current_count is not None and int(current_count["n"]) == 0
     registry.close()
 
 

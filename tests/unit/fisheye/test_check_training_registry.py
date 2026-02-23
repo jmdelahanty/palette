@@ -508,3 +508,263 @@ def test_recording_overview_view_works_without_training_sets(tmp_path: Path, cap
     assert rc == 0
     assert "Recording Overview" in out
     assert "rec_ov_001" in out
+
+
+def test_recording_steps_view_outputs_overview_rows(tmp_path: Path, capsys) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_steps_a",
+        session_uuid="session_steps_a",
+        zarr_path=tmp_path / "recordings" / "rec_steps_001" / "zarr" / "rec_steps_001_training.zarr",
+        recording_id="rec_steps_001",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_dataset(
+        "dataset_steps_b",
+        session_uuid="session_steps_b",
+        zarr_path=tmp_path / "recordings" / "rec_steps_001" / "zarr" / "rec_steps_001_analysis.zarr",
+        recording_id="rec_steps_001",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id, recording_id, step_name, status, run_name, source, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+        """,
+        [
+            (
+                "dataset_steps_a",
+                "rec_steps_001",
+                "detect",
+                "ok",
+                "detect_a",
+                "unit_test",
+                "2026-02-22T00:00:00+00:00",
+            ),
+            (
+                "dataset_steps_b",
+                "rec_steps_001",
+                "detect",
+                "ok",
+                "detect_b",
+                "unit_test",
+                "2026-02-22T00:00:01+00:00",
+            ),
+            (
+                "dataset_steps_a",
+                "rec_steps_001",
+                "keypoints",
+                "missing",
+                None,
+                "unit_test",
+                "2026-02-22T00:00:02+00:00",
+            ),
+        ],
+    )
+    registry.conn.commit()
+    registry.close()
+
+    rc = check_training_registry_main(
+        ["--registry", str(tmp_path / "registry.sqlite"), "--view", "recording-steps", "--no-rich"]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Recording Step Overview" in out
+    assert "rec_steps_001" in out
+    assert "keypoints" in out
+    assert "Recording Step Details" not in out
+
+
+def test_recording_steps_view_show_details_outputs_step_rows(tmp_path: Path, capsys) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_steps_detail",
+        session_uuid="session_steps_detail",
+        zarr_path=tmp_path / "recordings" / "rec_steps_002" / "zarr" / "rec_steps_002_analysis.zarr",
+        recording_id="rec_steps_002",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id, recording_id, step_name, status, run_name, method, coverage_pct, source, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_steps_detail",
+            "rec_steps_002",
+            "detect",
+            "ok",
+            "detect_detail",
+            "yolo",
+            98.5,
+            "unit_test",
+            "2026-02-22T00:10:00+00:00",
+        ),
+    )
+    registry.conn.commit()
+    registry.close()
+
+    rc = check_training_registry_main(
+        [
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--view",
+            "recording-steps",
+            "--show-recording-step-details",
+            "--no-rich",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Recording Step Overview" in out
+    assert "Recording Step Details" in out
+    assert "dataset_steps_detail" in out
+    assert "detect" in out
+    assert "yolo" in out
+
+
+def test_recording_steps_wide_view_outputs_rows(tmp_path: Path, capsys) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_steps_wide",
+        session_uuid="session_steps_wide",
+        zarr_path=tmp_path / "recordings" / "rec_steps_wide_001" / "zarr" / "rec_steps_wide_001_training.zarr",
+        recording_id="rec_steps_wide_001",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id, recording_id, step_name, status, run_name, method, coverage_pct, source, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        [
+            (
+                "dataset_steps_wide",
+                "rec_steps_wide_001",
+                "detect",
+                "ok",
+                "detect_run",
+                "blob",
+                73.6,
+                "unit_test",
+                "2026-02-22T02:00:00+00:00",
+            ),
+            (
+                "dataset_steps_wide",
+                "rec_steps_wide_001",
+                "refined_detect",
+                "ok",
+                "refined_detect_run",
+                "passthrough",
+                None,
+                "unit_test",
+                "2026-02-22T02:00:01+00:00",
+            ),
+            (
+                "dataset_steps_wide",
+                "rec_steps_wide_001",
+                "id_assignment",
+                "missing",
+                None,
+                None,
+                None,
+                "unit_test",
+                "2026-02-22T02:00:02+00:00",
+            ),
+            (
+                "dataset_steps_wide",
+                "rec_steps_wide_001",
+                "tracks",
+                "missing",
+                None,
+                None,
+                None,
+                "unit_test",
+                "2026-02-22T02:00:03+00:00",
+            ),
+            (
+                "dataset_steps_wide",
+                "rec_steps_wide_001",
+                "dish_mask",
+                "ok",
+                None,
+                None,
+                None,
+                "unit_test",
+                "2026-02-22T02:00:04+00:00",
+            ),
+            (
+                "dataset_steps_wide",
+                "rec_steps_wide_001",
+                "detection_tuning",
+                "ok",
+                None,
+                None,
+                None,
+                "unit_test",
+                "2026-02-22T02:00:05+00:00",
+            ),
+            (
+                "dataset_steps_wide",
+                "rec_steps_wide_001",
+                "keypoint_tuning",
+                "ok",
+                None,
+                None,
+                None,
+                "unit_test",
+                "2026-02-22T02:00:06+00:00",
+            ),
+            (
+                "dataset_steps_wide",
+                "rec_steps_wide_001",
+                "eye_mask_tuning",
+                "ok",
+                None,
+                None,
+                None,
+                "unit_test",
+                "2026-02-22T02:00:07+00:00",
+            ),
+            (
+                "dataset_steps_wide",
+                "rec_steps_wide_001",
+                "subdish_mask_tuning",
+                "na",
+                None,
+                None,
+                None,
+                "unit_test",
+                "2026-02-22T02:00:08+00:00",
+            ),
+        ],
+    )
+    registry.conn.commit()
+    registry.close()
+
+    rc = check_training_registry_main(
+        [
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--view",
+            "recording-steps-wide",
+            "--no-rich",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Recording Step Status (Wide)" in out
+    assert "rec_steps_wide_001" in out
+    assert "OK (73.6%, registry, blob)" in out
+    assert "100% (passthrough)" in out
+    assert "4/5" in out

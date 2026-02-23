@@ -51,11 +51,11 @@ Suggested owner files:
 
 ### RS2: Shared Status Writer API
 
-- [ ] Add shared helper for status upserts/event writes.
-- [ ] Resolve dataset/recording keys from zarr path using registry tables.
-- [ ] Standardize status enum:
+- [x] Add shared helper for status upserts/event writes.
+- [x] Resolve dataset/recording keys from zarr path using registry tables.
+- [x] Standardize status enum:
   - `ok`, `missing`, `absent`, `na`, `error`
-- [ ] Standardize payload fields:
+- [x] Standardize payload fields:
   - `step_name`, `status`, `run_name`, `method`, `coverage_pct`,
     `review_status_json`, `details_json`, `updated_utc`, `source`
 
@@ -111,10 +111,10 @@ Suggested owner files:
 
 ### RS5: Backfill + Reconcile Command
 
-- [ ] Add maintenance command to backfill step status from existing Zarrs.
-- [ ] Support `--dry-run`, `--apply`, and scoped filters (`--recording-id`,
+- [x] Add maintenance command to backfill step status from existing Zarrs.
+- [x] Support `--dry-run`, `--apply`, and scoped filters (`--recording-id`,
   `--zarr-use`, path prefix).
-- [ ] Emit machine-readable summary counts.
+- [x] Emit machine-readable summary counts.
 
 Acceptance:
 
@@ -128,11 +128,11 @@ Suggested owner files:
 
 ### RS6: Read Path + Operator UX
 
-- [ ] Add registry viewer output for step status overview.
+- [x] Add registry viewer output for step status overview.
 - [x] Add registry query filters for step status predicates.
-- [ ] Add dual-source mode to `check_recording_steps`:
+- [x] Add dual-source mode to `check_recording_steps`:
   - `--status-source filesystem|registry|compare`
-- [ ] Add parity report mode to compare filesystem-derived vs registry-derived status.
+- [x] Add parity report mode to compare filesystem-derived vs registry-derived status.
 
 Acceptance:
 
@@ -197,8 +197,8 @@ No cross-task file edits without explicit handoff.
 
 ## Definition Of Done
 
-- [ ] Backfill completes on target recordings with expected row counts.
+- [x] Backfill completes on target recordings with expected row counts.
 - [ ] New pipeline runs update step status in registry automatically.
-- [ ] `check_training_registry` can show recording step status directly.
-- [ ] `check_recording_steps --status-source compare` reports no mismatches for validation set.
-- [ ] Unit test suite passes for touched modules.
+- [x] `check_training_registry` can show recording step status directly.
+- [x] `check_recording_steps --status-source compare` reports no mismatches for validation set.
+- [x] Unit test suite passes for touched modules.

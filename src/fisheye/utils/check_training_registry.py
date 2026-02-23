@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fisheye.registry.db import Registry, RegistryPaths
 
@@ -188,6 +188,34 @@ class RecordingOverviewRow:
 
 
 @dataclass
+class RecordingStepOverviewRow:
+    recording_id: str
+    dataset_count: int
+    step_rows_total: int
+    ok_rows: int
+    missing_rows: int
+    absent_rows: int
+    na_rows: int
+    error_rows: int
+    blocking_steps_csv: Optional[str]
+    latest_step_update_utc: Optional[str]
+
+
+@dataclass
+class RecordingStepDetailRow:
+    recording_id: Optional[str]
+    dataset_id: str
+    zarr_use: Optional[str]
+    step_name: str
+    status: str
+    run_name: Optional[str]
+    method: Optional[str]
+    coverage_pct: Optional[float]
+    source: Optional[str]
+    updated_utc: Optional[str]
+
+
+@dataclass
 class RecordingVocabRow:
     recording_type: str
     recording_subtype: str
@@ -243,6 +271,69 @@ def _status_with_details(value: Optional[bool], details: Optional[str], *, rich:
     if details:
         return f"{base} ({details})"
     return base
+
+
+def _step_status_rich(status: Optional[str]) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized == "ok":
+        return "[chartreuse1]ok[/chartreuse1]"
+    if normalized in {"missing", "error"}:
+        return f"[red]{normalized}[/red]"
+    if normalized in {"absent", "na"}:
+        return f"[yellow]{normalized}[/yellow]"
+    return normalized or "—"
+
+
+def _step_status_text(status: Optional[str]) -> str:
+    normalized = str(status or "").strip().lower()
+    return normalized or "—"
+
+
+_RATIO_RE = re.compile(r"^\s*(\d+)\s*/\s*(\d+)\s*$")
+_PCT_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)%\s*(?:\(|$)")
+
+
+def _wide_cell_rich(value: Optional[str]) -> str:
+    text = str(value or "—").strip() or "—"
+    upper = text.upper()
+    if text == "—":
+        return text
+    if upper == "OK":
+        return "[chartreuse1]OK[/chartreuse1]"
+    if upper == "MISS":
+        return "[red]MISS[/red]"
+    if upper in {"N/A", "NA"}:
+        return "[yellow]N/A[/yellow]"
+    if upper.startswith("OK"):
+        return f"[chartreuse1]{text}[/chartreuse1]"
+    if upper.startswith("APPROVED"):
+        return f"[chartreuse1]{text}[/chartreuse1]"
+    if upper.startswith("FAILED") or upper.startswith("ERROR"):
+        return f"[red]{text}[/red]"
+    if upper.startswith("PENDING") or upper.startswith("REVIEW"):
+        return f"[yellow]{text}[/yellow]"
+    ratio_match = _RATIO_RE.fullmatch(text)
+    if ratio_match:
+        ok_count = int(ratio_match.group(1))
+        total_count = int(ratio_match.group(2))
+        if total_count <= 0:
+            return text
+        if ok_count == total_count:
+            return f"[chartreuse1]{text}[/chartreuse1]"
+        if ok_count == 0:
+            return f"[red]{text}[/red]"
+        return f"[yellow]{text}[/yellow]"
+    pct_match = _PCT_RE.match(text)
+    if pct_match:
+        pct = float(pct_match.group(1))
+        if pct >= 99.9:
+            return f"[chartreuse1]{text}[/chartreuse1]"
+        return f"[yellow]{text}[/yellow]"
+    if "(MISS)" in upper:
+        return f"[red]{text}[/red]"
+    if "(OK)" in upper:
+        return f"[chartreuse1]{text}[/chartreuse1]"
+    return text
 
 
 def _source_value(value: Optional[str]) -> str:
@@ -1314,6 +1405,179 @@ def _load_recording_overview_rows(
     ]
 
 
+def _view_exists(registry: Registry, view_name: str) -> bool:
+    row = registry.conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = ? LIMIT 1;",
+        (view_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _load_recording_step_overview_rows(
+    registry: Registry,
+    *,
+    set_filter: Optional[str],
+    limit: Optional[int] = None,
+) -> List[RecordingStepOverviewRow]:
+    if not _view_exists(registry, "recording_step_overview"):
+        return []
+    sql = [
+        "SELECT",
+        "recording_id,",
+        "dataset_count,",
+        "step_rows_total,",
+        "ok_rows,",
+        "missing_rows,",
+        "absent_rows,",
+        "na_rows,",
+        "error_rows,",
+        "blocking_steps_csv,",
+        "latest_step_update_utc",
+        "FROM recording_step_overview",
+        "WHERE 1=1",
+    ]
+    params: List[Any] = []
+    dataset_ids = _dataset_ids_for_set(registry, set_filter)
+    if dataset_ids is not None:
+        if not dataset_ids:
+            return []
+        placeholders = ", ".join("?" for _ in dataset_ids)
+        sql.append(
+            "AND recording_id IN ("
+            "SELECT DISTINCT recording_id FROM recording_step_status_latest "
+            f"WHERE dataset_id IN ({placeholders}) "
+            "AND recording_id IS NOT NULL AND TRIM(recording_id) <> ''"
+            ")"
+        )
+        params.extend(dataset_ids)
+    sql.append("ORDER BY COALESCE(latest_step_update_utc, '') DESC, recording_id ASC")
+    if limit and limit > 0:
+        sql.append("LIMIT ?")
+        params.append(int(limit))
+    rows = registry.conn.execute(" ".join(sql), params).fetchall()
+    return [
+        RecordingStepOverviewRow(
+            recording_id=str(row["recording_id"]),
+            dataset_count=int(row["dataset_count"] or 0),
+            step_rows_total=int(row["step_rows_total"] or 0),
+            ok_rows=int(row["ok_rows"] or 0),
+            missing_rows=int(row["missing_rows"] or 0),
+            absent_rows=int(row["absent_rows"] or 0),
+            na_rows=int(row["na_rows"] or 0),
+            error_rows=int(row["error_rows"] or 0),
+            blocking_steps_csv=row["blocking_steps_csv"],
+            latest_step_update_utc=row["latest_step_update_utc"],
+        )
+        for row in rows
+    ]
+
+
+def _load_recording_step_detail_rows(
+    registry: Registry,
+    *,
+    set_filter: Optional[str],
+    limit: Optional[int] = None,
+) -> List[RecordingStepDetailRow]:
+    if not _view_exists(registry, "recording_step_status_latest"):
+        return []
+    sql = [
+        "SELECT",
+        "recording_id,",
+        "dataset_id,",
+        "zarr_use,",
+        "step_name,",
+        "status,",
+        "run_name,",
+        "method,",
+        "coverage_pct,",
+        "source,",
+        "updated_utc",
+        "FROM recording_step_status_latest",
+        "WHERE 1=1",
+    ]
+    params: List[Any] = []
+    dataset_ids = _dataset_ids_for_set(registry, set_filter)
+    if dataset_ids is not None:
+        if not dataset_ids:
+            return []
+        placeholders = ", ".join("?" for _ in dataset_ids)
+        sql.append(f"AND dataset_id IN ({placeholders})")
+        params.extend(dataset_ids)
+    sql.append("ORDER BY COALESCE(updated_utc, '') DESC, recording_id ASC, dataset_id ASC, step_name ASC")
+    if limit and limit > 0:
+        sql.append("LIMIT ?")
+        params.append(int(limit))
+    rows = registry.conn.execute(" ".join(sql), params).fetchall()
+    return [
+        RecordingStepDetailRow(
+            recording_id=row["recording_id"],
+            dataset_id=str(row["dataset_id"]),
+            zarr_use=row["zarr_use"],
+            step_name=str(row["step_name"] or ""),
+            status=str(row["status"] or ""),
+            run_name=row["run_name"],
+            method=row["method"],
+            coverage_pct=float(row["coverage_pct"]) if row["coverage_pct"] is not None else None,
+            source=row["source"],
+            updated_utc=row["updated_utc"],
+        )
+        for row in rows
+    ]
+
+
+def _load_recording_step_wide_rows(
+    registry: Registry,
+    *,
+    set_filter: Optional[str],
+    limit: Optional[int] = None,
+) -> Tuple[List[str], List[Dict[str, str]]]:
+    if not _view_exists(registry, "recording_step_status_wide"):
+        return [], []
+
+    columns = [
+        str(row["name"])
+        for row in registry.conn.execute("PRAGMA table_info(recording_step_status_wide);").fetchall()
+        if row["name"] is not None
+    ]
+    if not columns:
+        return [], []
+
+    sql = ["SELECT * FROM recording_step_status_wide WHERE 1=1"]
+    params: List[Any] = []
+    dataset_ids = _dataset_ids_for_set(registry, set_filter)
+    if dataset_ids is not None:
+        if not dataset_ids:
+            return columns, []
+        placeholders = ", ".join("?" for _ in dataset_ids)
+        sql.append(
+            "AND [Recording] IN ("
+            "SELECT DISTINCT recording_id "
+            "FROM recording_step_status_latest "
+            f"WHERE dataset_id IN ({placeholders}) "
+            "AND recording_id IS NOT NULL AND TRIM(recording_id) <> ''"
+            ")"
+        )
+        params.extend(dataset_ids)
+    sql.append("ORDER BY [Recording] DESC, [Camera] ASC")
+    if limit and limit > 0:
+        sql.append("LIMIT ?")
+        params.append(int(limit))
+    rows = registry.conn.execute(" ".join(sql), params).fetchall()
+
+    rendered_rows: List[Dict[str, str]] = []
+    for row in rows:
+        rendered_row: Dict[str, str] = {}
+        for column in columns:
+            value = row[column]
+            if value is None:
+                rendered_row[column] = "—"
+                continue
+            text = str(value).strip()
+            rendered_row[column] = text if text else "—"
+        rendered_rows.append(rendered_row)
+    return columns, rendered_rows
+
+
 def _load_recording_vocab_rows(registry: Registry) -> List[RecordingVocabRow]:
     rows = registry.conn.execute(
         """
@@ -1423,6 +1687,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             "datasets",
             "recordings",
             "recording-overview",
+            "recording-steps",
+            "recording-steps-wide",
             "models",
             "onnx",
             "tensorrt",
@@ -1432,7 +1698,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         default="sets",
         help=(
             "Select output view: sets, datasets, recordings, recording-overview, "
-            "models, onnx, tensorrt, keypoint-quality, or lineage (default: sets)."
+            "recording-steps, recording-steps-wide, models, onnx, tensorrt, keypoint-quality, "
+            "or lineage (default: sets)."
         ),
     )
     parser.add_argument(
@@ -1455,6 +1722,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Print recording_type/recording_subtype distribution summary.",
     )
     parser.add_argument(
+        "--show-recording-step-details",
+        action="store_true",
+        help="Show step-detail rows from recording_step_status_latest (recording-steps view).",
+    )
+    parser.add_argument(
         "--hide-unlinked",
         action="store_true",
         help="Hide rows with no matching training_set row (applies to models/onnx/tensorrt views).",
@@ -1469,6 +1741,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     show_datasets = args.all or args.view == "datasets"
     show_recordings = args.all or args.view == "recordings"
     show_recording_overview = args.all or args.view == "recording-overview"
+    show_recording_steps = args.view == "recording-steps"
+    show_recording_steps_wide = args.view == "recording-steps-wide"
+    show_recording_step_details = bool(show_recording_steps and args.show_recording_step_details)
     show_models = args.all or args.view == "models"
     show_onnx = args.all or args.view == "onnx"
     show_tensorrt = args.all or args.view == "tensorrt"
@@ -1480,6 +1755,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         show_datasets = False
         show_recordings = False
         show_recording_overview = False
+        show_recording_steps = False
+        show_recording_steps_wide = False
+        show_recording_step_details = False
         show_models = False
         show_onnx = False
         show_tensorrt = False
@@ -1503,6 +1781,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         set_filter=args.set_id,
         limit=args.limit,
     ) if show_recording_overview else []
+    recording_step_overview_rows = _load_recording_step_overview_rows(
+        registry,
+        set_filter=args.set_id,
+        limit=args.limit,
+    ) if show_recording_steps else []
+    recording_step_detail_rows = _load_recording_step_detail_rows(
+        registry,
+        set_filter=args.set_id,
+        limit=args.limit,
+    ) if show_recording_step_details else []
+    recording_step_wide_columns, recording_step_wide_rows = _load_recording_step_wide_rows(
+        registry,
+        set_filter=args.set_id,
+        limit=args.limit,
+    ) if show_recording_steps_wide else ([], [])
     recording_summary_rows = _load_recording_summary_rows(registry) if args.recording_summary else []
     recording_vocab_rows = _load_recording_vocab_rows(registry) if args.recording_summary else []
     model_rows = (
@@ -1571,6 +1864,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     if not args.all and args.view == "recording-overview" and not recording_overview_rows:
         print("No recording overview rows found.")
+        return 1
+    if not args.all and args.view == "recording-steps" and not recording_step_overview_rows:
+        print("No recording step rows found.")
+        return 1
+    if not args.all and args.view == "recording-steps-wide" and not recording_step_wide_rows:
+        print("No recording step wide rows found.")
         return 1
     if not args.all and args.view == "onnx" and not onnx_rows:
         print("No ONNX rows found.")
@@ -1764,6 +2063,66 @@ def main(argv: Optional[List[str]] = None) -> int:
                     export_index = 11 if show_inference_col else 10
                     cells.insert(export_index, str(row.export_dataset_count))
                 table.add_row(*cells)
+            console.print(table)
+        if show_recording_steps:
+            table = Table(title="Recording Step Overview", show_lines=False)
+            table.add_column("Recording ID", style="cyan")
+            table.add_column("Datasets", justify="right")
+            table.add_column("Rows", justify="right")
+            table.add_column("OK", justify="right")
+            table.add_column("Missing", justify="right")
+            table.add_column("Absent", justify="right")
+            table.add_column("N/A", justify="right")
+            table.add_column("Error", justify="right")
+            table.add_column("Blocking Steps")
+            table.add_column("Latest Update")
+            for row in recording_step_overview_rows:
+                table.add_row(
+                    row.recording_id,
+                    str(row.dataset_count),
+                    str(row.step_rows_total),
+                    str(row.ok_rows),
+                    str(row.missing_rows),
+                    str(row.absent_rows),
+                    str(row.na_rows),
+                    str(row.error_rows),
+                    row.blocking_steps_csv or "—",
+                    _format_time(row.latest_step_update_utc),
+                )
+            console.print(table)
+            if show_recording_step_details and recording_step_detail_rows:
+                detail_table = Table(title="Recording Step Details", show_lines=False)
+                detail_table.add_column("Recording ID", style="cyan")
+                detail_table.add_column("Dataset ID")
+                detail_table.add_column("Use")
+                detail_table.add_column("Step")
+                detail_table.add_column("Status")
+                detail_table.add_column("Run")
+                detail_table.add_column("Method")
+                detail_table.add_column("Coverage")
+                detail_table.add_column("Source")
+                detail_table.add_column("Updated")
+                for row in recording_step_detail_rows:
+                    detail_table.add_row(
+                        row.recording_id or "—",
+                        row.dataset_id,
+                        row.zarr_use or "—",
+                        row.step_name or "—",
+                        _step_status_rich(row.status),
+                        row.run_name or "—",
+                        row.method or "—",
+                        (f"{float(row.coverage_pct):.1f}%" if row.coverage_pct is not None else "—"),
+                        row.source or "—",
+                        _format_time(row.updated_utc),
+                    )
+                console.print(detail_table)
+        if show_recording_steps_wide:
+            table = Table(title="Recording Step Status (Wide)", show_lines=False)
+            for column in recording_step_wide_columns:
+                style = "cyan" if column == "Recording" else None
+                table.add_column(column, style=style)
+            for row in recording_step_wide_rows:
+                table.add_row(*[_wide_cell_rich(row.get(column)) for column in recording_step_wide_columns])
             console.print(table)
         if args.recording_summary:
             summary_table = Table(title="Recording Type/Subtype Summary", show_lines=False)
@@ -2102,6 +2461,74 @@ def main(argv: Optional[List[str]] = None) -> int:
                     ]
                 )
                 print("\t".join(cells))
+        if show_recording_steps:
+            print("Recording Step Overview")
+            header = [
+                "recording_id",
+                "datasets",
+                "rows",
+                "ok",
+                "missing",
+                "absent",
+                "na",
+                "error",
+                "blocking_steps",
+                "latest_update",
+            ]
+            print("\t".join(header))
+            for row in recording_step_overview_rows:
+                cells = [
+                    row.recording_id,
+                    str(row.dataset_count),
+                    str(row.step_rows_total),
+                    str(row.ok_rows),
+                    str(row.missing_rows),
+                    str(row.absent_rows),
+                    str(row.na_rows),
+                    str(row.error_rows),
+                    row.blocking_steps_csv or "—",
+                    _format_time(row.latest_step_update_utc),
+                ]
+                print("\t".join(cells))
+            if show_recording_step_details and recording_step_detail_rows:
+                print("Recording Step Details")
+                detail_header = [
+                    "recording_id",
+                    "dataset_id",
+                    "use",
+                    "step_name",
+                    "status",
+                    "run_name",
+                    "method",
+                    "coverage",
+                    "source",
+                    "updated",
+                ]
+                print("\t".join(detail_header))
+                for row in recording_step_detail_rows:
+                    detail_cells = [
+                        row.recording_id or "—",
+                        row.dataset_id,
+                        row.zarr_use or "—",
+                        row.step_name or "—",
+                        _step_status_text(row.status),
+                        row.run_name or "—",
+                        row.method or "—",
+                        (f"{float(row.coverage_pct):.1f}%" if row.coverage_pct is not None else "—"),
+                        row.source or "—",
+                        _format_time(row.updated_utc),
+                    ]
+                    print("\t".join(detail_cells))
+        if show_recording_steps_wide:
+            print("Recording Step Status (Wide)")
+            print("\t".join(recording_step_wide_columns))
+            for row in recording_step_wide_rows:
+                print(
+                    "\t".join(
+                        row.get(column, "—")
+                        for column in recording_step_wide_columns
+                    )
+                )
         if args.recording_summary:
             print("Recording Type/Subtype Summary")
             for row in recording_summary_rows:

@@ -33,7 +33,7 @@ Related eye-mask parity work is tracked separately in `docs/eye_masks_detect_pos
   - Track runtime and throughput metrics from keypoint runs (both traditional and YOLO).
   - Acceptance: registry migrations create table/views; rescan populates rows.
 
-- [ ] Extend registry query CLI for keypoint quality/performance filters.
+- [x] Extend registry query CLI for keypoint quality/performance filters.
   - Add keypoint-focused filters to `registry_query.py` (review state/use, usable rate, method, runtime metrics).
   - Add group summaries for keypoint model/method similar to detect summaries.
   - Acceptance: one CLI can query both detect and keypoint status/performance slices.
@@ -66,6 +66,8 @@ Related eye-mask parity work is tracked separately in `docs/eye_masks_detect_pos
 - [x] Unit tests for strict keypoint accept CLI.
 - [x] Unit tests for unapproved keypoint lister.
 - [x] Registry migration tests for keypoint performance schema/views.
-- [ ] Registry query tests for new keypoint filters/group summaries.
+- [x] Registry query tests for new keypoint filters/group summaries.
 - [x] Batch logging tests to assert richer keypoint result payloads.
 - [ ] End-to-end smoke test: analysis zarr -> keypoints -> refine_keypoints -> registry scan -> quality/perf query.
+  - [x] Added operator runner script: `scripts/validate_pose_detect_parity_smoke.sh`.
+  - [ ] Execute on real registry recording and capture artifact output.
