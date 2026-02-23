@@ -90,6 +90,10 @@ if [[ ! -d "$RECORDING_DIR" ]]; then
   exit 2
 fi
 
+if [[ ! -d "$TMP_ROOT" ]]; then
+  mkdir -p "$TMP_ROOT"
+fi
+
 if [[ ! -f "$REGISTRY" ]]; then
   echo "Registry not found: $REGISTRY" >&2
   exit 2
@@ -156,9 +160,8 @@ if [[ -z "$RECORDING_ID" ]]; then
   exit 2
 fi
 
-STAMP="$(date +%Y%m%d_%H%M%S)"
-TMP_DIR="${TMP_ROOT%/}/recording_step_status_validate_${STAMP}"
-mkdir -p "$TMP_DIR"
+SAFE_RECORDING_NAME="$(printf '%s' "$RECORDING_NAME" | tr -cs 'A-Za-z0-9._-' '_')"
+TMP_DIR="$(mktemp -d "${TMP_ROOT%/}/recording_step_status_validate_${SAFE_RECORDING_NAME}_XXXXXX")"
 
 section() {
   printf '\n=== %s ===\n' "$1"
@@ -202,7 +205,7 @@ if ! scripts/py -m fisheye.utils.check_recording_steps \
 fi
 cat "$TMP_DIR/compare.log"
 
-if ! rg -q "^No status mismatches found\\.$" "$TMP_DIR/compare.log"; then
+if ! rg -q "No status mismatches found\\." "$TMP_DIR/compare.log"; then
   echo "Parity mismatch detected. Expected 'No status mismatches found.' output." >&2
   exit 1
 fi

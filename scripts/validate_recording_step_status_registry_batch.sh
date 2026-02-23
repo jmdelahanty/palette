@@ -181,7 +181,8 @@ set +e
 printf '%s\0' "${TARGETS[@]}" | xargs -0 -n1 -P "$JOBS" bash -c '
   rec="$1"
   name="$(basename "$rec")"
-  safe_name="$(printf "%s" "$name" | tr "/ " "__")"
+  rec_id="$(printf "%s" "$rec" | cksum | awk "{print \$1}")"
+  safe_name="$(printf "%s_%s" "$name" "$rec_id" | tr -cs "A-Za-z0-9._-" "_")"
   log_path="$LOG_DIR/${safe_name}.log"
   cmd=("$VALIDATOR" --recording-dir "$rec" --registry "$REGISTRY" --zarr-use "$ZARR_USE" --tmp-root "$TMP_ROOT")
   if [[ "$SKIP_BACKFILL" == "1" ]]; then
