@@ -28,6 +28,8 @@ query status directly from SQLite.
 ## Parallel Work Model
 
 Use canonical task IDs with strict file ownership to minimize conflicts.
+Parallel execution contract for RS3/RS4/RS7:
+`docs/recording_step_status_parallel_agents_contract.md`.
 
 ### RS1: Schema + Views (Foundational)
 
@@ -71,11 +73,11 @@ Suggested owner files:
 
 ### RS3: Detect/Crop Branch Write Hooks
 
-- [ ] Hook status writes into detect/crop-related producers:
+- [x] Hook status writes into detect/crop-related producers:
   - detect inference completion
   - refined-detect completion
   - crop completion
-- [ ] Capture review/coverage fields where available.
+- [x] Capture review/coverage fields where available.
 
 Acceptance:
 
@@ -89,13 +91,13 @@ Suggested owner files:
 
 ### RS4: Pose/Eye/Tracking Branch Write Hooks
 
-- [ ] Hook status writes into:
+- [x] Hook status writes into:
   - keypoint inference
   - refined keypoints
   - eye-mask inference
   - refined eye masks
   - id assignment / track (where applicable)
-- [ ] Capture review/quality pointers in `details_json` for query joins.
+- [x] Capture review/quality pointers in `details_json` for query joins.
 
 Acceptance:
 
@@ -198,7 +200,7 @@ No cross-task file edits without explicit handoff.
 ## Definition Of Done
 
 - [x] Backfill completes on target recordings with expected row counts.
-- [ ] New pipeline runs update step status in registry automatically.
+- [x] New pipeline runs update step status in registry automatically.
 - [x] `check_training_registry` can show recording step status directly.
 - [x] `check_recording_steps --status-source compare` reports no mismatches for validation set.
 - [x] Unit test suite passes for touched modules.

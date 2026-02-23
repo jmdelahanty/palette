@@ -38,6 +38,8 @@ from skimage import measure, morphology
 from skimage.measure import EllipseModel
 from collections import Counter
 
+from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
+from ..registry.status_ledger import upsert_recording_step_status
 from ..shared.mask_source import load_mask_bundle
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
 from ..shared.row_alignment import assert_row_alignment
@@ -58,9 +60,89 @@ _MIN_OBJECT_AREA = 12
 _PROBABILITY_THRESHOLD = 0.45
 _AREA_FILTER_Z_DEFAULT = 2.0
 _AREA_FILTER_MODE_DEFAULT = "either"
+_REFINED_EYE_MASKS_STATUS_SOURCE = "runtime_refine_eye_masks"
 
 _ZARR_GROUP_CACHE: Dict[str, zarr.Group] = {}
 _ZARR_ARRAY_CACHE: Dict[Tuple[str, str], zarr.Array] = {}
+
+
+def _status_text(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", "ignore").strip()
+    else:
+        text = str(value).strip()
+    return text or None
+
+
+def _status_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _emit_refined_eye_masks_status(
+    *,
+    root: zarr.Group,
+    zarr_path: Path,
+    status: str,
+    run_name: Optional[str],
+    method: Optional[str],
+    coverage_pct: Optional[float],
+    review_status: Optional[Dict[str, object]],
+    details: Dict[str, object],
+    console: Optional[Console],
+) -> None:
+    try:
+        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
+        recording_id = _status_text(root.attrs.get("recording_id")) or _status_text(session_uuid)
+        zarr_use = _status_text(root.attrs.get("zarr_use"))
+        zarr_purpose = _status_text(root.attrs.get("zarr_purpose"))
+
+        registry_path = RegistryPaths.from_env(Path.cwd()).path
+        registry = Registry(registry_path)
+        try:
+            registry.upsert_dataset(
+                dataset_id,
+                session_uuid=session_uuid,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+                zarr_purpose=zarr_purpose,
+            )
+            upsert_recording_step_status(
+                registry,
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                step_name="refined_eye_masks",
+                status=status,
+                run_name=run_name,
+                method=method,
+                coverage_pct=coverage_pct,
+                review_status_json=review_status,
+                details_json=details,
+                source=_REFINED_EYE_MASKS_STATUS_SOURCE,
+                zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_path),
+            )
+        finally:
+            registry.close()
+    except Exception as exc:
+        if console is not None:
+            console.print(
+                f"[yellow]Warning:[/yellow] failed to write recording step status "
+                f"for refined_eye_masks: {exc}"
+            )
 
 
 def _get_zarr_array(zarr_path: str, array_path: str) -> zarr.Array:
@@ -2264,6 +2346,33 @@ def refine_eye_masks(
     console.print(
         f"[green]✓[/green] Refined eye masks saved to [cyan]{REFINED_STAGE_NAME}_runs/{resolved_run_name}[/cyan] "
         f"({successful_pairs}/{total_rois} ROI pairs refined)"
+    )
+
+    review_status = run_group.attrs.get("eye_mask_review_status")
+    coverage_pct = _status_float(run_group.attrs.get("successful_roi_pair_rate"))
+    if coverage_pct is not None and coverage_pct <= 1.0:
+        coverage_pct *= 100.0
+    _emit_refined_eye_masks_status(
+        root=root,
+        zarr_path=Path(zarr_path).expanduser().resolve(),
+        status="ok",
+        run_name=resolved_run_name,
+        method=_status_text(run_group.attrs.get("method")) or "refine_eye_masks",
+        coverage_pct=coverage_pct,
+        review_status=review_status if isinstance(review_status, dict) else None,
+        details={
+            "reason": "present",
+            "source_eye_masks_run": src_run_name,
+            "source_crop_run": crop_run_name,
+            "source_keypoints_run": keypoint_run_name,
+            "source_keypoint_group": keypoint_group_name,
+            "total_rois": total_rois,
+            "successful_roi_pairs": successful_pairs,
+            "successful_roi_pair_rate": pair_rate,
+            "filtered_roi_pairs": stats.get("filtered_rois"),
+            "probability_source": mask_prob_dataset or "none",
+        },
+        console=console,
     )
     return resolved_run_name
 

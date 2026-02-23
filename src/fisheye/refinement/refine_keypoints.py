@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,12 +36,231 @@ except ImportError:
     HAVE_DISTRIBUTED = False
 
 from .keypoint_quality import KeypointGeometryMetrics, compute_geometry_metrics
+from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
+from ..registry.status_ledger import upsert_recording_step_status
 from ..shared.detect_reason_codec import write_reason_columns
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..utils.system import get_environment_info, get_git_info
 
 REFINED_KEYPOINT_GROUP = "refined_keypoints_runs"
 LEGACY_KEYPOINT_GROUP = "keypoints_refined_runs"
+_STEP_NAME_REFINED_KEYPOINTS = "refined_keypoints"
+_STATUS_SOURCE = "runtime_refine_keypoints"
+
+
+@dataclass(frozen=True)
+class _StatusContext:
+    registry_path: Path
+    dataset_id: str
+    recording_id: Optional[str]
+    zarr_path: Path
+
+
+def _as_text(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", "ignore").strip()
+    else:
+        text = str(value).strip()
+    return text or None
+
+
+def _as_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_mapping(value: object) -> Optional[Dict[str, object]]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    payload: Optional[str] = None
+    if isinstance(value, bytes):
+        payload = value.decode("utf-8", "ignore").strip()
+    elif isinstance(value, str):
+        payload = value.strip()
+    if not payload:
+        return None
+    try:
+        decoded = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(decoded, Mapping):
+        return dict(decoded)
+    return None
+
+
+def _zarr_mtime_ns(path: Path) -> Optional[int]:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _resolve_status_context(zarr_path: str) -> Optional[_StatusContext]:
+    resolved_zarr = Path(zarr_path).expanduser().resolve()
+    registry_path = RegistryPaths.from_env(Path.cwd()).path.expanduser().resolve()
+    if not registry_path.exists():
+        return None
+
+    registry = Registry(registry_path)
+    try:
+        path_hash = hashlib.sha256(str(resolved_zarr).encode("utf-8")).hexdigest()
+        row = registry.conn.execute(
+            """
+            SELECT dataset_id, recording_id
+            FROM datasets
+            WHERE path_hash = ?
+            ORDER BY COALESCE(last_seen_utc, '') DESC, dataset_id
+            LIMIT 1;
+            """,
+            (path_hash,),
+        ).fetchone()
+
+        if row is None:
+            path_variants = tuple(
+                dict.fromkeys(
+                    [
+                        str(resolved_zarr),
+                        str(Path(zarr_path).expanduser()),
+                        str(Path(zarr_path)),
+                    ]
+                )
+            )
+            for candidate in path_variants:
+                row = registry.conn.execute(
+                    """
+                    SELECT dataset_id, recording_id
+                    FROM datasets
+                    WHERE zarr_path = ?
+                    ORDER BY COALESCE(last_seen_utc, '') DESC, dataset_id
+                    LIMIT 1;
+                    """,
+                    (candidate,),
+                ).fetchone()
+                if row is not None:
+                    break
+
+        if row is None:
+            row = registry.conn.execute(
+                """
+                SELECT dataset_id, recording_id
+                FROM datasets
+                WHERE lower(COALESCE(zarr_path, '')) = lower(?)
+                ORDER BY COALESCE(last_seen_utc, '') DESC, dataset_id
+                LIMIT 1;
+                """,
+                (str(resolved_zarr),),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        dataset_id = _as_text(row["dataset_id"])
+        if dataset_id is None:
+            return None
+
+        return _StatusContext(
+            registry_path=registry_path,
+            dataset_id=dataset_id,
+            recording_id=_as_text(row["recording_id"]),
+            zarr_path=resolved_zarr,
+        )
+    finally:
+        registry.close()
+
+
+def _resolve_status_context_from_root(
+    root: zarr.Group,
+    zarr_path: str,
+) -> Optional[_StatusContext]:
+    resolved_zarr = Path(zarr_path).expanduser().resolve()
+    registry_path = RegistryPaths.from_env(Path.cwd()).path.expanduser().resolve()
+    try:
+        dataset_id, session_uuid = resolve_dataset_id(root, resolved_zarr)
+        recording_id = _as_text(root.attrs.get("recording_id")) or _as_text(session_uuid)
+    except Exception:
+        return None
+
+    registry = Registry(registry_path)
+    try:
+        registry.upsert_dataset(
+            dataset_id,
+            session_uuid=session_uuid,
+            zarr_path=resolved_zarr,
+            recording_id=recording_id,
+            zarr_use=_as_text(root.attrs.get("zarr_use")),
+            zarr_purpose=_as_text(root.attrs.get("zarr_purpose")),
+        )
+    except Exception:
+        pass
+    finally:
+        registry.close()
+
+    return _StatusContext(
+        registry_path=registry_path,
+        dataset_id=dataset_id,
+        recording_id=recording_id,
+        zarr_path=resolved_zarr,
+    )
+
+
+def _emit_refined_keypoint_status(
+    *,
+    context: Optional[_StatusContext],
+    status: str,
+    run_name: Optional[str],
+    method: Optional[str],
+    coverage_pct: Optional[float],
+    review_status_json: Optional[Dict[str, object]],
+    details: Dict[str, object],
+    console: Optional[Console],
+) -> bool:
+    if context is None:
+        return False
+
+    registry = Registry(context.registry_path)
+    try:
+        upsert_recording_step_status(
+            registry,
+            dataset_id=context.dataset_id,
+            recording_id=context.recording_id,
+            step_name=_STEP_NAME_REFINED_KEYPOINTS,
+            status=status,
+            run_name=run_name,
+            method=method,
+            coverage_pct=coverage_pct,
+            review_status_json=review_status_json,
+            details_json=details,
+            source=_STATUS_SOURCE,
+            zarr_mtime_ns=_zarr_mtime_ns(context.zarr_path),
+        )
+        return True
+    except Exception as exc:
+        if console is not None:
+            console.print(
+                f"[yellow]Warning:[/yellow] failed to write step status for "
+                f"'{_STEP_NAME_REFINED_KEYPOINTS}': {exc}"
+            )
+        return False
+    finally:
+        registry.close()
+
+
+def _classify_refined_keypoint_failure(exc: Exception) -> Tuple[str, str]:
+    message = str(exc).lower()
+    if isinstance(exc, RuntimeError):
+        if "no keypoint runs found" in message:
+            return "absent", "keypoints_missing"
+        if "contains zero rois" in message:
+            return "missing", "no_rois"
+    if isinstance(exc, KeyError) and "keypoints_runs/" in str(exc):
+        return "absent", "keypoint_run_missing"
+    return "error", "refine_failed"
 
 
 def _write_reason_arrays(group: zarr.Group, reason: np.ndarray, chunk_size: int) -> None:
@@ -401,7 +621,23 @@ def create_refined_keypoint_run(
     start_time = time.perf_counter()
 
     root = zarr.open(zarr_path, mode="a")
+    status_context = _resolve_status_context_from_root(root, zarr_path)
+    if status_context is None:
+        status_context = _resolve_status_context(zarr_path)
     if "keypoints_runs" not in root or root["keypoints_runs"].attrs.get("latest") is None:
+        _emit_refined_keypoint_status(
+            context=status_context,
+            status="absent",
+            run_name=None,
+            method="refine_keypoints",
+            coverage_pct=None,
+            review_status_json=None,
+            details={
+                "reason": "keypoints_missing",
+                "error": "No keypoint runs found. Run keypoint detection first.",
+            },
+            console=console,
+        )
         raise RuntimeError("No keypoint runs found. Run keypoint detection first.")
 
     if keypoint_run is None:
@@ -427,6 +663,19 @@ def create_refined_keypoint_run(
     total_rois = kp_source["keypoints_roi"].shape[0]
     console.print(f"Total ROI keypoints: {total_rois}")
     if total_rois == 0:
+        _emit_refined_keypoint_status(
+            context=status_context,
+            status="missing",
+            run_name=None,
+            method="refine_keypoints",
+            coverage_pct=None,
+            review_status_json=None,
+            details={
+                "reason": "no_rois",
+                "source_keypoints_run": keypoint_run,
+            },
+            console=console,
+        )
         raise RuntimeError("Keypoint run contains zero ROIs; nothing to refine.")
 
     # Prepare destination group
@@ -927,6 +1176,27 @@ def create_refined_keypoint_run(
 
     console.print("\n".join(report_lines))
     console.print(f"[green]✓[/green] Saved refined keypoints run: [cyan]{run_name}[/cyan]")
+
+    _emit_refined_keypoint_status(
+        context=status_context,
+        status="ok",
+        run_name=run_name,
+        method=_as_text(kp_refined.attrs.get("method")) or "refine_keypoints",
+        coverage_pct=pass_rate,
+        review_status_json=_as_mapping(kp_refined.attrs.get("keypoint_review_status")),
+        details={
+            "reason": "present",
+            "source_keypoints_run": keypoint_run,
+            "source_crop_run": _as_text(kp_refined.attrs.get("source_crop_run")),
+            "source_detect_run": _as_text(kp_refined.attrs.get("source_detect_run")),
+            "total_rois": stats["total"],
+            "refined_success": stats["refined_success"],
+            "usable_keypoints": stats["usable"],
+            "usable_keypoints_pct": (float(stats["usable"]) / float(stats["total"]) * 100.0) if stats["total"] else None,
+            "pass_rate_percent": pass_rate,
+        },
+        console=console,
+    )
 
     return run_name
 

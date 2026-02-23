@@ -16,10 +16,101 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 
+from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
+from ..registry.status_ledger import upsert_recording_step_status
 from ..shared.experiment_setup import infer_experiment_setup
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info
+
+_ID_ASSIGN_STATUS_SOURCE = "runtime_assign_ids"
+
+
+def _status_text(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", "ignore").strip()
+    else:
+        text = str(value).strip()
+    return text or None
+
+
+def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _emit_tracking_step_statuses(
+    *,
+    root: zarr.Group,
+    zarr_path: str,
+    id_status: str,
+    id_reason: str,
+    id_run_name: Optional[str],
+    id_method: Optional[str],
+    id_coverage_pct: Optional[float],
+    id_details: Dict[str, object],
+    tracks_status: str,
+    tracks_reason: str,
+    tracks_run_name: Optional[str],
+    tracks_method: Optional[str],
+    tracks_details: Dict[str, object],
+    console: Optional[Console],
+) -> None:
+    try:
+        zarr_file = Path(zarr_path).expanduser().resolve()
+        dataset_id, session_uuid = resolve_dataset_id(root, zarr_file)
+        recording_id = _status_text(root.attrs.get("recording_id")) or _status_text(session_uuid)
+        zarr_use = _status_text(root.attrs.get("zarr_use"))
+        zarr_purpose = _status_text(root.attrs.get("zarr_purpose"))
+
+        registry_path = RegistryPaths.from_env(Path.cwd()).path
+        registry = Registry(registry_path)
+        try:
+            registry.upsert_dataset(
+                dataset_id,
+                session_uuid=session_uuid,
+                zarr_path=zarr_file,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+                zarr_purpose=zarr_purpose,
+            )
+            upsert_recording_step_status(
+                registry,
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                step_name="id_assignment",
+                status=id_status,
+                run_name=id_run_name,
+                method=id_method,
+                coverage_pct=id_coverage_pct,
+                details_json={**id_details, "reason": id_reason},
+                source=_ID_ASSIGN_STATUS_SOURCE,
+                zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_file),
+            )
+            upsert_recording_step_status(
+                registry,
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                step_name="tracks",
+                status=tracks_status,
+                run_name=tracks_run_name,
+                method=tracks_method,
+                details_json={**tracks_details, "reason": tracks_reason},
+                source=_ID_ASSIGN_STATUS_SOURCE,
+                zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_file),
+            )
+        finally:
+            registry.close()
+    except Exception as exc:
+        if console is not None:
+            console.print(
+                f"[yellow]Warning:[/yellow] failed to write recording step status "
+                f"for assign_ids/tracks: {exc}"
+            )
 
 
 def _infer_num_frames(
@@ -269,6 +360,18 @@ def assign_ids_spatial(
     start_time = time.perf_counter()
     
     root = zarr.open(zarr_path, mode='a')
+
+    def _resolve_tracks_status(id_status: str) -> Tuple[str, str, Optional[str], Optional[str]]:
+        tracks_parent = root.get("tracking_runs")
+        if tracks_parent is not None:
+            latest_track = _status_text(tracks_parent.attrs.get("latest")) if hasattr(tracks_parent, "attrs") else None
+            if latest_track and latest_track in tracks_parent:
+                track_group = tracks_parent[latest_track]
+                track_method = _status_text(track_group.attrs.get("method")) if hasattr(track_group, "attrs") else None
+                return "ok", "present", latest_track, track_method
+        if id_status == "ok":
+            return "missing", "run_missing", None, None
+        return "absent", "upstream_missing", None, None
     
     # Check prerequisites
     if 'detect_runs' not in root:
@@ -315,6 +418,23 @@ def assign_ids_spatial(
         else:
             console.print("[yellow]Warning: Could not extract dish mask for single-dish mode.[/yellow]")
             console.print("[yellow]Make sure dish mask is tuned: python -m fisheye data.zarr --tune mask[/yellow]")
+            tracks_status, tracks_reason, tracks_run_name, tracks_method = _resolve_tracks_status("missing")
+            _emit_tracking_step_statuses(
+                root=root,
+                zarr_path=zarr_path,
+                id_status="missing",
+                id_reason="subdish_masks_missing",
+                id_run_name=None,
+                id_method="spatial",
+                id_coverage_pct=0.0,
+                id_details={"setup_type": setup_type},
+                tracks_status=tracks_status,
+                tracks_reason=tracks_reason,
+                tracks_run_name=tracks_run_name,
+                tracks_method=tracks_method,
+                tracks_details={"upstream": {"id_assignment": "missing"}},
+                console=console,
+            )
             return {'total_detections': 0, 'assigned': 0, 'unassigned': 0}
     
     # MULTI-DISH MODE: Require sub-dish ROI definitions
@@ -344,6 +464,23 @@ def assign_ids_spatial(
             console.print("[yellow]Warning: No sub-dish masks defined.[/yellow]")
             console.print("[yellow]Run the tuner first: python -m fisheye data.zarr --tune subdish[/yellow]")
             console.print("[yellow]Or add 'sub_dish_rois' to config under 'assign_ids'[/yellow]")
+            tracks_status, tracks_reason, tracks_run_name, tracks_method = _resolve_tracks_status("missing")
+            _emit_tracking_step_statuses(
+                root=root,
+                zarr_path=zarr_path,
+                id_status="missing",
+                id_reason="subdish_masks_missing",
+                id_run_name=None,
+                id_method="spatial",
+                id_coverage_pct=0.0,
+                id_details={"setup_type": setup_type},
+                tracks_status=tracks_status,
+                tracks_reason=tracks_reason,
+                tracks_run_name=tracks_run_name,
+                tracks_method=tracks_method,
+                tracks_details={"upstream": {"id_assignment": "missing"}},
+                console=console,
+            )
             return {'total_detections': 0, 'assigned': 0, 'unassigned': 0}
     
     # Validate expected vs actual number of ROIs
@@ -640,6 +777,35 @@ def assign_ids_spatial(
     
     console.print("\n")
     console.print(panel)
+
+    tracks_status, tracks_reason, tracks_run_name, tracks_method = _resolve_tracks_status("ok")
+    _emit_tracking_step_statuses(
+        root=root,
+        zarr_path=zarr_path,
+        id_status="ok",
+        id_reason="present",
+        id_run_name=run_group_name,
+        id_method="spatial",
+        id_coverage_pct=float(summary_stats.get("assignment_rate_percent", 0.0)),
+        id_details={
+            "setup_type": setup_type,
+            "assignment_source": assignment_source,
+            "source_detect_run": source_detect_run,
+            "source_refined_run": refined_run_name,
+            "num_masks": len(subdish_masks),
+            "assigned_detections": int(n_assigned),
+            "unassigned_detections": int(n_unassigned),
+        },
+        tracks_status=tracks_status,
+        tracks_reason=tracks_reason,
+        tracks_run_name=tracks_run_name,
+        tracks_method=tracks_method,
+        tracks_details={
+            "upstream": {"id_assignment": "ok"},
+            "source_run": tracks_run_name,
+        },
+        console=console,
+    )
     
     return summary_stats
 

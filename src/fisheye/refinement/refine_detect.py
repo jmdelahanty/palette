@@ -15,9 +15,12 @@ import numpy as np
 import zarr
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from rich.console import Console
 
+from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
+from ..registry.status_ledger import upsert_recording_step_status
 from ..utils.metadata import get_total_frames, get_detection_method
 from ..utils.system import get_environment_info, get_git_info
 from ..shared.detect_reason_codec import write_reason_columns
@@ -25,6 +28,67 @@ from ..shared.stage_provenance import build_stage_provenance, write_stage_proven
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
+_REFINED_DETECT_STATUS_SOURCE = "runtime_refine_detect"
+
+
+def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _emit_refined_detect_status(
+    *,
+    root: zarr.Group,
+    zarr_path: Path,
+    status: str,
+    run_name: Optional[str],
+    method: Optional[str],
+    coverage_pct: Optional[float],
+    review_status: Optional[Dict[str, object]],
+    details: Dict[str, object],
+    console: Optional[Console],
+) -> None:
+    try:
+        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
+        recording_id = _normalize_attr(root.attrs.get("recording_id")) or _normalize_attr(session_uuid)
+        zarr_use = _normalize_attr(root.attrs.get("zarr_use"))
+        zarr_purpose = _normalize_attr(root.attrs.get("zarr_purpose"))
+
+        registry_path = RegistryPaths.from_env(Path.cwd()).path
+        registry = Registry(registry_path)
+        try:
+            registry.upsert_dataset(
+                dataset_id,
+                session_uuid=session_uuid,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+                zarr_purpose=zarr_purpose,
+            )
+            upsert_recording_step_status(
+                registry,
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                step_name="refined_detect",
+                status=status,
+                run_name=run_name,
+                method=method,
+                coverage_pct=coverage_pct,
+                review_status_json=review_status,
+                details_json=details,
+                source=_REFINED_DETECT_STATUS_SOURCE,
+                zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_path),
+            )
+        finally:
+            registry.close()
+    except Exception as exc:
+        if console is not None:
+            console.print(
+                f"[yellow]Warning:[/yellow] failed to write recording step status "
+                f"for refined_detect: {exc}"
+            )
 
 def _normalize_attr(value: object) -> Optional[str]:
     if value is None:
@@ -883,6 +947,34 @@ def create_refined_run(
                     console.print("[green]✓[/green] Detection quality visualization stored in refined run.")
             except Exception as exc:
                 console.print(f"[yellow]Warning:[/yellow] Failed to render detection visualization: {exc}")
+
+    detect_review_status = _parse_mapping(refined_group.attrs.get("detect_review_status"))
+    _emit_refined_detect_status(
+        root=root,
+        zarr_path=Path(zarr_path).expanduser().resolve(),
+        status="ok",
+        run_name=run_name,
+        method=(
+            (_normalize_attr(refined_group.attrs.get("method")) if hasattr(refined_group, "attrs") else None)
+            or refine_mode
+        ),
+        coverage_pct=comparison_stats.get("interpolated", {}).get("coverage_percent"),
+        review_status=detect_review_status,
+        details={
+            "reason": "present",
+            "source_detect_run": detect_run,
+            "source_quality_run": resolved_quality_run,
+            "refine_mode": refine_mode,
+            "parameter_source": param_source,
+            "filters_applied": filters,
+            "coverage_frame_source": coverage_frame_source,
+            "coverage_frames_total": num_frames,
+            "coverage_frames_full": full_frame_count,
+            "gaps_filled": interp_stats.get("gaps_filled"),
+            "interpolated_detections": interp_stats.get("interpolated_detections"),
+        },
+        console=console,
+    )
     
     return run_name
 

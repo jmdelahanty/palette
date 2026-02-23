@@ -31,6 +31,8 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRe
 from rich.align import Align
 
 # Metadata helpers
+from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
+from ..registry.status_ledger import upsert_recording_step_status
 from ..utils.metadata import has_raw_video, get_video_source_path, get_total_frames, get_detection_method
 from ..shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
@@ -40,6 +42,7 @@ from ..shared.stage_provenance import build_stage_provenance, write_stage_proven
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
+_CROP_STATUS_SOURCE = "runtime_crop"
 
 # Dask imports
 import dask
@@ -170,6 +173,76 @@ def _build_crop_stage_provenance(
     if detection_source is not None:
         provenance["detection_source"] = dict(detection_source)
     return {key: value for key, value in provenance.items() if value is not None}
+
+
+def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _emit_crop_step_status(
+    *,
+    root: zarr.Group,
+    zarr_path: str,
+    status: str,
+    run_name: Optional[str],
+    method: Optional[str],
+    coverage_pct: Optional[float],
+    review_status: Optional[Dict[str, Any]],
+    details: Dict[str, Any],
+    console: Optional[Console],
+) -> None:
+    try:
+        zarr_file = Path(zarr_path).expanduser().resolve()
+        dataset_id, session_uuid = resolve_dataset_id(root, zarr_file)
+        recording_id = (
+            str(root.attrs.get("recording_id")).strip()
+            if root.attrs.get("recording_id") is not None
+            else None
+        )
+        if not recording_id and session_uuid:
+            recording_id = str(session_uuid).strip()
+        zarr_use = str(root.attrs.get("zarr_use")).strip() if root.attrs.get("zarr_use") is not None else None
+        zarr_purpose = (
+            str(root.attrs.get("zarr_purpose")).strip()
+            if root.attrs.get("zarr_purpose") is not None
+            else None
+        )
+
+        registry_path = RegistryPaths.from_env(Path.cwd()).path
+        registry = Registry(registry_path)
+        try:
+            registry.upsert_dataset(
+                dataset_id,
+                session_uuid=session_uuid,
+                zarr_path=zarr_file,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+                zarr_purpose=zarr_purpose,
+            )
+            upsert_recording_step_status(
+                registry,
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                step_name="crop",
+                status=status,
+                run_name=run_name,
+                method=method,
+                coverage_pct=coverage_pct,
+                review_status_json=review_status,
+                details_json=details,
+                source=_CROP_STATUS_SOURCE,
+                zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_file),
+            )
+        finally:
+            registry.close()
+    except Exception as exc:
+        if console is not None:
+            console.print(
+                f"[yellow]Warning:[/yellow] failed to write recording step status for crop: {exc}"
+            )
 
 
 def infer_detection_source_type(
@@ -1147,6 +1220,7 @@ def crop_from_external_video(
             'frames_with_crops': frames_with_crops,
             'percent_cropped': percent_cropped,
             'duration_seconds': duration,
+            'run_name': run_name,
             'detection_source_type': source_type,
             'detection_source_path': source_path
         }
@@ -1880,7 +1954,7 @@ def crop_detections(
         )
 
         # Use external video cropping
-        return crop_from_external_video(
+        external_result = crop_from_external_video(
             zarr_path=zarr_path,
             video_path=video_path,
             source_path=source_path,
@@ -1900,6 +1974,49 @@ def crop_detections(
             external_require_kvikio=require_kvikio,
             verbose=verbose
         )
+        external_run_name = external_result.get('run_name') if isinstance(external_result, dict) else None
+        external_run = (
+            root['crop_runs'][external_run_name]
+            if external_run_name and 'crop_runs' in root and external_run_name in root['crop_runs']
+            else None
+        )
+        external_run_status = (
+            str(external_run.attrs.get('status')).strip().lower()
+            if external_run is not None and external_run.attrs.get('status') is not None
+            else None
+        )
+        external_review = (
+            external_run.attrs.get('crop_review_status')
+            if external_run is not None
+            else None
+        )
+        external_step_status = 'ok'
+        if isinstance(external_result, dict) and int(external_result.get('total_crops', 0) or 0) <= 0:
+            external_step_status = 'missing'
+        if external_run_status in {'failed', 'error'}:
+            external_step_status = 'error'
+        _emit_crop_step_status(
+            root=root,
+            zarr_path=zarr_path,
+            status=external_step_status,
+            run_name=external_run_name,
+            method=source_type,
+            coverage_pct=(external_result.get('percent_cropped') if isinstance(external_result, dict) else None),
+            review_status=external_review if isinstance(external_review, dict) else None,
+            details={
+                'reason': (
+                    'present'
+                    if external_step_status == 'ok'
+                    else ('run_failed' if external_step_status == 'error' else 'no_detections')
+                ),
+                'run_state': external_run_status,
+                'detection_source_type': source_type,
+                'detection_source_path': source_path,
+                'video_source_type': 'external',
+            },
+            console=console,
+        )
+        return external_result
     
     # Otherwise, use zarr-based cropping
     
@@ -1938,6 +2055,22 @@ def crop_detections(
     
     if total_detections == 0:
         console.print("[yellow]Warning: No detections found. Nothing to crop.[/yellow]")
+        _emit_crop_step_status(
+            root=root,
+            zarr_path=zarr_path,
+            status='missing',
+            run_name=None,
+            method=source_type,
+            coverage_pct=0.0,
+            review_status=None,
+            details={
+                'reason': 'no_detections',
+                'detection_source_type': source_type,
+                'detection_source_path': source_path,
+                'video_source_type': 'zarr',
+            },
+            console=console,
+        )
         return {'total_crops': 0}
     
     console.print(f"Total detections to crop: {total_detections:,}")
@@ -2273,6 +2406,24 @@ def crop_detections(
         title="[bold green]Cropping Complete[/bold green]",
         border_style="green"
     ))
+
+    _emit_crop_step_status(
+        root=root,
+        zarr_path=zarr_path,
+        status='ok',
+        run_name=run_group_name,
+        method=source_type,
+        coverage_pct=percent_cropped,
+        review_status=(crop_group.attrs.get('crop_review_status') if isinstance(crop_group.attrs.get('crop_review_status'), dict) else None),
+        details={
+            'reason': 'present',
+            'run_state': str(crop_group.attrs.get('status')).strip().lower() if crop_group.attrs.get('status') is not None else None,
+            'detection_source_type': source_type,
+            'detection_source_path': source_path,
+            'video_source_type': 'zarr',
+        },
+        console=console,
+    )
 
     return {
         'total_crops': total_detections,
