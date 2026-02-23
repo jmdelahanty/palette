@@ -237,6 +237,80 @@ def test_keypoint_quality_extracts_shared_review_fields_and_legacy_timestamp_ali
     assert row["review_timestamp_utc"] == "2026-02-08T00:00:00+00:00"
 
 
+def test_replace_keypoint_quality_auto_adds_review_columns_for_legacy_table(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset("dataset_keypoint", session_uuid="dataset_keypoint", zarr_path=tmp_path / "kp.zarr")
+    registry.conn.execute("DROP VIEW IF EXISTS keypoint_quality_current;")
+    registry.conn.execute("DROP TABLE keypoint_quality;")
+    registry.conn.execute(
+        """
+        CREATE TABLE keypoint_quality (
+            dataset_id TEXT NOT NULL,
+            refined_run TEXT NOT NULL,
+            refined_created_utc TEXT,
+            source_keypoint_run TEXT NOT NULL,
+            keypoint_method TEXT,
+            review_state TEXT,
+            review_intended_use TEXT,
+            review_reviewer TEXT,
+            review_timestamp_utc TEXT,
+            usable_keypoints INTEGER,
+            total_keypoints INTEGER,
+            usable_keypoints_rate REAL,
+            raw_keypoints_success_rate REAL,
+            raw_keypoints_successful INTEGER,
+            quality_updated_utc TEXT,
+            zarr_mtime_ns INTEGER,
+            PRIMARY KEY (dataset_id, refined_run),
+            FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+        );
+        """
+    )
+    registry.conn.commit()
+
+    registry.replace_keypoint_quality(
+        "dataset_keypoint",
+        [
+            {
+                "refined_run": "refined_legacy",
+                "refined_created_utc": "2026-02-10T00:00:00+00:00",
+                "source_keypoint_run": "kp_001",
+                "keypoint_method": "traditional_pose",
+                "review_state": "approved",
+                "review_method": "manual",
+                "review_intended_use": "training",
+                "review_reviewer": "reviewer_keypoint",
+                "review_notes": "added via ensure_columns",
+                "review_timestamp_utc": "2026-02-10T00:01:00+00:00",
+                "usable_keypoints": 3,
+                "total_keypoints": 4,
+                "usable_keypoints_rate": 0.75,
+                "raw_keypoints_success_rate": 0.80,
+                "raw_keypoints_successful": 3,
+            }
+        ],
+    )
+
+    cols = {
+        str(row["name"])
+        for row in registry.conn.execute("PRAGMA table_info(keypoint_quality);").fetchall()
+    }
+    assert "review_method" in cols
+    assert "review_notes" in cols
+    row = registry.conn.execute(
+        """
+        SELECT review_method, review_notes
+        FROM keypoint_quality
+        WHERE dataset_id = ? AND refined_run = ?;
+        """,
+        ("dataset_keypoint", "refined_legacy"),
+    ).fetchone()
+    assert row is not None
+    assert str(row["review_method"]) == "manual"
+    assert str(row["review_notes"]) == "added via ensure_columns"
+    registry.close()
+
+
 def test_keypoint_quality_overview_view_exposes_expected_columns(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     registry.upsert_dataset("dataset_x", session_uuid="dataset_x", zarr_path=tmp_path / "x.zarr")

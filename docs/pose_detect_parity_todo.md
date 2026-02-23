@@ -87,4 +87,5 @@ Parallel execution contract for current P2 + validation tasks:
 - [x] Query/consumer tests for aligned detect/keypoint review-field access.
 - [ ] End-to-end smoke test: analysis zarr -> keypoints -> refine_keypoints -> registry scan -> quality/perf query.
   - [x] Added operator runner script: `scripts/validate_pose_detect_parity_smoke.sh`.
-  - [ ] Execute on real registry recording and capture artifact output.
+  - [x] Execute on real registry recording and capture artifact output.
+    - Artifact: `/tmp/pose_parity_smoke_20260222_233222` (`Smoke test passed.`).

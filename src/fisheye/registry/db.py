@@ -1633,6 +1633,11 @@ class Registry:
             (18, "keypoint_performance_registry", self._migration_018_keypoint_performance_registry),
             (19, "recording_step_status_registry", self._migration_019_recording_step_status_registry),
             (20, "recording_step_status_wide_view", self._migration_020_recording_step_status_wide_view),
+            (
+                21,
+                "detect_keypoint_quality_review_columns",
+                self._migration_021_detect_keypoint_quality_review_columns,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -5286,6 +5291,102 @@ class Registry:
             """
         )
 
+    def _migration_021_detect_keypoint_quality_review_columns(self) -> None:
+        # Additive migration for shared detect/keypoint review fields in quality tables.
+        self._ensure_columns(
+            "keypoint_quality",
+            {
+                "review_method": "TEXT",
+                "review_notes": "TEXT",
+            },
+        )
+        self._ensure_columns(
+            "detect_quality",
+            {
+                "review_method": "TEXT",
+                "review_notes": "TEXT",
+            },
+        )
+        cur = self.conn.cursor()
+        cur.execute("DROP VIEW IF EXISTS keypoint_quality_current;")
+        cur.execute(
+            """
+            CREATE VIEW keypoint_quality_current AS
+            WITH ranked AS (
+                SELECT
+                    kq.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY kq.dataset_id, COALESCE(kq.keypoint_method, '')
+                        ORDER BY
+                            COALESCE(kq.review_timestamp_utc, kq.refined_created_utc, kq.quality_updated_utc) DESC,
+                            COALESCE(kq.refined_created_utc, '') DESC,
+                            kq.refined_run DESC
+                    ) AS _rn
+                FROM keypoint_quality kq
+            )
+            SELECT
+                dataset_id,
+                refined_run,
+                refined_created_utc,
+                source_keypoint_run,
+                keypoint_method,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_notes,
+                review_timestamp_utc,
+                usable_keypoints,
+                total_keypoints,
+                usable_keypoints_rate,
+                raw_keypoints_success_rate,
+                raw_keypoints_successful,
+                quality_updated_utc,
+                zarr_mtime_ns
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS detect_quality_current;")
+        cur.execute(
+            """
+            CREATE VIEW detect_quality_current AS
+            WITH ranked AS (
+                SELECT
+                    dq.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY dq.dataset_id, COALESCE(dq.detect_method, '')
+                        ORDER BY
+                            COALESCE(dq.review_timestamp_utc, dq.refined_created_utc, dq.quality_updated_utc) DESC,
+                            COALESCE(dq.refined_created_utc, '') DESC,
+                            dq.refined_run DESC
+                    ) AS _rn
+                FROM detect_quality dq
+            )
+            SELECT
+                dataset_id,
+                refined_run,
+                refined_created_utc,
+                source_detect_run,
+                detect_method,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_notes,
+                review_timestamp_utc,
+                review_resolved_group,
+                total_detections,
+                real_detections,
+                interpolated_detections,
+                interpolated_detections_rate,
+                quality_updated_utc,
+                zarr_mtime_ns
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
         existing = {
             row["name"]
@@ -5737,6 +5838,13 @@ class Registry:
         quality_updated_utc: Optional[str] = None,
         zarr_mtime_ns: Optional[int] = None,
     ) -> None:
+        self._ensure_columns(
+            "keypoint_quality",
+            {
+                "review_method": "TEXT",
+                "review_notes": "TEXT",
+            },
+        )
         payload = {
             "dataset_id": str(dataset_id),
             "refined_run": str(refined_run),
@@ -6193,6 +6301,13 @@ class Registry:
         quality_updated_utc: Optional[str] = None,
         zarr_mtime_ns: Optional[int] = None,
     ) -> None:
+        self._ensure_columns(
+            "detect_quality",
+            {
+                "review_method": "TEXT",
+                "review_notes": "TEXT",
+            },
+        )
         payload = {
             "dataset_id": str(dataset_id),
             "refined_run": str(refined_run),
@@ -6433,6 +6548,13 @@ class Registry:
         return len(rows)
 
     def replace_detect_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        self._ensure_columns(
+            "detect_quality",
+            {
+                "review_method": "TEXT",
+                "review_notes": "TEXT",
+            },
+        )
         with self.conn:
             self.conn.execute("DELETE FROM detect_quality WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
@@ -6441,6 +6563,7 @@ class Registry:
                 payload.setdefault("quality_updated_utc", _utc_now())
                 payload.setdefault("review_method", None)
                 payload.setdefault("review_notes", None)
+                payload.setdefault("zarr_mtime_ns", None)
                 self.conn.execute(
                     """
                     INSERT INTO detect_quality (
@@ -6501,6 +6624,13 @@ class Registry:
         return len(rows)
 
     def replace_keypoint_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        self._ensure_columns(
+            "keypoint_quality",
+            {
+                "review_method": "TEXT",
+                "review_notes": "TEXT",
+            },
+        )
         with self.conn:
             self.conn.execute("DELETE FROM keypoint_quality WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
@@ -6509,6 +6639,7 @@ class Registry:
                 payload.setdefault("quality_updated_utc", _utc_now())
                 payload.setdefault("review_method", None)
                 payload.setdefault("review_notes", None)
+                payload.setdefault("zarr_mtime_ns", None)
                 self.conn.execute(
                     """
                     INSERT INTO keypoint_quality (

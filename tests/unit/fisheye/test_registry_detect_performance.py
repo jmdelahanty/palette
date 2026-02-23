@@ -179,6 +179,80 @@ def test_upsert_detect_quality_writes_shared_review_fields_to_current_view(tmp_p
     registry.close()
 
 
+def test_replace_detect_quality_auto_adds_review_columns_for_legacy_table(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset("dataset_detect", session_uuid="dataset_detect", zarr_path=tmp_path / "detect.zarr")
+    registry.conn.execute("DROP VIEW IF EXISTS detect_quality_current;")
+    registry.conn.execute("DROP TABLE detect_quality;")
+    registry.conn.execute(
+        """
+        CREATE TABLE detect_quality (
+            dataset_id TEXT NOT NULL,
+            refined_run TEXT NOT NULL,
+            refined_created_utc TEXT,
+            source_detect_run TEXT NOT NULL,
+            detect_method TEXT,
+            review_state TEXT,
+            review_intended_use TEXT,
+            review_reviewer TEXT,
+            review_timestamp_utc TEXT,
+            review_resolved_group TEXT,
+            total_detections INTEGER,
+            real_detections INTEGER,
+            interpolated_detections INTEGER,
+            interpolated_detections_rate REAL,
+            quality_updated_utc TEXT,
+            zarr_mtime_ns INTEGER,
+            PRIMARY KEY (dataset_id, refined_run),
+            FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+        );
+        """
+    )
+    registry.conn.commit()
+
+    registry.replace_detect_quality(
+        "dataset_detect",
+        [
+            {
+                "refined_run": "refined_legacy",
+                "refined_created_utc": "2026-02-10T00:00:00+00:00",
+                "source_detect_run": "detect_001",
+                "detect_method": "yolo",
+                "review_state": "approved",
+                "review_method": "manual",
+                "review_intended_use": "training",
+                "review_reviewer": "reviewer_detect",
+                "review_notes": "added via ensure_columns",
+                "review_timestamp_utc": "2026-02-10T00:01:00+00:00",
+                "review_resolved_group": "filtered",
+                "total_detections": 4,
+                "real_detections": 3,
+                "interpolated_detections": 1,
+                "interpolated_detections_rate": 0.25,
+            }
+        ],
+    )
+
+    cols = {
+        str(row["name"])
+        for row in registry.conn.execute("PRAGMA table_info(detect_quality);").fetchall()
+    }
+    assert "review_method" in cols
+    assert "review_notes" in cols
+    row = registry.conn.execute(
+        """
+        SELECT review_method, review_notes
+        FROM detect_quality
+        WHERE dataset_id = ? AND refined_run = ?;
+        """,
+        ("dataset_detect", "refined_legacy"),
+    ).fetchone()
+    assert row is not None
+    assert str(row["review_method"]) == "manual"
+    assert str(row["review_notes"]) == "added via ensure_columns"
+    registry.close()
+
+
 def test_register_from_root_populates_detect_performance_all_runs_and_latest(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
