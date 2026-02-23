@@ -76,9 +76,10 @@ Scope: prioritize correctness and auditability first, then orchestration and reg
 
 ## P3: Model Resolution and Provenance Parity
 
-- [ ] Add registry-resolved eye-mask inference wrapper(s) for model-based methods.
+- [x] Add registry-resolved eye-mask inference wrapper(s) for model-based methods.
   - Detect/pose have registry model resolution wrappers; eye-mask YOLO/U-Net should have equivalent entrypoints.
   - Write `model_resolution_*` attrs and `provenance.model_resolution` on resulting runs.
+  - Added: `src/fisheye/utils/run_eye_masks_with_registry_model.py`.
 
 - [ ] Standardize provenance payload shape with detect/pose conventions.
   - Align command, git, environment, platform, parameters, inputs, artifacts sections and key naming.

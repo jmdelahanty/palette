@@ -86,14 +86,35 @@ def _normalize_task_type(value: Any) -> Optional[str]:
         "pose": "pose",
         "keypoint": "pose",
         "keypoints": "pose",
+        "eye_mask": "eye_masks",
+        "eye_masks": "eye_masks",
+        "eye-mask": "eye_masks",
+        "segmentation": "eye_masks",
     }
     return alias.get(text)
 
 
 def _matches_task(*, run_id: str, set_id: str, model_path: str, task: str) -> bool:
     task_norm = str(task).strip().lower()
+    if task_norm == "eye-mask":
+        task_norm = "eye_masks"
     if task_norm == "any":
         return True
+
+    if task_norm == "eye_masks":
+        tokens = (
+            "eye_masks",
+            "eye_mask",
+            "unet_eye_masks",
+            "eye_seg",
+            "segmentation",
+        )
+        run_id_l = run_id.lower()
+        set_id_l = set_id.lower()
+        model_path_l = model_path.lower()
+        return any(token in run_id_l for token in tokens) or any(token in set_id_l for token in tokens) or any(
+            token in model_path_l for token in tokens
+        )
 
     run_token = f"_{task_norm}_"
     set_prefix = f"{task_norm}_"
@@ -410,7 +431,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--recording-dir", type=Path, help="Recording directory path to resolve recording ID.")
     parser.add_argument(
         "--task",
-        choices=("detect", "pose", "any"),
+        choices=("detect", "pose", "eye_masks", "any"),
         default="detect",
         help="Model task family to resolve (default: detect).",
     )

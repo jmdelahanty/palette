@@ -82,3 +82,18 @@ def test_matches_task_filters_pose_from_detect_default() -> None:
         model_path="/nvme1/models/pose/pose_cedar_shadow_manual_gray_latest_traditional_894ad574_v004/.../best.pt",
         task="detect",
     )
+
+
+def test_matches_task_identifies_eye_mask_candidates() -> None:
+    assert mod._matches_task(  # noqa: SLF001
+        run_id="omnifin0_shadow_eye_masks_20260223-010203_abcd1234",
+        set_id="eye_masks_shadow_v001",
+        model_path="/nvme1/models/eye_masks/eye_masks_shadow_v001/weights/best.pt",
+        task="eye_masks",
+    )
+    assert not mod._matches_task(  # noqa: SLF001
+        run_id="omnifin0_cedar_shadow_v004_pose_20260208-163716_c9dc72f5",
+        set_id="pose_cedar_shadow_manual_gray_latest_traditional_894ad574_v004",
+        model_path="/nvme1/models/pose/pose_cedar_shadow_manual_gray_latest_traditional_894ad574_v004/.../best.pt",
+        task="eye_masks",
+    )
