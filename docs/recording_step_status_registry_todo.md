@@ -153,11 +153,11 @@ Suggested owner files:
 
 ### RS7: Validation Harness + Smoke Script
 
-- [ ] Add scripted validation for one recording end-to-end:
+- [x] Add scripted validation for one recording end-to-end:
   - run step(s)
   - verify registry status update
   - verify compare parity
-- [ ] Add deterministic acceptance checks for expected rows/views.
+- [x] Add deterministic acceptance checks for expected rows/views.
 
 Acceptance:
 
@@ -168,6 +168,15 @@ Suggested owner files:
 
 - `scripts/validate_recording_step_status_registry.sh` (new)
 - `docs/recording_step_status_registry_todo.md` (validation section updates)
+
+Operator run example:
+
+```bash
+scripts/validate_recording_step_status_registry.sh \
+  --recording-dir /nvme1/recordings/2026-01-28T19-22-28Z_arena_1_DefaultScreen \
+  --registry /nvme1/palette_registry.sqlite \
+  --zarr-use training
+```
 
 ## Task Dependencies
 
