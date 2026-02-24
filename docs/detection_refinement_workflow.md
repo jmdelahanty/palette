@@ -336,6 +336,34 @@ Current state (2026-02-24):
 - data-card plotting includes `genotype_counts` and `dpf_histogram` outputs by
   default (still only opens with `--view`).
 
+### Registry quality freshness after Zarr writes
+
+Many registry quality/performance rows are fail-closed on `zarr_mtime_ns`.
+Any write to a Zarr store can stale these rows (detect, keypoints, eye masks,
+profile writes, etc.).
+
+Operational rule:
+- batch Zarr-modifying steps first,
+- refresh the relevant registry caches once before selection/build commands.
+
+Common refresh commands:
+
+```bash
+scripts/py -m fisheye.registry.maintenance --registry /nvme1/registry.sqlite --refresh-detect-quality
+scripts/py -m fisheye.registry.maintenance --registry /nvme1/registry.sqlite --refresh-keypoint-quality
+scripts/py -m fisheye.registry.maintenance --registry /nvme1/registry.sqlite --refresh-crop-quality
+scripts/py -m fisheye.registry.maintenance --registry /nvme1/registry.sqlite --refresh-eye-mask-performance
+scripts/py -m fisheye.registry.maintenance --registry /nvme1/registry.sqlite --refresh-detect-performance
+scripts/py -m fisheye.registry.maintenance --registry /nvme1/registry.sqlite --refresh-keypoint-performance
+```
+
+Practical guidance:
+- If detect training preflight fails with
+  `detect_quality row is stale for filesystem mtime`, run
+  `--refresh-detect-quality` and retry.
+- Apply the same pattern for keypoint/crop/eye-mask workflows with the matching
+  refresh command.
+
 ## Notes on sampled training imports
 
 If `import_mode=sampled` (large frame gaps):

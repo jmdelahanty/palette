@@ -99,7 +99,7 @@ Key findings (current state):
 2. Query surface already supports lineage filters:
    - `--genotype`, `--dpf`, `--dpf-min`, `--dpf-max`
    - ref: `src/fisheye/utils/registry_query.py`
-3. Training data card aggregation currently does not emit genotype/DPF aggregates.
+3. Training data card aggregation now emits genotype/DPF subject aggregates.
    - ref: `src/fisheye/utils/aggregate_detection_training_data_card.py`
 4. `check_training_registry` currently has no genotype/DPF view/filter.
    - ref: `src/fisheye/utils/check_training_registry.py`

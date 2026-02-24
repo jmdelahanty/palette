@@ -73,6 +73,7 @@ def _plot_histogram(
     title: str,
     xlabel: str,
     output_path: Path,
+    integer_center_ticks: bool = False,
 ) -> None:
     assert plt is not None
     edges, counts = _parse_histogram(hist)
@@ -87,6 +88,11 @@ def _plot_histogram(
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Count")
+    if integer_center_ticks:
+        ticks = _infer_integer_center_ticks(edges)
+        if ticks is not None and ticks.size > 0:
+            ax.set_xticks(ticks)
+            ax.set_xticklabels([str(int(v)) for v in ticks])
     ax.grid(axis="y", alpha=0.25)
     fig.tight_layout()
     fig.savefig(output_path, dpi=180)
@@ -145,6 +151,25 @@ def _subject_histogram_has_data(hist_payload: Any) -> bool:
     if counts.size == 0:
         return False
     return bool(np.any(counts > 0))
+
+
+def _infer_integer_center_ticks(edges: np.ndarray) -> Optional[np.ndarray]:
+    if edges.size < 2:
+        return None
+    widths = np.diff(edges)
+    if widths.size == 0:
+        return None
+    if not np.all(np.isfinite(widths)):
+        return None
+    if not np.allclose(widths, widths[0], atol=1e-9, rtol=0.0):
+        return None
+    if not np.isclose(float(widths[0]), 1.0, atol=1e-9, rtol=0.0):
+        return None
+    centers = edges[:-1] + (widths / 2.0)
+    rounded = np.round(centers)
+    if not np.allclose(centers, rounded, atol=1e-9, rtol=0.0):
+        return None
+    return rounded.astype(np.float64)
 
 
 def _histogram_focus_xlim(*, edges: np.ndarray, counts: np.ndarray) -> Optional[tuple[float, float]]:
@@ -313,6 +338,7 @@ def generate_detection_training_data_card_plots(
             title="DPF Distribution",
             xlabel="DPF at acquisition",
             output_path=output_path,
+            integer_center_ticks=True,
         )
         generated.append(output_path)
 

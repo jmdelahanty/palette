@@ -35,7 +35,7 @@ def _sample_card_payload() -> dict[str, object]:
             "wt": 1,
         },
         "dpf_histogram": {
-            "bin_edges": [5.0, 6.0, 7.0, 8.0],
+            "bin_edges": [4.5, 5.5, 6.5, 7.5],
             "counts": [1, 1, 1],
         },
     }
@@ -240,3 +240,62 @@ def test_histogram_focus_xlim_returns_full_range_when_empty() -> None:
 
     xlim = mod._histogram_focus_xlim(edges=edges, counts=counts)
     assert xlim == (0.0, 1.0)
+
+
+def test_infer_integer_center_ticks_from_half_step_edges() -> None:
+    edges = np.asarray([11.5, 12.5], dtype=np.float64)
+    ticks = mod._infer_integer_center_ticks(edges)
+    assert ticks is not None
+    assert ticks.tolist() == [12.0]
+
+
+def test_infer_integer_center_ticks_returns_none_for_non_integer_centers() -> None:
+    edges = np.asarray([0.0, 0.5, 1.0], dtype=np.float64)
+    ticks = mod._infer_integer_center_ticks(edges)
+    assert ticks is None
+
+
+def test_generate_detection_training_data_card_plots_uses_integer_ticks_for_dpf(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    payload = {"dpf_histogram": {"bin_edges": [11.5, 12.5], "counts": [3]}}
+    output_dir = tmp_path / "plots"
+    calls: list[dict[str, object]] = []
+
+    def _fake_plot_histogram(
+        *,
+        hist,
+        title,
+        xlabel,
+        output_path,
+        integer_center_ticks=False,
+    ):
+        calls.append(
+            {
+                "title": title,
+                "xlabel": xlabel,
+                "output_path": Path(output_path),
+                "integer_center_ticks": bool(integer_center_ticks),
+            }
+        )
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_bytes(b"PNG")
+
+    monkeypatch.setattr(mod, "_plot_histogram", _fake_plot_histogram)
+
+    generated = mod.generate_detection_training_data_card_plots(
+        card_payload=payload,
+        output_dir=output_dir,
+        prefix="detect_sample_v001",
+    )
+
+    assert generated == [output_dir / "detect_sample_v001.dpf_histogram.png"]
+    assert calls == [
+        {
+            "title": "DPF Distribution",
+            "xlabel": "DPF at acquisition",
+            "output_path": output_dir / "detect_sample_v001.dpf_histogram.png",
+            "integer_center_ticks": True,
+        }
+    ]
