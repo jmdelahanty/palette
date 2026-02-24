@@ -2,6 +2,29 @@
 
 Purpose: add SQL-level detect quality gating and observability with the same fail-closed posture used for keypoint quality.
 
+## Status Snapshot (2026-02-24)
+
+Implemented already:
+- `detect_quality` table + gate indexes in `src/fisheye/registry/db.py`.
+- `detect_quality_current` latest-row view (dataset + method partition).
+- refined-detect quality extraction (`_extract_detect_quality_rows`) with review + interpolation metrics.
+- registry write helpers (`upsert_detect_quality`, `replace_detect_quality`, `refresh_detect_quality_for_dataset`).
+- maintenance CLI actions:
+  - `--backfill-detect-quality`
+  - `--refresh-detect-quality`
+  - shared `--dry-run` count reporting.
+- finalized refinement visualization artifacts for approved refined runs:
+  - `detect_quality_overview_png`
+  - `refinement_pipeline_overview_png`
+- artifact export/view helper:
+  - `scripts/py -m fisheye.utils.export_detect_quality_overview`
+  - supports `--artifact`, `--recursive`, `--zarr-use`, and direct `--view`.
+
+Remaining items in this TODO are primarily policy lock-in and gating/reporting completion.
+
+Parallel execution contract for the remaining work:
+`docs/detect_quality_parallel_agents_contract.md`.
+
 ## Policy Decisions
 
 - [ ] Use refined/reviewed detect runs for gating.
@@ -17,7 +40,7 @@ Purpose: add SQL-level detect quality gating and observability with the same fai
 
 ## Priority 0 (Schema + Read Path)
 
-- [ ] Add `detect_quality` table.
+- [x] Add `detect_quality` table.
   - Proposed columns:
     - `dataset_id TEXT NOT NULL`
     - `refined_run TEXT NOT NULL`
@@ -25,8 +48,10 @@ Purpose: add SQL-level detect quality gating and observability with the same fai
     - `source_detect_run TEXT NOT NULL`
     - `detect_method TEXT`
     - `review_state TEXT`
+    - `review_method TEXT`
     - `review_intended_use TEXT`
     - `review_reviewer TEXT`
+    - `review_notes TEXT`
     - `review_timestamp_utc TEXT`
     - `review_resolved_group TEXT`
     - `total_detections INTEGER`
@@ -40,18 +65,18 @@ Purpose: add SQL-level detect quality gating and observability with the same fai
     - index on `(review_state, review_intended_use, detect_method, interpolated_detections_rate)`
     - index on `dataset_id`
 
-- [ ] Add `detect_quality_current` view.
+- [x] Add `detect_quality_current` view.
   - One canonical row per dataset + detect method.
   - Latest refined run wins.
 
 ## Priority 1 (Write Path + Backfill)
 
-- [ ] Parse refined detect run quality/review attrs from Zarr.
+- [x] Parse refined detect run quality/review attrs from Zarr.
   - read `detect_review_status`
   - read resolved group and detection-source counts
   - compute interpolated fraction
 
-- [ ] Add maintenance actions:
+- [x] Add maintenance actions:
   - `--backfill-detect-quality`
   - `--refresh-detect-quality`
   - include `--dry-run` and detailed counts
@@ -71,9 +96,28 @@ Purpose: add SQL-level detect quality gating and observability with the same fai
 - [ ] Extend registry reporting to summarize detect quality pass/exclusion counts.
 - [ ] Add exclusion reason breakdown (missing review, wrong state/use, high interpolation, stale row, etc.).
 
+## Priority 4 (Artifact Finalization + Inspection)
+
+- [x] Finalize approved refined-detect runs into canonical visualization artifacts.
+  - Artifact names:
+    - `detect_quality_overview_png`
+    - `refinement_pipeline_overview_png`
+  - Command:
+    - `scripts/py -m fisheye.utils.finalize_refinement_artifacts /nvme1/recordings --recursive --zarr-use training --required-intended-use training --apply`
+- [x] Provide recursive inspection helper for finalized artifacts directly from Zarr.
+  - Command examples:
+    - `scripts/py -m fisheye.utils.export_detect_quality_overview /nvme1/recordings --recursive --zarr-use training --artifact detect_quality_overview_png --view`
+    - `scripts/py -m fisheye.utils.export_detect_quality_overview /nvme1/recordings --recursive --zarr-use training --artifact refinement_pipeline_overview_png --view`
+- [x] Capture operator execution evidence.
+  - Latest observed run on real training data:
+    - finalize dry-run: `would_finalize=52`
+    - finalize apply: `rendered=52`, `errors=0`
+
 ## Validation Checklist
 
 - [ ] Backfill/refresh commands produce deterministic counts.
 - [ ] `detect_quality_current` row count aligns with expected dataset-method coverage.
 - [ ] Preflight rejects stale/divergent selected rows.
 - [ ] Reports can explain exclusions by reason.
+- [x] Approved refined-detect runs can be finalized into both canonical PNG artifacts.
+- [x] Finalized artifacts can be viewed recursively from Zarr without an intermediate export file.

@@ -143,6 +143,73 @@ def _get_sampled_frame_count(root: zarr.Group, detect_group: Optional[zarr.Group
         return int(detect_group["frame_counts"].shape[0])
     return None
 
+
+def _quality_guardrail_error(detect_run: str, reason: str, quality_run: Optional[str] = None) -> ValueError:
+    target = f"quality run '{quality_run}'" if quality_run else "latest quality run"
+    return ValueError(
+        f"Missing usable detect_quality context for detect run '{detect_run}' ({target}): {reason}. "
+        "Run `python -m fisheye.refinement.detect_quality <zarr_path>` for this detect run, "
+        "or pass --allow-missing-quality to opt out."
+    )
+
+
+def _resolve_detection_quality_labels(
+    detect_group: zarr.Group,
+    *,
+    detect_run: str,
+    quality_run: Optional[str],
+    total_detections: int,
+    require_quality: bool,
+    allow_missing_reason: str,
+    console: Optional[Console],
+) -> Tuple[np.ndarray, Optional[str], Optional[zarr.Group]]:
+    """Resolve per-detection quality labels and fail closed when required."""
+    total = int(total_detections)
+    quality_reports = detect_group.get("quality_reports")
+    requested_quality_run = _normalize_attr(quality_run)
+    resolved_quality_run = requested_quality_run
+    quality_group: Optional[zarr.Group] = None
+
+    if quality_reports is not None and resolved_quality_run is None:
+        resolved_quality_run = _normalize_attr(quality_reports.attrs.get("latest"))
+
+    missing_reason: Optional[str] = None
+    if quality_reports is None:
+        missing_reason = "quality_reports group is missing"
+    elif not resolved_quality_run:
+        missing_reason = "quality_reports/latest is missing and no --quality-run was provided"
+    elif resolved_quality_run not in quality_reports:
+        missing_reason = f"quality run '{resolved_quality_run}' was not found"
+    else:
+        quality_group = quality_reports[resolved_quality_run]
+        if "detection_quality_labels" not in quality_group:
+            missing_reason = "missing detection_quality_labels array"
+        else:
+            labels = np.asarray(quality_group["detection_quality_labels"][:], dtype="i1")
+            if labels.shape[0] != total:
+                missing_reason = (
+                    "detection_quality_labels length "
+                    f"{int(labels.shape[0])} does not match detections {total}"
+                )
+            else:
+                if console is not None:
+                    console.print(f"Source quality run: [cyan]{resolved_quality_run}[/cyan]")
+                return labels, resolved_quality_run, quality_group
+
+    if require_quality:
+        raise _quality_guardrail_error(
+            detect_run=detect_run,
+            reason=missing_reason or "quality report is missing",
+            quality_run=resolved_quality_run,
+        )
+
+    if console is not None:
+        console.print(
+            "[yellow]⚠ No usable detection quality report found; proceeding with all "
+            f"detections marked clean ({allow_missing_reason}).[/yellow]"
+        )
+    return np.zeros(total, dtype="i1"), None, None
+
 def filter_detections(
     bbox_coords: np.ndarray,
     scores: np.ndarray,
@@ -500,6 +567,7 @@ def create_refined_run(
     save_visuals: bool = False,
     show_visuals: bool = False,
     visuals_dpi: int = 150,
+    require_detect_quality: bool = True,
 ) -> str:
     """
     Create a refined detection run with filtered and interpolated data.
@@ -514,6 +582,7 @@ def create_refined_run(
         remove_jumps: Remove jump artifacts (overrides config)
         remove_blips: Remove blip artifacts (overrides config)
         console: Rich console for output
+        require_detect_quality: Require usable detect_quality labels for refinement
         
     Returns:
         Name of created refined run
@@ -582,22 +651,23 @@ def create_refined_run(
     bbox_coords = detect_group['bbox_norm_coords'][:]
     frame_indices = detect_group['frame_indices'][:]
 
-    # Load quality labels if available, otherwise assume all detections are clean
-    detection_quality_labels: np.ndarray
-    resolved_quality_run: Optional[str] = None
-    quality_group = None
-    if 'quality_reports' in detect_group and detect_group['quality_reports'].attrs.get('latest'):
-        if quality_run is None:
-            quality_run = detect_group['quality_reports'].attrs['latest']
-        resolved_quality_run = quality_run
-        quality_group = detect_group[f'quality_reports/{quality_run}']
-        console.print(f"Source quality run: [cyan]{quality_run}[/cyan]")
-        detection_quality_labels = quality_group['detection_quality_labels'][:]
-    else:
-        console.print("[yellow]⚠ No detection quality reports found; assuming all detections are valid.[/yellow]")
-        detection_quality_labels = np.zeros(len(bbox_coords), dtype='i1')
-
     sampled_import, sampled_meta = _read_sampled_import_meta(root)
+    require_quality_for_run = bool(require_detect_quality and not sampled_import)
+    if not require_detect_quality:
+        allow_missing_reason = "explicit opt-out (--allow-missing-quality)"
+    elif sampled_import:
+        allow_missing_reason = "sampled import passthrough mode"
+    else:
+        allow_missing_reason = "guardrail disabled"
+    (detection_quality_labels, resolved_quality_run, quality_group) = _resolve_detection_quality_labels(
+        detect_group,
+        detect_run=detect_run,
+        quality_run=quality_run,
+        total_detections=len(bbox_coords),
+        require_quality=require_quality_for_run,
+        allow_missing_reason=allow_missing_reason,
+        console=console,
+    )
     if sampled_import:
         console.print("[yellow]⚠ Sampled training import detected; disabling refine filters and interpolation.[/yellow]")
         detection_quality_labels = np.zeros_like(detection_quality_labels)
@@ -759,6 +829,8 @@ def create_refined_run(
         'refine_mode': refine_mode,
         'sampled_import': sampled_import,
         'sampled_import_meta': sampled_meta,
+        'detect_quality_guardrail_requested': bool(require_detect_quality),
+        'detect_quality_guardrail_enforced': bool(require_quality_for_run),
     }
 
     refined_group.attrs['source_detect_run'] = detect_run
@@ -774,7 +846,7 @@ def create_refined_run(
         refined_group.attrs['coverage_frames_full'] = int(full_frame_count)
     refined_group.attrs['inputs'] = {
         'detect_run': detect_run,
-        'quality_run': quality_run or 'N/A'
+        'quality_run': resolved_quality_run or 'N/A'
     }
 
     git_info = get_git_info()
@@ -819,7 +891,7 @@ def create_refined_run(
         parameters=parameters_payload,
         inputs={
             'detect_run': detect_run,
-            'quality_run': quality_run or 'N/A',
+            'quality_run': resolved_quality_run or 'N/A',
             'frame_source': 'zarr' if root.attrs.get('has_raw_video', True) else 'external',
             'source_video_path': root.attrs.get('source_video_path'),
         },
@@ -1029,6 +1101,11 @@ Examples:
                        help='Display detection quality visualization interactively after refinement.')
     parser.add_argument('--visuals-dpi', type=int, default=150,
                        help='DPI to use when rendering saved visualizations (default: 150).')
+    parser.add_argument(
+        '--allow-missing-quality',
+        action='store_true',
+        help='Allow refinement without detect_quality labels (legacy fallback).',
+    )
     
     args = parser.parse_args()
     
@@ -1057,6 +1134,7 @@ Examples:
             save_visuals=args.save_visuals,
             show_visuals=args.show_visuals,
             visuals_dpi=args.visuals_dpi,
+            require_detect_quality=not args.allow_missing_quality,
         )
         
         print(f"\n✓ Created refined run: {run_name}")

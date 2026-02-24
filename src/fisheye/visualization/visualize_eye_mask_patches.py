@@ -17,13 +17,22 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+
+# Keep viewer resource usage bounded on shared workstations.
+os.environ["OMP_NUM_THREADS"] = "8"
+os.environ["OPENBLAS_NUM_THREADS"] = "8"
+os.environ["MKL_NUM_THREADS"] = "8"
+os.environ["NUMEXPR_NUM_THREADS"] = "8"
+os.environ["OPENCV_FOR_THREADS_NUM"] = "8"
 
 import cv2
 import numpy as np
 import zarr
 
 from ..shared.provenance_attrs import resolve_source_keypoints_run
+
+cv2.setNumThreads(8)
 
 MAX_PADDING = 192
 DEFAULT_PADDING = 24
@@ -182,6 +191,94 @@ def _format_review_status(status: object) -> str:
     if suffix_parts:
         return f"{state} ({'/'.join(suffix_parts)})"
     return state
+
+
+def _resolve_registry_dataset_row(
+    registry: object,
+    *,
+    zarr_path: Path,
+) -> Optional[Mapping[str, object]]:
+    normalized = zarr_path.expanduser().resolve(strict=False)
+    candidates = tuple(dict.fromkeys((str(zarr_path), str(zarr_path.expanduser()), str(normalized))))
+    placeholders = ",".join("?" for _ in candidates)
+    rows = registry.conn.execute(  # type: ignore[attr-defined]
+        f"""
+        SELECT dataset_id, recording_id, zarr_use, zarr_path
+        FROM datasets
+        WHERE zarr_path IN ({placeholders})
+        ORDER BY CASE WHEN recording_id IS NULL THEN 1 ELSE 0 END, dataset_id;
+        """,
+        candidates,
+    ).fetchall()
+    if rows:
+        return rows[0]
+
+    # Fallback for path normalization mismatches (symlinked roots, etc.).
+    fallback_rows = registry.conn.execute(  # type: ignore[attr-defined]
+        """
+        SELECT dataset_id, recording_id, zarr_use, zarr_path
+        FROM datasets
+        WHERE zarr_path IS NOT NULL;
+        """
+    ).fetchall()
+    for row in fallback_rows:
+        try:
+            db_path = Path(str(row["zarr_path"])).expanduser().resolve(strict=False)
+        except Exception:
+            continue
+        if db_path == normalized:
+            return row
+    return None
+
+
+def _sync_registry_for_zarr(
+    *,
+    registry_path: Path,
+    zarr_path: Path,
+) -> Tuple[bool, str]:
+    from ..registry.db import Registry
+    from ..registry.maintenance import _backfill_recording_step_status
+
+    registry = Registry(registry_path)
+    try:
+        row = _resolve_registry_dataset_row(registry, zarr_path=zarr_path)
+        if row is None:
+            return False, f"no dataset row found for {zarr_path}"
+
+        dataset_id = str(row["dataset_id"])
+        recording_id_raw = row["recording_id"]
+        recording_id = str(recording_id_raw) if recording_id_raw else None
+        zarr_use_raw = row["zarr_use"]
+        zarr_use = str(zarr_use_raw).strip().lower() if zarr_use_raw else None
+        if zarr_use not in {"analysis", "training"}:
+            zarr_use = None
+
+        eye_rows = registry.refresh_eye_mask_performance_for_dataset(
+            dataset_id,
+            zarr_path=zarr_path.expanduser().resolve(strict=False),
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+
+        step_rows_updated = 0
+        if recording_id:
+            step_summary = _backfill_recording_step_status(
+                registry,
+                dry_run=False,
+                scope_paths=[zarr_path],
+                recording_ids=[recording_id],
+                zarr_use_filter=zarr_use or "all",
+            )
+            step_rows_updated = int(step_summary.get("rows_inserted", 0)) + int(step_summary.get("rows_updated", 0))
+
+        return True, (
+            f"dataset_id={dataset_id} eye_mask_rows={eye_rows} "
+            f"recording_step_rows_written={step_rows_updated}"
+        )
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        registry.close()
 
 
 def _friendly_eye_label(label: Optional[str], idx: int) -> str:
@@ -915,6 +1012,7 @@ def _step_clamped(value: int, delta: int, minimum: int, maximum: int) -> int:
 def create_viewer(
     zarr_path: Path,
     *,
+    registry_path: Optional[Path],
     refined_run: Optional[str],
     crop_run: Optional[str],
     keypoint_run: Optional[str],
@@ -1178,6 +1276,7 @@ def create_viewer(
     print("  h: toggle keypoint crosshair overlay")
     print("  Mouse while drawing: hold Shift to temporarily invert brush mode")
     print("  1/2: choose active eye")
+    print("  c: clear all eye masks for current ROI (unsaved until 's')")
     print("  s: save edits to refined run")
     print("  r: reset edits for current ROI")
     print("  b: flag current frame/ROI for cleanup")
@@ -1188,6 +1287,10 @@ def create_viewer(
         print(f"Frame flag file: {flag_path.expanduser().resolve(strict=False)}")
     if nudge_flag_path is not None:
         print(f"Keypoint nudge flag file: {nudge_flag_path.expanduser().resolve(strict=False)}")
+    if registry_path is not None:
+        print(f"Registry auto-sync: enabled ({registry_path.expanduser().resolve(strict=False)})")
+    else:
+        print("Registry auto-sync: disabled")
     print(f"Current review status: {review_label}")
 
     while True:
@@ -1347,6 +1450,16 @@ def create_viewer(
         elif key in (ord(","), ord("<")):
             pad_value = _adjust_padding_size(-PADDING_STEP)
             print(f"Patch size (half-width): {pad_value}px")
+        elif key in (ord("c"),):
+            edit_masks_row = state.get("edit_masks_row")
+            if edit_masks_row is None:
+                print("No ROI masks loaded to clear.")
+                continue
+            edit_masks_arr = np.asarray(edit_masks_row, dtype=np.uint8)
+            edit_masks_arr[...] = 0
+            state["edit_masks_row"] = edit_masks_arr
+            state["dirty"] = True
+            print(f"Cleared all eye masks for ROI {roi_idx}. Press 's' to save.")
         elif key in (ord("r"),):
             _load_roi(roi_idx)
             print(f"Reset edits for ROI {roi_idx}.")
@@ -1368,6 +1481,13 @@ def create_viewer(
                 f"Saved ROI {roi_idx}: {result['successful_eyes']}/{result['channel_count']} eyes fit "
                 f"(reject_reason={result['reject_reason'] or 'none'})."
             )
+            if registry_path is not None:
+                ok, detail = _sync_registry_for_zarr(
+                    registry_path=registry_path,
+                    zarr_path=zarr_path,
+                )
+                prefix = "Registry sync OK" if ok else "Registry sync FAILED"
+                print(f"{prefix}: {detail}")
         elif key in (ord("b"),):
             if flag_path is None:
                 print("No frame flag file configured. Pass --frame-flag-file to enable cleanup flagging.")
@@ -1425,6 +1545,13 @@ def create_viewer(
                     f"Set eye_mask_review_status: {payload.get('state')} "
                     f"({payload.get('method')}/{payload.get('intended_use')})"
                 )
+                if registry_path is not None:
+                    ok, detail = _sync_registry_for_zarr(
+                        registry_path=registry_path,
+                        zarr_path=zarr_path,
+                    )
+                    prefix = "Registry sync OK" if ok else "Registry sync FAILED"
+                    print(f"{prefix}: {detail}")
             except Exception as exc:
                 print(f"Failed to set eye_mask_review_status: {exc}")
 
@@ -1434,6 +1561,14 @@ def create_viewer(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zarr_path", type=Path, help="Path to Palette Zarr archive.")
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help=(
+            "Optional registry sqlite path. When provided, pressing 's' or 'a' "
+            "auto-refreshes eye-mask performance and recording-step status for this recording."
+        ),
+    )
     parser.add_argument("--refined-run", help="Refined eye-mask run name (default: latest).")
     parser.add_argument("--crop-run", help="Crop run name override.")
     parser.add_argument("--keypoint-run", help="Keypoint run override for eye centers.")
@@ -1501,6 +1636,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
     create_viewer(
         args.zarr_path,
+        registry_path=args.registry,
         refined_run=args.refined_run,
         crop_run=args.crop_run,
         keypoint_run=args.keypoint_run,

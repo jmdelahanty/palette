@@ -757,6 +757,158 @@ def _seed_detect_quality_rows(registry_path: Path) -> None:
     registry.close()
 
 
+def _seed_detection_data_profile_rows(registry_path: Path) -> None:
+    registry = Registry(registry_path)
+    profile_records = [
+        {
+            "dataset_id": "dataset_a",
+            "profile_run": "profile_a_v1",
+            "recording_id": "recording_a",
+            "zarr_use": "analysis",
+            "detection_type": "filtered",
+            "detection_path": "refined_detect_runs/refined_a_v1/filtered",
+            "profile_created_utc": "2026-02-12T00:00:00+00:00",
+            "frames_total": 100,
+            "frames_with_detections": 80,
+            "coverage_percent": 80.0,
+            "detections_total": 800,
+            "detections_per_frame_p50": 8.0,
+            "detections_per_frame_p90": 9.0,
+            "w_p10": 0.1,
+            "w_p50": 0.2,
+            "w_p90": 0.3,
+            "h_p10": 0.1,
+            "h_p50": 0.2,
+            "h_p90": 0.3,
+            "area_p10": 0.01,
+            "area_p50": 0.04,
+            "area_p90": 0.09,
+            "aspect_ratio_p10": 0.8,
+            "aspect_ratio_p50": 1.0,
+            "aspect_ratio_p90": 1.2,
+            "edge_proximity_rate": 0.10,
+            "rig_id": "rig_a",
+            "camera_id": "cam_1",
+            "arena_id": "arena_x",
+            "dish_design": "cedar",
+            "canvas_name": "canvas_a",
+            "protocol_name": "DefaultScreen",
+            "profile_json": json.dumps({"run": "profile_a_v1"}),
+            "zarr_mtime_ns": 1000,
+        },
+        {
+            "dataset_id": "dataset_a",
+            "profile_run": "profile_a_v2",
+            "recording_id": "recording_a",
+            "zarr_use": "analysis",
+            "detection_type": "manual",
+            "detection_path": "refined_detect_runs/refined_a_v2/manual",
+            "profile_created_utc": "2026-02-12T02:00:00+00:00",
+            "frames_total": 100,
+            "frames_with_detections": 97,
+            "coverage_percent": 97.0,
+            "detections_total": 970,
+            "detections_per_frame_p50": 9.0,
+            "detections_per_frame_p90": 10.0,
+            "w_p10": 0.1,
+            "w_p50": 0.2,
+            "w_p90": 0.3,
+            "h_p10": 0.1,
+            "h_p50": 0.2,
+            "h_p90": 0.3,
+            "area_p10": 0.01,
+            "area_p50": 0.04,
+            "area_p90": 0.09,
+            "aspect_ratio_p10": 0.8,
+            "aspect_ratio_p50": 1.0,
+            "aspect_ratio_p90": 1.2,
+            "edge_proximity_rate": 0.02,
+            "rig_id": "rig_a",
+            "camera_id": "cam_1",
+            "arena_id": "arena_x",
+            "dish_design": "cedar",
+            "canvas_name": "canvas_a",
+            "protocol_name": "DefaultScreen",
+            "profile_json": json.dumps({"run": "profile_a_v2"}),
+            "zarr_mtime_ns": 2000,
+        },
+        {
+            "dataset_id": "dataset_b",
+            "profile_run": "profile_b_v1",
+            "recording_id": "recording_b",
+            "zarr_use": "analysis",
+            "detection_type": "interpolated",
+            "detection_path": "refined_detect_runs/refined_b_v1/interpolated",
+            "profile_created_utc": "2026-02-12T01:00:00+00:00",
+            "frames_total": 100,
+            "frames_with_detections": 88,
+            "coverage_percent": 88.0,
+            "detections_total": 880,
+            "detections_per_frame_p50": 8.0,
+            "detections_per_frame_p90": 9.0,
+            "w_p10": 0.1,
+            "w_p50": 0.2,
+            "w_p90": 0.3,
+            "h_p10": 0.1,
+            "h_p50": 0.2,
+            "h_p90": 0.3,
+            "area_p10": 0.01,
+            "area_p50": 0.04,
+            "area_p90": 0.09,
+            "aspect_ratio_p10": 0.8,
+            "aspect_ratio_p50": 1.0,
+            "aspect_ratio_p90": 1.2,
+            "edge_proximity_rate": 0.07,
+            "rig_id": "rig_a",
+            "camera_id": "cam_2",
+            "arena_id": "arena_x",
+            "dish_design": "cedar",
+            "canvas_name": "canvas_a",
+            "protocol_name": "DefaultScreen",
+            "profile_json": json.dumps({"run": "profile_b_v1"}),
+            "zarr_mtime_ns": 1500,
+        },
+    ]
+    for record in profile_records:
+        registry.upsert_detection_data_profile(
+            dataset_id=record["dataset_id"],
+            profile_run=record["profile_run"],
+            recording_id=record["recording_id"],
+            zarr_use=record["zarr_use"],
+            detection_type=record["detection_type"],
+            detection_path=record["detection_path"],
+            profile_created_utc=record["profile_created_utc"],
+            frames_total=record["frames_total"],
+            frames_with_detections=record["frames_with_detections"],
+            coverage_percent=record["coverage_percent"],
+            detections_total=record["detections_total"],
+            detections_per_frame_p50=record["detections_per_frame_p50"],
+            detections_per_frame_p90=record["detections_per_frame_p90"],
+            w_p10=record["w_p10"],
+            w_p50=record["w_p50"],
+            w_p90=record["w_p90"],
+            h_p10=record["h_p10"],
+            h_p50=record["h_p50"],
+            h_p90=record["h_p90"],
+            area_p10=record["area_p10"],
+            area_p50=record["area_p50"],
+            area_p90=record["area_p90"],
+            aspect_ratio_p10=record["aspect_ratio_p10"],
+            aspect_ratio_p50=record["aspect_ratio_p50"],
+            aspect_ratio_p90=record["aspect_ratio_p90"],
+            edge_proximity_rate=record["edge_proximity_rate"],
+            rig_id=record["rig_id"],
+            camera_id=record["camera_id"],
+            arena_id=record["arena_id"],
+            dish_design=record["dish_design"],
+            canvas_name=record["canvas_name"],
+            protocol_name=record["protocol_name"],
+            profile_json=record["profile_json"],
+            zarr_mtime_ns=record["zarr_mtime_ns"],
+        )
+    registry.close()
+
+
 def _rewrite_detect_quality_current_view(
     registry_path: Path,
     *,
@@ -1272,6 +1424,95 @@ def test_registry_query_detect_model_summary_rejects_output_file_list(tmp_path: 
         assert "--output-file-list is only supported for dataset-row query mode." in str(exc)
     else:  # pragma: no cover - defensive branch
         raise AssertionError("Expected SystemExit for invalid output-file-list usage.")
+
+
+def test_registry_query_detection_data_profile_latest_mode_json(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_detection_data_profile_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--detection-data-profile-latest",
+            "--profile-detection-type",
+            "manual",
+            "--profile-coverage-min",
+            "90",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in payload} == {"dataset_a"}
+    row = payload[0]
+    assert row["profile_run"] == "profile_a_v2"
+    assert row["detection_type"] == "manual"
+    assert row["coverage_percent"] == pytest.approx(97.0)
+
+
+def test_registry_query_recording_detection_data_profile_latest_mode_json(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_detection_data_profile_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--recording-detection-data-profile-latest",
+            "--profile-recording-id",
+            "recording_b",
+            "--profile-dataset-id",
+            "dataset_b",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload) == 1
+    row = payload[0]
+    assert row["recording_id"] == "recording_b"
+    assert row["dataset_id"] == "dataset_b"
+    assert row["profile_run"] == "profile_b_v1"
+
+
+def test_registry_query_detection_data_profile_modes_are_mutually_exclusive(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_detection_data_profile_rows(registry_path)
+
+    with pytest.raises(
+        SystemExit,
+        match="--detection-data-profile-latest and --recording-detection-data-profile-latest are mutually exclusive.",
+    ):
+        registry_query_main(
+            [
+                "--registry",
+                str(registry_path),
+                "--detection-data-profile-latest",
+                "--recording-detection-data-profile-latest",
+            ]
+        )
+
+
+def test_registry_query_detection_data_profile_mode_rejects_output_file_list(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_detection_data_profile_rows(registry_path)
+    out_file = tmp_path / "rows.txt"
+
+    with pytest.raises(SystemExit, match="--output-file-list is only supported for dataset-row query mode."):
+        registry_query_main(
+            [
+                "--registry",
+                str(registry_path),
+                "--detection-data-profile-latest",
+                "--output-file-list",
+                str(out_file),
+            ]
+        )
 
 
 def test_registry_query_filters_by_crop_review_state(tmp_path: Path, capsys) -> None:

@@ -6,6 +6,7 @@ Visualizes the results of the refinement pipeline:
 - Original detections
 - After filtering (filtered/)
 - After interpolation (interpolated/)
+- Manual/retune variants when present (e.g., manual_review_latest)
 
 Shows trajectories, coverage, interpolated vs real detections, gap diagnostics,
 and supports listing runs or focusing on a specific frame window.
@@ -14,6 +15,11 @@ and supports listing runs or focusing on a specific frame window.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
+import os
+import tempfile
+from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
 import matplotlib.gridspec as gridspec
@@ -157,6 +163,68 @@ def compute_stage_stats(dataset: Dict) -> Dict:
     }
 
 
+def _is_detection_stage_group(group) -> bool:
+    """Return True if a group looks like a refined detection stage payload."""
+    try:
+        return ('bbox_norm_coords' in group) and ('frame_indices' in group)
+    except Exception:
+        return False
+
+
+def _resolve_manual_group_name(refined_group) -> Optional[str]:
+    """Resolve the active manual review subgroup name, if present."""
+    manual_label = refined_group.attrs.get('manual_review_latest')
+    if isinstance(manual_label, (bytes, bytearray)):
+        manual_label = manual_label.decode('utf-8', errors='ignore')
+    if isinstance(manual_label, str) and manual_label in refined_group:
+        return manual_label
+    if 'manual' in refined_group:
+        return 'manual'
+    return None
+
+
+def _iter_refined_stage_names(refined_group) -> List[str]:
+    """
+    Return refined subgroup names to plot, in display order.
+
+    Preferred order: filtered, interpolated, active manual group, then other
+    valid stage groups in lexical order.
+    """
+    ordered: List[str] = []
+    for default_name in ('filtered', 'interpolated'):
+        if default_name in refined_group and _is_detection_stage_group(refined_group[default_name]):
+            ordered.append(default_name)
+
+    manual_name = _resolve_manual_group_name(refined_group)
+    if manual_name and manual_name not in ordered and _is_detection_stage_group(refined_group[manual_name]):
+        ordered.append(manual_name)
+
+    extras = sorted(
+        name
+        for name in refined_group.keys()
+        if not name.startswith('_')
+        and name not in ordered
+        and _is_detection_stage_group(refined_group[name])
+    )
+    ordered.extend(extras)
+    return ordered
+
+
+def _stage_display_name(stage_name: str, manual_group_name: Optional[str]) -> str:
+    """Build a user-facing title for a stage key."""
+    if stage_name == 'original':
+        return 'Original Detections'
+    if stage_name == 'filtered':
+        return 'Filtered (Jumps Removed)'
+    if stage_name == 'interpolated':
+        return 'Interpolated (Gaps Filled)'
+    if manual_group_name and stage_name == manual_group_name:
+        if stage_name == 'manual':
+            return 'Manual Corrections'
+        return f'Manual Corrections ({stage_name})'
+    return f'Refined ({stage_name})'
+
+
 def summarize_refined_runs(zarr_path: str) -> int:
     """List available refined runs with parameters and coverage."""
     root = zarr.open(str(zarr_path), mode='r')
@@ -215,7 +283,8 @@ def summarize_refined_runs(zarr_path: str) -> int:
 def visualize_refinement_pipeline(zarr_path: str,
                                   refined_run: Optional[str] = None,
                                   save_path: Optional[str] = None,
-                                  frame_range: Optional[Tuple[int, int]] = None) -> None:
+                                  frame_range: Optional[Tuple[int, int]] = None,
+                                  show: bool = True) -> None:
     """
     Visualize the refinement pipeline results.
 
@@ -294,31 +363,62 @@ def visualize_refinement_pipeline(zarr_path: str,
     if quality_group is None:
         print("Warning: No quality report available; trajectory overlays will not show quality flags.")
 
+    manual_group_name = _resolve_manual_group_name(refined_group)
+    refined_stage_names = _iter_refined_stage_names(refined_group)
+    if not refined_stage_names:
+        print("\nError: Refined run does not contain any stage groups with frame_indices/bbox_norm_coords.")
+        return
+
+    print(f"Refined stages: {', '.join(refined_stage_names)}")
+
     datasets: Dict[str, Dict] = {}
     datasets['original'] = load_original_detections(detect_group, quality_group, fps, frame_range)
-    datasets['filtered'] = load_refined_stage(refined_group['filtered'], 'filtered', fps, frame_range)
-    datasets['interpolated'] = load_refined_stage(refined_group['interpolated'], 'interpolated', fps, frame_range)
+    for stage_name in refined_stage_names:
+        datasets[stage_name] = load_refined_stage(
+            refined_group[stage_name],
+            stage_name,
+            fps,
+            frame_range,
+        )
 
     stage_stats = {stage: compute_stage_stats(data) for stage, data in datasets.items()}
+    stage_order = list(datasets.keys())
+    dataset_items = [(stage, datasets[stage]) for stage in stage_order]
 
-    fig = plt.figure(figsize=(20, 14))
-    gs = gridspec.GridSpec(4, 3, figure=fig, hspace=0.35, wspace=0.25,
+    n_cols = len(stage_order)
+    fig_width = max(20.0, 5.5 * n_cols)
+    fig = plt.figure(figsize=(fig_width, 14))
+    gs = gridspec.GridSpec(4, n_cols, figure=fig, hspace=0.35, wspace=0.25,
                            height_ratios=[1.2, 0.5, 0.8, 0.8])
 
     stage_names = {
-        'original': 'Original Detections',
-        'filtered': 'Filtered (Jumps Removed)',
-        'interpolated': 'Interpolated (Gaps Filled)',
+        stage_name: _stage_display_name(stage_name, manual_group_name)
+        for stage_name in stage_order
     }
 
-    colors = {
-        'original': 'blue',
-        'filtered': 'green',
-        'interpolated': 'purple',
+    stage_colors = {
+        'original': '#1f77b4',
+        'filtered': '#2ca02c',
+        'interpolated': '#9467bd',
     }
+    if manual_group_name:
+        stage_colors[manual_group_name] = '#8c564b'
+    fallback_palette = [
+        '#17becf',
+        '#ff7f0e',
+        '#e377c2',
+        '#7f7f7f',
+        '#bcbd22',
+        '#d62728',
+    ]
+    fallback_index = 0
+    for stage_name in stage_order:
+        if stage_name not in stage_colors:
+            stage_colors[stage_name] = fallback_palette[fallback_index % len(fallback_palette)]
+            fallback_index += 1
 
     # Row 1: Trajectory plots
-    for idx, (stage, data) in enumerate(datasets.items()):
+    for idx, (stage, data) in enumerate(dataset_items):
         ax = fig.add_subplot(gs[0, idx])
 
         if len(data['centroids']) > 0:
@@ -346,7 +446,7 @@ def visualize_refinement_pipeline(zarr_path: str,
                                          c=data['frames'] - data['start_offset'],
                                          cmap='viridis', s=2, alpha=0.6)
                     plt.colorbar(scatter, ax=ax, label='Frame', pad=0.01)
-            elif stage == 'interpolated' and data['detection_source'] is not None:
+            elif stage != 'original' and data['detection_source'] is not None:
                 real_mask = data['detection_source'] == 0
                 interp_mask = data['detection_source'] == 1
 
@@ -379,9 +479,16 @@ def visualize_refinement_pipeline(zarr_path: str,
             coverage_loss = stage_stats['original']['coverage_percent'] - stats['coverage_percent']
             title += f"\nRemoved: {removed} ({coverage_loss:.2f}%)"
         elif stage == 'interpolated':
-            added = stats['total_detections'] - stage_stats['filtered']['total_detections']
-            coverage_gain = stats['coverage_percent'] - stage_stats['filtered']['coverage_percent']
-            title += f"\nAdded: {added} ({coverage_gain:.2f}%)"
+            baseline_stage = 'filtered' if 'filtered' in stage_stats else 'original'
+            baseline_label = 'Filtered' if baseline_stage == 'filtered' else 'Original'
+            added = stats['total_detections'] - stage_stats[baseline_stage]['total_detections']
+            coverage_gain = stats['coverage_percent'] - stage_stats[baseline_stage]['coverage_percent']
+            title += f"\nAdded vs {baseline_label}: {added} ({coverage_gain:.2f}%)"
+        elif idx > 0:
+            prev_stage = stage_order[idx - 1]
+            delta = stats['total_detections'] - stage_stats[prev_stage]['total_detections']
+            cov_delta = stats['coverage_percent'] - stage_stats[prev_stage]['coverage_percent']
+            title += f"\nΔ vs prev: {delta:+d} ({cov_delta:+.2f}%)"
 
         ax.set_title(title, fontweight='bold', fontsize=10)
         ax.set_xlabel('X Position (normalized)')
@@ -393,7 +500,7 @@ def visualize_refinement_pipeline(zarr_path: str,
         ax.invert_yaxis()
 
     # Row 2: Detection presence barcode
-    for idx, (stage, data) in enumerate(datasets.items()):
+    for idx, (stage, data) in enumerate(dataset_items):
         ax = fig.add_subplot(gs[1, idx])
 
         frame_counts = data['frame_counts']
@@ -414,7 +521,7 @@ def visualize_refinement_pipeline(zarr_path: str,
             extent=[0, extent_end, 0, 1],
         )
 
-        if stage == 'interpolated' and data.get('detection_source') is not None:
+        if stage != 'original' and data.get('detection_source') is not None:
             status = np.zeros_like(frame_counts, dtype=np.int8)
             status[detection_mask] = 1
 
@@ -488,7 +595,7 @@ def visualize_refinement_pipeline(zarr_path: str,
 
     # Row 3: Rolling coverage
     window = 100
-    for idx, (stage, data) in enumerate(datasets.items()):
+    for idx, (stage, data) in enumerate(dataset_items):
         ax = fig.add_subplot(gs[2, idx])
 
         frame_counts = data['frame_counts']
@@ -506,9 +613,9 @@ def visualize_refinement_pipeline(zarr_path: str,
         time_seconds = np.arange(len(detection_mask)) / max(fps, 1e-6)
 
         ax.fill_between(time_seconds, 0, rolling_coverage,
-                        color=colors[stage], alpha=0.3)
+                        color=stage_colors[stage], alpha=0.3)
         ax.plot(time_seconds, rolling_coverage,
-                color=colors[stage], alpha=0.8, linewidth=1)
+                color=stage_colors[stage], alpha=0.8, linewidth=1)
 
         in_gap = False
         gap_start = 0.0
@@ -534,7 +641,7 @@ def visualize_refinement_pipeline(zarr_path: str,
         ax.legend(loc='lower right', fontsize=8)
 
     # Row 4: Gap analysis
-    for idx, (stage, data) in enumerate(datasets.items()):
+    for idx, (stage, data) in enumerate(dataset_items):
         ax = fig.add_subplot(gs[3, idx])
 
         frame_counts = data['frame_counts']
@@ -563,7 +670,7 @@ def visualize_refinement_pipeline(zarr_path: str,
         if gap_sizes:
             max_gap = max(gap_sizes)
             bins = np.arange(0, min(max_gap + 2, 50), 1)
-            ax.hist(gap_sizes, bins=bins, color=colors[stage], alpha=0.7, edgecolor='black')
+            ax.hist(gap_sizes, bins=bins, color=stage_colors[stage], alpha=0.7, edgecolor='black')
 
             mean_gap = float(np.mean(gap_sizes))
             median_gap = float(np.median(gap_sizes))
@@ -606,21 +713,63 @@ def visualize_refinement_pipeline(zarr_path: str,
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"\n✓ Figure saved to: {save_path}")
 
-    plt.show()
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
     print(f"\n{'=' * 70}")
     print("SUMMARY")
     print(f"{'=' * 70}")
-    for stage_key in ['original', 'filtered', 'interpolated']:
+    for stage_key in stage_order:
         stats = stage_stats[stage_key]
         print(f"{stage_names[stage_key]}:")
         print(f"  Coverage: {stats['coverage_percent']:.2f}% "
               f"({stats['frames_with_detections']} frames)")
         print(f"  Detections: {stats['total_detections']}")
-    removed = stage_stats['original']['total_detections'] - stage_stats['filtered']['total_detections']
-    added = stage_stats['interpolated']['total_detections'] - stage_stats['filtered']['total_detections']
-    print(f"\nDetections removed by filtering: {removed}")
-    print(f"Detections added by interpolation: {added}")
+    if 'filtered' in stage_stats:
+        removed = stage_stats['original']['total_detections'] - stage_stats['filtered']['total_detections']
+        print(f"\nDetections removed by filtering: {removed}")
+    if 'interpolated' in stage_stats:
+        baseline_stage = 'filtered' if 'filtered' in stage_stats else 'original'
+        added = stage_stats['interpolated']['total_detections'] - stage_stats[baseline_stage]['total_detections']
+        print(f"Detections added by interpolation: {added}")
+
+
+def render_refinement_pipeline_png(
+    zarr_path: str,
+    *,
+    refined_run: Optional[str] = None,
+    frame_range: Optional[Tuple[int, int]] = None,
+) -> Tuple[bytes, Dict[str, Optional[str]]]:
+    """
+    Render refinement pipeline visualization to PNG bytes (no interactive window).
+
+    Returns:
+        (png_bytes, metadata)
+    """
+    tmp_path: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp_path = tmp.name
+        # Suppress CLI-oriented print output during artifact rendering.
+        with contextlib.redirect_stdout(io.StringIO()):
+            visualize_refinement_pipeline(
+                zarr_path=zarr_path,
+                refined_run=refined_run,
+                save_path=tmp_path,
+                frame_range=frame_range,
+                show=False,
+            )
+        if tmp_path is None or not os.path.exists(tmp_path):
+            raise RuntimeError("refinement pipeline render did not produce a PNG file")
+        png_bytes = Path(tmp_path).read_bytes()
+        if not png_bytes:
+            raise RuntimeError("refinement pipeline render produced an empty PNG file")
+        return png_bytes, {"refined_run": refined_run}
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 def main() -> int:

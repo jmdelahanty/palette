@@ -786,6 +786,29 @@ def _query_detect_model_summary_rows(
     return [dict(row) for row in rows]
 
 
+def _print_detection_profile_rows(rows: list[dict[str, Any]], *, recording_scope: bool) -> None:
+    for row in rows:
+        prefix = (
+            f"recording={row.get('recording_id') or '-'}\t"
+            f"dataset={row.get('dataset_id') or '-'}\t"
+            if recording_scope
+            else (
+                f"dataset={row.get('dataset_id') or '-'}\t"
+                f"recording={row.get('recording_id') or '-'}\t"
+            )
+        )
+        print(
+            prefix
+            + f"run={row.get('profile_run') or '-'}\t"
+            f"type={row.get('detection_type') or '-'}\t"
+            f"use={row.get('zarr_use') or '-'}\t"
+            f"coverage={row.get('coverage_percent') if row.get('coverage_percent') is not None else '-'}\t"
+            f"detections={row.get('detections_total') if row.get('detections_total') is not None else '-'}\t"
+            f"path={row.get('detection_path') or '-'}\t"
+            f"created={row.get('profile_created_utc') or '-'}"
+        )
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path.")
@@ -997,6 +1020,33 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--detect-model-run-id", type=str, help="Filter detect-model summary by exact model run id.")
     parser.add_argument("--detect-model-set-id", type=str, help="Filter detect-model summary by exact model set id.")
     parser.add_argument(
+        "--detection-data-profile-latest",
+        action="store_true",
+        help="Query detection_data_profile_latest rows directly.",
+    )
+    parser.add_argument(
+        "--recording-detection-data-profile-latest",
+        action="store_true",
+        help="Query recording_detection_data_profile_latest rows directly.",
+    )
+    parser.add_argument(
+        "--profile-dataset-id",
+        action="append",
+        help="Dataset-id filter for detection-data profile modes. Repeat to pass multiple IDs.",
+    )
+    parser.add_argument(
+        "--profile-recording-id",
+        action="append",
+        help="Recording-id filter for detection-data profile modes. Repeat to pass multiple IDs.",
+    )
+    parser.add_argument("--profile-zarr-use", type=str, help="zarr_use filter for detection-data profile modes.")
+    parser.add_argument("--profile-detection-type", type=str, help="detection_type filter for detection-data profile modes.")
+    parser.add_argument(
+        "--profile-coverage-min",
+        type=float,
+        help="Minimum coverage_percent filter for detection-data profile modes.",
+    )
+    parser.add_argument(
         "--model-input",
         choices=["gray", "rgb"],
         help="Filter datasets by available downsample modality required for training.",
@@ -1027,7 +1077,16 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     group_by = args.group_by or ("model" if args.group_by_model else None)
     keypoint_group_by = args.keypoint_group_by
-    if args.detect_model_summary and args.output_file_list:
+    profile_dataset_latest = bool(args.detection_data_profile_latest)
+    profile_recording_latest = bool(args.recording_detection_data_profile_latest)
+    profile_mode = profile_dataset_latest or profile_recording_latest
+    if profile_dataset_latest and profile_recording_latest:
+        raise SystemExit(
+            "--detection-data-profile-latest and --recording-detection-data-profile-latest are mutually exclusive."
+        )
+    if args.detect_model_summary and profile_mode:
+        raise SystemExit("--detect-model-summary cannot be combined with detection-data-profile view modes.")
+    if (args.detect_model_summary or profile_mode) and args.output_file_list:
         raise SystemExit("--output-file-list is only supported for dataset-row query mode.")
 
     registry_path = args.registry or RegistryPaths.from_env(Path.cwd()).path
@@ -1058,6 +1117,48 @@ def main(argv: Optional[list[str]] = None) -> int:
                     f"fps_p50={row.get('fps_p50') if row.get('fps_p50') is not None else '-'}\t"
                     f"read_ms_p50={row.get('read_ms_p50') if row.get('read_ms_p50') is not None else '-'}"
                 )
+        return 0
+
+    if profile_mode:
+        dataset_ids = [str(value).strip() for value in (args.profile_dataset_id or []) if str(value).strip()]
+        recording_ids = [str(value).strip() for value in (args.profile_recording_id or []) if str(value).strip()]
+        try:
+            if profile_recording_latest:
+                profile_rows = [
+                    dict(row)
+                    for row in registry.query_recording_detection_data_profile_latest(
+                        recording_ids=recording_ids or None,
+                        zarr_use=args.profile_zarr_use,
+                        detection_type=args.profile_detection_type,
+                        min_coverage_percent=args.profile_coverage_min,
+                    )
+                ]
+                if dataset_ids:
+                    allowed_dataset_ids = set(dataset_ids)
+                    profile_rows = [
+                        row
+                        for row in profile_rows
+                        if str(row.get("dataset_id") or "") in allowed_dataset_ids
+                    ]
+            else:
+                profile_rows = [
+                    dict(row)
+                    for row in registry.query_detection_data_profile_latest(
+                        dataset_ids=dataset_ids or None,
+                        recording_ids=recording_ids or None,
+                        zarr_use=args.profile_zarr_use,
+                        detection_type=args.profile_detection_type,
+                        min_coverage_percent=args.profile_coverage_min,
+                    )
+                ]
+            if args.limit is not None:
+                profile_rows = profile_rows[: int(args.limit)]
+        finally:
+            registry.close()
+        if args.json:
+            print(json.dumps(profile_rows, indent=2))
+        else:
+            _print_detection_profile_rows(profile_rows, recording_scope=profile_recording_latest)
         return 0
 
     use_subject_filters = any(

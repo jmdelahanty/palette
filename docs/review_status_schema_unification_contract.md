@@ -146,3 +146,31 @@ Recommended:
 - Non-breaking migration strategy: additive columns + fallback readers.
 - Do not require immediate historical backfill to mark task complete.
 - New writes should converge immediately on canonical payload keys.
+
+## Follow-Up TODO: Shared Review Registry Sync Helper
+
+Goal: avoid per-tool one-off registry sync code in reviewers/writers/refinement
+utilities by defining one shared helper contract.
+
+- [ ] Add shared helper module for review-registry sync by `zarr_path`.
+  - Suggested location: `src/fisheye/utils/review_registry_sync.py`.
+  - Helper should resolve dataset + recording context from registry and run
+    scoped refreshes needed by review tools.
+
+- [ ] Define one canonical API surface used across tools.
+  - Example:
+    - `sync_registry_for_review_update(registry_path, zarr_path, domains=..., refresh_recording_step_status=True)`.
+  - Include structured result payload (success flag, rows inserted/updated/deleted,
+    message/error details).
+
+- [ ] Migrate current/near-term review tools to use shared helper.
+  - `visualize_eye_mask_patches.py`
+  - detect/keypoint/crop review writers and related refinement entrypoints that
+    currently trigger direct registry maintenance flows.
+
+- [ ] Add focused unit tests for helper behavior.
+  - dataset resolution by path (including normalized path fallback)
+  - per-domain refresh routing
+  - failure handling (missing dataset, missing recording_id, sqlite errors).
+
+- [ ] Add operator docs snippet for enabling/disabling auto-sync from review CLIs.

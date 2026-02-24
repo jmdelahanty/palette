@@ -395,6 +395,8 @@ def _viewer_cmd(args: argparse.Namespace, plan: ReviewPlan) -> List[str]:
         "--review-intended-use",
         str(args.review_intended_use),
     ]
+    if args.registry:
+        cmd.extend(["--registry", str(args.registry)])
     if args.crop_run:
         cmd.extend(["--crop-run", str(args.crop_run)])
     if args.keypoint_run:

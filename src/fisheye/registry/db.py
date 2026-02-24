@@ -1638,6 +1638,11 @@ class Registry:
                 "detect_keypoint_quality_review_columns",
                 self._migration_021_detect_keypoint_quality_review_columns,
             ),
+            (
+                22,
+                "detection_data_profile_registry",
+                self._migration_022_detection_data_profile_registry,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -5387,6 +5392,221 @@ class Registry:
             """
         )
 
+    def _migration_022_detection_data_profile_registry(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS detection_data_profile (
+                dataset_id TEXT NOT NULL,
+                profile_run TEXT NOT NULL,
+                recording_id TEXT,
+                zarr_use TEXT,
+                detection_type TEXT,
+                detection_path TEXT,
+                profile_created_utc TEXT,
+                zarr_mtime_ns INTEGER,
+                updated_utc TEXT,
+                frames_total INTEGER,
+                frames_with_detections INTEGER,
+                coverage_percent REAL,
+                detections_total INTEGER,
+                detections_per_frame_p50 REAL,
+                detections_per_frame_p90 REAL,
+                w_p10 REAL,
+                w_p50 REAL,
+                w_p90 REAL,
+                h_p10 REAL,
+                h_p50 REAL,
+                h_p90 REAL,
+                area_p10 REAL,
+                area_p50 REAL,
+                area_p90 REAL,
+                aspect_ratio_p10 REAL,
+                aspect_ratio_p50 REAL,
+                aspect_ratio_p90 REAL,
+                edge_proximity_rate REAL,
+                rig_id TEXT,
+                camera_id TEXT,
+                arena_id TEXT,
+                dish_design TEXT,
+                canvas_name TEXT,
+                protocol_name TEXT,
+                profile_json TEXT,
+                PRIMARY KEY (dataset_id, profile_run),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        self._ensure_columns(
+            "detection_data_profile",
+            {
+                "recording_id": "TEXT",
+                "zarr_use": "TEXT",
+                "detection_type": "TEXT",
+                "detection_path": "TEXT",
+                "profile_created_utc": "TEXT",
+                "zarr_mtime_ns": "INTEGER",
+                "updated_utc": "TEXT",
+                "frames_total": "INTEGER",
+                "frames_with_detections": "INTEGER",
+                "coverage_percent": "REAL",
+                "detections_total": "INTEGER",
+                "detections_per_frame_p50": "REAL",
+                "detections_per_frame_p90": "REAL",
+                "w_p10": "REAL",
+                "w_p50": "REAL",
+                "w_p90": "REAL",
+                "h_p10": "REAL",
+                "h_p50": "REAL",
+                "h_p90": "REAL",
+                "area_p10": "REAL",
+                "area_p50": "REAL",
+                "area_p90": "REAL",
+                "aspect_ratio_p10": "REAL",
+                "aspect_ratio_p50": "REAL",
+                "aspect_ratio_p90": "REAL",
+                "edge_proximity_rate": "REAL",
+                "rig_id": "TEXT",
+                "camera_id": "TEXT",
+                "arena_id": "TEXT",
+                "dish_design": "TEXT",
+                "canvas_name": "TEXT",
+                "protocol_name": "TEXT",
+                "profile_json": "TEXT",
+            },
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_detection_data_profile_recording_created "
+            "ON detection_data_profile(recording_id, profile_created_utc DESC);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_detection_data_profile_detection_scope "
+            "ON detection_data_profile(detection_type, zarr_use);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_detection_data_profile_coverage "
+            "ON detection_data_profile(coverage_percent);"
+        )
+        cur.execute("DROP VIEW IF EXISTS detection_data_profile_latest;")
+        cur.execute(
+            """
+            CREATE VIEW detection_data_profile_latest AS
+            WITH ranked AS (
+                SELECT
+                    ddp.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ddp.dataset_id
+                        ORDER BY
+                            COALESCE(ddp.profile_created_utc, ddp.updated_utc) DESC,
+                            ddp.profile_run DESC
+                    ) AS _rn
+                FROM detection_data_profile ddp
+            )
+            SELECT
+                dataset_id,
+                profile_run,
+                recording_id,
+                zarr_use,
+                detection_type,
+                detection_path,
+                profile_created_utc,
+                zarr_mtime_ns,
+                updated_utc,
+                frames_total,
+                frames_with_detections,
+                coverage_percent,
+                detections_total,
+                detections_per_frame_p50,
+                detections_per_frame_p90,
+                w_p10,
+                w_p50,
+                w_p90,
+                h_p10,
+                h_p50,
+                h_p90,
+                area_p10,
+                area_p50,
+                area_p90,
+                aspect_ratio_p10,
+                aspect_ratio_p50,
+                aspect_ratio_p90,
+                edge_proximity_rate,
+                rig_id,
+                camera_id,
+                arena_id,
+                dish_design,
+                canvas_name,
+                protocol_name,
+                profile_json
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS recording_detection_data_profile_latest;")
+        cur.execute(
+            """
+            CREATE VIEW recording_detection_data_profile_latest AS
+            WITH ranked AS (
+                SELECT
+                    ddpl.*,
+                    d.zarr_path AS zarr_path,
+                    d.artifact_kind AS artifact_kind,
+                    d.status AS dataset_status,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ddpl.recording_id
+                        ORDER BY
+                            COALESCE(ddpl.profile_created_utc, ddpl.updated_utc) DESC,
+                            ddpl.profile_run DESC,
+                            ddpl.dataset_id DESC
+                    ) AS _rn
+                FROM detection_data_profile_latest ddpl
+                LEFT JOIN datasets d ON d.dataset_id = ddpl.dataset_id
+                WHERE ddpl.recording_id IS NOT NULL
+            )
+            SELECT
+                recording_id,
+                dataset_id,
+                profile_run,
+                zarr_use,
+                detection_type,
+                detection_path,
+                profile_created_utc,
+                zarr_mtime_ns,
+                updated_utc,
+                frames_total,
+                frames_with_detections,
+                coverage_percent,
+                detections_total,
+                detections_per_frame_p50,
+                detections_per_frame_p90,
+                w_p10,
+                w_p50,
+                w_p90,
+                h_p10,
+                h_p50,
+                h_p90,
+                area_p10,
+                area_p50,
+                area_p90,
+                aspect_ratio_p10,
+                aspect_ratio_p50,
+                aspect_ratio_p90,
+                edge_proximity_rate,
+                rig_id,
+                camera_id,
+                arena_id,
+                dish_design,
+                canvas_name,
+                protocol_name,
+                profile_json,
+                zarr_path,
+                artifact_kind,
+                dataset_status
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
         existing = {
             row["name"]
@@ -6279,6 +6499,151 @@ class Registry:
         )
         self.conn.commit()
 
+    def upsert_detection_data_profile(
+        self,
+        *,
+        dataset_id: str,
+        profile_run: str,
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+        detection_type: Optional[str],
+        detection_path: Optional[str],
+        profile_created_utc: Optional[str],
+        frames_total: Optional[int],
+        frames_with_detections: Optional[int],
+        coverage_percent: Optional[float],
+        detections_total: Optional[int],
+        detections_per_frame_p50: Optional[float],
+        detections_per_frame_p90: Optional[float],
+        w_p10: Optional[float],
+        w_p50: Optional[float],
+        w_p90: Optional[float],
+        h_p10: Optional[float],
+        h_p50: Optional[float],
+        h_p90: Optional[float],
+        area_p10: Optional[float],
+        area_p50: Optional[float],
+        area_p90: Optional[float],
+        aspect_ratio_p10: Optional[float],
+        aspect_ratio_p50: Optional[float],
+        aspect_ratio_p90: Optional[float],
+        edge_proximity_rate: Optional[float],
+        rig_id: Optional[str],
+        camera_id: Optional[str],
+        arena_id: Optional[str],
+        dish_design: Optional[str],
+        canvas_name: Optional[str],
+        protocol_name: Optional[str],
+        profile_json: Optional[str],
+        zarr_mtime_ns: Optional[int] = None,
+        updated_utc: Optional[str] = None,
+    ) -> None:
+        payload = {
+            "dataset_id": str(dataset_id),
+            "profile_run": str(profile_run),
+            "recording_id": recording_id,
+            "zarr_use": zarr_use,
+            "detection_type": detection_type,
+            "detection_path": detection_path,
+            "profile_created_utc": profile_created_utc,
+            "zarr_mtime_ns": zarr_mtime_ns,
+            "updated_utc": updated_utc or _utc_now(),
+            "frames_total": frames_total,
+            "frames_with_detections": frames_with_detections,
+            "coverage_percent": coverage_percent,
+            "detections_total": detections_total,
+            "detections_per_frame_p50": detections_per_frame_p50,
+            "detections_per_frame_p90": detections_per_frame_p90,
+            "w_p10": w_p10,
+            "w_p50": w_p50,
+            "w_p90": w_p90,
+            "h_p10": h_p10,
+            "h_p50": h_p50,
+            "h_p90": h_p90,
+            "area_p10": area_p10,
+            "area_p50": area_p50,
+            "area_p90": area_p90,
+            "aspect_ratio_p10": aspect_ratio_p10,
+            "aspect_ratio_p50": aspect_ratio_p50,
+            "aspect_ratio_p90": aspect_ratio_p90,
+            "edge_proximity_rate": edge_proximity_rate,
+            "rig_id": rig_id,
+            "camera_id": camera_id,
+            "arena_id": arena_id,
+            "dish_design": dish_design,
+            "canvas_name": canvas_name,
+            "protocol_name": protocol_name,
+            "profile_json": profile_json,
+        }
+        self.conn.execute(
+            """
+            INSERT INTO detection_data_profile (
+                dataset_id, profile_run, recording_id, zarr_use,
+                detection_type, detection_path, profile_created_utc,
+                zarr_mtime_ns, updated_utc,
+                frames_total, frames_with_detections, coverage_percent, detections_total,
+                detections_per_frame_p50, detections_per_frame_p90,
+                w_p10, w_p50, w_p90,
+                h_p10, h_p50, h_p90,
+                area_p10, area_p50, area_p90,
+                aspect_ratio_p10, aspect_ratio_p50, aspect_ratio_p90,
+                edge_proximity_rate,
+                rig_id, camera_id, arena_id, dish_design, canvas_name, protocol_name,
+                profile_json
+            )
+            VALUES (
+                :dataset_id, :profile_run, :recording_id, :zarr_use,
+                :detection_type, :detection_path, :profile_created_utc,
+                :zarr_mtime_ns, :updated_utc,
+                :frames_total, :frames_with_detections, :coverage_percent, :detections_total,
+                :detections_per_frame_p50, :detections_per_frame_p90,
+                :w_p10, :w_p50, :w_p90,
+                :h_p10, :h_p50, :h_p90,
+                :area_p10, :area_p50, :area_p90,
+                :aspect_ratio_p10, :aspect_ratio_p50, :aspect_ratio_p90,
+                :edge_proximity_rate,
+                :rig_id, :camera_id, :arena_id, :dish_design, :canvas_name, :protocol_name,
+                :profile_json
+            )
+            ON CONFLICT(dataset_id, profile_run) DO UPDATE SET
+                recording_id=excluded.recording_id,
+                zarr_use=excluded.zarr_use,
+                detection_type=excluded.detection_type,
+                detection_path=excluded.detection_path,
+                profile_created_utc=excluded.profile_created_utc,
+                zarr_mtime_ns=excluded.zarr_mtime_ns,
+                updated_utc=excluded.updated_utc,
+                frames_total=excluded.frames_total,
+                frames_with_detections=excluded.frames_with_detections,
+                coverage_percent=excluded.coverage_percent,
+                detections_total=excluded.detections_total,
+                detections_per_frame_p50=excluded.detections_per_frame_p50,
+                detections_per_frame_p90=excluded.detections_per_frame_p90,
+                w_p10=excluded.w_p10,
+                w_p50=excluded.w_p50,
+                w_p90=excluded.w_p90,
+                h_p10=excluded.h_p10,
+                h_p50=excluded.h_p50,
+                h_p90=excluded.h_p90,
+                area_p10=excluded.area_p10,
+                area_p50=excluded.area_p50,
+                area_p90=excluded.area_p90,
+                aspect_ratio_p10=excluded.aspect_ratio_p10,
+                aspect_ratio_p50=excluded.aspect_ratio_p50,
+                aspect_ratio_p90=excluded.aspect_ratio_p90,
+                edge_proximity_rate=excluded.edge_proximity_rate,
+                rig_id=excluded.rig_id,
+                camera_id=excluded.camera_id,
+                arena_id=excluded.arena_id,
+                dish_design=excluded.dish_design,
+                canvas_name=excluded.canvas_name,
+                protocol_name=excluded.protocol_name,
+                profile_json=excluded.profile_json;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
     def upsert_detect_quality(
         self,
         *,
@@ -6406,6 +6771,47 @@ class Registry:
                         :inference_duration_seconds, :inference_average_fps, :inference_avg_batch_ms, :inference_avg_read_ms,
                         :conf_threshold, :iou_threshold, :batch_size, :inference_width, :inference_height,
                         :zarr_mtime_ns, :updated_utc
+                    );
+                    """,
+                    payload,
+                )
+
+    def replace_detection_data_profile(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM detection_data_profile WHERE dataset_id = ?;", (str(dataset_id),))
+            for record in records:
+                payload = dict(record)
+                payload["dataset_id"] = str(dataset_id)
+                payload.setdefault("updated_utc", _utc_now())
+                self.conn.execute(
+                    """
+                    INSERT INTO detection_data_profile (
+                        dataset_id, profile_run, recording_id, zarr_use,
+                        detection_type, detection_path, profile_created_utc,
+                        zarr_mtime_ns, updated_utc,
+                        frames_total, frames_with_detections, coverage_percent, detections_total,
+                        detections_per_frame_p50, detections_per_frame_p90,
+                        w_p10, w_p50, w_p90,
+                        h_p10, h_p50, h_p90,
+                        area_p10, area_p50, area_p90,
+                        aspect_ratio_p10, aspect_ratio_p50, aspect_ratio_p90,
+                        edge_proximity_rate,
+                        rig_id, camera_id, arena_id, dish_design, canvas_name, protocol_name,
+                        profile_json
+                    )
+                    VALUES (
+                        :dataset_id, :profile_run, :recording_id, :zarr_use,
+                        :detection_type, :detection_path, :profile_created_utc,
+                        :zarr_mtime_ns, :updated_utc,
+                        :frames_total, :frames_with_detections, :coverage_percent, :detections_total,
+                        :detections_per_frame_p50, :detections_per_frame_p90,
+                        :w_p10, :w_p50, :w_p90,
+                        :h_p10, :h_p50, :h_p90,
+                        :area_p10, :area_p50, :area_p90,
+                        :aspect_ratio_p10, :aspect_ratio_p50, :aspect_ratio_p90,
+                        :edge_proximity_rate,
+                        :rig_id, :camera_id, :arena_id, :dish_design, :canvas_name, :protocol_name,
+                        :profile_json
                     );
                     """,
                     payload,
@@ -6739,6 +7145,74 @@ class Registry:
             )
             params.append(float(max_interpolated_detections_rate))
         sql.append("ORDER BY dataset_id, detect_method")
+        return list(self.conn.execute(" ".join(sql), params).fetchall())
+
+    def query_detection_data_profile_latest(
+        self,
+        *,
+        dataset_ids: Optional[Sequence[str]] = None,
+        recording_ids: Optional[Sequence[str]] = None,
+        zarr_use: Optional[str] = None,
+        detection_type: Optional[str] = None,
+        min_coverage_percent: Optional[float] = None,
+    ) -> List[sqlite3.Row]:
+        sql = ["SELECT * FROM detection_data_profile_latest WHERE 1=1"]
+        params: List[Any] = []
+
+        if dataset_ids:
+            normalized_ids = [str(dataset_id) for dataset_id in dataset_ids if dataset_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND dataset_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if recording_ids:
+            normalized_ids = [str(recording_id) for recording_id in recording_ids if recording_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND recording_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if zarr_use is not None:
+            sql.append("AND zarr_use = ?")
+            params.append(str(zarr_use))
+        if detection_type is not None:
+            sql.append("AND detection_type = ?")
+            params.append(str(detection_type))
+        if min_coverage_percent is not None:
+            sql.append("AND coverage_percent IS NOT NULL AND coverage_percent >= ?")
+            params.append(float(min_coverage_percent))
+        sql.append("ORDER BY dataset_id")
+        return list(self.conn.execute(" ".join(sql), params).fetchall())
+
+    def query_recording_detection_data_profile_latest(
+        self,
+        *,
+        recording_ids: Optional[Sequence[str]] = None,
+        zarr_use: Optional[str] = None,
+        detection_type: Optional[str] = None,
+        min_coverage_percent: Optional[float] = None,
+    ) -> List[sqlite3.Row]:
+        sql = ["SELECT * FROM recording_detection_data_profile_latest WHERE 1=1"]
+        params: List[Any] = []
+
+        if recording_ids:
+            normalized_ids = [str(recording_id) for recording_id in recording_ids if recording_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND recording_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if zarr_use is not None:
+            sql.append("AND zarr_use = ?")
+            params.append(str(zarr_use))
+        if detection_type is not None:
+            sql.append("AND detection_type = ?")
+            params.append(str(detection_type))
+        if min_coverage_percent is not None:
+            sql.append("AND coverage_percent IS NOT NULL AND coverage_percent >= ?")
+            params.append(float(min_coverage_percent))
+        sql.append("ORDER BY recording_id")
         return list(self.conn.execute(" ".join(sql), params).fetchall())
 
     def _resolve_effective_dataset_id(

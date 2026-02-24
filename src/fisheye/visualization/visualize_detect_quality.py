@@ -17,6 +17,28 @@ from io import BytesIO
 import matplotlib
 
 
+def _safe_mapping(value: object) -> Dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    if value is None:
+        return float(default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    if value is None:
+        return int(default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def load_quality_report(zarr_path: str, 
                        detect_run: Optional[str] = None,
                        quality_run: Optional[str] = None) -> Tuple[Dict, Dict]:
@@ -194,8 +216,15 @@ def create_quality_visualization(quality_data: Dict,
     ax2 = fig.add_subplot(gs[0, 2])
     ax2.axis('off')
     
-    score = quality_data['quality_score']
-    det_summary = quality_data['detection_summary']
+    score = _safe_mapping(quality_data.get('quality_score'))
+    det_summary = _safe_mapping(quality_data.get('detection_summary'))
+    grade = str(score.get('grade') or '?')
+    overall_score = _safe_float(score.get('overall_score'))
+    coverage_score = _safe_float(score.get('coverage_score'))
+    artifact_score = _safe_float(score.get('artifact_score'))
+    bbox_score = _safe_float(score.get('bbox_score'))
+    clean_detections = _safe_int(det_summary.get('clean_detections'))
+    clean_percentage = _safe_float(det_summary.get('clean_percentage'))
     grade_color = {
         'A': 'green',
         'B': 'lightgreen',
@@ -208,44 +237,53 @@ def create_quality_visualization(quality_data: Dict,
     
     summary_text = f"""QUALITY SCORE
 
-Overall Grade: {score['grade']}
-Overall Score: {score['overall_score']:.1f}/100
+Overall Grade: {grade}
+Overall Score: {overall_score:.1f}/100
 
 Component Scores:
-- Coverage: {score['coverage_score']:.1f}/100
-- Artifacts: {score['artifact_score']:.1f}/100
-- Bbox: {score['bbox_score']:.1f}/100
+- Coverage: {coverage_score:.1f}/100
+- Artifacts: {artifact_score:.1f}/100
+- Bbox: {bbox_score:.1f}/100
 
 Detection Quality:
-- Clean: {det_summary['clean_detections']} ({det_summary['clean_percentage']:.1f}%)
+- Clean: {clean_detections} ({clean_percentage:.1f}%)
 - Artifacts: {total_artifacts}
 """
     
     ax2.text(0.05, 0.95, summary_text, transform=ax2.transAxes,
             fontsize=11, verticalalignment='top', family='monospace',
-            bbox=dict(boxstyle='round', facecolor=grade_color.get(score['grade'], 'white'), 
+            bbox=dict(boxstyle='round', facecolor=grade_color.get(grade, 'white'),
                      alpha=0.8, edgecolor='black', linewidth=2))
     
     # Plot 3: Coverage Stats
     ax3 = fig.add_subplot(gs[1, 2])
     ax3.axis('off')
     
-    cov = quality_data['coverage_stats']
-    det_summary = quality_data['detection_summary']
+    cov = _safe_mapping(quality_data.get('coverage_stats'))
+    det_summary = _safe_mapping(quality_data.get('detection_summary'))
+    coverage_percent = _safe_float(cov.get('coverage_percent'))
+    total_frames = _safe_int(det_summary.get('total_frames'))
+    empty_frames = _safe_int(det_summary.get('empty_frames'))
+    frames_with_detections = _safe_int(det_summary.get('frames_with_detections'))
+    clean_frames = _safe_int(det_summary.get('clean_frames'))
+    gaps = _safe_mapping(cov.get('gaps'))
+    gap_total = _safe_int(gaps.get('total_count'))
+    gap_longest = _safe_int(gaps.get('longest_gap'))
+    gap_mean = _safe_float(gaps.get('mean_gap_size'))
     
     coverage_text = f"""COVERAGE
 
-Total Frames: {det_summary['total_frames']}
-Empty Frames: {det_summary['empty_frames']}
-With Detections: {det_summary['frames_with_detections']}
-Coverage: {cov['coverage_percent']:.1f}%
+Total Frames: {total_frames}
+Empty Frames: {empty_frames}
+With Detections: {frames_with_detections}
+Coverage: {coverage_percent:.1f}%
 
-Clean Frames: {det_summary['clean_frames']}
+Clean Frames: {clean_frames}
 
 Gaps:
-- Total: {cov['gaps']['total_count']}
-- Longest: {cov['gaps']['longest_gap']} frames
-- Mean: {cov['gaps']['mean_gap_size']:.1f} frames
+- Total: {gap_total}
+- Longest: {gap_longest} frames
+- Mean: {gap_mean:.1f} frames
 """
     
     ax3.text(0.05, 0.95, coverage_text, transform=ax3.transAxes,
@@ -256,21 +294,28 @@ Gaps:
     ax4 = fig.add_subplot(gs[2, 2])
     ax4.axis('off')
     
-    bbox = quality_data['bbox_validation']
+    bbox = _safe_mapping(quality_data.get('bbox_validation'))
+    total_bboxes = _safe_int(bbox.get('total_bboxes'))
+    out_of_range = _safe_int(bbox.get('out_of_range'))
+    size_outliers = _safe_int(bbox.get('size_outliers'))
+    malformed = _safe_int(bbox.get('malformed'))
+    mean_size = _safe_float(bbox.get('mean_size'))
+    std_size = _safe_float(bbox.get('std_size'))
+    size_cv = _safe_float(bbox.get('size_cv'))
     
     bbox_text = f"""BBOX VALIDATION
 
-Total Boxes: {bbox['total_bboxes']}
+Total Boxes: {total_bboxes}
 
 Issues:
-- Out of range: {bbox['out_of_range']}
-- Size outliers: {bbox['size_outliers']}
-- Malformed: {bbox['malformed']}
+- Out of range: {out_of_range}
+- Size outliers: {size_outliers}
+- Malformed: {malformed}
 
 Size Stats:
-- Mean: {bbox['mean_size']:.3f}
-- Std: {bbox['std_size']:.3f}
-- CV: {bbox['size_cv']:.3f}
+- Mean: {mean_size:.3f}
+- Std: {std_size:.3f}
+- CV: {size_cv:.3f}
 """
     
     ax4.text(0.05, 0.95, bbox_text, transform=ax4.transAxes,

@@ -17,6 +17,7 @@ from fisheye.registry.db import Registry
 from fisheye.registry.maintenance import (
     _backfill_crop_quality,
     _backfill_dataset_lineage,
+    _backfill_detect_quality,
     _backfill_detect_performance,
     _backfill_eye_mask_performance,
     _backfill_keypoint_performance,
@@ -442,6 +443,47 @@ def _create_detectless_zarr(path: Path, *, session_uuid: str = "detectless_sessi
     root.attrs["session_uuid"] = session_uuid
     raw = root.create_group("raw_video")
     raw.create_array("images_ds", data=np.zeros((4, 8, 8), dtype=np.uint8), chunks=(1, 8, 8))
+
+
+def _create_detect_quality_fake_zarr(path: Path, *, refined_runs: tuple[str, ...]) -> _FakeGroup:
+    _create_fake_zarr_store(path)
+
+    root = _FakeGroup(attrs={"session_uuid": "detect_quality_session", "zarr_purpose": "analysis"})
+    raw = root.add_group("raw_video")
+    raw.add_array("images_ds", np.zeros((4, 8, 8), dtype=np.uint8))
+
+    detect_parent = root.add_group("detect_runs", attrs={"latest": "detect_001"})
+    detect_parent.add_group(
+        "detect_001",
+        attrs={
+            "detect_timestamp_utc": "2026-02-16T00:00:00+00:00",
+            "detection_method": "yolo",
+        },
+    )
+
+    if not refined_runs:
+        return root
+
+    refined_parent = root.add_group("refined_detect_runs", attrs={"latest": refined_runs[-1]})
+    for index, refined_run in enumerate(refined_runs, start=1):
+        refined_group = refined_parent.add_group(
+            refined_run,
+            attrs={
+                "created_utc": f"2026-02-16T00:{index:02d}:00+00:00",
+                "source_detect_run": "detect_001",
+                "detect_review_status": {
+                    "state": "approved",
+                    "intended_use": "training",
+                    "reviewer": "pytest",
+                    "timestamp_utc": f"2026-02-16T00:{index + 10:02d}:00+00:00",
+                    "resolved_group": "filtered",
+                },
+            },
+        )
+        resolved = refined_group.add_group("filtered")
+        resolved.add_array("detection_source", np.array([0, 0, 1, 0], dtype=np.int8))
+
+    return root
 
 
 def test_is_nested_zarr_subpath() -> None:
@@ -3043,6 +3085,213 @@ def test_backfill_keypoint_performance_scope_defaults_to_source_analysis(tmp_pat
     )
     assert dry_all["datasets_scanned"] == 2
     assert dry_all["rows_inserted"] == 2
+    registry.close()
+
+
+def test_backfill_detect_quality_refresh_apply_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "detect_quality" / "zarr" / "detect_quality_analysis.zarr"
+    roots_by_path = {
+        str(zarr_path): _create_detect_quality_fake_zarr(
+            zarr_path,
+            refined_runs=("refined_detect_001",),
+        )
+    }
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule(roots_by_path),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_detect_quality_idempotent",
+        session_uuid="session_detect_quality_idempotent",
+        zarr_path=zarr_path,
+        recording_id="recording_detect_quality_idempotent",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    first = _backfill_detect_quality(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=True,
+    )
+    assert first["datasets_scanned"] == 1
+    assert first["rows_inserted"] == 1
+    assert first["rows_updated"] == 0
+    assert first["rows_deleted"] == 0
+    assert first["rows_skipped"] == 0
+
+    repeat_1 = _backfill_detect_quality(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=True,
+    )
+    repeat_2 = _backfill_detect_quality(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=True,
+    )
+    assert repeat_1 == repeat_2
+    assert repeat_1["rows_inserted"] == 0
+    assert repeat_1["rows_updated"] == 0
+    assert repeat_1["rows_deleted"] == 0
+    assert repeat_1["rows_skipped"] == 1
+
+    count_row = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM detect_quality WHERE dataset_id = ?;",
+        ("dataset_detect_quality_idempotent",),
+    ).fetchone()
+    assert count_row is not None and int(count_row["n"]) == 1
+    registry.close()
+
+
+def test_backfill_detect_quality_refresh_apply_deletes_rows_when_source_disappears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "detect_quality" / "zarr" / "detect_quality_analysis.zarr"
+    roots_by_path = {
+        str(zarr_path): _create_detect_quality_fake_zarr(
+            zarr_path,
+            refined_runs=("refined_detect_001",),
+        )
+    }
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule(roots_by_path),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_detect_quality_disappears",
+        session_uuid="session_detect_quality_disappears",
+        zarr_path=zarr_path,
+        recording_id="recording_detect_quality_disappears",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    seeded = _backfill_detect_quality(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=True,
+    )
+    assert seeded["rows_inserted"] == 1
+
+    roots_by_path[str(zarr_path)] = _create_detect_quality_fake_zarr(
+        zarr_path,
+        refined_runs=(),
+    )
+    refreshed = _backfill_detect_quality(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=True,
+    )
+    assert refreshed["datasets_scanned"] == 1
+    assert refreshed["datasets_no_quality"] == 1
+    assert refreshed["rows_inserted"] == 0
+    assert refreshed["rows_updated"] == 0
+    assert refreshed["rows_deleted"] == 1
+    assert refreshed["rows_skipped"] == 0
+
+    count_row = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM detect_quality WHERE dataset_id = ?;",
+        ("dataset_detect_quality_disappears",),
+    ).fetchone()
+    assert count_row is not None and int(count_row["n"]) == 0
+    registry.close()
+
+
+def test_backfill_detect_quality_refresh_dry_run_and_apply_counts_are_deterministic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "detect_quality" / "zarr" / "detect_quality_analysis.zarr"
+    roots_by_path = {
+        str(zarr_path): _create_detect_quality_fake_zarr(
+            zarr_path,
+            refined_runs=("refined_keep", "refined_update", "refined_new"),
+        )
+    }
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule(roots_by_path),
+    )
+
+    dataset_id = "dataset_detect_quality_deterministic"
+    registry.upsert_dataset(
+        dataset_id=dataset_id,
+        session_uuid="session_detect_quality_deterministic",
+        zarr_path=zarr_path,
+        recording_id="recording_detect_quality_deterministic",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    seeded = _backfill_detect_quality(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=True,
+    )
+    assert seeded["rows_inserted"] == 3
+
+    registry.conn.execute(
+        "DELETE FROM detect_quality WHERE dataset_id = ? AND refined_run = 'refined_new';",
+        (dataset_id,),
+    )
+    registry.conn.execute(
+        "UPDATE detect_quality SET review_state = 'needs_review' WHERE dataset_id = ? AND refined_run = 'refined_update';",
+        (dataset_id,),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO detect_quality (
+            dataset_id, refined_run, source_detect_run, quality_updated_utc
+        ) VALUES (?, 'refined_stale', 'detect_001', datetime('now'));
+        """,
+        (dataset_id,),
+    )
+    registry.conn.commit()
+
+    dry = _backfill_detect_quality(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=True,
+    )
+    applied = _backfill_detect_quality(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=True,
+    )
+    for key in ("rows_inserted", "rows_updated", "rows_deleted", "rows_skipped"):
+        assert dry[key] == applied[key]
+
+    assert dry["rows_inserted"] == 1
+    assert dry["rows_updated"] == 1
+    assert dry["rows_deleted"] == 1
+    assert dry["rows_skipped"] == 1
+
+    refined_runs = [
+        str(row["refined_run"])
+        for row in registry.conn.execute(
+            "SELECT refined_run FROM detect_quality WHERE dataset_id = ? ORDER BY refined_run;",
+            (dataset_id,),
+        ).fetchall()
+    ]
+    assert refined_runs == ["refined_keep", "refined_new", "refined_update"]
     registry.close()
 
 

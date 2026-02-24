@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 import sqlite3
 
@@ -175,3 +176,46 @@ def test_build_plans_from_registry_honors_explicit_refined_run(tmp_path: Path) -
     assert len(ok) == 1
     assert ok[0].zarr_path == target_path
     assert ok[0].refined_run == "refined_target"
+
+
+def _viewer_args(*, registry: Path | None) -> argparse.Namespace:
+    return argparse.Namespace(
+        padding=16,
+        scale_percent=220,
+        edit_zoom=4,
+        frame_flag_file="eye_mask_frame_flags.json",
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        registry=registry,
+        crop_run=None,
+        keypoint_run=None,
+        keypoint_group=None,
+        reviewer=None,
+        review_notes=None,
+    )
+
+
+def test_viewer_cmd_includes_registry_when_set(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    plan = mod.ReviewPlan(
+        zarr_path=tmp_path / "recordings" / "a_training.zarr",
+        refined_run="refined_a",
+        review_state=None,
+        status="ok",
+    )
+    cmd = mod._viewer_cmd(_viewer_args(registry=registry_path), plan)
+    assert "--registry" in cmd
+    idx = cmd.index("--registry")
+    assert cmd[idx + 1] == str(registry_path)
+
+
+def test_viewer_cmd_omits_registry_when_unset(tmp_path: Path) -> None:
+    plan = mod.ReviewPlan(
+        zarr_path=tmp_path / "recordings" / "a_training.zarr",
+        refined_run="refined_a",
+        review_state=None,
+        status="ok",
+    )
+    cmd = mod._viewer_cmd(_viewer_args(registry=None), plan)
+    assert "--registry" not in cmd

@@ -53,6 +53,12 @@ Pipeline context (recording analysis archives):
    scripts/py -m fisheye.utils.detect_quality_batch /nvme1/recordings --recursive --apply
    ```
 
+   Export/view saved detect quality visualization artifacts:
+   ```bash
+   scripts/py -m fisheye.utils.export_detect_quality_overview /nvme1/recordings --recursive --zarr-use training --artifact detect_quality_overview_png --view
+   scripts/py -m fisheye.utils.export_detect_quality_overview /nvme1/recordings --recursive --zarr-use training --artifact refinement_pipeline_overview_png --view
+   ```
+
 3) **Refine detections**
    ```bash
    python -m fisheye.refinement.refine_detect /path/to/zarr
@@ -93,6 +99,15 @@ Pipeline context (recording analysis archives):
    - Otherwise they use `interpolated` (or `filtered`) from the refined run.
    - `--crop-source preferred`/`auto` uses `detect_review_status` plus a policy
      chain; the chosen policy is stored in `detection_preferred_policy`.
+
+8) **Finalize detect/refinement visualization artifacts (approved runs)**
+   ```bash
+   scripts/py -m fisheye.utils.finalize_refinement_artifacts /nvme1/recordings --recursive --zarr-use training --required-intended-use training --apply
+   ```
+   - Writes both artifacts under each eligible refined run:
+     - `visualizations/detect_quality_overview_png`
+     - `visualizations/refinement_pipeline_overview_png`
+   - `refinement_pipeline_overview_png` includes the manual subgroup when present.
 
 ## YOLO-specific guidance
 
@@ -135,6 +150,102 @@ the refined run.
   ```bash
   python src/fisheye/utils/check_recording_steps.py /path/to/recordings --recursive
   ```
+- Finalize and inspect approved refinement artifacts:
+  ```bash
+  scripts/py -m fisheye.utils.finalize_refinement_artifacts /path/to/recordings --recursive --zarr-use training --required-intended-use training --apply
+  scripts/py -m fisheye.utils.export_detect_quality_overview /path/to/recordings --recursive --zarr-use training --artifact detect_quality_overview_png --view
+  scripts/py -m fisheye.utils.export_detect_quality_overview /path/to/recordings --recursive --zarr-use training --artifact refinement_pipeline_overview_png --view
+  ```
+
+## Detection Profile Registry Runbook (2026-02-24)
+
+This is the operational sequence used to expose detection-profile summaries via
+registry query views (without ad-hoc `python -c` snippets).
+
+### 1) Populate/refresh dataset rows in registry
+
+```bash
+scripts/py -m fisheye.utils.registry_rescan /nvme1/recordings --recursive --registry /nvme1/registry.sqlite
+```
+
+### 2) Backfill profile summaries into each training Zarr
+
+```bash
+scripts/py -m fisheye.utils.backfill_detection_profiles /nvme1/recordings --recursive --zarr-use training --registry /nvme1/registry.sqlite --apply
+```
+
+Observed on 2026-02-24:
+- `zarr_scanned=105`
+- `filtered_zarr_use=53`
+- `updated=52`
+- `errors=0`
+
+### 3) Sync latest profile runs into registry table
+
+```bash
+scripts/py -m fisheye.utils.sync_detection_profile_registry --registry /nvme1/registry.sqlite --zarr-use training --apply
+```
+
+Observed on 2026-02-24 after full rescan:
+- `datasets=52`
+- `updated=51`
+- `missing_profile=1`
+
+### 4) Recover missing-profile edge case
+
+When one dataset reported `missing_profile` but already had
+`analysis/detection_profile_runs` on disk:
+
+- dataset id:
+  `2026-01-28T19-22-28Z_arena_1:zc66de17bea1b`
+- targeted backfill returned:
+  `A group exists ... at path 'analysis/detection_profile_runs'`
+
+Root cause:
+- an intermittent Zarr group lookup failure (`group.get(...)`/`group[...]`) could
+  return "missing" for an existing group in this store layout.
+
+Fix implemented:
+- detection-profile writer now falls back to reopening child groups by
+  `store + path` before creating groups.
+- registry sync reader uses the same fallback when resolving:
+  - `analysis`
+  - `analysis/detection_profile_runs`
+  - selected profile run group.
+
+Targeted recovery command:
+
+```bash
+scripts/py -m fisheye.utils.sync_detection_profile_registry --registry /nvme1/registry.sqlite --dataset-id 2026-01-28T19-22-28Z_arena_1:zc66de17bea1b --apply
+```
+
+### 5) Query/verify the operator-facing view
+
+Count of training recording-latest rows:
+
+```bash
+scripts/py -m fisheye.utils.registry_query --registry /nvme1/registry.sqlite --recording-detection-data-profile-latest --profile-zarr-use training --json | jq 'length'
+```
+
+Observed on 2026-02-24: `52`.
+
+Spot-check a compact row payload:
+
+```bash
+scripts/py -m fisheye.utils.registry_query \
+  --registry /nvme1/registry.sqlite \
+  --detection-data-profile-latest \
+  --profile-dataset-id 2026-01-28T21-47-47Z_arena_1:z36ae7c3bf7e1 \
+  --json \
+| jq '.[0] | {dataset_id,profile_run,recording_id,zarr_use,detection_type,coverage_percent,detections_total,detection_path}'
+```
+
+### Dataset vs recording semantics (for query mode choice)
+
+- `dataset_id` identifies a specific Zarr dataset instance (recording + stable suffix).
+- `recording_id` identifies the recording event across dataset variants.
+- `--detection-data-profile-latest` returns latest profile per dataset.
+- `--recording-detection-data-profile-latest` returns latest profile per recording.
 
 ## Notes on sampled training imports
 

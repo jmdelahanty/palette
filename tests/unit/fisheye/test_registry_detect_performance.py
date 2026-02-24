@@ -1,5 +1,6 @@
 """Unit tests for detect performance registry extraction and views."""
 
+import json
 from pathlib import Path
 import sys
 
@@ -121,6 +122,36 @@ def _build_fake_detect_quality_root(*, timestamp_key: str = "timestamp_utc") -> 
     return root
 
 
+def _detect_quality_record(
+    *,
+    refined_run: str,
+    source_detect_run: str = "detect_001",
+    detect_method: str = "yolo",
+    refined_created_utc: str | None = "2026-02-10T00:00:00+00:00",
+    review_timestamp_utc: str | None = "2026-02-10T00:01:00+00:00",
+    quality_updated_utc: str = "2026-02-10T00:02:00+00:00",
+) -> dict[str, object | None]:
+    return {
+        "refined_run": refined_run,
+        "refined_created_utc": refined_created_utc,
+        "source_detect_run": source_detect_run,
+        "detect_method": detect_method,
+        "review_state": "approved",
+        "review_method": "manual",
+        "review_intended_use": "training",
+        "review_reviewer": "reviewer_detect",
+        "review_notes": "checked",
+        "review_timestamp_utc": review_timestamp_utc,
+        "review_resolved_group": "filtered",
+        "total_detections": 10,
+        "real_detections": 8,
+        "interpolated_detections": 2,
+        "interpolated_detections_rate": 0.2,
+        "quality_updated_utc": quality_updated_utc,
+        "zarr_mtime_ns": 123456789,
+    }
+
+
 def test_extract_detect_quality_rows_populates_shared_review_fields(tmp_path: Path) -> None:
     rows = _extract_detect_quality_rows(_build_fake_detect_quality_root(), zarr_path=tmp_path)
     assert len(rows) == 1
@@ -142,6 +173,131 @@ def test_detect_quality_legacy_timestamp_alias_maps_to_review_timestamp_utc(tmp_
     )
     assert len(rows) == 1
     assert rows[0]["review_timestamp_utc"] == "2026-02-10T00:01:00+00:00"
+
+
+def test_extract_detect_quality_rows_multiple_runs_with_mixed_review_payloads(tmp_path: Path) -> None:
+    root = _FakeGroup()
+    detect_parent = root.add_group("detect_runs")
+    detect_parent.add_group("detect_001", attrs={"detection_method": "yolo"})
+    detect_parent.add_group("detect_002", attrs={"method": "traditional"})
+    detect_parent.add_group("detect_003")
+
+    refined_parent = root.add_group("refined_detect_runs")
+    refined_full = refined_parent.add_group(
+        "refined_full",
+        attrs={
+            "source_detect_run": "detect_001",
+            "created_utc": "2026-02-10T00:00:00+00:00",
+            "detect_review_status": {
+                "state": "approved",
+                "method": "manual",
+                "intended_use": "training",
+                "reviewer": "alice",
+                "notes": "full payload",
+                "timestamp_utc": "2026-02-10T00:05:00+00:00",
+                "resolved_group": "filtered",
+            },
+        },
+    )
+    full_filtered = refined_full.add_group("filtered")
+    full_filtered.add_array("bbox_norm_coords", np.zeros((3, 4), dtype=np.float32))
+    full_filtered.add_array("detection_source", np.array([0, 1, 0], dtype=np.int8))
+
+    refined_json = refined_parent.add_group(
+        "refined_json",
+        attrs={
+            "source_detect_run": "detect_002",
+            "refinement_timestamp": "2026-02-10T01:00:00+00:00",
+            "created_utc": "2026-02-10T00:59:00+00:00",
+            "manual_review_latest": "manual",
+            "detect_review_status": json.dumps(
+                {
+                    "state": "needs_review",
+                    "intended_use": "validation",
+                    "reviewer": "bob",
+                    "notes": "json payload",
+                    "reviewed_at": "2026-02-10T01:05:00+00:00",
+                }
+            ),
+        },
+    )
+    refined_json.add_group(
+        "manual",
+        attrs={
+            "total_detections": 5,
+            "interpolated_detections": 2,
+            "original_detections": 3,
+        },
+    )
+
+    refined_fallback = refined_parent.add_group(
+        "refined_fallback",
+        attrs={
+            "source_detect_run": "detect_003",
+            "timestamp_utc": "2026-02-10T02:00:00+00:00",
+            "detect_review_status": "not-json",
+        },
+    )
+    refined_fallback.add_group(
+        "interpolated",
+        attrs={
+            "total_detections": 4,
+            "interpolated_detections": 1,
+        },
+    )
+    refined_parent.add_group("refined_skip", attrs={"created_utc": "2026-02-10T03:00:00+00:00"})
+
+    rows = _extract_detect_quality_rows(root, zarr_path=tmp_path)
+    by_run = {str(row["refined_run"]): row for row in rows}
+    assert set(by_run.keys()) == {"refined_fallback", "refined_full", "refined_json"}
+
+    full_row = by_run["refined_full"]
+    assert full_row["detect_method"] == "yolo"
+    assert full_row["review_state"] == "approved"
+    assert full_row["review_method"] == "manual"
+    assert full_row["review_intended_use"] == "training"
+    assert full_row["review_reviewer"] == "alice"
+    assert full_row["review_notes"] == "full payload"
+    assert full_row["review_timestamp_utc"] == "2026-02-10T00:05:00+00:00"
+    assert full_row["review_resolved_group"] == "filtered"
+    assert full_row["total_detections"] == 3
+    assert full_row["real_detections"] == 2
+    assert full_row["interpolated_detections"] == 1
+    assert full_row["interpolated_detections_rate"] == 1.0 / 3.0
+
+    json_row = by_run["refined_json"]
+    assert json_row["refined_created_utc"] == "2026-02-10T01:00:00+00:00"
+    assert json_row["detect_method"] == "traditional"
+    assert json_row["review_state"] == "needs_review"
+    assert json_row["review_method"] is None
+    assert json_row["review_intended_use"] == "validation"
+    assert json_row["review_reviewer"] == "bob"
+    assert json_row["review_notes"] == "json payload"
+    assert json_row["review_timestamp_utc"] == "2026-02-10T01:05:00+00:00"
+    assert json_row["review_resolved_group"] == "manual"
+    assert json_row["total_detections"] == 5
+    assert json_row["real_detections"] == 3
+    assert json_row["interpolated_detections"] == 2
+    assert json_row["interpolated_detections_rate"] == 0.4
+
+    fallback_row = by_run["refined_fallback"]
+    assert fallback_row["refined_created_utc"] == "2026-02-10T02:00:00+00:00"
+    assert fallback_row["detect_method"] is None
+    assert fallback_row["review_state"] is None
+    assert fallback_row["review_method"] is None
+    assert fallback_row["review_intended_use"] is None
+    assert fallback_row["review_reviewer"] is None
+    assert fallback_row["review_notes"] is None
+    assert fallback_row["review_timestamp_utc"] is None
+    assert fallback_row["review_resolved_group"] == "interpolated"
+    assert fallback_row["total_detections"] == 4
+    assert fallback_row["real_detections"] == 3
+    assert fallback_row["interpolated_detections"] == 1
+    assert fallback_row["interpolated_detections_rate"] == 0.25
+
+    assert full_row["quality_updated_utc"] == json_row["quality_updated_utc"] == fallback_row["quality_updated_utc"]
+    assert isinstance(full_row["zarr_mtime_ns"], int)
+    assert full_row["zarr_mtime_ns"] == json_row["zarr_mtime_ns"] == fallback_row["zarr_mtime_ns"]
 
 
 def test_upsert_detect_quality_writes_shared_review_fields_to_current_view(tmp_path: Path) -> None:
@@ -176,6 +332,99 @@ def test_upsert_detect_quality_writes_shared_review_fields_to_current_view(tmp_p
     assert str(row["review_notes"]) == "validated"
     assert str(row["review_timestamp_utc"]) == "2026-02-10T00:01:00+00:00"
     assert str(row["review_resolved_group"]) == "filtered"
+    registry.close()
+
+
+def test_detect_quality_current_prefers_newest_review_timestamp_utc(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset("dataset_detect", session_uuid="dataset_detect", zarr_path=tmp_path / "detect.zarr")
+    registry.replace_detect_quality(
+        "dataset_detect",
+        [
+            _detect_quality_record(
+                refined_run="refined_older_review",
+                refined_created_utc="2026-02-10T00:30:00+00:00",
+                review_timestamp_utc="2026-02-10T00:35:00+00:00",
+                quality_updated_utc="2026-02-10T00:40:00+00:00",
+            ),
+            _detect_quality_record(
+                refined_run="refined_newer_review",
+                refined_created_utc="2026-02-10T00:10:00+00:00",
+                review_timestamp_utc="2026-02-10T00:45:00+00:00",
+                quality_updated_utc="2026-02-10T00:20:00+00:00",
+            ),
+        ],
+    )
+    row = registry.query_detect_quality_current(
+        dataset_ids=["dataset_detect"],
+        detect_method="yolo",
+    )[0]
+    assert str(row["refined_run"]) == "refined_newer_review"
+    assert str(row["review_timestamp_utc"]) == "2026-02-10T00:45:00+00:00"
+    registry.close()
+
+
+def test_detect_quality_current_falls_back_to_refined_created_when_review_timestamp_missing(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset("dataset_detect", session_uuid="dataset_detect", zarr_path=tmp_path / "detect.zarr")
+    registry.replace_detect_quality(
+        "dataset_detect",
+        [
+            _detect_quality_record(
+                refined_run="refined_z_older_created",
+                refined_created_utc="2026-02-10T00:10:00+00:00",
+                review_timestamp_utc=None,
+                quality_updated_utc="2026-02-10T00:50:00+00:00",
+            ),
+            _detect_quality_record(
+                refined_run="refined_a_newer_created",
+                refined_created_utc="2026-02-10T00:20:00+00:00",
+                review_timestamp_utc=None,
+                quality_updated_utc="2026-02-10T00:50:00+00:00",
+            ),
+        ],
+    )
+    row = registry.query_detect_quality_current(
+        dataset_ids=["dataset_detect"],
+        detect_method="yolo",
+    )[0]
+    assert str(row["refined_run"]) == "refined_a_newer_created"
+    assert str(row["refined_created_utc"]) == "2026-02-10T00:20:00+00:00"
+    assert row["review_timestamp_utc"] is None
+    registry.close()
+
+
+def test_detect_quality_current_falls_back_to_lexical_refined_run_when_timestamps_tie(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset("dataset_detect", session_uuid="dataset_detect", zarr_path=tmp_path / "detect.zarr")
+    registry.replace_detect_quality(
+        "dataset_detect",
+        [
+            _detect_quality_record(
+                refined_run="refined_alpha",
+                refined_created_utc=None,
+                review_timestamp_utc=None,
+                quality_updated_utc="2026-02-10T00:50:00+00:00",
+            ),
+            _detect_quality_record(
+                refined_run="refined_zeta",
+                refined_created_utc=None,
+                review_timestamp_utc=None,
+                quality_updated_utc="2026-02-10T00:50:00+00:00",
+            ),
+        ],
+    )
+    row = registry.query_detect_quality_current(
+        dataset_ids=["dataset_detect"],
+        detect_method="yolo",
+    )[0]
+    assert str(row["refined_run"]) == "refined_zeta"
+    assert row["review_timestamp_utc"] is None
+    assert row["refined_created_utc"] is None
     registry.close()
 
 

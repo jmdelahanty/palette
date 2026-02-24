@@ -138,6 +138,38 @@ def test_run_keypoints_batch_builds_expected_command(monkeypatch, tmp_path: Path
     assert "--config" in cmd
 
 
+def test_run_detect_quality_builds_expected_command(monkeypatch, tmp_path: Path) -> None:
+    called: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], check: bool = False):  # noqa: FBT002
+        called.append(cmd)
+
+        class _Result:
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+
+    plan = RecordingAnalysisPlan(
+        recording_dir=tmp_path / "rec",
+        h5_path=tmp_path / "rec" / "raw" / "session.h5",
+        cam_video=tmp_path / "rec" / "cams" / "Cam2010093.mp4",
+        zarr_path=tmp_path / "rec" / "zarr" / "rec_analysis.zarr",
+    )
+    opts = _opts(tmp_path)
+
+    ok, rc, cmd = mod.run_detect_quality(plan, opts)
+
+    assert ok
+    assert rc == 0
+    assert called
+    assert cmd == called[0]
+    assert "-m" in cmd
+    assert "fisheye.refinement.detect_quality" in cmd
+    assert str(plan.zarr_path) in cmd
+
+
 def test_main_defaults_to_dry_run_and_does_not_create_archive(monkeypatch, tmp_path: Path) -> None:
     rec = tmp_path / "2026-01-28T19-22-28Z_arena_1_DefaultScreen"
     (rec / "cams").mkdir(parents=True, exist_ok=True)
@@ -194,6 +226,10 @@ def test_process_pipeline_happy_path_runs_stages_in_order(monkeypatch, tmp_path:
         order.append("detect")
         return True, 0, ["detect"]
 
+    def _quality(*_args, **_kwargs):
+        order.append("detect_quality")
+        return True, 0, ["detect_quality"]
+
     def _refine(*_args, **_kwargs):
         order.append("refine")
         return True, 0, ["refine"]
@@ -205,13 +241,40 @@ def test_process_pipeline_happy_path_runs_stages_in_order(monkeypatch, tmp_path:
 
     monkeypatch.setattr(mod, "process_recording_import", _import)
     monkeypatch.setattr(mod, "run_detect_yolo", _detect)
+    monkeypatch.setattr(mod, "run_detect_quality", _quality)
     monkeypatch.setattr(mod, "run_refine_detect", _refine)
 
     result = mod.process_recording_analysis_pipeline(plan, opts, registry=_Registry(), logger=None)
 
     assert result.ok is True
     assert result.dataset_id == "rec:zdataset"
-    assert order == ["import", "detect", "refine", "register"]
+    assert order == ["import", "detect", "detect_quality", "refine", "register"]
+
+
+def test_process_pipeline_returns_detect_quality_failure(monkeypatch, tmp_path: Path) -> None:
+    plan = RecordingAnalysisPlan(
+        recording_dir=tmp_path / "rec",
+        h5_path=tmp_path / "rec" / "raw" / "session.h5",
+        cam_video=tmp_path / "rec" / "cams" / "cam.mp4",
+        zarr_path=tmp_path / "rec" / "zarr" / "rec_analysis.zarr",
+    )
+    opts = _opts(tmp_path)
+    opts.refine_detect = True
+
+    monkeypatch.setattr(mod, "process_recording_import", lambda *a, **k: RecordingImportResult(ok=True))
+    monkeypatch.setattr(mod, "run_detect_yolo", lambda *a, **k: (True, 0, ["detect"]))
+    monkeypatch.setattr(mod, "run_detect_quality", lambda *a, **k: (False, 7, ["detect_quality"]))
+    monkeypatch.setattr(
+        mod,
+        "run_refine_detect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("refine should not run")),
+    )
+
+    result = mod.process_recording_analysis_pipeline(plan, opts, logger=None)
+
+    assert not result.ok
+    assert result.failed_step == "detect_quality"
+    assert result.returncode == 7
 
 
 def test_process_pipeline_full_stack_runs_stages_in_order(monkeypatch, tmp_path: Path) -> None:
@@ -236,6 +299,10 @@ def test_process_pipeline_full_stack_runs_stages_in_order(monkeypatch, tmp_path:
         order.append("detect")
         return True, 0, ["detect"]
 
+    def _quality(*_args, **_kwargs):
+        order.append("detect_quality")
+        return True, 0, ["detect_quality"]
+
     def _refine(*_args, **_kwargs):
         order.append("refine")
         return True, 0, ["refine"]
@@ -255,6 +322,7 @@ def test_process_pipeline_full_stack_runs_stages_in_order(monkeypatch, tmp_path:
 
     monkeypatch.setattr(mod, "process_recording_import", _import)
     monkeypatch.setattr(mod, "run_detect_yolo", _detect)
+    monkeypatch.setattr(mod, "run_detect_quality", _quality)
     monkeypatch.setattr(mod, "run_refine_detect", _refine)
     monkeypatch.setattr(mod, "run_keypoints_batch", _keypoints)
     monkeypatch.setattr(mod, "run_refine_keypoints", _refine_keypoints)
@@ -263,4 +331,4 @@ def test_process_pipeline_full_stack_runs_stages_in_order(monkeypatch, tmp_path:
 
     assert result.ok is True
     assert result.dataset_id == "rec:zdataset"
-    assert order == ["import", "detect", "refine", "keypoints", "refine_keypoints", "register"]
+    assert order == ["import", "detect", "detect_quality", "refine", "keypoints", "refine_keypoints", "register"]

@@ -240,13 +240,24 @@ scripts/py -m fisheye.utils.run_detect_training_pipeline \
   --merge-out-dir /nvme1/datasets/detect/detect_build \
   --merge-split 0.8/0.2 \
   --merge-seed 42 \
-  --merge-overwrite
+  --merge-overwrite \
+  --aggregate-training-data-card
 ```
 
 Notes:
 - `--export-merged` requires `--out-manifest` (the export step consumes that manifest).
 - `--export-merged` cannot be combined with `--dry-run` because preflight dry-run does not write files.
 - `fisheye.utils.prepare_detect_training_from_registry` is prepare-only and no longer launches merge/train.
+- `--aggregate-training-data-card` uses the preflight manifest dataset list and
+  `detection_data_profile_latest` rows to write `<set_id>.data_card.json`.
+
+Standalone data-card aggregation:
+
+```bash
+scripts/py -m fisheye.utils.aggregate_detection_training_data_card \
+  --manifest /nvme1/training/datasets/<set_id>/<set_id>.manifest.json \
+  --registry /nvme1/palette_registry.sqlite
+```
 
 ## One-Command Build (Pose: Registry -> Preflight -> Optional Train)
 

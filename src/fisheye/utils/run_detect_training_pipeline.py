@@ -12,6 +12,7 @@ from typing import List, Optional
 
 from fisheye.diagnostics import prepare_detect_training as pdt
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.utils import aggregate_detection_training_data_card as aggregate_data_card
 from fisheye.utils import export_detect_training_zarr as export_zarr
 from fisheye.utils import prepare_detect_training_from_registry as prepare_from_registry
 
@@ -273,12 +274,40 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--trt-profiling", action="store_true", help="Enable TensorRT profiling outputs.")
     parser.add_argument("--trt-verbose", action="store_true", help="Enable verbose TensorRT build logs.")
     parser.add_argument("--profile", action="store_true", help="Enable detect input-pipeline profiling during --train.")
+    parser.add_argument(
+        "--aggregate-training-data-card",
+        action="store_true",
+        help="Aggregate detection training data card from latest registry detection profiles after preflight.",
+    )
+    parser.add_argument(
+        "--data-card-output",
+        type=Path,
+        help="Optional output JSON path for --aggregate-training-data-card.",
+    )
+    parser.add_argument(
+        "--data-card-split",
+        type=str,
+        default="train",
+        help="Split label for data-card selection metadata (default: train).",
+    )
+    parser.add_argument(
+        "--data-card-allow-mtime-mismatch",
+        action="store_true",
+        help="Allow profile zarr_mtime_ns mismatch during data-card aggregation.",
+    )
+    parser.add_argument(
+        "--data-card-allow-detection-type-mismatch",
+        action="store_true",
+        help="Allow manifest/profile detection type mismatch during data-card aggregation.",
+    )
 
     args = parser.parse_args(argv)
     if args.export_merged and args.dry_run:
         raise SystemExit("--export-merged cannot be combined with --dry-run (no manifest is written).")
     if args.train and args.dry_run:
         raise SystemExit("--train cannot be combined with --dry-run.")
+    if args.aggregate_training_data_card and args.dry_run:
+        raise SystemExit("--aggregate-training-data-card cannot be combined with --dry-run.")
 
     model_input = args.model_input or args.input_format
     if args.model_input and args.model_input != args.input_format:
@@ -559,6 +588,26 @@ def main(argv: Optional[List[str]] = None) -> int:
             prepare_cli.extend(["--registry", str(reg_path)])
 
     pdt.main(prepare_cli)
+    if args.aggregate_training_data_card:
+        manifest_path = Path(args.out_manifest)
+        if not manifest_path.exists():
+            raise SystemExit(f"--aggregate-training-data-card requires manifest output: {manifest_path}")
+        card_cli: List[str] = [
+            "--manifest",
+            str(manifest_path),
+            "--registry",
+            str(registry_path),
+            "--split",
+            str(args.data_card_split),
+        ]
+        _add_arg(card_cli, "--output", args.data_card_output)
+        if args.data_card_allow_mtime_mismatch:
+            card_cli.append("--allow-mtime-mismatch")
+        if args.data_card_allow_detection_type_mismatch:
+            card_cli.append("--allow-detection-type-mismatch")
+        card_rc = aggregate_data_card.main(card_cli)
+        if card_rc != 0:
+            return int(card_rc)
     if args.export_merged:
         manifest_path = Path(args.out_manifest)
         if not manifest_path.exists():

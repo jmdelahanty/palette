@@ -4,10 +4,11 @@
 Pipeline order:
 1) import_recording_analysis (archive + metadata + stimulus)
 2) detect inference (explicit model or registry-resolved)
-3) refine_detect (optional)
-4) keypoints (optional)
-5) refine_keypoints (optional)
-6) registry scan (optional)
+3) detect_quality (required before refine_detect)
+4) refine_detect (optional)
+5) keypoints (optional)
+6) refine_keypoints (optional)
+7) registry scan (optional)
 """
 
 from __future__ import annotations
@@ -153,6 +154,18 @@ def run_refine_detect(plan: RecordingAnalysisPlan, opts: RecordingPipelineOption
     return result.returncode == 0, result.returncode, cmd
 
 
+def run_detect_quality(plan: RecordingAnalysisPlan, opts: RecordingPipelineOptions) -> tuple[bool, int, List[str]]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "fisheye.refinement.detect_quality",
+        str(plan.zarr_path),
+    ]
+    print(f"Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, check=False)
+    return result.returncode == 0, result.returncode, cmd
+
+
 def run_keypoints_batch(plan: RecordingAnalysisPlan, opts: RecordingPipelineOptions) -> tuple[bool, int, List[str]]:
     cmd = [
         sys.executable,
@@ -222,6 +235,23 @@ def process_recording_analysis_pipeline(
         )
 
     if opts.refine_detect:
+        quality_ok, quality_rc, quality_cmd = run_detect_quality(plan, opts)
+        _log(
+            logger,
+            "detect_quality_result",
+            recording_dir=str(plan.recording_dir),
+            zarr_path=str(plan.zarr_path),
+            returncode=int(quality_rc),
+            cmd=quality_cmd,
+        )
+        if not quality_ok:
+            return RecordingPipelineResult(
+                ok=False,
+                failed_step="detect_quality",
+                returncode=int(quality_rc),
+                error="detect quality failed",
+            )
+
         refine_ok, refine_rc, refine_cmd = run_refine_detect(plan, opts)
         _log(
             logger,
@@ -329,7 +359,7 @@ def _build_pipeline_options(args: argparse.Namespace, registry_path: Path) -> Re
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run one-recording analysis pipeline: import -> detect -> refine_detect -> keypoints -> refine_keypoints -> register.",
+        description="Run one-recording analysis pipeline: import -> detect -> detect_quality -> refine_detect -> keypoints -> refine_keypoints -> register.",
     )
     parser.add_argument("--recording-dir", type=Path, required=True, help="Recording directory to process.")
     parser.add_argument("--video", type=Path, help="Optional explicit camera video path.")

@@ -91,6 +91,9 @@ stage-specific attributes.
 - `utils/zarr_inspector.py`
 - Visualization: `visualize_refined_detections.py`, `visualize_detect_quality.py`,
   `visualize_online_movement.py`
+  - `visualize_refined_detections.py` now supports manual-stage display when
+    present and a non-interactive `render_refinement_pipeline_png(...)` helper
+    used by finalized artifact generation.
 
 ## Implementation notes
 
