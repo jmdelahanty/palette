@@ -35,6 +35,9 @@ COMPOSITION_FIELDS = (
 )
 GEOMETRY_ARRAY_NAMES = ("triangle_area", "min_angle", "heading")
 REFINED_PARENT_NAMES = ("refined_keypoints_runs", "keypoints_refined_runs")
+LANDMARK_HEATMAP_GRID_H = 32
+LANDMARK_HEATMAP_GRID_W = 32
+LANDMARK_EDGE_MARGIN_NORM = 0.05
 
 
 @dataclass(frozen=True)
@@ -863,21 +866,28 @@ def _resolve_refined_run_name(
     return str(candidates[0][1])
 
 
-def _resolve_roi_diagonal(root: Any, keypoint_group: Any) -> float:
+def _resolve_roi_dimensions(root: Any, keypoint_group: Any) -> tuple[int, int]:
     source_crop_run = _normalize_text(keypoint_group.attrs.get("source_crop_run"))
     if source_crop_run is None:
-        return 1.0
+        return (1, 1)
     crop_parent = root.get("crop_runs")
     if crop_parent is None or source_crop_run not in crop_parent:
-        return 1.0
+        return (1, 1)
     crop_group = crop_parent[source_crop_run]
     if "roi_images" not in crop_group:
-        return 1.0
+        return (1, 1)
     shape = tuple(int(v) for v in crop_group["roi_images"].shape)
     if len(shape) < 3:
-        return 1.0
+        return (1, 1)
     roi_h = int(shape[1])
     roi_w = int(shape[2])
+    if roi_h <= 0 or roi_w <= 0:
+        return (1, 1)
+    return (roi_h, roi_w)
+
+
+def _resolve_roi_diagonal(root: Any, keypoint_group: Any) -> float:
+    roi_h, roi_w = _resolve_roi_dimensions(root, keypoint_group)
     if roi_h <= 0 or roi_w <= 0:
         return 1.0
     diag = float(np.sqrt(float(roi_h * roi_h + roi_w * roi_w)))
@@ -924,9 +934,16 @@ def _manifest_quality_exclusion_counts(manifest: Mapping[str, Any]) -> dict[str,
     return {key: int(counter[key]) for key in sorted(counter)}
 
 
+def _resolve_split_group(root: Any) -> Any:
+    split_group = root.get("splits")
+    if split_group is not None:
+        return split_group
+    return root.get("split")
+
+
 def _split_counts_from_merged_zarr(path: Path) -> dict[str, int]:
     root = _open_zarr_group(path)
-    split_group = root.get("split")
+    split_group = _resolve_split_group(root)
     if split_group is None:
         return {}
     counts: dict[str, int] = {}
@@ -971,11 +988,370 @@ def _build_split_counts(
     return counts
 
 
+def _decode_string_array(values: np.ndarray) -> list[Optional[str]]:
+    flat = np.asarray(values).reshape(-1)
+    decoded: list[Optional[str]] = []
+    for value in flat.tolist():
+        decoded.append(_normalize_text(value))
+    return decoded
+
+
+def _split_dataset_counts_from_merged_zarr(path: Optional[Path]) -> dict[str, dict[str, int]]:
+    if path is None:
+        return {}
+    try:
+        root = _open_zarr_group(path)
+    except Exception:
+        return {}
+
+    split_group = _resolve_split_group(root)
+    source_index_group = root.get("source_index")
+    if split_group is None or source_index_group is None:
+        return {}
+    if "source_dataset_idx" not in source_index_group or "source_dataset_id" not in source_index_group:
+        return {}
+
+    try:
+        source_dataset_idx = np.asarray(source_index_group["source_dataset_idx"][:], dtype=np.int64).reshape(-1)
+        source_dataset_ids = _decode_string_array(np.asarray(source_index_group["source_dataset_id"][:]))
+    except Exception:
+        return {}
+    if source_dataset_idx.ndim != 1 or not source_dataset_ids:
+        return {}
+
+    split_counts: dict[str, dict[str, int]] = {}
+    for split_name in ("train", "val", "test"):
+        array_name = f"{split_name}_indices"
+        if array_name not in split_group:
+            continue
+        try:
+            split_indices = np.asarray(split_group[array_name][:], dtype=np.int64).reshape(-1)
+        except Exception:
+            continue
+        if split_indices.size == 0:
+            split_counts[split_name] = {}
+            continue
+
+        valid = (split_indices >= 0) & (split_indices < source_dataset_idx.shape[0])
+        if not np.any(valid):
+            split_counts[split_name] = {}
+            continue
+
+        counts: Counter[str] = Counter()
+        for dataset_idx in source_dataset_idx[split_indices[valid]].tolist():
+            if not isinstance(dataset_idx, (int, np.integer)):
+                continue
+            idx = int(dataset_idx)
+            if idx < 0 or idx >= len(source_dataset_ids):
+                continue
+            dataset_id = source_dataset_ids[idx]
+            if dataset_id is None:
+                continue
+            counts[dataset_id] += 1
+        split_counts[split_name] = {key: int(counts[key]) for key in sorted(counts)}
+
+    return split_counts
+
+
+def _weighted_metric_from_counts(
+    *,
+    dataset_counts: Mapping[str, int],
+    profile_rows_by_dataset: Mapping[str, Mapping[str, Any]],
+    field_name: str,
+) -> Optional[float]:
+    weighted_sum = 0.0
+    total_weight = 0.0
+    for dataset_id, raw_weight in dataset_counts.items():
+        weight = float(raw_weight)
+        if weight <= 0:
+            continue
+        row = profile_rows_by_dataset.get(dataset_id)
+        if row is None:
+            continue
+        value = _as_float(row.get(field_name))
+        if value is None:
+            continue
+        weighted_sum += float(value) * weight
+        total_weight += weight
+    if total_weight <= 0:
+        return None
+    return weighted_sum / total_weight
+
+
+def _weighted_lineage_dpf(
+    *,
+    dataset_counts: Mapping[str, int],
+    dpf_by_dataset: Mapping[str, Optional[float]],
+) -> Optional[float]:
+    weighted_sum = 0.0
+    total_weight = 0.0
+    for dataset_id, raw_weight in dataset_counts.items():
+        weight = float(raw_weight)
+        if weight <= 0:
+            continue
+        value = dpf_by_dataset.get(dataset_id)
+        if value is None:
+            continue
+        weighted_sum += float(value) * weight
+        total_weight += weight
+    if total_weight <= 0:
+        return None
+    return weighted_sum / total_weight
+
+
+def _weighted_genotype_fractions(
+    *,
+    dataset_counts: Mapping[str, int],
+    genotype_by_dataset: Mapping[str, Optional[str]],
+) -> dict[str, float]:
+    counter: Counter[str] = Counter()
+    total_weight = 0.0
+    for dataset_id, raw_weight in dataset_counts.items():
+        weight = float(raw_weight)
+        if weight <= 0:
+            continue
+        genotype = _normalize_text(genotype_by_dataset.get(dataset_id))
+        if genotype is None:
+            continue
+        counter[genotype] += int(raw_weight)
+        total_weight += weight
+    if total_weight <= 0:
+        return {}
+    return {key: float(counter[key]) / total_weight for key in sorted(counter)}
+
+
+def _max_fraction_delta(
+    left: Mapping[str, float],
+    right: Mapping[str, float],
+) -> Optional[float]:
+    keys = set(left.keys()) | set(right.keys())
+    if not keys:
+        return None
+    return max(abs(float(left.get(key, 0.0)) - float(right.get(key, 0.0))) for key in keys)
+
+
+def _build_train_val_parity(
+    *,
+    merged_zarr: Optional[Path],
+    profile_rows_by_dataset: Mapping[str, Mapping[str, Any]],
+    lineage_rows: Sequence[Mapping[str, Any]],
+) -> Optional[dict[str, Any]]:
+    split_dataset_counts = _split_dataset_counts_from_merged_zarr(merged_zarr)
+    train_counts = split_dataset_counts.get("train") or {}
+    val_counts = split_dataset_counts.get("val") or {}
+    if not train_counts or not val_counts:
+        return None
+
+    metric_specs = (
+        ("usable_keypoints_rate", "usable_rate"),
+        ("confidence_valid_rate", "confidence_valid_rate"),
+        ("geometry_valid_rate", "geometry_valid_rate"),
+        ("triangle_area_p50", "triangle_area_p50"),
+        ("triangle_area_p90", "triangle_area_p90"),
+        ("min_angle_p50", "min_angle_p50"),
+        ("min_angle_p90", "min_angle_p90"),
+    )
+    metric_payload: dict[str, dict[str, Optional[float]]] = {}
+    for metric_name, field_name in metric_specs:
+        train_value = _weighted_metric_from_counts(
+            dataset_counts=train_counts,
+            profile_rows_by_dataset=profile_rows_by_dataset,
+            field_name=field_name,
+        )
+        val_value = _weighted_metric_from_counts(
+            dataset_counts=val_counts,
+            profile_rows_by_dataset=profile_rows_by_dataset,
+            field_name=field_name,
+        )
+        metric_payload[metric_name] = {
+            "train": float(train_value) if train_value is not None else None,
+            "val": float(val_value) if val_value is not None else None,
+            "delta": (
+                float(abs(train_value - val_value))
+                if train_value is not None and val_value is not None
+                else None
+            ),
+        }
+
+    genotype_by_dataset = {
+        str(row.get("dataset_id")): _normalize_text(row.get("genotype"))
+        for row in lineage_rows
+        if _normalize_text(row.get("dataset_id")) is not None
+    }
+    dpf_by_dataset = {
+        str(row.get("dataset_id")): _as_float(row.get("dpf_at_acquisition"))
+        for row in lineage_rows
+        if _normalize_text(row.get("dataset_id")) is not None
+    }
+    train_genotype_fraction = _weighted_genotype_fractions(
+        dataset_counts=train_counts,
+        genotype_by_dataset=genotype_by_dataset,
+    )
+    val_genotype_fraction = _weighted_genotype_fractions(
+        dataset_counts=val_counts,
+        genotype_by_dataset=genotype_by_dataset,
+    )
+    train_dpf_mean = _weighted_lineage_dpf(
+        dataset_counts=train_counts,
+        dpf_by_dataset=dpf_by_dataset,
+    )
+    val_dpf_mean = _weighted_lineage_dpf(
+        dataset_counts=val_counts,
+        dpf_by_dataset=dpf_by_dataset,
+    )
+
+    return {
+        "split_dataset_row_counts": {
+            "train": {key: int(train_counts[key]) for key in sorted(train_counts)},
+            "val": {key: int(val_counts[key]) for key in sorted(val_counts)},
+        },
+        "metrics": metric_payload,
+        "lineage": {
+            "genotype_fraction": {
+                "train": train_genotype_fraction,
+                "val": val_genotype_fraction,
+            },
+            "genotype_mix_max_abs_delta": _max_fraction_delta(
+                train_genotype_fraction,
+                val_genotype_fraction,
+            ),
+            "dpf_mean": {
+                "train": float(train_dpf_mean) if train_dpf_mean is not None else None,
+                "val": float(val_dpf_mean) if val_dpf_mean is not None else None,
+                "delta": (
+                    float(abs(train_dpf_mean - val_dpf_mean))
+                    if train_dpf_mean is not None and val_dpf_mean is not None
+                    else None
+                ),
+            },
+        },
+    }
+
+
 def _as_finite_array(value: Any) -> np.ndarray:
     arr = np.asarray(value, dtype=np.float64)
     if arr.ndim == 0:
         arr = arr.reshape(1)
     return arr[np.isfinite(arr)]
+
+
+def _update_landmark_spatial_accumulators(
+    *,
+    dataset_id: str,
+    keypoints_arr: np.ndarray,
+    roi_h: int,
+    roi_w: int,
+    heatmap_counts: dict[int, np.ndarray],
+    edge_hits: dict[int, int],
+    total_points: dict[int, int],
+    source_dataset_ids: dict[int, set[str]],
+    grid_h: int,
+    grid_w: int,
+    edge_margin_norm: float,
+) -> None:
+    if keypoints_arr.ndim != 3 or int(keypoints_arr.shape[2]) != 2:
+        return
+    if grid_h <= 0 or grid_w <= 0:
+        return
+
+    x_raw = np.asarray(keypoints_arr[:, :, 0], dtype=np.float64)
+    y_raw = np.asarray(keypoints_arr[:, :, 1], dtype=np.float64)
+    finite_xy = np.isfinite(x_raw) & np.isfinite(y_raw)
+
+    # Handle both normalized and pixel-space ROI coordinates.
+    finite_values = np.concatenate(
+        [x_raw[finite_xy], y_raw[finite_xy]],
+        axis=0,
+    )
+    likely_normalized = bool(finite_values.size > 0 and float(np.nanmax(np.abs(finite_values))) <= 1.5)
+
+    if likely_normalized:
+        x_norm = np.clip(x_raw, 0.0, 1.0)
+        y_norm = np.clip(y_raw, 0.0, 1.0)
+    else:
+        roi_w_eff = float(roi_w if roi_w > 0 else 1)
+        roi_h_eff = float(roi_h if roi_h > 0 else 1)
+        x_norm = np.clip(x_raw / roi_w_eff, 0.0, 1.0)
+        y_norm = np.clip(y_raw / roi_h_eff, 0.0, 1.0)
+
+    kpt_count = int(keypoints_arr.shape[1])
+    for landmark_idx in range(kpt_count):
+        valid = finite_xy[:, landmark_idx]
+        if not np.any(valid):
+            continue
+
+        x_values = x_norm[valid, landmark_idx]
+        y_values = y_norm[valid, landmark_idx]
+        if x_values.size == 0:
+            continue
+
+        hist2d, _, _ = np.histogram2d(
+            y_values,
+            x_values,
+            bins=[int(grid_h), int(grid_w)],
+            range=[[0.0, 1.0], [0.0, 1.0]],
+        )
+        if landmark_idx not in heatmap_counts:
+            heatmap_counts[landmark_idx] = np.zeros((int(grid_h), int(grid_w)), dtype=np.float64)
+        heatmap_counts[landmark_idx] += hist2d
+
+        edge_mask = (
+            (x_values <= edge_margin_norm)
+            | (x_values >= (1.0 - edge_margin_norm))
+            | (y_values <= edge_margin_norm)
+            | (y_values >= (1.0 - edge_margin_norm))
+        )
+        edge_hits[landmark_idx] = int(edge_hits.get(landmark_idx, 0) + int(np.sum(edge_mask)))
+        total_points[landmark_idx] = int(total_points.get(landmark_idx, 0) + int(x_values.size))
+        source_dataset_ids.setdefault(landmark_idx, set()).add(str(dataset_id))
+
+
+def _build_spatial_payload(
+    *,
+    heatmap_counts: Mapping[int, np.ndarray],
+    edge_hits: Mapping[int, int],
+    total_points: Mapping[int, int],
+    source_dataset_ids: Mapping[int, set[str]],
+    pose_schema: PoseSchema,
+    edge_margin_norm: float,
+) -> Optional[dict[str, Any]]:
+    if not heatmap_counts:
+        return None
+
+    labels = list(pose_schema.keypoint_labels)
+    landmark_payload: dict[str, dict[str, Any]] = {}
+    for landmark_idx in sorted(heatmap_counts):
+        grid = np.asarray(heatmap_counts[landmark_idx], dtype=np.float64)
+        if grid.ndim != 2:
+            continue
+        total = float(np.sum(grid))
+        if total <= 0:
+            continue
+        density = grid / total
+        alias = labels[landmark_idx] if landmark_idx < len(labels) else None
+        point_count = int(total_points.get(landmark_idx, 0))
+        hit_count = int(edge_hits.get(landmark_idx, 0))
+        landmark_payload[str(int(landmark_idx))] = {
+            "landmark_index": int(landmark_idx),
+            "alias": alias,
+            "grid_h": int(grid.shape[0]),
+            "grid_w": int(grid.shape[1]),
+            "density": [float(v) for v in density.reshape(-1).tolist()],
+            "source_sample_count": point_count,
+            "source_dataset_count": int(len(source_dataset_ids.get(landmark_idx, set()))),
+            "edge_proximity_rate": (
+                float(hit_count) / float(point_count)
+                if point_count > 0
+                else None
+            ),
+        }
+    if not landmark_payload:
+        return None
+
+    return {
+        "edge_margin_norm": float(edge_margin_norm),
+        "landmark_center_heatmaps": landmark_payload,
+    }
 
 
 def _build_keypoint_training_data_card(
@@ -1059,6 +1435,10 @@ def _build_keypoint_training_data_card(
     geometry_values: dict[str, list[float]] = {name: [] for name in GEOMETRY_ARRAY_NAMES}
     edge_values: dict[str, list[float]] = {spec["key"]: [] for spec in graph_specs["edges"]}
     angle_values: dict[str, list[float]] = {spec["key"]: [] for spec in graph_specs["angles"]}
+    landmark_heatmap_counts: dict[int, np.ndarray] = {}
+    landmark_edge_hits: dict[int, int] = {}
+    landmark_total_points: dict[int, int] = {}
+    landmark_source_dataset_ids: dict[int, set[str]] = {}
 
     usable_totals: list[Optional[float]] = []
     total_keypoints_values: list[Optional[float]] = []
@@ -1269,6 +1649,20 @@ def _build_keypoint_training_data_card(
         if keypoints_source is not None:
             keypoints_arr = np.asarray(keypoints_source[:], dtype=np.float64)
             if keypoints_arr.ndim == 3 and int(keypoints_arr.shape[2]) == 2:
+                roi_h, roi_w = _resolve_roi_dimensions(root, keypoint_group)
+                _update_landmark_spatial_accumulators(
+                    dataset_id=ref.dataset_id,
+                    keypoints_arr=keypoints_arr,
+                    roi_h=int(roi_h),
+                    roi_w=int(roi_w),
+                    heatmap_counts=landmark_heatmap_counts,
+                    edge_hits=landmark_edge_hits,
+                    total_points=landmark_total_points,
+                    source_dataset_ids=landmark_source_dataset_ids,
+                    grid_h=int(LANDMARK_HEATMAP_GRID_H),
+                    grid_w=int(LANDMARK_HEATMAP_GRID_W),
+                    edge_margin_norm=float(LANDMARK_EDGE_MARGIN_NORM),
+                )
                 diag = _resolve_roi_diagonal(root, keypoint_group)
                 if diag <= 0:
                     diag = 1.0
@@ -1391,6 +1785,20 @@ def _build_keypoint_training_data_card(
         if counter:
             composition_counts[field] = {key: int(counter[key]) for key in sorted(counter)}
 
+    spatial_payload = _build_spatial_payload(
+        heatmap_counts=landmark_heatmap_counts,
+        edge_hits=landmark_edge_hits,
+        total_points=landmark_total_points,
+        source_dataset_ids=landmark_source_dataset_ids,
+        pose_schema=resolved_pose_schema,
+        edge_margin_norm=float(LANDMARK_EDGE_MARGIN_NORM),
+    )
+    train_val_parity = _build_train_val_parity(
+        merged_zarr=merged_zarr,
+        profile_rows_by_dataset=profile_rows_by_dataset,
+        lineage_rows=lineage_rows,
+    )
+
     dpf_values = [_as_float(row.get("dpf_at_acquisition")) for row in lineage_rows]
     card: dict[str, Any] = {
         "schema_name": SCHEMA_NAME,
@@ -1421,6 +1829,7 @@ def _build_keypoint_training_data_card(
             "edge_length_norm_stats": edge_stats_payload,
             "angle_stats": angle_stats_payload,
         },
+        "spatial": spatial_payload,
         "composition_counts": composition_counts,
         "subject_coverage": _build_subject_coverage_payload(subject_lineage_coverage),
         "genotype_counts": _build_genotype_counts(lineage_rows),
@@ -1429,6 +1838,7 @@ def _build_keypoint_training_data_card(
             dpf_values,
             source_dataset_count=len(refs),
         ),
+        "train_val_parity": train_val_parity,
         "audit_freshness": {
             "canonical_dataset_id_resolved_count": int(
                 sum(1 for ref in refs if ref.resolved_by_registry)

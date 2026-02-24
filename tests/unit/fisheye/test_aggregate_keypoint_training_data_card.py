@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
@@ -128,6 +129,20 @@ def _seed_keypoint_profile(
     source_keypoint_path: str = "refined_keypoints_runs/refined_001",
     keypoint_method: str = "traditional_pose",
     zarr_mtime_ns: int | None = None,
+    rows_total: int = 4,
+    rows_usable: int = 3,
+    usable_rate: float = 0.75,
+    confidence_valid_rate: float = 0.75,
+    geometry_valid_rate: float = 0.75,
+    triangle_area_p10: float = 110.0,
+    triangle_area_p50: float = 125.0,
+    triangle_area_p90: float = 140.0,
+    min_angle_p10: float = 18.0,
+    min_angle_p50: float = 21.0,
+    min_angle_p90: float = 24.0,
+    heading_p10: float = 5.0,
+    heading_p50: float = 12.5,
+    heading_p90: float = 20.0,
 ) -> None:
     if zarr_mtime_ns is None:
         zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
@@ -149,17 +164,35 @@ def _seed_keypoint_profile(
             "kpt_shape": [3, 2],
         },
         "quality": {
-            "rows_total": 4,
-            "rows_usable": 3,
-            "usable_keypoints_total": 3,
-            "usable_rate": 0.75,
-            "confidence_valid_rate": 0.75,
-            "geometry_valid_rate": 0.75,
+            "rows_total": int(rows_total),
+            "rows_usable": int(rows_usable),
+            "usable_keypoints_total": int(rows_usable),
+            "usable_rate": float(usable_rate),
+            "confidence_valid_rate": float(confidence_valid_rate),
+            "geometry_valid_rate": float(geometry_valid_rate),
         },
         "geometry": {
-            "triangle_area": {"stats": {"p10": 110.0, "p50": 125.0, "p90": 140.0}},
-            "min_angle": {"stats": {"p10": 18.0, "p50": 21.0, "p90": 24.0}},
-            "heading": {"stats": {"p10": 5.0, "p50": 12.5, "p90": 20.0}},
+            "triangle_area": {
+                "stats": {
+                    "p10": float(triangle_area_p10),
+                    "p50": float(triangle_area_p50),
+                    "p90": float(triangle_area_p90),
+                }
+            },
+            "min_angle": {
+                "stats": {
+                    "p10": float(min_angle_p10),
+                    "p50": float(min_angle_p50),
+                    "p90": float(min_angle_p90),
+                }
+            },
+            "heading": {
+                "stats": {
+                    "p10": float(heading_p10),
+                    "p50": float(heading_p50),
+                    "p90": float(heading_p90),
+                }
+            },
         },
     }
     registry.upsert_keypoint_data_profile(
@@ -173,21 +206,21 @@ def _seed_keypoint_profile(
         skeleton_id="traditional_v1",
         kpt_shape="[3,2]",
         profile_created_utc="2026-02-24T00:00:00+00:00",
-        rows_total=4,
-        rows_usable=3,
-        usable_keypoints_total=3,
-        usable_rate=0.75,
-        confidence_valid_rate=0.75,
-        geometry_valid_rate=0.75,
-        triangle_area_p10=110.0,
-        triangle_area_p50=125.0,
-        triangle_area_p90=140.0,
-        min_angle_p10=18.0,
-        min_angle_p50=21.0,
-        min_angle_p90=24.0,
-        heading_p10=5.0,
-        heading_p50=12.5,
-        heading_p90=20.0,
+        rows_total=int(rows_total),
+        rows_usable=int(rows_usable),
+        usable_keypoints_total=int(rows_usable),
+        usable_rate=float(usable_rate),
+        confidence_valid_rate=float(confidence_valid_rate),
+        geometry_valid_rate=float(geometry_valid_rate),
+        triangle_area_p10=float(triangle_area_p10),
+        triangle_area_p50=float(triangle_area_p50),
+        triangle_area_p90=float(triangle_area_p90),
+        min_angle_p10=float(min_angle_p10),
+        min_angle_p50=float(min_angle_p50),
+        min_angle_p90=float(min_angle_p90),
+        heading_p10=float(heading_p10),
+        heading_p50=float(heading_p50),
+        heading_p90=float(heading_p90),
         rig_id="rig_1",
         camera_id="camera_1",
         arena_id="arena_1",
@@ -326,13 +359,30 @@ def _make_pose_root(
     return root
 
 
-def _make_merged_root(*, train: int, val: int, test: int = 0) -> _FakeGroup:
+def _make_merged_root(
+    *,
+    train: int,
+    val: int,
+    test: int = 0,
+    source_dataset_ids: list[str] | None = None,
+    source_dataset_idx: list[int] | None = None,
+) -> _FakeGroup:
     root = _FakeGroup()
-    split = root.add_group("split")
+    split = root.add_group("splits")
     split.add_array("train_indices", np.arange(train, dtype=np.int64))
     split.add_array("val_indices", np.arange(train, train + val, dtype=np.int64))
     if test > 0:
         split.add_array("test_indices", np.arange(train + val, train + val + test, dtype=np.int64))
+
+    total = int(train + val + test)
+    source_ids = list(source_dataset_ids or ["dataset_0"])
+    dataset_idx = list(source_dataset_idx or ([0] * total))
+    if len(dataset_idx) != total:
+        raise ValueError("source_dataset_idx length must match total split rows.")
+
+    source_index = root.add_group("source_index")
+    source_index.add_array("source_dataset_idx", np.asarray(dataset_idx, dtype=np.int64))
+    source_index.add_array("source_dataset_id", np.asarray(source_ids, dtype=object))
     return root
 
 
@@ -641,7 +691,12 @@ def test_basic_payload_completeness(tmp_path: Path, monkeypatch) -> None:
                 skeleton=[[0, 1], [0, 2]],
                 labels=["swim_bladder", "eye_left", "eye_right"],
             ),
-            merged_zarr: _make_merged_root(train=3, val=1),
+            merged_zarr: _make_merged_root(
+                train=3,
+                val=1,
+                source_dataset_ids=["dataset_pose"],
+                source_dataset_idx=[0, 0, 0, 0],
+            ),
         },
     )
 
@@ -668,11 +723,13 @@ def test_basic_payload_completeness(tmp_path: Path, monkeypatch) -> None:
         "quality",
         "geometry",
         "skeleton_graph_metrics",
+        "spatial",
         "composition_counts",
         "subject_coverage",
         "genotype_counts",
         "dpf_stats",
         "dpf_histogram",
+        "train_val_parity",
         "audit_freshness",
     ):
         assert key in payload
@@ -687,10 +744,133 @@ def test_basic_payload_completeness(tmp_path: Path, monkeypatch) -> None:
     assert payload["geometry"]["triangle_area"]["stats"]["count"] == 4
     assert "edge_0_1" in payload["skeleton_graph_metrics"]["edge_length_norm_stats"]
     assert "angle_1_0_2" in payload["skeleton_graph_metrics"]["angle_stats"]
+    assert "0" in payload["spatial"]["landmark_center_heatmaps"]
+    assert payload["spatial"]["landmark_center_heatmaps"]["0"]["alias"] == "swim_bladder"
     assert payload["subject_coverage"]["lineage_covered_dataset_count"] == 1
     assert payload["genotype_counts"] == {"Tg(line_complete)": 1}
     assert payload["dpf_stats"]["max"] == 8.0
+    assert payload["train_val_parity"] is not None
+    assert payload["train_val_parity"]["metrics"]["usable_keypoints_rate"]["delta"] == 0.0
     assert payload["audit_freshness"]["zarr_mtime_mismatch_count"] == 0
+
+
+def test_train_val_parity_delta_from_merged_source_index(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    manifest_path = tmp_path / "pose.manifest.json"
+    output_path = tmp_path / "pose.data_card.json"
+    merged_zarr = tmp_path / "pose_merged.zarr"
+    zarr_a = tmp_path / "pose_a_training.zarr"
+    zarr_b = tmp_path / "pose_b_training.zarr"
+
+    db = Registry(registry_path)
+    _seed_dataset(db, dataset_id="dataset_a", recording_id="rec_a", zarr_path=zarr_a)
+    _seed_dataset(db, dataset_id="dataset_b", recording_id="rec_b", zarr_path=zarr_b)
+    _seed_keypoint_quality(db, dataset_id="dataset_a", zarr_path=zarr_a, source_keypoint_run="kp_001")
+    _seed_keypoint_quality(db, dataset_id="dataset_b", zarr_path=zarr_b, source_keypoint_run="kp_001")
+    _seed_keypoint_profile(
+        db,
+        dataset_id="dataset_a",
+        recording_id="rec_a",
+        zarr_path=zarr_a,
+        source_keypoint_run="kp_001",
+    )
+    _seed_keypoint_profile(
+        db,
+        dataset_id="dataset_b",
+        recording_id="rec_b",
+        zarr_path=zarr_b,
+        source_keypoint_run="kp_001",
+        usable_rate=0.50,
+        confidence_valid_rate=0.50,
+        geometry_valid_rate=0.50,
+        triangle_area_p50=105.0,
+        triangle_area_p90=120.0,
+        min_angle_p50=15.0,
+        min_angle_p90=18.0,
+    )
+    _seed_subject_lineage(
+        db,
+        dataset_id="dataset_a",
+        recording_id="rec_a",
+        subject_id="subject_a",
+        genotype="Tg(line_a)",
+        dpf=7,
+    )
+    _seed_subject_lineage(
+        db,
+        dataset_id="dataset_b",
+        recording_id="rec_b",
+        subject_id="subject_b",
+        genotype="Tg(line_b)",
+        dpf=10,
+    )
+    db.close()
+
+    _write_manifest(
+        manifest_path,
+        {
+            "set_id": "pose_parity_v001",
+            "datasets": [
+                {"dataset_id": "dataset_a", "zarr_path": str(zarr_a), "keypoint_run": "kp_001"},
+                {"dataset_id": "dataset_b", "zarr_path": str(zarr_b), "keypoint_run": "kp_001"},
+            ],
+            "pose_schema": {
+                "kpt_shape": [3, 2],
+                "keypoint_labels": ["swim_bladder", "eye_left", "eye_right"],
+                "skeleton": [[0, 1], [0, 2]],
+            },
+        },
+    )
+
+    _patch_open_group(
+        monkeypatch,
+        {
+            zarr_a: _make_pose_root(
+                kpt_count=3,
+                skeleton=[[0, 1], [0, 2]],
+                labels=["swim_bladder", "eye_left", "eye_right"],
+            ),
+            zarr_b: _make_pose_root(
+                kpt_count=3,
+                skeleton=[[0, 1], [0, 2]],
+                labels=["swim_bladder", "eye_left", "eye_right"],
+            ),
+            merged_zarr: _make_merged_root(
+                train=4,
+                val=4,
+                source_dataset_ids=["dataset_a", "dataset_b"],
+                source_dataset_idx=[0, 0, 0, 0, 1, 1, 1, 1],
+            ),
+        },
+    )
+
+    rc = mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--registry",
+            str(registry_path),
+            "--output",
+            str(output_path),
+            "--merged-zarr",
+            str(merged_zarr),
+            "--no-plots",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    parity = payload["train_val_parity"]
+    assert parity is not None
+
+    usable_rate_delta = parity["metrics"]["usable_keypoints_rate"]["delta"]
+    assert usable_rate_delta == pytest.approx(0.25)
+    triangle_p50_delta = parity["metrics"]["triangle_area_p50"]["delta"]
+    assert triangle_p50_delta == pytest.approx(20.0)
+    assert parity["lineage"]["genotype_mix_max_abs_delta"] == pytest.approx(1.0)
+    assert parity["lineage"]["dpf_mean"]["delta"] == pytest.approx(3.0)
 
 
 def test_missing_profile_rows_fail_closed_unless_fallback_enabled(
