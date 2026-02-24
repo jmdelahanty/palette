@@ -14,6 +14,7 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.utils import plot_detection_training_data_card as plot_data_card
 
 
 SCHEMA_NAME = "detection_training_data_card"
@@ -155,7 +156,10 @@ def _manifest_dataset_refs(registry: Registry, manifest: Mapping[str, Any]) -> l
         if zarr_path_text is None:
             raise ValueError("Manifest dataset row missing zarr_path.")
         zarr_path = Path(zarr_path_text)
-        dataset_id = _normalize_text(row.get("dataset_id")) or _resolve_dataset_id_from_registry(registry, zarr_path)
+        # Prefer canonical registry dataset_id keyed by zarr_path. This handles
+        # legacy manifests that may store recording_id/session_uuid instead of
+        # the collision-safe dataset_id used by registry profile tables.
+        dataset_id = _resolve_dataset_id_from_registry(registry, zarr_path) or _normalize_text(row.get("dataset_id"))
         if dataset_id is None:
             raise ValueError(f"Unable to resolve dataset_id for zarr path: {zarr_path}")
         refs.append(
@@ -180,6 +184,10 @@ def _normalize_manifest_stem(value: str) -> str:
 def _default_output_path(manifest_path: Path, set_id: Optional[str]) -> Path:
     base = _normalize_manifest_stem(set_id or manifest_path.stem) or "detection_training_data_card"
     return manifest_path.parent / f"{base}.data_card.json"
+
+
+def _default_plot_dir(output_path: Path) -> Path:
+    return output_path.parent / f"{output_path.stem}.plots"
 
 
 def _select_profile_rows(
@@ -501,9 +509,32 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Allow mismatch between manifest detection_source_type and profile detection_type.",
     )
+    parser.add_argument(
+        "--no-plots",
+        action="store_true",
+        help="Skip plot PNG generation for the aggregated data card.",
+    )
+    parser.add_argument(
+        "--plot-dir",
+        type=Path,
+        help="Optional output directory for data-card plots (default: <card_stem>.plots).",
+    )
+    parser.add_argument(
+        "--plot-prefix",
+        type=str,
+        help="Optional filename prefix for data-card plots (default: set_id).",
+    )
+    parser.add_argument(
+        "--plot-heatmap-bin-factor",
+        type=int,
+        default=2,
+        help="Coarsening factor for center heatmap bins in plot PNGs (default: 2).",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Compute card but do not write output JSON.")
     parser.add_argument("--json", action="store_true", help="Print card JSON to stdout.")
     args = parser.parse_args(argv)
+    if args.plot_heatmap_bin_factor < 1:
+        parser.error("--plot-heatmap-bin-factor must be >= 1.")
 
     manifest_path = Path(args.manifest)
     if not manifest_path.exists():
@@ -534,9 +565,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.json:
         print(json.dumps(card, indent=2))
     if args.dry_run:
+        plot_dir = Path(args.plot_dir) if args.plot_dir is not None else _default_plot_dir(output_path)
         print(
             "Detection training data card: mode=dry-run "
-            f"datasets={card['selection']['dataset_count']} output={output_path}"
+            f"datasets={card['selection']['dataset_count']} output={output_path} "
+            f"plots={'off' if args.no_plots else plot_dir} "
+            f"heatmap_bin_factor={int(args.plot_heatmap_bin_factor)}"
         )
         return 0
 
@@ -546,6 +580,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         "Detection training data card: mode=apply "
         f"datasets={card['selection']['dataset_count']} output={output_path}"
     )
+    if not args.no_plots:
+        plot_dir = Path(args.plot_dir) if args.plot_dir is not None else _default_plot_dir(output_path)
+        prefix = _normalize_text(args.plot_prefix) or _normalize_text(card.get("set_id")) or output_path.stem
+        try:
+            generated = plot_data_card.generate_detection_training_data_card_plots(
+                card_payload=card,
+                output_dir=plot_dir,
+                prefix=str(prefix),
+                heatmap_bin_factor=int(args.plot_heatmap_bin_factor),
+            )
+            print(
+                "Detection training data-card plots: mode=apply "
+                f"generated={len(generated)} output_dir={plot_dir} "
+                f"heatmap_bin_factor={int(args.plot_heatmap_bin_factor)}"
+            )
+        except Exception as exc:
+            print(f"Warning: detection training data-card plot generation skipped: {exc}")
     return 0
 
 

@@ -247,6 +247,25 @@ scripts/py -m fisheye.utils.registry_query \
 - `--detection-data-profile-latest` returns latest profile per dataset.
 - `--recording-detection-data-profile-latest` returns latest profile per recording.
 
+### Subject-lineage query note (dish vs genotype vs DPF)
+
+- `dish_design` and `genotype` are distinct fields.
+  - `dish_design`: capture context (for example `cedar`, `alpine`)
+  - `genotype`: subject lineage (for example `Tg(elavl3:gcamp7f)`)
+- `dpf_at_acquisition` is queried via `--dpf`, `--dpf-min`, `--dpf-max`.
+
+Example:
+
+```bash
+scripts/py -m fisheye.utils.registry_query \
+  --registry /nvme1/registry.sqlite \
+  --dish-design cedar \
+  --genotype 'Tg(elavl3:gcamp7f)' \
+  --dpf-min 6 \
+  --dpf-max 8 \
+  --json
+```
+
 ## Notes on sampled training imports
 
 If `import_mode=sampled` (large frame gaps):

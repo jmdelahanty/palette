@@ -241,6 +241,11 @@ Composition facets:
 - `rig_id TEXT`, `camera_id TEXT`, `arena_id TEXT`
 - `dish_design TEXT`, `canvas_name TEXT`, `protocol_name TEXT`
 
+Subject-lineage semantics:
+- `dish_design` is capture context (dish hardware/design), not subject biology.
+- `genotype` and `dpf_at_acquisition` are subject-lineage fields.
+- Keep these dimensions separate in query filters and aggregate reporting.
+
 Opaque payload:
 - `profile_json TEXT` (full JSON payload for downstream analysis)
 
@@ -288,6 +293,27 @@ Canonical payload:
   ]
 }
 ```
+
+### Planned Additive Extension (Subject Lineage)
+
+These fields are planned as additive `v1` extensions for training-card lineage
+coverage and biology-aware composition metrics:
+
+- `subject_coverage`:
+  - manifest dataset count
+  - lineage-covered dataset count
+  - missing-lineage dataset IDs
+- `genotype_counts`:
+  - map of genotype string -> count
+- `dpf_stats`:
+  - numeric summary over `dpf_at_acquisition` (count/min/max/mean/quantiles)
+- `dpf_histogram`:
+  - bucketed DPF distribution used by plotting helpers
+
+Registry projection extension target (planned):
+- `detection_data_profile` / latest views include optional lineage columns:
+  - `genotype`
+  - `dpf_at_acquisition`
 
 ## Invariants and Validation Rules
 

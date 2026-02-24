@@ -121,6 +121,14 @@ class KeypointQualitySummary:
 
 
 @dataclass
+class DetectQualitySummary:
+    total_rows: int
+    passing_rows: int
+    excluded_rows: int
+    exclusion_reasons: Dict[str, int]
+
+
+@dataclass
 class DatasetRow:
     dataset_id: str
     session_uuid: Optional[str]
@@ -242,6 +250,9 @@ class DatasetLineageSummary:
 KEYPOINT_GATE_REVIEW_STATE = "approved"
 KEYPOINT_GATE_REVIEW_INTENDED_USE = "training"
 KEYPOINT_GATE_MIN_RATE = 0.70
+DETECT_GATE_REVIEW_STATE = "approved"
+DETECT_GATE_REVIEW_INTENDED_USE = "training"
+DETECT_GATE_MAX_INTERPOLATED_RATE = 0.25
 BEHAVIOR_V1_REQUIRED_ARTIFACT_TYPES = {
     "h5_log",
     "camera_video",
@@ -1208,6 +1219,53 @@ def _load_keypoint_quality_rows(
     return [dict(row) for row in rows]
 
 
+def _load_detect_quality_rows(
+    registry: Registry,
+    *,
+    set_filter: Optional[str],
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    if not _view_exists(registry, "detect_quality_current"):
+        return []
+    sql = [
+        "SELECT",
+        "  dqc.dataset_id AS dataset_id,",
+        "  d.zarr_path AS zarr_path,",
+        "  d.zarr_origin AS zarr_origin,",
+        "  d.zarr_use AS zarr_use,",
+        "  dqc.detect_method AS detect_method,",
+        "  dqc.refined_run AS refined_run,",
+        "  dqc.source_detect_run AS source_detect_run,",
+        "  dqc.review_state AS review_state,",
+        "  dqc.review_intended_use AS review_intended_use,",
+        "  dqc.review_resolved_group AS review_resolved_group,",
+        "  dqc.total_detections AS total_detections,",
+        "  dqc.real_detections AS real_detections,",
+        "  dqc.interpolated_detections AS interpolated_detections,",
+        "  dqc.interpolated_detections_rate AS interpolated_detections_rate,",
+        "  dqc.review_timestamp_utc AS review_timestamp_utc,",
+        "  dqc.quality_updated_utc AS quality_updated_utc,",
+        "  dqc.zarr_mtime_ns AS zarr_mtime_ns",
+        "FROM detect_quality_current dqc",
+        "LEFT JOIN datasets d ON d.dataset_id = dqc.dataset_id",
+        "WHERE 1=1",
+    ]
+    params: List[Any] = []
+    dataset_ids = _dataset_ids_for_set(registry, set_filter)
+    if dataset_ids is not None:
+        if not dataset_ids:
+            return []
+        placeholders = ", ".join("?" for _ in dataset_ids)
+        sql.append(f"AND dqc.dataset_id IN ({placeholders})")
+        params.extend(dataset_ids)
+    sql.append("ORDER BY dqc.dataset_id, COALESCE(dqc.detect_method, ''), dqc.refined_run")
+    if limit and limit > 0:
+        sql.append("LIMIT ?")
+        params.append(int(limit))
+    rows = registry.conn.execute(" ".join(sql), params).fetchall()
+    return [dict(row) for row in rows]
+
+
 def _load_recording_rows(
     registry: Registry,
     *,
@@ -1684,6 +1742,118 @@ def _summarize_keypoint_quality_rows(rows: List[Dict[str, Any]]) -> KeypointQual
     )
 
 
+def _coerce_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _zarr_mtime_ns(path_text: Optional[str], *, mtime_cache: Dict[str, Optional[int]]) -> Optional[int]:
+    normalized = str(path_text or "").strip()
+    if not normalized:
+        return None
+    if normalized in mtime_cache:
+        return mtime_cache[normalized]
+    try:
+        mtime = int(Path(normalized).stat().st_mtime_ns)
+    except OSError:
+        mtime = None
+    mtime_cache[normalized] = mtime
+    return mtime
+
+
+def _detect_quality_stale_reason(
+    row: Dict[str, Any],
+    *,
+    mtime_cache: Dict[str, Optional[int]],
+) -> Optional[str]:
+    expected_mtime = _coerce_int(row.get("zarr_mtime_ns"))
+    if expected_mtime is None:
+        return "stale row: missing zarr_mtime_ns"
+    zarr_path = str(row.get("zarr_path") or "").strip()
+    if not zarr_path:
+        return "stale row: missing zarr_path"
+    actual_mtime = _zarr_mtime_ns(zarr_path, mtime_cache=mtime_cache)
+    if actual_mtime is None:
+        return "stale row: zarr missing on disk"
+    if int(actual_mtime) != int(expected_mtime):
+        return "stale row: mtime mismatch"
+    return None
+
+
+def _detect_quality_row_passes_default_gate(
+    row: Dict[str, Any],
+    *,
+    mtime_cache: Dict[str, Optional[int]],
+) -> bool:
+    if _detect_quality_stale_reason(row, mtime_cache=mtime_cache) is not None:
+        return False
+    rate = _coerce_float(row.get("interpolated_detections_rate"))
+    return (
+        row.get("review_state") == DETECT_GATE_REVIEW_STATE
+        and row.get("review_intended_use") == DETECT_GATE_REVIEW_INTENDED_USE
+        and rate is not None
+        and float(rate) <= DETECT_GATE_MAX_INTERPOLATED_RATE
+    )
+
+
+def _detect_quality_exclusion_reason(
+    row: Dict[str, Any],
+    *,
+    mtime_cache: Dict[str, Optional[int]],
+) -> Optional[str]:
+    if _detect_quality_row_passes_default_gate(row, mtime_cache=mtime_cache):
+        return None
+    stale_reason = _detect_quality_stale_reason(row, mtime_cache=mtime_cache)
+    if stale_reason is not None:
+        return stale_reason
+    state = row.get("review_state")
+    intended_use = row.get("review_intended_use")
+    rate = _coerce_float(row.get("interpolated_detections_rate"))
+    if not state or not intended_use:
+        return "missing review"
+    if state != DETECT_GATE_REVIEW_STATE or intended_use != DETECT_GATE_REVIEW_INTENDED_USE:
+        return "wrong state/use"
+    if rate is None:
+        return "missing interpolated rate"
+    if float(rate) > DETECT_GATE_MAX_INTERPOLATED_RATE:
+        return "high interpolation"
+    return "other"
+
+
+def _summarize_detect_quality_rows(rows: List[Dict[str, Any]]) -> DetectQualitySummary:
+    passing = 0
+    reasons: Dict[str, int] = {}
+    mtime_cache: Dict[str, Optional[int]] = {}
+    for row in rows:
+        reason = _detect_quality_exclusion_reason(row, mtime_cache=mtime_cache)
+        if reason is None:
+            passing += 1
+            continue
+        reasons[reason] = reasons.get(reason, 0) + 1
+    total = len(rows)
+    excluded = total - passing
+    ordered = dict(sorted(reasons.items(), key=lambda item: (-item[1], item[0])))
+    return DetectQualitySummary(
+        total_rows=total,
+        passing_rows=passing,
+        excluded_rows=excluded,
+        exclusion_reasons=ordered,
+    )
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path.")
@@ -1700,14 +1870,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             "models",
             "onnx",
             "tensorrt",
+            "detect-quality",
             "keypoint-quality",
             "lineage",
         ],
         default="sets",
         help=(
             "Select output view: sets, datasets, recordings, recording-overview, "
-            "recording-steps, recording-steps-wide, models, onnx, tensorrt, keypoint-quality, "
-            "or lineage (default: sets)."
+            "recording-steps, recording-steps-wide, models, onnx, tensorrt, "
+            "detect-quality, keypoint-quality, or lineage (default: sets)."
         ),
     )
     parser.add_argument(
@@ -1715,10 +1886,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help=(
             "Show all registry views (sets, datasets, recordings, recording-overview, "
-            "models, onnx, tensorrt, lineage, and keypoint quality)."
+            "models, onnx, tensorrt, lineage, detect quality, and keypoint quality)."
         ),
     )
     parser.add_argument("--limit", type=int, default=200)
+    parser.add_argument(
+        "--show-detect-quality",
+        action="store_true",
+        help="Print detailed detect quality rows (summary is always shown).",
+    )
     parser.add_argument(
         "--show-keypoint-quality",
         action="store_true",
@@ -1765,6 +1941,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     show_onnx = args.all or args.view == "onnx"
     show_tensorrt = args.all or args.view == "tensorrt"
     show_lineage = args.all or args.view == "lineage"
+    show_detect_view = args.view == "detect-quality"
+    show_detect_details = args.show_detect_quality or show_detect_view
     show_keypoint_view = args.view == "keypoint-quality"
     show_keypoint_details = args.show_keypoint_quality or show_keypoint_view
     if summary_only_mode:
@@ -1779,6 +1957,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         show_onnx = False
         show_tensorrt = False
         show_lineage = False
+        show_detect_view = False
+        show_detect_details = False
         show_keypoint_view = False
         show_keypoint_details = False
 
@@ -1856,6 +2036,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         if show_lineage
         else []
     )
+    detect_quality_limit = args.limit if (show_detect_details or show_detect_view) else None
+    detect_quality_rows = _load_detect_quality_rows(
+        registry,
+        set_filter=args.set_id,
+        limit=detect_quality_limit,
+    )
+    detect_quality_summary = _summarize_detect_quality_rows(detect_quality_rows)
     keypoint_quality_limit = args.limit if (show_keypoint_details or show_keypoint_view) else None
     keypoint_quality_rows = _load_keypoint_quality_rows(
         registry,
@@ -1898,6 +2085,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     if not args.all and args.view == "lineage" and not lineage_rows:
         print("No dataset lineage rows found.")
+        return 1
+    if not args.all and args.view == "detect-quality" and not detect_quality_rows:
+        print("No detect quality rows found.")
         return 1
     if not args.all and args.view == "keypoint-quality" and not keypoint_quality_rows:
         print("No keypoint quality rows found.")
@@ -2308,7 +2498,67 @@ def main(argv: Optional[List[str]] = None) -> int:
                 )
             console.print(table)
         if not summary_only_mode:
-            summary_lines = [
+            detect_lines = [
+                f"total rows: {detect_quality_summary.total_rows}",
+                (
+                    "passing rows "
+                    f"({DETECT_GATE_REVIEW_STATE}/{DETECT_GATE_REVIEW_INTENDED_USE}, "
+                    f"interpolated_rate<={DETECT_GATE_MAX_INTERPOLATED_RATE:.2f}, fresh mtime): "
+                    f"{detect_quality_summary.passing_rows}"
+                ),
+                f"excluded rows: {detect_quality_summary.excluded_rows}",
+            ]
+            if detect_quality_summary.exclusion_reasons:
+                detect_reason_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in detect_quality_summary.exclusion_reasons.items()
+                )
+            else:
+                detect_reason_text = "none"
+            detect_lines.append(f"top exclusion reasons: {detect_reason_text}")
+            console.print("[bold]Detect Quality[/bold]")
+            for line in detect_lines:
+                console.print(f"- {line}")
+            if show_detect_details and detect_quality_rows:
+                detect_table = Table(title="Detect Quality Details", show_lines=False)
+                detect_table.add_column("Dataset", style="cyan")
+                detect_table.add_column("Use")
+                detect_table.add_column("Method")
+                detect_table.add_column("Review")
+                detect_table.add_column("Interp/Total")
+                detect_table.add_column("InterpRate")
+                detect_table.add_column("Stale")
+                detect_table.add_column("Gate")
+                detect_table.add_column("Reason")
+                detect_mtime_cache: Dict[str, Optional[int]] = {}
+                for row in detect_quality_rows:
+                    passes = _detect_quality_row_passes_default_gate(
+                        row,
+                        mtime_cache=detect_mtime_cache,
+                    )
+                    reason = _detect_quality_exclusion_reason(
+                        row,
+                        mtime_cache=detect_mtime_cache,
+                    ) or "—"
+                    total = row.get("total_detections")
+                    interpolated = row.get("interpolated_detections")
+                    interp_rate = _coerce_float(row.get("interpolated_detections_rate"))
+                    stale = _detect_quality_stale_reason(row, mtime_cache=detect_mtime_cache)
+                    review = f"{row.get('review_state') or '—'}/{row.get('review_intended_use') or '—'}"
+                    detect_table.add_row(
+                        str(row.get("dataset_id") or "—"),
+                        str(row.get("zarr_use") or "—"),
+                        str(row.get("detect_method") or "—"),
+                        review,
+                        f"{interpolated if interpolated is not None else '—'}/{total if total is not None else '—'}",
+                        f"{float(interp_rate):.3f}" if interp_rate is not None else "—",
+                        "1" if stale is not None else "0",
+                        "[chartreuse1]PASS[/chartreuse1]" if passes else "[red]EXCLUDE[/red]",
+                        reason,
+                    )
+                console.print(detect_table)
+
+            keypoint_lines = [
                 f"total rows: {keypoint_quality_summary.total_rows}",
                 (
                     "passing rows "
@@ -2318,18 +2568,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"excluded rows: {keypoint_quality_summary.excluded_rows}",
             ]
             if keypoint_quality_summary.exclusion_reasons:
-                reason_text = ", ".join(
+                keypoint_reason_text = ", ".join(
                     f"{name}={count}"
                     for name, count in keypoint_quality_summary.exclusion_reasons.items()
                 )
             else:
-                reason_text = "none"
-            summary_lines.append(f"top exclusion reasons: {reason_text}")
-            summary_lines.append(
+                keypoint_reason_text = "none"
+            keypoint_lines.append(f"top exclusion reasons: {keypoint_reason_text}")
+            keypoint_lines.append(
                 "quality_stale note: currently flags only rows missing stored zarr_mtime_ns."
             )
             console.print("[bold]Keypoint Quality[/bold]")
-            for line in summary_lines:
+            for line in keypoint_lines:
                 console.print(f"- {line}")
             if show_keypoint_details and keypoint_quality_rows:
                 kq_table = Table(title="Keypoint Quality Details", show_lines=False)
@@ -2671,6 +2921,63 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"  host: {row.system_hostname or '—'}")
                 print(f"  onnx: {_status_text(_path_ok(row.onnx_path))}")
         if not summary_only_mode:
+            print("Detect Quality")
+            print(f"  total rows: {detect_quality_summary.total_rows}")
+            print(
+                "  passing rows "
+                f"({DETECT_GATE_REVIEW_STATE}/{DETECT_GATE_REVIEW_INTENDED_USE}, "
+                f"interpolated_rate<={DETECT_GATE_MAX_INTERPOLATED_RATE:.2f}, fresh mtime): "
+                f"{detect_quality_summary.passing_rows}"
+            )
+            print(f"  excluded rows: {detect_quality_summary.excluded_rows}")
+            if detect_quality_summary.exclusion_reasons:
+                detect_reason_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in detect_quality_summary.exclusion_reasons.items()
+                )
+            else:
+                detect_reason_text = "none"
+            print(f"  top exclusion reasons: {detect_reason_text}")
+            if show_detect_details and detect_quality_rows:
+                print("  details:")
+                detect_mtime_cache: Dict[str, Optional[int]] = {}
+                for row in detect_quality_rows:
+                    reason = _detect_quality_exclusion_reason(
+                        row,
+                        mtime_cache=detect_mtime_cache,
+                    )
+                    passes = _detect_quality_row_passes_default_gate(
+                        row,
+                        mtime_cache=detect_mtime_cache,
+                    )
+                    stale = _detect_quality_stale_reason(
+                        row,
+                        mtime_cache=detect_mtime_cache,
+                    )
+                    total = row.get("total_detections")
+                    interpolated = row.get("interpolated_detections")
+                    rate = _coerce_float(row.get("interpolated_detections_rate"))
+                    print(f"    {row.get('dataset_id')}")
+                    print(f"      use: {row.get('zarr_use') or '—'}")
+                    print(f"      method: {row.get('detect_method') or '—'}")
+                    print(
+                        "      review: "
+                        f"{row.get('review_state') or '—'}/{row.get('review_intended_use') or '—'}"
+                    )
+                    print(
+                        "      interpolated/total: "
+                        f"{interpolated if interpolated is not None else '—'}/"
+                        f"{total if total is not None else '—'}"
+                    )
+                    print(
+                        f"      interpolated_rate: {float(rate):.3f}"
+                        if rate is not None
+                        else "      interpolated_rate: —"
+                    )
+                    print(f"      quality_stale: {1 if stale is not None else 0}")
+                    print(f"      gate: {'PASS' if passes else 'EXCLUDE'}")
+                    print(f"      reason: {reason or '—'}")
+
             print("Keypoint Quality")
             print(f"  total rows: {keypoint_quality_summary.total_rows}")
             print(

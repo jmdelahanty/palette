@@ -20,7 +20,7 @@ def _seed_dataset(db: Registry, dataset_id: str, zarr_path: Path) -> None:
     db.upsert_provenance(
         dataset_id,
         provenance={},
-        context={"canvas_name": "DefaultScreen"},
+        context={"canvas_name": "DefaultScreen", "rig_id": "omnifin0"},
         protocol_name=None,
         protocol_hash=None,
         acquisition={
@@ -90,8 +90,65 @@ def test_auto_set_name_is_generated_when_missing(tmp_path: Path, monkeypatch) ->
     first_name = first_cli[first_cli.index("--set-name") + 1]
     second_name = second_cli[second_cli.index("--set-name") + 1]
     assert first_name == second_name
-    assert first_name.startswith("cedar_defaultscreen_manual_gray_")
+    assert first_name.startswith("cedar_defaultscreen_omnifin0_manual_gray_")
     assert len(first_name.rsplit("_", 1)[-1]) == 8
+
+
+def _naming_args(**overrides):
+    defaults = {
+        "dish_design": None,
+        "dish_design_like": None,
+        "fps_min": None,
+        "fps_max": None,
+        "exposure_min": None,
+        "exposure_max": None,
+        "frame_rate_min": None,
+        "frame_rate_max": None,
+        "gain_min": None,
+        "gain_max": None,
+        "video_codec": None,
+        "video_pix_fmt": None,
+        "format_encoder": None,
+        "format_title": None,
+        "format_comment": None,
+        "encoder_name": None,
+        "encoder_codec": None,
+        "encoder_preset": None,
+        "encoder_tuning": None,
+        "encoder_rc": None,
+        "compression": None,
+        "camera_model": None,
+        "camera_serial": None,
+        "camera_id": None,
+        "rig_id": None,
+        "arena_id": None,
+        "path_contains": None,
+        "limit": None,
+        "source_type": "manual",
+        "input_format": "gray",
+    }
+    defaults.update(overrides)
+    return type("Args", (), defaults)()
+
+
+def test_default_set_name_includes_rig_token_for_single_rig() -> None:
+    rows = [
+        {"dish_design": "cedar", "canvas_name": "shadow", "rig_id": "omnifin0"},
+        {"dish_design": "cedar", "canvas_name": "shadow", "rig_id": "omnifin0"},
+    ]
+    name = wrapper._default_set_name(_naming_args(), rows, model_input="gray")
+    assert name.startswith("cedar_shadow_omnifin0_manual_gray_")
+    assert len(name.rsplit("_", 1)[-1]) == 8
+
+
+def test_default_set_name_uses_mixed_rigs_token_for_multiple_rigs() -> None:
+    rows = [
+        {"dish_design": "cedar", "canvas_name": "shadow", "rig_id": "omnifin0"},
+        {"dish_design": "cedar", "canvas_name": "shadow", "rig_id": "omnifin1"},
+    ]
+    name = wrapper._default_set_name(_naming_args(), rows, model_input="gray")
+    assert name.startswith("cedar_shadow_mixed_rigs_manual_gray_")
+    assert len(name.rsplit("_", 1)[-1]) == 8
 
 
 def test_auto_out_manifest_is_set_when_out_config_is_given(tmp_path: Path, monkeypatch) -> None:
@@ -282,8 +339,14 @@ def test_detect_quality_exclusion_reasons_are_concrete(tmp_path: Path, capsys) -
 
     output = capsys.readouterr().out
     assert "Detect quality SQL filter excluded 5 dataset(s):" in output
+    assert "Detect quality filter summary: passed=0 excluded=5 reasons=" in output
+    assert "missing_quality_row=1" in output
     assert "missing_quality_row" in output
+    assert "review_state_mismatch:pending!=approved=1" in output
     assert "review_state_mismatch:pending!=approved" in output
+    assert "review_use_mismatch:full_recording!=training=1" in output
     assert "review_use_mismatch:full_recording!=training" in output
+    assert "missing_interpolated_detections_rate=1" in output
     assert "missing_interpolated_detections_rate" in output
+    assert "interpolated_rate_above_threshold:0.800000>0.300000=1" in output
     assert "interpolated_rate_above_threshold:0.800000>0.300000" in output

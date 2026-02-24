@@ -126,7 +126,10 @@ def _write_manifest(path: Path, *, datasets: list[dict[str, object]]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_aggregate_detection_training_data_card_writes_expected_payload(tmp_path: Path) -> None:
+def test_aggregate_detection_training_data_card_writes_expected_payload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     registry_path = tmp_path / "registry.sqlite"
     manifest_path = tmp_path / "detect.manifest.json"
     output_path = tmp_path / "detect.data_card.json"
@@ -170,6 +173,20 @@ def test_aggregate_detection_training_data_card_writes_expected_payload(tmp_path
         ],
     )
 
+    plot_calls: dict[str, object] = {}
+
+    def _fake_generate_plots(*, card_payload, output_dir, prefix, heatmap_bin_factor):
+        plot_calls["set_id"] = card_payload.get("set_id")
+        plot_calls["output_dir"] = Path(output_dir)
+        plot_calls["prefix"] = str(prefix)
+        plot_calls["heatmap_bin_factor"] = int(heatmap_bin_factor)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        fake_plot = output_dir / f"{prefix}.fake.png"
+        fake_plot.write_bytes(b"PNG")
+        return [fake_plot]
+
+    monkeypatch.setattr(mod.plot_data_card, "generate_detection_training_data_card_plots", _fake_generate_plots)
+
     rc = mod.main(
         [
             "--manifest",
@@ -199,6 +216,11 @@ def test_aggregate_detection_training_data_card_writes_expected_payload(tmp_path
     assert center["grid_w"] == 2
     assert len(center["density"]) == 4
     assert pytest.approx(sum(center["density"]), rel=1e-6) == 1.0
+    assert plot_calls["set_id"] == "detect_smoke_v001"
+    assert plot_calls["prefix"] == "detect_smoke_v001"
+    assert plot_calls["output_dir"] == tmp_path / "detect.data_card.plots"
+    assert plot_calls["heatmap_bin_factor"] == 2
+    assert (tmp_path / "detect.data_card.plots" / "detect_smoke_v001.fake.png").exists()
 
 
 def test_aggregate_detection_training_data_card_fails_when_profile_missing(tmp_path: Path) -> None:
@@ -244,6 +266,107 @@ def test_aggregate_detection_training_data_card_fails_when_profile_missing(tmp_p
     )
     assert rc == 1
     assert not output_path.exists()
+
+
+def test_aggregate_detection_data_card_prefers_registry_dataset_id_for_manifest_rows(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    manifest_path = tmp_path / "detect.manifest.json"
+    output_path = tmp_path / "detect.data_card.json"
+
+    zarr_path = tmp_path / "legacy_training.zarr"
+    db = Registry(registry_path)
+    _seed_dataset(
+        db,
+        dataset_id="rec_legacy:z123456789abc",
+        recording_id="rec_legacy",
+        zarr_path=zarr_path,
+    )
+    _upsert_profile(
+        db,
+        dataset_id="rec_legacy:z123456789abc",
+        profile_run="profile_legacy",
+        recording_id="rec_legacy",
+        zarr_path=zarr_path,
+    )
+    db.close()
+
+    _write_manifest(
+        manifest_path,
+        datasets=[
+            {
+                "name": "legacy_dataset",
+                # Intentional legacy-style manifest id (recording/session id).
+                "dataset_id": "rec_legacy",
+                "zarr_path": str(zarr_path),
+                "detection_source_type": "manual",
+            }
+        ],
+    )
+
+    rc = mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--registry",
+            str(registry_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["profile_run_refs"][0]["dataset_id"] == "rec_legacy:z123456789abc"
+
+
+def test_aggregate_detection_training_data_card_no_plots_flag_disables_plot_generation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    manifest_path = tmp_path / "detect.manifest.json"
+    output_path = tmp_path / "detect.data_card.json"
+
+    zarr_a = tmp_path / "a_training.zarr"
+    db = Registry(registry_path)
+    _seed_dataset(db, dataset_id="dataset_a", recording_id="rec_a", zarr_path=zarr_a)
+    _upsert_profile(db, dataset_id="dataset_a", profile_run="profile_a", recording_id="rec_a", zarr_path=zarr_a)
+    db.close()
+
+    _write_manifest(
+        manifest_path,
+        datasets=[
+            {
+                "name": "dataset_a",
+                "dataset_id": "dataset_a",
+                "zarr_path": str(zarr_a),
+                "detection_source_type": "manual",
+            }
+        ],
+    )
+
+    called = {"plots": False}
+
+    def _fake_generate_plots(*, card_payload, output_dir, prefix, heatmap_bin_factor):
+        called["plots"] = True
+        return []
+
+    monkeypatch.setattr(mod.plot_data_card, "generate_detection_training_data_card_plots", _fake_generate_plots)
+
+    rc = mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--registry",
+            str(registry_path),
+            "--output",
+            str(output_path),
+            "--no-plots",
+        ]
+    )
+    assert rc == 0
+    assert output_path.exists()
+    assert called["plots"] is False
+    assert not (tmp_path / "detect.data_card.plots").exists()
 
 
 def test_aggregate_detection_training_data_card_mtime_validation(tmp_path: Path) -> None:

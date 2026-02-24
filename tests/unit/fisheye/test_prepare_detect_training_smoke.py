@@ -34,9 +34,9 @@ def _write_base_detect_config(path: Path) -> None:
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
 
-def _create_minimal_detect_zarr(path: Path) -> None:
+def _create_minimal_detect_zarr(path: Path, *, session_uuid: str = "session_smoke_001") -> None:
     root = zarr.open_group(str(path), mode="w")
-    root.attrs["session_uuid"] = "session_smoke_001"
+    root.attrs["session_uuid"] = session_uuid
 
     raw = root.create_group("raw_video")
     raw.create_array(
@@ -188,6 +188,63 @@ def test_prepare_detect_training_preserves_set_id_with_explicit_out_config(monke
             ("detect_smoke_set_v001",),
         ).fetchone()
     assert row is not None
+
+
+def test_prepare_detect_training_manifest_prefers_canonical_registry_dataset_id(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "sample.zarr"
+    _create_minimal_detect_zarr(zarr_path, session_uuid="session_smoke_001")
+
+    base_config_path = tmp_path / "detect_config.yaml"
+    _write_base_detect_config(base_config_path)
+
+    registry_path = tmp_path / "palette_registry.sqlite"
+    db = Registry(registry_path)
+    # Seed a conflicting base dataset_id on a different path so registry scan
+    # resolves this dataset to the collision-safe canonical suffix form.
+    db.upsert_dataset(
+        "session_smoke_001",
+        session_uuid="session_smoke_001",
+        zarr_path=tmp_path / "other_sample.zarr",
+        recording_id="session_smoke_001",
+    )
+    db.upsert_dataset(
+        "session_smoke_001:legacy",
+        session_uuid="session_smoke_001",
+        zarr_path=zarr_path,
+        recording_id="session_smoke_001",
+    )
+    db.close()
+
+    monkeypatch.setenv("PALETTE_REGISTRY_PATH", str(registry_path))
+    monkeypatch.chdir(tmp_path)
+
+    out_config = tmp_path / "custom" / "detect_custom.yaml"
+    prepare_detect_training.main(
+        [
+            str(zarr_path),
+            "--base-config",
+            str(base_config_path),
+            "--out-config",
+            str(out_config),
+            "--registry",
+            str(registry_path),
+        ]
+    )
+
+    manifest = json.loads(out_config.with_suffix(".manifest.json").read_text(encoding="utf-8"))
+    with sqlite3.connect(registry_path) as conn:
+        row = conn.execute(
+            "SELECT dataset_id FROM datasets WHERE zarr_path = ? LIMIT 1;",
+            (str(zarr_path),),
+        ).fetchone()
+    assert row is not None
+    canonical_dataset_id = str(row[0])
+    assert manifest["datasets"][0]["dataset_id"] == canonical_dataset_id
+    assert canonical_dataset_id
+    assert manifest["datasets"][0]["session_uuid"] == "session_smoke_001"
 
 
 def test_registry_record_training_run_persists_invocation_json(tmp_path: Path) -> None:

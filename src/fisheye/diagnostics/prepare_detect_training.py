@@ -229,6 +229,40 @@ def _as_int(value: Any) -> Optional[int]:
         return None
 
 
+def _lookup_registry_dataset_id(registry: Registry, zarr_path: Path) -> Optional[str]:
+    candidates = [str(zarr_path)]
+    try:
+        resolved = str(zarr_path.resolve())
+    except OSError:
+        resolved = None
+    if resolved and resolved not in candidates:
+        candidates.append(resolved)
+    for candidate in candidates:
+        row = registry.conn.execute(
+            "SELECT dataset_id FROM datasets WHERE zarr_path = ? LIMIT 1;",
+            (candidate,),
+        ).fetchone()
+        if row is not None and row["dataset_id"] is not None:
+            text = str(row["dataset_id"]).strip()
+            if text:
+                return text
+    return None
+
+
+def _resolve_manifest_dataset_identity(
+    *,
+    root: zarr.Group,
+    zarr_path: Path,
+    registry: Optional[Registry],
+) -> Tuple[str, Optional[str]]:
+    dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
+    if registry is not None:
+        canonical_dataset_id = _lookup_registry_dataset_id(registry, zarr_path)
+        if canonical_dataset_id:
+            dataset_id = canonical_dataset_id
+    return dataset_id, session_uuid
+
+
 def _parse_arena_config(raw: Any) -> Dict[str, Any]:
     if raw is None:
         return {}
@@ -1009,7 +1043,17 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             provenance.warnings = []
         _log_timing(args.timing, f"{dataset_label}: extract provenance", phase_started)
 
-        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
+        dataset_id, session_uuid = _resolve_manifest_dataset_identity(
+            root=root,
+            zarr_path=zarr_path,
+            registry=registry,
+        )
+        if registry is not None and should_register_datasets:
+            phase_started = perf_counter()
+            registered_dataset_id = registry.register_from_root(root, zarr_path)
+            if registered_dataset_id:
+                dataset_id = str(registered_dataset_id)
+            _log_timing(args.timing, f"{dataset_label}: registry dataset upsert", phase_started)
         manifests.append(
             DatasetManifest(
                 name=dataset_name,
@@ -1032,10 +1076,6 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 provenance=provenance,
             )
         )
-        if registry is not None and should_register_datasets:
-            phase_started = perf_counter()
-            registry.register_from_root(root, zarr_path)
-            _log_timing(args.timing, f"{dataset_label}: registry dataset upsert", phase_started)
         _log_timing(args.timing, f"{dataset_label}: total preflight", dataset_started)
 
     if skipped:

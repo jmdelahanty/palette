@@ -84,6 +84,50 @@ Canonical schema contract (defined):
   - optional pipeline integration:
     `scripts/py -m fisheye.utils.run_detect_training_pipeline ... --aggregate-training-data-card`
 
+## Subject Lineage Follow-up (Planned)
+
+Context clarification:
+- `dish_design` (for example `cedar`, `alpine`) is dish/capture context.
+- `genotype` is subject lineage biology (for example `Tg(elavl3:gcamp7f)`).
+- These are separate dimensions and should not be conflated in queries or card metrics.
+
+Key findings (current state):
+1. Subject lineage is already in registry and linked to dataset/recording via:
+   - `recording_subjects`
+   - `recording_subject_overview`
+   - refs: `src/fisheye/registry/db.py` (`recording_subjects` table + `recording_subject_overview` view)
+2. Query surface already supports lineage filters:
+   - `--genotype`, `--dpf`, `--dpf-min`, `--dpf-max`
+   - ref: `src/fisheye/utils/registry_query.py`
+3. Training data card aggregation currently does not emit genotype/DPF aggregates.
+   - ref: `src/fisheye/utils/aggregate_detection_training_data_card.py`
+4. `check_training_registry` currently has no genotype/DPF view/filter.
+   - ref: `src/fisheye/utils/check_training_registry.py`
+
+TODO (next implementation slice):
+- [ ] Add subject-lineage precheck in training data card aggregation.
+  - join manifest dataset IDs against `recording_subject_overview`
+  - emit coverage counts + missing dataset IDs
+  - add `--subject-lineage-policy warn|require` (default: `warn`)
+- [ ] Extend profile/registry projection for subject metrics.
+  - include `genotype` and `dpf_at_acquisition` in profile composition extraction
+  - sync fields into detection profile registry projection/views
+- [ ] Extend training data card payload with subject aggregates.
+  - `subject_coverage`
+  - `genotype_counts`
+  - `dpf_stats`
+  - `dpf_histogram`
+- [ ] Extend plotting utility defaults.
+  - generate genotype bar chart + DPF histogram by default
+  - do not auto-open unless `--view` is requested
+- [ ] Add operator validation runbook.
+  - example: use `registry_query` with separate `--dish-design`, `--genotype`, `--dpf-*` filters
+  - confirm expected lineage coverage before aggregation
+- [ ] Add unit tests.
+  - subject-lineage policy behavior (`warn` vs `require`)
+  - genotype/DPF aggregate correctness
+  - missing-lineage edge cases
+
 ## Execution Evidence (2026-02-24)
 
 Detection profile registry surfaces were validated on production training data
@@ -117,3 +161,5 @@ After training:
 ## Decision for Now
 Detection profile schema, writer/backfill, registry projection/query, sync
 workflow, and training data card aggregation are implemented and validated.
+Subject-lineage aggregation and coverage checks are tracked in the follow-up
+TODO section above.

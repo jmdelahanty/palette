@@ -7,8 +7,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
 from fisheye.utils.check_training_registry import (
+    DETECT_GATE_MAX_INTERPOLATED_RATE,
     KEYPOINT_GATE_MIN_RATE,
     RecordingVocabRow,
+    _detect_quality_exclusion_reason,
     _fetch_exports,
     _load_onnx_rows,
     _load_tensorrt_rows,
@@ -21,6 +23,7 @@ from fisheye.utils.check_training_registry import (
     _run_id_style,
     _sum_manifest_rois,
     _status_with_details,
+    _summarize_detect_quality_rows,
     _summarize_keypoint_quality_rows,
 )
 
@@ -305,6 +308,87 @@ def test_view_outputs_include_nms_summary(tmp_path: Path, capsys) -> None:
     assert "nms: c=0.800 i=0.650 k=1" in out_trt
 
 
+def test_detect_quality_view_outputs_summary_and_details(tmp_path: Path, capsys) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    pass_path = tmp_path / "pass.zarr"
+    exclude_path = tmp_path / "exclude.zarr"
+    pass_path.mkdir(parents=True, exist_ok=True)
+    exclude_path.mkdir(parents=True, exist_ok=True)
+    pass_mtime = int(pass_path.stat().st_mtime_ns)
+    exclude_mtime = int(exclude_path.stat().st_mtime_ns)
+
+    registry.upsert_dataset(
+        "dataset_pass",
+        session_uuid="session_pass",
+        zarr_path=pass_path,
+        recording_id="recording_pass",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_dataset(
+        "dataset_exclude",
+        session_uuid="session_exclude",
+        zarr_path=exclude_path,
+        recording_id="recording_exclude",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_detect_quality(
+        dataset_id="dataset_pass",
+        refined_run="refined_pass",
+        refined_created_utc="2026-02-24T00:00:00+00:00",
+        source_detect_run="detect_pass",
+        detect_method="manual",
+        review_state="approved",
+        review_intended_use="training",
+        review_reviewer=None,
+        review_timestamp_utc="2026-02-24T00:01:00+00:00",
+        review_resolved_group="manual",
+        total_detections=100,
+        real_detections=95,
+        interpolated_detections=5,
+        interpolated_detections_rate=0.05,
+        zarr_mtime_ns=pass_mtime,
+    )
+    registry.upsert_detect_quality(
+        dataset_id="dataset_exclude",
+        refined_run="refined_exclude",
+        refined_created_utc="2026-02-24T00:10:00+00:00",
+        source_detect_run="detect_exclude",
+        detect_method="manual",
+        review_state="pending",
+        review_intended_use="training",
+        review_reviewer=None,
+        review_timestamp_utc="2026-02-24T00:11:00+00:00",
+        review_resolved_group="manual",
+        total_detections=100,
+        real_detections=70,
+        interpolated_detections=30,
+        interpolated_detections_rate=0.30,
+        zarr_mtime_ns=exclude_mtime,
+    )
+    registry.close()
+
+    rc = check_training_registry_main(
+        [
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--view",
+            "detect-quality",
+            "--show-detect-quality",
+            "--no-rich",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Detect Quality" in out
+    assert "passing rows (approved/training, interpolated_rate<=0.25, fresh mtime): 1" in out
+    assert "excluded rows: 1" in out
+    assert "top exclusion reasons: wrong state/use=1" in out
+    assert "dataset_pass" in out
+    assert "dataset_exclude" in out
+
+
 def test_onnx_plugin_details_formats_ops_and_versions() -> None:
     assert (
         _onnx_plugin_details(
@@ -392,6 +476,105 @@ def test_keypoint_exclusion_reason_precedence() -> None:
             }
         )
         == "missing rate"
+    )
+
+
+def test_detect_quality_summary_counts_and_buckets(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "sample.zarr"
+    zarr_path.mkdir(parents=True, exist_ok=True)
+    mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    rows = [
+        {
+            "dataset_id": "a",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns,
+            "review_state": "approved",
+            "review_intended_use": "training",
+            "interpolated_detections_rate": DETECT_GATE_MAX_INTERPOLATED_RATE - 0.01,
+        },
+        {
+            "dataset_id": "b",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns,
+            "review_state": None,
+            "review_intended_use": "training",
+            "interpolated_detections_rate": 0.1,
+        },
+        {
+            "dataset_id": "c",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns,
+            "review_state": "pending",
+            "review_intended_use": "training",
+            "interpolated_detections_rate": 0.1,
+        },
+        {
+            "dataset_id": "d",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns,
+            "review_state": "approved",
+            "review_intended_use": "training",
+            "interpolated_detections_rate": None,
+        },
+        {
+            "dataset_id": "e",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns,
+            "review_state": "approved",
+            "review_intended_use": "training",
+            "interpolated_detections_rate": DETECT_GATE_MAX_INTERPOLATED_RATE + 0.01,
+        },
+        {
+            "dataset_id": "f",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": None,
+            "review_state": "approved",
+            "review_intended_use": "training",
+            "interpolated_detections_rate": 0.1,
+        },
+    ]
+    summary = _summarize_detect_quality_rows(rows)
+    assert summary.total_rows == 6
+    assert summary.passing_rows == 1
+    assert summary.excluded_rows == 5
+    assert summary.exclusion_reasons == {
+        "high interpolation": 1,
+        "missing interpolated rate": 1,
+        "missing review": 1,
+        "stale row: missing zarr_mtime_ns": 1,
+        "wrong state/use": 1,
+    }
+
+
+def test_detect_quality_exclusion_reason_precedence(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "sample_precedence.zarr"
+    zarr_path.mkdir(parents=True, exist_ok=True)
+    mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    assert (
+        _detect_quality_exclusion_reason(
+            {
+                "zarr_path": str(zarr_path),
+                "zarr_mtime_ns": None,
+                "review_state": "pending",
+                "review_intended_use": "training",
+                "interpolated_detections_rate": 0.9,
+            },
+            mtime_cache={},
+        )
+        == "stale row: missing zarr_mtime_ns"
+    )
+    assert (
+        _detect_quality_exclusion_reason(
+            {
+                "zarr_path": str(zarr_path),
+                "zarr_mtime_ns": mtime_ns,
+                "review_state": "approved",
+                "review_intended_use": "training",
+                "interpolated_detections_rate": None,
+            },
+            mtime_cache={},
+        )
+        == "missing interpolated rate"
     )
 
 

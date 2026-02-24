@@ -169,11 +169,16 @@ def _default_set_name(
     else:
         dish_raw = _infer_row_value(rows, "dish_design", fallback="all_dishes", mixed="mixed_dishes")
     canvas_raw = _infer_row_value(rows, "canvas_name", fallback="unknown_canvas", mixed="mixed_canvas")
+    if args.rig_id:
+        rig_raw = args.rig_id
+    else:
+        rig_raw = _infer_row_value(rows, "rig_id", fallback="unknown_rig", mixed="mixed_rigs")
     query_hash = _query_hash(args, model_input=model_input)
     return "_".join(
         [
             _slug_component(dish_raw, fallback="all_dishes"),
             _slug_component(canvas_raw, fallback="unknown_canvas"),
+            _slug_component(rig_raw, fallback="unknown_rig"),
             _slug_component(args.source_type, fallback="source"),
             _slug_component(args.input_format, fallback="input"),
             query_hash,
@@ -294,6 +299,36 @@ def _rate_matches(expected: Optional[float], observed: Optional[float], *, tol: 
     if expected is None or observed is None:
         return False
     return abs(float(expected) - float(observed)) <= tol
+
+
+def _detect_quality_reason_counts(
+    exclusions: Sequence[Mapping[str, Any]],
+) -> list[tuple[str, int]]:
+    reason_counts: dict[str, int] = {}
+    for exclusion in exclusions:
+        reason = _decode_attr(exclusion.get("reason")) or "unknown"
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    return sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))
+
+
+def _format_detect_quality_summary_line(
+    *,
+    passed_count: int,
+    exclusions: Sequence[Mapping[str, Any]],
+    max_reasons: int = 8,
+) -> str:
+    ordered = _detect_quality_reason_counts(exclusions)
+    if not ordered:
+        reason_text = "none"
+    else:
+        shown = ordered[:max_reasons]
+        reason_text = ", ".join(f"{name}={count}" for name, count in shown)
+        if len(ordered) > len(shown):
+            reason_text += f", ... (+{len(ordered) - len(shown)} more)"
+    return (
+        "Detect quality filter summary: "
+        f"passed={int(passed_count)} excluded={len(exclusions)} reasons={reason_text}"
+    )
 
 
 def _resolve_detect_quality_from_zarr(
@@ -659,6 +694,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"  - {exclusion['dataset_id']} [{exclusion['reason']}] {exclusion['zarr_path']}")
             if len(quality_exclusions) > 20:
                 print(f"  ... {len(quality_exclusions) - 20} more exclusion(s) omitted.")
+        print(
+            _format_detect_quality_summary_line(
+                passed_count=len(rows),
+                exclusions=quality_exclusions,
+            )
+        )
 
     registry.close()
 

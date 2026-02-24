@@ -425,6 +425,13 @@ def test_aggregate_training_data_card_invokes_aggregator(tmp_path: Path, monkeyp
             str(tmp_path / "card.json"),
             "--data-card-split",
             "train",
+            "--data-card-no-plots",
+            "--data-card-plot-dir",
+            str(tmp_path / "card_plots"),
+            "--data-card-plot-prefix",
+            "manual_train",
+            "--data-card-plot-heatmap-bin-factor",
+            "3",
         ]
     )
     assert rc == 0
@@ -433,6 +440,66 @@ def test_aggregate_training_data_card_invokes_aggregator(tmp_path: Path, monkeyp
     assert "--registry" in aggregate_cli and str(registry_path) in aggregate_cli
     assert "--output" in aggregate_cli and str(tmp_path / "card.json") in aggregate_cli
     assert "--split" in aggregate_cli and "train" in aggregate_cli
+    assert "--no-plots" in aggregate_cli
+    assert "--plot-dir" in aggregate_cli and str(tmp_path / "card_plots") in aggregate_cli
+    assert "--plot-prefix" in aggregate_cli and "manual_train" in aggregate_cli
+    assert "--plot-heatmap-bin-factor" in aggregate_cli and "3" in aggregate_cli
+
+
+def test_build_dataset_invokes_export_and_aggregator(tmp_path: Path, monkeypatch) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, tmp_path / "dataset_1.zarr")
+
+    out_manifest = tmp_path / "prep" / "detect.manifest.json"
+    calls: dict[str, list[str]] = {}
+
+    def fake_prepare(cli: list[str]) -> None:
+        calls["prepare"] = list(cli)
+        out_manifest.parent.mkdir(parents=True, exist_ok=True)
+        out_manifest.write_text('{"set_id":"detect_smoke_v001","datasets":[{"dataset_id":"dataset_1","zarr_path":"x"}]}', encoding="utf-8")
+
+    def fake_aggregate(cli: list[str]) -> int:
+        calls["aggregate"] = list(cli)
+        return 0
+
+    def fake_export(cli: list[str]) -> int:
+        calls["export"] = list(cli)
+        return 0
+
+    monkeypatch.setattr(pipeline.pdt, "main", fake_prepare)
+    monkeypatch.setattr(pipeline.aggregate_data_card, "main", fake_aggregate)
+    monkeypatch.setattr(pipeline.export_zarr, "main", fake_export)
+
+    rc = pipeline.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--out-manifest",
+            str(out_manifest),
+            "--build-dataset",
+        ]
+    )
+    assert rc == 0
+    assert "--manifest" in calls["aggregate"] and str(out_manifest) in calls["aggregate"]
+    assert "--registry" in calls["aggregate"] and str(registry_path) in calls["aggregate"]
+    assert "--manifest" in calls["export"] and str(out_manifest) in calls["export"]
+    assert "--registry" in calls["export"] and str(registry_path) in calls["export"]
+    assert "--merge" in calls["export"]
+
+
+def test_build_dataset_cannot_be_combined_with_dry_run(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    db = Registry(registry_path)
+    db.close()
+    with pytest.raises(SystemExit, match="--build-dataset cannot be combined with --dry-run"):
+        pipeline.main(
+            [
+                "--registry",
+                str(registry_path),
+                "--build-dataset",
+                "--dry-run",
+            ]
+        )
 
 
 def test_aggregate_training_data_card_cannot_be_combined_with_dry_run(tmp_path: Path) -> None:
@@ -614,8 +681,14 @@ def test_detect_quality_exclusion_reasons_are_concrete(tmp_path: Path, capsys) -
 
     output = capsys.readouterr().out
     assert "Detect quality SQL filter excluded 5 dataset(s):" in output
+    assert "Detect quality filter summary: passed=0 excluded=5 reasons=" in output
+    assert "missing_quality_row=1" in output
     assert "missing_quality_row" in output
+    assert "review_state_mismatch:pending!=approved=1" in output
     assert "review_state_mismatch:pending!=approved" in output
+    assert "review_use_mismatch:full_recording!=training=1" in output
     assert "review_use_mismatch:full_recording!=training" in output
+    assert "missing_interpolated_detections_rate=1" in output
     assert "missing_interpolated_detections_rate" in output
+    assert "interpolated_rate_above_threshold:0.800000>0.300000=1" in output
     assert "interpolated_rate_above_threshold:0.800000>0.300000" in output

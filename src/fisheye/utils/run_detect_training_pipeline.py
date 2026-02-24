@@ -219,6 +219,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="After preflight manifest generation, export one merged training Zarr.",
     )
     parser.add_argument(
+        "--build-dataset",
+        action="store_true",
+        help="Convenience flag that enables both --export-merged and --aggregate-training-data-card.",
+    )
+    parser.add_argument(
         "--merge-out-zarr",
         type=Path,
         help="Output merged .zarr path (passed to export_detect_training_zarr --out-zarr).",
@@ -300,8 +305,34 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Allow manifest/profile detection type mismatch during data-card aggregation.",
     )
+    parser.add_argument(
+        "--data-card-no-plots",
+        action="store_true",
+        help="Skip plot PNG generation when aggregating detection training data card.",
+    )
+    parser.add_argument(
+        "--data-card-plot-dir",
+        type=Path,
+        help="Optional output directory for detection training data-card plots.",
+    )
+    parser.add_argument(
+        "--data-card-plot-prefix",
+        type=str,
+        help="Optional filename prefix for detection training data-card plots.",
+    )
+    parser.add_argument(
+        "--data-card-plot-heatmap-bin-factor",
+        type=int,
+        default=2,
+        help="Coarsening factor for center heatmap bins in data-card plots (default: 2).",
+    )
 
     args = parser.parse_args(argv)
+    if args.build_dataset:
+        args.export_merged = True
+        args.aggregate_training_data_card = True
+    if args.build_dataset and args.dry_run:
+        raise SystemExit("--build-dataset cannot be combined with --dry-run.")
     if args.export_merged and args.dry_run:
         raise SystemExit("--export-merged cannot be combined with --dry-run (no manifest is written).")
     if args.train and args.dry_run:
@@ -468,6 +499,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"  - {exclusion['dataset_id']} [{exclusion['reason']}] {exclusion['zarr_path']}")
             if len(quality_exclusions) > 20:
                 print(f"  ... {len(quality_exclusions) - 20} more exclusion(s) omitted.")
+        print(
+            prepare_from_registry._format_detect_quality_summary_line(
+                passed_count=len(rows),
+                exclusions=quality_exclusions,
+            )
+        )
 
     if not rows:
         raise SystemExit("No datasets remain after detect quality filtering.")
@@ -605,6 +642,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             card_cli.append("--allow-mtime-mismatch")
         if args.data_card_allow_detection_type_mismatch:
             card_cli.append("--allow-detection-type-mismatch")
+        if args.data_card_no_plots:
+            card_cli.append("--no-plots")
+        _add_arg(card_cli, "--plot-dir", args.data_card_plot_dir)
+        _add_arg(card_cli, "--plot-prefix", args.data_card_plot_prefix)
+        _add_arg(card_cli, "--plot-heatmap-bin-factor", args.data_card_plot_heatmap_bin_factor)
         card_rc = aggregate_data_card.main(card_cli)
         if card_rc != 0:
             return int(card_rc)

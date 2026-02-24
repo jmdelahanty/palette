@@ -235,21 +235,26 @@ scripts/py -m fisheye.utils.run_detect_training_pipeline \
   --model-input gray \
   --out-config /tmp/detect_build.yaml \
   --out-manifest /tmp/detect_build.manifest.json \
-  --export-merged \
+  --build-dataset \
   --merge-out-zarr /nvme1/datasets/detect/detect_build_merged.zarr \
   --merge-out-dir /nvme1/datasets/detect/detect_build \
   --merge-split 0.8/0.2 \
   --merge-seed 42 \
-  --merge-overwrite \
-  --aggregate-training-data-card
+  --merge-overwrite
 ```
 
 Notes:
+- `--build-dataset` is a convenience alias for `--export-merged` + `--aggregate-training-data-card`.
 - `--export-merged` requires `--out-manifest` (the export step consumes that manifest).
 - `--export-merged` cannot be combined with `--dry-run` because preflight dry-run does not write files.
 - `fisheye.utils.prepare_detect_training_from_registry` is prepare-only and no longer launches merge/train.
 - `--aggregate-training-data-card` uses the preflight manifest dataset list and
   `detection_data_profile_latest` rows to write `<set_id>.data_card.json`.
+- Data-card aggregation now also writes plot PNGs by default to
+  `<set_id>.data_card.plots/` (histograms + center heatmap). Use
+  `--data-card-no-plots` in pipeline mode or `--no-plots` in standalone mode to disable.
+- Adjust center-heatmap coarsening with `--data-card-plot-heatmap-bin-factor` (pipeline)
+  or `--plot-heatmap-bin-factor` (standalone aggregation/plot tool).
 
 Standalone data-card aggregation:
 
@@ -257,6 +262,33 @@ Standalone data-card aggregation:
 scripts/py -m fisheye.utils.aggregate_detection_training_data_card \
   --manifest /nvme1/training/datasets/<set_id>/<set_id>.manifest.json \
   --registry /nvme1/palette_registry.sqlite
+```
+
+Standalone plot rendering from an existing data-card JSON:
+
+```bash
+scripts/py -m fisheye.utils.plot_detection_training_data_card \
+  --card /nvme1/training/datasets/<set_id>/<set_id>.data_card.json
+```
+
+Default center-heatmap plotting uses coarser bins (`--heatmap-bin-factor 2`) for readability.
+Use `--heatmap-bin-factor 1` for full-resolution bins.
+
+Open existing plots (or generate missing ones, then open):
+
+```bash
+scripts/py -m fisheye.utils.plot_detection_training_data_card \
+  --card /nvme1/training/datasets/<set_id>/<set_id>.data_card.json \
+  --view
+```
+
+Regenerate all plot files and then open them:
+
+```bash
+scripts/py -m fisheye.utils.plot_detection_training_data_card \
+  --card /nvme1/training/datasets/<set_id>/<set_id>.data_card.json \
+  --view \
+  --force
 ```
 
 ## One-Command Build (Pose: Registry -> Preflight -> Optional Train)
