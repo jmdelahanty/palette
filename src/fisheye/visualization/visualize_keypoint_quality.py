@@ -35,6 +35,36 @@ def _safe_mapping(value: object) -> Dict[str, object]:
     return {}
 
 
+def _normalize_summary_statistics(value: object) -> Dict[str, object]:
+    """Normalize legacy/nested summary payloads to a flat dict.
+
+    Some refined keypoint runs persist summary_statistics as:
+      {"refine": {...}, "postprocess": {...}}
+    while newer runs may store a flat dict directly.
+    """
+    payload = _safe_mapping(value)
+    if not payload:
+        return {}
+
+    refine = _safe_mapping(payload.get("refine"))
+    postprocess = _safe_mapping(payload.get("postprocess"))
+    if not refine and not postprocess:
+        return payload
+
+    merged: Dict[str, object] = {}
+    merged.update(refine)
+    merged.update(postprocess)
+    return merged
+
+
+def _review_timestamp(review: Mapping[str, object]) -> Optional[str]:
+    for key in ("timestamp_utc", "timestamp", "reviewed_at_utc", "reviewed_at", "updated_utc"):
+        text = _decode_text(review.get(key))
+        if text:
+            return text
+    return None
+
+
 def _safe_float(value: object, default: float = 0.0) -> float:
     if value is None:
         return float(default)
@@ -164,7 +194,7 @@ def load_keypoint_quality_report(
         raise ValueError("No refined keypoint run available.")
 
     run_group = parent_group[selected_run]
-    summary = _safe_mapping(run_group.attrs.get("summary_statistics"))
+    summary = _normalize_summary_statistics(run_group.attrs.get("summary_statistics"))
     params = _safe_mapping(run_group.attrs.get("parameters"))
     review = _safe_mapping(run_group.attrs.get("keypoint_review_status"))
 
@@ -219,7 +249,7 @@ def create_keypoint_quality_visualization(quality_data: Mapping[str, object]) ->
     fig.suptitle("Keypoint Refinement Quality Overview", fontsize=16, fontweight="bold")
     gs = fig.add_gridspec(2, 3, hspace=0.32, wspace=0.26)
 
-    summary = _safe_mapping(quality_data.get("summary_statistics"))
+    summary = _normalize_summary_statistics(quality_data.get("summary_statistics"))
     params = _safe_mapping(quality_data.get("parameters"))
     review = _safe_mapping(quality_data.get("review_status"))
     total_rows = _safe_int(quality_data.get("total_rows"))
@@ -241,7 +271,7 @@ def create_keypoint_quality_visualization(quality_data: Mapping[str, object]) ->
         f"Geometry issues: {_safe_int(summary.get('geometry_issues'))}\n"
         f"Low confidence: {_safe_int(summary.get('low_confidence'))}\n"
         f"Confidence missing: {_safe_int(summary.get('confidence_missing'))}\n"
-        f"Flips corrected: {_safe_int(summary.get('flips_corrected'))}\n\n"
+        f"Flips corrected: {_safe_int(summary.get('flips_corrected', summary.get('flip_corrected')))}\n\n"
         f"Review: {_decode_text(review.get('state')) or '—'}/"
         f"{_decode_text(review.get('intended_use')) or '—'}"
     )
@@ -345,7 +375,7 @@ def create_keypoint_refinement_pipeline_visualization(quality_data: Mapping[str,
     fig.suptitle("Keypoint Refinement Pipeline Overview", fontsize=16, fontweight="bold")
     gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.25], wspace=0.24)
 
-    summary = _safe_mapping(quality_data.get("summary_statistics"))
+    summary = _normalize_summary_statistics(quality_data.get("summary_statistics"))
     review = _safe_mapping(quality_data.get("review_status"))
     source_counts = dict(quality_data.get("detection_source_counts") or {})
 
@@ -360,7 +390,7 @@ def create_keypoint_refinement_pipeline_visualization(quality_data: Mapping[str,
         f"Review state: {_decode_text(review.get('state')) or '—'}\n"
         f"Review intended_use: {_decode_text(review.get('intended_use')) or '—'}\n"
         f"Review method: {_decode_text(review.get('method')) or '—'}\n"
-        f"Review timestamp: {_decode_text(review.get('timestamp_utc')) or '—'}\n"
+        f"Review timestamp: {_review_timestamp(review) or '—'}\n"
     )
     ax_meta.text(
         0.02,
