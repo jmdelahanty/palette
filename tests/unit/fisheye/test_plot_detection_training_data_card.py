@@ -30,6 +30,14 @@ def _sample_card_payload() -> dict[str, object]:
                 "density": [0.1, 0.2, 0.3, 0.4],
             }
         },
+        "genotype_counts": {
+            "Tg(elavl3:gcamp7f)": 2,
+            "wt": 1,
+        },
+        "dpf_histogram": {
+            "bin_edges": [5.0, 6.0, 7.0, 8.0],
+            "counts": [1, 1, 1],
+        },
     }
 
 
@@ -52,6 +60,8 @@ def test_plot_detection_training_data_card_writes_expected_pngs(tmp_path: Path) 
     assert (output_dir / "detect_sample_v001.area_norm.png").exists()
     assert (output_dir / "detect_sample_v001.aspect_ratio.png").exists()
     assert (output_dir / "detect_sample_v001.center_heatmap.png").exists()
+    assert (output_dir / "detect_sample_v001.genotype_counts.png").exists()
+    assert (output_dir / "detect_sample_v001.dpf_histogram.png").exists()
 
 
 def test_plot_detection_training_data_card_dry_run_does_not_write(tmp_path: Path) -> None:
@@ -125,7 +135,8 @@ def test_plot_detection_training_data_card_view_generates_when_missing(tmp_path:
 
     rc = mod.main(["--card", str(card_path), "--output-dir", str(output_dir), "--view"])
     assert rc == 0
-    assert len(opened) == 5
+    expected = mod._expected_plot_paths(card_payload=payload, output_dir=output_dir, prefix="detect_sample_v001")
+    assert sorted(opened) == sorted(expected)
     for path in opened:
         assert path.exists()
 
@@ -183,6 +194,32 @@ def test_plot_detection_training_data_card_rejects_nonpositive_heatmap_bin_facto
 
     with pytest.raises(SystemExit):
         mod.main(["--card", str(card_path), "--heatmap-bin-factor", "0"])
+
+
+def test_plot_detection_training_data_card_skips_empty_subject_aggregates(tmp_path: Path) -> None:
+    card_path = tmp_path / "detect_sample.data_card.json"
+    output_dir = tmp_path / "plots"
+    payload = _sample_card_payload()
+    payload["genotype_counts"] = {}
+    payload["dpf_histogram"] = {}
+    card_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    rc = mod.main(
+        [
+            "--card",
+            str(card_path),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+    assert rc == 0
+    assert (output_dir / "detect_sample_v001.w_norm.png").exists()
+    assert (output_dir / "detect_sample_v001.h_norm.png").exists()
+    assert (output_dir / "detect_sample_v001.area_norm.png").exists()
+    assert (output_dir / "detect_sample_v001.aspect_ratio.png").exists()
+    assert (output_dir / "detect_sample_v001.center_heatmap.png").exists()
+    assert not (output_dir / "detect_sample_v001.genotype_counts.png").exists()
+    assert not (output_dir / "detect_sample_v001.dpf_histogram.png").exists()
 
 
 def test_histogram_focus_xlim_zooms_to_occupied_bins() -> None:

@@ -13,6 +13,8 @@ import numpy as np
 
 
 HISTOGRAM_NAMES = ("w_norm", "h_norm", "area_norm", "aspect_ratio")
+GENOTYPE_COUNTS_PLOT_NAME = "genotype_counts"
+DPF_HISTOGRAM_PLOT_NAME = "dpf_histogram"
 
 try:  # pragma: no cover - import fallback is environment-specific
     import matplotlib
@@ -34,6 +36,15 @@ def _normalize_text(value: Any) -> Optional[str]:
     else:
         text = str(value).strip()
     return text or None
+
+
+def _as_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
 
 
 def _default_plot_dir(card_path: Path) -> Path:
@@ -80,6 +91,60 @@ def _plot_histogram(
     fig.tight_layout()
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
+
+
+def _parse_positive_count_mapping(payload: Mapping[str, Any]) -> list[tuple[str, float]]:
+    parsed: list[tuple[str, float]] = []
+    for raw_label, raw_count in payload.items():
+        label = _normalize_text(raw_label)
+        count = _as_float(raw_count)
+        if label is None or count is None or not np.isfinite(count) or count <= 0:
+            continue
+        parsed.append((label, float(count)))
+    parsed.sort(key=lambda item: (-item[1], item[0].lower()))
+    return parsed
+
+
+def _plot_genotype_counts(
+    *,
+    genotype_counts: Mapping[str, Any],
+    output_path: Path,
+) -> bool:
+    assert plt is not None
+    parsed = _parse_positive_count_mapping(genotype_counts)
+    if not parsed:
+        return False
+
+    labels = [item[0] for item in parsed]
+    counts = np.asarray([item[1] for item in parsed], dtype=np.float64)
+    y_pos = np.arange(len(labels))
+
+    fig_height = min(11.0, max(3.5, 0.45 * len(labels) + 1.6))
+    fig, ax = plt.subplots(figsize=(9.5, fig_height))
+    ax.barh(y_pos, counts, color="#4A7C59", edgecolor="#264A38", linewidth=0.8)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.set_title("Genotype Distribution")
+    ax.set_xlabel("Dataset Count")
+    ax.set_ylabel("Genotype")
+    ax.grid(axis="x", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+    return True
+
+
+def _subject_histogram_has_data(hist_payload: Any) -> bool:
+    if not isinstance(hist_payload, Mapping):
+        return False
+    try:
+        _, counts = _parse_histogram(hist_payload)
+    except Exception:
+        return False
+    if counts.size == 0:
+        return False
+    return bool(np.any(counts > 0))
 
 
 def _histogram_focus_xlim(*, edges: np.ndarray, counts: np.ndarray) -> Optional[tuple[float, float]]:
@@ -170,6 +235,14 @@ def _expected_plot_paths(*, card_payload: Mapping[str, Any], output_dir: Path, p
         center_heatmap = spatial.get("center_heatmap")
         if isinstance(center_heatmap, Mapping):
             expected.append(output_dir / f"{prefix}.center_heatmap.png")
+
+    genotype_counts = card_payload.get("genotype_counts")
+    if isinstance(genotype_counts, Mapping) and _parse_positive_count_mapping(genotype_counts):
+        expected.append(output_dir / f"{prefix}.{GENOTYPE_COUNTS_PLOT_NAME}.png")
+
+    dpf_histogram = card_payload.get("dpf_histogram")
+    if _subject_histogram_has_data(dpf_histogram):
+        expected.append(output_dir / f"{prefix}.{DPF_HISTOGRAM_PLOT_NAME}.png")
     return expected
 
 
@@ -224,6 +297,24 @@ def generate_detection_training_data_card_plots(
                 heatmap_bin_factor=int(heatmap_bin_factor),
             )
             generated.append(output_path)
+
+    genotype_counts = card_payload.get("genotype_counts")
+    if isinstance(genotype_counts, Mapping):
+        output_path = output_dir / f"{prefix}.{GENOTYPE_COUNTS_PLOT_NAME}.png"
+        if _plot_genotype_counts(genotype_counts=genotype_counts, output_path=output_path):
+            generated.append(output_path)
+
+    dpf_histogram = card_payload.get("dpf_histogram")
+    if _subject_histogram_has_data(dpf_histogram):
+        assert isinstance(dpf_histogram, Mapping)
+        output_path = output_dir / f"{prefix}.{DPF_HISTOGRAM_PLOT_NAME}.png"
+        _plot_histogram(
+            hist=dpf_histogram,
+            title="DPF Distribution",
+            xlabel="DPF at acquisition",
+            output_path=output_path,
+        )
+        generated.append(output_path)
 
     return generated
 

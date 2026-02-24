@@ -284,6 +284,58 @@ Notes:
 - If you also want lineage fields embedded in each profile run payload, rerun:
   `backfill_detection_profiles --apply`, then rerun sync.
 
+### Subject-lineage aggregate validation (pre/post aggregation)
+
+Use this when preparing a training data card aggregation run.
+
+Set shared paths:
+
+```bash
+REGISTRY=/nvme1/registry.sqlite
+MANIFEST=/nvme1/training/datasets/<set_id>/<set_id>.manifest.json
+```
+
+Pre-aggregation checks:
+
+1) Keep dish/capture and lineage checks separate:
+
+```bash
+scripts/py -m fisheye.utils.registry_query --registry "$REGISTRY" --zarr-use training --dish-design cedar --json | jq 'length'
+scripts/py -m fisheye.utils.registry_query --registry "$REGISTRY" --zarr-use training --genotype 'Tg(elavl3:gcamp7f)' --json | jq 'length'
+scripts/py -m fisheye.utils.registry_query --registry "$REGISTRY" --zarr-use training --dpf-min 6 --dpf-max 8 --json | jq 'length'
+```
+
+2) Gate manifest lineage coverage before aggregation:
+
+```bash
+scripts/py -m fisheye.utils.aggregate_detection_training_data_card \
+  --manifest "$MANIFEST" \
+  --registry "$REGISTRY" \
+  --subject-lineage-policy require \
+  --dry-run
+```
+
+Expected pre-aggregation output:
+- `Subject lineage coverage: <n>/<n> datasets`
+- no `Subject lineage missing dataset_id(s): ...` line
+
+Expected checks before/after aggregation:
+- before apply: dry-run with `--subject-lineage-policy require` succeeds.
+- after apply: `selection.dataset_count` in the card matches manifest dataset count.
+- after subject aggregates are enabled in card payload:
+  - `subject_coverage` manifest dataset count equals `selection.dataset_count`
+  - `subject_coverage` lineage-covered dataset count equals manifest dataset count
+  - `sum(genotype_counts.*)` equals lineage-covered dataset count
+  - `dpf_stats.count` equals lineage-covered dataset count
+  - `sum(dpf_histogram.counts) == dpf_stats.count`
+
+Current state (2026-02-24):
+- aggregation enforces lineage precheck (`warn|require`).
+- training card payload includes `subject_coverage`, `genotype_counts`,
+  `dpf_stats`, and `dpf_histogram`.
+- data-card plotting includes `genotype_counts` and `dpf_histogram` outputs by
+  default (still only opens with `--view`).
+
 ## Notes on sampled training imports
 
 If `import_mode=sampled` (large frame gaps):

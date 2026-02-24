@@ -84,7 +84,7 @@ Canonical schema contract (defined):
   - optional pipeline integration:
     `scripts/py -m fisheye.utils.run_detect_training_pipeline ... --aggregate-training-data-card`
 
-## Subject Lineage Follow-up (In Progress)
+## Subject Lineage Follow-up (Completed 2026-02-24)
 
 Context clarification:
 - `dish_design` (for example `cedar`, `alpine`) is dish/capture context.
@@ -121,18 +121,24 @@ TODO (next implementation slice):
     `missing_profile=1` (merged training dataset without analysis group).
   - optional (only if you want lineage embedded in profile run JSON payloads):
     rerun `backfill_detection_profiles`, then rerun sync.
-- [ ] Extend training data card payload with subject aggregates.
+- [x] Extend training data card payload with subject aggregates.
   - `subject_coverage`
   - `genotype_counts`
   - `dpf_stats`
   - `dpf_histogram`
-- [ ] Extend plotting utility defaults.
+- [x] Extend plotting utility defaults.
   - generate genotype bar chart + DPF histogram by default
   - do not auto-open unless `--view` is requested
-- [ ] Add operator validation runbook.
-  - example: use `registry_query` with separate `--dish-design`, `--genotype`, `--dpf-*` filters
-  - confirm expected lineage coverage before aggregation
-- [ ] Add unit tests.
+- [x] Add operator validation runbook.
+  - refs:
+    - `docs/detection_refinement_workflow.md`
+      - `Subject-lineage query note (dish vs genotype vs DPF)`
+      - `Subject-lineage aggregate validation (pre/post aggregation)`
+  - includes:
+    - separate `--dish-design` vs `--genotype` / `--dpf-*` pre-aggregation checks
+    - expected precheck/output behavior with `--subject-lineage-policy require`
+    - before/after aggregation validation checklist
+- [x] Add unit tests.
   - subject-lineage policy behavior (`warn` vs `require`)
   - genotype/DPF aggregate correctness
   - missing-lineage edge cases
@@ -169,7 +175,5 @@ After training:
 
 ## Decision for Now
 Detection profile schema, writer/backfill, registry projection/query, sync
-workflow, and training data card aggregation are implemented and validated.
-Subject-lineage precheck and lineage projection columns are implemented.
-Subject-lineage aggregate metrics in the training data card remain in the
-follow-up TODO section above.
+workflow, training data card aggregation, and subject-lineage aggregate payload
+and plotting are implemented and validated for this slice.

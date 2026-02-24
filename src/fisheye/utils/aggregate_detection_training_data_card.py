@@ -30,6 +30,14 @@ class DatasetRef:
     detection_source_type: Optional[str]
 
 
+@dataclass(frozen=True)
+class SubjectLineageCoverage:
+    manifest_dataset_count: int
+    lineage_covered_dataset_count: Optional[int]
+    missing_lineage_dataset_ids: tuple[str, ...]
+    coverage_unavailable_reason: Optional[str]
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -232,12 +240,13 @@ def _evaluate_subject_lineage_coverage(
     *,
     dataset_ids: Sequence[str],
     subject_lineage_policy: str,
-) -> None:
+) -> SubjectLineageCoverage:
     policy = _normalize_text(subject_lineage_policy) or "warn"
     if policy not in {"warn", "require"}:
         raise ValueError(f"Unsupported subject lineage policy: {subject_lineage_policy}")
 
     unique_dataset_ids = list(dict.fromkeys(dataset_ids))
+    total_count = len(unique_dataset_ids)
     try:
         covered_dataset_ids = _query_subject_lineage_dataset_ids(
             registry,
@@ -248,19 +257,24 @@ def _evaluate_subject_lineage_coverage(
             raise ValueError(
                 f"Subject lineage coverage unavailable (recording_subject_overview query failed): {exc}"
             ) from exc
+        reason = f"recording_subject_overview query failed: {exc}"
         print(
             "Subject lineage coverage: unavailable "
-            f"(recording_subject_overview query failed: {exc})"
+            f"({reason})"
         )
-        return
+        return SubjectLineageCoverage(
+            manifest_dataset_count=int(total_count),
+            lineage_covered_dataset_count=None,
+            missing_lineage_dataset_ids=tuple(sorted(unique_dataset_ids)),
+            coverage_unavailable_reason=reason,
+        )
 
     missing_dataset_ids = sorted(
         dataset_id
         for dataset_id in unique_dataset_ids
         if dataset_id not in covered_dataset_ids
     )
-    covered_count = len(unique_dataset_ids) - len(missing_dataset_ids)
-    total_count = len(unique_dataset_ids)
+    covered_count = total_count - len(missing_dataset_ids)
     print(f"Subject lineage coverage: {covered_count}/{total_count} datasets")
     if missing_dataset_ids:
         print(
@@ -272,6 +286,59 @@ def _evaluate_subject_lineage_coverage(
             "Missing subject lineage rows in recording_subject_overview for dataset_id(s): "
             + ", ".join(missing_dataset_ids)
         )
+    return SubjectLineageCoverage(
+        manifest_dataset_count=int(total_count),
+        lineage_covered_dataset_count=int(covered_count),
+        missing_lineage_dataset_ids=tuple(missing_dataset_ids),
+        coverage_unavailable_reason=None,
+    )
+
+
+def _build_subject_coverage_payload(coverage: SubjectLineageCoverage) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "manifest_dataset_count": int(coverage.manifest_dataset_count),
+        "lineage_covered_dataset_count": (
+            int(coverage.lineage_covered_dataset_count)
+            if coverage.lineage_covered_dataset_count is not None
+            else None
+        ),
+        "missing_lineage_dataset_ids": list(coverage.missing_lineage_dataset_ids),
+    }
+    if coverage.coverage_unavailable_reason:
+        payload["coverage_unavailable_reason"] = str(coverage.coverage_unavailable_reason)
+    return payload
+
+
+def _build_genotype_counts(profile_rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for row in profile_rows:
+        genotype = _normalize_text(row.get("genotype"))
+        if genotype is not None:
+            counter[genotype] += 1
+    return {key: int(counter[key]) for key in sorted(counter)}
+
+
+def _build_dpf_histogram(
+    dpf_values: Sequence[Optional[float]],
+    *,
+    source_dataset_count: int,
+) -> Optional[dict[str, Any]]:
+    arr = np.asarray([float(v) for v in dpf_values if v is not None], dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    low = int(np.floor(float(np.min(arr))))
+    high = int(np.ceil(float(np.max(arr))))
+    if high < low:
+        return None
+    edges = np.arange(low - 0.5, high + 1.5, 1.0, dtype=np.float64)
+    counts, _ = np.histogram(arr, bins=edges)
+    return {
+        "bin_edges": [float(x) for x in edges.tolist()],
+        "counts": [int(x) for x in counts.astype(np.int64).tolist()],
+        "source_dataset_count": int(arr.size),
+        "skipped_missing_values": int(max(0, int(source_dataset_count) - int(arr.size))),
+    }
 
 
 def _aggregate_histograms(profile_summaries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -407,6 +474,7 @@ def _build_card(
     dataset_refs: Sequence[DatasetRef],
     profile_rows: Sequence[Mapping[str, Any]],
     profile_summaries: Sequence[Mapping[str, Any]],
+    subject_lineage_coverage: SubjectLineageCoverage,
     split: str,
 ) -> dict[str, Any]:
     dataset_count = len(dataset_refs)
@@ -416,6 +484,7 @@ def _build_card(
     coverage_percent_values = [_as_float(row.get("coverage_percent")) for row in profile_rows]
     dpf_p50_values = [_as_float(row.get("detections_per_frame_p50")) for row in profile_rows]
     dpf_p90_values = [_as_float(row.get("detections_per_frame_p90")) for row in profile_rows]
+    lineage_dpf_values = [_as_float(row.get("dpf_at_acquisition")) for row in profile_rows]
 
     frames_total_sum = int(sum(v for v in frames_total_values if v is not None))
     frames_with_sum = int(sum(v for v in frames_with_values if v is not None))
@@ -478,6 +547,13 @@ def _build_card(
         },
         "histograms_aggregate": _aggregate_histograms(profile_summaries),
         "composition_counts": _build_composition_counts(profile_rows),
+        "subject_coverage": _build_subject_coverage_payload(subject_lineage_coverage),
+        "genotype_counts": _build_genotype_counts(profile_rows),
+        "dpf_stats": _numeric_stats(lineage_dpf_values),
+        "dpf_histogram": _build_dpf_histogram(
+            lineage_dpf_values,
+            source_dataset_count=len(profile_rows),
+        ),
         "train_val_parity": None,
         "profile_run_refs": [
             {
@@ -501,7 +577,7 @@ def _build_detection_training_data_card(
 ) -> dict[str, Any]:
     refs = _manifest_dataset_refs(registry, manifest)
     dataset_ids = [item.dataset_id for item in refs]
-    _evaluate_subject_lineage_coverage(
+    subject_lineage_coverage = _evaluate_subject_lineage_coverage(
         registry,
         dataset_ids=dataset_ids,
         subject_lineage_policy=subject_lineage_policy,
@@ -561,6 +637,7 @@ def _build_detection_training_data_card(
         dataset_refs=refs,
         profile_rows=profile_rows,
         profile_summaries=profile_summaries,
+        subject_lineage_coverage=subject_lineage_coverage,
         split=split,
     )
 

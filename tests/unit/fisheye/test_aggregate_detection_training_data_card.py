@@ -109,6 +109,8 @@ def _upsert_profile(
     coverage_percent: float = 95.0,
     camera_id: str = "cam_a",
     heatmap_density: list[float] | None = None,
+    genotype: str | None = None,
+    dpf_at_acquisition: int | None = None,
 ) -> None:
     if heatmap_density is None:
         heatmap_density = [0.1, 0.2, 0.3, 0.4]
@@ -146,6 +148,8 @@ def _upsert_profile(
         dish_design="cedar",
         canvas_name="shadow",
         protocol_name="DefaultScreen",
+        genotype=genotype,
+        dpf_at_acquisition=dpf_at_acquisition,
         profile_json=_profile_json(camera_id=camera_id, heatmap_density=heatmap_density),
     )
 
@@ -174,7 +178,16 @@ def test_aggregate_detection_training_data_card_writes_expected_payload(
     db = Registry(registry_path)
     _seed_dataset(db, dataset_id="dataset_a", recording_id="rec_a", zarr_path=zarr_a)
     _seed_dataset(db, dataset_id="dataset_b", recording_id="rec_b", zarr_path=zarr_b)
-    _upsert_profile(db, dataset_id="dataset_a", profile_run="profile_a", recording_id="rec_a", zarr_path=zarr_a, camera_id="cam_a")
+    _upsert_profile(
+        db,
+        dataset_id="dataset_a",
+        profile_run="profile_a",
+        recording_id="rec_a",
+        zarr_path=zarr_a,
+        camera_id="cam_a",
+        genotype="Tg(line_a)",
+        dpf_at_acquisition=7,
+    )
     _upsert_profile(
         db,
         dataset_id="dataset_b",
@@ -187,7 +200,11 @@ def test_aggregate_detection_training_data_card_writes_expected_payload(
         frames_with_detections=110,
         coverage_percent=100.0,
         heatmap_density=[0.4, 0.3, 0.2, 0.1],
+        genotype="Tg(line_b)",
+        dpf_at_acquisition=8,
     )
+    _seed_subject_lineage(db, dataset_id="dataset_a", recording_id="rec_a", subject_id="subject_a")
+    _seed_subject_lineage(db, dataset_id="dataset_b", recording_id="rec_b", subject_id="subject_b")
     db.close()
 
     _write_manifest(
@@ -244,6 +261,20 @@ def test_aggregate_detection_training_data_card_writes_expected_payload(
     assert payload["coverage"]["frames_with_detections"] == 205
     assert payload["counts"]["detections_total"] == 220
     assert payload["composition_counts"]["camera_id"] == {"cam_a": 1, "cam_b": 1}
+    assert payload["subject_coverage"] == {
+        "manifest_dataset_count": 2,
+        "lineage_covered_dataset_count": 2,
+        "missing_lineage_dataset_ids": [],
+    }
+    assert payload["genotype_counts"] == {"Tg(line_a)": 1, "Tg(line_b)": 1}
+    assert payload["dpf_stats"]["count"] == 2
+    assert payload["dpf_stats"]["min"] == 7.0
+    assert payload["dpf_stats"]["max"] == 8.0
+    assert payload["dpf_stats"]["mean"] == 7.5
+    assert payload["dpf_histogram"]["bin_edges"] == [6.5, 7.5, 8.5]
+    assert payload["dpf_histogram"]["counts"] == [1, 1]
+    assert payload["dpf_histogram"]["source_dataset_count"] == 2
+    assert payload["dpf_histogram"]["skipped_missing_values"] == 0
     assert len(payload["profile_run_refs"]) == 2
     assert payload["histograms_aggregate"]["w_norm"]["counts"] == [20, 180]
     center = payload["spatial_aggregate"]["center_heatmap"]
@@ -400,6 +431,15 @@ def test_aggregate_detection_training_data_card_no_plots_flag_disables_plot_gene
     )
     assert rc == 0
     assert output_path.exists()
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["subject_coverage"] == {
+        "manifest_dataset_count": 1,
+        "lineage_covered_dataset_count": 0,
+        "missing_lineage_dataset_ids": ["dataset_a"],
+    }
+    assert payload["genotype_counts"] == {}
+    assert payload["dpf_stats"] is None
+    assert payload["dpf_histogram"] is None
     assert called["plots"] is False
     assert not (tmp_path / "detect.data_card.plots").exists()
 
@@ -473,7 +513,15 @@ def test_aggregate_detection_training_data_card_subject_lineage_warn_policy(
     db = Registry(registry_path)
     _seed_dataset(db, dataset_id="dataset_a", recording_id="rec_a", zarr_path=zarr_a)
     _seed_dataset(db, dataset_id="dataset_b", recording_id="rec_b", zarr_path=zarr_b)
-    _upsert_profile(db, dataset_id="dataset_a", profile_run="profile_a", recording_id="rec_a", zarr_path=zarr_a)
+    _upsert_profile(
+        db,
+        dataset_id="dataset_a",
+        profile_run="profile_a",
+        recording_id="rec_a",
+        zarr_path=zarr_a,
+        genotype="Tg(line_warn)",
+        dpf_at_acquisition=7,
+    )
     _upsert_profile(db, dataset_id="dataset_b", profile_run="profile_b", recording_id="rec_b", zarr_path=zarr_b)
     _seed_subject_lineage(db, dataset_id="dataset_a", recording_id="rec_a", subject_id="subject_a")
     db.close()
@@ -509,6 +557,20 @@ def test_aggregate_detection_training_data_card_subject_lineage_warn_policy(
     )
     assert rc == 0
     assert output_path.exists()
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["subject_coverage"] == {
+        "manifest_dataset_count": 2,
+        "lineage_covered_dataset_count": 1,
+        "missing_lineage_dataset_ids": ["dataset_b"],
+    }
+    assert payload["genotype_counts"] == {"Tg(line_warn)": 1}
+    assert payload["dpf_stats"]["count"] == 1
+    assert payload["dpf_stats"]["min"] == 7.0
+    assert payload["dpf_stats"]["max"] == 7.0
+    assert payload["dpf_histogram"]["bin_edges"] == [6.5, 7.5]
+    assert payload["dpf_histogram"]["counts"] == [1]
+    assert payload["dpf_histogram"]["source_dataset_count"] == 1
+    assert payload["dpf_histogram"]["skipped_missing_values"] == 1
     stdout = capsys.readouterr().out
     assert "Subject lineage coverage: 1/2 datasets" in stdout
     assert "Subject lineage missing dataset_id(s): dataset_b" in stdout
