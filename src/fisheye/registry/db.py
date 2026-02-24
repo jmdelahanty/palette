@@ -859,6 +859,159 @@ def _extract_keypoint_performance_rows(
     return rows
 
 
+def _extract_stat_value(metric_payload: Mapping[str, Any], key: str) -> Optional[float]:
+    if not isinstance(metric_payload, Mapping):
+        return None
+    stats = metric_payload.get("stats")
+    if isinstance(stats, Mapping):
+        return _as_float(stats.get(key))
+    return _as_float(metric_payload.get(key))
+
+
+def _normalize_kpt_shape_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        try:
+            return _canonical_json_text([int(v) for v in value])
+        except Exception:
+            try:
+                return _canonical_json_text(list(value))
+            except Exception:
+                return None
+    return _decode_attr(value)
+
+
+def _extract_keypoint_profile_rows(
+    root: zarr.Group,
+    *,
+    zarr_path: Path,
+    dataset_id: str,
+    recording_id: Optional[str],
+    zarr_use: Optional[str],
+    genotype: Optional[str],
+    dpf_at_acquisition: Optional[int],
+) -> List[Dict[str, Any]]:
+    analysis = root.get("analysis")
+    if analysis is None:
+        return []
+    runs_parent = analysis.get("keypoint_profile_runs")
+    if runs_parent is None:
+        return []
+
+    try:
+        zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    except Exception:
+        zarr_mtime_ns = None
+    updated_utc = _utc_now()
+
+    rows: List[Dict[str, Any]] = []
+    for profile_run in _keypoint_run_names(runs_parent):
+        if profile_run not in runs_parent:
+            continue
+        run_group = runs_parent[profile_run]
+        summary = _coerce_mapping(run_group.attrs.get("profile_summary"))
+        if not summary:
+            continue
+
+        dataset_map = _coerce_mapping(summary.get("dataset")) or {}
+        source_map = _coerce_mapping(summary.get("source")) or {}
+        quality_map = _coerce_mapping(summary.get("quality")) or {}
+        geometry_map = _coerce_mapping(summary.get("geometry")) or {}
+        composition_map = _coerce_mapping(summary.get("composition")) or {}
+
+        triangle_stats = _coerce_mapping(geometry_map.get("triangle_area")) or {}
+        min_angle_stats = _coerce_mapping(geometry_map.get("min_angle")) or {}
+        heading_stats = _coerce_mapping(geometry_map.get("heading")) or {}
+
+        row_recording_id = (
+            _decode_attr(dataset_map.get("recording_id"))
+            or _decode_attr(run_group.attrs.get("source_recording_id"))
+            or recording_id
+        )
+        row_zarr_use = (
+            _decode_attr(dataset_map.get("zarr_use"))
+            or _decode_attr(run_group.attrs.get("source_zarr_use"))
+            or zarr_use
+        )
+
+        row_genotype = _decode_attr(composition_map.get("genotype")) or genotype
+        row_dpf = _as_int(composition_map.get("dpf_at_acquisition"))
+        if row_dpf is None:
+            row_dpf = dpf_at_acquisition
+
+        rows.append(
+            {
+                "dataset_id": str(dataset_id),
+                "profile_run": str(profile_run),
+                "recording_id": row_recording_id,
+                "zarr_use": row_zarr_use,
+                "keypoint_method": (
+                    _decode_attr(source_map.get("keypoint_method"))
+                    or _decode_attr(run_group.attrs.get("source_keypoint_method"))
+                ),
+                "source_keypoint_path": (
+                    _decode_attr(source_map.get("keypoint_path"))
+                    or _decode_attr(run_group.attrs.get("source_keypoint_path"))
+                ),
+                "source_keypoint_run": (
+                    _decode_attr(source_map.get("keypoint_run"))
+                    or _decode_attr(run_group.attrs.get("source_keypoint_run"))
+                ),
+                "skeleton_id": (
+                    _decode_attr(source_map.get("skeleton_id"))
+                    or _decode_attr(run_group.attrs.get("source_skeleton_id"))
+                ),
+                "kpt_shape": _normalize_kpt_shape_text(
+                    source_map.get("kpt_shape") or run_group.attrs.get("source_kpt_shape")
+                ),
+                "profile_created_utc": (
+                    _decode_attr(summary.get("created_at_utc"))
+                    or _decode_attr(run_group.attrs.get("created_at_utc"))
+                ),
+                "zarr_mtime_ns": zarr_mtime_ns,
+                "updated_utc": updated_utc,
+                "rows_total": _as_int(quality_map.get("rows_total")),
+                "rows_usable": _as_int(
+                    quality_map.get("rows_usable")
+                    if quality_map.get("rows_usable") is not None
+                    else quality_map.get("usable_keypoints_total")
+                ),
+                "usable_keypoints_total": _as_int(quality_map.get("usable_keypoints_total")),
+                "usable_rate": _as_float(
+                    quality_map.get("usable_rate")
+                    if quality_map.get("usable_rate") is not None
+                    else quality_map.get("usable_keypoints_rate_overall")
+                ),
+                "confidence_valid_rate": _as_float(quality_map.get("confidence_valid_rate")),
+                "geometry_valid_rate": _as_float(quality_map.get("geometry_valid_rate")),
+                "triangle_area_p10": _extract_stat_value(triangle_stats, "p10"),
+                "triangle_area_p50": _extract_stat_value(triangle_stats, "p50"),
+                "triangle_area_p90": _extract_stat_value(triangle_stats, "p90"),
+                "min_angle_p10": _extract_stat_value(min_angle_stats, "p10"),
+                "min_angle_p50": _extract_stat_value(min_angle_stats, "p50"),
+                "min_angle_p90": _extract_stat_value(min_angle_stats, "p90"),
+                "heading_p10": _extract_stat_value(heading_stats, "p10"),
+                "heading_p50": _extract_stat_value(heading_stats, "p50"),
+                "heading_p90": _extract_stat_value(heading_stats, "p90"),
+                "rig_id": _decode_attr(composition_map.get("rig_id")),
+                "camera_id": _decode_attr(composition_map.get("camera_id")),
+                "arena_id": _decode_attr(composition_map.get("arena_id")),
+                "dish_design": _decode_attr(composition_map.get("dish_design")),
+                "canvas_name": _decode_attr(composition_map.get("canvas_name")),
+                "protocol_name": _decode_attr(composition_map.get("protocol_name")),
+                "genotype": row_genotype,
+                "dpf_at_acquisition": row_dpf,
+                "profile_json": _canonical_json_text(summary),
+            }
+        )
+
+    return rows
+
+
 def _eye_mask_run_names(parent: zarr.Group) -> List[str]:
     try:
         names = list(parent.group_keys())
@@ -1647,6 +1800,11 @@ class Registry:
                 23,
                 "detection_data_profile_lineage_projection",
                 self._migration_023_detection_data_profile_lineage_projection,
+            ),
+            (
+                24,
+                "keypoint_data_profile_registry",
+                self._migration_024_keypoint_data_profile_registry,
             ),
         ]
 
@@ -5626,6 +5784,233 @@ class Registry:
         # reconciler to ensure columns/views are present with the latest shape.
         self._migration_022_detection_data_profile_registry()
 
+    def _migration_024_keypoint_data_profile_registry(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS keypoint_data_profile (
+                dataset_id TEXT NOT NULL,
+                profile_run TEXT NOT NULL,
+                recording_id TEXT,
+                zarr_use TEXT,
+                keypoint_method TEXT,
+                source_keypoint_path TEXT,
+                source_keypoint_run TEXT,
+                skeleton_id TEXT,
+                kpt_shape TEXT,
+                profile_created_utc TEXT,
+                zarr_mtime_ns INTEGER,
+                updated_utc TEXT,
+                rows_total INTEGER,
+                rows_usable INTEGER,
+                usable_keypoints_total INTEGER,
+                usable_rate REAL,
+                confidence_valid_rate REAL,
+                geometry_valid_rate REAL,
+                triangle_area_p10 REAL,
+                triangle_area_p50 REAL,
+                triangle_area_p90 REAL,
+                min_angle_p10 REAL,
+                min_angle_p50 REAL,
+                min_angle_p90 REAL,
+                heading_p10 REAL,
+                heading_p50 REAL,
+                heading_p90 REAL,
+                rig_id TEXT,
+                camera_id TEXT,
+                arena_id TEXT,
+                dish_design TEXT,
+                canvas_name TEXT,
+                protocol_name TEXT,
+                genotype TEXT,
+                dpf_at_acquisition INTEGER,
+                profile_json TEXT,
+                PRIMARY KEY (dataset_id, profile_run),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        self._ensure_columns(
+            "keypoint_data_profile",
+            {
+                "recording_id": "TEXT",
+                "zarr_use": "TEXT",
+                "keypoint_method": "TEXT",
+                "source_keypoint_path": "TEXT",
+                "source_keypoint_run": "TEXT",
+                "skeleton_id": "TEXT",
+                "kpt_shape": "TEXT",
+                "profile_created_utc": "TEXT",
+                "zarr_mtime_ns": "INTEGER",
+                "updated_utc": "TEXT",
+                "rows_total": "INTEGER",
+                "rows_usable": "INTEGER",
+                "usable_keypoints_total": "INTEGER",
+                "usable_rate": "REAL",
+                "confidence_valid_rate": "REAL",
+                "geometry_valid_rate": "REAL",
+                "triangle_area_p10": "REAL",
+                "triangle_area_p50": "REAL",
+                "triangle_area_p90": "REAL",
+                "min_angle_p10": "REAL",
+                "min_angle_p50": "REAL",
+                "min_angle_p90": "REAL",
+                "heading_p10": "REAL",
+                "heading_p50": "REAL",
+                "heading_p90": "REAL",
+                "rig_id": "TEXT",
+                "camera_id": "TEXT",
+                "arena_id": "TEXT",
+                "dish_design": "TEXT",
+                "canvas_name": "TEXT",
+                "protocol_name": "TEXT",
+                "genotype": "TEXT",
+                "dpf_at_acquisition": "INTEGER",
+                "profile_json": "TEXT",
+            },
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_keypoint_data_profile_dataset "
+            "ON keypoint_data_profile(dataset_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_keypoint_data_profile_recording_created "
+            "ON keypoint_data_profile(recording_id, profile_created_utc DESC);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_keypoint_data_profile_method_scope "
+            "ON keypoint_data_profile(keypoint_method, zarr_use);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_keypoint_data_profile_method_usable_rate "
+            "ON keypoint_data_profile(keypoint_method, usable_rate);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_keypoint_data_profile_lineage "
+            "ON keypoint_data_profile(genotype, dpf_at_acquisition);"
+        )
+        cur.execute("DROP VIEW IF EXISTS keypoint_data_profile_latest;")
+        cur.execute(
+            """
+            CREATE VIEW keypoint_data_profile_latest AS
+            WITH ranked AS (
+                SELECT
+                    kdp.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY kdp.dataset_id, COALESCE(kdp.keypoint_method, '')
+                        ORDER BY
+                            COALESCE(kdp.profile_created_utc, kdp.updated_utc) DESC,
+                            kdp.profile_run DESC
+                    ) AS _rn
+                FROM keypoint_data_profile kdp
+            )
+            SELECT
+                dataset_id,
+                profile_run,
+                recording_id,
+                zarr_use,
+                keypoint_method,
+                source_keypoint_path,
+                source_keypoint_run,
+                skeleton_id,
+                kpt_shape,
+                profile_created_utc,
+                zarr_mtime_ns,
+                updated_utc,
+                rows_total,
+                rows_usable,
+                usable_keypoints_total,
+                usable_rate,
+                confidence_valid_rate,
+                geometry_valid_rate,
+                triangle_area_p10,
+                triangle_area_p50,
+                triangle_area_p90,
+                min_angle_p10,
+                min_angle_p50,
+                min_angle_p90,
+                heading_p10,
+                heading_p50,
+                heading_p90,
+                rig_id,
+                camera_id,
+                arena_id,
+                dish_design,
+                canvas_name,
+                protocol_name,
+                genotype,
+                dpf_at_acquisition,
+                profile_json
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS recording_keypoint_data_profile_latest;")
+        cur.execute(
+            """
+            CREATE VIEW recording_keypoint_data_profile_latest AS
+            WITH ranked AS (
+                SELECT
+                    kdpl.*,
+                    d.zarr_path AS zarr_path,
+                    d.artifact_kind AS artifact_kind,
+                    d.status AS dataset_status,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY kdpl.recording_id, COALESCE(kdpl.keypoint_method, '')
+                        ORDER BY
+                            COALESCE(kdpl.profile_created_utc, kdpl.updated_utc) DESC,
+                            kdpl.profile_run DESC,
+                            kdpl.dataset_id DESC
+                    ) AS _rn
+                FROM keypoint_data_profile_latest kdpl
+                LEFT JOIN datasets d ON d.dataset_id = kdpl.dataset_id
+                WHERE kdpl.recording_id IS NOT NULL
+            )
+            SELECT
+                recording_id,
+                dataset_id,
+                profile_run,
+                zarr_use,
+                keypoint_method,
+                source_keypoint_path,
+                source_keypoint_run,
+                skeleton_id,
+                kpt_shape,
+                profile_created_utc,
+                zarr_mtime_ns,
+                updated_utc,
+                rows_total,
+                rows_usable,
+                usable_keypoints_total,
+                usable_rate,
+                confidence_valid_rate,
+                geometry_valid_rate,
+                triangle_area_p10,
+                triangle_area_p50,
+                triangle_area_p90,
+                min_angle_p10,
+                min_angle_p50,
+                min_angle_p90,
+                heading_p10,
+                heading_p50,
+                heading_p90,
+                rig_id,
+                camera_id,
+                arena_id,
+                dish_design,
+                canvas_name,
+                protocol_name,
+                genotype,
+                dpf_at_acquisition,
+                profile_json,
+                zarr_path,
+                artifact_kind,
+                dataset_status
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
         existing = {
             row["name"]
@@ -6671,6 +7056,154 @@ class Registry:
         )
         self.conn.commit()
 
+    def upsert_keypoint_data_profile(
+        self,
+        *,
+        dataset_id: str,
+        profile_run: str,
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+        keypoint_method: Optional[str],
+        source_keypoint_path: Optional[str],
+        source_keypoint_run: Optional[str],
+        skeleton_id: Optional[str],
+        kpt_shape: Optional[str],
+        profile_created_utc: Optional[str],
+        rows_total: Optional[int],
+        rows_usable: Optional[int],
+        usable_keypoints_total: Optional[int],
+        usable_rate: Optional[float],
+        confidence_valid_rate: Optional[float],
+        geometry_valid_rate: Optional[float],
+        triangle_area_p10: Optional[float],
+        triangle_area_p50: Optional[float],
+        triangle_area_p90: Optional[float],
+        min_angle_p10: Optional[float],
+        min_angle_p50: Optional[float],
+        min_angle_p90: Optional[float],
+        heading_p10: Optional[float],
+        heading_p50: Optional[float],
+        heading_p90: Optional[float],
+        rig_id: Optional[str],
+        camera_id: Optional[str],
+        arena_id: Optional[str],
+        dish_design: Optional[str],
+        canvas_name: Optional[str],
+        protocol_name: Optional[str],
+        profile_json: Optional[str],
+        genotype: Optional[str] = None,
+        dpf_at_acquisition: Optional[int] = None,
+        zarr_mtime_ns: Optional[int] = None,
+        updated_utc: Optional[str] = None,
+    ) -> None:
+        payload = {
+            "dataset_id": str(dataset_id),
+            "profile_run": str(profile_run),
+            "recording_id": recording_id,
+            "zarr_use": zarr_use,
+            "keypoint_method": keypoint_method,
+            "source_keypoint_path": source_keypoint_path,
+            "source_keypoint_run": source_keypoint_run,
+            "skeleton_id": skeleton_id,
+            "kpt_shape": kpt_shape,
+            "profile_created_utc": profile_created_utc,
+            "zarr_mtime_ns": zarr_mtime_ns,
+            "updated_utc": updated_utc or _utc_now(),
+            "rows_total": rows_total,
+            "rows_usable": rows_usable,
+            "usable_keypoints_total": usable_keypoints_total,
+            "usable_rate": usable_rate,
+            "confidence_valid_rate": confidence_valid_rate,
+            "geometry_valid_rate": geometry_valid_rate,
+            "triangle_area_p10": triangle_area_p10,
+            "triangle_area_p50": triangle_area_p50,
+            "triangle_area_p90": triangle_area_p90,
+            "min_angle_p10": min_angle_p10,
+            "min_angle_p50": min_angle_p50,
+            "min_angle_p90": min_angle_p90,
+            "heading_p10": heading_p10,
+            "heading_p50": heading_p50,
+            "heading_p90": heading_p90,
+            "rig_id": rig_id,
+            "camera_id": camera_id,
+            "arena_id": arena_id,
+            "dish_design": dish_design,
+            "canvas_name": canvas_name,
+            "protocol_name": protocol_name,
+            "genotype": genotype,
+            "dpf_at_acquisition": dpf_at_acquisition,
+            "profile_json": profile_json,
+        }
+        self.conn.execute(
+            """
+            INSERT INTO keypoint_data_profile (
+                dataset_id, profile_run, recording_id, zarr_use,
+                keypoint_method, source_keypoint_path, source_keypoint_run,
+                skeleton_id, kpt_shape, profile_created_utc,
+                zarr_mtime_ns, updated_utc,
+                rows_total, rows_usable, usable_keypoints_total, usable_rate,
+                confidence_valid_rate, geometry_valid_rate,
+                triangle_area_p10, triangle_area_p50, triangle_area_p90,
+                min_angle_p10, min_angle_p50, min_angle_p90,
+                heading_p10, heading_p50, heading_p90,
+                rig_id, camera_id, arena_id, dish_design, canvas_name, protocol_name,
+                genotype, dpf_at_acquisition,
+                profile_json
+            )
+            VALUES (
+                :dataset_id, :profile_run, :recording_id, :zarr_use,
+                :keypoint_method, :source_keypoint_path, :source_keypoint_run,
+                :skeleton_id, :kpt_shape, :profile_created_utc,
+                :zarr_mtime_ns, :updated_utc,
+                :rows_total, :rows_usable, :usable_keypoints_total, :usable_rate,
+                :confidence_valid_rate, :geometry_valid_rate,
+                :triangle_area_p10, :triangle_area_p50, :triangle_area_p90,
+                :min_angle_p10, :min_angle_p50, :min_angle_p90,
+                :heading_p10, :heading_p50, :heading_p90,
+                :rig_id, :camera_id, :arena_id, :dish_design, :canvas_name, :protocol_name,
+                :genotype, :dpf_at_acquisition,
+                :profile_json
+            )
+            ON CONFLICT(dataset_id, profile_run) DO UPDATE SET
+                recording_id=excluded.recording_id,
+                zarr_use=excluded.zarr_use,
+                keypoint_method=excluded.keypoint_method,
+                source_keypoint_path=excluded.source_keypoint_path,
+                source_keypoint_run=excluded.source_keypoint_run,
+                skeleton_id=excluded.skeleton_id,
+                kpt_shape=excluded.kpt_shape,
+                profile_created_utc=excluded.profile_created_utc,
+                zarr_mtime_ns=excluded.zarr_mtime_ns,
+                updated_utc=excluded.updated_utc,
+                rows_total=excluded.rows_total,
+                rows_usable=excluded.rows_usable,
+                usable_keypoints_total=excluded.usable_keypoints_total,
+                usable_rate=excluded.usable_rate,
+                confidence_valid_rate=excluded.confidence_valid_rate,
+                geometry_valid_rate=excluded.geometry_valid_rate,
+                triangle_area_p10=excluded.triangle_area_p10,
+                triangle_area_p50=excluded.triangle_area_p50,
+                triangle_area_p90=excluded.triangle_area_p90,
+                min_angle_p10=excluded.min_angle_p10,
+                min_angle_p50=excluded.min_angle_p50,
+                min_angle_p90=excluded.min_angle_p90,
+                heading_p10=excluded.heading_p10,
+                heading_p50=excluded.heading_p50,
+                heading_p90=excluded.heading_p90,
+                rig_id=excluded.rig_id,
+                camera_id=excluded.camera_id,
+                arena_id=excluded.arena_id,
+                dish_design=excluded.dish_design,
+                canvas_name=excluded.canvas_name,
+                protocol_name=excluded.protocol_name,
+                genotype=excluded.genotype,
+                dpf_at_acquisition=excluded.dpf_at_acquisition,
+                profile_json=excluded.profile_json;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
     def upsert_detect_quality(
         self,
         *,
@@ -6840,6 +7373,49 @@ class Registry:
                         :area_p10, :area_p50, :area_p90,
                         :aspect_ratio_p10, :aspect_ratio_p50, :aspect_ratio_p90,
                         :edge_proximity_rate,
+                        :rig_id, :camera_id, :arena_id, :dish_design, :canvas_name, :protocol_name,
+                        :genotype, :dpf_at_acquisition,
+                        :profile_json
+                    );
+                    """,
+                    payload,
+                )
+
+    def replace_keypoint_data_profile(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM keypoint_data_profile WHERE dataset_id = ?;", (str(dataset_id),))
+            for record in records:
+                payload = dict(record)
+                payload["dataset_id"] = str(dataset_id)
+                payload.setdefault("updated_utc", _utc_now())
+                payload.setdefault("genotype", None)
+                payload.setdefault("dpf_at_acquisition", None)
+                self.conn.execute(
+                    """
+                    INSERT INTO keypoint_data_profile (
+                        dataset_id, profile_run, recording_id, zarr_use,
+                        keypoint_method, source_keypoint_path, source_keypoint_run,
+                        skeleton_id, kpt_shape, profile_created_utc,
+                        zarr_mtime_ns, updated_utc,
+                        rows_total, rows_usable, usable_keypoints_total, usable_rate,
+                        confidence_valid_rate, geometry_valid_rate,
+                        triangle_area_p10, triangle_area_p50, triangle_area_p90,
+                        min_angle_p10, min_angle_p50, min_angle_p90,
+                        heading_p10, heading_p50, heading_p90,
+                        rig_id, camera_id, arena_id, dish_design, canvas_name, protocol_name,
+                        genotype, dpf_at_acquisition,
+                        profile_json
+                    )
+                    VALUES (
+                        :dataset_id, :profile_run, :recording_id, :zarr_use,
+                        :keypoint_method, :source_keypoint_path, :source_keypoint_run,
+                        :skeleton_id, :kpt_shape, :profile_created_utc,
+                        :zarr_mtime_ns, :updated_utc,
+                        :rows_total, :rows_usable, :usable_keypoints_total, :usable_rate,
+                        :confidence_valid_rate, :geometry_valid_rate,
+                        :triangle_area_p10, :triangle_area_p50, :triangle_area_p90,
+                        :min_angle_p10, :min_angle_p50, :min_angle_p90,
+                        :heading_p10, :heading_p50, :heading_p90,
                         :rig_id, :camera_id, :arena_id, :dish_design, :canvas_name, :protocol_name,
                         :genotype, :dpf_at_acquisition,
                         :profile_json
@@ -7244,6 +7820,74 @@ class Registry:
             sql.append("AND coverage_percent IS NOT NULL AND coverage_percent >= ?")
             params.append(float(min_coverage_percent))
         sql.append("ORDER BY recording_id")
+        return list(self.conn.execute(" ".join(sql), params).fetchall())
+
+    def query_keypoint_data_profile_latest(
+        self,
+        *,
+        dataset_ids: Optional[Sequence[str]] = None,
+        recording_ids: Optional[Sequence[str]] = None,
+        zarr_use: Optional[str] = None,
+        keypoint_method: Optional[str] = None,
+        min_usable_rate: Optional[float] = None,
+    ) -> List[sqlite3.Row]:
+        sql = ["SELECT * FROM keypoint_data_profile_latest WHERE 1=1"]
+        params: List[Any] = []
+
+        if dataset_ids:
+            normalized_ids = [str(dataset_id) for dataset_id in dataset_ids if dataset_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND dataset_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if recording_ids:
+            normalized_ids = [str(recording_id) for recording_id in recording_ids if recording_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND recording_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if zarr_use is not None:
+            sql.append("AND zarr_use = ?")
+            params.append(str(zarr_use))
+        if keypoint_method is not None:
+            sql.append("AND keypoint_method = ?")
+            params.append(str(keypoint_method))
+        if min_usable_rate is not None:
+            sql.append("AND usable_rate IS NOT NULL AND usable_rate >= ?")
+            params.append(float(min_usable_rate))
+        sql.append("ORDER BY dataset_id, keypoint_method")
+        return list(self.conn.execute(" ".join(sql), params).fetchall())
+
+    def query_recording_keypoint_data_profile_latest(
+        self,
+        *,
+        recording_ids: Optional[Sequence[str]] = None,
+        zarr_use: Optional[str] = None,
+        keypoint_method: Optional[str] = None,
+        min_usable_rate: Optional[float] = None,
+    ) -> List[sqlite3.Row]:
+        sql = ["SELECT * FROM recording_keypoint_data_profile_latest WHERE 1=1"]
+        params: List[Any] = []
+
+        if recording_ids:
+            normalized_ids = [str(recording_id) for recording_id in recording_ids if recording_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND recording_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if zarr_use is not None:
+            sql.append("AND zarr_use = ?")
+            params.append(str(zarr_use))
+        if keypoint_method is not None:
+            sql.append("AND keypoint_method = ?")
+            params.append(str(keypoint_method))
+        if min_usable_rate is not None:
+            sql.append("AND usable_rate IS NOT NULL AND usable_rate >= ?")
+            params.append(float(min_usable_rate))
+        sql.append("ORDER BY recording_id, keypoint_method")
         return list(self.conn.execute(" ".join(sql), params).fetchall())
 
     def _resolve_effective_dataset_id(

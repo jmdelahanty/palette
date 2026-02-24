@@ -102,6 +102,34 @@ Scope: prioritize correctness and auditability first, then UX/orchestration, the
   - Implemented maintenance command support in `fisheye.registry.maintenance`:
     `--reconcile-in-progress-runs` with `--in-progress-task` and `--in-progress-max-age-hours`.
 
+- [x] Add keypoint profile-registry parity with detect profile registry.
+  - Detailed implementation plan: `docs/keypoint_data_profile_registry_todo.md`.
+  - Status (2026-02-24): schema/read, write/backfill/sync, maintenance integration,
+    query/check UX, and pipeline/data-card fail-closed freshness integration are complete.
+    See `docs/keypoint_data_profile_registry_todo.md` for command evidence and
+    operational notes.
+  - Detect currently has `detection_data_profile` + latest views and sync/query surface.
+  - Keypoint needs equivalent registry projection:
+    - `keypoint_data_profile` table
+    - `keypoint_data_profile_latest` view
+    - `recording_keypoint_data_profile_latest` view
+    - sync/backfill utility (detect-equivalent of `sync_detection_profile_registry`)
+    - `registry_query` and `check_training_registry` support for keypoint profile views/filters.
+  - Keep canonical `dataset_id` linkage and freshness (`zarr_mtime_ns`) fail-closed semantics aligned with detect.
+
+- [ ] Add keypoint quality-overview artifact parity with detect refinement UX.
+  - Detect has exportable/viewable refinement artifacts:
+    - `detect_quality_overview_png`
+    - `refinement_pipeline_overview_png`
+    - `scripts/py -m fisheye.utils.export_detect_quality_overview ... --view`
+  - Keypoint currently has registry/query quality surfaces and keypoint training data-card plots,
+    but no detect-equivalent refinement quality artifact exporter/viewer.
+  - Target:
+    - define keypoint quality artifact names and on-disk locations under refined keypoint runs,
+    - add keypoint artifact export/view CLI (detect-equivalent UX),
+    - wire into finalize/report workflows and docs,
+    - add unit tests for export/view behavior and missing-artifact handling.
+
 ## P5: Docs and Migration Hygiene
 
 - [x] Update stale status in `docs/detect_keypoints_parity_contract.md`.

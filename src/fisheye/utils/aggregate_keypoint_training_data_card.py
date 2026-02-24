@@ -105,6 +105,21 @@ def _coalesce(*values: Any) -> Any:
     return None
 
 
+def _as_mapping(value: Any) -> Optional[Mapping[str, Any]]:
+    if isinstance(value, Mapping):
+        return value
+    text = _normalize_text(value)
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return None
+    if isinstance(payload, Mapping):
+        return payload
+    return None
+
+
 def _numeric_stats(values: Sequence[Optional[float]]) -> Optional[dict[str, Any]]:
     arr = np.asarray([float(v) for v in values if v is not None], dtype=np.float64)
     arr = arr[np.isfinite(arr)]
@@ -482,6 +497,36 @@ def _resolved_pose_schema(manifest_schema: PoseSchema, observed_schema: PoseSche
     )
 
 
+def _pose_schema_keypoint_count(schema: PoseSchema) -> Optional[int]:
+    if schema.kpt_shape is not None and len(schema.kpt_shape) >= 1:
+        count = _as_int(schema.kpt_shape[0])
+        if count is not None and count > 0:
+            return int(count)
+    if schema.keypoint_labels:
+        return int(len(schema.keypoint_labels))
+    if schema.skeleton:
+        return int(max(max(edge) for edge in schema.skeleton) + 1)
+    return None
+
+
+def _pose_schema_conflicts(expected: PoseSchema, observed: PoseSchema) -> bool:
+    expected_count = _pose_schema_keypoint_count(expected)
+    observed_count = _pose_schema_keypoint_count(observed)
+    if expected_count is not None and observed_count is not None and expected_count != observed_count:
+        return True
+    if expected.skeleton and observed.skeleton and expected.skeleton != observed.skeleton:
+        return True
+    return False
+
+
+def _pose_schema_info_score(schema: PoseSchema) -> tuple[int, int, int]:
+    return (
+        len(schema.skeleton),
+        len(schema.keypoint_labels),
+        len(schema.kpt_shape or ()),
+    )
+
+
 def _extract_pose_schema_from_dataset_root(
     root: Any,
     *,
@@ -508,13 +553,20 @@ def _extract_pose_schema_from_dataset_root(
         return PoseSchema(kpt_shape=None, keypoint_labels=(), skeleton=()), None
 
     keypoint_group = keypoints_parent[keypoint_run]
-    kpt_shape: Optional[tuple[int, ...]] = None
-    if "keypoints_roi" in keypoint_group:
+    pose_schema_attr = _as_mapping(keypoint_group.attrs.get("pose_schema"))
+    kpt_shape = _normalize_kpt_shape(keypoint_group.attrs.get("kpt_shape"))
+    if kpt_shape is None and pose_schema_attr is not None:
+        kpt_shape = _normalize_kpt_shape(pose_schema_attr.get("kpt_shape"))
+    if kpt_shape is None and "keypoints_roi" in keypoint_group:
         shape = tuple(int(v) for v in keypoint_group["keypoints_roi"].shape[1:])
         if shape:
             kpt_shape = shape
     labels = _normalize_labels(keypoint_group.attrs.get("keypoint_labels"))
+    if not labels and pose_schema_attr is not None:
+        labels = _normalize_labels(pose_schema_attr.get("nodes"))
     skeleton = _normalize_skeleton_edges(keypoint_group.attrs.get("keypoint_skeleton"))
+    if not skeleton and pose_schema_attr is not None:
+        skeleton = _normalize_skeleton_edges(pose_schema_attr.get("edges"))
     return PoseSchema(kpt_shape=kpt_shape, keypoint_labels=labels, skeleton=skeleton), keypoint_run
 
 
@@ -532,7 +584,7 @@ def _enforce_single_skeleton(
     manifest_schema: PoseSchema,
 ) -> PoseSchema:
     observed_identities: dict[str, str] = {}
-    observed_schema_candidates: dict[str, PoseSchema] = {}
+    observed_schemas: dict[str, PoseSchema] = {}
     expected_key = _pose_schema_identity_key(manifest_schema)
 
     mismatches: list[str] = []
@@ -550,8 +602,8 @@ def _enforce_single_skeleton(
         if key is None:
             continue
         observed_identities[ref.dataset_id] = key
-        observed_schema_candidates[key] = schema
-        if expected_key is not None and key != expected_key:
+        observed_schemas[ref.dataset_id] = schema
+        if expected_key is not None and key != expected_key and _pose_schema_conflicts(manifest_schema, schema):
             mismatches.append(ref.dataset_id)
 
     if expected_key is not None and mismatches:
@@ -560,15 +612,27 @@ def _enforce_single_skeleton(
             "mismatched dataset_id(s): " + ", ".join(sorted(set(mismatches)))
         )
 
-    unique_keys = sorted(set(observed_identities.values()))
-    if expected_key is None and len(unique_keys) > 1:
-        by_dataset = ", ".join(f"{dataset_id}:{key}" for dataset_id, key in sorted(observed_identities.items()))
-        raise ValueError(f"Mixed skeleton identities across manifest datasets: {by_dataset}")
+    if expected_key is None and observed_schemas:
+        observed_counts = {
+            count
+            for count in (_pose_schema_keypoint_count(schema) for schema in observed_schemas.values())
+            if count is not None
+        }
+        if len(observed_counts) > 1:
+            by_dataset = ", ".join(
+                f"{dataset_id}:{_pose_schema_keypoint_count(schema)}"
+                for dataset_id, schema in sorted(observed_schemas.items())
+            )
+            raise ValueError(f"Mixed skeleton identities across manifest datasets (keypoint_count): {by_dataset}")
+        observed_edges = {schema.skeleton for schema in observed_schemas.values() if schema.skeleton}
+        if len(observed_edges) > 1:
+            by_dataset = ", ".join(
+                f"{dataset_id}:{schema.skeleton}" for dataset_id, schema in sorted(observed_schemas.items())
+            )
+            raise ValueError(f"Mixed skeleton identities across manifest datasets (skeleton_edges): {by_dataset}")
 
-    if expected_key is not None:
-        return manifest_schema
-    if unique_keys:
-        return observed_schema_candidates[unique_keys[0]]
+    if observed_schemas:
+        return max(observed_schemas.values(), key=_pose_schema_info_score)
     return manifest_schema
 
 
@@ -672,6 +736,82 @@ def _select_quality_rows(
 
         selected[ref.dataset_id] = max(candidates, key=_rank)
     return selected
+
+
+def _select_profile_rows(
+    registry: Registry,
+    *,
+    dataset_refs: Sequence[DatasetRef],
+    quality_rows_by_dataset: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    dataset_ids = [ref.dataset_id for ref in dataset_refs]
+    rows = registry.query_keypoint_data_profile_latest(dataset_ids=dataset_ids)
+    by_dataset: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        payload = dict(row)
+        dataset_id = _normalize_text(payload.get("dataset_id"))
+        if dataset_id is None:
+            continue
+        by_dataset.setdefault(dataset_id, []).append(payload)
+
+    selected: dict[str, dict[str, Any]] = {}
+    for ref in dataset_refs:
+        candidates = by_dataset.get(ref.dataset_id, [])
+        if not candidates:
+            continue
+        quality_row = quality_rows_by_dataset.get(ref.dataset_id)
+        desired_source_run = (
+            _normalize_text(quality_row.get("source_keypoint_run")) if quality_row is not None else None
+        ) or _normalize_text(ref.manifest_row.get("keypoint_run_resolved")) or _normalize_text(
+            ref.manifest_row.get("keypoint_run")
+        )
+        desired_method = (
+            _normalize_text(quality_row.get("keypoint_method")) if quality_row is not None else None
+        ) or _normalize_text(ref.manifest_row.get("quality_registry_keypoint_method")) or _normalize_text(
+            ref.manifest_row.get("keypoint_method")
+        )
+
+        def _rank(candidate: Mapping[str, Any]) -> tuple[Any, ...]:
+            source_run = _normalize_text(candidate.get("source_keypoint_run"))
+            method = _normalize_text(candidate.get("keypoint_method"))
+            return (
+                1 if desired_source_run is not None and source_run == desired_source_run else 0,
+                1 if desired_method is not None and method == desired_method else 0,
+                _parse_iso_ts(candidate.get("profile_created_utc")),
+                _parse_iso_ts(candidate.get("updated_utc")),
+                _normalize_text(candidate.get("profile_run")) or "",
+            )
+
+        selected[ref.dataset_id] = max(candidates, key=_rank)
+    return selected
+
+
+def _profile_stale_reason(
+    profile_row: Mapping[str, Any],
+    *,
+    zarr_path: Path,
+) -> Optional[str]:
+    expected_mtime = _as_int(profile_row.get("zarr_mtime_ns"))
+    if expected_mtime is None:
+        return "missing zarr_mtime_ns"
+    if not zarr_path.exists():
+        return "zarr missing on disk"
+    try:
+        observed_mtime = int(zarr_path.stat().st_mtime_ns)
+    except OSError:
+        return "unable to stat zarr path"
+    if observed_mtime != expected_mtime:
+        return f"mtime mismatch (registry={expected_mtime}, actual={observed_mtime})"
+    return None
+
+
+def _profile_refresh_remediation_text(registry_path: Path) -> str:
+    return (
+        "Remediation: run "
+        f"'scripts/py -m fisheye.registry.maintenance --registry {registry_path} --refresh-keypoint-profiles', "
+        f"then 'scripts/py -m fisheye.utils.check_training_registry --registry {registry_path} "
+        "--view keypoint-profile --no-rich', then rerun aggregation/pipeline."
+    )
 
 
 def _resolve_refined_parent(root: Any) -> tuple[Optional[str], Any]:
@@ -845,11 +985,18 @@ def _build_keypoint_training_data_card(
     merged_zarr: Optional[Path],
     split: str,
     subject_lineage_policy: str,
+    allow_profile_mtime_mismatch: bool,
+    allow_profile_fallback_scan: bool,
 ) -> dict[str, Any]:
     source_rows = _manifest_source_rows(manifest)
     refs = _manifest_dataset_refs(registry, manifest)
     dataset_ids = [ref.dataset_id for ref in refs]
     quality_rows_by_dataset = _select_quality_rows(registry, dataset_refs=refs)
+    profile_rows_by_dataset = _select_profile_rows(
+        registry,
+        dataset_refs=refs,
+        quality_rows_by_dataset=quality_rows_by_dataset,
+    )
     provenance_rows = _query_provenance_rows(registry, dataset_ids=dataset_ids)
     subject_lineage_coverage, lineage_rows = _evaluate_subject_lineage_coverage(
         registry,
@@ -874,6 +1021,40 @@ def _build_keypoint_training_data_card(
         rows_post_gate=rows_post_gate,
     )
 
+    missing_profile_dataset_ids = [
+        ref.dataset_id for ref in refs if ref.dataset_id not in profile_rows_by_dataset
+    ]
+    if missing_profile_dataset_ids and not allow_profile_fallback_scan:
+        raise ValueError(
+            "Missing keypoint_data_profile_latest rows for dataset_id(s): "
+            + ", ".join(sorted(missing_profile_dataset_ids))
+            + ". "
+            + _profile_refresh_remediation_text(Path(registry.path))
+            + " To continue without profile rows, rerun with --allow-profile-fallback-scan."
+        )
+    if missing_profile_dataset_ids and allow_profile_fallback_scan:
+        print(
+            "Keypoint profile fallback enabled: missing keypoint_data_profile_latest row(s) for dataset_id(s): "
+            + ", ".join(sorted(missing_profile_dataset_ids))
+        )
+
+    stale_profile_rows: list[str] = []
+    for ref in refs:
+        profile_row = profile_rows_by_dataset.get(ref.dataset_id)
+        if profile_row is None:
+            continue
+        stale_reason = _profile_stale_reason(profile_row, zarr_path=ref.zarr_path)
+        if stale_reason is not None:
+            stale_profile_rows.append(f"{ref.dataset_id}:{stale_reason}")
+    if stale_profile_rows and not allow_profile_mtime_mismatch:
+        raise ValueError(
+            "Stale keypoint_data_profile_latest row(s): "
+            + ", ".join(sorted(stale_profile_rows))
+            + ". "
+            + _profile_refresh_remediation_text(Path(registry.path))
+            + " To bypass staleness checks, rerun with --allow-profile-mtime-mismatch."
+        )
+
     composition_rows: list[dict[str, Any]] = []
     geometry_values: dict[str, list[float]] = {name: [] for name in GEOMETRY_ARRAY_NAMES}
     edge_values: dict[str, list[float]] = {spec["key"]: [] for spec in graph_specs["edges"]}
@@ -885,6 +1066,8 @@ def _build_keypoint_training_data_card(
     raw_success_rate_values: list[Optional[float]] = []
     raw_successful_values: list[Optional[float]] = []
     raw_success_pairs: list[tuple[Optional[float], Optional[float]]] = []
+    confidence_valid_pairs: list[tuple[Optional[float], Optional[float]]] = []
+    geometry_valid_pairs: list[tuple[Optional[float], Optional[float]]] = []
 
     confidence_valid_true = 0
     confidence_valid_total = 0
@@ -899,41 +1082,53 @@ def _build_keypoint_training_data_card(
 
     for ref in refs:
         quality_row = quality_rows_by_dataset.get(ref.dataset_id)
+        profile_row = profile_rows_by_dataset.get(ref.dataset_id)
         provenance = provenance_rows.get(ref.dataset_id, {})
         manifest_row = ref.manifest_row
 
         keypoint_method = (
+            _normalize_text(profile_row.get("keypoint_method")) if profile_row is not None else None
+        ) or (
             _normalize_text(quality_row.get("keypoint_method")) if quality_row is not None else None
         ) or _normalize_text(manifest_row.get("quality_registry_keypoint_method")) or _normalize_text(
             manifest_row.get("keypoint_method")
         )
         composition_rows.append(
             {
-                "rig_id": _normalize_text(provenance.get("rig_id")) or _normalize_text(manifest_row.get("rig_id")),
-                "camera_id": _normalize_text(provenance.get("camera_id")) or _normalize_text(manifest_row.get("camera_id")),
-                "arena_id": _normalize_text(provenance.get("arena_id")) or _normalize_text(manifest_row.get("arena_id")),
-                "dish_design": _normalize_text(provenance.get("dish_design")) or _normalize_text(
-                    manifest_row.get("dish_design")
-                ),
-                "canvas_name": _normalize_text(provenance.get("canvas_name")) or _normalize_text(
-                    manifest_row.get("canvas_name")
-                ),
-                "protocol_name": _normalize_text(provenance.get("protocol_name")) or _normalize_text(
-                    manifest_row.get("protocol_name")
-                ),
+                "rig_id": (
+                    _normalize_text(profile_row.get("rig_id")) if profile_row is not None else None
+                ) or _normalize_text(provenance.get("rig_id")) or _normalize_text(manifest_row.get("rig_id")),
+                "camera_id": (
+                    _normalize_text(profile_row.get("camera_id")) if profile_row is not None else None
+                ) or _normalize_text(provenance.get("camera_id")) or _normalize_text(manifest_row.get("camera_id")),
+                "arena_id": (
+                    _normalize_text(profile_row.get("arena_id")) if profile_row is not None else None
+                ) or _normalize_text(provenance.get("arena_id")) or _normalize_text(manifest_row.get("arena_id")),
+                "dish_design": (
+                    _normalize_text(profile_row.get("dish_design")) if profile_row is not None else None
+                ) or _normalize_text(provenance.get("dish_design")) or _normalize_text(manifest_row.get("dish_design")),
+                "canvas_name": (
+                    _normalize_text(profile_row.get("canvas_name")) if profile_row is not None else None
+                ) or _normalize_text(provenance.get("canvas_name")) or _normalize_text(manifest_row.get("canvas_name")),
+                "protocol_name": (
+                    _normalize_text(profile_row.get("protocol_name")) if profile_row is not None else None
+                ) or _normalize_text(provenance.get("protocol_name")) or _normalize_text(manifest_row.get("protocol_name")),
                 "keypoint_method": keypoint_method,
             }
         )
 
         usable_value = _coalesce(
+            _as_float(profile_row.get("usable_keypoints_total")) if profile_row is not None else None,
             _as_float(quality_row.get("usable_keypoints")) if quality_row is not None else None,
             _as_float(manifest_row.get("usable_keypoints_total")),
         )
         total_value = _coalesce(
+            _as_float(profile_row.get("rows_total")) if profile_row is not None else None,
             _as_float(quality_row.get("total_keypoints")) if quality_row is not None else None,
             _as_float(manifest_row.get("keypoints_total")),
         )
         usable_rate = _coalesce(
+            _as_float(profile_row.get("usable_rate")) if profile_row is not None else None,
             _as_float(quality_row.get("usable_keypoints_rate")) if quality_row is not None else None,
             _as_float(manifest_row.get("usable_keypoints_rate")),
         )
@@ -951,8 +1146,23 @@ def _build_keypoint_training_data_card(
         raw_success_rate_values.append(raw_success_rate)
         raw_successful_values.append(raw_successful)
         raw_success_pairs.append((raw_success_rate, total_value))
+        confidence_valid_pairs.append(
+            (
+                _as_float(profile_row.get("confidence_valid_rate")) if profile_row is not None else None,
+                total_value,
+            )
+        )
+        geometry_valid_pairs.append(
+            (
+                _as_float(profile_row.get("geometry_valid_rate")) if profile_row is not None else None,
+                total_value,
+            )
+        )
 
-        expected_mtime = _as_int(quality_row.get("zarr_mtime_ns")) if quality_row is not None else None
+        expected_mtime = _coalesce(
+            _as_int(profile_row.get("zarr_mtime_ns")) if profile_row is not None else None,
+            _as_int(quality_row.get("zarr_mtime_ns")) if quality_row is not None else None,
+        )
         observed_mtime = None
         if ref.zarr_path.exists():
             try:
@@ -963,15 +1173,24 @@ def _build_keypoint_training_data_card(
         if not mtime_matches:
             zarr_mtime_mismatch_count += 1
 
-        if quality_row is None or not mtime_matches:
+        profile_stale_reason = _profile_stale_reason(profile_row, zarr_path=ref.zarr_path) if profile_row is not None else "missing profile row"
+        if profile_stale_reason is not None:
             quality_stale_count += 1
 
         source_ref_payload: dict[str, Any] = {
             "dataset_id": ref.dataset_id,
             "zarr_path": str(ref.zarr_path),
+            "profile_row_present": profile_row is not None,
+            "profile_run": _normalize_text(profile_row.get("profile_run")) if profile_row is not None else None,
+            "profile_source_keypoint_path": (
+                _normalize_text(profile_row.get("source_keypoint_path")) if profile_row is not None else None
+            ),
+            "profile_stale_reason": profile_stale_reason,
             "quality_row_present": quality_row is not None,
             "quality_row_refined_run": _normalize_text(quality_row.get("refined_run")) if quality_row is not None else None,
             "source_keypoint_run": (
+                _normalize_text(profile_row.get("source_keypoint_run")) if profile_row is not None else None
+            ) or (
                 _normalize_text(quality_row.get("source_keypoint_run")) if quality_row is not None else None
             ) or _normalize_text(manifest_row.get("keypoint_run_resolved")) or _normalize_text(manifest_row.get("keypoint_run")),
             "zarr_mtime_expected_ns": expected_mtime,
@@ -1111,14 +1330,29 @@ def _build_keypoint_training_data_card(
         if has_raw_successful and raw_success_denom > 0
         else _weighted_mean(raw_success_pairs)
     )
+    confidence_valid_rate_overall = (
+        _safe_ratio(float(confidence_valid_true), float(confidence_valid_total))
+        if confidence_valid_total > 0
+        else _weighted_mean(confidence_valid_pairs)
+    )
+    geometry_valid_rate_overall = (
+        _safe_ratio(float(geometry_valid_true), float(geometry_valid_total))
+        if geometry_valid_total > 0
+        else _weighted_mean(geometry_valid_pairs)
+    )
 
     quality_payload = {
         "usable_keypoints_total": int(usable_total_sum) if total_keypoints_sum > 0 else None,
         "usable_keypoints_rate_overall": float(usable_rate_overall) if usable_rate_overall is not None else None,
         "usable_keypoints_rate_dataset_stats": _numeric_stats(usable_rate_values),
+        "usable_keypoints_rate_histogram": _numeric_histogram(usable_rate_values),
         "raw_success_rate_overall": float(raw_success_rate_overall) if raw_success_rate_overall is not None else None,
-        "confidence_valid_rate": _safe_ratio(float(confidence_valid_true), float(confidence_valid_total)),
-        "geometry_valid_rate": _safe_ratio(float(geometry_valid_true), float(geometry_valid_total)),
+        "confidence_valid_rate": (
+            float(confidence_valid_rate_overall) if confidence_valid_rate_overall is not None else None
+        ),
+        "geometry_valid_rate": (
+            float(geometry_valid_rate_overall) if geometry_valid_rate_overall is not None else None
+        ),
         "flips_corrected_rate": _safe_ratio(float(flips_corrected_total), float(flips_total_rows)),
     }
 
@@ -1255,6 +1489,22 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--allow-profile-mtime-mismatch",
+        action="store_true",
+        help=(
+            "Allow stale keypoint_data_profile_latest rows where zarr_mtime_ns "
+            "does not match filesystem mtime."
+        ),
+    )
+    parser.add_argument(
+        "--allow-profile-fallback-scan",
+        action="store_true",
+        help=(
+            "Allow fallback to direct Zarr scanning when keypoint_data_profile_latest "
+            "rows are missing."
+        ),
+    )
+    parser.add_argument(
         "--no-plots",
         action="store_true",
         help="Skip plot PNG generation for the aggregated data card.",
@@ -1309,6 +1559,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             merged_zarr=merged_zarr,
             split=str(args.split),
             subject_lineage_policy=str(args.subject_lineage_policy),
+            allow_profile_mtime_mismatch=bool(args.allow_profile_mtime_mismatch),
+            allow_profile_fallback_scan=bool(args.allow_profile_fallback_scan),
         )
     except Exception as exc:
         print(f"Training data card aggregation failed: {exc}")

@@ -213,6 +213,10 @@ def _build_data_card_cli(
     _add_arg(card_cli, "--plot-dir", args.data_card_plot_dir)
     _add_arg(card_cli, "--plot-prefix", args.data_card_plot_prefix)
     _add_arg(card_cli, "--plot-heatmap-bin-factor", args.data_card_plot_heatmap_bin_factor)
+    if args.data_card_allow_profile_mtime_mismatch:
+        card_cli.append("--allow-profile-mtime-mismatch")
+    if args.data_card_allow_profile_fallback_scan:
+        card_cli.append("--allow-profile-fallback-scan")
     if args.data_card_view:
         card_cli.append("--view")
     if args.data_card_force_plots:
@@ -395,6 +399,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         type=int,
         default=2,
         help="Coarsening factor for keypoint heatmap bins in data-card plots (default: 2).",
+    )
+    parser.add_argument(
+        "--data-card-allow-profile-mtime-mismatch",
+        action="store_true",
+        help=(
+            "Allow keypoint_data_profile_latest mtime mismatches during keypoint "
+            "training data-card aggregation."
+        ),
+    )
+    parser.add_argument(
+        "--data-card-allow-profile-fallback-scan",
+        action="store_true",
+        help=(
+            "Allow keypoint data-card aggregation to scan Zarr directly when "
+            "keypoint_data_profile_latest rows are missing."
+        ),
     )
     parser.add_argument(
         "--data-card-view",

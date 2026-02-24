@@ -63,6 +63,137 @@ def _upsert_profile(
     )
 
 
+def _insert_keypoint_profile(
+    registry: Registry,
+    *,
+    dataset_id: str,
+    profile_run: str,
+    recording_id: str,
+    keypoint_method: str = "traditional_pose",
+    profile_created_utc: str = "2026-02-24T00:00:00+00:00",
+    usable_rate: float = 0.90,
+) -> None:
+    registry.conn.execute(
+        """
+        INSERT INTO keypoint_data_profile (
+            dataset_id,
+            profile_run,
+            recording_id,
+            zarr_use,
+            keypoint_method,
+            source_keypoint_path,
+            source_keypoint_run,
+            skeleton_id,
+            kpt_shape,
+            profile_created_utc,
+            zarr_mtime_ns,
+            updated_utc,
+            rows_total,
+            rows_usable,
+            usable_keypoints_total,
+            usable_rate,
+            confidence_valid_rate,
+            geometry_valid_rate,
+            triangle_area_p10,
+            triangle_area_p50,
+            triangle_area_p90,
+            min_angle_p10,
+            min_angle_p50,
+            min_angle_p90,
+            heading_p10,
+            heading_p50,
+            heading_p90,
+            rig_id,
+            camera_id,
+            arena_id,
+            dish_design,
+            canvas_name,
+            protocol_name,
+            genotype,
+            dpf_at_acquisition,
+            profile_json
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'),
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        ON CONFLICT(dataset_id, profile_run) DO UPDATE SET
+            recording_id=excluded.recording_id,
+            zarr_use=excluded.zarr_use,
+            keypoint_method=excluded.keypoint_method,
+            source_keypoint_path=excluded.source_keypoint_path,
+            source_keypoint_run=excluded.source_keypoint_run,
+            skeleton_id=excluded.skeleton_id,
+            kpt_shape=excluded.kpt_shape,
+            profile_created_utc=excluded.profile_created_utc,
+            zarr_mtime_ns=excluded.zarr_mtime_ns,
+            updated_utc=datetime('now'),
+            rows_total=excluded.rows_total,
+            rows_usable=excluded.rows_usable,
+            usable_keypoints_total=excluded.usable_keypoints_total,
+            usable_rate=excluded.usable_rate,
+            confidence_valid_rate=excluded.confidence_valid_rate,
+            geometry_valid_rate=excluded.geometry_valid_rate,
+            triangle_area_p10=excluded.triangle_area_p10,
+            triangle_area_p50=excluded.triangle_area_p50,
+            triangle_area_p90=excluded.triangle_area_p90,
+            min_angle_p10=excluded.min_angle_p10,
+            min_angle_p50=excluded.min_angle_p50,
+            min_angle_p90=excluded.min_angle_p90,
+            heading_p10=excluded.heading_p10,
+            heading_p50=excluded.heading_p50,
+            heading_p90=excluded.heading_p90,
+            rig_id=excluded.rig_id,
+            camera_id=excluded.camera_id,
+            arena_id=excluded.arena_id,
+            dish_design=excluded.dish_design,
+            canvas_name=excluded.canvas_name,
+            protocol_name=excluded.protocol_name,
+            genotype=excluded.genotype,
+            dpf_at_acquisition=excluded.dpf_at_acquisition,
+            profile_json=excluded.profile_json
+        ;
+        """,
+        (
+            dataset_id,
+            profile_run,
+            recording_id,
+            "training",
+            keypoint_method,
+            f"refined_keypoint_runs/{profile_run}/{keypoint_method}",
+            f"keypoint_{profile_run}",
+            "fish_v1",
+            "[3,3]",
+            profile_created_utc,
+            123,
+            200,
+            180,
+            540,
+            usable_rate,
+            0.95,
+            0.96,
+            0.01,
+            0.02,
+            0.03,
+            10.0,
+            20.0,
+            30.0,
+            -0.4,
+            0.0,
+            0.4,
+            "omnifin0",
+            "2010094",
+            "arena_2",
+            "cedar",
+            "shadow",
+            "DefaultScreen",
+            "Tg(elavl3:gcamp7f)",
+            7,
+            '{"schema_name":"keypoint_dataset_profile","schema_version":"v1"}',
+        ),
+    )
+    registry.conn.commit()
+
+
 def test_schema_has_detection_data_profile_table_views_and_indexes(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
 
@@ -105,6 +236,52 @@ def test_schema_has_detection_data_profile_table_views_and_indexes(tmp_path: Pat
         "idx_detection_data_profile_recording_created",
         "idx_detection_data_profile_detection_scope",
         "idx_detection_data_profile_coverage",
+    }
+    registry.close()
+
+
+def test_schema_has_keypoint_data_profile_table_views_and_indexes(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+
+    table = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'keypoint_data_profile';
+        """
+    ).fetchone()
+    assert table is not None
+
+    views = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'view' AND name IN (
+            'keypoint_data_profile_latest',
+            'recording_keypoint_data_profile_latest'
+        );
+        """
+    ).fetchall()
+    assert {str(row["name"]) for row in views} == {
+        "keypoint_data_profile_latest",
+        "recording_keypoint_data_profile_latest",
+    }
+
+    indexes = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'index' AND name IN (
+            'idx_keypoint_data_profile_recording_created',
+            'idx_keypoint_data_profile_method_scope',
+            'idx_keypoint_data_profile_method_usable_rate'
+        );
+        """
+    ).fetchall()
+    assert {str(row["name"]) for row in indexes} == {
+        "idx_keypoint_data_profile_recording_created",
+        "idx_keypoint_data_profile_method_scope",
+        "idx_keypoint_data_profile_method_usable_rate",
     }
     registry.close()
 
@@ -176,6 +353,80 @@ def test_query_detection_data_profile_latest_and_recording_latest(tmp_path: Path
     assert str(recording_latest[0]["recording_id"]) == "rec_shared"
     assert str(recording_latest[0]["dataset_id"]) == "dataset_b"
     assert str(recording_latest[0]["profile_run"]) == "profile_b"
+    registry.close()
+
+
+def test_query_keypoint_data_profile_latest_and_recording_latest(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_a",
+        session_uuid="session_a",
+        zarr_path=tmp_path / "a_training.zarr",
+        recording_id="rec_shared",
+        zarr_use="training",
+    )
+    registry.upsert_dataset(
+        "dataset_b",
+        session_uuid="session_b",
+        zarr_path=tmp_path / "b_training.zarr",
+        recording_id="rec_shared",
+        zarr_use="training",
+    )
+
+    _insert_keypoint_profile(
+        registry,
+        dataset_id="dataset_a",
+        profile_run="kp_old",
+        recording_id="rec_shared",
+        keypoint_method="traditional_pose",
+        profile_created_utc="2026-02-22T00:00:00+00:00",
+        usable_rate=0.82,
+    )
+    _insert_keypoint_profile(
+        registry,
+        dataset_id="dataset_a",
+        profile_run="kp_new",
+        recording_id="rec_shared",
+        keypoint_method="traditional_pose",
+        profile_created_utc="2026-02-23T00:00:00+00:00",
+        usable_rate=0.91,
+    )
+    _insert_keypoint_profile(
+        registry,
+        dataset_id="dataset_b",
+        profile_run="kp_b",
+        recording_id="rec_shared",
+        keypoint_method="yolo_pose",
+        profile_created_utc="2026-02-24T00:00:00+00:00",
+        usable_rate=0.94,
+    )
+
+    dataset_latest = registry.query_keypoint_data_profile_latest(dataset_ids=["dataset_a"])
+    assert len(dataset_latest) == 1
+    assert str(dataset_latest[0]["dataset_id"]) == "dataset_a"
+    assert str(dataset_latest[0]["profile_run"]) == "kp_new"
+    assert str(dataset_latest[0]["keypoint_method"]) == "traditional_pose"
+    assert float(dataset_latest[0]["usable_rate"]) == 0.91
+    assert str(dataset_latest[0]["genotype"]) == "Tg(elavl3:gcamp7f)"
+    assert int(dataset_latest[0]["dpf_at_acquisition"]) == 7
+
+    usable_filtered = registry.query_keypoint_data_profile_latest(
+        min_usable_rate=0.93,
+        zarr_use="training",
+    )
+    assert len(usable_filtered) == 1
+    assert str(usable_filtered[0]["dataset_id"]) == "dataset_b"
+    assert str(usable_filtered[0]["keypoint_method"]) == "yolo_pose"
+
+    recording_latest = registry.query_recording_keypoint_data_profile_latest(
+        recording_ids=["rec_shared"],
+        keypoint_method="yolo_pose",
+        min_usable_rate=0.90,
+    )
+    assert len(recording_latest) == 1
+    assert str(recording_latest[0]["recording_id"]) == "rec_shared"
+    assert str(recording_latest[0]["dataset_id"]) == "dataset_b"
+    assert str(recording_latest[0]["profile_run"]) == "kp_b"
     registry.close()
 
 

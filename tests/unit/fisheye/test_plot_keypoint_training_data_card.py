@@ -64,10 +64,91 @@ def _sample_card_payload() -> dict[str, object]:
     }
 
 
+def _sample_card_payload_modern() -> dict[str, object]:
+    return {
+        "schema_name": "keypoint_training_data_card",
+        "schema_version": "v1",
+        "set_id": "pose_sample_v001",
+        "quality": {
+            "usable_keypoints_rate_histogram": {
+                "bin_edges": [0.0, 0.5, 1.0],
+                "counts": [10, 90],
+            }
+        },
+        "geometry": {
+            "triangle_area": {
+                "histogram": {
+                    "bin_edges": [0.0, 10.0, 20.0],
+                    "counts": [30, 70],
+                }
+            },
+            "min_angle": {
+                "histogram": {
+                    "bin_edges": [0.0, 45.0, 90.0],
+                    "counts": [40, 60],
+                }
+            },
+            "heading": {
+                "histogram": {
+                    "bin_edges": [0.0, 180.0, 360.0],
+                    "counts": [55, 45],
+                }
+            },
+        },
+        "spatial": {
+            "landmark_center_heatmaps": {
+                "0": {
+                    "alias": "eye_left",
+                    "grid_h": 2,
+                    "grid_w": 2,
+                    "density": [0.1, 0.2, 0.3, 0.4],
+                },
+                "1": {
+                    "alias": "eye_right",
+                    "grid_h": 2,
+                    "grid_w": 2,
+                    "density": [0.4, 0.3, 0.2, 0.1],
+                },
+            }
+        },
+        "genotype_counts": {
+            "Tg(elavl3:gcamp7f)": 2,
+            "wt": 1,
+        },
+        "dpf_histogram": {
+            "bin_edges": [4.5, 5.5, 6.5, 7.5],
+            "counts": [1, 1, 1],
+        },
+    }
+
+
 def test_plot_keypoint_training_data_card_writes_expected_pngs(tmp_path: Path) -> None:
     card_path = tmp_path / "pose_sample.data_card.json"
     output_dir = tmp_path / "plots"
     card_path.write_text(json.dumps(_sample_card_payload()), encoding="utf-8")
+
+    rc = mod.main(
+        [
+            "--card",
+            str(card_path),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+    assert rc == 0
+    assert (output_dir / "pose_sample_v001.usable_rate_distribution.png").exists()
+    assert (output_dir / "pose_sample_v001.triangle_area_distribution.png").exists()
+    assert (output_dir / "pose_sample_v001.min_angle_distribution.png").exists()
+    assert (output_dir / "pose_sample_v001.heading_distribution.png").exists()
+    assert (output_dir / "pose_sample_v001.landmark_heatmap_panel.png").exists()
+    assert (output_dir / "pose_sample_v001.genotype_counts.png").exists()
+    assert (output_dir / "pose_sample_v001.dpf_histogram.png").exists()
+
+
+def test_plot_keypoint_training_data_card_writes_expected_pngs_modern_schema(tmp_path: Path) -> None:
+    card_path = tmp_path / "pose_sample.data_card.json"
+    output_dir = tmp_path / "plots"
+    card_path.write_text(json.dumps(_sample_card_payload_modern()), encoding="utf-8")
 
     rc = mod.main(
         [

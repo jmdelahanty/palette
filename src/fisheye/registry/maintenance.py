@@ -21,6 +21,7 @@ from .db import (
     _extract_detect_quality_rows,
     _extract_eye_mask_performance_rows,
     _extract_keypoint_performance_rows,
+    _extract_keypoint_profile_rows,
     _extract_keypoint_quality_rows,
     _import_zarr,
 )
@@ -283,6 +284,13 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--backfill-keypoint-profiles",
+        action="store_true",
+        help=(
+            "Backfill keypoint_data_profile rows for source recording datasets that currently have no profile rows."
+        ),
+    )
+    parser.add_argument(
         "--backfill-keypoint-quality",
         action="store_true",
         help=(
@@ -347,6 +355,13 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help=(
             "Optional zarr_use filter for --backfill-recording-step-status "
             "(default: all)."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-keypoint-profiles",
+        action="store_true",
+        help=(
+            "Refresh keypoint_data_profile rows for all source recording datasets in scope and remove stale rows."
         ),
     )
     parser.add_argument(
@@ -2240,6 +2255,199 @@ def _quality_row_signature(row: Dict[str, object]) -> tuple[object, ...]:
         row.get("raw_keypoints_successful"),
         row.get("zarr_mtime_ns"),
     )
+
+
+def _keypoint_profile_row_signature(row: Dict[str, object]) -> tuple[object, ...]:
+    return (
+        row.get("recording_id"),
+        row.get("zarr_use"),
+        row.get("keypoint_method"),
+        row.get("source_keypoint_path"),
+        row.get("source_keypoint_run"),
+        row.get("skeleton_id"),
+        row.get("kpt_shape"),
+        row.get("profile_created_utc"),
+        row.get("zarr_mtime_ns"),
+        row.get("rows_total"),
+        row.get("rows_usable"),
+        row.get("usable_keypoints_total"),
+        row.get("usable_rate"),
+        row.get("confidence_valid_rate"),
+        row.get("geometry_valid_rate"),
+        row.get("triangle_area_p10"),
+        row.get("triangle_area_p50"),
+        row.get("triangle_area_p90"),
+        row.get("min_angle_p10"),
+        row.get("min_angle_p50"),
+        row.get("min_angle_p90"),
+        row.get("heading_p10"),
+        row.get("heading_p50"),
+        row.get("heading_p90"),
+        row.get("rig_id"),
+        row.get("camera_id"),
+        row.get("arena_id"),
+        row.get("dish_design"),
+        row.get("canvas_name"),
+        row.get("protocol_name"),
+        row.get("genotype"),
+        row.get("dpf_at_acquisition"),
+        row.get("profile_json"),
+    )
+
+
+def _backfill_keypoint_profiles(
+    registry: Registry,
+    *,
+    dry_run: bool,
+    scope_paths: Optional[Sequence[Path]],
+    refresh: bool,
+) -> Dict[str, int]:
+    rows = registry.conn.execute(
+        """
+        SELECT
+            d.dataset_id,
+            d.zarr_path,
+            d.recording_id,
+            d.zarr_use,
+            p.genotype AS genotype,
+            p.dpf_at_acquisition AS dpf_at_acquisition
+        FROM datasets d
+        LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
+        WHERE (status IS NULL OR lower(status) != 'missing')
+          AND lower(COALESCE(d.artifact_kind, '')) = 'source_recording'
+        ORDER BY d.dataset_id;
+        """
+    ).fetchall()
+    scope_roots = _normalize_scope_paths(scope_paths)
+    zarr = _import_zarr()
+    summary: Dict[str, int] = {
+        "datasets_scanned": 0,
+        "datasets_skipped_existing": 0,
+        "datasets_missing": 0,
+        "datasets_errors": 0,
+        "datasets_no_profile": 0,
+        "rows_inserted": 0,
+        "rows_updated": 0,
+        "rows_skipped": 0,
+        "rows_deleted": 0,
+    }
+
+    for row in rows:
+        dataset_id = str(row["dataset_id"])
+        zarr_path = Path(str(row["zarr_path"])).expanduser()
+        recording_id = str(row["recording_id"]) if row["recording_id"] else None
+        zarr_use = str(row["zarr_use"]) if row["zarr_use"] else None
+        genotype = _decode_text(row["genotype"])
+        dpf_at_acquisition = _coerce_int_value(row["dpf_at_acquisition"])
+
+        if not _matches_scope(str(zarr_path), scope_roots):
+            continue
+        summary["datasets_scanned"] += 1
+        if not _is_zarr_root_path(zarr_path):
+            summary["datasets_missing"] += 1
+            continue
+
+        existing_rows = registry.conn.execute(
+            "SELECT * FROM keypoint_data_profile WHERE dataset_id = ?;",
+            (dataset_id,),
+        ).fetchall()
+        if not refresh and existing_rows:
+            summary["datasets_skipped_existing"] += 1
+            summary["rows_skipped"] += len(existing_rows)
+            continue
+
+        try:
+            try:
+                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+            except TypeError:
+                root = zarr.open_group(str(zarr_path), mode="r")
+            extracted_rows = _extract_keypoint_profile_rows(
+                root,
+                zarr_path=zarr_path,
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+                genotype=genotype,
+                dpf_at_acquisition=dpf_at_acquisition,
+            )
+        except Exception:
+            summary["datasets_errors"] += 1
+            continue
+
+        if not extracted_rows:
+            summary["datasets_no_profile"] += 1
+
+        existing_by_run: Dict[str, Dict[str, object]] = {
+            str(existing["profile_run"]): {key: existing[key] for key in existing.keys()}
+            for existing in existing_rows
+        }
+        extracted_by_run: Dict[str, Dict[str, object]] = {
+            str(extracted["profile_run"]): extracted for extracted in extracted_rows
+        }
+
+        for profile_run, extracted in extracted_by_run.items():
+            existing = existing_by_run.get(profile_run)
+            if existing is None:
+                summary["rows_inserted"] += 1
+                continue
+            existing_sig = _keypoint_profile_row_signature(existing)
+            extracted_sig = _keypoint_profile_row_signature(extracted)
+            if existing_sig == extracted_sig:
+                summary["rows_skipped"] += 1
+            else:
+                summary["rows_updated"] += 1
+
+        if refresh:
+            for profile_run in existing_by_run:
+                if profile_run not in extracted_by_run:
+                    summary["rows_deleted"] += 1
+
+        if dry_run:
+            continue
+        if refresh:
+            registry.replace_keypoint_data_profile(dataset_id, extracted_rows)
+        else:
+            for extracted in extracted_rows:
+                registry.upsert_keypoint_data_profile(
+                    dataset_id=dataset_id,
+                    profile_run=str(extracted["profile_run"]),
+                    recording_id=extracted.get("recording_id"),
+                    zarr_use=extracted.get("zarr_use"),
+                    keypoint_method=extracted.get("keypoint_method"),
+                    source_keypoint_path=extracted.get("source_keypoint_path"),
+                    source_keypoint_run=extracted.get("source_keypoint_run"),
+                    skeleton_id=extracted.get("skeleton_id"),
+                    kpt_shape=extracted.get("kpt_shape"),
+                    profile_created_utc=extracted.get("profile_created_utc"),
+                    rows_total=extracted.get("rows_total"),
+                    rows_usable=extracted.get("rows_usable"),
+                    usable_keypoints_total=extracted.get("usable_keypoints_total"),
+                    usable_rate=extracted.get("usable_rate"),
+                    confidence_valid_rate=extracted.get("confidence_valid_rate"),
+                    geometry_valid_rate=extracted.get("geometry_valid_rate"),
+                    triangle_area_p10=extracted.get("triangle_area_p10"),
+                    triangle_area_p50=extracted.get("triangle_area_p50"),
+                    triangle_area_p90=extracted.get("triangle_area_p90"),
+                    min_angle_p10=extracted.get("min_angle_p10"),
+                    min_angle_p50=extracted.get("min_angle_p50"),
+                    min_angle_p90=extracted.get("min_angle_p90"),
+                    heading_p10=extracted.get("heading_p10"),
+                    heading_p50=extracted.get("heading_p50"),
+                    heading_p90=extracted.get("heading_p90"),
+                    rig_id=extracted.get("rig_id"),
+                    camera_id=extracted.get("camera_id"),
+                    arena_id=extracted.get("arena_id"),
+                    dish_design=extracted.get("dish_design"),
+                    canvas_name=extracted.get("canvas_name"),
+                    protocol_name=extracted.get("protocol_name"),
+                    profile_json=extracted.get("profile_json"),
+                    genotype=extracted.get("genotype"),
+                    dpf_at_acquisition=extracted.get("dpf_at_acquisition"),
+                    zarr_mtime_ns=extracted.get("zarr_mtime_ns"),
+                    updated_utc=extracted.get("updated_utc"),
+                )
+
+    return summary
 
 
 def _backfill_keypoint_quality(
@@ -5652,6 +5860,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.backfill_model_tables
         and not args.remap_training_set_dataset_ids
         and not args.backfill_dataset_lineage
+        and not args.backfill_keypoint_profiles
         and not args.backfill_keypoint_quality
         and not args.backfill_detect_quality
         and not args.backfill_detect_performance
@@ -5659,6 +5868,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.backfill_crop_quality
         and not args.backfill_eye_mask_performance
         and not args.backfill_recording_step_status
+        and not args.refresh_keypoint_profiles
         and not args.refresh_keypoint_quality
         and not args.refresh_detect_quality
         and not args.refresh_detect_performance
@@ -5673,13 +5883,14 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "--prune-failed-runs, --reconcile-in-progress-runs, --delete-run-id, --delete-set-id, "
             "--prune-empty-sets, --backfill-recording-entities, --backfill-subject-dish-cross, "
             "--backfill-subjects, "
-            "--backfill-model-tables, --backfill-keypoint-quality, "
+            "--backfill-model-tables, --backfill-keypoint-profiles, --backfill-keypoint-quality, "
             "--remap-training-set-dataset-ids, "
             "--backfill-dataset-lineage, "
             "--backfill-detect-quality, --backfill-detect-performance, --backfill-keypoint-performance, "
             "--backfill-crop-quality, --backfill-eye-mask-performance, "
             "--backfill-recording-step-status, "
-            "--refresh-keypoint-quality, --refresh-detect-quality, --refresh-detect-performance, "
+            "--refresh-keypoint-profiles, --refresh-keypoint-quality, "
+            "--refresh-detect-quality, --refresh-detect-performance, "
             "--refresh-keypoint-performance, "
             "--refresh-crop-quality, --refresh-eye-mask-performance, "
             "--check-integrity, and/or --vacuum."
@@ -6093,6 +6304,40 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     f"inserted={summary['rows_inserted']} "
                     f"deleted={summary['rows_deleted']} "
                     f"unchanged={summary['rows_unchanged']} relationship(s)."
+                )
+
+        if args.backfill_keypoint_profiles or args.refresh_keypoint_profiles:
+            summary = _backfill_keypoint_profiles(
+                registry,
+                dry_run=bool(args.dry_run),
+                scope_paths=scope_paths or None,
+                refresh=bool(args.refresh_keypoint_profiles),
+            )
+            mode = "refresh" if args.refresh_keypoint_profiles else "backfill"
+            print(
+                f"Keypoint profiles {mode}: "
+                "scope=source-recording-all-uses "
+                f"scanned={summary['datasets_scanned']} "
+                f"missing={summary['datasets_missing']} "
+                f"errors={summary['datasets_errors']} "
+                f"no_profile={summary['datasets_no_profile']} "
+                f"skipped_existing={summary['datasets_skipped_existing']}"
+            )
+            if args.dry_run:
+                print(
+                    "Dry run: would apply "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+            else:
+                print(
+                    "Applied "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
                 )
 
         if args.backfill_keypoint_quality or args.refresh_keypoint_quality:

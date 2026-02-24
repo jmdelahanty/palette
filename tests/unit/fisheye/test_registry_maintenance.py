@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from fisheye.registry.db import Registry
 from fisheye.registry.maintenance import (
+    _backfill_keypoint_profiles,
     _backfill_crop_quality,
     _backfill_dataset_lineage,
     _backfill_detect_quality,
@@ -51,6 +52,7 @@ from fisheye.registry.maintenance import (
     _resolve_existing_run_ids,
     _reconcile_stale_in_progress_runs,
     _normalize_status_values,
+    main as maintenance_main,
 )
 
 
@@ -138,6 +140,55 @@ def _create_keypoint_performance_zarr(path: Path) -> None:
         "mean_confidence": 0.91,
     }
     kp.create_array("keypoints_roi", data=np.zeros((4, 3, 2), dtype=np.float32), chunks=(1, 3, 2))
+
+
+def _create_keypoint_profile_zarr(
+    path: Path,
+    *,
+    profile_run: str = "keypoint_profile_001",
+    zarr_use: str = "analysis",
+    usable_rate: float = 0.75,
+) -> object:
+    _create_fake_zarr_store(path)
+    root = _FakeGroup(attrs={"session_uuid": "keypoint_profile_session", "zarr_purpose": zarr_use})
+    analysis = root.add_group("analysis")
+    profile_parent = analysis.add_group("keypoint_profile_runs", attrs={"latest": profile_run})
+    profile = profile_parent.add_group(profile_run)
+    profile.attrs["profile_summary"] = {
+        "created_at_utc": "2026-02-24T00:00:00+00:00",
+        "dataset": {"recording_id": "recording_profile", "zarr_use": zarr_use},
+        "source": {
+            "keypoint_method": "traditional_pose",
+            "keypoint_path": "keypoints_runs/keypoints_001",
+            "keypoint_run": "keypoints_001",
+            "skeleton_id": "fish_v1",
+            "kpt_shape": [3, 3],
+        },
+        "quality": {
+            "rows_total": 4,
+            "rows_usable": 3,
+            "usable_keypoints_total": 9,
+            "usable_rate": usable_rate,
+            "confidence_valid_rate": 0.95,
+            "geometry_valid_rate": 0.96,
+        },
+        "geometry": {
+            "triangle_area": {"stats": {"p10": 0.1, "p50": 0.2, "p90": 0.3}},
+            "min_angle": {"stats": {"p10": 10.0, "p50": 20.0, "p90": 30.0}},
+            "heading": {"stats": {"p10": -0.1, "p50": 0.0, "p90": 0.1}},
+        },
+        "composition": {
+            "rig_id": "omnifin0",
+            "camera_id": "2010094",
+            "arena_id": "arena_2",
+            "dish_design": "cedar",
+            "canvas_name": "shadow",
+            "protocol_name": "DefaultScreen",
+            "genotype": "Tg(elavl3:gcamp7f)",
+            "dpf_at_acquisition": 7,
+        },
+    }
+    return root
 
 
 def _create_crop_quality_zarr(path: Path) -> None:
@@ -2978,6 +3029,200 @@ def test_refresh_keypoint_quality_deletes_stale_rows(tmp_path: Path) -> None:
     registry.close()
 
 
+def test_backfill_keypoint_profiles_dry_run_and_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_profile" / "zarr" / "rec_profile_analysis.zarr"
+    fake_root = _create_keypoint_profile_zarr(zarr_path, zarr_use="analysis")
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+    dataset_id = "dataset_profile_a"
+    registry.upsert_dataset(
+        dataset_id=dataset_id,
+        session_uuid="session_profile_a",
+        zarr_path=zarr_path,
+        recording_id="recording_profile_a",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.conn.execute("DELETE FROM keypoint_data_profile WHERE dataset_id = ?;", (dataset_id,))
+    registry.conn.commit()
+
+    dry = _backfill_keypoint_profiles(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert dry["datasets_scanned"] == 1
+    assert dry["rows_inserted"] == 1
+    assert dry["rows_updated"] == 0
+    assert dry["rows_deleted"] == 0
+
+    applied = _backfill_keypoint_profiles(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert applied["rows_inserted"] == 1
+    row = registry.conn.execute(
+        """
+        SELECT profile_run, keypoint_method, usable_rate, genotype, dpf_at_acquisition
+        FROM keypoint_data_profile_latest
+        WHERE dataset_id = ?;
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert row is not None
+    assert str(row["profile_run"]) == "keypoint_profile_001"
+    assert str(row["keypoint_method"]) == "traditional_pose"
+    assert float(row["usable_rate"]) == pytest.approx(0.75)
+    assert str(row["genotype"]) == "Tg(elavl3:gcamp7f)"
+    assert int(row["dpf_at_acquisition"]) == 7
+    registry.close()
+
+
+def test_backfill_keypoint_profiles_scope_defaults_to_source_all_uses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    analysis_path = tmp_path / "recordings" / "rec_profile_a" / "zarr" / "rec_profile_a_analysis.zarr"
+    training_path = tmp_path / "recordings" / "rec_profile_b" / "zarr" / "rec_profile_b_training.zarr"
+    fake_analysis = _create_keypoint_profile_zarr(analysis_path, zarr_use="analysis")
+    fake_training = _create_keypoint_profile_zarr(training_path, zarr_use="training")
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule(
+            {
+                str(analysis_path): fake_analysis,
+                str(training_path): fake_training,
+            }
+        ),
+    )
+
+    analysis_id = "dataset_profile_analysis"
+    training_id = "dataset_profile_training"
+    registry.upsert_dataset(
+        dataset_id=analysis_id,
+        session_uuid="session_profile_analysis",
+        zarr_path=analysis_path,
+        recording_id="recording_profile_analysis",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_dataset(
+        dataset_id=training_id,
+        session_uuid="session_profile_training",
+        zarr_path=training_path,
+        recording_id="recording_profile_training",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.conn.execute("DELETE FROM keypoint_data_profile WHERE dataset_id IN (?, ?);", (analysis_id, training_id))
+    registry.conn.commit()
+
+    dry = _backfill_keypoint_profiles(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert dry["datasets_scanned"] == 2
+    assert dry["rows_inserted"] == 2
+
+    applied = _backfill_keypoint_profiles(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert applied["rows_inserted"] == 2
+    analysis_rows = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM keypoint_data_profile WHERE dataset_id = ?;",
+        (analysis_id,),
+    ).fetchone()
+    training_rows = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM keypoint_data_profile WHERE dataset_id = ?;",
+        (training_id,),
+    ).fetchone()
+    assert analysis_rows is not None and int(analysis_rows["n"]) == 1
+    assert training_rows is not None and int(training_rows["n"]) == 1
+    registry.close()
+
+
+def test_refresh_keypoint_profiles_deletes_stale_rows_and_is_deterministic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_profile" / "zarr" / "rec_profile_refresh.zarr"
+    fake_root = _create_keypoint_profile_zarr(zarr_path, zarr_use="analysis")
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+
+    dataset_id = "dataset_profile_refresh"
+    registry.upsert_dataset(
+        dataset_id=dataset_id,
+        session_uuid="session_profile_refresh",
+        zarr_path=zarr_path,
+        recording_id="recording_profile_refresh",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO keypoint_data_profile (dataset_id, profile_run, updated_utc)
+        VALUES
+            (?, 'keypoint_profile_001', datetime('now')),
+            (?, 'stale_profile', datetime('now'));
+        """,
+        (dataset_id, dataset_id),
+    )
+    registry.conn.commit()
+
+    dry = _backfill_keypoint_profiles(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=True,
+    )
+    applied = _backfill_keypoint_profiles(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=True,
+    )
+    assert dry["rows_inserted"] == 0
+    assert dry["rows_updated"] == 1
+    assert dry["rows_deleted"] == 1
+    assert dry["rows_skipped"] == 0
+    assert applied["rows_inserted"] == 0
+    assert applied["rows_updated"] == 1
+    assert applied["rows_deleted"] == 1
+    assert applied["rows_skipped"] == 0
+
+    stale = registry.conn.execute(
+        "SELECT COUNT(*) AS n FROM keypoint_data_profile WHERE dataset_id = ? AND profile_run = 'stale_profile';",
+        (dataset_id,),
+    ).fetchone()
+    assert stale is not None and int(stale["n"]) == 0
+    rows = registry.conn.execute(
+        "SELECT profile_run FROM keypoint_data_profile WHERE dataset_id = ?;",
+        (dataset_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert str(rows[0]["profile_run"]) == "keypoint_profile_001"
+    registry.close()
+
+
 def test_backfill_keypoint_performance_dry_run_and_apply(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
@@ -3086,6 +3331,68 @@ def test_backfill_keypoint_performance_scope_defaults_to_source_analysis(tmp_pat
     assert dry_all["datasets_scanned"] == 2
     assert dry_all["rows_inserted"] == 2
     registry.close()
+
+
+def test_main_no_action_message_includes_keypoint_profile_flags() -> None:
+    with pytest.raises(SystemExit) as exc:
+        maintenance_main([])
+    message = str(exc.value)
+    assert "--backfill-keypoint-profiles" in message
+    assert "--refresh-keypoint-profiles" in message
+
+
+def test_main_backfill_keypoint_profiles_wiring_and_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    Registry(registry_path).close()
+    calls: list[Dict[str, object]] = []
+
+    def _fake_backfill(
+        _registry: Registry,
+        *,
+        dry_run: bool,
+        scope_paths: Optional[list[Path]],
+        refresh: bool,
+    ) -> Dict[str, int]:
+        calls.append(
+            {
+                "dry_run": dry_run,
+                "scope_paths": scope_paths,
+                "refresh": refresh,
+            }
+        )
+        return {
+            "datasets_scanned": 5,
+            "datasets_skipped_existing": 3,
+            "datasets_missing": 1,
+            "datasets_errors": 0,
+            "datasets_no_profile": 2,
+            "rows_inserted": 2,
+            "rows_updated": 1,
+            "rows_skipped": 3,
+            "rows_deleted": 0,
+        }
+
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._backfill_keypoint_profiles",
+        _fake_backfill,
+    )
+
+    maintenance_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--backfill-keypoint-profiles",
+            "--dry-run",
+        ]
+    )
+    assert calls == [{"dry_run": True, "scope_paths": None, "refresh": False}]
+    output = capsys.readouterr().out
+    assert "Keypoint profiles backfill: scope=source-recording-all-uses" in output
+    assert "Dry run: would apply inserted=2 updated=1 deleted=0 unchanged=3 row(s)." in output
 
 
 def test_backfill_detect_quality_refresh_apply_is_idempotent(

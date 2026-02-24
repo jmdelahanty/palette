@@ -117,6 +117,90 @@ def _seed_keypoint_quality(
     )
 
 
+def _seed_keypoint_profile(
+    registry: Registry,
+    *,
+    dataset_id: str,
+    recording_id: str,
+    zarr_path: Path,
+    profile_run: str = "keypoint_profile_001",
+    source_keypoint_run: str = "kp_001",
+    source_keypoint_path: str = "refined_keypoints_runs/refined_001",
+    keypoint_method: str = "traditional_pose",
+    zarr_mtime_ns: int | None = None,
+) -> None:
+    if zarr_mtime_ns is None:
+        zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    profile_summary = {
+        "created_at_utc": "2026-02-24T00:00:00+00:00",
+        "dataset": {
+            "dataset_id": dataset_id,
+            "recording_id": recording_id,
+            "zarr_use": "training",
+            "zarr_path": str(zarr_path),
+        },
+        "source": {
+            "keypoint_path": source_keypoint_path,
+            "keypoint_type": "refined",
+            "keypoint_method": keypoint_method,
+            "keypoint_run": source_keypoint_run,
+            "refined_run": "refined_001",
+            "skeleton_id": "traditional_v1",
+            "kpt_shape": [3, 2],
+        },
+        "quality": {
+            "rows_total": 4,
+            "rows_usable": 3,
+            "usable_keypoints_total": 3,
+            "usable_rate": 0.75,
+            "confidence_valid_rate": 0.75,
+            "geometry_valid_rate": 0.75,
+        },
+        "geometry": {
+            "triangle_area": {"stats": {"p10": 110.0, "p50": 125.0, "p90": 140.0}},
+            "min_angle": {"stats": {"p10": 18.0, "p50": 21.0, "p90": 24.0}},
+            "heading": {"stats": {"p10": 5.0, "p50": 12.5, "p90": 20.0}},
+        },
+    }
+    registry.upsert_keypoint_data_profile(
+        dataset_id=dataset_id,
+        profile_run=profile_run,
+        recording_id=recording_id,
+        zarr_use="training",
+        keypoint_method=keypoint_method,
+        source_keypoint_path=source_keypoint_path,
+        source_keypoint_run=source_keypoint_run,
+        skeleton_id="traditional_v1",
+        kpt_shape="[3,2]",
+        profile_created_utc="2026-02-24T00:00:00+00:00",
+        rows_total=4,
+        rows_usable=3,
+        usable_keypoints_total=3,
+        usable_rate=0.75,
+        confidence_valid_rate=0.75,
+        geometry_valid_rate=0.75,
+        triangle_area_p10=110.0,
+        triangle_area_p50=125.0,
+        triangle_area_p90=140.0,
+        min_angle_p10=18.0,
+        min_angle_p50=21.0,
+        min_angle_p90=24.0,
+        heading_p10=5.0,
+        heading_p50=12.5,
+        heading_p90=20.0,
+        rig_id="rig_1",
+        camera_id="camera_1",
+        arena_id="arena_1",
+        dish_design="cedar",
+        canvas_name="shadow",
+        protocol_name="DefaultScreen",
+        genotype=None,
+        dpf_at_acquisition=None,
+        profile_json=json.dumps(profile_summary),
+        zarr_mtime_ns=int(zarr_mtime_ns),
+    )
+
+
 def _seed_subject_lineage(
     registry: Registry,
     *,
@@ -278,6 +362,8 @@ def test_mixed_skeleton_rejected(tmp_path: Path, monkeypatch, capsys) -> None:
     db = Registry(registry_path)
     _seed_dataset(db, dataset_id="dataset_a", recording_id="rec_a", zarr_path=zarr_a)
     _seed_dataset(db, dataset_id="dataset_b", recording_id="rec_b", zarr_path=zarr_b)
+    _seed_keypoint_profile(db, dataset_id="dataset_a", recording_id="rec_a", zarr_path=zarr_a)
+    _seed_keypoint_profile(db, dataset_id="dataset_b", recording_id="rec_b", zarr_path=zarr_b)
     db.close()
 
     _write_manifest(
@@ -324,6 +410,78 @@ def test_mixed_skeleton_rejected(tmp_path: Path, monkeypatch, capsys) -> None:
     assert "Mixed skeleton identities" in stdout
 
 
+def test_manifest_pose_schema_dims_do_not_false_fail_when_keypoint_count_matches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    manifest_path = tmp_path / "pose.manifest.json"
+    output_path = tmp_path / "pose.data_card.json"
+    zarr_a = tmp_path / "a_training.zarr"
+    zarr_b = tmp_path / "b_training.zarr"
+
+    db = Registry(registry_path)
+    _seed_dataset(db, dataset_id="dataset_a", recording_id="rec_a", zarr_path=zarr_a)
+    _seed_dataset(db, dataset_id="dataset_b", recording_id="rec_b", zarr_path=zarr_b)
+    _seed_keypoint_profile(db, dataset_id="dataset_a", recording_id="rec_a", zarr_path=zarr_a)
+    _seed_keypoint_profile(db, dataset_id="dataset_b", recording_id="rec_b", zarr_path=zarr_b)
+    db.close()
+
+    _write_manifest(
+        manifest_path,
+        {
+            "set_id": "pose_schema_dims_v001",
+            "datasets": [
+                {"dataset_id": "dataset_a", "zarr_path": str(zarr_a), "keypoint_run": "kp_001"},
+                {"dataset_id": "dataset_b", "zarr_path": str(zarr_b), "keypoint_run": "kp_001"},
+            ],
+            "pose_schema": {
+                "skeleton_id": "pose_schema:traditional_v1",
+                "kpt_shape": [3, 3],
+                "keypoint_labels": ["bladder", "eye_left", "eye_right"],
+                "skeleton": None,
+            },
+        },
+    )
+
+    pose_root_a = _make_pose_root(
+        kpt_count=3,
+        skeleton=[[0, 1], [0, 2], [1, 2]],
+        labels=["bladder", "eye_left", "eye_right"],
+    )
+    # Real keypoint runs can carry edges under pose_schema instead of keypoint_skeleton.
+    del pose_root_a["keypoints_runs"]["kp_001"].attrs["keypoint_skeleton"]
+    pose_root_a["keypoints_runs"]["kp_001"].attrs["pose_schema"] = {
+        "name": "traditional_v1",
+        "nodes": ["bladder", "eye_left", "eye_right"],
+        "edges": [[0, 1], [0, 2], [1, 2]],
+    }
+    pose_root_b = _make_pose_root(
+        kpt_count=3,
+        skeleton=[[0, 1], [0, 2], [1, 2]],
+        labels=["bladder", "eye_left", "eye_right"],
+    )
+
+    _patch_open_group(monkeypatch, {zarr_a: pose_root_a, zarr_b: pose_root_b})
+
+    rc = mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--registry",
+            str(registry_path),
+            "--output",
+            str(output_path),
+            "--no-plots",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["skeleton_graph_metrics"]["pose_schema"]["kpt_shape"] == [3, 3]
+    assert payload["skeleton_graph_metrics"]["pose_schema"]["skeleton"] == [[0, 1], [0, 2], [1, 2]]
+    assert "edge_0_1" in payload["skeleton_graph_metrics"]["edge_length_norm_stats"]
+
+
 def test_subject_lineage_warn_and_require_policy(tmp_path: Path, monkeypatch, capsys) -> None:
     registry_path = tmp_path / "registry.sqlite"
     manifest_path = tmp_path / "pose.manifest.json"
@@ -334,6 +492,8 @@ def test_subject_lineage_warn_and_require_policy(tmp_path: Path, monkeypatch, ca
     db = Registry(registry_path)
     _seed_dataset(db, dataset_id="dataset_a", recording_id="rec_a", zarr_path=zarr_a)
     _seed_dataset(db, dataset_id="dataset_b", recording_id="rec_b", zarr_path=zarr_b)
+    _seed_keypoint_profile(db, dataset_id="dataset_a", recording_id="rec_a", zarr_path=zarr_a)
+    _seed_keypoint_profile(db, dataset_id="dataset_b", recording_id="rec_b", zarr_path=zarr_b)
     _seed_subject_lineage(
         db,
         dataset_id="dataset_a",
@@ -439,6 +599,7 @@ def test_basic_payload_completeness(tmp_path: Path, monkeypatch) -> None:
     db = Registry(registry_path)
     _seed_dataset(db, dataset_id="dataset_pose", recording_id="rec_pose", zarr_path=zarr_path)
     _seed_keypoint_quality(db, dataset_id="dataset_pose", zarr_path=zarr_path)
+    _seed_keypoint_profile(db, dataset_id="dataset_pose", recording_id="rec_pose", zarr_path=zarr_path)
     _seed_subject_lineage(
         db,
         dataset_id="dataset_pose",
@@ -522,6 +683,7 @@ def test_basic_payload_completeness(tmp_path: Path, monkeypatch) -> None:
     assert payload["selection"]["split_counts"] == {"train": 3, "val": 1}
     assert payload["quality"]["usable_keypoints_total"] == 3
     assert payload["quality"]["usable_keypoints_rate_overall"] == 0.75
+    assert payload["quality"]["usable_keypoints_rate_histogram"] is not None
     assert payload["geometry"]["triangle_area"]["stats"]["count"] == 4
     assert "edge_0_1" in payload["skeleton_graph_metrics"]["edge_length_norm_stats"]
     assert "angle_1_0_2" in payload["skeleton_graph_metrics"]["angle_stats"]
@@ -529,3 +691,163 @@ def test_basic_payload_completeness(tmp_path: Path, monkeypatch) -> None:
     assert payload["genotype_counts"] == {"Tg(line_complete)": 1}
     assert payload["dpf_stats"]["max"] == 8.0
     assert payload["audit_freshness"]["zarr_mtime_mismatch_count"] == 0
+
+
+def test_missing_profile_rows_fail_closed_unless_fallback_enabled(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    manifest_path = tmp_path / "pose.manifest.json"
+    output_path = tmp_path / "pose.data_card.json"
+    zarr_path = tmp_path / "pose_training.zarr"
+
+    db = Registry(registry_path)
+    _seed_dataset(db, dataset_id="dataset_pose", recording_id="rec_pose", zarr_path=zarr_path)
+    _seed_keypoint_quality(db, dataset_id="dataset_pose", zarr_path=zarr_path)
+    db.close()
+
+    _write_manifest(
+        manifest_path,
+        {
+            "set_id": "pose_missing_profile_v001",
+            "datasets": [
+                {
+                    "dataset_id": "dataset_pose",
+                    "zarr_path": str(zarr_path),
+                    "keypoint_run": "kp_001",
+                }
+            ],
+            "pose_schema": {
+                "kpt_shape": [3, 2],
+                "keypoint_labels": ["swim_bladder", "eye_left", "eye_right"],
+                "skeleton": [[0, 1], [0, 2]],
+            },
+        },
+    )
+    _patch_open_group(
+        monkeypatch,
+        {
+            zarr_path: _make_pose_root(
+                kpt_count=3,
+                skeleton=[[0, 1], [0, 2]],
+                labels=["swim_bladder", "eye_left", "eye_right"],
+            ),
+        },
+    )
+
+    rc_fail = mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--registry",
+            str(registry_path),
+            "--output",
+            str(output_path),
+            "--no-plots",
+        ]
+    )
+    assert rc_fail == 1
+    stdout_fail = capsys.readouterr().out
+    assert "Missing keypoint_data_profile_latest rows" in stdout_fail
+    assert "--refresh-keypoint-profiles" in stdout_fail
+
+    rc_fallback = mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--registry",
+            str(registry_path),
+            "--output",
+            str(output_path),
+            "--allow-profile-fallback-scan",
+            "--no-plots",
+        ]
+    )
+    assert rc_fallback == 0
+    assert output_path.exists()
+
+
+def test_profile_mtime_mismatch_fail_closed_unless_allowed(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    manifest_path = tmp_path / "pose.manifest.json"
+    output_path = tmp_path / "pose.data_card.json"
+    zarr_path = tmp_path / "pose_training.zarr"
+
+    db = Registry(registry_path)
+    _seed_dataset(db, dataset_id="dataset_pose", recording_id="rec_pose", zarr_path=zarr_path)
+    _seed_keypoint_quality(db, dataset_id="dataset_pose", zarr_path=zarr_path)
+    _seed_keypoint_profile(
+        db,
+        dataset_id="dataset_pose",
+        recording_id="rec_pose",
+        zarr_path=zarr_path,
+        zarr_mtime_ns=int(zarr_path.stat().st_mtime_ns) + 1,
+    )
+    db.close()
+
+    _write_manifest(
+        manifest_path,
+        {
+            "set_id": "pose_stale_profile_v001",
+            "datasets": [
+                {
+                    "dataset_id": "dataset_pose",
+                    "zarr_path": str(zarr_path),
+                    "keypoint_run": "kp_001",
+                }
+            ],
+            "pose_schema": {
+                "kpt_shape": [3, 2],
+                "keypoint_labels": ["swim_bladder", "eye_left", "eye_right"],
+                "skeleton": [[0, 1], [0, 2]],
+            },
+        },
+    )
+    _patch_open_group(
+        monkeypatch,
+        {
+            zarr_path: _make_pose_root(
+                kpt_count=3,
+                skeleton=[[0, 1], [0, 2]],
+                labels=["swim_bladder", "eye_left", "eye_right"],
+            ),
+        },
+    )
+
+    rc_fail = mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--registry",
+            str(registry_path),
+            "--output",
+            str(output_path),
+            "--no-plots",
+        ]
+    )
+    assert rc_fail == 1
+    stdout_fail = capsys.readouterr().out
+    assert "Stale keypoint_data_profile_latest row(s)" in stdout_fail
+    assert "--refresh-keypoint-profiles" in stdout_fail
+
+    rc_allow = mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--registry",
+            str(registry_path),
+            "--output",
+            str(output_path),
+            "--allow-profile-mtime-mismatch",
+            "--no-plots",
+        ]
+    )
+    assert rc_allow == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["audit_freshness"]["zarr_mtime_mismatch_count"] == 1

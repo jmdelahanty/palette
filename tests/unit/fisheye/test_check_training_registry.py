@@ -24,6 +24,7 @@ from fisheye.utils.check_training_registry import (
     _sum_manifest_rois,
     _status_with_details,
     _summarize_detect_quality_rows,
+    _summarize_keypoint_profile_rows,
     _summarize_keypoint_quality_rows,
 )
 
@@ -446,6 +447,42 @@ def test_keypoint_quality_summary_counts_and_buckets() -> None:
     }
 
 
+def test_keypoint_profile_summary_counts_and_buckets(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "kp_profile.zarr"
+    zarr_path.mkdir(parents=True, exist_ok=True)
+    mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    rows = [
+        {
+            "dataset_id": "a",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns,
+            "keypoint_method": "traditional_pose",
+            "profile_json": '{"ok":true}',
+        },
+        {
+            "dataset_id": "b",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns,
+            "keypoint_method": "traditional_pose",
+            "profile_json": None,
+        },
+        {
+            "dataset_id": "c",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": None,
+            "keypoint_method": None,
+            "profile_json": None,
+        },
+    ]
+    summary = _summarize_keypoint_profile_rows(rows)
+    assert summary.total_rows == 3
+    assert summary.stale_rows == 1
+    assert summary.exclusion_reasons == {
+        "missing profile_json": 1,
+        "missing profile_json+method": 1,
+    }
+
+
 def test_keypoint_exclusion_reason_precedence() -> None:
     assert (
         _keypoint_exclusion_reason(
@@ -576,6 +613,122 @@ def test_detect_quality_exclusion_reason_precedence(tmp_path: Path) -> None:
         )
         == "missing interpolated rate"
     )
+
+
+def test_keypoint_profile_view_outputs_summary(tmp_path: Path, capsys) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "dataset_profile_training.zarr"
+    zarr_path.mkdir(parents=True, exist_ok=True)
+    current_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    stale_mtime_ns = current_mtime_ns + 1
+    registry.upsert_dataset(
+        "dataset_profile",
+        session_uuid="session_profile",
+        zarr_path=zarr_path,
+        recording_id="recording_profile",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO keypoint_data_profile (
+            dataset_id,
+            profile_run,
+            recording_id,
+            zarr_use,
+            keypoint_method,
+            source_keypoint_path,
+            source_keypoint_run,
+            skeleton_id,
+            kpt_shape,
+            profile_created_utc,
+            zarr_mtime_ns,
+            updated_utc,
+            rows_total,
+            rows_usable,
+            usable_keypoints_total,
+            usable_rate,
+            confidence_valid_rate,
+            geometry_valid_rate,
+            triangle_area_p10,
+            triangle_area_p50,
+            triangle_area_p90,
+            min_angle_p10,
+            min_angle_p50,
+            min_angle_p90,
+            heading_p10,
+            heading_p50,
+            heading_p90,
+            rig_id,
+            camera_id,
+            arena_id,
+            dish_design,
+            canvas_name,
+            protocol_name,
+            genotype,
+            dpf_at_acquisition,
+            profile_json
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'),
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        );
+        """,
+        (
+            "dataset_profile",
+            "kp_profile_001",
+            "recording_profile",
+            "training",
+            "traditional_pose",
+            "refined_keypoint_runs/refined_001/traditional_pose",
+            "keypoint_001",
+            "fish_v1",
+            "[3,3]",
+            "2026-02-24T00:00:00+00:00",
+            stale_mtime_ns,
+            100,
+            90,
+            270,
+            0.9,
+            0.95,
+            0.96,
+            0.01,
+            0.02,
+            0.03,
+            10.0,
+            20.0,
+            30.0,
+            -0.4,
+            0.0,
+            0.4,
+            "omnifin0",
+            "2010094",
+            "arena_2",
+            "cedar",
+            "shadow",
+            "DefaultScreen",
+            "Tg(elavl3:gcamp7f)",
+            7,
+            None,
+        ),
+    )
+    registry.conn.commit()
+    registry.close()
+
+    rc = check_training_registry_main(
+        [
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--view",
+            "keypoint-profile",
+            "--no-rich",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Keypoint Profile" in out
+    assert "total rows: 1" in out
+    assert "stale rows (mtime mismatch/missing): 1" in out
+    assert "top exclusion-ish reasons: missing profile_json=1" in out
 
 
 def test_run_id_style_contract_and_legacy() -> None:

@@ -108,6 +108,23 @@ scripts/py -m fisheye.utils.run_keypoint_training_pipeline \
   --data-card-view
 ```
 
+If aggregation fails with stale/missing `keypoint_data_profile_latest` rows:
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  --registry /nvme1/palette_registry.sqlite \
+  --refresh-keypoint-profiles
+
+scripts/py -m fisheye.utils.check_training_registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --view keypoint-profile \
+  --no-rich
+```
+
+Then rerun pipeline. Emergency overrides (not recommended for production):
+- `--data-card-allow-profile-mtime-mismatch`
+- `--data-card-allow-profile-fallback-scan`
+
 Optional ONNX/TRT after train:
 
 ```bash
@@ -193,6 +210,11 @@ scripts/py -m fisheye.utils.check_training_registry \
   - `--aggregate-training-data-card` cannot be combined with `--dry-run`.
   - keypoint data-card aggregation is auto-enabled for `--export-merged` unless
     `--no-aggregate-training-data-card` is set.
+  - keypoint data-card aggregation is fail-closed on stale profile rows by
+    default; use `--data-card-allow-profile-mtime-mismatch` only for
+    controlled recovery.
+  - missing keypoint profile rows fail closed by default; use
+    `--data-card-allow-profile-fallback-scan` only for controlled fallback.
   - if the keypoint data-card aggregator module is unavailable, auto-aggregation is skipped;
     use `--aggregate-training-data-card` to require it and fail closed.
 - Merged pose export defaults:

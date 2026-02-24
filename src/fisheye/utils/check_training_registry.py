@@ -129,6 +129,13 @@ class DetectQualitySummary:
 
 
 @dataclass
+class KeypointProfileSummary:
+    total_rows: int
+    stale_rows: int
+    exclusion_reasons: Dict[str, int]
+
+
+@dataclass
 class DatasetRow:
     dataset_id: str
     session_uuid: Optional[str]
@@ -253,6 +260,7 @@ KEYPOINT_GATE_MIN_RATE = 0.70
 DETECT_GATE_REVIEW_STATE = "approved"
 DETECT_GATE_REVIEW_INTENDED_USE = "training"
 DETECT_GATE_MAX_INTERPOLATED_RATE = 0.25
+KEYPOINT_PROFILE_METHOD_KEYS = ("keypoint_method", "method")
 BEHAVIOR_V1_REQUIRED_ARTIFACT_TYPES = {
     "h5_log",
     "camera_video",
@@ -1219,6 +1227,93 @@ def _load_keypoint_quality_rows(
     return [dict(row) for row in rows]
 
 
+def _load_keypoint_profile_rows(
+    registry: Registry,
+    *,
+    set_filter: Optional[str],
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    dataset_ids = _dataset_ids_for_set(registry, set_filter)
+    if dataset_ids is not None and not dataset_ids:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    query_latest = getattr(registry, "query_keypoint_data_profile_latest", None)
+    if callable(query_latest):
+        try:
+            if dataset_ids is None:
+                raw_rows = query_latest()
+            else:
+                raw_rows = query_latest(dataset_ids=dataset_ids)
+        except TypeError:
+            # Defensive fallback for older/alternate query signatures.
+            try:
+                raw_rows = query_latest()
+            except Exception:
+                raw_rows = []
+        except Exception:
+            raw_rows = []
+        rows = [dict(row) for row in raw_rows]
+    elif _view_exists(registry, "keypoint_data_profile_latest"):
+        # SQL fallback keeps this report usable even if helper API is absent.
+        sql = ["SELECT * FROM keypoint_data_profile_latest WHERE 1=1"]
+        params: List[Any] = []
+        if dataset_ids is not None:
+            placeholders = ", ".join("?" for _ in dataset_ids)
+            sql.append(f"AND dataset_id IN ({placeholders})")
+            params.extend(dataset_ids)
+        sql.append("ORDER BY dataset_id, COALESCE(keypoint_method, ''), COALESCE(profile_run, '')")
+        if limit and limit > 0:
+            sql.append("LIMIT ?")
+            params.append(int(limit))
+        rows = [dict(row) for row in registry.conn.execute(" ".join(sql), params).fetchall()]
+    else:
+        return []
+
+    dataset_ids_in_rows = sorted(
+        {
+            str(row.get("dataset_id")).strip()
+            for row in rows
+            if str(row.get("dataset_id") or "").strip()
+        }
+    )
+    if dataset_ids_in_rows:
+        placeholders = ", ".join("?" for _ in dataset_ids_in_rows)
+        dataset_sql = (
+            "SELECT dataset_id, zarr_path, zarr_use FROM datasets "
+            f"WHERE dataset_id IN ({placeholders})"
+        )
+        dataset_rows = registry.conn.execute(dataset_sql, dataset_ids_in_rows).fetchall()
+        dataset_lookup: Dict[str, Dict[str, Any]] = {
+            str(row["dataset_id"]): dict(row)
+            for row in dataset_rows
+            if row["dataset_id"] is not None
+        }
+        for row in rows:
+            dataset_id = str(row.get("dataset_id") or "").strip()
+            if not dataset_id:
+                continue
+            dataset_payload = dataset_lookup.get(dataset_id)
+            if not dataset_payload:
+                continue
+            if not str(row.get("zarr_path") or "").strip():
+                row["zarr_path"] = dataset_payload.get("zarr_path")
+            if not str(row.get("zarr_use") or "").strip():
+                row["zarr_use"] = dataset_payload.get("zarr_use")
+
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            str(row.get("dataset_id") or ""),
+            str(row.get("keypoint_method") or row.get("method") or ""),
+            str(row.get("profile_run") or ""),
+        ),
+    )
+    if limit and limit > 0:
+        rows = rows[: int(limit)]
+    return rows
+
+
 def _load_detect_quality_rows(
     registry: Registry,
     *,
@@ -1695,6 +1790,26 @@ def _format_recording_vocab_inline(grouped: Dict[str, List[str]]) -> str:
     )
 
 
+def _present_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
+def _keypoint_profile_method_info(row: Dict[str, Any]) -> Tuple[Optional[str], bool]:
+    for key in KEYPOINT_PROFILE_METHOD_KEYS:
+        if key not in row:
+            continue
+        raw = row.get(key)
+        if raw is None:
+            return None, True
+        text = str(raw).strip()
+        return (text or None), True
+    return None, False
+
+
 def _keypoint_row_passes_default_gate(row: Dict[str, Any]) -> bool:
     rate = row.get("usable_keypoints_rate")
     return (
@@ -1772,6 +1887,57 @@ def _zarr_mtime_ns(path_text: Optional[str], *, mtime_cache: Dict[str, Optional[
         mtime = None
     mtime_cache[normalized] = mtime
     return mtime
+
+
+def _keypoint_profile_stale_reason(
+    row: Dict[str, Any],
+    *,
+    mtime_cache: Dict[str, Optional[int]],
+) -> Optional[str]:
+    expected_mtime = _coerce_int(row.get("zarr_mtime_ns"))
+    if expected_mtime is None:
+        return "stale row: missing zarr_mtime_ns"
+    zarr_path = str(row.get("zarr_path") or "").strip()
+    if not zarr_path:
+        return "stale row: missing zarr_path"
+    actual_mtime = _zarr_mtime_ns(zarr_path, mtime_cache=mtime_cache)
+    if actual_mtime is None:
+        return "stale row: zarr missing on disk"
+    if int(actual_mtime) != int(expected_mtime):
+        return "stale row: mtime mismatch"
+    return None
+
+
+def _keypoint_profile_exclusion_reason(row: Dict[str, Any]) -> Optional[str]:
+    profile_missing = not _present_value(row.get("profile_json"))
+    method_value, method_detectable = _keypoint_profile_method_info(row)
+    method_missing = method_detectable and not _present_value(method_value)
+    if not profile_missing and not method_missing:
+        return None
+    if profile_missing and method_missing:
+        return "missing profile_json+method"
+    if profile_missing:
+        return "missing profile_json"
+    return "missing method"
+
+
+def _summarize_keypoint_profile_rows(rows: List[Dict[str, Any]]) -> KeypointProfileSummary:
+    stale_rows = 0
+    reasons: Dict[str, int] = {}
+    mtime_cache: Dict[str, Optional[int]] = {}
+    for row in rows:
+        if _keypoint_profile_stale_reason(row, mtime_cache=mtime_cache) is not None:
+            stale_rows += 1
+        reason = _keypoint_profile_exclusion_reason(row)
+        if reason is None:
+            continue
+        reasons[reason] = reasons.get(reason, 0) + 1
+    ordered = dict(sorted(reasons.items(), key=lambda item: (-item[1], item[0])))
+    return KeypointProfileSummary(
+        total_rows=len(rows),
+        stale_rows=stale_rows,
+        exclusion_reasons=ordered,
+    )
 
 
 def _detect_quality_stale_reason(
@@ -1872,13 +2038,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             "tensorrt",
             "detect-quality",
             "keypoint-quality",
+            "keypoint-profile",
             "lineage",
         ],
         default="sets",
         help=(
             "Select output view: sets, datasets, recordings, recording-overview, "
             "recording-steps, recording-steps-wide, models, onnx, tensorrt, "
-            "detect-quality, keypoint-quality, or lineage (default: sets)."
+            "detect-quality, keypoint-quality, keypoint-profile, or lineage (default: sets)."
         ),
     )
     parser.add_argument(
@@ -1886,7 +2053,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help=(
             "Show all registry views (sets, datasets, recordings, recording-overview, "
-            "models, onnx, tensorrt, lineage, detect quality, and keypoint quality)."
+            "models, onnx, tensorrt, lineage, detect quality, keypoint quality, "
+            "and keypoint profile)."
         ),
     )
     parser.add_argument("--limit", type=int, default=200)
@@ -1945,6 +2113,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     show_detect_details = args.show_detect_quality or show_detect_view
     show_keypoint_view = args.view == "keypoint-quality"
     show_keypoint_details = args.show_keypoint_quality or show_keypoint_view
+    show_keypoint_profile = args.view == "keypoint-profile"
     if summary_only_mode:
         show_sets = False
         show_datasets = False
@@ -1961,6 +2130,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         show_detect_details = False
         show_keypoint_view = False
         show_keypoint_details = False
+        show_keypoint_profile = False
 
     set_rows = _load_set_rows(registry, args.set_id, args.limit) if show_sets else []
     dataset_rows = _load_dataset_rows(
@@ -2050,6 +2220,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         limit=keypoint_quality_limit,
     )
     keypoint_quality_summary = _summarize_keypoint_quality_rows(keypoint_quality_rows)
+    keypoint_profile_limit = args.limit if show_keypoint_profile else None
+    keypoint_profile_rows = _load_keypoint_profile_rows(
+        registry,
+        set_filter=args.set_id,
+        limit=keypoint_profile_limit,
+    )
+    keypoint_profile_summary = _summarize_keypoint_profile_rows(keypoint_profile_rows)
     dataset_lineage_summary = _summarize_dataset_lineage(
         registry,
         set_filter=args.set_id,
@@ -2091,6 +2268,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     if not args.all and args.view == "keypoint-quality" and not keypoint_quality_rows:
         print("No keypoint quality rows found.")
+        return 1
+    if not args.all and args.view == "keypoint-profile" and not keypoint_profile_rows:
+        print("No keypoint profile rows found.")
         return 1
 
     show_inference_col = any(row.inference_dataset_count > 0 for row in recording_overview_rows)
@@ -2611,6 +2791,24 @@ def main(argv: Optional[List[str]] = None) -> int:
                         reason,
                     )
                 console.print(kq_table)
+
+            keypoint_profile_lines = [
+                f"total rows: {keypoint_profile_summary.total_rows}",
+                f"stale rows (mtime mismatch/missing): {keypoint_profile_summary.stale_rows}",
+            ]
+            if keypoint_profile_summary.exclusion_reasons:
+                keypoint_profile_reason_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in keypoint_profile_summary.exclusion_reasons.items()
+                )
+            else:
+                keypoint_profile_reason_text = "none"
+            keypoint_profile_lines.append(
+                f"top exclusion-ish reasons: {keypoint_profile_reason_text}"
+            )
+            console.print("[bold]Keypoint Profile[/bold]")
+            for line in keypoint_profile_lines:
+                console.print(f"- {line}")
     else:
         if show_sets:
             for row in set_rows:
@@ -3014,6 +3212,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print(f"      quality_stale: {int(row.get('quality_stale') or 0)}")
                     print(f"      gate: {'PASS' if reason is None else 'EXCLUDE'}")
                     print(f"      reason: {reason or '—'}")
+
+            print("Keypoint Profile")
+            print(f"  total rows: {keypoint_profile_summary.total_rows}")
+            print(
+                "  stale rows (mtime mismatch/missing): "
+                f"{keypoint_profile_summary.stale_rows}"
+            )
+            if keypoint_profile_summary.exclusion_reasons:
+                keypoint_profile_reason_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in keypoint_profile_summary.exclusion_reasons.items()
+                )
+            else:
+                keypoint_profile_reason_text = "none"
+            print(f"  top exclusion-ish reasons: {keypoint_profile_reason_text}")
     return 0
 
 

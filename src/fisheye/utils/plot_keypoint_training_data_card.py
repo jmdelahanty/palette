@@ -38,6 +38,7 @@ HISTOGRAM_PLOT_SPECS: tuple[tuple[str, str, str, tuple[tuple[str, ...], ...]], .
         "Triangle Area Distribution",
         "Triangle area",
         (
+            ("geometry", "triangle_area", "histogram"),
             ("geometry", "triangle_area_histogram"),
             ("geometry", "triangle_area_stats", "histogram"),
             ("triangle_area_histogram",),
@@ -48,6 +49,7 @@ HISTOGRAM_PLOT_SPECS: tuple[tuple[str, str, str, tuple[tuple[str, ...], ...]], .
         "Minimum Angle Distribution",
         "Minimum angle (deg)",
         (
+            ("geometry", "min_angle", "histogram"),
             ("geometry", "min_angle_histogram"),
             ("geometry", "min_angle_stats", "histogram"),
             ("min_angle_histogram",),
@@ -58,6 +60,7 @@ HISTOGRAM_PLOT_SPECS: tuple[tuple[str, str, str, tuple[tuple[str, ...], ...]], .
         "Heading Distribution",
         "Heading (deg)",
         (
+            ("geometry", "heading", "histogram"),
             ("geometry", "heading_histogram"),
             ("geometry", "heading_stats", "histogram"),
             ("heading_histogram",),

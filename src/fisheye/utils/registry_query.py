@@ -809,6 +809,41 @@ def _print_detection_profile_rows(rows: list[dict[str, Any]], *, recording_scope
         )
 
 
+def _print_keypoint_profile_rows(rows: list[dict[str, Any]], *, recording_scope: bool) -> None:
+    for row in rows:
+        prefix = (
+            f"recording={row.get('recording_id') or '-'}\t"
+            f"dataset={row.get('dataset_id') or '-'}\t"
+            if recording_scope
+            else (
+                f"dataset={row.get('dataset_id') or '-'}\t"
+                f"recording={row.get('recording_id') or '-'}\t"
+            )
+        )
+        run_name = row.get("profile_run") or row.get("keypoint_run")
+        method = row.get("keypoint_method") or row.get("detection_type")
+        coverage = row.get("coverage_percent")
+        if coverage is None:
+            coverage = row.get("usable_keypoints_rate")
+        keypoints = row.get("keypoints_total")
+        if keypoints is None:
+            keypoints = row.get("total_keypoints")
+        if keypoints is None:
+            keypoints = row.get("detections_total")
+        path = row.get("keypoint_path") or row.get("detection_path")
+        created = row.get("profile_created_utc") or row.get("keypoint_created_utc")
+        print(
+            prefix
+            + f"run={run_name or '-'}\t"
+            f"method={method or '-'}\t"
+            f"use={row.get('zarr_use') or '-'}\t"
+            f"coverage={coverage if coverage is not None else '-'}\t"
+            f"keypoints={keypoints if keypoints is not None else '-'}\t"
+            f"path={path or '-'}\t"
+            f"created={created or '-'}"
+        )
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path.")
@@ -1030,21 +1065,38 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Query recording_detection_data_profile_latest rows directly.",
     )
     parser.add_argument(
+        "--keypoint-data-profile-latest",
+        action="store_true",
+        help="Query keypoint_data_profile_latest rows directly.",
+    )
+    parser.add_argument(
+        "--recording-keypoint-data-profile-latest",
+        action="store_true",
+        help="Query recording_keypoint_data_profile_latest rows directly.",
+    )
+    parser.add_argument(
         "--profile-dataset-id",
         action="append",
-        help="Dataset-id filter for detection-data profile modes. Repeat to pass multiple IDs.",
+        help="Dataset-id filter for profile query modes. Repeat to pass multiple IDs.",
     )
     parser.add_argument(
         "--profile-recording-id",
         action="append",
-        help="Recording-id filter for detection-data profile modes. Repeat to pass multiple IDs.",
+        help="Recording-id filter for profile query modes. Repeat to pass multiple IDs.",
     )
-    parser.add_argument("--profile-zarr-use", type=str, help="zarr_use filter for detection-data profile modes.")
-    parser.add_argument("--profile-detection-type", type=str, help="detection_type filter for detection-data profile modes.")
+    parser.add_argument("--profile-zarr-use", type=str, help="zarr_use filter for profile query modes.")
+    parser.add_argument(
+        "--profile-detection-type",
+        type=str,
+        help="detection_type/keypoint_method filter for profile query modes.",
+    )
     parser.add_argument(
         "--profile-coverage-min",
         type=float,
-        help="Minimum coverage_percent filter for detection-data profile modes.",
+        help=(
+            "Minimum profile rate filter for profile query modes "
+            "(coverage_percent for detect profile modes; usable_rate for keypoint profile modes)."
+        ),
     )
     parser.add_argument(
         "--model-input",
@@ -1079,13 +1131,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     keypoint_group_by = args.keypoint_group_by
     profile_dataset_latest = bool(args.detection_data_profile_latest)
     profile_recording_latest = bool(args.recording_detection_data_profile_latest)
-    profile_mode = profile_dataset_latest or profile_recording_latest
+    keypoint_profile_dataset_latest = bool(args.keypoint_data_profile_latest)
+    keypoint_profile_recording_latest = bool(args.recording_keypoint_data_profile_latest)
+    detection_profile_mode = profile_dataset_latest or profile_recording_latest
+    keypoint_profile_mode = keypoint_profile_dataset_latest or keypoint_profile_recording_latest
+    profile_mode = detection_profile_mode or keypoint_profile_mode
     if profile_dataset_latest and profile_recording_latest:
         raise SystemExit(
             "--detection-data-profile-latest and --recording-detection-data-profile-latest are mutually exclusive."
         )
+    if keypoint_profile_dataset_latest and keypoint_profile_recording_latest:
+        raise SystemExit(
+            "--keypoint-data-profile-latest and --recording-keypoint-data-profile-latest are mutually exclusive."
+        )
+    if detection_profile_mode and keypoint_profile_mode:
+        raise SystemExit(
+            "Detection and keypoint profile-latest modes are mutually exclusive."
+        )
     if args.detect_model_summary and profile_mode:
-        raise SystemExit("--detect-model-summary cannot be combined with detection-data-profile view modes.")
+        raise SystemExit("--detect-model-summary cannot be combined with profile view modes.")
     if (args.detect_model_summary or profile_mode) and args.output_file_list:
         raise SystemExit("--output-file-list is only supported for dataset-row query mode.")
 
@@ -1140,7 +1204,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         for row in profile_rows
                         if str(row.get("dataset_id") or "") in allowed_dataset_ids
                     ]
-            else:
+            elif profile_dataset_latest:
                 profile_rows = [
                     dict(row)
                     for row in registry.query_detection_data_profile_latest(
@@ -1151,6 +1215,34 @@ def main(argv: Optional[list[str]] = None) -> int:
                         min_coverage_percent=args.profile_coverage_min,
                     )
                 ]
+            elif keypoint_profile_recording_latest:
+                profile_rows = [
+                    dict(row)
+                    for row in registry.query_recording_keypoint_data_profile_latest(
+                        recording_ids=recording_ids or None,
+                        zarr_use=args.profile_zarr_use,
+                        keypoint_method=args.profile_detection_type,
+                        min_usable_rate=args.profile_coverage_min,
+                    )
+                ]
+                if dataset_ids:
+                    allowed_dataset_ids = set(dataset_ids)
+                    profile_rows = [
+                        row
+                        for row in profile_rows
+                        if str(row.get("dataset_id") or "") in allowed_dataset_ids
+                    ]
+            else:
+                profile_rows = [
+                    dict(row)
+                    for row in registry.query_keypoint_data_profile_latest(
+                        dataset_ids=dataset_ids or None,
+                        recording_ids=recording_ids or None,
+                        zarr_use=args.profile_zarr_use,
+                        keypoint_method=args.profile_detection_type,
+                        min_usable_rate=args.profile_coverage_min,
+                    )
+                ]
             if args.limit is not None:
                 profile_rows = profile_rows[: int(args.limit)]
         finally:
@@ -1158,7 +1250,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.json:
             print(json.dumps(profile_rows, indent=2))
         else:
-            _print_detection_profile_rows(profile_rows, recording_scope=profile_recording_latest)
+            if detection_profile_mode:
+                _print_detection_profile_rows(profile_rows, recording_scope=profile_recording_latest)
+            else:
+                _print_keypoint_profile_rows(profile_rows, recording_scope=keypoint_profile_recording_latest)
         return 0
 
     use_subject_filters = any(

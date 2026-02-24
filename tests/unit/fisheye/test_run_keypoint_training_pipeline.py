@@ -310,3 +310,45 @@ def test_train_after_merged_export_uses_merged_outputs(tmp_path: Path, monkeypat
     assert "pose_set_v001" in train_cmd
     assert "--registry" in train_cmd
     assert str(registry_path) in train_cmd
+
+
+def test_data_card_profile_flags_are_forwarded_to_aggregator(tmp_path: Path, monkeypatch) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, tmp_path / "dataset_1.zarr")
+    manifest_path = tmp_path / "pose.manifest.json"
+    calls: dict[str, list[str]] = {}
+
+    def fake_prepare(cli: list[str]) -> int:
+        calls["prepare"] = list(cli)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps({"set_id": "pose_set_v001"}), encoding="utf-8")
+        return 0
+
+    def fake_export(cli: list[str]) -> int:
+        calls["export"] = list(cli)
+        return 0
+
+    def fake_aggregate(*, cli: list[str], required: bool) -> int:
+        del required
+        calls["aggregate"] = list(cli)
+        return 0
+
+    monkeypatch.setattr(pipeline.prepare_from_registry, "main", fake_prepare)
+    monkeypatch.setattr(pipeline.export_zarr, "main", fake_export)
+    monkeypatch.setattr(pipeline, "_run_keypoint_data_card_aggregation", fake_aggregate)
+
+    rc = pipeline.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--out-manifest",
+            str(manifest_path),
+            "--export-merged",
+            "--data-card-allow-profile-mtime-mismatch",
+            "--data-card-allow-profile-fallback-scan",
+        ]
+    )
+    assert rc == 0
+    aggregate_cli = calls["aggregate"]
+    assert "--allow-profile-mtime-mismatch" in aggregate_cli
+    assert "--allow-profile-fallback-scan" in aggregate_cli

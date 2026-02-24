@@ -917,6 +917,205 @@ def _seed_detection_data_profile_rows(registry_path: Path) -> None:
     registry.close()
 
 
+def _seed_keypoint_data_profile_rows(registry_path: Path) -> None:
+    registry = Registry(registry_path)
+    profile_records = [
+        {
+            "dataset_id": "dataset_a",
+            "profile_run": "kp_profile_a_v1",
+            "recording_id": "recording_a",
+            "zarr_use": "training",
+            "keypoint_method": "traditional_pose",
+            "source_keypoint_path": "refined_keypoint_runs/refined_a_v1/traditional_pose",
+            "source_keypoint_run": "keypoint_a_v1",
+            "skeleton_id": "fish_v1",
+            "kpt_shape": "[3,3]",
+            "profile_created_utc": "2026-02-12T00:00:00+00:00",
+            "rows_total": 100,
+            "rows_usable": 80,
+            "usable_keypoints_total": 240,
+            "usable_rate": 0.80,
+            "confidence_valid_rate": 0.90,
+            "geometry_valid_rate": 0.91,
+            "triangle_area_p10": 0.01,
+            "triangle_area_p50": 0.02,
+            "triangle_area_p90": 0.03,
+            "min_angle_p10": 10.0,
+            "min_angle_p50": 20.0,
+            "min_angle_p90": 30.0,
+            "heading_p10": -0.4,
+            "heading_p50": 0.0,
+            "heading_p90": 0.4,
+            "rig_id": "rig_a",
+            "camera_id": "cam_1",
+            "arena_id": "arena_x",
+            "dish_design": "cedar",
+            "canvas_name": "canvas_a",
+            "protocol_name": "DefaultScreen",
+            "genotype": "Tg(elavl3:gcamp7f)",
+            "dpf_at_acquisition": 7,
+            "profile_json": json.dumps({"run": "kp_profile_a_v1"}),
+            "zarr_mtime_ns": 1000,
+        },
+        {
+            "dataset_id": "dataset_a",
+            "profile_run": "kp_profile_a_v2",
+            "recording_id": "recording_a",
+            "zarr_use": "training",
+            "keypoint_method": "traditional_pose",
+            "source_keypoint_path": "refined_keypoint_runs/refined_a_v2/traditional_pose",
+            "source_keypoint_run": "keypoint_a_v2",
+            "skeleton_id": "fish_v1",
+            "kpt_shape": "[3,3]",
+            "profile_created_utc": "2026-02-12T02:00:00+00:00",
+            "rows_total": 100,
+            "rows_usable": 92,
+            "usable_keypoints_total": 276,
+            "usable_rate": 0.92,
+            "confidence_valid_rate": 0.95,
+            "geometry_valid_rate": 0.96,
+            "triangle_area_p10": 0.01,
+            "triangle_area_p50": 0.02,
+            "triangle_area_p90": 0.03,
+            "min_angle_p10": 10.0,
+            "min_angle_p50": 20.0,
+            "min_angle_p90": 30.0,
+            "heading_p10": -0.4,
+            "heading_p50": 0.0,
+            "heading_p90": 0.4,
+            "rig_id": "rig_a",
+            "camera_id": "cam_1",
+            "arena_id": "arena_x",
+            "dish_design": "cedar",
+            "canvas_name": "canvas_a",
+            "protocol_name": "DefaultScreen",
+            "genotype": "Tg(elavl3:gcamp7f)",
+            "dpf_at_acquisition": 7,
+            "profile_json": json.dumps({"run": "kp_profile_a_v2"}),
+            "zarr_mtime_ns": 2000,
+        },
+        {
+            "dataset_id": "dataset_b",
+            "profile_run": "kp_profile_b_v1",
+            "recording_id": "recording_b",
+            "zarr_use": "training",
+            "keypoint_method": "yolo_pose",
+            "source_keypoint_path": "refined_keypoint_runs/refined_b_v1/yolo_pose",
+            "source_keypoint_run": "keypoint_b_v1",
+            "skeleton_id": "fish_v1",
+            "kpt_shape": "[3,3]",
+            "profile_created_utc": "2026-02-12T01:00:00+00:00",
+            "rows_total": 100,
+            "rows_usable": 95,
+            "usable_keypoints_total": 285,
+            "usable_rate": 0.95,
+            "confidence_valid_rate": 0.96,
+            "geometry_valid_rate": 0.97,
+            "triangle_area_p10": 0.01,
+            "triangle_area_p50": 0.02,
+            "triangle_area_p90": 0.03,
+            "min_angle_p10": 10.0,
+            "min_angle_p50": 20.0,
+            "min_angle_p90": 30.0,
+            "heading_p10": -0.4,
+            "heading_p50": 0.0,
+            "heading_p90": 0.4,
+            "rig_id": "rig_a",
+            "camera_id": "cam_2",
+            "arena_id": "arena_x",
+            "dish_design": "cedar",
+            "canvas_name": "canvas_a",
+            "protocol_name": "DefaultScreen",
+            "genotype": "Tg(elavl3:gcamp7f)",
+            "dpf_at_acquisition": 8,
+            "profile_json": json.dumps({"run": "kp_profile_b_v1"}),
+            "zarr_mtime_ns": 1500,
+        },
+    ]
+    registry.conn.executemany(
+        """
+        INSERT INTO keypoint_data_profile (
+            dataset_id,
+            profile_run,
+            recording_id,
+            zarr_use,
+            keypoint_method,
+            source_keypoint_path,
+            source_keypoint_run,
+            skeleton_id,
+            kpt_shape,
+            profile_created_utc,
+            zarr_mtime_ns,
+            updated_utc,
+            rows_total,
+            rows_usable,
+            usable_keypoints_total,
+            usable_rate,
+            confidence_valid_rate,
+            geometry_valid_rate,
+            triangle_area_p10,
+            triangle_area_p50,
+            triangle_area_p90,
+            min_angle_p10,
+            min_angle_p50,
+            min_angle_p90,
+            heading_p10,
+            heading_p50,
+            heading_p90,
+            rig_id,
+            camera_id,
+            arena_id,
+            dish_design,
+            canvas_name,
+            protocol_name,
+            genotype,
+            dpf_at_acquisition,
+            profile_json
+        ) VALUES (
+            :dataset_id,
+            :profile_run,
+            :recording_id,
+            :zarr_use,
+            :keypoint_method,
+            :source_keypoint_path,
+            :source_keypoint_run,
+            :skeleton_id,
+            :kpt_shape,
+            :profile_created_utc,
+            :zarr_mtime_ns,
+            datetime('now'),
+            :rows_total,
+            :rows_usable,
+            :usable_keypoints_total,
+            :usable_rate,
+            :confidence_valid_rate,
+            :geometry_valid_rate,
+            :triangle_area_p10,
+            :triangle_area_p50,
+            :triangle_area_p90,
+            :min_angle_p10,
+            :min_angle_p50,
+            :min_angle_p90,
+            :heading_p10,
+            :heading_p50,
+            :heading_p90,
+            :rig_id,
+            :camera_id,
+            :arena_id,
+            :dish_design,
+            :canvas_name,
+            :protocol_name,
+            :genotype,
+            :dpf_at_acquisition,
+            :profile_json
+        );
+        """,
+        profile_records,
+    )
+    registry.conn.commit()
+    registry.close()
+
+
 def _rewrite_detect_quality_current_view(
     registry_path: Path,
     *,
@@ -1519,6 +1718,119 @@ def test_registry_query_detection_data_profile_mode_rejects_output_file_list(tmp
                 "--registry",
                 str(registry_path),
                 "--detection-data-profile-latest",
+                "--output-file-list",
+                str(out_file),
+            ]
+        )
+
+
+def test_registry_query_keypoint_data_profile_latest_mode_json(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_keypoint_data_profile_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--keypoint-data-profile-latest",
+            "--profile-detection-type",
+            "traditional_pose",
+            "--profile-coverage-min",
+            "0.90",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in payload} == {"dataset_a"}
+    row = payload[0]
+    assert row["profile_run"] == "kp_profile_a_v2"
+    assert row["keypoint_method"] == "traditional_pose"
+    assert row["usable_rate"] == pytest.approx(0.92)
+    assert row["genotype"] == "Tg(elavl3:gcamp7f)"
+    assert row["dpf_at_acquisition"] == 7
+
+
+def test_registry_query_recording_keypoint_data_profile_latest_mode_json(
+    tmp_path: Path, capsys
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_keypoint_data_profile_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--recording-keypoint-data-profile-latest",
+            "--profile-recording-id",
+            "recording_b",
+            "--profile-dataset-id",
+            "dataset_b",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload) == 1
+    row = payload[0]
+    assert row["recording_id"] == "recording_b"
+    assert row["dataset_id"] == "dataset_b"
+    assert row["profile_run"] == "kp_profile_b_v1"
+
+
+def test_registry_query_keypoint_data_profile_modes_are_mutually_exclusive(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_keypoint_data_profile_rows(registry_path)
+
+    with pytest.raises(
+        SystemExit,
+        match="--keypoint-data-profile-latest and --recording-keypoint-data-profile-latest are mutually exclusive.",
+    ):
+        registry_query_main(
+            [
+                "--registry",
+                str(registry_path),
+                "--keypoint-data-profile-latest",
+                "--recording-keypoint-data-profile-latest",
+            ]
+        )
+
+
+def test_registry_query_profile_modes_cross_task_are_mutually_exclusive(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_detection_data_profile_rows(registry_path)
+    _seed_keypoint_data_profile_rows(registry_path)
+
+    with pytest.raises(
+        SystemExit,
+        match="Detection and keypoint profile-latest modes are mutually exclusive.",
+    ):
+        registry_query_main(
+            [
+                "--registry",
+                str(registry_path),
+                "--detection-data-profile-latest",
+                "--keypoint-data-profile-latest",
+            ]
+        )
+
+
+def test_registry_query_keypoint_data_profile_mode_rejects_output_file_list(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_keypoint_data_profile_rows(registry_path)
+    out_file = tmp_path / "rows.txt"
+
+    with pytest.raises(SystemExit, match="--output-file-list is only supported for dataset-row query mode."):
+        registry_query_main(
+            [
+                "--registry",
+                str(registry_path),
+                "--keypoint-data-profile-latest",
                 "--output-file-list",
                 str(out_file),
             ]
