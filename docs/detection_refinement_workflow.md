@@ -266,6 +266,24 @@ scripts/py -m fisheye.utils.registry_query \
   --json
 ```
 
+### Subject-lineage projection refresh (one-time after schema/code update)
+
+If `genotype` / `dpf_at_acquisition` projection fields were added after profile
+rows already existed, run a one-time sync refresh to populate existing registry
+rows:
+
+```bash
+scripts/py -m fisheye.utils.sync_detection_profile_registry --registry /nvme1/registry.sqlite --zarr-use any --apply
+```
+
+Notes:
+- This refresh is required for existing `detection_data_profile` rows.
+- Rewriting Zarr profile runs is optional for registry projection because sync
+  can fall back to registry provenance when lineage fields are absent in older
+  profile summaries.
+- If you also want lineage fields embedded in each profile run payload, rerun:
+  `backfill_detection_profiles --apply`, then rerun sync.
+
 ## Notes on sampled training imports
 
 If `import_mode=sampled` (large frame gaps):

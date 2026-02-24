@@ -131,6 +131,12 @@ def _make_detect_root() -> _FakeGroup:
             "protocol_name_from_definition": "DefaultScreen",
         }
     )
+    analysis_meta.attrs["subject_metadata"] = json.dumps(
+        {
+            "days_post_fertilization": 7,
+            "dish": {"genotype": "Tg(elavl3:gcamp7f)"},
+        }
+    )
 
     detect_parent = root.create_group("detect_runs")
     detect_parent.attrs["latest"] = "detect_001"
@@ -237,6 +243,8 @@ def test_build_detection_profile_summary_invariants() -> None:
     assert composition["canvas_name"] == "shadow"
     assert composition["protocol_name"] == "DefaultScreen"
     assert composition["dish_design"] == "cedar"
+    assert composition["genotype"] == "Tg(elavl3:gcamp7f)"
+    assert composition["dpf_at_acquisition"] == 7
 
 
 def test_write_detection_profile_writes_run_attrs_and_latest_pointer() -> None:

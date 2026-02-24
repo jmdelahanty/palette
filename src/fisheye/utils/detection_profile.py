@@ -25,6 +25,8 @@ COMPOSITION_FIELDS = (
     "dish_design",
     "canvas_name",
     "protocol_name",
+    "genotype",
+    "dpf_at_acquisition",
 )
 
 DEFAULT_PROFILE_CONFIG: dict[str, Any] = {
@@ -266,22 +268,57 @@ def _histogram_counts(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return counts.astype(np.int64, copy=False)
 
 
-def _extract_composition(root: zarr.Group) -> dict[str, str]:
+def _extract_subject_snapshot(root: zarr.Group) -> dict[str, Any]:
+    analysis_meta = root.get("analysis_metadata")
+    if analysis_meta is None:
+        return {}
+    for key in ("subject_metadata", "zebrobot_snapshot"):
+        payload = _coerce_mapping(analysis_meta.attrs.get(key))
+        if payload:
+            return payload
+    return {}
+
+
+def _extract_composition(root: zarr.Group) -> dict[str, Any]:
     session_context: dict[str, Any] = {}
     analysis_meta = root.get("analysis_metadata")
     if analysis_meta is not None:
         payload = _coerce_mapping(analysis_meta.attrs.get("session_context"))
         if payload:
             session_context = payload
+    subject_snapshot = _extract_subject_snapshot(root)
+    dish_map = _coerce_mapping(subject_snapshot.get("dish")) if subject_snapshot else None
+    dish_map = dish_map or {}
 
     protocol_from_context = _normalize_text(
         session_context.get("protocol_name") or session_context.get("protocol_name_from_definition")
     )
+    genotype_from_snapshot = _normalize_text(
+        dish_map.get("genotype") or subject_snapshot.get("genotype")
+    )
+    dpf_from_snapshot = _as_int(
+        subject_snapshot.get("dpf_at_acquisition")
+        or subject_snapshot.get("days_post_fertilization")
+    )
 
-    composition: dict[str, str] = {}
+    composition: dict[str, Any] = {}
     for key in COMPOSITION_FIELDS:
         if key == "protocol_name":
             value = _normalize_text(root.attrs.get("protocol_name")) or protocol_from_context
+        elif key == "genotype":
+            value = (
+                _normalize_text(root.attrs.get("genotype"))
+                or _normalize_text(session_context.get("genotype"))
+                or genotype_from_snapshot
+            )
+        elif key == "dpf_at_acquisition":
+            value = _as_int(root.attrs.get("dpf_at_acquisition"))
+            if value is None:
+                value = _as_int(session_context.get("dpf_at_acquisition"))
+            if value is None:
+                value = _as_int(session_context.get("days_post_fertilization"))
+            if value is None:
+                value = dpf_from_snapshot
         else:
             value = _normalize_text(root.attrs.get(key)) or _normalize_text(session_context.get(key))
         if value is not None:

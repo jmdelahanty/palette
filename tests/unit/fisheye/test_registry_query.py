@@ -793,6 +793,8 @@ def _seed_detection_data_profile_rows(registry_path: Path) -> None:
             "dish_design": "cedar",
             "canvas_name": "canvas_a",
             "protocol_name": "DefaultScreen",
+            "genotype": "Tg(elavl3:gcamp7f)",
+            "dpf_at_acquisition": 7,
             "profile_json": json.dumps({"run": "profile_a_v1"}),
             "zarr_mtime_ns": 1000,
         },
@@ -829,6 +831,8 @@ def _seed_detection_data_profile_rows(registry_path: Path) -> None:
             "dish_design": "cedar",
             "canvas_name": "canvas_a",
             "protocol_name": "DefaultScreen",
+            "genotype": "Tg(elavl3:gcamp7f)",
+            "dpf_at_acquisition": 7,
             "profile_json": json.dumps({"run": "profile_a_v2"}),
             "zarr_mtime_ns": 2000,
         },
@@ -865,6 +869,8 @@ def _seed_detection_data_profile_rows(registry_path: Path) -> None:
             "dish_design": "cedar",
             "canvas_name": "canvas_a",
             "protocol_name": "DefaultScreen",
+            "genotype": "Tg(elavl3:gcamp7f)",
+            "dpf_at_acquisition": 8,
             "profile_json": json.dumps({"run": "profile_b_v1"}),
             "zarr_mtime_ns": 1500,
         },
@@ -903,6 +909,8 @@ def _seed_detection_data_profile_rows(registry_path: Path) -> None:
             dish_design=record["dish_design"],
             canvas_name=record["canvas_name"],
             protocol_name=record["protocol_name"],
+            genotype=record["genotype"],
+            dpf_at_acquisition=record["dpf_at_acquisition"],
             profile_json=record["profile_json"],
             zarr_mtime_ns=record["zarr_mtime_ns"],
         )
@@ -1450,6 +1458,8 @@ def test_registry_query_detection_data_profile_latest_mode_json(tmp_path: Path, 
     assert row["profile_run"] == "profile_a_v2"
     assert row["detection_type"] == "manual"
     assert row["coverage_percent"] == pytest.approx(97.0)
+    assert row["genotype"] == "Tg(elavl3:gcamp7f)"
+    assert row["dpf_at_acquisition"] == 7
 
 
 def test_registry_query_recording_detection_data_profile_latest_mode_json(tmp_path: Path, capsys) -> None:

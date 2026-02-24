@@ -1643,6 +1643,11 @@ class Registry:
                 "detection_data_profile_registry",
                 self._migration_022_detection_data_profile_registry,
             ),
+            (
+                23,
+                "detection_data_profile_lineage_projection",
+                self._migration_023_detection_data_profile_lineage_projection,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -5431,6 +5436,8 @@ class Registry:
                 dish_design TEXT,
                 canvas_name TEXT,
                 protocol_name TEXT,
+                genotype TEXT,
+                dpf_at_acquisition INTEGER,
                 profile_json TEXT,
                 PRIMARY KEY (dataset_id, profile_run),
                 FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
@@ -5472,6 +5479,8 @@ class Registry:
                 "dish_design": "TEXT",
                 "canvas_name": "TEXT",
                 "protocol_name": "TEXT",
+                "genotype": "TEXT",
+                "dpf_at_acquisition": "INTEGER",
                 "profile_json": "TEXT",
             },
         )
@@ -5537,6 +5546,8 @@ class Registry:
                 dish_design,
                 canvas_name,
                 protocol_name,
+                genotype,
+                dpf_at_acquisition,
                 profile_json
             FROM ranked
             WHERE _rn = 1;
@@ -5598,6 +5609,8 @@ class Registry:
                 dish_design,
                 canvas_name,
                 protocol_name,
+                genotype,
+                dpf_at_acquisition,
                 profile_json,
                 zarr_path,
                 artifact_kind,
@@ -5606,6 +5619,12 @@ class Registry:
             WHERE _rn = 1;
             """
         )
+
+    def _migration_023_detection_data_profile_lineage_projection(self) -> None:
+        # Append-only follow-up migration: existing registries may already be at
+        # v22 from before lineage projection columns were added. Re-run the v22
+        # reconciler to ensure columns/views are present with the latest shape.
+        self._migration_022_detection_data_profile_registry()
 
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
         existing = {
@@ -6535,6 +6554,8 @@ class Registry:
         canvas_name: Optional[str],
         protocol_name: Optional[str],
         profile_json: Optional[str],
+        genotype: Optional[str] = None,
+        dpf_at_acquisition: Optional[int] = None,
         zarr_mtime_ns: Optional[int] = None,
         updated_utc: Optional[str] = None,
     ) -> None:
@@ -6573,6 +6594,8 @@ class Registry:
             "dish_design": dish_design,
             "canvas_name": canvas_name,
             "protocol_name": protocol_name,
+            "genotype": genotype,
+            "dpf_at_acquisition": dpf_at_acquisition,
             "profile_json": profile_json,
         }
         self.conn.execute(
@@ -6589,6 +6612,7 @@ class Registry:
                 aspect_ratio_p10, aspect_ratio_p50, aspect_ratio_p90,
                 edge_proximity_rate,
                 rig_id, camera_id, arena_id, dish_design, canvas_name, protocol_name,
+                genotype, dpf_at_acquisition,
                 profile_json
             )
             VALUES (
@@ -6603,6 +6627,7 @@ class Registry:
                 :aspect_ratio_p10, :aspect_ratio_p50, :aspect_ratio_p90,
                 :edge_proximity_rate,
                 :rig_id, :camera_id, :arena_id, :dish_design, :canvas_name, :protocol_name,
+                :genotype, :dpf_at_acquisition,
                 :profile_json
             )
             ON CONFLICT(dataset_id, profile_run) DO UPDATE SET
@@ -6638,6 +6663,8 @@ class Registry:
                 dish_design=excluded.dish_design,
                 canvas_name=excluded.canvas_name,
                 protocol_name=excluded.protocol_name,
+                genotype=excluded.genotype,
+                dpf_at_acquisition=excluded.dpf_at_acquisition,
                 profile_json=excluded.profile_json;
             """,
             payload,
@@ -6783,6 +6810,8 @@ class Registry:
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
                 payload.setdefault("updated_utc", _utc_now())
+                payload.setdefault("genotype", None)
+                payload.setdefault("dpf_at_acquisition", None)
                 self.conn.execute(
                     """
                     INSERT INTO detection_data_profile (
@@ -6797,6 +6826,7 @@ class Registry:
                         aspect_ratio_p10, aspect_ratio_p50, aspect_ratio_p90,
                         edge_proximity_rate,
                         rig_id, camera_id, arena_id, dish_design, canvas_name, protocol_name,
+                        genotype, dpf_at_acquisition,
                         profile_json
                     )
                     VALUES (
@@ -6811,6 +6841,7 @@ class Registry:
                         :aspect_ratio_p10, :aspect_ratio_p50, :aspect_ratio_p90,
                         :edge_proximity_rate,
                         :rig_id, :camera_id, :arena_id, :dish_design, :canvas_name, :protocol_name,
+                        :genotype, :dpf_at_acquisition,
                         :profile_json
                     );
                     """,
@@ -8448,6 +8479,7 @@ class Registry:
             "SELECT d.dataset_id, d.session_uuid, d.zarr_path,",
             "d.zarr_origin, d.zarr_use,",
             "p.dish_design, p.fish_id, p.subject_count, p.fps, p.exposure, p.exposure_unit, p.frame_rate, p.gain,",
+            "p.genotype, p.dpf_at_acquisition,",
             "p.video_codec, p.video_pix_fmt, p.format_title, p.format_comment, p.format_encoder,",
             "p.encoder_name, p.encoder_codec, p.encoder_preset, p.encoder_tuning, p.encoder_rc,",
             "p.encoder_bpp, p.encoder_target_bps, p.encoder_res, p.encoder_res_width, p.encoder_res_height,",

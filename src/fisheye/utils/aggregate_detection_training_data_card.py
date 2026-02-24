@@ -206,6 +206,74 @@ def _select_profile_rows(
     return profile_by_dataset
 
 
+def _query_subject_lineage_dataset_ids(
+    registry: Registry,
+    *,
+    dataset_ids: Sequence[str],
+) -> set[str]:
+    if not dataset_ids:
+        return set()
+    placeholders = ", ".join("?" for _ in dataset_ids)
+    sql = (
+        "SELECT DISTINCT dataset_id FROM recording_subject_overview "
+        f"WHERE dataset_id IN ({placeholders});"
+    )
+    rows = registry.conn.execute(sql, tuple(dataset_ids)).fetchall()
+    covered: set[str] = set()
+    for row in rows:
+        dataset_id = _normalize_text(row["dataset_id"])
+        if dataset_id is not None:
+            covered.add(dataset_id)
+    return covered
+
+
+def _evaluate_subject_lineage_coverage(
+    registry: Registry,
+    *,
+    dataset_ids: Sequence[str],
+    subject_lineage_policy: str,
+) -> None:
+    policy = _normalize_text(subject_lineage_policy) or "warn"
+    if policy not in {"warn", "require"}:
+        raise ValueError(f"Unsupported subject lineage policy: {subject_lineage_policy}")
+
+    unique_dataset_ids = list(dict.fromkeys(dataset_ids))
+    try:
+        covered_dataset_ids = _query_subject_lineage_dataset_ids(
+            registry,
+            dataset_ids=unique_dataset_ids,
+        )
+    except Exception as exc:
+        if policy == "require":
+            raise ValueError(
+                f"Subject lineage coverage unavailable (recording_subject_overview query failed): {exc}"
+            ) from exc
+        print(
+            "Subject lineage coverage: unavailable "
+            f"(recording_subject_overview query failed: {exc})"
+        )
+        return
+
+    missing_dataset_ids = sorted(
+        dataset_id
+        for dataset_id in unique_dataset_ids
+        if dataset_id not in covered_dataset_ids
+    )
+    covered_count = len(unique_dataset_ids) - len(missing_dataset_ids)
+    total_count = len(unique_dataset_ids)
+    print(f"Subject lineage coverage: {covered_count}/{total_count} datasets")
+    if missing_dataset_ids:
+        print(
+            "Subject lineage missing dataset_id(s): "
+            + ", ".join(missing_dataset_ids)
+        )
+    if policy == "require" and missing_dataset_ids:
+        raise ValueError(
+            "Missing subject lineage rows in recording_subject_overview for dataset_id(s): "
+            + ", ".join(missing_dataset_ids)
+        )
+
+
 def _aggregate_histograms(profile_summaries: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for hist_name in HISTOGRAM_NAMES:
@@ -429,9 +497,15 @@ def _build_detection_training_data_card(
     split: str,
     allow_mtime_mismatch: bool,
     allow_detection_type_mismatch: bool,
+    subject_lineage_policy: str,
 ) -> dict[str, Any]:
     refs = _manifest_dataset_refs(registry, manifest)
     dataset_ids = [item.dataset_id for item in refs]
+    _evaluate_subject_lineage_coverage(
+        registry,
+        dataset_ids=dataset_ids,
+        subject_lineage_policy=subject_lineage_policy,
+    )
     profiles_by_dataset = _select_profile_rows(registry, dataset_ids=dataset_ids)
 
     missing_profiles = [item.dataset_id for item in refs if item.dataset_id not in profiles_by_dataset]
@@ -510,6 +584,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Allow mismatch between manifest detection_source_type and profile detection_type.",
     )
     parser.add_argument(
+        "--subject-lineage-policy",
+        choices=("warn", "require"),
+        default="warn",
+        help=(
+            "Subject-lineage coverage policy for manifest datasets using "
+            "recording_subject_overview (default: warn)."
+        ),
+    )
+    parser.add_argument(
         "--no-plots",
         action="store_true",
         help="Skip plot PNG generation for the aggregated data card.",
@@ -551,6 +634,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             split=str(args.split),
             allow_mtime_mismatch=bool(args.allow_mtime_mismatch),
             allow_detection_type_mismatch=bool(args.allow_detection_type_mismatch),
+            subject_lineage_policy=str(args.subject_lineage_policy),
         )
     except Exception as exc:
         print(f"Training data card aggregation failed: {exc}")

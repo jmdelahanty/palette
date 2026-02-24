@@ -55,6 +55,8 @@ def _upsert_profile(
         dish_design="cedar",
         canvas_name="shadow",
         protocol_name="DefaultScreen",
+        genotype="Tg(elavl3:gcamp7f)",
+        dpf_at_acquisition=7,
         profile_json='{"schema_name":"detection_dataset_profile","schema_version":"v1"}',
         zarr_mtime_ns=123,
         updated_utc=updated_utc,
@@ -154,6 +156,8 @@ def test_query_detection_data_profile_latest_and_recording_latest(tmp_path: Path
     assert str(dataset_latest[0]["dataset_id"]) == "dataset_a"
     assert str(dataset_latest[0]["profile_run"]) == "profile_new"
     assert float(dataset_latest[0]["coverage_percent"]) == 88.0
+    assert str(dataset_latest[0]["genotype"]) == "Tg(elavl3:gcamp7f)"
+    assert int(dataset_latest[0]["dpf_at_acquisition"]) == 7
 
     coverage_filtered = registry.query_detection_data_profile_latest(
         min_coverage_percent=90.0,
@@ -220,6 +224,8 @@ def test_replace_detection_data_profile_replaces_dataset_scope_rows(tmp_path: Pa
                 "dish_design": "cedar",
                 "canvas_name": "shadow",
                 "protocol_name": "DefaultScreen",
+                "genotype": "Tg(elavl3:gcamp7f)",
+                "dpf_at_acquisition": 7,
                 "profile_json": '{"schema_name":"detection_dataset_profile","schema_version":"v1"}',
                 "zarr_mtime_ns": 10,
             },
@@ -255,6 +261,8 @@ def test_replace_detection_data_profile_replaces_dataset_scope_rows(tmp_path: Pa
                 "dish_design": "cedar",
                 "canvas_name": "shadow",
                 "protocol_name": "DefaultScreen",
+                "genotype": "Tg(elavl3:gcamp7f)",
+                "dpf_at_acquisition": 7,
                 "profile_json": '{"schema_name":"detection_dataset_profile","schema_version":"v1"}',
                 "zarr_mtime_ns": 11,
             },
@@ -301,6 +309,8 @@ def test_replace_detection_data_profile_replaces_dataset_scope_rows(tmp_path: Pa
                 "dish_design": "cedar",
                 "canvas_name": "shadow",
                 "protocol_name": "DefaultScreen",
+                "genotype": "Tg(elavl3:gcamp7f)",
+                "dpf_at_acquisition": 8,
                 "profile_json": '{"schema_name":"detection_dataset_profile","schema_version":"v1","run":"c"}',
                 "zarr_mtime_ns": 12,
             }
@@ -315,5 +325,7 @@ def test_replace_detection_data_profile_replaces_dataset_scope_rows(tmp_path: Pa
     latest = registry.query_detection_data_profile_latest(dataset_ids=["dataset_replace"])
     assert len(latest) == 1
     assert str(latest[0]["profile_run"]) == "profile_c"
+    assert str(latest[0]["genotype"]) == "Tg(elavl3:gcamp7f)"
+    assert int(latest[0]["dpf_at_acquisition"]) == 8
     assert '"run":"c"' in str(latest[0]["profile_json"])
     registry.close()

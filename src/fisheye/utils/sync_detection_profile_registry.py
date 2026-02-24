@@ -148,6 +148,8 @@ def _build_profile_payload(
     dataset_id: str,
     fallback_recording_id: Optional[str],
     fallback_zarr_use: Optional[str],
+    fallback_genotype: Optional[str],
+    fallback_dpf_at_acquisition: Optional[int],
     profile_run: str,
     summary: Mapping[str, Any],
     zarr_path: Path,
@@ -174,6 +176,10 @@ def _build_profile_payload(
         zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
     except OSError:
         zarr_mtime_ns = None
+
+    dpf_at_acquisition = _as_int(composition_map.get("dpf_at_acquisition"))
+    if dpf_at_acquisition is None:
+        dpf_at_acquisition = fallback_dpf_at_acquisition
 
     return {
         "dataset_id": dataset_id,
@@ -208,6 +214,8 @@ def _build_profile_payload(
         "dish_design": _normalize_text(composition_map.get("dish_design")),
         "canvas_name": _normalize_text(composition_map.get("canvas_name")),
         "protocol_name": _normalize_text(composition_map.get("protocol_name")),
+        "genotype": _normalize_text(composition_map.get("genotype")) or fallback_genotype,
+        "dpf_at_acquisition": dpf_at_acquisition,
         "profile_json": _to_json_text(summary),
         "zarr_mtime_ns": zarr_mtime_ns,
     }
@@ -345,6 +353,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     dataset_id=dataset_id,
                     fallback_recording_id=dataset_recording_id,
                     fallback_zarr_use=_normalize_text(row.get("zarr_use")),
+                    fallback_genotype=_normalize_text(row.get("genotype")),
+                    fallback_dpf_at_acquisition=_as_int(row.get("dpf_at_acquisition")),
                     profile_run=str(profile_run),
                     summary=summary,
                     zarr_path=zarr_path,
@@ -383,6 +393,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                         dish_design=_normalize_text(payload.get("dish_design")),
                         canvas_name=_normalize_text(payload.get("canvas_name")),
                         protocol_name=_normalize_text(payload.get("protocol_name")),
+                        genotype=_normalize_text(payload.get("genotype")),
+                        dpf_at_acquisition=_as_int(payload.get("dpf_at_acquisition")),
                         profile_json=_normalize_text(payload.get("profile_json")),
                         zarr_mtime_ns=_as_int(payload.get("zarr_mtime_ns")),
                     )

@@ -28,6 +28,30 @@ Out of scope:
 2. Registry projection (query-critical subset + references)
 3. Training data card (aggregate across selected dataset profiles)
 
+## Data Ownership and Denormalization Policy
+
+Some fields intentionally exist in multiple locations. This is expected and
+required for performance + auditability.
+
+- Canonical capture provenance (including subject lineage such as genotype/DPF)
+  originates from recording/dataset metadata in Zarr and registry provenance
+  entities.
+- `analysis/detection_profile_runs/<run>/attrs["profile_summary"]` stores a
+  point-in-time snapshot used for reproducibility of profile-derived metrics.
+- `detection_data_profile` and latest views store a query projection optimized
+  for filtering/build selection without reopening Zarr stores.
+
+This is not a many-writer model:
+- source metadata is authoritative,
+- profile + registry rows are derived caches/snapshots,
+- derived state is refreshable and may be rebuilt.
+
+Operational refresh policy:
+- If lineage fields are missing/stale in registry projection rows:
+  `scripts/py -m fisheye.utils.sync_detection_profile_registry --registry <registry.sqlite> --zarr-use any --apply`
+- If lineage fields are also desired in historical on-disk profile payloads:
+  rerun `backfill_detection_profiles --apply`, then rerun sync.
+
 ## Stage Association Policy
 
 Detection profile runs are derived analytics artifacts that reference, but do

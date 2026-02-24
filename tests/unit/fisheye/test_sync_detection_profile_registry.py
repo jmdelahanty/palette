@@ -51,7 +51,15 @@ class _FakeGroup:
         return self._children.keys()
 
 
-def _seed_dataset_row(registry_path: Path, *, dataset_id: str, zarr_path: Path, zarr_use: str) -> None:
+def _seed_dataset_row(
+    registry_path: Path,
+    *,
+    dataset_id: str,
+    zarr_path: Path,
+    zarr_use: str,
+    genotype: str | None = None,
+    dpf_at_acquisition: int | None = None,
+) -> None:
     registry = Registry(registry_path)
     registry.upsert_dataset(
         dataset_id,
@@ -61,6 +69,18 @@ def _seed_dataset_row(registry_path: Path, *, dataset_id: str, zarr_path: Path, 
         artifact_kind="source_recording",
         zarr_use=zarr_use,
     )
+    if genotype is not None or dpf_at_acquisition is not None:
+        registry.upsert_provenance(
+            dataset_id,
+            provenance={
+                "genotype": genotype,
+                "dpf_at_acquisition": dpf_at_acquisition,
+            },
+            context={},
+            protocol_name=None,
+            protocol_hash=None,
+            acquisition={},
+        )
     registry.close()
 
 
@@ -106,6 +126,8 @@ def _summary_payload(*, dataset_id: str, recording_id: str, zarr_use: str) -> di
             "dish_design": "cedar",
             "canvas_name": "canvas_a",
             "protocol_name": "DefaultScreen",
+            "genotype": "Tg(elavl3:gcamp7f)",
+            "dpf_at_acquisition": 7,
         },
     }
 
@@ -147,6 +169,8 @@ def test_sync_detection_profile_registry_apply_upserts_latest_row(tmp_path: Path
         assert row["detection_type"] == "manual"
         assert row["coverage_percent"] == pytest.approx(95.0)
         assert row["detections_total"] == 950
+        assert row["genotype"] == "Tg(elavl3:gcamp7f)"
+        assert int(row["dpf_at_acquisition"]) == 7
     finally:
         registry.close()
 
@@ -215,6 +239,56 @@ def test_sync_detection_profile_registry_missing_profile_is_reported(
         count = registry.conn.execute("SELECT COUNT(*) AS n FROM detection_data_profile;").fetchone()
         assert count is not None
         assert int(count["n"]) == 0
+    finally:
+        registry.close()
+
+
+def test_sync_detection_profile_registry_falls_back_to_provenance_subject_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    zarr_path = tmp_path / "dataset_d_training.zarr"
+    zarr_path.mkdir(parents=True)
+    _seed_dataset_row(
+        registry_path,
+        dataset_id="dataset_d",
+        zarr_path=zarr_path,
+        zarr_use="training",
+        genotype="Tg(test:line)",
+        dpf_at_acquisition=9,
+    )
+
+    summary = _summary_payload(dataset_id="dataset_d", recording_id="recording_d", zarr_use="training")
+    composition = dict(summary["composition"])  # type: ignore[index]
+    composition.pop("genotype", None)
+    composition.pop("dpf_at_acquisition", None)
+    summary["composition"] = composition
+    monkeypatch.setattr(sync_module, "_open_root", lambda _: object())
+    monkeypatch.setattr(
+        sync_module,
+        "_latest_profile_summary",
+        lambda _root: ("detection_profile_2026-02-12_05-00-00", summary, None),
+    )
+
+    rc = sync_module.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--dataset-id",
+            "dataset_d",
+            "--apply",
+        ]
+    )
+    assert rc == 0
+
+    registry = Registry(registry_path)
+    try:
+        rows = registry.query_detection_data_profile_latest(dataset_ids=["dataset_d"])
+        assert len(rows) == 1
+        row = dict(rows[0])
+        assert row["genotype"] == "Tg(test:line)"
+        assert int(row["dpf_at_acquisition"]) == 9
     finally:
         registry.close()
 

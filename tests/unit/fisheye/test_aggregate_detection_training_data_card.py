@@ -24,6 +24,41 @@ def _seed_dataset(registry: Registry, *, dataset_id: str, recording_id: str, zar
     )
 
 
+def _seed_subject_lineage(
+    registry: Registry,
+    *,
+    dataset_id: str,
+    recording_id: str,
+    subject_id: str,
+) -> None:
+    registry.conn.execute(
+        "INSERT OR IGNORE INTO recordings (recording_id) VALUES (?);",
+        (recording_id,),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_subjects (
+            recording_id,
+            subject_id,
+            dataset_id,
+            created_utc,
+            updated_utc
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(recording_id, subject_id) DO UPDATE SET
+            dataset_id=excluded.dataset_id,
+            updated_utc=excluded.updated_utc;
+        """,
+        (
+            recording_id,
+            subject_id,
+            dataset_id,
+            "2026-02-24T00:00:00+00:00",
+            "2026-02-24T00:00:00+00:00",
+        ),
+    )
+    registry.conn.commit()
+
+
 def _profile_json(*, camera_id: str, heatmap_density: list[float]) -> str:
     payload = {
         "schema_name": "detection_dataset_profile",
@@ -423,3 +458,115 @@ def test_aggregate_detection_training_data_card_mtime_validation(tmp_path: Path)
     )
     assert rc == 0
     assert output_path.exists()
+
+
+def test_aggregate_detection_training_data_card_subject_lineage_warn_policy(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    manifest_path = tmp_path / "detect.manifest.json"
+    output_path = tmp_path / "detect.data_card.json"
+
+    zarr_a = tmp_path / "a_training.zarr"
+    zarr_b = tmp_path / "b_training.zarr"
+    db = Registry(registry_path)
+    _seed_dataset(db, dataset_id="dataset_a", recording_id="rec_a", zarr_path=zarr_a)
+    _seed_dataset(db, dataset_id="dataset_b", recording_id="rec_b", zarr_path=zarr_b)
+    _upsert_profile(db, dataset_id="dataset_a", profile_run="profile_a", recording_id="rec_a", zarr_path=zarr_a)
+    _upsert_profile(db, dataset_id="dataset_b", profile_run="profile_b", recording_id="rec_b", zarr_path=zarr_b)
+    _seed_subject_lineage(db, dataset_id="dataset_a", recording_id="rec_a", subject_id="subject_a")
+    db.close()
+
+    _write_manifest(
+        manifest_path,
+        datasets=[
+            {
+                "name": "dataset_a",
+                "dataset_id": "dataset_a",
+                "zarr_path": str(zarr_a),
+                "detection_source_type": "manual",
+            },
+            {
+                "name": "dataset_b",
+                "dataset_id": "dataset_b",
+                "zarr_path": str(zarr_b),
+                "detection_source_type": "manual",
+            },
+        ],
+    )
+
+    rc = mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--registry",
+            str(registry_path),
+            "--output",
+            str(output_path),
+            "--no-plots",
+        ]
+    )
+    assert rc == 0
+    assert output_path.exists()
+    stdout = capsys.readouterr().out
+    assert "Subject lineage coverage: 1/2 datasets" in stdout
+    assert "Subject lineage missing dataset_id(s): dataset_b" in stdout
+
+
+def test_aggregate_detection_training_data_card_subject_lineage_require_policy(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    manifest_path = tmp_path / "detect.manifest.json"
+    output_path = tmp_path / "detect.data_card.json"
+
+    zarr_a = tmp_path / "a_training.zarr"
+    zarr_b = tmp_path / "b_training.zarr"
+    db = Registry(registry_path)
+    _seed_dataset(db, dataset_id="dataset_a", recording_id="rec_a", zarr_path=zarr_a)
+    _seed_dataset(db, dataset_id="dataset_b", recording_id="rec_b", zarr_path=zarr_b)
+    _upsert_profile(db, dataset_id="dataset_a", profile_run="profile_a", recording_id="rec_a", zarr_path=zarr_a)
+    _upsert_profile(db, dataset_id="dataset_b", profile_run="profile_b", recording_id="rec_b", zarr_path=zarr_b)
+    _seed_subject_lineage(db, dataset_id="dataset_a", recording_id="rec_a", subject_id="subject_a")
+    db.close()
+
+    _write_manifest(
+        manifest_path,
+        datasets=[
+            {
+                "name": "dataset_a",
+                "dataset_id": "dataset_a",
+                "zarr_path": str(zarr_a),
+                "detection_source_type": "manual",
+            },
+            {
+                "name": "dataset_b",
+                "dataset_id": "dataset_b",
+                "zarr_path": str(zarr_b),
+                "detection_source_type": "manual",
+            },
+        ],
+    )
+
+    rc = mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--registry",
+            str(registry_path),
+            "--output",
+            str(output_path),
+            "--subject-lineage-policy",
+            "require",
+            "--no-plots",
+        ]
+    )
+    assert rc == 1
+    assert not output_path.exists()
+    stdout = capsys.readouterr().out
+    assert (
+        "Training data card aggregation failed: Missing subject lineage rows in "
+        "recording_subject_overview for dataset_id(s): dataset_b"
+    ) in stdout
