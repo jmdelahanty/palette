@@ -2,6 +2,10 @@
 
 Purpose: define the minimum and target parity between detection and keypoints (pose) training workflows so curation, export, training, and auditability behave consistently.
 
+Related contracts:
+- keypoint training data-card schema/metrics:
+  `docs/keypoint_training_data_card_contract.md`
+
 ## Decision
 
 - Enforce strict parity for user-facing interfaces:

@@ -118,6 +118,25 @@ Scope: prioritize correctness and auditability first, then UX/orchestration, the
   - Integrity-check command sequence.
   - Status: documented in keypoint quality registry workflow and maintenance runbooks.
 
+## P6: Keypoint Data-Card Parity (New)
+
+- [ ] Add a keypoint training data-card schema contract.
+  - Status: drafted in `docs/keypoint_training_data_card_contract.md`.
+  - Includes skeleton-graph metric naming, lineage parity, and plot bundle rules.
+
+- [ ] Add a keypoint dataset-statistics implementation TODO.
+  - Status: drafted in `docs/keypoint_dataset_statistics_todo.md`.
+  - Tracks aggregation utility, plotting utility, pipeline wiring, and tests.
+
+- [ ] Enforce mixed-skeleton hard fail for keypoint training sets.
+  - A training set must resolve to exactly one `skeleton_id`/`kpt_shape`.
+  - Applies to preflight, merged export, merged validation, and data-card aggregation.
+
+- [ ] Implement schema-derived keypoint graph metrics.
+  - Distances/angles must derive from `pose_schema.skeleton`.
+  - Canonical keys are index-based (`edge_<i>_<j>`, `angle_<i>_<j>_<k>`).
+  - Optional label aliases should be emitted for user/LLM readability.
+
 ## Acceptance Criteria
 
 - [x] Keypoint training cannot silently mix keypoints with ROI images from a different crop source.
