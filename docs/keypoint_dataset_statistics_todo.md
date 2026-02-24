@@ -19,69 +19,85 @@ Contract reference:
 
 This TODO is the implementation plan for that contract.
 
+## Status (2026-02-24)
+
+- Implemented:
+  - keypoint data-card aggregator + CLI
+  - keypoint data-card plotter + CLI
+  - pipeline integration flags/default behavior
+  - mixed-skeleton hard-fail enforcement (prepare/export/validate/aggregate)
+  - skeleton-graph key derivation + alias metadata
+  - subject-lineage coverage policy (`warn|require`)
+  - focused unit tests for new utilities and guardrails
+- Remaining:
+  - add `spatial` payload section to aggregator
+  - add `train_val_parity` payload section + delta tests
+  - run/record operator validation checklist on production datasets
+
 ## Required Guardrails
 
-- [ ] Enforce single-skeleton training sets everywhere.
+- [x] Enforce single-skeleton training sets everywhere.
   - Fail if selected datasets resolve to mixed `skeleton_id`/`kpt_shape`.
   - Enforce in prepare/export/validate/card aggregation surfaces.
-- [ ] Do not hard-code fish-specific distance metrics as required fields.
+- [x] Do not hard-code fish-specific distance metrics as required fields.
   - Required geometry must be derived from `pose_schema.skeleton`.
 
 ## Phase 1: Card Aggregation (`v1`)
 
-- [ ] Add keypoint training data-card aggregation command.
+- [x] Add keypoint training data-card aggregation command.
   - Suggested entrypoint:
     `scripts/py -m fisheye.utils.aggregate_keypoint_training_data_card --manifest <set>.manifest.json --registry <registry.sqlite>`
 - [ ] Implement required payload sections:
-  - `selection`
-  - `quality`
-  - `geometry`
-  - `skeleton_graph_metrics`
-  - `spatial`
-  - `composition_counts`
-  - `subject_coverage`, `genotype_counts`, `dpf_stats`, `dpf_histogram`
-  - `train_val_parity`
-  - `audit_freshness`
-- [ ] Include canonical metric keys and alias metadata.
+  - [x] `selection`
+  - [x] `quality`
+  - [x] `geometry`
+  - [x] `skeleton_graph_metrics`
+  - [ ] `spatial`
+  - [x] `composition_counts`
+  - [x] `subject_coverage`, `genotype_counts`, `dpf_stats`, `dpf_histogram`
+  - [ ] `train_val_parity`
+  - [x] `audit_freshness`
+- [x] Include canonical metric keys and alias metadata.
   - Canonical: `edge_<i>_<j>`, `angle_<i>_<j>_<k>`
   - Alias labels when keypoint labels are available.
-- [ ] Add subject-lineage precheck policy (`warn|require`) aligned with detect.
+- [x] Add subject-lineage precheck policy (`warn|require`) aligned with detect.
 
 ## Phase 2: Plotting Parity
 
-- [ ] Add keypoint data-card plotting utility.
+- [x] Add keypoint data-card plotting utility.
   - Suggested entrypoint:
     `scripts/py -m fisheye.utils.plot_keypoint_training_data_card --card <set>.data_card.json`
 - [ ] Generate default plot bundle without auto-view:
-  - usable-rate distribution
-  - triangle-area distribution
-  - min-angle distribution
-  - heading distribution
-  - landmark heatmap panel
-  - genotype counts
-  - DPF histogram
-- [ ] Add `--view` option to open generated/existing plots.
+  - [x] usable-rate distribution
+  - [x] triangle-area distribution
+  - [x] min-angle distribution
+  - [x] heading distribution
+  - [ ] landmark heatmap panel (pending aggregator `spatial` payload)
+  - [x] genotype counts
+  - [x] DPF histogram
+- [x] Add `--view` option to open generated/existing plots.
 
 ## Phase 3: Pipeline Integration
 
-- [ ] Add pipeline flag for keypoint card aggregation.
+- [x] Add pipeline flag for keypoint card aggregation.
   - Suggested:
     `scripts/py -m fisheye.utils.run_keypoint_training_pipeline ... --aggregate-training-data-card`
-- [ ] Decide default behavior for non-dry-run merged builds.
+- [x] Decide default behavior for non-dry-run merged builds.
   - Prefer generating card + plots by default after successful build/export.
+  - Status: auto-enabled with `--export-merged`; disable via `--no-aggregate-training-data-card`.
 
 ## Phase 4: Validation and Tests
 
-- [ ] Unit tests for mixed-skeleton hard-fail behavior.
-- [ ] Unit tests for skeleton graph metric derivation.
+- [x] Unit tests for mixed-skeleton hard-fail behavior.
+- [x] Unit tests for skeleton graph metric derivation.
   - edge and angle key generation from schema
   - alias metadata emission
-- [ ] Unit tests for subject-lineage policy behavior (`warn` vs `require`).
+- [x] Unit tests for subject-lineage policy behavior (`warn` vs `require`).
 - [ ] Unit tests for aggregate correctness:
-  - quality rates
-  - geometry stats
-  - train/val parity deltas
-- [ ] Unit tests for plotting utility output contract.
+  - [x] quality rates
+  - [x] geometry stats
+  - [ ] train/val parity deltas
+- [x] Unit tests for plotting utility output contract.
 
 ## Operator Validation Checklist
 

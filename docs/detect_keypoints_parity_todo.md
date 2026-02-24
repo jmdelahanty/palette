@@ -120,22 +120,26 @@ Scope: prioritize correctness and auditability first, then UX/orchestration, the
 
 ## P6: Keypoint Data-Card Parity (New)
 
-- [ ] Add a keypoint training data-card schema contract.
+- [x] Add a keypoint training data-card schema contract.
   - Status: drafted in `docs/keypoint_training_data_card_contract.md`.
   - Includes skeleton-graph metric naming, lineage parity, and plot bundle rules.
 
-- [ ] Add a keypoint dataset-statistics implementation TODO.
+- [x] Add a keypoint dataset-statistics implementation TODO.
   - Status: drafted in `docs/keypoint_dataset_statistics_todo.md`.
   - Tracks aggregation utility, plotting utility, pipeline wiring, and tests.
 
-- [ ] Enforce mixed-skeleton hard fail for keypoint training sets.
+- [x] Enforce mixed-skeleton hard fail for keypoint training sets.
   - A training set must resolve to exactly one `skeleton_id`/`kpt_shape`.
   - Applies to preflight, merged export, merged validation, and data-card aggregation.
 
-- [ ] Implement schema-derived keypoint graph metrics.
+- [x] Implement schema-derived keypoint graph metrics.
   - Distances/angles must derive from `pose_schema.skeleton`.
   - Canonical keys are index-based (`edge_<i>_<j>`, `angle_<i>_<j>_<k>`).
   - Optional label aliases should be emitted for user/LLM readability.
+
+- [ ] Complete remaining keypoint data-card parity fields.
+  - Remaining: `spatial` payload and `train_val_parity` payload/tests.
+  - Tracking source of truth: `docs/keypoint_dataset_statistics_todo.md`.
 
 ## Acceptance Criteria
 
