@@ -72,6 +72,18 @@ scripts/py -m fisheye.utils.prepare_keypoint_training_from_registry \
   --min-usable-keypoints-rate 0.70
 ```
 
+## 4.1 Optional quality visualization export/view
+
+Finalize artifacts, then export/view refined-keypoint quality dashboards
+(detect-style operator UX):
+
+```bash
+scripts/py -m fisheye.utils.finalize_keypoint_refinement_artifacts /path/to/recordings --recursive --zarr-use training --required-intended-use training --apply
+
+scripts/py -m fisheye.utils.export_keypoint_quality_overview /path/to/recordings --recursive --zarr-use training --artifact keypoint_quality_overview_png --view
+scripts/py -m fisheye.utils.export_keypoint_quality_overview /path/to/recordings --recursive --zarr-use training --artifact keypoint_refinement_pipeline_overview_png --view
+```
+
 ## 5. Recovery for stale or divergent metadata
 
 If preflight/integrity reports stale or divergent quality rows:

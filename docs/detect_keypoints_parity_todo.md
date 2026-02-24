@@ -124,6 +124,13 @@ Scope: prioritize correctness and auditability first, then UX/orchestration, the
     - `scripts/py -m fisheye.utils.export_detect_quality_overview ... --view`
   - Keypoint currently has registry/query quality surfaces and keypoint training data-card plots,
     but no detect-equivalent refinement quality artifact exporter/viewer.
+  - Status (2026-02-24): implemented initial parity surface:
+    - `fisheye.visualization.visualize_keypoint_quality`
+    - `scripts/py -m fisheye.utils.finalize_keypoint_refinement_artifacts`
+    - `scripts/py -m fisheye.utils.export_keypoint_quality_overview`
+    - workflow docs + unit tests added.
+    - remaining follow-up: optional maintenance/reconcile integration to mirror
+      broader detect artifact automation patterns.
   - Target:
     - define keypoint quality artifact names and on-disk locations under refined keypoint runs,
     - add keypoint artifact export/view CLI (detect-equivalent UX),
