@@ -15,6 +15,17 @@ from fisheye.registry.db import Registry
 from fisheye.utils import prepare_keypoint_training_from_registry as wrapper
 
 
+def test_prepare_keypoint_skeleton_signature_helpers() -> None:
+    assert wrapper._normalize_kpt_shape([3, 3]) == (3, 3)
+    assert wrapper._normalize_kpt_shape([3, "3"]) == (3, 3)
+    assert wrapper._normalize_kpt_shape([0, 3]) is None
+    assert wrapper._normalize_kpt_shape(None) is None
+    assert (
+        wrapper._format_skeleton_signature(skeleton_id="pose_skel_a", kpt_shape=(3, 3))
+        == "skeleton_id=pose_skel_a, kpt_shape=[3,3]"
+    )
+
+
 def _mock_invocation_sources(monkeypatch) -> None:
     monkeypatch.setattr(
         "fisheye.utils.system.get_git_info",
@@ -73,7 +84,9 @@ def _write_base_pose_config(path: Path) -> None:
 def _create_minimal_pose_zarr(
     path: Path,
     *,
+    session_uuid: str = "session_pose_001",
     keypoints_rows: int = 4,
+    keypoint_count: int = 3,
     roi_rows: int = 4,
     success_rows: int = 4,
     include_success_rate: bool = True,
@@ -82,9 +95,12 @@ def _create_minimal_pose_zarr(
     refined_usable_rows: int = 0,
     review_state: str | None = None,
     review_intended_use: str | None = None,
+    skeleton_id: str | None = "pose_skel_traditional_v1",
+    kpt_shape: tuple[int, int] | None = (3, 3),
+    pose_schema_name: str | None = "traditional_v1",
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
-    root.attrs["session_uuid"] = "session_pose_001"
+    root.attrs["session_uuid"] = session_uuid
 
     raw = root.create_group("raw_video")
     raw.create_array(
@@ -108,6 +124,18 @@ def _create_minimal_pose_zarr(
     kp_group = kp_parent.create_group("kp_pose_001")
     kp_group.attrs["method"] = "traditional_pose"
     kp_group.attrs["keypoints_timestamp_utc"] = "2026-02-06T00:00:00+00:00"
+    kp_group.attrs["keypoint_labels"] = [f"kpt_{idx}" for idx in range(int(keypoint_count))]
+    if skeleton_id is not None:
+        kp_group.attrs["skeleton_id"] = skeleton_id
+    if kpt_shape is not None:
+        kp_group.attrs["kpt_shape"] = [int(kpt_shape[0]), int(kpt_shape[1])]
+    if pose_schema_name is not None or kpt_shape is not None:
+        pose_schema_payload = {}
+        if pose_schema_name is not None:
+            pose_schema_payload["name"] = str(pose_schema_name)
+        if kpt_shape is not None:
+            pose_schema_payload["kpt_shape"] = [int(kpt_shape[0]), int(kpt_shape[1])]
+        kp_group.attrs["pose_schema"] = pose_schema_payload
     if include_source_crop_run:
         kp_group.attrs["source_crop_run"] = "crop_pose_001"
     if include_success_rate:
@@ -115,8 +143,8 @@ def _create_minimal_pose_zarr(
     kp_group.attrs["keypoints_processed"] = keypoints_rows
     kp_group.create_array(
         "keypoints_roi",
-        data=np.zeros((keypoints_rows, 3, 2), dtype=np.float32),
-        chunks=(1, 3, 2),
+        data=np.zeros((keypoints_rows, int(keypoint_count), 2), dtype=np.float32),
+        chunks=(1, int(keypoint_count), 2),
     )
     kp_group.create_array(
         "detection_success",
@@ -146,10 +174,11 @@ def _create_minimal_pose_zarr(
 def _seed_registry(registry_path: Path, zarr_path: Path) -> None:
     db = Registry(registry_path)
     root = zarr.open_group(str(zarr_path), mode="r")
+    dataset_id = str(root.attrs.get("session_uuid") or "session_pose_001")
     db.register_from_root(root, zarr_path)
     # Keep deterministic provenance values used by assertions.
     db.upsert_provenance(
-        "session_pose_001",
+        dataset_id,
         provenance={},
         context={"canvas_name": "DefaultScreen"},
         protocol_name=None,
@@ -802,3 +831,52 @@ def test_prepare_keypoint_from_registry_fails_closed_on_quality_divergence(
                 "--dry-run",
             ]
         )
+
+
+def test_prepare_keypoint_from_registry_fails_on_mixed_skeleton_signatures(
+    monkeypatch, tmp_path: Path
+) -> None:
+    zarr_a = tmp_path / "pose_a.zarr"
+    zarr_b = tmp_path / "pose_b.zarr"
+    _create_minimal_pose_zarr(
+        zarr_a,
+        session_uuid="session_pose_a",
+        skeleton_id="pose_skel_a",
+        kpt_shape=(3, 3),
+        pose_schema_name="schema_a",
+    )
+    _create_minimal_pose_zarr(
+        zarr_b,
+        session_uuid="session_pose_b",
+        skeleton_id="pose_skel_b",
+        kpt_shape=(3, 3),
+        pose_schema_name="schema_b",
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_a)
+    _seed_registry(registry_path, zarr_b)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    with pytest.raises(ValueError) as excinfo:
+        wrapper.main(
+            [
+                "--registry",
+                str(registry_path),
+                "--base-config",
+                str(base_config_path),
+                "--source-type",
+                "filtered",
+                "--input-format",
+                "gray",
+                "--dry-run",
+            ]
+        )
+    message = str(excinfo.value)
+    assert "Mixed skeleton identities detected" in message
+    assert "session_pose_a" in message
+    assert "session_pose_b" in message
+    assert "skeleton_id=pose_skel_a" in message
+    assert "skeleton_id=pose_skel_b" in message

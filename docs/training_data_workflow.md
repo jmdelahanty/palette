@@ -312,6 +312,26 @@ scripts/py -m fisheye.utils.run_keypoint_training_pipeline \
   --train
 ```
 
+Include keypoint data-card aggregation + plot controls in pipeline mode:
+
+```bash
+scripts/py -m fisheye.utils.run_keypoint_training_pipeline \
+  --registry /nvme1/palette_registry.sqlite \
+  --dish-design cedar \
+  --source-type filtered \
+  --input-format gray \
+  --model-input gray \
+  --keypoint-run latest_traditional \
+  --set-name cedar_shadow_pose \
+  --export-merged \
+  --data-card-output /nvme1/training/datasets/pose/cedar_shadow_pose.data_card.json \
+  --data-card-split train \
+  --data-card-plot-dir /nvme1/training/datasets/pose/cedar_shadow_pose.data_card.plots \
+  --data-card-plot-prefix cedar_shadow_pose_train \
+  --data-card-plot-heatmap-bin-factor 2 \
+  --data-card-view
+```
+
 Dry-run preflight (no files written):
 
 ```bash
@@ -330,6 +350,11 @@ Notes:
 - `--set-name` is recommended when using `--train` so `set_id` is generated deterministically.
 - `--train` cannot be combined with `--dry-run`.
 - `--export-merged` requires a written preflight manifest and cannot be combined with `--dry-run`.
+- keypoint data-card aggregation is auto-enabled for `--export-merged`; disable with
+  `--no-aggregate-training-data-card`.
+- use `--aggregate-training-data-card` to require data-card aggregation even without
+  `--export-merged` and fail if the keypoint aggregator module is unavailable.
+- `--aggregate-training-data-card` cannot be combined with `--dry-run`.
 - `--model-input` defaults to `--input-format` if omitted.
 - `--merge-row-gate-policy` defaults to `auto` in pose merged export.
 - `--register-registry` defaults to `--registry` when `--register` is set.

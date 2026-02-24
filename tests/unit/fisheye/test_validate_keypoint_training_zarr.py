@@ -11,13 +11,40 @@ from zarr.errors import UnstableSpecificationWarning
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from fisheye.utils.export_keypoint_training_zarr import validate_merged_keypoint_training_zarr
+from fisheye.utils.export_keypoint_training_zarr import (
+    _format_skeleton_signature,
+    validate_merged_keypoint_training_zarr,
+)
+
+
+def test_validate_keypoint_skeleton_signature_helper() -> None:
+    assert (
+        _format_skeleton_signature(skeleton_id="pose_skel_traditional_v1", kpt_shape=(3, 3))
+        == "skeleton_id=pose_skel_traditional_v1, kpt_shape=[3,3]"
+    )
 
 
 def _write_valid_merged_pose_zarr(path: Path, *, suppress_legacy_string_warning: bool = True) -> None:
     root = zarr.open_group(str(path), mode="w")
     root.attrs["zarr_purpose"] = "training"
-    root.attrs["training_export"] = {"input_format": "gray"}
+    root.attrs["training_export"] = {
+        "input_format": "gray",
+        "skeleton_id": "pose_skel_traditional_v1",
+        "kpt_shape": [3, 3],
+        "skeleton_signature": "skeleton_id=pose_skel_traditional_v1, kpt_shape=[3,3]",
+        "source_skeleton_signatures": [
+            {
+                "dataset_id": "dataset_a",
+                "skeleton_id": "pose_skel_traditional_v1",
+                "kpt_shape": [3, 3],
+            },
+            {
+                "dataset_id": "dataset_b",
+                "skeleton_id": "pose_skel_traditional_v1",
+                "kpt_shape": [3, 3],
+            },
+        ],
+    }
 
     crop_parent = root.create_group("crop_runs")
     crop_parent.attrs["latest"] = "merged_export_smoke"
@@ -119,6 +146,8 @@ def test_validate_merged_keypoint_training_zarr_passes(tmp_path: Path) -> None:
     assert summary["success_count"] == 3
     assert summary["split_counts"] == {"train": 2, "val": 1, "test": 1}
     assert summary["source_count"] == 2
+    assert summary["skeleton_id"] == "pose_skel_traditional_v1"
+    assert summary["kpt_shape"] == [3, 3]
 
 
 def test_validate_merged_keypoint_training_zarr_rejects_invalid_frame_indices(tmp_path: Path) -> None:
@@ -151,3 +180,22 @@ def test_validate_legacy_fixed_unicode_source_index_without_backfill(tmp_path: P
         expected_total_samples=4,
     )
     assert summary["source_count"] == 2
+
+
+def test_validate_merged_keypoint_training_zarr_rejects_mixed_skeleton_signatures(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "merged_pose_mixed_skeletons.zarr"
+    _write_valid_merged_pose_zarr(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    training_export = dict(root.attrs["training_export"])
+    training_export["source_skeleton_signatures"] = [
+        {"dataset_id": "dataset_a", "skeleton_id": "pose_skel_a", "kpt_shape": [3, 3]},
+        {"dataset_id": "dataset_b", "skeleton_id": "pose_skel_b", "kpt_shape": [3, 3]},
+    ]
+    root.attrs["training_export"] = training_export
+
+    with pytest.raises(ValueError, match="Mixed skeleton identities detected"):
+        validate_merged_keypoint_training_zarr(
+            zarr_path,
+            expected_input_format="gray",
+            expected_total_samples=4,
+        )

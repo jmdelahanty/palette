@@ -88,6 +88,26 @@ scripts/py -m fisheye.utils.run_keypoint_training_pipeline \
   --train
 ```
 
+Preflight + merged export + keypoint data-card aggregation (plots + view):
+
+```bash
+scripts/py -m fisheye.utils.run_keypoint_training_pipeline \
+  --registry /nvme1/palette_registry.sqlite \
+  --dish-design cedar \
+  --source-type filtered \
+  --input-format gray \
+  --model-input gray \
+  --keypoint-run latest_traditional \
+  --set-name cedar_shadow_pose \
+  --export-merged \
+  --data-card-output /tmp/cedar_shadow_pose.data_card.json \
+  --data-card-split train \
+  --data-card-plot-dir /tmp/cedar_shadow_pose.data_card.plots \
+  --data-card-plot-prefix cedar_shadow_pose_train \
+  --data-card-plot-heatmap-bin-factor 2 \
+  --data-card-view
+```
+
 Optional ONNX/TRT after train:
 
 ```bash
@@ -170,6 +190,11 @@ scripts/py -m fisheye.utils.check_training_registry \
   - `--train` runs `fisheye.training.train_pose` after preflight.
   - `--export-merged` requires a written manifest and cannot be used with `--dry-run`.
   - `--train` cannot be combined with `--dry-run`.
+  - `--aggregate-training-data-card` cannot be combined with `--dry-run`.
+  - keypoint data-card aggregation is auto-enabled for `--export-merged` unless
+    `--no-aggregate-training-data-card` is set.
+  - if the keypoint data-card aggregator module is unavailable, auto-aggregation is skipped;
+    use `--aggregate-training-data-card` to require it and fail closed.
 - Merged pose export defaults:
   - `--merge-row-gate-policy auto` (prefers refined `usable_keypoints` when available).
   - `--trt-precision fp16` when `--export-trt` is enabled (unless overridden).

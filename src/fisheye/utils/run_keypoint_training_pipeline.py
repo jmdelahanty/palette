@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 from pathlib import Path
 import subprocess
 import sys
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.utils import export_keypoint_training_zarr as export_zarr
@@ -146,6 +147,79 @@ def _run_training(
     return int(completed.returncode)
 
 
+def _load_keypoint_data_card_main() -> tuple[Optional[Callable[[Optional[List[str]]], int]], Optional[str]]:
+    try:
+        module = importlib.import_module("fisheye.utils.aggregate_keypoint_training_data_card")
+    except Exception as exc:  # pragma: no cover - exercised when module is not yet present
+        return None, f"{exc.__class__.__name__}: {exc}"
+    main_fn = getattr(module, "main", None)
+    if not callable(main_fn):
+        return None, "module does not define callable main(argv)."
+    return main_fn, None
+
+
+def _run_keypoint_data_card_aggregation(*, cli: List[str], required: bool) -> int:
+    main_fn, load_error = _load_keypoint_data_card_main()
+    if main_fn is None:
+        if required:
+            raise SystemExit(
+                "Keypoint training data-card aggregation requested, but "
+                "fisheye.utils.aggregate_keypoint_training_data_card is unavailable "
+                f"({load_error})."
+            )
+        print(
+            "Skipping keypoint training data-card aggregation: "
+            f"aggregator unavailable ({load_error})."
+        )
+        return 0
+    try:
+        result = main_fn(cli)
+    except SystemExit as exc:  # pragma: no cover - defensive wrapper around argparse exits
+        rc = int(exc.code) if isinstance(exc.code, int) else 1
+        if required:
+            return rc
+        print(
+            "Skipping keypoint training data-card aggregation: "
+            f"aggregator exited with code {rc}."
+        )
+        return 0
+    rc = int(result) if result is not None else 0
+    if rc != 0 and not required:
+        print(
+            "Skipping keypoint training data-card aggregation: "
+            f"aggregator returned code {rc}."
+        )
+        return 0
+    return rc
+
+
+def _build_data_card_cli(
+    *,
+    manifest_path: Path,
+    registry_path: Path,
+    args: argparse.Namespace,
+) -> List[str]:
+    card_cli: List[str] = [
+        "--manifest",
+        str(manifest_path),
+        "--registry",
+        str(registry_path),
+        "--split",
+        str(args.data_card_split),
+    ]
+    _add_arg(card_cli, "--output", args.data_card_output)
+    if args.data_card_no_plots:
+        card_cli.append("--no-plots")
+    _add_arg(card_cli, "--plot-dir", args.data_card_plot_dir)
+    _add_arg(card_cli, "--plot-prefix", args.data_card_plot_prefix)
+    _add_arg(card_cli, "--plot-heatmap-bin-factor", args.data_card_plot_heatmap_bin_factor)
+    if args.data_card_view:
+        card_cli.append("--view")
+    if args.data_card_force_plots:
+        card_cli.append("--force")
+    return card_cli
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", type=Path, help="Registry SQLite path.")
@@ -280,6 +354,58 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Allow overwrite of an existing merged output Zarr.",
     )
+    parser.add_argument(
+        "--aggregate-training-data-card",
+        action="store_true",
+        help="Aggregate keypoint training data card from the preflight manifest after successful prepare/export.",
+    )
+    parser.add_argument(
+        "--no-aggregate-training-data-card",
+        action="store_true",
+        help="Disable automatic data-card aggregation when --export-merged is used.",
+    )
+    parser.add_argument(
+        "--data-card-output",
+        type=Path,
+        help="Optional output JSON path for keypoint training data-card aggregation.",
+    )
+    parser.add_argument(
+        "--data-card-split",
+        type=str,
+        default="train",
+        help="Split label for data-card selection metadata (default: train).",
+    )
+    parser.add_argument(
+        "--data-card-no-plots",
+        action="store_true",
+        help="Skip plot PNG generation when aggregating the keypoint training data card.",
+    )
+    parser.add_argument(
+        "--data-card-plot-dir",
+        type=Path,
+        help="Optional output directory for keypoint training data-card plots.",
+    )
+    parser.add_argument(
+        "--data-card-plot-prefix",
+        type=str,
+        help="Optional filename prefix for keypoint training data-card plots.",
+    )
+    parser.add_argument(
+        "--data-card-plot-heatmap-bin-factor",
+        type=int,
+        default=2,
+        help="Coarsening factor for keypoint heatmap bins in data-card plots (default: 2).",
+    )
+    parser.add_argument(
+        "--data-card-view",
+        action="store_true",
+        help="Open keypoint data-card plots after aggregation (uses existing plots unless forced).",
+    )
+    parser.add_argument(
+        "--data-card-force-plots",
+        action="store_true",
+        help="Regenerate keypoint data-card plots even when plot files already exist.",
+    )
     parser.add_argument("--export-onnx", action="store_true", help="Export ONNX after --train.")
     parser.add_argument("--onnx-opset", type=int, default=13, help="ONNX opset for export.")
     parser.add_argument("--onnx-simplify", action="store_true", help="Run ONNX simplification after export.")
@@ -307,8 +433,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         raise SystemExit("--export-merged cannot be combined with --dry-run (no manifest is written).")
     if args.train and args.dry_run:
         raise SystemExit("--train cannot be combined with --dry-run.")
+    if args.aggregate_training_data_card and args.dry_run:
+        raise SystemExit("--aggregate-training-data-card cannot be combined with --dry-run.")
     if args.register_registry and not args.register:
         raise SystemExit("--register-registry requires --register.")
+    if args.aggregate_training_data_card and args.no_aggregate_training_data_card:
+        raise SystemExit(
+            "--aggregate-training-data-card cannot be combined with --no-aggregate-training-data-card."
+        )
+    if args.data_card_plot_heatmap_bin_factor < 1:
+        parser.error("--data-card-plot-heatmap-bin-factor must be >= 1.")
+    if args.data_card_view and args.data_card_no_plots:
+        parser.error("--data-card-view cannot be combined with --data-card-no-plots.")
+    if args.data_card_force_plots and args.data_card_no_plots:
+        parser.error("--data-card-force-plots cannot be combined with --data-card-no-plots.")
 
     model_input = args.model_input or args.input_format
     if args.model_input and args.model_input != args.input_format:
@@ -375,6 +513,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Wrote {len(zarr_paths)} paths to {args.output_file_list}")
 
     print(f"Registry query matched {len(zarr_paths)} dataset(s).")
+    preflight_manifest_path = Path(args.out_manifest)
+    explicit_data_card_requested = bool(args.aggregate_training_data_card)
+    auto_data_card_requested = bool(args.export_merged and not args.no_aggregate_training_data_card)
+    should_aggregate_data_card = bool(explicit_data_card_requested or auto_data_card_requested)
+    if should_aggregate_data_card and auto_data_card_requested and not explicit_data_card_requested:
+        print(
+            "Auto enabling keypoint training data-card aggregation for merged export. "
+            "Use --no-aggregate-training-data-card to disable."
+        )
 
     prepare_cli: List[str] = []
     _add_arg(prepare_cli, "--dish-design", args.dish_design)
@@ -433,13 +580,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     prepare_from_registry.main(prepare_cli)
 
     if args.export_merged:
-        manifest_path = Path(args.out_manifest)
-        if not manifest_path.exists():
-            raise SystemExit(f"Expected manifest not found after preflight: {manifest_path}")
+        if not preflight_manifest_path.exists():
+            raise SystemExit(f"Expected manifest not found after preflight: {preflight_manifest_path}")
 
         export_cli: List[str] = [
             "--manifest",
-            str(manifest_path),
+            str(preflight_manifest_path),
             "--merge",
             "--split",
             str(args.merge_split),
@@ -457,10 +603,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.merge_overwrite:
             export_cli.append("--overwrite")
         export_zarr.main(export_cli)
+        if should_aggregate_data_card:
+            card_cli = _build_data_card_cli(
+                manifest_path=preflight_manifest_path,
+                registry_path=Path(registry_path),
+                args=args,
+            )
+            card_rc = _run_keypoint_data_card_aggregation(
+                cli=card_cli,
+                required=explicit_data_card_requested,
+            )
+            if card_rc != 0:
+                return int(card_rc)
 
         if args.train:
             merged_config, merged_manifest = _resolve_merged_training_paths(
-                preflight_manifest_path=manifest_path,
+                preflight_manifest_path=preflight_manifest_path,
                 merge_out_dir=args.merge_out_dir,
             )
             effective_set_id = _require_manifest_set_id(merged_manifest)
@@ -483,7 +641,26 @@ def main(argv: Optional[List[str]] = None) -> int:
                 trt_profiling=args.trt_profiling,
                 trt_verbose=args.trt_verbose,
             )
-    elif args.train:
+    else:
+        if should_aggregate_data_card:
+            if not preflight_manifest_path.exists():
+                raise SystemExit(
+                    f"--aggregate-training-data-card requires manifest output: {preflight_manifest_path}"
+                )
+            card_cli = _build_data_card_cli(
+                manifest_path=preflight_manifest_path,
+                registry_path=Path(registry_path),
+                args=args,
+            )
+            card_rc = _run_keypoint_data_card_aggregation(
+                cli=card_cli,
+                required=explicit_data_card_requested,
+            )
+            if card_rc != 0:
+                return int(card_rc)
+        if not args.train:
+            return 0
+
         train_config = Path(args.out_config)
         train_manifest = Path(args.out_manifest)
         effective_set_id = _require_manifest_set_id(train_manifest)

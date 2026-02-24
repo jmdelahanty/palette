@@ -216,6 +216,78 @@ def _as_int(value: Any) -> Optional[int]:
         return None
 
 
+def _as_mapping(value: Any) -> Optional[Mapping[str, Any]]:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", "ignore")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return None
+        if isinstance(payload, Mapping):
+            return payload
+    return None
+
+
+def _normalize_kpt_shape(value: Any) -> Optional[Tuple[int, int]]:
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    try:
+        k = int(value[0])
+        d = int(value[1])
+    except Exception:
+        return None
+    if k <= 0 or d <= 0:
+        return None
+    return (k, d)
+
+
+def _format_kpt_shape(value: Optional[Tuple[int, int]]) -> str:
+    if value is None:
+        return "missing"
+    return f"[{value[0]},{value[1]}]"
+
+
+def _format_skeleton_signature(*, skeleton_id: Optional[str], kpt_shape: Optional[Tuple[int, int]]) -> str:
+    return f"skeleton_id={skeleton_id or 'missing'}, kpt_shape={_format_kpt_shape(kpt_shape)}"
+
+
+def _resolve_dataset_skeleton_identity(
+    *,
+    kp_group: zarr.Group,
+    keypoint_count: int,
+    fallback_kpt_shape: Optional[Tuple[int, int]],
+) -> Tuple[Optional[str], Tuple[int, int]]:
+    pose_schema = _as_mapping(kp_group.attrs.get("pose_schema"))
+    skeleton_id = _decode_attr(kp_group.attrs.get("skeleton_id"))
+    if skeleton_id is None and pose_schema is not None:
+        skeleton_id = _decode_attr(pose_schema.get("skeleton_id"))
+    if skeleton_id is None and pose_schema is not None:
+        pose_schema_name = _decode_attr(pose_schema.get("name"))
+        if pose_schema_name:
+            skeleton_id = f"pose_schema:{pose_schema_name}"
+
+    resolved_kpt_shape = _normalize_kpt_shape(kp_group.attrs.get("kpt_shape"))
+    if resolved_kpt_shape is None and pose_schema is not None:
+        resolved_kpt_shape = _normalize_kpt_shape(pose_schema.get("kpt_shape"))
+    if resolved_kpt_shape is None and fallback_kpt_shape is not None and fallback_kpt_shape[0] == keypoint_count:
+        resolved_kpt_shape = fallback_kpt_shape
+    if resolved_kpt_shape is None:
+        inferred_dims = fallback_kpt_shape[1] if fallback_kpt_shape is not None else 2
+        resolved_kpt_shape = (int(keypoint_count), int(inferred_dims))
+    if resolved_kpt_shape[0] != int(keypoint_count):
+        raise ValueError(
+            "kpt_shape/keypoints_roi mismatch for keypoint run metadata "
+            f"(kpt_shape={list(resolved_kpt_shape)} vs keypoints_roi K={keypoint_count})."
+        )
+    return skeleton_id, resolved_kpt_shape
+
+
 def _normalize_keypoint_run_selector(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -1015,6 +1087,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if not isinstance(base_config, dict):
         raise ValueError(f"Base config is not a mapping: {args.base_config}")
     base_config.setdefault("training_params", {})
+    base_config_kpt_shape = _normalize_kpt_shape(base_config.get("kpt_shape"))
+    if base_config.get("kpt_shape") is not None and base_config_kpt_shape is None:
+        raise ValueError(
+            f"Base config has invalid kpt_shape '{base_config.get('kpt_shape')}'. Expected [K,D] with positive ints."
+        )
 
     seen_names: set[str] = set()
     dataset_entries: Dict[str, Dict[str, Any]] = {}
@@ -1022,6 +1099,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     dataset_ids: List[str] = []
     inferred_keypoint_labels: Optional[List[str]] = None
     inferred_keypoint_skeleton: Optional[List[List[int]]] = None
+    selected_skeleton_identity: Optional[Tuple[Optional[str], Tuple[int, int]]] = None
+    selected_skeleton_signature: Optional[str] = None
+    skeleton_signature_members: Dict[str, List[str]] = {}
 
     for idx, row in enumerate(rows, start=1):
         zarr_path = Path(row["zarr_path"])
@@ -1141,7 +1221,45 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                     inferred_keypoint_skeleton = edges
         if "keypoints_roi" not in kp_group:
             raise ValueError(f"{zarr_path.name}: keypoint run '{keypoint_run_resolved}' missing keypoints_roi array.")
-        keypoints_total = int(kp_group["keypoints_roi"].shape[0])
+        keypoints_arr = kp_group["keypoints_roi"]
+        keypoint_shape = tuple(int(v) for v in keypoints_arr.shape)
+        if len(keypoint_shape) < 2:
+            raise ValueError(
+                f"{zarr_path.name}: keypoints_roi must have at least 2 dims (N,K), got shape={keypoint_shape}."
+            )
+        keypoints_total = int(keypoint_shape[0])
+        keypoint_count = int(keypoint_shape[1])
+        dataset_skeleton_id, dataset_kpt_shape = _resolve_dataset_skeleton_identity(
+            kp_group=kp_group,
+            keypoint_count=keypoint_count,
+            fallback_kpt_shape=base_config_kpt_shape,
+        )
+        if base_config_kpt_shape is not None and dataset_kpt_shape != base_config_kpt_shape:
+            raise ValueError(
+                f"{zarr_path.name}: keypoint run '{keypoint_run_resolved}' resolved "
+                f"{_format_skeleton_signature(skeleton_id=dataset_skeleton_id, kpt_shape=dataset_kpt_shape)} "
+                f"but base config kpt_shape={list(base_config_kpt_shape)}."
+            )
+        dataset_signature = _format_skeleton_signature(
+            skeleton_id=dataset_skeleton_id,
+            kpt_shape=dataset_kpt_shape,
+        )
+        dataset_label = str(row["dataset_id"] or zarr_path.name)
+        dataset_member = f"{dataset_label} (zarr={zarr_path.name}, keypoint_run={keypoint_run_resolved})"
+        skeleton_signature_members.setdefault(dataset_signature, []).append(dataset_member)
+        candidate_identity = (dataset_skeleton_id, dataset_kpt_shape)
+        if selected_skeleton_identity is None:
+            selected_skeleton_identity = candidate_identity
+            selected_skeleton_signature = dataset_signature
+        elif candidate_identity != selected_skeleton_identity:
+            detail_lines = []
+            for signature, members in sorted(skeleton_signature_members.items()):
+                detail_lines.append(f"- {signature}: {', '.join(members)}")
+            raise ValueError(
+                "Mixed skeleton identities detected while selecting keypoint training datasets. "
+                "Expected one (skeleton_id, kpt_shape) signature but found:\n"
+                + "\n".join(detail_lines)
+            )
 
         crop_parent = root.get("crop_runs")
         if crop_parent is None:
@@ -1331,6 +1449,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 "keypoints_total": keypoints_total,
                 "keypoints_successful": keypoints_successful,
                 "keypoints_success_rate": keypoints_success_rate,
+                "skeleton_id": dataset_skeleton_id,
+                "kpt_shape": list(dataset_kpt_shape),
+                "skeleton_signature": dataset_signature,
                 "usable_keypoints_total": usable_keypoints_total,
                 "usable_keypoints_rate": usable_keypoints_rate,
                 "keypoint_review_status": review_status,
@@ -1349,14 +1470,30 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     PoseConfig.model_validate(base_config)
     manifest_imgsz = _imgsz_list(base_config["training_params"]["imgsz"])
+    pose_schema_kpt_shape = (
+        list(selected_skeleton_identity[1])
+        if selected_skeleton_identity is not None
+        else (
+            list(base_config_kpt_shape)
+            if base_config_kpt_shape is not None
+            else (
+                list(base_config.get("kpt_shape"))
+                if isinstance(base_config.get("kpt_shape"), (list, tuple))
+                else None
+            )
+        )
+    )
+    pose_schema_skeleton_id = selected_skeleton_identity[0] if selected_skeleton_identity is not None else None
+    pose_schema_signature = selected_skeleton_signature or _format_skeleton_signature(
+        skeleton_id=pose_schema_skeleton_id,
+        kpt_shape=_normalize_kpt_shape(pose_schema_kpt_shape),
+    )
     pose_schema_payload = {
-        "kpt_shape": (
-            list(base_config.get("kpt_shape"))
-            if isinstance(base_config.get("kpt_shape"), (list, tuple))
-            else None
-        ),
+        "skeleton_id": pose_schema_skeleton_id,
+        "kpt_shape": pose_schema_kpt_shape,
         "keypoint_labels": inferred_keypoint_labels,
         "skeleton": inferred_keypoint_skeleton,
+        "skeleton_signature": pose_schema_signature,
     }
 
     query_filter_payload = _build_query_filter_payload(
