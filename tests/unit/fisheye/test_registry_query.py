@@ -1116,6 +1116,123 @@ def _seed_keypoint_data_profile_rows(registry_path: Path) -> None:
     registry.close()
 
 
+def _seed_eye_mask_data_profile_rows(registry_path: Path) -> None:
+    registry = Registry(registry_path)
+    registry.upsert_eye_mask_data_profile(
+        dataset_id="dataset_a",
+        profile_run="eye_profile_a_v1",
+        recording_id="recording_a",
+        zarr_use="analysis",
+        stage_group="refined_eye_masks",
+        eye_mask_method="refine_eye_masks",
+        source_eye_mask_path="/tmp/dataset_a.zarr/refined_eye_masks",
+        source_eye_mask_run="refined_eye_masks_run_a",
+        source_keypoint_path="/tmp/dataset_a.zarr/keypoints",
+        source_keypoint_run="keypoints_run_a",
+        source_crop_run="crop_run_a",
+        profile_created_utc="2026-02-12T00:00:00+00:00",
+        rows_total=200,
+        rows_usable=196,
+        usable_rate=0.98,
+        reviewed_rate=1.0,
+        excluded_rate=0.0,
+        exclusion_reasons_json=json.dumps({}),
+        ellipse_success_rate=0.98,
+        pair_success_rate=0.98,
+        area_p10=12.0,
+        area_p50=20.0,
+        area_p90=32.0,
+        major_axis_p10=4.0,
+        major_axis_p50=5.0,
+        major_axis_p90=6.0,
+        minor_axis_p10=2.0,
+        minor_axis_p50=2.5,
+        minor_axis_p90=3.0,
+        aspect_ratio_p10=1.5,
+        aspect_ratio_p50=2.0,
+        aspect_ratio_p90=2.5,
+        eye_separation_p10=8.0,
+        eye_separation_p50=10.0,
+        eye_separation_p90=12.0,
+        edge_proximity_rate=0.02,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_timestamp_utc="2026-02-12T00:10:00+00:00",
+        source_keypoint_stale_state=None,
+        source_keypoint_stale_reason=None,
+        source_keypoint_stale_timestamp_utc=None,
+        source_keypoint_stale_json=None,
+        rig_id="rig_a",
+        camera_id="camera_a",
+        arena_id="arena_a",
+        dish_design="round",
+        canvas_name="canvas_a",
+        protocol_name="protocol_a",
+        genotype="AB",
+        dpf_at_acquisition=7,
+        profile_json=json.dumps({"run": "eye_profile_a_v1"}),
+        zarr_mtime_ns=2000,
+    )
+    registry.upsert_eye_mask_data_profile(
+        dataset_id="dataset_b",
+        profile_run="eye_profile_b_v1",
+        recording_id="recording_b",
+        zarr_use="analysis",
+        stage_group="refined_eye_masks",
+        eye_mask_method="refine_eye_masks",
+        source_eye_mask_path="/tmp/dataset_b.zarr/refined_eye_masks",
+        source_eye_mask_run="refined_eye_masks_run_b",
+        source_keypoint_path="/tmp/dataset_b.zarr/keypoints",
+        source_keypoint_run="keypoints_run_b",
+        source_crop_run="crop_run_b",
+        profile_created_utc="2026-02-12T01:00:00+00:00",
+        rows_total=180,
+        rows_usable=151,
+        usable_rate=0.84,
+        reviewed_rate=0.9,
+        excluded_rate=0.16,
+        exclusion_reasons_json=json.dumps({"stale_source": 29}),
+        ellipse_success_rate=0.86,
+        pair_success_rate=0.84,
+        area_p10=10.0,
+        area_p50=16.0,
+        area_p90=28.0,
+        major_axis_p10=3.5,
+        major_axis_p50=4.5,
+        major_axis_p90=5.8,
+        minor_axis_p10=1.8,
+        minor_axis_p50=2.2,
+        minor_axis_p90=2.8,
+        aspect_ratio_p10=1.4,
+        aspect_ratio_p50=1.9,
+        aspect_ratio_p90=2.3,
+        eye_separation_p10=7.5,
+        eye_separation_p50=9.8,
+        eye_separation_p90=11.5,
+        edge_proximity_rate=0.12,
+        review_state="needs_review",
+        review_method="manual",
+        review_intended_use="training",
+        review_timestamp_utc="2026-02-12T01:10:00+00:00",
+        source_keypoint_stale_state="stale",
+        source_keypoint_stale_reason="source keypoints changed",
+        source_keypoint_stale_timestamp_utc="2026-02-12T01:20:00+00:00",
+        source_keypoint_stale_json=json.dumps({"state": "stale"}),
+        rig_id="rig_b",
+        camera_id="camera_b",
+        arena_id="arena_b",
+        dish_design="round",
+        canvas_name="canvas_b",
+        protocol_name="protocol_b",
+        genotype="WT",
+        dpf_at_acquisition=8,
+        profile_json=json.dumps({"run": "eye_profile_b_v1"}),
+        zarr_mtime_ns=1500,
+    )
+    registry.close()
+
+
 def _rewrite_detect_quality_current_view(
     registry_path: Path,
     *,
@@ -1835,6 +1952,134 @@ def test_registry_query_keypoint_data_profile_mode_rejects_output_file_list(tmp_
                 str(out_file),
             ]
         )
+
+
+def test_registry_query_eye_mask_data_profile_latest_mode_json(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_eye_mask_data_profile_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--eye-mask-data-profile-latest",
+            "--profile-detection-type",
+            "refine_eye_masks",
+            "--profile-coverage-min",
+            "0.90",
+            "--eye-mask-review-state",
+            "approved",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in payload} == {"dataset_a"}
+    row = payload[0]
+    assert row["profile_run"] == "eye_profile_a_v1"
+    assert row["eye_mask_method"] == "refine_eye_masks"
+    assert row["usable_rate"] == pytest.approx(0.98)
+
+
+def test_registry_query_recording_eye_mask_data_profile_latest_mode_json(
+    tmp_path: Path, capsys
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_eye_mask_data_profile_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--recording-eye-mask-data-profile-latest",
+            "--profile-recording-id",
+            "recording_b",
+            "--profile-dataset-id",
+            "dataset_b",
+            "--eye-mask-stale-state",
+            "stale",
+            "--eye-mask-lifecycle-state",
+            "stale",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload) == 1
+    row = payload[0]
+    assert row["recording_id"] == "recording_b"
+    assert row["dataset_id"] == "dataset_b"
+    assert row["profile_run"] == "eye_profile_b_v1"
+    assert row["source_keypoint_stale_state"] == "stale"
+    assert row.get("lifecycle_state", row["source_keypoint_stale_state"]) == "stale"
+
+
+def test_registry_query_eye_mask_profile_modes_are_mutually_exclusive(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_eye_mask_data_profile_rows(registry_path)
+
+    with pytest.raises(
+        SystemExit,
+        match="--eye-mask-data-profile-latest and --recording-eye-mask-data-profile-latest are mutually exclusive.",
+    ):
+        registry_query_main(
+            [
+                "--registry",
+                str(registry_path),
+                "--eye-mask-data-profile-latest",
+                "--recording-eye-mask-data-profile-latest",
+            ]
+        )
+
+
+def test_registry_query_eye_mask_profile_modes_cross_task_are_mutually_exclusive(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_detection_data_profile_rows(registry_path)
+    _seed_eye_mask_data_profile_rows(registry_path)
+
+    with pytest.raises(
+        SystemExit,
+        match="Eye-mask profile-latest modes are mutually exclusive with detection/keypoint profile-latest modes.",
+    ):
+        registry_query_main(
+            [
+                "--registry",
+                str(registry_path),
+                "--detection-data-profile-latest",
+                "--eye-mask-data-profile-latest",
+            ]
+        )
+
+
+def test_registry_query_eye_mask_profile_plain_output_includes_remediation_for_stale_rows(
+    tmp_path: Path, capsys
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_eye_mask_data_profile_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--recording-eye-mask-data-profile-latest",
+            "--profile-recording-id",
+            "recording_b",
+            "--eye-mask-stale-state",
+            "stale",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "recording=recording_b" in out
+    assert "dataset=dataset_b" in out
+    assert "run=eye_profile_b_v1" in out
+    assert "stale=stale" in out
+    assert "Remediation: stale eye-mask profile rows detected;" in out
 
 
 def test_registry_query_filters_by_crop_review_state(tmp_path: Path, capsys) -> None:

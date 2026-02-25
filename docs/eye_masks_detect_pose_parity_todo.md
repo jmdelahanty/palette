@@ -1,6 +1,9 @@
 # Eye Masks Detect/Pose Parity TODO (Ordered by Impact)
 
-Purpose: track the remaining work to bring eye-mask workflow parity up to the current detect/pose workflow standard.
+Status (2026-02-25): completed historical plan for detect/pose parity surfaces.
+For current eye-mask parity backlog covering profile/data-card/plot/pipeline/check surfaces, see `docs/eye_mask_parity_todo.md`.
+
+Purpose: track the work that brought eye-mask workflow parity up to the detect/pose workflow standard at the time.
 
 Scope: prioritize correctness and auditability first, then orchestration and registry ergonomics.
 
@@ -117,7 +120,7 @@ Scope: prioritize correctness and auditability first, then orchestration and reg
 - [x] Registry query surfaces eye-mask quality/performance status alongside detect/pose.
 - [x] Unit tests cover cross-method provenance and migration compatibility.
 
-Validation evidence (2026-02-22/23):
+Validation evidence (2026-02-22/23, historical snapshot):
 - `scripts/validate_recording_step_status_registry.sh` passed for a scoped real recording (`status=PASS`).
   - Artifact: `/tmp/recording_step_status_validate_20260222_214840`
 - `scripts/validate_recording_step_status_registry_batch.sh --skip-backfill` passed across training recordings.

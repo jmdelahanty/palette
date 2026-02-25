@@ -1161,6 +1161,59 @@ def _extract_eye_mask_performance_rows(
     return rows
 
 
+def _extract_eye_mask_quality_rows(
+    root: zarr.Group,
+    *,
+    zarr_path: Path,
+    recording_id: Optional[str],
+    zarr_use: Optional[str],
+) -> List[Dict[str, Any]]:
+    performance_rows = _extract_eye_mask_performance_rows(
+        root,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        zarr_use=zarr_use,
+    )
+    rows: List[Dict[str, Any]] = []
+    for performance in performance_rows:
+        # Quality parity tracks reviewed refined runs, mirroring detect/keypoint quality scope.
+        if str(performance.get("stage_group") or "") != "refined_eye_masks_runs":
+            continue
+        rows.append(
+            {
+                "stage_group": str(performance.get("stage_group") or "refined_eye_masks_runs"),
+                "run_name": str(performance.get("run_name") or ""),
+                "run_created_utc": performance.get("run_created_utc"),
+                "recording_id": performance.get("recording_id"),
+                "zarr_use": performance.get("zarr_use"),
+                "eye_mask_method": performance.get("method"),
+                "source_crop_run": performance.get("source_crop_run"),
+                "source_keypoint_group": performance.get("source_keypoint_group"),
+                "source_keypoints_run": performance.get("source_keypoints_run"),
+                "source_eye_masks_run": performance.get("source_eye_masks_run"),
+                "source_eye_masks_method": performance.get("source_eye_masks_method"),
+                "review_state": performance.get("review_state"),
+                "review_method": performance.get("review_method"),
+                "review_intended_use": performance.get("review_intended_use"),
+                "review_reviewer": performance.get("review_reviewer"),
+                "review_timestamp_utc": performance.get("review_timestamp_utc"),
+                "total_rois": performance.get("total_rois"),
+                "successful_eyes": performance.get("successful_eyes"),
+                "successful_roi_pairs": performance.get("successful_roi_pairs"),
+                "successful_roi_pair_rate": performance.get("successful_roi_pair_rate"),
+                "source_keypoint_stale_state": performance.get("source_keypoint_stale_state"),
+                "source_keypoint_stale_reason": performance.get("source_keypoint_stale_reason"),
+                "source_keypoint_stale_timestamp_utc": performance.get("source_keypoint_stale_timestamp_utc"),
+                "source_keypoint_stale_json": performance.get("source_keypoint_stale_json"),
+                "lifecycle_state": performance.get("lifecycle_state"),
+                "lifecycle_reason": performance.get("lifecycle_reason"),
+                "quality_updated_utc": performance.get("updated_utc") or _utc_now(),
+                "zarr_mtime_ns": performance.get("zarr_mtime_ns"),
+            }
+        )
+    return rows
+
+
 def _first_value(payload: Dict[str, Any], keys: Iterable[str]) -> Optional[Any]:
     for key in keys:
         if key in payload:
@@ -1805,6 +1858,16 @@ class Registry:
                 24,
                 "keypoint_data_profile_registry",
                 self._migration_024_keypoint_data_profile_registry,
+            ),
+            (
+                25,
+                "eye_mask_data_profile_registry",
+                self._migration_025_eye_mask_data_profile_registry,
+            ),
+            (
+                26,
+                "eye_mask_quality_registry",
+                self._migration_026_eye_mask_quality_registry,
             ),
         ]
 
@@ -6011,6 +6074,681 @@ class Registry:
             """
         )
 
+    def _migration_025_eye_mask_data_profile_registry(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS eye_mask_data_profile (
+                dataset_id TEXT NOT NULL,
+                profile_run TEXT NOT NULL,
+                recording_id TEXT,
+                zarr_use TEXT,
+                stage_group TEXT,
+                eye_mask_method TEXT,
+                source_eye_mask_path TEXT,
+                source_eye_mask_run TEXT,
+                source_keypoint_path TEXT,
+                source_keypoint_run TEXT,
+                source_crop_run TEXT,
+                profile_created_utc TEXT,
+                zarr_mtime_ns INTEGER,
+                updated_utc TEXT,
+                rows_total INTEGER,
+                rows_usable INTEGER,
+                usable_rate REAL,
+                reviewed_rate REAL,
+                excluded_rate REAL,
+                exclusion_reasons_json TEXT,
+                ellipse_success_rate REAL,
+                pair_success_rate REAL,
+                area_p10 REAL,
+                area_p50 REAL,
+                area_p90 REAL,
+                left_area_p10 REAL,
+                left_area_p50 REAL,
+                left_area_p90 REAL,
+                right_area_p10 REAL,
+                right_area_p50 REAL,
+                right_area_p90 REAL,
+                union_area_p10 REAL,
+                union_area_p50 REAL,
+                union_area_p90 REAL,
+                area_lr_ratio_p10 REAL,
+                area_lr_ratio_p50 REAL,
+                area_lr_ratio_p90 REAL,
+                major_axis_p10 REAL,
+                major_axis_p50 REAL,
+                major_axis_p90 REAL,
+                minor_axis_p10 REAL,
+                minor_axis_p50 REAL,
+                minor_axis_p90 REAL,
+                aspect_ratio_p10 REAL,
+                aspect_ratio_p50 REAL,
+                aspect_ratio_p90 REAL,
+                eye_separation_p10 REAL,
+                eye_separation_p50 REAL,
+                eye_separation_p90 REAL,
+                edge_proximity_rate REAL,
+                review_state TEXT,
+                review_method TEXT,
+                review_intended_use TEXT,
+                review_timestamp_utc TEXT,
+                source_keypoint_stale_state TEXT,
+                source_keypoint_stale_reason TEXT,
+                source_keypoint_stale_timestamp_utc TEXT,
+                source_keypoint_stale_json TEXT,
+                rig_id TEXT,
+                camera_id TEXT,
+                arena_id TEXT,
+                dish_design TEXT,
+                canvas_name TEXT,
+                protocol_name TEXT,
+                genotype TEXT,
+                dpf_at_acquisition INTEGER,
+                profile_json TEXT,
+                PRIMARY KEY (dataset_id, profile_run),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        self._ensure_columns(
+            "eye_mask_data_profile",
+            {
+                "recording_id": "TEXT",
+                "zarr_use": "TEXT",
+                "stage_group": "TEXT",
+                "eye_mask_method": "TEXT",
+                "source_eye_mask_path": "TEXT",
+                "source_eye_mask_run": "TEXT",
+                "source_keypoint_path": "TEXT",
+                "source_keypoint_run": "TEXT",
+                "source_crop_run": "TEXT",
+                "profile_created_utc": "TEXT",
+                "zarr_mtime_ns": "INTEGER",
+                "updated_utc": "TEXT",
+                "rows_total": "INTEGER",
+                "rows_usable": "INTEGER",
+                "usable_rate": "REAL",
+                "reviewed_rate": "REAL",
+                "excluded_rate": "REAL",
+                "exclusion_reasons_json": "TEXT",
+                "ellipse_success_rate": "REAL",
+                "pair_success_rate": "REAL",
+                "area_p10": "REAL",
+                "area_p50": "REAL",
+                "area_p90": "REAL",
+                "left_area_p10": "REAL",
+                "left_area_p50": "REAL",
+                "left_area_p90": "REAL",
+                "right_area_p10": "REAL",
+                "right_area_p50": "REAL",
+                "right_area_p90": "REAL",
+                "union_area_p10": "REAL",
+                "union_area_p50": "REAL",
+                "union_area_p90": "REAL",
+                "area_lr_ratio_p10": "REAL",
+                "area_lr_ratio_p50": "REAL",
+                "area_lr_ratio_p90": "REAL",
+                "major_axis_p10": "REAL",
+                "major_axis_p50": "REAL",
+                "major_axis_p90": "REAL",
+                "minor_axis_p10": "REAL",
+                "minor_axis_p50": "REAL",
+                "minor_axis_p90": "REAL",
+                "aspect_ratio_p10": "REAL",
+                "aspect_ratio_p50": "REAL",
+                "aspect_ratio_p90": "REAL",
+                "eye_separation_p10": "REAL",
+                "eye_separation_p50": "REAL",
+                "eye_separation_p90": "REAL",
+                "edge_proximity_rate": "REAL",
+                "review_state": "TEXT",
+                "review_method": "TEXT",
+                "review_intended_use": "TEXT",
+                "review_timestamp_utc": "TEXT",
+                "source_keypoint_stale_state": "TEXT",
+                "source_keypoint_stale_reason": "TEXT",
+                "source_keypoint_stale_timestamp_utc": "TEXT",
+                "source_keypoint_stale_json": "TEXT",
+                "rig_id": "TEXT",
+                "camera_id": "TEXT",
+                "arena_id": "TEXT",
+                "dish_design": "TEXT",
+                "canvas_name": "TEXT",
+                "protocol_name": "TEXT",
+                "genotype": "TEXT",
+                "dpf_at_acquisition": "INTEGER",
+                "profile_json": "TEXT",
+            },
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_eye_mask_data_profile_recording_created "
+            "ON eye_mask_data_profile(recording_id, profile_created_utc DESC);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_eye_mask_data_profile_method_scope "
+            "ON eye_mask_data_profile(eye_mask_method, zarr_use);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_eye_mask_data_profile_stage_usable_rate "
+            "ON eye_mask_data_profile(stage_group, usable_rate);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_eye_mask_data_profile_stale_state "
+            "ON eye_mask_data_profile(source_keypoint_stale_state);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_eye_mask_data_profile_lineage "
+            "ON eye_mask_data_profile(genotype, dpf_at_acquisition);"
+        )
+
+        cur.execute("DROP VIEW IF EXISTS eye_mask_data_profile_latest;")
+        cur.execute(
+            """
+            CREATE VIEW eye_mask_data_profile_latest AS
+            WITH ranked AS (
+                SELECT
+                    emdp.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY emdp.dataset_id, COALESCE(emdp.stage_group, ''), COALESCE(emdp.eye_mask_method, '')
+                        ORDER BY
+                            COALESCE(emdp.profile_created_utc, emdp.updated_utc) DESC,
+                            emdp.profile_run DESC
+                    ) AS _rn
+                FROM eye_mask_data_profile emdp
+            )
+            SELECT
+                dataset_id,
+                profile_run,
+                recording_id,
+                zarr_use,
+                stage_group,
+                eye_mask_method,
+                source_eye_mask_path,
+                source_eye_mask_run,
+                source_keypoint_path,
+                source_keypoint_run,
+                source_crop_run,
+                profile_created_utc,
+                zarr_mtime_ns,
+                updated_utc,
+                rows_total,
+                rows_usable,
+                usable_rate,
+                reviewed_rate,
+                excluded_rate,
+                exclusion_reasons_json,
+                ellipse_success_rate,
+                pair_success_rate,
+                area_p10,
+                area_p50,
+                area_p90,
+                left_area_p10,
+                left_area_p50,
+                left_area_p90,
+                right_area_p10,
+                right_area_p50,
+                right_area_p90,
+                union_area_p10,
+                union_area_p50,
+                union_area_p90,
+                area_lr_ratio_p10,
+                area_lr_ratio_p50,
+                area_lr_ratio_p90,
+                major_axis_p10,
+                major_axis_p50,
+                major_axis_p90,
+                minor_axis_p10,
+                minor_axis_p50,
+                minor_axis_p90,
+                aspect_ratio_p10,
+                aspect_ratio_p50,
+                aspect_ratio_p90,
+                eye_separation_p10,
+                eye_separation_p50,
+                eye_separation_p90,
+                edge_proximity_rate,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_timestamp_utc,
+                source_keypoint_stale_state,
+                source_keypoint_stale_reason,
+                source_keypoint_stale_timestamp_utc,
+                source_keypoint_stale_json,
+                rig_id,
+                camera_id,
+                arena_id,
+                dish_design,
+                canvas_name,
+                protocol_name,
+                genotype,
+                dpf_at_acquisition,
+                profile_json
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+        cur.execute("DROP VIEW IF EXISTS recording_eye_mask_data_profile_latest;")
+        cur.execute(
+            """
+            CREATE VIEW recording_eye_mask_data_profile_latest AS
+            WITH ranked AS (
+                SELECT
+                    emdpl.*,
+                    d.zarr_path AS zarr_path,
+                    d.artifact_kind AS artifact_kind,
+                    d.status AS dataset_status,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY emdpl.recording_id, COALESCE(emdpl.stage_group, ''), COALESCE(emdpl.eye_mask_method, '')
+                        ORDER BY
+                            COALESCE(emdpl.profile_created_utc, emdpl.updated_utc) DESC,
+                            emdpl.profile_run DESC,
+                            emdpl.dataset_id DESC
+                    ) AS _rn
+                FROM eye_mask_data_profile_latest emdpl
+                LEFT JOIN datasets d ON d.dataset_id = emdpl.dataset_id
+                WHERE emdpl.recording_id IS NOT NULL
+            )
+            SELECT
+                recording_id,
+                dataset_id,
+                profile_run,
+                zarr_use,
+                stage_group,
+                eye_mask_method,
+                source_eye_mask_path,
+                source_eye_mask_run,
+                source_keypoint_path,
+                source_keypoint_run,
+                source_crop_run,
+                profile_created_utc,
+                zarr_mtime_ns,
+                updated_utc,
+                rows_total,
+                rows_usable,
+                usable_rate,
+                reviewed_rate,
+                excluded_rate,
+                exclusion_reasons_json,
+                ellipse_success_rate,
+                pair_success_rate,
+                area_p10,
+                area_p50,
+                area_p90,
+                left_area_p10,
+                left_area_p50,
+                left_area_p90,
+                right_area_p10,
+                right_area_p50,
+                right_area_p90,
+                union_area_p10,
+                union_area_p50,
+                union_area_p90,
+                area_lr_ratio_p10,
+                area_lr_ratio_p50,
+                area_lr_ratio_p90,
+                major_axis_p10,
+                major_axis_p50,
+                major_axis_p90,
+                minor_axis_p10,
+                minor_axis_p50,
+                minor_axis_p90,
+                aspect_ratio_p10,
+                aspect_ratio_p50,
+                aspect_ratio_p90,
+                eye_separation_p10,
+                eye_separation_p50,
+                eye_separation_p90,
+                edge_proximity_rate,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_timestamp_utc,
+                source_keypoint_stale_state,
+                source_keypoint_stale_reason,
+                source_keypoint_stale_timestamp_utc,
+                source_keypoint_stale_json,
+                rig_id,
+                camera_id,
+                arena_id,
+                dish_design,
+                canvas_name,
+                protocol_name,
+                genotype,
+                dpf_at_acquisition,
+                profile_json,
+                zarr_path,
+                artifact_kind,
+                dataset_status
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+    def _migration_026_eye_mask_quality_registry(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS eye_mask_quality (
+                dataset_id TEXT NOT NULL,
+                stage_group TEXT NOT NULL,
+                run_name TEXT NOT NULL,
+                run_created_utc TEXT,
+                recording_id TEXT,
+                zarr_use TEXT,
+                eye_mask_method TEXT,
+                source_crop_run TEXT,
+                source_keypoint_group TEXT,
+                source_keypoints_run TEXT,
+                source_eye_masks_run TEXT,
+                source_eye_masks_method TEXT,
+                review_state TEXT,
+                review_method TEXT,
+                review_intended_use TEXT,
+                review_reviewer TEXT,
+                review_timestamp_utc TEXT,
+                total_rois INTEGER,
+                successful_eyes INTEGER,
+                successful_roi_pairs INTEGER,
+                successful_roi_pair_rate REAL,
+                source_keypoint_stale_state TEXT,
+                source_keypoint_stale_reason TEXT,
+                source_keypoint_stale_timestamp_utc TEXT,
+                source_keypoint_stale_json TEXT,
+                lifecycle_state TEXT,
+                lifecycle_reason TEXT,
+                quality_updated_utc TEXT,
+                zarr_mtime_ns INTEGER,
+                PRIMARY KEY (dataset_id, stage_group, run_name),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        self._ensure_columns(
+            "eye_mask_quality",
+            {
+                "run_created_utc": "TEXT",
+                "recording_id": "TEXT",
+                "zarr_use": "TEXT",
+                "eye_mask_method": "TEXT",
+                "source_crop_run": "TEXT",
+                "source_keypoint_group": "TEXT",
+                "source_keypoints_run": "TEXT",
+                "source_eye_masks_run": "TEXT",
+                "source_eye_masks_method": "TEXT",
+                "review_state": "TEXT",
+                "review_method": "TEXT",
+                "review_intended_use": "TEXT",
+                "review_reviewer": "TEXT",
+                "review_timestamp_utc": "TEXT",
+                "total_rois": "INTEGER",
+                "successful_eyes": "INTEGER",
+                "successful_roi_pairs": "INTEGER",
+                "successful_roi_pair_rate": "REAL",
+                "source_keypoint_stale_state": "TEXT",
+                "source_keypoint_stale_reason": "TEXT",
+                "source_keypoint_stale_timestamp_utc": "TEXT",
+                "source_keypoint_stale_json": "TEXT",
+                "lifecycle_state": "TEXT",
+                "lifecycle_reason": "TEXT",
+                "quality_updated_utc": "TEXT",
+                "zarr_mtime_ns": "INTEGER",
+            },
+        )
+
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_eye_mask_quality_dataset_id ON eye_mask_quality(dataset_id);"
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_eye_mask_quality_gate
+            ON eye_mask_quality(review_state, review_intended_use, eye_mask_method, successful_roi_pair_rate);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_eye_mask_quality_stage_method
+            ON eye_mask_quality(stage_group, eye_mask_method);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_eye_mask_quality_recording
+            ON eye_mask_quality(recording_id, stage_group, run_created_utc DESC);
+            """
+        )
+
+        cur.execute(
+            """
+            INSERT INTO eye_mask_quality (
+                dataset_id, stage_group, run_name, run_created_utc, recording_id, zarr_use,
+                eye_mask_method, source_crop_run, source_keypoint_group, source_keypoints_run,
+                source_eye_masks_run, source_eye_masks_method,
+                review_state, review_method, review_intended_use, review_reviewer, review_timestamp_utc,
+                total_rois, successful_eyes, successful_roi_pairs, successful_roi_pair_rate,
+                source_keypoint_stale_state, source_keypoint_stale_reason, source_keypoint_stale_timestamp_utc,
+                source_keypoint_stale_json, lifecycle_state, lifecycle_reason, quality_updated_utc, zarr_mtime_ns
+            )
+            SELECT
+                dataset_id,
+                stage_group,
+                run_name,
+                run_created_utc,
+                recording_id,
+                zarr_use,
+                method AS eye_mask_method,
+                source_crop_run,
+                source_keypoint_group,
+                source_keypoints_run,
+                source_eye_masks_run,
+                source_eye_masks_method,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                total_rois,
+                successful_eyes,
+                successful_roi_pairs,
+                successful_roi_pair_rate,
+                source_keypoint_stale_state,
+                source_keypoint_stale_reason,
+                source_keypoint_stale_timestamp_utc,
+                source_keypoint_stale_json,
+                lifecycle_state,
+                lifecycle_reason,
+                COALESCE(updated_utc, CURRENT_TIMESTAMP) AS quality_updated_utc,
+                zarr_mtime_ns
+            FROM eye_mask_performance
+            WHERE stage_group = 'refined_eye_masks_runs'
+            ON CONFLICT(dataset_id, stage_group, run_name) DO UPDATE SET
+                run_created_utc=excluded.run_created_utc,
+                recording_id=excluded.recording_id,
+                zarr_use=excluded.zarr_use,
+                eye_mask_method=excluded.eye_mask_method,
+                source_crop_run=excluded.source_crop_run,
+                source_keypoint_group=excluded.source_keypoint_group,
+                source_keypoints_run=excluded.source_keypoints_run,
+                source_eye_masks_run=excluded.source_eye_masks_run,
+                source_eye_masks_method=excluded.source_eye_masks_method,
+                review_state=excluded.review_state,
+                review_method=excluded.review_method,
+                review_intended_use=excluded.review_intended_use,
+                review_reviewer=excluded.review_reviewer,
+                review_timestamp_utc=excluded.review_timestamp_utc,
+                total_rois=excluded.total_rois,
+                successful_eyes=excluded.successful_eyes,
+                successful_roi_pairs=excluded.successful_roi_pairs,
+                successful_roi_pair_rate=excluded.successful_roi_pair_rate,
+                source_keypoint_stale_state=excluded.source_keypoint_stale_state,
+                source_keypoint_stale_reason=excluded.source_keypoint_stale_reason,
+                source_keypoint_stale_timestamp_utc=excluded.source_keypoint_stale_timestamp_utc,
+                source_keypoint_stale_json=excluded.source_keypoint_stale_json,
+                lifecycle_state=excluded.lifecycle_state,
+                lifecycle_reason=excluded.lifecycle_reason,
+                quality_updated_utc=excluded.quality_updated_utc,
+                zarr_mtime_ns=excluded.zarr_mtime_ns;
+            """
+        )
+
+        cur.execute("DROP VIEW IF EXISTS eye_mask_quality_current;")
+        cur.execute(
+            """
+            CREATE VIEW eye_mask_quality_current AS
+            WITH ranked AS (
+                SELECT
+                    emq.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY emq.dataset_id, COALESCE(emq.stage_group, ''), COALESCE(emq.eye_mask_method, '')
+                        ORDER BY
+                            COALESCE(emq.review_timestamp_utc, emq.run_created_utc, emq.quality_updated_utc) DESC,
+                            COALESCE(emq.run_created_utc, '') DESC,
+                            emq.run_name DESC
+                    ) AS _rn
+                FROM eye_mask_quality emq
+            )
+            SELECT
+                dataset_id,
+                stage_group,
+                run_name,
+                run_created_utc,
+                recording_id,
+                zarr_use,
+                eye_mask_method,
+                source_crop_run,
+                source_keypoint_group,
+                source_keypoints_run,
+                source_eye_masks_run,
+                source_eye_masks_method,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                total_rois,
+                successful_eyes,
+                successful_roi_pairs,
+                successful_roi_pair_rate,
+                source_keypoint_stale_state,
+                source_keypoint_stale_reason,
+                source_keypoint_stale_timestamp_utc,
+                source_keypoint_stale_json,
+                lifecycle_state,
+                lifecycle_reason,
+                quality_updated_utc,
+                zarr_mtime_ns
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS eye_mask_quality_overview;")
+        cur.execute(
+            """
+            CREATE VIEW eye_mask_quality_overview AS
+            SELECT
+                emqc.dataset_id AS dataset_id,
+                d.zarr_path AS zarr_path,
+                d.zarr_origin AS zarr_origin,
+                d.zarr_use AS zarr_use,
+                d.zarr_use AS zarr_purpose,
+                d.artifact_kind AS artifact_kind,
+                d.status AS dataset_status,
+                emqc.stage_group AS stage_group,
+                emqc.run_name AS run_name,
+                emqc.run_created_utc AS run_created_utc,
+                emqc.recording_id AS recording_id,
+                emqc.eye_mask_method AS eye_mask_method,
+                emqc.source_crop_run AS source_crop_run,
+                emqc.source_keypoint_group AS source_keypoint_group,
+                emqc.source_keypoints_run AS source_keypoints_run,
+                emqc.source_eye_masks_run AS source_eye_masks_run,
+                emqc.source_eye_masks_method AS source_eye_masks_method,
+                emqc.review_state AS review_state,
+                emqc.review_method AS review_method,
+                emqc.review_intended_use AS review_intended_use,
+                emqc.review_reviewer AS review_reviewer,
+                emqc.review_timestamp_utc AS review_timestamp_utc,
+                emqc.total_rois AS total_rois,
+                emqc.successful_eyes AS successful_eyes,
+                emqc.successful_roi_pairs AS successful_roi_pairs,
+                emqc.successful_roi_pair_rate AS successful_roi_pair_rate,
+                emqc.source_keypoint_stale_state AS source_keypoint_stale_state,
+                emqc.source_keypoint_stale_reason AS source_keypoint_stale_reason,
+                emqc.source_keypoint_stale_timestamp_utc AS source_keypoint_stale_timestamp_utc,
+                emqc.source_keypoint_stale_json AS source_keypoint_stale_json,
+                emqc.lifecycle_state AS lifecycle_state,
+                emqc.lifecycle_reason AS lifecycle_reason,
+                emqc.quality_updated_utc AS quality_updated_utc,
+                emqc.zarr_mtime_ns AS zarr_mtime_ns,
+                CASE
+                    WHEN emqc.zarr_mtime_ns IS NULL THEN 1
+                    ELSE 0
+                END AS quality_stale
+            FROM eye_mask_quality_current emqc
+            LEFT JOIN datasets d ON d.dataset_id = emqc.dataset_id;
+            """
+        )
+        cur.execute("DROP VIEW IF EXISTS recording_eye_mask_quality_overview;")
+        cur.execute(
+            """
+            CREATE VIEW recording_eye_mask_quality_overview AS
+            WITH ranked AS (
+                SELECT
+                    emqo.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY emqo.recording_id, COALESCE(emqo.stage_group, ''), COALESCE(emqo.eye_mask_method, '')
+                        ORDER BY
+                            COALESCE(emqo.review_timestamp_utc, emqo.run_created_utc, emqo.quality_updated_utc) DESC,
+                            COALESCE(emqo.run_created_utc, '') DESC,
+                            emqo.run_name DESC,
+                            emqo.dataset_id DESC
+                    ) AS _rn
+                FROM eye_mask_quality_overview emqo
+                WHERE emqo.recording_id IS NOT NULL
+            )
+            SELECT
+                recording_id,
+                dataset_id,
+                zarr_path,
+                zarr_origin,
+                zarr_use,
+                zarr_purpose,
+                artifact_kind,
+                dataset_status,
+                stage_group,
+                run_name,
+                run_created_utc,
+                eye_mask_method,
+                source_crop_run,
+                source_keypoint_group,
+                source_keypoints_run,
+                source_eye_masks_run,
+                source_eye_masks_method,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                total_rois,
+                successful_eyes,
+                successful_roi_pairs,
+                successful_roi_pair_rate,
+                source_keypoint_stale_state,
+                source_keypoint_stale_reason,
+                source_keypoint_stale_timestamp_utc,
+                source_keypoint_stale_json,
+                lifecycle_state,
+                lifecycle_reason,
+                quality_updated_utc,
+                zarr_mtime_ns,
+                quality_stale
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
         existing = {
             row["name"]
@@ -7204,6 +7942,387 @@ class Registry:
         )
         self.conn.commit()
 
+    def upsert_eye_mask_data_profile(
+        self,
+        *,
+        dataset_id: str,
+        profile_run: str,
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+        stage_group: Optional[str],
+        eye_mask_method: Optional[str],
+        source_eye_mask_path: Optional[str],
+        source_eye_mask_run: Optional[str],
+        source_keypoint_path: Optional[str],
+        source_keypoint_run: Optional[str],
+        source_crop_run: Optional[str],
+        profile_created_utc: Optional[str],
+        rows_total: Optional[int],
+        rows_usable: Optional[int],
+        usable_rate: Optional[float],
+        reviewed_rate: Optional[float],
+        excluded_rate: Optional[float],
+        exclusion_reasons_json: Optional[str],
+        ellipse_success_rate: Optional[float],
+        pair_success_rate: Optional[float],
+        area_p10: Optional[float],
+        area_p50: Optional[float],
+        area_p90: Optional[float],
+        left_area_p10: Optional[float] = None,
+        left_area_p50: Optional[float] = None,
+        left_area_p90: Optional[float] = None,
+        right_area_p10: Optional[float] = None,
+        right_area_p50: Optional[float] = None,
+        right_area_p90: Optional[float] = None,
+        union_area_p10: Optional[float] = None,
+        union_area_p50: Optional[float] = None,
+        union_area_p90: Optional[float] = None,
+        area_lr_ratio_p10: Optional[float] = None,
+        area_lr_ratio_p50: Optional[float] = None,
+        area_lr_ratio_p90: Optional[float] = None,
+        major_axis_p10: Optional[float] = None,
+        major_axis_p50: Optional[float] = None,
+        major_axis_p90: Optional[float] = None,
+        minor_axis_p10: Optional[float] = None,
+        minor_axis_p50: Optional[float] = None,
+        minor_axis_p90: Optional[float] = None,
+        aspect_ratio_p10: Optional[float] = None,
+        aspect_ratio_p50: Optional[float] = None,
+        aspect_ratio_p90: Optional[float] = None,
+        eye_separation_p10: Optional[float] = None,
+        eye_separation_p50: Optional[float] = None,
+        eye_separation_p90: Optional[float] = None,
+        edge_proximity_rate: Optional[float] = None,
+        review_state: Optional[str] = None,
+        review_method: Optional[str] = None,
+        review_intended_use: Optional[str] = None,
+        review_timestamp_utc: Optional[str] = None,
+        source_keypoint_stale_state: Optional[str] = None,
+        source_keypoint_stale_reason: Optional[str] = None,
+        source_keypoint_stale_timestamp_utc: Optional[str] = None,
+        source_keypoint_stale_json: Optional[str] = None,
+        rig_id: Optional[str] = None,
+        camera_id: Optional[str] = None,
+        arena_id: Optional[str] = None,
+        dish_design: Optional[str] = None,
+        canvas_name: Optional[str] = None,
+        protocol_name: Optional[str] = None,
+        genotype: Optional[str] = None,
+        dpf_at_acquisition: Optional[int] = None,
+        profile_json: Optional[str] = None,
+        zarr_mtime_ns: Optional[int] = None,
+        updated_utc: Optional[str] = None,
+    ) -> None:
+        payload = {
+            "dataset_id": str(dataset_id),
+            "profile_run": str(profile_run),
+            "recording_id": recording_id,
+            "zarr_use": zarr_use,
+            "stage_group": stage_group,
+            "eye_mask_method": eye_mask_method,
+            "source_eye_mask_path": source_eye_mask_path,
+            "source_eye_mask_run": source_eye_mask_run,
+            "source_keypoint_path": source_keypoint_path,
+            "source_keypoint_run": source_keypoint_run,
+            "source_crop_run": source_crop_run,
+            "profile_created_utc": profile_created_utc,
+            "zarr_mtime_ns": zarr_mtime_ns,
+            "updated_utc": updated_utc or _utc_now(),
+            "rows_total": rows_total,
+            "rows_usable": rows_usable,
+            "usable_rate": usable_rate,
+            "reviewed_rate": reviewed_rate,
+            "excluded_rate": excluded_rate,
+            "exclusion_reasons_json": exclusion_reasons_json,
+            "ellipse_success_rate": ellipse_success_rate,
+            "pair_success_rate": pair_success_rate,
+            "area_p10": area_p10,
+            "area_p50": area_p50,
+            "area_p90": area_p90,
+            "left_area_p10": left_area_p10,
+            "left_area_p50": left_area_p50,
+            "left_area_p90": left_area_p90,
+            "right_area_p10": right_area_p10,
+            "right_area_p50": right_area_p50,
+            "right_area_p90": right_area_p90,
+            "union_area_p10": union_area_p10,
+            "union_area_p50": union_area_p50,
+            "union_area_p90": union_area_p90,
+            "area_lr_ratio_p10": area_lr_ratio_p10,
+            "area_lr_ratio_p50": area_lr_ratio_p50,
+            "area_lr_ratio_p90": area_lr_ratio_p90,
+            "major_axis_p10": major_axis_p10,
+            "major_axis_p50": major_axis_p50,
+            "major_axis_p90": major_axis_p90,
+            "minor_axis_p10": minor_axis_p10,
+            "minor_axis_p50": minor_axis_p50,
+            "minor_axis_p90": minor_axis_p90,
+            "aspect_ratio_p10": aspect_ratio_p10,
+            "aspect_ratio_p50": aspect_ratio_p50,
+            "aspect_ratio_p90": aspect_ratio_p90,
+            "eye_separation_p10": eye_separation_p10,
+            "eye_separation_p50": eye_separation_p50,
+            "eye_separation_p90": eye_separation_p90,
+            "edge_proximity_rate": edge_proximity_rate,
+            "review_state": review_state,
+            "review_method": review_method,
+            "review_intended_use": review_intended_use,
+            "review_timestamp_utc": review_timestamp_utc,
+            "source_keypoint_stale_state": source_keypoint_stale_state,
+            "source_keypoint_stale_reason": source_keypoint_stale_reason,
+            "source_keypoint_stale_timestamp_utc": source_keypoint_stale_timestamp_utc,
+            "source_keypoint_stale_json": source_keypoint_stale_json,
+            "rig_id": rig_id,
+            "camera_id": camera_id,
+            "arena_id": arena_id,
+            "dish_design": dish_design,
+            "canvas_name": canvas_name,
+            "protocol_name": protocol_name,
+            "genotype": genotype,
+            "dpf_at_acquisition": dpf_at_acquisition,
+            "profile_json": profile_json,
+        }
+        self.conn.execute(
+            """
+            INSERT INTO eye_mask_data_profile (
+                dataset_id, profile_run, recording_id, zarr_use,
+                stage_group, eye_mask_method,
+                source_eye_mask_path, source_eye_mask_run,
+                source_keypoint_path, source_keypoint_run, source_crop_run,
+                profile_created_utc, zarr_mtime_ns, updated_utc,
+                rows_total, rows_usable, usable_rate, reviewed_rate, excluded_rate,
+                exclusion_reasons_json, ellipse_success_rate, pair_success_rate,
+                area_p10, area_p50, area_p90,
+                left_area_p10, left_area_p50, left_area_p90,
+                right_area_p10, right_area_p50, right_area_p90,
+                union_area_p10, union_area_p50, union_area_p90,
+                area_lr_ratio_p10, area_lr_ratio_p50, area_lr_ratio_p90,
+                major_axis_p10, major_axis_p50, major_axis_p90,
+                minor_axis_p10, minor_axis_p50, minor_axis_p90,
+                aspect_ratio_p10, aspect_ratio_p50, aspect_ratio_p90,
+                eye_separation_p10, eye_separation_p50, eye_separation_p90,
+                edge_proximity_rate,
+                review_state, review_method, review_intended_use, review_timestamp_utc,
+                source_keypoint_stale_state, source_keypoint_stale_reason,
+                source_keypoint_stale_timestamp_utc, source_keypoint_stale_json,
+                rig_id, camera_id, arena_id, dish_design, canvas_name, protocol_name,
+                genotype, dpf_at_acquisition,
+                profile_json
+            )
+            VALUES (
+                :dataset_id, :profile_run, :recording_id, :zarr_use,
+                :stage_group, :eye_mask_method,
+                :source_eye_mask_path, :source_eye_mask_run,
+                :source_keypoint_path, :source_keypoint_run, :source_crop_run,
+                :profile_created_utc, :zarr_mtime_ns, :updated_utc,
+                :rows_total, :rows_usable, :usable_rate, :reviewed_rate, :excluded_rate,
+                :exclusion_reasons_json, :ellipse_success_rate, :pair_success_rate,
+                :area_p10, :area_p50, :area_p90,
+                :left_area_p10, :left_area_p50, :left_area_p90,
+                :right_area_p10, :right_area_p50, :right_area_p90,
+                :union_area_p10, :union_area_p50, :union_area_p90,
+                :area_lr_ratio_p10, :area_lr_ratio_p50, :area_lr_ratio_p90,
+                :major_axis_p10, :major_axis_p50, :major_axis_p90,
+                :minor_axis_p10, :minor_axis_p50, :minor_axis_p90,
+                :aspect_ratio_p10, :aspect_ratio_p50, :aspect_ratio_p90,
+                :eye_separation_p10, :eye_separation_p50, :eye_separation_p90,
+                :edge_proximity_rate,
+                :review_state, :review_method, :review_intended_use, :review_timestamp_utc,
+                :source_keypoint_stale_state, :source_keypoint_stale_reason,
+                :source_keypoint_stale_timestamp_utc, :source_keypoint_stale_json,
+                :rig_id, :camera_id, :arena_id, :dish_design, :canvas_name, :protocol_name,
+                :genotype, :dpf_at_acquisition,
+                :profile_json
+            )
+            ON CONFLICT(dataset_id, profile_run) DO UPDATE SET
+                recording_id=excluded.recording_id,
+                zarr_use=excluded.zarr_use,
+                stage_group=excluded.stage_group,
+                eye_mask_method=excluded.eye_mask_method,
+                source_eye_mask_path=excluded.source_eye_mask_path,
+                source_eye_mask_run=excluded.source_eye_mask_run,
+                source_keypoint_path=excluded.source_keypoint_path,
+                source_keypoint_run=excluded.source_keypoint_run,
+                source_crop_run=excluded.source_crop_run,
+                profile_created_utc=excluded.profile_created_utc,
+                zarr_mtime_ns=excluded.zarr_mtime_ns,
+                updated_utc=excluded.updated_utc,
+                rows_total=excluded.rows_total,
+                rows_usable=excluded.rows_usable,
+                usable_rate=excluded.usable_rate,
+                reviewed_rate=excluded.reviewed_rate,
+                excluded_rate=excluded.excluded_rate,
+                exclusion_reasons_json=excluded.exclusion_reasons_json,
+                ellipse_success_rate=excluded.ellipse_success_rate,
+                pair_success_rate=excluded.pair_success_rate,
+                area_p10=excluded.area_p10,
+                area_p50=excluded.area_p50,
+                area_p90=excluded.area_p90,
+                left_area_p10=excluded.left_area_p10,
+                left_area_p50=excluded.left_area_p50,
+                left_area_p90=excluded.left_area_p90,
+                right_area_p10=excluded.right_area_p10,
+                right_area_p50=excluded.right_area_p50,
+                right_area_p90=excluded.right_area_p90,
+                union_area_p10=excluded.union_area_p10,
+                union_area_p50=excluded.union_area_p50,
+                union_area_p90=excluded.union_area_p90,
+                area_lr_ratio_p10=excluded.area_lr_ratio_p10,
+                area_lr_ratio_p50=excluded.area_lr_ratio_p50,
+                area_lr_ratio_p90=excluded.area_lr_ratio_p90,
+                major_axis_p10=excluded.major_axis_p10,
+                major_axis_p50=excluded.major_axis_p50,
+                major_axis_p90=excluded.major_axis_p90,
+                minor_axis_p10=excluded.minor_axis_p10,
+                minor_axis_p50=excluded.minor_axis_p50,
+                minor_axis_p90=excluded.minor_axis_p90,
+                aspect_ratio_p10=excluded.aspect_ratio_p10,
+                aspect_ratio_p50=excluded.aspect_ratio_p50,
+                aspect_ratio_p90=excluded.aspect_ratio_p90,
+                eye_separation_p10=excluded.eye_separation_p10,
+                eye_separation_p50=excluded.eye_separation_p50,
+                eye_separation_p90=excluded.eye_separation_p90,
+                edge_proximity_rate=excluded.edge_proximity_rate,
+                review_state=excluded.review_state,
+                review_method=excluded.review_method,
+                review_intended_use=excluded.review_intended_use,
+                review_timestamp_utc=excluded.review_timestamp_utc,
+                source_keypoint_stale_state=excluded.source_keypoint_stale_state,
+                source_keypoint_stale_reason=excluded.source_keypoint_stale_reason,
+                source_keypoint_stale_timestamp_utc=excluded.source_keypoint_stale_timestamp_utc,
+                source_keypoint_stale_json=excluded.source_keypoint_stale_json,
+                rig_id=excluded.rig_id,
+                camera_id=excluded.camera_id,
+                arena_id=excluded.arena_id,
+                dish_design=excluded.dish_design,
+                canvas_name=excluded.canvas_name,
+                protocol_name=excluded.protocol_name,
+                genotype=excluded.genotype,
+                dpf_at_acquisition=excluded.dpf_at_acquisition,
+                profile_json=excluded.profile_json;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
+    def upsert_eye_mask_quality(
+        self,
+        *,
+        dataset_id: str,
+        stage_group: str,
+        run_name: str,
+        run_created_utc: Optional[str],
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+        eye_mask_method: Optional[str],
+        source_crop_run: Optional[str],
+        source_keypoint_group: Optional[str],
+        source_keypoints_run: Optional[str],
+        source_eye_masks_run: Optional[str],
+        source_eye_masks_method: Optional[str],
+        review_state: Optional[str],
+        review_method: Optional[str],
+        review_intended_use: Optional[str],
+        review_reviewer: Optional[str],
+        review_timestamp_utc: Optional[str],
+        total_rois: Optional[int],
+        successful_eyes: Optional[int],
+        successful_roi_pairs: Optional[int],
+        successful_roi_pair_rate: Optional[float],
+        source_keypoint_stale_state: Optional[str] = None,
+        source_keypoint_stale_reason: Optional[str] = None,
+        source_keypoint_stale_timestamp_utc: Optional[str] = None,
+        source_keypoint_stale_json: Optional[str] = None,
+        lifecycle_state: Optional[str] = None,
+        lifecycle_reason: Optional[str] = None,
+        quality_updated_utc: Optional[str] = None,
+        zarr_mtime_ns: Optional[int] = None,
+    ) -> None:
+        payload = {
+            "dataset_id": str(dataset_id),
+            "stage_group": str(stage_group),
+            "run_name": str(run_name),
+            "run_created_utc": run_created_utc,
+            "recording_id": recording_id,
+            "zarr_use": zarr_use,
+            "eye_mask_method": eye_mask_method,
+            "source_crop_run": source_crop_run,
+            "source_keypoint_group": source_keypoint_group,
+            "source_keypoints_run": source_keypoints_run,
+            "source_eye_masks_run": source_eye_masks_run,
+            "source_eye_masks_method": source_eye_masks_method,
+            "review_state": review_state,
+            "review_method": review_method,
+            "review_intended_use": review_intended_use,
+            "review_reviewer": review_reviewer,
+            "review_timestamp_utc": review_timestamp_utc,
+            "total_rois": total_rois,
+            "successful_eyes": successful_eyes,
+            "successful_roi_pairs": successful_roi_pairs,
+            "successful_roi_pair_rate": successful_roi_pair_rate,
+            "source_keypoint_stale_state": source_keypoint_stale_state,
+            "source_keypoint_stale_reason": source_keypoint_stale_reason,
+            "source_keypoint_stale_timestamp_utc": source_keypoint_stale_timestamp_utc,
+            "source_keypoint_stale_json": source_keypoint_stale_json,
+            "lifecycle_state": lifecycle_state,
+            "lifecycle_reason": lifecycle_reason,
+            "quality_updated_utc": quality_updated_utc or _utc_now(),
+            "zarr_mtime_ns": zarr_mtime_ns,
+        }
+        self.conn.execute(
+            """
+            INSERT INTO eye_mask_quality (
+                dataset_id, stage_group, run_name, run_created_utc, recording_id, zarr_use,
+                eye_mask_method, source_crop_run, source_keypoint_group, source_keypoints_run,
+                source_eye_masks_run, source_eye_masks_method,
+                review_state, review_method, review_intended_use, review_reviewer, review_timestamp_utc,
+                total_rois, successful_eyes, successful_roi_pairs, successful_roi_pair_rate,
+                source_keypoint_stale_state, source_keypoint_stale_reason, source_keypoint_stale_timestamp_utc,
+                source_keypoint_stale_json, lifecycle_state, lifecycle_reason,
+                quality_updated_utc, zarr_mtime_ns
+            )
+            VALUES (
+                :dataset_id, :stage_group, :run_name, :run_created_utc, :recording_id, :zarr_use,
+                :eye_mask_method, :source_crop_run, :source_keypoint_group, :source_keypoints_run,
+                :source_eye_masks_run, :source_eye_masks_method,
+                :review_state, :review_method, :review_intended_use, :review_reviewer, :review_timestamp_utc,
+                :total_rois, :successful_eyes, :successful_roi_pairs, :successful_roi_pair_rate,
+                :source_keypoint_stale_state, :source_keypoint_stale_reason, :source_keypoint_stale_timestamp_utc,
+                :source_keypoint_stale_json, :lifecycle_state, :lifecycle_reason,
+                :quality_updated_utc, :zarr_mtime_ns
+            )
+            ON CONFLICT(dataset_id, stage_group, run_name) DO UPDATE SET
+                run_created_utc=excluded.run_created_utc,
+                recording_id=excluded.recording_id,
+                zarr_use=excluded.zarr_use,
+                eye_mask_method=excluded.eye_mask_method,
+                source_crop_run=excluded.source_crop_run,
+                source_keypoint_group=excluded.source_keypoint_group,
+                source_keypoints_run=excluded.source_keypoints_run,
+                source_eye_masks_run=excluded.source_eye_masks_run,
+                source_eye_masks_method=excluded.source_eye_masks_method,
+                review_state=excluded.review_state,
+                review_method=excluded.review_method,
+                review_intended_use=excluded.review_intended_use,
+                review_reviewer=excluded.review_reviewer,
+                review_timestamp_utc=excluded.review_timestamp_utc,
+                total_rois=excluded.total_rois,
+                successful_eyes=excluded.successful_eyes,
+                successful_roi_pairs=excluded.successful_roi_pairs,
+                successful_roi_pair_rate=excluded.successful_roi_pair_rate,
+                source_keypoint_stale_state=excluded.source_keypoint_stale_state,
+                source_keypoint_stale_reason=excluded.source_keypoint_stale_reason,
+                source_keypoint_stale_timestamp_utc=excluded.source_keypoint_stale_timestamp_utc,
+                source_keypoint_stale_json=excluded.source_keypoint_stale_json,
+                lifecycle_state=excluded.lifecycle_state,
+                lifecycle_reason=excluded.lifecycle_reason,
+                quality_updated_utc=excluded.quality_updated_utc,
+                zarr_mtime_ns=excluded.zarr_mtime_ns;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
     def upsert_detect_quality(
         self,
         *,
@@ -7424,6 +8543,96 @@ class Registry:
                     payload,
                 )
 
+    def replace_eye_mask_data_profile(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM eye_mask_data_profile WHERE dataset_id = ?;", (str(dataset_id),))
+            for record in records:
+                payload = dict(record)
+                payload["dataset_id"] = str(dataset_id)
+                payload.setdefault("updated_utc", _utc_now())
+                for key in (
+                    "source_keypoint_stale_state",
+                    "source_keypoint_stale_reason",
+                    "source_keypoint_stale_timestamp_utc",
+                    "source_keypoint_stale_json",
+                    "left_area_p10",
+                    "left_area_p50",
+                    "left_area_p90",
+                    "right_area_p10",
+                    "right_area_p50",
+                    "right_area_p90",
+                    "union_area_p10",
+                    "union_area_p50",
+                    "union_area_p90",
+                    "area_lr_ratio_p10",
+                    "area_lr_ratio_p50",
+                    "area_lr_ratio_p90",
+                    "rig_id",
+                    "camera_id",
+                    "arena_id",
+                    "dish_design",
+                    "canvas_name",
+                    "protocol_name",
+                    "genotype",
+                    "dpf_at_acquisition",
+                ):
+                    payload.setdefault(key, None)
+                self.conn.execute(
+                    """
+                    INSERT INTO eye_mask_data_profile (
+                        dataset_id, profile_run, recording_id, zarr_use,
+                        stage_group, eye_mask_method,
+                        source_eye_mask_path, source_eye_mask_run,
+                        source_keypoint_path, source_keypoint_run, source_crop_run,
+                        profile_created_utc, zarr_mtime_ns, updated_utc,
+                        rows_total, rows_usable, usable_rate, reviewed_rate, excluded_rate,
+                        exclusion_reasons_json, ellipse_success_rate, pair_success_rate,
+                        area_p10, area_p50, area_p90,
+                        left_area_p10, left_area_p50, left_area_p90,
+                        right_area_p10, right_area_p50, right_area_p90,
+                        union_area_p10, union_area_p50, union_area_p90,
+                        area_lr_ratio_p10, area_lr_ratio_p50, area_lr_ratio_p90,
+                        major_axis_p10, major_axis_p50, major_axis_p90,
+                        minor_axis_p10, minor_axis_p50, minor_axis_p90,
+                        aspect_ratio_p10, aspect_ratio_p50, aspect_ratio_p90,
+                        eye_separation_p10, eye_separation_p50, eye_separation_p90,
+                        edge_proximity_rate,
+                        review_state, review_method, review_intended_use, review_timestamp_utc,
+                        source_keypoint_stale_state, source_keypoint_stale_reason,
+                        source_keypoint_stale_timestamp_utc, source_keypoint_stale_json,
+                        rig_id, camera_id, arena_id, dish_design, canvas_name, protocol_name,
+                        genotype, dpf_at_acquisition,
+                        profile_json
+                    )
+                    VALUES (
+                        :dataset_id, :profile_run, :recording_id, :zarr_use,
+                        :stage_group, :eye_mask_method,
+                        :source_eye_mask_path, :source_eye_mask_run,
+                        :source_keypoint_path, :source_keypoint_run, :source_crop_run,
+                        :profile_created_utc, :zarr_mtime_ns, :updated_utc,
+                        :rows_total, :rows_usable, :usable_rate, :reviewed_rate, :excluded_rate,
+                        :exclusion_reasons_json, :ellipse_success_rate, :pair_success_rate,
+                        :area_p10, :area_p50, :area_p90,
+                        :left_area_p10, :left_area_p50, :left_area_p90,
+                        :right_area_p10, :right_area_p50, :right_area_p90,
+                        :union_area_p10, :union_area_p50, :union_area_p90,
+                        :area_lr_ratio_p10, :area_lr_ratio_p50, :area_lr_ratio_p90,
+                        :major_axis_p10, :major_axis_p50, :major_axis_p90,
+                        :minor_axis_p10, :minor_axis_p50, :minor_axis_p90,
+                        :aspect_ratio_p10, :aspect_ratio_p50, :aspect_ratio_p90,
+                        :eye_separation_p10, :eye_separation_p50, :eye_separation_p90,
+                        :edge_proximity_rate,
+                        :review_state, :review_method, :review_intended_use, :review_timestamp_utc,
+                        :source_keypoint_stale_state, :source_keypoint_stale_reason,
+                        :source_keypoint_stale_timestamp_utc, :source_keypoint_stale_json,
+                        :rig_id, :camera_id, :arena_id, :dish_design, :canvas_name, :protocol_name,
+                        :genotype, :dpf_at_acquisition,
+                        :profile_json
+                    );
+                    """,
+                    payload,
+                )
+
     def replace_keypoint_performance(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM keypoint_performance WHERE dataset_id = ?;", (str(dataset_id),))
@@ -7494,6 +8703,40 @@ class Registry:
                     payload,
                 )
 
+    def replace_eye_mask_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM eye_mask_quality WHERE dataset_id = ?;", (str(dataset_id),))
+            for record in records:
+                payload = dict(record)
+                payload["dataset_id"] = str(dataset_id)
+                payload.setdefault("quality_updated_utc", _utc_now())
+                payload.setdefault("zarr_mtime_ns", None)
+                self.conn.execute(
+                    """
+                    INSERT INTO eye_mask_quality (
+                        dataset_id, stage_group, run_name, run_created_utc, recording_id, zarr_use,
+                        eye_mask_method, source_crop_run, source_keypoint_group, source_keypoints_run,
+                        source_eye_masks_run, source_eye_masks_method,
+                        review_state, review_method, review_intended_use, review_reviewer, review_timestamp_utc,
+                        total_rois, successful_eyes, successful_roi_pairs, successful_roi_pair_rate,
+                        source_keypoint_stale_state, source_keypoint_stale_reason, source_keypoint_stale_timestamp_utc,
+                        source_keypoint_stale_json, lifecycle_state, lifecycle_reason,
+                        quality_updated_utc, zarr_mtime_ns
+                    )
+                    VALUES (
+                        :dataset_id, :stage_group, :run_name, :run_created_utc, :recording_id, :zarr_use,
+                        :eye_mask_method, :source_crop_run, :source_keypoint_group, :source_keypoints_run,
+                        :source_eye_masks_run, :source_eye_masks_method,
+                        :review_state, :review_method, :review_intended_use, :review_reviewer, :review_timestamp_utc,
+                        :total_rois, :successful_eyes, :successful_roi_pairs, :successful_roi_pair_rate,
+                        :source_keypoint_stale_state, :source_keypoint_stale_reason, :source_keypoint_stale_timestamp_utc,
+                        :source_keypoint_stale_json, :lifecycle_state, :lifecycle_reason,
+                        :quality_updated_utc, :zarr_mtime_ns
+                    );
+                    """,
+                    payload,
+                )
+
     def refresh_detect_performance_for_dataset(
         self,
         dataset_id: str,
@@ -7558,6 +8801,28 @@ class Registry:
             zarr_use=zarr_use,
         )
         self.replace_eye_mask_performance(dataset_id, rows)
+        return len(rows)
+
+    def refresh_eye_mask_quality_for_dataset(
+        self,
+        dataset_id: str,
+        *,
+        zarr_path: Path,
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+    ) -> int:
+        zarr = _import_zarr()
+        try:
+            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+        except TypeError:
+            root = zarr.open_group(str(zarr_path), mode="r")
+        rows = _extract_eye_mask_quality_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_eye_mask_quality(dataset_id, rows)
         return len(rows)
 
     def replace_detect_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
@@ -7754,6 +9019,44 @@ class Registry:
         sql.append("ORDER BY dataset_id, detect_method")
         return list(self.conn.execute(" ".join(sql), params).fetchall())
 
+    def query_eye_mask_quality_current(
+        self,
+        *,
+        dataset_ids: Optional[Sequence[str]] = None,
+        stage_group: Optional[str] = None,
+        eye_mask_method: Optional[str] = None,
+        review_state: Optional[str] = None,
+        review_intended_use: Optional[str] = None,
+        min_successful_roi_pair_rate: Optional[float] = None,
+    ) -> List[sqlite3.Row]:
+        sql = ["SELECT * FROM eye_mask_quality_current WHERE 1=1"]
+        params: List[Any] = []
+
+        if dataset_ids:
+            normalized_ids = [str(dataset_id) for dataset_id in dataset_ids if dataset_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND dataset_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if stage_group is not None:
+            sql.append("AND stage_group = ?")
+            params.append(str(stage_group))
+        if eye_mask_method is not None:
+            sql.append("AND eye_mask_method = ?")
+            params.append(str(eye_mask_method))
+        if review_state is not None:
+            sql.append("AND review_state = ?")
+            params.append(str(review_state))
+        if review_intended_use is not None:
+            sql.append("AND review_intended_use = ?")
+            params.append(str(review_intended_use))
+        if min_successful_roi_pair_rate is not None:
+            sql.append("AND successful_roi_pair_rate IS NOT NULL AND successful_roi_pair_rate >= ?")
+            params.append(float(min_successful_roi_pair_rate))
+        sql.append("ORDER BY dataset_id, stage_group, eye_mask_method")
+        return list(self.conn.execute(" ".join(sql), params).fetchall())
+
     def query_detection_data_profile_latest(
         self,
         *,
@@ -7890,6 +9193,82 @@ class Registry:
         sql.append("ORDER BY recording_id, keypoint_method")
         return list(self.conn.execute(" ".join(sql), params).fetchall())
 
+    def query_eye_mask_data_profile_latest(
+        self,
+        *,
+        dataset_ids: Optional[Sequence[str]] = None,
+        recording_ids: Optional[Sequence[str]] = None,
+        zarr_use: Optional[str] = None,
+        stage_group: Optional[str] = None,
+        eye_mask_method: Optional[str] = None,
+        min_usable_rate: Optional[float] = None,
+    ) -> List[sqlite3.Row]:
+        sql = ["SELECT * FROM eye_mask_data_profile_latest WHERE 1=1"]
+        params: List[Any] = []
+
+        if dataset_ids:
+            normalized_ids = [str(dataset_id) for dataset_id in dataset_ids if dataset_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND dataset_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if recording_ids:
+            normalized_ids = [str(recording_id) for recording_id in recording_ids if recording_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND recording_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if zarr_use is not None:
+            sql.append("AND zarr_use = ?")
+            params.append(str(zarr_use))
+        if stage_group is not None:
+            sql.append("AND stage_group = ?")
+            params.append(str(stage_group))
+        if eye_mask_method is not None:
+            sql.append("AND eye_mask_method = ?")
+            params.append(str(eye_mask_method))
+        if min_usable_rate is not None:
+            sql.append("AND usable_rate IS NOT NULL AND usable_rate >= ?")
+            params.append(float(min_usable_rate))
+        sql.append("ORDER BY dataset_id, stage_group, eye_mask_method")
+        return list(self.conn.execute(" ".join(sql), params).fetchall())
+
+    def query_recording_eye_mask_data_profile_latest(
+        self,
+        *,
+        recording_ids: Optional[Sequence[str]] = None,
+        zarr_use: Optional[str] = None,
+        stage_group: Optional[str] = None,
+        eye_mask_method: Optional[str] = None,
+        min_usable_rate: Optional[float] = None,
+    ) -> List[sqlite3.Row]:
+        sql = ["SELECT * FROM recording_eye_mask_data_profile_latest WHERE 1=1"]
+        params: List[Any] = []
+
+        if recording_ids:
+            normalized_ids = [str(recording_id) for recording_id in recording_ids if recording_id]
+            if not normalized_ids:
+                return []
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            sql.append(f"AND recording_id IN ({placeholders})")
+            params.extend(normalized_ids)
+        if zarr_use is not None:
+            sql.append("AND zarr_use = ?")
+            params.append(str(zarr_use))
+        if stage_group is not None:
+            sql.append("AND stage_group = ?")
+            params.append(str(stage_group))
+        if eye_mask_method is not None:
+            sql.append("AND eye_mask_method = ?")
+            params.append(str(eye_mask_method))
+        if min_usable_rate is not None:
+            sql.append("AND usable_rate IS NOT NULL AND usable_rate >= ?")
+            params.append(float(min_usable_rate))
+        sql.append("ORDER BY recording_id, stage_group, eye_mask_method")
+        return list(self.conn.execute(" ".join(sql), params).fetchall())
+
     def _resolve_effective_dataset_id(
         self,
         *,
@@ -8008,6 +9387,13 @@ class Registry:
             zarr_use=zarr_use,
         )
         self.replace_eye_mask_performance(dataset_id, eye_mask_performance_rows)
+        eye_mask_quality_rows = _extract_eye_mask_quality_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_eye_mask_quality(dataset_id, eye_mask_quality_rows)
         return dataset_id
 
     def record_training_run(

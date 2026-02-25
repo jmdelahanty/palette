@@ -17,6 +17,7 @@ from fisheye.visualization.visualize_eye_mask_patches import (
     _format_reason_tags_compact,
     _load_frame_flags,
     _mouse_modifier_state,
+    _refresh_refined_eye_mask_metrics,
     _reason_tags_from_value,
     _resolve_erase_mode,
     _save_roi_mask_edits,
@@ -208,6 +209,25 @@ def test_parse_args_sets_default_frame_flag_file() -> None:
     assert args.review_state == "approved"
     assert args.review_method == "manual"
     assert args.review_intended_use == "training"
+
+
+def test_refresh_refined_eye_mask_metrics_delegates_to_review_module(monkeypatch) -> None:
+    from fisheye.tune import eye_mask_review as review_mod
+
+    captured = {}
+
+    def _fake_update(root, refined, *, print_summary):
+        captured["root"] = root
+        captured["refined"] = refined
+        captured["print_summary"] = print_summary
+        return {"ok": True}
+
+    monkeypatch.setattr(review_mod, "_update_postprocess_summary", _fake_update)
+    root = object()
+    refined = object()
+    payload = _refresh_refined_eye_mask_metrics(root, refined)  # type: ignore[arg-type]
+    assert payload == {"ok": True}
+    assert captured == {"root": root, "refined": refined, "print_summary": False}
 
 
 def test_apply_eye_mask_review_status_writes_contract_attrs(tmp_path: Path) -> None:

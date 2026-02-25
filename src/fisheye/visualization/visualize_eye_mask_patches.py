@@ -281,6 +281,12 @@ def _sync_registry_for_zarr(
         registry.close()
 
 
+def _refresh_refined_eye_mask_metrics(root: zarr.Group, refined: zarr.Group) -> Dict[str, object]:
+    from ..tune.eye_mask_review import _update_postprocess_summary
+
+    return _update_postprocess_summary(root, refined, print_summary=False)
+
+
 def _friendly_eye_label(label: Optional[str], idx: int) -> str:
     if label is None:
         return f"Eye {idx + 1}"
@@ -1476,6 +1482,10 @@ def create_viewer(
                 reason_arr=reason_arr if isinstance(reason_arr, zarr.Array) else None,
             )
             _refresh_source_reason_state(int(roi_idx))
+            try:
+                _refresh_refined_eye_mask_metrics(root, refined)
+            except Exception as exc:
+                print(f"Warning: failed to refresh refined metrics after save: {exc}")
             state["dirty"] = False
             print(
                 f"Saved ROI {roi_idx}: {result['successful_eyes']}/{result['channel_count']} eyes fit "
@@ -1530,6 +1540,10 @@ def create_viewer(
                 print(f"Failed to flag keypoint nudge frame: {exc}")
         elif key in (ord("a"),):
             try:
+                try:
+                    _refresh_refined_eye_mask_metrics(root, refined)
+                except Exception as exc:
+                    print(f"Warning: failed to refresh refined metrics before review status write: {exc}")
                 payload = _apply_eye_mask_review_status(
                     refined_parent,
                     refined_run,

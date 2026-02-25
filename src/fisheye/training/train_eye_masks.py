@@ -255,6 +255,8 @@ def main(args: argparse.Namespace) -> None:
 
     try:
         config = EyeMaskTrainingConfig.from_yaml(Path(args.config_path))
+        if getattr(args, "project", None):
+            config.training_params.project = str(args.project)
         console.print(f"[bold green]✓ Loaded config:[/bold green] {args.config_path}\n")
     except Exception as exc:
         console.print(f"[bold red]✗ Failed to load config:[/bold red] {exc}")
@@ -356,5 +358,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a YOLO segmentation model for eye masks using Zarr datasets")
     parser.add_argument("config_path", type=str, help="Path to eye mask training config YAML")
     parser.add_argument("--run-name", type=str, help="Optional name for the training run directory")
+    parser.add_argument("--project", type=str, help="Optional training project override.")
+    parser.add_argument("--manifest", type=str, help="Optional training manifest path (metadata only).")
+    parser.add_argument("--set-id", type=str, help="Optional training set identifier (metadata only).")
+    parser.add_argument("--registry", type=str, help="Optional registry path (metadata only).")
     parsed_args = parser.parse_args()
     main(parsed_args)

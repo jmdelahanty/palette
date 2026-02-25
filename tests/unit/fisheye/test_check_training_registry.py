@@ -24,6 +24,8 @@ from fisheye.utils.check_training_registry import (
     _sum_manifest_rois,
     _status_with_details,
     _summarize_detect_quality_rows,
+    _summarize_eye_mask_performance_rows,
+    _summarize_eye_mask_profile_rows,
     _summarize_keypoint_profile_rows,
     _summarize_keypoint_quality_rows,
 )
@@ -729,6 +731,327 @@ def test_keypoint_profile_view_outputs_summary(tmp_path: Path, capsys) -> None:
     assert "total rows: 1" in out
     assert "stale rows (mtime mismatch/missing): 1" in out
     assert "top exclusion-ish reasons: missing profile_json=1" in out
+
+
+def test_eye_mask_performance_summary_counts_and_rollups(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "eye_mask_perf.zarr"
+    zarr_path.mkdir(parents=True, exist_ok=True)
+    mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    rows = [
+        {
+            "dataset_id": "a",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns,
+            "review_state": "approved",
+            "review_intended_use": "training",
+            "source_keypoint_stale_state": None,
+            "lifecycle_state": "approved",
+            "successful_roi_pair_rate": 0.98,
+        },
+        {
+            "dataset_id": "b",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns,
+            "review_state": "needs_review",
+            "review_intended_use": "training",
+            "source_keypoint_stale_state": None,
+            "lifecycle_state": "in_progress",
+            "successful_roi_pair_rate": 0.90,
+        },
+        {
+            "dataset_id": "c",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns,
+            "review_state": "approved",
+            "review_intended_use": "training",
+            "source_keypoint_stale_state": "stale",
+            "lifecycle_state": "stale",
+            "successful_roi_pair_rate": 0.85,
+        },
+    ]
+    summary = _summarize_eye_mask_performance_rows(rows)
+    assert summary.total_rows == 3
+    assert summary.passing_rows == 1
+    assert summary.excluded_rows == 2
+    assert summary.stale_rows == 1
+    assert summary.exclusion_reasons == {
+        "stale source keypoint": 1,
+        "wrong state/use": 1,
+    }
+    assert summary.review_rollups == {
+        "approved/training": 2,
+        "needs_review/training": 1,
+    }
+
+
+def test_eye_mask_profile_summary_counts_and_buckets(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "eye_mask_profile.zarr"
+    zarr_path.mkdir(parents=True, exist_ok=True)
+    mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    rows = [
+        {
+            "dataset_id": "a",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns,
+            "eye_mask_method": "refine_eye_masks",
+            "review_state": "approved",
+            "review_intended_use": "training",
+            "profile_json": '{"ok":true}',
+        },
+        {
+            "dataset_id": "b",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns,
+            "eye_mask_method": "refine_eye_masks",
+            "review_state": "pending",
+            "review_intended_use": "training",
+            "profile_json": '{"ok":true}',
+        },
+        {
+            "dataset_id": "c",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns + 1,
+            "eye_mask_method": "refine_eye_masks",
+            "review_state": "approved",
+            "review_intended_use": "training",
+            "profile_json": '{"ok":true}',
+        },
+    ]
+    summary = _summarize_eye_mask_profile_rows(rows)
+    assert summary.total_rows == 3
+    assert summary.stale_rows == 1
+    assert summary.exclusion_reasons == {
+        "stale row: mtime mismatch": 1,
+        "wrong state/use": 1,
+    }
+    assert summary.review_rollups == {
+        "approved/training": 2,
+        "pending/training": 1,
+    }
+
+
+def test_eye_mask_performance_view_outputs_summary_and_details(tmp_path: Path, capsys) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    pass_path = tmp_path / "eye_mask_pass.zarr"
+    stale_path = tmp_path / "eye_mask_stale.zarr"
+    pass_path.mkdir(parents=True, exist_ok=True)
+    stale_path.mkdir(parents=True, exist_ok=True)
+    pass_mtime = int(pass_path.stat().st_mtime_ns)
+    stale_mtime = int(stale_path.stat().st_mtime_ns)
+    registry.upsert_dataset(
+        "dataset_pass",
+        session_uuid="session_pass",
+        zarr_path=pass_path,
+        recording_id="recording_pass",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_dataset(
+        "dataset_stale",
+        session_uuid="session_stale",
+        zarr_path=stale_path,
+        recording_id="recording_stale",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_pass",
+        stage_group="refined_eye_masks_runs",
+        run_name="refined_eye_masks_pass",
+        run_created_utc="2026-02-24T00:00:00+00:00",
+        recording_id="recording_pass",
+        zarr_use="training",
+        method="refine_eye_masks",
+        source_crop_run="crop_pass",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="kp_pass",
+        source_eye_masks_run="eye_masks_pass",
+        source_eye_masks_method="traditional_eye_segmentation",
+        total_rois=200,
+        successful_eyes=392,
+        successful_roi_pairs=196,
+        successful_roi_pair_rate=0.98,
+        duration_seconds=40.0,
+        rois_per_second=5.0,
+        inference_duration_seconds=None,
+        inference_average_fps=5.0,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="alice",
+        review_timestamp_utc="2026-02-24T00:10:00+00:00",
+        source_keypoint_stale_state=None,
+        source_keypoint_stale_reason=None,
+        source_keypoint_stale_timestamp_utc=None,
+        source_keypoint_stale_json=None,
+        lifecycle_state="approved",
+        lifecycle_reason="approved",
+        zarr_mtime_ns=pass_mtime,
+    )
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_stale",
+        stage_group="refined_eye_masks_runs",
+        run_name="refined_eye_masks_stale",
+        run_created_utc="2026-02-24T00:05:00+00:00",
+        recording_id="recording_stale",
+        zarr_use="training",
+        method="refine_eye_masks",
+        source_crop_run="crop_stale",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="kp_stale",
+        source_eye_masks_run="eye_masks_stale",
+        source_eye_masks_method="traditional_eye_segmentation",
+        total_rois=200,
+        successful_eyes=360,
+        successful_roi_pairs=180,
+        successful_roi_pair_rate=0.9,
+        duration_seconds=50.0,
+        rois_per_second=4.0,
+        inference_duration_seconds=None,
+        inference_average_fps=4.0,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="needs_review",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="bob",
+        review_timestamp_utc="2026-02-24T00:15:00+00:00",
+        source_keypoint_stale_state="stale",
+        source_keypoint_stale_reason="keypoint_manual_correction",
+        source_keypoint_stale_timestamp_utc="2026-02-24T00:20:00+00:00",
+        source_keypoint_stale_json='{"state":"stale"}',
+        lifecycle_state="stale",
+        lifecycle_reason="keypoint_manual_correction",
+        zarr_mtime_ns=stale_mtime,
+    )
+    registry.close()
+
+    rc = check_training_registry_main(
+        [
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--view",
+            "eye-mask-quality",
+            "--show-eye-mask-quality",
+            "--no-rich",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Eye-Mask Quality" in out
+    assert "passing rows (approved/training, non-stale source): 1" in out
+    assert "excluded rows: 1" in out
+    assert "stale rows: 1" in out
+    assert "top exclusion reasons: stale source keypoint=1" in out
+    assert "dataset_stale" in out
+    assert "reason: stale source keypoint" in out
+
+
+def test_eye_mask_profile_view_outputs_summary_and_remediation(tmp_path: Path, capsys) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "dataset_eye_profile.zarr"
+    zarr_path.mkdir(parents=True, exist_ok=True)
+    current_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    stale_mtime_ns = current_mtime_ns + 1
+    registry.upsert_dataset(
+        "dataset_eye_profile",
+        session_uuid="session_eye_profile",
+        zarr_path=zarr_path,
+        recording_id="recording_eye_profile",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS eye_mask_data_profile (
+            dataset_id TEXT NOT NULL,
+            profile_run TEXT NOT NULL,
+            recording_id TEXT,
+            zarr_use TEXT,
+            eye_mask_method TEXT,
+            profile_created_utc TEXT,
+            review_state TEXT,
+            review_intended_use TEXT,
+            source_keypoint_stale_state TEXT,
+            zarr_mtime_ns INTEGER,
+            profile_json TEXT,
+            PRIMARY KEY (dataset_id, profile_run)
+        );
+        """
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO eye_mask_data_profile (
+            dataset_id,
+            profile_run,
+            recording_id,
+            zarr_use,
+            eye_mask_method,
+            profile_created_utc,
+            review_state,
+            review_intended_use,
+            source_keypoint_stale_state,
+            zarr_mtime_ns,
+            profile_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_eye_profile",
+            "eye_profile_001",
+            "recording_eye_profile",
+            "training",
+            "refine_eye_masks",
+            "2026-02-24T00:00:00+00:00",
+            "pending",
+            "training",
+            None,
+            stale_mtime_ns,
+            None,
+        ),
+    )
+    registry.conn.execute("DROP VIEW IF EXISTS eye_mask_data_profile_latest;")
+    registry.conn.execute(
+        """
+        CREATE VIEW eye_mask_data_profile_latest AS
+        SELECT
+            dataset_id,
+            profile_run,
+            recording_id,
+            zarr_use,
+            eye_mask_method,
+            profile_created_utc,
+            review_state,
+            review_intended_use,
+            source_keypoint_stale_state,
+            zarr_mtime_ns,
+            profile_json
+        FROM eye_mask_data_profile;
+        """
+    )
+    registry.conn.commit()
+    registry.close()
+
+    rc = check_training_registry_main(
+        [
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--view",
+            "eye-mask-profile",
+            "--show-eye-mask-profile",
+            "--no-rich",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Eye-Mask Profile" in out
+    assert "total rows: 1" in out
+    assert "stale rows (mtime mismatch/missing): 1" in out
+    assert "top exclusion reasons: stale row: mtime mismatch=1" in out
+    assert "review rollups: pending/training=1" in out
+    assert "scripts/py -m fisheye.registry.maintenance --refresh-eye-mask-profiles" in out
+    assert "scripts/py -m fisheye.utils.sync_eye_mask_profile_registry" in out
 
 
 def test_run_id_style_contract_and_legacy() -> None:

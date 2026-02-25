@@ -194,6 +194,87 @@ def _insert_keypoint_profile(
     registry.conn.commit()
 
 
+def _upsert_eye_mask_profile(
+    registry: Registry,
+    *,
+    dataset_id: str,
+    profile_run: str,
+    recording_id: str,
+    stage_group: str = "refined_eye_masks_runs",
+    eye_mask_method: str = "traditional",
+    profile_created_utc: str = "2026-02-24T00:00:00+00:00",
+    usable_rate: float = 0.90,
+) -> None:
+    registry.upsert_eye_mask_data_profile(
+        dataset_id=dataset_id,
+        profile_run=profile_run,
+        recording_id=recording_id,
+        zarr_use="training",
+        stage_group=stage_group,
+        eye_mask_method=eye_mask_method,
+        source_eye_mask_path=f"{stage_group}/{profile_run}",
+        source_eye_mask_run=profile_run,
+        source_keypoint_path="refined_keypoints_runs/refined_keypoints_001",
+        source_keypoint_run="refined_keypoints_001",
+        source_crop_run="crop_001",
+        profile_created_utc=profile_created_utc,
+        rows_total=200,
+        rows_usable=180,
+        usable_rate=usable_rate,
+        reviewed_rate=1.0,
+        excluded_rate=0.10,
+        exclusion_reasons_json='{"ellipse_fit_failed":20}',
+        ellipse_success_rate=0.95,
+        pair_success_rate=0.90,
+        area_p10=300.0,
+        area_p50=420.0,
+        area_p90=560.0,
+        left_area_p10=145.0,
+        left_area_p50=205.0,
+        left_area_p90=265.0,
+        right_area_p10=150.0,
+        right_area_p50=210.0,
+        right_area_p90=275.0,
+        union_area_p10=300.0,
+        union_area_p50=415.0,
+        union_area_p90=545.0,
+        area_lr_ratio_p10=0.90,
+        area_lr_ratio_p50=0.98,
+        area_lr_ratio_p90=1.08,
+        major_axis_p10=14.0,
+        major_axis_p50=19.0,
+        major_axis_p90=25.0,
+        minor_axis_p10=7.0,
+        minor_axis_p50=10.0,
+        minor_axis_p90=13.0,
+        aspect_ratio_p10=1.4,
+        aspect_ratio_p50=1.8,
+        aspect_ratio_p90=2.2,
+        eye_separation_p10=21.0,
+        eye_separation_p50=27.0,
+        eye_separation_p90=34.0,
+        edge_proximity_rate=0.05,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_timestamp_utc="2026-02-24T00:05:00+00:00",
+        source_keypoint_stale_state="fresh",
+        source_keypoint_stale_reason=None,
+        source_keypoint_stale_timestamp_utc="2026-02-24T00:04:00+00:00",
+        source_keypoint_stale_json='{"state":"fresh"}',
+        rig_id="omnifin0",
+        camera_id="2010094",
+        arena_id="arena_2",
+        dish_design="cedar",
+        canvas_name="shadow",
+        protocol_name="DefaultScreen",
+        genotype="Tg(elavl3:gcamp7f)",
+        dpf_at_acquisition=7,
+        profile_json='{"schema_name":"eye_mask_dataset_profile","schema_version":"v1"}',
+        zarr_mtime_ns=123,
+    )
+
+
 def test_schema_has_detection_data_profile_table_views_and_indexes(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
 
@@ -282,6 +363,52 @@ def test_schema_has_keypoint_data_profile_table_views_and_indexes(tmp_path: Path
         "idx_keypoint_data_profile_recording_created",
         "idx_keypoint_data_profile_method_scope",
         "idx_keypoint_data_profile_method_usable_rate",
+    }
+    registry.close()
+
+
+def test_schema_has_eye_mask_data_profile_table_views_and_indexes(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+
+    table = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'eye_mask_data_profile';
+        """
+    ).fetchone()
+    assert table is not None
+
+    views = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'view' AND name IN (
+            'eye_mask_data_profile_latest',
+            'recording_eye_mask_data_profile_latest'
+        );
+        """
+    ).fetchall()
+    assert {str(row["name"]) for row in views} == {
+        "eye_mask_data_profile_latest",
+        "recording_eye_mask_data_profile_latest",
+    }
+
+    indexes = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'index' AND name IN (
+            'idx_eye_mask_data_profile_recording_created',
+            'idx_eye_mask_data_profile_method_scope',
+            'idx_eye_mask_data_profile_stage_usable_rate'
+        );
+        """
+    ).fetchall()
+    assert {str(row["name"]) for row in indexes} == {
+        "idx_eye_mask_data_profile_recording_created",
+        "idx_eye_mask_data_profile_method_scope",
+        "idx_eye_mask_data_profile_stage_usable_rate",
     }
     registry.close()
 
@@ -427,6 +554,87 @@ def test_query_keypoint_data_profile_latest_and_recording_latest(tmp_path: Path)
     assert str(recording_latest[0]["recording_id"]) == "rec_shared"
     assert str(recording_latest[0]["dataset_id"]) == "dataset_b"
     assert str(recording_latest[0]["profile_run"]) == "kp_b"
+    registry.close()
+
+
+def test_query_eye_mask_data_profile_latest_and_recording_latest(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_a",
+        session_uuid="session_a",
+        zarr_path=tmp_path / "a_training.zarr",
+        recording_id="rec_shared",
+        zarr_use="training",
+    )
+    registry.upsert_dataset(
+        "dataset_b",
+        session_uuid="session_b",
+        zarr_path=tmp_path / "b_training.zarr",
+        recording_id="rec_shared",
+        zarr_use="training",
+    )
+
+    _upsert_eye_mask_profile(
+        registry,
+        dataset_id="dataset_a",
+        profile_run="eye_old",
+        recording_id="rec_shared",
+        stage_group="refined_eye_masks_runs",
+        eye_mask_method="traditional",
+        profile_created_utc="2026-02-22T00:00:00+00:00",
+        usable_rate=0.82,
+    )
+    _upsert_eye_mask_profile(
+        registry,
+        dataset_id="dataset_a",
+        profile_run="eye_new",
+        recording_id="rec_shared",
+        stage_group="refined_eye_masks_runs",
+        eye_mask_method="traditional",
+        profile_created_utc="2026-02-23T00:00:00+00:00",
+        usable_rate=0.91,
+    )
+    _upsert_eye_mask_profile(
+        registry,
+        dataset_id="dataset_b",
+        profile_run="eye_b",
+        recording_id="rec_shared",
+        stage_group="refined_eye_masks_runs",
+        eye_mask_method="yolo",
+        profile_created_utc="2026-02-24T00:00:00+00:00",
+        usable_rate=0.94,
+    )
+
+    dataset_latest = registry.query_eye_mask_data_profile_latest(dataset_ids=["dataset_a"])
+    assert len(dataset_latest) == 1
+    assert str(dataset_latest[0]["dataset_id"]) == "dataset_a"
+    assert str(dataset_latest[0]["profile_run"]) == "eye_new"
+    assert str(dataset_latest[0]["eye_mask_method"]) == "traditional"
+    assert float(dataset_latest[0]["usable_rate"]) == 0.91
+    assert float(dataset_latest[0]["left_area_p50"]) == 205.0
+    assert float(dataset_latest[0]["area_lr_ratio_p50"]) == 0.98
+    assert str(dataset_latest[0]["genotype"]) == "Tg(elavl3:gcamp7f)"
+    assert int(dataset_latest[0]["dpf_at_acquisition"]) == 7
+
+    usable_filtered = registry.query_eye_mask_data_profile_latest(
+        min_usable_rate=0.93,
+        zarr_use="training",
+        stage_group="refined_eye_masks_runs",
+    )
+    assert len(usable_filtered) == 1
+    assert str(usable_filtered[0]["dataset_id"]) == "dataset_b"
+    assert str(usable_filtered[0]["eye_mask_method"]) == "yolo"
+
+    recording_latest = registry.query_recording_eye_mask_data_profile_latest(
+        recording_ids=["rec_shared"],
+        stage_group="refined_eye_masks_runs",
+        eye_mask_method="yolo",
+        min_usable_rate=0.90,
+    )
+    assert len(recording_latest) == 1
+    assert str(recording_latest[0]["recording_id"]) == "rec_shared"
+    assert str(recording_latest[0]["dataset_id"]) == "dataset_b"
+    assert str(recording_latest[0]["profile_run"]) == "eye_b"
     registry.close()
 
 

@@ -23,6 +23,9 @@ import numpy as np
 import zarr
 
 
+_DEFAULT_SUCCESS_MIN_EYE_AREA_PX = 50.0
+
+
 def _get_latest_refined_run(root: zarr.Group) -> str:
     refined_parent = root.get("refined_eye_masks_runs")
     if refined_parent is None:
@@ -91,11 +94,69 @@ def _get_sep_limits(root: zarr.Group, refined: zarr.Group) -> tuple[Optional[flo
     return None, None
 
 
+def _positive_float(value: object) -> Optional[float]:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric <= 0:
+        return None
+    return numeric
+
+
+def _resolve_success_min_eye_area_px(refined: zarr.Group) -> Optional[float]:
+    raw = refined.attrs.get("success_min_eye_area_px")
+    if raw is None:
+        raw = refined.attrs.get("min_eye_area_success_px")
+    threshold = _positive_float(raw)
+    if threshold is not None:
+        return threshold
+    return float(_DEFAULT_SUCCESS_MIN_EYE_AREA_PX)
+
+
+def _load_area_refined(refined: zarr.Group) -> Optional[np.ndarray]:
+    masks_arr = refined.get("masks_roi")
+    shape = getattr(masks_arr, "shape", None) if masks_arr is not None else None
+    if isinstance(shape, tuple) and len(shape) == 4 and int(shape[1]) >= 2:
+        total = int(shape[0])
+        if total <= 0:
+            return np.zeros((0, 2), dtype=np.float32)
+        chunks = getattr(masks_arr, "chunks", None)
+        if isinstance(chunks, tuple) and chunks:
+            step = max(1, int(chunks[0]))
+        elif isinstance(chunks, int):
+            step = max(1, int(chunks))
+        else:
+            step = 256
+        out = np.zeros((total, 2), dtype=np.float32)
+        for start in range(0, total, step):
+            stop = min(total, start + step)
+            block = np.asarray(masks_arr[start:stop], dtype=np.uint8)
+            if block.ndim != 4 or int(block.shape[1]) < 2:
+                return None
+            area = np.sum((block[:, :2] > 0).reshape(block.shape[0], 2, -1), axis=2, dtype=np.int64)
+            out[start:stop, :] = np.asarray(area, dtype=np.float32)
+        return out
+
+    metrics = refined.get("metrics")
+    if not isinstance(metrics, zarr.Group):
+        return None
+    area_arr = metrics.get("area_refined")
+    if area_arr is None:
+        return None
+    area_refined = np.asarray(area_arr[:], dtype=np.float32)
+    if area_refined.ndim != 2 or area_refined.shape[1] < 2:
+        return None
+    return area_refined[:, :2]
+
+
 def _compute_success_mask(
     ellipse_success: np.ndarray,
     eye_separation: np.ndarray,
     min_sep: Optional[float],
     max_sep: Optional[float],
+    area_refined: Optional[np.ndarray],
+    min_eye_area_px: Optional[float],
 ) -> np.ndarray:
     pair_success = np.all(ellipse_success, axis=1)
     sep_ok = np.ones_like(pair_success, dtype=bool)
@@ -105,7 +166,13 @@ def _compute_success_mask(
             sep_ok &= eye_separation >= float(min_sep)
         if max_sep is not None:
             sep_ok &= eye_separation <= float(max_sep)
-    return pair_success & sep_ok
+
+    area_ok = np.ones_like(pair_success, dtype=bool)
+    threshold = _positive_float(min_eye_area_px) if min_eye_area_px is not None else None
+    if threshold is not None and area_refined is not None and area_refined.shape[0] == pair_success.shape[0]:
+        finite = np.all(np.isfinite(area_refined[:, :2]), axis=1)
+        area_ok = finite & np.all(area_refined[:, :2] >= float(threshold), axis=1)
+    return pair_success & sep_ok & area_ok
 
 
 def _update_postprocess_summary(
@@ -114,14 +181,32 @@ def _update_postprocess_summary(
     *,
     print_summary: bool = True,
 ) -> Dict[str, object]:
+    group_path = str(getattr(refined, "path", "") or "")
+    if group_path and not group_path.startswith("refined_eye_masks_runs/"):
+        raise RuntimeError(
+            "_update_postprocess_summary expects a refined_eye_masks_runs/<run> group; "
+            f"got path={group_path!r}."
+        )
+
     ellipse_success = np.asarray(refined["ellipse_success"][:], dtype=bool)
     eye_separation = np.asarray(refined["eye_separation"][:], dtype=np.float32)
     min_sep, max_sep = _get_sep_limits(root, refined)
-    success_mask = _compute_success_mask(ellipse_success, eye_separation, min_sep, max_sep)
+    area_refined = _load_area_refined(refined)
+    min_eye_area_px = _resolve_success_min_eye_area_px(refined)
+    success_mask = _compute_success_mask(
+        ellipse_success,
+        eye_separation,
+        min_sep,
+        max_sep,
+        area_refined,
+        min_eye_area_px,
+    )
 
     total_rois = int(success_mask.size)
+    successful_eyes = int(np.asarray(ellipse_success, dtype=bool).sum())
     successful_pairs = int(np.sum(success_mask))
     remaining_failures = max(0, total_rois - successful_pairs)
+    successful_pair_rate = (float(successful_pairs) / float(total_rois)) if total_rois else 0.0
     success_rate = (successful_pairs / total_rois * 100.0) if total_rois else 0.0
 
     reason_arr = _get_reason_array(refined)
@@ -133,7 +218,9 @@ def _update_postprocess_summary(
 
     post_stats: Dict[str, object] = {
         "total_rois": total_rois,
+        "successful_eyes": successful_eyes,
         "successful_roi_pairs": successful_pairs,
+        "successful_roi_pair_rate": successful_pair_rate,
         "remaining_failures": remaining_failures,
         "success_rate_percent": round(success_rate, 2),
         "manual_corrections": manual_corrections,
@@ -142,7 +229,16 @@ def _update_postprocess_summary(
         "reason_counts": reason_counts,
         "min_eye_separation": min_sep,
         "max_eye_separation": max_sep,
+        "min_eye_area_success_px": min_eye_area_px,
     }
+
+    # Keep top-level refined run attrs aligned with postprocess metrics so registry
+    # refresh/backfill and data-card aggregation see the latest reviewed values.
+    refined.attrs["total_rois"] = total_rois
+    refined.attrs["successful_eyes"] = successful_eyes
+    refined.attrs["successful_roi_pairs"] = successful_pairs
+    refined.attrs["successful_roi_pair_rate"] = successful_pair_rate
+    refined.attrs["reason_counts"] = reason_counts
 
     summary_raw = refined.attrs.get("summary_statistics", {})
     if not isinstance(summary_raw, dict):
@@ -154,6 +250,7 @@ def _update_postprocess_summary(
         summary_out = {"refine": refined.attrs.get("refine_stats", {})}
 
     summary_out["postprocess"] = post_stats
+    summary_out["reason_counts"] = reason_counts
     summary_out["postprocess_updated_utc"] = datetime.now(timezone.utc).isoformat()
     refined.attrs["summary_statistics"] = summary_out
 

@@ -42,10 +42,11 @@ This mixture causes avoidable drift, warning noise, and consumer compatibility i
 
 ## Known Runtime Hotspots
 
-Current fixed-width Unicode writes to migrate:
+Historical fixed-width Unicode hotspots (now migrated to `VariableLengthUTF8()`):
 
 - `src/fisheye/utils/export_detect_training_zarr.py` (`_write_string_array`)
 - `src/fisheye/utils/export_keypoint_training_zarr.py` (`_write_string_array`)
+- `src/fisheye/utils/export_eye_mask_training_zarr.py` test fixtures were aligned to runtime helpers.
 
 Current canonical reason codec (already aligned):
 
@@ -56,6 +57,29 @@ Current `VariableLengthUTF8` writers (already aligned):
 - `src/fisheye/shared/detect_reason_codec.py` (`reason` mirror)
 - `src/fisheye/segmentation/eye_segmentation.py` (reason array)
 - `src/fisheye/refinement/refine_eye_masks.py` (reason array)
+
+## 2026-02-25 Cross-Repo Contract Check (Crimson vs Palette)
+
+Reference-first path:
+- Contract/spec: `/home/delahantyj@hhmi.org/gitrepos/crimson/zarr_structure.md`
+- Write behavior: `/home/delahantyj@hhmi.org/gitrepos/crimson/src/zarr_loader_write.cpp`
+
+Findings:
+- Crimson manual/refined detect writes canonical `reason_bytes` (`uint8[N,width]`,
+  null-terminated UTF-8) plus fallback attrs (`reason_encoding`,
+  `reason_bytes_width`, `reason_bytes_null_terminated`,
+  `reason_fallback_order`).
+- Crimson read precedence is explicit and compatibility-safe:
+  `reason_bytes` -> `reason` -> labels derived from `detection_source`.
+- Palette already had a canonical codec for this in
+  `src/fisheye/shared/detect_reason_codec.py`, but eye-mask merged training
+  export previously wrote only `reason` text and did not always enforce full
+  reason-bytes contract semantics.
+
+Decision implemented:
+- Eye-mask merged export now writes reason columns via the shared codec
+  (`write_reason_columns`) and validation now checks reason-label decode and
+  reason-bytes attr consistency when present.
 
 ## Rollout Plan
 

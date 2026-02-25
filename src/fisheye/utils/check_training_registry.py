@@ -136,6 +136,24 @@ class KeypointProfileSummary:
 
 
 @dataclass
+class EyeMaskPerformanceSummary:
+    total_rows: int
+    passing_rows: int
+    excluded_rows: int
+    stale_rows: int
+    exclusion_reasons: Dict[str, int]
+    review_rollups: Dict[str, int]
+
+
+@dataclass
+class EyeMaskProfileSummary:
+    total_rows: int
+    stale_rows: int
+    exclusion_reasons: Dict[str, int]
+    review_rollups: Dict[str, int]
+
+
+@dataclass
 class DatasetRow:
     dataset_id: str
     session_uuid: Optional[str]
@@ -261,6 +279,16 @@ DETECT_GATE_REVIEW_STATE = "approved"
 DETECT_GATE_REVIEW_INTENDED_USE = "training"
 DETECT_GATE_MAX_INTERPOLATED_RATE = 0.25
 KEYPOINT_PROFILE_METHOD_KEYS = ("keypoint_method", "method")
+EYE_MASK_GATE_REVIEW_STATE = "approved"
+EYE_MASK_GATE_REVIEW_INTENDED_USE = "training"
+EYE_MASK_PROFILE_METHOD_KEYS = ("eye_mask_method", "method", "source_eye_masks_method")
+EYE_MASK_PROFILE_STALE_STATE_KEYS = (
+    "source_keypoint_stale_state",
+    "profile_stale_state",
+    "stale_state",
+)
+EYE_MASK_SYNC_COMMAND = "scripts/py -m fisheye.utils.sync_eye_mask_profile_registry"
+EYE_MASK_REFRESH_COMMAND = "scripts/py -m fisheye.registry.maintenance --refresh-eye-mask-profiles"
 BEHAVIOR_V1_REQUIRED_ARTIFACT_TYPES = {
     "h5_log",
     "camera_video",
@@ -1314,6 +1342,225 @@ def _load_keypoint_profile_rows(
     return rows
 
 
+def _load_eye_mask_performance_rows(
+    registry: Registry,
+    *,
+    set_filter: Optional[str],
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    params: List[Any] = []
+    dataset_ids = _dataset_ids_for_set(registry, set_filter)
+    if dataset_ids is not None:
+        if not dataset_ids:
+            return []
+    if _view_exists(registry, "eye_mask_quality_overview"):
+        sql = [
+            "SELECT",
+            "  emqo.dataset_id AS dataset_id,",
+            "  emqo.zarr_path AS zarr_path,",
+            "  emqo.zarr_use AS zarr_use,",
+            "  emqo.stage_group AS stage_group,",
+            "  emqo.run_name AS run_name,",
+            "  emqo.run_created_utc AS run_created_utc,",
+            "  emqo.recording_id AS recording_id,",
+            "  emqo.eye_mask_method AS method,",
+            "  emqo.source_crop_run AS source_crop_run,",
+            "  emqo.source_keypoint_group AS source_keypoint_group,",
+            "  emqo.source_keypoints_run AS source_keypoints_run,",
+            "  emqo.source_eye_masks_run AS source_eye_masks_run,",
+            "  emqo.source_eye_masks_method AS source_eye_masks_method,",
+            "  emqo.total_rois AS total_rois,",
+            "  emqo.successful_eyes AS successful_eyes,",
+            "  emqo.successful_roi_pairs AS successful_roi_pairs,",
+            "  emqo.successful_roi_pair_rate AS successful_roi_pair_rate,",
+            "  emp.duration_seconds AS duration_seconds,",
+            "  emp.rois_per_second AS rois_per_second,",
+            "  emp.inference_duration_seconds AS inference_duration_seconds,",
+            "  emp.inference_average_fps AS inference_average_fps,",
+            "  emqo.review_state AS review_state,",
+            "  emqo.review_method AS review_method,",
+            "  emqo.review_intended_use AS review_intended_use,",
+            "  emqo.review_reviewer AS review_reviewer,",
+            "  emqo.review_timestamp_utc AS review_timestamp_utc,",
+            "  emqo.source_keypoint_stale_state AS source_keypoint_stale_state,",
+            "  emqo.source_keypoint_stale_reason AS source_keypoint_stale_reason,",
+            "  emqo.source_keypoint_stale_timestamp_utc AS source_keypoint_stale_timestamp_utc,",
+            "  emqo.lifecycle_state AS lifecycle_state,",
+            "  emqo.lifecycle_reason AS lifecycle_reason,",
+            "  emqo.zarr_mtime_ns AS zarr_mtime_ns,",
+            "  emqo.quality_updated_utc AS quality_updated_utc",
+            "FROM eye_mask_quality_overview emqo",
+            "LEFT JOIN eye_mask_performance emp",
+            "  ON emp.dataset_id = emqo.dataset_id",
+            " AND emp.stage_group = emqo.stage_group",
+            " AND emp.run_name = emqo.run_name",
+            "WHERE 1=1",
+        ]
+        quality_params: List[Any] = []
+        if dataset_ids is not None:
+            placeholders = ", ".join("?" for _ in dataset_ids)
+            sql.append(f"AND emqo.dataset_id IN ({placeholders})")
+            quality_params.extend(dataset_ids)
+        sql.append("ORDER BY emqo.dataset_id, COALESCE(emqo.stage_group, ''), COALESCE(emqo.run_created_utc, '')")
+        if limit and limit > 0:
+            sql.append("LIMIT ?")
+            quality_params.append(int(limit))
+        quality_rows = registry.conn.execute(" ".join(sql), quality_params).fetchall()
+        if quality_rows:
+            return [dict(row) for row in quality_rows]
+
+    if not _view_exists(registry, "eye_mask_performance_latest"):
+        return []
+    sql = [
+        "SELECT",
+        "  empl.dataset_id AS dataset_id,",
+        "  d.zarr_path AS zarr_path,",
+        "  d.zarr_use AS zarr_use,",
+        "  empl.stage_group AS stage_group,",
+        "  empl.run_name AS run_name,",
+        "  empl.run_created_utc AS run_created_utc,",
+        "  empl.recording_id AS recording_id,",
+        "  empl.method AS method,",
+        "  empl.source_crop_run AS source_crop_run,",
+        "  empl.source_keypoint_group AS source_keypoint_group,",
+        "  empl.source_keypoints_run AS source_keypoints_run,",
+        "  empl.source_eye_masks_run AS source_eye_masks_run,",
+        "  empl.source_eye_masks_method AS source_eye_masks_method,",
+        "  empl.total_rois AS total_rois,",
+        "  empl.successful_eyes AS successful_eyes,",
+        "  empl.successful_roi_pairs AS successful_roi_pairs,",
+        "  empl.successful_roi_pair_rate AS successful_roi_pair_rate,",
+        "  empl.duration_seconds AS duration_seconds,",
+        "  empl.rois_per_second AS rois_per_second,",
+        "  empl.inference_duration_seconds AS inference_duration_seconds,",
+        "  empl.inference_average_fps AS inference_average_fps,",
+        "  empl.review_state AS review_state,",
+        "  empl.review_method AS review_method,",
+        "  empl.review_intended_use AS review_intended_use,",
+        "  empl.review_reviewer AS review_reviewer,",
+        "  empl.review_timestamp_utc AS review_timestamp_utc,",
+        "  empl.source_keypoint_stale_state AS source_keypoint_stale_state,",
+        "  empl.source_keypoint_stale_reason AS source_keypoint_stale_reason,",
+        "  empl.source_keypoint_stale_timestamp_utc AS source_keypoint_stale_timestamp_utc,",
+        "  empl.lifecycle_state AS lifecycle_state,",
+        "  empl.lifecycle_reason AS lifecycle_reason,",
+        "  empl.zarr_mtime_ns AS zarr_mtime_ns",
+        "FROM eye_mask_performance_latest empl",
+        "LEFT JOIN datasets d ON d.dataset_id = empl.dataset_id",
+        "WHERE 1=1",
+    ]
+    if dataset_ids is not None:
+        placeholders = ", ".join("?" for _ in dataset_ids)
+        sql.append(f"AND empl.dataset_id IN ({placeholders})")
+        params.extend(dataset_ids)
+    sql.append("ORDER BY empl.dataset_id, COALESCE(empl.stage_group, ''), COALESCE(empl.run_created_utc, '')")
+    if limit and limit > 0:
+        sql.append("LIMIT ?")
+        params.append(int(limit))
+    rows = registry.conn.execute(" ".join(sql), params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _load_eye_mask_profile_rows(
+    registry: Registry,
+    *,
+    set_filter: Optional[str],
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    dataset_ids = _dataset_ids_for_set(registry, set_filter)
+    if dataset_ids is not None and not dataset_ids:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    query_latest = getattr(registry, "query_eye_mask_data_profile_latest", None)
+    if callable(query_latest):
+        try:
+            if dataset_ids is None:
+                raw_rows = query_latest()
+            else:
+                raw_rows = query_latest(dataset_ids=dataset_ids)
+        except TypeError:
+            try:
+                raw_rows = query_latest()
+            except Exception:
+                raw_rows = []
+        except Exception:
+            raw_rows = []
+        rows = [dict(row) for row in raw_rows]
+    if not rows and _view_exists(registry, "eye_mask_data_profile_latest"):
+        sql = ["SELECT * FROM eye_mask_data_profile_latest WHERE 1=1"]
+        params: List[Any] = []
+        if dataset_ids is not None:
+            placeholders = ", ".join("?" for _ in dataset_ids)
+            sql.append(f"AND dataset_id IN ({placeholders})")
+            params.extend(dataset_ids)
+        sql.append(
+            "ORDER BY dataset_id, COALESCE(eye_mask_method, COALESCE(method, '')), COALESCE(profile_run, '')"
+        )
+        if limit and limit > 0:
+            sql.append("LIMIT ?")
+            params.append(int(limit))
+        try:
+            rows = [dict(row) for row in registry.conn.execute(" ".join(sql), params).fetchall()]
+        except Exception:
+            fallback_sql = ["SELECT * FROM eye_mask_data_profile_latest WHERE 1=1"]
+            fallback_params: List[Any] = []
+            if dataset_ids is not None:
+                placeholders = ", ".join("?" for _ in dataset_ids)
+                fallback_sql.append(f"AND dataset_id IN ({placeholders})")
+                fallback_params.extend(dataset_ids)
+            fallback_sql.append("ORDER BY dataset_id")
+            if limit and limit > 0:
+                fallback_sql.append("LIMIT ?")
+                fallback_params.append(int(limit))
+            rows = [dict(row) for row in registry.conn.execute(" ".join(fallback_sql), fallback_params).fetchall()]
+    if not rows:
+        return []
+
+    dataset_ids_in_rows = sorted(
+        {
+            str(row.get("dataset_id")).strip()
+            for row in rows
+            if str(row.get("dataset_id") or "").strip()
+        }
+    )
+    if dataset_ids_in_rows:
+        placeholders = ", ".join("?" for _ in dataset_ids_in_rows)
+        dataset_sql = (
+            "SELECT dataset_id, zarr_path, zarr_use FROM datasets "
+            f"WHERE dataset_id IN ({placeholders})"
+        )
+        dataset_rows = registry.conn.execute(dataset_sql, dataset_ids_in_rows).fetchall()
+        dataset_lookup: Dict[str, Dict[str, Any]] = {
+            str(row["dataset_id"]): dict(row)
+            for row in dataset_rows
+            if row["dataset_id"] is not None
+        }
+        for row in rows:
+            dataset_id = str(row.get("dataset_id") or "").strip()
+            if not dataset_id:
+                continue
+            dataset_payload = dataset_lookup.get(dataset_id)
+            if not dataset_payload:
+                continue
+            if not str(row.get("zarr_path") or "").strip():
+                row["zarr_path"] = dataset_payload.get("zarr_path")
+            if not str(row.get("zarr_use") or "").strip():
+                row["zarr_use"] = dataset_payload.get("zarr_use")
+
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            str(row.get("dataset_id") or ""),
+            str(row.get("eye_mask_method") or row.get("method") or row.get("source_eye_masks_method") or ""),
+            str(row.get("profile_run") or row.get("run_name") or ""),
+        ),
+    )
+    if limit and limit > 0:
+        rows = rows[: int(limit)]
+    return rows
+
+
 def _load_detect_quality_rows(
     registry: Registry,
     *,
@@ -1940,6 +2187,219 @@ def _summarize_keypoint_profile_rows(rows: List[Dict[str, Any]]) -> KeypointProf
     )
 
 
+def _review_rollups(
+    rows: List[Dict[str, Any]],
+    *,
+    state_key: str = "review_state",
+    intended_use_key: str = "review_intended_use",
+) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for row in rows:
+        state = str(row.get(state_key) or "").strip() or "—"
+        intended_use = str(row.get(intended_use_key) or "").strip() or "—"
+        label = f"{state}/{intended_use}"
+        counts[label] = counts.get(label, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _eye_mask_profile_method_info(row: Dict[str, Any]) -> Tuple[Optional[str], bool]:
+    for key in EYE_MASK_PROFILE_METHOD_KEYS:
+        if key not in row:
+            continue
+        raw = row.get(key)
+        if raw is None:
+            return None, True
+        text = str(raw).strip()
+        return (text or None), True
+    return None, False
+
+
+def _eye_mask_profile_stale_state(row: Dict[str, Any]) -> Optional[str]:
+    for key in EYE_MASK_PROFILE_STALE_STATE_KEYS:
+        if key not in row:
+            continue
+        value = str(row.get(key) or "").strip().lower()
+        if value:
+            return value
+    return None
+
+
+def _eye_mask_profile_stale_reason(
+    row: Dict[str, Any],
+    *,
+    mtime_cache: Dict[str, Optional[int]],
+) -> Optional[str]:
+    stale_state = _eye_mask_profile_stale_state(row)
+    if stale_state == "stale":
+        return "stale row: source keypoint stale"
+
+    expected_mtime = _coerce_int(row.get("zarr_mtime_ns"))
+    if expected_mtime is None:
+        return "stale row: missing zarr_mtime_ns"
+    zarr_path = str(row.get("zarr_path") or "").strip()
+    if not zarr_path:
+        return "stale row: missing zarr_path"
+    actual_mtime = _zarr_mtime_ns(zarr_path, mtime_cache=mtime_cache)
+    if actual_mtime is None:
+        return "stale row: zarr missing on disk"
+    if int(actual_mtime) != int(expected_mtime):
+        return "stale row: mtime mismatch"
+    return None
+
+
+def _eye_mask_profile_exclusion_reason(
+    row: Dict[str, Any],
+    *,
+    mtime_cache: Dict[str, Optional[int]],
+) -> Optional[str]:
+    stale_reason = _eye_mask_profile_stale_reason(row, mtime_cache=mtime_cache)
+    if stale_reason is not None:
+        return stale_reason
+
+    review_detectable = "review_state" in row or "review_intended_use" in row
+    if review_detectable:
+        state = row.get("review_state")
+        intended_use = row.get("review_intended_use")
+        if not state or not intended_use:
+            return "missing review"
+        if state != EYE_MASK_GATE_REVIEW_STATE or intended_use != EYE_MASK_GATE_REVIEW_INTENDED_USE:
+            return "wrong state/use"
+
+    profile_missing = not _present_value(row.get("profile_json"))
+    method_value, method_detectable = _eye_mask_profile_method_info(row)
+    method_missing = method_detectable and not _present_value(method_value)
+    if not profile_missing and not method_missing:
+        return None
+    if profile_missing and method_missing:
+        return "missing profile_json+method"
+    if profile_missing:
+        return "missing profile_json"
+    return "missing method"
+
+
+def _summarize_eye_mask_profile_rows(rows: List[Dict[str, Any]]) -> EyeMaskProfileSummary:
+    stale_rows = 0
+    reasons: Dict[str, int] = {}
+    mtime_cache: Dict[str, Optional[int]] = {}
+    for row in rows:
+        if _eye_mask_profile_stale_reason(row, mtime_cache=mtime_cache) is not None:
+            stale_rows += 1
+        reason = _eye_mask_profile_exclusion_reason(
+            row,
+            mtime_cache=mtime_cache,
+        )
+        if reason is None:
+            continue
+        reasons[reason] = reasons.get(reason, 0) + 1
+    ordered = dict(sorted(reasons.items(), key=lambda item: (-item[1], item[0])))
+    return EyeMaskProfileSummary(
+        total_rows=len(rows),
+        stale_rows=stale_rows,
+        exclusion_reasons=ordered,
+        review_rollups=_review_rollups(rows),
+    )
+
+
+def _eye_mask_performance_stale_reason(
+    row: Dict[str, Any],
+    *,
+    mtime_cache: Dict[str, Optional[int]],
+) -> Optional[str]:
+    stale_state = str(row.get("source_keypoint_stale_state") or "").strip().lower()
+    if stale_state == "stale":
+        return "stale source keypoint"
+    lifecycle_state = str(row.get("lifecycle_state") or "").strip().lower()
+    if lifecycle_state == "stale":
+        return "stale lifecycle"
+
+    expected_mtime = _coerce_int(row.get("zarr_mtime_ns"))
+    zarr_path = str(row.get("zarr_path") or "").strip()
+    if expected_mtime is None:
+        return "stale row: missing zarr_mtime_ns"
+    if not zarr_path:
+        return "stale row: missing zarr_path"
+    actual_mtime = _zarr_mtime_ns(zarr_path, mtime_cache=mtime_cache)
+    if actual_mtime is None:
+        return "stale row: zarr missing on disk"
+    if int(actual_mtime) != int(expected_mtime):
+        return "stale row: mtime mismatch"
+    return None
+
+
+def _eye_mask_performance_row_passes_default_gate(
+    row: Dict[str, Any],
+    *,
+    mtime_cache: Dict[str, Optional[int]],
+) -> bool:
+    if _eye_mask_performance_stale_reason(row, mtime_cache=mtime_cache) is not None:
+        return False
+    return (
+        row.get("review_state") == EYE_MASK_GATE_REVIEW_STATE
+        and row.get("review_intended_use") == EYE_MASK_GATE_REVIEW_INTENDED_USE
+    )
+
+
+def _eye_mask_performance_exclusion_reason(
+    row: Dict[str, Any],
+    *,
+    mtime_cache: Dict[str, Optional[int]],
+) -> Optional[str]:
+    if _eye_mask_performance_row_passes_default_gate(row, mtime_cache=mtime_cache):
+        return None
+    stale_reason = _eye_mask_performance_stale_reason(row, mtime_cache=mtime_cache)
+    if stale_reason is not None:
+        return stale_reason
+    state = row.get("review_state")
+    intended_use = row.get("review_intended_use")
+    if not state or not intended_use:
+        return "missing review"
+    if state != EYE_MASK_GATE_REVIEW_STATE or intended_use != EYE_MASK_GATE_REVIEW_INTENDED_USE:
+        return "wrong state/use"
+    return "other"
+
+
+def _summarize_eye_mask_performance_rows(rows: List[Dict[str, Any]]) -> EyeMaskPerformanceSummary:
+    passing = 0
+    stale_rows = 0
+    reasons: Dict[str, int] = {}
+    mtime_cache: Dict[str, Optional[int]] = {}
+    for row in rows:
+        stale_reason = _eye_mask_performance_stale_reason(row, mtime_cache=mtime_cache)
+        if stale_reason is not None:
+            stale_rows += 1
+        reason = _eye_mask_performance_exclusion_reason(row, mtime_cache=mtime_cache)
+        if reason is None:
+            passing += 1
+            continue
+        reasons[reason] = reasons.get(reason, 0) + 1
+    total = len(rows)
+    ordered = dict(sorted(reasons.items(), key=lambda item: (-item[1], item[0])))
+    return EyeMaskPerformanceSummary(
+        total_rows=total,
+        passing_rows=passing,
+        excluded_rows=total - passing,
+        stale_rows=stale_rows,
+        exclusion_reasons=ordered,
+        review_rollups=_review_rollups(rows),
+    )
+
+
+def _eye_mask_profile_remediation_lines(
+    summary: EyeMaskProfileSummary,
+    *,
+    registry_path: Path,
+) -> List[str]:
+    sync_cmd = f"{EYE_MASK_SYNC_COMMAND} --registry {registry_path} --apply"
+    refresh_cmd = f"{EYE_MASK_REFRESH_COMMAND} --registry {registry_path} --apply"
+    lines: List[str] = []
+    if summary.total_rows <= 0:
+        lines.append(f"remediation: no eye-mask profile rows found; run `{sync_cmd}`")
+    if summary.stale_rows > 0:
+        lines.append(f"remediation: stale eye-mask profile rows detected; run `{refresh_cmd}`")
+        lines.append(f"remediation: re-sync latest profile rows with `{sync_cmd}`")
+    return lines
+
+
 def _detect_quality_stale_reason(
     row: Dict[str, Any],
     *,
@@ -2039,13 +2499,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             "detect-quality",
             "keypoint-quality",
             "keypoint-profile",
+            "eye-mask-quality",
+            "eye-mask-performance",
+            "eye-mask-profile",
             "lineage",
         ],
         default="sets",
         help=(
             "Select output view: sets, datasets, recordings, recording-overview, "
             "recording-steps, recording-steps-wide, models, onnx, tensorrt, "
-            "detect-quality, keypoint-quality, keypoint-profile, or lineage (default: sets)."
+            "detect-quality, keypoint-quality, keypoint-profile, eye-mask-quality, "
+            "eye-mask-performance, "
+            "eye-mask-profile, or lineage (default: sets)."
         ),
     )
     parser.add_argument(
@@ -2054,7 +2519,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         help=(
             "Show all registry views (sets, datasets, recordings, recording-overview, "
             "models, onnx, tensorrt, lineage, detect quality, keypoint quality, "
-            "and keypoint profile)."
+            "keypoint profile, eye-mask quality/performance, and eye-mask profile)."
         ),
     )
     parser.add_argument("--limit", type=int, default=200)
@@ -2067,6 +2532,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--show-keypoint-quality",
         action="store_true",
         help="Print detailed keypoint quality rows (summary is always shown).",
+    )
+    parser.add_argument(
+        "--show-eye-mask-quality",
+        action="store_true",
+        help="Print detailed eye-mask quality rows (summary is always shown).",
+    )
+    parser.add_argument(
+        "--show-eye-mask-performance",
+        action="store_true",
+        help="Alias of --show-eye-mask-quality.",
+    )
+    parser.add_argument(
+        "--show-eye-mask-profile",
+        action="store_true",
+        help="Print detailed eye-mask profile rows (summary is always shown).",
     )
     parser.add_argument(
         "--recording-summary",
@@ -2114,6 +2594,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     show_keypoint_view = args.view == "keypoint-quality"
     show_keypoint_details = args.show_keypoint_quality or show_keypoint_view
     show_keypoint_profile = args.view == "keypoint-profile"
+    show_eye_mask_performance_view = args.view in {"eye-mask-quality", "eye-mask-performance"}
+    show_eye_mask_performance_details = (
+        args.show_eye_mask_quality
+        or args.show_eye_mask_performance
+        or show_eye_mask_performance_view
+    )
+    show_eye_mask_profile_view = args.view == "eye-mask-profile"
+    show_eye_mask_profile_details = args.show_eye_mask_profile or show_eye_mask_profile_view
     if summary_only_mode:
         show_sets = False
         show_datasets = False
@@ -2131,6 +2619,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         show_keypoint_view = False
         show_keypoint_details = False
         show_keypoint_profile = False
+        show_eye_mask_performance_view = False
+        show_eye_mask_performance_details = False
+        show_eye_mask_profile_view = False
+        show_eye_mask_profile_details = False
 
     set_rows = _load_set_rows(registry, args.set_id, args.limit) if show_sets else []
     dataset_rows = _load_dataset_rows(
@@ -2227,6 +2719,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         limit=keypoint_profile_limit,
     )
     keypoint_profile_summary = _summarize_keypoint_profile_rows(keypoint_profile_rows)
+    eye_mask_performance_limit = args.limit if (show_eye_mask_performance_view or show_eye_mask_performance_details) else None
+    eye_mask_performance_rows = _load_eye_mask_performance_rows(
+        registry,
+        set_filter=args.set_id,
+        limit=eye_mask_performance_limit,
+    )
+    eye_mask_performance_summary = _summarize_eye_mask_performance_rows(eye_mask_performance_rows)
+    eye_mask_profile_limit = args.limit if (show_eye_mask_profile_view or show_eye_mask_profile_details) else None
+    eye_mask_profile_rows = _load_eye_mask_profile_rows(
+        registry,
+        set_filter=args.set_id,
+        limit=eye_mask_profile_limit,
+    )
+    eye_mask_profile_summary = _summarize_eye_mask_profile_rows(eye_mask_profile_rows)
+    eye_mask_profile_remediation = _eye_mask_profile_remediation_lines(
+        eye_mask_profile_summary,
+        registry_path=registry_path,
+    )
     dataset_lineage_summary = _summarize_dataset_lineage(
         registry,
         set_filter=args.set_id,
@@ -2271,6 +2781,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     if not args.all and args.view == "keypoint-profile" and not keypoint_profile_rows:
         print("No keypoint profile rows found.")
+        return 1
+    if not args.all and args.view in {"eye-mask-quality", "eye-mask-performance"} and not eye_mask_performance_rows:
+        print("No eye-mask quality rows found.")
+        return 1
+    if not args.all and args.view == "eye-mask-profile" and not eye_mask_profile_rows:
+        print("No eye-mask profile rows found.")
+        for line in eye_mask_profile_remediation:
+            print(f"  {line}")
         return 1
 
     show_inference_col = any(row.inference_dataset_count > 0 for row in recording_overview_rows)
@@ -2809,6 +3327,141 @@ def main(argv: Optional[List[str]] = None) -> int:
             console.print("[bold]Keypoint Profile[/bold]")
             for line in keypoint_profile_lines:
                 console.print(f"- {line}")
+
+            eye_mask_lines = [
+                f"total rows: {eye_mask_performance_summary.total_rows}",
+                (
+                    "passing rows "
+                    f"({EYE_MASK_GATE_REVIEW_STATE}/{EYE_MASK_GATE_REVIEW_INTENDED_USE}, non-stale source): "
+                    f"{eye_mask_performance_summary.passing_rows}"
+                ),
+                f"excluded rows: {eye_mask_performance_summary.excluded_rows}",
+                f"stale rows: {eye_mask_performance_summary.stale_rows}",
+            ]
+            if eye_mask_performance_summary.exclusion_reasons:
+                eye_mask_reason_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in eye_mask_performance_summary.exclusion_reasons.items()
+                )
+            else:
+                eye_mask_reason_text = "none"
+            eye_mask_lines.append(f"top exclusion reasons: {eye_mask_reason_text}")
+            if eye_mask_performance_summary.review_rollups:
+                rollup_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in eye_mask_performance_summary.review_rollups.items()
+                )
+            else:
+                rollup_text = "none"
+            eye_mask_lines.append(f"review rollups: {rollup_text}")
+            console.print("[bold]Eye-Mask Quality[/bold]")
+            for line in eye_mask_lines:
+                console.print(f"- {line}")
+            if show_eye_mask_performance_details and eye_mask_performance_rows:
+                ep_table = Table(title="Eye-Mask Quality Details", show_lines=False)
+                ep_table.add_column("Dataset", style="cyan")
+                ep_table.add_column("Use")
+                ep_table.add_column("Stage")
+                ep_table.add_column("Method")
+                ep_table.add_column("Review")
+                ep_table.add_column("Stale")
+                ep_table.add_column("Lifecycle")
+                ep_table.add_column("Rate")
+                ep_table.add_column("Gate")
+                ep_table.add_column("Reason")
+                eye_mask_mtime_cache: Dict[str, Optional[int]] = {}
+                for row in eye_mask_performance_rows:
+                    reason = _eye_mask_performance_exclusion_reason(
+                        row,
+                        mtime_cache=eye_mask_mtime_cache,
+                    ) or "—"
+                    stale_reason = _eye_mask_performance_stale_reason(
+                        row,
+                        mtime_cache=eye_mask_mtime_cache,
+                    )
+                    passes = _eye_mask_performance_row_passes_default_gate(
+                        row,
+                        mtime_cache=eye_mask_mtime_cache,
+                    )
+                    review = f"{row.get('review_state') or '—'}/{row.get('review_intended_use') or '—'}"
+                    rate = _coerce_float(row.get("successful_roi_pair_rate"))
+                    ep_table.add_row(
+                        str(row.get("dataset_id") or "—"),
+                        str(row.get("zarr_use") or "—"),
+                        str(row.get("stage_group") or "—"),
+                        str(row.get("method") or "—"),
+                        review,
+                        "1" if stale_reason is not None else "0",
+                        str(row.get("lifecycle_state") or "—"),
+                        f"{float(rate):.3f}" if rate is not None else "—",
+                        "[chartreuse1]PASS[/chartreuse1]" if passes else "[red]EXCLUDE[/red]",
+                        reason,
+                    )
+                console.print(ep_table)
+
+            eye_mask_profile_lines = [
+                f"total rows: {eye_mask_profile_summary.total_rows}",
+                f"stale rows (mtime mismatch/missing): {eye_mask_profile_summary.stale_rows}",
+            ]
+            if eye_mask_profile_summary.exclusion_reasons:
+                eye_mask_profile_reason_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in eye_mask_profile_summary.exclusion_reasons.items()
+                )
+            else:
+                eye_mask_profile_reason_text = "none"
+            eye_mask_profile_lines.append(f"top exclusion reasons: {eye_mask_profile_reason_text}")
+            if eye_mask_profile_summary.review_rollups:
+                eye_mask_profile_rollups = ", ".join(
+                    f"{name}={count}"
+                    for name, count in eye_mask_profile_summary.review_rollups.items()
+                )
+            else:
+                eye_mask_profile_rollups = "none"
+            eye_mask_profile_lines.append(f"review rollups: {eye_mask_profile_rollups}")
+            console.print("[bold]Eye-Mask Profile[/bold]")
+            for line in eye_mask_profile_lines:
+                console.print(f"- {line}")
+            for line in eye_mask_profile_remediation:
+                console.print(f"- {line}")
+            if show_eye_mask_profile_details and eye_mask_profile_rows:
+                epf_table = Table(title="Eye-Mask Profile Details", show_lines=False)
+                epf_table.add_column("Dataset", style="cyan")
+                epf_table.add_column("Use")
+                epf_table.add_column("Method")
+                epf_table.add_column("Review")
+                epf_table.add_column("Stale")
+                epf_table.add_column("Lifecycle")
+                epf_table.add_column("Profile JSON")
+                epf_table.add_column("Gate")
+                epf_table.add_column("Reason")
+                eye_mask_profile_mtime_cache: Dict[str, Optional[int]] = {}
+                for row in eye_mask_profile_rows:
+                    reason = _eye_mask_profile_exclusion_reason(
+                        row,
+                        mtime_cache=eye_mask_profile_mtime_cache,
+                    ) or "—"
+                    stale = _eye_mask_profile_stale_reason(
+                        row,
+                        mtime_cache=eye_mask_profile_mtime_cache,
+                    )
+                    epf_table.add_row(
+                        str(row.get("dataset_id") or "—"),
+                        str(row.get("zarr_use") or "—"),
+                        str(
+                            row.get("eye_mask_method")
+                            or row.get("method")
+                            or row.get("source_eye_masks_method")
+                            or "—"
+                        ),
+                        f"{row.get('review_state') or '—'}/{row.get('review_intended_use') or '—'}",
+                        "1" if stale is not None else "0",
+                        str(row.get("lifecycle_state") or "—"),
+                        "1" if _present_value(row.get("profile_json")) else "0",
+                        "[chartreuse1]PASS[/chartreuse1]" if reason == "—" else "[red]EXCLUDE[/red]",
+                        reason,
+                    )
+                console.print(epf_table)
     else:
         if show_sets:
             for row in set_rows:
@@ -3227,6 +3880,117 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 keypoint_profile_reason_text = "none"
             print(f"  top exclusion-ish reasons: {keypoint_profile_reason_text}")
+
+            print("Eye-Mask Quality")
+            print(f"  total rows: {eye_mask_performance_summary.total_rows}")
+            print(
+                "  passing rows "
+                f"({EYE_MASK_GATE_REVIEW_STATE}/{EYE_MASK_GATE_REVIEW_INTENDED_USE}, non-stale source): "
+                f"{eye_mask_performance_summary.passing_rows}"
+            )
+            print(f"  excluded rows: {eye_mask_performance_summary.excluded_rows}")
+            print(f"  stale rows: {eye_mask_performance_summary.stale_rows}")
+            if eye_mask_performance_summary.exclusion_reasons:
+                eye_mask_reason_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in eye_mask_performance_summary.exclusion_reasons.items()
+                )
+            else:
+                eye_mask_reason_text = "none"
+            print(f"  top exclusion reasons: {eye_mask_reason_text}")
+            if eye_mask_performance_summary.review_rollups:
+                eye_mask_rollup_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in eye_mask_performance_summary.review_rollups.items()
+                )
+            else:
+                eye_mask_rollup_text = "none"
+            print(f"  review rollups: {eye_mask_rollup_text}")
+            if show_eye_mask_performance_details and eye_mask_performance_rows:
+                print("  details:")
+                eye_mask_mtime_cache: Dict[str, Optional[int]] = {}
+                for row in eye_mask_performance_rows:
+                    reason = _eye_mask_performance_exclusion_reason(
+                        row,
+                        mtime_cache=eye_mask_mtime_cache,
+                    )
+                    stale_reason = _eye_mask_performance_stale_reason(
+                        row,
+                        mtime_cache=eye_mask_mtime_cache,
+                    )
+                    passes = _eye_mask_performance_row_passes_default_gate(
+                        row,
+                        mtime_cache=eye_mask_mtime_cache,
+                    )
+                    rate = _coerce_float(row.get("successful_roi_pair_rate"))
+                    print(f"    {row.get('dataset_id')}")
+                    print(f"      use: {row.get('zarr_use') or '—'}")
+                    print(f"      stage: {row.get('stage_group') or '—'}")
+                    print(f"      method: {row.get('method') or '—'}")
+                    print(
+                        "      review: "
+                        f"{row.get('review_state') or '—'}/{row.get('review_intended_use') or '—'}"
+                    )
+                    print(f"      stale: {1 if stale_reason is not None else 0}")
+                    print(f"      lifecycle: {row.get('lifecycle_state') or '—'}")
+                    print(f"      success_rate: {float(rate):.3f}" if rate is not None else "      success_rate: —")
+                    print(f"      gate: {'PASS' if passes else 'EXCLUDE'}")
+                    print(f"      reason: {reason or '—'}")
+
+            print("Eye-Mask Profile")
+            print(f"  total rows: {eye_mask_profile_summary.total_rows}")
+            print(
+                "  stale rows (mtime mismatch/missing): "
+                f"{eye_mask_profile_summary.stale_rows}"
+            )
+            if eye_mask_profile_summary.exclusion_reasons:
+                eye_mask_profile_reason_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in eye_mask_profile_summary.exclusion_reasons.items()
+                )
+            else:
+                eye_mask_profile_reason_text = "none"
+            print(f"  top exclusion reasons: {eye_mask_profile_reason_text}")
+            if eye_mask_profile_summary.review_rollups:
+                eye_mask_profile_rollup_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in eye_mask_profile_summary.review_rollups.items()
+                )
+            else:
+                eye_mask_profile_rollup_text = "none"
+            print(f"  review rollups: {eye_mask_profile_rollup_text}")
+            for line in eye_mask_profile_remediation:
+                print(f"  {line}")
+            if show_eye_mask_profile_details and eye_mask_profile_rows:
+                print("  details:")
+                eye_mask_profile_mtime_cache: Dict[str, Optional[int]] = {}
+                for row in eye_mask_profile_rows:
+                    reason = _eye_mask_profile_exclusion_reason(
+                        row,
+                        mtime_cache=eye_mask_profile_mtime_cache,
+                    )
+                    stale = _eye_mask_profile_stale_reason(
+                        row,
+                        mtime_cache=eye_mask_profile_mtime_cache,
+                    )
+                    method = (
+                        row.get("eye_mask_method")
+                        or row.get("method")
+                        or row.get("source_eye_masks_method")
+                        or "—"
+                    )
+                    print(f"    {row.get('dataset_id')}")
+                    print(f"      use: {row.get('zarr_use') or '—'}")
+                    print(f"      method: {method}")
+                    print(
+                        "      review: "
+                        f"{row.get('review_state') or '—'}/{row.get('review_intended_use') or '—'}"
+                    )
+                    print(f"      stale: {1 if stale is not None else 0}")
+                    print(f"      lifecycle: {row.get('lifecycle_state') or '—'}")
+                    print(f"      profile_json: {1 if _present_value(row.get('profile_json')) else 0}")
+                    print(f"      gate: {'PASS' if reason is None else 'EXCLUDE'}")
+                    print(f"      reason: {reason or '—'}")
     return 0
 
 

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from fisheye.tune import eye_mask_failure_review as mod
 
@@ -78,3 +79,59 @@ def test_next_review_position_keeps_forward_order_when_current_removed() -> None
         previous_pos=1,
     )
     assert out == 1
+
+
+def test_load_failure_indices_includes_small_area_pairs(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeArray:
+        def __init__(self, data: np.ndarray) -> None:
+            self._data = data
+
+        def __getitem__(self, item):
+            if isinstance(item, slice):
+                return self._data[item]
+            if item == slice(None):
+                return self._data
+            return self._data[item]
+
+    class _FakeGroup(dict):
+        def __init__(self, *args, attrs: dict[str, object] | None = None, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.attrs = attrs or {}
+
+        def get(self, key: str, default=None):
+            return super().get(key, default)
+
+    monkeypatch.setattr(mod.zarr, "Group", _FakeGroup)
+
+    metrics = _FakeGroup(
+        {
+            "area_refined": _FakeArray(
+                np.array(
+                    [
+                        [40.0, 100.0],  # left eye below default threshold (50 px)
+                        [80.0, 90.0],
+                    ],
+                    dtype=np.float32,
+                )
+            )
+        }
+    )
+    refined = _FakeGroup(
+        {
+            "ellipse_success": _FakeArray(
+                np.array(
+                    [
+                        [True, True],
+                        [True, True],
+                    ],
+                    dtype=bool,
+                )
+            ),
+            "eye_separation": _FakeArray(np.array([10.0, 10.0], dtype=np.float32)),
+            "metrics": metrics,
+        },
+        attrs={},
+    )
+
+    failures = mod._load_failure_indices(refined, min_sep=None, max_sep=None)
+    np.testing.assert_array_equal(failures, np.array([0], dtype=np.int32))

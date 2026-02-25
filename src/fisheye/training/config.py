@@ -156,7 +156,7 @@ class EyeMaskTrainingParams(TrainingParams):
     """Training parameters for eye-mask segmentation pipelines."""
 
     label_source: Literal["yolo", "manual"] = "yolo"
-    label_mode: Literal["union", "lr"] = "union"
+    label_mode: Literal["union", "lr"] = "lr"
     eye_masks_run: Optional[str] = None
     eye_masks_method: Optional[str] = None
 

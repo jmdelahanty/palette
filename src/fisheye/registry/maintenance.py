@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from .db import (
     _extract_crop_quality_rows,
     _extract_detect_performance_rows,
     _extract_detect_quality_rows,
+    _extract_eye_mask_quality_rows,
     _extract_eye_mask_performance_rows,
     _extract_keypoint_performance_rows,
     _extract_keypoint_profile_rows,
@@ -291,10 +293,24 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--backfill-eye-mask-profiles",
+        action="store_true",
+        help=(
+            "Backfill eye_mask_data_profile rows for source recording datasets that currently have no profile rows."
+        ),
+    )
+    parser.add_argument(
         "--backfill-keypoint-quality",
         action="store_true",
         help=(
             "Backfill keypoint_quality rows for datasets that currently have no quality rows."
+        ),
+    )
+    parser.add_argument(
+        "--backfill-eye-mask-quality",
+        action="store_true",
+        help=(
+            "Backfill eye_mask_quality rows for datasets that currently have no quality rows."
         ),
     )
     parser.add_argument(
@@ -365,10 +381,24 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--refresh-eye-mask-profiles",
+        action="store_true",
+        help=(
+            "Refresh eye_mask_data_profile rows for all source recording datasets in scope and remove stale rows."
+        ),
+    )
+    parser.add_argument(
         "--refresh-keypoint-quality",
         action="store_true",
         help=(
             "Refresh keypoint_quality rows for all datasets in scope and remove stale rows."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-eye-mask-quality",
+        action="store_true",
+        help=(
+            "Refresh eye_mask_quality rows for all datasets in scope and remove stale rows."
         ),
     )
     parser.add_argument(
@@ -2295,6 +2325,688 @@ def _keypoint_profile_row_signature(row: Dict[str, object]) -> tuple[object, ...
     )
 
 
+def _invoke_with_supported_kwargs(func: object, *args: object, **kwargs: object) -> object:
+    if not callable(func):
+        raise TypeError("Expected callable.")
+    try:
+        signature = inspect.signature(func)
+    except Exception:
+        return func(*args, **kwargs)
+    has_var_kwargs = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in signature.parameters.values()
+    )
+    if has_var_kwargs:
+        return func(*args, **kwargs)
+    filtered_kwargs = {
+        name: value
+        for name, value in kwargs.items()
+        if name in signature.parameters
+    }
+    return func(*args, **filtered_kwargs)
+
+
+def _row_to_dict(row: object) -> Dict[str, Any]:
+    if isinstance(row, dict):
+        return dict(row)
+    if hasattr(row, "keys"):
+        keys = row.keys()  # type: ignore[attr-defined]
+        return {str(key): row[key] for key in keys}  # type: ignore[index]
+    raise TypeError("Unsupported row type.")
+
+
+def _eye_mask_profile_signature_value(value: object) -> object:
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", "ignore")
+    if isinstance(value, (dict, list, tuple)):
+        return _canonical_json_text(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ""
+        if text.startswith("{") or text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                return text
+            canonical = _canonical_json_text(parsed)
+            return canonical if canonical is not None else text
+        return text
+    return value
+
+
+def _eye_mask_data_profile_row_signature(
+    row: Dict[str, object],
+    *,
+    keys: Optional[Sequence[str]] = None,
+) -> tuple[object, ...]:
+    signature_keys = (
+        tuple(keys)
+        if keys is not None
+        else tuple(
+            sorted(
+                key
+                for key in row.keys()
+                if key not in {"dataset_id", "profile_run", "updated_utc", "created_utc"}
+            )
+        )
+    )
+    return tuple(_eye_mask_profile_signature_value(row.get(key)) for key in signature_keys)
+
+
+def _eye_mask_profile_group_names(parent: object) -> List[str]:
+    names: List[str] = []
+    try:
+        if hasattr(parent, "group_keys"):
+            names = [str(name) for name in parent.group_keys()]  # type: ignore[attr-defined]
+        elif hasattr(parent, "keys"):
+            names = [str(name) for name in parent.keys()]  # type: ignore[attr-defined]
+    except Exception:
+        names = []
+    return sorted(name for name in names if name)
+
+
+def _eye_mask_profile_stat_value(metric_payload: object, key: str) -> Optional[float]:
+    metric = _coerce_mapping_value(metric_payload)
+    if metric is None:
+        return None
+    stats = _coerce_mapping_value(metric.get("stats"))
+    if stats is not None:
+        return _coerce_float_value(stats.get(key))
+    return _coerce_float_value(metric.get(key))
+
+
+def _eye_mask_profile_metric_alias_stat(
+    geometry_map: Mapping[str, object],
+    *,
+    metric_names: Sequence[str],
+    stat_key: str,
+) -> Optional[float]:
+    for metric_name in metric_names:
+        value = _eye_mask_profile_stat_value(geometry_map.get(metric_name), stat_key)
+        if value is not None:
+            return value
+    return None
+
+
+def _extract_eye_mask_profile_rows_fallback(
+    root: object,
+    *,
+    zarr_path: Path,
+    dataset_id: str,
+    recording_id: Optional[str],
+    zarr_use: Optional[str],
+    genotype: Optional[str],
+    dpf_at_acquisition: Optional[int],
+) -> List[Dict[str, Any]]:
+    analysis = root.get("analysis") if hasattr(root, "get") else None  # type: ignore[attr-defined]
+    if analysis is None or not hasattr(analysis, "get"):
+        return []
+    runs_parent = analysis.get("eye_mask_profile_runs")  # type: ignore[attr-defined]
+    if runs_parent is None:
+        return []
+
+    try:
+        zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    except Exception:
+        zarr_mtime_ns = None
+    updated_utc = datetime.now(timezone.utc).isoformat()
+
+    rows: List[Dict[str, Any]] = []
+    for profile_run in _eye_mask_profile_group_names(runs_parent):
+        try:
+            run_group = runs_parent[profile_run]  # type: ignore[index]
+        except Exception:
+            continue
+        attrs = getattr(run_group, "attrs", None)
+        summary = _coerce_mapping_value(attrs.get("profile_summary")) if attrs is not None else None  # type: ignore[arg-type]
+        if not summary:
+            continue
+
+        dataset_map = _coerce_mapping_value(summary.get("dataset")) or {}
+        source_map = _coerce_mapping_value(summary.get("source")) or {}
+        quality_map = _coerce_mapping_value(summary.get("quality")) or {}
+        geometry_map = _coerce_mapping_value(summary.get("geometry")) or {}
+        spatial_map = _coerce_mapping_value(summary.get("spatial")) or {}
+        composition_map = _coerce_mapping_value(summary.get("composition")) or {}
+
+        row_genotype = _decode_text(composition_map.get("genotype")) or genotype
+        row_dpf = _coerce_int_value(composition_map.get("dpf_at_acquisition"))
+        if row_dpf is None:
+            row_dpf = dpf_at_acquisition
+
+        rows_total = _coerce_int_value(quality_map.get("rows_total"))
+        rows_usable = _coerce_int_value(quality_map.get("rows_usable"))
+        if rows_usable is None:
+            rows_usable = _coerce_int_value(quality_map.get("usable_rows"))
+        if rows_usable is None:
+            rows_usable = _coerce_int_value(quality_map.get("rows_training_usable"))
+        usable_rate = _coerce_float_value(quality_map.get("usable_rate"))
+        if usable_rate is None:
+            usable_rate = _coerce_float_value(quality_map.get("rows_usable_rate"))
+
+        ellipse_area_map = _coerce_mapping_value(geometry_map.get("ellipse_area")) or {}
+        circularity_map = _coerce_mapping_value(geometry_map.get("circularity")) or {}
+        interocular_map = _coerce_mapping_value(geometry_map.get("interocular_px")) or {}
+
+        profile_json = _canonical_json_text(summary)
+        attrs_recording_id = _decode_text(attrs.get("source_recording_id")) if attrs is not None else None
+        attrs_zarr_use = _decode_text(attrs.get("source_zarr_use")) if attrs is not None else None
+        attrs_method = _decode_text(attrs.get("source_eye_mask_method")) if attrs is not None else None
+        attrs_source_eye_masks_run = _decode_text(attrs.get("source_eye_masks_run")) if attrs is not None else None
+        attrs_source_refined_eye_masks_run = (
+            _decode_text(attrs.get("source_refined_eye_masks_run")) if attrs is not None else None
+        )
+        attrs_source_crop_run = _decode_text(attrs.get("source_crop_run")) if attrs is not None else None
+        attrs_source_keypoints_run = _decode_text(attrs.get("source_keypoints_run")) if attrs is not None else None
+        attrs_profile_created = _decode_text(attrs.get("created_at_utc")) if attrs is not None else None
+
+        rows.append(
+            {
+                "dataset_id": str(dataset_id),
+                "profile_run": str(profile_run),
+                "recording_id": _decode_text(dataset_map.get("recording_id")) or attrs_recording_id or recording_id,
+                "zarr_use": _decode_text(dataset_map.get("zarr_use")) or attrs_zarr_use or zarr_use,
+                "eye_mask_method": _decode_text(source_map.get("eye_mask_method")) or attrs_method,
+                "source_eye_masks_run": _decode_text(source_map.get("eye_masks_run")) or attrs_source_eye_masks_run,
+                "source_refined_eye_masks_run": (
+                    _decode_text(source_map.get("refined_eye_masks_run"))
+                    or attrs_source_refined_eye_masks_run
+                ),
+                "source_crop_run": _decode_text(source_map.get("crop_run")) or attrs_source_crop_run,
+                "source_keypoints_run": _decode_text(source_map.get("keypoints_run")) or attrs_source_keypoints_run,
+                "profile_created_utc": _decode_text(summary.get("created_at_utc")) or attrs_profile_created,
+                "rows_total": rows_total,
+                "rows_usable": rows_usable,
+                "usable_rate": usable_rate,
+                "reviewed_rate": _coerce_float_value(quality_map.get("reviewed_rate")),
+                "excluded_rate": _coerce_float_value(quality_map.get("excluded_rate")),
+                "ellipse_success_rate": _coerce_float_value(quality_map.get("ellipse_success_rate")),
+                "pair_success_rate": _coerce_float_value(quality_map.get("pair_success_rate")),
+                "area_p10": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("area", "ellipse_area", "union_area", "area_union"),
+                    stat_key="p10",
+                ),
+                "area_p50": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("area", "ellipse_area", "union_area", "area_union"),
+                    stat_key="p50",
+                ),
+                "area_p90": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("area", "ellipse_area", "union_area", "area_union"),
+                    stat_key="p90",
+                ),
+                "left_area_p10": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("left_area", "area_left", "left_eye_area"),
+                    stat_key="p10",
+                ),
+                "left_area_p50": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("left_area", "area_left", "left_eye_area"),
+                    stat_key="p50",
+                ),
+                "left_area_p90": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("left_area", "area_left", "left_eye_area"),
+                    stat_key="p90",
+                ),
+                "right_area_p10": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("right_area", "area_right", "right_eye_area"),
+                    stat_key="p10",
+                ),
+                "right_area_p50": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("right_area", "area_right", "right_eye_area"),
+                    stat_key="p50",
+                ),
+                "right_area_p90": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("right_area", "area_right", "right_eye_area"),
+                    stat_key="p90",
+                ),
+                "union_area_p10": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("union_area", "area_union", "combined_area", "area"),
+                    stat_key="p10",
+                ),
+                "union_area_p50": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("union_area", "area_union", "combined_area", "area"),
+                    stat_key="p50",
+                ),
+                "union_area_p90": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("union_area", "area_union", "combined_area", "area"),
+                    stat_key="p90",
+                ),
+                "area_lr_ratio_p10": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("area_lr_ratio", "left_right_area_ratio", "area_ratio_left_right"),
+                    stat_key="p10",
+                ),
+                "area_lr_ratio_p50": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("area_lr_ratio", "left_right_area_ratio", "area_ratio_left_right"),
+                    stat_key="p50",
+                ),
+                "area_lr_ratio_p90": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("area_lr_ratio", "left_right_area_ratio", "area_ratio_left_right"),
+                    stat_key="p90",
+                ),
+                "major_axis_p10": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("major_axis", "ellipse_major"),
+                    stat_key="p10",
+                ),
+                "major_axis_p50": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("major_axis", "ellipse_major"),
+                    stat_key="p50",
+                ),
+                "major_axis_p90": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("major_axis", "ellipse_major"),
+                    stat_key="p90",
+                ),
+                "minor_axis_p10": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("minor_axis", "ellipse_minor"),
+                    stat_key="p10",
+                ),
+                "minor_axis_p50": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("minor_axis", "ellipse_minor"),
+                    stat_key="p50",
+                ),
+                "minor_axis_p90": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("minor_axis", "ellipse_minor"),
+                    stat_key="p90",
+                ),
+                "aspect_ratio_p10": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("aspect_ratio", "axis_ratio"),
+                    stat_key="p10",
+                ),
+                "aspect_ratio_p50": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("aspect_ratio", "axis_ratio"),
+                    stat_key="p50",
+                ),
+                "aspect_ratio_p90": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("aspect_ratio", "axis_ratio"),
+                    stat_key="p90",
+                ),
+                "eye_separation_p10": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("eye_separation", "interocular_px"),
+                    stat_key="p10",
+                ),
+                "eye_separation_p50": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("eye_separation", "interocular_px"),
+                    stat_key="p50",
+                ),
+                "eye_separation_p90": _eye_mask_profile_metric_alias_stat(
+                    geometry_map,
+                    metric_names=("eye_separation", "interocular_px"),
+                    stat_key="p90",
+                ),
+                "edge_proximity_rate": _coerce_float_value(
+                    spatial_map.get("edge_proximity_rate")
+                    if spatial_map.get("edge_proximity_rate") is not None
+                    else spatial_map.get("edge_touch_rate")
+                ),
+                "review_approved_rate": _coerce_float_value(quality_map.get("review_approved_rate")),
+                "review_rejected_rate": _coerce_float_value(quality_map.get("review_rejected_rate")),
+                "ellipse_area_p10": _eye_mask_profile_stat_value(ellipse_area_map, "p10"),
+                "ellipse_area_p50": _eye_mask_profile_stat_value(ellipse_area_map, "p50"),
+                "ellipse_area_p90": _eye_mask_profile_stat_value(ellipse_area_map, "p90"),
+                "circularity_p10": _eye_mask_profile_stat_value(circularity_map, "p10"),
+                "circularity_p50": _eye_mask_profile_stat_value(circularity_map, "p50"),
+                "circularity_p90": _eye_mask_profile_stat_value(circularity_map, "p90"),
+                "interocular_px_p10": _eye_mask_profile_stat_value(interocular_map, "p10"),
+                "interocular_px_p50": _eye_mask_profile_stat_value(interocular_map, "p50"),
+                "interocular_px_p90": _eye_mask_profile_stat_value(interocular_map, "p90"),
+                "rig_id": _decode_text(composition_map.get("rig_id")),
+                "camera_id": _decode_text(composition_map.get("camera_id")),
+                "arena_id": _decode_text(composition_map.get("arena_id")),
+                "dish_design": _decode_text(composition_map.get("dish_design")),
+                "canvas_name": _decode_text(composition_map.get("canvas_name")),
+                "protocol_name": _decode_text(composition_map.get("protocol_name")),
+                "genotype": row_genotype,
+                "dpf_at_acquisition": row_dpf,
+                "profile_json": profile_json,
+                "zarr_mtime_ns": zarr_mtime_ns,
+                "updated_utc": updated_utc,
+            }
+        )
+
+    return rows
+
+
+def _extract_eye_mask_profile_rows_for_maintenance(
+    root: object,
+    *,
+    zarr_path: Path,
+    dataset_id: str,
+    recording_id: Optional[str],
+    zarr_use: Optional[str],
+    genotype: Optional[str],
+    dpf_at_acquisition: Optional[int],
+) -> List[Dict[str, Any]]:
+    from . import db as registry_db
+
+    extract_fn = getattr(registry_db, "_extract_eye_mask_profile_rows", None)
+    if callable(extract_fn):
+        extracted = _invoke_with_supported_kwargs(
+            extract_fn,
+            root,
+            zarr_path=zarr_path,
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+            genotype=genotype,
+            dpf_at_acquisition=dpf_at_acquisition,
+        )
+        if extracted is None:
+            return []
+        rows: List[Dict[str, Any]] = []
+        for item in extracted:
+            rows.append(_row_to_dict(item))
+        return rows
+
+    return _extract_eye_mask_profile_rows_fallback(
+        root,
+        zarr_path=zarr_path,
+        dataset_id=dataset_id,
+        recording_id=recording_id,
+        zarr_use=zarr_use,
+        genotype=genotype,
+        dpf_at_acquisition=dpf_at_acquisition,
+    )
+
+
+def _eye_mask_profile_table_columns(registry: Registry) -> tuple[str, ...]:
+    rows = registry.conn.execute("PRAGMA table_info(eye_mask_data_profile);").fetchall()
+    columns: List[str] = []
+    for row in rows:
+        try:
+            name = row["name"]  # type: ignore[index]
+        except Exception:
+            name = row[1] if len(row) > 1 else None  # type: ignore[index]
+        text = _decode_text(name)
+        if text:
+            columns.append(text)
+    return tuple(columns)
+
+
+def _normalize_eye_mask_profile_db_value(value: object) -> object:
+    if isinstance(value, (dict, list, tuple)):
+        return _canonical_json_text(value)
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", "ignore")
+    return value
+
+
+def _upsert_eye_mask_profile_row_sql(
+    registry: Registry,
+    *,
+    dataset_id: str,
+    row: Dict[str, Any],
+    table_columns: Sequence[str],
+) -> None:
+    if "dataset_id" not in table_columns or "profile_run" not in table_columns:
+        raise RuntimeError(
+            "eye_mask_data_profile table is missing required dataset_id/profile_run columns."
+        )
+    profile_run = _decode_text(row.get("profile_run"))
+    if not profile_run:
+        return
+
+    normalized = dict(row)
+    normalized["dataset_id"] = str(dataset_id)
+    normalized["profile_run"] = str(profile_run)
+
+    payload: Dict[str, object] = {}
+    for column in table_columns:
+        if column not in normalized:
+            continue
+        payload[column] = _normalize_eye_mask_profile_db_value(normalized[column])
+    payload["dataset_id"] = str(dataset_id)
+    payload["profile_run"] = str(profile_run)
+
+    ordered_columns = [column for column in table_columns if column in payload]
+    placeholders = ", ".join(f":{column}" for column in ordered_columns)
+    update_columns = [column for column in ordered_columns if column not in {"dataset_id", "profile_run"}]
+    if update_columns:
+        conflict_sql = (
+            "ON CONFLICT(dataset_id, profile_run) DO UPDATE SET "
+            + ", ".join(f"{column}=excluded.{column}" for column in update_columns)
+        )
+    else:
+        conflict_sql = "ON CONFLICT(dataset_id, profile_run) DO NOTHING"
+
+    sql = (
+        "INSERT INTO eye_mask_data_profile ("
+        + ", ".join(ordered_columns)
+        + ") VALUES ("
+        + placeholders
+        + ") "
+        + conflict_sql
+        + ";"
+    )
+    registry.conn.execute(
+        sql,
+        {column: payload[column] for column in ordered_columns},
+    )
+
+
+def _upsert_eye_mask_profile_row(
+    registry: Registry,
+    *,
+    dataset_id: str,
+    row: Dict[str, Any],
+) -> None:
+    profile_run = _decode_text(row.get("profile_run"))
+    if not profile_run:
+        return
+    payload = dict(row)
+    payload["dataset_id"] = str(dataset_id)
+    payload["profile_run"] = str(profile_run)
+
+    table_columns = _eye_mask_profile_table_columns(registry)
+    _upsert_eye_mask_profile_row_sql(
+        registry,
+        dataset_id=str(dataset_id),
+        row=payload,
+        table_columns=table_columns,
+    )
+
+
+def _replace_eye_mask_profile_rows(
+    registry: Registry,
+    *,
+    dataset_id: str,
+    records: Sequence[Dict[str, Any]],
+) -> None:
+    table_columns = _eye_mask_profile_table_columns(registry)
+    if "dataset_id" not in table_columns or "profile_run" not in table_columns:
+        raise RuntimeError(
+            "eye_mask_data_profile table is missing required dataset_id/profile_run columns."
+        )
+    with registry.conn:
+        registry.conn.execute(
+            "DELETE FROM eye_mask_data_profile WHERE dataset_id = ?;",
+            (str(dataset_id),),
+        )
+        for row in records:
+            _upsert_eye_mask_profile_row_sql(
+                registry,
+                dataset_id=str(dataset_id),
+                row=row,
+                table_columns=table_columns,
+            )
+
+
+def _backfill_eye_mask_profiles(
+    registry: Registry,
+    *,
+    dry_run: bool,
+    scope_paths: Optional[Sequence[Path]],
+    refresh: bool,
+) -> Dict[str, int]:
+    table_columns = _eye_mask_profile_table_columns(registry)
+    if "dataset_id" not in table_columns or "profile_run" not in table_columns:
+        raise RuntimeError(
+            "eye_mask_data_profile table is unavailable. Run eye-mask profile registry migrations first."
+        )
+
+    rows = registry.conn.execute(
+        """
+        SELECT
+            d.dataset_id,
+            d.zarr_path,
+            d.recording_id,
+            d.zarr_use,
+            p.genotype AS genotype,
+            p.dpf_at_acquisition AS dpf_at_acquisition
+        FROM datasets d
+        LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
+        WHERE (status IS NULL OR lower(status) != 'missing')
+          AND lower(COALESCE(d.artifact_kind, '')) = 'source_recording'
+        ORDER BY d.dataset_id;
+        """
+    ).fetchall()
+    scope_roots = _normalize_scope_paths(scope_paths)
+    zarr = _import_zarr()
+    summary: Dict[str, int] = {
+        "datasets_scanned": 0,
+        "datasets_skipped_existing": 0,
+        "datasets_missing": 0,
+        "datasets_errors": 0,
+        "datasets_no_profile": 0,
+        "rows_inserted": 0,
+        "rows_updated": 0,
+        "rows_skipped": 0,
+        "rows_deleted": 0,
+    }
+
+    for row in rows:
+        dataset_id = str(row["dataset_id"])
+        zarr_path = Path(str(row["zarr_path"])).expanduser()
+        recording_id = str(row["recording_id"]) if row["recording_id"] else None
+        zarr_use = str(row["zarr_use"]) if row["zarr_use"] else None
+        genotype = _decode_text(row["genotype"])
+        dpf_at_acquisition = _coerce_int_value(row["dpf_at_acquisition"])
+
+        if not _matches_scope(str(zarr_path), scope_roots):
+            continue
+        summary["datasets_scanned"] += 1
+        if not _is_zarr_root_path(zarr_path):
+            summary["datasets_missing"] += 1
+            continue
+
+        existing_rows = [
+            _row_to_dict(existing)
+            for existing in registry.conn.execute(
+                "SELECT * FROM eye_mask_data_profile WHERE dataset_id = ?;",
+                (dataset_id,),
+            ).fetchall()
+        ]
+        if not refresh and existing_rows:
+            summary["datasets_skipped_existing"] += 1
+            summary["rows_skipped"] += len(existing_rows)
+            continue
+
+        try:
+            try:
+                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+            except TypeError:
+                root = zarr.open_group(str(zarr_path), mode="r")
+            extracted_rows = _extract_eye_mask_profile_rows_for_maintenance(
+                root,
+                zarr_path=zarr_path,
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+                genotype=genotype,
+                dpf_at_acquisition=dpf_at_acquisition,
+            )
+        except Exception:
+            summary["datasets_errors"] += 1
+            continue
+
+        if not extracted_rows:
+            summary["datasets_no_profile"] += 1
+
+        existing_by_run: Dict[str, Dict[str, Any]] = {}
+        for existing in existing_rows:
+            run_name = _decode_text(existing.get("profile_run"))
+            if run_name:
+                existing_by_run[run_name] = existing
+
+        extracted_by_run: Dict[str, Dict[str, Any]] = {}
+        for extracted in extracted_rows:
+            run_name = _decode_text(extracted.get("profile_run"))
+            if not run_name:
+                continue
+            normalized = dict(extracted)
+            normalized["dataset_id"] = dataset_id
+            normalized["profile_run"] = run_name
+            extracted_by_run[run_name] = normalized
+
+        for run_name in sorted(extracted_by_run):
+            extracted = extracted_by_run[run_name]
+            existing = existing_by_run.get(run_name)
+            if existing is None:
+                summary["rows_inserted"] += 1
+                continue
+            signature_keys = sorted(
+                key
+                for key in extracted.keys()
+                if key in table_columns
+                and key not in {"dataset_id", "profile_run", "updated_utc", "created_utc"}
+            )
+            existing_sig = _eye_mask_data_profile_row_signature(existing, keys=signature_keys)
+            extracted_sig = _eye_mask_data_profile_row_signature(extracted, keys=signature_keys)
+            if existing_sig == extracted_sig:
+                summary["rows_skipped"] += 1
+            else:
+                summary["rows_updated"] += 1
+
+        if refresh:
+            for run_name in sorted(existing_by_run):
+                if run_name not in extracted_by_run:
+                    summary["rows_deleted"] += 1
+
+        if dry_run:
+            continue
+        records = [extracted_by_run[run_name] for run_name in sorted(extracted_by_run)]
+        if refresh:
+            _replace_eye_mask_profile_rows(
+                registry,
+                dataset_id=dataset_id,
+                records=records,
+            )
+        else:
+            with registry.conn:
+                for extracted in records:
+                    _upsert_eye_mask_profile_row(
+                        registry,
+                        dataset_id=dataset_id,
+                        row=extracted,
+                    )
+
+    return summary
+
+
 def _backfill_keypoint_profiles(
     registry: Registry,
     *,
@@ -2557,6 +3269,170 @@ def _backfill_keypoint_quality(
                     usable_keypoints_rate=extracted.get("usable_keypoints_rate"),
                     raw_keypoints_success_rate=extracted.get("raw_keypoints_success_rate"),
                     raw_keypoints_successful=extracted.get("raw_keypoints_successful"),
+                    quality_updated_utc=extracted.get("quality_updated_utc"),
+                    zarr_mtime_ns=extracted.get("zarr_mtime_ns"),
+                )
+
+    return summary
+
+
+def _eye_mask_quality_row_signature(row: Dict[str, object]) -> tuple[object, ...]:
+    return (
+        row.get("run_created_utc"),
+        row.get("recording_id"),
+        row.get("zarr_use"),
+        row.get("eye_mask_method"),
+        row.get("source_crop_run"),
+        row.get("source_keypoint_group"),
+        row.get("source_keypoints_run"),
+        row.get("source_eye_masks_run"),
+        row.get("source_eye_masks_method"),
+        row.get("review_state"),
+        row.get("review_method"),
+        row.get("review_intended_use"),
+        row.get("review_reviewer"),
+        row.get("review_timestamp_utc"),
+        row.get("total_rois"),
+        row.get("successful_eyes"),
+        row.get("successful_roi_pairs"),
+        row.get("successful_roi_pair_rate"),
+        row.get("source_keypoint_stale_state"),
+        row.get("source_keypoint_stale_reason"),
+        row.get("source_keypoint_stale_timestamp_utc"),
+        row.get("source_keypoint_stale_json"),
+        row.get("lifecycle_state"),
+        row.get("lifecycle_reason"),
+        row.get("zarr_mtime_ns"),
+    )
+
+
+def _backfill_eye_mask_quality(
+    registry: Registry,
+    *,
+    dry_run: bool,
+    scope_paths: Optional[Sequence[Path]],
+    refresh: bool,
+) -> Dict[str, int]:
+    rows = registry.conn.execute(
+        """
+        SELECT dataset_id, zarr_path, recording_id, zarr_use
+        FROM datasets
+        WHERE status IS NULL OR lower(status) != 'missing'
+        ORDER BY dataset_id;
+        """
+    ).fetchall()
+    scope_roots = _normalize_scope_paths(scope_paths)
+    zarr = _import_zarr()
+    summary: Dict[str, int] = {
+        "datasets_scanned": 0,
+        "datasets_skipped_existing": 0,
+        "datasets_missing": 0,
+        "datasets_errors": 0,
+        "datasets_no_quality": 0,
+        "rows_inserted": 0,
+        "rows_updated": 0,
+        "rows_skipped": 0,
+        "rows_deleted": 0,
+    }
+
+    for row in rows:
+        dataset_id = str(row["dataset_id"])
+        zarr_path = Path(str(row["zarr_path"])).expanduser()
+        recording_id = str(row["recording_id"]) if row["recording_id"] else None
+        zarr_use = str(row["zarr_use"]) if row["zarr_use"] else None
+        if not _matches_scope(str(zarr_path), scope_roots):
+            continue
+        summary["datasets_scanned"] += 1
+        if not _is_zarr_root_path(zarr_path):
+            summary["datasets_missing"] += 1
+            continue
+
+        existing_rows = registry.conn.execute(
+            "SELECT * FROM eye_mask_quality WHERE dataset_id = ?;",
+            (dataset_id,),
+        ).fetchall()
+        if not refresh and existing_rows:
+            summary["datasets_skipped_existing"] += 1
+            summary["rows_skipped"] += len(existing_rows)
+            continue
+
+        try:
+            try:
+                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+            except TypeError:
+                root = zarr.open_group(str(zarr_path), mode="r")
+            extracted_rows = _extract_eye_mask_quality_rows(
+                root,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+            )
+        except Exception:
+            summary["datasets_errors"] += 1
+            continue
+
+        if not extracted_rows:
+            summary["datasets_no_quality"] += 1
+
+        existing_by_key: Dict[tuple[str, str], Dict[str, object]] = {
+            (str(existing["stage_group"]), str(existing["run_name"])): {key: existing[key] for key in existing.keys()}
+            for existing in existing_rows
+        }
+        extracted_by_key: Dict[tuple[str, str], Dict[str, object]] = {
+            (str(extracted["stage_group"]), str(extracted["run_name"])): extracted for extracted in extracted_rows
+        }
+
+        for key, extracted in extracted_by_key.items():
+            existing = existing_by_key.get(key)
+            if existing is None:
+                summary["rows_inserted"] += 1
+                continue
+            existing_sig = _eye_mask_quality_row_signature(existing)
+            extracted_sig = _eye_mask_quality_row_signature(extracted)
+            if existing_sig == extracted_sig:
+                summary["rows_skipped"] += 1
+            else:
+                summary["rows_updated"] += 1
+
+        if refresh:
+            for key in existing_by_key:
+                if key not in extracted_by_key:
+                    summary["rows_deleted"] += 1
+
+        if dry_run:
+            continue
+        if refresh:
+            registry.replace_eye_mask_quality(dataset_id, extracted_rows)
+        else:
+            for extracted in extracted_rows:
+                registry.upsert_eye_mask_quality(
+                    dataset_id=dataset_id,
+                    stage_group=str(extracted["stage_group"]),
+                    run_name=str(extracted["run_name"]),
+                    run_created_utc=extracted.get("run_created_utc"),
+                    recording_id=extracted.get("recording_id"),
+                    zarr_use=extracted.get("zarr_use"),
+                    eye_mask_method=extracted.get("eye_mask_method"),
+                    source_crop_run=extracted.get("source_crop_run"),
+                    source_keypoint_group=extracted.get("source_keypoint_group"),
+                    source_keypoints_run=extracted.get("source_keypoints_run"),
+                    source_eye_masks_run=extracted.get("source_eye_masks_run"),
+                    source_eye_masks_method=extracted.get("source_eye_masks_method"),
+                    review_state=extracted.get("review_state"),
+                    review_method=extracted.get("review_method"),
+                    review_intended_use=extracted.get("review_intended_use"),
+                    review_reviewer=extracted.get("review_reviewer"),
+                    review_timestamp_utc=extracted.get("review_timestamp_utc"),
+                    total_rois=extracted.get("total_rois"),
+                    successful_eyes=extracted.get("successful_eyes"),
+                    successful_roi_pairs=extracted.get("successful_roi_pairs"),
+                    successful_roi_pair_rate=extracted.get("successful_roi_pair_rate"),
+                    source_keypoint_stale_state=extracted.get("source_keypoint_stale_state"),
+                    source_keypoint_stale_reason=extracted.get("source_keypoint_stale_reason"),
+                    source_keypoint_stale_timestamp_utc=extracted.get("source_keypoint_stale_timestamp_utc"),
+                    source_keypoint_stale_json=extracted.get("source_keypoint_stale_json"),
+                    lifecycle_state=extracted.get("lifecycle_state"),
+                    lifecycle_reason=extracted.get("lifecycle_reason"),
                     quality_updated_utc=extracted.get("quality_updated_utc"),
                     zarr_mtime_ns=extracted.get("zarr_mtime_ns"),
                 )
@@ -5861,7 +6737,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.remap_training_set_dataset_ids
         and not args.backfill_dataset_lineage
         and not args.backfill_keypoint_profiles
+        and not args.backfill_eye_mask_profiles
         and not args.backfill_keypoint_quality
+        and not args.backfill_eye_mask_quality
         and not args.backfill_detect_quality
         and not args.backfill_detect_performance
         and not args.backfill_keypoint_performance
@@ -5869,7 +6747,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.backfill_eye_mask_performance
         and not args.backfill_recording_step_status
         and not args.refresh_keypoint_profiles
+        and not args.refresh_eye_mask_profiles
         and not args.refresh_keypoint_quality
+        and not args.refresh_eye_mask_quality
         and not args.refresh_detect_quality
         and not args.refresh_detect_performance
         and not args.refresh_keypoint_performance
@@ -5884,12 +6764,16 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "--prune-empty-sets, --backfill-recording-entities, --backfill-subject-dish-cross, "
             "--backfill-subjects, "
             "--backfill-model-tables, --backfill-keypoint-profiles, --backfill-keypoint-quality, "
+            "--backfill-eye-mask-quality, "
+            "--backfill-eye-mask-profiles, "
             "--remap-training-set-dataset-ids, "
             "--backfill-dataset-lineage, "
             "--backfill-detect-quality, --backfill-detect-performance, --backfill-keypoint-performance, "
             "--backfill-crop-quality, --backfill-eye-mask-performance, "
             "--backfill-recording-step-status, "
             "--refresh-keypoint-profiles, --refresh-keypoint-quality, "
+            "--refresh-eye-mask-quality, "
+            "--refresh-eye-mask-profiles, "
             "--refresh-detect-quality, --refresh-detect-performance, "
             "--refresh-keypoint-performance, "
             "--refresh-crop-quality, --refresh-eye-mask-performance, "
@@ -6340,6 +7224,40 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                     f"unchanged={summary['rows_skipped']} row(s)."
                 )
 
+        if args.backfill_eye_mask_profiles or args.refresh_eye_mask_profiles:
+            summary = _backfill_eye_mask_profiles(
+                registry,
+                dry_run=bool(args.dry_run),
+                scope_paths=scope_paths or None,
+                refresh=bool(args.refresh_eye_mask_profiles),
+            )
+            mode = "refresh" if args.refresh_eye_mask_profiles else "backfill"
+            print(
+                f"Eye-mask profiles {mode}: "
+                "scope=source-recording-all-uses "
+                f"scanned={summary['datasets_scanned']} "
+                f"missing={summary['datasets_missing']} "
+                f"errors={summary['datasets_errors']} "
+                f"no_profile={summary['datasets_no_profile']} "
+                f"skipped_existing={summary['datasets_skipped_existing']}"
+            )
+            if args.dry_run:
+                print(
+                    "Dry run: would apply "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+            else:
+                print(
+                    "Applied "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+
         if args.backfill_keypoint_quality or args.refresh_keypoint_quality:
             summary = _backfill_keypoint_quality(
                 registry,
@@ -6350,6 +7268,39 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             mode = "refresh" if args.refresh_keypoint_quality else "backfill"
             print(
                 f"Keypoint quality {mode}: "
+                f"scanned={summary['datasets_scanned']} "
+                f"missing={summary['datasets_missing']} "
+                f"errors={summary['datasets_errors']} "
+                f"no_quality={summary['datasets_no_quality']} "
+                f"skipped_existing={summary['datasets_skipped_existing']}"
+            )
+            if args.dry_run:
+                print(
+                    "Dry run: would apply "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+            else:
+                print(
+                    "Applied "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+
+        if args.backfill_eye_mask_quality or args.refresh_eye_mask_quality:
+            summary = _backfill_eye_mask_quality(
+                registry,
+                dry_run=bool(args.dry_run),
+                scope_paths=scope_paths or None,
+                refresh=bool(args.refresh_eye_mask_quality),
+            )
+            mode = "refresh" if args.refresh_eye_mask_quality else "backfill"
+            print(
+                f"Eye-mask quality {mode}: "
                 f"scanned={summary['datasets_scanned']} "
                 f"missing={summary['datasets_missing']} "
                 f"errors={summary['datasets_errors']} "

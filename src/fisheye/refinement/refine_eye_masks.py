@@ -60,6 +60,7 @@ _MIN_OBJECT_AREA = 12
 _PROBABILITY_THRESHOLD = 0.45
 _AREA_FILTER_Z_DEFAULT = 2.0
 _AREA_FILTER_MODE_DEFAULT = "either"
+_SUCCESS_MIN_EYE_AREA_PX_DEFAULT = 50.0
 _REFINED_EYE_MASKS_STATUS_SOURCE = "runtime_refine_eye_masks"
 
 _ZARR_GROUP_CACHE: Dict[str, zarr.Group] = {}
@@ -83,6 +84,18 @@ def _status_float(value: object) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _coerce_positive_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric <= 0:
+        return None
+    return float(numeric)
 
 
 def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
@@ -1357,6 +1370,7 @@ def refine_eye_masks(
     created_at_utc: Optional[str] = None,
     area_filter_z: Optional[float] = _AREA_FILTER_Z_DEFAULT,
     area_filter_mode: str = _AREA_FILTER_MODE_DEFAULT,
+    success_min_eye_area_px: Optional[float] = _SUCCESS_MIN_EYE_AREA_PX_DEFAULT,
     force_refine_traditional: bool = False,
     allow_latest_keypoint_fallback: bool = False,
 ) -> str:
@@ -1368,14 +1382,8 @@ def refine_eye_masks(
     area_filter_mode = (area_filter_mode or _AREA_FILTER_MODE_DEFAULT).lower()
     if area_filter_mode not in {"either", "both"}:
         area_filter_mode = _AREA_FILTER_MODE_DEFAULT
-    if area_filter_z is not None:
-        try:
-            area_filter_z = float(area_filter_z)
-        except (TypeError, ValueError):
-            area_filter_z = None
-        else:
-            if area_filter_z <= 0:
-                area_filter_z = None
+    area_filter_z = _coerce_positive_float(area_filter_z)
+    success_min_eye_area_px = _coerce_positive_float(success_min_eye_area_px)
 
     chunk_size = max(1, int(chunk_size))
 
@@ -1599,6 +1607,9 @@ def refine_eye_masks(
         "filtered_rois": 0,
         "filtered_left": 0,
         "filtered_right": 0,
+        "small_area_rois": 0,
+        "small_area_left": 0,
+        "small_area_right": 0,
     }
 
     chunk_rois = min(512, total_rois) if total_rois > 0 else 1
@@ -1785,11 +1796,10 @@ def refine_eye_masks(
     gathered_results.sort(key=lambda item: item[0])
 
     wrote_any_probs = False
-    total_successful_eyes = 0
-    successful_pair_count = 0
 
     refined_area_metrics = np.zeros((total_rois, 2), dtype=np.float32)
     source_area_metrics = np.zeros((total_rois, 2), dtype=np.float32)
+    ellipse_success_metrics = np.zeros((total_rois, 2), dtype=bool)
     union_refined_metrics = np.zeros(total_rois, dtype=np.float32)
     union_source_metrics = np.zeros(total_rois, dtype=np.float32)
     centroid_error_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
@@ -1812,9 +1822,6 @@ def refine_eye_masks(
     for global_idx, result in gathered_results:
         if result.probabilities is not None:
             wrote_any_probs = True
-        total_successful_eyes += int(result.ellipse_success.sum())
-        if result.ellipse_success.all():
-            successful_pair_count += 1
         if result.smoothing_changed.any():
             stats["smoothed_rois"] += 1
             stats["smoothed_channels"] += int(result.smoothing_changed.sum())
@@ -1826,6 +1833,7 @@ def refine_eye_masks(
 
         refined_area_metrics[global_idx] = result.refined_areas
         source_area_metrics[global_idx] = result.source_areas
+        ellipse_success_metrics[global_idx] = result.ellipse_success.astype(bool, copy=False)
         union_refined_metrics[global_idx] = result.refined_union_area
         union_source_metrics[global_idx] = result.source_union_area
         centroid_error_metrics[global_idx] = result.centroid_errors
@@ -1915,8 +1923,8 @@ def refine_eye_masks(
 
     filter_flags = np.zeros((total_rois, 2), dtype=bool)
     pair_filter_flags = np.zeros(total_rois, dtype=bool)
-    if area_filter_z is not None and area_filter_z > 0 and total_rois > 0:
-        threshold = float(area_filter_z)
+    if area_filter_z is not None and total_rois > 0:
+        threshold = area_filter_z
         filter_flags = np.abs(area_zscores) > threshold
         if area_filter_mode == "both":
             pair_filter_flags = np.all(filter_flags, axis=1)
@@ -1939,6 +1947,31 @@ def refine_eye_masks(
         stats["filtered_left"] = 0
         stats["filtered_right"] = 0
         stats["filtered_rois"] = 0
+
+    small_area_flags = np.zeros((total_rois, 2), dtype=bool)
+    small_area_pair_flags = np.zeros(total_rois, dtype=bool)
+    if success_min_eye_area_px is not None and total_rois > 0:
+        small_area_flags = refined_area_metrics < float(success_min_eye_area_px)
+        small_area_pair_flags = np.any(small_area_flags, axis=1)
+
+        for idx in np.nonzero(small_area_flags[:, 0])[0]:
+            reason_strings[idx] = _append_reason_tag(reason_strings[idx], "small_area_left")
+        for idx in np.nonzero(small_area_flags[:, 1])[0]:
+            reason_strings[idx] = _append_reason_tag(reason_strings[idx], "small_area_right")
+        for idx in np.nonzero(small_area_pair_flags)[0]:
+            reason_strings[idx] = _append_reason_tag(reason_strings[idx], "small_area_pair")
+
+        stats["small_area_left"] = int(small_area_flags[:, 0].sum())
+        stats["small_area_right"] = int(small_area_flags[:, 1].sum())
+        stats["small_area_rois"] = int(small_area_pair_flags.sum())
+    else:
+        stats["small_area_left"] = 0
+        stats["small_area_right"] = 0
+        stats["small_area_rois"] = 0
+
+    effective_success = ellipse_success_metrics & ~small_area_flags
+    if total_rois > 0:
+        run_group["ellipse_success"][:] = effective_success.astype(bool, copy=False)
 
     reason_array = np.array(reason_strings, dtype=object)
     reason_counts = dict(Counter(reason_strings))
@@ -2134,8 +2167,12 @@ def refine_eye_masks(
         "filtered_left": stats["filtered_left"],
         "filtered_right": stats["filtered_right"],
         "filtered_roi_pairs": stats["filtered_rois"],
-        "area_filter_threshold": float(area_filter_z) if area_filter_z is not None and area_filter_z > 0 else None,
+        "small_area_left": stats["small_area_left"],
+        "small_area_right": stats["small_area_right"],
+        "small_area_roi_pairs": stats["small_area_rois"],
+        "area_filter_threshold": area_filter_z,
         "area_filter_mode": area_filter_mode,
+        "success_min_eye_area_px": success_min_eye_area_px,
     }
 
     left_concat = np.concatenate(left_points, axis=0).astype(np.float32) if left_points else np.zeros((0, 2), dtype=np.float32)
@@ -2185,8 +2222,8 @@ def refine_eye_masks(
     source_eye_labels = list(src_run.attrs.get("eye_labels", ["eye_0", "eye_1"]))
     eye_labels = ["eye_left", "eye_right"]
 
-    total_eyes = int(total_successful_eyes)
-    successful_pairs = int(successful_pair_count)
+    total_eyes = int(effective_success.sum()) if total_rois else 0
+    successful_pairs = int(np.all(effective_success, axis=1).sum()) if total_rois else 0
     pair_rate = float(successful_pairs / total_rois) if total_rois else float("nan")
 
     git_info = get_git_info()
@@ -2237,12 +2274,20 @@ def refine_eye_masks(
     }
 
     area_filter_info = {
-        "enabled": bool(area_filter_z and area_filter_z > 0),
-        "z_threshold": float(area_filter_z) if area_filter_z is not None and area_filter_z > 0 else None,
+        "enabled": area_filter_z is not None,
+        "z_threshold": area_filter_z,
         "mode": area_filter_mode,
         "filtered_left": stats["filtered_left"],
         "filtered_right": stats["filtered_right"],
         "filtered_roi_pairs": stats["filtered_rois"],
+    }
+
+    small_area_filter_info = {
+        "enabled": success_min_eye_area_px is not None,
+        "min_eye_area_px": success_min_eye_area_px,
+        "small_area_left": stats["small_area_left"],
+        "small_area_right": stats["small_area_right"],
+        "small_area_roi_pairs": stats["small_area_rois"],
     }
 
     mask_parameters = {
@@ -2259,6 +2304,7 @@ def refine_eye_masks(
         "probability_split": int(stats["probability_split"]),
         "metrics_version": 1,
         "area_filter": area_filter_info,
+        "success_area_filter": small_area_filter_info,
     }
 
     artifact_keys = [
@@ -2325,6 +2371,8 @@ def refine_eye_masks(
         "mask_binary_identity": bundle.binary_identity,
         "mask_probability_identity": bundle.probs_identity or "none",
         "mask_bundle_provenance": mask_bundle_provenance,
+        "success_min_eye_area_px": success_min_eye_area_px,
+        "min_eye_area_success_px": success_min_eye_area_px,
         "traditional_fast_path": bool(use_fast_path),
         "force_refine_traditional": bool(force_refine_traditional),
         "dask_scheduler": scheduler_key,
@@ -2370,6 +2418,7 @@ def refine_eye_masks(
             "successful_roi_pairs": successful_pairs,
             "successful_roi_pair_rate": pair_rate,
             "filtered_roi_pairs": stats.get("filtered_rois"),
+            "small_area_roi_pairs": stats.get("small_area_rois"),
             "probability_source": mask_prob_dataset or "none",
         },
         console=console,
@@ -2434,6 +2483,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Require either eye or both eyes to exceed the threshold before flagging a pair.",
     )
     parser.add_argument(
+        "--success-min-eye-area-px",
+        type=float,
+        default=_SUCCESS_MIN_EYE_AREA_PX_DEFAULT,
+        help="Require each eye area to be at least this many pixels to count ROI-pair success (default: 50).",
+    )
+    parser.add_argument(
         "--force-refine-traditional",
         action="store_true",
         help="Run full refinement even for traditional eye-mask runs (enables smoothing/component enforcement).",
@@ -2466,6 +2521,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             created_at_utc=created_at,
             area_filter_z=args.area_filter_z,
             area_filter_mode=args.area_filter_mode,
+            success_min_eye_area_px=args.success_min_eye_area_px,
             force_refine_traditional=args.force_refine_traditional,
             allow_latest_keypoint_fallback=args.allow_latest_keypoint_fallback,
         )

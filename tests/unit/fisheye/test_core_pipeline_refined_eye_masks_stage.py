@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from fisheye.core.pipeline import Pipeline, PipelineConfig
 from fisheye.refinement import refine_eye_masks as refine_eye_masks_mod
 
@@ -71,6 +73,7 @@ def test_run_refined_eye_masks_passes_config_and_normalizes_scheduler(
         "num_workers": 7,
         "area_filter_z": 3.5,
         "area_filter_mode": "both",
+        "success_min_eye_area_px": 42.0,
         "force_refine_traditional": True,
         "allow_latest_keypoint_fallback": True,
     }
@@ -94,7 +97,102 @@ def test_run_refined_eye_masks_passes_config_and_normalizes_scheduler(
     assert captured["num_workers"] == 7
     assert captured["area_filter_z"] == 3.5
     assert captured["area_filter_mode"] == "both"
+    assert captured["success_min_eye_area_px"] == pytest.approx(42.0)
     assert captured["force_refine_traditional"] is True
     assert captured["allow_latest_keypoint_fallback"] is True
     assert captured["command"] == "pipeline:refined_eye_masks"
     assert captured["created_at_utc"] is not None
+
+
+def test_run_refined_eye_masks_exports_merged_and_auto_aggregates(monkeypatch, tmp_path: Path) -> None:
+    pipeline = _make_pipeline(tmp_path)
+    pipeline.zarr_root = object()
+    merged_out = tmp_path / "merged_eye_training.zarr"
+    pipeline.pipeline_params["refine_eye_masks"] = {
+        "enabled": True,
+        "merged_out_zarr": str(merged_out),
+    }
+
+    captured: dict[str, object] = {}
+
+    def _fake_refine_eye_masks(**_kwargs):
+        return "refined_eye_masks_001"
+
+    def _fake_export_merged_eye_mask_training_zarr(**kwargs):
+        captured.update(kwargs)
+        return {"zarr_path": str(kwargs["out_zarr"])}
+
+    monkeypatch.setattr(refine_eye_masks_mod, "refine_eye_masks", _fake_refine_eye_masks)
+    monkeypatch.setattr(
+        "fisheye.utils.export_eye_mask_training_zarr.export_merged_eye_mask_training_zarr",
+        _fake_export_merged_eye_mask_training_zarr,
+    )
+
+    pipeline._run_refined_eye_masks()
+
+    assert captured["source_zarr"] == Path(pipeline.config.zarr_path)
+    assert captured["out_zarr"] == merged_out
+    assert captured["eye_stage"] == "refined_eye_masks_runs"
+    assert captured["eye_run"] == "refined_eye_masks_001"
+    assert captured["aggregate_training_data_card"] is True
+    assert pipeline.stage_results["eye_mask_merged_export"]["zarr_path"] == str(merged_out)
+
+
+def test_run_refined_eye_masks_respects_no_aggregate_opt_out(monkeypatch, tmp_path: Path) -> None:
+    pipeline = _make_pipeline(tmp_path)
+    pipeline.zarr_root = object()
+    merged_out = tmp_path / "merged_eye_training.zarr"
+    pipeline.pipeline_params["refine_eye_masks"] = {
+        "enabled": True,
+        "merged_out_zarr": str(merged_out),
+        "no_aggregate_training_data_card": True,
+    }
+
+    captured: dict[str, object] = {}
+
+    def _fake_refine_eye_masks(**_kwargs):
+        return "refined_eye_masks_001"
+
+    def _fake_export_merged_eye_mask_training_zarr(**kwargs):
+        captured.update(kwargs)
+        return {"zarr_path": str(kwargs["out_zarr"])}
+
+    monkeypatch.setattr(refine_eye_masks_mod, "refine_eye_masks", _fake_refine_eye_masks)
+    monkeypatch.setattr(
+        "fisheye.utils.export_eye_mask_training_zarr.export_merged_eye_mask_training_zarr",
+        _fake_export_merged_eye_mask_training_zarr,
+    )
+
+    pipeline._run_refined_eye_masks()
+
+    assert captured["aggregate_training_data_card"] is False
+
+
+def test_run_refined_eye_masks_rejects_conflicting_aggregate_flags(monkeypatch, tmp_path: Path) -> None:
+    pipeline = _make_pipeline(tmp_path)
+    pipeline.zarr_root = object()
+    pipeline.pipeline_params["refine_eye_masks"] = {
+        "enabled": True,
+        "merged_out_zarr": str(tmp_path / "merged_eye_training.zarr"),
+        "aggregate_training_data_card": True,
+        "no_aggregate_training_data_card": True,
+    }
+
+    monkeypatch.setattr(refine_eye_masks_mod, "refine_eye_masks", lambda **_kwargs: "refined_eye_masks_001")
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        pipeline._run_refined_eye_masks()
+
+
+def test_run_refined_eye_masks_requires_merged_export_for_aggregation(monkeypatch, tmp_path: Path) -> None:
+    pipeline = _make_pipeline(tmp_path)
+    pipeline.zarr_root = object()
+    pipeline.pipeline_params["refine_eye_masks"] = {
+        "enabled": True,
+        "aggregate_training_data_card": True,
+    }
+
+    monkeypatch.setattr(refine_eye_masks_mod, "refine_eye_masks", lambda **_kwargs: "refined_eye_masks_001")
+
+    with pytest.raises(ValueError, match="Provide --eye-mask-merged-out-zarr"):
+        pipeline._run_refined_eye_masks()

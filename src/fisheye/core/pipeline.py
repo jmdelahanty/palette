@@ -69,6 +69,17 @@ class PipelineConfig:
     training_data: bool = False
     frame_step: Optional[int] = None
     no_dask_progress: bool = False
+    registry_path: Optional[str] = None
+    eye_mask_merged_out_zarr: Optional[str] = None
+    eye_mask_merge_overwrite: bool = False
+    eye_mask_training_set_id: Optional[str] = None
+    eye_mask_training_set_name: Optional[str] = None
+    aggregate_training_data_card: bool = False
+    no_aggregate_training_data_card: bool = False
+    data_card_output: Optional[str] = None
+    data_card_no_plots: bool = False
+    data_card_plot_dir: Optional[str] = None
+    data_card_plot_prefix: Optional[str] = None
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "PipelineConfig":
@@ -95,6 +106,17 @@ class PipelineConfig:
             training_data=getattr(args, 'training_data', False),
             frame_step=getattr(args, 'frame_step', None),
             no_dask_progress=getattr(args, 'no_dask_progress', False),
+            registry_path=getattr(args, 'registry', None),
+            eye_mask_merged_out_zarr=getattr(args, 'eye_mask_merged_out_zarr', None),
+            eye_mask_merge_overwrite=getattr(args, 'eye_mask_merge_overwrite', False),
+            eye_mask_training_set_id=getattr(args, 'eye_mask_training_set_id', None),
+            eye_mask_training_set_name=getattr(args, 'eye_mask_training_set_name', None),
+            aggregate_training_data_card=getattr(args, 'aggregate_training_data_card', False),
+            no_aggregate_training_data_card=getattr(args, 'no_aggregate_training_data_card', False),
+            data_card_output=getattr(args, 'data_card_output', None),
+            data_card_no_plots=getattr(args, 'data_card_no_plots', False),
+            data_card_plot_dir=getattr(args, 'data_card_plot_dir', None),
+            data_card_plot_prefix=getattr(args, 'data_card_plot_prefix', None),
         )
 
 
@@ -240,13 +262,26 @@ class Pipeline:
                 'source_run': None,
                 'run_name': None,
                 'keypoint_run': None,
+                'merged_out_zarr': None,
+                'merged_run_name': None,
+                'merged_overwrite': False,
                 'chunk_size': 512,
                 'scheduler': 'processes',
                 'num_workers': None,
                 'area_filter_z': 2.0,
                 'area_filter_mode': 'either',
+                'success_min_eye_area_px': 50.0,
                 'force_refine_traditional': False,
                 'allow_latest_keypoint_fallback': False,
+                'registry_path': None,
+                'training_set_id': None,
+                'training_set_name': None,
+                'aggregate_training_data_card': False,
+                'no_aggregate_training_data_card': False,
+                'data_card_output': None,
+                'data_card_no_plots': False,
+                'data_card_plot_dir': None,
+                'data_card_plot_prefix': None,
             }
         }
         
@@ -676,11 +711,76 @@ class Pipeline:
             created_at_utc=datetime.now(timezone.utc).isoformat(),
             area_filter_z=params.get('area_filter_z', 2.0),
             area_filter_mode=params.get('area_filter_mode', 'either'),
+            success_min_eye_area_px=params.get('success_min_eye_area_px', 50.0),
             force_refine_traditional=bool(params.get('force_refine_traditional', False)),
             allow_latest_keypoint_fallback=bool(params.get('allow_latest_keypoint_fallback', False)),
         )
 
         self.console.print(f"[green]✓[/green] Eye-mask refinement saved as [cyan]{run_name}[/cyan]")
+
+        merged_out_zarr = params.get('merged_out_zarr') or self.config.eye_mask_merged_out_zarr
+        explicit_aggregate_requested = (
+            bool(params.get('aggregate_training_data_card'))
+            if 'aggregate_training_data_card' in params
+            else bool(self.config.aggregate_training_data_card)
+        )
+        no_aggregate_requested = (
+            bool(params.get('no_aggregate_training_data_card'))
+            if 'no_aggregate_training_data_card' in params
+            else bool(self.config.no_aggregate_training_data_card)
+        )
+        if explicit_aggregate_requested and no_aggregate_requested:
+            raise ValueError(
+                "refine_eye_masks aggregate_training_data_card cannot be combined with "
+                "no_aggregate_training_data_card."
+            )
+
+        auto_aggregate_requested = bool(merged_out_zarr) and not no_aggregate_requested
+        should_aggregate = bool(explicit_aggregate_requested or auto_aggregate_requested)
+        if should_aggregate and not merged_out_zarr:
+            raise ValueError(
+                "Eye-mask data-card aggregation requires merged export output. "
+                "Provide --eye-mask-merged-out-zarr or refine_eye_masks.merged_out_zarr."
+            )
+        if auto_aggregate_requested and not explicit_aggregate_requested:
+            self.console.print(
+                "[cyan]Auto enabling eye-mask training data-card aggregation for merged export. "
+                "Use --no-aggregate-training-data-card to disable.[/cyan]"
+            )
+
+        if merged_out_zarr:
+            from ..utils.export_eye_mask_training_zarr import export_merged_eye_mask_training_zarr
+
+            merged_run_name = params.get('merged_run_name') or run_name
+            merged_overwrite = bool(params.get('merged_overwrite', self.config.eye_mask_merge_overwrite))
+            registry_path = params.get('registry_path') or self.config.registry_path
+            training_set_id = params.get('training_set_id') or self.config.eye_mask_training_set_id
+            training_set_name = params.get('training_set_name') or self.config.eye_mask_training_set_name
+            data_card_output = params.get('data_card_output') or self.config.data_card_output
+            data_card_plot_dir = params.get('data_card_plot_dir') or self.config.data_card_plot_dir
+            data_card_plot_prefix = params.get('data_card_plot_prefix') or self.config.data_card_plot_prefix
+            data_card_no_plots = bool(params.get('data_card_no_plots', self.config.data_card_no_plots))
+
+            export_summary = export_merged_eye_mask_training_zarr(
+                source_zarr=Path(self.config.zarr_path),
+                out_zarr=Path(str(merged_out_zarr)),
+                eye_stage='refined_eye_masks_runs',
+                eye_run=str(run_name),
+                run_name=str(merged_run_name),
+                overwrite=merged_overwrite,
+                registry=Path(str(registry_path)) if registry_path else None,
+                training_set_id=training_set_id,
+                training_set_name=training_set_name,
+                aggregate_training_data_card=should_aggregate,
+                data_card_output=Path(str(data_card_output)) if data_card_output else None,
+                data_card_plot_dir=Path(str(data_card_plot_dir)) if data_card_plot_dir else None,
+                data_card_plot_prefix=data_card_plot_prefix,
+                data_card_no_plots=data_card_no_plots,
+            )
+            self.stage_results['eye_mask_merged_export'] = export_summary
+            self.console.print(
+                f"[green]✓[/green] Eye-mask merged export saved as [cyan]{merged_out_zarr}[/cyan]"
+            )
     
     def _run_refine(self) -> None:
         """Run detection refinement stage (filter & interpolate detections)."""
@@ -1301,6 +1401,62 @@ Examples:
     )
 
     parser.add_argument(
+        "--registry",
+        type=str,
+        help="Optional registry SQLite path used for eye-mask merged export registration and data-card workflows.",
+    )
+    parser.add_argument(
+        "--eye-mask-merged-out-zarr",
+        type=str,
+        help="Optional merged eye-mask training Zarr output path written after refined_eye_masks stage.",
+    )
+    parser.add_argument(
+        "--eye-mask-merge-overwrite",
+        action="store_true",
+        help="Overwrite existing merged eye-mask training Zarr output path when exporting.",
+    )
+    parser.add_argument(
+        "--eye-mask-training-set-id",
+        type=str,
+        help="Optional training set id for eye-mask merged export registry linkage and data-card aggregation.",
+    )
+    parser.add_argument(
+        "--eye-mask-training-set-name",
+        type=str,
+        help="Optional training set name for eye-mask merged export registry linkage.",
+    )
+    parser.add_argument(
+        "--aggregate-training-data-card",
+        action="store_true",
+        help="Aggregate eye-mask training data card after merged export.",
+    )
+    parser.add_argument(
+        "--no-aggregate-training-data-card",
+        action="store_true",
+        help="Disable automatic eye-mask data-card aggregation when merged export is enabled.",
+    )
+    parser.add_argument(
+        "--data-card-output",
+        type=str,
+        help="Optional deterministic output JSON path for eye-mask data-card aggregation.",
+    )
+    parser.add_argument(
+        "--data-card-no-plots",
+        action="store_true",
+        help="Skip eye-mask data-card plot generation during aggregation.",
+    )
+    parser.add_argument(
+        "--data-card-plot-dir",
+        type=str,
+        help="Optional deterministic output directory for eye-mask data-card plots.",
+    )
+    parser.add_argument(
+        "--data-card-plot-prefix",
+        type=str,
+        help="Optional deterministic filename prefix for eye-mask data-card plots.",
+    )
+
+    parser.add_argument(
         "--refine-max-gap",
         type=int,
         help="Override maximum gap (in frames) for refinement"
@@ -1460,6 +1616,11 @@ Examples:
             frame_idx=args.frame,
             use_full_res=args.full,
             console=console
+        )
+
+    if args.aggregate_training_data_card and args.no_aggregate_training_data_card:
+        parser.error(
+            "--aggregate-training-data-card cannot be combined with --no-aggregate-training-data-card."
         )
     
     # Validate requirements for normal pipeline operation

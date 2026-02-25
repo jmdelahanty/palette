@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 import shutil
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,13 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import zarr
 from zarr.core.dtype import VariableLengthUTF8
+
+from fisheye.registry.db import Registry, resolve_dataset_id
+from fisheye.shared.detect_reason_codec import (
+    REASON_BYTES_ENCODING,
+    read_reason_labels,
+    write_reason_columns,
+)
 
 
 def _utc_now() -> str:
@@ -57,6 +65,197 @@ def _normalize_label_mode(value: Optional[str]) -> Optional[str]:
     if text in {"union", "merged"}:
         return "union"
     return None
+
+
+def _clean_slug(value: Optional[str], fallback: str) -> str:
+    text = _as_text(value) or fallback
+    cleaned = "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in text)
+    cleaned = cleaned.strip("._")
+    return cleaned or fallback
+
+
+def _default_data_card_output_path(out_zarr: Path) -> Path:
+    return out_zarr.with_suffix(".data_card.json")
+
+
+def _default_data_card_plot_dir(card_json: Path) -> Path:
+    return card_json.parent / f"{card_json.stem}.plots"
+
+
+def _default_data_card_plot_prefix(*, run_name: str, card_json: Path) -> str:
+    return _clean_slug(run_name, fallback=card_json.stem)
+
+
+def _json_list(raw: Any) -> List[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(item) for item in raw if item]
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "ignore")
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return []
+        if isinstance(payload, list):
+            return [str(item) for item in payload if item]
+    return []
+
+
+def _json_dict(raw: Any) -> Optional[Dict[str, Any]]:
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "ignore")
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return None
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _format_command(command: Sequence[str]) -> str:
+    return " ".join(str(part) for part in command)
+
+
+def _run_command_checked(
+    *,
+    command: Sequence[str],
+    step_name: str,
+    remediation: str,
+) -> str:
+    command_text = _format_command(command)
+    try:
+        completed = subprocess.run(
+            [str(part) for part in command],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"{step_name} failed: command not found ({command_text}). "
+            f"Remediation: {remediation}"
+        ) from exc
+
+    if int(completed.returncode) != 0:
+        output = (completed.stderr or completed.stdout or "").strip()
+        if output:
+            output = " ".join(output.splitlines())
+            if len(output) > 300:
+                output = f"{output[:300]}..."
+            details = f" (exit={int(completed.returncode)}; output={output})"
+        else:
+            details = f" (exit={int(completed.returncode)})"
+        raise RuntimeError(
+            f"{step_name} failed{details}. Command: {command_text}. "
+            f"Remediation: {remediation}"
+        )
+    return command_text
+
+
+def _resolve_source_dataset_id(
+    *,
+    source_root: zarr.Group,
+    source_path: Path,
+    registry_path: Optional[Path],
+) -> str:
+    """Resolve source dataset identity with detect/keypoint-aligned precedence."""
+    explicit_dataset_id = _as_text(source_root.attrs.get("dataset_id"))
+    if explicit_dataset_id:
+        return str(explicit_dataset_id)
+
+    dataset_id, _ = resolve_dataset_id(source_root, source_path)
+
+    if registry_path is not None:
+        registry = Registry(registry_path)
+        try:
+            registered_dataset_id = registry.scan_zarr(source_path)
+            if registered_dataset_id:
+                return str(registered_dataset_id)
+        finally:
+            registry.close()
+
+    return str(dataset_id)
+
+
+def _register_merged_dataset_in_registry(
+    *,
+    registry_path: Path,
+    merged_zarr: Path,
+    source_zarr_paths: Sequence[Path],
+    set_id: Optional[str],
+    set_name: Optional[str],
+) -> Dict[str, Any]:
+    """Register merged eye-mask export and update lineage/training-set linkage."""
+    registry = Registry(registry_path)
+    try:
+        merged_dataset_id = registry.scan_zarr(merged_zarr)
+        if not merged_dataset_id:
+            raise RuntimeError(f"Failed to register merged zarr: {merged_zarr}")
+
+        source_dataset_ids: List[str] = []
+        for source_path in source_zarr_paths:
+            source_dataset_id = registry.scan_zarr(source_path)
+            if source_dataset_id:
+                source_dataset_ids.append(str(source_dataset_id))
+        source_dataset_ids = sorted(set(source_dataset_ids))
+
+        training_set_linked = False
+        if set_id:
+            existing = registry.conn.execute(
+                "SELECT name, query_filter, dataset_ids_json, invocation_json FROM training_sets WHERE set_id = ?",
+                (str(set_id),),
+            ).fetchone()
+            existing_ids = _json_list(existing["dataset_ids_json"]) if existing else []
+            existing_query_filter = _json_dict(existing["query_filter"]) if existing else None
+            existing_invocation = _json_dict(existing["invocation_json"]) if existing else None
+            merged_ids = sorted(
+                {
+                    str(merged_dataset_id),
+                    *(str(item) for item in source_dataset_ids if item),
+                    *(str(item) for item in existing_ids if item),
+                }
+            )
+            registry.upsert_training_set(
+                set_id=str(set_id),
+                name=set_name or (existing["name"] if existing else None),
+                task_type=None,
+                query_filter=existing_query_filter,
+                dataset_ids=merged_ids,
+                invocation=existing_invocation,
+            )
+            training_set_linked = True
+
+        registry.replace_dataset_lineage(
+            child_dataset_id=str(merged_dataset_id),
+            parent_dataset_ids=source_dataset_ids,
+            relationship_type="training_merge_source",
+            source_set_id=str(set_id) if set_id else None,
+            metadata={"producer": "export_eye_mask_training_zarr"},
+        )
+
+        return {
+            "registry_path": str(registry_path),
+            "merged_dataset_id": str(merged_dataset_id),
+            "source_dataset_ids": source_dataset_ids,
+            "training_set_linked": bool(training_set_linked),
+            "training_set_id": str(set_id) if set_id else None,
+        }
+    finally:
+        registry.close()
 
 
 def _iter_chunk_slices(shape: Tuple[int, ...], chunks: Tuple[int, ...]) -> Iterable[Tuple[slice, ...]]:
@@ -161,15 +360,26 @@ def _resolve_eye_source(
     raise ValueError(f"No eye-mask runs found in selected stage(s): {stage_order}.")
 
 
-def _resolve_reason_source(run_group: zarr.Group) -> Optional[zarr.Array]:
+def _read_reason_labels_safe(group: zarr.Group) -> Optional[np.ndarray]:
+    try:
+        return read_reason_labels(group)
+    except Exception:
+        reason_arr = group.get("reason")
+        if isinstance(reason_arr, zarr.Array):
+            return np.asarray(reason_arr[:], dtype=object)
+    return None
+
+
+def _resolve_reason_labels(run_group: zarr.Group) -> Optional[np.ndarray]:
     metrics_group = run_group.get("metrics")
     if isinstance(metrics_group, zarr.Group):
-        reason_arr = metrics_group.get("reason")
-        if isinstance(reason_arr, zarr.Array):
-            return reason_arr
-    reason_arr = run_group.get("reason")
-    if isinstance(reason_arr, zarr.Array):
-        return reason_arr
+        labels = _read_reason_labels_safe(metrics_group)
+        if labels is not None:
+            return labels
+
+    labels = _read_reason_labels_safe(run_group)
+    if labels is not None:
+        return labels
     return None
 
 
@@ -288,50 +498,364 @@ def _select_source_runs(
     return selection, crop_group, eye_group
 
 
-def export_merged_eye_mask_training_zarr(
-    source_zarr: Path,
-    out_zarr: Path,
+@dataclass(frozen=True)
+class EyeMaskCardArtifacts:
+    card_json: Path
+    plot_dir: Path
+    plot_prefix: str
+    training_set_id: Optional[str]
+
+
+def _resolve_card_artifacts(
     *,
-    crop_run: Optional[str] = None,
-    eye_stage: str = "auto",
-    eye_run: Optional[str] = None,
-    run_name: str = "merged_export_smoke",
-    input_format: str = "gray",
-    label_mode: str = "lr",
-    split_train: float = 0.8,
-    split_val: float = 0.2,
-    split_test: float = 0.0,
-    split_seed: int = 42,
-    overwrite: bool = False,
-    validate: bool = True,
+    out_zarr: Path,
+    run_name: str,
+    training_set_id: Optional[str],
+    data_card_output: Optional[Path],
+    data_card_plot_dir: Optional[Path],
+    data_card_plot_prefix: Optional[str],
+) -> EyeMaskCardArtifacts:
+    card_json = (
+        Path(data_card_output).expanduser().resolve()
+        if data_card_output is not None
+        else _default_data_card_output_path(out_zarr)
+    )
+    plot_dir = (
+        Path(data_card_plot_dir).expanduser().resolve()
+        if data_card_plot_dir is not None
+        else _default_data_card_plot_dir(card_json)
+    )
+    plot_prefix = (
+        _clean_slug(_as_text(data_card_plot_prefix), fallback=card_json.stem)
+        if data_card_plot_prefix is not None
+        else _default_data_card_plot_prefix(run_name=run_name, card_json=card_json)
+    )
+    training_set_text = _as_text(training_set_id)
+    resolved_training_set = (
+        _clean_slug(training_set_text, fallback="training_set")
+        if training_set_text is not None
+        else None
+    )
+    return EyeMaskCardArtifacts(
+        card_json=card_json,
+        plot_dir=plot_dir,
+        plot_prefix=plot_prefix,
+        training_set_id=resolved_training_set,
+    )
+
+
+def _run_data_card_workflow(
+    *,
+    registry_path: Optional[Path],
+    artifacts: EyeMaskCardArtifacts,
+    no_plots: bool,
 ) -> Dict[str, Any]:
-    source_path = Path(source_zarr).expanduser().resolve()
-    out_path = Path(out_zarr).expanduser().resolve()
+    if not artifacts.training_set_id:
+        raise ValueError(
+            "Eye-mask data-card aggregation requires an explicit training_set_id. "
+            "Provide --training-set-id (or training_set_id=...) to run aggregation."
+        )
+
+    sync_cmd: List[str] = [
+        "scripts/py",
+        "-m",
+        "fisheye.utils.sync_eye_mask_profile_registry",
+        "--apply",
+    ]
+    if registry_path is not None:
+        sync_cmd.extend(["--registry", str(registry_path)])
+    sync_text = _run_command_checked(
+        command=sync_cmd,
+        step_name="Eye-mask profile sync",
+        remediation=(
+            "Run scripts/py -m fisheye.utils.sync_eye_mask_profile_registry --apply "
+            "before retrying eye-mask data-card aggregation."
+        ),
+    )
+
+    aggregate_cmd: List[str] = [
+        "scripts/py",
+        "-m",
+        "fisheye.utils.aggregate_eye_mask_training_data_card",
+        "--training-set",
+        str(artifacts.training_set_id),
+        "--output",
+        str(artifacts.card_json),
+    ]
+    if registry_path is not None:
+        aggregate_cmd.extend(["--registry", str(registry_path)])
+    if no_plots:
+        aggregate_cmd.append("--no-plots")
+    else:
+        aggregate_cmd.extend(
+            [
+                "--plot-dir",
+                str(artifacts.plot_dir),
+                "--plot-prefix",
+                str(artifacts.plot_prefix),
+            ]
+        )
+    aggregate_text = _run_command_checked(
+        command=aggregate_cmd,
+        step_name="Eye-mask data-card aggregation",
+        remediation=(
+            "Run scripts/py -m fisheye.utils.aggregate_eye_mask_training_data_card "
+            "--training-set <set_id> (and optional --registry) after successful profile sync."
+        ),
+    )
+
+    plot_text: Optional[str] = None
+    if not no_plots:
+        plot_cmd: List[str] = [
+            "scripts/py",
+            "-m",
+            "fisheye.utils.plot_eye_mask_training_data_card",
+            "--card-json",
+            str(artifacts.card_json),
+            "--outdir",
+            str(artifacts.plot_dir),
+            "--prefix",
+            str(artifacts.plot_prefix),
+        ]
+        plot_text = _run_command_checked(
+            command=plot_cmd,
+            step_name="Eye-mask data-card plotting",
+            remediation=(
+                "Run scripts/py -m fisheye.utils.plot_eye_mask_training_data_card "
+                f"--card-json {artifacts.card_json} --outdir {artifacts.plot_dir}."
+            ),
+        )
+
+    return {
+        "profile_sync_command": sync_text,
+        "aggregate_command": aggregate_text,
+        "plot_command": plot_text,
+        "plots_generated": not bool(no_plots),
+    }
+
+
+@dataclass(frozen=True)
+class EyeMergeSourceSpec:
+    source_zarr: Path
+    crop_run: Optional[str] = None
+    eye_stage: str = "auto"
+    eye_run: Optional[str] = None
+
+
+@dataclass
+class _ResolvedEyeMergeSource:
+    source_path: Path
+    source_dataset_id: str
+    selection: EyeExportSelection
+    crop_group: zarr.Group
+    eye_group: zarr.Group
+    roi_images: zarr.Array
+    bbox_norm: zarr.Array
+    crop_bbox: Optional[zarr.Array]
+    masks_roi: zarr.Array
+    ellipse_params: zarr.Array
+    ellipse_success: zarr.Array
+    mask_probs_name: Optional[str]
+    mask_probs_src: Optional[zarr.Array]
+    source_frame_idx: np.ndarray
+    source_roi_idx: np.ndarray
+    detection_source: np.ndarray
+    eye_separation_data: np.ndarray
+    reason_values: np.ndarray
+
+    @property
+    def total_samples(self) -> int:
+        return int(self.selection.total_samples)
+
+
+def _collapse_source_attr(values: Sequence[str], *, mixed_value: str = "mixed") -> str:
+    unique = sorted({str(value) for value in values if str(value)})
+    if not unique:
+        return ""
+    if len(unique) == 1:
+        return unique[0]
+    return mixed_value
+
+
+def _merge_chunks(chunks: Optional[Tuple[int, ...]], *, total_samples: int) -> Optional[Tuple[int, ...]]:
+    if chunks is None:
+        return None
+    normalized: List[int] = []
+    for idx, value in enumerate(chunks):
+        try:
+            chunk = int(value)
+        except Exception:
+            chunk = 0
+        if chunk <= 0:
+            chunk = max(1, int(total_samples))
+        if idx == 0:
+            chunk = max(1, min(chunk, max(1, int(total_samples))))
+        normalized.append(chunk)
+    return tuple(normalized) if normalized else None
+
+
+def _validate_source_for_merge(
+    source: _ResolvedEyeMergeSource,
+    *,
+    expected_input_format: str,
+    expected_label_mode: str,
+) -> None:
+    roi_images = source.roi_images
+    masks_roi = source.masks_roi
+    ellipse_params = source.ellipse_params
+    ellipse_success = source.ellipse_success
+    bbox_norm = source.bbox_norm
+    total_samples = int(source.total_samples)
+    source_id = source.source_path.name
+
+    if roi_images.ndim < 3:
+        raise ValueError(f"{source_id}: roi_images must be (N,H,W) or (N,H,W,C), got {roi_images.shape}.")
+    if int(roi_images.shape[0]) != total_samples:
+        raise ValueError(
+            f"{source_id}: roi_images length mismatch ({roi_images.shape[0]} != {total_samples})."
+        )
+    if expected_input_format == "rgb":
+        if roi_images.ndim != 4 or int(roi_images.shape[-1]) != 3:
+            raise ValueError(f"{source_id}: expected RGB roi_images with shape (N,H,W,3), got {roi_images.shape}.")
+    elif roi_images.ndim == 4 and int(roi_images.shape[-1]) == 3:
+        raise ValueError(f"{source_id}: roi_images appears RGB but input_format is gray.")
+
+    if bbox_norm.ndim != 2 or int(bbox_norm.shape[1]) != 4:
+        raise ValueError(f"{source_id}: bbox_norm_coords must be (N,4), got {bbox_norm.shape}.")
+    if int(bbox_norm.shape[0]) != total_samples:
+        raise ValueError(
+            f"{source_id}: bbox_norm_coords length mismatch ({bbox_norm.shape[0]} != {total_samples})."
+        )
+    if isinstance(source.crop_bbox, zarr.Array):
+        if source.crop_bbox.ndim != 2 or int(source.crop_bbox.shape[1]) != 4:
+            raise ValueError(f"{source_id}: crop_bbox_norm_coords must be (N,4), got {source.crop_bbox.shape}.")
+        if int(source.crop_bbox.shape[0]) != total_samples:
+            raise ValueError(
+                f"{source_id}: crop_bbox_norm_coords length mismatch ({source.crop_bbox.shape[0]} != {total_samples})."
+            )
+
+    if masks_roi.ndim != 4:
+        raise ValueError(f"{source_id}: masks_roi must be (N,C,H,W), got {masks_roi.shape}.")
+    if int(masks_roi.shape[0]) != total_samples:
+        raise ValueError(f"{source_id}: masks_roi length mismatch ({masks_roi.shape[0]} != {total_samples}).")
+    if expected_label_mode == "lr" and int(masks_roi.shape[1]) != 2:
+        raise ValueError(f"{source_id}: label_mode=lr requires masks channel count 2, got {masks_roi.shape[1]}.")
+    if expected_label_mode == "union" and int(masks_roi.shape[1]) != 1:
+        raise ValueError(
+            f"{source_id}: label_mode=union requires masks channel count 1, got {masks_roi.shape[1]}."
+        )
+    if int(masks_roi.shape[2]) != int(roi_images.shape[1]) or int(masks_roi.shape[3]) != int(roi_images.shape[2]):
+        raise ValueError(
+            f"{source_id}: masks_roi spatial shape {masks_roi.shape[2:]} does not match roi_images {roi_images.shape[1:3]}."
+        )
+
+    if ellipse_params.ndim != 3 or int(ellipse_params.shape[-1]) != 5:
+        raise ValueError(f"{source_id}: ellipse_params must be (N,C,5), got {ellipse_params.shape}.")
+    if ellipse_success.ndim != 2:
+        raise ValueError(f"{source_id}: ellipse_success must be (N,C), got {ellipse_success.shape}.")
+    if tuple(ellipse_params.shape[:2]) != tuple(ellipse_success.shape[:2]):
+        raise ValueError(
+            f"{source_id}: ellipse_params/ellipse_success channel mismatch "
+            f"({ellipse_params.shape[:2]} != {ellipse_success.shape[:2]})."
+        )
+    if int(ellipse_params.shape[0]) != total_samples or int(ellipse_success.shape[0]) != total_samples:
+        raise ValueError(f"{source_id}: ellipse arrays length mismatch with total_samples={total_samples}.")
+
+    if int(source.source_frame_idx.shape[0]) != total_samples:
+        raise ValueError(
+            f"{source_id}: source frame-index length mismatch ({source.source_frame_idx.shape[0]} != {total_samples})."
+        )
+    if int(source.detection_source.shape[0]) != total_samples:
+        raise ValueError(
+            f"{source_id}: detection_source length mismatch ({source.detection_source.shape[0]} != {total_samples})."
+        )
+    if int(source.eye_separation_data.shape[0]) != total_samples:
+        raise ValueError(
+            f"{source_id}: eye_separation length mismatch ({source.eye_separation_data.shape[0]} != {total_samples})."
+        )
+    if int(source.reason_values.shape[0]) != total_samples:
+        raise ValueError(
+            f"{source_id}: reason label length mismatch ({source.reason_values.shape[0]} != {total_samples})."
+        )
+    if isinstance(source.mask_probs_src, zarr.Array) and source.mask_probs_name:
+        if tuple(source.mask_probs_src.shape) != tuple(masks_roi.shape):
+            raise ValueError(
+                f"{source_id}: {source.mask_probs_name} shape {source.mask_probs_src.shape} "
+                f"does not match masks_roi {masks_roi.shape}."
+            )
+
+
+def _validate_merge_schema_compatibility(
+    reference: _ResolvedEyeMergeSource,
+    candidate: _ResolvedEyeMergeSource,
+) -> None:
+    reference_id = reference.source_path.name
+    candidate_id = candidate.source_path.name
+
+    if tuple(candidate.roi_images.shape[1:]) != tuple(reference.roi_images.shape[1:]):
+        raise ValueError(
+            f"{candidate_id}: roi_images shape tail {candidate.roi_images.shape[1:]} "
+            f"does not match {reference_id} {reference.roi_images.shape[1:]}."
+        )
+    if candidate.roi_images.dtype != reference.roi_images.dtype:
+        raise ValueError(
+            f"{candidate_id}: roi_images dtype {candidate.roi_images.dtype} "
+            f"does not match {reference_id} {reference.roi_images.dtype}."
+        )
+
+    if tuple(candidate.bbox_norm.shape[1:]) != tuple(reference.bbox_norm.shape[1:]):
+        raise ValueError(
+            f"{candidate_id}: bbox_norm_coords shape tail {candidate.bbox_norm.shape[1:]} "
+            f"does not match {reference_id} {reference.bbox_norm.shape[1:]}."
+        )
+    if candidate.bbox_norm.dtype != reference.bbox_norm.dtype:
+        raise ValueError(
+            f"{candidate_id}: bbox_norm_coords dtype {candidate.bbox_norm.dtype} "
+            f"does not match {reference_id} {reference.bbox_norm.dtype}."
+        )
+
+    if tuple(candidate.masks_roi.shape[1:]) != tuple(reference.masks_roi.shape[1:]):
+        raise ValueError(
+            f"{candidate_id}: masks_roi shape tail {candidate.masks_roi.shape[1:]} "
+            f"does not match {reference_id} {reference.masks_roi.shape[1:]}."
+        )
+    if candidate.masks_roi.dtype != reference.masks_roi.dtype:
+        raise ValueError(
+            f"{candidate_id}: masks_roi dtype {candidate.masks_roi.dtype} "
+            f"does not match {reference_id} {reference.masks_roi.dtype}."
+        )
+
+    if tuple(candidate.ellipse_params.shape[1:]) != tuple(reference.ellipse_params.shape[1:]):
+        raise ValueError(
+            f"{candidate_id}: ellipse_params shape tail {candidate.ellipse_params.shape[1:]} "
+            f"does not match {reference_id} {reference.ellipse_params.shape[1:]}."
+        )
+    if tuple(candidate.ellipse_success.shape[1:]) != tuple(reference.ellipse_success.shape[1:]):
+        raise ValueError(
+            f"{candidate_id}: ellipse_success shape tail {candidate.ellipse_success.shape[1:]} "
+            f"does not match {reference_id} {reference.ellipse_success.shape[1:]}."
+        )
+
+
+def _resolve_merge_source(
+    source_spec: EyeMergeSourceSpec,
+    *,
+    registry_path: Optional[Path],
+) -> _ResolvedEyeMergeSource:
+    source_path = Path(source_spec.source_zarr).expanduser().resolve()
     if not source_path.exists():
         raise FileNotFoundError(f"Source zarr does not exist: {source_path}")
 
-    normalized_input_format = _normalize_input_format(input_format)
-    if normalized_input_format is None:
-        raise ValueError(f"Unsupported input_format '{input_format}'. Expected gray or rgb.")
-    normalized_label_mode = _normalize_label_mode(label_mode)
-    if normalized_label_mode is None:
-        raise ValueError(f"Unsupported label_mode '{label_mode}'. Expected lr or union.")
+    try:
+        src_root = zarr.open_group(str(source_path), mode="r", use_consolidated=False)
+    except TypeError:
+        src_root = zarr.open_group(str(source_path), mode="r")
 
-    if out_path.exists():
-        if not overwrite:
-            raise FileExistsError(f"Destination exists: {out_path}")
-        if out_path.is_dir():
-            shutil.rmtree(out_path)
-        else:
-            out_path.unlink()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    src_root = zarr.open_group(str(source_path), mode="r", use_consolidated=False)
     selection, crop_group, eye_group = _select_source_runs(
         src_root,
-        crop_run=crop_run,
-        eye_stage=eye_stage,
-        eye_run=eye_run,
+        crop_run=source_spec.crop_run,
+        eye_stage=source_spec.eye_stage,
+        eye_run=source_spec.eye_run,
     )
 
     roi_images = crop_group["roi_images"]
@@ -344,7 +868,7 @@ def export_merged_eye_mask_training_zarr(
     ellipse_params = eye_group["ellipse_params"]
     ellipse_success = eye_group["ellipse_success"]
     eye_separation = eye_group.get("eye_separation")
-    reason_src = _resolve_reason_source(eye_group)
+    reason_labels = _resolve_reason_labels(eye_group)
     mask_probs_name = selection.mask_probs_name
     mask_probs_src = eye_group[mask_probs_name] if mask_probs_name else None
 
@@ -355,39 +879,191 @@ def export_merged_eye_mask_training_zarr(
         if isinstance(crop_frame_indices, zarr.Array)
         else local_frame_indices.copy()
     )
-    if int(source_frame_idx.shape[0]) != total_samples:
-        raise ValueError(
-            f"crop_runs/{selection.crop_run}/frame_indices has {source_frame_idx.shape[0]} rows, expected {total_samples}."
-        )
-
     detection_source = (
         np.asarray(crop_detection_source[:], dtype=np.int8)
         if isinstance(crop_detection_source, zarr.Array)
         else np.zeros((total_samples,), dtype=np.int8)
     )
-    if int(detection_source.shape[0]) != total_samples:
-        raise ValueError(
-            f"crop_runs/{selection.crop_run}/detection_source has {detection_source.shape[0]} rows, expected {total_samples}."
-        )
-
     if eye_separation is None:
         eye_separation_data = np.full((total_samples,), np.nan, dtype=np.float32)
     else:
         eye_separation_data = np.asarray(eye_separation[:], dtype=np.float32)
-    if int(eye_separation_data.shape[0]) != total_samples:
-        raise ValueError(
-            f"{selection.eye_stage}/{selection.eye_run}/eye_separation has {eye_separation_data.shape[0]} rows, expected {total_samples}."
-        )
 
-    if reason_src is not None:
-        reason_values = np.asarray(reason_src[:], dtype=object)
-        if int(reason_values.shape[0]) != total_samples:
-            raise ValueError(
-                f"Reason array in {selection.eye_stage}/{selection.eye_run} has {reason_values.shape[0]} rows, expected {total_samples}."
-            )
+    if reason_labels is not None:
+        reason_values = np.asarray(reason_labels, dtype=object)
         reason_values = np.asarray([str(v) if v is not None else "" for v in reason_values], dtype=object)
     else:
-        reason_values = np.asarray([""] * total_samples, dtype=object)
+        reason_values = np.where(
+            detection_source.astype(np.int8, copy=False) == 1,
+            "interpolated",
+            "clean",
+        ).astype(object)
+
+    source_dataset_id = _resolve_source_dataset_id(
+        source_root=src_root,
+        source_path=source_path,
+        registry_path=registry_path,
+    )
+    return _ResolvedEyeMergeSource(
+        source_path=source_path,
+        source_dataset_id=source_dataset_id,
+        selection=selection,
+        crop_group=crop_group,
+        eye_group=eye_group,
+        roi_images=roi_images,
+        bbox_norm=bbox_norm,
+        crop_bbox=crop_bbox if isinstance(crop_bbox, zarr.Array) else None,
+        masks_roi=masks_roi,
+        ellipse_params=ellipse_params,
+        ellipse_success=ellipse_success,
+        mask_probs_name=mask_probs_name,
+        mask_probs_src=mask_probs_src if isinstance(mask_probs_src, zarr.Array) else None,
+        source_frame_idx=source_frame_idx,
+        source_roi_idx=np.arange(total_samples, dtype=np.int64),
+        detection_source=detection_source,
+        eye_separation_data=eye_separation_data,
+        reason_values=reason_values,
+    )
+
+
+def export_merged_eye_mask_training_zarr_from_sources(
+    source_specs: Sequence[EyeMergeSourceSpec | Path | str],
+    out_zarr: Path,
+    *,
+    run_name: str = "merged_export_smoke",
+    input_format: str = "gray",
+    label_mode: str = "lr",
+    split_train: float = 0.8,
+    split_val: float = 0.2,
+    split_test: float = 0.0,
+    split_seed: int = 42,
+    overwrite: bool = False,
+    validate: bool = True,
+    registry: Optional[Path] = None,
+    training_set_id: Optional[str] = None,
+    training_set_name: Optional[str] = None,
+    aggregate_training_data_card: bool = False,
+    data_card_output: Optional[Path] = None,
+    data_card_plot_dir: Optional[Path] = None,
+    data_card_plot_prefix: Optional[str] = None,
+    data_card_no_plots: bool = False,
+) -> Dict[str, Any]:
+    if not source_specs:
+        raise ValueError("At least one source spec is required for merged eye-mask export.")
+
+    normalized_source_specs: List[EyeMergeSourceSpec] = []
+    for spec in source_specs:
+        if isinstance(spec, EyeMergeSourceSpec):
+            normalized_source_specs.append(spec)
+            continue
+        if isinstance(spec, (str, Path)):
+            normalized_source_specs.append(
+                EyeMergeSourceSpec(
+                    source_zarr=Path(spec),
+                    crop_run=None,
+                    eye_stage="auto",
+                    eye_run=None,
+                )
+            )
+            continue
+        raise TypeError(
+            "source_specs items must be EyeMergeSourceSpec or path-like values. "
+            f"Got {type(spec).__name__}."
+        )
+
+    out_path = Path(out_zarr).expanduser().resolve()
+    normalized_input_format = _normalize_input_format(input_format)
+    if normalized_input_format is None:
+        raise ValueError(f"Unsupported input_format '{input_format}'. Expected gray or rgb.")
+    normalized_label_mode = _normalize_label_mode(label_mode)
+    if normalized_label_mode is None:
+        raise ValueError(f"Unsupported label_mode '{label_mode}'. Expected lr or union.")
+    registry_path = Path(registry).expanduser().resolve() if registry is not None else None
+    artifacts = _resolve_card_artifacts(
+        out_zarr=out_path,
+        run_name=run_name,
+        training_set_id=training_set_id,
+        data_card_output=data_card_output,
+        data_card_plot_dir=data_card_plot_dir,
+        data_card_plot_prefix=data_card_plot_prefix,
+    )
+    if aggregate_training_data_card and not artifacts.training_set_id:
+        raise ValueError(
+            "aggregate_training_data_card requires training_set_id. "
+            "Pass --training-set-id (CLI) or training_set_id=... (API)."
+        )
+
+    if out_path.exists():
+        if not overwrite:
+            raise FileExistsError(f"Destination exists: {out_path}")
+        if out_path.is_dir():
+            shutil.rmtree(out_path)
+        else:
+            out_path.unlink()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    resolved_sources: List[_ResolvedEyeMergeSource] = [
+        _resolve_merge_source(spec, registry_path=registry_path) for spec in normalized_source_specs
+    ]
+    if not resolved_sources:
+        raise ValueError("No source data resolved for merged eye-mask export.")
+
+    for source in resolved_sources:
+        _validate_source_for_merge(
+            source,
+            expected_input_format=normalized_input_format,
+            expected_label_mode=normalized_label_mode,
+        )
+    ref_source = resolved_sources[0]
+    for source in resolved_sources[1:]:
+        _validate_merge_schema_compatibility(ref_source, source)
+
+    source_mask_prob_names = [source.mask_probs_name for source in resolved_sources]
+    mask_probs_name = source_mask_prob_names[0]
+    if not mask_probs_name or any(name != mask_probs_name for name in source_mask_prob_names):
+        mask_probs_name = None
+    if mask_probs_name and any(source.mask_probs_src is None for source in resolved_sources):
+        mask_probs_name = None
+
+    source_counts = [int(source.total_samples) for source in resolved_sources]
+    total_samples = int(sum(source_counts))
+    local_frame_indices = np.arange(total_samples, dtype=np.int64)
+    detection_source = (
+        np.concatenate([source.detection_source for source in resolved_sources]).astype(np.int8, copy=False)
+        if total_samples > 0
+        else np.empty((0,), dtype=np.int8)
+    )
+    source_frame_idx = (
+        np.concatenate([source.source_frame_idx for source in resolved_sources]).astype(np.int64, copy=False)
+        if total_samples > 0
+        else np.empty((0,), dtype=np.int64)
+    )
+    source_roi_idx = (
+        np.concatenate([source.source_roi_idx for source in resolved_sources]).astype(np.int64, copy=False)
+        if total_samples > 0
+        else np.empty((0,), dtype=np.int64)
+    )
+    eye_separation_data = (
+        np.concatenate([source.eye_separation_data for source in resolved_sources]).astype(np.float32, copy=False)
+        if total_samples > 0
+        else np.empty((0,), dtype=np.float32)
+    )
+    reason_values = (
+        np.concatenate([source.reason_values for source in resolved_sources]).astype(object, copy=False)
+        if total_samples > 0
+        else np.empty((0,), dtype=object)
+    )
+    source_dataset_idx = np.empty((total_samples,), dtype=np.int32)
+    offset = 0
+    for idx, count in enumerate(source_counts):
+        if count > 0:
+            source_dataset_idx[offset: offset + count] = int(idx)
+            offset += int(count)
+
+    source_stage = _collapse_source_attr([source.selection.eye_stage for source in resolved_sources])
+    source_eye_run = _collapse_source_attr([source.selection.eye_run for source in resolved_sources])
+    source_crop_run = _collapse_source_attr([source.selection.crop_run for source in resolved_sources])
+    source_zarr_paths = [str(source.source_path) for source in resolved_sources]
 
     dst_root = zarr.open_group(str(out_path), mode="w")
     training_export_payload = {
@@ -395,10 +1071,20 @@ def export_merged_eye_mask_training_zarr(
         "created_at_utc": _utc_now(),
         "input_format": normalized_input_format,
         "label_mode": normalized_label_mode,
-        "source_stage": selection.eye_stage,
-        "source_eye_run": selection.eye_run,
-        "source_crop_run": selection.crop_run,
+        "source_stage": source_stage,
+        "source_eye_run": source_eye_run,
+        "source_crop_run": source_crop_run,
+        "source_count": int(len(resolved_sources)),
+        "source_zarr_paths": source_zarr_paths,
         "split_seed": int(split_seed),
+        "training_set_id": artifacts.training_set_id,
+        "aggregate_training_data_card": bool(aggregate_training_data_card),
+        "data_card_no_plots": bool(data_card_no_plots),
+        "artifact_paths": {
+            "data_card_json": str(artifacts.card_json),
+            "data_card_plot_dir": str(artifacts.plot_dir),
+            "data_card_plot_prefix": str(artifacts.plot_prefix),
+        },
     }
     dst_root.attrs.update(
         {
@@ -411,18 +1097,89 @@ def export_merged_eye_mask_training_zarr(
     dst_crop_parent = dst_root.create_group("crop_runs")
     dst_crop_parent.attrs["latest"] = run_name
     dst_crop = dst_crop_parent.create_group(run_name)
-    _copy_array(roi_images, dst_crop, "roi_images")
-    _copy_array(bbox_norm, dst_crop, "bbox_norm_coords")
-    if isinstance(crop_bbox, zarr.Array):
-        _copy_array(crop_bbox, dst_crop, "crop_bbox_norm_coords")
-    else:
-        bbox_copy = np.asarray(bbox_norm[:], dtype=np.float32)
-        dst_crop.create_array(
-            "crop_bbox_norm_coords",
-            data=bbox_copy,
-            chunks=getattr(bbox_norm, "chunks", None),
+    roi_shape = (total_samples, *tuple(int(v) for v in ref_source.roi_images.shape[1:]))
+    roi_images_dest = dst_crop.create_array(
+        "roi_images",
+        shape=roi_shape,
+        dtype=ref_source.roi_images.dtype,
+        chunks=_merge_chunks(getattr(ref_source.roi_images, "chunks", None), total_samples=total_samples),
+        overwrite=True,
+    )
+    bbox_shape = (total_samples, *tuple(int(v) for v in ref_source.bbox_norm.shape[1:]))
+    bbox_dest = dst_crop.create_array(
+        "bbox_norm_coords",
+        shape=bbox_shape,
+        dtype=ref_source.bbox_norm.dtype,
+        chunks=_merge_chunks(getattr(ref_source.bbox_norm, "chunks", None), total_samples=total_samples),
+        overwrite=True,
+    )
+    crop_bbox_dest = dst_crop.create_array(
+        "crop_bbox_norm_coords",
+        shape=bbox_shape,
+        dtype=ref_source.bbox_norm.dtype,
+        chunks=_merge_chunks(getattr(ref_source.bbox_norm, "chunks", None), total_samples=total_samples),
+        overwrite=True,
+    )
+
+    dst_eye_parent = dst_root.create_group("eye_masks_runs")
+    dst_eye_parent.attrs["latest"] = run_name
+    dst_eye = dst_eye_parent.create_group(run_name)
+    masks_shape = (total_samples, *tuple(int(v) for v in ref_source.masks_roi.shape[1:]))
+    masks_dest = dst_eye.create_array(
+        "masks_roi",
+        shape=masks_shape,
+        dtype=ref_source.masks_roi.dtype,
+        chunks=_merge_chunks(getattr(ref_source.masks_roi, "chunks", None), total_samples=total_samples),
+        overwrite=True,
+    )
+    ellipse_params_shape = (total_samples, *tuple(int(v) for v in ref_source.ellipse_params.shape[1:]))
+    ellipse_params_dest = dst_eye.create_array(
+        "ellipse_params",
+        shape=ellipse_params_shape,
+        dtype=ref_source.ellipse_params.dtype,
+        chunks=_merge_chunks(getattr(ref_source.ellipse_params, "chunks", None), total_samples=total_samples),
+        overwrite=True,
+    )
+    ellipse_success_shape = (total_samples, *tuple(int(v) for v in ref_source.ellipse_success.shape[1:]))
+    ellipse_success_dest = dst_eye.create_array(
+        "ellipse_success",
+        shape=ellipse_success_shape,
+        dtype=ref_source.ellipse_success.dtype,
+        chunks=_merge_chunks(getattr(ref_source.ellipse_success, "chunks", None), total_samples=total_samples),
+        overwrite=True,
+    )
+    mask_probs_dest: Optional[zarr.Array] = None
+    if mask_probs_name:
+        mask_probs_dest = dst_eye.create_array(
+            mask_probs_name,
+            shape=masks_shape,
+            dtype=resolved_sources[0].mask_probs_src.dtype if resolved_sources[0].mask_probs_src is not None else np.float32,
+            chunks=_merge_chunks(
+                getattr(resolved_sources[0].mask_probs_src, "chunks", None)
+                if resolved_sources[0].mask_probs_src is not None
+                else None,
+                total_samples=total_samples,
+            ),
             overwrite=True,
         )
+
+    offset = 0
+    for source in resolved_sources:
+        next_offset = offset + int(source.total_samples)
+        if next_offset > offset:
+            roi_images_dest[offset:next_offset, ...] = source.roi_images[:]
+            bbox_dest[offset:next_offset, ...] = source.bbox_norm[:]
+            if isinstance(source.crop_bbox, zarr.Array):
+                crop_bbox_dest[offset:next_offset, ...] = source.crop_bbox[:]
+            else:
+                crop_bbox_dest[offset:next_offset, ...] = np.asarray(source.bbox_norm[:], dtype=np.float32)
+            masks_dest[offset:next_offset, ...] = source.masks_roi[:]
+            ellipse_params_dest[offset:next_offset, ...] = source.ellipse_params[:]
+            ellipse_success_dest[offset:next_offset, ...] = source.ellipse_success[:]
+            if mask_probs_dest is not None and source.mask_probs_src is not None:
+                mask_probs_dest[offset:next_offset, ...] = source.mask_probs_src[:]
+        offset = next_offset
+
     dst_crop.create_array(
         "frame_indices",
         data=local_frame_indices,
@@ -437,17 +1194,13 @@ def export_merged_eye_mask_training_zarr(
     )
     dst_crop.attrs.update(
         {
-            "source_crop_run": selection.crop_run,
-            "source_zarr_path": str(source_path),
+            "source_crop_run": source_crop_run,
+            "source_zarr_paths": source_zarr_paths,
         }
     )
+    if len(resolved_sources) == 1:
+        dst_crop.attrs["source_zarr_path"] = source_zarr_paths[0]
 
-    dst_eye_parent = dst_root.create_group("eye_masks_runs")
-    dst_eye_parent.attrs["latest"] = run_name
-    dst_eye = dst_eye_parent.create_group(run_name)
-    _copy_array(masks_roi, dst_eye, "masks_roi")
-    _copy_array(ellipse_params, dst_eye, "ellipse_params")
-    _copy_array(ellipse_success, dst_eye, "ellipse_success")
     dst_eye.create_array(
         "eye_separation",
         data=eye_separation_data,
@@ -466,16 +1219,13 @@ def export_merged_eye_mask_training_zarr(
         chunks=(max(1, min(total_samples, 65536)),),
         overwrite=True,
     )
-    reason_dst = dst_eye.create_array(
-        "reason",
-        shape=(total_samples,),
-        dtype=VariableLengthUTF8(),
-        chunks=(max(1, min(total_samples, 65536)),),
+    write_reason_columns(
+        dst_eye,
+        reason_values,
+        chunk_size=max(1, min(total_samples, 65536)),
+        include_reason_text=True,
         overwrite=True,
     )
-    reason_dst[:] = reason_values
-    if isinstance(mask_probs_src, zarr.Array) and mask_probs_name:
-        _copy_array(mask_probs_src, dst_eye, mask_probs_name)
 
     for attr_name in (
         "method",
@@ -490,17 +1240,22 @@ def export_merged_eye_mask_training_zarr(
         "source_eye_masks_method",
         "reason_counts",
     ):
-        if attr_name in eye_group.attrs:
-            dst_eye.attrs[attr_name] = eye_group.attrs[attr_name]
+        ref_value = ref_source.eye_group.attrs.get(attr_name)
+        if ref_value is None:
+            continue
+        if all(source.eye_group.attrs.get(attr_name) == ref_value for source in resolved_sources):
+            dst_eye.attrs[attr_name] = ref_value
     dst_eye.attrs.update(
         {
-            "source_eye_stage": selection.eye_stage,
-            "source_eye_run": selection.eye_run,
-            "source_crop_run": selection.crop_run,
-            "source_zarr_path": str(source_path),
+            "source_eye_stage": source_stage,
+            "source_eye_run": source_eye_run,
+            "source_crop_run": source_crop_run,
+            "source_zarr_paths": source_zarr_paths,
             "label_mode": normalized_label_mode,
         }
     )
+    if len(resolved_sources) == 1:
+        dst_eye.attrs["source_zarr_path"] = source_zarr_paths[0]
 
     train_idx, val_idx, test_idx = _make_split_indices(
         total_samples,
@@ -510,9 +1265,21 @@ def export_merged_eye_mask_training_zarr(
         seed=int(split_seed),
     )
     split_group = dst_root.create_group("splits")
-    split_group.create_array("train_indices", data=train_idx.astype(np.int64, copy=False), chunks=(max(1, min(train_idx.size or 1, 65536)),))
-    split_group.create_array("val_indices", data=val_idx.astype(np.int64, copy=False), chunks=(max(1, min(val_idx.size or 1, 65536)),))
-    split_group.create_array("test_indices", data=test_idx.astype(np.int64, copy=False), chunks=(max(1, min(test_idx.size or 1, 65536)),))
+    split_group.create_array(
+        "train_indices",
+        data=train_idx.astype(np.int64, copy=False),
+        chunks=(max(1, min(train_idx.size or 1, 65536)),),
+    )
+    split_group.create_array(
+        "val_indices",
+        data=val_idx.astype(np.int64, copy=False),
+        chunks=(max(1, min(val_idx.size or 1, 65536)),),
+    )
+    split_group.create_array(
+        "test_indices",
+        data=test_idx.astype(np.int64, copy=False),
+        chunks=(max(1, min(test_idx.size or 1, 65536)),),
+    )
     split_group.attrs.update(
         {
             "split_seed": int(split_seed),
@@ -527,7 +1294,7 @@ def export_merged_eye_mask_training_zarr(
     source_index = dst_root.create_group("source_index")
     source_index.create_array(
         "source_dataset_idx",
-        data=np.zeros((total_samples,), dtype=np.int32),
+        data=source_dataset_idx,
         chunks=(max(1, min(total_samples, 65536)),),
         overwrite=True,
     )
@@ -539,17 +1306,17 @@ def export_merged_eye_mask_training_zarr(
     )
     source_index.create_array(
         "source_roi_idx",
-        data=np.arange(total_samples, dtype=np.int64),
+        data=source_roi_idx.astype(np.int64, copy=False),
         chunks=(max(1, min(total_samples, 65536)),),
         overwrite=True,
     )
-    dataset_id = source_path.stem
-    _write_string_array(source_index, "source_dataset_id", [dataset_id])
-    _write_string_array(source_index, "source_zarr_path", [str(source_path)])
+    source_dataset_ids = [source.source_dataset_id for source in resolved_sources]
+    _write_string_array(source_index, "source_dataset_id", source_dataset_ids)
+    _write_string_array(source_index, "source_zarr_path", source_zarr_paths)
     source_index.attrs.update(
         {
             "mapping_version": 1,
-            "source_count": 1,
+            "source_count": int(len(resolved_sources)),
         }
     )
 
@@ -573,15 +1340,121 @@ def export_merged_eye_mask_training_zarr(
             },
         }
 
+    registry_summary: Optional[Dict[str, Any]] = None
+    if registry_path is not None:
+        try:
+            registry_summary = _register_merged_dataset_in_registry(
+                registry_path=registry_path,
+                merged_zarr=out_path,
+                source_zarr_paths=[source.source_path for source in resolved_sources],
+                set_id=training_set_id,
+                set_name=training_set_name,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Merged eye-mask export registry registration failed. "
+                "Remediation: rerun with a valid --registry path, or omit --registry to skip registration."
+            ) from exc
+        training_export_payload["registry_registration"] = registry_summary
+
+    workflow_summary: Optional[Dict[str, Any]] = None
+    if aggregate_training_data_card:
+        workflow_summary = _run_data_card_workflow(
+            registry_path=registry_path,
+            artifacts=artifacts,
+            no_plots=bool(data_card_no_plots),
+        )
+        training_export_payload["data_card_workflow"] = workflow_summary
+    else:
+        training_export_payload["data_card_workflow"] = {
+            "profile_sync_command": None,
+            "aggregate_command": None,
+            "plot_command": None,
+            "plots_generated": False,
+        }
+
+    dst_root.attrs["training_export"] = training_export_payload
+
     summary.update(
         {
-            "source_zarr": str(source_path),
-            "source_eye_stage": selection.eye_stage,
-            "source_eye_run": selection.eye_run,
-            "source_crop_run": selection.crop_run,
+            "source_zarrs": source_zarr_paths,
+            "source_dataset_ids": source_dataset_ids,
+            "source_eye_stages": [source.selection.eye_stage for source in resolved_sources],
+            "source_eye_runs": [source.selection.eye_run for source in resolved_sources],
+            "source_crop_runs": [source.selection.crop_run for source in resolved_sources],
+            "source_count": int(len(resolved_sources)),
+            "training_set_id": artifacts.training_set_id,
+            "artifact_paths": {
+                "data_card_json": str(artifacts.card_json),
+                "data_card_plot_dir": str(artifacts.plot_dir),
+                "data_card_plot_prefix": str(artifacts.plot_prefix),
+            },
+            "aggregate_training_data_card": bool(aggregate_training_data_card),
+            "data_card_no_plots": bool(data_card_no_plots),
+            "registry_registration": registry_summary,
+            "data_card_workflow": workflow_summary,
         }
     )
+    if len(resolved_sources) == 1:
+        summary["source_zarr"] = source_zarr_paths[0]
+        summary["source_eye_stage"] = resolved_sources[0].selection.eye_stage
+        summary["source_eye_run"] = resolved_sources[0].selection.eye_run
+        summary["source_crop_run"] = resolved_sources[0].selection.crop_run
     return summary
+
+
+def export_merged_eye_mask_training_zarr(
+    source_zarr: Path,
+    out_zarr: Path,
+    *,
+    crop_run: Optional[str] = None,
+    eye_stage: str = "auto",
+    eye_run: Optional[str] = None,
+    run_name: str = "merged_export_smoke",
+    input_format: str = "gray",
+    label_mode: str = "lr",
+    split_train: float = 0.8,
+    split_val: float = 0.2,
+    split_test: float = 0.0,
+    split_seed: int = 42,
+    overwrite: bool = False,
+    validate: bool = True,
+    registry: Optional[Path] = None,
+    training_set_id: Optional[str] = None,
+    training_set_name: Optional[str] = None,
+    aggregate_training_data_card: bool = False,
+    data_card_output: Optional[Path] = None,
+    data_card_plot_dir: Optional[Path] = None,
+    data_card_plot_prefix: Optional[str] = None,
+    data_card_no_plots: bool = False,
+) -> Dict[str, Any]:
+    source_spec = EyeMergeSourceSpec(
+        source_zarr=Path(source_zarr),
+        crop_run=crop_run,
+        eye_stage=eye_stage,
+        eye_run=eye_run,
+    )
+    return export_merged_eye_mask_training_zarr_from_sources(
+        [source_spec],
+        out_zarr=out_zarr,
+        run_name=run_name,
+        input_format=input_format,
+        label_mode=label_mode,
+        split_train=float(split_train),
+        split_val=float(split_val),
+        split_test=float(split_test),
+        split_seed=int(split_seed),
+        overwrite=bool(overwrite),
+        validate=bool(validate),
+        registry=registry,
+        training_set_id=training_set_id,
+        training_set_name=training_set_name,
+        aggregate_training_data_card=bool(aggregate_training_data_card),
+        data_card_output=data_card_output,
+        data_card_plot_dir=data_card_plot_dir,
+        data_card_plot_prefix=data_card_plot_prefix,
+        data_card_no_plots=bool(data_card_no_plots),
+    )
 
 
 def validate_merged_eye_mask_training_zarr(
@@ -771,10 +1644,54 @@ def validate_merged_eye_mask_training_zarr(
             ):
                 errors.append("eye detection_source must match crop detection_source.")
 
-    if "reason" in eye:
-        reason_arr = np.asarray(eye["reason"][:], dtype=object)
+    reason_labels: Optional[np.ndarray] = None
+    try:
+        reason_labels = read_reason_labels(eye)
+    except Exception as exc:
+        errors.append(f"eye reason label decode failed: {exc}")
+    if reason_labels is not None:
+        reason_arr = np.asarray(reason_labels, dtype=object)
         if reason_arr.ndim != 1 or int(reason_arr.shape[0]) != total_samples:
-            errors.append(f"eye reason must be 1D length N ({total_samples}), got {tuple(reason_arr.shape)}.")
+            errors.append(
+                f"eye reason labels must be 1D length N ({total_samples}), got {tuple(reason_arr.shape)}."
+            )
+
+    if "reason_bytes" in eye:
+        reason_bytes = np.asarray(eye["reason_bytes"][:], dtype=np.uint8)
+        if reason_bytes.ndim != 2 or int(reason_bytes.shape[0]) != total_samples:
+            errors.append(
+                "eye reason_bytes must be 2D with first dimension N "
+                f"({total_samples}), got {tuple(reason_bytes.shape)}."
+            )
+        encoding = _as_text(eye.attrs.get("reason_encoding"))
+        if encoding is not None and encoding != REASON_BYTES_ENCODING:
+            errors.append(
+                "eye reason_encoding must be "
+                f"'{REASON_BYTES_ENCODING}', got '{encoding}'."
+            )
+        width_attr = eye.attrs.get("reason_bytes_width")
+        if width_attr is not None and reason_bytes.ndim == 2:
+            if int(width_attr) != int(reason_bytes.shape[1]):
+                errors.append(
+                    "eye reason_bytes_width attr does not match reason_bytes shape "
+                    f"({width_attr} != {reason_bytes.shape[1]})."
+                )
+        null_term = eye.attrs.get("reason_bytes_null_terminated")
+        if null_term is not None and bool(null_term) is not True:
+            errors.append("eye reason_bytes_null_terminated attr must be true when present.")
+        fallback = eye.attrs.get("reason_fallback_order")
+        if fallback is not None:
+            if isinstance(fallback, np.ndarray):
+                fallback_list = [str(item) for item in fallback.tolist()]
+            elif isinstance(fallback, (list, tuple)):
+                fallback_list = [str(item) for item in fallback]
+            else:
+                fallback_list = [str(fallback)]
+            if fallback_list != ["reason_bytes", "reason", "detection_source"]:
+                errors.append(
+                    "eye reason_fallback_order must be "
+                    "['reason_bytes', 'reason', 'detection_source']."
+                )
 
     probs_name_present = None
     for probs_name in ("mask_probs_roi_refined", "mask_probs_roi"):
@@ -973,6 +1890,47 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--split-val", type=float, default=0.2)
     parser.add_argument("--split-test", type=float, default=0.0)
     parser.add_argument("--split-seed", type=int, default=42)
+    parser.add_argument("--registry", type=Path, help="Optional registry SQLite path for merged-export registration.")
+    parser.add_argument(
+        "--training-set-id",
+        type=str,
+        help="Optional training set identifier used for registry linkage and data-card aggregation.",
+    )
+    parser.add_argument(
+        "--training-set-name",
+        type=str,
+        help="Optional training set display name when updating registry linkage.",
+    )
+    parser.add_argument(
+        "--aggregate-training-data-card",
+        action="store_true",
+        help="Aggregate eye-mask data card after export (requires --training-set-id).",
+    )
+    parser.add_argument(
+        "--no-aggregate-training-data-card",
+        action="store_true",
+        help="Compatibility flag; no automatic aggregation is enabled by default.",
+    )
+    parser.add_argument(
+        "--data-card-output",
+        type=Path,
+        help="Deterministic output JSON path for eye-mask data-card aggregation.",
+    )
+    parser.add_argument(
+        "--data-card-no-plots",
+        action="store_true",
+        help="Skip plot generation for eye-mask data-card aggregation.",
+    )
+    parser.add_argument(
+        "--data-card-plot-dir",
+        type=Path,
+        help="Deterministic output directory for eye-mask data-card plots.",
+    )
+    parser.add_argument(
+        "--data-card-plot-prefix",
+        type=str,
+        help="Deterministic filename prefix for eye-mask data-card plot artifacts.",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing out_zarr.")
     parser.add_argument("--no-validate", action="store_true", help="Skip post-export validation.")
     return parser
@@ -981,6 +1939,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.aggregate_training_data_card and args.no_aggregate_training_data_card:
+        parser.error(
+            "--aggregate-training-data-card cannot be combined with --no-aggregate-training-data-card."
+        )
+    should_aggregate = bool(args.aggregate_training_data_card)
+
     summary = export_merged_eye_mask_training_zarr(
         source_zarr=args.source_zarr,
         out_zarr=args.out_zarr,
@@ -996,6 +1960,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         split_seed=int(args.split_seed),
         overwrite=bool(args.overwrite),
         validate=not bool(args.no_validate),
+        registry=args.registry,
+        training_set_id=args.training_set_id,
+        training_set_name=args.training_set_name,
+        aggregate_training_data_card=should_aggregate,
+        data_card_output=args.data_card_output,
+        data_card_plot_dir=args.data_card_plot_dir,
+        data_card_plot_prefix=args.data_card_plot_prefix,
+        data_card_no_plots=bool(args.data_card_no_plots),
     )
     print(json.dumps(summary, indent=2))
     return 0
