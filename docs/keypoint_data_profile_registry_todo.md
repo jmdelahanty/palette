@@ -36,12 +36,13 @@ Keypoint currently lacks the equivalent profile-registry projection layer.
 
 ## Priority 0 (Schema + Read Path)
 
-- [ ] Define keypoint profile schema contract (`v1`) for:
+- [x] Define keypoint profile schema contract (`v1`) for:
   - on-disk profile payload (`analysis/keypoint_profile_runs/<run>/attrs["profile_summary"]`)
   - registry projection columns
   - training data-card aggregate linkage fields
   - relation to existing card contract:
     `docs/keypoint_training_data_card_contract.md`
+  - contract doc: `docs/keypoint_data_profile_schema_contract.md`
 
 - [x] Add registry table: `keypoint_data_profile`.
   - Proposed key:

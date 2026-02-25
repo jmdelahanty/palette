@@ -207,6 +207,12 @@ def _default_plot_dir(output_path: Path) -> Path:
     return output_path.parent / f"{output_path.stem}.plots"
 
 
+def _add_arg(argv: list[str], flag: str, value: Any) -> None:
+    if value is None:
+        return
+    argv.extend([str(flag), str(value)])
+
+
 def _load_manifest(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):

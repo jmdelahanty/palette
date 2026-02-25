@@ -19,7 +19,7 @@ Contract reference:
 
 This TODO is the implementation plan for that contract.
 
-## Status (2026-02-24)
+## Status (2026-02-25)
 
 - Implemented:
   - keypoint data-card aggregator + CLI
@@ -28,10 +28,12 @@ This TODO is the implementation plan for that contract.
   - mixed-skeleton hard-fail enforcement (prepare/export/validate/aggregate)
   - skeleton-graph key derivation + alias metadata
   - subject-lineage coverage policy (`warn|require`)
+  - `spatial` payload aggregation
+  - `train_val_parity` payload aggregation
+  - train/val parity delta test coverage
+  - landmark heatmap panel generation in default plot bundle
   - focused unit tests for new utilities and guardrails
 - Remaining:
-  - add `spatial` payload section to aggregator
-  - add `train_val_parity` payload section + delta tests
   - run/record operator validation checklist on production datasets
 
 ## Required Guardrails
@@ -47,15 +49,15 @@ This TODO is the implementation plan for that contract.
 - [x] Add keypoint training data-card aggregation command.
   - Suggested entrypoint:
     `scripts/py -m fisheye.utils.aggregate_keypoint_training_data_card --manifest <set>.manifest.json --registry <registry.sqlite>`
-- [ ] Implement required payload sections:
+- [x] Implement required payload sections:
   - [x] `selection`
   - [x] `quality`
   - [x] `geometry`
   - [x] `skeleton_graph_metrics`
-  - [ ] `spatial`
+  - [x] `spatial`
   - [x] `composition_counts`
   - [x] `subject_coverage`, `genotype_counts`, `dpf_stats`, `dpf_histogram`
-  - [ ] `train_val_parity`
+  - [x] `train_val_parity`
   - [x] `audit_freshness`
 - [x] Include canonical metric keys and alias metadata.
   - Canonical: `edge_<i>_<j>`, `angle_<i>_<j>_<k>`
@@ -67,12 +69,12 @@ This TODO is the implementation plan for that contract.
 - [x] Add keypoint data-card plotting utility.
   - Suggested entrypoint:
     `scripts/py -m fisheye.utils.plot_keypoint_training_data_card --card <set>.data_card.json`
-- [ ] Generate default plot bundle without auto-view:
+- [x] Generate default plot bundle without auto-view:
   - [x] usable-rate distribution
   - [x] triangle-area distribution
   - [x] min-angle distribution
   - [x] heading distribution
-  - [ ] landmark heatmap panel (pending aggregator `spatial` payload)
+  - [x] landmark heatmap panel
   - [x] genotype counts
   - [x] DPF histogram
 - [x] Add `--view` option to open generated/existing plots.
@@ -93,10 +95,10 @@ This TODO is the implementation plan for that contract.
   - edge and angle key generation from schema
   - alias metadata emission
 - [x] Unit tests for subject-lineage policy behavior (`warn` vs `require`).
-- [ ] Unit tests for aggregate correctness:
+- [x] Unit tests for aggregate correctness:
   - [x] quality rates
   - [x] geometry stats
-  - [ ] train/val parity deltas
+  - [x] train/val parity deltas
 - [x] Unit tests for plotting utility output contract.
 
 ## Operator Validation Checklist

@@ -170,8 +170,8 @@ Scope: prioritize correctness and auditability first, then UX/orchestration, the
   - Canonical keys are index-based (`edge_<i>_<j>`, `angle_<i>_<j>_<k>`).
   - Optional label aliases should be emitted for user/LLM readability.
 
-- [ ] Complete remaining keypoint data-card parity fields.
-  - Remaining: `spatial` payload and `train_val_parity` payload/tests.
+- [x] Complete remaining keypoint data-card parity fields.
+  - `spatial` payload and `train_val_parity` payload/tests are implemented.
   - Tracking source of truth: `docs/keypoint_dataset_statistics_todo.md`.
 
 ## Acceptance Criteria
