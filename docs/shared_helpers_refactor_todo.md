@@ -1,7 +1,7 @@
 # Shared Helpers & Deduplication TODO
 
 Initial audit: 2026-02-24
-Updated: 2026-03-04 (status refresh + C1 direct-path migration update)
+Updated: 2026-03-04 (status refresh + C1/C2 alignment cleanup)
 
 Scan covered ~150+ files across `src/fisheye/` and `src/` standalone scripts
 (vendored `decord/` excluded).
@@ -114,51 +114,61 @@ Current state after direct code-audit verification of CRITICAL/HIGH/MEDIUM/LOW s
 - Item 12 should explicitly include `check_smoothed_orientation_nan.py` alongside distance/speed NaN checks.
 - Item 13 duplication extends well beyond the 9 previously called out batch scripts.
 
-### Open Questions (Need Decision Before Broad Migration)
+### Open Questions / Decisions (2026-03-04)
 
-1. For reporting and success metrics, should counts target `src/fisheye` only or all of `src` including standalone scripts?
-2. Should `emit_stage_completion(...)` accept a live `Registry` instance, a `registry_path`, or both (some current paths use one, some the other)?
-3. How should shared dataset metadata helpers handle hash-suffixed canonical dataset IDs vs legacy IDs to avoid step-status regressions?
-4. What is the standard error policy for registry writes in shared helpers: warn-and-continue, or hard-fail for selected stages?
-5. Should `src/config_models.py` be removed, deprecated, or retained for external compatibility?
-6. For Items 12/15, should shared metric helpers live under `fisheye/shared/*` or expand `fisheye/refinement/utils.py`?
+**Resolved in current implementation:**
+1. `emit_stage_completion(...)` now supports a live `Registry` instance,
+   path-like input, or env-discovered registry via `registry=...` +
+   `auto_registry_from_env`.
+2. Dataset metadata extraction is centralized in `registry/db.py` and now
+   flows through canonical dataset-id resolution paths (including
+   hash-suffixed IDs for source recordings).
 
-### Recommended Implementation Plan
+**Still open:**
+1. For reporting and success metrics, should counts target `src/fisheye` only
+   or all of `src` including standalone scripts?
+2. What is the standard error policy for registry writes in shared helpers:
+   warn-and-continue, or hard-fail for selected stages?
+3. Should `src/config_models.py` be removed, deprecated, or retained for
+   external compatibility?
+4. For Items 12/15, should shared metric helpers live under
+   `fisheye/shared/*` or expand `fisheye/refinement/utils.py`?
 
-#### Phase A (Foundation, CRITICAL)
+### Recommended Next Implementation Plan (from current baseline)
 
-1. Implement `shared/type_conversions.py` (`normalize_attr`, numeric coercions) and migrate new keypoint/eye-mask paths first.
-2. Implement `shared/registry_stage_complete.py` with:
-   - `extract_dataset_metadata(...)`
-   - `emit_stage_completion(...)`
-3. Canary migrate only recently touched files first:
-   - `detect_keypoints_yolo.py`
-   - `detect_keypoints_traditional.py`
-   - `eye_segmentation_yolo.py`
-   - `infer_unet_eye_masks.py`
-   - `refine_eye_masks.py`
-4. Expand migration to remaining emitters once canary behavior is stable.
+#### Phase A (In Progress: Finish Remaining Critical Work)
 
-#### Phase B (Batch Script Convergence)
+1. C3: replace remaining local `_normalize_attr/_status_text/_as_text/_decode_attr`
+   helpers with shared conversions.
+2. C4: continue batch logging/timestamp migration beyond the 4 core runners.
+3. Add focused regression tests where helper migration touches monkeypatchable
+   status-write hooks.
 
-1. Implement `shared/batch_logging.py`.
-2. Implement `shared/environment.py` and `shared/zarr_discovery.py`.
-3. Migrate 4 core batch runners (`run_detections_batch`, `crop_batch`, `run_keypoints_batch`, `run_eye_masks_batch`) to shared logging + discovery + root/log-dir resolution.
-4. Introduce shared CLI arg builders after discovery signatures stabilize.
+#### Phase B (High Priority Consolidation)
 
-#### Phase C (Read-Path + Diagnostics Consolidation)
+1. Item 1: introduce read-path `resolve_zarr_run(...)` and migrate diagnostics.
+2. Item 2: promote `open_zarr_root()` across remaining raw `zarr.open(...)`
+   call sites.
+3. Item 5: expand CLI shared argument builders into detection/model/batch/store
+   groups.
+4. Item 4: add YOLO model loading/device placement helper and migrate major
+   inference/training call sites.
 
-1. Add run-resolution helpers for diagnostics/read flows.
-2. Expand `open_zarr_root()` adoption with low-risk migration sweep.
-3. Add `array_validation.py` and `console.make_progress()`; migrate repeated NaN/gap/progress patterns.
-4. Add sampled import metadata helper and migrate the two duplicate callsites.
+#### Phase C (Medium Priority Pipeline Hygiene)
 
-#### Phase D (Data/Card/Plot Cleanup)
+1. Item 16: extract shared batch plan/execute/summarize loop.
+2. Item 11: add higher-level provenance recording wrapper.
+3. Items 12/13/14: consolidate array validation, progress factory, and lineage
+   source-attr writes.
+4. Item 17: deduplicate sampled-import metadata reader in refine-detect paths.
 
-1. Consolidate data-card aggregation shared statistics/type conversions.
-2. Unify data-card plotting helpers (include eye-mask plotting in first pass).
-3. Add shared color constants and migrate top plotting consumers.
-4. Resolve Pydantic schema cleanup decision (`config_models.py` lifecycle).
+#### Phase D (Reporting & Plotting Cleanup)
+
+1. Item 3: consolidate data-card aggregation helpers/statistics.
+2. Item 6: standardize figure save/finalize helpers.
+3. Item 19: unify data-card plotting module(s), including eye-mask path.
+4. Item 20: consolidate color scheme constants.
+5. Item 18: finalize Pydantic schema consolidation decision.
 
 ---
 
@@ -200,19 +210,22 @@ def _emit_crop_step_status(*, root, zarr_path, status, run_name, method,
 **Proposed helper:**
 ```python
 def emit_stage_completion(
-    root: zarr.Group,
+    root: zarr.Group | None,
     zarr_path: Path,
     *,
     step_name: str,
     status: str,
-    run_name: str,
-    method: str,
     source: str,
+    run_name: str | None = None,
+    method: str | None = None,
     coverage_pct: float | None = None,
     review_status_json: dict | None = None,
     details_json: dict | None = None,
     console: Console | None = None,
-) -> None:
+    registry: Registry | Path | str | None = None,
+    metadata: DatasetMetadata | None = None,
+    upsert_dataset_row: bool = True,
+) -> bool:
     """Write step status + cascade after a pipeline stage completes."""
 ```
 
@@ -376,7 +389,7 @@ not *resolution of existing runs*. 14+ pipeline files already use
 
 ### 2. Promote Existing `open_zarr_root()`
 
-- [ ] Audit 187+ raw `zarr.open()` call sites in `src/fisheye/`
+- [ ] Audit 200+ raw `zarr.open()` call sites in `src/fisheye/`
 - [ ] Replace with `open_zarr_root()` from `fisheye/utils/zarr_io.py` where appropriate
 - [ ] Consider a grep-based pre-commit check to discourage raw `zarr.open()` in new code
 
@@ -730,24 +743,25 @@ src/fisheye/cli/
 
 ## Impact Estimate
 
-| Area                          | Est. lines removable | Files affected |
-|-------------------------------|---------------------:|---------------:|
-| Registry status emission (C1) |                 ~600 |            13  |
-| Batch logging + timestamps (C4)|                ~450 |         15-29  |
-| Zarr run resolution (1)       |                 ~400 |            20+ |
-| Normalization helpers (C3)    |                 ~300 |            33  |
-| Data card dedup (3)           |                 ~300 |              4 |
-| Batch processing loop (16)    |                 ~300 |              4 |
-| Argparse groups (5)           |                 ~500 |            25+ |
-| Plot save boilerplate (6)     |                 ~300 |            68+ |
-| Dataset metadata (C2)         |                 ~200 |            14  |
-| Registry zarr discovery (7)   |                 ~200 |              4 |
-| Model loader (4)              |                 ~200 |            24  |
-| Root path resolution (8)      |                 ~200 |            33  |
-| Lineage tracking (14)         |                 ~150 |              8 |
-| Data quality metrics (15)     |                 ~120 |              5 |
-| Type conversion dedup (3)     |                 ~100 |            10+ |
-| **Total**                     |         **~4,020+** |      **150+** |
+| Area                          | Status | Est. lines removable | Files affected |
+|-------------------------------|--------|---------------------:|---------------:|
+| Registry status emission (C1) | Done   |                 ~600 |            13  |
+| Batch logging + timestamps (C4) | Partial |              ~450 |         15-29  |
+| Zarr run resolution (1)       | Open   |                 ~400 |            20+ |
+| Normalization helpers (C3)    | Partial |               ~300 |            33  |
+| Data card dedup (3)           | Open   |                 ~300 |              4 |
+| Batch processing loop (16)    | Partial |               ~300 |              4 |
+| Argparse groups (5)           | Partial |               ~500 |            25+ |
+| Plot save boilerplate (6)     | Open   |                 ~300 |            68+ |
+| Dataset metadata (C2)         | Done   |                 ~200 |            14  |
+| Registry zarr discovery (7)   | Done   |                 ~200 |              4 |
+| Model loader (4)              | Open   |                 ~200 |            24  |
+| Root path resolution (8)      | Partial |               ~200 |            33  |
+| Lineage tracking (14)         | Partial |               ~150 |              8 |
+| Data quality metrics (15)     | Partial |               ~120 |              5 |
+| Type conversion dedup (3)     | Partial |               ~100 |            10+ |
+| **Gross potential (historical, includes completed items)** | N/A | **~4,020+** | **150+** |
+| **Approx remaining (excludes completed C1/C2/7)** | N/A | **~3,020+** | **120+** |
 
 ---
 
