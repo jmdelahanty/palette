@@ -4,10 +4,10 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 import h5py
 import numpy as np
@@ -17,7 +17,14 @@ import zarr
 from fisheye.detection.detect_keypoints_traditional import detect_keypoints
 from fisheye.detection.detect_keypoints_yolo import detect_keypoints_yolo
 from fisheye.refinement.refine_keypoints import create_refined_keypoint_run
+from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils import refine_keypoints_batch as refine_keypoints_batch_mod
+from fisheye.utils.resolve_detect_model import Candidate
+from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
+from fisheye.utils.run_keypoints_with_registry_model import (
+    _write_model_resolution_provenance as _write_keypoint_model_resolution_provenance,
+)
 
 try:
     from rich.console import Console
@@ -35,7 +42,7 @@ except Exception:  # pragma: no cover - rich is optional
 @dataclass
 class KeypointPlan:
     recording_dir: Path
-    h5_path: Path
+    h5_path: Optional[Path]
     zarr_path: Path
     camera_id: Optional[str]
     status: str
@@ -44,6 +51,18 @@ class KeypointPlan:
     crop_present: bool = False
     background_present: bool = False
     tuning_present: bool = False
+
+
+@dataclass(frozen=True)
+class ResolvedModel:
+    model_path: str
+    payload: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RegistryZarrEntry:
+    zarr_path: Path
+    camera_id: Optional[str]
 
 
 def _utc_now() -> str:
@@ -338,7 +357,7 @@ def _plan_from_zarr(
     *,
     zarr_path: Path,
     recording_dir: Path,
-    h5_path: Path,
+    h5_path: Optional[Path],
     camera_id: Optional[str],
     skip_existing: bool,
     require_crop: bool,
@@ -513,6 +532,97 @@ def _build_plans_from_zarr(
     return plans
 
 
+def _discover_zarrs_from_registry(
+    *,
+    registry_path: Path,
+    scope_paths: Sequence[Path],
+    rig_id: Optional[str] = None,
+    arena_id: Optional[str] = None,
+    camera_id: Optional[str] = None,
+    path_contains: Optional[str] = None,
+    skip_existing: bool = False,
+) -> List[Path]:
+    entries = _discover_registry_entries(
+        registry_path=registry_path,
+        scope_paths=scope_paths,
+        rig_id=rig_id,
+        arena_id=arena_id,
+        camera_id=camera_id,
+        path_contains=path_contains,
+        skip_existing=skip_existing,
+    )
+    return [entry.zarr_path for entry in entries]
+
+
+def _discover_registry_entries(
+    *,
+    registry_path: Path,
+    scope_paths: Sequence[Path],
+    rig_id: Optional[str] = None,
+    arena_id: Optional[str] = None,
+    camera_id: Optional[str] = None,
+    path_contains: Optional[str] = None,
+    skip_existing: bool = False,
+) -> List[RegistryZarrEntry]:
+    """Query the registry for analysis zarr paths suitable for keypoint processing.
+
+    When *skip_existing* is True, recordings whose ``keypoints`` step status is
+    already ``'ok'`` are excluded at the SQL level.  Additionally, only
+    recordings whose ``detect`` and ``crop`` steps are both ``'ok'`` are
+    returned, ensuring prerequisite pipeline stages are complete.
+    """
+    registry = Registry(registry_path)
+    try:
+        query_kwargs: dict[str, Any] = dict(
+            zarr_use="analysis",
+            exclude_status="missing",
+            require_recording=True,
+            require_steps_ok=["detect", "crop"],
+            rig_id=rig_id,
+            arena_id=arena_id,
+            camera_id=camera_id,
+            path_contains=path_contains,
+        )
+        if skip_existing:
+            query_kwargs["exclude_step_ok"] = "keypoints"
+        rows = registry.query_datasets(**query_kwargs)
+    finally:
+        registry.close()
+
+    entries: list[RegistryZarrEntry] = []
+    for row in rows:
+        raw = row["zarr_path"]
+        if raw is None:
+            continue
+        zarr_path = Path(str(raw))
+        if not zarr_path.name.endswith("_analysis.zarr"):
+            continue
+        entries.append(
+            RegistryZarrEntry(
+                zarr_path=zarr_path.resolve(),
+                camera_id=_normalize_attr(row["camera_id"]),
+            )
+        )
+
+    # Scope filter: if caller provided paths, keep only zarrs under those roots.
+    if scope_paths:
+        resolved_scopes = [str(p.expanduser().resolve()).rstrip("/") + "/" for p in scope_paths]
+        entries = [entry for entry in entries if any(str(entry.zarr_path).startswith(s) for s in resolved_scopes)]
+
+    # Deduplicate and sort by zarr path (match filesystem discovery contract).
+    merged: Dict[str, RegistryZarrEntry] = {}
+    for entry in entries:
+        key = str(entry.zarr_path)
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = entry
+            continue
+        if existing.camera_id is None and entry.camera_id is not None:
+            merged[key] = entry
+    ordered = sorted(merged.values(), key=lambda item: str(item.zarr_path))
+    return ordered
+
+
 def _print_plan(plans: List[KeypointPlan]) -> None:
     counts = {"ok": 0, "skipped": 0, "missing": 0}
     for plan in plans:
@@ -545,6 +655,222 @@ def _resolve_method(config: Dict[str, Any], override: Optional[str]) -> str:
     return str(method).lower()
 
 
+def _resolve_registry_path(path: Optional[Path]) -> Path:
+    if path is not None:
+        return path.expanduser().resolve()
+    return RegistryPaths.from_env(Path.cwd()).path.expanduser().resolve()
+
+
+def _pick_best_candidate(candidates: List[Candidate], *, require_unique: bool) -> Candidate:
+    if not candidates:
+        raise RuntimeError("No pose model candidates found.")
+    best = candidates[0]
+    if require_unique and len(candidates) > 1:
+        if abs(candidates[0].weighted_score - candidates[1].weighted_score) < 1e-12:
+            raise RuntimeError("Top candidate score tied; rerun with --model-set-id to choose deterministically.")
+    return best
+
+
+def _candidate_payload(item: Candidate) -> Dict[str, Any]:
+    return {
+        "run_id": item.run_id,
+        "set_id": item.set_id,
+        "model_path": item.model_path,
+        "score": item.weighted_score,
+        "created_utc": item.created_utc,
+        "status": item.status,
+        "dataset_count": item.dataset_count,
+        "feature_match_counts": item.feature_match_counts,
+        "feature_weights_used": item.feature_weights_used,
+    }
+
+
+def _resolve_registry_model_for_plan(
+    *,
+    plan: KeypointPlan,
+    registry_path: Path,
+    set_id_filter: Optional[str],
+    require_unique: bool,
+    top_k: int,
+    include_non_success: bool,
+    crop_run: Optional[str],
+    batch_size: Optional[int],
+    device: Optional[str],
+    imgsz: Optional[int],
+    conf: Optional[float],
+    iou: Optional[float],
+    max_det: Optional[int],
+    mask_threshold: Optional[float],
+) -> ResolvedModel:
+    registry = Registry(registry_path)
+    try:
+        recording_id = _resolve_recording_id(
+            registry,
+            recording_id=None,
+            recording_dir=plan.recording_dir,
+        )
+        target = _load_target_profile(registry, recording_id)
+        candidates = _load_candidates(
+            registry,
+            target=target,
+            task="pose",
+            set_id_filter=set_id_filter,
+            include_non_success=include_non_success,
+        )
+    finally:
+        registry.close()
+
+    best = _pick_best_candidate(candidates, require_unique=require_unique)
+    selected_payload = _candidate_payload(best)
+    candidate_payloads = [_candidate_payload(item) for item in candidates[: max(0, int(top_k))]]
+    invocation_args = argparse.Namespace(
+        model_source="registry",
+        model_set_id=set_id_filter,
+        model_require_unique=bool(require_unique),
+        model_top_k=int(top_k),
+        model_include_non_success=bool(include_non_success),
+        crop_run=crop_run,
+        batch_size=batch_size,
+        device=device,
+        imgsz=imgsz,
+        conf=conf,
+        iou=iou,
+        max_det=max_det,
+        mask_threshold=mask_threshold,
+    )
+    payload = build_model_resolution_payload(
+        tool="fisheye.utils.run_keypoints_batch",
+        args=invocation_args,
+        argv=None,
+        task="pose",
+        registry_path=registry_path,
+        recording_id=recording_id,
+        target=asdict(target),
+        selected=selected_payload,
+        candidates=candidate_payloads,
+        parameters={
+            "set_id_filter": set_id_filter,
+            "require_unique": bool(require_unique),
+            "top_k": int(top_k),
+            "include_non_success": bool(include_non_success),
+        },
+        inputs={
+            "recording_dir": str(plan.recording_dir),
+            "output_zarr": str(plan.zarr_path),
+            "recording_id": recording_id,
+        },
+        artifacts={
+            "selected_model": selected_payload,
+            "candidate_models": candidate_payloads,
+            "output_zarr": str(plan.zarr_path),
+        },
+    )
+    return ResolvedModel(model_path=str(best.model_path), payload=payload)
+
+
+def _resolve_registry_models_for_plans(
+    *,
+    plans: List[KeypointPlan],
+    registry_path: Path,
+    set_id_filter: Optional[str],
+    require_unique: bool,
+    top_k: int,
+    include_non_success: bool,
+    config: Dict[str, Any],
+    on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> tuple[Dict[str, ResolvedModel], Dict[str, str]]:
+    params = config.get("keypoints", {})
+    resolved: Dict[str, ResolvedModel] = {}
+    errors: Dict[str, str] = {}
+    resolved_by_recording: Dict[str, ResolvedModel] = {}
+    errors_by_recording: Dict[str, str] = {}
+    total = len(plans)
+    for index, plan in enumerate(plans, start=1):
+        key = str(plan.zarr_path.resolve())
+        recording_key = str(plan.recording_dir.resolve())
+        base_event: Dict[str, Any] = {
+            "index": index,
+            "total": total,
+            "recording": str(plan.recording_dir),
+            "zarr": str(plan.zarr_path),
+            "camera_id": plan.camera_id,
+        }
+        cached = resolved_by_recording.get(recording_key)
+        if cached is not None:
+            resolved[key] = cached
+            selected = cached.payload.get("selected")
+            selected_payload = selected if isinstance(selected, dict) else {}
+            if on_event is not None:
+                on_event(
+                    {
+                        **base_event,
+                        "event": "model_resolution_cached",
+                        "selected_model_path": cached.model_path,
+                        "selected_run_id": selected_payload.get("run_id"),
+                        "selected_set_id": selected_payload.get("set_id"),
+                    }
+                )
+            continue
+        cached_error = errors_by_recording.get(recording_key)
+        if cached_error is not None:
+            errors[key] = cached_error
+            if on_event is not None:
+                on_event(
+                    {
+                        **base_event,
+                        "event": "model_resolution_failed",
+                        "error": cached_error,
+                    }
+                )
+            continue
+        if on_event is not None:
+            on_event({**base_event, "event": "model_resolution_start"})
+        try:
+            model = _resolve_registry_model_for_plan(
+                plan=plan,
+                registry_path=registry_path,
+                set_id_filter=set_id_filter,
+                require_unique=require_unique,
+                top_k=top_k,
+                include_non_success=include_non_success,
+                crop_run=params.get("crop_run"),
+                batch_size=params.get("batch_size", 256),
+                device=params.get("device"),
+                imgsz=params.get("imgsz"),
+                conf=params.get("conf", 0.25),
+                iou=params.get("iou", 0.5),
+                max_det=params.get("max_det", 1),
+                mask_threshold=params.get("mask_threshold", 0.5),
+            )
+            resolved[key] = model
+            resolved_by_recording[recording_key] = model
+            selected = model.payload.get("selected")
+            selected_payload = selected if isinstance(selected, dict) else {}
+            if on_event is not None:
+                on_event(
+                    {
+                        **base_event,
+                        "event": "model_resolution_ok",
+                        "selected_model_path": model.model_path,
+                        "selected_run_id": selected_payload.get("run_id"),
+                        "selected_set_id": selected_payload.get("set_id"),
+                    }
+                )
+        except Exception as exc:
+            message = str(exc)
+            errors[key] = message
+            errors_by_recording[recording_key] = message
+            if on_event is not None:
+                on_event(
+                    {
+                        **base_event,
+                        "event": "model_resolution_failed",
+                        "error": message,
+                    }
+                )
+    return resolved, errors
+
+
 def _run_traditional(
     zarr_path: str,
     config: Dict[str, Any],
@@ -574,9 +900,14 @@ def _run_traditional(
     )
 
 
-def _run_yolo(zarr_path: str, config: Dict[str, Any], quiet: bool) -> str:
+def _run_yolo(
+    zarr_path: str,
+    config: Dict[str, Any],
+    quiet: bool,
+    model_path_override: Optional[str] = None,
+) -> str:
     params = config.get("keypoints", {})
-    model_path = params.get("model") or params.get("model_path")
+    model_path = model_path_override or params.get("model") or params.get("model_path")
     if not model_path:
         raise ValueError("YOLO keypoints require 'model' or 'model_path' in config.")
     if quiet and Console is not None:
@@ -651,6 +982,7 @@ def _run_plan(
     refine: bool,
     refine_only: bool,
     json_output: bool,
+    resolved_model: Optional[ResolvedModel] = None,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "recording": str(plan.recording_dir),
@@ -676,7 +1008,12 @@ def _run_plan(
             payload["refine_skipped_reason"] = "zero_keypoint_rois"
     else:
         if method in {"yolo", "yolo_pose"}:
-            run_name = _run_yolo(str(plan.zarr_path), config, quiet=quiet)
+            run_name = _run_yolo(
+                str(plan.zarr_path),
+                config,
+                quiet=quiet,
+                model_path_override=(resolved_model.model_path if resolved_model else None),
+            )
         else:
             _run_traditional(
                 str(plan.zarr_path),
@@ -694,6 +1031,24 @@ def _run_plan(
             "keypoints_runs",
             run_name,
         )
+        if resolved_model is not None:
+            _write_keypoint_model_resolution_provenance(
+                zarr_path=plan.zarr_path,
+                run_name=run_name,
+                payload=resolved_model.payload,
+            )
+            selected = (
+                resolved_model.payload.get("selected", {})
+                if isinstance(resolved_model.payload.get("selected"), dict)
+                else {}
+            )
+            payload["model_resolution"] = {
+                "mode": "registry",
+                "selected_model_path": selected.get("model_path"),
+                "selected_run_id": selected.get("run_id"),
+                "selected_set_id": selected.get("set_id"),
+                "selected_score": selected.get("score"),
+            }
         if refine:
             total_rois = _keypoints_total_rois(plan.zarr_path, run_name)
             if total_rois is None or total_rois > 0:
@@ -861,6 +1216,70 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Disable JSONL logging.",
     )
+    # --- Registry discovery mode ---
+    parser.add_argument(
+        "--source",
+        choices=["filesystem", "registry"],
+        default="filesystem",
+        help="Discovery source: filesystem (default) or registry.",
+    )
+    parser.add_argument(
+        "--emit-paths",
+        action="store_true",
+        help="Print discovered zarr paths (one per line) and exit.",
+    )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help="Path to registry SQLite database (required when --source registry).",
+    )
+    parser.add_argument(
+        "--rig-id",
+        type=str,
+        help="Filter by rig_id (registry mode).",
+    )
+    parser.add_argument(
+        "--arena-id",
+        type=str,
+        help="Filter by arena_id (registry mode).",
+    )
+    parser.add_argument(
+        "--camera-id-filter",
+        type=str,
+        help="Filter by camera_id in registry (registry mode). Named --camera-id-filter to avoid ambiguity with per-recording camera_id.",
+    )
+    parser.add_argument(
+        "--path-contains",
+        type=str,
+        help="Filter zarr_path by substring (registry mode).",
+    )
+    parser.add_argument(
+        "--model-source",
+        choices=["config", "registry"],
+        default="config",
+        help="YOLO model resolution source: config (default) or registry.",
+    )
+    parser.add_argument(
+        "--model-set-id",
+        type=str,
+        help="Optional set_id filter when --model-source registry.",
+    )
+    parser.add_argument(
+        "--model-require-unique",
+        action="store_true",
+        help="When --model-source registry, fail plan resolution on top-score ties.",
+    )
+    parser.add_argument(
+        "--model-top-k",
+        type=int,
+        default=5,
+        help="Number of registry model candidates to capture in provenance payloads.",
+    )
+    parser.add_argument(
+        "--model-include-non-success",
+        action="store_true",
+        help="Include non-success training runs when resolving models from registry.",
+    )
     parser.set_defaults(require_crop=True)
 
     args = parser.parse_args(argv)
@@ -904,6 +1323,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     config = _load_config(args.config)
     method = _resolve_method(config, args.method)
+    if args.model_source == "registry" and method not in {"yolo", "yolo_pose"}:
+        print(
+            f"Error: --model-source registry requires YOLO keypoints method, got '{method}'.",
+            file=sys.stderr,
+        )
+        return 1
     explicit_background_pref = bool(args.require_background) or bool(args.no_require_background)
     if explicit_background_pref:
         require_background = bool(args.require_background) and not bool(args.no_require_background)
@@ -941,32 +1366,75 @@ def main(argv: Optional[List[str]] = None) -> int:
             refine_only=bool(args.refine_only),
             dask_progress=bool(args.dask_progress),
             json=bool(args.json),
+            source=args.source,
+            sql_prefilter=bool(args.source == "registry" and skip_existing),
+            model_source=args.model_source,
+            model_set_id=args.model_set_id,
         )
 
     plans: List[KeypointPlan] = []
-    if roots:
-        plans.extend(
-            _build_plans(
-                roots,
-                args.recursive,
-                skip_existing=skip_existing,
-                require_crop=require_crop,
-                require_background=require_background,
-                require_tuning=bool(args.require_tuning),
-                refine_only=bool(args.refine_only),
+    resolved_registry_path: Optional[Path] = None
+    if args.source == "registry" or args.model_source == "registry":
+        resolved_registry_path = _resolve_registry_path(args.registry)
+    if args.source == "registry":
+        if resolved_registry_path is None or not resolved_registry_path.exists():
+            print(
+                f"Error: registry database not found: {resolved_registry_path}",
+                file=sys.stderr,
             )
+            return 1
+        registry_entries = _discover_registry_entries(
+            registry_path=resolved_registry_path,
+            scope_paths=roots + explicit_zarrs,
+            rig_id=args.rig_id,
+            arena_id=args.arena_id,
+            camera_id=getattr(args, "camera_id_filter", None),
+            path_contains=args.path_contains,
+            skip_existing=skip_existing,
         )
-    if explicit_zarrs:
-        plans.extend(
-            _build_plans_from_zarr(
-                explicit_zarrs,
-                skip_existing=skip_existing,
-                require_crop=require_crop,
-                require_background=require_background,
-                require_tuning=bool(args.require_tuning),
-                refine_only=bool(args.refine_only),
+        registry_zarrs = [entry.zarr_path for entry in registry_entries]
+        camera_ids_by_zarr = {str(entry.zarr_path.resolve()): entry.camera_id for entry in registry_entries}
+        if args.emit_paths:
+            for p in registry_zarrs:
+                print(p)
+            return 0
+        registry_plans = _build_plans_from_zarr(
+            registry_zarrs,
+            skip_existing=skip_existing,
+            require_crop=require_crop,
+            require_background=require_background,
+            require_tuning=bool(args.require_tuning),
+            refine_only=bool(args.refine_only),
+        )
+        for plan in registry_plans:
+            camera_id = camera_ids_by_zarr.get(str(plan.zarr_path.resolve()))
+            if camera_id is not None:
+                plan.camera_id = camera_id
+        plans.extend(registry_plans)
+    else:
+        if roots:
+            plans.extend(
+                _build_plans(
+                    roots,
+                    args.recursive,
+                    skip_existing=skip_existing,
+                    require_crop=require_crop,
+                    require_background=require_background,
+                    require_tuning=bool(args.require_tuning),
+                    refine_only=bool(args.refine_only),
+                )
             )
-        )
+        if explicit_zarrs:
+            plans.extend(
+                _build_plans_from_zarr(
+                    explicit_zarrs,
+                    skip_existing=skip_existing,
+                    require_crop=require_crop,
+                    require_background=require_background,
+                    require_tuning=bool(args.require_tuning),
+                    refine_only=bool(args.refine_only),
+                )
+            )
 
     if plans:
         seen: set[str] = set()
@@ -1070,6 +1538,102 @@ def main(argv: Optional[List[str]] = None) -> int:
             continue
         runnable_plans.append(plan)
 
+    resolved_models_by_plan: Dict[str, ResolvedModel] = {}
+    if args.model_source == "registry" and runnable_plans:
+        if resolved_registry_path is None or not resolved_registry_path.exists():
+            print(
+                f"Error: registry database not found for model resolution: {resolved_registry_path}",
+                file=sys.stderr,
+            )
+            return 1
+        if not args.json and not args.quiet:
+            print(f"Pre-resolving registry models for {len(runnable_plans)} recording plan(s)...")
+
+        def _emit_model_resolution_event(event_payload: Dict[str, Any]) -> None:
+            event_name = str(event_payload.get("event", "model_resolution_event"))
+            if logger is not None:
+                logger.log(
+                    event_name,
+                    **{k: v for k, v in event_payload.items() if k != "event"},
+                )
+            if args.json or args.quiet:
+                return
+            index = event_payload.get("index")
+            total = event_payload.get("total")
+            prefix = f"[{index}/{total}] " if index is not None and total is not None else ""
+            event = event_name
+            if event == "model_resolution_start":
+                print(f"{prefix}Resolving model for {event_payload.get('recording')}")
+                return
+            if event == "model_resolution_cached":
+                print(
+                    f"{prefix}Using cached model for {event_payload.get('recording')}: "
+                    f"{event_payload.get('selected_model_path')}"
+                )
+                return
+            if event == "model_resolution_ok":
+                print(
+                    f"{prefix}Resolved model for {event_payload.get('recording')}: "
+                    f"{event_payload.get('selected_model_path')}"
+                )
+                return
+            if event == "model_resolution_failed":
+                print(
+                    f"{prefix}Model resolution failed for {event_payload.get('zarr')}: "
+                    f"{event_payload.get('error')}"
+                )
+
+        resolved_models_by_plan, resolution_errors = _resolve_registry_models_for_plans(
+            plans=runnable_plans,
+            registry_path=resolved_registry_path,
+            set_id_filter=args.model_set_id,
+            require_unique=bool(args.model_require_unique),
+            top_k=int(args.model_top_k),
+            include_non_success=bool(args.model_include_non_success),
+            config=config,
+            on_event=_emit_model_resolution_event,
+        )
+        if logger is not None:
+            logger.log(
+                "model_resolution_summary",
+                total=len(runnable_plans),
+                resolved=len(resolved_models_by_plan),
+                failed=len(resolution_errors),
+            )
+        if not args.json and not args.quiet:
+            print(
+                "Model resolution summary: "
+                f"resolved={len(resolved_models_by_plan)} failed={len(resolution_errors)}"
+            )
+        if resolution_errors:
+            runnable_after_resolution: List[KeypointPlan] = []
+            for plan in runnable_plans:
+                key = str(plan.zarr_path.resolve())
+                error = resolution_errors.get(key)
+                if error is None:
+                    runnable_after_resolution.append(plan)
+                    continue
+                failed += 1
+                if args.json:
+                    print(
+                        json.dumps(
+                            {
+                                "status": "failed",
+                                "zarr": str(plan.zarr_path),
+                                "error": f"model resolution failed: {error}",
+                            }
+                        )
+                    )
+                else:
+                    print(f"Keypoints failed for {plan.zarr_path}: model resolution failed: {error}")
+                if logger is not None:
+                    logger.log(
+                        "keypoints_failed",
+                        zarr=str(plan.zarr_path),
+                        error=f"model resolution failed: {error}",
+                    )
+            runnable_plans = runnable_after_resolution
+
     console = Console() if (Console is not None and not args.json and not args.quiet) else None
     progress = _progress(console if not args.json else None, total=len(runnable_plans))
     quiet = bool(args.quiet or args.json)
@@ -1089,6 +1653,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     refine=bool(args.refine),
                     refine_only=bool(args.refine_only),
                     json_output=bool(args.json),
+                    resolved_model=resolved_models_by_plan.get(str(plan.zarr_path.resolve())),
                 )
                 ok += 1
                 if args.json:
@@ -1127,6 +1692,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         refine=bool(args.refine),
                         refine_only=bool(args.refine_only),
                         json_output=bool(args.json),
+                        resolved_model=resolved_models_by_plan.get(str(plan.zarr_path.resolve())),
                     )
                     ok += 1
                     if args.json:

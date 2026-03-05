@@ -340,3 +340,407 @@ def test_main_refine_only_delegates_to_refine_keypoints_batch(
     assert "--no-log" in argv
     assert "--json" in argv
     assert "--scheduler" not in argv
+
+
+# ---------------------------------------------------------------------------
+# Registry discovery tests
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_row(zarr_path: str) -> dict:
+    return {"zarr_path": zarr_path}
+
+
+def test_discover_zarrs_from_registry_skip_existing_passes_exclude_step_ok(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When skip_existing=True, exclude_step_ok='keypoints' is passed."""
+    registry_path = tmp_path / "registry.sqlite"
+    registry_path.write_text("", encoding="utf-8")
+
+    captured_kwargs: list[dict] = []
+
+    class _FakeRegistry:
+        def __init__(self, _path):
+            pass
+
+        def query_datasets(self, **kwargs):
+            captured_kwargs.append(kwargs)
+            return []
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(mod, "Registry", _FakeRegistry)
+
+    mod._discover_zarrs_from_registry(
+        registry_path=registry_path,
+        scope_paths=[],
+        skip_existing=True,
+    )
+
+    assert len(captured_kwargs) == 1
+    assert captured_kwargs[0]["exclude_step_ok"] == "keypoints"
+    assert captured_kwargs[0]["require_steps_ok"] == ["detect", "crop"]
+
+
+def test_discover_zarrs_from_registry_no_skip_omits_exclude_step_ok(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When skip_existing=False (default), exclude_step_ok is not passed."""
+    registry_path = tmp_path / "registry.sqlite"
+    registry_path.write_text("", encoding="utf-8")
+
+    captured_kwargs: list[dict] = []
+
+    class _FakeRegistry:
+        def __init__(self, _path):
+            pass
+
+        def query_datasets(self, **kwargs):
+            captured_kwargs.append(kwargs)
+            return []
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(mod, "Registry", _FakeRegistry)
+
+    mod._discover_zarrs_from_registry(
+        registry_path=registry_path,
+        scope_paths=[],
+        skip_existing=False,
+    )
+
+    assert len(captured_kwargs) == 1
+    assert "exclude_step_ok" not in captured_kwargs[0]
+    assert captured_kwargs[0]["require_steps_ok"] == ["detect", "crop"]
+
+
+def test_main_source_registry_missing_registry_fails(tmp_path: Path) -> None:
+    """--source registry with missing registry file returns exit code 1."""
+    rc = mod.main(
+        [
+            "--source",
+            "registry",
+            "--registry",
+            str(tmp_path / "nonexistent.sqlite"),
+            "--no-log",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 1
+
+
+def test_main_emit_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--emit-paths prints discovered paths and exits 0."""
+    registry_path = tmp_path / "registry.sqlite"
+    registry_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(
+        mod,
+        "_discover_registry_entries",
+        lambda **_kw: [
+            mod.RegistryZarrEntry(zarr_path=Path("/data/rec_a_analysis.zarr"), camera_id="1"),
+            mod.RegistryZarrEntry(zarr_path=Path("/data/rec_b_analysis.zarr"), camera_id="2"),
+        ],
+    )
+
+    rc = mod.main(
+        [
+            "--source",
+            "registry",
+            "--emit-paths",
+            "--registry",
+            str(registry_path),
+            "--no-log",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    lines = [l for l in out.strip().splitlines() if l.strip()]
+    assert "/data/rec_a_analysis.zarr" in lines
+    assert "/data/rec_b_analysis.zarr" in lines
+
+
+def test_main_source_registry_uses_registry_camera_ids_in_dry_run_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    registry_path.write_text("", encoding="utf-8")
+    recording_dir = tmp_path / "recording_a"
+    zarr_path = recording_dir / "zarr" / "recording_a_analysis.zarr"
+    discovered = [mod.RegistryZarrEntry(zarr_path=zarr_path, camera_id="7")]
+
+    def _fake_build_plans_from_zarr(*args, **kwargs):  # noqa: ANN002, ANN003
+        return [
+            mod.KeypointPlan(
+                recording_dir=recording_dir,
+                h5_path=None,
+                zarr_path=zarr_path,
+                camera_id=None,
+                status="ok",
+            )
+        ]
+
+    monkeypatch.setattr(mod, "_discover_registry_entries", lambda **_kw: discovered)
+    monkeypatch.setattr(mod, "_load_config", lambda _path: {"keypoints": {"method": "yolo"}})
+    monkeypatch.setattr(mod, "_build_plans_from_zarr", _fake_build_plans_from_zarr)
+
+    rc = mod.main(
+        [
+            "--source",
+            "registry",
+            "--method",
+            "yolo",
+            "--registry",
+            str(registry_path),
+            "--dry-run",
+            "--json",
+            "--no-log",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    assert lines
+    payload = json.loads(lines[0])
+    assert payload["camera_id"] == "7"
+
+
+def test_run_yolo_prefers_model_path_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_detect_keypoints_yolo(**kwargs):  # noqa: ANN003
+        captured.update(kwargs)
+        return "keypoints_001"
+
+    monkeypatch.setattr(mod, "detect_keypoints_yolo", _fake_detect_keypoints_yolo)
+    run_name = mod._run_yolo(
+        "recording_analysis.zarr",
+        {"keypoints": {"model": "/models/from_config.pt", "batch_size": 64}},
+        quiet=False,
+        model_path_override="/models/from_registry.pt",
+    )
+    assert run_name == "keypoints_001"
+    assert captured["model_path"] == "/models/from_registry.pt"
+
+
+def test_resolve_registry_models_for_plans_collects_resolution_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    plan_ok = mod.KeypointPlan(
+        recording_dir=tmp_path / "rec_ok",
+        h5_path=None,
+        zarr_path=tmp_path / "rec_ok" / "zarr" / "rec_ok_analysis.zarr",
+        camera_id=None,
+        status="ok",
+    )
+    plan_fail = mod.KeypointPlan(
+        recording_dir=tmp_path / "rec_fail",
+        h5_path=None,
+        zarr_path=tmp_path / "rec_fail" / "zarr" / "rec_fail_analysis.zarr",
+        camera_id=None,
+        status="ok",
+    )
+
+    def _fake_resolve(**kwargs):  # noqa: ANN003
+        plan = kwargs["plan"]
+        if plan.recording_dir.name == "rec_fail":
+            raise RuntimeError("resolution boom")
+        return mod.ResolvedModel(
+            model_path="/models/pose.pt",
+            payload={"selected": {"run_id": "pose_run_001", "set_id": "pose_set_001", "model_path": "/models/pose.pt"}},
+        )
+
+    monkeypatch.setattr(mod, "_resolve_registry_model_for_plan", _fake_resolve)
+    resolved, errors = mod._resolve_registry_models_for_plans(
+        plans=[plan_ok, plan_fail],
+        registry_path=tmp_path / "registry.sqlite",
+        set_id_filter=None,
+        require_unique=False,
+        top_k=5,
+        include_non_success=False,
+        config={"keypoints": {}},
+    )
+    assert str(plan_ok.zarr_path.resolve()) in resolved
+    assert str(plan_fail.zarr_path.resolve()) in errors
+    assert "resolution boom" in errors[str(plan_fail.zarr_path.resolve())]
+
+
+def test_resolve_registry_models_for_plans_resolves_once_per_recording(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    recording_dir = tmp_path / "rec_shared"
+    plan_a = mod.KeypointPlan(
+        recording_dir=recording_dir,
+        h5_path=None,
+        zarr_path=recording_dir / "zarr" / "rec_shared_analysis.zarr",
+        camera_id=None,
+        status="ok",
+    )
+    plan_b = mod.KeypointPlan(
+        recording_dir=recording_dir,
+        h5_path=None,
+        zarr_path=recording_dir / "zarr" / "rec_shared_training.zarr",
+        camera_id=None,
+        status="ok",
+    )
+    calls: list[str] = []
+
+    def _fake_resolve(**kwargs):  # noqa: ANN003
+        plan = kwargs["plan"]
+        calls.append(str(plan.zarr_path))
+        return mod.ResolvedModel(
+            model_path="/models/pose.pt",
+            payload={"selected": {"run_id": "pose_run_001", "set_id": "pose_set_001", "model_path": "/models/pose.pt"}},
+        )
+
+    monkeypatch.setattr(mod, "_resolve_registry_model_for_plan", _fake_resolve)
+    resolved, errors = mod._resolve_registry_models_for_plans(
+        plans=[plan_a, plan_b],
+        registry_path=tmp_path / "registry.sqlite",
+        set_id_filter=None,
+        require_unique=False,
+        top_k=5,
+        include_non_success=False,
+        config={"keypoints": {}},
+    )
+    assert not errors
+    assert len(calls) == 1
+    assert str(plan_a.zarr_path.resolve()) in resolved
+    assert str(plan_b.zarr_path.resolve()) in resolved
+    assert resolved[str(plan_a.zarr_path.resolve())] == resolved[str(plan_b.zarr_path.resolve())]
+
+
+def test_resolve_registry_models_for_plans_emits_progress_events(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    recording_dir = tmp_path / "rec_shared"
+    plan_a = mod.KeypointPlan(
+        recording_dir=recording_dir,
+        h5_path=None,
+        zarr_path=recording_dir / "zarr" / "rec_shared_analysis.zarr",
+        camera_id="1",
+        status="ok",
+    )
+    plan_b = mod.KeypointPlan(
+        recording_dir=recording_dir,
+        h5_path=None,
+        zarr_path=recording_dir / "zarr" / "rec_shared_training.zarr",
+        camera_id="1",
+        status="ok",
+    )
+    events: list[dict[str, object]] = []
+
+    def _fake_resolve(**kwargs):  # noqa: ANN003
+        return mod.ResolvedModel(
+            model_path="/models/pose.pt",
+            payload={"selected": {"run_id": "pose_run_001", "set_id": "pose_set_001", "model_path": "/models/pose.pt"}},
+        )
+
+    monkeypatch.setattr(mod, "_resolve_registry_model_for_plan", _fake_resolve)
+    resolved, errors = mod._resolve_registry_models_for_plans(
+        plans=[plan_a, plan_b],
+        registry_path=tmp_path / "registry.sqlite",
+        set_id_filter=None,
+        require_unique=False,
+        top_k=5,
+        include_non_success=False,
+        config={"keypoints": {}},
+        on_event=lambda payload: events.append(payload),
+    )
+    assert not errors
+    assert str(plan_a.zarr_path.resolve()) in resolved
+    assert str(plan_b.zarr_path.resolve()) in resolved
+    assert [event["event"] for event in events] == [
+        "model_resolution_start",
+        "model_resolution_ok",
+        "model_resolution_cached",
+    ]
+    assert events[0]["index"] == 1
+    assert events[2]["index"] == 2
+
+
+def test_main_model_source_registry_passes_pre_resolved_model_to_run_plan(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    registry_path.write_text("", encoding="utf-8")
+    recording_dir = tmp_path / "recording_a"
+    plan = mod.KeypointPlan(
+        recording_dir=recording_dir,
+        h5_path=recording_dir / "raw" / "recording_a.h5",
+        zarr_path=recording_dir / "zarr" / "recording_a_analysis.zarr",
+        camera_id="1",
+        status="ok",
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(mod, "_resolve_root", lambda _paths: [tmp_path])
+    monkeypatch.setattr(mod, "_load_config", lambda _path: {"keypoints": {"method": "yolo"}})
+    monkeypatch.setattr(mod, "_build_plans", lambda *args, **kwargs: [plan])  # noqa: ARG005
+    monkeypatch.setattr(mod, "_build_plans_from_zarr", lambda *args, **kwargs: [])  # noqa: ARG005
+    monkeypatch.setattr(
+        mod,
+        "_resolve_registry_models_for_plans",
+        lambda **kwargs: (  # noqa: ARG005
+            {
+                str(plan.zarr_path.resolve()): mod.ResolvedModel(
+                    model_path="/models/resolved.pt",
+                    payload={
+                        "selected": {
+                            "run_id": "pose_run_001",
+                            "set_id": "pose_set_001",
+                            "model_path": "/models/resolved.pt",
+                        }
+                    },
+                )
+            },
+            {},
+        ),
+    )
+
+    def _fake_run_plan(*args, **kwargs):  # noqa: ANN002, ANN003
+        captured["resolved_model"] = kwargs.get("resolved_model")
+        return {
+            "recording": str(recording_dir),
+            "zarr": str(plan.zarr_path),
+            "status": "ok",
+            "method": "yolo",
+        }
+
+    monkeypatch.setattr(mod, "_run_plan", _fake_run_plan)
+
+    rc = mod.main(
+        [
+            "--apply",
+            "--model-source",
+            "registry",
+            "--registry",
+            str(registry_path),
+            "--no-log",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    resolved_model = captured.get("resolved_model")
+    assert isinstance(resolved_model, mod.ResolvedModel)
+    assert resolved_model.model_path == "/models/resolved.pt"
+
+
+def test_main_model_source_registry_requires_yolo_method(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(mod, "_load_config", lambda _path: {"keypoints": {"method": "traditional"}})
+    rc = mod.main(
+        [
+            "--apply",
+            "--model-source",
+            "registry",
+            "--no-log",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 1
