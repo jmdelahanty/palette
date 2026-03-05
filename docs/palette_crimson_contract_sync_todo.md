@@ -8,7 +8,8 @@ Establish palette as the single source of truth for all `palette-crimson`
 contracts. The contracts repo becomes a read-only mirror of palette's
 `docs/palette-crimson/` directory, synced automatically via CI. The existing
 contracts repo automation (contract-trigger, question-router, clarify loop)
-continues to work unchanged — the only difference is where edits happen.
+continues with targeted adjustments (notably answer-consumer scope + sync PR
+automation) — the main difference is where `palette-crimson` edits originate.
 
 ---
 
@@ -100,14 +101,21 @@ continues to work unchanged — the only difference is where edits happen.
 
 - [ ] Add `.github/workflows/palette-contract-sync.yml` to palette repo.
 - [ ] Trigger: push to `main` with changes in `docs/palette-crimson/**`.
+- [ ] **Auth prerequisite (cross-repo PRs):**
+  - Create a fine-grained PAT (or app token) that can write to
+    `jmdelahanty/agent-contracts`.
+  - Minimum permissions on `agent-contracts`: `Contents: Read and write`,
+    `Pull requests: Read and write`, `Metadata: Read-only`.
+  - Store it as a secret in the palette repo (example:
+    `CONTRACTS_SYNC_TOKEN`) and use that token for create/update PR actions.
 - [ ] Actions:
   1. Check out palette repo (for source files).
   2. Check out contracts repo (target).
   3. Copy `docs/palette-crimson/*` → contracts repo `palette-crimson/`.
   4. Remove any files in contracts `palette-crimson/` that no longer exist in
-     palette (full mirror, not append-only).
-  5. Skip automation smoke test files (`automation_smoke_test*.md`,
-     `automation_validate_*.md`) — these are contracts-repo-only test artifacts.
+     palette (**full mirror with preserve list**).
+  5. Preserve contracts-repo-only artifacts (do not delete/overwrite):
+     `automation_smoke_test*.md`, `automation_validate_*.md`.
   6. If no changes detected, exit cleanly.
   7. Open PR to contracts repo main.
   8. Branch naming: `automation/palette-contract-sync-<sha>`.
@@ -120,20 +128,27 @@ continues to work unchanged — the only difference is where edits happen.
       the palette sync bot.
 - [ ] Match criteria:
   - Branch starts with `automation/palette-contract-sync-`
-  - PR actor is `github-actions[bot]` (or palette's bot identity)
+  - PR actor is trusted sync identity
   - Only `palette-crimson/` files are modified
-- [ ] Use the same `hmarr/auto-approve-action@v4` +
-      `peter-evans/enable-pull-request-automerge@v3` pattern as
-      `qa-answer-auto-approve.yml`.
+- [ ] Use token strategy that avoids self-approval failures:
+  - PR creation token identity must be different from approval token identity.
+  - If using `QA_PR_APPROVER_TOKEN`, ensure it is **not** the same identity as
+    the PR author.
+  - Prefer the same `actions/github-script` + PAT merge approach already used
+    in `qa-question-auto-pr.yml` rather than `gh pr merge` with
+    `GITHUB_TOKEN`.
 - [ ] Merge method: squash.
 
 ### 2c. Bot loop prevention
 
-- [ ] Ensure the contracts repo's `contract-trigger.yml` ignores the sync bot
-      actor (it already ignores `github-actions[bot]` via `IGNORED_ACTORS_REGEX`
-      — verify this covers the palette sync identity).
-- [ ] If palette's sync uses a different bot identity, add it to the ignore
-      regex.
+- [ ] **Do not automatically add sync actor to `contract-trigger` ignore regex.**
+      `palette-crimson/` sync merges should normally trigger downstream
+      assessments (especially crimson).
+- [ ] Verify merge actor behavior:
+  - If sync PR merges as `github-actions[bot]`, current ignore regex may skip
+    trigger jobs.
+  - Prefer merge identity that is not ignored, or adjust actor policy
+    deliberately after validating no-loop behavior.
 
 ---
 
