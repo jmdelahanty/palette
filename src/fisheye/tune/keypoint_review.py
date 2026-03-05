@@ -203,8 +203,10 @@ def _update_postprocess_summary(
     else:
         summary_out = {"refine": summary_raw}
 
+    previous_post = summary_out.get("postprocess")
     summary_out["postprocess"] = post_stats
-    summary_out["postprocess_updated_utc"] = datetime.now(timezone.utc).isoformat()
+    if previous_post != post_stats or "postprocess_updated_utc" not in summary_out:
+        summary_out["postprocess_updated_utc"] = datetime.now(timezone.utc).isoformat()
     refined.attrs["summary_statistics"] = summary_out
 
     if print_summary:

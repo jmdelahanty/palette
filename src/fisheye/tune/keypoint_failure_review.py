@@ -142,6 +142,57 @@ def _clean_reason(existing: str, new_tags: Sequence[str]) -> str:
     return "|".join(unique) if unique else "manual_correction"
 
 
+def _values_equal(current: object, new_value: object) -> bool:
+    current_arr = np.asarray(current)
+    new_arr = np.asarray(new_value)
+    if current_arr.shape != new_arr.shape:
+        return False
+    try:
+        return bool(np.array_equal(current_arr, new_arr, equal_nan=True))
+    except TypeError:
+        # Object arrays can raise with equal_nan; compare normalized string forms.
+        current_obj = current_arr.astype(object, copy=False)
+        new_obj = new_arr.astype(object, copy=False)
+        if current_obj.ndim == 0:
+            return str(current_obj.item()) == str(new_obj.item())
+        return all(str(lhs) == str(rhs) for lhs, rhs in zip(current_obj.flat, new_obj.flat))
+
+
+def _set_roi_value_if_changed(arr: Optional[zarr.Array], roi_idx: int, value: object) -> bool:
+    if arr is None:
+        return False
+    current = arr[roi_idx]
+    if _values_equal(current, value):
+        return False
+    arr[roi_idx] = value
+    return True
+
+
+def _build_manual_reason(existing: str, *, geom_ok: bool) -> str:
+    existing_tags = [tag for tag in existing.split("|") if tag]
+    drop_tags = {
+        "detection_failed",
+        "low_confidence",
+        "confidence_missing",
+        "fish_present_no_keypoints",
+        "detection_issue",
+        "manual_correction",
+        "geometry_issue",
+    }
+    kept_tags = [tag for tag in existing_tags if tag not in drop_tags]
+    tags = kept_tags + ["manual_correction"]
+    if not geom_ok:
+        tags.append("geometry_issue")
+    unique: list[str] = []
+    seen = set()
+    for tag in tags:
+        if not tag or tag in seen:
+            continue
+        unique.append(tag)
+        seen.add(tag)
+    return "|".join(unique) if unique else "manual_correction"
+
+
 def _sanitize_reason_array(reason_arr: zarr.Array) -> None:
     try:
         raw = reason_arr[:]
@@ -544,16 +595,14 @@ def launch_review(
             print("Set all three keypoints before saving.")
             return
 
-        kp_roi_arr[roi_idx] = points
+        changed = False
+        changed |= _set_roi_value_if_changed(kp_roi_arr, roi_idx, points)
         full_points = points + roi_coords[roi_idx]
-        if kp_img_arr is not None:
-            kp_img_arr[roi_idx] = full_points
-        if kp_norm_arr is not None:
-            kp_norm_arr[roi_idx] = full_points / norm_factor
+        changed |= _set_roi_value_if_changed(kp_img_arr, roi_idx, full_points)
+        changed |= _set_roi_value_if_changed(kp_norm_arr, roi_idx, full_points / norm_factor)
 
         heading_val = _compute_heading_from_points(points[0], points[1], points[2])
-        if heading_arr is not None:
-            heading_arr[roi_idx] = heading_val
+        changed |= _set_roi_value_if_changed(heading_arr, roi_idx, heading_val)
 
         metrics = compute_geometry_metrics(points)
         max_ok = max_triangle_area is None or metrics.area <= max_triangle_area
@@ -565,76 +614,55 @@ def launch_review(
             and max_ok
         )
 
-        if triangle_area_arr is not None:
-            triangle_area_arr[roi_idx] = metrics.area
-        if min_angle_arr is not None:
-            min_angle_arr[roi_idx] = metrics.min_angle
-        if triangle_angles_arr is not None:
-            triangle_angles_arr[roi_idx] = metrics.angles
+        changed |= _set_roi_value_if_changed(triangle_area_arr, roi_idx, metrics.area)
+        changed |= _set_roi_value_if_changed(min_angle_arr, roi_idx, metrics.min_angle)
+        changed |= _set_roi_value_if_changed(triangle_angles_arr, roi_idx, metrics.angles)
 
         conf_ok = True
         if conf_arr is not None:
             conf_vals = np.ones(len(labels), dtype=np.float64)
-            conf_arr[roi_idx] = conf_vals
+            changed |= _set_roi_value_if_changed(conf_arr, roi_idx, conf_vals)
             conf_ok = bool(np.all(conf_vals >= confidence_threshold))
 
-        if confidence_arr is not None:
-            confidence_arr[roi_idx] = 1.0
+        changed |= _set_roi_value_if_changed(confidence_arr, roi_idx, 1.0)
 
         refined_success_val = True
-        if refined_success_arr is not None:
-            refined_success_arr[roi_idx] = refined_success_val
-        if flip_corrected_arr is not None:
-            flip_corrected_arr[roi_idx] = False
-        if quality_labels_arr is not None:
-            quality_labels_arr[roi_idx] = 0
-        if confidence_valid_arr is not None:
-            confidence_valid_arr[roi_idx] = conf_ok
-        if geometry_valid_arr is not None:
-            geometry_valid_arr[roi_idx] = geom_ok
-        if usable_arr is not None:
-            usable_arr[roi_idx] = conf_ok and geom_ok
+        changed |= _set_roi_value_if_changed(refined_success_arr, roi_idx, refined_success_val)
+        changed |= _set_roi_value_if_changed(flip_corrected_arr, roi_idx, False)
+        changed |= _set_roi_value_if_changed(quality_labels_arr, roi_idx, 0)
+        changed |= _set_roi_value_if_changed(confidence_valid_arr, roi_idx, conf_ok)
+        changed |= _set_roi_value_if_changed(geometry_valid_arr, roi_idx, geom_ok)
+        changed |= _set_roi_value_if_changed(usable_arr, roi_idx, conf_ok and geom_ok)
         heading_is_finite = bool(np.isfinite(heading_val))
-        if heading_finite_arr is not None:
-            heading_finite_arr[roi_idx] = heading_is_finite
+        changed |= _set_roi_value_if_changed(heading_finite_arr, roi_idx, heading_is_finite)
         if heading_usable_arr is not None:
             det_src = int(detection_source_arr[roi_idx]) if detection_source_arr is not None else 0
-            heading_usable_arr[roi_idx] = refined_success_val and det_src == 0 and heading_is_finite
+            changed |= _set_roi_value_if_changed(
+                heading_usable_arr,
+                roi_idx,
+                refined_success_val and det_src == 0 and heading_is_finite,
+            )
         if reason_arr is not None:
             existing = str(reason_arr[roi_idx]) if reason_arr[roi_idx] is not None else ""
-            existing_tags = [tag for tag in existing.split("|") if tag]
-            drop_tags = {
-                "detection_failed",
-                "low_confidence",
-                "confidence_missing",
-                "fish_present_no_keypoints",
-                "detection_issue",
-            }
-            kept_tags = [tag for tag in existing_tags if tag not in drop_tags and tag != "manual_correction"]
-            tags = kept_tags + ["manual_correction"]
-            if not geom_ok:
-                tags.append("geometry_issue")
-            unique: list[str] = []
-            seen = set()
-            for tag in tags:
-                if not tag or tag in seen:
-                    continue
-                unique.append(tag)
-                seen.add(tag)
-            reason_value = "|".join(unique) if unique else "manual_correction"
-            reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
+            reason_value = _build_manual_reason(existing, geom_ok=geom_ok)
+            if existing != reason_value:
+                reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
+                changed = True
 
-        stale_touched = mark_downstream_eye_mask_runs_stale(
-            root,
-            source_keypoint_group="refined_keypoints_runs",
-            source_keypoints_run=str(refined_run),
-            roi_indices=[roi_idx],
-            frame_indices=[frame_idx],
-            reason="keypoint_manual_correction",
-        )
-        print(f"Saved manual correction for ROI {roi_idx}.")
-        if stale_touched:
-            print(f"Marked {stale_touched} downstream eye-mask run(s) stale.")
+        if changed:
+            stale_touched = mark_downstream_eye_mask_runs_stale(
+                root,
+                source_keypoint_group="refined_keypoints_runs",
+                source_keypoints_run=str(refined_run),
+                roi_indices=[roi_idx],
+                frame_indices=[frame_idx],
+                reason="keypoint_manual_correction",
+            )
+            print(f"Saved manual correction for ROI {roi_idx}.")
+            if stale_touched:
+                print(f"Marked {stale_touched} downstream eye-mask run(s) stale.")
+        else:
+            print(f"No changes for ROI {roi_idx}; skipped stale marker update.")
 
         active_idx = 0
         if idx_pos < len(failures) - 1:
@@ -647,56 +675,54 @@ def launch_review(
         roi_idx = int(failures[idx_pos])
         frame_idx = int(frame_indices[roi_idx])
 
+        changed = False
         if kp_roi_arr is not None:
-            kp_roi_arr[roi_idx] = np.nan
+            changed |= _set_roi_value_if_changed(kp_roi_arr, roi_idx, np.full_like(np.asarray(kp_roi_arr[roi_idx]), np.nan))
         if kp_img_arr is not None:
-            kp_img_arr[roi_idx] = np.nan
+            changed |= _set_roi_value_if_changed(kp_img_arr, roi_idx, np.full_like(np.asarray(kp_img_arr[roi_idx]), np.nan))
         if kp_norm_arr is not None:
-            kp_norm_arr[roi_idx] = np.nan
-        if heading_arr is not None:
-            heading_arr[roi_idx] = np.nan
-        if confidence_arr is not None:
-            confidence_arr[roi_idx] = np.nan
+            changed |= _set_roi_value_if_changed(kp_norm_arr, roi_idx, np.full_like(np.asarray(kp_norm_arr[roi_idx]), np.nan))
+        changed |= _set_roi_value_if_changed(heading_arr, roi_idx, np.nan)
+        changed |= _set_roi_value_if_changed(confidence_arr, roi_idx, np.nan)
         if conf_arr is not None:
-            conf_arr[roi_idx] = np.nan
-        if triangle_area_arr is not None:
-            triangle_area_arr[roi_idx] = np.nan
-        if min_angle_arr is not None:
-            min_angle_arr[roi_idx] = np.nan
+            changed |= _set_roi_value_if_changed(conf_arr, roi_idx, np.full_like(np.asarray(conf_arr[roi_idx]), np.nan))
+        changed |= _set_roi_value_if_changed(triangle_area_arr, roi_idx, np.nan)
+        changed |= _set_roi_value_if_changed(min_angle_arr, roi_idx, np.nan)
         if triangle_angles_arr is not None:
-            triangle_angles_arr[roi_idx] = np.nan
-        if refined_success_arr is not None:
-            refined_success_arr[roi_idx] = False
-        if flip_corrected_arr is not None:
-            flip_corrected_arr[roi_idx] = False
-        if quality_labels_arr is not None:
-            quality_labels_arr[roi_idx] = 0
-        if confidence_valid_arr is not None:
-            confidence_valid_arr[roi_idx] = False
-        if geometry_valid_arr is not None:
-            geometry_valid_arr[roi_idx] = False
-        if usable_arr is not None:
-            usable_arr[roi_idx] = False
-        if heading_finite_arr is not None:
-            heading_finite_arr[roi_idx] = False
-        if heading_usable_arr is not None:
-            heading_usable_arr[roi_idx] = False
+            changed |= _set_roi_value_if_changed(
+                triangle_angles_arr,
+                roi_idx,
+                np.full_like(np.asarray(triangle_angles_arr[roi_idx]), np.nan),
+            )
+        changed |= _set_roi_value_if_changed(refined_success_arr, roi_idx, False)
+        changed |= _set_roi_value_if_changed(flip_corrected_arr, roi_idx, False)
+        changed |= _set_roi_value_if_changed(quality_labels_arr, roi_idx, 0)
+        changed |= _set_roi_value_if_changed(confidence_valid_arr, roi_idx, False)
+        changed |= _set_roi_value_if_changed(geometry_valid_arr, roi_idx, False)
+        changed |= _set_roi_value_if_changed(usable_arr, roi_idx, False)
+        changed |= _set_roi_value_if_changed(heading_finite_arr, roi_idx, False)
+        changed |= _set_roi_value_if_changed(heading_usable_arr, roi_idx, False)
         if reason_arr is not None:
             existing = str(reason_arr[roi_idx]) if reason_arr[roi_idx] is not None else ""
             reason_value = str(_clean_reason(existing, ["fish_present_no_keypoints"]))
-            reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
+            if existing != reason_value:
+                reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
+                changed = True
 
-        stale_touched = mark_downstream_eye_mask_runs_stale(
-            root,
-            source_keypoint_group="refined_keypoints_runs",
-            source_keypoints_run=str(refined_run),
-            roi_indices=[roi_idx],
-            frame_indices=[frame_idx],
-            reason="keypoint_mark_no_keypoints",
-        )
-        print(f"Marked fish-present/no-keypoints for ROI {roi_idx} (frame {frame_idx}).")
-        if stale_touched:
-            print(f"Marked {stale_touched} downstream eye-mask run(s) stale.")
+        if changed:
+            stale_touched = mark_downstream_eye_mask_runs_stale(
+                root,
+                source_keypoint_group="refined_keypoints_runs",
+                source_keypoints_run=str(refined_run),
+                roi_indices=[roi_idx],
+                frame_indices=[frame_idx],
+                reason="keypoint_mark_no_keypoints",
+            )
+            print(f"Marked fish-present/no-keypoints for ROI {roi_idx} (frame {frame_idx}).")
+            if stale_touched:
+                print(f"Marked {stale_touched} downstream eye-mask run(s) stale.")
+        else:
+            print(f"No changes for ROI {roi_idx} (frame {frame_idx}); skipped stale marker update.")
 
         failures = np.delete(failures, idx_pos)
         if failures.size == 0:
@@ -723,56 +749,54 @@ def launch_review(
             except Exception as exc:
                 print(f"Failed to flag detection path: {exc}")
 
+        changed = False
         if kp_roi_arr is not None:
-            kp_roi_arr[roi_idx] = np.nan
+            changed |= _set_roi_value_if_changed(kp_roi_arr, roi_idx, np.full_like(np.asarray(kp_roi_arr[roi_idx]), np.nan))
         if kp_img_arr is not None:
-            kp_img_arr[roi_idx] = np.nan
+            changed |= _set_roi_value_if_changed(kp_img_arr, roi_idx, np.full_like(np.asarray(kp_img_arr[roi_idx]), np.nan))
         if kp_norm_arr is not None:
-            kp_norm_arr[roi_idx] = np.nan
-        if heading_arr is not None:
-            heading_arr[roi_idx] = np.nan
-        if confidence_arr is not None:
-            confidence_arr[roi_idx] = np.nan
+            changed |= _set_roi_value_if_changed(kp_norm_arr, roi_idx, np.full_like(np.asarray(kp_norm_arr[roi_idx]), np.nan))
+        changed |= _set_roi_value_if_changed(heading_arr, roi_idx, np.nan)
+        changed |= _set_roi_value_if_changed(confidence_arr, roi_idx, np.nan)
         if conf_arr is not None:
-            conf_arr[roi_idx] = np.nan
-        if triangle_area_arr is not None:
-            triangle_area_arr[roi_idx] = np.nan
-        if min_angle_arr is not None:
-            min_angle_arr[roi_idx] = np.nan
+            changed |= _set_roi_value_if_changed(conf_arr, roi_idx, np.full_like(np.asarray(conf_arr[roi_idx]), np.nan))
+        changed |= _set_roi_value_if_changed(triangle_area_arr, roi_idx, np.nan)
+        changed |= _set_roi_value_if_changed(min_angle_arr, roi_idx, np.nan)
         if triangle_angles_arr is not None:
-            triangle_angles_arr[roi_idx] = np.nan
-        if refined_success_arr is not None:
-            refined_success_arr[roi_idx] = False
-        if flip_corrected_arr is not None:
-            flip_corrected_arr[roi_idx] = False
-        if quality_labels_arr is not None:
-            quality_labels_arr[roi_idx] = 0
-        if confidence_valid_arr is not None:
-            confidence_valid_arr[roi_idx] = False
-        if geometry_valid_arr is not None:
-            geometry_valid_arr[roi_idx] = False
-        if usable_arr is not None:
-            usable_arr[roi_idx] = False
-        if heading_finite_arr is not None:
-            heading_finite_arr[roi_idx] = False
-        if heading_usable_arr is not None:
-            heading_usable_arr[roi_idx] = False
+            changed |= _set_roi_value_if_changed(
+                triangle_angles_arr,
+                roi_idx,
+                np.full_like(np.asarray(triangle_angles_arr[roi_idx]), np.nan),
+            )
+        changed |= _set_roi_value_if_changed(refined_success_arr, roi_idx, False)
+        changed |= _set_roi_value_if_changed(flip_corrected_arr, roi_idx, False)
+        changed |= _set_roi_value_if_changed(quality_labels_arr, roi_idx, 0)
+        changed |= _set_roi_value_if_changed(confidence_valid_arr, roi_idx, False)
+        changed |= _set_roi_value_if_changed(geometry_valid_arr, roi_idx, False)
+        changed |= _set_roi_value_if_changed(usable_arr, roi_idx, False)
+        changed |= _set_roi_value_if_changed(heading_finite_arr, roi_idx, False)
+        changed |= _set_roi_value_if_changed(heading_usable_arr, roi_idx, False)
         if reason_arr is not None:
             existing = str(reason_arr[roi_idx]) if reason_arr[roi_idx] is not None else ""
             reason_value = str(_clean_reason(existing, ["detection_issue"]))
-            reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
+            if existing != reason_value:
+                reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
+                changed = True
 
-        stale_touched = mark_downstream_eye_mask_runs_stale(
-            root,
-            source_keypoint_group="refined_keypoints_runs",
-            source_keypoints_run=str(refined_run),
-            roi_indices=[roi_idx],
-            frame_indices=[frame_idx],
-            reason="keypoint_mark_detection_issue",
-        )
-        print(f"Marked detection issue for ROI {roi_idx} (frame {frame_idx}).")
-        if stale_touched:
-            print(f"Marked {stale_touched} downstream eye-mask run(s) stale.")
+        if changed:
+            stale_touched = mark_downstream_eye_mask_runs_stale(
+                root,
+                source_keypoint_group="refined_keypoints_runs",
+                source_keypoints_run=str(refined_run),
+                roi_indices=[roi_idx],
+                frame_indices=[frame_idx],
+                reason="keypoint_mark_detection_issue",
+            )
+            print(f"Marked detection issue for ROI {roi_idx} (frame {frame_idx}).")
+            if stale_touched:
+                print(f"Marked {stale_touched} downstream eye-mask run(s) stale.")
+        else:
+            print(f"No changes for ROI {roi_idx} (frame {frame_idx}); skipped stale marker update.")
 
         failures = np.delete(failures, idx_pos)
         if failures.size == 0:
