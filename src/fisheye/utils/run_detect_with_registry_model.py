@@ -12,9 +12,9 @@ from typing import Any, Optional
 import zarr
 
 from fisheye.detection.detect_yolo import detect_yolo
-from fisheye.registry.db import Registry, RegistryPaths, resolve_dataset_id
-from fisheye.registry.status_ledger import upsert_recording_step_status
-from fisheye.registry.step_cascade import invalidate_downstream_steps
+from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.shared.registry_stage_complete import emit_stage_completion
+from fisheye.shared.type_conversions import normalize_attr
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils.resolve_detect_model import Candidate, TargetProfile
 from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
@@ -22,19 +22,8 @@ from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_pr
 _DETECT_STATUS_SOURCE = "runtime_detect_with_registry_model"
 
 
-def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
-    try:
-        return int(path.stat().st_mtime_ns)
-    except OSError:
-        return None
-
-
 def _normalize_attr(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "ignore")
-    return str(value)
+    return normalize_attr(value)
 
 
 def _emit_detect_step_status(
@@ -49,11 +38,8 @@ def _emit_detect_step_status(
 ) -> None:
     """Write a detect step status row to the registry (non-fatal)."""
     try:
-        root = zarr.open(str(zarr_path), mode="r")
-        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
-        recording_id = _normalize_attr(root.attrs.get("recording_id")) or _normalize_attr(session_uuid)
-        zarr_use = _normalize_attr(root.attrs.get("zarr_use"))
-        zarr_purpose = _normalize_attr(root.attrs.get("zarr_purpose"))
+        resolved_zarr_path = zarr_path.expanduser().resolve()
+        root = zarr.open(str(resolved_zarr_path), mode="r")
 
         # Extract method and coverage from the detect run if available
         method = None
@@ -72,47 +58,28 @@ def _emit_detect_step_status(
                         except (TypeError, ValueError):
                             pass
 
-        registry_path = RegistryPaths.from_env(Path.cwd()).path
-        registry = Registry(registry_path)
-        try:
-            registry.upsert_dataset(
-                dataset_id,
-                session_uuid=session_uuid,
-                zarr_path=zarr_path,
-                recording_id=recording_id,
-                zarr_use=zarr_use,
-                zarr_purpose=zarr_purpose,
-            )
-            upsert_recording_step_status(
-                registry,
-                dataset_id=dataset_id,
-                recording_id=recording_id,
-                step_name="detect",
-                status=status,
-                run_name=run_name,
-                method=method,
-                coverage_pct=coverage_pct,
-                review_status_json=None,
-                details_json={
-                    "reason": reason,
-                    "selected_model_path": selected_model_path,
-                    "run_id": selected_run_id,
-                    "set_id": selected_set_id,
-                },
-                source=_DETECT_STATUS_SOURCE,
-                zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_path),
-            )
-            if status == "ok":
-                invalidate_downstream_steps(
-                    registry,
-                    dataset_id=dataset_id,
-                    step_name="detect",
-                    source=_DETECT_STATUS_SOURCE,
-                    recording_id=recording_id,
-                    trigger_run_name=run_name,
-                )
-        finally:
-            registry.close()
+        emit_stage_completion(
+            root,
+            resolved_zarr_path,
+            step_name="detect",
+            status=status,
+            source=_DETECT_STATUS_SOURCE,
+            run_name=run_name,
+            method=method,
+            coverage_pct=coverage_pct,
+            review_status_json=None,
+            details_json={
+                "reason": reason,
+                "selected_model_path": selected_model_path,
+                "run_id": selected_run_id,
+                "set_id": selected_set_id,
+            },
+            console=None,
+            auto_registry_from_env=True,
+            require_env_registry_exists=False,
+            invalidate_on_ok=True,
+            trigger_run_name=run_name,
+        )
     except Exception:
         pass  # Non-fatal; batch runners log results via JSONL already
 
@@ -242,6 +209,8 @@ def _resolution_payload(
             "iou": args.iou,
             "max_det": args.max_det,
             "batch_size": args.batch_size,
+            "resize_dims": args.resize_dims,
+            "imgsz": args.imgsz,
         },
         inputs={
             "recording_dir": str(recording_dir),
@@ -341,6 +310,8 @@ def _build_payload_args(
     iou: Optional[float],
     max_det: Optional[int],
     batch_size: Optional[int],
+    resize_dims: Optional[list[int]],
+    imgsz: Optional[list[int]],
 ) -> argparse.Namespace:
     return argparse.Namespace(
         set_id=set_id,
@@ -354,6 +325,8 @@ def _build_payload_args(
         iou=iou,
         max_det=max_det,
         batch_size=batch_size,
+        resize_dims=resize_dims,
+        imgsz=imgsz,
     )
 
 
@@ -373,6 +346,8 @@ def run_detect_with_registry_model(
     iou: Optional[float] = None,
     max_det: Optional[int] = None,
     batch_size: Optional[int] = None,
+    resize_dims: Optional[list[int]] = None,
+    imgsz: Optional[list[int]] = None,
     cpu: bool = False,
     write_raw_video_metadata: bool = False,
     overwrite_raw_video_metadata: bool = False,
@@ -459,6 +434,8 @@ def run_detect_with_registry_model(
         iou=iou,
         max_det=max_det,
         batch_size=batch_size,
+        resize_dims=resize_dims,
+        imgsz=imgsz,
     )
 
     payload = _resolution_payload(
@@ -506,6 +483,8 @@ def run_detect_with_registry_model(
             iou_threshold=iou,
             max_det=max_det,
             batch_size=batch_size,
+            resize_dims=resize_dims,
+            imgsz=imgsz,
             use_gpu=(False if cpu else None),
             write_raw_video_metadata=bool(write_raw_video_metadata),
             overwrite_raw_video_metadata=bool(overwrite_raw_video_metadata),
@@ -601,6 +580,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--iou", type=float, default=None, help="Optional IoU threshold override.")
     parser.add_argument("--max-det", type=int, default=None, help="Optional max detections override.")
     parser.add_argument("--batch-size", type=int, default=None, help="Optional batch size override.")
+    parser.add_argument(
+        "--resize-dims",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Canonical inference size override [h w] (or one value for square); mapped to YOLO imgsz.",
+    )
+    parser.add_argument(
+        "--imgsz",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Legacy alias for YOLO inference size; normalized into --resize-dims.",
+    )
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference.")
     parser.add_argument(
         "--write-raw-video-metadata",
@@ -630,6 +623,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         iou=args.iou,
         max_det=args.max_det,
         batch_size=args.batch_size,
+        resize_dims=args.resize_dims,
+        imgsz=args.imgsz,
         cpu=bool(args.cpu),
         write_raw_video_metadata=bool(args.write_raw_video_metadata),
         overwrite_raw_video_metadata=bool(args.overwrite_raw_video_metadata),

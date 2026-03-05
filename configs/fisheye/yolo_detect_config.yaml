@@ -22,6 +22,9 @@ detection:
   batch_size: 16            # Frames to process at once
                             # Larger = faster (if GPU memory allows)
                             # Try: 16, 32, 64, or 128
+  resize_dims: [640, 640]   # Canonical inference size [height, width]
+                            # Mapped to Ultralytics imgsz internally
+                            # Set null to use backend default behavior
 video:
-  resize: [640, 640]        # Resize frames before inference [width, height]
-                            # null = use original size
+  resize: null              # Legacy pre-resize [width, height] before YOLO
+                            # Prefer detection.resize_dims as the canonical knob

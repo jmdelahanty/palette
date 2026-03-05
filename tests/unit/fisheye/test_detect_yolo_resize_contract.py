@@ -1,0 +1,25 @@
+from __future__ import annotations
+
+import pytest
+
+from fisheye.detection import detect_yolo as mod
+
+
+def test_normalize_legacy_video_resize_maps_width_height_to_height_width() -> None:
+    assert mod._normalize_legacy_video_resize([1280, 768]) == [768, 1280]  # noqa: SLF001
+
+
+def test_resize_dims_to_imgsz_returns_scalar_for_square_and_list_for_rectangular() -> None:
+    assert mod._resize_dims_to_imgsz([640, 640]) == 640  # noqa: SLF001
+    assert mod._resize_dims_to_imgsz([768, 1280]) == [768, 1280]  # noqa: SLF001
+
+
+def test_detect_yolo_rejects_conflicting_resize_dims_and_imgsz() -> None:
+    with pytest.raises(ValueError, match="Conflicting CLI overrides"):
+        mod.detect_yolo(
+            video_path="missing_video.mp4",
+            model_path="missing_model.pt",
+            output_zarr="missing_output.zarr",
+            resize_dims=[768, 1280],
+            imgsz=[640, 640],
+        )

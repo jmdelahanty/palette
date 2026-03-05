@@ -354,7 +354,8 @@ scripts/py -m fisheye.utils.run_eye_masks_batch /nvme1/recordings \
 | `--camera-id-filter`       | *(none)* | Filter by camera_id (registry only)     |
 | `--dry-run`                | off     | Print manifests + commands; do not submit|
 
-**YOLO-specific options:** `--imgsz`, `--conf`, `--iou`, `--max-det`,
+**YOLO-specific options:** `--resize-dims` (canonical), `--imgsz` (legacy alias),
+`--conf`, `--iou`, `--max-det`,
 `--mask-threshold`, `--adaptive-scale`, `--adaptive-cap`, `--no-retina-masks`,
 `--proto-upsample-factor`, `--legacy-masks`, `--verbose`
 

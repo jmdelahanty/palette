@@ -17,9 +17,7 @@ import zarr
 from rich.console import Console
 
 from ..detection.detect_yolo import detect_yolo as run_detect_yolo
-from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
-from ..registry.status_ledger import upsert_recording_step_status
-from ..registry.step_cascade import invalidate_downstream_steps
+from ..shared.registry_stage_complete import emit_stage_completion
 
 
 def _normalize_text(value: object) -> Optional[str]:
@@ -114,13 +112,6 @@ def _extract_detect_quality_pointer(detect_group: object) -> tuple[Optional[str]
     return quality_run, quality_grade, quality_overall
 
 
-def _safe_zarr_mtime_ns(zarr_path: Path) -> Optional[int]:
-    try:
-        return int(zarr_path.stat().st_mtime_ns)
-    except Exception:
-        return None
-
-
 def _write_detect_step_status(
     *,
     output_zarr: Path,
@@ -137,7 +128,6 @@ def _write_detect_step_status(
 
     try:
         root = zarr.open_group(str(output_zarr_path), mode="r")
-        dataset_id, _ = resolve_dataset_id(root, output_zarr_path)
 
         detect_group = None
         resolved_run_name = _normalize_text(run_name)
@@ -182,32 +172,25 @@ def _write_detect_step_status(
         }
         details = {key: value for key, value in details.items() if value is not None}
 
-        registry_path = RegistryPaths.from_env(Path.cwd()).path
-        registry = Registry(registry_path)
-        try:
-            upsert_recording_step_status(
-                registry,
-                dataset_id=dataset_id,
-                step_name="detect",
-                status=status,
-                run_name=resolved_run_name,
-                method=method,
-                coverage_pct=coverage_pct,
-                review_status_json=None,
-                details_json=details,
-                source="runtime_predict_detections",
-                zarr_mtime_ns=_safe_zarr_mtime_ns(output_zarr_path),
-            )
-            if status == "ok":
-                invalidate_downstream_steps(
-                    registry,
-                    dataset_id=dataset_id,
-                    step_name="detect",
-                    source="runtime_predict_detections",
-                    trigger_run_name=resolved_run_name,
-                )
-        finally:
-            registry.close()
+        emit_stage_completion(
+            root,
+            output_zarr_path,
+            step_name="detect",
+            status=status,
+            source="runtime_predict_detections",
+            run_name=resolved_run_name,
+            method=method,
+            coverage_pct=coverage_pct,
+            review_status_json=None,
+            details_json=details,
+            console=console,
+            warning_label="detect",
+            auto_registry_from_env=True,
+            require_env_registry_exists=False,
+            invalidate_on_ok=True,
+            trigger_run_name=resolved_run_name,
+            upsert_dataset_row=False,
+        )
     except Exception as exc:
         if console is not None:
             console.print(
@@ -243,6 +226,18 @@ Examples:
     parser.add_argument("--iou", dest="iou_threshold", type=float, help="IoU threshold override")
     parser.add_argument("--max-det", dest="max_det", type=int, help="Max detections per frame override")
     parser.add_argument("--batch-size", type=int, help="Batch size override")
+    parser.add_argument(
+        "--resize-dims",
+        nargs="+",
+        type=int,
+        help="Canonical inference size override [h w] (or one value for square); mapped to YOLO imgsz.",
+    )
+    parser.add_argument(
+        "--imgsz",
+        nargs="+",
+        type=int,
+        help="Legacy alias for YOLO inference size; normalized into --resize-dims.",
+    )
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference")
     parser.add_argument("--gpu", action="store_true", help="Force GPU inference")
     return parser
@@ -283,6 +278,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             iou_threshold=args.iou_threshold,
             max_det=args.max_det,
             batch_size=args.batch_size,
+            resize_dims=args.resize_dims,
+            imgsz=args.imgsz,
             console=console,
             use_gpu=use_gpu,
         )

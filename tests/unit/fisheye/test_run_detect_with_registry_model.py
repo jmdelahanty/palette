@@ -291,6 +291,9 @@ def test_main_runs_detect_resolution_and_writes_provenance(
             "--set-id",
             "detect_set_123",
             "--include-non-success",
+            "--resize-dims",
+            "768",
+            "1280",
         ]
     )
 
@@ -306,6 +309,8 @@ def test_main_runs_detect_resolution_and_writes_provenance(
     assert detect_kwargs.get("video_path") == str(video_path.resolve())
     assert detect_kwargs.get("model_path") == "/tmp/detect_model.pt"
     assert detect_kwargs.get("output_zarr") == str(output_path.resolve())
+    assert detect_kwargs.get("resize_dims") == [768, 1280]
+    assert detect_kwargs.get("imgsz") is None
 
     assert calls.get("write_zarr_path") == output_path.resolve()
     assert calls.get("write_run_name") == "detect_001"

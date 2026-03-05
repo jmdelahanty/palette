@@ -128,8 +128,13 @@ This creates a **detection-only** Zarr with `source_video_path` metadata.
 ```bash
 python -m fisheye.detection.detect_yolo /path/to/video.mp4 \
   --model /path/to/model.pt \
+  --resize-dims 768 1280 \
   --output /path/to/output/detect_runs.zarr
 ```
+
+Notes:
+- `--resize-dims` is the canonical inference-size knob (`[height width]`).
+- `--imgsz` is still accepted as a legacy alias and normalizes into `resize_dims`.
 
 ### 3) Refine + QC detections
 ```bash

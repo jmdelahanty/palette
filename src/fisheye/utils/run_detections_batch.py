@@ -473,6 +473,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--iou", type=float, default=None, help="Optional detect IoU threshold override.")
     parser.add_argument("--max-det", type=int, default=None, help="Optional detect max_det override.")
     parser.add_argument("--batch-size", type=int, default=None, help="Optional detect batch size override.")
+    parser.add_argument(
+        "--resize-dims",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Canonical inference size override [h w] (or one value for square); mapped to YOLO imgsz.",
+    )
+    parser.add_argument(
+        "--imgsz",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Legacy alias for YOLO inference size; normalized into --resize-dims.",
+    )
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference.")
     parser.add_argument(
         "--write-raw-video-metadata",
@@ -564,6 +578,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 require_unique=bool(args.require_unique),
                 include_non_success=bool(args.include_non_success),
                 top_k=int(args.top_k),
+                conf=args.conf,
+                iou=args.iou,
+                max_det=args.max_det,
+                batch_size=args.batch_size,
+                resize_dims=args.resize_dims,
+                imgsz=args.imgsz,
+                cpu=bool(args.cpu),
             )
 
     if args.source == "registry":
@@ -702,6 +723,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             iou=args.iou,
             max_det=args.max_det,
             batch_size=args.batch_size,
+            resize_dims=args.resize_dims,
+            imgsz=args.imgsz,
             cpu=bool(args.cpu),
             write_raw_video_metadata=bool(args.write_raw_video_metadata),
             overwrite_raw_video_metadata=bool(args.overwrite_raw_video_metadata),

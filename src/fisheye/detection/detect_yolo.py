@@ -283,6 +283,86 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     return {}
 
 
+def _normalize_imgsz(value: Optional[Any]) -> Optional[int | list[int]]:
+    """Normalize imgsz to Ultralytics-compatible int or [h, w] list."""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        ints: list[int] = []
+        for item in value:
+            if item is None:
+                continue
+            try:
+                ints.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        if not ints:
+            return None
+        if len(ints) == 1:
+            return ints[0]
+        return [ints[0], ints[1]]
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _imgsz_to_resize_dims(value: Optional[int | list[int]]) -> Optional[list[int]]:
+    """Normalize imgsz-like values to canonical [h, w] resize dims."""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        if value <= 0:
+            return None
+        return [value, value]
+    if not value:
+        return None
+    if len(value) == 1:
+        edge = int(value[0])
+        if edge <= 0:
+            return None
+        return [edge, edge]
+    height = int(value[0])
+    width = int(value[1])
+    if height <= 0 or width <= 0:
+        return None
+    return [height, width]
+
+
+def _normalize_resize_dims(value: Optional[Any]) -> Optional[list[int]]:
+    """Normalize canonical resize dims to [h, w]."""
+    return _imgsz_to_resize_dims(_normalize_imgsz(value))
+
+
+def _normalize_legacy_video_resize(value: Optional[Any]) -> Optional[list[int]]:
+    """
+    Normalize legacy video.resize [w, h] to canonical [h, w].
+
+    Historical detect configs use video.resize as [width, height].
+    """
+    parsed = _normalize_imgsz(value)
+    if parsed is None:
+        return None
+    if isinstance(parsed, int):
+        return _imgsz_to_resize_dims(parsed)
+    if len(parsed) == 1:
+        return _imgsz_to_resize_dims(parsed)
+    width = int(parsed[0])
+    height = int(parsed[1])
+    if width <= 0 or height <= 0:
+        return None
+    return [height, width]
+
+
+def _resize_dims_to_imgsz(value: Optional[list[int]]) -> Optional[int | list[int]]:
+    """Convert canonical [h, w] dims to an Ultralytics imgsz value."""
+    if value is None:
+        return None
+    if value[0] == value[1]:
+        return int(value[0])
+    return [int(value[0]), int(value[1])]
+
+
 def detect_yolo(
     video_path: str,
     model_path: Optional[str] = None,
@@ -292,6 +372,8 @@ def detect_yolo(
     iou_threshold: Optional[float] = None,
     max_det: Optional[int] = None,
     batch_size: Optional[int] = None,
+    resize_dims: Optional[list[int] | tuple[int, int]] = None,
+    imgsz: Optional[int | list[int] | tuple[int, int]] = None,
     console: Optional[Console] = None,
     use_gpu: Optional[bool] = None,
     write_raw_video_metadata: bool = False,
@@ -312,6 +394,8 @@ def detect_yolo(
         iou_threshold: IoU threshold for NMS (overrides config)
         max_det: Max detections per frame (overrides config)
         batch_size: Frames to process at once (overrides config)
+        resize_dims: Canonical inference size [h, w]; mapped to YOLO imgsz
+        imgsz: Legacy YOLO inference size alias; normalized into resize_dims
         console: Rich console
         use_gpu: Use GPU for inference (overrides config)
         write_raw_video_metadata: Create/update raw_video attrs (no frames) for registry/provenance
@@ -344,10 +428,57 @@ def detect_yolo(
     iou_threshold = iou_threshold if iou_threshold is not None else detect_config.get('iou_threshold', 0.45)
     max_det = max_det if max_det is not None else detect_config.get('max_det', 20)
     batch_size = batch_size if batch_size is not None else detect_config.get('batch_size', 32)
-    
+
+    cli_resize_dims = _normalize_resize_dims(resize_dims)
+    cli_imgsz_legacy = _normalize_imgsz(imgsz)
+    cli_imgsz_as_resize = _imgsz_to_resize_dims(cli_imgsz_legacy)
+    if cli_resize_dims is not None and cli_imgsz_as_resize is not None and cli_resize_dims != cli_imgsz_as_resize:
+        raise ValueError(
+            f"Conflicting CLI overrides: resize_dims={cli_resize_dims} and imgsz={cli_imgsz_as_resize}. "
+            "Set one, or make them equal."
+        )
+
+    config_resize_dims = _normalize_resize_dims(detect_config.get("resize_dims"))
+    config_imgsz_legacy = _normalize_imgsz(detect_config.get("imgsz"))
+    config_imgsz_as_resize = _imgsz_to_resize_dims(config_imgsz_legacy)
+    if config_resize_dims is not None and config_imgsz_as_resize is not None and config_resize_dims != config_imgsz_as_resize:
+        raise ValueError(
+            "Conflicting config values: detection.resize_dims and detection.imgsz differ. "
+            "Use detection.resize_dims as canonical, or keep them equal."
+        )
+
+    requested_resize_dims = (
+        cli_resize_dims
+        or cli_imgsz_as_resize
+        or config_resize_dims
+        or config_imgsz_as_resize
+    )
+    if cli_resize_dims is not None:
+        resize_dims_source = "cli:resize_dims"
+    elif cli_imgsz_as_resize is not None:
+        resize_dims_source = "cli:imgsz"
+    elif config_resize_dims is not None:
+        resize_dims_source = "config:detection.resize_dims"
+    elif config_imgsz_as_resize is not None:
+        resize_dims_source = "config:detection.imgsz"
+    else:
+        resize_dims_source = "none"
+
     # Get video processing parameters
     video_config = config.get('video', {})
-    resize_dims = video_config.get('resize', None)  # e.g., [640, 640] or None
+    legacy_video_resize_dims = _normalize_legacy_video_resize(video_config.get("resize"))
+    legacy_video_resize_ignored = False
+    if requested_resize_dims is not None:
+        pre_resize_dims = None
+        if legacy_video_resize_dims is not None:
+            legacy_video_resize_ignored = True
+    else:
+        requested_resize_dims = legacy_video_resize_dims
+        pre_resize_dims = legacy_video_resize_dims
+        if legacy_video_resize_dims is not None:
+            resize_dims_source = "config:video.resize"
+
+    imgsz_applied = _resize_dims_to_imgsz(requested_resize_dims)
 
     source_zarr_config = (
         video_config.get('source_zarr')
@@ -389,11 +520,26 @@ def detect_yolo(
     console.print(f"  IoU threshold: {iou_threshold}")
     console.print(f"  Max detections: {max_det}")
     console.print(f"  Batch size: {batch_size}")
-    if resize_dims:
-        console.print(f"  Resize to: {resize_dims[0]}×{resize_dims[1]}")
+    if requested_resize_dims is not None:
+        console.print(
+            f"  Resize dims (canonical): {requested_resize_dims[0]}×{requested_resize_dims[1]} "
+            f"[{resize_dims_source}]"
+        )
     else:
-        console.print(f"  Resize: None (use original)")
-    
+        console.print("  Resize dims (canonical): None")
+    if imgsz_applied is not None:
+        console.print(f"  YOLO imgsz applied: {imgsz_applied}")
+    if pre_resize_dims:
+        console.print(
+            f"  Frame pre-resize (legacy video.resize): {pre_resize_dims[1]}×{pre_resize_dims[0]}"
+        )
+    else:
+        console.print("  Frame pre-resize: None (use original)")
+    if legacy_video_resize_ignored:
+        console.print(
+            "[yellow]  Note:[/yellow] Ignored legacy video.resize because canonical detection resize_dims/imgsz was set."
+        )
+
     # Load model
     console.print("\n[bold]Loading model...[/bold]")
     model = YOLO(str(model_path))
@@ -421,6 +567,17 @@ def detect_yolo(
         else:
             console.print(f"[yellow]⚠[/yellow]  CUDA not available, using CPU")
             use_gpu = False
+
+    predict_kwargs: Dict[str, Any] = {
+        "conf": conf_threshold,
+        "iou": iou_threshold,
+        "max_det": max_det,
+        "verbose": False,
+        "device": 'cuda' if use_gpu else 'cpu',
+        "half": model_fp16,
+    }
+    if imgsz_applied is not None:
+        predict_kwargs["imgsz"] = imgsz_applied
     
     # Open video to get metadata
     console.print("\n[bold]Opening video...[/bold]")
@@ -451,8 +608,8 @@ def detect_yolo(
         use_decord = False
     
     # Determine dimensions for normalization (actual or resized)
-    if resize_dims:
-        inference_width, inference_height = resize_dims
+    if pre_resize_dims:
+        inference_height, inference_width = pre_resize_dims
         console.print(f"[green]✓[/green] Video: {n_frames} frames, {fps:.1f} fps, {width}×{height}")
         console.print(f"[cyan]  Will resize to {inference_width}×{inference_height} for inference[/cyan]")
     else:
@@ -539,7 +696,7 @@ def detect_yolo(
             # Processing info
             'inference_width': inference_width,
             'inference_height': inference_height,
-            'resized_for_inference': resize_dims is not None,
+            'resized_for_inference': pre_resize_dims is not None,
             
             # Git provenance
             'git_commit_hash': git_info.get('commit_hash', 'unknown'),
@@ -671,7 +828,20 @@ def detect_yolo(
     root.attrs['inference_resolution'] = [int(inference_width), int(inference_height)]
     root.attrs['inference_width'] = int(inference_width)
     root.attrs['inference_height'] = int(inference_height)
-    root.attrs['resized_for_inference'] = resize_dims is not None
+    root.attrs['resized_for_inference'] = pre_resize_dims is not None
+    root.attrs['resize_dims_requested'] = (
+        [int(requested_resize_dims[0]), int(requested_resize_dims[1])]
+        if requested_resize_dims is not None
+        else None
+    )
+    root.attrs['resize_dims_source'] = resize_dims_source
+    root.attrs['imgsz_applied'] = imgsz_applied
+    root.attrs['imgsz_legacy_input'] = cli_imgsz_legacy
+    root.attrs['pre_resize_dims'] = (
+        [int(pre_resize_dims[0]), int(pre_resize_dims[1])]
+        if pre_resize_dims is not None
+        else None
+    )
     if source_zarr_path is not None:
         root.attrs['source_zarr_path'] = str(source_zarr_path)
 
@@ -798,25 +968,17 @@ def detect_yolo(
                         chunk = frames_chw[start:end]
                         try:
                             chunk = chunk.to(device=device, dtype=dtype, non_blocking=True).contiguous(memory_format=torch.channels_last)
-                            if resize_dims:
+                            if pre_resize_dims:
                                 chunk = F.interpolate(
                                     chunk,
-                                    size=resize_dims,
+                                    size=pre_resize_dims,
                                     mode='bilinear',
                                     align_corners=False
                                 )
                             chunk = chunk.mul_(1.0 / 255.0)
                             
                             inference_start = time.time()
-                            preds = model.predict(
-                                chunk,
-                                conf=conf_threshold,
-                                iou=iou_threshold,
-                                max_det=max_det,
-                                verbose=False,
-                                device='cuda' if use_gpu else 'cpu',
-                                half=model_fp16
-                            )
+                            preds = model.predict(chunk, **predict_kwargs)
                             inference_times.append(time.time() - inference_start)
                             results.extend(preds)
                             start = end
@@ -832,24 +994,16 @@ def detect_yolo(
                     del frames_chw
                 else:
                     frames_nd = current_batch.asnumpy() if hasattr(current_batch, "asnumpy") else np.asarray(current_batch)
-                    if resize_dims:
+                    if pre_resize_dims:
                         batch_frames_np = [
-                            cv2.resize(frame, tuple(resize_dims)) for frame in frames_nd
+                            cv2.resize(frame, (int(pre_resize_dims[1]), int(pre_resize_dims[0]))) for frame in frames_nd
                         ]
                     else:
                         batch_frames_np = [np.asarray(frame) for frame in frames_nd]
                     del frames_nd
                 
                     inference_start = time.time()
-                    results = model.predict(
-                        batch_frames_np,
-                        conf=conf_threshold,
-                        iou=iou_threshold,
-                        max_det=max_det,
-                        verbose=False,
-                        device='cuda' if use_gpu else 'cpu',
-                        half=model_fp16
-                    )
+                    results = model.predict(batch_frames_np, **predict_kwargs)
                     inference_times.append(time.time() - inference_start)
                 
                 for batch_i, result in enumerate(results):
@@ -887,8 +1041,8 @@ def detect_yolo(
                     break
                 
                 # Resize if specified
-                if resize_dims:
-                    frame = cv2.resize(frame, tuple(resize_dims))
+                if pre_resize_dims:
+                    frame = cv2.resize(frame, (int(pre_resize_dims[1]), int(pre_resize_dims[0])))
                 
                 # Convert BGR to RGB
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -902,15 +1056,7 @@ def detect_yolo(
                     inference_start = time.time()
                     
                     # Run inference
-                    results = model.predict(
-                        batch_frames,
-                        conf=conf_threshold,
-                        iou=iou_threshold,
-                        max_det=max_det,
-                        verbose=False,
-                        device='cuda' if use_gpu else 'cpu',
-                        half=model_fp16
-                    )
+                    results = model.predict(batch_frames, **predict_kwargs)
                     
                     inference_time = time.time() - inference_start
                     inference_times.append(inference_time)
@@ -1027,7 +1173,13 @@ def detect_yolo(
             'iou_threshold': iou_threshold,
             'max_det': max_det,
             'batch_size': batch_size,
-            'resize_dims': resize_dims,
+            'resize_dims': requested_resize_dims,
+            'resize_dims_source': resize_dims_source,
+            'imgsz': imgsz_applied,
+            'imgsz_applied': imgsz_applied,
+            'imgsz_legacy_input': cli_imgsz_legacy,
+            'pre_resize_dims': pre_resize_dims,
+            'legacy_video_resize_dims': legacy_video_resize_dims,
         },
         'summary_statistics': stats,
         'git_commit': git_info.get('commit_hash', 'unknown'),
@@ -1177,6 +1329,20 @@ Examples:
                        help='Max detections per frame (overrides config)')
     parser.add_argument('--batch-size', type=int, default=None, 
                        help='Inference batch size (overrides config)')
+    parser.add_argument(
+        '--resize-dims',
+        nargs='+',
+        type=int,
+        default=None,
+        help='Canonical inference size override [h w] (or one value for square); mapped to YOLO imgsz',
+    )
+    parser.add_argument(
+        '--imgsz',
+        nargs='+',
+        type=int,
+        default=None,
+        help='Legacy alias for YOLO inference size; normalized into --resize-dims',
+    )
     parser.add_argument('--cpu', action='store_true', 
                        help='Force CPU inference')
     parser.add_argument(
@@ -1202,6 +1368,8 @@ Examples:
             iou_threshold=args.iou,
             max_det=args.max_det,
             batch_size=args.batch_size,
+            resize_dims=args.resize_dims,
+            imgsz=args.imgsz,
             use_gpu=not args.cpu if args.cpu else None,
             write_raw_video_metadata=args.write_raw_video_metadata,
             overwrite_raw_video_metadata=args.overwrite_raw_video_metadata,
