@@ -24,7 +24,8 @@ import zarr
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..utils.zarr_metadata import get_downsample_array_path, get_downsample_shape
-from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
+from ..registry.db import Registry, RegistryPaths
+from ..shared.registry_stage_complete import extract_dataset_metadata
 from ..utils.system import build_invocation_record
 
 
@@ -255,7 +256,9 @@ def _resolve_manifest_dataset_identity(
     zarr_path: Path,
     registry: Optional[Registry],
 ) -> Tuple[str, Optional[str]]:
-    dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
+    metadata = extract_dataset_metadata(root, zarr_path)
+    dataset_id = metadata.dataset_id
+    session_uuid = metadata.session_uuid
     if registry is not None:
         canonical_dataset_id = _lookup_registry_dataset_id(registry, zarr_path)
         if canonical_dataset_id:

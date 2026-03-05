@@ -1,8 +1,7 @@
 # Shared Helpers & Deduplication TODO
 
 Initial audit: 2026-02-24
-Updated: 2026-03-03 (parallel agent re-audit after inline keypoint/eye-mask
-registry sync changes)
+Updated: 2026-03-04 (status refresh + C1 direct-path migration update)
 
 Scan covered ~150+ files across `src/fisheye/` and `src/` standalone scripts
 (vendored `decord/` excluded).
@@ -17,15 +16,15 @@ Scan covered ~150+ files across `src/fisheye/` and `src/` standalone scripts
 
 ---
 
-## 2026-03-03 Snapshot (Parallel Audit)
+## 2026-03-04 Snapshot (Code-Verified Refresh)
 
-Current state after a fresh 3-agent scan of CRITICAL/HIGH/MEDIUM/LOW sections.
+Current state after direct code-audit verification of CRITICAL/HIGH/MEDIUM/LOW sections.
 
 | Item | Status | Notes |
 |---|---|---|
-| C1. Registry step status helper | [~] Partial | Inline keypoint/eye-mask status coverage improved, but shared `emit_stage_completion()` module not created and many per-file emitters remain. |
-| C2. Dataset metadata extraction helper | [~] Partial | Resolve+attrs extraction still duplicated; no shared `extract_dataset_metadata(...)` helper yet. |
-| C3. Normalization helper consolidation | [ ] Not started | No shared `type_conversions.normalize_attr()` module; many `_normalize_attr/_status_text/_decode_attr` variants remain. |
+| C1. Registry step status helper | [x] Done | Shared `emit_stage_completion()` covers all current `_emit_*_status` wrappers and the direct inference/batch/manual sync status paths touched in this slice. |
+| C2. Dataset metadata extraction helper | [x] Done | `extract_dataset_metadata(...)` is centralized in `registry/db.py`, reused via shared stage helpers, and direct resolve+attrs extraction callsites in active paths (including `registry/db.py` registration) are migrated. |
+| C3. Normalization helper consolidation | [~] Partial | Shared `type_conversions.normalize_attr()` exists, but many private `_normalize_attr/_status_text/_decode_attr` variants remain. |
 | C4. Batch logging/timestamp consolidation | [~] Partial | Added shared `batch_logging.py`; migrated 4 core batch runners to shared logger/run-id helpers. |
 | 1. Zarr run resolution helper | [ ] Not started | Diagnostic/read paths still duplicate run resolution logic. |
 | 2. Promote `open_zarr_root()` | [~] Partial | Helper exists, but adoption is limited and most call sites still use raw `zarr.open(...)`. |
@@ -48,16 +47,36 @@ Current state after a fresh 3-agent scan of CRITICAL/HIGH/MEDIUM/LOW sections.
 | 19. Data-card plot unification | [ ] Not started | Duplicate plotting logic spans detection, keypoint, and eye-mask data-card scripts. |
 | 20. Color scheme constants | [ ] Not started | No shared color constants module; repeated hardcoded palettes remain. |
 
-### Phase A Progress (2026-03-03)
+### Phase A Progress (2026-03-04)
 
 - Added `src/fisheye/shared/type_conversions.py` with shared normalization/numeric coercion helpers.
-- Added `src/fisheye/shared/registry_stage_complete.py` with `extract_dataset_metadata(...)` and `emit_stage_completion(...)`.
-- Canary-migrated stage emitters to shared helpers:
+- Added `src/fisheye/shared/registry_stage_complete.py` with `emit_stage_completion(...)` and shared registry-completion flow.
+- Centralized `extract_dataset_metadata(...)` in `src/fisheye/registry/db.py` and reused it from shared stage-completion utilities.
+- Shared stage-completion helper is now wired through current `_emit_*_status` wrappers in:
   - `detection/detect_keypoints_yolo.py`
   - `detection/detect_keypoints_traditional.py`
   - `segmentation/eye_segmentation_yolo.py`
   - `segmentation/infer_unet_eye_masks.py`
   - `refinement/refine_eye_masks.py`
+  - `refinement/refine_detect.py`
+  - `refinement/refine_keypoints.py`
+  - `refinement/detect_quality.py`
+  - `tracking/crop.py`
+  - `tracking/assign_ids.py`
+  - `inference/predict_pose.py`
+  - `utils/keypoint_retry.py`
+  - `utils/run_detect_with_registry_model.py`
+  - `utils/run_eye_masks_with_registry_model.py`
+- Additional direct status-write migrations now use `emit_stage_completion(...)`:
+  - `inference/predict_detections.py`
+  - `inference/predict_eye_masks.py`
+  - `utils/run_keypoints_batch.py`
+  - `utils/run_eye_masks_batch.py`
+  - `tune/keypoint_failure_review.py`
+- C2 cleanup slice migrated direct dataset metadata extraction to shared helper in:
+  - `diagnostics/prepare_detect_training.py`
+  - `refinement/refine_keypoints.py`
+  - `registry/db.py` (`register_from_root`)
 
 ### Phase B Progress (2026-03-03)
 
@@ -75,17 +94,19 @@ Current state after a fresh 3-agent scan of CRITICAL/HIGH/MEDIUM/LOW sections.
   - `utils/run_keypoints_batch.py`
   - `utils/run_eye_masks_batch.py`
 
-### Audit Metrics (2026-03-03)
+### Audit Metrics (2026-03-04)
 
-- `zarr.open(...)`: 197 call sites across 121 files.
+- `zarr.open(...)`: 254 call sites across 160 files.
 - `open_zarr_root(...)` usage outside helper definition: 3 call sites.
-- `PALETTE_RECORDINGS_ROOT` references: 69 occurrences across 44 files.
-- `JsonLogger` definitions/usages in 18 files.
-- `_utc_now` helper copies in 34 files.
+- `emit_stage_completion(...)`: 21 call sites across 20 files.
+- direct `upsert_recording_step_status(...)` outside helper/ledger/cascade definitions: 1 call site (callback wrapper in `run_eye_masks_batch.py` for test hook compatibility).
+- `PALETTE_RECORDINGS_ROOT` references: 66 occurrences across 43 files.
+- `JsonLogger` references in 19 files.
+- `_utc_now` helper copies in 32 files.
 - `_run_id` helper copies in 17 files.
-- `if ... not in root: root.create_group(...)`: 13 files under `src/fisheye`, 24 across `src`.
+- `if ... not in root` + `root.create_group(...)`: 12 files under `src/fisheye`, 18 across `src`.
 - Local `_progress()` wrappers: 9 files.
-- `Progress(...)` constructions: 30 files.
+- `Progress(...)` constructions: 37 call sites across 30 files.
 
 ### Scope Corrections From Re-Audit
 
@@ -149,7 +170,7 @@ core pipeline execution path and should be tackled before the HIGH items.
 ### C1. Registry Step Status Emission Helper
 
 - [x] Create `emit_stage_completion()` in `fisheye/shared/registry_stage_complete.py`
-- [ ] Migrate 13+ `_emit_*_status()` functions across detection, tracking,
+- [x] Migrate 13+ `_emit_*_status()` functions across detection, tracking,
       refinement, and segmentation stages
 
 **Pattern (repeated 13 times, ~50 lines each):**
@@ -210,6 +231,13 @@ def emit_stage_completion(
 - `utils/run_detect_with_registry_model.py` — `_emit_detect_step_status()` (~77 lines)
 - `utils/run_eye_masks_with_registry_model.py` — `_emit_eye_masks_failure_status()` (~30 lines)
 
+**Additional direct-path migrations (2026-03-04):**
+- `inference/predict_detections.py` — detect step status writer now calls `emit_stage_completion(...)`
+- `inference/predict_eye_masks.py` — eye-mask status writer now calls `emit_stage_completion(...)`
+- `utils/run_keypoints_batch.py` — refined keypoint auto-review sync now calls `emit_stage_completion(...)`
+- `utils/run_eye_masks_batch.py` — post-run eye-mask/refined-eye-mask sync now calls `emit_stage_completion(...)`
+- `tune/keypoint_failure_review.py` — manual review sync now calls `emit_stage_completion(...)`
+
 **Cross-reference:** `docs/keypoints_pipeline_inline_registry_report.md` (Priority 1)
 recommends this same helper as the foundation for closing all inline-registry gaps.
 
@@ -219,9 +247,9 @@ recommends this same helper as the foundation for closing all inline-registry ga
 
 ### C2. Dataset Metadata Extraction Helper
 
-- [x] Create `extract_dataset_metadata(root, zarr_path)` in
-      `fisheye/shared/registry_stage_complete.py` (co-located with C1)
-- [ ] Migrate 14+ files that duplicate the resolve + attr extraction block
+- [x] Create `extract_dataset_metadata(root, zarr_path)` as a shared helper in
+      `fisheye/registry/db.py` and consume it via `shared/registry_stage_complete.py`
+- [x] Migrate remaining direct resolve + attr extraction paths in active code paths
 
 **Pattern (repeated 14+ times, ~6 lines each):**
 ```python
@@ -244,7 +272,7 @@ zarr_purpose = _normalize_attr(root.attrs.get("zarr_purpose"))
 
 - [x] Promote `_decode_attr()` from `registry/db.py` to
       `fisheye/shared/type_conversions.py` as `normalize_attr()`
-- [ ] Replace 33+ private copies of `_normalize_attr`, `_status_text`,
+- [ ] Replace remaining private copies of `_normalize_attr`, `_status_text`,
       `_as_text`, `_decode_attr` across the codebase
 
 **Pattern (repeated with minor name variations in 33+ files):**
@@ -673,7 +701,7 @@ def _read_sampled_import_meta(root):
 
 ```
 src/fisheye/shared/
-    registry_stage_complete.py  # emit_stage_completion, extract_dataset_metadata (C1, C2)
+    registry_stage_complete.py  # emit_stage_completion (C1), uses extract_dataset_metadata from registry/db (C2)
     type_conversions.py         # normalize_attr, _as_float, _as_int, safe_json_parse (C3)
     batch_logging.py            # JsonLogger, utc_now, make_run_id (C4)
     zarr_helpers.py             # resolve_zarr_run, ensure_group, get_latest_run (1)

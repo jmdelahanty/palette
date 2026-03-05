@@ -1325,6 +1325,32 @@ def resolve_dataset_id(root: zarr.Group, zarr_path: Path) -> Tuple[str, Optional
     return dataset_id, session_uuid
 
 
+@dataclass(frozen=True)
+class DatasetMetadata:
+    dataset_id: str
+    session_uuid: Optional[str]
+    recording_id: Optional[str]
+    zarr_use: Optional[str]
+    zarr_purpose: Optional[str]
+
+
+def extract_dataset_metadata(
+    root: zarr.Group,
+    zarr_path: Path,
+    *,
+    resolve_dataset_id_fn: Callable[[zarr.Group, Path], Tuple[str, Optional[str]]] = resolve_dataset_id,
+) -> DatasetMetadata:
+    resolved_path = Path(zarr_path).expanduser().resolve()
+    dataset_id, session_uuid = resolve_dataset_id_fn(root, resolved_path)
+    return DatasetMetadata(
+        dataset_id=dataset_id,
+        session_uuid=session_uuid,
+        recording_id=_decode_attr(root.attrs.get("recording_id")) or _decode_attr(session_uuid),
+        zarr_use=_decode_attr(root.attrs.get("zarr_use")),
+        zarr_purpose=_decode_attr(root.attrs.get("zarr_purpose")),
+    )
+
+
 def _infer_dataset_artifact_kind(
     *,
     zarr_path: Path,
@@ -9490,8 +9516,10 @@ class Registry:
         return f"{session_uuid}:z{current_hash}"
 
     def register_from_root(self, root: zarr.Group, zarr_path: Path) -> str:
-        base_dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
-        zarr_purpose = _extract_zarr_purpose(root)
+        metadata = extract_dataset_metadata(root, zarr_path)
+        base_dataset_id = metadata.dataset_id
+        session_uuid = metadata.session_uuid
+        zarr_purpose = metadata.zarr_purpose
         dataset_id = self._resolve_effective_dataset_id(
             base_dataset_id=base_dataset_id,
             session_uuid=session_uuid,
@@ -9501,7 +9529,9 @@ class Registry:
             dataset_id,
             session_uuid=session_uuid,
             zarr_path=zarr_path,
+            recording_id=metadata.recording_id,
             zarr_purpose=zarr_purpose,
+            zarr_use=metadata.zarr_use,
         )
         dataset_row = self.conn.execute(
             "SELECT recording_id, zarr_use FROM datasets WHERE dataset_id = ?;",

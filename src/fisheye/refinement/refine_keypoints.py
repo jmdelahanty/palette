@@ -36,9 +36,13 @@ except ImportError:
     HAVE_DISTRIBUTED = False
 
 from .keypoint_quality import KeypointGeometryMetrics, compute_geometry_metrics
-from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
+from ..registry.db import Registry, RegistryPaths
 from ..shared.detect_reason_codec import write_reason_columns
-from ..shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
+from ..shared.registry_stage_complete import (
+    DatasetMetadata,
+    emit_stage_completion,
+    extract_dataset_metadata,
+)
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import as_float, normalize_attr
 from ..utils.system import get_environment_info, get_git_info
@@ -192,8 +196,7 @@ def _resolve_status_context_from_root(
     resolved_zarr = Path(zarr_path).expanduser().resolve()
     registry_path = RegistryPaths.from_env(Path.cwd()).path.expanduser().resolve()
     try:
-        base_dataset_id, session_uuid = resolve_dataset_id(root, resolved_zarr)
-        recording_id = _as_text(root.attrs.get("recording_id")) or _as_text(session_uuid)
+        metadata = extract_dataset_metadata(root, resolved_zarr)
     except Exception:
         return None
 
@@ -201,17 +204,17 @@ def _resolve_status_context_from_root(
     try:
         dataset_id = _resolve_status_dataset_id(
             registry,
-            base_dataset_id=base_dataset_id,
-            session_uuid=session_uuid,
+            base_dataset_id=metadata.dataset_id,
+            session_uuid=metadata.session_uuid,
             zarr_path=resolved_zarr,
         )
         registry.upsert_dataset(
             dataset_id,
-            session_uuid=session_uuid,
+            session_uuid=metadata.session_uuid,
             zarr_path=resolved_zarr,
-            recording_id=recording_id,
-            zarr_use=_as_text(root.attrs.get("zarr_use")),
-            zarr_purpose=_as_text(root.attrs.get("zarr_purpose")),
+            recording_id=metadata.recording_id,
+            zarr_use=metadata.zarr_use,
+            zarr_purpose=metadata.zarr_purpose,
         )
         row = registry.conn.execute(
             """
@@ -222,7 +225,7 @@ def _resolve_status_context_from_root(
             """,
             (dataset_id,),
         ).fetchone()
-        resolved_recording_id = _as_text(row["recording_id"]) if row is not None else recording_id
+        resolved_recording_id = _as_text(row["recording_id"]) if row is not None else metadata.recording_id
     except Exception:
         return None
     finally:
