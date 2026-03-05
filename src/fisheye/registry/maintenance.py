@@ -4339,15 +4339,7 @@ def _resolve_latest_group(parent: object) -> tuple[Optional[str], Optional[objec
         except Exception:
             pass
 
-    names: List[str] = []
-    try:
-        if hasattr(parent, "group_keys"):
-            names = [str(name) for name in parent.group_keys()]  # type: ignore[attr-defined]
-        else:
-            names = [str(name) for name in parent.keys()]  # type: ignore[attr-defined]
-    except Exception:
-        names = []
-    names = sorted(name for name in names if name)
+    names = _group_names(parent)
     if not names:
         return None, None, "none"
 
@@ -4356,6 +4348,63 @@ def _resolve_latest_group(parent: object) -> tuple[Optional[str], Optional[objec
         return fallback, parent[fallback], "sorted_fallback"  # type: ignore[index]
     except Exception:
         return fallback, None, "sorted_fallback_error"
+
+
+def _group_names(parent: object) -> List[str]:
+    if parent is None:
+        return []
+    names: List[str] = []
+    try:
+        if hasattr(parent, "group_keys"):
+            names = [str(name) for name in parent.group_keys()]  # type: ignore[attr-defined]
+        else:
+            names = [str(name) for name in parent.keys()]  # type: ignore[attr-defined]
+    except Exception:
+        names = []
+    return sorted(name for name in names if name)
+
+
+def _extract_source_keypoints_run(group: object) -> Optional[str]:
+    if group is None or not hasattr(group, "attrs"):
+        return None
+    source_run = _decode_text(group.attrs.get("source_keypoints_run"))  # type: ignore[attr-defined]
+    if source_run:
+        return source_run
+    return _decode_text(group.attrs.get("source_keypoint_run"))  # type: ignore[attr-defined]
+
+
+def _resolve_refined_keypoints_group(
+    parent: object,
+    *,
+    source_keypoints_run: Optional[str],
+) -> tuple[Optional[str], Optional[object], str, Optional[str], Optional[str]]:
+    latest_run, latest_group, latest_selection = _resolve_latest_group(parent)
+    latest_source_run = _extract_source_keypoints_run(latest_group)
+    if source_keypoints_run is None:
+        return latest_run, latest_group, latest_selection, None, None
+    if latest_group is not None and latest_source_run == source_keypoints_run:
+        return latest_run, latest_group, f"source_match_{latest_selection}", None, None
+
+    matches: List[str] = []
+    for name in _group_names(parent):
+        try:
+            group = parent[name]  # type: ignore[index]
+        except Exception:
+            continue
+        if _extract_source_keypoints_run(group) == source_keypoints_run:
+            matches.append(name)
+    if matches:
+        matched_run = sorted(matches)[-1]
+        try:
+            return matched_run, parent[matched_run], "source_match_sorted_fallback", None, None  # type: ignore[index]
+        except Exception:
+            return matched_run, None, "source_match_sorted_fallback_error", None, None
+
+    if latest_run is not None:
+        if latest_source_run is None:
+            return None, None, "source_mismatch_missing_attr", latest_run, None
+        return None, None, "source_mismatch", latest_run, latest_source_run
+    return None, None, "none", None, None
 
 
 def _extract_coverage_pct(group: object) -> Optional[float]:
@@ -4801,14 +4850,26 @@ def _build_recording_step_rows_from_root(
     ) if keypoints_group is not None else None
 
     refined_keypoints_parent = root.get("refined_keypoints_runs") or root.get("keypoints_refined_runs")  # type: ignore[attr-defined]
-    refined_keypoints_run, refined_keypoints_group, refined_keypoints_selection = _resolve_latest_group(
-        refined_keypoints_parent
+    (
+        refined_keypoints_run,
+        refined_keypoints_group,
+        refined_keypoints_selection,
+        refined_keypoints_latest_run,
+        refined_keypoints_latest_source_run,
+    ) = _resolve_refined_keypoints_group(
+        refined_keypoints_parent,
+        source_keypoints_run=keypoints_run,
     )
     refined_keypoints_status, refined_keypoints_reason = _step_status_from_presence(
         present=refined_keypoints_group is not None,
         is_production=is_production,
         prerequisite_statuses=(keypoints_status,),
     )
+    if refined_keypoints_group is None and keypoints_run and refined_keypoints_parent is not None:
+        if refined_keypoints_selection == "source_mismatch":
+            refined_keypoints_reason = "stale_vs_latest_keypoints"
+        elif refined_keypoints_selection == "source_mismatch_missing_attr":
+            refined_keypoints_reason = "missing_source_keypoints_run"
     refined_keypoints_method = _decode_text(
         refined_keypoints_group.attrs.get("method")  # type: ignore[union-attr]
     ) if refined_keypoints_group is not None else None
@@ -4927,6 +4988,21 @@ def _build_recording_step_rows_from_root(
         "zarr_purpose": zarr_purpose,
         "pipeline_type": pipeline_type,
     }
+    refined_keypoints_details: Dict[str, object] = {
+        **common_details,
+        "reason": refined_keypoints_reason,
+        "latest_selector": refined_keypoints_selection,
+        "upstream": {"keypoints": keypoints_status},
+    }
+    if keypoints_run:
+        refined_keypoints_details["expected_source_keypoints_run"] = keypoints_run
+    refined_keypoints_source_run = _extract_source_keypoints_run(refined_keypoints_group)
+    if refined_keypoints_source_run:
+        refined_keypoints_details["source_keypoints_run"] = refined_keypoints_source_run
+    if refined_keypoints_latest_run:
+        refined_keypoints_details["latest_refined_run"] = refined_keypoints_latest_run
+    if refined_keypoints_latest_source_run:
+        refined_keypoints_details["latest_refined_source_keypoints_run"] = refined_keypoints_latest_source_run
 
     rows: List[Dict[str, object]] = [
         _make_recording_step_row(
@@ -5057,12 +5133,7 @@ def _build_recording_step_rows_from_root(
             method=refined_keypoints_method,
             coverage_pct=refined_keypoints_coverage,
             review_status=keypoint_review_status,
-            details={
-                **common_details,
-                "reason": refined_keypoints_reason,
-                "latest_selector": refined_keypoints_selection,
-                "upstream": {"keypoints": keypoints_status},
-            },
+            details=refined_keypoints_details,
             source=source,
             zarr_mtime_ns=zarr_mtime_ns,
             updated_utc=_extract_updated_utc(refined_keypoints_group, fallback=fallback_updated_utc),

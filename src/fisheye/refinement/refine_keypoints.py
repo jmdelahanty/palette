@@ -101,6 +101,34 @@ def _zarr_mtime_ns(path: Path) -> Optional[int]:
         return None
 
 
+def _resolve_status_dataset_id(
+    registry: Registry,
+    *,
+    base_dataset_id: str,
+    session_uuid: Optional[str],
+    zarr_path: Path,
+) -> str:
+    path_text = str(zarr_path).replace("\\", "/").lower()
+    is_source_recording = bool(session_uuid) and "/recordings/" in path_text
+    if not is_source_recording:
+        return base_dataset_id
+
+    assert session_uuid is not None
+    path_hash = hashlib.sha256(str(zarr_path).encode("utf-8")).hexdigest()
+    candidate = f"{session_uuid}:z{path_hash[:12]}"
+    for extra in ("", path_hash[12:16], path_hash[16:20], path_hash[20:24]):
+        resolved = candidate if not extra else f"{candidate}{extra}"
+        row = registry.conn.execute(
+            "SELECT path_hash FROM datasets WHERE dataset_id = ?;",
+            (resolved,),
+        ).fetchone()
+        if row is None:
+            return resolved
+        if str(row["path_hash"] or "") == path_hash:
+            return resolved
+    return f"{session_uuid}:z{path_hash}"
+
+
 def _resolve_status_context(zarr_path: str) -> Optional[_StatusContext]:
     resolved_zarr = Path(zarr_path).expanduser().resolve()
     registry_path = RegistryPaths.from_env(Path.cwd()).path.expanduser().resolve()
@@ -181,13 +209,19 @@ def _resolve_status_context_from_root(
     resolved_zarr = Path(zarr_path).expanduser().resolve()
     registry_path = RegistryPaths.from_env(Path.cwd()).path.expanduser().resolve()
     try:
-        dataset_id, session_uuid = resolve_dataset_id(root, resolved_zarr)
+        base_dataset_id, session_uuid = resolve_dataset_id(root, resolved_zarr)
         recording_id = _as_text(root.attrs.get("recording_id")) or _as_text(session_uuid)
     except Exception:
         return None
 
     registry = Registry(registry_path)
     try:
+        dataset_id = _resolve_status_dataset_id(
+            registry,
+            base_dataset_id=base_dataset_id,
+            session_uuid=session_uuid,
+            zarr_path=resolved_zarr,
+        )
         registry.upsert_dataset(
             dataset_id,
             session_uuid=session_uuid,
@@ -196,15 +230,25 @@ def _resolve_status_context_from_root(
             zarr_use=_as_text(root.attrs.get("zarr_use")),
             zarr_purpose=_as_text(root.attrs.get("zarr_purpose")),
         )
+        row = registry.conn.execute(
+            """
+            SELECT recording_id
+            FROM datasets
+            WHERE dataset_id = ?
+            LIMIT 1;
+            """,
+            (dataset_id,),
+        ).fetchone()
+        resolved_recording_id = _as_text(row["recording_id"]) if row is not None else recording_id
     except Exception:
-        pass
+        return None
     finally:
         registry.close()
 
     return _StatusContext(
         registry_path=registry_path,
         dataset_id=dataset_id,
-        recording_id=recording_id,
+        recording_id=resolved_recording_id,
         zarr_path=resolved_zarr,
     )
 

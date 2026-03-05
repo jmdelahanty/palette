@@ -744,3 +744,74 @@ def test_main_model_source_registry_requires_yolo_method(monkeypatch: pytest.Mon
         ]
     )
     assert rc == 1
+
+
+def test_maybe_auto_approve_refined_keypoints_applies_when_threshold_met(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.group()
+    refined_parent = root.create_group("refined_keypoints_runs")
+    refined_parent.attrs["latest"] = "refined_keypoints_001"
+    refined = refined_parent.create_group("refined_keypoints_001")
+    refined.attrs["summary_statistics"] = {"total_rois": 8, "usable_keypoints": 8}
+    refined.attrs["source_keypoints_run"] = "keypoints_001"
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: root)
+
+    result = mod._maybe_auto_approve_refined_keypoints(
+        zarr_path=zarr_path,
+        refined_run="refined_keypoints_001",
+        min_usable_rate=1.0,
+        intended_use="full_recording",
+        reviewer="auto-batch",
+    )
+
+    assert result["applied"] is True
+    assert result["reason"] == "threshold_met"
+    assert result["usable_rate"] == pytest.approx(1.0)
+
+    refined_after = root["refined_keypoints_runs"]["refined_keypoints_001"]
+    review_status = dict(refined_after.attrs.get("keypoint_review_status"))
+    assert review_status["state"] == "approved"
+    assert review_status["method"] == "algorithmic"
+    assert review_status["intended_use"] == "full_recording"
+    assert review_status["reviewer"] == "auto-batch"
+    assert root["refined_keypoints_runs"].attrs.get("keypoint_review_status_latest") == "refined_keypoints_001"
+
+
+def test_maybe_auto_approve_refined_keypoints_skips_when_threshold_not_met(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.group()
+    refined_parent = root.create_group("refined_keypoints_runs")
+    refined = refined_parent.create_group("refined_keypoints_001")
+    refined.attrs["summary_statistics"] = {"total_rois": 8, "usable_keypoints": 7}
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: root)
+
+    result = mod._maybe_auto_approve_refined_keypoints(
+        zarr_path=zarr_path,
+        refined_run="refined_keypoints_001",
+        min_usable_rate=1.0,
+        intended_use="full_recording",
+        reviewer=None,
+    )
+
+    assert result["applied"] is False
+    assert result["reason"] == "threshold_not_met"
+    assert result["usable_rate"] == pytest.approx(7.0 / 8.0)
+    assert refined.attrs.get("keypoint_review_status") is None
+
+
+def test_main_auto_approve_requires_refine_flag(tmp_path: Path) -> None:
+    rc = mod.main(
+        [
+            "--apply",
+            "--auto-approve-perfect",
+            "--no-log",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 1

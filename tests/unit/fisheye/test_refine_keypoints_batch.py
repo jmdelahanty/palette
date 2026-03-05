@@ -17,6 +17,7 @@ def _make_archive(
     zarr_purpose: str | None,
     with_keypoints: bool = True,
     with_refined: bool = False,
+    refined_source_keypoints_run: str | None = None,
 ) -> Path:
     zarr_path = root / recording / "zarr" / zarr_name
     zarr_path.parent.mkdir(parents=True, exist_ok=True)
@@ -29,7 +30,9 @@ def _make_archive(
         keypoints.attrs["latest"] = "keypoints_001"
     if with_refined:
         refined = group.create_group("refined_keypoints_runs")
-        refined.create_group("refined_keypoints_001")
+        refined_run = refined.create_group("refined_keypoints_001")
+        if refined_source_keypoints_run is not None:
+            refined_run.attrs["source_keypoints_run"] = refined_source_keypoints_run
         refined.attrs["latest"] = "refined_keypoints_001"
     return zarr_path
 
@@ -123,6 +126,7 @@ def test_build_plans_skips_when_refined_present_by_default(tmp_path: Path) -> No
         "rec_a_analysis.zarr",
         zarr_purpose="analysis",
         with_refined=True,
+        refined_source_keypoints_run="keypoints_001",
     )
 
     plans = _build_plans(
@@ -135,7 +139,31 @@ def test_build_plans_skips_when_refined_present_by_default(tmp_path: Path) -> No
     by_name = {plan.zarr_path.name: plan for plan in plans}
 
     assert by_name[zarr_path.name].status == "skipped"
-    assert by_name[zarr_path.name].reason == "refined_keypoints_runs present"
+    assert by_name[zarr_path.name].reason == "refined_keypoints run already exists for source 'keypoints_001'"
+
+
+def test_build_plans_does_not_skip_when_refined_present_for_different_source_run(tmp_path: Path) -> None:
+    zarr_path = _make_archive(
+        tmp_path,
+        "rec_a",
+        "rec_a_analysis.zarr",
+        zarr_purpose="analysis",
+        with_refined=True,
+        refined_source_keypoints_run="keypoints_000",
+    )
+
+    plans = _build_plans(
+        [tmp_path],
+        recursive=True,
+        keypoint_run=None,
+        skip_existing=True,
+        zarr_use_filter="analysis",
+    )
+    by_name = {plan.zarr_path.name: plan for plan in plans}
+
+    assert by_name[zarr_path.name].status == "ok"
+    assert by_name[zarr_path.name].reason is None
+    assert by_name[zarr_path.name].keypoint_run == "keypoints_001"
 
 
 def test_build_plans_marks_missing_when_requested_run_not_found(tmp_path: Path) -> None:

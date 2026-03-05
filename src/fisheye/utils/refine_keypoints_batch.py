@@ -118,17 +118,48 @@ def _iter_zarr(roots: List[Path], recursive: bool) -> Iterable[Path]:
                 yield candidate
 
 
-def _has_refined(root: zarr.Group) -> bool:
+def _decode_text(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        text = value.decode("utf-8", "ignore").strip()
+    else:
+        text = str(value).strip()
+    return text or None
+
+
+def _source_keypoints_run(run_group: object) -> Optional[str]:
+    attrs = getattr(run_group, "attrs", None)
+    if attrs is None:
+        return None
+    source = _decode_text(attrs.get("source_keypoints_run"))
+    if source:
+        return source
+    return _decode_text(attrs.get("source_keypoint_run"))
+
+
+def _has_matching_refined(root: zarr.Group, *, keypoint_run: str) -> bool:
     refined_parent = root.get("refined_keypoints_runs") or root.get("keypoints_refined_runs")
     if refined_parent is None:
         return False
-    latest = refined_parent.attrs.get("latest")
-    if latest:
-        return True
+    latest = _decode_text(refined_parent.attrs.get("latest"))
+    if latest and latest in refined_parent:
+        try:
+            if _source_keypoints_run(refined_parent[latest]) == keypoint_run:
+                return True
+        except Exception:
+            pass
     try:
-        return len(list(refined_parent.group_keys())) > 0
+        run_names = list(refined_parent.group_keys())
     except Exception:
         return False
+    for run_name in run_names:
+        try:
+            if _source_keypoints_run(refined_parent[run_name]) == keypoint_run:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _select_keypoint_run(root: zarr.Group, requested: Optional[str]) -> Optional[str]:
@@ -137,7 +168,7 @@ def _select_keypoint_run(root: zarr.Group, requested: Optional[str]) -> Optional
         return None
     if requested:
         return requested if requested in keypoint_parent else None
-    return keypoint_parent.attrs.get("latest")
+    return _decode_text(keypoint_parent.attrs.get("latest"))
 
 
 def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
@@ -187,13 +218,13 @@ def _build_plans(
                 )
             )
             continue
-        refined_present = _has_refined(root)
+        refined_present = _has_matching_refined(root, keypoint_run=selected)
         if skip_existing and refined_present:
             plans.append(
                 RefinePlan(
                     zarr_path=zarr_path,
                     status="skipped",
-                    reason="refined_keypoints_runs present",
+                    reason=f"refined_keypoints run already exists for source '{selected}'",
                     keypoint_run=selected,
                     refined_present=True,
                 )

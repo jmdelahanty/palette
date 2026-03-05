@@ -488,6 +488,7 @@ def _create_recording_step_status_zarr(path: Path) -> _FakeGroup:
         attrs={
             "created_utc": "2026-02-15T00:30:00+00:00",
             "method": "refine_keypoints",
+            "source_keypoints_run": "kp_001",
             "summary_statistics": {"postprocess": {"total_rois": 4, "usable_keypoints": 3}},
             "keypoint_review_status": {
                 "state": "approved",
@@ -4654,6 +4655,74 @@ def test_backfill_recording_step_status_apply_and_convergent(
         ("dataset_step_a",),
     ).fetchone()
     assert history_count is not None and int(history_count["n"]) == 18
+    registry.close()
+
+
+def test_backfill_recording_step_status_marks_refined_keypoints_stale_when_source_mismatches_latest_keypoints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_step_b" / "zarr" / "rec_step_b_analysis.zarr"
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    keypoints_parent = fake_root["keypoints_runs"]
+    keypoints_parent.add_group(
+        "kp_002",
+        attrs={"created_utc": "2026-02-15T01:10:00+00:00", "method": "yolo_pose"},
+    )
+    keypoints_parent.attrs["latest"] = "kp_002"
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_step_b",
+        session_uuid="session_step_b",
+        zarr_path=zarr_path,
+        recording_id="recording_step_b",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+
+    refined_row = registry.conn.execute(
+        """
+        SELECT status, run_name, coverage_pct, details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'refined_keypoints';
+        """,
+        ("dataset_step_b",),
+    ).fetchone()
+    assert refined_row is not None
+    assert str(refined_row["status"]) == "missing"
+    assert refined_row["run_name"] is None
+    assert refined_row["coverage_pct"] is None
+    refined_details = json.loads(str(refined_row["details_json"]))
+    assert refined_details["reason"] == "stale_vs_latest_keypoints"
+    assert refined_details["expected_source_keypoints_run"] == "kp_002"
+    assert refined_details["latest_refined_run"] == "refined_kp_001"
+    assert refined_details["latest_refined_source_keypoints_run"] == "kp_001"
+
+    keypoints_row = registry.conn.execute(
+        """
+        SELECT status, run_name, method
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'keypoints';
+        """,
+        ("dataset_step_b",),
+    ).fetchone()
+    assert keypoints_row is not None
+    assert str(keypoints_row["status"]) == "ok"
+    assert str(keypoints_row["run_name"]) == "kp_002"
+    assert str(keypoints_row["method"]) == "yolo_pose"
     registry.close()
 
 

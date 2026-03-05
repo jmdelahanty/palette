@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -304,6 +305,160 @@ def _keypoints_total_rois(zarr_path: Path, run_name: Optional[str]) -> Optional[
         except (TypeError, ValueError):
             return None
     return None
+
+
+def _as_nonnegative_int(value: object) -> Optional[int]:
+    try:
+        int_value = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return int_value if int_value >= 0 else None
+
+
+def _hash_parameters(params: object) -> Optional[str]:
+    if params is None:
+        return None
+    try:
+        payload = json.dumps(params, sort_keys=True, default=str).encode("utf-8")
+    except (TypeError, ValueError):
+        payload = str(params).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _build_keypoint_signature(attrs: Dict[str, Any]) -> Dict[str, object]:
+    params = attrs.get("parameters")
+    if not isinstance(params, dict):
+        provenance = attrs.get("provenance")
+        if isinstance(provenance, dict):
+            params = provenance.get("parameters")
+    if not isinstance(params, dict):
+        params = None
+
+    parameter_source = attrs.get("parameter_source")
+    if parameter_source is None and isinstance(params, dict):
+        parameter_source = params.get("parameter_source")
+
+    return {
+        "signature_version": 1,
+        "source_keypoints_run": attrs.get("source_keypoints_run"),
+        "source_crop_run": attrs.get("source_crop_run"),
+        "source_detect_run": attrs.get("source_detect_run"),
+        "source_refined_run": attrs.get("source_refined_run"),
+        "parameter_source": parameter_source,
+        "parameters_hash": _hash_parameters(params),
+    }
+
+
+def _pick_refined_parent(root: zarr.Group) -> Optional[zarr.Group]:
+    if "refined_keypoints_runs" in root:
+        return root["refined_keypoints_runs"]
+    if "keypoints_refined_runs" in root:
+        return root["keypoints_refined_runs"]
+    return None
+
+
+def _refined_usable_counts(refined: zarr.Group) -> tuple[Optional[int], Optional[int]]:
+    total: Optional[int] = None
+    usable: Optional[int] = None
+
+    summary = refined.attrs.get("summary_statistics")
+    if isinstance(summary, dict):
+        total = _as_nonnegative_int(summary.get("total_rois"))
+        usable = _as_nonnegative_int(summary.get("usable_keypoints"))
+
+    if (total is None or usable is None) and "usable_keypoints" in refined:
+        try:
+            usable_values = np.asarray(refined["usable_keypoints"][:], dtype=bool)
+            total = int(usable_values.shape[0])
+            usable = int(np.count_nonzero(usable_values))
+        except Exception:
+            pass
+
+    return total, usable
+
+
+def _maybe_auto_approve_refined_keypoints(
+    *,
+    zarr_path: Path,
+    refined_run: str,
+    min_usable_rate: float,
+    intended_use: str,
+    reviewer: Optional[str],
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "enabled": True,
+        "applied": False,
+        "threshold": float(min_usable_rate),
+        "intended_use": intended_use,
+        "refined_run": refined_run,
+    }
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    refined_parent = _pick_refined_parent(root)
+    if refined_parent is None:
+        result["reason"] = "refined_keypoints_parent_missing"
+        return result
+    if refined_run not in refined_parent:
+        result["reason"] = "refined_run_missing"
+        return result
+
+    refined = refined_parent[refined_run]
+    existing_review = refined.attrs.get("keypoint_review_status")
+    if isinstance(existing_review, dict) and existing_review.get("state") is not None:
+        result["reason"] = "already_reviewed"
+        result["existing_review_status"] = _jsonable(existing_review)
+        return result
+
+    total, usable = _refined_usable_counts(refined)
+    result["total_rois"] = total
+    result["usable_keypoints"] = usable
+
+    if total is None or usable is None:
+        result["reason"] = "usable_counts_unavailable"
+        return result
+    if total <= 0:
+        result["reason"] = "zero_total_rois"
+        return result
+
+    usable_rate = float(usable) / float(total)
+    result["usable_rate"] = usable_rate
+    if usable_rate + 1e-12 < float(min_usable_rate):
+        result["reason"] = "threshold_not_met"
+        return result
+
+    timestamp_utc = _utc_now()
+    status_payload: Dict[str, Any] = {
+        "state": "approved",
+        "method": "algorithmic",
+        "intended_use": intended_use,
+        "timestamp_utc": timestamp_utc,
+        "timestamp": timestamp_utc,
+        "notes": (
+            "Auto-approved by run_keypoints_batch: "
+            f"usable_keypoints={usable}/{total} (rate={usable_rate:.6f}) "
+            f">= threshold={float(min_usable_rate):.6f}"
+        ),
+    }
+    if reviewer:
+        status_payload["reviewer"] = reviewer
+
+    refined_attrs = dict(refined.attrs)
+    refined_attrs["keypoint_review_status"] = status_payload
+    signature = refined_attrs.get("keypoint_signature")
+    if not isinstance(signature, dict):
+        signature = _build_keypoint_signature(refined_attrs)
+        refined_attrs["keypoint_signature"] = signature
+    refined_attrs["keypoint_review_signature"] = signature
+    refined.attrs.put(refined_attrs)
+
+    parent_attrs = dict(refined_parent.attrs)
+    parent_attrs["keypoint_review_status_latest"] = refined_run
+    refined_parent.attrs.put(parent_attrs)
+
+    result["applied"] = True
+    result["reason"] = "threshold_met"
+    result["review_status"] = _jsonable(status_payload)
+    return result
 
 
 def _decode_source_runs(attrs: Dict[str, Any]) -> Dict[str, Any]:
@@ -983,6 +1138,9 @@ def _run_plan(
     refine_only: bool,
     json_output: bool,
     resolved_model: Optional[ResolvedModel] = None,
+    auto_approve_min_usable_rate: Optional[float] = None,
+    auto_approve_intended_use: str = "full_recording",
+    auto_approve_reviewer: Optional[str] = None,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "recording": str(plan.recording_dir),
@@ -1004,6 +1162,14 @@ def _run_plan(
                 "refined_keypoints_runs",
                 refined_run,
             )
+            if auto_approve_min_usable_rate is not None:
+                payload["auto_review"] = _maybe_auto_approve_refined_keypoints(
+                    zarr_path=plan.zarr_path,
+                    refined_run=refined_run,
+                    min_usable_rate=float(auto_approve_min_usable_rate),
+                    intended_use=auto_approve_intended_use,
+                    reviewer=auto_approve_reviewer,
+                )
         else:
             payload["refine_skipped_reason"] = "zero_keypoint_rois"
     else:
@@ -1058,6 +1224,14 @@ def _run_plan(
                     "refined_keypoints_runs",
                     refined_run,
                 )
+                if auto_approve_min_usable_rate is not None:
+                    payload["auto_review"] = _maybe_auto_approve_refined_keypoints(
+                        zarr_path=plan.zarr_path,
+                        refined_run=refined_run,
+                        min_usable_rate=float(auto_approve_min_usable_rate),
+                        intended_use=auto_approve_intended_use,
+                        reviewer=auto_approve_reviewer,
+                    )
             else:
                 payload["refine_skipped_reason"] = "zero_keypoint_rois"
 
@@ -1202,6 +1376,33 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Refine existing keypoints runs without re-running keypoint detection.",
     )
     parser.add_argument(
+        "--auto-approve-perfect",
+        action="store_true",
+        help=(
+            "After refinement, auto-set keypoint_review_status to approved/algorithmic "
+            "when usable keypoint coverage is 100%."
+        ),
+    )
+    parser.add_argument(
+        "--auto-approve-min-usable-rate",
+        type=float,
+        help=(
+            "After refinement, auto-set keypoint_review_status to approved/algorithmic "
+            "when usable_keypoints/total_rois >= this threshold (0-1)."
+        ),
+    )
+    parser.add_argument(
+        "--auto-approve-intended-use",
+        choices=["training", "full_recording"],
+        default="full_recording",
+        help="Review intended_use to write for auto-approvals (default: full_recording).",
+    )
+    parser.add_argument(
+        "--auto-approve-reviewer",
+        type=str,
+        help="Optional reviewer label to include in auto-approval payloads.",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Emit JSON lines for each plan/result.",
@@ -1283,12 +1484,39 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.set_defaults(require_crop=True)
 
     args = parser.parse_args(argv)
+    if args.auto_approve_perfect and args.auto_approve_min_usable_rate is not None:
+        print(
+            "Error: use either --auto-approve-perfect or --auto-approve-min-usable-rate, not both.",
+            file=sys.stderr,
+        )
+        return 1
+    auto_approve_min_usable_rate: Optional[float] = None
+    if args.auto_approve_perfect:
+        auto_approve_min_usable_rate = 1.0
+    elif args.auto_approve_min_usable_rate is not None:
+        auto_approve_min_usable_rate = float(args.auto_approve_min_usable_rate)
+    if auto_approve_min_usable_rate is not None and not (0.0 <= auto_approve_min_usable_rate <= 1.0):
+        print("Error: --auto-approve-min-usable-rate must be between 0 and 1.", file=sys.stderr)
+        return 1
+    if auto_approve_min_usable_rate is not None and not (args.refine or args.refine_only):
+        print(
+            "Error: auto-approval requires --refine (or legacy --refine-only).",
+            file=sys.stderr,
+        )
+        return 1
     if args.refine_only:
         deprecation_msg = (
             "Deprecation warning: `run_keypoints_batch --refine-only` is deprecated. "
             "Use `scripts/py -m fisheye.utils.refine_keypoints_batch`."
         )
         print(deprecation_msg, file=sys.stderr)
+        if auto_approve_min_usable_rate is not None:
+            print(
+                "Error: auto-approval is not supported with --refine-only delegation. "
+                "Use --refine on run_keypoints_batch instead.",
+                file=sys.stderr,
+            )
+            return 1
         return _delegate_refine_only(args)
 
     file_list_paths: List[Path] = []
@@ -1370,6 +1598,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             sql_prefilter=bool(args.source == "registry" and skip_existing),
             model_source=args.model_source,
             model_set_id=args.model_set_id,
+            auto_approve_min_usable_rate=auto_approve_min_usable_rate,
+            auto_approve_intended_use=args.auto_approve_intended_use,
+            auto_approve_reviewer=args.auto_approve_reviewer,
         )
 
     plans: List[KeypointPlan] = []
@@ -1654,6 +1885,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     refine_only=bool(args.refine_only),
                     json_output=bool(args.json),
                     resolved_model=resolved_models_by_plan.get(str(plan.zarr_path.resolve())),
+                    auto_approve_min_usable_rate=auto_approve_min_usable_rate,
+                    auto_approve_intended_use=str(args.auto_approve_intended_use),
+                    auto_approve_reviewer=args.auto_approve_reviewer,
                 )
                 ok += 1
                 if args.json:
@@ -1693,6 +1927,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                         refine_only=bool(args.refine_only),
                         json_output=bool(args.json),
                         resolved_model=resolved_models_by_plan.get(str(plan.zarr_path.resolve())),
+                        auto_approve_min_usable_rate=auto_approve_min_usable_rate,
+                        auto_approve_intended_use=str(args.auto_approve_intended_use),
+                        auto_approve_reviewer=args.auto_approve_reviewer,
                     )
                     ok += 1
                     if args.json:
