@@ -26,10 +26,10 @@ import dask
 from dask import delayed
 from dask.diagnostics import ProgressBar
 
-from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
-from ..registry.status_ledger import upsert_recording_step_status
-from ..registry.step_cascade import invalidate_downstream_steps
+from ..registry.db import RegistryPaths
+from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
 from ..pose.schema import schema_from_package
 
@@ -49,20 +49,7 @@ _KEYPOINT_STATUS_SOURCE = "runtime_keypoints_detect"
 
 
 def _status_text(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        text = value.decode("utf-8", "ignore").strip()
-    else:
-        text = str(value).strip()
-    return text or None
-
-
-def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
-    try:
-        return int(path.stat().st_mtime_ns)
-    except OSError:
-        return None
+    return normalize_attr(value)
 
 
 def _resolve_registry_path(registry: Optional[Path]) -> Optional[Path]:
@@ -88,51 +75,21 @@ def _emit_keypoint_step_status(
     registry_path = _resolve_registry_path(registry)
     if registry_path is None:
         return
-    try:
-        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
-        recording_id = _status_text(root.attrs.get("recording_id")) or _status_text(session_uuid)
-        zarr_use = _status_text(root.attrs.get("zarr_use"))
-        zarr_purpose = _status_text(root.attrs.get("zarr_purpose"))
-
-        registry_db = Registry(registry_path)
-        try:
-            registry_db.upsert_dataset(
-                dataset_id,
-                session_uuid=session_uuid,
-                zarr_path=zarr_path,
-                recording_id=recording_id,
-                zarr_use=zarr_use,
-                zarr_purpose=zarr_purpose,
-            )
-            upsert_recording_step_status(
-                registry_db,
-                dataset_id=dataset_id,
-                recording_id=recording_id,
-                step_name=_KEYPOINT_STEP_NAME,
-                status="ok",
-                run_name=run_name,
-                method=method,
-                coverage_pct=coverage_pct,
-                details_json=details,
-                source=_KEYPOINT_STATUS_SOURCE,
-                zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_path),
-            )
-            invalidate_downstream_steps(
-                registry_db,
-                dataset_id=dataset_id,
-                step_name=_KEYPOINT_STEP_NAME,
-                source=_KEYPOINT_STATUS_SOURCE,
-                recording_id=recording_id,
-                trigger_run_name=run_name,
-            )
-        finally:
-            registry_db.close()
-    except Exception as exc:
-        if console is not None:
-            console.print(
-                f"[yellow]Warning:[/yellow] failed to write recording step status "
-                f"for {_KEYPOINT_STEP_NAME}: {exc}"
-            )
+    emit_stage_completion(
+        root,
+        zarr_path,
+        step_name=_KEYPOINT_STEP_NAME,
+        status="ok",
+        source=_KEYPOINT_STATUS_SOURCE,
+        run_name=run_name,
+        method=method,
+        coverage_pct=coverage_pct,
+        details_json=details,
+        console=console,
+        registry=registry_path,
+        auto_registry_from_env=False,
+        trigger_run_name=run_name,
+    )
 
 
 # ========== Core Detection Functions ==========

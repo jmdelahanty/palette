@@ -39,11 +39,12 @@ from skimage.measure import EllipseModel
 from collections import Counter
 
 from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
-from ..registry.status_ledger import upsert_recording_step_status
 from ..shared.mask_source import load_mask_bundle
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
+from ..shared.registry_stage_complete import emit_stage_completion, extract_dataset_metadata
 from ..shared.row_alignment import assert_row_alignment
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.type_conversions import as_float, coerce_positive_float, normalize_attr
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
 
@@ -68,41 +69,15 @@ _ZARR_ARRAY_CACHE: Dict[Tuple[str, str], zarr.Array] = {}
 
 
 def _status_text(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        text = value.decode("utf-8", "ignore").strip()
-    else:
-        text = str(value).strip()
-    return text or None
+    return normalize_attr(value)
 
 
 def _status_float(value: object) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return as_float(value)
 
 
 def _coerce_positive_float(value: object) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    if numeric <= 0:
-        return None
-    return float(numeric)
-
-
-def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
-    try:
-        return int(path.stat().st_mtime_ns)
-    except OSError:
-        return None
+    return coerce_positive_float(value)
 
 
 def _emit_refined_eye_masks_status(
@@ -117,45 +92,25 @@ def _emit_refined_eye_masks_status(
     details: Dict[str, object],
     console: Optional[Console],
 ) -> None:
-    try:
-        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
-        recording_id = _status_text(root.attrs.get("recording_id")) or _status_text(session_uuid)
-        zarr_use = _status_text(root.attrs.get("zarr_use"))
-        zarr_purpose = _status_text(root.attrs.get("zarr_purpose"))
-
-        registry_path = RegistryPaths.from_env(Path.cwd()).path
-        registry = Registry(registry_path)
-        try:
-            registry.upsert_dataset(
-                dataset_id,
-                session_uuid=session_uuid,
-                zarr_path=zarr_path,
-                recording_id=recording_id,
-                zarr_use=zarr_use,
-                zarr_purpose=zarr_purpose,
-            )
-            upsert_recording_step_status(
-                registry,
-                dataset_id=dataset_id,
-                recording_id=recording_id,
-                step_name="refined_eye_masks",
-                status=status,
-                run_name=run_name,
-                method=method,
-                coverage_pct=coverage_pct,
-                review_status_json=review_status,
-                details_json=details,
-                source=_REFINED_EYE_MASKS_STATUS_SOURCE,
-                zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_path),
-            )
-        finally:
-            registry.close()
-    except Exception as exc:
-        if console is not None:
-            console.print(
-                f"[yellow]Warning:[/yellow] failed to write recording step status "
-                f"for refined_eye_masks: {exc}"
-            )
+    emit_stage_completion(
+        root,
+        zarr_path,
+        step_name="refined_eye_masks",
+        status=status,
+        source=_REFINED_EYE_MASKS_STATUS_SOURCE,
+        run_name=run_name,
+        method=method,
+        coverage_pct=coverage_pct,
+        review_status_json=review_status,
+        details_json=details,
+        console=console,
+        warning_label="refined_eye_masks",
+        registry=None,
+        auto_registry_from_env=True,
+        require_env_registry_exists=False,
+        invalidate_on_ok=False,
+        resolve_dataset_id_fn=resolve_dataset_id,
+    )
 
 
 def _refresh_refined_eye_masks_registry_rows(
@@ -166,35 +121,37 @@ def _refresh_refined_eye_masks_registry_rows(
 ) -> None:
     """Refresh eye-mask performance/quality rows for one dataset (non-fatal)."""
     try:
-        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
-        recording_id = _status_text(root.attrs.get("recording_id")) or _status_text(session_uuid)
-        zarr_use = _status_text(root.attrs.get("zarr_use")) or _status_text(root.attrs.get("zarr_purpose"))
-        zarr_purpose = _status_text(root.attrs.get("zarr_purpose"))
+        metadata = extract_dataset_metadata(
+            root,
+            zarr_path,
+            resolve_dataset_id_fn=resolve_dataset_id,
+        )
+        zarr_use = metadata.zarr_use or metadata.zarr_purpose
 
         registry_path = RegistryPaths.from_env(Path.cwd()).path
         registry = Registry(registry_path)
         try:
             registry.upsert_dataset(
-                dataset_id,
-                session_uuid=session_uuid,
+                metadata.dataset_id,
+                session_uuid=metadata.session_uuid,
                 zarr_path=zarr_path,
-                recording_id=recording_id,
+                recording_id=metadata.recording_id,
                 zarr_use=zarr_use,
-                zarr_purpose=zarr_purpose,
+                zarr_purpose=metadata.zarr_purpose,
             )
             perf_rows = int(
                 registry.refresh_eye_mask_performance_for_dataset(
-                    dataset_id,
+                    metadata.dataset_id,
                     zarr_path=zarr_path,
-                    recording_id=recording_id,
+                    recording_id=metadata.recording_id,
                     zarr_use=zarr_use,
                 )
             )
             quality_rows = int(
                 registry.refresh_eye_mask_quality_for_dataset(
-                    dataset_id,
+                    metadata.dataset_id,
                     zarr_path=zarr_path,
-                    recording_id=recording_id,
+                    recording_id=metadata.recording_id,
                     zarr_use=zarr_use,
                 )
             )
@@ -203,7 +160,7 @@ def _refresh_refined_eye_masks_registry_rows(
         if console is not None:
             console.print(
                 "[dim]Refreshed registry eye-mask rows "
-                f"(performance={perf_rows}, quality={quality_rows}) for dataset {dataset_id}[/dim]"
+                f"(performance={perf_rows}, quality={quality_rows}) for dataset {metadata.dataset_id}[/dim]"
             )
     except Exception as exc:
         if console is not None:

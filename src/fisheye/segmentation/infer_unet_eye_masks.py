@@ -20,8 +20,10 @@ from ..registry.db import Registry, resolve_dataset_id
 from ..registry.status_ledger import upsert_recording_step_status
 from ..registry.step_cascade import invalidate_downstream_steps
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
+from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.row_alignment import assert_row_alignment
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.type_conversions import as_float, clean_mapping, normalize_attr
 from ..shared.zarr.schema import add_processing_run
 from ..utils.system import get_environment_info, get_git_info
 from .unet import UNetSmall
@@ -99,32 +101,15 @@ _EYE_MASKS_STATUS_SOURCE = "runtime_infer_unet_eye_masks"
 
 
 def _status_text(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", "ignore")
-    text = str(value).strip()
-    return text or None
+    return normalize_attr(value)
 
 
 def _status_float(value: object) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
-    try:
-        return int(path.stat().st_mtime_ns)
-    except OSError:
-        return None
+    return as_float(value)
 
 
 def _clean_details(details: Dict[str, object]) -> Dict[str, object]:
-    return {key: value for key, value in details.items() if value is not None}
+    return clean_mapping(details)
 
 
 def _emit_eye_masks_status(
@@ -144,78 +129,57 @@ def _emit_eye_masks_status(
     if registry is None:
         return
 
-    try:
-        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
-        recording_id = _status_text(root.attrs.get("recording_id")) or _status_text(session_uuid)
-        zarr_use = _status_text(root.attrs.get("zarr_use"))
-        zarr_purpose = _status_text(root.attrs.get("zarr_purpose"))
-        registry.upsert_dataset(
-            dataset_id,
-            session_uuid=session_uuid,
-            zarr_path=zarr_path,
-            recording_id=recording_id,
-            zarr_use=zarr_use,
-            zarr_purpose=zarr_purpose,
-        )
+    run_attrs: Dict[str, object] = {}
+    eye_parent = root.get("eye_masks_runs")
+    if run_name and eye_parent is not None and run_name in eye_parent:
+        run_attrs = dict(getattr(eye_parent[run_name], "attrs", {}))
 
-        run_attrs: Dict[str, object] = {}
-        eye_parent = root.get("eye_masks_runs")
-        if run_name and eye_parent is not None and run_name in eye_parent:
-            run_attrs = dict(getattr(eye_parent[run_name], "attrs", {}))
+    method = _status_text(run_attrs.get("method")) or _status_text(method_hint)
+    total_rois = _status_float(run_attrs.get("total_rois"))
+    coverage_pct = 100.0 if total_rois is not None and total_rois > 0 and status == "ok" else None
 
-        method = _status_text(run_attrs.get("method")) or _status_text(method_hint)
-        total_rois = _status_float(run_attrs.get("total_rois"))
-        coverage_pct = 100.0 if total_rois is not None and total_rois > 0 and status == "ok" else None
+    review_status_raw = run_attrs.get("eye_mask_review_status")
+    review_status = review_status_raw if isinstance(review_status_raw, dict) else None
+    details = _clean_details(
+        {
+            "reason": reason,
+            "source_crop_run": _status_text(run_attrs.get("source_crop_run")),
+            "source_eye_masks_run": _status_text(run_attrs.get("source_eye_masks_run")),
+            "source_keypoints_run": _status_text(
+                run_attrs.get("source_keypoints_run") or run_attrs.get("source_keypoint_run")
+            ),
+            "probabilities_channels": run_attrs.get("probabilities_channels"),
+            "write_binary_masks": run_attrs.get("masks_from") is not None,
+            "total_rois": run_attrs.get("total_rois"),
+            "inference_duration_seconds": run_attrs.get("inference_duration_seconds"),
+            "requested_crop_run": _status_text(requested_crop_run),
+            "error": _status_text(error_text),
+        }
+    )
+    if isinstance(status_details, dict):
+        details.update(_clean_details(dict(status_details)))
 
-        review_status_raw = run_attrs.get("eye_mask_review_status")
-        review_status = review_status_raw if isinstance(review_status_raw, dict) else None
-        details = _clean_details(
-            {
-                "reason": reason,
-                "source_crop_run": _status_text(run_attrs.get("source_crop_run")),
-                "source_eye_masks_run": _status_text(run_attrs.get("source_eye_masks_run")),
-                "source_keypoints_run": _status_text(
-                    run_attrs.get("source_keypoints_run") or run_attrs.get("source_keypoint_run")
-                ),
-                "probabilities_channels": run_attrs.get("probabilities_channels"),
-                "write_binary_masks": run_attrs.get("masks_from") is not None,
-                "total_rois": run_attrs.get("total_rois"),
-                "inference_duration_seconds": run_attrs.get("inference_duration_seconds"),
-                "requested_crop_run": _status_text(requested_crop_run),
-                "error": _status_text(error_text),
-            }
-        )
-        if isinstance(status_details, dict):
-            details.update(_clean_details(dict(status_details)))
-
-        upsert_recording_step_status(
-            registry,
-            dataset_id=dataset_id,
-            recording_id=recording_id,
-            step_name="eye_masks",
-            status=status,
-            run_name=run_name,
-            method=method,
-            coverage_pct=coverage_pct,
-            review_status_json=review_status,
-            details_json=details,
-            source=_EYE_MASKS_STATUS_SOURCE,
-            zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_path),
-        )
-        if status == "ok":
-            invalidate_downstream_steps(
-                registry,
-                dataset_id=dataset_id,
-                step_name="eye_masks",
-                source=_EYE_MASKS_STATUS_SOURCE,
-                recording_id=recording_id,
-                trigger_run_name=run_name,
-            )
-    except Exception as exc:
-        if console is not None:
-            console.print(
-                f"[yellow]Warning:[/yellow] failed to write recording step status for eye_masks: {exc}"
-            )
+    emit_stage_completion(
+        root,
+        zarr_path,
+        step_name="eye_masks",
+        status=status,
+        source=_EYE_MASKS_STATUS_SOURCE,
+        run_name=run_name,
+        method=method,
+        coverage_pct=coverage_pct,
+        review_status_json=review_status,
+        details_json=details,
+        console=console,
+        warning_label="eye_masks",
+        registry=registry,
+        auto_registry_from_env=False,
+        invalidate_on_ok=True,
+        trigger_run_name=run_name,
+        resolve_dataset_id_fn=resolve_dataset_id,
+        upsert_step_status_fn=upsert_recording_step_status,
+        invalidate_steps_fn=invalidate_downstream_steps,
+    )
 
 
 def _resolve_source_keypoints_run_for_unet(

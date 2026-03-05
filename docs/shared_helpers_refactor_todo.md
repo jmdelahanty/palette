@@ -1,8 +1,8 @@
 # Shared Helpers & Deduplication TODO
 
 Initial audit: 2026-02-24
-Updated: 2026-03-02 (deep agent scan across zarr I/O, registry, batch/CLI, and
-provenance/validation patterns)
+Updated: 2026-03-03 (parallel agent re-audit after inline keypoint/eye-mask
+registry sync changes)
 
 Scan covered ~150+ files across `src/fisheye/` and `src/` standalone scripts
 (vendored `decord/` excluded).
@@ -12,7 +12,116 @@ Scan covered ~150+ files across `src/fisheye/` and `src/` standalone scripts
 ## Status Key
 
 - [ ] Not started
+- [~] Partial / in progress
 - [x] Done
+
+---
+
+## 2026-03-03 Snapshot (Parallel Audit)
+
+Current state after a fresh 3-agent scan of CRITICAL/HIGH/MEDIUM/LOW sections.
+
+| Item | Status | Notes |
+|---|---|---|
+| C1. Registry step status helper | [~] Partial | Inline keypoint/eye-mask status coverage improved, but shared `emit_stage_completion()` module not created and many per-file emitters remain. |
+| C2. Dataset metadata extraction helper | [~] Partial | Resolve+attrs extraction still duplicated; no shared `extract_dataset_metadata(...)` helper yet. |
+| C3. Normalization helper consolidation | [ ] Not started | No shared `type_conversions.normalize_attr()` module; many `_normalize_attr/_status_text/_decode_attr` variants remain. |
+| C4. Batch logging/timestamp consolidation | [ ] Not started | No shared `batch_logging.py`; duplicated `JsonLogger`, `_utc_now`, `_run_id` remain widespread. |
+| 1. Zarr run resolution helper | [ ] Not started | Diagnostic/read paths still duplicate run resolution logic. |
+| 2. Promote `open_zarr_root()` | [~] Partial | Helper exists, but adoption is limited and most call sites still use raw `zarr.open(...)`. |
+| 3. Data-card aggregation dedup | [ ] Not started | Detection/keypoint aggregate scripts still largely parallel implementations. |
+| 4. Model loading/device helper | [ ] Not started | YOLO model load/device placement remains copy-pasted across many files. |
+| 5. CLI shared argument builders | [ ] Not started | Batch/inference scripts still define repeated argparse groups inline. |
+| 6. Plot save/finalize helper | [ ] Not started | `tight_layout/savefig/close` boilerplate remains duplicated. |
+| 7. Registry zarr discovery factory | [ ] Not started | Discovery logic still duplicated in detection/crop/keypoint/eye-mask batch scripts. |
+| 8. Root/log-dir resolution | [ ] Not started | `PALETTE_RECORDINGS_ROOT` + default root logic is still scattered. |
+| 9. Ensure-group pattern | [~] Partial | `require_group` usage exists, but many files still use `if not in root: create_group`. |
+| 10. Bbox/keypoint utilities | [ ] Not started | No shared `bbox_utils.py`; duplicated local implementations remain. |
+| 11. Provenance recording wrapper | [~] Partial | Base stage provenance helper exists, but many callsites still manually gather git/env/platform payloads. |
+| 12. Array validation/gap helpers | [ ] Not started | No shared `array_validation.py`; duplicated NaN/gap/monotonic checks remain. |
+| 13. Rich progress factory | [~] Partial | Repeated `_progress()` wrappers and `Progress(...)` setups remain; no shared factory. |
+| 14. Lineage tracking wrapper | [~] Partial | Keypoint lineage helper exists, but generic `build_source_attrs()` is missing and ad-hoc source attrs remain. |
+| 15. Data quality/coverage computation | [~] Partial | Some utilities exist in `refinement/utils.py`, but no shared cross-stage metrics helper yet. |
+| 16. Batch loop abstraction | [~] Partial | Plan dataclasses and loop/summarize blocks remain duplicated across 4 core batch scripts. |
+| 17. Sampled import metadata helper | [ ] Not started | Identical helper still duplicated in detect-quality and refine-detect. |
+| 18. Pydantic schema consolidation | [~] Partial | Training uses v2 config; legacy `src/config_models.py` remains and appears orphaned in-repo. |
+| 19. Data-card plot unification | [ ] Not started | Duplicate plotting logic spans detection, keypoint, and eye-mask data-card scripts. |
+| 20. Color scheme constants | [ ] Not started | No shared color constants module; repeated hardcoded palettes remain. |
+
+### Phase A Progress (2026-03-03)
+
+- Added `src/fisheye/shared/type_conversions.py` with shared normalization/numeric coercion helpers.
+- Added `src/fisheye/shared/registry_stage_complete.py` with `extract_dataset_metadata(...)` and `emit_stage_completion(...)`.
+- Canary-migrated stage emitters to shared helpers:
+  - `detection/detect_keypoints_yolo.py`
+  - `detection/detect_keypoints_traditional.py`
+  - `segmentation/eye_segmentation_yolo.py`
+  - `segmentation/infer_unet_eye_masks.py`
+  - `refinement/refine_eye_masks.py`
+
+### Audit Metrics (2026-03-03)
+
+- `zarr.open(...)`: 197 call sites across 121 files.
+- `open_zarr_root(...)` usage outside helper definition: 3 call sites.
+- `PALETTE_RECORDINGS_ROOT` references: 69 occurrences across 44 files.
+- `JsonLogger` definitions/usages in 18 files.
+- `_utc_now` helper copies in 34 files.
+- `_run_id` helper copies in 17 files.
+- `if ... not in root: root.create_group(...)`: 13 files under `src/fisheye`, 24 across `src`.
+- Local `_progress()` wrappers: 9 files.
+- `Progress(...)` constructions: 30 files.
+
+### Scope Corrections From Re-Audit
+
+- Item 19 is broader than originally written: data-card plotting duplication is across 3 scripts (detection, keypoint, eye-mask), not only 2.
+- Item 12 should explicitly include `check_smoothed_orientation_nan.py` alongside distance/speed NaN checks.
+- Item 13 duplication extends well beyond the 9 previously called out batch scripts.
+
+### Open Questions (Need Decision Before Broad Migration)
+
+1. For reporting and success metrics, should counts target `src/fisheye` only or all of `src` including standalone scripts?
+2. Should `emit_stage_completion(...)` accept a live `Registry` instance, a `registry_path`, or both (some current paths use one, some the other)?
+3. How should shared dataset metadata helpers handle hash-suffixed canonical dataset IDs vs legacy IDs to avoid step-status regressions?
+4. What is the standard error policy for registry writes in shared helpers: warn-and-continue, or hard-fail for selected stages?
+5. Should `src/config_models.py` be removed, deprecated, or retained for external compatibility?
+6. For Items 12/15, should shared metric helpers live under `fisheye/shared/*` or expand `fisheye/refinement/utils.py`?
+
+### Recommended Implementation Plan
+
+#### Phase A (Foundation, CRITICAL)
+
+1. Implement `shared/type_conversions.py` (`normalize_attr`, numeric coercions) and migrate new keypoint/eye-mask paths first.
+2. Implement `shared/registry_stage_complete.py` with:
+   - `extract_dataset_metadata(...)`
+   - `emit_stage_completion(...)`
+3. Canary migrate only recently touched files first:
+   - `detect_keypoints_yolo.py`
+   - `detect_keypoints_traditional.py`
+   - `eye_segmentation_yolo.py`
+   - `infer_unet_eye_masks.py`
+   - `refine_eye_masks.py`
+4. Expand migration to remaining emitters once canary behavior is stable.
+
+#### Phase B (Batch Script Convergence)
+
+1. Implement `shared/batch_logging.py`.
+2. Implement `shared/environment.py` and `shared/zarr_discovery.py`.
+3. Migrate 4 core batch runners (`run_detections_batch`, `crop_batch`, `run_keypoints_batch`, `run_eye_masks_batch`) to shared logging + discovery + root/log-dir resolution.
+4. Introduce shared CLI arg builders after discovery signatures stabilize.
+
+#### Phase C (Read-Path + Diagnostics Consolidation)
+
+1. Add run-resolution helpers for diagnostics/read flows.
+2. Expand `open_zarr_root()` adoption with low-risk migration sweep.
+3. Add `array_validation.py` and `console.make_progress()`; migrate repeated NaN/gap/progress patterns.
+4. Add sampled import metadata helper and migrate the two duplicate callsites.
+
+#### Phase D (Data/Card/Plot Cleanup)
+
+1. Consolidate data-card aggregation shared statistics/type conversions.
+2. Unify data-card plotting helpers (include eye-mask plotting in first pass).
+3. Add shared color constants and migrate top plotting consumers.
+4. Resolve Pydantic schema cleanup decision (`config_models.py` lifecycle).
 
 ---
 
@@ -23,7 +132,7 @@ core pipeline execution path and should be tackled before the HIGH items.
 
 ### C1. Registry Step Status Emission Helper
 
-- [ ] Create `emit_stage_completion()` in `fisheye/shared/registry_stage_complete.py`
+- [x] Create `emit_stage_completion()` in `fisheye/shared/registry_stage_complete.py`
 - [ ] Migrate 13+ `_emit_*_status()` functions across detection, tracking,
       refinement, and segmentation stages
 
@@ -94,7 +203,7 @@ recommends this same helper as the foundation for closing all inline-registry ga
 
 ### C2. Dataset Metadata Extraction Helper
 
-- [ ] Create `extract_dataset_metadata(root, zarr_path)` in
+- [x] Create `extract_dataset_metadata(root, zarr_path)` in
       `fisheye/shared/registry_stage_complete.py` (co-located with C1)
 - [ ] Migrate 14+ files that duplicate the resolve + attr extraction block
 
@@ -117,7 +226,7 @@ zarr_purpose = _normalize_attr(root.attrs.get("zarr_purpose"))
 
 ### C3. Normalization Helper Consolidation
 
-- [ ] Promote `_decode_attr()` from `registry/db.py` to
+- [x] Promote `_decode_attr()` from `registry/db.py` to
       `fisheye/shared/type_conversions.py` as `normalize_attr()`
 - [ ] Replace 33+ private copies of `_normalize_attr`, `_status_text`,
       `_as_text`, `_decode_attr` across the codebase
