@@ -19,6 +19,7 @@ from rich.console import Console
 from ..detection.detect_yolo import detect_yolo as run_detect_yolo
 from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
 from ..registry.status_ledger import upsert_recording_step_status
+from ..registry.step_cascade import invalidate_downstream_steps
 
 
 def _normalize_text(value: object) -> Optional[str]:
@@ -197,6 +198,14 @@ def _write_detect_step_status(
                 source="runtime_predict_detections",
                 zarr_mtime_ns=_safe_zarr_mtime_ns(output_zarr_path),
             )
+            if status == "ok":
+                invalidate_downstream_steps(
+                    registry,
+                    dataset_id=dataset_id,
+                    step_name="detect",
+                    source="runtime_predict_detections",
+                    trigger_run_name=resolved_run_name,
+                )
         finally:
             registry.close()
     except Exception as exc:

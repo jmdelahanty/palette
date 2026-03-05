@@ -13,6 +13,7 @@ from rich.console import Console
 
 from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
 from ..registry.status_ledger import upsert_recording_step_status
+from ..registry.step_cascade import invalidate_downstream_steps
 from ..segmentation.eye_segmentation_yolo import segment_eye_masks_yolo
 
 _STATUS_SOURCE = "runtime_predict_eye_masks"
@@ -170,6 +171,15 @@ def _write_eye_masks_status(
             source=_STATUS_SOURCE,
             zarr_mtime_ns=_zarr_mtime_ns(zarr_file),
         )
+        if status == "ok":
+            invalidate_downstream_steps(
+                registry,
+                dataset_id=dataset_id,
+                step_name="eye_masks",
+                source=_STATUS_SOURCE,
+                recording_id=recording_id,
+                trigger_run_name=run_name,
+            )
     except Exception as exc:
         if console is not None:
             console.print(f"[yellow]Status ledger write failed for eye_masks: {exc}[/yellow]")

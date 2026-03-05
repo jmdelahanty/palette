@@ -21,6 +21,7 @@ from rich.console import Console
 
 from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
 from ..registry.status_ledger import upsert_recording_step_status
+from ..registry.step_cascade import invalidate_downstream_steps
 from ..utils.metadata import get_total_frames, get_detection_method
 from ..utils.system import get_environment_info, get_git_info
 from ..shared.detect_reason_codec import write_reason_columns
@@ -81,6 +82,15 @@ def _emit_refined_detect_status(
                 source=_REFINED_DETECT_STATUS_SOURCE,
                 zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_path),
             )
+            if status == "ok":
+                invalidate_downstream_steps(
+                    registry,
+                    dataset_id=dataset_id,
+                    step_name="refined_detect",
+                    source=_REFINED_DETECT_STATUS_SOURCE,
+                    recording_id=recording_id,
+                    trigger_run_name=run_name,
+                )
         finally:
             registry.close()
     except Exception as exc:

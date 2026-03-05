@@ -15,6 +15,7 @@ from rich.console import Console
 from ..detection.detect_keypoints_yolo import detect_keypoints_yolo
 from ..registry.db import Registry, RegistryPaths
 from ..registry.status_ledger import upsert_recording_step_status
+from ..registry.step_cascade import invalidate_downstream_steps
 
 _KEYPOINT_STEP_NAME = "keypoints"
 _STATUS_SOURCE = "runtime_predict_pose"
@@ -259,6 +260,15 @@ def _emit_keypoint_status(
             source=_STATUS_SOURCE,
             zarr_mtime_ns=_zarr_mtime_ns(context.zarr_path),
         )
+        if status == "ok":
+            invalidate_downstream_steps(
+                registry,
+                dataset_id=context.dataset_id,
+                step_name=_KEYPOINT_STEP_NAME,
+                source=_STATUS_SOURCE,
+                recording_id=context.recording_id,
+                trigger_run_name=run_name,
+            )
     except Exception as exc:
         console.print(
             f"[yellow]Warning:[/yellow] failed to write step status for '{_KEYPOINT_STEP_NAME}': {exc}"

@@ -33,6 +33,7 @@ from rich.align import Align
 # Metadata helpers
 from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
 from ..registry.status_ledger import upsert_recording_step_status
+from ..registry.step_cascade import invalidate_downstream_steps
 from ..utils.metadata import has_raw_video, get_video_source_path, get_total_frames, get_detection_method
 from ..shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
@@ -236,6 +237,15 @@ def _emit_crop_step_status(
                 source=_CROP_STATUS_SOURCE,
                 zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_file),
             )
+            if status == "ok":
+                invalidate_downstream_steps(
+                    registry,
+                    dataset_id=dataset_id,
+                    step_name="crop",
+                    source=_CROP_STATUS_SOURCE,
+                    recording_id=recording_id,
+                    trigger_run_name=run_name,
+                )
         finally:
             registry.close()
     except Exception as exc:

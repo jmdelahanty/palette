@@ -14,6 +14,7 @@ import zarr
 from fisheye.detection.detect_yolo import detect_yolo
 from fisheye.registry.db import Registry, RegistryPaths, resolve_dataset_id
 from fisheye.registry.status_ledger import upsert_recording_step_status
+from fisheye.registry.step_cascade import invalidate_downstream_steps
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils.resolve_detect_model import Candidate, TargetProfile
 from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
@@ -101,6 +102,15 @@ def _emit_detect_step_status(
                 source=_DETECT_STATUS_SOURCE,
                 zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_path),
             )
+            if status == "ok":
+                invalidate_downstream_steps(
+                    registry,
+                    dataset_id=dataset_id,
+                    step_name="detect",
+                    source=_DETECT_STATUS_SOURCE,
+                    recording_id=recording_id,
+                    trigger_run_name=run_name,
+                )
         finally:
             registry.close()
     except Exception:

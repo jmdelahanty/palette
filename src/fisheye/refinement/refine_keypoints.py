@@ -38,6 +38,7 @@ except ImportError:
 from .keypoint_quality import KeypointGeometryMetrics, compute_geometry_metrics
 from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
 from ..registry.status_ledger import upsert_recording_step_status
+from ..registry.step_cascade import invalidate_downstream_steps
 from ..shared.detect_reason_codec import write_reason_columns
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..utils.system import get_environment_info, get_git_info
@@ -283,6 +284,15 @@ def _emit_refined_keypoint_status(
             source=_STATUS_SOURCE,
             zarr_mtime_ns=_zarr_mtime_ns(context.zarr_path),
         )
+        if status == "ok":
+            invalidate_downstream_steps(
+                registry,
+                dataset_id=context.dataset_id,
+                step_name=_STEP_NAME_REFINED_KEYPOINTS,
+                source=_STATUS_SOURCE,
+                recording_id=context.recording_id,
+                trigger_run_name=run_name,
+            )
         return True
     except Exception as exc:
         if console is not None:
