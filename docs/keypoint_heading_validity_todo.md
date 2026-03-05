@@ -5,15 +5,15 @@ explicit heading quality fields.
 
 Date anchored: 2026-02-11.
 
-## Status (2026-02-11)
+## Status (2026-02-25)
 
-- Completed in code:
-  - Phase 1 runtime cutover (`heading_finite` + `heading_usable` writes).
-  - Phase 2 reader cutover (review/provenance checks read new fields).
-  - `src/fisheye/docs/zarr_structure.md` updated.
-- Remaining:
-  - Phase 3 one-time archive backfill utility (`backfill_keypoint_heading_fields`).
-  - Phase 4 doc/contract updates outside `zarr_structure.md` (including Crimson docs).
+- [x] Phase 1 complete: runtime cutover (`heading_finite` + `heading_usable` writes in all detection/refinement/manual/patch paths; `heading_valid` writes removed from all files).
+- [x] Phase 2 complete: reader cutover (review/provenance checks read new fields only; `heading_valid` no longer read by any runtime module). `src/fisheye/docs/zarr_structure.md` updated.
+- [x] Backfill utility implemented: `fisheye.utils.backfill_keypoint_heading_fields` exists with dry-run/apply, covered by `test_backfill_keypoint_heading_fields.py`.
+- [x] Crimson contracts updated: `crimson_keypoint_read_contract.md` references `heading_finite`/`heading_usable`.
+- [ ] Phase 3 remaining: run one-time backfill on production archives (utility exists but has not been executed against live data).
+- [ ] Phase 4 remaining: verify `docs/keypoint_review_policy.md` and `src/fisheye/docs/provenance_workflow.md` no longer reference `heading_valid`.
+  - Note: `heading_valid` still appears as local Python variable names in `eye_angle_analysis.py` and `movement_analysis.py` (not Zarr array writes — non-blocking).
 
 ## Decision
 

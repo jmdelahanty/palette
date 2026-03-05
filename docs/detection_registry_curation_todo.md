@@ -116,7 +116,8 @@ Purpose: track the concrete follow-up work from the detection dataset and SQLite
 
 ## Validation Checklist (after implementation)
 
-- [ ] `prepare_detect_training` + `train_detection` produce deterministic, source-faithful dataset composition.
+- [x] `prepare_detect_training` + `train_detection` produce deterministic, source-faithful dataset composition.
+  - Status: implemented via `GlobalIndexManager._build_global_index` with `balanced`/`proportional`/`weighted` strategies and source-type mismatch enforcement.
 - [ ] Registry tables in active DB have non-zero rows for:
   - `datasets`
   - `provenance`
@@ -124,5 +125,7 @@ Purpose: track the concrete follow-up work from the detection dataset and SQLite
   - `training_sets`
   - `training_runs`
   - `model_exports`
-- [ ] Query CLI can return filtered outputs for curation without ad-hoc SQL.
-- [ ] Status report accurately reflects missing provenance and missing datasets.
+- [x] Query CLI can return filtered outputs for curation without ad-hoc SQL.
+  - Status: `registry_query` supports genotype, DPF, cross-id, detect-coverage, provenance, and table/json/csv output formats.
+- [x] Status report accurately reflects missing provenance and missing datasets.
+  - Status: `check_training_registry` shows status with missing-provenance indicators and `--missing-provenance` filter in `registry_query`.

@@ -49,7 +49,8 @@ Purpose: track the implementation steps to split analysis archive creation/prove
   - skip/always/overwrite controls
 - [x] Implement optional registry registration.
   - rescan created/updated archive
-- [ ] Minor cleanup: use one shared `run_id` value for JSONL filename and JSON payload run metadata.
+- [x] Minor cleanup: use one shared `run_id` value for JSONL filename and JSON payload run metadata.
+  - Status: implemented — `create_analysis_zarr.py` uses `run_id = _run_id()` for both log filename and `JsonLogger` payload.
 
 ## Phase C: Integrate orchestrator
 

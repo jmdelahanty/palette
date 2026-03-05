@@ -576,13 +576,15 @@ for read-only access:
   - Read-only: palette never writes to zebrobot.db.
   - Example: enrich palette cross data with screening outcomes from zebrobot.
 
-- [ ] Model `dishes` as children of `crosses` (defined in Phase 2).
+- [x] Model `dishes` as children of `crosses` (defined in Phase 2).
   - `dishes.cross_id -> crosses.cross_id`
   - preserve dish metadata used during acquisition.
+  - Status: implemented in schema migration v6 (`dishes.cross_id` FK to `crosses.cross_id`).
 
-- [ ] Link `subjects` to dish/cross lineage (defined in Phase 6).
+- [x] Link `subjects` to dish/cross lineage (defined in Phase 6).
   - `subjects.dish_id` (implies cross through dish)
   - optional denormalized `subjects.cross_id` remains deferred; base model is normalized.
+  - Status: implemented in schema migration v7 (`subjects.dish_id` FK).
 
 - [x] Add Phase 6 query/performance indexes for cross/genotype workflows.
   - `CREATE INDEX ... ON crosses(genotype)`
@@ -598,7 +600,8 @@ for read-only access:
 
 ## Compatibility + Write Path
 
-- [ ] Keep current `provenance` table during migration as denormalized cache.
+- [x] Keep current `provenance` table during migration as denormalized cache.
+  - Status: provenance table is actively maintained and dual-written during entity normalization phases.
 - [ ] Update `Registry.register_from_root(...)` to:
   - resolve/create recording
   - link dataset->recording
@@ -654,11 +657,12 @@ Consumer code paths requiring migration:
 
 Use a layered model so new recording variants do not force frequent core-schema churn.
 
-- [ ] Separate workflow intent from modality classification.
+- [x] Separate workflow intent from modality classification.
   - `zarr_use` should answer "why this artifact exists now" (e.g. `training`, `analysis`, `export`, `archive`).
     (Legacy `zarr_purpose` has been split into `zarr_origin` + `zarr_use` — see Phase 1A above.)
   - `recording_type` / `recording_subtype` should answer "what kind of recording this is."
   - Do not use `zarr_use` to encode modality.
+  - Status: implemented — `zarr_origin`/`zarr_use` split is live; `recording_type`/`recording_subtype` are separate dimensions.
 
 - [ ] Keep top-level `recording_type` small and stable.
   - Example: `behavior`, `microscopy`, `histology`.
@@ -686,9 +690,10 @@ Use a layered model so new recording variants do not force frequent core-schema 
   - Add version/validity windows for evolving vocabularies if needed.
   - Initial implementation: recording type/subtype vocab tables + active flags.
 
-- [ ] Keep rare/unstable fields in `metadata_json`, then promote by usage.
+- [x] Keep rare/unstable fields in `metadata_json`, then promote by usage.
   - Promotion rule: if used repeatedly in WHERE/GROUP BY, add a typed column.
   - Keep `metadata_json` for ad-hoc, low-frequency, or evolving attributes.
+  - Status: policy is active — `metadata_json` columns exist on entity tables; promotion rule documented in Phase 1 guardrails.
 
 - [ ] Include explicit schema versions for modality payloads.
   - Each modality extension table should carry a version field where structure may evolve.
@@ -727,9 +732,10 @@ artifact schema, not from directory naming conventions.
     maintenance integrity checks and surfaced in registry viewer recordings panel.
   - [ ] Generalize to schema-driven validation for arbitrary `artifact_schema_id` values.
 
-- [ ] Keep this contract path-independent.
+- [x] Keep this contract path-independent.
   - If storage layout changes later (tier moves, reorg, migration), recording
     classification and query behavior remain unchanged.
+  - Status: classification uses declared metadata (`recording_type`, `artifact_schema_id`) not filesystem paths.
 
 ### Quick audit query (type/subtype distribution)
 

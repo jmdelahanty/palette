@@ -248,12 +248,14 @@ Execution snapshot (2026-02-09, target DB `/nvme1/palette_registry.sqlite`):
 
 ## Open Decisions
 
-- [ ] Should we store all detect runs or only the latest per dataset on first pass?
+- [x] Should we store all detect runs or only the latest per dataset on first pass?
   - Recommendation: store all runs in table, expose latest via view.
+  - Status: implemented — `_extract_detect_performance_rows()` stores all runs; latest exposed via `detect_performance_latest` view.
 - [ ] Should thresholds be policy-enforced now (alerts/gates) or observability-only?
   - Recommendation: observability-only first.
-- [ ] Do we include non-source datasets (`derived_training_merge`) in this table?
+- [x] Do we include non-source datasets (`derived_training_merge`) in this table?
   - Recommendation: source-recording datasets first; extend later if needed.
+  - Status: implemented — default scope is source-analysis only; `--detect-performance-all-datasets` opt-in for broader scope.
 - [x] Should backfill default scope be narrowed to source-recording analysis datasets only?
   - Recommendation: yes (`artifact_kind='source_recording'` and `zarr_use='analysis'`) for operator-facing defaults.
   - Status: implemented (`source-analysis-only` default; `--detect-performance-all-datasets` opt-in).

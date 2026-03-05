@@ -32,10 +32,10 @@ Purpose: track the work needed to make training dataset versioning strict, audit
   - Goal: write stable `total_rois`/frame counts where downstream tools already look for them.
   - Acceptance: training metadata table shows non-zero counts without requiring fallback logic.
 
-- [ ] Add robust fallback metadata reads in trainer display path.
+- [x] Add robust fallback metadata reads in trainer display path.
   - Files: `src/fisheye/training/train_detection.py`
   - Goal: if summary attrs are absent, derive counts from arrays (`bbox_norm_coords.shape[0]`, `images_ds.shape[0]`).
-  - Acceptance: merged and legacy datasets both display correct counts.
+  - Status: implemented — `train_detection.py` falls back to `bbox_norm_coords.shape[0]` when summary attrs are absent.
 
 - [ ] Add drift warning between persisted metadata and derived values.
   - Files: `src/fisheye/training/train_detection.py` (read path), `src/fisheye/utils/validate_detect_training_zarr.py` (validator)
@@ -62,7 +62,8 @@ Purpose: track the work needed to make training dataset versioning strict, audit
 ## Validation Checklist
 
 - [ ] Creating a new version never mutates prior version artifacts in place.
-- [ ] Registry can show current run state (`in_progress`/`success`/`failed`) for active training.
+- [x] Registry can show current run state (`in_progress`/`success`/`failed`) for active training.
+  - Status: implemented in `check_training_registry` with run lifecycle state display.
 - [ ] Trainer metadata display is correct for merged datasets (non-zero frame/ROI counts).
 - [ ] Lineage query can explain how a version was derived from previous versions.
 - [ ] Fingerprint and manifest hashes are present for each registered training set/run.

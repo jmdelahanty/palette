@@ -38,18 +38,22 @@
 
 ## Implementation Phases
 
-### Phase 1: Read-Only Browser (v1 milestone)
-- Build app shell and keyboard navigation.
-- Implement core views and column sorting.
-- Add filter model:
-  - status, date range, dish/canvas/rig, review/use, quality thresholds.
-- Add relationship panel for highlighted rows.
-- Add copyable “equivalent CLI/SQL” preview for current query.
+### Phase 1: Read-Only Browser (v1 milestone) — COMPLETE (2026-02-25)
+
+Implemented in `src/fisheye/utils/registry_tui.py` (single-file, 413 lines) using Textual:
+- [x] Build app shell and keyboard navigation.
+- [x] Implement core views and column sorting.
+  - All curated views: `datasets`, `training_sets`, `training_runs`, `onnx_models`, `tensorrt_models`, `keypoint_quality_current`, `detect_quality_current`, `pose_skeleton_specs`.
+- [x] Add filter model (filter bar with text input).
+- [x] Add relationship/details panel for highlighted rows.
+- [ ] Add copyable “equivalent CLI/SQL” preview for current query.
+
+Note: implemented as a single file rather than the suggested `src/fisheye/registry/tui/` package structure. No TUI-specific unit tests yet.
 
 Acceptance criteria:
-- Can browse all target views without leaving TUI.
-- Can apply/clear filters and see row counts update.
-- Highlighting any row updates lineage panel correctly.
+- [x] Can browse all target views without leaving TUI.
+- [x] Can apply/clear filters and see row counts update.
+- [x] Highlighting any row updates lineage panel correctly.
 
 ### Phase 2: Maintenance Actions
 - Add actions:
