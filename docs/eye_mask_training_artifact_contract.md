@@ -1,4 +1,9 @@
 # Eye Mask Training Artifact Contract (v1)
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+-->
 
 This document defines the merged eye-mask training artifact expected by:
 

@@ -1,4 +1,10 @@
 # Detect Batch Analysis-Zarr Parallel Agent Contract
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+stage_arrays_spec: DETECT_SPEC
+-->
 
 Purpose: define a conflict-safe parallel execution contract for shipping
 registry-model-backed batch detection inference across analysis zarr archives.

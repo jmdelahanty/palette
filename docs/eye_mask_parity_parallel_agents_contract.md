@@ -1,4 +1,10 @@
 # Eye-Mask Parity Parallel Agent Contract
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+stage_arrays_spec: EYE_MASKS_SPEC
+-->
 
 Purpose: define a conflict-safe parallel execution contract for implementing
 `docs/eye_mask_parity_todo.md` with deterministic delivery gates.

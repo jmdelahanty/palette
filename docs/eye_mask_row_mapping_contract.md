@@ -1,4 +1,10 @@
 # Eye Mask Row-Mapping Contract
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+stage_arrays_spec: EYE_MASKS_SPEC
+-->
 
 Purpose: define the canonical contract for ROI lineage arrays on eye-mask runs so
 Palette and Crimson consumers can align rows safely.

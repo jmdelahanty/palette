@@ -375,14 +375,22 @@ Source: the array inventories in Section 2 above, cross-checked against
 ### Lower priority (not blocked on stage_arrays.py)
 
 #### Registry data dictionary
-- [ ] Script to auto-generate `docs/registry_schema_reference.md` from live DB
+- [x] Script to auto-generate `docs/registry_schema_reference.md` from live DB
       via `PRAGMA table_info()`, `PRAGMA foreign_key_list()`,
-      `PRAGMA index_list()`.
-- [ ] Include column types, constraints, FK relationships, and index coverage.
+      `PRAGMA index_list()`. Completed 2026-02-27: added
+      `scripts/generate_registry_schema_reference.py`.
+- [x] Include column types, constraints, FK relationships, and index coverage.
+      Completed 2026-02-27: generated `docs/registry_schema_reference.md` with
+      table/view column dictionaries, foreign keys, and index coverage.
 
 #### Contract versioning
-- [ ] Add version/status/last-verified header block to each `*_contract.md`.
-- [ ] Scan script to report stale contracts.
+- [x] Add version/status/last-verified header block to each `*_contract.md`.
+      Completed 2026-02-27: added `<!-- contract-meta -->` headers to all
+      `docs/*contract*.md` files, including conservative
+      `stage_arrays_spec` linkage where unambiguous.
+- [x] Scan script to report stale contracts.
+      Completed 2026-02-27: added `scripts/check_contract_freshness.py` with
+      staleness checks (`--max-age-days`) and machine-readable output (`--json`).
 
 ---
 

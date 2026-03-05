@@ -1,4 +1,9 @@
 # Crimson Detect Review Acceptance Contract
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+-->
 
 Purpose: define a migration-safe, operator-first contract for approving detect
 review status from Crimson after inspection/manual edits.

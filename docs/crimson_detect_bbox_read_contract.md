@@ -1,4 +1,9 @@
 # Crimson Detect BBox Read Contract
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+-->
 
 Purpose: define the read-only contract Crimson should use to load detection
 bounding boxes from Palette Zarr archives.

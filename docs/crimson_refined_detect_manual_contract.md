@@ -1,4 +1,10 @@
 # Crimson Refined-Detect Manual Write Contract
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+stage_arrays_spec: REFINED_DETECT_SPEC
+-->
 
 Purpose: define exactly what Crimson must write so Palette recognizes manual refined detections as the active source.
 

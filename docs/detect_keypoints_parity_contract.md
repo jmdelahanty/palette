@@ -1,4 +1,9 @@
 # Detect-Keypoints Training Parity Contract
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+-->
 
 Purpose: define the minimum and target parity between detection and keypoints (pose) training workflows so curation, export, training, and auditability behave consistently.
 

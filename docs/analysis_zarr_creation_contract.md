@@ -1,4 +1,9 @@
 # Analysis Zarr Creation Contract (Proposed)
+<!-- contract-meta
+version: 1
+status: draft
+last_verified: 2026-02-27
+-->
 
 Purpose: define a migration-safe, operator-first contract for creating analysis archives independently from `detect_yolo` inference.
 

@@ -1,4 +1,9 @@
 # Pose/Detect Parity Parallel Agent Contract
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+-->
 
 Purpose: define a conflict-free parallel execution plan for the current
 Pose/Detect parity P2 tasks so multiple agents can work simultaneously and

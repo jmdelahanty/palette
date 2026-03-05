@@ -1,4 +1,9 @@
 # Eye-Mask Training Data Card Contract
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+-->
 
 Purpose: define a canonical, reproducible summary payload for eye-mask training
 sets with parity to detect/keypoint data-card workflows.

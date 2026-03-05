@@ -1,4 +1,9 @@
 # Keypoint Merged Row-Gate Contract
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+-->
 
 Purpose: define row-level inclusion semantics for merged pose training exports.
 

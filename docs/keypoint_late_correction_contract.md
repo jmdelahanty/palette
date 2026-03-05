@@ -1,4 +1,10 @@
 # Keypoint Late-Correction Contract
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+stage_arrays_spec: REFINED_KEYPOINTS_SPEC
+-->
 
 Purpose: define how to flag missed keypoint ROIs late in the workflow, apply
 targeted corrections, and mark downstream eye-mask runs stale without rerunning

@@ -1,4 +1,10 @@
 # Detect Quality Parallel Agent Contract
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+stage_arrays_spec: DETECT_QUALITY_SPEC
+-->
 
 Purpose: define a conflict-safe parallel execution plan for the remaining
 detect-quality registry TODO work after schema + write-path implementation.
@@ -127,4 +133,3 @@ scripts/py -m pytest tests/unit/fisheye/test_registry_maintenance.py -k detect_q
 scripts/py -m pytest tests/unit/fisheye/test_prepare_detect_training_from_registry.py
 scripts/py -m pytest tests/unit/fisheye/test_run_detect_training_pipeline.py
 ```
-

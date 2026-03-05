@@ -1,4 +1,9 @@
 # Recording Analysis Pipeline Contract
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+-->
 
 Purpose: define the canonical, operator-first contract for analysis processing per recording.
 

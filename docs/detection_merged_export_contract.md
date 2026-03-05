@@ -1,4 +1,9 @@
 # Detection Merged Export Contract (Proposed)
+<!-- contract-meta
+version: 1
+status: draft
+last_verified: 2026-02-27
+-->
 
 Purpose: define an implementation-ready contract for exporting a single merged detection-training Zarr per training set, while preserving provenance and compatibility with current training loaders.
 

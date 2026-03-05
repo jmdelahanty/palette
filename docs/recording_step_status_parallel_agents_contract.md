@@ -1,4 +1,9 @@
 # Recording Step Status Parallel Agent Contract
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+-->
 
 Purpose: define a conflict-free parallel execution plan for RS3/RS4 hook-write
 work so multiple agents can implement status writes simultaneously and produce
@@ -187,4 +192,3 @@ scripts/py -m fisheye.utils.check_recording_steps \
   --registry /nvme1/palette_registry.sqlite \
   --status-source compare
 ```
-

@@ -1,4 +1,9 @@
 # Recording Manifest Contract
+<!-- contract-meta
+version: 1
+status: active
+last_verified: 2026-02-27
+-->
 
 This document defines the minimum metadata contract for `recording_manifest.json`
 files that are later ingested into the palette registry.

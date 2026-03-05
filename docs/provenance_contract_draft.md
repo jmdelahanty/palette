@@ -1,4 +1,9 @@
 # Provenance Contract Draft (v0)
+<!-- contract-meta
+version: 0
+status: draft
+last_verified: 2026-02-27
+-->
 
 Purpose: define a single, queryable stage-wide provenance contract for
 refinement stages so detect/keypoints/eye-masks expose consistent metadata,
