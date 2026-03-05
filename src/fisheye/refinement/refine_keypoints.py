@@ -11,11 +11,12 @@ from __future__ import annotations
 import time
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, MutableMapping, Optional, Tuple
 
 import numpy as np
 import zarr
@@ -393,6 +394,143 @@ def _build_keypoint_signature(
         "parameter_source": parameters.get("parameter_source") if parameters else None,
         "parameters_hash": _hash_parameters(parameters),
     }
+
+
+def _analyze_coordinate_space(
+    *,
+    zarr_path: str,
+    run_name: str,
+    crop_run: Optional[str],
+    tol_px: float,
+    pad_px: float,
+) -> Dict[str, Any]:
+    from ..utils.audit_keypoint_coordinate_spaces import analyze as _analyze
+
+    return _analyze(
+        zarr_path=zarr_path,
+        run_name=run_name,
+        crop_run=crop_run,
+        tol_px=tol_px,
+        pad_px=pad_px,
+    )
+
+
+def _analyze_bad_row_overlap(
+    *,
+    zarr_path: str,
+    run_name: str,
+    crop_run: Optional[str],
+    tol_px: float,
+    bad_ratio_threshold: float,
+    pad_px: float,
+) -> Dict[str, Any]:
+    from ..utils.analyze_bad_keypoint_row_overlap import analyze as _analyze
+
+    return _analyze(
+        zarr_path=zarr_path,
+        run_name=run_name,
+        crop_run=crop_run,
+        tol_px=tol_px,
+        bad_ratio_threshold=bad_ratio_threshold,
+        pad_px=pad_px,
+    )
+
+
+def _dataset_report_stem(zarr_path: str) -> str:
+    name = Path(zarr_path).name
+    if name.endswith(".zarr"):
+        name = name[:-5]
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    return stem or "dataset"
+
+
+def _run_post_refinement_diagnostics(
+    *,
+    zarr_path: str,
+    run_name: str,
+    source_crop_run: Optional[str],
+    config: Optional[Dict[str, Any]],
+    run_attrs: MutableMapping[str, Any],
+    console: Optional[Console],
+) -> Dict[str, Any]:
+    refine_cfg: Dict[str, Any] = {}
+    if config:
+        cfg = config.get("refine_keypoints")
+        if isinstance(cfg, Mapping):
+            refine_cfg = dict(cfg)
+
+    enabled = bool(refine_cfg.get("post_refinement_audit", True))
+    overlap_enabled = bool(refine_cfg.get("post_refinement_overlap", False))
+    tol_px = float(refine_cfg.get("post_refinement_tol_px", 2.0))
+    pad_px = float(refine_cfg.get("post_refinement_pad_px", 5.0))
+    bad_ratio_threshold = float(refine_cfg.get("post_refinement_bad_ratio_threshold", 0.5))
+    output_dir = Path(str(refine_cfg.get("post_refinement_output_dir", "/tmp"))).expanduser()
+    dataset_stem = _dataset_report_stem(zarr_path)
+
+    result: Dict[str, Any] = {
+        "enabled": enabled,
+        "overlap_enabled": overlap_enabled,
+        "output_dir": str(output_dir),
+        "audit_json": None,
+        "overlap_json": None,
+        "audit_error": None,
+        "overlap_error": None,
+    }
+    if not enabled:
+        return result
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    audit_json_path = output_dir / f"{dataset_stem}_audit.json"
+
+    try:
+        audit_report = _analyze_coordinate_space(
+            zarr_path=zarr_path,
+            run_name=run_name,
+            crop_run=source_crop_run,
+            tol_px=tol_px,
+            pad_px=pad_px,
+        )
+        audit_json_path.write_text(json.dumps(audit_report, indent=2), encoding="utf-8")
+        result["audit_json"] = str(audit_json_path)
+        run_attrs["post_refinement_audit_json"] = str(audit_json_path)
+        run_attrs["post_refinement_audit_generated_utc"] = datetime.now(timezone.utc).isoformat()
+        if isinstance(audit_report.get("status_counts"), Mapping):
+            run_attrs["post_refinement_audit_status_counts"] = dict(audit_report["status_counts"])
+        if console is not None:
+            console.print(f"[green]✓[/green] Coordinate-space audit JSON: [cyan]{audit_json_path}[/cyan]")
+    except Exception as exc:
+        result["audit_error"] = str(exc)
+        if console is not None:
+            console.print(f"[yellow]Warning:[/yellow] coordinate-space audit failed: {exc}")
+        return result
+
+    if not overlap_enabled:
+        return result
+
+    overlap_json_path = output_dir / f"{dataset_stem}_overlap.json"
+    try:
+        overlap_report = _analyze_bad_row_overlap(
+            zarr_path=zarr_path,
+            run_name=run_name,
+            crop_run=source_crop_run,
+            tol_px=tol_px,
+            bad_ratio_threshold=bad_ratio_threshold,
+            pad_px=pad_px,
+        )
+        overlap_json_path.write_text(json.dumps(overlap_report, indent=2), encoding="utf-8")
+        result["overlap_json"] = str(overlap_json_path)
+        run_attrs["post_refinement_overlap_json"] = str(overlap_json_path)
+        run_attrs["post_refinement_overlap_generated_utc"] = datetime.now(timezone.utc).isoformat()
+        if "bad_row_count" in overlap_report:
+            run_attrs["post_refinement_overlap_bad_row_count"] = int(overlap_report["bad_row_count"])
+        if console is not None:
+            console.print(f"[green]✓[/green] Bad-row overlap JSON: [cyan]{overlap_json_path}[/cyan]")
+    except Exception as exc:
+        result["overlap_error"] = str(exc)
+        if console is not None:
+            console.print(f"[yellow]Warning:[/yellow] bad-row overlap analysis failed: {exc}")
+
+    return result
 
 
 def _normalize_keypoint_labels(
@@ -1426,6 +1564,15 @@ def create_refined_keypoint_run(
         console=console,
     )
 
+    _run_post_refinement_diagnostics(
+        zarr_path=zarr_path,
+        run_name=run_name,
+        source_crop_run=_as_text(source_crop_run),
+        config=config,
+        run_attrs=kp_refined.attrs,
+        console=console,
+    )
+
     return run_name
 
 
@@ -1467,6 +1614,21 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         action="store_true",
         help="Launch the manual keypoint failure review tool after refinement.",
     )
+    parser.add_argument(
+        "--no-post-audit",
+        action="store_true",
+        help="Disable post-refinement coordinate-space audit JSON export.",
+    )
+    parser.add_argument(
+        "--post-overlap",
+        action="store_true",
+        help="Enable post-refinement bad-row overlap analysis JSON export.",
+    )
+    parser.add_argument(
+        "--post-audit-output-dir",
+        type=str,
+        help="Directory for post-refinement audit/overlap JSON files (default: /tmp).",
+    )
 
     args = parser.parse_args(argv)
     console = Console()
@@ -1502,6 +1664,15 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         overrides_applied = True
     if args.memory_limit is not None:
         refine_cfg["memory_limit"] = args.memory_limit
+        overrides_applied = True
+    if args.no_post_audit:
+        refine_cfg["post_refinement_audit"] = False
+        overrides_applied = True
+    if args.post_overlap:
+        refine_cfg["post_refinement_overlap"] = True
+        overrides_applied = True
+    if args.post_audit_output_dir is not None:
+        refine_cfg["post_refinement_output_dir"] = args.post_audit_output_dir
         overrides_applied = True
 
     config_to_use = config if (config or overrides_applied) else None

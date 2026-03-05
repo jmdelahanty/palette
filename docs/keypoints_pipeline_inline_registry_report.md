@@ -10,6 +10,9 @@ their completion. This report identifies the gaps across both the keypoints and
 eye masks pipelines, documents the existing infrastructure, and recommends
 specific changes.
 
+Related incident note for refined-keypoint coordinate-space mismatch:
+- `docs/keypoint_refined_coordinate_space_incident_2026-03-04.md`
+
 ---
 
 ## Current state: who talks to the registry?

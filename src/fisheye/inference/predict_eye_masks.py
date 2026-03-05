@@ -11,10 +11,8 @@ import zarr
 
 from rich.console import Console
 
-from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
-from ..registry.status_ledger import upsert_recording_step_status
-from ..registry.step_cascade import invalidate_downstream_steps
 from ..segmentation.eye_segmentation_yolo import segment_eye_masks_yolo
+from ..shared.registry_stage_complete import emit_stage_completion
 
 _STATUS_SOURCE = "runtime_predict_eye_masks"
 
@@ -67,13 +65,6 @@ def _open_root(zarr_path: Path) -> zarr.Group:
             return zarr.open(str(zarr_path), mode="r")
 
 
-def _zarr_mtime_ns(zarr_path: Path) -> Optional[int]:
-    try:
-        return int(zarr_path.stat().st_mtime_ns)
-    except OSError:
-        return None
-
-
 def _classify_failure(exc: Exception) -> Tuple[str, str]:
     message = str(exc).lower()
     if "missing crop_runs" in message or "no crop run available" in message:
@@ -111,9 +102,7 @@ def _write_eye_masks_status(
             console.print(f"[yellow]Status ledger write skipped: unable to open Zarr ({exc}).[/yellow]")
         return
 
-    dataset_id, session_uuid = resolve_dataset_id(root, zarr_file)
     root_attrs = getattr(root, "attrs", {})
-    recording_id = _as_optional_text(session_uuid) or _as_optional_text(root_attrs.get("recording_id"))
 
     run_attrs: Dict[str, object] = {}
     eye_parent = root.get("eye_masks_runs") if hasattr(root, "get") else None
@@ -146,43 +135,24 @@ def _write_eye_masks_status(
     )
     review_status = _coerce_mapping(run_attrs.get("eye_mask_review_status"))
 
-    try:
-        registry_path = RegistryPaths.from_env(Path.cwd()).path
-        registry = Registry(registry_path)
-        registry.upsert_dataset(
-            dataset_id,
-            session_uuid=session_uuid,
-            zarr_path=zarr_file,
-            recording_id=recording_id,
-            zarr_purpose=_as_optional_text(root_attrs.get("zarr_purpose")),
-            zarr_use=_as_optional_text(root_attrs.get("zarr_use")),
-        )
-        upsert_recording_step_status(
-            registry,
-            dataset_id=dataset_id,
-            recording_id=recording_id,
-            step_name="eye_masks",
-            status=status,
-            run_name=run_name,
-            method=method,
-            coverage_pct=coverage_pct,
-            review_status_json=review_status,
-            details_json=details,
-            source=_STATUS_SOURCE,
-            zarr_mtime_ns=_zarr_mtime_ns(zarr_file),
-        )
-        if status == "ok":
-            invalidate_downstream_steps(
-                registry,
-                dataset_id=dataset_id,
-                step_name="eye_masks",
-                source=_STATUS_SOURCE,
-                recording_id=recording_id,
-                trigger_run_name=run_name,
-            )
-    except Exception as exc:
-        if console is not None:
-            console.print(f"[yellow]Status ledger write failed for eye_masks: {exc}[/yellow]")
+    emit_stage_completion(
+        root,
+        zarr_file,
+        step_name="eye_masks",
+        status=status,
+        source=_STATUS_SOURCE,
+        run_name=run_name,
+        method=method,
+        coverage_pct=coverage_pct,
+        review_status_json=review_status,
+        details_json=details,
+        console=console,
+        warning_label="eye_masks",
+        auto_registry_from_env=True,
+        require_env_registry_exists=False,
+        invalidate_on_ok=True,
+        trigger_run_name=run_name,
+    )
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:

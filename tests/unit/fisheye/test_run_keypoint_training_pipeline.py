@@ -221,6 +221,7 @@ def test_export_merged_invokes_exporter(tmp_path: Path, monkeypatch) -> None:
     assert "--seed" in export_cli
     assert "123" in export_cli
     assert "--overwrite" in export_cli
+    assert "--no-aggregate-training-data-card" in export_cli
 
 
 def test_passes_cross_method_review_fallback_flag_to_preflight(tmp_path: Path, monkeypatch) -> None:

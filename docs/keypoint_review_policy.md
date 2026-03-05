@@ -61,3 +61,7 @@ default behavior (exclude `fish_present_no_keypoints`).
 ## Related Contract
 - Late correction + ROI flagging + downstream stale marking:
   `docs/keypoint_late_correction_contract.md`
+
+## Related Incident
+- Refined-keypoint coordinate-space mismatch investigation and recovery:
+  `docs/keypoint_refined_coordinate_space_incident_2026-03-04.md`

@@ -62,6 +62,10 @@ from .training_console import (
     print_training_start,
 )
 from .zarr_yolo_dataset_loader import create_zarr_dataset, ZarrDatasetConfig
+from ..shared.refined_detect_review import (
+    DEFAULT_DETECT_GROUP_PREFERENCE,
+    resolve_refined_detect_group,
+)
 from ..utils.system import get_git_info, build_invocation_record
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
@@ -425,7 +429,9 @@ def get_zarr_metadata(zarr_paths, console=None):
                 'video_frames': 0,
                 'crop_info': {},
                 'detection_info': {},
-                'data_quality': {}
+                'data_quality': {},
+                'detect_source_options': {},
+                'detect_source_default': {},
             }
 
             # Get video info
@@ -456,6 +462,7 @@ def get_zarr_metadata(zarr_paths, console=None):
                 latest_detect = root['detect_runs'].attrs.get('latest')
                 if latest_detect:
                     detect_group = root[f'detect_runs/{latest_detect}']
+                    zarr_meta['detect_source_options']['detect'] = f"detect_runs/{latest_detect}"
                     if 'summary_statistics' in detect_group.attrs:
                         stats = detect_group.attrs['summary_statistics']
                         zarr_meta['detection_info'] = {
@@ -519,6 +526,7 @@ def get_zarr_metadata(zarr_paths, console=None):
                 latest_refined = refined_root.attrs.get('latest')
                 if latest_refined and latest_refined in refined_root:
                     refined_group = refined_root[latest_refined]
+                    parent_name = REFINED_DETECT_GROUP if REFINED_DETECT_GROUP in root else LEGACY_REFINED_DETECT_GROUP
                     
                     zarr_meta['data_quality']['has_refinement'] = True
                     zarr_meta['data_quality']['refined_run'] = latest_refined
@@ -528,11 +536,35 @@ def get_zarr_metadata(zarr_paths, console=None):
                         filtered_grp = refined_group['filtered']
                         zarr_meta['data_quality']['filtered_detections'] = filtered_grp.attrs.get('total_detections', 0)
                         zarr_meta['data_quality']['jumps_removed'] = filtered_grp.attrs.get('dropped_detections', 0)
+                        zarr_meta['detect_source_options']['filtered'] = f"{parent_name}/{latest_refined}/filtered"
                     
                     if 'interpolated' in refined_group:
                         interp_grp = refined_group['interpolated']
                         zarr_meta['data_quality']['interpolated_detections'] = interp_grp.attrs.get('total_detections', 0)
                         zarr_meta['data_quality']['gaps_filled'] = interp_grp.attrs.get('gaps_filled', 0)
+                        zarr_meta['detect_source_options']['interpolated'] = f"{parent_name}/{latest_refined}/interpolated"
+                    manual_latest = refined_group.attrs.get("manual_review_latest")
+                    if manual_latest and manual_latest in refined_group:
+                        zarr_meta['detect_source_options']['manual'] = f"{parent_name}/{latest_refined}/{manual_latest}"
+                    elif "manual" in refined_group:
+                        zarr_meta['detect_source_options']['manual'] = f"{parent_name}/{latest_refined}/manual"
+
+                    resolution = resolve_refined_detect_group(
+                        refined_group,
+                        preference=DEFAULT_DETECT_GROUP_PREFERENCE,
+                    )
+                    if resolution.group:
+                        label = str(resolution.label or resolution.group).lower()
+                        zarr_meta['detect_source_default'] = {
+                            "source_type": label,
+                            "source_path": f"{parent_name}/{latest_refined}/{resolution.group}",
+                        }
+
+            if not zarr_meta['detect_source_default'] and 'detect' in zarr_meta['detect_source_options']:
+                zarr_meta['detect_source_default'] = {
+                    "source_type": "detect",
+                    "source_path": zarr_meta['detect_source_options']['detect'],
+                }
             
             metadata[path_name] = zarr_meta
             
@@ -683,21 +715,20 @@ def _collect_source_mismatches(full_config: DetectConfig, zarr_metadata: dict) -
             continue
 
         requested_source = _normalize_source_type(getattr(dataset_cfg, "source_type", None))
-        crop_info = dataset_meta.get("crop_info") if isinstance(dataset_meta.get("crop_info"), dict) else {}
-        detection_info = (
-            dataset_meta.get("detection_info") if isinstance(dataset_meta.get("detection_info"), dict) else {}
-        )
+        options = dataset_meta.get("detect_source_options")
+        options = options if isinstance(options, dict) else {}
+        if requested_source in options:
+            continue
 
-        available_source = None
-        available_source_path = None
-        if crop_info:
-            available_source = _normalize_source_type(crop_info.get("source_type"))
-            available_source_path = crop_info.get("source_path")
-        elif detection_info:
-            available_source = "detect"
-            run_name = detection_info.get("run_name")
-            if run_name:
-                available_source_path = f"detect_runs/{run_name}"
+        default_source = dataset_meta.get("detect_source_default")
+        default_source = default_source if isinstance(default_source, dict) else {}
+        available_source = _normalize_source_type(default_source.get("source_type"), default="")
+        available_source_path = default_source.get("source_path")
+
+        if not available_source and options:
+            first_key = next(iter(options))
+            available_source = _normalize_source_type(first_key, default="")
+            available_source_path = options.get(first_key)
 
         if available_source and requested_source != available_source:
             mismatches.append(

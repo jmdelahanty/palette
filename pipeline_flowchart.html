@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Data Processing Pipeline</title>
+  <style>
+    body {
+      margin: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      background: #1a1a2e;
+      font-family: system-ui, sans-serif;
+    }
+    #container {
+      background: #fff;
+      border-radius: 12px;
+      padding: 2rem;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+      max-width: 90vw;
+      overflow: auto;
+    }
+    h1 {
+      text-align: center;
+      color: #333;
+      margin-top: 0;
+      font-size: 1.4rem;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <h1>Video-to-Zarr Processing Pipeline</h1>
+    <pre class="mermaid">
+flowchart TD
+    A["Raw Video Input"]:::input --> B["Frame Extraction"]
+    B --> C["YOLO Inference"]
+    C --> D{"Detection\nconfidence > threshold?"}
+    D -- "Yes" --> E["Keypoint Detection"]
+    D -- "No" --> F["Skip Frame"]
+    E --> G[("Output to\nZarr Array")]:::output
+    F --> H["Log Skipped Frame"]
+    H --> I{{"More frames?"}}
+    G --> I
+    I -- "Yes" --> B
+    I -- "No" --> J(["Pipeline Complete"]):::done
+
+    classDef input fill:#4fc3f7,stroke:#0288d1,color:#000,stroke-width:2px
+    classDef output fill:#81c784,stroke:#388e3c,color:#000,stroke-width:2px
+    classDef done fill:#ce93d8,stroke:#7b1fa2,color:#000,stroke-width:2px
+    </pre>
+  </div>
+
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      flowchart: { curve: 'basis', padding: 20 },
+      securityLevel: 'loose'
+    });
+  </script>
+</body>
+</html>

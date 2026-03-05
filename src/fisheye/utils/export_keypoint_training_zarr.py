@@ -11,6 +11,7 @@ Merged mode is the initial supported mode:
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import shutil
 from dataclasses import dataclass
@@ -24,7 +25,7 @@ import yaml
 import zarr
 from zarr.core.dtype import VariableLengthUTF8
 
-from fisheye.registry.db import Registry
+from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.detect_reason_codec import read_reason_labels
 from fisheye.utils import prepare_keypoint_training_from_registry as prepare_pose
 from fisheye.utils.system import build_invocation_record
@@ -2018,6 +2019,92 @@ def _write_merge_summary(
     summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _add_arg(cmd: List[str], flag: str, value: Any) -> None:
+    if value is None:
+        return
+    cmd.extend([flag, str(value)])
+
+
+def _load_keypoint_data_card_main() -> tuple[Optional[Callable[[Optional[List[str]]], int]], Optional[str]]:
+    try:
+        module = importlib.import_module("fisheye.utils.aggregate_keypoint_training_data_card")
+    except Exception as exc:  # pragma: no cover - exercised when module is unavailable
+        return None, f"{exc.__class__.__name__}: {exc}"
+    main_fn = getattr(module, "main", None)
+    if not callable(main_fn):
+        return None, "module does not define callable main(argv)."
+    return main_fn, None
+
+
+def _run_keypoint_data_card_aggregation(*, cli: List[str], required: bool) -> int:
+    main_fn, load_error = _load_keypoint_data_card_main()
+    if main_fn is None:
+        if required:
+            raise SystemExit(
+                "Keypoint training data-card aggregation requested, but "
+                "fisheye.utils.aggregate_keypoint_training_data_card is unavailable "
+                f"({load_error})."
+            )
+        print(
+            "Skipping keypoint training data-card aggregation: "
+            f"aggregator unavailable ({load_error})."
+        )
+        return 0
+    try:
+        result = main_fn(cli)
+    except SystemExit as exc:  # pragma: no cover - defensive wrapper around argparse exits
+        rc = int(exc.code) if isinstance(exc.code, int) else 1
+        if required:
+            return rc
+        print(
+            "Skipping keypoint training data-card aggregation: "
+            f"aggregator exited with code {rc}."
+        )
+        return 0
+    rc = int(result) if result is not None else 0
+    if rc != 0 and not required:
+        print(
+            "Skipping keypoint training data-card aggregation: "
+            f"aggregator returned code {rc}."
+        )
+        return 0
+    return rc
+
+
+def _build_data_card_cli(
+    *,
+    manifest_path: Path,
+    merged_zarr: Path,
+    registry_path: Path,
+    args: argparse.Namespace,
+) -> List[str]:
+    card_cli: List[str] = [
+        "--manifest",
+        str(manifest_path),
+        "--merged-zarr",
+        str(merged_zarr),
+        "--registry",
+        str(registry_path),
+        "--split",
+        str(args.data_card_split),
+    ]
+    _add_arg(card_cli, "--output", args.data_card_output)
+    if args.data_card_no_plots:
+        card_cli.append("--no-plots")
+    _add_arg(card_cli, "--plot-dir", args.data_card_plot_dir)
+    _add_arg(card_cli, "--plot-prefix", args.data_card_plot_prefix)
+    _add_arg(card_cli, "--plot-heatmap-bin-factor", args.data_card_plot_heatmap_bin_factor)
+    if args.data_card_allow_profile_mtime_mismatch:
+        card_cli.append("--allow-profile-mtime-mismatch")
+    if args.data_card_allow_profile_fallback_scan:
+        card_cli.append("--allow-profile-fallback-scan")
+    if args.data_card_view:
+        card_cli.append("--view")
+    if args.data_card_force_plots:
+        card_cli.append("--force")
+    return card_cli
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True, help="Training manifest JSON.")
@@ -2072,6 +2159,72 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--skip-validate",
         action="store_true",
         help="Skip merged-zarr post-export validation checks.",
+    )
+    aggregate_group = parser.add_mutually_exclusive_group()
+    aggregate_group.add_argument(
+        "--aggregate-training-data-card",
+        dest="aggregate_training_data_card",
+        action="store_true",
+        help="Aggregate keypoint training data card after export/validation (default: enabled).",
+    )
+    aggregate_group.add_argument(
+        "--no-aggregate-training-data-card",
+        dest="aggregate_training_data_card",
+        action="store_false",
+        help="Disable automatic keypoint training data-card aggregation after export.",
+    )
+    parser.set_defaults(aggregate_training_data_card=True)
+    parser.add_argument(
+        "--data-card-output",
+        type=Path,
+        help="Optional output JSON path for keypoint training data-card aggregation.",
+    )
+    parser.add_argument(
+        "--data-card-split",
+        type=str,
+        default="train",
+        help="Split label for data-card selection metadata (default: train).",
+    )
+    parser.add_argument(
+        "--data-card-no-plots",
+        action="store_true",
+        help="Skip plot PNG generation when aggregating the keypoint training data card.",
+    )
+    parser.add_argument(
+        "--data-card-plot-dir",
+        type=Path,
+        help="Optional output directory for keypoint training data-card plots.",
+    )
+    parser.add_argument(
+        "--data-card-plot-prefix",
+        type=str,
+        help="Optional filename prefix for keypoint training data-card plots.",
+    )
+    parser.add_argument(
+        "--data-card-plot-heatmap-bin-factor",
+        type=int,
+        default=2,
+        help="Coarsening factor for keypoint heatmap bins in data-card plots (default: 2).",
+    )
+    parser.add_argument(
+        "--data-card-allow-profile-mtime-mismatch",
+        action="store_true",
+        help="Allow keypoint_data_profile_latest mtime mismatches during data-card aggregation.",
+    )
+    parser.add_argument(
+        "--data-card-allow-profile-fallback-scan",
+        action="store_true",
+        help="Allow data-card aggregation to scan Zarr directly when profile rows are missing.",
+    )
+    parser.add_argument(
+        "--data-card-view",
+        action="store_true",
+        help="Open keypoint data-card plots after aggregation.",
+    )
+    parser.add_argument(
+        "--data-card-force-plots",
+        action="store_true",
+        help="Regenerate keypoint data-card plots even when files already exist.",
     )
     args = parser.parse_args(argv)
 
@@ -2214,6 +2367,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         val_ratio=config_val_ratio,
         random_seed=int(args.seed),
     )
+
+    if args.aggregate_training_data_card:
+        card_registry = Path(args.registry) if args.registry is not None else RegistryPaths.from_env(Path.cwd()).path
+        card_cli = _build_data_card_cli(
+            manifest_path=out_manifest,
+            merged_zarr=merged_zarr,
+            registry_path=card_registry,
+            args=args,
+        )
+        card_rc = _run_keypoint_data_card_aggregation(
+            cli=card_cli,
+            required=True,
+        )
+        if card_rc != 0:
+            return int(card_rc)
 
     print(f"\nWrote merged zarr: {merged_zarr}")
     print(f"Wrote summary: {summary_path}")

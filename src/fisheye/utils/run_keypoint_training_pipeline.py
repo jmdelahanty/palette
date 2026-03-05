@@ -621,6 +621,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         _add_arg(export_cli, "--registry", export_registry)
         _add_arg(export_cli, "--out-zarr", args.merge_out_zarr)
         _add_arg(export_cli, "--out-dir", args.merge_out_dir)
+        # Pipeline controls data-card orchestration below; avoid duplicate aggregation in exporter.
+        export_cli.append("--no-aggregate-training-data-card")
         if args.merge_overwrite:
             export_cli.append("--overwrite")
         export_zarr.main(export_cli)

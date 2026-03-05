@@ -1,7 +1,9 @@
 """Tests for keypoint merged-export skeleton identity guardrails."""
 
+import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -9,6 +11,7 @@ import zarr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
+from fisheye.utils import export_keypoint_training_zarr as mod
 from fisheye.utils.export_keypoint_training_zarr import (
     _discover_merge_sources,
     _format_skeleton_signature,
@@ -212,3 +215,154 @@ def test_discover_merge_sources_raw_success_plus_box_only_includes_tagged_rows(t
     assert spec.row_gate_box_only_selected == 1
     assert spec.box_only_selected_mask is not None
     assert spec.box_only_selected_mask.tolist() == [False, False, True, False]
+
+
+def _write_min_manifest(path: Path, *, set_id: str = "pose_set_v001") -> None:
+    payload = {
+        "set_id": set_id,
+        "set_name": "pose_set",
+        "input_format": "gray",
+        "source_type": "filtered",
+        "datasets": [
+            {
+                "name": "dataset_a",
+                "dataset_id": "dataset_a",
+                "zarr_path": "/tmp/dataset_a.zarr",
+            }
+        ],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_main_auto_aggregates_keypoint_data_card_by_default(tmp_path: Path, monkeypatch) -> None:
+    manifest_path = tmp_path / "pose_set_v001.manifest.json"
+    _write_min_manifest(manifest_path)
+
+    out_dir = tmp_path / "out"
+    out_zarr = out_dir / "zarr" / "pose_set_v001_merged.zarr"
+    out_manifest = out_dir / "pose_set_v001.manifest.json"
+
+    merge_result = SimpleNamespace(
+        input_format="gray",
+        total_samples=4,
+        source_specs=[],
+        source_type="filtered",
+        run_name="merged_export_smoke",
+    )
+
+    monkeypatch.setattr(mod, "_export_merged", lambda **_kwargs: merge_result)
+    monkeypatch.setattr(
+        mod,
+        "validate_merged_keypoint_training_zarr",
+        lambda *_args, **_kwargs: {
+            "total_samples": 4,
+            "split_counts": {"train": 3, "val": 1, "test": 0},
+            "source_count": 1,
+        },
+    )
+    monkeypatch.setattr(mod, "_write_merge_summary", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        mod,
+        "_build_merged_manifest_payload",
+        lambda **_kwargs: {"set_id": "pose_set_v001", "datasets": [], "merged_export": {"source_datasets": []}},
+    )
+    monkeypatch.setattr(mod, "_write_merged_config", lambda **_kwargs: None)
+
+    class _RegistryPaths:
+        path = tmp_path / "registry.sqlite"
+
+    monkeypatch.setattr(
+        mod.RegistryPaths,
+        "from_env",
+        classmethod(lambda cls, _cwd: _RegistryPaths()),  # type: ignore[misc]
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_card(*, cli: list[str], required: bool) -> int:
+        captured["cli"] = list(cli)
+        captured["required"] = bool(required)
+        return 0
+
+    monkeypatch.setattr(mod, "_run_keypoint_data_card_aggregation", _fake_card)
+
+    rc = mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--merge",
+            "--out-dir",
+            str(out_dir),
+            "--out-zarr",
+            str(out_zarr),
+            "--overwrite",
+        ]
+    )
+    assert rc == 0
+    assert out_manifest.exists()
+
+    assert captured["required"] is True
+    card_cli = [str(item) for item in captured["cli"]]
+    assert "--manifest" in card_cli and str(out_manifest) in card_cli
+    assert "--merged-zarr" in card_cli and str(out_zarr) in card_cli
+    assert "--registry" in card_cli
+    assert str(tmp_path / "registry.sqlite") in card_cli
+
+
+def test_main_no_aggregate_training_data_card_disables_aggregation(tmp_path: Path, monkeypatch) -> None:
+    manifest_path = tmp_path / "pose_set_v001.manifest.json"
+    _write_min_manifest(manifest_path)
+
+    out_dir = tmp_path / "out"
+    out_zarr = out_dir / "zarr" / "pose_set_v001_merged.zarr"
+
+    merge_result = SimpleNamespace(
+        input_format="gray",
+        total_samples=2,
+        source_specs=[],
+        source_type="filtered",
+        run_name="merged_export_smoke",
+    )
+
+    monkeypatch.setattr(mod, "_export_merged", lambda **_kwargs: merge_result)
+    monkeypatch.setattr(
+        mod,
+        "validate_merged_keypoint_training_zarr",
+        lambda *_args, **_kwargs: {
+            "total_samples": 2,
+            "split_counts": {"train": 1, "val": 1, "test": 0},
+            "source_count": 1,
+        },
+    )
+    monkeypatch.setattr(mod, "_write_merge_summary", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        mod,
+        "_build_merged_manifest_payload",
+        lambda **_kwargs: {"set_id": "pose_set_v001", "datasets": [], "merged_export": {"source_datasets": []}},
+    )
+    monkeypatch.setattr(mod, "_write_merged_config", lambda **_kwargs: None)
+
+    called = {"card": False}
+
+    def _fake_card(*, cli: list[str], required: bool) -> int:
+        del cli, required
+        called["card"] = True
+        return 0
+
+    monkeypatch.setattr(mod, "_run_keypoint_data_card_aggregation", _fake_card)
+
+    rc = mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--merge",
+            "--out-dir",
+            str(out_dir),
+            "--out-zarr",
+            str(out_zarr),
+            "--overwrite",
+            "--no-aggregate-training-data-card",
+        ]
+    )
+    assert rc == 0
+    assert called["card"] is False

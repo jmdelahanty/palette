@@ -222,26 +222,6 @@ def test_plot_detection_training_data_card_skips_empty_subject_aggregates(tmp_pa
     assert not (output_dir / "detect_sample_v001.dpf_histogram.png").exists()
 
 
-def test_histogram_focus_xlim_zooms_to_occupied_bins() -> None:
-    edges = np.linspace(0.0, 1.0, 11)
-    counts = np.zeros(10, dtype=np.float64)
-    counts[1] = 3.0
-    counts[2] = 5.0
-
-    xlim = mod._histogram_focus_xlim(edges=edges, counts=counts)
-    assert xlim is not None
-    assert xlim[0] == pytest.approx(0.09)
-    assert xlim[1] == pytest.approx(0.31)
-
-
-def test_histogram_focus_xlim_returns_full_range_when_empty() -> None:
-    edges = np.linspace(0.0, 1.0, 6)
-    counts = np.zeros(5, dtype=np.float64)
-
-    xlim = mod._histogram_focus_xlim(edges=edges, counts=counts)
-    assert xlim == (0.0, 1.0)
-
-
 def test_infer_integer_center_ticks_from_half_step_edges() -> None:
     edges = np.asarray([11.5, 12.5], dtype=np.float64)
     ticks = mod._infer_integer_center_ticks(edges)

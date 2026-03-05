@@ -16,6 +16,10 @@ import yaml
 import zarr
 from torch.utils.data import Dataset
 
+from ..shared.refined_detect_review import (
+    DEFAULT_DETECT_GROUP_PREFERENCE,
+    resolve_refined_detect_group,
+)
 from ..utils.zarr_metadata import get_downsample_array_path, get_downsample_formats
 
 # Setup logging
@@ -325,13 +329,8 @@ class GlobalIndexManager:
                 frame_array_path: Optional[str] = None
                 if self.config.task == 'detect':
                     frame_array_rel = get_downsample_array_path(root, format_hint=requested_input_format)
-                    if frame_array_rel is None:
-                        available_formats = get_downsample_formats(root)
-                        raise KeyError(
-                            f"Downsampled frames for format '{requested_input_format}' not found in {Path(path_str).name}. "
-                            f"Available formats: {available_formats or 'none'}."
-                        )
-                    frame_array_path = frame_array_rel
+                    if frame_array_rel is not None:
+                        frame_array_path = frame_array_rel
 
                 # Tracking setup
                 column_names: List[str] = []
@@ -351,7 +350,154 @@ class GlobalIndexManager:
                 n_real_rois = 0
                 n_interpolated_rois = 0
 
-                if uses_crop_data:
+                if self.config.task == 'detect':
+                    refined_parent_name = None
+                    refined_parent = None
+                    if "refined_detect_runs" in root:
+                        refined_parent_name = "refined_detect_runs"
+                        refined_parent = root["refined_detect_runs"]
+                    elif "refined_runs" in root:
+                        refined_parent_name = "refined_runs"
+                        refined_parent = root["refined_runs"]
+
+                    selected_source_type: Optional[str] = None
+                    selected_group_path: Optional[str] = None
+                    selected_group: Optional[zarr.Group] = None
+                    selected_detect_run: Optional[str] = None
+
+                    if requested_source == "detect":
+                        detect_run_name = (
+                            detect_parent.attrs.get("latest") if detect_parent is not None else None
+                        )
+                        if detect_parent is not None and detect_run_name and detect_run_name in detect_parent:
+                            selected_source_type = "detect"
+                            selected_group_path = f"detect_runs/{detect_run_name}"
+                            selected_group = detect_parent[detect_run_name]
+                            selected_detect_run = str(detect_run_name)
+                    else:
+                        refined_run_name = (
+                            refined_parent.attrs.get("latest") if refined_parent is not None else None
+                        )
+                        if refined_parent is not None and refined_run_name and refined_run_name in refined_parent:
+                            refined_run = refined_parent[refined_run_name]
+                            preferred_group: Optional[str] = None
+                            if requested_source == "manual":
+                                manual_latest = refined_run.attrs.get("manual_review_latest")
+                                if manual_latest and manual_latest in refined_run:
+                                    preferred_group = str(manual_latest)
+                                elif "manual" in refined_run:
+                                    preferred_group = "manual"
+                            elif requested_source in {"filtered", "interpolated"} and requested_source in refined_run:
+                                preferred_group = requested_source
+
+                            if preferred_group is not None:
+                                selected_source_type = requested_source
+                                selected_group_path = (
+                                    f"{refined_parent_name}/{refined_run_name}/{preferred_group}"
+                                )
+                                selected_group = refined_run[preferred_group]
+                                source_detect_attr = refined_run.attrs.get("source_detect_run")
+                                selected_detect_run = str(source_detect_attr) if source_detect_attr else None
+                            else:
+                                resolved = resolve_refined_detect_group(
+                                    refined_run,
+                                    preference=DEFAULT_DETECT_GROUP_PREFERENCE,
+                                )
+                                resolved_group = resolved.group
+                                if resolved_group and resolved_group in refined_run:
+                                    selected_source_type = str(
+                                        (resolved.label or resolved_group)
+                                    ).lower()
+                                    selected_group_path = (
+                                        f"{refined_parent_name}/{refined_run_name}/{resolved_group}"
+                                    )
+                                    selected_group = refined_run[resolved_group]
+                                    selected_detect_run = (
+                                        str(resolved.source_detect_run)
+                                        if resolved.source_detect_run
+                                        else None
+                                    )
+                                elif resolved.label == "raw":
+                                    detect_run_name = (
+                                        resolved.source_detect_run
+                                        or (detect_parent.attrs.get("latest") if detect_parent is not None else None)
+                                    )
+                                    if detect_parent is not None and detect_run_name and detect_run_name in detect_parent:
+                                        selected_source_type = "detect"
+                                        selected_group_path = f"detect_runs/{detect_run_name}"
+                                        selected_group = detect_parent[detect_run_name]
+                                        selected_detect_run = str(detect_run_name)
+
+                    # Legacy fallback for merged/training artifacts that only carry crop labels.
+                    if selected_group is None and uses_crop_data:
+                        selected_source_type = str(
+                            crop_group.attrs.get("detection_source_type", "detect")
+                        ).strip().lower()
+                        selected_group_path = f"crop_runs/{latest_crop}"
+                        selected_group = crop_group
+                        if frame_array_path is None and "roi_images" in crop_group:
+                            frame_array_path = f"crop_runs/{latest_crop}/roi_images"
+                        logger.warning(
+                            "  ⚠ %s: falling back to crop_runs/%s for detect labels (legacy source resolution).",
+                            Path(path_str).name,
+                            latest_crop,
+                        )
+
+                    if selected_group is None or selected_group_path is None:
+                        available_formats = get_downsample_formats(root)
+                        raise KeyError(
+                            f"{Path(path_str).name}: unable to resolve detect label source "
+                            f"for requested source_type '{requested_source}'. "
+                            f"Available downsample formats: {available_formats or 'none'}."
+                        )
+
+                    actual_source_type = selected_source_type or requested_source
+                    if requested_source != actual_source_type:
+                        message = (
+                            f"{Path(path_str).name}: requested source_type '{requested_source}' "
+                            f"but available source is '{actual_source_type}'."
+                        )
+                        if self.config.allow_source_mismatch:
+                            logger.warning(
+                                f"  ⚠ {message} Using available '{actual_source_type}' data "
+                                "(allow_source_mismatch=True)."
+                            )
+                        else:
+                            raise ValueError(
+                                f"{message} Re-run refine/review to produce requested source, "
+                                "or set allow_source_mismatch=true (or pass --allow-source-mismatch)."
+                            )
+
+                    bbox_array_path = f"{selected_group_path}/bbox_norm_coords"
+                    if "frame_indices" in selected_group:
+                        frame_indices_path = f"{selected_group_path}/frame_indices"
+                    if "detection_source" in selected_group:
+                        detection_source_path = f"{selected_group_path}/detection_source"
+
+                    if frame_array_path is None and uses_crop_data and "roi_images" in crop_group:
+                        frame_array_path = f"crop_runs/{latest_crop}/roi_images"
+                    if frame_array_path is None:
+                        available_formats = get_downsample_formats(root)
+                        raise KeyError(
+                            f"Downsampled frames for format '{requested_input_format}' not found in {Path(path_str).name}. "
+                            f"Available formats: {available_formats or 'none'}."
+                        )
+
+                    n_total = int(selected_group["bbox_norm_coords"].shape[0])
+                    if detection_source_path and detection_source_path in root:
+                        detection_source = np.asarray(root[detection_source_path][:], dtype=np.int8)
+                        n_interpolated_rois = int(np.count_nonzero(detection_source != 0))
+                        n_real_rois = int(max(0, detection_source.shape[0] - n_interpolated_rois))
+                    else:
+                        n_interpolated_rois = 0
+                        n_real_rois = n_total
+
+                    has_interpolated = bool(
+                        actual_source_type == "interpolated" or n_interpolated_rois > 0
+                    )
+                    roi_shape = (0, 0)
+                    total_frames = n_total
+                elif uses_crop_data:
                     actual_source_type = crop_group.attrs.get('detection_source_type', 'detect')
                     has_interpolated = crop_group.attrs.get('includes_interpolated', False)
                     n_real_rois = crop_group.attrs.get('n_real_detections', crop_group['bbox_norm_coords'].shape[0])
@@ -363,33 +509,11 @@ class GlobalIndexManager:
                     if 'frame_indices' in crop_group:
                         frame_indices_path = f"crop_runs/{latest_crop}/frame_indices"
                     detection_source_path = f"crop_runs/{latest_crop}/detection_source" if 'detection_source' in crop_group else None
-                elif self.config.task == 'detect':
-                    if detect_parent is None or 'latest' not in detect_parent.attrs:
-                        raise KeyError(
-                            f"Could not find 'crop_runs' in {Path(path_str).name} and no detect_runs available for fallback."
-                        )
-                    detect_run_name = detect_parent.attrs['latest']
-                    if detect_run_name not in detect_parent:
-                        raise KeyError(f"Detect run '{detect_run_name}' not found in {Path(path_str).name}.")
-                    detect_group = detect_parent[detect_run_name]
-                    actual_source_type = 'detect'
-                    has_interpolated = False
-                    n_interpolated_rois = 0
-                    n_real_rois = int(detect_group['bbox_norm_coords'].shape[0])
-                    roi_shape = (0, 0)
-                    total_frames = n_real_rois
-                    bbox_array_path = f"detect_runs/{detect_run_name}/bbox_norm_coords"
-                    if 'frame_indices' in detect_group:
-                        frame_indices_path = f"detect_runs/{detect_run_name}/frame_indices"
-                    detection_source_path = None
-                    logger.warning(
-                        f"  ⚠ {Path(path_str).name}: crop_runs missing; training will read boxes directly from detect_runs/{detect_run_name}."
-                    )
                 else:
                     raise KeyError(f"Could not find 'crop_runs' in {Path(path_str).name}")
 
                 # Warn if requested != available
-                if requested_source != actual_source_type:
+                if self.config.task != "detect" and requested_source != actual_source_type:
                     message = (
                         f"{Path(path_str).name}: requested source_type '{requested_source}' "
                         f"but available source is '{actual_source_type}'."

@@ -748,7 +748,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.detect_frame_flag_file and (args.manual or args.retune):
             cmd.extend(["--detect-frame-flag-file", args.detect_frame_flag_file])
 
-        subprocess.run(cmd, check=False)
+        env = None
+        if args.registry:
+            env = os.environ.copy()
+            env["PALETTE_REGISTRY_PATH"] = str(Path(args.registry).expanduser().resolve())
+        subprocess.run(cmd, check=False, env=env)
         if idx < end - 1 and not args.no_prompt:
             if not _prompt_continue():
                 break

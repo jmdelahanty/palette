@@ -16,10 +16,10 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 
-from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
-from ..registry.status_ledger import upsert_recording_step_status
 from ..shared.experiment_setup import infer_experiment_setup
+from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info
 
@@ -27,20 +27,7 @@ _ID_ASSIGN_STATUS_SOURCE = "runtime_assign_ids"
 
 
 def _status_text(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        text = value.decode("utf-8", "ignore").strip()
-    else:
-        text = str(value).strip()
-    return text or None
-
-
-def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
-    try:
-        return int(path.stat().st_mtime_ns)
-    except OSError:
-        return None
+    return normalize_attr(value)
 
 
 def _emit_tracking_step_statuses(
@@ -60,57 +47,39 @@ def _emit_tracking_step_statuses(
     tracks_details: Dict[str, object],
     console: Optional[Console],
 ) -> None:
-    try:
-        zarr_file = Path(zarr_path).expanduser().resolve()
-        dataset_id, session_uuid = resolve_dataset_id(root, zarr_file)
-        recording_id = _status_text(root.attrs.get("recording_id")) or _status_text(session_uuid)
-        zarr_use = _status_text(root.attrs.get("zarr_use"))
-        zarr_purpose = _status_text(root.attrs.get("zarr_purpose"))
-
-        registry_path = RegistryPaths.from_env(Path.cwd()).path
-        registry = Registry(registry_path)
-        try:
-            registry.upsert_dataset(
-                dataset_id,
-                session_uuid=session_uuid,
-                zarr_path=zarr_file,
-                recording_id=recording_id,
-                zarr_use=zarr_use,
-                zarr_purpose=zarr_purpose,
-            )
-            upsert_recording_step_status(
-                registry,
-                dataset_id=dataset_id,
-                recording_id=recording_id,
-                step_name="id_assignment",
-                status=id_status,
-                run_name=id_run_name,
-                method=id_method,
-                coverage_pct=id_coverage_pct,
-                details_json={**id_details, "reason": id_reason},
-                source=_ID_ASSIGN_STATUS_SOURCE,
-                zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_file),
-            )
-            upsert_recording_step_status(
-                registry,
-                dataset_id=dataset_id,
-                recording_id=recording_id,
-                step_name="tracks",
-                status=tracks_status,
-                run_name=tracks_run_name,
-                method=tracks_method,
-                details_json={**tracks_details, "reason": tracks_reason},
-                source=_ID_ASSIGN_STATUS_SOURCE,
-                zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_file),
-            )
-        finally:
-            registry.close()
-    except Exception as exc:
-        if console is not None:
-            console.print(
-                f"[yellow]Warning:[/yellow] failed to write recording step status "
-                f"for assign_ids/tracks: {exc}"
-            )
+    zarr_file = Path(zarr_path).expanduser().resolve()
+    emit_stage_completion(
+        root,
+        zarr_file,
+        step_name="id_assignment",
+        status=id_status,
+        source=_ID_ASSIGN_STATUS_SOURCE,
+        run_name=id_run_name,
+        method=id_method,
+        coverage_pct=id_coverage_pct,
+        details_json={**id_details, "reason": id_reason},
+        console=console,
+        warning_label="assign_ids/tracks",
+        auto_registry_from_env=True,
+        require_env_registry_exists=False,
+        invalidate_on_ok=False,
+    )
+    emit_stage_completion(
+        root,
+        zarr_file,
+        step_name="tracks",
+        status=tracks_status,
+        source=_ID_ASSIGN_STATUS_SOURCE,
+        run_name=tracks_run_name,
+        method=tracks_method,
+        coverage_pct=None,
+        details_json={**tracks_details, "reason": tracks_reason},
+        console=console,
+        warning_label="assign_ids/tracks",
+        auto_registry_from_env=True,
+        require_env_registry_exists=False,
+        invalidate_on_ok=False,
+    )
 
 
 def _infer_num_frames(

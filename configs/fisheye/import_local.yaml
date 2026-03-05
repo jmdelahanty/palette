@@ -8,7 +8,8 @@ import:
   gpu_fp16: true
   full: true
   downsampled:
-    size: [640, 640]
+    preserve_aspect: true
+    size: [768, 1280]
     method: area
-    formats: [gray]
+    formats: [rgb]
     chunk_size: 64

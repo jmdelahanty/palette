@@ -11,8 +11,9 @@ from typing import Any, Optional
 
 import zarr
 
-from fisheye.registry.db import Registry, RegistryPaths, resolve_dataset_id
-from fisheye.registry.status_ledger import upsert_recording_step_status
+from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.shared.registry_stage_complete import emit_stage_completion
+from fisheye.shared.type_conversions import clean_mapping, normalize_attr
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils.resolve_detect_model import Candidate, TargetProfile
 from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
@@ -36,20 +37,8 @@ def _pick_best_candidate(candidates: list[Candidate], *, require_unique: bool) -
     return best
 
 
-def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
-    try:
-        return int(path.stat().st_mtime_ns)
-    except OSError:
-        return None
-
-
 def _normalize_attr(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", "ignore")
-    text = str(value).strip()
-    return text or None
+    return normalize_attr(value)
 
 
 def _classify_eye_masks_failure(exc: Exception) -> tuple[str, str]:
@@ -83,38 +72,30 @@ def _emit_eye_masks_failure_status(
         return
     try:
         root = zarr.open_group(str(zarr_path), mode="r")
-        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
-        recording_id = _normalize_attr(root.attrs.get("recording_id")) or _normalize_attr(session_uuid)
-        zarr_use = _normalize_attr(root.attrs.get("zarr_use"))
-        zarr_purpose = _normalize_attr(root.attrs.get("zarr_purpose"))
-        registry.upsert_dataset(
-            dataset_id,
-            session_uuid=session_uuid,
-            zarr_path=zarr_path,
-            recording_id=recording_id,
-            zarr_use=zarr_use,
-            zarr_purpose=zarr_purpose,
+        details = clean_mapping(
+            {
+                "reason": reason,
+                "selected_model_path": selected_model_path,
+                "selected_run_id": selected_run_id,
+                "selected_set_id": selected_set_id,
+                "error": error_text,
+            }
         )
-        details = {
-            "reason": reason,
-            "selected_model_path": selected_model_path,
-            "selected_run_id": selected_run_id,
-            "selected_set_id": selected_set_id,
-            "error": error_text,
-        }
-        details = {key: value for key, value in details.items() if value is not None}
-        upsert_recording_step_status(
-            registry,
-            dataset_id=dataset_id,
-            recording_id=recording_id,
+        emit_stage_completion(
+            root,
+            zarr_path,
             step_name="eye_masks",
             status=status,
+            source=_EYE_MASKS_STATUS_SOURCE,
             run_name=None,
             method=method,
             coverage_pct=None,
             details_json=details,
-            source=_EYE_MASKS_STATUS_SOURCE,
-            zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_path),
+            console=None,
+            warning_label="eye_masks",
+            registry=registry,
+            auto_registry_from_env=False,
+            invalidate_on_ok=False,
         )
     except Exception:
         pass

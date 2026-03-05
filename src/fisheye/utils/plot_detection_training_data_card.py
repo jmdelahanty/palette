@@ -82,9 +82,6 @@ def _plot_histogram(
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.bar(centers, counts, width=widths, color="#2E6F95", edgecolor="#123146", linewidth=0.8)
-    x_limits = _histogram_focus_xlim(edges=edges, counts=counts)
-    if x_limits is not None:
-        ax.set_xlim(*x_limits)
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Count")
@@ -170,32 +167,6 @@ def _infer_integer_center_ticks(edges: np.ndarray) -> Optional[np.ndarray]:
     if not np.allclose(centers, rounded, atol=1e-9, rtol=0.0):
         return None
     return rounded.astype(np.float64)
-
-
-def _histogram_focus_xlim(*, edges: np.ndarray, counts: np.ndarray) -> Optional[tuple[float, float]]:
-    if edges.size < 2 or counts.size == 0:
-        return None
-    lower = float(edges[0])
-    upper = float(edges[-1])
-    if not np.isfinite(lower) or not np.isfinite(upper) or upper <= lower:
-        return None
-
-    occupied = np.flatnonzero(counts > 0)
-    if occupied.size == 0:
-        return lower, upper
-    left_idx = int(occupied[0])
-    right_idx = int(occupied[-1] + 1)
-    left = float(edges[left_idx])
-    right = float(edges[right_idx])
-    if not np.isfinite(left) or not np.isfinite(right) or right <= left:
-        return lower, upper
-
-    padding = 0.05 * (right - left)
-    focused_left = max(lower, left - padding)
-    focused_right = min(upper, right + padding)
-    if focused_right <= focused_left:
-        return lower, upper
-    return focused_left, focused_right
 
 
 def _coarsen_heatmap_grid(grid: np.ndarray, factor: int) -> np.ndarray:

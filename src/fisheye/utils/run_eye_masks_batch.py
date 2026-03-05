@@ -28,6 +28,7 @@ from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.environment import resolve_log_dir as resolve_shared_log_dir
 from fisheye.shared.environment import resolve_recording_roots as resolve_shared_recording_roots
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
+from fisheye.shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
 from fisheye.shared.zarr_discovery import discover_registry_zarrs as discover_shared_registry_zarrs
 
 try:
@@ -755,6 +756,13 @@ def _sync_eye_mask_registry_rows_after_run(
             else _normalize_attr(context.get("recording_id"))
         )
         zarr_use = _normalize_attr(dataset_row["zarr_use"]) if dataset_row is not None else None
+        metadata = DatasetMetadata(
+            dataset_id=dataset_id,
+            session_uuid=None,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+            zarr_purpose=None,
+        )
 
         step_status_written: List[str] = []
         step_status_errors: Dict[str, str] = {}
@@ -766,12 +774,16 @@ def _sync_eye_mask_registry_rows_after_run(
                 continue
             review_status = payload.get("review_status")
             try:
-                upsert_recording_step_status(
-                    registry,
-                    dataset_id=dataset_id,
-                    recording_id=recording_id,
+                def _upsert_with_mtime(*args: Any, **kwargs: Any) -> None:
+                    kwargs["zarr_mtime_ns"] = _zarr_mtime_ns(zarr_path)
+                    upsert_recording_step_status(*args, **kwargs)
+
+                wrote = emit_stage_completion(
+                    None,
+                    zarr_path,
                     step_name=step_name,
                     status="ok",
+                    source="run_eye_masks_batch_postrun_sync",
                     run_name=run_name,
                     method=(
                         _normalize_attr(payload.get("method"))
@@ -780,9 +792,16 @@ def _sync_eye_mask_registry_rows_after_run(
                     coverage_pct=_coverage_pct_from_stage_payload(payload),
                     review_status_json=review_status if isinstance(review_status, dict) else None,
                     details_json=_step_status_details_from_stage_payload(payload),
-                    source="run_eye_masks_batch_postrun_sync",
-                    zarr_mtime_ns=_zarr_mtime_ns(zarr_path),
+                    console=None,
+                    registry=registry,
+                    auto_registry_from_env=False,
+                    invalidate_on_ok=False,
+                    metadata=metadata,
+                    upsert_dataset_row=False,
+                    upsert_step_status_fn=_upsert_with_mtime,
                 )
+                if not wrote:
+                    raise RuntimeError("emit_stage_completion returned false")
                 step_status_written.append(step_name)
             except Exception as exc:  # pragma: no cover - defensive
                 step_status_errors[step_name] = str(exc)

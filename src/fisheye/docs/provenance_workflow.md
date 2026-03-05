@@ -72,6 +72,21 @@ After new ROIs exist, rerun stages that depend on them:
    python -m fisheye.refinement.refine_keypoints <archive>.zarr
    ```
    The keypoint script now auto-applies refined ROI overrides when available.
+   The refinement step also runs a coordinate-space audit by default and writes:
+   `/tmp/<archive_name>_audit.json`.
+
+   Optional overlap analysis and output-dir override:
+   ```bash
+   python -m fisheye.refinement.refine_keypoints <archive>.zarr \
+     --post-overlap \
+     --post-audit-output-dir /tmp
+   ```
+   This additionally writes `/tmp/<archive_name>_overlap.json`.
+
+   Equivalent batch flags on `run_keypoints_batch`:
+   - `--no-refine-post-audit` (disable default audit)
+   - `--refine-post-overlap` (enable overlap report)
+   - `--refine-post-audit-output-dir <dir>` (override `/tmp`)
 
 2. Eye masks (defaults to refined keypoints when present):
    ```bash

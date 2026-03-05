@@ -21,13 +21,14 @@ from fisheye.detection.detect_keypoints_traditional import detect_keypoints
 from fisheye.detection.detect_keypoints_yolo import detect_keypoints_yolo
 from fisheye.refinement.refine_keypoints import create_refined_keypoint_run
 from fisheye.registry.db import Registry, RegistryPaths
-from fisheye.registry.status_ledger import upsert_recording_step_status
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.environment import resolve_log_dir as resolve_shared_log_dir
 from fisheye.shared.environment import resolve_recording_roots as resolve_shared_recording_roots
+from fisheye.shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
 from fisheye.shared.zarr_discovery import discover_registry_zarr_entries as discover_shared_registry_zarr_entries
 from fisheye.utils.auto_keypoint_review import AutoReviewPolicy, apply_auto_review
+from fisheye.utils.keypoint_retry import retry_failed_keypoints_yolo
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils import refine_keypoints_batch as refine_keypoints_batch_mod
 from fisheye.utils.resolve_detect_model import Candidate
@@ -566,13 +567,6 @@ def _coverage_pct_from_stage_payload(stage_payload: Dict[str, Any]) -> Optional[
     return None
 
 
-def _zarr_mtime_ns(path: Path) -> Optional[int]:
-    try:
-        return int(path.stat().st_mtime_ns)
-    except Exception:
-        return None
-
-
 def _sync_refined_keypoint_step_status_after_auto_review(
     *,
     zarr_path: Path,
@@ -617,20 +611,37 @@ def _sync_refined_keypoint_step_status_after_auto_review(
             merged_details.update(existing_details)
         merged_details.update(details_update)
 
-        upsert_recording_step_status(
-            registry,
+        metadata = DatasetMetadata(
             dataset_id=str(context["dataset_id"]),
-            recording_id=context.get("recording_id"),
+            session_uuid=None,
+            recording_id=_normalize_attr(context.get("recording_id")),
+            zarr_use=None,
+            zarr_purpose=None,
+        )
+        wrote = emit_stage_completion(
+            None,
+            zarr_path,
             step_name="refined_keypoints",
             status="ok",
+            source="run_keypoints_batch_auto_review",
             run_name=refined_run,
             method=_normalize_attr(stage_payload.get("method")) or "refine_keypoints",
             coverage_pct=_coverage_pct_from_stage_payload(stage_payload),
             review_status_json=review_status,
             details_json=merged_details,
-            source="run_keypoints_batch_auto_review",
-            zarr_mtime_ns=_zarr_mtime_ns(zarr_path),
+            console=None,
+            registry=registry,
+            auto_registry_from_env=False,
+            invalidate_on_ok=False,
+            metadata=metadata,
+            upsert_dataset_row=False,
         )
+        if not wrote:
+            return {
+                "synced": False,
+                "reason": "upsert_failed",
+                "error": "emit_stage_completion returned false",
+            }
         return {
             "synced": True,
             "dataset_id": str(context["dataset_id"]),
@@ -1306,6 +1317,62 @@ def _run_yolo(
     )
 
 
+def _run_yolo_retry_failed_only(
+    zarr_path: str,
+    config: Dict[str, Any],
+    quiet: bool,
+    model_path_override: Optional[str] = None,
+    source_keypoints_run: Optional[str] = None,
+    refined_run: Optional[str] = None,
+    include_fish_present_no_keypoints: bool = False,
+    force_new: bool = False,
+    registry: Optional[Path] = None,
+) -> Dict[str, Any]:
+    params = config.get("keypoints", {})
+    model_path = model_path_override or params.get("model") or params.get("model_path")
+    if not model_path:
+        raise ValueError("YOLO keypoints retry requires 'model' or 'model_path' in config.")
+    if quiet and Console is not None:
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            console = Console(file=devnull, force_terminal=False)
+            return retry_failed_keypoints_yolo(
+                zarr_path=zarr_path,
+                model_path=model_path,
+                source_keypoints_run=source_keypoints_run,
+                refined_run=refined_run,
+                batch_size=params.get("batch_size", 256),
+                device=params.get("device"),
+                imgsz=params.get("imgsz"),
+                conf=params.get("conf", 0.25),
+                iou=params.get("iou", 0.5),
+                max_det=params.get("max_det", 1),
+                verbose=params.get("verbose", False),
+                mask_threshold=params.get("mask_threshold", 0.5),
+                include_fish_present_no_keypoints=include_fish_present_no_keypoints,
+                force_new=force_new,
+                registry=registry,
+                console=console,
+            )
+    return retry_failed_keypoints_yolo(
+        zarr_path=zarr_path,
+        model_path=model_path,
+        source_keypoints_run=source_keypoints_run,
+        refined_run=refined_run,
+        batch_size=params.get("batch_size", 256),
+        device=params.get("device"),
+        imgsz=params.get("imgsz"),
+        conf=params.get("conf", 0.25),
+        iou=params.get("iou", 0.5),
+        max_det=params.get("max_det", 1),
+        verbose=params.get("verbose", False),
+        mask_threshold=params.get("mask_threshold", 0.5),
+        include_fish_present_no_keypoints=include_fish_present_no_keypoints,
+        force_new=force_new,
+        registry=registry,
+        console=None,
+    )
+
+
 def _run_refine(
     zarr_path: str,
     config: Dict[str, Any],
@@ -1349,6 +1416,11 @@ def _run_plan(
     auto_approve_reviewer: Optional[str] = None,
     registry_path_for_keypoints: Optional[Path] = None,
     registry_path_for_sync: Optional[Path] = None,
+    retry_failed_only: bool = False,
+    retry_source_keypoints_run: Optional[str] = None,
+    retry_refined_run: Optional[str] = None,
+    retry_include_fish_present_no_keypoints: bool = False,
+    retry_force_new: bool = False,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "recording": str(plan.recording_dir),
@@ -1395,7 +1467,84 @@ def _run_plan(
         else:
             payload["refine_skipped_reason"] = "zero_keypoint_rois"
     else:
-        if method in {"yolo", "yolo_pose"}:
+        if retry_failed_only:
+            if method not in {"yolo", "yolo_pose"}:
+                raise RuntimeError(f"retry-failed-only requires YOLO method, got '{method}'.")
+            retry_result = _run_yolo_retry_failed_only(
+                str(plan.zarr_path),
+                config,
+                quiet=quiet,
+                model_path_override=(resolved_model.model_path if resolved_model else None),
+                source_keypoints_run=retry_source_keypoints_run,
+                refined_run=retry_refined_run,
+                include_fish_present_no_keypoints=retry_include_fish_present_no_keypoints,
+                force_new=retry_force_new,
+                registry=registry_path_for_keypoints,
+            )
+            payload["keypoint_retry"] = _jsonable(retry_result)
+            run_name = str(retry_result["run_name"])
+            payload["keypoints"] = _collect_stage_payload(
+                plan.zarr_path,
+                "keypoints_runs",
+                run_name,
+            )
+            updated_keypoint_outputs = bool(
+                retry_result.get("created_new_run") or retry_result.get("reused_existing")
+            )
+            if resolved_model is not None and bool(retry_result.get("created_new_run")):
+                _write_keypoint_model_resolution_provenance(
+                    zarr_path=plan.zarr_path,
+                    run_name=run_name,
+                    payload=resolved_model.payload,
+                )
+            if resolved_model is not None:
+                selected = (
+                    resolved_model.payload.get("selected", {})
+                    if isinstance(resolved_model.payload.get("selected"), dict)
+                    else {}
+                )
+                payload["model_resolution"] = {
+                    "mode": "registry",
+                    "selected_model_path": selected.get("model_path"),
+                    "selected_run_id": selected.get("run_id"),
+                    "selected_set_id": selected.get("set_id"),
+                    "selected_score": selected.get("score"),
+                }
+            if refine and updated_keypoint_outputs:
+                total_rois = _keypoints_total_rois(plan.zarr_path, run_name)
+                if total_rois is None or total_rois > 0:
+                    refined_run = _run_refine(str(plan.zarr_path), config, run_name, quiet=quiet)
+                    payload["refined_keypoints"] = _collect_stage_payload(
+                        plan.zarr_path,
+                        "refined_keypoints_runs",
+                        refined_run,
+                    )
+                    updated_keypoint_outputs = True
+                    if auto_approve_min_usable_rate is not None:
+                        payload["auto_review"] = _maybe_auto_approve_refined_keypoints(
+                            zarr_path=plan.zarr_path,
+                            refined_run=refined_run,
+                            min_usable_rate=float(auto_approve_min_usable_rate),
+                            intended_use=auto_approve_intended_use,
+                            reviewer=auto_approve_reviewer,
+                        )
+                        auto_review_payload = payload.get("auto_review")
+                        if isinstance(auto_review_payload, dict):
+                            review_status = auto_review_payload.get("review_status")
+                            if not isinstance(review_status, dict):
+                                review_status = auto_review_payload.get("existing_review_status")
+                            if isinstance(review_status, dict):
+                                auto_review_payload["step_status_sync"] = _sync_refined_keypoint_step_status_after_auto_review(
+                                    zarr_path=plan.zarr_path,
+                                    refined_run=refined_run,
+                                    stage_payload=payload["refined_keypoints"],
+                                    review_status=review_status,
+                                )
+                else:
+                    payload["refine_skipped_reason"] = "zero_keypoint_rois"
+            elif refine and str(retry_result.get("skipped_reason") or "") == "no_retry_targets":
+                payload["refine_skipped_reason"] = "no_retry_targets"
+        elif method in {"yolo", "yolo_pose"}:
             run_name = _run_yolo(
                 str(plan.zarr_path),
                 config,
@@ -1416,62 +1565,63 @@ def _run_plan(
             run_name = _latest_keypoints_run(plan.zarr_path)
             if not run_name:
                 raise RuntimeError("keypoints run not found after detection")
-        payload["keypoints"] = _collect_stage_payload(
-            plan.zarr_path,
-            "keypoints_runs",
-            run_name,
-        )
-        updated_keypoint_outputs = True
-        if resolved_model is not None:
-            _write_keypoint_model_resolution_provenance(
-                zarr_path=plan.zarr_path,
-                run_name=run_name,
-                payload=resolved_model.payload,
+        if not retry_failed_only:
+            payload["keypoints"] = _collect_stage_payload(
+                plan.zarr_path,
+                "keypoints_runs",
+                run_name,
             )
-            selected = (
-                resolved_model.payload.get("selected", {})
-                if isinstance(resolved_model.payload.get("selected"), dict)
-                else {}
-            )
-            payload["model_resolution"] = {
-                "mode": "registry",
-                "selected_model_path": selected.get("model_path"),
-                "selected_run_id": selected.get("run_id"),
-                "selected_set_id": selected.get("set_id"),
-                "selected_score": selected.get("score"),
-            }
-        if refine:
-            total_rois = _keypoints_total_rois(plan.zarr_path, run_name)
-            if total_rois is None or total_rois > 0:
-                refined_run = _run_refine(str(plan.zarr_path), config, run_name, quiet=quiet)
-                payload["refined_keypoints"] = _collect_stage_payload(
-                    plan.zarr_path,
-                    "refined_keypoints_runs",
-                    refined_run,
+            updated_keypoint_outputs = True
+            if resolved_model is not None:
+                _write_keypoint_model_resolution_provenance(
+                    zarr_path=plan.zarr_path,
+                    run_name=run_name,
+                    payload=resolved_model.payload,
                 )
-                updated_keypoint_outputs = True
-                if auto_approve_min_usable_rate is not None:
-                    payload["auto_review"] = _maybe_auto_approve_refined_keypoints(
-                        zarr_path=plan.zarr_path,
-                        refined_run=refined_run,
-                        min_usable_rate=float(auto_approve_min_usable_rate),
-                        intended_use=auto_approve_intended_use,
-                        reviewer=auto_approve_reviewer,
+                selected = (
+                    resolved_model.payload.get("selected", {})
+                    if isinstance(resolved_model.payload.get("selected"), dict)
+                    else {}
+                )
+                payload["model_resolution"] = {
+                    "mode": "registry",
+                    "selected_model_path": selected.get("model_path"),
+                    "selected_run_id": selected.get("run_id"),
+                    "selected_set_id": selected.get("set_id"),
+                    "selected_score": selected.get("score"),
+                }
+            if refine:
+                total_rois = _keypoints_total_rois(plan.zarr_path, run_name)
+                if total_rois is None or total_rois > 0:
+                    refined_run = _run_refine(str(plan.zarr_path), config, run_name, quiet=quiet)
+                    payload["refined_keypoints"] = _collect_stage_payload(
+                        plan.zarr_path,
+                        "refined_keypoints_runs",
+                        refined_run,
                     )
-                    auto_review_payload = payload.get("auto_review")
-                    if isinstance(auto_review_payload, dict):
-                        review_status = auto_review_payload.get("review_status")
-                        if not isinstance(review_status, dict):
-                            review_status = auto_review_payload.get("existing_review_status")
-                        if isinstance(review_status, dict):
-                            auto_review_payload["step_status_sync"] = _sync_refined_keypoint_step_status_after_auto_review(
-                                zarr_path=plan.zarr_path,
-                                refined_run=refined_run,
-                                stage_payload=payload["refined_keypoints"],
-                                review_status=review_status,
-                            )
-            else:
-                payload["refine_skipped_reason"] = "zero_keypoint_rois"
+                    updated_keypoint_outputs = True
+                    if auto_approve_min_usable_rate is not None:
+                        payload["auto_review"] = _maybe_auto_approve_refined_keypoints(
+                            zarr_path=plan.zarr_path,
+                            refined_run=refined_run,
+                            min_usable_rate=float(auto_approve_min_usable_rate),
+                            intended_use=auto_approve_intended_use,
+                            reviewer=auto_approve_reviewer,
+                        )
+                        auto_review_payload = payload.get("auto_review")
+                        if isinstance(auto_review_payload, dict):
+                            review_status = auto_review_payload.get("review_status")
+                            if not isinstance(review_status, dict):
+                                review_status = auto_review_payload.get("existing_review_status")
+                            if isinstance(review_status, dict):
+                                auto_review_payload["step_status_sync"] = _sync_refined_keypoint_step_status_after_auto_review(
+                                    zarr_path=plan.zarr_path,
+                                    refined_run=refined_run,
+                                    stage_payload=payload["refined_keypoints"],
+                                    review_status=review_status,
+                                )
+                else:
+                    payload["refine_skipped_reason"] = "zero_keypoint_rois"
 
     if updated_keypoint_outputs:
         payload["registry_sync"] = _sync_keypoint_registry_rows_after_run(
@@ -1614,6 +1764,49 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Refine existing keypoints runs without re-running keypoint detection.",
     )
     parser.add_argument(
+        "--no-refine-post-audit",
+        action="store_true",
+        help="Disable post-refinement coordinate-space audit JSON export.",
+    )
+    parser.add_argument(
+        "--refine-post-overlap",
+        action="store_true",
+        help="Enable post-refinement bad-row overlap analysis JSON export.",
+    )
+    parser.add_argument(
+        "--refine-post-audit-output-dir",
+        type=str,
+        help="Directory for post-refinement audit/overlap JSON files (default: /tmp).",
+    )
+    parser.add_argument(
+        "--retry-failed-only",
+        action="store_true",
+        help=(
+            "For YOLO keypoints, create a new keypoints run by re-predicting only refined failures "
+            "(excluding detection_issue and fish_present_no_keypoints by default)."
+        ),
+    )
+    parser.add_argument(
+        "--retry-source-keypoints-run",
+        type=str,
+        help="Optional source keypoints run to retry from (default: keypoints_runs latest).",
+    )
+    parser.add_argument(
+        "--retry-refined-run",
+        type=str,
+        help="Optional refined keypoints run to source failure targets from (default: matched latest).",
+    )
+    parser.add_argument(
+        "--retry-include-fish-present-no-keypoints",
+        action="store_true",
+        help="Include fish_present_no_keypoints failures in retry targets (default excludes them).",
+    )
+    parser.add_argument(
+        "--retry-force-new",
+        action="store_true",
+        help="Force creating a new retry run even when an identical retry fingerprint already exists.",
+    )
+    parser.add_argument(
         "--auto-approve-perfect",
         action="store_true",
         help=(
@@ -1692,6 +1885,24 @@ def main(argv: Optional[List[str]] = None) -> int:
             file=sys.stderr,
         )
         return 1
+    retry_option_fields = (
+        bool(args.retry_source_keypoints_run),
+        bool(args.retry_refined_run),
+        bool(args.retry_include_fish_present_no_keypoints),
+        bool(args.retry_force_new),
+    )
+    if any(retry_option_fields) and not bool(args.retry_failed_only):
+        print(
+            "Error: retry options require --retry-failed-only.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.retry_failed_only and args.refine_only:
+        print(
+            "Error: --retry-failed-only cannot be combined with --refine-only.",
+            file=sys.stderr,
+        )
+        return 1
     auto_approve_min_usable_rate: Optional[float] = None
     if args.auto_approve_perfect:
         auto_approve_min_usable_rate = 1.0
@@ -1750,9 +1961,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not log_roots and explicit_zarrs:
         log_roots = [_infer_recording_dir(explicit_zarrs[0]).parent]
     skip_existing = not args.overwrite
+    if args.retry_failed_only:
+        skip_existing = False
 
     config = _load_config(args.config)
+    refine_cfg = config.setdefault("refine_keypoints", {})
+    if args.no_refine_post_audit:
+        refine_cfg["post_refinement_audit"] = False
+    if args.refine_post_overlap:
+        refine_cfg["post_refinement_overlap"] = True
+    if args.refine_post_audit_output_dir is not None:
+        refine_cfg["post_refinement_output_dir"] = str(args.refine_post_audit_output_dir)
     method = _resolve_method(config, args.method)
+    if args.retry_failed_only and method not in {"yolo", "yolo_pose"}:
+        print(
+            f"Error: --retry-failed-only requires YOLO keypoints method, got '{method}'.",
+            file=sys.stderr,
+        )
+        return 1
     if args.model_source == "registry" and method not in {"yolo", "yolo_pose"}:
         print(
             f"Error: --model-source registry requires YOLO keypoints method, got '{method}'.",
@@ -1794,6 +2020,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             quiet=bool(args.quiet),
             refine=bool(args.refine),
             refine_only=bool(args.refine_only),
+            no_refine_post_audit=bool(args.no_refine_post_audit),
+            refine_post_overlap=bool(args.refine_post_overlap),
+            refine_post_audit_output_dir=args.refine_post_audit_output_dir,
             dask_progress=bool(args.dask_progress),
             json=bool(args.json),
             source=args.source,
@@ -1803,6 +2032,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             auto_approve_min_usable_rate=auto_approve_min_usable_rate,
             auto_approve_intended_use=args.auto_approve_intended_use,
             auto_approve_reviewer=args.auto_approve_reviewer,
+            retry_failed_only=bool(args.retry_failed_only),
+            retry_source_keypoints_run=args.retry_source_keypoints_run,
+            retry_refined_run=args.retry_refined_run,
+            retry_include_fish_present_no_keypoints=bool(args.retry_include_fish_present_no_keypoints),
+            retry_force_new=bool(args.retry_force_new),
         )
 
     plans: List[KeypointPlan] = []
@@ -2092,6 +2326,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     auto_approve_reviewer=args.auto_approve_reviewer,
                     registry_path_for_keypoints=(resolved_registry_path or args.registry),
                     registry_path_for_sync=(resolved_registry_path or args.registry),
+                    retry_failed_only=bool(args.retry_failed_only),
+                    retry_source_keypoints_run=args.retry_source_keypoints_run,
+                    retry_refined_run=args.retry_refined_run,
+                    retry_include_fish_present_no_keypoints=bool(args.retry_include_fish_present_no_keypoints),
+                    retry_force_new=bool(args.retry_force_new),
                 )
                 ok += 1
                 if args.json:
@@ -2136,6 +2375,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                         auto_approve_reviewer=args.auto_approve_reviewer,
                         registry_path_for_keypoints=(resolved_registry_path or args.registry),
                         registry_path_for_sync=(resolved_registry_path or args.registry),
+                        retry_failed_only=bool(args.retry_failed_only),
+                        retry_source_keypoints_run=args.retry_source_keypoints_run,
+                        retry_refined_run=args.retry_refined_run,
+                        retry_include_fish_present_no_keypoints=bool(args.retry_include_fish_present_no_keypoints),
+                        retry_force_new=bool(args.retry_force_new),
                     )
                     ok += 1
                     if args.json:

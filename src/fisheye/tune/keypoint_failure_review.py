@@ -7,7 +7,7 @@ Edits are applied to the refined run only (raw keypoints remain untouched).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Sequence, Dict, Any
+from typing import Optional, Sequence, Dict, Any, Tuple
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -20,12 +20,18 @@ import zarr
 
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
+from ..shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
 from ..refinement.keypoint_quality import compute_geometry_metrics
 from ..refinement.refine_keypoints import _compute_heading_from_points
+from ..registry.db import Registry, RegistryPaths
 
 
 _DEFAULT_LABELS = ("swim_bladder", "eye_left", "eye_right")
 _DEFAULT_COLORS = ("#22c55e", "#1a66f3", "#f85151")
+_NO_REVIEWABLE_FAILURES_POLICY_ID = "keypoint_no_reviewable_failures_v1"
+_NO_REVIEWABLE_FAILURES_POLICY_VERSION = 1
+_NO_REVIEWABLE_FAILURES_ALLOWED_TAGS = ("fish_present_no_keypoints",)
+_NO_REVIEWABLE_FAILURES_BLOCKED_TAGS = ("detection_issue",)
 
 
 def _get_latest_run(root: zarr.Group, group_name: str) -> str:
@@ -103,17 +109,7 @@ def _load_failure_indices(refined: zarr.Group, include_all: bool = False) -> np.
         if total <= 0:
             return np.zeros(0, dtype="i4")
         return np.arange(total, dtype="i4")
-    if "refined_success" in refined:
-        success = np.asarray(refined["refined_success"][:], dtype=bool)
-        failures = np.where(~success)[0].astype("i4", copy=False)
-    elif "source_success" in refined:
-        success = np.asarray(refined["source_success"][:], dtype=bool)
-        failures = np.where(~success)[0].astype("i4", copy=False)
-    elif "failure_indices" in refined:
-        failures = np.asarray(refined["failure_indices"][:], dtype="i4")
-    else:
-        return np.zeros(0, dtype="i4")
-
+    failures = _load_raw_failure_indices(refined)
     if failures.size == 0:
         return failures
     reason_vals = read_reason_labels(refined)
@@ -133,6 +129,130 @@ def _load_failure_indices(refined: zarr.Group, include_all: bool = False) -> np.
             and "detection_issue" not in text
         )
     return failures[np.array(keep_mask, dtype=bool)]
+
+
+def _load_raw_failure_indices(refined: zarr.Group) -> np.ndarray:
+    if "refined_success" in refined:
+        success = np.asarray(refined["refined_success"][:], dtype=bool)
+        return np.where(~success)[0].astype("i4", copy=False)
+    elif "source_success" in refined:
+        success = np.asarray(refined["source_success"][:], dtype=bool)
+        return np.where(~success)[0].astype("i4", copy=False)
+    elif "failure_indices" in refined:
+        return np.asarray(refined["failure_indices"][:], dtype="i4")
+    else:
+        return np.zeros(0, dtype="i4")
+
+
+def _empty_review_auto_state(refined: zarr.Group, raw_failures: np.ndarray) -> Tuple[bool, Optional[str]]:
+    if raw_failures.size == 0:
+        return True, None
+
+    reason_vals = read_reason_labels(refined)
+    if reason_vals is None:
+        return False, "missing_reason_labels"
+    reason_vals = np.asarray(reason_vals, dtype=object)
+    if reason_vals.size == 0:
+        return False, "missing_reason_labels"
+
+    has_detection_issue = False
+    has_other_failure = False
+    for idx in raw_failures:
+        try:
+            raw_text = reason_vals[int(idx)]
+        except Exception:
+            has_other_failure = True
+            continue
+        text = str(raw_text) if raw_text is not None else ""
+        tags = {token.strip() for token in text.split("|") if token.strip()}
+        if "detection_issue" in tags:
+            has_detection_issue = True
+            continue
+        if "fish_present_no_keypoints" in tags and tags.issubset({"fish_present_no_keypoints"}):
+            continue
+        has_other_failure = True
+
+    if has_detection_issue:
+        return False, "detection_issue_present"
+    if has_other_failure:
+        return False, "non_reviewable_failures_present"
+    return True, None
+
+
+def _failure_reason_tag_counts(refined: zarr.Group, raw_failures: np.ndarray) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    if raw_failures.size == 0:
+        return counts
+    reason_vals = read_reason_labels(refined)
+    if reason_vals is None:
+        return counts
+    reason_vals = np.asarray(reason_vals, dtype=object)
+    if reason_vals.size == 0:
+        return counts
+    for idx in raw_failures:
+        try:
+            raw_text = reason_vals[int(idx)]
+        except Exception:
+            continue
+        text = str(raw_text) if raw_text is not None else ""
+        for token in text.split("|"):
+            tag = token.strip()
+            if not tag:
+                continue
+            counts[tag] = int(counts.get(tag, 0) + 1)
+    return counts
+
+
+def _build_no_reviewable_failures_auto_review(
+    *,
+    refined: zarr.Group,
+    raw_failures: np.ndarray,
+    state: str,
+) -> Dict[str, object]:
+    now_utc = datetime.now(timezone.utc).isoformat()
+    reason_counts = _failure_reason_tag_counts(refined, raw_failures)
+    blocked_tags = {
+        tag: int(reason_counts.get(tag, 0))
+        for tag in _NO_REVIEWABLE_FAILURES_BLOCKED_TAGS
+    }
+    blocked_total = int(sum(blocked_tags.values()))
+    allowed = set(_NO_REVIEWABLE_FAILURES_ALLOWED_TAGS)
+    blocked = set(_NO_REVIEWABLE_FAILURES_BLOCKED_TAGS)
+    other_tags = {
+        tag: count
+        for tag, count in reason_counts.items()
+        if tag not in allowed and tag not in blocked
+    }
+    other_total = int(sum(other_tags.values()))
+    return {
+        "policy_id": _NO_REVIEWABLE_FAILURES_POLICY_ID,
+        "policy_version": int(_NO_REVIEWABLE_FAILURES_POLICY_VERSION),
+        "result": state,
+        "applied_at_utc": now_utc,
+        "thresholds": {
+            "allowed_failure_tags": list(_NO_REVIEWABLE_FAILURES_ALLOWED_TAGS),
+            "blocked_failure_tags": list(_NO_REVIEWABLE_FAILURES_BLOCKED_TAGS),
+            "other_failure_tag_count_max": 0,
+        },
+        "checks": {
+            "blocked_failure_tags": {
+                "observed_total": blocked_total,
+                "tags": blocked_tags,
+                "pass": blocked_total == 0,
+            },
+            "other_failure_tags": {
+                "observed_total": other_total,
+                "tags": other_tags,
+                "pass": other_total == 0,
+            },
+        },
+        "evidence": {
+            "raw_failure_count": int(raw_failures.size),
+            "reason_counts": reason_counts,
+            "fish_present_no_keypoints_count": int(reason_counts.get("fish_present_no_keypoints", 0)),
+            "detection_issue_count": int(reason_counts.get("detection_issue", 0)),
+        },
+    }
 
 
 def _clean_reason(existing: str, new_tags: Sequence[str]) -> str:
@@ -370,27 +490,270 @@ def _build_keypoint_signature(attrs: Dict[str, Any]) -> Dict[str, object]:
     }
 
 
+def _normalize_attr(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _jsonable_scalar(value: object) -> object:
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _parse_json_mapping(value: object) -> Optional[Dict[str, Any]]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8", "ignore")
+        except Exception:
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return None
+        if isinstance(parsed, dict):
+            return dict(parsed)
+    return None
+
+
+def _resolve_registry_dataset_context(
+    zarr_path: Path,
+    *,
+    registry_path: Optional[Path] = None,
+) -> Optional[Dict[str, Optional[str]]]:
+    resolved_zarr = zarr_path.expanduser().resolve()
+    resolved_registry = (
+        registry_path.expanduser().resolve()
+        if registry_path is not None
+        else RegistryPaths.from_env(Path.cwd()).path.expanduser().resolve()
+    )
+    if not resolved_registry.exists():
+        return None
+
+    registry = Registry(resolved_registry)
+    try:
+        path_hash = hashlib.sha256(str(resolved_zarr).encode("utf-8")).hexdigest()
+        row = registry.conn.execute(
+            """
+            SELECT dataset_id, recording_id, zarr_use
+            FROM datasets
+            WHERE path_hash = ?
+              AND (status IS NULL OR lower(status) = 'active')
+            ORDER BY COALESCE(last_seen_utc, '') DESC, dataset_id
+            LIMIT 1;
+            """,
+            (path_hash,),
+        ).fetchone()
+        if row is None:
+            row = registry.conn.execute(
+                """
+                SELECT dataset_id, recording_id, zarr_use
+                FROM datasets
+                WHERE zarr_path = ?
+                  AND (status IS NULL OR lower(status) = 'active')
+                ORDER BY COALESCE(last_seen_utc, '') DESC, dataset_id
+                LIMIT 1;
+                """,
+                (str(resolved_zarr),),
+            ).fetchone()
+        if row is None:
+            row = registry.conn.execute(
+                """
+                SELECT dataset_id, recording_id, zarr_use
+                FROM datasets
+                WHERE lower(COALESCE(zarr_path, '')) = lower(?)
+                  AND (status IS NULL OR lower(status) = 'active')
+                ORDER BY COALESCE(last_seen_utc, '') DESC, dataset_id
+                LIMIT 1;
+                """,
+                (str(resolved_zarr),),
+            ).fetchone()
+        if row is None:
+            return None
+        dataset_id = _normalize_attr(row["dataset_id"])
+        if dataset_id is None:
+            return None
+        return {
+            "registry_path": str(resolved_registry),
+            "dataset_id": dataset_id,
+            "recording_id": _normalize_attr(row["recording_id"]),
+            "zarr_use": _normalize_attr(row["zarr_use"]),
+        }
+    finally:
+        registry.close()
+
+
+def _refined_coverage_pct(refined: zarr.Group) -> Optional[float]:
+    summary_raw = refined.attrs.get("summary_statistics")
+    candidates: list[object] = []
+    if isinstance(summary_raw, dict):
+        postprocess = summary_raw.get("postprocess")
+        refine = summary_raw.get("refine")
+        if isinstance(postprocess, dict):
+            candidates.extend([postprocess.get("pass_rate_percent"), postprocess.get("success_rate_percent")])
+        if isinstance(refine, dict):
+            candidates.extend([refine.get("pass_rate_percent"), refine.get("success_rate_percent")])
+        candidates.extend([summary_raw.get("pass_rate_percent"), summary_raw.get("success_rate_percent")])
+    candidates.append(refined.attrs.get("success_rate"))
+
+    for raw in candidates:
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value <= 1.0:
+            value *= 100.0
+        return value
+    return None
+
+
+def _build_refined_keypoint_details(refined: zarr.Group) -> Dict[str, Any]:
+    details: Dict[str, Any] = {
+        "reason": "present",
+        "latest_selector": "keypoint_failure_review_manual",
+    }
+    for key in ("source_keypoints_run", "source_crop_run", "source_detect_run"):
+        value = refined.attrs.get(key)
+        if value is not None:
+            details[key] = _jsonable_scalar(value)
+
+    summary_raw = refined.attrs.get("summary_statistics")
+    if isinstance(summary_raw, dict):
+        for key in ("total_rois", "refined_success", "remaining_failures", "usable_keypoints", "pass_rate_percent"):
+            if key in summary_raw and summary_raw.get(key) is not None:
+                details[key] = _jsonable_scalar(summary_raw.get(key))
+        postprocess = summary_raw.get("postprocess")
+        if isinstance(postprocess, dict):
+            for key in ("total_rois", "refined_success", "remaining_failures", "usable_keypoints", "pass_rate_percent"):
+                if postprocess.get(key) is not None:
+                    details[key] = _jsonable_scalar(postprocess.get(key))
+    return details
+
+
+def _sync_registry_after_review_status(
+    *,
+    zarr_path: str,
+    refined_run: str,
+    refined: zarr.Group,
+    review_status: Dict[str, object],
+    registry_path: Optional[Path] = None,
+) -> Dict[str, object]:
+    context = _resolve_registry_dataset_context(Path(zarr_path), registry_path=registry_path)
+    if context is None:
+        return {"synced": False, "reason": "status_context_unavailable"}
+
+    resolved_registry = Path(str(context["registry_path"]))
+    resolved_zarr = Path(zarr_path).expanduser().resolve()
+    registry = Registry(resolved_registry)
+    try:
+        dataset_id = str(context["dataset_id"])
+        row = registry.conn.execute(
+            """
+            SELECT details_json
+            FROM recording_step_status
+            WHERE dataset_id = ? AND step_name = 'refined_keypoints'
+            LIMIT 1;
+            """,
+            (dataset_id,),
+        ).fetchone()
+        existing_details = _parse_json_mapping(row["details_json"]) if row is not None else None
+        merged_details: Dict[str, Any] = {}
+        if isinstance(existing_details, dict):
+            merged_details.update(existing_details)
+        merged_details.update(_build_refined_keypoint_details(refined))
+
+        method = (
+            _normalize_attr(refined.attrs.get("method"))
+            or _normalize_attr(refined.attrs.get("refinement_role"))
+            or "refine_keypoints"
+        )
+        metadata = DatasetMetadata(
+            dataset_id=dataset_id,
+            session_uuid=None,
+            recording_id=_normalize_attr(context.get("recording_id")),
+            zarr_use=_normalize_attr(context.get("zarr_use")),
+            zarr_purpose=None,
+        )
+        wrote = emit_stage_completion(
+            None,
+            resolved_zarr,
+            step_name="refined_keypoints",
+            status="ok",
+            source="keypoint_failure_review_manual",
+            run_name=refined_run,
+            method=method,
+            coverage_pct=_refined_coverage_pct(refined),
+            review_status_json=review_status,
+            details_json=merged_details,
+            console=None,
+            registry=registry,
+            auto_registry_from_env=False,
+            invalidate_on_ok=False,
+            metadata=metadata,
+            upsert_dataset_row=False,
+        )
+        if not wrote:
+            return {"synced": False, "reason": "sync_failed", "error": "emit_stage_completion returned false"}
+        perf_rows = int(
+            registry.refresh_keypoint_performance_for_dataset(
+                dataset_id,
+                zarr_path=resolved_zarr,
+                recording_id=context.get("recording_id"),
+                zarr_use=context.get("zarr_use"),
+            )
+        )
+        quality_rows = int(registry.refresh_keypoint_quality_for_dataset(dataset_id, zarr_path=resolved_zarr))
+        return {
+            "synced": True,
+            "dataset_id": dataset_id,
+            "recording_id": context.get("recording_id"),
+            "keypoint_performance_rows": perf_rows,
+            "keypoint_quality_rows": quality_rows,
+        }
+    except Exception as exc:
+        return {"synced": False, "reason": "sync_failed", "error": str(exc)}
+    finally:
+        registry.close()
+
+
 def _apply_review_status(
     refined_parent: zarr.Group,
     refined_run: str,
     refined: zarr.Group,
     *,
+    zarr_path: str,
     state: str,
     method: str,
     intended_use: str,
     reviewer: Optional[str],
     notes: Optional[str],
-) -> Dict[str, object]:
+    registry_path: Optional[Path] = None,
+    auto_review: Optional[Dict[str, object]] = None,
+) -> Tuple[Dict[str, object], Dict[str, object]]:
+    now_utc = datetime.now(timezone.utc).isoformat()
     payload: Dict[str, object] = {
         "state": state,
         "method": method,
         "intended_use": intended_use,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp_utc": now_utc,
+        "timestamp": now_utc,
     }
     if reviewer:
         payload["reviewer"] = reviewer
     if notes:
         payload["notes"] = notes
+    if isinstance(auto_review, dict):
+        payload["auto_review"] = dict(auto_review)
 
     refined.attrs["keypoint_review_status"] = payload
 
@@ -401,7 +764,14 @@ def _apply_review_status(
     refined.attrs["keypoint_review_signature"] = signature
 
     refined_parent.attrs["keypoint_review_status_latest"] = refined_run
-    return payload
+    sync_result = _sync_registry_after_review_status(
+        zarr_path=zarr_path,
+        refined_run=refined_run,
+        refined=refined,
+        review_status=payload,
+        registry_path=registry_path,
+    )
+    return payload, sync_result
 
 
 def _normalize_optional_text(raw: object) -> Optional[str]:
@@ -513,14 +883,63 @@ def launch_review(
         targeted = True
         failures = np.array(sorted(selected), dtype="i4")
     if failures.size == 0:
+        raw_failures = _load_raw_failure_indices(refined)
         if targeted:
             print("No matching keypoints found for requested targets.")
             return
         if include_all:
             print("No keypoints found to review.")
+            return
         else:
-            print("No failed keypoints to review.")
-        return
+            can_auto_apply, blocked_reason = _empty_review_auto_state(refined, raw_failures)
+            if can_auto_apply:
+                auto_review_payload = _build_no_reviewable_failures_auto_review(
+                    refined=refined,
+                    raw_failures=raw_failures,
+                    state=review_state,
+                )
+                auto_reviewer = f"auto:{_NO_REVIEWABLE_FAILURES_POLICY_ID}"
+                auto_notes = review_notes or (
+                    "Auto-approved: no reviewable failures "
+                    "(fish_present_no_keypoints-only or none)."
+                )
+                payload, sync = _apply_review_status(
+                    refined_parent,
+                    refined_run,
+                    refined,
+                    zarr_path=zarr_path,
+                    state=review_state,
+                    method="algorithmic",
+                    intended_use=resolved_review_intended_use,
+                    reviewer=auto_reviewer,
+                    notes=auto_notes,
+                    auto_review=auto_review_payload,
+                )
+                if raw_failures.size > 0:
+                    print(
+                        "No reviewable failures found; auto-applied keypoint review status "
+                        "for fish_present_no_keypoints-only failures."
+                    )
+                else:
+                    print("No failed keypoints to review; auto-applied keypoint review status.")
+                print(
+                    f"✓ Keypoint review set: {payload.get('state')} "
+                    f"({payload.get('method')}/{payload.get('intended_use')})"
+                )
+                if not bool(sync.get("synced")):
+                    reason = str(sync.get("reason") or "unknown")
+                    if reason != "status_context_unavailable":
+                        detail = str(sync.get("error") or "")
+                        suffix = f" ({detail})" if detail else ""
+                        print(f"Warning: registry sync skipped: {reason}{suffix}")
+            else:
+                print("No failed keypoints to review.")
+                print(
+                    "Review status not auto-applied because remaining failures are not "
+                    f"fish_present_no_keypoints-only ({blocked_reason})."
+                )
+                return
+            return
     if flag_path is not None:
         print(f"Frame flag file: {flag_path.expanduser().resolve(strict=False)}")
     if detect_flag_path is not None:
@@ -884,10 +1303,11 @@ def launch_review(
     def on_key(event) -> None:
         nonlocal active_idx, show_text
         def apply_state(state: str) -> None:
-            payload = _apply_review_status(
+            payload, sync = _apply_review_status(
                 refined_parent,
                 refined_run,
                 refined,
+                zarr_path=zarr_path,
                 state=state,
                 method=review_method,
                 intended_use=resolved_review_intended_use,
@@ -895,6 +1315,12 @@ def launch_review(
                 notes=review_notes,
             )
             print(f"✓ Keypoint review set: {payload.get('state')} ({payload.get('method')}/{payload.get('intended_use')})")
+            if not bool(sync.get("synced")):
+                reason = str(sync.get("reason") or "unknown")
+                if reason != "status_context_unavailable":
+                    detail = str(sync.get("error") or "")
+                    suffix = f" ({detail})" if detail else ""
+                    print(f"Warning: registry sync skipped: {reason}{suffix}")
 
         if event.key in {"1", "2", "3"}:
             active_idx = int(event.key) - 1

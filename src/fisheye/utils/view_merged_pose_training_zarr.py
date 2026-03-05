@@ -180,10 +180,14 @@ def main() -> int:
 
     roi_images = crop_group["roi_images"]
     bbox_pose_all = np.asarray(crop_group["bbox_norm_coords"][:], dtype=np.float32)
-    if "crop_bbox_norm_coords" not in crop_group:
-        raise SystemExit("Merged crop run missing crop_bbox_norm_coords (expected new merged schema).")
-    # Keep loading for schema enforcement/provenance sanity, but we do not render it.
-    _ = np.asarray(crop_group["crop_bbox_norm_coords"][:], dtype=np.float32)
+    if "crop_bbox_norm_coords" in crop_group:
+        # Keep loading for schema enforcement/provenance sanity, but we do not render it.
+        _ = np.asarray(crop_group["crop_bbox_norm_coords"][:], dtype=np.float32)
+    else:
+        print(
+            "WARNING: merged crop run missing crop_bbox_norm_coords; "
+            "continuing in legacy-compat mode."
+        )
     keypoints_all = np.asarray(kp_group["keypoints_roi"][:], dtype=np.float32)
     detection_success = (
         np.asarray(kp_group["detection_success"][:], dtype=bool)

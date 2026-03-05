@@ -31,9 +31,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRe
 from rich.align import Align
 
 # Metadata helpers
-from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
-from ..registry.status_ledger import upsert_recording_step_status
-from ..registry.step_cascade import invalidate_downstream_steps
+from ..shared.registry_stage_complete import emit_stage_completion
 from ..utils.metadata import has_raw_video, get_video_source_path, get_total_frames, get_detection_method
 from ..shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
@@ -176,13 +174,6 @@ def _build_crop_stage_provenance(
     return {key: value for key, value in provenance.items() if value is not None}
 
 
-def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
-    try:
-        return int(path.stat().st_mtime_ns)
-    except OSError:
-        return None
-
-
 def _emit_crop_step_status(
     *,
     root: zarr.Group,
@@ -195,64 +186,25 @@ def _emit_crop_step_status(
     details: Dict[str, Any],
     console: Optional[Console],
 ) -> None:
-    try:
-        zarr_file = Path(zarr_path).expanduser().resolve()
-        dataset_id, session_uuid = resolve_dataset_id(root, zarr_file)
-        recording_id = (
-            str(root.attrs.get("recording_id")).strip()
-            if root.attrs.get("recording_id") is not None
-            else None
-        )
-        if not recording_id and session_uuid:
-            recording_id = str(session_uuid).strip()
-        zarr_use = str(root.attrs.get("zarr_use")).strip() if root.attrs.get("zarr_use") is not None else None
-        zarr_purpose = (
-            str(root.attrs.get("zarr_purpose")).strip()
-            if root.attrs.get("zarr_purpose") is not None
-            else None
-        )
-
-        registry_path = RegistryPaths.from_env(Path.cwd()).path
-        registry = Registry(registry_path)
-        try:
-            registry.upsert_dataset(
-                dataset_id,
-                session_uuid=session_uuid,
-                zarr_path=zarr_file,
-                recording_id=recording_id,
-                zarr_use=zarr_use,
-                zarr_purpose=zarr_purpose,
-            )
-            upsert_recording_step_status(
-                registry,
-                dataset_id=dataset_id,
-                recording_id=recording_id,
-                step_name="crop",
-                status=status,
-                run_name=run_name,
-                method=method,
-                coverage_pct=coverage_pct,
-                review_status_json=review_status,
-                details_json=details,
-                source=_CROP_STATUS_SOURCE,
-                zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_file),
-            )
-            if status == "ok":
-                invalidate_downstream_steps(
-                    registry,
-                    dataset_id=dataset_id,
-                    step_name="crop",
-                    source=_CROP_STATUS_SOURCE,
-                    recording_id=recording_id,
-                    trigger_run_name=run_name,
-                )
-        finally:
-            registry.close()
-    except Exception as exc:
-        if console is not None:
-            console.print(
-                f"[yellow]Warning:[/yellow] failed to write recording step status for crop: {exc}"
-            )
+    zarr_file = Path(zarr_path).expanduser().resolve()
+    emit_stage_completion(
+        root,
+        zarr_file,
+        step_name="crop",
+        status=status,
+        source=_CROP_STATUS_SOURCE,
+        run_name=run_name,
+        method=method,
+        coverage_pct=coverage_pct,
+        review_status_json=review_status,
+        details_json=details,
+        console=console,
+        warning_label="crop",
+        auto_registry_from_env=True,
+        require_env_registry_exists=False,
+        invalidate_on_ok=True,
+        trigger_run_name=run_name,
+    )
 
 
 def infer_detection_source_type(

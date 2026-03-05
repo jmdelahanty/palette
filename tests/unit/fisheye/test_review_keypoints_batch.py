@@ -226,10 +226,10 @@ def test_main_registry_mode_launches_keypoint_review(monkeypatch, tmp_path: Path
 
     monkeypatch.setattr(mod, "_build_plans", _fail_if_called)
 
-    seen_cmds: list[list[str]] = []
+    seen_runs: list[tuple[list[str], dict[str, object]]] = []
 
-    def _fake_run(cmd: list[str], check: bool = False) -> None:  # noqa: ARG001
-        seen_cmds.append(cmd)
+    def _fake_run(cmd: list[str], check: bool = False, **kwargs: object) -> None:  # noqa: ARG001
+        seen_runs.append((cmd, kwargs))
 
     monkeypatch.setattr(mod.subprocess, "run", _fake_run)
 
@@ -243,13 +243,16 @@ def test_main_registry_mode_launches_keypoint_review(monkeypatch, tmp_path: Path
         ]
     )
     assert rc == 0
-    assert len(seen_cmds) == 1
-    cmd = seen_cmds[0]
+    assert len(seen_runs) == 1
+    cmd, kwargs = seen_runs[0]
     assert cmd[1:3] == ["-m", "fisheye.tune.keypoint_review"]
     assert "--manual" in cmd
     assert "--refined-run" in cmd
     assert "refined_a" in cmd
     assert "--review-intended-use" not in cmd
+    env = kwargs.get("env")
+    assert isinstance(env, dict)
+    assert env.get("PALETTE_REGISTRY_PATH") == str((tmp_path / "registry.sqlite").resolve())
 
 
 def test_main_registry_mode_passes_explicit_review_intended_use(monkeypatch, tmp_path: Path) -> None:
@@ -264,10 +267,10 @@ def test_main_registry_mode_passes_explicit_review_intended_use(monkeypatch, tmp
     monkeypatch.setattr(mod, "_build_plans_from_registry", lambda *_args, **_kwargs: plans)
     monkeypatch.setattr(mod, "_build_plans", lambda *_args, **_kwargs: [])
 
-    seen_cmds: list[list[str]] = []
+    seen_runs: list[tuple[list[str], dict[str, object]]] = []
 
-    def _fake_run(cmd: list[str], check: bool = False) -> None:  # noqa: ARG001
-        seen_cmds.append(cmd)
+    def _fake_run(cmd: list[str], check: bool = False, **kwargs: object) -> None:  # noqa: ARG001
+        seen_runs.append((cmd, kwargs))
 
     monkeypatch.setattr(mod.subprocess, "run", _fake_run)
 
@@ -283,11 +286,14 @@ def test_main_registry_mode_passes_explicit_review_intended_use(monkeypatch, tmp
         ]
     )
     assert rc == 0
-    assert len(seen_cmds) == 1
-    cmd = seen_cmds[0]
+    assert len(seen_runs) == 1
+    cmd, kwargs = seen_runs[0]
     assert "--review-intended-use" in cmd
     idx = cmd.index("--review-intended-use")
     assert cmd[idx + 1] == "full_recording"
+    env = kwargs.get("env")
+    assert isinstance(env, dict)
+    assert env.get("PALETTE_REGISTRY_PATH") == str((tmp_path / "registry.sqlite").resolve())
 
 
 def test_main_registry_mode_passes_review_state_filter(monkeypatch, tmp_path: Path) -> None:

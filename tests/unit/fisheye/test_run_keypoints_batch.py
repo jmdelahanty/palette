@@ -944,3 +944,205 @@ def test_main_auto_approve_requires_refine_flag(tmp_path: Path) -> None:
         ]
     )
     assert rc == 1
+
+
+def test_run_plan_retry_failed_only_routes_to_retry_helper(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured_retry_kwargs: dict[str, object] = {}
+    captured_provenance: dict[str, object] = {}
+
+    def _fake_retry(*args, **kwargs):  # noqa: ANN002, ANN003
+        captured_retry_kwargs.update(kwargs)
+        return {
+            "run_name": "keypoints_retry_001",
+            "source_keypoints_run": "keypoints_001",
+            "source_refined_run": "refined_keypoints_001",
+            "retry_target_count": 7,
+            "retry_replaced_count": 6,
+            "retry_selector": "failed_only",
+            "retry_policy": "replace_on_success_only",
+            "updated": True,
+            "created_new_run": True,
+            "reused_existing": False,
+        }
+
+    def _fake_collect(_zarr_path: Path, group_name: str, run_name: str) -> dict:
+        if group_name == "keypoints_runs":
+            return {
+                "group": group_name,
+                "run_name": run_name,
+                "method": "yolo_pose",
+                "summary_statistics": {"total_rois": 10},
+                "source_runs": {},
+            }
+        return {
+            "group": group_name,
+            "run_name": run_name,
+            "method": "refine_keypoints",
+            "summary_statistics": {"total_rois": 10, "usable_keypoints": 10},
+            "source_runs": {"source_keypoints_run": "keypoints_retry_001"},
+        }
+
+    monkeypatch.setattr(mod, "_run_yolo_retry_failed_only", _fake_retry)
+    monkeypatch.setattr(mod, "_collect_stage_payload", _fake_collect)
+    monkeypatch.setattr(mod, "_keypoints_total_rois", lambda _zarr_path, _run_name: 10)
+    monkeypatch.setattr(mod, "_run_refine", lambda *args, **kwargs: "refined_keypoints_retry_001")  # noqa: ANN002, ANN003
+    monkeypatch.setattr(
+        mod,
+        "_sync_keypoint_registry_rows_after_run",
+        lambda **kwargs: {"synced": True, "dataset_id": "dataset_retry"},  # noqa: ANN003
+    )
+    monkeypatch.setattr(
+        mod,
+        "_write_keypoint_model_resolution_provenance",
+        lambda **kwargs: captured_provenance.update(kwargs),  # noqa: ANN003
+    )
+
+    plan = mod.KeypointPlan(
+        recording_dir=tmp_path / "recording",
+        h5_path=None,
+        zarr_path=tmp_path / "recording" / "zarr" / "recording_analysis.zarr",
+        camera_id="7",
+        status="ok",
+    )
+    resolved_model = mod.ResolvedModel(
+        model_path="/models/pose_retry.pt",
+        payload={"selected": {"model_path": "/models/pose_retry.pt", "run_id": "pose_run_001", "set_id": "pose_set_001"}},
+    )
+    result = mod._run_plan(
+        plan,
+        config={},
+        method="yolo",
+        scheduler=None,
+        num_workers=None,
+        quiet=True,
+        dask_progress=False,
+        refine=True,
+        refine_only=False,
+        json_output=False,
+        resolved_model=resolved_model,
+        retry_failed_only=True,
+        retry_source_keypoints_run="keypoints_001",
+        retry_refined_run="refined_keypoints_001",
+        retry_include_fish_present_no_keypoints=True,
+        retry_force_new=True,
+    )
+
+    assert captured_retry_kwargs["model_path_override"] == "/models/pose_retry.pt"
+    assert captured_retry_kwargs["source_keypoints_run"] == "keypoints_001"
+    assert captured_retry_kwargs["refined_run"] == "refined_keypoints_001"
+    assert captured_retry_kwargs["include_fish_present_no_keypoints"] is True
+    assert captured_retry_kwargs["force_new"] is True
+    assert result["keypoint_retry"]["run_name"] == "keypoints_retry_001"
+    assert result["keypoints"]["run_name"] == "keypoints_retry_001"
+    assert result["refined_keypoints"]["run_name"] == "refined_keypoints_retry_001"
+    assert result["registry_sync"]["synced"] is True
+    assert captured_provenance["run_name"] == "keypoints_retry_001"
+
+
+def test_main_retry_options_require_retry_failed_only(tmp_path: Path) -> None:
+    rc = mod.main(
+        [
+            "--retry-refined-run",
+            "refined_keypoints_001",
+            "--no-log",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 1
+
+
+def test_main_retry_failed_only_requires_yolo_method(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(mod, "_load_config", lambda _path: {"keypoints": {"method": "traditional"}})
+    rc = mod.main(
+        [
+            "--apply",
+            "--retry-failed-only",
+            "--no-log",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 1
+
+
+def test_main_retry_failed_only_forces_skip_existing_false(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _capture_build_plans(*_args, **kwargs):  # noqa: ANN002, ANN003
+        captured["skip_existing"] = kwargs["skip_existing"]
+        return []
+
+    monkeypatch.setattr(mod, "_resolve_root", lambda _paths: [tmp_path])
+    monkeypatch.setattr(mod, "_load_config", lambda _path: {"keypoints": {"method": "yolo"}})
+    monkeypatch.setattr(mod, "_build_plans", _capture_build_plans)
+    monkeypatch.setattr(mod, "_build_plans_from_zarr", lambda *args, **kwargs: [])  # noqa: ARG005
+
+    rc = mod.main(
+        [
+            "--retry-failed-only",
+            "--no-log",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    assert captured["skip_existing"] is False
+
+
+def test_main_retry_failed_only_passes_retry_args_to_run_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    recording_dir = tmp_path / "recording_a"
+    plan = mod.KeypointPlan(
+        recording_dir=recording_dir,
+        h5_path=recording_dir / "raw" / "recording_a.h5",
+        zarr_path=recording_dir / "zarr" / "recording_a_analysis.zarr",
+        camera_id="1",
+        status="ok",
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(mod, "_resolve_root", lambda _paths: [tmp_path])
+    monkeypatch.setattr(mod, "_load_config", lambda _path: {"keypoints": {"method": "yolo"}})
+    monkeypatch.setattr(mod, "_build_plans", lambda *args, **kwargs: [plan])  # noqa: ARG005
+    monkeypatch.setattr(mod, "_build_plans_from_zarr", lambda *args, **kwargs: [])  # noqa: ARG005
+
+    def _fake_run_plan(*args, **kwargs):  # noqa: ANN002, ANN003
+        captured.update(kwargs)
+        return {
+            "recording": str(recording_dir),
+            "zarr": str(plan.zarr_path),
+            "status": "ok",
+            "method": "yolo",
+        }
+
+    monkeypatch.setattr(mod, "_run_plan", _fake_run_plan)
+
+    rc = mod.main(
+        [
+            "--apply",
+            "--retry-failed-only",
+            "--retry-source-keypoints-run",
+            "keypoints_123",
+            "--retry-refined-run",
+            "refined_keypoints_123",
+            "--retry-include-fish-present-no-keypoints",
+            "--retry-force-new",
+            "--no-log",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    assert captured["retry_failed_only"] is True
+    assert captured["retry_source_keypoints_run"] == "keypoints_123"
+    assert captured["retry_refined_run"] == "refined_keypoints_123"
+    assert captured["retry_include_fish_present_no_keypoints"] is True
+    assert captured["retry_force_new"] is True

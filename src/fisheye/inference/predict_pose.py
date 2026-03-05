@@ -14,8 +14,8 @@ from rich.console import Console
 
 from ..detection.detect_keypoints_yolo import detect_keypoints_yolo
 from ..registry.db import Registry, RegistryPaths
-from ..registry.status_ledger import upsert_recording_step_status
-from ..registry.step_cascade import invalidate_downstream_steps
+from ..shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
+from ..shared.type_conversions import as_float, normalize_attr
 
 _KEYPOINT_STEP_NAME = "keypoints"
 _STATUS_SOURCE = "runtime_predict_pose"
@@ -30,29 +30,11 @@ class _StatusContext:
 
 
 def _as_text(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        text = value.decode("utf-8", "ignore").strip()
-    else:
-        text = str(value).strip()
-    return text or None
+    return normalize_attr(value)
 
 
 def _as_float(value: object) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _zarr_mtime_ns(path: Path) -> Optional[int]:
-    try:
-        return int(path.stat().st_mtime_ns)
-    except OSError:
-        return None
+    return as_float(value)
 
 
 def _resolve_status_context(zarr_path: str) -> Optional[_StatusContext]:
@@ -247,31 +229,31 @@ def _emit_keypoint_status(
 
     registry = Registry(context.registry_path)
     try:
-        upsert_recording_step_status(
-            registry,
+        metadata = DatasetMetadata(
             dataset_id=context.dataset_id,
+            session_uuid=None,
             recording_id=context.recording_id,
+            zarr_use=None,
+            zarr_purpose=None,
+        )
+        emit_stage_completion(
+            None,
+            context.zarr_path,
             step_name=_KEYPOINT_STEP_NAME,
             status=status,
+            source=_STATUS_SOURCE,
             run_name=run_name,
             method=method,
             coverage_pct=coverage_pct,
             details_json=details,
-            source=_STATUS_SOURCE,
-            zarr_mtime_ns=_zarr_mtime_ns(context.zarr_path),
-        )
-        if status == "ok":
-            invalidate_downstream_steps(
-                registry,
-                dataset_id=context.dataset_id,
-                step_name=_KEYPOINT_STEP_NAME,
-                source=_STATUS_SOURCE,
-                recording_id=context.recording_id,
-                trigger_run_name=run_name,
-            )
-    except Exception as exc:
-        console.print(
-            f"[yellow]Warning:[/yellow] failed to write step status for '{_KEYPOINT_STEP_NAME}': {exc}"
+            console=console,
+            warning_label=_KEYPOINT_STEP_NAME,
+            registry=registry,
+            auto_registry_from_env=False,
+            invalidate_on_ok=True,
+            trigger_run_name=run_name,
+            metadata=metadata,
+            upsert_dataset_row=False,
         )
     finally:
         registry.close()

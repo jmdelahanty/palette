@@ -394,6 +394,18 @@ refinement parameters (thresholds), `summary_statistics`, `retune_params`,
 `keypoint_signature`, `keypoint_review_status`, `keypoint_review_signature`,
 scheduler config, environment/provenance metadata.
 
+Post-refinement coordinate-space diagnostics attrs (when audit is enabled):
+
+- `post_refinement_audit_json`: absolute path to `<dataset>_audit.json`
+- `post_refinement_audit_generated_utc`: UTC timestamp of audit generation
+- `post_refinement_audit_status_counts`: status-count snapshot from the audit report
+
+Optional overlap-analysis attrs (when overlap analysis is enabled):
+
+- `post_refinement_overlap_json`: absolute path to `<dataset>_overlap.json`
+- `post_refinement_overlap_generated_utc`: UTC timestamp of overlap report generation
+- `post_refinement_overlap_bad_row_count`: bad-row count from overlap analysis
+
 Reason-label attrs on refined keypoint runs:
 
 - `reason_encoding="utf8-null-terminated"`
