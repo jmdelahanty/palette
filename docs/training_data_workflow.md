@@ -260,6 +260,8 @@ Notes:
   `--data-card-no-plots` in pipeline mode or `--no-plots` in standalone mode to disable.
 - Adjust center-heatmap coarsening with `--data-card-plot-heatmap-bin-factor` (pipeline)
   or `--plot-heatmap-bin-factor` (standalone aggregation/plot tool).
+- For a full "where artifacts live" matrix (filesystem vs zarr visualizations),
+  see `docs/artifact_storage_map.md`.
 
 Standalone data-card aggregation:
 
