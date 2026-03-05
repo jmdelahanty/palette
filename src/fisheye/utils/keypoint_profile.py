@@ -381,6 +381,91 @@ def _metric_stats(values: np.ndarray) -> dict[str, Any]:
     return stats
 
 
+def _edge_labels_from_source(source_group: zarr.Group, edge_pairs: np.ndarray) -> list[str]:
+    labels_raw = source_group.attrs.get("edge_distance_labels")
+    labels: list[str] = []
+    if isinstance(labels_raw, (list, tuple)):
+        labels = [str(item).strip() for item in labels_raw if str(item).strip()]
+    if len(labels) == int(edge_pairs.shape[0]):
+        return labels
+
+    keypoint_labels_raw = source_group.attrs.get("keypoint_labels")
+    keypoint_labels: list[str] = []
+    if isinstance(keypoint_labels_raw, (list, tuple)):
+        keypoint_labels = [str(item).strip() for item in keypoint_labels_raw if str(item).strip()]
+
+    derived: list[str] = []
+    for src, dst in edge_pairs.tolist():
+        src_i = int(src)
+        dst_i = int(dst)
+        if 0 <= src_i < len(keypoint_labels) and 0 <= dst_i < len(keypoint_labels):
+            derived.append(f"{keypoint_labels[src_i]}-{keypoint_labels[dst_i]}")
+        else:
+            derived.append(f"{src_i}-{dst_i}")
+    return derived
+
+
+def _build_edge_distance_payload(
+    source_group: zarr.Group,
+    *,
+    rows_total: Optional[int],
+) -> Optional[dict[str, Any]]:
+    if "edge_pairs" not in source_group or "edge_distances" not in source_group:
+        return None
+    edge_pairs = np.asarray(source_group["edge_pairs"][:], dtype=np.int64)
+    if edge_pairs.ndim != 2 or edge_pairs.shape[1] < 2:
+        return None
+    edge_pairs = edge_pairs[:, :2]
+    edge_count = int(edge_pairs.shape[0])
+    if edge_count <= 0:
+        return None
+
+    edge_distances = np.asarray(source_group["edge_distances"][:], dtype=np.float64)
+    if edge_distances.ndim != 2 or edge_distances.shape[1] != edge_count:
+        return None
+
+    edge_distances_norm = None
+    if "edge_distances_norm" in source_group:
+        candidate = np.asarray(source_group["edge_distances_norm"][:], dtype=np.float64)
+        if candidate.shape == edge_distances.shape:
+            edge_distances_norm = candidate
+
+    edge_distance_valid = None
+    if "edge_distance_valid" in source_group:
+        candidate = np.asarray(source_group["edge_distance_valid"][:], dtype=bool)
+        if candidate.shape == edge_distances.shape:
+            edge_distance_valid = candidate
+    if edge_distance_valid is None:
+        edge_distance_valid = np.isfinite(edge_distances)
+
+    total_rows = int(edge_distances.shape[0]) if rows_total is None else int(rows_total)
+    normalization = _coerce_mapping(source_group.attrs.get("edge_distance_normalization"))
+    labels = _edge_labels_from_source(source_group, edge_pairs)
+    edges: list[dict[str, Any]] = []
+    for edge_idx in range(edge_count):
+        valid = np.asarray(edge_distance_valid[:, edge_idx], dtype=bool)
+        valid_count = int(np.count_nonzero(valid))
+        rate = _safe_ratio(float(valid_count), float(total_rows))
+        edge_info: dict[str, Any] = {
+            "edge": [int(edge_pairs[edge_idx, 0]), int(edge_pairs[edge_idx, 1])],
+            "label": labels[edge_idx],
+            "valid_count": valid_count,
+            "valid_rate": rate,
+            "distance": _metric_stats(edge_distances[valid, edge_idx]),
+        }
+        if edge_distances_norm is not None:
+            edge_info["distance_norm"] = _metric_stats(edge_distances_norm[valid, edge_idx])
+        edges.append(edge_info)
+
+    return {
+        "total_rows": total_rows,
+        "edge_order": edge_pairs.tolist(),
+        "edge_labels": labels,
+        "normalization": normalization or {},
+        "edges": edges,
+    }
+
+
 def _load_source_group(root: zarr.Group, source: ResolvedKeypointSource) -> zarr.Group:
     try:
         group = root[source.keypoint_path]
@@ -462,6 +547,12 @@ def build_keypoint_profile_summary(
             geometry_payload[metric_name] = {"stats": _metric_stats(values)}
         else:
             geometry_payload[metric_name] = {"stats": _metric_stats(np.asarray([], dtype=np.float64))}
+    edge_distance_payload = _build_edge_distance_payload(
+        source_group,
+        rows_total=rows_total,
+    )
+    if edge_distance_payload is not None:
+        geometry_payload["edge_distance"] = edge_distance_payload
 
     dataset_id = _normalize_text(dataset_id) or _normalize_text(root.attrs.get("dataset_id"))
     recording_id = (

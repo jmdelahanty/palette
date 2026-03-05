@@ -53,6 +53,24 @@ def _sample_card_payload() -> dict[str, object]:
                 },
             }
         },
+        "skeleton_graph_metrics": {
+            "edge_length_norm_stats": {
+                "edge_0_1": {
+                    "alias": "edge_swim_bladder_eye_left",
+                    "histogram": {
+                        "bin_edges": [0.0, 0.5, 1.0],
+                        "counts": [20, 80],
+                    },
+                },
+                "edge_0_2": {
+                    "alias": "edge_swim_bladder_eye_right",
+                    "histogram": {
+                        "bin_edges": [0.0, 0.4, 0.8],
+                        "counts": [30, 70],
+                    },
+                },
+            }
+        },
         "genotype_counts": {
             "Tg(elavl3:gcamp7f)": 2,
             "wt": 1,
@@ -111,6 +129,24 @@ def _sample_card_payload_modern() -> dict[str, object]:
                 },
             }
         },
+        "skeleton_graph_metrics": {
+            "edge_length_norm_stats": {
+                "edge_0_1": {
+                    "alias": "edge_swim_bladder_eye_left",
+                    "histogram": {
+                        "bin_edges": [0.0, 0.5, 1.0],
+                        "counts": [20, 80],
+                    },
+                },
+                "edge_0_2": {
+                    "alias": "edge_swim_bladder_eye_right",
+                    "histogram": {
+                        "bin_edges": [0.0, 0.4, 0.8],
+                        "counts": [30, 70],
+                    },
+                },
+            }
+        },
         "genotype_counts": {
             "Tg(elavl3:gcamp7f)": 2,
             "wt": 1,
@@ -141,6 +177,7 @@ def test_plot_keypoint_training_data_card_writes_expected_pngs(tmp_path: Path) -
     assert (output_dir / "pose_sample_v001.min_angle_distribution.png").exists()
     assert (output_dir / "pose_sample_v001.heading_distribution.png").exists()
     assert (output_dir / "pose_sample_v001.landmark_heatmap_panel.png").exists()
+    assert (output_dir / "pose_sample_v001.edge_length_norm_panel.png").exists()
     assert (output_dir / "pose_sample_v001.genotype_counts.png").exists()
     assert (output_dir / "pose_sample_v001.dpf_histogram.png").exists()
 
@@ -164,6 +201,7 @@ def test_plot_keypoint_training_data_card_writes_expected_pngs_modern_schema(tmp
     assert (output_dir / "pose_sample_v001.min_angle_distribution.png").exists()
     assert (output_dir / "pose_sample_v001.heading_distribution.png").exists()
     assert (output_dir / "pose_sample_v001.landmark_heatmap_panel.png").exists()
+    assert (output_dir / "pose_sample_v001.edge_length_norm_panel.png").exists()
     assert (output_dir / "pose_sample_v001.genotype_counts.png").exists()
     assert (output_dir / "pose_sample_v001.dpf_histogram.png").exists()
 
@@ -322,6 +360,7 @@ def test_plot_keypoint_training_data_card_skips_empty_subject_aggregates(tmp_pat
     assert (output_dir / "pose_sample_v001.min_angle_distribution.png").exists()
     assert (output_dir / "pose_sample_v001.heading_distribution.png").exists()
     assert (output_dir / "pose_sample_v001.landmark_heatmap_panel.png").exists()
+    assert (output_dir / "pose_sample_v001.edge_length_norm_panel.png").exists()
     assert not (output_dir / "pose_sample_v001.genotype_counts.png").exists()
     assert not (output_dir / "pose_sample_v001.dpf_histogram.png").exists()
 

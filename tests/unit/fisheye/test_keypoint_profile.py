@@ -6,6 +6,7 @@ import sys
 from typing import Any
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
@@ -197,6 +198,87 @@ def test_build_keypoint_profile_summary_invariants() -> None:
     assert composition["dish_design"] == "cedar"
     assert composition["genotype"] == "Tg(elavl3:gcamp7f)"
     assert composition["dpf_at_acquisition"] == 7
+
+
+def test_build_keypoint_profile_summary_includes_edge_distance_metrics() -> None:
+    root = _make_keypoint_root()
+    keypoints_run = root["keypoints_runs/keypoints_001"]
+    keypoints_run.create_array(
+        "edge_pairs",
+        data=np.asarray([[0, 1], [0, 2], [1, 2]], dtype=np.int16),
+    )
+    keypoints_run.create_array(
+        "edge_distances",
+        data=np.asarray(
+            [
+                [10.0, 20.0, 30.0],
+                [12.0, 22.0, np.nan],
+                [14.0, 24.0, 34.0],
+                [16.0, 26.0, 36.0],
+                [18.0, 28.0, 38.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
+    keypoints_run.create_array(
+        "edge_distances_norm",
+        data=np.asarray(
+            [
+                [0.10, 0.20, 0.30],
+                [0.12, 0.22, np.nan],
+                [0.14, 0.24, 0.34],
+                [0.16, 0.26, 0.36],
+                [0.18, 0.28, 0.38],
+            ],
+            dtype=np.float32,
+        ),
+    )
+    keypoints_run.create_array(
+        "edge_distance_valid",
+        data=np.asarray(
+            [
+                [True, True, True],
+                [True, True, False],
+                [True, True, True],
+                [True, True, True],
+                [True, True, True],
+            ],
+            dtype=np.bool_,
+        ),
+    )
+    keypoints_run.attrs["edge_distance_labels"] = [
+        "swim_bladder-eye_left",
+        "swim_bladder-eye_right",
+        "eye_left-eye_right",
+    ]
+    keypoints_run.attrs["edge_distance_normalization"] = {"mode": "roi_diagonal", "roi_diagonal": 90.5}
+
+    summary = build_keypoint_profile_summary(
+        root,
+        zarr_path=Path("/tmp/rec_001_analysis.zarr"),
+    )
+    edge_distance = summary["geometry"]["edge_distance"]
+
+    assert edge_distance["edge_order"] == [[0, 1], [0, 2], [1, 2]]
+    assert edge_distance["edge_labels"] == [
+        "swim_bladder-eye_left",
+        "swim_bladder-eye_right",
+        "eye_left-eye_right",
+    ]
+    assert edge_distance["normalization"]["mode"] == "roi_diagonal"
+
+    first_edge = edge_distance["edges"][0]
+    assert first_edge["label"] == "swim_bladder-eye_left"
+    assert first_edge["valid_count"] == 5
+    assert first_edge["valid_rate"] == 1.0
+    assert first_edge["distance"]["p50"] == pytest.approx(14.0)
+    assert first_edge["distance_norm"]["p50"] == pytest.approx(0.14)
+
+    third_edge = edge_distance["edges"][2]
+    assert third_edge["valid_count"] == 4
+    assert third_edge["valid_rate"] == pytest.approx(4.0 / 5.0)
+    assert third_edge["distance"]["count"] == 4
+    assert third_edge["distance_norm"]["count"] == 4
 
 
 def test_write_keypoint_profile_writes_run_attrs_and_latest_pointer() -> None:

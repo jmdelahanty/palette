@@ -37,10 +37,10 @@ except ImportError:
 
 from .keypoint_quality import KeypointGeometryMetrics, compute_geometry_metrics
 from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
-from ..registry.status_ledger import upsert_recording_step_status
-from ..registry.step_cascade import invalidate_downstream_steps
 from ..shared.detect_reason_codec import write_reason_columns
+from ..shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.type_conversions import as_float, normalize_attr
 from ..utils.system import get_environment_info, get_git_info
 
 REFINED_KEYPOINT_GROUP = "refined_keypoints_runs"
@@ -58,22 +58,11 @@ class _StatusContext:
 
 
 def _as_text(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        text = value.decode("utf-8", "ignore").strip()
-    else:
-        text = str(value).strip()
-    return text or None
+    return normalize_attr(value)
 
 
 def _as_float(value: object) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return as_float(value)
 
 
 def _as_mapping(value: object) -> Optional[Dict[str, object]]:
@@ -93,13 +82,6 @@ def _as_mapping(value: object) -> Optional[Dict[str, object]]:
     if isinstance(decoded, Mapping):
         return dict(decoded)
     return None
-
-
-def _zarr_mtime_ns(path: Path) -> Optional[int]:
-    try:
-        return int(path.stat().st_mtime_ns)
-    except OSError:
-        return None
 
 
 def _resolve_status_dataset_id(
@@ -270,37 +252,33 @@ def _emit_refined_keypoint_status(
 
     registry = Registry(context.registry_path)
     try:
-        upsert_recording_step_status(
-            registry,
+        metadata = DatasetMetadata(
             dataset_id=context.dataset_id,
+            session_uuid=None,
             recording_id=context.recording_id,
+            zarr_use=None,
+            zarr_purpose=None,
+        )
+        return emit_stage_completion(
+            None,
+            context.zarr_path,
             step_name=_STEP_NAME_REFINED_KEYPOINTS,
             status=status,
+            source=_STATUS_SOURCE,
             run_name=run_name,
             method=method,
             coverage_pct=coverage_pct,
             review_status_json=review_status_json,
             details_json=details,
-            source=_STATUS_SOURCE,
-            zarr_mtime_ns=_zarr_mtime_ns(context.zarr_path),
+            console=console,
+            warning_label=_STEP_NAME_REFINED_KEYPOINTS,
+            registry=registry,
+            auto_registry_from_env=False,
+            invalidate_on_ok=True,
+            trigger_run_name=run_name,
+            metadata=metadata,
+            upsert_dataset_row=False,
         )
-        if status == "ok":
-            invalidate_downstream_steps(
-                registry,
-                dataset_id=context.dataset_id,
-                step_name=_STEP_NAME_REFINED_KEYPOINTS,
-                source=_STATUS_SOURCE,
-                recording_id=context.recording_id,
-                trigger_run_name=run_name,
-            )
-        return True
-    except Exception as exc:
-        if console is not None:
-            console.print(
-                f"[yellow]Warning:[/yellow] failed to write step status for "
-                f"'{_STEP_NAME_REFINED_KEYPOINTS}': {exc}"
-            )
-        return False
     finally:
         registry.close()
 
@@ -412,6 +390,121 @@ def _build_keypoint_signature(
         "parameter_source": parameters.get("parameter_source") if parameters else None,
         "parameters_hash": _hash_parameters(parameters),
     }
+
+
+def _normalize_keypoint_labels(
+    kp_source: zarr.Group,
+    *,
+    n_keypoints: int,
+) -> List[str]:
+    labels_raw = kp_source.attrs.get("keypoint_labels")
+    labels: List[str] = []
+    if isinstance(labels_raw, (list, tuple)):
+        labels = [str(item).strip() for item in labels_raw if str(item).strip()]
+    if len(labels) != n_keypoints:
+        pose_schema = _as_mapping(kp_source.attrs.get("pose_schema")) or {}
+        nodes = pose_schema.get("nodes")
+        parsed_nodes: List[str] = []
+        if isinstance(nodes, (list, tuple)):
+            for node in nodes:
+                if isinstance(node, Mapping):
+                    text = _as_text(node.get("name")) or _as_text(node.get("id"))
+                    if text:
+                        parsed_nodes.append(text)
+                else:
+                    text = _as_text(node)
+                    if text:
+                        parsed_nodes.append(text)
+        if len(parsed_nodes) == n_keypoints:
+            labels = parsed_nodes
+    if len(labels) != n_keypoints:
+        labels = [f"k{i}" for i in range(n_keypoints)]
+    return labels
+
+
+def _extract_skeleton_edges(
+    kp_source: zarr.Group,
+    *,
+    n_keypoints: int,
+) -> Tuple[np.ndarray, str]:
+    raw_edges: Optional[object] = None
+    source = "none"
+    pose_schema = _as_mapping(kp_source.attrs.get("pose_schema"))
+    if pose_schema:
+        raw_edges = pose_schema.get("edges")
+        if raw_edges is None:
+            raw_edges = pose_schema.get("skeleton")
+        if raw_edges is not None:
+            source = "pose_schema"
+
+    if raw_edges is None:
+        raw_edges = kp_source.attrs.get("keypoint_skeleton")
+        if raw_edges is not None:
+            source = "keypoint_skeleton"
+
+    if raw_edges is None and n_keypoints == 3:
+        raw_edges = ((0, 1), (0, 2), (1, 2))
+        source = "default_triangle"
+
+    pairs: List[Tuple[int, int]] = []
+    if isinstance(raw_edges, (list, tuple)):
+        for edge in raw_edges:
+            a_raw: Optional[object] = None
+            b_raw: Optional[object] = None
+            if isinstance(edge, Mapping):
+                a_raw = edge.get("from")
+                if a_raw is None:
+                    a_raw = edge.get("source")
+                if a_raw is None:
+                    a_raw = edge.get("a")
+                b_raw = edge.get("to")
+                if b_raw is None:
+                    b_raw = edge.get("target")
+                if b_raw is None:
+                    b_raw = edge.get("b")
+            elif isinstance(edge, (list, tuple)) and len(edge) >= 2:
+                a_raw = edge[0]
+                b_raw = edge[1]
+            if a_raw is None or b_raw is None:
+                continue
+            try:
+                a = int(a_raw)
+                b = int(b_raw)
+            except (TypeError, ValueError):
+                continue
+            if a < 0 or b < 0 or a >= n_keypoints or b >= n_keypoints or a == b:
+                continue
+            left, right = (a, b) if a < b else (b, a)
+            pair = (left, right)
+            if pair not in pairs:
+                pairs.append(pair)
+
+    if not pairs:
+        return np.zeros((0, 2), dtype=np.int16), source
+
+    max_index = max(max(pair) for pair in pairs)
+    dtype = np.int16 if max_index <= np.iinfo(np.int16).max else np.int32
+    return np.asarray(pairs, dtype=dtype), source
+
+
+def _resolve_roi_diagonal(
+    root: zarr.Group,
+    *,
+    source_crop_run: Optional[str],
+) -> Optional[float]:
+    if not source_crop_run:
+        return None
+    crop_group = root.get(f"crop_runs/{source_crop_run}")
+    if crop_group is None or "roi_images" not in crop_group:
+        return None
+    try:
+        shape = crop_group["roi_images"].shape
+        roi_h = float(shape[1])
+        roi_w = float(shape[2])
+    except Exception:
+        return None
+    diagonal = float(np.hypot(roi_w, roi_h))
+    return diagonal if np.isfinite(diagonal) and diagonal > 0 else None
 
 
 def _compute_heading_from_points(
@@ -715,6 +808,7 @@ def create_refined_keypoint_run(
         console.print(f"  Max triangle area: {params.max_triangle_area}")
 
     total_rois = kp_source["keypoints_roi"].shape[0]
+    n_keypoints = int(kp_source["keypoints_roi"].shape[1])
     console.print(f"Total ROI keypoints: {total_rois}")
     if total_rois == 0:
         _emit_refined_keypoint_status(
@@ -731,6 +825,12 @@ def create_refined_keypoint_run(
             console=console,
         )
         raise RuntimeError("Keypoint run contains zero ROIs; nothing to refine.")
+
+    keypoint_labels = _normalize_keypoint_labels(kp_source, n_keypoints=n_keypoints)
+    edge_pairs, edge_source = _extract_skeleton_edges(kp_source, n_keypoints=n_keypoints)
+    edge_count = int(edge_pairs.shape[0])
+    edge_labels = [f"{keypoint_labels[int(src)]}-{keypoint_labels[int(dst)]}" for src, dst in edge_pairs.tolist()]
+    console.print(f"Edge-distance pairs: {edge_count} ({edge_source})")
 
     # Prepare destination group
     kp_refined_root = _ensure_group(root, REFINED_KEYPOINT_GROUP)
@@ -762,10 +862,23 @@ def create_refined_keypoint_run(
 
     if "keypoint_labels" in kp_source.attrs:
         kp_refined.attrs["keypoint_labels"] = kp_source.attrs["keypoint_labels"]
+    else:
+        kp_refined.attrs["keypoint_labels"] = keypoint_labels
 
     # Copy pose schema if present in source run
     if "pose_schema" in kp_source.attrs:
         kp_refined.attrs["pose_schema"] = kp_source.attrs["pose_schema"]
+
+    if edge_count > 0:
+        edge_chunks = (max(1, min(128, edge_count)), 2)
+        kp_refined.create_array(
+            "edge_pairs",
+            data=edge_pairs,
+            chunks=edge_chunks,
+            overwrite=True,
+        )
+        kp_refined.attrs["edge_distance_labels"] = edge_labels
+    kp_refined.attrs["edge_distance_source"] = edge_source
 
     # Copy metadata arrays (frame indices, counts, etc.)
     for meta_name in ("frame_indices", "n_rois", "frame_counts", "detection_indices"):
@@ -976,6 +1089,41 @@ def create_refined_keypoint_run(
         overwrite=True,
     )
 
+    edge_distances_dst = None
+    edge_distances_norm_dst = None
+    edge_distance_valid_dst = None
+    roi_diagonal = _resolve_roi_diagonal(root, source_crop_run=_as_text(source_crop_run))
+    if edge_count > 0:
+        edge_chunks = (heading_chunks[0] if heading_chunks else max(1, min(1024, total_rois)), edge_count)
+        edge_distances_dst = kp_refined.create_array(
+            "edge_distances",
+            shape=(total_rois, edge_count),
+            chunks=edge_chunks,
+            dtype="f4",
+            fill_value=np.nan,
+            overwrite=True,
+        )
+        edge_distances_norm_dst = kp_refined.create_array(
+            "edge_distances_norm",
+            shape=(total_rois, edge_count),
+            chunks=edge_chunks,
+            dtype="f4",
+            fill_value=np.nan,
+            overwrite=True,
+        )
+        edge_distance_valid_dst = kp_refined.create_array(
+            "edge_distance_valid",
+            shape=(total_rois, edge_count),
+            chunks=edge_chunks,
+            dtype="bool",
+            fill_value=False,
+            overwrite=True,
+        )
+        kp_refined.attrs["edge_distance_normalization"] = {
+            "mode": "roi_diagonal",
+            "roi_diagonal": roi_diagonal,
+        }
+
     stats = {
         "total": int(total_rois),
         "source_success": int(np.sum(source_success)),
@@ -1072,6 +1220,25 @@ def create_refined_keypoint_run(
         usable_dst[idx] = result["usable"]
         reason_values[idx] = np.asarray(result["reason"], dtype=object)
         flip_dst[idx] = result["flip_flags"]
+        if edge_distances_dst is not None and edge_distances_norm_dst is not None and edge_distance_valid_dst is not None:
+            roi_chunk = np.asarray(result["roi"], dtype=np.float64)
+            src_points = roi_chunk[:, edge_pairs[:, 0], :]
+            dst_points = roi_chunk[:, edge_pairs[:, 1], :]
+            valid = (
+                np.asarray(result["refined_success"], dtype=bool)[:, None]
+                & np.all(np.isfinite(src_points), axis=2)
+                & np.all(np.isfinite(dst_points), axis=2)
+            )
+            deltas = src_points - dst_points
+            distances = np.sqrt(np.sum(np.square(deltas), axis=2, dtype=np.float64))
+            distances[~valid] = np.nan
+            if roi_diagonal is not None and np.isfinite(roi_diagonal) and roi_diagonal > 0:
+                distances_norm = distances / float(roi_diagonal)
+            else:
+                distances_norm = np.full_like(distances, np.nan)
+            edge_distances_dst[idx] = distances.astype(np.float32, copy=False)
+            edge_distances_norm_dst[idx] = distances_norm.astype(np.float32, copy=False)
+            edge_distance_valid_dst[idx] = valid
 
         stats["refined_success"] += result["stats"]["refined_success"]
         stats["flips_corrected"] += result["stats"]["flips_corrected"]
@@ -1101,6 +1268,10 @@ def create_refined_keypoint_run(
         "min_triangle_angle": params.min_triangle_angle,
         "min_triangle_area": params.min_triangle_area,
         "max_triangle_area": params.max_triangle_area,
+        "edge_distance_count": edge_count,
+        "edge_distance_source": edge_source,
+        "edge_distance_normalization": "roi_diagonal",
+        "edge_distance_roi_diagonal": roi_diagonal,
         "pass_rate_percent": pass_rate,
         "duration_seconds": duration,
     }

@@ -17,6 +17,7 @@ TRIANGLE_AREA_PLOT_NAME = "triangle_area_distribution"
 MIN_ANGLE_PLOT_NAME = "min_angle_distribution"
 HEADING_PLOT_NAME = "heading_distribution"
 LANDMARK_HEATMAP_PANEL_PLOT_NAME = "landmark_heatmap_panel"
+EDGE_LENGTH_NORM_PANEL_PLOT_NAME = "edge_length_norm_panel"
 GENOTYPE_COUNTS_PLOT_NAME = "genotype_counts"
 DPF_HISTOGRAM_PLOT_NAME = "dpf_histogram"
 
@@ -299,6 +300,23 @@ def _resolve_histogram_payload(
     return None
 
 
+def _resolve_edge_length_histograms(card_payload: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
+    graph_metrics = _mapping_at_path(card_payload, ("skeleton_graph_metrics", "edge_length_norm_stats"))
+    if not isinstance(graph_metrics, Mapping):
+        return []
+    resolved: list[tuple[str, Mapping[str, Any]]] = []
+    for key in sorted(graph_metrics.keys(), key=lambda item: str(item).lower()):
+        entry = graph_metrics.get(key)
+        if not isinstance(entry, Mapping):
+            continue
+        hist = entry.get("histogram")
+        if not isinstance(hist, Mapping):
+            continue
+        label = _normalize_text(entry.get("alias")) or _normalize_text(key) or "edge"
+        resolved.append((label, hist))
+    return resolved
+
+
 def _is_heatmap_payload(value: Any) -> bool:
     if not isinstance(value, Mapping):
         return False
@@ -450,6 +468,56 @@ def _plot_landmark_heatmap_panel(
     plt.close(fig)
 
 
+def _plot_edge_length_norm_panel(
+    *,
+    edge_histograms: Sequence[tuple[str, Mapping[str, Any]]],
+    output_path: Path,
+) -> None:
+    assert plt is not None
+    parsed: list[tuple[str, np.ndarray, np.ndarray]] = []
+    for raw_label, hist in edge_histograms:
+        label = _normalize_text(raw_label) or "edge"
+        try:
+            edges, counts = _parse_histogram(hist)
+        except Exception:
+            continue
+        parsed.append((label, edges, counts))
+    if not parsed:
+        raise ValueError("No valid edge-length histograms available for plotting.")
+
+    panel_count = len(parsed)
+    cols = int(min(3, max(1, np.ceil(np.sqrt(panel_count)))))
+    rows = int(np.ceil(panel_count / cols))
+    fig, axes = plt.subplots(
+        rows,
+        cols,
+        figsize=(4.2 * cols, 2.9 * rows + 0.4),
+        squeeze=False,
+    )
+
+    for index, (label, edges, counts) in enumerate(parsed):
+        ax = axes.flat[index]
+        widths = np.diff(edges)
+        centers = edges[:-1] + (widths / 2.0)
+        ax.bar(centers, counts, width=widths, color="#6D9DC5", edgecolor="#2C4A63", linewidth=0.7)
+        x_limits = _histogram_focus_xlim(edges=edges, counts=counts)
+        if x_limits is not None:
+            ax.set_xlim(*x_limits)
+        ax.set_title(label, fontsize=9)
+        ax.set_xlabel("Norm length", fontsize=8)
+        ax.set_ylabel("Count", fontsize=8)
+        ax.tick_params(axis="both", labelsize=8)
+        ax.grid(axis="y", alpha=0.2)
+
+    for index in range(panel_count, rows * cols):
+        axes.flat[index].axis("off")
+
+    fig.suptitle("Skeleton Edge Length (Normalized) Distributions", fontsize=12)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
 def _expected_plot_paths(*, card_payload: Mapping[str, Any], output_dir: Path, prefix: str) -> list[Path]:
     expected: list[Path] = []
 
@@ -460,6 +528,9 @@ def _expected_plot_paths(*, card_payload: Mapping[str, Any], output_dir: Path, p
 
     if _resolve_landmark_heatmaps(card_payload):
         expected.append(output_dir / f"{prefix}.{LANDMARK_HEATMAP_PANEL_PLOT_NAME}.png")
+
+    if _resolve_edge_length_histograms(card_payload):
+        expected.append(output_dir / f"{prefix}.{EDGE_LENGTH_NORM_PANEL_PLOT_NAME}.png")
 
     genotype_counts = card_payload.get("genotype_counts")
     if isinstance(genotype_counts, Mapping) and _parse_positive_count_mapping(genotype_counts):
@@ -517,6 +588,15 @@ def generate_keypoint_training_data_card_plots(
             landmark_heatmaps=landmark_heatmaps,
             output_path=output_path,
             heatmap_bin_factor=int(heatmap_bin_factor),
+        )
+        generated.append(output_path)
+
+    edge_histograms = _resolve_edge_length_histograms(card_payload)
+    if edge_histograms:
+        output_path = output_dir / f"{prefix}.{EDGE_LENGTH_NORM_PANEL_PLOT_NAME}.png"
+        _plot_edge_length_norm_panel(
+            edge_histograms=edge_histograms,
+            output_path=output_path,
         )
         generated.append(output_path)
 

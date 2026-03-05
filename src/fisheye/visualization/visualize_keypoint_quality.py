@@ -122,6 +122,92 @@ def _nonempty_finite(values: Optional[np.ndarray]) -> np.ndarray:
     return data[np.isfinite(data)]
 
 
+def _decode_text_list(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    out: list[str] = []
+    for item in value:
+        text = _decode_text(item)
+        if text is not None:
+            out.append(text)
+    return out
+
+
+def _derive_edge_labels(
+    *,
+    edge_pairs: Optional[np.ndarray],
+    explicit_labels: object,
+    keypoint_labels: object,
+) -> list[str]:
+    if edge_pairs is None:
+        return []
+    labels = _decode_text_list(explicit_labels)
+    edge_count = int(edge_pairs.shape[0]) if edge_pairs.ndim == 2 else 0
+    if edge_count <= 0:
+        return []
+    if len(labels) == edge_count:
+        return labels
+
+    keypoint_names = _decode_text_list(keypoint_labels)
+    derived: list[str] = []
+    for edge_idx in range(edge_count):
+        src = int(edge_pairs[edge_idx, 0])
+        dst = int(edge_pairs[edge_idx, 1])
+        if 0 <= src < len(keypoint_names) and 0 <= dst < len(keypoint_names):
+            derived.append(f"{keypoint_names[src]}-{keypoint_names[dst]}")
+        else:
+            derived.append(f"{src}-{dst}")
+    return derived
+
+
+def _edge_distance_panel_data(quality_data: Mapping[str, object]) -> tuple[list[dict[str, object]], str]:
+    edge_pairs = quality_data.get("edge_pairs")
+    if not isinstance(edge_pairs, np.ndarray) or edge_pairs.ndim != 2 or edge_pairs.shape[1] < 2:
+        return [], "missing"
+
+    norm_values = quality_data.get("edge_distances_norm")
+    raw_values = quality_data.get("edge_distances")
+    values: Optional[np.ndarray] = None
+    mode = "missing"
+    if isinstance(norm_values, np.ndarray) and norm_values.ndim == 2 and norm_values.shape[1] == edge_pairs.shape[0]:
+        values = np.asarray(norm_values, dtype=np.float64)
+        mode = "normalized"
+    elif isinstance(raw_values, np.ndarray) and raw_values.ndim == 2 and raw_values.shape[1] == edge_pairs.shape[0]:
+        values = np.asarray(raw_values, dtype=np.float64)
+        mode = "raw"
+    if values is None:
+        return [], "missing"
+
+    valid = quality_data.get("edge_distance_valid")
+    if isinstance(valid, np.ndarray) and valid.shape == values.shape:
+        valid_mask = np.asarray(valid, dtype=bool)
+    else:
+        valid_mask = np.isfinite(values)
+
+    labels_raw = quality_data.get("edge_labels")
+    labels = [str(item) for item in labels_raw] if isinstance(labels_raw, list) else []
+    if len(labels) != int(edge_pairs.shape[0]):
+        labels = [f"{int(pair[0])}-{int(pair[1])}" for pair in edge_pairs[:, :2].tolist()]
+
+    total_rows = int(values.shape[0])
+    items: list[dict[str, object]] = []
+    for edge_idx in range(int(edge_pairs.shape[0])):
+        mask = np.asarray(valid_mask[:, edge_idx], dtype=bool) & np.isfinite(values[:, edge_idx])
+        valid_count = int(np.count_nonzero(mask))
+        if valid_count <= 0:
+            continue
+        p50 = float(np.percentile(values[mask, edge_idx], 50))
+        items.append(
+            {
+                "label": labels[edge_idx],
+                "p50": p50,
+                "valid_count": valid_count,
+                "valid_rate": float(valid_count / total_rows) if total_rows > 0 else 0.0,
+            }
+        )
+    return items, mode
+
+
 def _count_reason_tokens(reason_labels: Optional[np.ndarray]) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     if reason_labels is None:
@@ -207,7 +293,16 @@ def load_keypoint_quality_report(
     min_angle = _array_or_none(run_group, "min_angle", dtype=np.float64)
     confidence = _array_or_none(run_group, "confidence", dtype=np.float64)
     detection_source = _array_or_none(run_group, "detection_source", dtype=np.int16)
+    edge_pairs = _array_or_none(run_group, "edge_pairs", dtype=np.int32)
+    edge_distances = _array_or_none(run_group, "edge_distances", dtype=np.float64)
+    edge_distances_norm = _array_or_none(run_group, "edge_distances_norm", dtype=np.float64)
+    edge_distance_valid = _array_or_none(run_group, "edge_distance_valid", dtype=bool)
     reason_labels = read_reason_labels(run_group)
+    edge_labels = _derive_edge_labels(
+        edge_pairs=edge_pairs,
+        explicit_labels=run_group.attrs.get("edge_distance_labels"),
+        keypoint_labels=run_group.attrs.get("keypoint_labels"),
+    )
 
     if usable_keypoints is not None:
         total_rows = int(usable_keypoints.size)
@@ -236,6 +331,12 @@ def load_keypoint_quality_report(
         "min_angle": min_angle,
         "confidence": confidence,
         "detection_source": detection_source,
+        "edge_pairs": edge_pairs,
+        "edge_distances": edge_distances,
+        "edge_distances_norm": edge_distances_norm,
+        "edge_distance_valid": edge_distance_valid,
+        "edge_labels": edge_labels,
+        "edge_distance_normalization": _safe_mapping(run_group.attrs.get("edge_distance_normalization")),
         "reason_labels": reason_labels,
         "reason_counts": _count_reason_tokens(reason_labels),
         "detection_source_counts": _compute_detection_source_counts(detection_source),
@@ -244,14 +345,18 @@ def load_keypoint_quality_report(
 
 
 def create_keypoint_quality_visualization(quality_data: Mapping[str, object]) -> plt.Figure:
-    """Create a 2x3 quality dashboard figure for a refined keypoint run."""
-    fig = plt.figure(figsize=(18, 11))
+    """Create a quality dashboard figure for a refined keypoint run."""
+    fig = plt.figure(figsize=(22, 11))
     fig.suptitle("Keypoint Refinement Quality Overview", fontsize=16, fontweight="bold")
-    gs = fig.add_gridspec(2, 3, hspace=0.32, wspace=0.26)
+    gs = fig.add_gridspec(2, 4, hspace=0.32, wspace=0.26)
 
     summary = _normalize_summary_statistics(quality_data.get("summary_statistics"))
     params = _safe_mapping(quality_data.get("parameters"))
     review = _safe_mapping(quality_data.get("review_status"))
+    source_counts = dict(quality_data.get("detection_source_counts") or {})
+    edge_items, edge_mode = _edge_distance_panel_data(quality_data)
+    normalization = _safe_mapping(quality_data.get("edge_distance_normalization"))
+    normalization_mode = _decode_text(normalization.get("mode")) if normalization else None
     total_rows = _safe_int(quality_data.get("total_rows"))
     refined_success = _safe_int(summary.get("refined_success"), default=total_rows)
     usable_total = _safe_int(summary.get("usable_keypoints"))
@@ -273,7 +378,9 @@ def create_keypoint_quality_visualization(quality_data: Mapping[str, object]) ->
         f"Confidence missing: {_safe_int(summary.get('confidence_missing'))}\n"
         f"Flips corrected: {_safe_int(summary.get('flips_corrected', summary.get('flip_corrected')))}\n\n"
         f"Review: {_decode_text(review.get('state')) or '—'}/"
-        f"{_decode_text(review.get('intended_use')) or '—'}"
+        f"{_decode_text(review.get('intended_use')) or '—'}\n"
+        f"Edge metrics: {len(edge_items)} "
+        f"({normalization_mode or edge_mode or '—'})"
     )
     ax_summary.text(
         0.02,
@@ -312,6 +419,31 @@ def create_keypoint_quality_visualization(quality_data: Mapping[str, object]) ->
     else:
         ax_reasons.axis("off")
         ax_reasons.text(0.5, 0.5, "No reason labels", ha="center", va="center", fontsize=11)
+
+    ax_edges = fig.add_subplot(gs[0, 3])
+    if edge_items:
+        labels = [str(item["label"]) for item in edge_items]
+        p50_values = np.asarray([float(item["p50"]) for item in edge_items], dtype=np.float64)
+        y = np.arange(len(edge_items), dtype=np.int32)
+        ax_edges.barh(y, p50_values, color="#6D9DC5", edgecolor="#2C4A63", linewidth=0.7)
+        ax_edges.set_yticks(y, labels=labels)
+        ax_edges.invert_yaxis()
+        ax_edges.set_xlabel("P50 distance")
+        panel_title = "Edge Distance P50"
+        if normalization_mode:
+            panel_title = f"Edge Distance P50 ({normalization_mode})"
+        elif edge_mode == "normalized":
+            panel_title = "Edge Distance P50 (normalized)"
+        ax_edges.set_title(panel_title)
+        ax_edges.grid(axis="x", alpha=0.25)
+        max_val = float(np.max(p50_values)) if p50_values.size else 0.0
+        for idx, item in enumerate(edge_items):
+            rate = float(item.get("valid_rate") or 0.0) * 100.0
+            x_text = float(item["p50"]) + (0.01 * max(1.0, max_val))
+            ax_edges.text(x_text, idx, f"{rate:.1f}%", va="center", fontsize=8)
+    else:
+        ax_edges.axis("off")
+        ax_edges.text(0.5, 0.5, "No edge-distance metrics", ha="center", va="center", fontsize=11)
 
     area_values = _nonempty_finite(quality_data.get("triangle_area"))
     angle_values = _nonempty_finite(quality_data.get("min_angle"))
@@ -365,19 +497,35 @@ def create_keypoint_quality_visualization(quality_data: Mapping[str, object]) ->
     ax_conf.set_ylabel("Count")
     ax_conf.grid(alpha=0.2)
 
+    ax_source = fig.add_subplot(gs[1, 3])
+    if source_counts:
+        labels = ["manual_or_clean", "interpolated", "other"]
+        values = [int(source_counts.get(label, 0)) for label in labels]
+        ax_source.bar(labels, values, color=["#4E79A7", "#F28E2B", "#9C755F"])
+        ax_source.set_title("Detection Source Counts")
+        ax_source.set_ylabel("Count")
+        ax_source.tick_params(axis="x", rotation=20)
+        ax_source.grid(axis="y", alpha=0.2)
+    else:
+        ax_source.axis("off")
+        ax_source.text(0.5, 0.5, "No detection_source", ha="center", va="center", fontsize=11)
+
     fig.tight_layout()
     return fig
 
 
 def create_keypoint_refinement_pipeline_visualization(quality_data: Mapping[str, object]) -> plt.Figure:
     """Create a refinement-pipeline summary figure for a refined keypoint run."""
-    fig = plt.figure(figsize=(16, 8))
+    fig = plt.figure(figsize=(20, 8))
     fig.suptitle("Keypoint Refinement Pipeline Overview", fontsize=16, fontweight="bold")
-    gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.25], wspace=0.24)
+    gs = fig.add_gridspec(1, 3, width_ratios=[1.0, 1.25, 1.15], wspace=0.24)
 
     summary = _normalize_summary_statistics(quality_data.get("summary_statistics"))
     review = _safe_mapping(quality_data.get("review_status"))
     source_counts = dict(quality_data.get("detection_source_counts") or {})
+    edge_items, edge_mode = _edge_distance_panel_data(quality_data)
+    normalization = _safe_mapping(quality_data.get("edge_distance_normalization"))
+    normalization_mode = _decode_text(normalization.get("mode")) if normalization else None
 
     ax_meta = fig.add_subplot(gs[0, 0])
     ax_meta.axis("off")
@@ -390,7 +538,9 @@ def create_keypoint_refinement_pipeline_visualization(quality_data: Mapping[str,
         f"Review state: {_decode_text(review.get('state')) or '—'}\n"
         f"Review intended_use: {_decode_text(review.get('intended_use')) or '—'}\n"
         f"Review method: {_decode_text(review.get('method')) or '—'}\n"
-        f"Review timestamp: {_review_timestamp(review) or '—'}\n"
+        f"Review timestamp: {_review_timestamp(review) or '—'}\n\n"
+        f"Edge metrics: {len(edge_items)} edges "
+        f"({normalization_mode or edge_mode or '—'})\n"
     )
     ax_meta.text(
         0.02,
@@ -441,6 +591,31 @@ def create_keypoint_refinement_pipeline_visualization(quality_data: Mapping[str,
             fontsize=9,
             family="monospace",
         )
+
+    ax_edges = fig.add_subplot(gs[0, 2])
+    if edge_items:
+        labels = [str(item["label"]) for item in edge_items]
+        p50_values = np.asarray([float(item["p50"]) for item in edge_items], dtype=np.float64)
+        y = np.arange(len(edge_items), dtype=np.int32)
+        ax_edges.barh(y, p50_values, color="#6D9DC5", edgecolor="#2C4A63", linewidth=0.7)
+        ax_edges.set_yticks(y, labels=labels)
+        ax_edges.invert_yaxis()
+        ax_edges.set_xlabel("P50 distance")
+        panel_title = "Edge Distance P50"
+        if normalization_mode:
+            panel_title = f"Edge Distance P50 ({normalization_mode})"
+        elif edge_mode == "normalized":
+            panel_title = "Edge Distance P50 (normalized)"
+        ax_edges.set_title(panel_title)
+        ax_edges.grid(axis="x", alpha=0.25)
+        max_val = float(np.max(p50_values)) if p50_values.size else 0.0
+        for idx, item in enumerate(edge_items):
+            rate = float(item.get("valid_rate") or 0.0) * 100.0
+            x_text = float(item["p50"]) + (0.01 * max(1.0, max_val))
+            ax_edges.text(x_text, idx, f"{rate:.1f}%", va="center", fontsize=8)
+    else:
+        ax_edges.axis("off")
+        ax_edges.text(0.5, 0.5, "No edge-distance metrics", ha="center", va="center", fontsize=11)
 
     fig.tight_layout()
     return fig
