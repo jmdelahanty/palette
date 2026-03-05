@@ -62,10 +62,6 @@ class _StatusContext:
     zarr_path: Path
 
 
-def _as_text(value: object) -> Optional[str]:
-    return normalize_attr(value)
-
-
 def _as_float(value: object) -> Optional[float]:
     return as_float(value)
 
@@ -176,14 +172,14 @@ def _resolve_status_context(zarr_path: str) -> Optional[_StatusContext]:
         if row is None:
             return None
 
-        dataset_id = _as_text(row["dataset_id"])
+        dataset_id = normalize_attr(row["dataset_id"])
         if dataset_id is None:
             return None
 
         return _StatusContext(
             registry_path=registry_path,
             dataset_id=dataset_id,
-            recording_id=_as_text(row["recording_id"]),
+            recording_id=normalize_attr(row["recording_id"]),
             zarr_path=resolved_zarr,
         )
     finally:
@@ -226,7 +222,7 @@ def _resolve_status_context_from_root(
             """,
             (dataset_id,),
         ).fetchone()
-        resolved_recording_id = _as_text(row["recording_id"]) if row is not None else metadata.recording_id
+        resolved_recording_id = normalize_attr(row["recording_id"]) if row is not None else metadata.recording_id
     except Exception:
         return None
     finally:
@@ -549,11 +545,11 @@ def _normalize_keypoint_labels(
         if isinstance(nodes, (list, tuple)):
             for node in nodes:
                 if isinstance(node, Mapping):
-                    text = _as_text(node.get("name")) or _as_text(node.get("id"))
+                    text = normalize_attr(node.get("name")) or normalize_attr(node.get("id"))
                     if text:
                         parsed_nodes.append(text)
                 else:
-                    text = _as_text(node)
+                    text = normalize_attr(node)
                     if text:
                         parsed_nodes.append(text)
         if len(parsed_nodes) == n_keypoints:
@@ -1233,7 +1229,7 @@ def create_refined_keypoint_run(
     edge_distances_dst = None
     edge_distances_norm_dst = None
     edge_distance_valid_dst = None
-    roi_diagonal = _resolve_roi_diagonal(root, source_crop_run=_as_text(source_crop_run))
+    roi_diagonal = _resolve_roi_diagonal(root, source_crop_run=normalize_attr(source_crop_run))
     if edge_count > 0:
         edge_chunks = (heading_chunks[0] if heading_chunks else max(1, min(1024, total_rois)), edge_count)
         edge_distances_dst = kp_refined.create_array(
@@ -1547,14 +1543,14 @@ def create_refined_keypoint_run(
         context=status_context,
         status="ok",
         run_name=run_name,
-        method=_as_text(kp_refined.attrs.get("method")) or "refine_keypoints",
+        method=normalize_attr(kp_refined.attrs.get("method")) or "refine_keypoints",
         coverage_pct=pass_rate,
         review_status_json=_as_mapping(kp_refined.attrs.get("keypoint_review_status")),
         details={
             "reason": "present",
             "source_keypoints_run": keypoint_run,
-            "source_crop_run": _as_text(kp_refined.attrs.get("source_crop_run")),
-            "source_detect_run": _as_text(kp_refined.attrs.get("source_detect_run")),
+            "source_crop_run": normalize_attr(kp_refined.attrs.get("source_crop_run")),
+            "source_detect_run": normalize_attr(kp_refined.attrs.get("source_detect_run")),
             "total_rois": stats["total"],
             "refined_success": stats["refined_success"],
             "usable_keypoints": stats["usable"],
@@ -1567,7 +1563,7 @@ def create_refined_keypoint_run(
     _run_post_refinement_diagnostics(
         zarr_path=zarr_path,
         run_name=run_name,
-        source_crop_run=_as_text(source_crop_run),
+        source_crop_run=normalize_attr(source_crop_run),
         config=config,
         run_attrs=kp_refined.attrs,
         console=console,

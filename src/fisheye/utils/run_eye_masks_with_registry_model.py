@@ -13,7 +13,7 @@ import zarr
 
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.registry_stage_complete import emit_stage_completion
-from fisheye.shared.type_conversions import clean_mapping, normalize_attr
+from fisheye.shared.type_conversions import clean_mapping
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils.resolve_detect_model import Candidate, TargetProfile
 from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
@@ -35,10 +35,6 @@ def _pick_best_candidate(candidates: list[Candidate], *, require_unique: bool) -
         if abs(candidates[0].weighted_score - candidates[1].weighted_score) < 1e-12:
             raise SystemExit("Top candidate score tied; rerun with --set-id to choose deterministically.")
     return best
-
-
-def _normalize_attr(value: object) -> Optional[str]:
-    return normalize_attr(value)
 
 
 def _classify_eye_masks_failure(exc: Exception) -> tuple[str, str]:

@@ -29,10 +29,6 @@ class _StatusContext:
     zarr_path: Path
 
 
-def _as_text(value: object) -> Optional[str]:
-    return normalize_attr(value)
-
-
 def _as_float(value: object) -> Optional[float]:
     return as_float(value)
 
@@ -96,10 +92,10 @@ def _resolve_status_context(zarr_path: str) -> Optional[_StatusContext]:
         if row is None:
             return None
 
-        dataset_id = _as_text(row["dataset_id"])
+        dataset_id = normalize_attr(row["dataset_id"])
         if dataset_id is None:
             return None
-        recording_id = _as_text(row["recording_id"])
+        recording_id = normalize_attr(row["recording_id"])
         return _StatusContext(
             registry_path=registry_path,
             dataset_id=dataset_id,
@@ -145,7 +141,7 @@ def _collect_keypoint_run_payload(
 
     run_group = keypoint_parent[run_name]
     details["run_present"] = True
-    method = _as_text(run_group.attrs.get("method"))
+    method = normalize_attr(run_group.attrs.get("method"))
 
     summary = run_group.attrs.get("summary_statistics")
     if isinstance(summary, Mapping):
@@ -178,7 +174,7 @@ def _collect_keypoint_run_payload(
         "model_resolution_selected_run_id",
         "model_resolution_selected_set_id",
     ):
-        text = _as_text(run_group.attrs.get(key))
+        text = normalize_attr(run_group.attrs.get(key))
         if text is not None:
             details[key] = text
 
@@ -197,7 +193,7 @@ def _collect_no_roi_payload(zarr_path: Path) -> Dict[str, object]:
     crop_parent = root.get("crop_runs")
     if crop_parent is None:
         return details
-    latest_crop = _as_text(crop_parent.attrs.get("latest"))
+    latest_crop = normalize_attr(crop_parent.attrs.get("latest"))
     if latest_crop is not None:
         details["source_crop_run"] = latest_crop
     return details

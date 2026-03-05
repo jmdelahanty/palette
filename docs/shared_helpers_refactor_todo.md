@@ -1,7 +1,7 @@
 # Shared Helpers & Deduplication TODO
 
 Initial audit: 2026-02-24
-Updated: 2026-03-05 (status refresh + C1/C2 alignment cleanup + C3 batch-1)
+Updated: 2026-03-05 (status refresh + C1/C2 alignment cleanup + C3 batch-2)
 
 Scan covered ~150+ files across `src/fisheye/` and `src/` standalone scripts
 (vendored `decord/` excluded).
@@ -87,6 +87,12 @@ Current state after direct code-audit verification of CRITICAL/HIGH/MEDIUM/LOW s
   - `refinement/refine_eye_masks.py`
   - `refinement/refine_detect.py`
   - `refinement/detect_quality.py`
+- C3 cleanup batch-2 replaced additional local wrappers with shared
+  `normalize_attr(...)` in:
+  - `inference/predict_pose.py`
+  - `refinement/refine_keypoints.py`
+  - `utils/run_detect_with_registry_model.py`
+  - `utils/run_eye_masks_with_registry_model.py`
 
 ### Phase B Progress (2026-03-03)
 
@@ -104,14 +110,14 @@ Current state after direct code-audit verification of CRITICAL/HIGH/MEDIUM/LOW s
   - `utils/run_keypoints_batch.py`
   - `utils/run_eye_masks_batch.py`
 
-### Audit Metrics (2026-03-04)
+### Audit Metrics (2026-03-05)
 
 - `zarr.open(...)`: 254 call sites across 160 files.
 - `open_zarr_root(...)` usage outside helper definition: 3 call sites.
 - `emit_stage_completion(...)`: 21 call sites across 20 files.
 - direct `upsert_recording_step_status(...)` outside helper/ledger/cascade definitions: 1 call site (callback wrapper in `run_eye_masks_batch.py` for test hook compatibility).
-- local `_normalize_attr/_status_text/_as_text/_decode_attr` helper defs: 30
-  (down from 38 before C3 batch-1).
+- local `_normalize_attr/_status_text/_as_text/_decode_attr` helper defs: 26
+  (down from 38 before C3 batches).
 - `PALETTE_RECORDINGS_ROOT` references: 66 occurrences across 43 files.
 - `JsonLogger` references in 19 files.
 - `_utc_now` helper copies in 32 files.

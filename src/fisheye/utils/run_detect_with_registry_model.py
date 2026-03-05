@@ -22,10 +22,6 @@ from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_pr
 _DETECT_STATUS_SOURCE = "runtime_detect_with_registry_model"
 
 
-def _normalize_attr(value: object) -> Optional[str]:
-    return normalize_attr(value)
-
-
 def _emit_detect_step_status(
     *,
     zarr_path: Path,
@@ -48,7 +44,7 @@ def _emit_detect_step_status(
             detect_runs = root.get("detect_runs")
             if detect_runs is not None and run_name in detect_runs:
                 detect_group = detect_runs[run_name]
-                method = _normalize_attr(detect_group.attrs.get("detection_method"))
+                method = normalize_attr(detect_group.attrs.get("detection_method"))
                 summary = detect_group.attrs.get("summary_statistics")
                 if isinstance(summary, dict):
                     cov = summary.get("coverage_pct") or summary.get("coverage_percent")
