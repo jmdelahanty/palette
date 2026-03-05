@@ -196,6 +196,8 @@ def _build_query_signature(args: argparse.Namespace, *, model_input: str) -> Dic
         "input_format": args.input_format,
         "model_input": model_input,
         "label_mode": args.label_mode,
+        "row_gate_policy": args.row_gate_policy,
+        "explicit_negative_ratio": args.explicit_negative_ratio,
         "profile_stage_group": args.profile_stage_group,
         "eye_mask_method": args.eye_mask_method,
         "min_usable_rate": args.min_usable_rate,
@@ -350,6 +352,8 @@ def _build_query_filter_payload(
         "split_val": float(args.split_val),
         "split_test": float(args.split_test),
         "split_seed": int(args.split_seed),
+        "row_gate_policy": str(args.row_gate_policy),
+        "explicit_negative_ratio": float(args.explicit_negative_ratio),
         "set_name": set_name,
         "set_version": set_version,
         "set_id": set_id,
@@ -445,6 +449,8 @@ def _print_summary(
     set_name: Optional[str],
     input_format: str,
     label_mode: str,
+    row_gate_policy: str,
+    explicit_negative_ratio: float,
     selected_sources: Sequence[Mapping[str, Any]],
     merged_dataset: Mapping[str, Any],
 ) -> None:
@@ -452,6 +458,9 @@ def _print_summary(
     print("  Task: eye_masks")
     print(f"  Input format: {input_format}")
     print(f"  Label mode: {label_mode}")
+    print(f"  Row gate policy: {row_gate_policy}")
+    if str(row_gate_policy).strip().lower() == "usable_plus_explicit_negatives":
+        print(f"  Explicit negative ratio: {explicit_negative_ratio}")
     if set_name is not None:
         print(f"  Set name: {set_name}")
     if set_id is not None:
@@ -474,6 +483,7 @@ def _build_training_config_payload(
     datasets: Sequence[Mapping[str, Any]],
     label_mode: str,
     split_seed: int,
+    row_gate_policy: str,
 ) -> Dict[str, Any]:
     if not base_config_path.exists():
         raise FileNotFoundError(f"Base config not found: {base_config_path}")
@@ -495,6 +505,8 @@ def _build_training_config_payload(
         dataset_entry["zarr_path"] = str(dataset["out_zarr"])
         dataset_entry["crop_run"] = str(dataset["run_name"])
         dataset_entry["mask_run"] = str(dataset["run_name"])
+        if str(row_gate_policy).strip().lower() == "usable_plus_explicit_negatives":
+            dataset_entry["include_empty"] = True
         generated_datasets[str(dataset["name"])] = dataset_entry
     config_payload["datasets"] = generated_datasets
 
@@ -519,6 +531,8 @@ def _execute_merged_export(
     split_val: float,
     split_test: float,
     split_seed: int,
+    row_gate_policy: str,
+    explicit_negative_ratio: float,
     overwrite: bool,
     registry_path: Optional[Path],
     set_id: Optional[str],
@@ -552,6 +566,8 @@ def _execute_merged_export(
             split_val=float(split_val),
             split_test=float(split_test),
             split_seed=int(split_seed),
+            row_gate_policy=str(row_gate_policy),
+            explicit_negative_ratio=float(explicit_negative_ratio),
             overwrite=bool(overwrite),
             validate=True,
             registry=registry_path,
@@ -635,6 +651,24 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--split-val", type=float, default=0.2)
     parser.add_argument("--split-test", type=float, default=0.0)
     parser.add_argument("--split-seed", type=int, default=42)
+    parser.add_argument(
+        "--row-gate-policy",
+        choices=list(export_eye.EYE_ROW_GATE_POLICIES),
+        default="usable_only",
+        help=(
+            "Planned merged-export row policy. "
+            "usable_only is recommended for U-Net training data quality."
+        ),
+    )
+    parser.add_argument(
+        "--explicit-negative-ratio",
+        type=float,
+        default=0.25,
+        help=(
+            "Planned cap for fish_present_no_keypoints negatives per positive row "
+            "when row-gate-policy=usable_plus_explicit_negatives."
+        ),
+    )
 
     parser.add_argument(
         "--profile-stage-group",
@@ -693,6 +727,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         raise ValueError("Split ratios must be non-negative.")
     if (float(args.split_train) + float(args.split_val) + float(args.split_test)) <= 0.0:
         raise ValueError("At least one split ratio must be greater than zero.")
+    if not (float(args.explicit_negative_ratio) >= 0.0):
+        raise ValueError("--explicit-negative-ratio must be >= 0.")
 
     model_input = args.model_input or args.input_format
     if args.model_input and args.model_input != args.input_format:
@@ -975,6 +1011,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             str(float(args.split_test)),
             "--split-seed",
             str(int(args.split_seed)),
+            "--row-gate-policy",
+            str(args.row_gate_policy),
+            "--explicit-negative-ratio",
+            str(float(args.explicit_negative_ratio)),
         ]
         if registry_path is not None:
             single_cmd.extend(["--registry", str(registry_path)])
@@ -992,7 +1032,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     else:
         command_lines.append(
             "# multi-source merged eye-mask export executed via API "
-            f"(sources={len(selected_sources_payload)} out_zarr={merged_out_zarr})"
+            f"(sources={len(selected_sources_payload)} out_zarr={merged_out_zarr} "
+            f"row_gate={args.row_gate_policy} explicit_negative_ratio={float(args.explicit_negative_ratio)})"
         )
 
     merged_dataset_payload: Dict[str, Any] = {
@@ -1010,6 +1051,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             "test": float(args.split_test),
             "seed": int(args.split_seed),
         },
+        "row_gate_policy": str(args.row_gate_policy),
+        "explicit_negative_ratio": float(args.explicit_negative_ratio),
         "export_command": command_lines[0],
         "export_status": "planned",
     }
@@ -1032,6 +1075,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         datasets=[merged_dataset_payload],
         label_mode=args.label_mode,
         split_seed=int(args.split_seed),
+        row_gate_policy=str(args.row_gate_policy),
     )
     merged_export_payload: Dict[str, Any] = {
         "dataset_name": merged_dataset_name,
@@ -1040,6 +1084,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         "zarr_path": str(merged_out_zarr),
         "source_count": int(len(selected_sources_payload)),
         "total_samples": int(total_selected_samples),
+        "row_gate_policy": str(args.row_gate_policy),
+        "explicit_negative_ratio": float(args.explicit_negative_ratio),
         "source_datasets": selected_sources_payload,
         "command": command_lines[0],
         "export_status": "planned",
@@ -1080,6 +1126,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         set_name=resolved_set_name,
         input_format=args.input_format,
         label_mode=args.label_mode,
+        row_gate_policy=str(args.row_gate_policy),
+        explicit_negative_ratio=float(args.explicit_negative_ratio),
         selected_sources=selected_sources_payload,
         merged_dataset=merged_dataset_payload,
     )

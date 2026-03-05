@@ -1347,7 +1347,20 @@ def _build_eye_mask_training_data_card(
                 ("geometry", "minor_axis", "stats", "p50"),
             ),
         )
-        left_area_p50 = _metric_from_row_or_summary(
+        left_area_p50_usable = _metric_from_row_or_summary(
+            row,
+            summary,
+            row_fields=(),
+            summary_paths=(
+                ("geometry", "left_area_usable", "stats", "p50"),
+                ("geometry", "area_left_usable", "stats", "p50"),
+                ("geometry", "left_eye_area_usable", "stats", "p50"),
+                ("geometry", "left_area_usable", "p50"),
+                ("geometry", "area_left_usable", "p50"),
+                ("geometry", "left_eye_area_usable", "p50"),
+            ),
+        )
+        left_area_p50_all = _metric_from_row_or_summary(
             row,
             summary,
             row_fields=("left_area_p50", "area_left_p50", "left_eye_area_p50"),
@@ -1360,7 +1373,22 @@ def _build_eye_mask_training_data_card(
                 ("geometry", "left_eye_area", "p50"),
             ),
         )
-        right_area_p50 = _metric_from_row_or_summary(
+        left_area_p50 = left_area_p50_usable if left_area_p50_usable is not None else left_area_p50_all
+
+        right_area_p50_usable = _metric_from_row_or_summary(
+            row,
+            summary,
+            row_fields=(),
+            summary_paths=(
+                ("geometry", "right_area_usable", "stats", "p50"),
+                ("geometry", "area_right_usable", "stats", "p50"),
+                ("geometry", "right_eye_area_usable", "stats", "p50"),
+                ("geometry", "right_area_usable", "p50"),
+                ("geometry", "area_right_usable", "p50"),
+                ("geometry", "right_eye_area_usable", "p50"),
+            ),
+        )
+        right_area_p50_all = _metric_from_row_or_summary(
             row,
             summary,
             row_fields=("right_area_p50", "area_right_p50", "right_eye_area_p50"),
@@ -1373,7 +1401,24 @@ def _build_eye_mask_training_data_card(
                 ("geometry", "right_eye_area", "p50"),
             ),
         )
-        union_area_p50 = _metric_from_row_or_summary(
+        right_area_p50 = right_area_p50_usable if right_area_p50_usable is not None else right_area_p50_all
+
+        union_area_p50_usable = _metric_from_row_or_summary(
+            row,
+            summary,
+            row_fields=(),
+            summary_paths=(
+                ("geometry", "union_area_usable", "stats", "p50"),
+                ("geometry", "area_union_usable", "stats", "p50"),
+                ("geometry", "combined_area_usable", "stats", "p50"),
+                ("geometry", "area_usable", "stats", "p50"),
+                ("geometry", "union_area_usable", "p50"),
+                ("geometry", "area_union_usable", "p50"),
+                ("geometry", "combined_area_usable", "p50"),
+                ("geometry", "area_usable", "p50"),
+            ),
+        )
+        union_area_p50_all = _metric_from_row_or_summary(
             row,
             summary,
             row_fields=("union_area_p50", "area_union_p50", "combined_area_p50", "area_p50"),
@@ -1388,6 +1433,7 @@ def _build_eye_mask_training_data_card(
                 ("geometry", "area", "p50"),
             ),
         )
+        union_area_p50 = union_area_p50_usable if union_area_p50_usable is not None else union_area_p50_all
         area_lr_ratio_p50 = _metric_from_row_or_summary(
             row,
             summary,
@@ -1432,8 +1478,14 @@ def _build_eye_mask_training_data_card(
             "ellipse_major_p50": ellipse_major_p50,
             "ellipse_minor_p50": ellipse_minor_p50,
             "left_area_p50": left_area_p50,
+            "left_area_p50_usable": left_area_p50_usable,
+            "left_area_p50_all": left_area_p50_all,
             "right_area_p50": right_area_p50,
+            "right_area_p50_usable": right_area_p50_usable,
+            "right_area_p50_all": right_area_p50_all,
             "union_area_p50": union_area_p50,
+            "union_area_p50_usable": union_area_p50_usable,
+            "union_area_p50_all": union_area_p50_all,
             "area_lr_ratio_p50": area_lr_ratio_p50,
         }
 
@@ -1477,8 +1529,26 @@ def _build_eye_mask_training_data_card(
                 "stage_group": _normalize_text(row.get("stage_group")),
                 "successful_roi_pair_rate": successful_rate,
                 "left_area_p50": left_area_p50,
+                "left_area_p50_usable": left_area_p50_usable,
+                "left_area_p50_all": left_area_p50_all,
                 "right_area_p50": right_area_p50,
+                "right_area_p50_usable": right_area_p50_usable,
+                "right_area_p50_all": right_area_p50_all,
                 "union_area_p50": union_area_p50,
+                "union_area_p50_usable": union_area_p50_usable,
+                "union_area_p50_all": union_area_p50_all,
+                "area_metric_source": (
+                    "usable"
+                    if any(
+                        value is not None
+                        for value in (
+                            left_area_p50_usable,
+                            right_area_p50_usable,
+                            union_area_p50_usable,
+                        )
+                    )
+                    else "all_rows"
+                ),
             }
         )
 

@@ -231,12 +231,18 @@ def test_prepare_eye_mask_from_registry_auto_set_name_and_set_id(
     assert merged["dataset_id"] == f"{set_id}_merged"
     assert merged["name"] == f"{set_id}_merged"
     assert merged["out_zarr"] == str(dataset_root / set_id / "zarr" / f"{set_id}_merged.zarr")
+    assert merged["row_gate_policy"] == "usable_only"
+    assert merged["explicit_negative_ratio"] == pytest.approx(0.25)
     assert merged["export_status"] == "planned"
     cmd = merged["export_command"]
+    assert "--row-gate-policy usable_only" in cmd
+    assert "--explicit-negative-ratio 0.25" in cmd
     assert "--training-set-id" in cmd
     assert f"--training-set-id {set_id}" in cmd
     assert payload["merged_export"]["source_count"] == 1
     assert payload["merged_export"]["zarr_path"] == merged["out_zarr"]
+    assert payload["merged_export"]["row_gate_policy"] == "usable_only"
+    assert payload["merged_export"]["explicit_negative_ratio"] == pytest.approx(0.25)
     assert payload["execution"] == {"mode": "planned", "planned": 1, "succeeded": 0, "failed": 0}
 
     config = yaml.safe_load(out_config.read_text(encoding="utf-8"))
@@ -316,6 +322,8 @@ def test_prepare_eye_mask_from_registry_quality_filters_select_matching_profile(
     ]
     merged = payload["datasets"][0]
     cmd = merged["export_command"]
+    assert "--row-gate-policy usable_only" in str(cmd)
+    assert "--explicit-negative-ratio 0.25" in str(cmd)
     assert "--training-set-id" not in str(cmd)
     assert payload["datasets"][0]["export_status"] == "planned"
     assert payload["execution"] == {"mode": "planned", "planned": 1, "succeeded": 0, "failed": 0}
@@ -374,6 +382,51 @@ def test_prepare_eye_mask_from_registry_explicit_set_identity_with_out_manifest(
     config = yaml.safe_load(out_config.read_text(encoding="utf-8"))
     assert list(config["datasets"].keys()) == ["eye_mask_eye_ops_v003_merged"]
     assert config["training_params"]["label_mode"] == "lr"
+
+
+def test_prepare_eye_mask_from_registry_sets_include_empty_for_explicit_negatives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    base_config_path = _write_base_config(tmp_path / "eye_base.yaml")
+    source_path = tmp_path / "source_a.zarr"
+    manifest_path = tmp_path / "negatives.manifest.json"
+
+    db = Registry(registry_path)
+    _seed_dataset(db, dataset_id="dataset_a", zarr_path=source_path)
+    db.close()
+
+    _monkeypatch_selection(monkeypatch)
+    _monkeypatch_export_not_called(monkeypatch)
+
+    rc = wrapper.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--base-config",
+            str(base_config_path),
+            "--out-manifest",
+            str(manifest_path),
+            "--row-gate-policy",
+            "usable_plus_explicit_negatives",
+            "--explicit-negative-ratio",
+            "0.4",
+        ]
+    )
+    assert rc == 0
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    merged = payload["datasets"][0]
+    assert merged["row_gate_policy"] == "usable_plus_explicit_negatives"
+    assert merged["explicit_negative_ratio"] == pytest.approx(0.4)
+    assert "--row-gate-policy usable_plus_explicit_negatives" in merged["export_command"]
+    assert "--explicit-negative-ratio 0.4" in merged["export_command"]
+
+    out_config = manifest_path.with_name("negatives.yaml")
+    config = yaml.safe_load(out_config.read_text(encoding="utf-8"))
+    cfg_dataset = config["datasets"][merged["name"]]
+    assert cfg_dataset["include_empty"] is True
 
 
 def test_prepare_eye_mask_from_registry_rejects_orchestration_flags(

@@ -80,6 +80,9 @@ def _profile_summary(
     right_area: float = 185.0,
     union_area: float = 360.0,
     area_ratio: float = 0.97,
+    left_area_usable: float | None = None,
+    right_area_usable: float | None = None,
+    union_area_usable: float | None = None,
 ) -> str:
     payload = {
         "quality": {
@@ -110,6 +113,12 @@ def _profile_summary(
             "protocol_name": "DefaultScreen",
         },
     }
+    if left_area_usable is not None:
+        payload["geometry"]["left_area_usable"] = {"stats": {"p50": float(left_area_usable)}}
+    if right_area_usable is not None:
+        payload["geometry"]["right_area_usable"] = {"stats": {"p50": float(right_area_usable)}}
+    if union_area_usable is not None:
+        payload["geometry"]["union_area_usable"] = {"stats": {"p50": float(union_area_usable)}}
     return json.dumps(payload)
 
 
@@ -555,6 +564,89 @@ def test_aggregate_eye_mask_data_card_reports_low_area_sources(
     low_area_lines = [line for line in stdout.splitlines() if line.startswith("low_area\t")]
     assert len(low_area_lines) == 1
     assert "dataset_a" in low_area_lines[0]
+
+
+def test_aggregate_eye_mask_data_card_prefers_usable_area_metrics_for_low_area_report(
+    tmp_path: Path,
+    monkeypatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    manifest_path = tmp_path / "eye_mask.manifest.json"
+    output_path = tmp_path / "eye_mask.data_card.json"
+
+    zarr_a = tmp_path / "a_training.zarr"
+    db = Registry(registry_path)
+    _seed_dataset(db, dataset_id="dataset_a", recording_id="rec_a", zarr_path=zarr_a)
+    db.close()
+
+    _write_manifest(
+        manifest_path,
+        datasets=[{"dataset_id": "dataset_a", "zarr_path": str(zarr_a)}],
+    )
+
+    row_a = {
+        "dataset_id": "dataset_a",
+        "profile_run": "eye_profile_a",
+        "zarr_mtime_ns": int(zarr_a.stat().st_mtime_ns),
+        "total_rois": 100,
+        "successful_roi_pairs": 90,
+        "successful_roi_pair_rate": 0.9,
+        "rois_per_second": 4.0,
+        "method": "refine_eye_masks",
+        "stage_group": "refined_eye_masks_runs",
+        "review_state": "approved",
+        # Legacy registry columns can still carry all-row medians with many intentional empties.
+        "left_area_p50": 0.0,
+        "right_area_p50": 0.0,
+        "union_area_p50": 0.0,
+        "profile_json": _profile_summary(
+            heatmap_density=[0.1, 0.2, 0.3, 0.4],
+            eye_sep=5.1,
+            major=8.0,
+            minor=5.0,
+            left_area=0.0,
+            right_area=0.0,
+            union_area=0.0,
+            left_area_usable=180.0,
+            right_area_usable=185.0,
+            union_area_usable=360.0,
+            area_ratio=0.11,
+        ),
+    }
+
+    def _fake_select_profile_rows(_registry: Registry, *, dataset_ids):
+        assert list(dataset_ids) == ["dataset_a"]
+        return ({"dataset_a": dict(row_a)}, "registry_sql_view")
+
+    monkeypatch.setattr(mod, "_select_profile_rows_registry_first", _fake_select_profile_rows)
+
+    rc = mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--registry",
+            str(registry_path),
+            "--output",
+            str(output_path),
+            "--no-plots",
+            "--report-min-eye-area-p50",
+            "50",
+            "--report-min-union-area-p50",
+            "50",
+        ]
+    )
+    assert rc == 0
+    stdout = capsys.readouterr().out
+    assert "datasets_flagged=0/1" in stdout
+    assert "low_area\tdataset_a" not in stdout
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    source_refs = payload["audit_freshness"]["source_run_refs"]
+    assert len(source_refs) == 1
+    assert source_refs[0]["left_area_p50"] == pytest.approx(180.0)
+    assert source_refs[0]["left_area_p50_all"] == pytest.approx(0.0)
+    assert source_refs[0]["area_metric_source"] == "usable"
 
 
 def test_aggregate_eye_mask_data_card_view_cannot_combine_dry_run() -> None:

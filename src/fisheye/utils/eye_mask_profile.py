@@ -204,6 +204,18 @@ def _metric_payload(values: Optional[np.ndarray]) -> dict[str, Any]:
     return {"stats": _metric_stats(values)}
 
 
+def _mask_metric_values(values: Optional[np.ndarray], mask: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    if values is None or mask is None:
+        return None
+    arr = np.asarray(values, dtype=np.float64)
+    mask_arr = np.asarray(mask, dtype=np.bool_).reshape(-1)
+    if arr.ndim == 0:
+        return None
+    if int(arr.shape[0]) != int(mask_arr.shape[0]):
+        return None
+    return arr[mask_arr]
+
+
 def _open_child_group(parent: zarr.Group, key: str, *, mode: str = "r") -> Optional[zarr.Group]:
     store = getattr(parent, "store", None)
     if store is None:
@@ -654,12 +666,14 @@ def build_eye_mask_profile_summary(
     rows_total = _rows_total(source_group, source_attrs)
 
     ellipse_success = _load_ellipse_success(source_group)
+    pair_success_mask: Optional[np.ndarray] = None
+    if ellipse_success is not None and ellipse_success.size > 0:
+        pair_success_mask = np.all(ellipse_success, axis=1)
     rows_usable = _as_int(source_attrs.get("successful_roi_pairs"))
     if rows_usable is None:
         rows_usable = _as_int(summary_stats.get("successful_roi_pairs"))
-    if rows_usable is None and ellipse_success is not None:
-        pair_success = np.all(ellipse_success, axis=1)
-        rows_usable = int(np.sum(pair_success))
+    if rows_usable is None and pair_success_mask is not None:
+        rows_usable = int(np.sum(pair_success_mask))
 
     usable_rate = _as_float(source_attrs.get("successful_roi_pair_rate"))
     if usable_rate is None:
@@ -699,6 +713,9 @@ def build_eye_mask_profile_summary(
     left_area = mask_left if mask_left is not None else metrics_geometry["left_area"]
     right_area = mask_right if mask_right is not None else metrics_geometry["right_area"]
     union_area = mask_union if mask_union is not None else metrics_geometry["union_area"]
+    left_area_usable = _mask_metric_values(left_area, pair_success_mask)
+    right_area_usable = _mask_metric_values(right_area, pair_success_mask)
+    union_area_usable = _mask_metric_values(union_area, pair_success_mask)
     edge_rate = mask_edge_rate
 
     area_lr_ratio = None
@@ -730,6 +747,7 @@ def build_eye_mask_profile_summary(
         ellipse_area = union_area
 
     area_values = union_area if union_area is not None else ellipse_area
+    area_values_usable = union_area_usable if union_area_usable is not None else _mask_metric_values(ellipse_area, pair_success_mask)
 
     if edge_rate is None:
         edge_rate = _as_float(source_attrs.get("edge_proximity_rate"))
@@ -828,15 +846,25 @@ def build_eye_mask_profile_summary(
 
     geometry_map: dict[str, Any] = {
         "area": _metric_payload(area_values),
+        "area_usable": _metric_payload(area_values_usable),
         "left_area": _metric_payload(left_area),
+        "left_area_usable": _metric_payload(left_area_usable),
         "area_left": _metric_payload(left_area),
+        "area_left_usable": _metric_payload(left_area_usable),
         "left_eye_area": _metric_payload(left_area),
+        "left_eye_area_usable": _metric_payload(left_area_usable),
         "right_area": _metric_payload(right_area),
+        "right_area_usable": _metric_payload(right_area_usable),
         "area_right": _metric_payload(right_area),
+        "area_right_usable": _metric_payload(right_area_usable),
         "right_eye_area": _metric_payload(right_area),
+        "right_eye_area_usable": _metric_payload(right_area_usable),
         "union_area": _metric_payload(union_area),
+        "union_area_usable": _metric_payload(union_area_usable),
         "area_union": _metric_payload(union_area),
+        "area_union_usable": _metric_payload(union_area_usable),
         "combined_area": _metric_payload(union_area),
+        "combined_area_usable": _metric_payload(union_area_usable),
         "area_lr_ratio": _metric_payload(area_lr_ratio),
         "left_right_area_ratio": _metric_payload(area_lr_ratio),
         "area_ratio_left_right": _metric_payload(area_lr_ratio),

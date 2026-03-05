@@ -192,11 +192,21 @@ def test_export_merged_invokes_exporter(tmp_path: Path, monkeypatch) -> None:
             "0.7/0.3",
             "--merge-seed",
             "123",
+            "--merge-row-gate-policy",
+            "usable_plus_explicit_negatives",
+            "--merge-explicit-negative-ratio",
+            "0.4",
             "--merge-overwrite",
             "--no-aggregate-training-data-card",
         ]
     )
     assert rc == 0
+
+    prepare_cli = calls["prepare"]
+    assert "--row-gate-policy" in prepare_cli
+    assert prepare_cli[prepare_cli.index("--row-gate-policy") + 1] == "usable_plus_explicit_negatives"
+    assert "--explicit-negative-ratio" in prepare_cli
+    assert prepare_cli[prepare_cli.index("--explicit-negative-ratio") + 1] == "0.4"
 
     export_call = calls["export"]
     assert export_call["out_zarr"] == merged_out
@@ -204,6 +214,8 @@ def test_export_merged_invokes_exporter(tmp_path: Path, monkeypatch) -> None:
     assert export_call["kwargs"]["split_val"] == pytest.approx(0.3)
     assert export_call["kwargs"]["split_test"] == pytest.approx(0.0)
     assert export_call["kwargs"]["split_seed"] == 123
+    assert export_call["kwargs"]["row_gate_policy"] == "usable_plus_explicit_negatives"
+    assert export_call["kwargs"]["explicit_negative_ratio"] == pytest.approx(0.4)
     assert export_call["kwargs"]["overwrite"] is True
     assert len(export_call["source_specs"]) == 1
 

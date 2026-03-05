@@ -9,6 +9,7 @@ This module provides:
 from __future__ import annotations
 
 import argparse
+from hashlib import sha1
 import json
 import math
 import shutil
@@ -28,6 +29,8 @@ from fisheye.shared.detect_reason_codec import (
     read_reason_labels,
     write_reason_columns,
 )
+
+EYE_ROW_GATE_POLICIES = ("all_rows", "usable_only", "usable_plus_explicit_negatives")
 
 
 def _utc_now() -> str:
@@ -65,6 +68,130 @@ def _normalize_label_mode(value: Optional[str]) -> Optional[str]:
     if text in {"union", "merged"}:
         return "union"
     return None
+
+
+def _normalize_row_gate_policy(value: str) -> str:
+    policy = str(value).strip().lower()
+    if policy not in EYE_ROW_GATE_POLICIES:
+        raise ValueError(
+            f"Unsupported row_gate_policy '{value}'. "
+            f"Expected one of: {', '.join(EYE_ROW_GATE_POLICIES)}."
+        )
+    return policy
+
+
+def _normalize_explicit_negative_ratio(value: float) -> float:
+    ratio = float(value)
+    if not math.isfinite(ratio) or ratio < 0.0:
+        raise ValueError(
+            f"Invalid explicit_negative_ratio '{value}'. "
+            "Expected a finite value >= 0.0."
+        )
+    return ratio
+
+
+def _reason_has_tag(reason_value: object, tag: str) -> bool:
+    reason_text = _as_text(reason_value)
+    if reason_text is None:
+        return False
+    tag_norm = str(tag).strip().lower()
+    if not tag_norm:
+        return False
+    tokens = [
+        token.strip().lower()
+        for token in reason_text.replace(",", "|").replace(";", "|").split("|")
+        if token is not None
+    ]
+    return tag_norm in {token for token in tokens if token}
+
+
+def _row_gate_seed(*, split_seed: int, source_dataset_id: str, source_path: Path) -> int:
+    digest = sha1(f"{int(split_seed)}::{source_dataset_id}::{source_path}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=False)
+
+
+def _resolve_row_gate_selection(
+    *,
+    source_path: Path,
+    source_dataset_id: str,
+    ellipse_success: zarr.Array,
+    reason_values: np.ndarray,
+    row_gate_policy: str,
+    explicit_negative_ratio: float,
+    split_seed: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    policy = _normalize_row_gate_policy(row_gate_policy)
+    ratio = _normalize_explicit_negative_ratio(explicit_negative_ratio)
+
+    ellipse_success_arr = np.asarray(ellipse_success[:], dtype=np.bool_)
+    if ellipse_success_arr.ndim == 1:
+        pair_success = ellipse_success_arr.astype(np.bool_, copy=False)
+    elif ellipse_success_arr.ndim == 2:
+        pair_success = np.all(ellipse_success_arr, axis=1)
+    else:
+        raise ValueError(
+            f"{source_path.name}: ellipse_success must be 1D or 2D for row gating, got {ellipse_success_arr.shape}."
+        )
+    total_rows = int(pair_success.shape[0])
+
+    reason_arr = np.asarray(reason_values, dtype=object)
+    if int(reason_arr.shape[0]) != total_rows:
+        raise ValueError(
+            f"{source_path.name}: reason label length mismatch for row gating "
+            f"({reason_arr.shape[0]} != {total_rows})."
+        )
+    explicit_negative_mask = np.asarray(
+        [_reason_has_tag(value, "fish_present_no_keypoints") for value in reason_arr],
+        dtype=np.bool_,
+    )
+    explicit_negative_mask &= ~pair_success
+
+    positive_indices = np.where(pair_success)[0].astype(np.int64, copy=False)
+    explicit_negative_indices = np.where(explicit_negative_mask)[0].astype(np.int64, copy=False)
+
+    selected_indices: np.ndarray
+    selected_explicit_negative = 0
+    if policy == "all_rows":
+        selected_indices = np.arange(total_rows, dtype=np.int64)
+        selected_explicit_negative = int(explicit_negative_indices.shape[0])
+    elif policy == "usable_only":
+        selected_indices = positive_indices
+    else:
+        max_negatives = int(math.floor(float(positive_indices.shape[0]) * ratio))
+        if max_negatives <= 0 or explicit_negative_indices.size == 0:
+            sampled_negatives = np.empty((0,), dtype=np.int64)
+        elif explicit_negative_indices.size <= max_negatives:
+            sampled_negatives = explicit_negative_indices
+        else:
+            rng = np.random.default_rng(
+                _row_gate_seed(
+                    split_seed=int(split_seed),
+                    source_dataset_id=source_dataset_id,
+                    source_path=source_path,
+                )
+            )
+            sampled_negatives = np.sort(
+                rng.choice(explicit_negative_indices, size=max_negatives, replace=False).astype(
+                    np.int64,
+                    copy=False,
+                )
+            )
+        selected_explicit_negative = int(sampled_negatives.shape[0])
+        if sampled_negatives.size > 0:
+            selected_indices = np.sort(np.concatenate([positive_indices, sampled_negatives], axis=0))
+        else:
+            selected_indices = positive_indices
+
+    stats = {
+        "policy": policy,
+        "total_rows": int(total_rows),
+        "selected_rows": int(selected_indices.shape[0]),
+        "pair_success_rows": int(np.sum(pair_success)),
+        "explicit_negative_rows": int(explicit_negative_indices.shape[0]),
+        "explicit_negative_selected_rows": int(selected_explicit_negative),
+        "explicit_negative_ratio": float(ratio),
+    }
+    return selected_indices.astype(np.int64, copy=False), stats
 
 
 def _clean_slug(value: Optional[str], fallback: str) -> str:
@@ -662,10 +789,17 @@ class _ResolvedEyeMergeSource:
     detection_source: np.ndarray
     eye_separation_data: np.ndarray
     reason_values: np.ndarray
+    selected_indices: np.ndarray
+    row_gate_policy: str
+    row_gate_stats: Dict[str, Any]
 
     @property
     def total_samples(self) -> int:
         return int(self.selection.total_samples)
+
+    @property
+    def selected_samples(self) -> int:
+        return int(self.selected_indices.shape[0])
 
 
 def _collapse_source_attr(values: Sequence[str], *, mixed_value: str = "mixed") -> str:
@@ -692,6 +826,44 @@ def _merge_chunks(chunks: Optional[Tuple[int, ...]], *, total_samples: int) -> O
             chunk = max(1, min(chunk, max(1, int(total_samples))))
         normalized.append(chunk)
     return tuple(normalized) if normalized else None
+
+
+def _read_row_selection(array_obj: zarr.Array, row_indices: np.ndarray) -> np.ndarray:
+    indices = np.asarray(row_indices, dtype=np.int64).reshape(-1)
+    tail_shape = tuple(int(v) for v in array_obj.shape[1:])
+    if indices.size == 0:
+        return np.empty((0, *tail_shape), dtype=array_obj.dtype)
+
+    if indices.size == int(array_obj.shape[0]) and np.array_equal(
+        indices,
+        np.arange(indices.size, dtype=np.int64),
+    ):
+        return np.asarray(array_obj[:])
+
+    if indices.size == 1:
+        idx = int(indices[0])
+        return np.asarray(array_obj[idx:idx + 1, ...])
+
+    starts: List[int] = []
+    stops: List[int] = []
+    run_start = int(indices[0])
+    prev = run_start
+    for raw_idx in indices[1:]:
+        idx = int(raw_idx)
+        if idx == prev + 1:
+            prev = idx
+            continue
+        starts.append(run_start)
+        stops.append(prev + 1)
+        run_start = idx
+        prev = idx
+    starts.append(run_start)
+    stops.append(prev + 1)
+
+    blocks = [np.asarray(array_obj[start:stop, ...]) for start, stop in zip(starts, stops, strict=False)]
+    if len(blocks) == 1:
+        return blocks[0]
+    return np.concatenate(blocks, axis=0)
 
 
 def _validate_source_for_merge(
@@ -841,6 +1013,9 @@ def _resolve_merge_source(
     source_spec: EyeMergeSourceSpec,
     *,
     registry_path: Optional[Path],
+    row_gate_policy: str,
+    explicit_negative_ratio: float,
+    split_seed: int,
 ) -> _ResolvedEyeMergeSource:
     source_path = Path(source_spec.source_zarr).expanduser().resolve()
     if not source_path.exists():
@@ -904,6 +1079,15 @@ def _resolve_merge_source(
         source_path=source_path,
         registry_path=registry_path,
     )
+    selected_indices, row_gate_stats = _resolve_row_gate_selection(
+        source_path=source_path,
+        source_dataset_id=source_dataset_id,
+        ellipse_success=ellipse_success,
+        reason_values=reason_values,
+        row_gate_policy=row_gate_policy,
+        explicit_negative_ratio=explicit_negative_ratio,
+        split_seed=split_seed,
+    )
     return _ResolvedEyeMergeSource(
         source_path=source_path,
         source_dataset_id=source_dataset_id,
@@ -923,6 +1107,9 @@ def _resolve_merge_source(
         detection_source=detection_source,
         eye_separation_data=eye_separation_data,
         reason_values=reason_values,
+        selected_indices=selected_indices,
+        row_gate_policy=str(row_gate_stats["policy"]),
+        row_gate_stats=dict(row_gate_stats),
     )
 
 
@@ -937,6 +1124,8 @@ def export_merged_eye_mask_training_zarr_from_sources(
     split_val: float = 0.2,
     split_test: float = 0.0,
     split_seed: int = 42,
+    row_gate_policy: str = "all_rows",
+    explicit_negative_ratio: float = 0.25,
     overwrite: bool = False,
     validate: bool = True,
     registry: Optional[Path] = None,
@@ -978,6 +1167,8 @@ def export_merged_eye_mask_training_zarr_from_sources(
     normalized_label_mode = _normalize_label_mode(label_mode)
     if normalized_label_mode is None:
         raise ValueError(f"Unsupported label_mode '{label_mode}'. Expected lr or union.")
+    normalized_row_gate_policy = _normalize_row_gate_policy(row_gate_policy)
+    normalized_explicit_negative_ratio = _normalize_explicit_negative_ratio(explicit_negative_ratio)
     registry_path = Path(registry).expanduser().resolve() if registry is not None else None
     artifacts = _resolve_card_artifacts(
         out_zarr=out_path,
@@ -1003,7 +1194,14 @@ def export_merged_eye_mask_training_zarr_from_sources(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     resolved_sources: List[_ResolvedEyeMergeSource] = [
-        _resolve_merge_source(spec, registry_path=registry_path) for spec in normalized_source_specs
+        _resolve_merge_source(
+            spec,
+            registry_path=registry_path,
+            row_gate_policy=normalized_row_gate_policy,
+            explicit_negative_ratio=normalized_explicit_negative_ratio,
+            split_seed=int(split_seed),
+        )
+        for spec in normalized_source_specs
     ]
     if not resolved_sources:
         raise ValueError("No source data resolved for merged eye-mask export.")
@@ -1025,31 +1223,66 @@ def export_merged_eye_mask_training_zarr_from_sources(
     if mask_probs_name and any(source.mask_probs_src is None for source in resolved_sources):
         mask_probs_name = None
 
-    source_counts = [int(source.total_samples) for source in resolved_sources]
+    source_counts = [int(source.selected_samples) for source in resolved_sources]
     total_samples = int(sum(source_counts))
+    if total_samples <= 0:
+        raise ValueError(
+            "Row gating selected zero samples across all sources. "
+            "Relax row-gate settings or provide sources with usable eye-mask rows."
+        )
     local_frame_indices = np.arange(total_samples, dtype=np.int64)
     detection_source = (
-        np.concatenate([source.detection_source for source in resolved_sources]).astype(np.int8, copy=False)
+        np.concatenate(
+            [
+                np.asarray(source.detection_source[source.selected_indices], dtype=np.int8)
+                for source in resolved_sources
+                if source.selected_samples > 0
+            ]
+        ).astype(np.int8, copy=False)
         if total_samples > 0
         else np.empty((0,), dtype=np.int8)
     )
     source_frame_idx = (
-        np.concatenate([source.source_frame_idx for source in resolved_sources]).astype(np.int64, copy=False)
+        np.concatenate(
+            [
+                np.asarray(source.source_frame_idx[source.selected_indices], dtype=np.int64)
+                for source in resolved_sources
+                if source.selected_samples > 0
+            ]
+        ).astype(np.int64, copy=False)
         if total_samples > 0
         else np.empty((0,), dtype=np.int64)
     )
     source_roi_idx = (
-        np.concatenate([source.source_roi_idx for source in resolved_sources]).astype(np.int64, copy=False)
+        np.concatenate(
+            [
+                np.asarray(source.source_roi_idx[source.selected_indices], dtype=np.int64)
+                for source in resolved_sources
+                if source.selected_samples > 0
+            ]
+        ).astype(np.int64, copy=False)
         if total_samples > 0
         else np.empty((0,), dtype=np.int64)
     )
     eye_separation_data = (
-        np.concatenate([source.eye_separation_data for source in resolved_sources]).astype(np.float32, copy=False)
+        np.concatenate(
+            [
+                np.asarray(source.eye_separation_data[source.selected_indices], dtype=np.float32)
+                for source in resolved_sources
+                if source.selected_samples > 0
+            ]
+        ).astype(np.float32, copy=False)
         if total_samples > 0
         else np.empty((0,), dtype=np.float32)
     )
     reason_values = (
-        np.concatenate([source.reason_values for source in resolved_sources]).astype(object, copy=False)
+        np.concatenate(
+            [
+                np.asarray(source.reason_values[source.selected_indices], dtype=object)
+                for source in resolved_sources
+                if source.selected_samples > 0
+            ]
+        ).astype(object, copy=False)
         if total_samples > 0
         else np.empty((0,), dtype=object)
     )
@@ -1059,6 +1292,21 @@ def export_merged_eye_mask_training_zarr_from_sources(
         if count > 0:
             source_dataset_idx[offset: offset + count] = int(idx)
             offset += int(count)
+
+    row_gate_policies = sorted({str(source.row_gate_policy) for source in resolved_sources})
+    applied_row_gate_policy = row_gate_policies[0] if len(row_gate_policies) == 1 else "mixed"
+    row_gate_total_rows = int(sum(int(source.row_gate_stats.get("total_rows", 0)) for source in resolved_sources))
+    row_gate_selected_rows = int(sum(int(source.row_gate_stats.get("selected_rows", 0)) for source in resolved_sources))
+    row_gate_pair_success_rows = int(
+        sum(int(source.row_gate_stats.get("pair_success_rows", 0)) for source in resolved_sources)
+    )
+    row_gate_explicit_negative_rows = int(
+        sum(int(source.row_gate_stats.get("explicit_negative_rows", 0)) for source in resolved_sources)
+    )
+    row_gate_explicit_negative_selected_rows = int(
+        sum(int(source.row_gate_stats.get("explicit_negative_selected_rows", 0)) for source in resolved_sources)
+    )
+    row_gate_applied = bool(applied_row_gate_policy != "all_rows" or row_gate_selected_rows != row_gate_total_rows)
 
     source_stage = _collapse_source_attr([source.selection.eye_stage for source in resolved_sources])
     source_eye_run = _collapse_source_attr([source.selection.eye_run for source in resolved_sources])
@@ -1076,6 +1324,17 @@ def export_merged_eye_mask_training_zarr_from_sources(
         "source_crop_run": source_crop_run,
         "source_count": int(len(resolved_sources)),
         "source_zarr_paths": source_zarr_paths,
+        "row_gate": {
+            "requested_policy": normalized_row_gate_policy,
+            "applied_policy": applied_row_gate_policy,
+            "applied": bool(row_gate_applied),
+            "explicit_negative_ratio": float(normalized_explicit_negative_ratio),
+            "total_rows": int(row_gate_total_rows),
+            "selected_rows": int(row_gate_selected_rows),
+            "pair_success_rows": int(row_gate_pair_success_rows),
+            "explicit_negative_rows": int(row_gate_explicit_negative_rows),
+            "explicit_negative_selected_rows": int(row_gate_explicit_negative_selected_rows),
+        },
         "split_seed": int(split_seed),
         "training_set_id": artifacts.training_set_id,
         "aggregate_training_data_card": bool(aggregate_training_data_card),
@@ -1165,19 +1424,23 @@ def export_merged_eye_mask_training_zarr_from_sources(
 
     offset = 0
     for source in resolved_sources:
-        next_offset = offset + int(source.total_samples)
+        selected = np.asarray(source.selected_indices, dtype=np.int64)
+        next_offset = offset + int(selected.shape[0])
         if next_offset > offset:
-            roi_images_dest[offset:next_offset, ...] = source.roi_images[:]
-            bbox_dest[offset:next_offset, ...] = source.bbox_norm[:]
+            roi_images_dest[offset:next_offset, ...] = _read_row_selection(source.roi_images, selected)
+            bbox_dest[offset:next_offset, ...] = _read_row_selection(source.bbox_norm, selected)
             if isinstance(source.crop_bbox, zarr.Array):
-                crop_bbox_dest[offset:next_offset, ...] = source.crop_bbox[:]
+                crop_bbox_dest[offset:next_offset, ...] = _read_row_selection(source.crop_bbox, selected)
             else:
-                crop_bbox_dest[offset:next_offset, ...] = np.asarray(source.bbox_norm[:], dtype=np.float32)
-            masks_dest[offset:next_offset, ...] = source.masks_roi[:]
-            ellipse_params_dest[offset:next_offset, ...] = source.ellipse_params[:]
-            ellipse_success_dest[offset:next_offset, ...] = source.ellipse_success[:]
+                crop_bbox_dest[offset:next_offset, ...] = np.asarray(
+                    _read_row_selection(source.bbox_norm, selected),
+                    dtype=np.float32,
+                )
+            masks_dest[offset:next_offset, ...] = _read_row_selection(source.masks_roi, selected)
+            ellipse_params_dest[offset:next_offset, ...] = _read_row_selection(source.ellipse_params, selected)
+            ellipse_success_dest[offset:next_offset, ...] = _read_row_selection(source.ellipse_success, selected)
             if mask_probs_dest is not None and source.mask_probs_src is not None:
-                mask_probs_dest[offset:next_offset, ...] = source.mask_probs_src[:]
+                mask_probs_dest[offset:next_offset, ...] = _read_row_selection(source.mask_probs_src, selected)
         offset = next_offset
 
     dst_crop.create_array(
@@ -1252,6 +1515,17 @@ def export_merged_eye_mask_training_zarr_from_sources(
             "source_crop_run": source_crop_run,
             "source_zarr_paths": source_zarr_paths,
             "label_mode": normalized_label_mode,
+            "row_gate_policy": applied_row_gate_policy,
+            "row_gate_requested_policy": normalized_row_gate_policy,
+            "row_gate_applied": bool(row_gate_applied),
+            "row_gate_explicit_negative_ratio": float(normalized_explicit_negative_ratio),
+            "row_gate_counts": {
+                "total_rows": int(row_gate_total_rows),
+                "selected_rows": int(row_gate_selected_rows),
+                "pair_success_rows": int(row_gate_pair_success_rows),
+                "explicit_negative_rows": int(row_gate_explicit_negative_rows),
+                "explicit_negative_selected_rows": int(row_gate_explicit_negative_selected_rows),
+            },
         }
     )
     if len(resolved_sources) == 1:
@@ -1383,6 +1657,25 @@ def export_merged_eye_mask_training_zarr_from_sources(
             "source_eye_runs": [source.selection.eye_run for source in resolved_sources],
             "source_crop_runs": [source.selection.crop_run for source in resolved_sources],
             "source_count": int(len(resolved_sources)),
+            "row_gate": {
+                "requested_policy": normalized_row_gate_policy,
+                "applied_policy": applied_row_gate_policy,
+                "applied": bool(row_gate_applied),
+                "explicit_negative_ratio": float(normalized_explicit_negative_ratio),
+                "total_rows": int(row_gate_total_rows),
+                "selected_rows": int(row_gate_selected_rows),
+                "pair_success_rows": int(row_gate_pair_success_rows),
+                "explicit_negative_rows": int(row_gate_explicit_negative_rows),
+                "explicit_negative_selected_rows": int(row_gate_explicit_negative_selected_rows),
+            },
+            "source_row_gate": [
+                {
+                    "source_dataset_id": source.source_dataset_id,
+                    "source_zarr_path": str(source.source_path),
+                    **dict(source.row_gate_stats),
+                }
+                for source in resolved_sources
+            ],
             "training_set_id": artifacts.training_set_id,
             "artifact_paths": {
                 "data_card_json": str(artifacts.card_json),
@@ -1417,6 +1710,8 @@ def export_merged_eye_mask_training_zarr(
     split_val: float = 0.2,
     split_test: float = 0.0,
     split_seed: int = 42,
+    row_gate_policy: str = "all_rows",
+    explicit_negative_ratio: float = 0.25,
     overwrite: bool = False,
     validate: bool = True,
     registry: Optional[Path] = None,
@@ -1444,6 +1739,8 @@ def export_merged_eye_mask_training_zarr(
         split_val=float(split_val),
         split_test=float(split_test),
         split_seed=int(split_seed),
+        row_gate_policy=str(row_gate_policy),
+        explicit_negative_ratio=float(explicit_negative_ratio),
         overwrite=bool(overwrite),
         validate=bool(validate),
         registry=registry,
@@ -1839,11 +2136,10 @@ def validate_merged_eye_mask_training_zarr(
                 source_roi_idx_i64 = source_roi_idx.astype(np.int64, copy=False)
                 if source_roi_idx_i64.size > 0:
                     min_idx = int(source_roi_idx_i64.min())
-                    max_idx = int(source_roi_idx_i64.max())
-                    if min_idx < 0 or max_idx >= total_samples:
+                    if min_idx < 0:
                         errors.append(
-                            "source_index/source_roi_idx out of bounds "
-                            f"(min={min_idx}, max={max_idx}, total_samples={total_samples})."
+                            "source_index/source_roi_idx must reference non-negative source-local row indices "
+                            f"(min={min_idx})."
                         )
 
     if errors:
@@ -1890,6 +2186,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--split-val", type=float, default=0.2)
     parser.add_argument("--split-test", type=float, default=0.0)
     parser.add_argument("--split-seed", type=int, default=42)
+    parser.add_argument(
+        "--row-gate-policy",
+        choices=list(EYE_ROW_GATE_POLICIES),
+        default="all_rows",
+        help=(
+            "Row inclusion policy for merged eye-mask export. "
+            "usable_only keeps pair-success rows; usable_plus_explicit_negatives "
+            "adds capped fish_present_no_keypoints negatives."
+        ),
+    )
+    parser.add_argument(
+        "--explicit-negative-ratio",
+        type=float,
+        default=0.25,
+        help=(
+            "Maximum explicit-negative rows per positive row when "
+            "--row-gate-policy=usable_plus_explicit_negatives."
+        ),
+    )
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path for merged-export registration.")
     parser.add_argument(
         "--training-set-id",
@@ -1958,6 +2273,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         split_val=float(args.split_val),
         split_test=float(args.split_test),
         split_seed=int(args.split_seed),
+        row_gate_policy=str(args.row_gate_policy),
+        explicit_negative_ratio=float(args.explicit_negative_ratio),
         overwrite=bool(args.overwrite),
         validate=not bool(args.no_validate),
         registry=args.registry,

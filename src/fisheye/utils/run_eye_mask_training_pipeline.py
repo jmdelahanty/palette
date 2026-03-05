@@ -386,6 +386,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Split ratios for merged export (train/val or train/val/test).",
     )
     parser.add_argument("--merge-seed", type=int, default=42, help="Split seed for merged export.")
+    parser.add_argument(
+        "--merge-row-gate-policy",
+        choices=list(export_zarr.EYE_ROW_GATE_POLICIES),
+        default="usable_only",
+        help=(
+            "Row inclusion policy for merged eye-mask export. "
+            "usable_only is the recommended U-Net baseline."
+        ),
+    )
+    parser.add_argument(
+        "--merge-explicit-negative-ratio",
+        type=float,
+        default=0.25,
+        help=(
+            "Cap fish_present_no_keypoints negatives per positive row when "
+            "--merge-row-gate-policy=usable_plus_explicit_negatives."
+        ),
+    )
     parser.add_argument("--merge-overwrite", action="store_true", help="Allow overwrite of merged output zarr.")
     parser.add_argument(
         "--aggregate-training-data-card",
@@ -460,6 +478,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error("--data-card-view cannot be combined with --data-card-no-plots.")
     if args.data_card_force_plots and args.data_card_no_plots:
         parser.error("--data-card-force-plots cannot be combined with --data-card-no-plots.")
+    if float(args.merge_explicit_negative_ratio) < 0.0:
+        parser.error("--merge-explicit-negative-ratio must be >= 0.")
 
     model_input = args.model_input or args.input_format
     if args.model_input and args.model_input != args.input_format:
@@ -607,6 +627,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     _add_arg(prepare_cli, "--split-val", args.split_val)
     _add_arg(prepare_cli, "--split-test", args.split_test)
     _add_arg(prepare_cli, "--split-seed", args.split_seed)
+    _add_arg(prepare_cli, "--row-gate-policy", args.merge_row_gate_policy)
+    _add_arg(prepare_cli, "--explicit-negative-ratio", args.merge_explicit_negative_ratio)
     _add_arg(prepare_cli, "--profile-stage-group", args.profile_stage_group)
     _add_arg(prepare_cli, "--eye-mask-method", args.eye_mask_method)
     _add_arg(prepare_cli, "--min-usable-rate", args.min_usable_rate)
@@ -682,6 +704,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             split_val=float(val_ratio),
             split_test=float(test_ratio),
             split_seed=int(args.merge_seed),
+            row_gate_policy=str(args.merge_row_gate_policy),
+            explicit_negative_ratio=float(args.merge_explicit_negative_ratio),
             overwrite=bool(args.merge_overwrite),
             validate=True,
             registry=Path(registry_path),

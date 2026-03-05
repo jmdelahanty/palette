@@ -127,6 +127,8 @@ def _write_source_eye_zarr(
     dataset_id: str | None = None,
     session_uuid: str | None = None,
     frame_start: int = 100,
+    ellipse_success: np.ndarray | None = None,
+    reason_labels: list[str] | None = None,
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
     if dataset_id is not None:
@@ -180,17 +182,31 @@ def _write_source_eye_zarr(
     ellipse_params[0, 1] = np.array([11.0, 6.0, 8.0, 6.0, 0.0], dtype=np.float32)
     ellipse_params[1, 0] = np.array([6.0, 6.0, 8.0, 6.0, 0.0], dtype=np.float32)
     ellipse_params[1, 1] = np.array([11.0, 6.0, 8.0, 6.0, 0.0], dtype=np.float32)
+    if ellipse_success is None:
+        ellipse_success_data = np.array([[True, True], [True, True], [False, False], [False, False]], dtype=np.bool_)
+    else:
+        ellipse_success_data = np.asarray(ellipse_success, dtype=np.bool_)
+    for row_idx in range(int(ellipse_success_data.shape[0])):
+        for eye_idx in range(int(ellipse_success_data.shape[1])):
+            if not bool(ellipse_success_data[row_idx, eye_idx]):
+                continue
+            if np.all(np.isfinite(ellipse_params[row_idx, eye_idx])):
+                continue
+            center_x = 6.0 if eye_idx == 0 else 11.0
+            ellipse_params[row_idx, eye_idx] = np.array([center_x, 6.0, 8.0, 6.0, 0.0], dtype=np.float32)
     refined.create_array("ellipse_params", data=ellipse_params, chunks=(4, 2, 5))
     refined.create_array(
         "ellipse_success",
-        data=np.array([[True, True], [True, True], [False, False], [False, False]], dtype=np.bool_),
+        data=ellipse_success_data,
         chunks=(4, 2),
     )
     refined.create_array("eye_separation", data=np.array([5.0, 5.0, np.nan, np.nan], dtype=np.float32), chunks=(4,))
     metrics = refined.create_group("metrics")
+    if reason_labels is None:
+        reason_labels = ["clean", "clean", "incomplete", "incomplete"]
     export_mod.write_reason_columns(
         metrics,
-        np.asarray(["clean", "clean", "incomplete", "incomplete"], dtype=object),
+        np.asarray(reason_labels, dtype=object),
         chunk_size=4,
         include_reason_text=True,
         overwrite=True,
@@ -319,6 +335,94 @@ def test_export_merged_eye_mask_training_zarr_from_multiple_sources_tracks_sourc
     assert source_roi_idx == [0, 1, 2, 3, 0, 1, 2, 3]
     assert source_dataset_ids == ["dataset_a", "dataset_b"]
     assert source_zarr_paths == [str(source_a.resolve()), str(source_b.resolve())]
+
+
+def test_export_row_gate_usable_only_keeps_pair_success_rows(tmp_path: Path) -> None:
+    source_path = tmp_path / "source_training.zarr"
+    out_path = tmp_path / "merged_eye_usable_only.zarr"
+    _write_source_eye_zarr(
+        source_path,
+        ellipse_success=np.array(
+            [[True, True], [False, False], [False, False], [True, True]],
+            dtype=np.bool_,
+        ),
+        reason_labels=[
+            "clean",
+            "fish_present_no_keypoints",
+            "fish_present_no_keypoints",
+            "clean",
+        ],
+    )
+
+    summary = export_merged_eye_mask_training_zarr(
+        source_path,
+        out_path,
+        eye_stage="refined_eye_masks_runs",
+        eye_run="refined_eye_masks_001",
+        row_gate_policy="usable_only",
+        overwrite=True,
+    )
+    assert summary["total_samples"] == 2
+    assert summary["row_gate"]["applied_policy"] == "usable_only"
+    assert summary["row_gate"]["selected_rows"] == 2
+    assert summary["row_gate"]["total_rows"] == 4
+
+    recheck = validate_merged_eye_mask_training_zarr(
+        out_path,
+        expected_input_format="gray",
+        expected_total_samples=2,
+        expected_label_mode="lr",
+    )
+    assert recheck["total_samples"] == 2
+
+    root = zarr.open_group(str(out_path), mode="r")
+    source_roi_idx = np.asarray(root["source_index/source_roi_idx"][:], dtype=np.int64).tolist()
+    assert source_roi_idx == [0, 3]
+    eye_latest = str(root["eye_masks_runs"].attrs["latest"])
+    eye = root[f"eye_masks_runs/{eye_latest}"]
+    assert eye.attrs["row_gate_policy"] == "usable_only"
+    assert bool(eye.attrs["row_gate_applied"]) is True
+
+
+def test_export_row_gate_usable_plus_explicit_negatives_caps_rows(tmp_path: Path) -> None:
+    source_path = tmp_path / "source_training.zarr"
+    out_path = tmp_path / "merged_eye_usable_plus_neg.zarr"
+    _write_source_eye_zarr(
+        source_path,
+        ellipse_success=np.array(
+            [[True, True], [False, False], [False, False], [True, True]],
+            dtype=np.bool_,
+        ),
+        reason_labels=[
+            "clean",
+            "fish_present_no_keypoints",
+            "fish_present_no_keypoints",
+            "clean",
+        ],
+    )
+
+    summary = export_merged_eye_mask_training_zarr(
+        source_path,
+        out_path,
+        eye_stage="refined_eye_masks_runs",
+        eye_run="refined_eye_masks_001",
+        row_gate_policy="usable_plus_explicit_negatives",
+        explicit_negative_ratio=0.5,
+        split_seed=7,
+        overwrite=True,
+    )
+    assert summary["total_samples"] == 3
+    assert summary["row_gate"]["applied_policy"] == "usable_plus_explicit_negatives"
+    assert summary["row_gate"]["pair_success_rows"] == 2
+    assert summary["row_gate"]["explicit_negative_rows"] == 2
+    assert summary["row_gate"]["explicit_negative_selected_rows"] == 1
+
+    root = zarr.open_group(str(out_path), mode="r")
+    source_roi_idx = np.asarray(root["source_index/source_roi_idx"][:], dtype=np.int64).tolist()
+    assert source_roi_idx[0] == 0
+    assert source_roi_idx[-1] == 3
+    assert len(source_roi_idx) == 3
+    assert set(source_roi_idx).issubset({0, 1, 2, 3})
 
 
 def test_export_records_deterministic_data_card_artifact_paths(tmp_path: Path) -> None:
