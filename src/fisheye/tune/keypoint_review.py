@@ -233,7 +233,7 @@ def run_manual_review(
     target_roi_indices: Optional[Sequence[int]] = None,
     review_state: str = "approved",
     review_method: str = "manual",
-    review_intended_use: str = "training",
+    review_intended_use: Optional[str] = None,
     reviewer: Optional[str] = None,
     review_notes: Optional[str] = None,
     frame_flag_file: Optional[str] = None,
@@ -329,9 +329,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     )
     parser.add_argument(
         "--review-intended-use",
-        default="training",
+        default=None,
         choices=["training", "full_recording"],
-        help="Intended use label (default: training).",
+        help="Intended use label (default: infer from existing status or zarr use).",
     )
     parser.add_argument("--reviewer", help="Reviewer name (defaults to $USER).")
     parser.add_argument("--review-notes", help="Optional review notes.")

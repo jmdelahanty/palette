@@ -517,8 +517,12 @@ def _seed_keypoint_quality_and_performance_rows(registry_path: Path) -> None:
         source_keypoint_run: str,
         keypoint_method: str,
         review_state: str | None,
+        review_method: str | None,
         review_intended_use: str | None,
         review_reviewer: str | None,
+        review_notes: str | None = None,
+        review_policy_id: str | None = None,
+        review_policy_version: int | None = None,
         review_timestamp_utc: str | None,
         usable_rate: float | None,
         usable_count: int,
@@ -532,8 +536,12 @@ def _seed_keypoint_quality_and_performance_rows(registry_path: Path) -> None:
             "source_keypoint_run": source_keypoint_run,
             "keypoint_method": keypoint_method,
             "review_state": review_state,
+            "review_method": review_method,
             "review_intended_use": review_intended_use,
             "review_reviewer": review_reviewer,
+            "review_notes": review_notes,
+            "review_policy_id": review_policy_id,
+            "review_policy_version": review_policy_version,
             "review_timestamp_utc": review_timestamp_utc,
             "usable_keypoints": usable_count,
             "total_keypoints": total_count,
@@ -553,8 +561,12 @@ def _seed_keypoint_quality_and_performance_rows(registry_path: Path) -> None:
                 source_keypoint_run="keypoints_a_trad",
                 keypoint_method="traditional_pose",
                 review_state="approved",
-                review_intended_use="training",
+                review_method="algorithmic",
+                review_intended_use="full_recording",
                 review_reviewer="alice",
+                review_notes="auto-approved by policy",
+                review_policy_id="keypoint_auto_review_v1",
+                review_policy_version=1,
                 review_timestamp_utc="2026-02-11T00:45:00+00:00",
                 usable_rate=0.95,
                 usable_count=95,
@@ -568,6 +580,7 @@ def _seed_keypoint_quality_and_performance_rows(registry_path: Path) -> None:
                 source_keypoint_run="keypoints_a_yolo",
                 keypoint_method="yolo_pose",
                 review_state="needs_review",
+                review_method="manual",
                 review_intended_use="training",
                 review_reviewer="alice",
                 review_timestamp_utc="2026-02-11T00:55:00+00:00",
@@ -588,6 +601,7 @@ def _seed_keypoint_quality_and_performance_rows(registry_path: Path) -> None:
                 source_keypoint_run="keypoints_b_trad",
                 keypoint_method="traditional_pose",
                 review_state=None,
+                review_method=None,
                 review_intended_use=None,
                 review_reviewer=None,
                 review_timestamp_utc=None,
@@ -608,6 +622,7 @@ def _seed_keypoint_quality_and_performance_rows(registry_path: Path) -> None:
                 source_keypoint_run="keypoints_c_yolo",
                 keypoint_method="yolo_pose",
                 review_state="approved",
+                review_method="manual",
                 review_intended_use="training",
                 review_reviewer="carol",
                 review_timestamp_utc="2026-02-11T02:35:00+00:00",
@@ -2281,6 +2296,39 @@ def test_registry_query_filters_by_keypoint_missing_review_state(tmp_path: Path,
     payload = json.loads(capsys.readouterr().out)
     assert {row["dataset_id"] for row in payload} == {"dataset_b"}
     assert payload[0]["keypoint_review_state"] is None
+
+
+def test_registry_query_filters_by_keypoint_review_method_and_policy(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_keypoint_quality_and_performance_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--keypoint-method",
+            "traditional_pose",
+            "--keypoint-review-state",
+            "approved",
+            "--keypoint-review-intended-use",
+            "full_recording",
+            "--keypoint-review-method",
+            "algorithmic",
+            "--keypoint-review-policy-id",
+            "keypoint_auto_review_v1",
+            "--keypoint-review-policy-version",
+            "1",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in payload} == {"dataset_a"}
+    row = payload[0]
+    assert row["keypoint_review_method"] == "algorithmic"
+    assert row["keypoint_review_policy_id"] == "keypoint_auto_review_v1"
+    assert row["keypoint_review_policy_version"] == 1
 
 
 def test_registry_query_detect_and_keypoint_shared_review_fields_when_available(tmp_path: Path, capsys) -> None:

@@ -35,6 +35,11 @@ def _make_eye_run(
         run.create_array("frame_counts", data=np.array([1], dtype=np.int32))
 
 
+def _make_generic_run(parent: zarr.Group, run_name: str) -> None:
+    run = parent.create_group(run_name)
+    run.create_array("values", data=np.array([1], dtype=np.int32))
+
+
 def test_iter_zarr_accepts_explicit_zarr_directory(tmp_path: Path) -> None:
     zarr_dir = tmp_path / "recording_training.zarr"
     zarr_dir.mkdir(parents=True, exist_ok=True)
@@ -71,3 +76,36 @@ def test_build_lineage_failure_plan_prunes_nonlatest_failures(tmp_path: Path) ->
 def test_main_rejects_lineage_stage_without_lineage_mode(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="--lineage-stage requires --lineage-failures-only."):
         mod.main([str(tmp_path), "--lineage-stage", "eye_masks_runs"])
+
+
+def test_resolve_selected_parents_defaults_to_all() -> None:
+    selected = mod._resolve_selected_parents(None)
+    assert selected == mod.RUN_PARENTS
+
+
+def test_resolve_selected_parents_rejects_unknown_value() -> None:
+    with pytest.raises(SystemExit, match="Unknown run parent"):
+        mod._resolve_selected_parents("keypoints_runs,unknown_runs")
+
+
+def test_build_plan_respects_selected_parents(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+
+    keypoint_parent = root.create_group("keypoints_runs")
+    _make_generic_run(keypoint_parent, "keypoints_old")
+    _make_generic_run(keypoint_parent, "keypoints_latest")
+    keypoint_parent.attrs["latest"] = "keypoints_latest"
+
+    detect_parent = root.create_group("detect_runs")
+    _make_generic_run(detect_parent, "detect_old")
+    _make_generic_run(detect_parent, "detect_latest")
+    detect_parent.attrs["latest"] = "detect_latest"
+
+    deletions, _ = mod._build_plan(root, ["keypoints_runs"])
+    assert deletions == {"keypoints_runs": ["keypoints_old"]}
+
+
+def test_main_rejects_parents_with_lineage_mode(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="--parents cannot be used with --lineage-failures-only."):
+        mod.main([str(tmp_path), "--lineage-failures-only", "--parents", "keypoints_runs"])

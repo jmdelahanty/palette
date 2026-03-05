@@ -19,6 +19,8 @@ from fisheye.detection.detect_keypoints_traditional import detect_keypoints
 from fisheye.detection.detect_keypoints_yolo import detect_keypoints_yolo
 from fisheye.refinement.refine_keypoints import create_refined_keypoint_run
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.registry.status_ledger import upsert_recording_step_status
+from fisheye.utils.auto_keypoint_review import AutoReviewPolicy, apply_auto_review
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils import refine_keypoints_batch as refine_keypoints_batch_mod
 from fisheye.utils.resolve_detect_model import Candidate
@@ -393,72 +395,322 @@ def _maybe_auto_approve_refined_keypoints(
         "refined_run": refined_run,
     }
 
-    root = zarr.open_group(str(zarr_path), mode="a")
-    refined_parent = _pick_refined_parent(root)
-    if refined_parent is None:
-        result["reason"] = "refined_keypoints_parent_missing"
-        return result
-    if refined_run not in refined_parent:
-        result["reason"] = "refined_run_missing"
+    policy = AutoReviewPolicy(
+        policy_id="keypoint_auto_review_v1",
+        policy_version=1,
+        remaining_failures_max=10**12,
+        refined_success_rate_min=0.0,
+        usable_keypoints_rate_min=float(min_usable_rate),
+        confidence_valid_rate_min=0.0,
+        geometry_valid_rate_min=0.0,
+        disqualifying_tags=(),
+    )
+    try:
+        dry_result = apply_auto_review(
+            zarr_path,
+            refined_run=refined_run,
+            source_keypoints_run=None,
+            policy=policy,
+            intended_use=intended_use,
+            reviewer=reviewer,
+            state_on_pass="approved",
+            state_on_fail="needs_review",
+            overwrite_existing=False,
+            update_latest=True,
+            dry_run=True,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        if "No refined_keypoints_runs found" in message:
+            result["reason"] = "refined_keypoints_parent_missing"
+            return result
+        if "Refined keypoint run" in message and "not found" in message:
+            result["reason"] = "refined_run_missing"
+            return result
+        result["reason"] = "auto_review_error"
+        result["error"] = message
         return result
 
-    refined = refined_parent[refined_run]
-    existing_review = refined.attrs.get("keypoint_review_status")
-    if isinstance(existing_review, dict) and existing_review.get("state") is not None:
-        result["reason"] = "already_reviewed"
-        result["existing_review_status"] = _jsonable(existing_review)
+    payload = dry_result.get("payload")
+    if isinstance(payload, dict):
+        auto_review = payload.get("auto_review")
+        if isinstance(auto_review, dict):
+            evidence = auto_review.get("evidence")
+            if isinstance(evidence, dict):
+                result["total_rois"] = evidence.get("total_rois")
+                result["usable_keypoints"] = evidence.get("usable_keypoints")
+                result["usable_rate"] = evidence.get("usable_keypoints_rate")
+
+    if dry_result.get("skipped"):
+        skip_reason = str(dry_result.get("skip_reason") or "skipped")
+        if skip_reason == "existing_review_status":
+            result["reason"] = "already_reviewed"
+            existing_payload = dry_result.get("payload")
+            if isinstance(existing_payload, dict):
+                result["existing_review_status"] = _jsonable(existing_payload)
+            return result
+        result["reason"] = skip_reason
         return result
 
-    total, usable = _refined_usable_counts(refined)
-    result["total_rois"] = total
-    result["usable_keypoints"] = usable
-
-    if total is None or usable is None:
-        result["reason"] = "usable_counts_unavailable"
-        return result
-    if total <= 0:
-        result["reason"] = "zero_total_rois"
-        return result
-
-    usable_rate = float(usable) / float(total)
-    result["usable_rate"] = usable_rate
-    if usable_rate + 1e-12 < float(min_usable_rate):
+    if not bool(dry_result.get("passed")):
         result["reason"] = "threshold_not_met"
+        result["evaluation"] = _jsonable(payload)
         return result
 
-    timestamp_utc = _utc_now()
-    status_payload: Dict[str, Any] = {
-        "state": "approved",
-        "method": "algorithmic",
-        "intended_use": intended_use,
-        "timestamp_utc": timestamp_utc,
-        "timestamp": timestamp_utc,
-        "notes": (
-            "Auto-approved by run_keypoints_batch: "
-            f"usable_keypoints={usable}/{total} (rate={usable_rate:.6f}) "
-            f">= threshold={float(min_usable_rate):.6f}"
-        ),
-    }
-    if reviewer:
-        status_payload["reviewer"] = reviewer
-
-    refined_attrs = dict(refined.attrs)
-    refined_attrs["keypoint_review_status"] = status_payload
-    signature = refined_attrs.get("keypoint_signature")
-    if not isinstance(signature, dict):
-        signature = _build_keypoint_signature(refined_attrs)
-        refined_attrs["keypoint_signature"] = signature
-    refined_attrs["keypoint_review_signature"] = signature
-    refined.attrs.put(refined_attrs)
-
-    parent_attrs = dict(refined_parent.attrs)
-    parent_attrs["keypoint_review_status_latest"] = refined_run
-    refined_parent.attrs.put(parent_attrs)
-
-    result["applied"] = True
-    result["reason"] = "threshold_met"
-    result["review_status"] = _jsonable(status_payload)
+    notes = (
+        "Auto-approved by run_keypoints_batch: "
+        f"usable_keypoints_rate >= threshold={float(min_usable_rate):.6f}"
+    )
+    write_result = apply_auto_review(
+        zarr_path,
+        refined_run=refined_run,
+        source_keypoints_run=None,
+        policy=policy,
+        intended_use=intended_use,
+        reviewer=reviewer,
+        notes=notes,
+        state_on_pass="approved",
+        state_on_fail="needs_review",
+        overwrite_existing=False,
+        update_latest=True,
+        dry_run=False,
+    )
+    result["applied"] = not bool(write_result.get("skipped"))
+    result["reason"] = "threshold_met" if result["applied"] else str(write_result.get("skip_reason") or "skipped")
+    write_payload = write_result.get("payload")
+    if isinstance(write_payload, dict):
+        result["review_status"] = _jsonable(write_payload)
     return result
+
+
+def _parse_json_mapping(value: object) -> Optional[Dict[str, Any]]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8", "ignore")
+        except Exception:
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return None
+        if isinstance(parsed, dict):
+            return dict(parsed)
+    return None
+
+
+def _resolve_step_status_context(
+    zarr_path: Path,
+    *,
+    registry_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    resolved_zarr = zarr_path.expanduser().resolve()
+    resolved_registry_path = (
+        registry_path.expanduser().resolve()
+        if registry_path is not None
+        else RegistryPaths.from_env(Path.cwd()).path.expanduser().resolve()
+    )
+    if not resolved_registry_path.exists():
+        return None
+
+    registry = Registry(resolved_registry_path)
+    try:
+        path_hash = hashlib.sha256(str(resolved_zarr).encode("utf-8")).hexdigest()
+        row = registry.conn.execute(
+            """
+            SELECT dataset_id, recording_id
+            FROM datasets
+            WHERE path_hash = ?
+            ORDER BY COALESCE(last_seen_utc, '') DESC, dataset_id
+            LIMIT 1;
+            """,
+            (path_hash,),
+        ).fetchone()
+        if row is None:
+            row = registry.conn.execute(
+                """
+                SELECT dataset_id, recording_id
+                FROM datasets
+                WHERE zarr_path = ?
+                ORDER BY COALESCE(last_seen_utc, '') DESC, dataset_id
+                LIMIT 1;
+                """,
+                (str(resolved_zarr),),
+            ).fetchone()
+        if row is None:
+            row = registry.conn.execute(
+                """
+                SELECT dataset_id, recording_id
+                FROM datasets
+                WHERE lower(COALESCE(zarr_path, '')) = lower(?)
+                ORDER BY COALESCE(last_seen_utc, '') DESC, dataset_id
+                LIMIT 1;
+                """,
+                (str(resolved_zarr),),
+            ).fetchone()
+        if row is None:
+            return None
+        dataset_id = _normalize_attr(row["dataset_id"])
+        if not dataset_id:
+            return None
+        return {
+            "registry_path": resolved_registry_path,
+            "dataset_id": dataset_id,
+            "recording_id": _normalize_attr(row["recording_id"]),
+        }
+    finally:
+        registry.close()
+
+
+def _coverage_pct_from_stage_payload(stage_payload: Dict[str, Any]) -> Optional[float]:
+    summary = stage_payload.get("summary_statistics")
+    if isinstance(summary, dict):
+        for key in ("pass_rate_percent", "success_rate_percent"):
+            if key in summary:
+                try:
+                    return float(summary[key])
+                except (TypeError, ValueError):
+                    continue
+    success_rate = stage_payload.get("success_rate")
+    if success_rate is not None:
+        try:
+            value = float(success_rate)
+            if value <= 1.0:
+                value *= 100.0
+            return value
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _zarr_mtime_ns(path: Path) -> Optional[int]:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except Exception:
+        return None
+
+
+def _sync_refined_keypoint_step_status_after_auto_review(
+    *,
+    zarr_path: Path,
+    refined_run: str,
+    stage_payload: Dict[str, Any],
+    review_status: Dict[str, Any],
+) -> Dict[str, Any]:
+    context = _resolve_step_status_context(zarr_path)
+    if context is None:
+        return {"synced": False, "reason": "status_context_unavailable"}
+
+    details_update: Dict[str, Any] = {
+        "reason": "present",
+        "latest_selector": "run_keypoints_batch_auto_review",
+    }
+    source_runs = stage_payload.get("source_runs")
+    if isinstance(source_runs, dict):
+        for key in ("source_keypoints_run", "source_crop_run", "source_detect_run"):
+            if source_runs.get(key) is not None:
+                details_update[key] = source_runs.get(key)
+
+    summary = stage_payload.get("summary_statistics")
+    if isinstance(summary, dict):
+        for key in ("total_rois", "refined_success", "usable_keypoints", "pass_rate_percent"):
+            if summary.get(key) is not None:
+                details_update[key] = summary.get(key)
+
+    registry = Registry(Path(str(context["registry_path"])))
+    try:
+        existing_row = registry.conn.execute(
+            """
+            SELECT details_json
+            FROM recording_step_status
+            WHERE dataset_id = ? AND step_name = 'refined_keypoints'
+            LIMIT 1;
+            """,
+            (str(context["dataset_id"]),),
+        ).fetchone()
+        existing_details = _parse_json_mapping(existing_row["details_json"]) if existing_row is not None else None
+        merged_details: Dict[str, Any] = {}
+        if isinstance(existing_details, dict):
+            merged_details.update(existing_details)
+        merged_details.update(details_update)
+
+        upsert_recording_step_status(
+            registry,
+            dataset_id=str(context["dataset_id"]),
+            recording_id=context.get("recording_id"),
+            step_name="refined_keypoints",
+            status="ok",
+            run_name=refined_run,
+            method=_normalize_attr(stage_payload.get("method")) or "refine_keypoints",
+            coverage_pct=_coverage_pct_from_stage_payload(stage_payload),
+            review_status_json=review_status,
+            details_json=merged_details,
+            source="run_keypoints_batch_auto_review",
+            zarr_mtime_ns=_zarr_mtime_ns(zarr_path),
+        )
+        return {
+            "synced": True,
+            "dataset_id": str(context["dataset_id"]),
+            "recording_id": context.get("recording_id"),
+        }
+    except Exception as exc:
+        return {"synced": False, "reason": "upsert_failed", "error": str(exc)}
+    finally:
+        registry.close()
+
+
+def _sync_keypoint_registry_rows_after_run(
+    *,
+    zarr_path: Path,
+    registry_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    context = _resolve_step_status_context(zarr_path, registry_path=registry_path)
+    if context is None:
+        return {"synced": False, "reason": "status_context_unavailable"}
+
+    registry = Registry(Path(str(context["registry_path"])))
+    try:
+        dataset_id = str(context["dataset_id"])
+        dataset_row = registry.conn.execute(
+            """
+            SELECT recording_id, zarr_use
+            FROM datasets
+            WHERE dataset_id = ?
+            LIMIT 1;
+            """,
+            (dataset_id,),
+        ).fetchone()
+        recording_id = (
+            _normalize_attr(dataset_row["recording_id"])
+            if dataset_row is not None
+            else _normalize_attr(context.get("recording_id"))
+        )
+        zarr_use = _normalize_attr(dataset_row["zarr_use"]) if dataset_row is not None else None
+        perf_rows = int(
+            registry.refresh_keypoint_performance_for_dataset(
+                dataset_id,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+            )
+        )
+        quality_rows = int(registry.refresh_keypoint_quality_for_dataset(dataset_id, zarr_path=zarr_path))
+        return {
+            "synced": True,
+            "dataset_id": dataset_id,
+            "recording_id": recording_id,
+            "keypoint_performance_rows": perf_rows,
+            "keypoint_quality_rows": quality_rows,
+        }
+    except Exception as exc:
+        return {"synced": False, "reason": "refresh_failed", "error": str(exc)}
+    finally:
+        registry.close()
 
 
 def _decode_source_runs(attrs: Dict[str, Any]) -> Dict[str, Any]:
@@ -1141,6 +1393,7 @@ def _run_plan(
     auto_approve_min_usable_rate: Optional[float] = None,
     auto_approve_intended_use: str = "full_recording",
     auto_approve_reviewer: Optional[str] = None,
+    registry_path_for_sync: Optional[Path] = None,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "recording": str(plan.recording_dir),
@@ -1150,6 +1403,7 @@ def _run_plan(
         "status": "ok",
     }
     stage_start = time.perf_counter()
+    updated_keypoint_outputs = False
 
     if refine_only:
         source_run = _latest_keypoints_run(plan.zarr_path)
@@ -1162,6 +1416,7 @@ def _run_plan(
                 "refined_keypoints_runs",
                 refined_run,
             )
+            updated_keypoint_outputs = True
             if auto_approve_min_usable_rate is not None:
                 payload["auto_review"] = _maybe_auto_approve_refined_keypoints(
                     zarr_path=plan.zarr_path,
@@ -1170,6 +1425,18 @@ def _run_plan(
                     intended_use=auto_approve_intended_use,
                     reviewer=auto_approve_reviewer,
                 )
+                auto_review_payload = payload.get("auto_review")
+                if isinstance(auto_review_payload, dict):
+                    review_status = auto_review_payload.get("review_status")
+                    if not isinstance(review_status, dict):
+                        review_status = auto_review_payload.get("existing_review_status")
+                    if isinstance(review_status, dict):
+                        auto_review_payload["step_status_sync"] = _sync_refined_keypoint_step_status_after_auto_review(
+                            zarr_path=plan.zarr_path,
+                            refined_run=refined_run,
+                            stage_payload=payload["refined_keypoints"],
+                            review_status=review_status,
+                        )
         else:
             payload["refine_skipped_reason"] = "zero_keypoint_rois"
     else:
@@ -1197,6 +1464,7 @@ def _run_plan(
             "keypoints_runs",
             run_name,
         )
+        updated_keypoint_outputs = True
         if resolved_model is not None:
             _write_keypoint_model_resolution_provenance(
                 zarr_path=plan.zarr_path,
@@ -1224,6 +1492,7 @@ def _run_plan(
                     "refined_keypoints_runs",
                     refined_run,
                 )
+                updated_keypoint_outputs = True
                 if auto_approve_min_usable_rate is not None:
                     payload["auto_review"] = _maybe_auto_approve_refined_keypoints(
                         zarr_path=plan.zarr_path,
@@ -1232,8 +1501,26 @@ def _run_plan(
                         intended_use=auto_approve_intended_use,
                         reviewer=auto_approve_reviewer,
                     )
+                    auto_review_payload = payload.get("auto_review")
+                    if isinstance(auto_review_payload, dict):
+                        review_status = auto_review_payload.get("review_status")
+                        if not isinstance(review_status, dict):
+                            review_status = auto_review_payload.get("existing_review_status")
+                        if isinstance(review_status, dict):
+                            auto_review_payload["step_status_sync"] = _sync_refined_keypoint_step_status_after_auto_review(
+                                zarr_path=plan.zarr_path,
+                                refined_run=refined_run,
+                                stage_payload=payload["refined_keypoints"],
+                                review_status=review_status,
+                            )
             else:
                 payload["refine_skipped_reason"] = "zero_keypoint_rois"
+
+    if updated_keypoint_outputs:
+        payload["registry_sync"] = _sync_keypoint_registry_rows_after_run(
+            zarr_path=plan.zarr_path,
+            registry_path=registry_path_for_sync,
+        )
 
     payload["duration_seconds"] = time.perf_counter() - stage_start
     return payload
@@ -1888,6 +2175,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     auto_approve_min_usable_rate=auto_approve_min_usable_rate,
                     auto_approve_intended_use=str(args.auto_approve_intended_use),
                     auto_approve_reviewer=args.auto_approve_reviewer,
+                    registry_path_for_sync=(resolved_registry_path or args.registry),
                 )
                 ok += 1
                 if args.json:
@@ -1930,6 +2218,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         auto_approve_min_usable_rate=auto_approve_min_usable_rate,
                         auto_approve_intended_use=str(args.auto_approve_intended_use),
                         auto_approve_reviewer=args.auto_approve_reviewer,
+                        registry_path_for_sync=(resolved_registry_path or args.registry),
                     )
                     ok += 1
                     if args.json:

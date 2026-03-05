@@ -10,6 +10,8 @@ from typing import Iterable, List, Optional
 
 import zarr
 
+from fisheye.utils.auto_keypoint_review import AutoReviewPolicy, apply_auto_review
+
 try:
     from rich.console import Console
     from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
@@ -105,7 +107,7 @@ def _load_paths_file(path: Path) -> List[Path]:
 def _iter_zarr(roots: List[Path], recursive: bool) -> Iterable[Path]:
     for root in roots:
         root = root.expanduser()
-        if root.is_file() and root.suffix == ".zarr":
+        if root.suffix == ".zarr" and (root.is_file() or root.is_dir()):
             yield root
             continue
         if not root.exists():
@@ -263,6 +265,20 @@ def _build_cmd(args: argparse.Namespace, zarr_path: Path, keypoint_run: Optional
     return cmd
 
 
+def _build_auto_review_policy(args: argparse.Namespace) -> AutoReviewPolicy:
+    tags = tuple(args.auto_review_disqualifying_tag) if args.auto_review_disqualifying_tag else AutoReviewPolicy.disqualifying_tags
+    return AutoReviewPolicy(
+        policy_id=str(args.auto_review_policy_id),
+        policy_version=int(args.auto_review_policy_version),
+        remaining_failures_max=int(args.auto_review_remaining_failures_max),
+        refined_success_rate_min=float(args.auto_review_refined_success_rate_min),
+        usable_keypoints_rate_min=float(args.auto_review_usable_rate_min),
+        confidence_valid_rate_min=float(args.auto_review_confidence_valid_rate_min),
+        geometry_valid_rate_min=float(args.auto_review_geometry_valid_rate_min),
+        disqualifying_tags=tags,
+    )
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Batch refine keypoints for Palette Zarr archives.")
     parser.add_argument("paths", nargs="*", type=Path, help="Recording roots or zarr paths.")
@@ -295,6 +311,35 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--log-dir", type=Path, default=None, help="Directory to store JSONL logs.")
     parser.add_argument("--no-log", action="store_true", help="Disable JSONL logging in apply mode.")
     parser.add_argument("--json", action="store_true", help="Emit JSON lines for plans/results.")
+    parser.add_argument(
+        "--auto-review-full-recording",
+        action="store_true",
+        help=(
+            "After successful refinement, write algorithmic keypoint_review_status with "
+            "intended_use=full_recording using policy thresholds."
+        ),
+    )
+    parser.add_argument("--auto-review-policy-id", default=AutoReviewPolicy.policy_id, help="Auto-review policy identifier.")
+    parser.add_argument("--auto-review-policy-version", type=int, default=AutoReviewPolicy.policy_version, help="Auto-review policy version.")
+    parser.add_argument("--auto-review-remaining-failures-max", type=int, default=AutoReviewPolicy.remaining_failures_max)
+    parser.add_argument("--auto-review-refined-success-rate-min", type=float, default=AutoReviewPolicy.refined_success_rate_min)
+    parser.add_argument("--auto-review-usable-rate-min", type=float, default=AutoReviewPolicy.usable_keypoints_rate_min)
+    parser.add_argument("--auto-review-confidence-valid-rate-min", type=float, default=AutoReviewPolicy.confidence_valid_rate_min)
+    parser.add_argument("--auto-review-geometry-valid-rate-min", type=float, default=AutoReviewPolicy.geometry_valid_rate_min)
+    parser.add_argument(
+        "--auto-review-disqualifying-tag",
+        action="append",
+        default=None,
+        help="Reason tag that forces needs_review (repeatable).",
+    )
+    parser.add_argument("--auto-review-reviewer", help="Optional reviewer label for auto-review payload.")
+    parser.add_argument("--auto-review-notes", help="Optional notes for auto-review payload.")
+    parser.add_argument("--auto-review-overwrite-existing", action="store_true", help="Overwrite existing keypoint_review_status.")
+    parser.add_argument(
+        "--auto-review-no-latest",
+        action="store_true",
+        help="Do not update refined parent keypoint_review_status_latest pointer.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -305,6 +350,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     roots = _resolve_root(list(args.paths) + file_list_paths)
     skip_existing = not args.no_skip_existing
+    auto_review_enabled = bool(args.auto_review_full_recording)
+    auto_policy = _build_auto_review_policy(args) if auto_review_enabled else None
 
     plans = _build_plans(roots, args.recursive, args.keypoint_run, skip_existing, args.zarr_use)
     if not plans:
@@ -359,6 +406,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             file_list=[str(p) for p in (args.file_list or [])],
             recursive=bool(args.recursive),
             zarr_use=str(args.zarr_use),
+            auto_review_enabled=auto_review_enabled,
+            auto_review_policy=(
+                {
+                    "policy_id": auto_policy.policy_id,
+                    "policy_version": auto_policy.policy_version,
+                    "remaining_failures_max": auto_policy.remaining_failures_max,
+                    "refined_success_rate_min": auto_policy.refined_success_rate_min,
+                    "usable_keypoints_rate_min": auto_policy.usable_keypoints_rate_min,
+                    "confidence_valid_rate_min": auto_policy.confidence_valid_rate_min,
+                    "geometry_valid_rate_min": auto_policy.geometry_valid_rate_min,
+                    "disqualifying_tags": list(auto_policy.disqualifying_tags),
+                }
+                if auto_policy is not None
+                else None
+            ),
         )
 
     console = Console() if Console else None
@@ -387,21 +449,67 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"Running: {' '.join(cmd)}")
             result = subprocess.run(cmd, check=False)
             if result.returncode == 0:
-                ok += 1
-                if args.json:
-                    print(
-                        json.dumps(
-                            {
-                                "status": "ok",
-                                "zarr": str(plan.zarr_path),
-                                "returncode": int(result.returncode),
-                                "keypoint_run": plan.keypoint_run,
-                            },
-                            sort_keys=True,
+                auto_review_result: Optional[dict] = None
+                auto_review_error: Optional[str] = None
+                if auto_review_enabled and auto_policy is not None:
+                    try:
+                        auto_review_result = apply_auto_review(
+                            plan.zarr_path,
+                            source_keypoints_run=plan.keypoint_run,
+                            policy=auto_policy,
+                            intended_use="full_recording",
+                            reviewer=args.auto_review_reviewer,
+                            notes=args.auto_review_notes,
+                            overwrite_existing=bool(args.auto_review_overwrite_existing),
+                            update_latest=not bool(args.auto_review_no_latest),
+                            dry_run=False,
                         )
-                    )
-                if logger is not None:
-                    logger.log("refine_success", zarr=str(plan.zarr_path), returncode=result.returncode)
+                    except Exception as exc:
+                        auto_review_error = str(exc)
+
+                if auto_review_error is None:
+                    ok += 1
+                    if args.json:
+                        payload = {
+                            "status": "ok",
+                            "zarr": str(plan.zarr_path),
+                            "returncode": int(result.returncode),
+                            "keypoint_run": plan.keypoint_run,
+                        }
+                        if auto_review_enabled:
+                            payload["auto_review"] = auto_review_result
+                        print(json.dumps(payload, sort_keys=True))
+                    if logger is not None:
+                        logger.log(
+                            "refine_success",
+                            zarr=str(plan.zarr_path),
+                            returncode=result.returncode,
+                            auto_review=auto_review_result,
+                        )
+                else:
+                    failed += 1
+                    if args.json:
+                        print(
+                            json.dumps(
+                                {
+                                    "status": "failed",
+                                    "zarr": str(plan.zarr_path),
+                                    "returncode": int(result.returncode),
+                                    "keypoint_run": plan.keypoint_run,
+                                    "failure_stage": "auto_review",
+                                    "error": auto_review_error,
+                                },
+                                sort_keys=True,
+                            )
+                        )
+                    if logger is not None:
+                        logger.log(
+                            "auto_review_failed",
+                            zarr=str(plan.zarr_path),
+                            returncode=result.returncode,
+                            keypoint_run=plan.keypoint_run,
+                            error=auto_review_error,
+                        )
             else:
                 failed += 1
                 if args.json:

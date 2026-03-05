@@ -14,7 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional
 
+import numpy as np
 import zarr
+
+from fisheye.shared.detect_reason_codec import read_reason_labels
 
 
 @dataclass
@@ -85,6 +88,26 @@ def _normalize_review_state(raw: object) -> Optional[str]:
     return _normalize_optional_text(state)
 
 
+def _matches_review_state_filter(review_state: Optional[str], review_state_filter: str) -> bool:
+    filt = _normalize_optional_text(review_state_filter) or "any"
+    if filt in {"any", "all"}:
+        return True
+    if filt == "missing":
+        return review_state is None
+    if filt in {"not_approved", "not-approved"}:
+        return review_state != "approved"
+    return review_state == filt
+
+
+def _relation_has_columns(conn: sqlite3.Connection, relation: str, required: tuple[str, ...]) -> bool:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({relation});").fetchall()
+    except sqlite3.Error:
+        return False
+    names = {str(row["name"]) for row in rows if row["name"] is not None}
+    return all(name in names for name in required)
+
+
 def _normalize_scope_roots(paths: List[Path]) -> List[Path]:
     roots: List[Path] = []
     seen: set[str] = set()
@@ -131,20 +154,100 @@ def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
     return None
 
 
+def _extract_failures_from_refined_group(refined_group: zarr.Group) -> Optional[np.ndarray]:
+    if "refined_success" in refined_group:
+        success = np.asarray(refined_group["refined_success"][:], dtype=bool)
+        failures = np.where(~success)[0].astype("i4", copy=False)
+    elif "source_success" in refined_group:
+        success = np.asarray(refined_group["source_success"][:], dtype=bool)
+        failures = np.where(~success)[0].astype("i4", copy=False)
+    elif "failure_indices" in refined_group:
+        failures = np.asarray(refined_group["failure_indices"][:], dtype="i4")
+    else:
+        return None
+
+    if failures.size == 0:
+        return failures
+
+    reason_vals = read_reason_labels(refined_group)
+    if reason_vals is None:
+        return failures
+    reason_vals = np.asarray(reason_vals, dtype=object)
+    if reason_vals.size == 0:
+        return failures
+
+    keep_mask = []
+    for idx in failures:
+        try:
+            text = str(reason_vals[int(idx)]) if reason_vals[int(idx)] is not None else ""
+        except Exception:
+            text = ""
+        keep_mask.append(
+            "fish_present_no_keypoints" not in text
+            and "detection_issue" not in text
+        )
+    return failures[np.array(keep_mask, dtype=bool)]
+
+
+def _run_has_review_failures(zarr_path: Path, refined_run: str) -> Optional[bool]:
+    if not zarr_path.exists():
+        return None
+    try:
+        root = zarr.open(str(zarr_path), mode="r")
+    except Exception:
+        return None
+
+    refined_parent = root.get("refined_keypoints_runs") or root.get("keypoints_refined_runs")
+    if refined_parent is None or refined_run not in refined_parent:
+        return None
+    refined_group = refined_parent[refined_run]
+
+    summary_stats = refined_group.attrs.get("summary_statistics")
+    if isinstance(summary_stats, dict):
+        postprocess = summary_stats.get("postprocess")
+        if isinstance(postprocess, dict):
+            remaining = postprocess.get("remaining_failures")
+            if remaining is not None:
+                try:
+                    return int(remaining) > 0
+                except Exception:
+                    pass
+        remaining = summary_stats.get("remaining_failures")
+        if remaining is not None:
+            try:
+                return int(remaining) > 0
+            except Exception:
+                pass
+
+    failures = _extract_failures_from_refined_group(refined_group)
+    if failures is None:
+        return None
+    return bool(failures.size > 0)
+
+
 def _build_plans_from_registry(
     registry_path: Path,
     roots: List[Path],
     refined_run: Optional[str],
     zarr_use: str,
+    require_failures: bool = False,
+    review_state_filter: str = "any",
 ) -> List[ReviewPlan]:
     scope_roots = _normalize_scope_roots(roots)
     plans: List[ReviewPlan] = []
     try:
         with sqlite3.connect(str(registry_path)) as conn:
             conn.row_factory = sqlite3.Row
+            use_filter = _normalize_optional_text(zarr_use)
+            if use_filter == "any":
+                use_filter = None
             if refined_run:
-                rows = conn.execute(
-                    """
+                has_failure_columns = _relation_has_columns(
+                    conn,
+                    "keypoint_quality",
+                    ("total_keypoints", "usable_keypoints"),
+                )
+                sql = """
                     SELECT
                         d.zarr_path AS zarr_path,
                         kq.refined_run AS refined_run,
@@ -153,13 +256,38 @@ def _build_plans_from_registry(
                     FROM keypoint_quality kq
                     JOIN datasets d ON d.dataset_id = kq.dataset_id
                     WHERE kq.refined_run = ?
-                      AND (d.status IS NULL OR lower(d.status) != 'missing');
-                    """,
-                    (refined_run,),
+                      AND (d.status IS NULL OR lower(d.status) != 'missing')
+                """
+                params: list[object] = [refined_run]
+                if use_filter:
+                    sql += " AND lower(COALESCE(d.zarr_use, '')) = ?"
+                    params.append(use_filter)
+                if require_failures and has_failure_columns:
+                    sql += " AND COALESCE(kq.total_keypoints, 0) > COALESCE(kq.usable_keypoints, 0)"
+                sql += ";"
+                rows = conn.execute(
+                    sql,
+                    params,
                 ).fetchall()
             else:
+                has_failure_columns = _relation_has_columns(
+                    conn,
+                    "keypoint_quality_current",
+                    ("total_keypoints", "usable_keypoints"),
+                )
+                filters = [
+                    "d.zarr_path IS NOT NULL",
+                    "TRIM(d.zarr_path) != ''",
+                    "(d.status IS NULL OR lower(d.status) != 'missing')",
+                ]
+                params = []
+                if use_filter:
+                    filters.append("lower(COALESCE(d.zarr_use, '')) = ?")
+                    params.append(use_filter)
+                if require_failures and has_failure_columns:
+                    filters.append("COALESCE(kqc.total_keypoints, 0) > COALESCE(kqc.usable_keypoints, 0)")
                 rows = conn.execute(
-                    """
+                    f"""
                     WITH ranked AS (
                         SELECT
                             kqc.dataset_id AS dataset_id,
@@ -172,13 +300,11 @@ def _build_plans_from_registry(
                                 ORDER BY
                                     COALESCE(kqc.review_timestamp_utc, kqc.refined_created_utc, kqc.quality_updated_utc) DESC,
                                     COALESCE(kqc.refined_created_utc, '') DESC,
-                                    kqc.refined_run DESC
+                                kqc.refined_run DESC
                             ) AS _rn
                         FROM keypoint_quality_current kqc
                         JOIN datasets d ON d.dataset_id = kqc.dataset_id
-                        WHERE d.zarr_path IS NOT NULL
-                          AND TRIM(d.zarr_path) != ''
-                          AND (d.status IS NULL OR lower(d.status) != 'missing')
+                        WHERE {" AND ".join(filters)}
                     )
                     SELECT
                         zarr_path,
@@ -187,7 +313,8 @@ def _build_plans_from_registry(
                         zarr_use
                     FROM ranked
                     WHERE _rn = 1;
-                    """
+                    """,
+                    params,
                 ).fetchall()
     except sqlite3.Error as exc:
         raise RuntimeError(f"Failed to query registry keypoint quality rows: {exc}") from exc
@@ -196,6 +323,8 @@ def _build_plans_from_registry(
         raw_zarr_path = row["zarr_path"]
         raw_refined_run = row["refined_run"]
         review_state = _normalize_review_state(row["review_state"])
+        if not _matches_review_state_filter(review_state, review_state_filter):
+            continue
 
         if raw_zarr_path is None:
             plans.append(
@@ -254,6 +383,10 @@ def _build_plans_from_registry(
                 status="ok",
             )
         )
+        if require_failures:
+            has_failures = _run_has_review_failures(zarr_path, str(raw_refined_run))
+            if has_failures is False:
+                plans.pop()
     return sorted(plans, key=lambda p: str(p.zarr_path))
 
 
@@ -262,6 +395,7 @@ def _build_plans(
     recursive: bool,
     refined_run: Optional[str],
     zarr_use: str,
+    review_state_filter: str = "any",
 ) -> List[ReviewPlan]:
     plans: List[ReviewPlan] = []
     for zarr_path in _iter_zarr(roots, recursive):
@@ -330,6 +464,8 @@ def _build_plans(
 
         run_group = refined_parent[run_name]
         review_state = _normalize_review_state(run_group.attrs.get("keypoint_review_status"))
+        if not _matches_review_state_filter(review_state, review_state_filter):
+            continue
         plans.append(
             ReviewPlan(
                 zarr_path=zarr_path,
@@ -391,6 +527,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         default="any",
         help="Filter zarr archives by use (default: any).",
     )
+    parser.add_argument(
+        "--review-state-filter",
+        default="any",
+        choices=["any", "approved", "pending", "rejected", "needs_review", "missing", "not_approved"],
+        help="Filter candidate runs by review state before launching review.",
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--retune", action="store_true", help="Run failure retune UI.")
     mode.add_argument("--manual", action="store_true", help="Run manual correction UI.")
@@ -439,9 +581,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument(
         "--review-intended-use",
-        default="training",
+        default=None,
         choices=["training", "full_recording"],
-        help="Intended use label (default: training).",
+        help="Intended use label (default: infer from existing status or zarr use).",
     )
     parser.add_argument("--reviewer", help="Reviewer name (defaults to $USER).")
     parser.add_argument("--review-notes", help="Optional review notes.")
@@ -502,13 +644,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     plans: List[ReviewPlan]
+    review_state_filter = str(args.review_state_filter)
     if args.registry:
+        require_failures = bool(args.retune or (args.manual and not args.all))
         try:
             plans = _build_plans_from_registry(
                 Path(args.registry),
                 roots=roots,
                 refined_run=args.refined_run,
                 zarr_use=str(args.zarr_use),
+                require_failures=require_failures,
+                review_state_filter=review_state_filter,
             )
         except RuntimeError as exc:
             if args.registry_only:
@@ -520,6 +666,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 recursive=bool(args.recursive),
                 refined_run=args.refined_run,
                 zarr_use=str(args.zarr_use),
+                review_state_filter=review_state_filter,
             )
     else:
         plans = _build_plans(
@@ -527,6 +674,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             recursive=bool(args.recursive),
             refined_run=args.refined_run,
             zarr_use=str(args.zarr_use),
+            review_state_filter=review_state_filter,
         )
 
     if not plans:
@@ -585,7 +733,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 cmd.append("--all")
             cmd.extend(["--review-state", args.review_state])
             cmd.extend(["--review-method", args.review_method])
-            cmd.extend(["--review-intended-use", args.review_intended_use])
+            if args.review_intended_use is not None:
+                cmd.extend(["--review-intended-use", args.review_intended_use])
             if args.reviewer:
                 cmd.extend(["--reviewer", args.reviewer])
             if args.review_notes:

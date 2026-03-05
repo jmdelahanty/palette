@@ -53,8 +53,8 @@ If visibility flags are **not** supported by your training pipeline, keep the
 default behavior (exclude `fish_present_no_keypoints`).
 
 ## Notes / follow-ups
-- If we add a training exporter flag, it should default to **exclude** and
-  optionally include these frames with `visibility=0`.
+- Current merged export supports explicit inclusion via
+  `--row-gate-policy raw_success_plus_box_only` (box-only rows with `visibility=0`).
 - Approval decisions should consider the proportion of
   `fish_present_no_keypoints` frames when targeting training use.
 

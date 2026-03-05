@@ -66,6 +66,28 @@ def test_build_plans_analysis_filter_skips_training(tmp_path: Path) -> None:
     assert "wanted=analysis" in (by_name[training.name].reason or "")
 
 
+def test_build_plans_accepts_direct_zarr_directory_path(tmp_path: Path) -> None:
+    analysis = _make_archive(
+        tmp_path,
+        "rec_a",
+        "rec_a_analysis.zarr",
+        zarr_purpose="analysis",
+    )
+
+    plans = _build_plans(
+        [analysis],
+        recursive=False,
+        keypoint_run=None,
+        skip_existing=False,
+        zarr_use_filter="analysis",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].zarr_path == analysis
+    assert plans[0].status == "ok"
+    assert plans[0].keypoint_run == "keypoints_001"
+
+
 def test_build_plans_any_filter_includes_all_uses(tmp_path: Path) -> None:
     analysis = _make_archive(
         tmp_path,
@@ -246,3 +268,84 @@ def test_main_apply_json_reports_subprocess_results_and_failure_accounting(
         "rec_a_analysis.zarr": "ok",
         "rec_b_analysis.zarr": "failed",
     }
+
+
+def test_main_apply_json_runs_auto_review_when_enabled(monkeypatch, tmp_path: Path, capsys) -> None:
+    plans = [
+        mod.RefinePlan(zarr_path=tmp_path / "rec_a_analysis.zarr", status="ok", keypoint_run="kp_a"),
+    ]
+    monkeypatch.setattr(mod, "_resolve_root", lambda _paths: [tmp_path])
+    monkeypatch.setattr(mod, "_build_plans", lambda *args, **kwargs: plans)  # noqa: ARG005
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda cmd, check=False: subprocess.CompletedProcess(args=cmd, returncode=0),  # noqa: ARG005
+    )
+
+    calls: list[tuple[Path, object]] = []
+
+    def _fake_auto_review(zarr_path: Path, **kwargs):  # noqa: ANN001
+        calls.append((zarr_path, dict(kwargs)))
+        return {"state": "approved", "passed": True}
+
+    monkeypatch.setattr(mod, "apply_auto_review", _fake_auto_review)
+
+    rc = mod.main(
+        [
+            str(tmp_path),
+            "--recursive",
+            "--zarr-use",
+            "analysis",
+            "--apply",
+            "--json",
+            "--no-log",
+            "--auto-review-full-recording",
+        ]
+    )
+    out = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines() if line.strip()]
+
+    assert rc == 0
+    assert len(out) == 1
+    assert out[0]["status"] == "ok"
+    assert out[0]["auto_review"] == {"state": "approved", "passed": True}
+    assert calls and calls[0][0] == tmp_path / "rec_a_analysis.zarr"
+    assert calls[0][1]["source_keypoints_run"] == "kp_a"
+    assert calls[0][1]["intended_use"] == "full_recording"
+
+
+def test_main_apply_json_fails_when_auto_review_raises(monkeypatch, tmp_path: Path, capsys) -> None:
+    plans = [
+        mod.RefinePlan(zarr_path=tmp_path / "rec_a_analysis.zarr", status="ok", keypoint_run="kp_a"),
+    ]
+    monkeypatch.setattr(mod, "_resolve_root", lambda _paths: [tmp_path])
+    monkeypatch.setattr(mod, "_build_plans", lambda *args, **kwargs: plans)  # noqa: ARG005
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda cmd, check=False: subprocess.CompletedProcess(args=cmd, returncode=0),  # noqa: ARG005
+    )
+
+    def _raise_auto_review(*_args, **_kwargs):  # noqa: ANN001
+        raise RuntimeError("auto review boom")
+
+    monkeypatch.setattr(mod, "apply_auto_review", _raise_auto_review)
+
+    rc = mod.main(
+        [
+            str(tmp_path),
+            "--recursive",
+            "--zarr-use",
+            "analysis",
+            "--apply",
+            "--json",
+            "--no-log",
+            "--auto-review-full-recording",
+        ]
+    )
+    out = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines() if line.strip()]
+
+    assert rc == 1
+    assert len(out) == 1
+    assert out[0]["status"] == "failed"
+    assert out[0]["failure_stage"] == "auto_review"
+    assert out[0]["error"] == "auto review boom"

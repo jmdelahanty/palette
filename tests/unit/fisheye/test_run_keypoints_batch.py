@@ -170,6 +170,11 @@ def test_run_plan_returns_rich_payload_with_optional_refine(
     monkeypatch.setattr(mod, "_keypoints_total_rois", lambda _zarr_path, _run_name: 10)
     monkeypatch.setattr(mod, "_run_refine", _refine)
     monkeypatch.setattr(mod, "_collect_stage_payload", _collect)
+    monkeypatch.setattr(
+        mod,
+        "_sync_keypoint_registry_rows_after_run",
+        lambda **kwargs: {"synced": True, "dataset_id": "dataset_x"},  # noqa: ANN003
+    )
 
     plan = mod.KeypointPlan(
         recording_dir=tmp_path,
@@ -196,6 +201,7 @@ def test_run_plan_returns_rich_payload_with_optional_refine(
     assert result["method"] == "traditional"
     assert result["keypoints"]["run_name"] == "keypoints_001"
     assert result["refined_keypoints"]["run_name"] == "refined_keypoints_001"
+    assert result["registry_sync"]["synced"] is True
     assert "duration_seconds" in result
 
 
@@ -235,6 +241,86 @@ def test_run_plan_refine_only_skips_refine_when_zero_rois(
     assert result["source_keypoints_run"] == "keypoints_001"
     assert result["refine_skipped_reason"] == "zero_keypoint_rois"
     assert "refined_keypoints" not in result
+
+
+def test_run_plan_auto_review_syncs_step_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(mod, "_run_traditional", lambda *args, **kwargs: {"success_rate_percent": 99.0})  # noqa: ANN002, ANN003
+    monkeypatch.setattr(mod, "_latest_keypoints_run", lambda _zarr_path: "keypoints_001")
+    monkeypatch.setattr(mod, "_keypoints_total_rois", lambda _zarr_path, _run_name: 10)
+    monkeypatch.setattr(mod, "_run_refine", lambda *args, **kwargs: "refined_keypoints_001")  # noqa: ANN002, ANN003
+
+    def _collect(_zarr_path: Path, group_name: str, run_name: str) -> dict:
+        if group_name == "keypoints_runs":
+            return {
+                "group": group_name,
+                "run_name": run_name,
+                "method": "yolo_pose",
+                "summary_statistics": {"total_rois": 10},
+                "source_runs": {},
+            }
+        return {
+            "group": group_name,
+            "run_name": run_name,
+            "method": "refine_keypoints",
+            "summary_statistics": {"total_rois": 10, "refined_success": 10, "usable_keypoints": 10, "pass_rate_percent": 100.0},
+            "source_runs": {
+                "source_keypoints_run": "keypoints_001",
+                "source_crop_run": "crop_001",
+                "source_detect_run": "refined_detect_001",
+            },
+        }
+
+    monkeypatch.setattr(mod, "_collect_stage_payload", _collect)
+    monkeypatch.setattr(
+        mod,
+        "_maybe_auto_approve_refined_keypoints",
+        lambda **kwargs: {  # noqa: ANN003
+            "enabled": True,
+            "applied": True,
+            "reason": "threshold_met",
+            "review_status": {
+                "state": "approved",
+                "method": "algorithmic",
+                "intended_use": "full_recording",
+            },
+        },
+    )
+
+    captured: dict[str, object] = {}
+
+    def _sync(**kwargs):  # noqa: ANN003
+        captured.update(kwargs)
+        return {"synced": True}
+
+    monkeypatch.setattr(mod, "_sync_refined_keypoint_step_status_after_auto_review", _sync)
+
+    plan = mod.KeypointPlan(
+        recording_dir=tmp_path,
+        h5_path=tmp_path / "raw" / "recording.h5",
+        zarr_path=tmp_path / "zarr" / "recording_training.zarr",
+        camera_id="3",
+        status="ok",
+    )
+    result = mod._run_plan(
+        plan,
+        config={},
+        method="traditional",
+        scheduler=None,
+        num_workers=None,
+        quiet=True,
+        dask_progress=False,
+        refine=True,
+        refine_only=False,
+        json_output=False,
+        auto_approve_min_usable_rate=1.0,
+    )
+
+    assert result["auto_review"]["step_status_sync"]["synced"] is True
+    assert captured["refined_run"] == "refined_keypoints_001"
+    assert captured["zarr_path"] == plan.zarr_path
 
 
 def test_main_logs_rich_keypoint_results_to_jsonl(
@@ -751,13 +837,38 @@ def test_maybe_auto_approve_refined_keypoints_applies_when_threshold_met(
     tmp_path: Path,
 ) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
-    root = zarr.group()
-    refined_parent = root.create_group("refined_keypoints_runs")
-    refined_parent.attrs["latest"] = "refined_keypoints_001"
-    refined = refined_parent.create_group("refined_keypoints_001")
-    refined.attrs["summary_statistics"] = {"total_rois": 8, "usable_keypoints": 8}
-    refined.attrs["source_keypoints_run"] = "keypoints_001"
-    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: root)
+    calls: list[dict] = []
+
+    def _fake_apply_auto_review(path: Path, **kwargs):  # noqa: ANN003
+        assert path == zarr_path
+        calls.append(dict(kwargs))
+        if kwargs["dry_run"]:
+            return {
+                "skipped": False,
+                "passed": True,
+                "payload": {
+                    "auto_review": {
+                        "evidence": {
+                            "total_rois": 8,
+                            "usable_keypoints": 8,
+                            "usable_keypoints_rate": 1.0,
+                        }
+                    }
+                },
+            }
+        payload = {
+            "state": "approved",
+            "method": "algorithmic",
+            "intended_use": "full_recording",
+            "reviewer": "auto-batch",
+            "auto_review": {
+                "policy_id": "keypoint_auto_review_v1",
+                "policy_version": 1,
+            },
+        }
+        return {"skipped": False, "payload": payload}
+
+    monkeypatch.setattr(mod, "apply_auto_review", _fake_apply_auto_review)
 
     result = mod._maybe_auto_approve_refined_keypoints(
         zarr_path=zarr_path,
@@ -770,14 +881,16 @@ def test_maybe_auto_approve_refined_keypoints_applies_when_threshold_met(
     assert result["applied"] is True
     assert result["reason"] == "threshold_met"
     assert result["usable_rate"] == pytest.approx(1.0)
-
-    refined_after = root["refined_keypoints_runs"]["refined_keypoints_001"]
-    review_status = dict(refined_after.attrs.get("keypoint_review_status"))
+    review_status = dict(result["review_status"])
     assert review_status["state"] == "approved"
     assert review_status["method"] == "algorithmic"
     assert review_status["intended_use"] == "full_recording"
     assert review_status["reviewer"] == "auto-batch"
-    assert root["refined_keypoints_runs"].attrs.get("keypoint_review_status_latest") == "refined_keypoints_001"
+    assert review_status["auto_review"]["policy_id"] == "keypoint_auto_review_v1"
+    assert review_status["auto_review"]["policy_version"] == 1
+    assert len(calls) == 2
+    assert calls[0]["dry_run"] is True
+    assert calls[1]["dry_run"] is False
 
 
 def test_maybe_auto_approve_refined_keypoints_skips_when_threshold_not_met(
@@ -785,11 +898,27 @@ def test_maybe_auto_approve_refined_keypoints_skips_when_threshold_not_met(
     tmp_path: Path,
 ) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
-    root = zarr.group()
-    refined_parent = root.create_group("refined_keypoints_runs")
-    refined = refined_parent.create_group("refined_keypoints_001")
-    refined.attrs["summary_statistics"] = {"total_rois": 8, "usable_keypoints": 7}
-    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: root)
+    calls: list[dict] = []
+
+    def _fake_apply_auto_review(path: Path, **kwargs):  # noqa: ANN003
+        assert path == zarr_path
+        calls.append(dict(kwargs))
+        assert kwargs["dry_run"] is True
+        return {
+            "skipped": False,
+            "passed": False,
+            "payload": {
+                "auto_review": {
+                    "evidence": {
+                        "total_rois": 8,
+                        "usable_keypoints": 7,
+                        "usable_keypoints_rate": 7.0 / 8.0,
+                    }
+                }
+            },
+        }
+
+    monkeypatch.setattr(mod, "apply_auto_review", _fake_apply_auto_review)
 
     result = mod._maybe_auto_approve_refined_keypoints(
         zarr_path=zarr_path,
@@ -802,7 +931,7 @@ def test_maybe_auto_approve_refined_keypoints_skips_when_threshold_not_met(
     assert result["applied"] is False
     assert result["reason"] == "threshold_not_met"
     assert result["usable_rate"] == pytest.approx(7.0 / 8.0)
-    assert refined.attrs.get("keypoint_review_status") is None
+    assert len(calls) == 1
 
 
 def test_main_auto_approve_requires_refine_flag(tmp_path: Path) -> None:

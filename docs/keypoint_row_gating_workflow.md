@@ -31,6 +31,7 @@ CLI:
 - `--row-gate-policy auto` (default)
 - `--row-gate-policy refined_usable`
 - `--row-gate-policy raw_success`
+- `--row-gate-policy raw_success_plus_box_only`
 
 Policy semantics:
 
@@ -42,6 +43,11 @@ Policy semantics:
    - Fail if no compatible refined mask is available.
 3. `raw_success`:
    - Always use raw `detection_success`.
+4. `raw_success_plus_box_only`:
+   - Start from raw `detection_success`.
+   - Also include rows tagged `fish_present_no_keypoints` as box-only supervision.
+   - Box-only rows are exported with `keypoint_box_only=true`, visibility set to 0, and
+     no keypoint-coordinate supervision.
 
 ## What Gets Written
 
@@ -51,6 +57,7 @@ Merged keypoint run attrs include:
 - `row_gate_applied = true`
 - `row_gate_policy = <policy|mixed>`
 - `row_gate_counts = {...}`
+- `keypoint_box_only` array in merged keypoint group (bool per row)
 
 Merged manifest/summary include row-gate provenance:
 
@@ -76,6 +83,8 @@ You may still see:
 - source keypoint rows (`keypoints_roi` in source run) > merged samples
 
 That difference is expected when row gating excludes rows before merge output is written.
+With `raw_success_plus_box_only`, merged samples can include additional box-only rows
+that are not counted as full keypoint-supervision rows.
 
 ## Diagnostics
 
@@ -128,3 +137,6 @@ Use `auto` for normal curated workflows:
 - preserves backward compatibility via raw-success fallback.
 
 Use `refined_usable` for strict review-only training.
+
+Use `raw_success_plus_box_only` only when you explicitly want to include
+`fish_present_no_keypoints` as box-only supervision.

@@ -19,6 +19,8 @@ Purpose: define row-level inclusion semantics for merged pose training exports.
 - `auto` (default): use refined usable mask when available, else raw success.
 - `refined_usable`: require refined usable mask; fail if unavailable.
 - `raw_success`: use raw `detection_success` only.
+- `raw_success_plus_box_only`: use raw `detection_success` and also include
+  `fish_present_no_keypoints` rows as box-only supervision (`keypoint_box_only=true`).
 
 ## Provenance requirements
 

@@ -304,6 +304,9 @@ def _extract_keypoint_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List
         review_intended_use = _decode_attr(review_status.get("intended_use")) if review_status else None
         review_reviewer = _decode_attr(review_status.get("reviewer")) if review_status else None
         review_notes = _decode_attr(review_status.get("notes")) if review_status else None
+        auto_review = _coerce_mapping(review_status.get("auto_review")) if review_status else None
+        review_policy_id = _decode_attr(auto_review.get("policy_id")) if auto_review else None
+        review_policy_version = _as_int(auto_review.get("policy_version")) if auto_review else None
         review_timestamp_utc = (
             _decode_attr(review_status.get("timestamp_utc"))
             or _decode_attr(review_status.get("timestamp"))
@@ -358,6 +361,8 @@ def _extract_keypoint_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List
                 "review_intended_use": review_intended_use,
                 "review_reviewer": review_reviewer,
                 "review_notes": review_notes,
+                "review_policy_id": review_policy_id,
+                "review_policy_version": review_policy_version,
                 "review_timestamp_utc": review_timestamp_utc,
                 "usable_keypoints": usable_keypoints,
                 "total_keypoints": total_keypoints,
@@ -1911,6 +1916,16 @@ class Registry:
                 "detect_quality_wide_view_columns",
                 self._migration_027_detect_quality_wide_view_columns,
             ),
+            (
+                28,
+                "keypoint_auto_review_policy_columns",
+                self._migration_028_keypoint_auto_review_policy_columns,
+            ),
+            (
+                29,
+                "keypoint_quality_current_latest_source_preference",
+                self._migration_029_keypoint_quality_current_latest_source_preference,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -2288,6 +2303,8 @@ class Registry:
                 review_intended_use TEXT,
                 review_reviewer TEXT,
                 review_notes TEXT,
+                review_policy_id TEXT,
+                review_policy_version INTEGER,
                 review_timestamp_utc TEXT,
                 usable_keypoints INTEGER,
                 total_keypoints INTEGER,
@@ -2621,6 +2638,8 @@ class Registry:
                 review_intended_use,
                 review_reviewer,
                 review_notes,
+                review_policy_id,
+                review_policy_version,
                 review_timestamp_utc,
                 usable_keypoints,
                 total_keypoints,
@@ -2647,7 +2666,10 @@ class Registry:
                 kqc.source_keypoint_run AS source_keypoint_run,
                 kqc.refined_run AS refined_run,
                 kqc.review_state AS review_state,
+                kqc.review_method AS review_method,
                 kqc.review_intended_use AS review_intended_use,
+                kqc.review_policy_id AS review_policy_id,
+                kqc.review_policy_version AS review_policy_version,
                 kqc.usable_keypoints AS usable_keypoints,
                 kqc.total_keypoints AS total_keypoints,
                 kqc.usable_keypoints_rate AS usable_keypoints_rate,
@@ -3112,7 +3134,10 @@ class Registry:
                 kqc.source_keypoint_run AS source_keypoint_run,
                 kqc.refined_run AS refined_run,
                 kqc.review_state AS review_state,
+                kqc.review_method AS review_method,
                 kqc.review_intended_use AS review_intended_use,
+                kqc.review_policy_id AS review_policy_id,
+                kqc.review_policy_version AS review_policy_version,
                 kqc.usable_keypoints AS usable_keypoints,
                 kqc.total_keypoints AS total_keypoints,
                 kqc.usable_keypoints_rate AS usable_keypoints_rate,
@@ -5570,38 +5595,36 @@ class Registry:
             """
         )
 
-    def _migration_021_detect_keypoint_quality_review_columns(self) -> None:
-        # Additive migration for shared detect/keypoint review fields in quality tables.
-        self._ensure_columns(
-            "keypoint_quality",
-            {
-                "review_method": "TEXT",
-                "review_notes": "TEXT",
-            },
-        )
-        self._ensure_columns(
-            "detect_quality",
-            {
-                "review_method": "TEXT",
-                "review_notes": "TEXT",
-            },
-        )
+    def _refresh_keypoint_quality_current_view(self) -> None:
         cur = self.conn.cursor()
         cur.execute("DROP VIEW IF EXISTS keypoint_quality_current;")
         cur.execute(
             """
             CREATE VIEW keypoint_quality_current AS
-            WITH ranked AS (
+            WITH latest_keypoint AS (
+                SELECT
+                    dataset_id,
+                    keypoint_run AS latest_keypoint_run
+                FROM keypoint_performance_latest
+            ),
+            ranked AS (
                 SELECT
                     kq.*,
                     ROW_NUMBER() OVER (
                         PARTITION BY kq.dataset_id, COALESCE(kq.keypoint_method, '')
                         ORDER BY
+                            CASE
+                                WHEN lk.latest_keypoint_run IS NOT NULL
+                                    AND COALESCE(kq.source_keypoint_run, '') = COALESCE(lk.latest_keypoint_run, '')
+                                THEN 0
+                                ELSE 1
+                            END,
                             COALESCE(kq.review_timestamp_utc, kq.refined_created_utc, kq.quality_updated_utc) DESC,
                             COALESCE(kq.refined_created_utc, '') DESC,
                             kq.refined_run DESC
                     ) AS _rn
                 FROM keypoint_quality kq
+                LEFT JOIN latest_keypoint lk ON lk.dataset_id = kq.dataset_id
             )
             SELECT
                 dataset_id,
@@ -5614,6 +5637,8 @@ class Registry:
                 review_intended_use,
                 review_reviewer,
                 review_notes,
+                review_policy_id,
+                review_policy_version,
                 review_timestamp_utc,
                 usable_keypoints,
                 total_keypoints,
@@ -5626,6 +5651,27 @@ class Registry:
             WHERE _rn = 1;
             """
         )
+
+    def _migration_021_detect_keypoint_quality_review_columns(self) -> None:
+        # Additive migration for shared detect/keypoint review fields in quality tables.
+        self._ensure_columns(
+            "keypoint_quality",
+            {
+                "review_method": "TEXT",
+                "review_notes": "TEXT",
+                "review_policy_id": "TEXT",
+                "review_policy_version": "INTEGER",
+            },
+        )
+        self._ensure_columns(
+            "detect_quality",
+            {
+                "review_method": "TEXT",
+                "review_notes": "TEXT",
+            },
+        )
+        cur = self.conn.cursor()
+        self._refresh_keypoint_quality_current_view()
         cur.execute("DROP VIEW IF EXISTS detect_quality_current;")
         cur.execute(
             """
@@ -6801,6 +6847,51 @@ class Registry:
         """Re-create wide view to include detect_quality step columns."""
         self._migration_020_recording_step_status_wide_view()
 
+    def _migration_028_keypoint_auto_review_policy_columns(self) -> None:
+        self._ensure_columns(
+            "keypoint_quality",
+            {
+                "review_policy_id": "TEXT",
+                "review_policy_version": "INTEGER",
+            },
+        )
+        cur = self.conn.cursor()
+        self._refresh_keypoint_quality_current_view()
+        cur.execute("DROP VIEW IF EXISTS keypoint_quality_overview;")
+        cur.execute(
+            """
+            CREATE VIEW keypoint_quality_overview AS
+            SELECT
+                kqc.dataset_id AS dataset_id,
+                d.zarr_path AS zarr_path,
+                d.zarr_origin AS zarr_origin,
+                d.zarr_use AS zarr_use,
+                d.zarr_use AS zarr_purpose,
+                kqc.keypoint_method AS keypoint_method,
+                kqc.source_keypoint_run AS source_keypoint_run,
+                kqc.refined_run AS refined_run,
+                kqc.review_state AS review_state,
+                kqc.review_method AS review_method,
+                kqc.review_intended_use AS review_intended_use,
+                kqc.review_policy_id AS review_policy_id,
+                kqc.review_policy_version AS review_policy_version,
+                kqc.usable_keypoints AS usable_keypoints,
+                kqc.total_keypoints AS total_keypoints,
+                kqc.usable_keypoints_rate AS usable_keypoints_rate,
+                kqc.quality_updated_utc AS quality_updated_utc,
+                kqc.zarr_mtime_ns AS zarr_mtime_ns,
+                CASE
+                    WHEN kqc.zarr_mtime_ns IS NULL THEN 1
+                    ELSE 0
+                END AS quality_stale
+            FROM keypoint_quality_current kqc
+            LEFT JOIN datasets d ON d.dataset_id = kqc.dataset_id;
+            """
+        )
+
+    def _migration_029_keypoint_quality_current_latest_source_preference(self) -> None:
+        self._refresh_keypoint_quality_current_view()
+
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
         existing = {
             row["name"]
@@ -7249,6 +7340,8 @@ class Registry:
         raw_keypoints_successful: Optional[int],
         review_method: Optional[str] = None,
         review_notes: Optional[str] = None,
+        review_policy_id: Optional[str] = None,
+        review_policy_version: Optional[int] = None,
         quality_updated_utc: Optional[str] = None,
         zarr_mtime_ns: Optional[int] = None,
     ) -> None:
@@ -7257,6 +7350,8 @@ class Registry:
             {
                 "review_method": "TEXT",
                 "review_notes": "TEXT",
+                "review_policy_id": "TEXT",
+                "review_policy_version": "INTEGER",
             },
         )
         payload = {
@@ -7270,6 +7365,8 @@ class Registry:
             "review_intended_use": review_intended_use,
             "review_reviewer": review_reviewer,
             "review_notes": review_notes,
+            "review_policy_id": review_policy_id,
+            "review_policy_version": review_policy_version,
             "review_timestamp_utc": review_timestamp_utc,
             "usable_keypoints": usable_keypoints,
             "total_keypoints": total_keypoints,
@@ -7283,14 +7380,16 @@ class Registry:
             """
             INSERT INTO keypoint_quality (
                 dataset_id, refined_run, refined_created_utc, source_keypoint_run, keypoint_method,
-                review_state, review_method, review_intended_use, review_reviewer, review_notes, review_timestamp_utc,
+                review_state, review_method, review_intended_use, review_reviewer, review_notes,
+                review_policy_id, review_policy_version, review_timestamp_utc,
                 usable_keypoints, total_keypoints, usable_keypoints_rate,
                 raw_keypoints_success_rate, raw_keypoints_successful,
                 quality_updated_utc, zarr_mtime_ns
             )
             VALUES (
                 :dataset_id, :refined_run, :refined_created_utc, :source_keypoint_run, :keypoint_method,
-                :review_state, :review_method, :review_intended_use, :review_reviewer, :review_notes, :review_timestamp_utc,
+                :review_state, :review_method, :review_intended_use, :review_reviewer, :review_notes,
+                :review_policy_id, :review_policy_version, :review_timestamp_utc,
                 :usable_keypoints, :total_keypoints, :usable_keypoints_rate,
                 :raw_keypoints_success_rate, :raw_keypoints_successful,
                 :quality_updated_utc, :zarr_mtime_ns
@@ -7304,6 +7403,8 @@ class Registry:
                 review_intended_use=excluded.review_intended_use,
                 review_reviewer=excluded.review_reviewer,
                 review_notes=excluded.review_notes,
+                review_policy_id=excluded.review_policy_id,
+                review_policy_version=excluded.review_policy_version,
                 review_timestamp_utc=excluded.review_timestamp_utc,
                 usable_keypoints=excluded.usable_keypoints,
                 total_keypoints=excluded.total_keypoints,
@@ -8959,6 +9060,8 @@ class Registry:
             {
                 "review_method": "TEXT",
                 "review_notes": "TEXT",
+                "review_policy_id": "TEXT",
+                "review_policy_version": "INTEGER",
             },
         )
         with self.conn:
@@ -8969,19 +9072,23 @@ class Registry:
                 payload.setdefault("quality_updated_utc", _utc_now())
                 payload.setdefault("review_method", None)
                 payload.setdefault("review_notes", None)
+                payload.setdefault("review_policy_id", None)
+                payload.setdefault("review_policy_version", None)
                 payload.setdefault("zarr_mtime_ns", None)
                 self.conn.execute(
                     """
                     INSERT INTO keypoint_quality (
                         dataset_id, refined_run, refined_created_utc, source_keypoint_run, keypoint_method,
-                        review_state, review_method, review_intended_use, review_reviewer, review_notes, review_timestamp_utc,
+                        review_state, review_method, review_intended_use, review_reviewer, review_notes,
+                        review_policy_id, review_policy_version, review_timestamp_utc,
                         usable_keypoints, total_keypoints, usable_keypoints_rate,
                         raw_keypoints_success_rate, raw_keypoints_successful,
                         quality_updated_utc, zarr_mtime_ns
                     )
                     VALUES (
                         :dataset_id, :refined_run, :refined_created_utc, :source_keypoint_run, :keypoint_method,
-                        :review_state, :review_method, :review_intended_use, :review_reviewer, :review_notes, :review_timestamp_utc,
+                        :review_state, :review_method, :review_intended_use, :review_reviewer, :review_notes,
+                        :review_policy_id, :review_policy_version, :review_timestamp_utc,
                         :usable_keypoints, :total_keypoints, :usable_keypoints_rate,
                         :raw_keypoints_success_rate, :raw_keypoints_successful,
                         :quality_updated_utc, :zarr_mtime_ns
@@ -9006,7 +9113,10 @@ class Registry:
         dataset_ids: Optional[Sequence[str]] = None,
         keypoint_method: Optional[str] = None,
         review_state: Optional[str] = None,
+        review_method: Optional[str] = None,
         review_intended_use: Optional[str] = None,
+        review_policy_id: Optional[str] = None,
+        review_policy_version: Optional[int] = None,
         min_usable_keypoints_rate: Optional[float] = None,
     ) -> List[sqlite3.Row]:
         sql = ["SELECT * FROM keypoint_quality_current WHERE 1=1"]
@@ -9025,9 +9135,18 @@ class Registry:
         if review_state is not None:
             sql.append("AND review_state = ?")
             params.append(str(review_state))
+        if review_method is not None:
+            sql.append("AND review_method = ?")
+            params.append(str(review_method))
         if review_intended_use is not None:
             sql.append("AND review_intended_use = ?")
             params.append(str(review_intended_use))
+        if review_policy_id is not None:
+            sql.append("AND review_policy_id = ?")
+            params.append(str(review_policy_id))
+        if review_policy_version is not None:
+            sql.append("AND review_policy_version = ?")
+            params.append(int(review_policy_version))
         if min_usable_keypoints_rate is not None:
             sql.append("AND usable_keypoints_rate IS NOT NULL AND usable_keypoints_rate >= ?")
             params.append(float(min_usable_keypoints_rate))

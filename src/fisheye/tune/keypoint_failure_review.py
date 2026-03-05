@@ -404,6 +404,50 @@ def _apply_review_status(
     return payload
 
 
+def _normalize_optional_text(raw: object) -> Optional[str]:
+    if raw is None:
+        return None
+    text = str(raw).strip().lower()
+    return text or None
+
+
+def _infer_zarr_use(root: zarr.Group, zarr_path: str) -> Optional[str]:
+    for key in ("zarr_use", "zarr_purpose"):
+        value = _normalize_optional_text(root.attrs.get(key))
+        if value in {"analysis", "training"}:
+            return value
+    name = Path(zarr_path).name.lower()
+    if name.endswith("_analysis.zarr"):
+        return "analysis"
+    if name.endswith("_training.zarr"):
+        return "training"
+    return None
+
+
+def _resolve_review_intended_use(
+    *,
+    requested: Optional[str],
+    refined: zarr.Group,
+    root: zarr.Group,
+    zarr_path: str,
+) -> str:
+    normalized_requested = _normalize_optional_text(requested)
+    if normalized_requested in {"training", "full_recording"}:
+        return str(normalized_requested)
+
+    existing_status = refined.attrs.get("keypoint_review_status")
+    existing_use = None
+    if isinstance(existing_status, dict):
+        existing_use = _normalize_optional_text(existing_status.get("intended_use"))
+    if existing_use in {"training", "full_recording"}:
+        return str(existing_use)
+
+    observed_use = _infer_zarr_use(root, zarr_path)
+    if observed_use == "training":
+        return "training"
+    return "full_recording"
+
+
 def launch_review(
     zarr_path: str,
     refined_run: Optional[str] = None,
@@ -413,7 +457,7 @@ def launch_review(
     target_roi_indices: Optional[Sequence[int]] = None,
     review_state: str = "approved",
     review_method: str = "manual",
-    review_intended_use: str = "training",
+    review_intended_use: Optional[str] = None,
     reviewer: Optional[str] = None,
     review_notes: Optional[str] = None,
     frame_flag_file: Optional[str] = None,
@@ -432,6 +476,12 @@ def launch_review(
     if not refined_run or refined_run not in refined_parent:
         raise RuntimeError("Refined keypoint run not found.")
     refined = refined_parent[refined_run]
+    resolved_review_intended_use = _resolve_review_intended_use(
+        requested=review_intended_use,
+        refined=refined,
+        root=root,
+        zarr_path=zarr_path,
+    )
 
     flag_path = Path(frame_flag_file).expanduser() if frame_flag_file else None
     detect_flag_path = Path(detect_flag_file).expanduser() if detect_flag_file else None
@@ -840,7 +890,7 @@ def launch_review(
                 refined,
                 state=state,
                 method=review_method,
-                intended_use=review_intended_use,
+                intended_use=resolved_review_intended_use,
                 reviewer=reviewer or os.environ.get("USER"),
                 notes=review_notes,
             )

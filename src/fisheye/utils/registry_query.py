@@ -45,6 +45,15 @@ def _as_float(value: Optional[str]) -> Optional[float]:
         return None
 
 
+def _as_int(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
 def _query_detect_performance_map(
     registry: Registry,
     *,
@@ -253,6 +262,8 @@ def _query_keypoint_quality_map(
             "raw_keypoints_success_rate",
             "raw_keypoints_successful",
             "quality_updated_utc",
+            "review_policy_id",
+            "review_policy_version",
         ),
     )
     out: dict[str, list[dict[str, Any]]] = {}
@@ -1197,6 +1208,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Keypoint review intended-use filter (or 'missing').",
     )
     parser.add_argument(
+        "--keypoint-review-method",
+        type=str,
+        help="Keypoint review method filter (for example manual/algorithmic, or 'missing').",
+    )
+    parser.add_argument(
+        "--keypoint-review-policy-id",
+        type=str,
+        help="Keypoint auto-review policy_id filter (or 'missing').",
+    )
+    parser.add_argument(
+        "--keypoint-review-policy-version",
+        type=int,
+        help="Keypoint auto-review policy_version exact match.",
+    )
+    parser.add_argument(
         "--keypoint-usable-rate-min",
         type=float,
         help="Minimum keypoint usable_keypoints_rate from keypoint quality view.",
@@ -1700,6 +1726,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.keypoint_method,
             args.keypoint_review_state,
             args.keypoint_review_intended_use,
+            args.keypoint_review_method,
+            args.keypoint_review_policy_id,
+            args.keypoint_review_policy_version,
             args.keypoint_usable_rate_min,
             args.keypoint_usable_rate_max,
             args.keypoint_success_rate_min,
@@ -2232,6 +2261,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 for value in (
                     args.keypoint_review_state,
                     args.keypoint_review_intended_use,
+                    args.keypoint_review_method,
+                    args.keypoint_review_policy_id,
+                    args.keypoint_review_policy_version,
                     args.keypoint_usable_rate_min,
                     args.keypoint_usable_rate_max,
                 )
@@ -2267,6 +2299,20 @@ def main(argv: Optional[list[str]] = None) -> int:
                         args.keypoint_review_intended_use,
                     ):
                         continue
+                    if not _matches_optional_text_filter(
+                        candidate.get("review_method"),
+                        args.keypoint_review_method,
+                    ):
+                        continue
+                    if not _matches_optional_text_filter(
+                        candidate.get("review_policy_id"),
+                        args.keypoint_review_policy_id,
+                    ):
+                        continue
+                    if args.keypoint_review_policy_version is not None:
+                        policy_version = _as_int(candidate.get("review_policy_version"))
+                        if policy_version is None or policy_version != int(args.keypoint_review_policy_version):
+                            continue
                     usable_rate = _as_float(candidate.get("usable_keypoints_rate"))
                     if args.keypoint_usable_rate_min is not None and (
                         usable_rate is None or usable_rate < float(args.keypoint_usable_rate_min)
@@ -2347,6 +2393,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     row["keypoint_raw_success_rate"] = selected_quality.get("raw_keypoints_success_rate")
                     row["keypoint_raw_successful"] = selected_quality.get("raw_keypoints_successful")
                     row["keypoint_quality_updated_utc"] = selected_quality.get("quality_updated_utc")
+                    row["keypoint_review_policy_id"] = selected_quality.get("review_policy_id")
+                    row["keypoint_review_policy_version"] = selected_quality.get("review_policy_version")
 
                 if selected_perf is not None:
                     row["keypoint_run"] = selected_perf.get("keypoint_run")

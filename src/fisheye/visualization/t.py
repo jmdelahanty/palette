@@ -773,11 +773,11 @@
 #         (set_id, run_id),
 #     )
 # print(f"rows_updated={cur.rowcount}")
-import json, pathlib
-run = pathlib.Path("/nvme1/models/detect/detect_cedar_shadow_v007/omnifin0_cedar_shadow_v007_detect_20260206-235656_25f3fbcb")
-onnx_manifest = run / "exports/onnx" / f"{run.name}.onnx.manifest.json"
-trt_manifest = run / "exports/tensorrt" / f"{run.name}_fp16.tensorrt.manifest.json"
-for p in [onnx_manifest, trt_manifest]:
-    print("\n", p)
-    d = json.loads(p.read_text())
-    print(d.get("onnx", {}).get("outputs"))
+# import json, pathlib
+# run = pathlib.Path("/nvme1/models/detect/detect_cedar_shadow_v007/omnifin0_cedar_shadow_v007_detect_20260206-235656_25f3fbcb")
+# onnx_manifest = run / "exports/onnx" / f"{run.name}.onnx.manifest.json"
+# trt_manifest = run / "exports/tensorrt" / f"{run.name}_fp16.tensorrt.manifest.json"
+# for p in [onnx_manifest, trt_manifest]:
+#     print("\n", p)
+#     d = json.loads(p.read_text())
+#     print(d.get("onnx", {}).get("outputs"))

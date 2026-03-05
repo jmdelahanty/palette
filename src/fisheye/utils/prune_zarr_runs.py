@@ -34,6 +34,7 @@ RUN_PARENTS = [
     "background_runs",
     "stimulus_runs",
 ]
+RUN_PARENT_SET = set(RUN_PARENTS)
 
 LINEAGE_RUN_PARENTS = [
     "eye_masks_runs",
@@ -289,6 +290,27 @@ def _build_lineage_failure_plan(
     return deletions, skips
 
 
+def _resolve_selected_parents(raw: Optional[str]) -> List[str]:
+    if raw is None:
+        return list(RUN_PARENTS)
+    tokens = [token.strip() for token in str(raw).split(",")]
+    selected: List[str] = []
+    seen: Set[str] = set()
+    for token in tokens:
+        if not token:
+            continue
+        if token not in RUN_PARENT_SET:
+            allowed = ", ".join(sorted(RUN_PARENT_SET))
+            raise SystemExit(f"Unknown run parent '{token}'. Allowed values: {allowed}")
+        if token in seen:
+            continue
+        seen.add(token)
+        selected.append(token)
+    if not selected:
+        raise SystemExit("--parents requires at least one run parent name.")
+    return selected
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Prune unreferenced run groups from Palette Zarr archives.")
     parser.add_argument("paths", nargs="*", type=Path, help="Recording roots or zarr paths.")
@@ -308,11 +330,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         default="both",
         help="When --lineage-failures-only is set, choose which stage(s) to inspect (default: both).",
     )
+    parser.add_argument(
+        "--parents",
+        type=str,
+        help=(
+            "Comma-separated run parents to prune in standard mode "
+            f"(default: all). Choices: {', '.join(RUN_PARENTS)}"
+        ),
+    )
     parser.add_argument("--log-dir", type=Path, default=None, help="Directory to store JSONL logs.")
     args = parser.parse_args(argv)
 
     if args.lineage_stage and not args.lineage_failures_only and args.lineage_stage != "both":
         raise SystemExit("--lineage-stage requires --lineage-failures-only.")
+    if args.parents and args.lineage_failures_only:
+        raise SystemExit("--parents cannot be used with --lineage-failures-only.")
+
+    selected_parents = _resolve_selected_parents(args.parents)
 
     roots = _resolve_root(args.paths)
     zarr_paths = list(_iter_zarr(roots, args.recursive))
@@ -334,7 +368,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.lineage_failures_only:
             deletions, skips = _build_lineage_failure_plan(root, lineage_parents)
         else:
-            deletions, skips = _build_plan(root, RUN_PARENTS)
+            deletions, skips = _build_plan(root, selected_parents)
         plans.append(RunPrunePlan(zarr_path=zarr_path, deletions=deletions, skips=skips))
 
     if not args.apply:
@@ -369,6 +403,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "run_start",
         lineage_failures_only=bool(args.lineage_failures_only),
         lineage_stage=str(args.lineage_stage),
+        selected_parents=selected_parents,
     )
 
     console = Console() if Console else None

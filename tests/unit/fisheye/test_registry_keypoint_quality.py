@@ -64,6 +64,8 @@ def _create_pose_with_quality(
     review_reviewer: str = "pytest",
     review_notes: str = "looks good",
     review_timestamp_key: str = "timestamp_utc",
+    review_policy_id: str | None = None,
+    review_policy_version: int | None = None,
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
     root.attrs["session_uuid"] = session_uuid
@@ -89,6 +91,11 @@ def _create_pose_with_quality(
         "reviewer": review_reviewer,
         "notes": review_notes,
     }
+    if review_policy_id is not None or review_policy_version is not None:
+        review_status["auto_review"] = {
+            "policy_id": review_policy_id,
+            "policy_version": review_policy_version,
+        }
     review_status[review_timestamp_key] = "2026-02-08T00:00:00+00:00"
     refined.attrs["keypoint_review_status"] = review_status
     refined.create_array(
@@ -182,6 +189,85 @@ def test_keypoint_quality_current_view_keeps_latest_per_dataset_method(tmp_path:
     registry.close()
 
 
+def test_keypoint_quality_current_view_prefers_latest_keypoint_source_run(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset("dataset_x", session_uuid="dataset_x", zarr_path=tmp_path / "x.zarr")
+    registry.upsert_keypoint_performance(
+        dataset_id="dataset_x",
+        keypoint_run="kp_latest",
+        keypoint_created_utc="2026-02-10T00:00:00+00:00",
+        recording_id=None,
+        zarr_use=None,
+        keypoint_method="yolo_pose",
+        model_run_id=None,
+        model_set_id=None,
+        model_path=None,
+        model_name=None,
+        source_crop_run=None,
+        source_detect_run=None,
+        source_refined_run=None,
+        total_rois=4,
+        successful_detections=4,
+        failed_detections=0,
+        success_rate_percent=100.0,
+        frames_with_keypoints=None,
+        mean_confidence=None,
+        duration_seconds=None,
+        inference_duration_seconds=None,
+        keypoints_per_second=None,
+        inference_average_fps=None,
+        batch_size=None,
+        imgsz=None,
+        conf_threshold=None,
+        iou_threshold=None,
+        summary_statistics_json=None,
+    )
+    registry.upsert_keypoint_quality(
+        dataset_id="dataset_x",
+        refined_run="refined_stale",
+        refined_created_utc="2026-02-08T00:00:00+00:00",
+        source_keypoint_run="kp_old",
+        keypoint_method="yolo_pose",
+        review_state="approved",
+        review_intended_use="training",
+        review_reviewer=None,
+        review_timestamp_utc="2026-02-11T00:00:00+00:00",
+        review_method="manual",
+        review_notes="reviewed later",
+        usable_keypoints=4,
+        total_keypoints=4,
+        usable_keypoints_rate=1.0,
+        raw_keypoints_success_rate=1.0,
+        raw_keypoints_successful=4,
+    )
+    registry.upsert_keypoint_quality(
+        dataset_id="dataset_x",
+        refined_run="refined_latest_source",
+        refined_created_utc="2026-02-10T00:00:00+00:00",
+        source_keypoint_run="kp_latest",
+        keypoint_method="yolo_pose",
+        review_state="approved",
+        review_intended_use="training",
+        review_reviewer=None,
+        review_timestamp_utc="2026-02-09T00:00:00+00:00",
+        review_method="manual",
+        review_notes="matches latest keypoint run",
+        usable_keypoints=4,
+        total_keypoints=4,
+        usable_keypoints_rate=1.0,
+        raw_keypoints_success_rate=1.0,
+        raw_keypoints_successful=4,
+    )
+
+    row = registry.query_keypoint_quality_current(
+        dataset_ids=["dataset_x"],
+        keypoint_method="yolo_pose",
+    )[0]
+    assert str(row["refined_run"]) == "refined_latest_source"
+    assert str(row["source_keypoint_run"]) == "kp_latest"
+    registry.close()
+
+
 def test_quality_tables_have_aligned_shared_review_columns(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     shared = {
@@ -198,6 +284,8 @@ def test_quality_tables_have_aligned_shared_review_columns(tmp_path: Path) -> No
     }
     assert shared.issubset(detect_cols)
     assert shared.issubset(keypoint_cols)
+    assert "review_policy_id" in keypoint_cols
+    assert "review_policy_version" in keypoint_cols
     assert "review_resolved_group" in detect_cols
     registry.close()
 
@@ -221,6 +309,10 @@ def test_keypoint_quality_extracts_shared_review_fields_and_legacy_timestamp_ali
                 "reviewer": "reviewer_a",
                 "notes": "legacy alias",
                 "reviewed_at": "2026-02-08T00:00:00+00:00",
+                "auto_review": {
+                    "policy_id": "keypoint_auto_review_v1",
+                    "policy_version": 1,
+                },
             },
         },
     )
@@ -234,6 +326,8 @@ def test_keypoint_quality_extracts_shared_review_fields_and_legacy_timestamp_ali
     assert row["review_intended_use"] == "training"
     assert row["review_reviewer"] == "reviewer_a"
     assert row["review_notes"] == "legacy alias"
+    assert row["review_policy_id"] == "keypoint_auto_review_v1"
+    assert row["review_policy_version"] == 1
     assert row["review_timestamp_utc"] == "2026-02-08T00:00:00+00:00"
 
 
@@ -281,6 +375,8 @@ def test_replace_keypoint_quality_auto_adds_review_columns_for_legacy_table(tmp_
                 "review_intended_use": "training",
                 "review_reviewer": "reviewer_keypoint",
                 "review_notes": "added via ensure_columns",
+                "review_policy_id": "keypoint_auto_review_v1",
+                "review_policy_version": 1,
                 "review_timestamp_utc": "2026-02-10T00:01:00+00:00",
                 "usable_keypoints": 3,
                 "total_keypoints": 4,
@@ -297,9 +393,11 @@ def test_replace_keypoint_quality_auto_adds_review_columns_for_legacy_table(tmp_
     }
     assert "review_method" in cols
     assert "review_notes" in cols
+    assert "review_policy_id" in cols
+    assert "review_policy_version" in cols
     row = registry.conn.execute(
         """
-        SELECT review_method, review_notes
+        SELECT review_method, review_notes, review_policy_id, review_policy_version
         FROM keypoint_quality
         WHERE dataset_id = ? AND refined_run = ?;
         """,
@@ -308,6 +406,8 @@ def test_replace_keypoint_quality_auto_adds_review_columns_for_legacy_table(tmp_
     assert row is not None
     assert str(row["review_method"]) == "manual"
     assert str(row["review_notes"]) == "added via ensure_columns"
+    assert str(row["review_policy_id"]) == "keypoint_auto_review_v1"
+    assert int(row["review_policy_version"]) == 1
     registry.close()
 
 
@@ -343,7 +443,10 @@ def test_keypoint_quality_overview_view_exposes_expected_columns(tmp_path: Path)
         "source_keypoint_run",
         "refined_run",
         "review_state",
+        "review_method",
         "review_intended_use",
+        "review_policy_id",
+        "review_policy_version",
         "usable_keypoints",
         "total_keypoints",
         "usable_keypoints_rate",
