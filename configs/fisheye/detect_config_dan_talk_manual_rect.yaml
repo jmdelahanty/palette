@@ -1,0 +1,49 @@
+# Temporary detection training config for talk/demo run on /nvme1/dan.zarr
+
+train: ./dummy_train.txt
+val: ./dummy_val.txt
+nc: 1
+names: ["fish"]
+
+datasets:
+  dan_talk_manual:
+    zarr_path: /nvme1/dan.zarr
+    source_type: manual
+    input_format: rgb
+    split:
+      train: 0.8
+      val: 0.2
+
+task: detect
+random_seed: 42
+sampling_strategy: proportional
+allow_source_mismatch: false
+
+training_params:
+  model: yolo11n.pt
+  epochs: 100
+  batch: 16
+  imgsz: [768, 1280]
+  rect: true
+  lr0: 0.002
+  momentum: 0.9
+  weight_decay: 0.0005
+  patience: 10
+  device: "0"
+  max_det: 1
+  num_workers: 4
+  prefetch_factor: 2
+  chunk_cache_size: 64
+  persistent_workers: true
+  chunk_locality_sampling: true
+  hsv_h: 0.0
+  hsv_s: 0.0
+  hsv_v: 0.15
+  degrees: 15.0
+  translate: 0.05
+  scale: 0.1
+  shear: 0.0
+  perspective: 0.0
+  fliplr: 0.5
+  flipud: 0.0
+  erasing: 0.0

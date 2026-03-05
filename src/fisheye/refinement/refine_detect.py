@@ -14,29 +14,22 @@ Workflow:
 import numpy as np
 import zarr
 import sys
+from json import JSONDecodeError, loads as json_loads
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from rich.console import Console
 
-from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
-from ..registry.status_ledger import upsert_recording_step_status
-from ..registry.step_cascade import invalidate_downstream_steps
 from ..utils.metadata import get_total_frames, get_detection_method
 from ..utils.system import get_environment_info, get_git_info
 from ..shared.detect_reason_codec import write_reason_columns
+from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.type_conversions import normalize_attr
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
 _REFINED_DETECT_STATUS_SOURCE = "runtime_refine_detect"
-
-
-def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
-    try:
-        return int(path.stat().st_mtime_ns)
-    except OSError:
-        return None
 
 
 def _emit_refined_detect_status(
@@ -51,61 +44,44 @@ def _emit_refined_detect_status(
     details: Dict[str, object],
     console: Optional[Console],
 ) -> None:
-    try:
-        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
-        recording_id = _normalize_attr(root.attrs.get("recording_id")) or _normalize_attr(session_uuid)
-        zarr_use = _normalize_attr(root.attrs.get("zarr_use"))
-        zarr_purpose = _normalize_attr(root.attrs.get("zarr_purpose"))
-
-        registry_path = RegistryPaths.from_env(Path.cwd()).path
-        registry = Registry(registry_path)
-        try:
-            registry.upsert_dataset(
-                dataset_id,
-                session_uuid=session_uuid,
-                zarr_path=zarr_path,
-                recording_id=recording_id,
-                zarr_use=zarr_use,
-                zarr_purpose=zarr_purpose,
-            )
-            upsert_recording_step_status(
-                registry,
-                dataset_id=dataset_id,
-                recording_id=recording_id,
-                step_name="refined_detect",
-                status=status,
-                run_name=run_name,
-                method=method,
-                coverage_pct=coverage_pct,
-                review_status_json=review_status,
-                details_json=details,
-                source=_REFINED_DETECT_STATUS_SOURCE,
-                zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_path),
-            )
-            if status == "ok":
-                invalidate_downstream_steps(
-                    registry,
-                    dataset_id=dataset_id,
-                    step_name="refined_detect",
-                    source=_REFINED_DETECT_STATUS_SOURCE,
-                    recording_id=recording_id,
-                    trigger_run_name=run_name,
-                )
-        finally:
-            registry.close()
-    except Exception as exc:
-        if console is not None:
-            console.print(
-                f"[yellow]Warning:[/yellow] failed to write recording step status "
-                f"for refined_detect: {exc}"
-            )
+    emit_stage_completion(
+        root,
+        zarr_path,
+        step_name="refined_detect",
+        status=status,
+        source=_REFINED_DETECT_STATUS_SOURCE,
+        run_name=run_name,
+        method=method,
+        coverage_pct=coverage_pct,
+        review_status_json=review_status,
+        details_json=details,
+        console=console,
+        warning_label="refined_detect",
+        auto_registry_from_env=True,
+        require_env_registry_exists=False,
+        invalidate_on_ok=True,
+        trigger_run_name=run_name,
+    )
 
 def _normalize_attr(value: object) -> Optional[str]:
-    if value is None:
+    return normalize_attr(value)
+
+
+def _parse_mapping(value: object) -> Optional[Dict[str, object]]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", "ignore")
+    if not isinstance(value, str):
         return None
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "ignore")
-    return str(value)
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        payload = json_loads(text)
+    except JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _read_sampled_import_meta(root: zarr.Group) -> Tuple[bool, Dict[str, Any]]:
@@ -608,7 +584,6 @@ def create_refined_run(
     # Load config if not provided
     if config is None:
         import yaml
-        from pathlib import Path
         config_path = Path("pipeline_config.yaml")
         if config_path.exists():
             with open(config_path) as f:

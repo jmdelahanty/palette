@@ -99,6 +99,7 @@ def _default_import_config() -> Dict[str, Any]:
                 "size": [640, 640],
                 "method": "area",
                 "chunk_size": 16,
+                "preserve_aspect": False,
             },
         }
     }
@@ -210,6 +211,65 @@ def _process_video_gpu_kvikio(
 ):
     import torch.nn.functional as F
 
+    def _compute_letterbox_dims(
+        source_h: int,
+        source_w: int,
+        target_h: int,
+        target_w: int,
+    ) -> Tuple[int, int, int, int, int, int]:
+        scale = min(target_h / source_h, target_w / source_w)
+        resized_h = max(1, min(target_h, int(round(source_h * scale))))
+        resized_w = max(1, min(target_w, int(round(source_w * scale))))
+        pad_top = (target_h - resized_h) // 2
+        pad_bottom = target_h - resized_h - pad_top
+        pad_left = (target_w - resized_w) // 2
+        pad_right = target_w - resized_w - pad_left
+        return resized_h, resized_w, pad_top, pad_bottom, pad_left, pad_right
+
+    def _resize_batch(
+        batch_bchw: torch.Tensor,
+        target_h: int,
+        target_w: int,
+        method: str,
+        method_align_corners: Optional[bool],
+        preserve_aspect: bool,
+    ) -> torch.Tensor:
+        if not preserve_aspect:
+            return F.interpolate(
+                batch_bchw,
+                size=(target_h, target_w),
+                mode=method,
+                align_corners=method_align_corners,
+            )
+
+        source_h = int(batch_bchw.shape[-2])
+        source_w = int(batch_bchw.shape[-1])
+        (
+            resized_h,
+            resized_w,
+            pad_top,
+            pad_bottom,
+            pad_left,
+            pad_right,
+        ) = _compute_letterbox_dims(source_h, source_w, target_h, target_w)
+
+        resized = F.interpolate(
+            batch_bchw,
+            size=(resized_h, resized_w),
+            mode=method,
+            align_corners=method_align_corners,
+        )
+
+        if pad_top == 0 and pad_bottom == 0 and pad_left == 0 and pad_right == 0:
+            return resized
+
+        return F.pad(
+            resized,
+            (pad_left, pad_right, pad_top, pad_bottom),
+            mode="constant",
+            value=0,
+        )
+
     # If frame_indices not provided, import all frames sequentially
     if frame_indices is None:
         frame_indices = list(range(n_frames))
@@ -261,6 +321,7 @@ def _process_video_gpu_kvikio(
     
     # Get downsample method if needed
     down_method = config['import'].get('downsampled', {}).get('method', 'area')
+    down_preserve_aspect = bool(config['import'].get('downsampled', {}).get('preserve_aspect', False))
     align_corners = False if down_method in ['bilinear', 'bicubic'] else None
     
     write_times = []
@@ -324,11 +385,13 @@ def _process_video_gpu_kvikio(
                         # Add batch and channel dims for interpolation
                         gray_for_interp = gray_uint8.unsqueeze(1).float()  # [B, 1, H, W]
 
-                        gray_down = F.interpolate(
+                        gray_down = _resize_batch(
                             gray_for_interp,
-                            size=(down_h, down_w),
-                            mode=down_method,
-                            align_corners=align_corners
+                            target_h=down_h,
+                            target_w=down_w,
+                            method=down_method,
+                            method_align_corners=align_corners,
+                            preserve_aspect=down_preserve_aspect,
                         ).squeeze(1).to(torch.uint8)  # Remove channel dim
 
                         buffers['downsampled_gray'][buffer_position:buffer_position+batch_size_actual] = gray_down
@@ -337,11 +400,13 @@ def _process_video_gpu_kvikio(
                     if 'downsampled_rgb' in buffers:
                         down_h, down_w, _ = shapes['downsampled_rgb']
                         rgb_for_interp = frames_f32.permute(0, 3, 1, 2)  # [B, 3, H, W]
-                        rgb_down = F.interpolate(
+                        rgb_down = _resize_batch(
                             rgb_for_interp,
-                            size=(down_h, down_w),
-                            mode=down_method,
-                            align_corners=align_corners
+                            target_h=down_h,
+                            target_w=down_w,
+                            method=down_method,
+                            method_align_corners=align_corners,
+                            preserve_aspect=down_preserve_aspect,
                         ).permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)
                         buffers['downsampled_rgb'][buffer_position:buffer_position+batch_size_actual] = rgb_down
                         del rgb_down, rgb_for_interp
@@ -692,6 +757,7 @@ def import_video(
 
             down_target = down_config.get("size", [640, 640])
             down_h, down_w = int(down_target[0]), int(down_target[1])
+            down_preserve_aspect = bool(down_config.get("preserve_aspect", False))
             down_chunk_size = int(down_config.get("chunk_size", chunk_size))
             if use_sharding:
                 down_io_batch = down_chunk_size * chunks_per_shard
@@ -811,6 +877,16 @@ def import_video(
                             compressors=None,
                             overwrite=True
                         )
+                    else:
+                        arrays['downsampled_rgb'] = raw.create_array(
+                            name='images_ds_rgb',
+                            shape=rgb_shape,
+                            chunks=(down_chunk_size, down_h, down_w, 3),
+                            dtype="uint8",
+                            fill_value=0,
+                            compressors=None,
+                            overwrite=True
+                        )
 
                 if 'downsampled_gray' in arrays:
                     arrays['downsampled_gray'].attrs['format'] = 'gray'
@@ -853,7 +929,23 @@ def import_video(
                     metadata["has_downsampled"] = True
                     metadata["downsampled_resolution"] = list(down_target)
                     metadata["downsample_method"] = down_config.get("method", "area")
+                    metadata["downsample_preserve_aspect"] = down_preserve_aspect
                     metadata["downsample_formats"] = down_formats
+                    if down_preserve_aspect:
+                        scale = min(down_h / full_h, down_w / full_w)
+                        resized_h = max(1, min(down_h, int(round(full_h * scale))))
+                        resized_w = max(1, min(down_w, int(round(full_w * scale))))
+                        pad_top = (down_h - resized_h) // 2
+                        pad_bottom = down_h - resized_h - pad_top
+                        pad_left = (down_w - resized_w) // 2
+                        pad_right = down_w - resized_w - pad_left
+                        metadata["downsample_resized_shape"] = [resized_h, resized_w]
+                        metadata["downsample_padding"] = {
+                            "top": pad_top,
+                            "bottom": pad_bottom,
+                            "left": pad_left,
+                            "right": pad_right,
+                        }
                     if downsample_specs:
                         metadata["downsampled_shapes"] = {k: list(v) for k, v in downsample_specs.items()}
                 
@@ -932,7 +1024,8 @@ def import_video(
             if create_down:
                 target_size = down_config.get("size", [640, 640])
                 fmt_label = "/".join(down_formats)
-                res_info.append(f"Downsampled ({fmt_label}): {target_size[0]}×{target_size[1]}")
+                aspect_note = " (preserve_aspect)" if down_preserve_aspect else ""
+                res_info.append(f"Downsampled ({fmt_label}): {target_size[0]}×{target_size[1]}{aspect_note}")
 
             frames_info = f"{n_import_frames}"
             if training_data_mode and frame_step:
