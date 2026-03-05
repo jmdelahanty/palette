@@ -6,7 +6,6 @@ import re
 import sys
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
@@ -20,6 +19,11 @@ from fisheye.detection.detect_keypoints_yolo import detect_keypoints_yolo
 from fisheye.refinement.refine_keypoints import create_refined_keypoint_run
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.registry.status_ledger import upsert_recording_step_status
+from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
+from fisheye.shared.batch_logging import make_run_id
+from fisheye.shared.environment import resolve_log_dir as resolve_shared_log_dir
+from fisheye.shared.environment import resolve_recording_roots as resolve_shared_recording_roots
+from fisheye.shared.zarr_discovery import discover_registry_zarr_entries as discover_shared_registry_zarr_entries
 from fisheye.utils.auto_keypoint_review import AutoReviewPolicy, apply_auto_review
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils import refine_keypoints_batch as refine_keypoints_batch_mod
@@ -68,24 +72,8 @@ class RegistryZarrEntry:
     camera_id: Optional[str]
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-class JsonLogger:
-    def __init__(self, path: Path, run_id: str):
-        self.path = path
-        self.run_id = run_id
-        self._fh = self.path.open("w", encoding="utf-8")
-
-    def log(self, event: str, **fields: object) -> None:
-        payload = {"event": event, "ts_utc": _utc_now(), "run_id": self.run_id}
-        payload.update(fields)
-        self._fh.write(json.dumps(payload, sort_keys=True) + "\n")
-        self._fh.flush()
-
-    def close(self) -> None:
-        self._fh.close()
+class JsonLogger(SharedJsonLogger):
+    pass
 
 
 def _jsonable(value: Any) -> Any:
@@ -137,28 +125,15 @@ def _read_camera_id(h5_path: Path) -> Optional[str]:
 
 
 def _resolve_root(paths: Optional[List[Path]]) -> List[Path]:
-    if paths:
-        return paths
-    env_root = os.environ.get("PALETTE_RECORDINGS_ROOT")
-    if env_root:
-        return [Path(env_root)]
-    return [Path("/nvme1/recordings")]
+    return resolve_shared_recording_roots(paths)
 
 
 def _resolve_log_dir(arg_log_dir: Optional[Path], roots: List[Path]) -> Path:
-    if arg_log_dir is not None:
-        return arg_log_dir
-    env_root = os.environ.get("PALETTE_LOG_ROOT")
-    if env_root:
-        return Path(env_root) / "run_keypoints_batch"
-    if roots:
-        return roots[0] / "logs" / "run_keypoints_batch"
-    return Path.cwd() / "logs" / "run_keypoints_batch"
+    return resolve_shared_log_dir(arg_log_dir, roots, log_subdir="run_keypoints_batch")
 
 
 def _run_id() -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{stamp}_{os.getpid()}"
+    return make_run_id()
 
 
 def _progress(console: Optional[Console], total: int):
@@ -978,56 +953,26 @@ def _discover_registry_entries(
     recordings whose ``detect`` and ``crop`` steps are both ``'ok'`` are
     returned, ensuring prerequisite pipeline stages are complete.
     """
-    registry = Registry(registry_path)
-    try:
-        query_kwargs: dict[str, Any] = dict(
-            zarr_use="analysis",
-            exclude_status="missing",
-            require_recording=True,
-            require_steps_ok=["detect", "crop"],
-            rig_id=rig_id,
-            arena_id=arena_id,
-            camera_id=camera_id,
-            path_contains=path_contains,
+    entries = discover_shared_registry_zarr_entries(
+        registry_path=registry_path,
+        scope_paths=scope_paths,
+        zarr_use="analysis",
+        rig_id=rig_id,
+        arena_id=arena_id,
+        camera_id=camera_id,
+        path_contains=path_contains,
+        require_steps_ok=["detect", "crop"],
+        exclude_step_ok="keypoints" if skip_existing else None,
+        zarr_suffix="_analysis.zarr",
+        registry_cls=Registry,
+    )
+    return [
+        RegistryZarrEntry(
+            zarr_path=entry.zarr_path,
+            camera_id=entry.camera_id,
         )
-        if skip_existing:
-            query_kwargs["exclude_step_ok"] = "keypoints"
-        rows = registry.query_datasets(**query_kwargs)
-    finally:
-        registry.close()
-
-    entries: list[RegistryZarrEntry] = []
-    for row in rows:
-        raw = row["zarr_path"]
-        if raw is None:
-            continue
-        zarr_path = Path(str(raw))
-        if not zarr_path.name.endswith("_analysis.zarr"):
-            continue
-        entries.append(
-            RegistryZarrEntry(
-                zarr_path=zarr_path.resolve(),
-                camera_id=_normalize_attr(row["camera_id"]),
-            )
-        )
-
-    # Scope filter: if caller provided paths, keep only zarrs under those roots.
-    if scope_paths:
-        resolved_scopes = [str(p.expanduser().resolve()).rstrip("/") + "/" for p in scope_paths]
-        entries = [entry for entry in entries if any(str(entry.zarr_path).startswith(s) for s in resolved_scopes)]
-
-    # Deduplicate and sort by zarr path (match filesystem discovery contract).
-    merged: Dict[str, RegistryZarrEntry] = {}
-    for entry in entries:
-        key = str(entry.zarr_path)
-        existing = merged.get(key)
-        if existing is None:
-            merged[key] = entry
-            continue
-        if existing.camera_id is None and entry.camera_id is not None:
-            merged[key] = entry
-    ordered = sorted(merged.values(), key=lambda item: str(item.zarr_path))
-    return ordered
+        for entry in entries
+    ]
 
 
 def _print_plan(plans: List[KeypointPlan]) -> None:

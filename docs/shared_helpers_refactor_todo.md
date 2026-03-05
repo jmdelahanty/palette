@@ -26,15 +26,15 @@ Current state after a fresh 3-agent scan of CRITICAL/HIGH/MEDIUM/LOW sections.
 | C1. Registry step status helper | [~] Partial | Inline keypoint/eye-mask status coverage improved, but shared `emit_stage_completion()` module not created and many per-file emitters remain. |
 | C2. Dataset metadata extraction helper | [~] Partial | Resolve+attrs extraction still duplicated; no shared `extract_dataset_metadata(...)` helper yet. |
 | C3. Normalization helper consolidation | [ ] Not started | No shared `type_conversions.normalize_attr()` module; many `_normalize_attr/_status_text/_decode_attr` variants remain. |
-| C4. Batch logging/timestamp consolidation | [ ] Not started | No shared `batch_logging.py`; duplicated `JsonLogger`, `_utc_now`, `_run_id` remain widespread. |
+| C4. Batch logging/timestamp consolidation | [~] Partial | Added shared `batch_logging.py`; migrated 4 core batch runners to shared logger/run-id helpers. |
 | 1. Zarr run resolution helper | [ ] Not started | Diagnostic/read paths still duplicate run resolution logic. |
 | 2. Promote `open_zarr_root()` | [~] Partial | Helper exists, but adoption is limited and most call sites still use raw `zarr.open(...)`. |
 | 3. Data-card aggregation dedup | [ ] Not started | Detection/keypoint aggregate scripts still largely parallel implementations. |
 | 4. Model loading/device helper | [ ] Not started | YOLO model load/device placement remains copy-pasted across many files. |
 | 5. CLI shared argument builders | [ ] Not started | Batch/inference scripts still define repeated argparse groups inline. |
 | 6. Plot save/finalize helper | [ ] Not started | `tight_layout/savefig/close` boilerplate remains duplicated. |
-| 7. Registry zarr discovery factory | [ ] Not started | Discovery logic still duplicated in detection/crop/keypoint/eye-mask batch scripts. |
-| 8. Root/log-dir resolution | [ ] Not started | `PALETTE_RECORDINGS_ROOT` + default root logic is still scattered. |
+| 7. Registry zarr discovery factory | [~] Partial | Added shared `zarr_discovery.py`; migrated discovery in detection/crop/keypoint/eye-mask runners. |
+| 8. Root/log-dir resolution | [~] Partial | Added shared `environment.py`; migrated root/log-dir helpers in 4 core batch runners. |
 | 9. Ensure-group pattern | [~] Partial | `require_group` usage exists, but many files still use `if not in root: create_group`. |
 | 10. Bbox/keypoint utilities | [ ] Not started | No shared `bbox_utils.py`; duplicated local implementations remain. |
 | 11. Provenance recording wrapper | [~] Partial | Base stage provenance helper exists, but many callsites still manually gather git/env/platform payloads. |
@@ -58,6 +58,20 @@ Current state after a fresh 3-agent scan of CRITICAL/HIGH/MEDIUM/LOW sections.
   - `segmentation/eye_segmentation_yolo.py`
   - `segmentation/infer_unet_eye_masks.py`
   - `refinement/refine_eye_masks.py`
+
+### Phase B Progress (2026-03-03)
+
+- Added `src/fisheye/shared/batch_logging.py` with shared `JsonLogger`,
+  `utc_now()`, and `make_run_id()`.
+- Added `src/fisheye/shared/environment.py` with shared
+  `resolve_recording_roots()` and `resolve_log_dir()`.
+- Added `src/fisheye/shared/zarr_discovery.py` with shared registry-backed
+  zarr discovery for paths and camera-aware entries.
+- Migrated 4 core batch runners to shared helpers:
+  - `utils/run_detections_batch.py`
+  - `utils/crop_batch.py`
+  - `utils/run_keypoints_batch.py`
+  - `utils/run_eye_masks_batch.py`
 
 ### Audit Metrics (2026-03-03)
 
@@ -252,11 +266,11 @@ Variants: `_normalize_attr`, `_status_text`, `_as_text`, `_decode_attr`,
 
 ### C4. Batch Logging & Timestamp Consolidation
 
-- [ ] Create `fisheye/shared/batch_logging.py` with:
+- [x] Create `fisheye/shared/batch_logging.py` with:
   - `JsonLogger(log_dir, run_id)` — JSONL event logger
   - `utc_now() -> str` — ISO 8601 UTC timestamp
   - `make_run_id() -> str` — `YYYYMMDDTHHMMSSZ_<pid>` run identifier
-- [ ] Migrate 15-29 files that define identical private copies
+- [~] Migrate 15-29 files that define identical private copies
 
 **Pattern: `JsonLogger` class (identical in 15+ files):**
 ```python
@@ -426,9 +440,9 @@ sequence across 68+ files.
 
 ### 7. Registry Zarr Discovery Factory
 
-- [ ] Create `discover_zarrs(source, registry_path, scope_paths, **filters)` in
+- [x] Create `discover_zarrs(source, registry_path, scope_paths, **filters)` in
       `fisheye/shared/zarr_discovery.py`
-- [ ] Migrate 4 batch scripts that each implement `_discover_zarrs_from_registry()`
+- [x] Migrate 4 batch scripts that each implement `_discover_zarrs_from_registry()`
 
 **Pattern (repeated in 4 files, ~60 lines each):**
 ```python
@@ -461,9 +475,9 @@ def _discover_zarrs_from_registry(
 
 ### 8. Root Path & Log Dir Resolution
 
-- [ ] Create `resolve_recording_roots()` and `resolve_log_dir()` in
+- [x] Create `resolve_recording_roots()` and `resolve_log_dir()` in
       `fisheye/shared/environment.py`
-- [ ] Migrate 33+ files that duplicate the `PALETTE_RECORDINGS_ROOT` env lookup
+- [~] Migrate 33+ files that duplicate the `PALETTE_RECORDINGS_ROOT` env lookup
 
 **Pattern (repeated in 33+ files):**
 ```python

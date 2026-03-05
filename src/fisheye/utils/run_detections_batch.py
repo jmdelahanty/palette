@@ -8,10 +8,14 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, List, Optional, Sequence
+from typing import Iterable, List, Optional, Sequence
 
+from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
+from fisheye.shared.batch_logging import make_run_id
+from fisheye.shared.environment import resolve_log_dir
+from fisheye.shared.environment import resolve_recording_roots
+from fisheye.shared.zarr_discovery import discover_registry_zarrs
 from fisheye.utils.run_detect_with_registry_model import run_detect_with_registry_model
 
 try:
@@ -49,32 +53,13 @@ class DetectPlan:
     tuning_present: bool = False
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-class JsonLogger:
-    def __init__(self, path: Path, run_id: str):
-        self.path = path
-        self.run_id = run_id
-        self._fh = self.path.open("w", encoding="utf-8")
-
+class JsonLogger(SharedJsonLogger):
     def log(self, event: str, *, zarr: str, status: str, reason: Optional[str] = None, **fields: object) -> None:
-        payload = {
-            "event": event,
-            "ts_utc": _utc_now(),
-            "run_id": self.run_id,
-            "zarr": zarr,
-            "status": status,
-        }
+        payload: dict[str, object] = {"zarr": zarr, "status": status}
         if reason is not None:
             payload["reason"] = reason
         payload.update(fields)
-        self._fh.write(json.dumps(payload, sort_keys=True) + "\n")
-        self._fh.flush()
-
-    def close(self) -> None:
-        self._fh.close()
+        super().log(event, **payload)
 
 
 def _load_paths_file(path: Path) -> List[Path]:
@@ -93,31 +78,21 @@ def _resolve_input_paths(paths: Sequence[Path], file_lists: Sequence[Path]) -> L
     input_paths.extend(paths)
     for file_path in file_lists:
         input_paths.extend(_load_paths_file(file_path))
-    if input_paths:
-        return input_paths
-    env_root = os.environ.get("PALETTE_RECORDINGS_ROOT")
-    if env_root:
-        return [Path(env_root)]
-    return [Path("/nvme1/recordings")]
+    return resolve_recording_roots(input_paths)
 
 
 def _resolve_log_dir(arg_log_dir: Optional[Path], inputs: Sequence[Path]) -> Path:
-    if arg_log_dir is not None:
-        return arg_log_dir
-    env_root = os.environ.get("PALETTE_LOG_ROOT")
-    if env_root:
-        return Path(env_root) / "run_detections_batch"
+    log_roots: list[Path] = []
     for path in inputs:
         if path.suffix == ".zarr":
-            return _infer_recording_dir(path) / "logs" / "run_detections_batch"
-        if path.exists() and path.is_dir():
-            return path / "logs" / "run_detections_batch"
-    return Path.cwd() / "logs" / "run_detections_batch"
+            log_roots.append(_infer_recording_dir(path))
+        else:
+            log_roots.append(path)
+    return resolve_log_dir(arg_log_dir, log_roots, log_subdir="run_detections_batch")
 
 
 def _run_id() -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{stamp}_{os.getpid()}"
+    return make_run_id()
 
 
 def _is_analysis_zarr(path: Path) -> bool:
@@ -182,50 +157,17 @@ def _discover_analysis_zarrs_from_registry(
     already ``'ok'`` in the registry are excluded at the SQL level, avoiding
     unnecessary filesystem I/O during plan building.
     """
-    from fisheye.registry.db import Registry
-
-    registry = Registry(registry_path)
-    try:
-        query_kwargs: dict[str, Any] = dict(
-            zarr_use="analysis",
-            exclude_status="missing",
-            require_recording=True,
-            rig_id=rig_id,
-            arena_id=arena_id,
-            camera_id=camera_id,
-            path_contains=path_contains,
-        )
-        if skip_existing:
-            query_kwargs["exclude_step_ok"] = "detect"
-        rows = registry.query_datasets(**query_kwargs)
-    finally:
-        registry.close()
-
-    paths: list[Path] = []
-    for row in rows:
-        raw = row["zarr_path"]
-        if raw is None:
-            continue
-        zarr = Path(str(raw))
-        if not zarr.name.endswith("_analysis.zarr"):
-            continue
-        paths.append(zarr.resolve())
-
-    # Scope filter: if caller provided paths, keep only zarrs under those roots.
-    if scope_paths:
-        resolved_scopes = [str(p.expanduser().resolve()).rstrip("/") + "/" for p in scope_paths]
-        paths = [p for p in paths if any(str(p).startswith(s) for s in resolved_scopes)]
-
-    # Deduplicate and sort (match filesystem discovery contract).
-    seen: set[str] = set()
-    ordered: list[Path] = []
-    for p in paths:
-        key = str(p)
-        if key not in seen:
-            seen.add(key)
-            ordered.append(p)
-    ordered.sort(key=lambda item: str(item))
-    return ordered
+    return discover_registry_zarrs(
+        registry_path=registry_path,
+        scope_paths=scope_paths,
+        zarr_use="analysis",
+        rig_id=rig_id,
+        arena_id=arena_id,
+        camera_id=camera_id,
+        path_contains=path_contains,
+        exclude_step_ok="detect" if skip_existing else None,
+        zarr_suffix="_analysis.zarr",
+    )
 
 
 def _infer_recording_dir(zarr_path: Path) -> Path:

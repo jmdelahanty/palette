@@ -6,7 +6,6 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -20,7 +19,13 @@ from fisheye.refinement.refine_eye_masks import refine_eye_masks
 from fisheye.segmentation.eye_segmentation import segment_eye_masks as segment_eye_masks_traditional
 from fisheye.segmentation.eye_segmentation_yolo import segment_eye_masks_yolo
 from fisheye.segmentation.infer_unet_eye_masks import main as infer_unet_eye_masks_main
+from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
+from fisheye.shared.batch_logging import make_run_id
+from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.environment import resolve_log_dir as resolve_shared_log_dir
+from fisheye.shared.environment import resolve_recording_roots as resolve_shared_recording_roots
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
+from fisheye.shared.zarr_discovery import discover_registry_zarrs as discover_shared_registry_zarrs
 
 try:
     from rich.console import Console
@@ -50,23 +55,11 @@ class EyeMaskPlan:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now()
 
 
-class JsonLogger:
-    def __init__(self, path: Path, run_id: str):
-        self.path = path
-        self.run_id = run_id
-        self._fh = self.path.open("w", encoding="utf-8")
-
-    def log(self, event: str, **fields: object) -> None:
-        payload = {"event": event, "ts_utc": _utc_now(), "run_id": self.run_id}
-        payload.update(fields)
-        self._fh.write(json.dumps(payload, sort_keys=True) + "\n")
-        self._fh.flush()
-
-    def close(self) -> None:
-        self._fh.close()
+class JsonLogger(SharedJsonLogger):
+    pass
 
 
 def _normalize_attr(value: object) -> Optional[str]:
@@ -102,28 +95,15 @@ def _read_camera_id(h5_path: Path) -> Optional[str]:
 
 
 def _resolve_root(paths: Optional[List[Path]]) -> List[Path]:
-    if paths:
-        return paths
-    env_root = os.environ.get("PALETTE_RECORDINGS_ROOT")
-    if env_root:
-        return [Path(env_root)]
-    return [Path("/nvme1/recordings")]
+    return resolve_shared_recording_roots(paths)
 
 
 def _resolve_log_dir(arg_log_dir: Optional[Path], roots: List[Path]) -> Path:
-    if arg_log_dir is not None:
-        return arg_log_dir
-    env_root = os.environ.get("PALETTE_LOG_ROOT")
-    if env_root:
-        return Path(env_root) / "run_eye_masks_batch"
-    if roots:
-        return roots[0] / "logs" / "run_eye_masks_batch"
-    return Path.cwd() / "logs" / "run_eye_masks_batch"
+    return resolve_shared_log_dir(arg_log_dir, roots, log_subdir="run_eye_masks_batch")
 
 
 def _run_id() -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{stamp}_{os.getpid()}"
+    return make_run_id()
 
 
 def _progress(console: Optional[Console], total: int):
@@ -498,49 +478,18 @@ def _discover_zarrs_from_registry(
     ``crop`` and ``keypoints`` steps are both ``'ok'`` are returned, ensuring
     prerequisite pipeline stages are complete.
     """
-    registry = Registry(registry_path)
-    try:
-        query_kwargs: dict[str, Any] = dict(
-            zarr_use="analysis",
-            exclude_status="missing",
-            require_recording=True,
-            require_steps_ok=["crop", "keypoints"],
-            rig_id=rig_id,
-            arena_id=arena_id,
-            camera_id=camera_id,
-            path_contains=path_contains,
-        )
-        if skip_existing:
-            query_kwargs["exclude_step_ok"] = "eye_masks"
-        rows = registry.query_datasets(**query_kwargs)
-    finally:
-        registry.close()
-
-    paths: list[Path] = []
-    for row in rows:
-        raw = row["zarr_path"]
-        if raw is None:
-            continue
-        zarr_path = Path(str(raw))
-        if not zarr_path.name.endswith("_analysis.zarr"):
-            continue
-        paths.append(zarr_path.resolve())
-
-    # Scope filter: if caller provided paths, keep only zarrs under those roots.
-    if scope_paths:
-        resolved_scopes = [str(p.expanduser().resolve()).rstrip("/") + "/" for p in scope_paths]
-        paths = [p for p in paths if any(str(p).startswith(s) for s in resolved_scopes)]
-
-    # Deduplicate and sort (match filesystem discovery contract).
-    seen: set[str] = set()
-    ordered: list[Path] = []
-    for p in paths:
-        key = str(p)
-        if key not in seen:
-            seen.add(key)
-            ordered.append(p)
-    ordered.sort(key=lambda item: str(item))
-    return ordered
+    return discover_shared_registry_zarrs(
+        registry_path=registry_path,
+        scope_paths=scope_paths,
+        zarr_use="analysis",
+        rig_id=rig_id,
+        arena_id=arena_id,
+        camera_id=camera_id,
+        path_contains=path_contains,
+        require_steps_ok=["crop", "keypoints"],
+        exclude_step_ok="eye_masks" if skip_existing else None,
+        zarr_suffix="_analysis.zarr",
+    )
 
 
 def _print_plan(plans: List[EyeMaskPlan]) -> None:
