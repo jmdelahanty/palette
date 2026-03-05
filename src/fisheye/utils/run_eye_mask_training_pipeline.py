@@ -238,11 +238,22 @@ def _write_merged_outputs(
     manifest_payload["output_config_path"] = str(merged_config)
     manifest_payload["output_manifest_path"] = str(merged_manifest)
 
+    merged_run_name = ""
+    if isinstance(merge_summary, Mapping):
+        merged_run_name = str(merge_summary.get("run_name") or "").strip()
+    if not merged_run_name and isinstance(datasets, list) and datasets:
+        dataset0 = datasets[0]
+        if isinstance(dataset0, Mapping):
+            merged_run_name = str(dataset0.get("run_name") or "").strip()
+
     generated_datasets = config_payload.get("datasets")
     if isinstance(generated_datasets, dict):
         for _, dataset_cfg in generated_datasets.items():
             if isinstance(dataset_cfg, dict):
                 dataset_cfg["zarr_path"] = str(merged_out_zarr)
+                if merged_run_name:
+                    dataset_cfg["crop_run"] = str(merged_run_name)
+                    dataset_cfg["mask_run"] = str(merged_run_name)
 
     merged_config.parent.mkdir(parents=True, exist_ok=True)
     merged_manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -267,7 +278,7 @@ def _run_training(
     cmd: List[str] = [
         sys.executable,
         "-m",
-        "fisheye.training.train_eye_masks",
+        "fisheye.segmentation.train_unet_eye_masks",
         str(config_path),
         "--manifest",
         str(manifest_path),
@@ -277,7 +288,7 @@ def _run_training(
         str(registry_path),
     ]
     _add_arg(cmd, "--run-name", run_name)
-    _add_arg(cmd, "--project", project)
+    _add_arg(cmd, "--output-dir", project)
     print("Launching training: " + " ".join(cmd))
     completed = subprocess.run(cmd, check=False)
     return int(completed.returncode)
@@ -365,7 +376,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--train",
         action="store_true",
-        help="Run fisheye.training.train_eye_masks after successful prepare/export.",
+        help="Run fisheye.segmentation.train_unet_eye_masks after successful prepare/export.",
     )
     parser.add_argument(
         "--export-merged",
@@ -403,6 +414,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             "Cap fish_present_no_keypoints negatives per positive row when "
             "--merge-row-gate-policy=usable_plus_explicit_negatives."
         ),
+    )
+    parser.add_argument(
+        "--merge-copy-batch-size",
+        type=int,
+        default=128,
+        help="Batch size for merged eye-mask indexed row copies (default: 128).",
     )
     parser.add_argument("--merge-overwrite", action="store_true", help="Allow overwrite of merged output zarr.")
     parser.add_argument(
@@ -480,6 +497,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error("--data-card-force-plots cannot be combined with --data-card-no-plots.")
     if float(args.merge_explicit_negative_ratio) < 0.0:
         parser.error("--merge-explicit-negative-ratio must be >= 0.")
+    if int(args.merge_copy_batch_size) <= 0:
+        parser.error("--merge-copy-batch-size must be > 0.")
 
     model_input = args.model_input or args.input_format
     if args.model_input and args.model_input != args.input_format:
@@ -706,6 +725,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             split_seed=int(args.merge_seed),
             row_gate_policy=str(args.merge_row_gate_policy),
             explicit_negative_ratio=float(args.merge_explicit_negative_ratio),
+            copy_batch_size=int(args.merge_copy_batch_size),
             overwrite=bool(args.merge_overwrite),
             validate=True,
             registry=Path(registry_path),
@@ -780,11 +800,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.train:
         print("Stage 4/4: train eye-mask model")
-        set_id = _require_manifest_set_id(effective_manifest_path)
+        train_set_id = _require_manifest_set_id(effective_manifest_path)
         return _run_training(
             config_path=effective_config_path,
             manifest_path=effective_manifest_path,
-            set_id=set_id,
+            set_id=train_set_id,
             registry_path=Path(registry_path),
             run_name=args.run_name,
             project=args.project,

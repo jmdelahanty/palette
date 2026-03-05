@@ -6,7 +6,7 @@ Bring pose/keypoint workflow parity with detect workflow for:
 - computational argument/runtime tracking
 - registry status/query/selection ergonomics
 
-Related eye-mask parity work is tracked separately in `docs/eye_masks_detect_pose_parity_todo.md`.
+Related eye-mask parity work is tracked separately in `docs/eye_mask_parity_todo.md`.
 Parallel execution contract for current P2 + validation tasks:
 `docs/pose_detect_parity_parallel_agents_contract.md`.
 

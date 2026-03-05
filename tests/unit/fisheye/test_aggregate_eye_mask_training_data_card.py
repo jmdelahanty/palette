@@ -644,9 +644,15 @@ def test_aggregate_eye_mask_data_card_prefers_usable_area_metrics_for_low_area_r
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     source_refs = payload["audit_freshness"]["source_run_refs"]
     assert len(source_refs) == 1
+    expected_ratio = 180.0 / 185.0
     assert source_refs[0]["left_area_p50"] == pytest.approx(180.0)
     assert source_refs[0]["left_area_p50_all"] == pytest.approx(0.0)
+    assert source_refs[0]["area_lr_ratio_p50"] == pytest.approx(expected_ratio)
+    assert source_refs[0]["area_lr_ratio_p50_derived"] == pytest.approx(expected_ratio)
+    assert source_refs[0]["area_lr_ratio_p50_profile"] == pytest.approx(0.11)
+    assert source_refs[0]["area_lr_ratio_metric_source"] == "derived_from_selected_area_p50"
     assert source_refs[0]["area_metric_source"] == "usable"
+    assert payload["geometry"]["area_lr_ratio_p50_dataset_stats"]["p50"] == pytest.approx(expected_ratio)
 
 
 def test_aggregate_eye_mask_data_card_view_cannot_combine_dry_run() -> None:

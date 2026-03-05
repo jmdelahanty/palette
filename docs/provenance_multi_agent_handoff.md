@@ -218,7 +218,7 @@ Workflow and lineage context:
 
 - `src/fisheye/docs/provenance_workflow.md`
 - `docs/recording_analysis_pipeline_contract.md`
-- `docs/eye_masks_detect_pose_parity_todo.md`
+- `docs/eye_mask_parity_todo.md`
 
 ## Working Conventions
 

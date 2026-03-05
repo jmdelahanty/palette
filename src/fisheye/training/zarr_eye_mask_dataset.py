@@ -106,6 +106,7 @@ def load_yolo_targets(
     label_mode: str,
     eye_masks_method: Optional[str] = None,
     mask_preference: str = "auto",
+    crop_run_override: Optional[str] = None,
 ) -> YOLOTargetStore:
     """Resolve ROI and mask arrays for U-Net training without materializing them."""
 
@@ -171,7 +172,7 @@ def load_yolo_targets(
 
     use_probs = mask_probs_arr is not None
 
-    crop_run = run_grp.attrs.get("source_crop_run")
+    crop_run = crop_run_override or run_grp.attrs.get("source_crop_run")
     if not crop_run:
         crop_parent = root.get("crop_runs", None)
         if crop_parent is not None:

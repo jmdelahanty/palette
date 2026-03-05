@@ -3,6 +3,9 @@
 Purpose: triage and repair eye-mask training data-card aggregation failures caused by missing
 `eye_mask_data_profile_latest` rows, and document when fallback mode is appropriate.
 
+For the full build/train workflow (query -> merged export -> card/plots -> U-Net train),
+see `docs/eye_mask_training_workflow.md`.
+
 ## 1. Failure Signature
 
 Typical aggregator failure:

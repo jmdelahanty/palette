@@ -14,12 +14,23 @@ class BCEDiceCriterion(nn.Module):
         bce_weight: Blend factor for BCE term (0..1). 1.0 => pure BCE, 0.0 => pure Dice.
         eps: Small constant to avoid divide-by-zero in dice.
         reduction: Currently only ``mean`` is supported (kept for future parity).
+        overlap_weight: Optional penalty weight for cross-channel overlap
+            (useful for left/right eye channels). Ignored when channel count < 2.
     """
 
-    def __init__(self, bce_weight: float = 0.5, eps: float = 1e-6, reduction: str = "mean") -> None:
+    def __init__(
+        self,
+        bce_weight: float = 0.5,
+        eps: float = 1e-6,
+        reduction: str = "mean",
+        overlap_weight: float = 0.0,
+    ) -> None:
         super().__init__()
         self.bce_weight = float(bce_weight)
         self.eps = float(eps)
+        self.overlap_weight = float(overlap_weight)
+        if self.overlap_weight < 0.0:
+            raise ValueError("overlap_weight must be >= 0.0")
         if reduction not in {"mean"}:
             raise ValueError("Only 'mean' reduction is supported.")
         self.reduction = reduction
@@ -45,5 +56,8 @@ class BCEDiceCriterion(nn.Module):
         dice = 1.0 - (2.0 * intersection + self.eps) / (denom + self.eps)
         dice = dice.mean()
 
-        return self.bce_weight * bce + (1.0 - self.bce_weight) * dice
+        overlap_penalty = torch.zeros((), dtype=probs.dtype, device=probs.device)
+        if self.overlap_weight > 0.0 and probs.shape[1] >= 2:
+            overlap_penalty = (probs[:, 0] * probs[:, 1]).mean()
 
+        return self.bce_weight * bce + (1.0 - self.bce_weight) * dice + self.overlap_weight * overlap_penalty

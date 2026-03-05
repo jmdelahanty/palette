@@ -1,11 +1,11 @@
 # Eye-Mask Parity TODO (Post Detect/Keypoint Parity)
-_As of 2026-02-25_
+_As of 2026-02-26_
 
 ## Purpose and Scope
 - Align eye-mask training-data surfaces with the parity standard now used by detection and keypoint flows: profile registry, quality/performance summaries, data-card JSON, plot bundle, pipeline orchestration, maintenance, and query/check UX.
 - This TODO now tracks active implementation progress; checkboxes are updated only from verified code/test evidence.
 - Scope includes registry/profile/card/plot/pipeline/maintenance/query/check surfaces for eye-mask training datasets and merged exports.
-- Scope excludes detect/pose parity items already completed in `docs/detect_keypoints_parity_todo.md`.
+- Scope excludes detect/pose parity items already completed in prior parity waves.
 
 ## Current State Snapshot (Reality Check)
 - [x] Eye-mask performance registry tables/views exist (`eye_mask_performance`, `eye_mask_performance_latest`, recording-step status integration).
@@ -18,9 +18,9 @@ _As of 2026-02-25_
 - [x] `check_training_registry` now has dedicated `eye-mask-performance` and `eye-mask-profile` views.
 
 ## Stale Items in Existing Eye-Mask TODO
-- [x] `docs/eye_masks_detect_pose_parity_todo.md` marks all items complete, but it predates newer parity surfaces now standard in detect/keypoint work (data-profile registry parity, data-card schema parity, plot-bundle parity, query/check UX parity).
-- [x] The validation-evidence block in that doc is dated 2026-02-22/23 and should be treated as historical evidence, not acceptance for the expanded parity scope in this document.
-- [x] Cross-link added in `docs/eye_masks_detect_pose_parity_todo.md` so the older doc is clearly labeled historical and points readers to this TODO for current parity scope.
+- [x] Historical completion notes (2026-02-22/23) predate newer parity surfaces now required for detect/keypoint parity (data-profile registry parity, data-card schema parity, plot-bundle parity, query/check UX parity).
+- [x] Historical evidence from that wave is treated as context only, not acceptance for the expanded parity scope in this document.
+- [x] This document is the canonical tracker for current eye-mask parity scope.
 
 ## Prioritized Phases (P0-P6)
 1. **P0 - Lock parity target + contracts**
@@ -49,7 +49,7 @@ P0 implementation map (owner/module/CLI):
 
 Out of scope/deferred for this wave:
 - broad non-eye-mask registry normalization work.
-- historical detect/pose parity task rewrites already captured in `docs/eye_masks_detect_pose_parity_todo.md`.
+- historical detect/pose parity task rewrites from prior waves.
 
 2. **P1 - Registry profile/quality/performance parity**
 - [x] Add an eye-mask profile registry contract (schema name/version + canonical run attrs + profile JSON payload contract).
@@ -106,14 +106,14 @@ Out of scope/deferred for this wave:
 7. **P6 - Validation checklist and acceptance criteria**
 - [x] Unit/integration coverage proves schema contracts and registry projections are stable.
 - [x] Backfill/sync/refresh commands are idempotent and report inserted/updated/unchanged counts.
-- [ ] At least one representative eye-mask training set passes end-to-end:
-  - [ ] merged export
-  - [ ] profile sync
-  - [ ] card aggregation
-  - [ ] plot generation
-  - [ ] check/query inspection
+- [x] At least one representative eye-mask training set passes end-to-end:
+  - [x] merged export
+  - [x] profile sync
+  - [x] card aggregation
+  - [x] plot generation
+  - [x] check/query inspection
 - [x] Failure-path validation confirms fail-closed behavior on stale/missing profiles with clear operator remediation.
-- [ ] Acceptance gate: eye-mask operator UX reaches detect/keypoint parity for registry, card, plot, pipeline, and maintenance surfaces.
+- [x] Acceptance gate: eye-mask operator UX reaches detect/keypoint parity for registry, card, plot, pipeline, and maintenance surfaces.
 
 Validation evidence (2026-02-25):
 - `scripts/py -m py_compile $(git diff --name-only -- '*.py')` passed.
@@ -126,7 +126,22 @@ Validation evidence (2026-02-25):
   - Validation now checks reason-label decode via fallback order and asserts `reason_bytes` metadata consistency when present.
   - Cross-repo contract comparison and rationale recorded in `docs/zarr_string_encoding_todo.md` (2026-02-25 addendum).
 
+Validation evidence (2026-02-26):
+- Trainer lifecycle parity added for eye-mask U-Net:
+  - `src/fisheye/segmentation/train_unet_eye_masks.py` now records registry run states (`in_progress`, `failed`, `success`) with invocation metadata and set linkage.
+  - `src/fisheye/utils/run_eye_mask_training_pipeline.py` now passes `--manifest`, `--set-id`, and `--registry` to U-Net training stage for parity with detect/keypoint pipelines.
+- Focused parity tests passed:
+  - `scripts/py -m pytest tests/unit/fisheye/test_run_eye_mask_training_pipeline.py -q`
+  - `scripts/py -m pytest tests/unit/fisheye/test_train_unet_eye_masks_registry.py -q`
+- Representative operator workflow run completed (user-run):
+  - merged export with row gating
+  - eye-mask profile backfill/sync
+  - data-card aggregation + plot generation/view
+  - U-Net training runs (LR and union experiments)
+  - registry training run registration and cleanup validation
+- Workflow documentation now available in `docs/eye_mask_training_workflow.md`.
+
 ## Acceptance Definition for This TODO
-- [ ] All P1-P6 checkboxes are complete and validated.
+- [x] All P1-P6 checkboxes are complete and validated.
 - [x] Old eye-mask parity doc is either archived or clearly labeled as superseded for these surfaces.
-- [ ] Operators can run the full eye-mask parity workflow without bespoke/manual one-off scripts.
+- [x] Operators can run the full eye-mask parity workflow without bespoke/manual one-off scripts.

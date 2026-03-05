@@ -84,7 +84,7 @@ cache:
 training_params:
   model: unet-small            # Recorded for provenance; U-Net trainer ignores external checkpoints
   epochs: 100
-  batch: 256
+  batch_size: 256
   imgsz: 256
   lr0: 0.0005
   momentum: 0.9

@@ -337,6 +337,45 @@ def test_export_merged_eye_mask_training_zarr_from_multiple_sources_tracks_sourc
     assert source_zarr_paths == [str(source_a.resolve()), str(source_b.resolve())]
 
 
+def test_export_union_label_mode_collapses_two_channel_source_masks(tmp_path: Path) -> None:
+    source_path = tmp_path / "source_training.zarr"
+    out_path = tmp_path / "merged_eye_union_export.zarr"
+    _write_source_eye_zarr(source_path)
+
+    source_root = zarr.open_group(str(source_path), mode="a")
+    refined = source_root["refined_eye_masks_runs/refined_eye_masks_001"]
+    masks_src = np.asarray(refined["masks_roi"][:], dtype=np.uint8)
+    masks_src[0, 0, 2:4, 2:4] = 1
+    masks_src[0, 1, 10:12, 10:12] = 1
+    masks_src[1, 0, 3:6, 3:6] = 1
+    masks_src[1, 1, 9:12, 9:12] = 1
+    refined["masks_roi"][:] = masks_src
+
+    summary = export_merged_eye_mask_training_zarr(
+        source_path,
+        out_path,
+        eye_stage="refined_eye_masks_runs",
+        eye_run="refined_eye_masks_001",
+        label_mode="union",
+        overwrite=True,
+    )
+    assert summary["channels"] == 1
+
+    recheck = validate_merged_eye_mask_training_zarr(
+        out_path,
+        expected_input_format="gray",
+        expected_total_samples=4,
+        expected_label_mode="union",
+    )
+    assert recheck["channels"] == 1
+
+    out_root = zarr.open_group(str(out_path), mode="r")
+    eye_latest = str(out_root["eye_masks_runs"].attrs["latest"])
+    masks_out = np.asarray(out_root[f"eye_masks_runs/{eye_latest}/masks_roi"][:], dtype=np.uint8)
+    expected_union = np.max(masks_src, axis=1, keepdims=True).astype(np.uint8, copy=False)
+    np.testing.assert_array_equal(masks_out, expected_union)
+
+
 def test_export_row_gate_usable_only_keeps_pair_success_rows(tmp_path: Path) -> None:
     source_path = tmp_path / "source_training.zarr"
     out_path = tmp_path / "merged_eye_usable_only.zarr"

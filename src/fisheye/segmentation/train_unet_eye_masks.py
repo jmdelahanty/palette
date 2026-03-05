@@ -32,8 +32,15 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 
 from ..training.config import EyeMaskTrainingConfig, EyeMaskDatasetConfig
 from ..training.losses import BCEDiceCriterion
+from ..training.training_run_shared import (
+    record_registry_training_run as _shared_record_registry_training_run,
+)
 from ..training.zarr_eye_mask_dataset import YOLOTargetStore, load_yolo_targets
-from ..utils.system import get_git_info, get_environment_info
+from ..utils.system import (
+    build_invocation_record,
+    get_git_info,
+    get_environment_info,
+)
 from .unet import UNetSmall
 
 try:
@@ -318,6 +325,7 @@ def _load_arrays_for_dataset(
             label_mode,
             eye_masks_method,
             mask_preference,
+            cfg.crop_run,
         )
     except Exception as exc:  # pragma: no cover - safety net for runtime datasets
         raise RuntimeError(f"Failed to load dataset '{name}' from {cfg.zarr_path}: {exc}") from exc
@@ -423,6 +431,25 @@ def _compute_dice(logits: torch.Tensor, targets: torch.Tensor, eps: float = 1e-6
     return dice_mean, per_channel
 
 
+def _compute_overlap_stats(logits: torch.Tensor) -> Tuple[float, float]:
+    """Return LR overlap mean and left/right mass ratio for a validation batch."""
+    probs = logits.sigmoid()
+    if probs.ndim == 3:
+        probs = probs.unsqueeze(1)
+    if probs.shape[1] < 2:
+        return float("nan"), float("nan")
+
+    probs = probs.float()
+    p_left = probs[:, 0]
+    p_right = probs[:, 1]
+    overlap_mean = float((p_left * p_right).mean().item())
+    right_mass = float(p_right.sum().item())
+    if right_mass <= 0.0:
+        return overlap_mean, float("nan")
+    mass_ratio = float(p_left.sum().item() / right_mass)
+    return overlap_mean, mass_ratio
+
+
 def _create_run_directory(base_dir: Path, run_name: Optional[str]) -> Path:
     base_dir = base_dir.expanduser().resolve()
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -464,11 +491,84 @@ def _save_checkpoint(
     torch.save(checkpoint, path)
 
 
+def _read_manifest_set_id(manifest_path: Optional[Path]) -> Optional[str]:
+    if manifest_path is None:
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw_set_id = payload.get("set_id")
+    if raw_set_id is None:
+        return None
+    set_id = str(raw_set_id).strip()
+    return set_id or None
+
+
+def _record_registry_training_run(
+    *,
+    args: argparse.Namespace,
+    console: Console,
+    invocation_payload: Optional[Dict[str, object]],
+    run_id: str,
+    set_id: Optional[str],
+    config_path: Optional[Path],
+    manifest_path: Optional[Path],
+    model_path: Optional[Path],
+    metrics_path: Optional[Path],
+    status: str,
+    final_metrics: Optional[Dict[str, object]],
+) -> None:
+    _shared_record_registry_training_run(
+        args=args,
+        console=console,
+        invocation_payload=invocation_payload,
+        run_id=run_id,
+        set_id=set_id,
+        config_path=config_path,
+        manifest_path=manifest_path,
+        model_path=model_path,
+        metrics_path=metrics_path,
+        status=status,
+        final_metrics=final_metrics,
+    )
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Train a U-Net eye mask segmenter using YOLO segmentation outputs stored in Zarr."
     )
     parser.add_argument("config_path", help="Path to EyeMaskTrainingConfig YAML.")
+    parser.add_argument(
+        "--manifest",
+        type=str,
+        help="Optional manifest JSON path to record in the registry.",
+    )
+    parser.add_argument(
+        "--set-id",
+        type=str,
+        help="Optional training set ID to associate with this run. Defaults to manifest set_id when available.",
+    )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help="Optional registry SQLite path.",
+    )
+    parser.add_argument(
+        "--log-registry",
+        dest="log_registry",
+        action="store_true",
+        default=True,
+        help="Record this training run in the registry (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-log-registry",
+        dest="log_registry",
+        action="store_false",
+        help="Disable registry logging for this training run.",
+    )
     parser.add_argument(
         "--run-name",
         help="Optional name for the training run directory (defaults to timestamp).",
@@ -502,6 +602,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable torch.compile even if available.",
     )
+    parser.add_argument(
+        "--overlap-weight",
+        type=float,
+        default=None,
+        help=(
+            "Optional override for training_params.overlap_weight. "
+            "Applies an LR channel-overlap penalty."
+        ),
+    )
     return parser
 
 
@@ -510,342 +619,525 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parser.parse_args(argv)
 
     console = Console()
+    cfg_path = Path(args.config_path)
+    manifest_path = Path(args.manifest).expanduser().resolve() if args.manifest else None
+    effective_set_id = str(args.set_id).strip() if args.set_id else None
+    registry_run_id = args.run_name or f"unet_{int(time.time())}"
+    invocation_payload = (
+        build_invocation_record(
+            tool="fisheye.segmentation.train_unet_eye_masks",
+            args=args,
+        )
+        if args.log_registry
+        else None
+    )
+
+    if not effective_set_id and manifest_path is not None:
+        effective_set_id = _read_manifest_set_id(manifest_path)
+
     console.print("[bold cyan]Starting U-Net eye-mask training[/bold cyan]\n")
 
-    cfg_path = Path(args.config_path)
-    config = EyeMaskTrainingConfig.from_yaml(cfg_path)
+    try:
+        config = EyeMaskTrainingConfig.from_yaml(cfg_path)
+    except Exception as exc:
+        if args.log_registry:
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=registry_run_id,
+                set_id=effective_set_id,
+                config_path=cfg_path,
+                manifest_path=manifest_path,
+                model_path=None,
+                metrics_path=None,
+                status="failed",
+                final_metrics={
+                    "stage": "config_load",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
+        raise
 
-    train_dataset, val_dataset, meta_list = _assemble_training_datasets(config, console)
+    try:
+        train_dataset, val_dataset, meta_list = _assemble_training_datasets(config, console)
+    except Exception as exc:
+        if args.log_registry:
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=registry_run_id,
+                set_id=effective_set_id,
+                config_path=cfg_path,
+                manifest_path=manifest_path,
+                model_path=None,
+                metrics_path=None,
+                status="failed",
+                final_metrics={
+                    "stage": "dataset_load",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
+        raise
+
     _summarise_datasets(meta_list, console)
 
     train_params = config.training_params
     device = _resolve_device(args.device or train_params.device)
     epochs = int(args.epochs or train_params.epochs)
-    batch_size = int(train_params.batch)
+    batch_size = int(train_params.batch_size)
     num_workers = int(config.num_workers)
     rng_seed = int(config.random_seed)
+    overlap_weight = (
+        float(args.overlap_weight)
+        if args.overlap_weight is not None
+        else float(getattr(train_params, "overlap_weight", 0.0) or 0.0)
+    )
+    if overlap_weight < 0.0:
+        raise ValueError("overlap_weight must be >= 0.0")
 
     default_run_name = f"unet_{(config.training_params.label_mode or 'union').lower()}"
     run_dir = _create_run_directory(
         Path(args.output_dir or train_params.project or "runs/eye_masks"),
         args.run_name or default_run_name,
     )
+    registry_run_id = run_dir.name
     console.print(f"[green]Output directory:[/green] {run_dir}\n")
 
+    if args.log_registry:
+        _record_registry_training_run(
+            args=args,
+            console=console,
+            invocation_payload=invocation_payload,
+            run_id=registry_run_id,
+            set_id=effective_set_id,
+            config_path=cfg_path,
+            manifest_path=manifest_path,
+            model_path=None,
+            metrics_path=None,
+            status="in_progress",
+            final_metrics={
+                "stage": "preflight_and_training",
+                "status_detail": "training_started",
+            },
+        )
+
     writer = None
-    if args.tb_logdir and TB_AVAILABLE:
-        tb_dir = Path(args.tb_logdir).expanduser().resolve()
-        tb_dir.mkdir(parents=True, exist_ok=True)
-        writer = SummaryWriter(log_dir=str(tb_dir))
-        console.print(f"[cyan]TensorBoard:[/cyan] logging to {tb_dir}")
-    elif args.tb_logdir and not TB_AVAILABLE:
-        console.print("[yellow]TensorBoard not available; install tensorboard to enable logging.[/yellow]")
-
-    preview_dir = run_dir / "validation_previews"
-
-    torch.manual_seed(int(config.random_seed))
-    np.random.seed(int(config.random_seed))
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(int(config.random_seed))
-
-    torch.backends.cudnn.benchmark = device.type == "cuda"
-    torch._dynamo.config.suppress_errors = True
-
-    train_sampler = ChunkSampler(train_dataset, seed=rng_seed, shuffle=True)
-    val_sampler = ChunkSampler(val_dataset, seed=rng_seed + 1, shuffle=False)
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        sampler=train_sampler,
-        num_workers=num_workers,
-        prefetch_factor=4 if num_workers > 0 else None,
-        persistent_workers=bool(num_workers > 0),
-        pin_memory=device.type == "cuda",
-        drop_last=False,
-        collate_fn=_collate_pairs,
-        worker_init_fn=_worker_init_fn if num_workers > 0 else None,
-    )
-    val_worker_count = max(0, num_workers // 2)
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        sampler=val_sampler,
-        num_workers=val_worker_count,
-        prefetch_factor=2 if val_worker_count > 0 else None,
-        persistent_workers=bool(val_worker_count > 0),
-        pin_memory=device.type == "cuda",
-        drop_last=False,
-        collate_fn=_collate_pairs,
-        worker_init_fn=_worker_init_fn if val_worker_count > 0 else None,
-    )
-
-    sample = train_dataset[0]
-    in_channels = int(sample["img"].shape[0])
-    out_channels = 1 if config.training_params.label_mode == "union" else 2
-    model = UNetSmall(in_channels=in_channels, out_channels=out_channels, base_channels=32).to(device)
-    compile_enabled_flag = False
-    if args.no_compile:
-        console.print("[yellow]torch.compile disabled (--no-compile).[/yellow]")
-    elif importlib.util.find_spec("networkx") is None:
-        console.print("[yellow]torch.compile skipped (networkx not available).[/yellow]")
-    else:
-        try:
-            model = torch.compile(model)  # type: ignore[attr-defined]
-            compile_enabled_flag = True
-        except Exception as exc:
-            console.print(
-                f"[yellow]torch.compile failed ({exc.__class__.__name__}); running eager mode.[/yellow]"
-            )
-    if compile_enabled_flag:
-        console.print("[cyan]torch.compile:[/cyan] enabled")
-
-    criterion = BCEDiceCriterion(
-        bce_weight=float(train_params.bce_weight) if train_params.bce_weight is not None else 0.5
-    ).to(device)
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=float(train_params.lr0),
-        weight_decay=float(train_params.weight_decay),
-    )
-    use_autocast = device.type == "cuda"
-    scaler = amp.GradScaler(enabled=use_autocast)
-
-    history: List[Dict[str, float]] = []
+    failure_stage = "preflight_and_training"
     best_dice = float("-inf")
     best_epoch = -1
+    history: List[Dict[str, float]] = []
+    preview_dir = run_dir / "validation_previews"
+    success_summary: Optional[Dict[str, object]] = None
 
-    git_info = get_git_info()
-    env_info = get_environment_info()
+    try:
+        if args.tb_logdir and TB_AVAILABLE:
+            tb_dir = Path(args.tb_logdir).expanduser().resolve()
+            tb_dir.mkdir(parents=True, exist_ok=True)
+            writer = SummaryWriter(log_dir=str(tb_dir))
+            console.print(f"[cyan]TensorBoard:[/cyan] logging to {tb_dir}")
+        elif args.tb_logdir and not TB_AVAILABLE:
+            console.print("[yellow]TensorBoard not available; install tensorboard to enable logging.[/yellow]")
 
-    console.print(f"[cyan]Training device:[/cyan] {device}")
-    console.print(f"[cyan]Epochs:[/cyan] {epochs}, [cyan]Batch size:[/cyan] {batch_size}\n")
+        torch.manual_seed(int(config.random_seed))
+        np.random.seed(int(config.random_seed))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(config.random_seed))
 
-    use_progress = not args.no_progress
+        torch.backends.cudnn.benchmark = device.type == "cuda"
+        torch._dynamo.config.suppress_errors = True
 
-    for epoch in range(epochs):
-        model.train()
-        train_loss_total = 0.0
-        train_samples = 0
+        train_sampler = ChunkSampler(train_dataset, seed=rng_seed, shuffle=True)
+        val_sampler = ChunkSampler(val_dataset, seed=rng_seed + 1, shuffle=False)
 
-        ema_loss = EMA()
-        ema_rate = EMA(beta=0.90)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            sampler=train_sampler,
+            num_workers=num_workers,
+            prefetch_factor=4 if num_workers > 0 else None,
+            persistent_workers=bool(num_workers > 0),
+            pin_memory=device.type == "cuda",
+            drop_last=False,
+            collate_fn=_collate_pairs,
+            worker_init_fn=_worker_init_fn if num_workers > 0 else None,
+        )
+        val_worker_count = max(0, num_workers // 2)
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            sampler=val_sampler,
+            num_workers=val_worker_count,
+            prefetch_factor=2 if val_worker_count > 0 else None,
+            persistent_workers=bool(val_worker_count > 0),
+            pin_memory=device.type == "cuda",
+            drop_last=False,
+            collate_fn=_collate_pairs,
+            worker_init_fn=_worker_init_fn if val_worker_count > 0 else None,
+        )
 
-        train_progress = None
-        if use_progress:
-            train_progress = Progress(
-                SpinnerColumn(style="cyan"),
-                TextColumn("[bold]Train[/bold]"),
-                BarColumn(bar_width=None),
-                MofNCompleteColumn(),
-                TextColumn("•"),
-                TextColumn("{task.fields[loss]}"),
-                TextColumn("•"),
-                TextColumn("{task.fields[rate]}"),
-                TimeElapsedColumn(),
-                TextColumn("• ETA"),
-                TimeRemainingColumn(),
-                console=console,
-                transient=False,
-            )
-            train_progress.__enter__()
-            train_task = train_progress.add_task(
-                f"[blue]Epoch {epoch+1}/{epochs}[/blue]",
-                total=len(train_loader),
-                loss="loss=----",
-                rate="-----",
-            )
-
-        _t0 = time.time()
-        for step, (imgs, masks) in enumerate(train_loader, 1):
-            imgs = imgs.to(device, non_blocking=True)
-            masks = masks.to(device, non_blocking=True)
-
-            optimizer.zero_grad(set_to_none=True)
-            with amp.autocast("cuda", dtype=torch.float16, enabled=use_autocast):
-                logits = model(imgs)
-                loss = criterion(logits, masks)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-
-            batch_size_eff = imgs.size(0)
-            train_loss_total += float(loss.item()) * batch_size_eff
-            train_samples += batch_size_eff
-
-            batch_time = max(1e-6, time.time() - _t0)
-            samples_per_sec = batch_size_eff / batch_time
-            sm_loss = ema_loss.update(float(loss.item()))
-            sm_rate = ema_rate.update(samples_per_sec)
-
-            if use_progress and train_progress is not None:
-                train_progress.update(
-                    train_task,
-                    advance=1,
-                    loss=f"loss={sm_loss:.4f}",
-                    rate=_fmt_rate(sm_rate, batch_size_eff),
+        sample = train_dataset[0]
+        in_channels = int(sample["img"].shape[0])
+        out_channels = 1 if config.training_params.label_mode == "union" else 2
+        model = UNetSmall(in_channels=in_channels, out_channels=out_channels, base_channels=32).to(device)
+        compile_enabled_flag = False
+        if args.no_compile:
+            console.print("[yellow]torch.compile disabled (--no-compile).[/yellow]")
+        elif importlib.util.find_spec("networkx") is None:
+            console.print("[yellow]torch.compile skipped (networkx not available).[/yellow]")
+        else:
+            try:
+                model = torch.compile(model)  # type: ignore[attr-defined]
+                compile_enabled_flag = True
+            except Exception as exc:
+                console.print(
+                    f"[yellow]torch.compile failed ({exc.__class__.__name__}); running eager mode.[/yellow]"
                 )
+        if compile_enabled_flag:
+            console.print("[cyan]torch.compile:[/cyan] enabled")
+
+        criterion = BCEDiceCriterion(
+            bce_weight=float(train_params.bce_weight) if train_params.bce_weight is not None else 0.5,
+            overlap_weight=overlap_weight,
+        ).to(device)
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=float(train_params.lr0),
+            weight_decay=float(train_params.weight_decay),
+        )
+        use_autocast = device.type == "cuda"
+        scaler = amp.GradScaler(enabled=use_autocast)
+
+        git_info = get_git_info()
+        env_info = get_environment_info()
+
+        console.print(f"[cyan]Training device:[/cyan] {device}")
+        console.print(f"[cyan]Epochs:[/cyan] {epochs}, [cyan]Batch size:[/cyan] {batch_size}\n")
+        if overlap_weight > 0.0 and config.training_params.label_mode == "lr":
+            console.print(f"[cyan]Overlap penalty:[/cyan] enabled (weight={overlap_weight:.4f})")
+        elif overlap_weight > 0.0:
+            console.print(
+                f"[yellow]Overlap penalty configured ({overlap_weight:.4f}) but label_mode is union; no effect.[/yellow]"
+            )
+
+        use_progress = not args.no_progress
+        failure_stage = "training_loop"
+        for epoch in range(epochs):
+            model.train()
+            train_loss_total = 0.0
+            train_samples = 0
+
+            ema_loss = EMA()
+            ema_rate = EMA(beta=0.90)
+
+            train_progress = None
+            if use_progress:
+                train_progress = Progress(
+                    SpinnerColumn(style="cyan"),
+                    TextColumn("[bold]Train[/bold]"),
+                    BarColumn(bar_width=None),
+                    MofNCompleteColumn(),
+                    TextColumn("•"),
+                    TextColumn("{task.fields[loss]}"),
+                    TextColumn("•"),
+                    TextColumn("{task.fields[rate]}"),
+                    TimeElapsedColumn(),
+                    TextColumn("• ETA"),
+                    TimeRemainingColumn(),
+                    console=console,
+                    transient=False,
+                )
+                train_progress.__enter__()
+                train_task = train_progress.add_task(
+                    f"[blue]Epoch {epoch+1}/{epochs}[/blue]",
+                    total=len(train_loader),
+                    loss="loss=----",
+                    rate="-----",
+                )
+
             _t0 = time.time()
-
-        if train_progress is not None:
-            train_progress.__exit__(None, None, None)
-
-        train_loss = train_loss_total / max(1, train_samples)
-
-        model.eval()
-        val_loss_total = 0.0
-        val_samples = 0
-        dice_accum: List[float] = []
-        dice_per_channel_accum: List[List[float]] = []
-        preview_written = False
-
-        val_progress = None
-        if use_progress:
-            val_progress = Progress(
-                SpinnerColumn(style="magenta"),
-                TextColumn("[bold]Val  [/bold]"),
-                BarColumn(bar_width=None),
-                MofNCompleteColumn(),
-                TextColumn("•"),
-                TextColumn("{task.fields[loss]}"),
-                TextColumn("• Dice {task.fields[dice]}"),
-                console=console,
-                transient=False,
-            )
-            val_progress.__enter__()
-            val_task = val_progress.add_task(
-                f"[magenta]Epoch {epoch+1}/{epochs}[/magenta]",
-                total=len(val_loader),
-                loss="loss=----",
-                dice="----",
-            )
-
-        with torch.no_grad():
-            for step, (imgs, masks) in enumerate(val_loader, 1):
+            for step, (imgs, masks) in enumerate(train_loader, 1):
                 imgs = imgs.to(device, non_blocking=True)
                 masks = masks.to(device, non_blocking=True)
 
+                optimizer.zero_grad(set_to_none=True)
                 with amp.autocast("cuda", dtype=torch.float16, enabled=use_autocast):
                     logits = model(imgs)
                     loss = criterion(logits, masks)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
 
                 batch_size_eff = imgs.size(0)
-                val_loss_total += float(loss.item()) * batch_size_eff
-                val_samples += batch_size_eff
+                train_loss_total += float(loss.item()) * batch_size_eff
+                train_samples += batch_size_eff
 
-                dice_mean, dice_channels = _compute_dice(logits, masks)
-                dice_accum.append(dice_mean)
-                dice_per_channel_accum.append(dice_channels)
+                batch_time = max(1e-6, time.time() - _t0)
+                samples_per_sec = batch_size_eff / batch_time
+                sm_loss = ema_loss.update(float(loss.item()))
+                sm_rate = ema_rate.update(samples_per_sec)
 
-                if not preview_written:
-                    imgs_cpu = imgs.detach().cpu().float().numpy()
-                    targets_cpu = masks.detach().cpu().float().numpy()
-                    preds_cpu = torch.sigmoid(logits.detach()).cpu().float().numpy()
-                    preview_grid = _compose_preview_grid(
-                        imgs_cpu,
-                        targets_cpu,
-                        preds_cpu,
-                        config.training_params.label_mode,
+                if use_progress and train_progress is not None:
+                    train_progress.update(
+                        train_task,
+                        advance=1,
+                        loss=f"loss={sm_loss:.4f}",
+                        rate=_fmt_rate(sm_rate, batch_size_eff),
                     )
-                    if preview_grid is not None:
-                        preview_dir.mkdir(parents=True, exist_ok=True)
-                        preview_path = preview_dir / f"epoch_{epoch + 1:03d}.png"
-                        Image.fromarray((preview_grid * 255).astype(np.uint8)).save(preview_path)
-                        if writer is not None:
-                            writer.add_image(
-                                "validation/preview",
-                                torch.from_numpy(preview_grid.transpose(2, 0, 1)).float(),
-                                epoch + 1,
+                _t0 = time.time()
+
+            if train_progress is not None:
+                train_progress.__exit__(None, None, None)
+
+            train_loss = train_loss_total / max(1, train_samples)
+
+            model.eval()
+            val_loss_total = 0.0
+            val_samples = 0
+            dice_accum: List[float] = []
+            dice_per_channel_accum: List[List[float]] = []
+            overlap_accum: List[float] = []
+            mass_ratio_accum: List[float] = []
+            preview_written = False
+
+            val_progress = None
+            if use_progress:
+                val_progress = Progress(
+                    SpinnerColumn(style="magenta"),
+                    TextColumn("[bold]Val  [/bold]"),
+                    BarColumn(bar_width=None),
+                    MofNCompleteColumn(),
+                    TextColumn("•"),
+                    TextColumn("{task.fields[loss]}"),
+                    TextColumn("• Dice {task.fields[dice]}"),
+                    console=console,
+                    transient=False,
+                )
+                val_progress.__enter__()
+                val_task = val_progress.add_task(
+                    f"[magenta]Epoch {epoch+1}/{epochs}[/magenta]",
+                    total=len(val_loader),
+                    loss="loss=----",
+                    dice="----",
+                )
+
+            with torch.no_grad():
+                for step, (imgs, masks) in enumerate(val_loader, 1):
+                    imgs = imgs.to(device, non_blocking=True)
+                    masks = masks.to(device, non_blocking=True)
+
+                    with amp.autocast("cuda", dtype=torch.float16, enabled=use_autocast):
+                        logits = model(imgs)
+                        loss = criterion(logits, masks)
+
+                    batch_size_eff = imgs.size(0)
+                    val_loss_total += float(loss.item()) * batch_size_eff
+                    val_samples += batch_size_eff
+
+                    dice_mean, dice_channels = _compute_dice(logits, masks)
+                    dice_accum.append(dice_mean)
+                    dice_per_channel_accum.append(dice_channels)
+                    overlap_mean, mass_ratio = _compute_overlap_stats(logits)
+                    if math.isfinite(overlap_mean):
+                        overlap_accum.append(overlap_mean)
+                    if math.isfinite(mass_ratio):
+                        mass_ratio_accum.append(mass_ratio)
+
+                    if not preview_written:
+                        imgs_cpu = imgs.detach().cpu().float().numpy()
+                        targets_cpu = masks.detach().cpu().float().numpy()
+                        preds_cpu = torch.sigmoid(logits.detach()).cpu().float().numpy()
+                        preview_grid = _compose_preview_grid(
+                            imgs_cpu,
+                            targets_cpu,
+                            preds_cpu,
+                            config.training_params.label_mode,
+                        )
+                        if preview_grid is not None:
+                            preview_dir.mkdir(parents=True, exist_ok=True)
+                            preview_path = preview_dir / f"epoch_{epoch + 1:03d}.png"
+                            Image.fromarray((preview_grid * 255).astype(np.uint8)).save(preview_path)
+                            if writer is not None:
+                                writer.add_image(
+                                    "validation/preview",
+                                    torch.from_numpy(preview_grid.transpose(2, 0, 1)).float(),
+                                    epoch + 1,
+                                )
+                            preview_written = True
+                            console.print(
+                                f"[cyan]Saved validation preview:[/cyan] {preview_path}"
                             )
-                        preview_written = True
-                        console.print(
-                            f"[cyan]Saved validation preview:[/cyan] {preview_path}"
+
+                    if use_progress and val_progress is not None:
+                        val_progress.update(
+                            val_task,
+                            advance=1,
+                            loss=f"loss={float(loss.item()):.4f}",
+                            dice=f"{float(dice_mean):.4f}",
                         )
 
-                if use_progress and val_progress is not None:
-                    val_progress.update(
-                        val_task,
-                        advance=1,
-                        loss=f"loss={float(loss.item()):.4f}",
-                        dice=f"{float(dice_mean):.4f}",
-                    )
+            if val_progress is not None:
+                val_progress.__exit__(None, None, None)
 
-        if val_progress is not None:
-            val_progress.__exit__(None, None, None)
+            val_loss = val_loss_total / max(1, val_samples)
+            val_dice = float(np.mean(dice_accum)) if dice_accum else float("nan")
+            per_channel_mean: List[float] = []
+            if dice_per_channel_accum:
+                per_channel_mean = list(np.mean(dice_per_channel_accum, axis=0))
+            val_overlap_mean = float(np.mean(overlap_accum)) if overlap_accum else float("nan")
+            val_mass_ratio = float(np.mean(mass_ratio_accum)) if mass_ratio_accum else float("nan")
 
-        val_loss = val_loss_total / max(1, val_samples)
-        val_dice = float(np.mean(dice_accum)) if dice_accum else float("nan")
-        per_channel_mean: List[float] = []
-        if dice_per_channel_accum:
-            per_channel_mean = list(np.mean(dice_per_channel_accum, axis=0))
+            history.append(
+                {
+                    "epoch": float(epoch + 1),
+                    "train_loss": float(train_loss),
+                    "val_loss": float(val_loss),
+                    "val_dice": float(val_dice),
+                    "val_overlap_mean": float(val_overlap_mean),
+                    "val_lr_mass_ratio": float(val_mass_ratio),
+                }
+            )
 
-        history.append(
-            {
-                "epoch": float(epoch + 1),
-                "train_loss": float(train_loss),
-                "val_loss": float(val_loss),
-                "val_dice": float(val_dice),
-            }
-        )
-
-        summary = Table(title=f"Epoch {epoch+1}/{epochs} Summary", show_header=True)
-        summary.add_column("Metric", style="cyan")
-        summary.add_column("Value", style="yellow")
-        summary.add_row("train_loss", f"{train_loss:.4f}")
-        summary.add_row("val_loss", f"{val_loss:.4f}")
-        summary.add_row("val_dice", f"{val_dice:.4f}")
-        if per_channel_mean:
-            for idx, val in enumerate(per_channel_mean):
-                summary.add_row(f"val_dice_ch{idx}", f"{val:.4f}")
-        console.print(summary)
-
-        if writer is not None:
-            global_step = epoch + 1
-            writer.add_scalar("loss/train", train_loss, global_step)
-            writer.add_scalar("loss/val", val_loss, global_step)
-            writer.add_scalar("dice/val_mean", val_dice, global_step)
+            summary = Table(title=f"Epoch {epoch+1}/{epochs} Summary", show_header=True)
+            summary.add_column("Metric", style="cyan")
+            summary.add_column("Value", style="yellow")
+            summary.add_row("train_loss", f"{train_loss:.4f}")
+            summary.add_row("val_loss", f"{val_loss:.4f}")
+            summary.add_row("val_dice", f"{val_dice:.4f}")
+            if math.isfinite(val_overlap_mean):
+                summary.add_row("val_overlap_mean", f"{val_overlap_mean:.6f}")
+            if math.isfinite(val_mass_ratio):
+                summary.add_row("val_lr_mass_ratio", f"{val_mass_ratio:.4f}")
             if per_channel_mean:
                 for idx, val in enumerate(per_channel_mean):
-                    writer.add_scalar(f"dice/val_ch{idx}", float(val), global_step)
+                    summary.add_row(f"val_dice_ch{idx}", f"{val:.4f}")
+            console.print(summary)
 
-        if val_dice > best_dice:
-            best_dice = val_dice
-            best_epoch = epoch + 1
-            _save_checkpoint(run_dir / "best_model.pt", model, history, config, meta_list, best_dice)
+            if writer is not None:
+                global_step = epoch + 1
+                writer.add_scalar("loss/train", train_loss, global_step)
+                writer.add_scalar("loss/val", val_loss, global_step)
+                writer.add_scalar("dice/val_mean", val_dice, global_step)
+                if math.isfinite(val_overlap_mean):
+                    writer.add_scalar("consistency/val_overlap_mean", val_overlap_mean, global_step)
+                if math.isfinite(val_mass_ratio):
+                    writer.add_scalar("consistency/val_lr_mass_ratio", val_mass_ratio, global_step)
+                if per_channel_mean:
+                    for idx, val in enumerate(per_channel_mean):
+                        writer.add_scalar(f"dice/val_ch{idx}", float(val), global_step)
 
-    _save_checkpoint(run_dir / "last_model.pt", model, history, config, meta_list, best_dice)
+            if val_dice > best_dice:
+                best_dice = val_dice
+                best_epoch = epoch + 1
+                _save_checkpoint(run_dir / "best_model.pt", model, history, config, meta_list, best_dice)
 
-    summary = {
-        "run_dir": str(run_dir),
-        "best_val_dice": float(best_dice),
-        "best_epoch": int(best_epoch),
-        "epochs": int(epochs),
-        "train_samples": int(len(train_dataset)),
-        "val_samples": int(len(val_dataset)),
-        "label_mode": config.training_params.label_mode,
-        "label_source": config.training_params.label_source,
-        "device": str(device),
-        "git_commit": git_info.get("commit_hash", "unknown"),
-        "git_branch": git_info.get("branch", "unknown"),
-        "hostname": env_info["platform"].get("hostname", "unknown"),
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
+        _save_checkpoint(run_dir / "last_model.pt", model, history, config, meta_list, best_dice)
 
-    with open(run_dir / "training_summary.json", "w", encoding="utf-8") as fh:
-        json.dump(summary, fh, indent=2)
-    with open(run_dir / "training_history.json", "w", encoding="utf-8") as fh:
-        json.dump(history, fh, indent=2)
-    with open(run_dir / "dataset_metadata.json", "w", encoding="utf-8") as fh:
-        json.dump(meta_list, fh, indent=2)
+        failure_stage = "write_artifacts"
+        summary = {
+            "run_dir": str(run_dir),
+            "best_val_dice": float(best_dice),
+            "best_epoch": int(best_epoch),
+            "epochs": int(epochs),
+            "train_samples": int(len(train_dataset)),
+            "val_samples": int(len(val_dataset)),
+            "label_mode": config.training_params.label_mode,
+            "label_source": config.training_params.label_source,
+            "device": str(device),
+            "git_commit": git_info.get("commit_hash", "unknown"),
+            "git_branch": git_info.get("branch", "unknown"),
+            "hostname": env_info["platform"].get("hostname", "unknown"),
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+
+        with open(run_dir / "training_summary.json", "w", encoding="utf-8") as fh:
+            json.dump(summary, fh, indent=2)
+        with open(run_dir / "training_history.json", "w", encoding="utf-8") as fh:
+            json.dump(history, fh, indent=2)
+        with open(run_dir / "dataset_metadata.json", "w", encoding="utf-8") as fh:
+            json.dump(meta_list, fh, indent=2)
+        success_summary = summary
+    except KeyboardInterrupt as exc:
+        if args.log_registry:
+            failed_model_path = run_dir / "best_model.pt"
+            failed_metrics_path = run_dir / "training_history.json"
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=registry_run_id,
+                set_id=effective_set_id,
+                config_path=cfg_path,
+                manifest_path=manifest_path,
+                model_path=failed_model_path if failed_model_path.exists() else None,
+                metrics_path=failed_metrics_path if failed_metrics_path.exists() else None,
+                status="failed",
+                final_metrics={
+                    "stage": failure_stage,
+                    "error_type": type(exc).__name__,
+                    "error_message": "training_interrupted_by_user",
+                },
+            )
+        raise SystemExit(130)
+    except Exception as exc:
+        if args.log_registry:
+            failed_model_path = run_dir / "best_model.pt"
+            failed_metrics_path = run_dir / "training_history.json"
+            _record_registry_training_run(
+                args=args,
+                console=console,
+                invocation_payload=invocation_payload,
+                run_id=registry_run_id,
+                set_id=effective_set_id,
+                config_path=cfg_path,
+                manifest_path=manifest_path,
+                model_path=failed_model_path if failed_model_path.exists() else None,
+                metrics_path=failed_metrics_path if failed_metrics_path.exists() else None,
+                status="failed",
+                final_metrics={
+                    "stage": failure_stage,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
+        raise
+    finally:
+        if writer is not None:
+            writer.flush()
+            writer.close()
+
+    if args.log_registry and success_summary is not None:
+        model_path = run_dir / "best_model.pt"
+        metrics_path = run_dir / "training_history.json"
+        _record_registry_training_run(
+            args=args,
+            console=console,
+            invocation_payload=invocation_payload,
+            run_id=registry_run_id,
+            set_id=effective_set_id,
+            config_path=cfg_path,
+            manifest_path=manifest_path,
+            model_path=model_path if model_path.exists() else None,
+            metrics_path=metrics_path if metrics_path.exists() else None,
+            status="success",
+            final_metrics={
+                "stage": "completed",
+                "status_detail": "training_complete",
+                "best_val_dice": float(success_summary["best_val_dice"]),
+                "best_epoch": int(success_summary["best_epoch"]),
+                "epochs": int(success_summary["epochs"]),
+                "train_samples": int(success_summary["train_samples"]),
+                "val_samples": int(success_summary["val_samples"]),
+            },
+        )
 
     console.print(
         f"\n[green]Training complete.[/green] Best val dice={best_dice:.4f} (epoch {best_epoch}). "
         f"Checkpoints saved in {run_dir}"
     )
-
-    if writer is not None:
-        writer.flush()
-        writer.close()
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point

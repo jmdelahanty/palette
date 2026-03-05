@@ -155,10 +155,27 @@ class TrainingParams(BaseModel):
 class EyeMaskTrainingParams(TrainingParams):
     """Training parameters for eye-mask segmentation pipelines."""
 
+    batch: Optional[int] = Field(
+        default=None,
+        description="Legacy field; eye-mask trainers use training_params.batch_size.",
+    )
+    batch_size: int = Field(
+        ...,
+        gt=0,
+        description="Training batch size for eye-mask segmentation.",
+    )
     label_source: Literal["yolo", "manual"] = "yolo"
     label_mode: Literal["union", "lr"] = "lr"
     eye_masks_run: Optional[str] = None
     eye_masks_method: Optional[str] = None
+    overlap_weight: float = Field(
+        0.0,
+        ge=0.0,
+        description=(
+            "Optional left/right overlap penalty weight for LR eye-mask training. "
+            "Ignored for union label mode."
+        ),
+    )
 
 
 class DetectConfig(BaseModel):

@@ -42,7 +42,15 @@ def _write_preflight_files(config_path: Path, manifest_path: Path, source_zarr: 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
-        "datasets:\n  test_merged:\n    zarr_path: /tmp/placeholder.zarr\ntraining_params:\n  label_mode: lr\n",
+        (
+            "datasets:\n"
+            "  test_merged:\n"
+            "    zarr_path: /tmp/placeholder.zarr\n"
+            "    crop_run: mixed\n"
+            "    mask_run: mixed\n"
+            "training_params:\n"
+            "  label_mode: lr\n"
+        ),
         encoding="utf-8",
     )
     manifest_path.write_text(
@@ -120,12 +128,13 @@ def test_train_runs_eye_masks_after_preflight(tmp_path: Path, monkeypatch) -> No
     assert rc == 0
     train_cmd = calls["train"]
     assert str(out_config) in train_cmd
+    assert "fisheye.segmentation.train_unet_eye_masks" in train_cmd
     assert "--manifest" in train_cmd
-    assert str(out_manifest) in train_cmd
+    assert train_cmd[train_cmd.index("--manifest") + 1] == str(out_manifest)
     assert "--set-id" in train_cmd
-    assert "eye_mask_smoke_v001" in train_cmd
+    assert train_cmd[train_cmd.index("--set-id") + 1] == "eye_mask_smoke_v001"
     assert "--registry" in train_cmd
-    assert str(registry_path) in train_cmd
+    assert train_cmd[train_cmd.index("--registry") + 1] == str(registry_path)
 
 
 def test_train_cannot_combine_dry_run(tmp_path: Path) -> None:
@@ -165,6 +174,7 @@ def test_export_merged_invokes_exporter(tmp_path: Path, monkeypatch) -> None:
             "kwargs": dict(kwargs),
         }
         return {
+            "run_name": "merged_export_test",
             "zarr_path": str(out_zarr),
             "total_samples": 42,
             "source_count": len(list(source_specs)),
@@ -223,6 +233,11 @@ def test_export_merged_invokes_exporter(tmp_path: Path, monkeypatch) -> None:
     assert payload["datasets"][0]["out_zarr"] == str(merged_out)
     assert payload["datasets"][0]["export_status"] == "succeeded"
     assert payload["execution"] == {"mode": "apply", "planned": 1, "succeeded": 1, "failed": 0}
+
+    cfg_payload = pipeline.yaml.safe_load(out_config.read_text(encoding="utf-8"))
+    assert cfg_payload["datasets"]["test_merged"]["zarr_path"] == str(merged_out)
+    assert cfg_payload["datasets"]["test_merged"]["crop_run"] == "merged_export_test"
+    assert cfg_payload["datasets"]["test_merged"]["mask_run"] == "merged_export_test"
 
 
 def test_data_card_flags_are_forwarded_to_aggregator(tmp_path: Path, monkeypatch) -> None:

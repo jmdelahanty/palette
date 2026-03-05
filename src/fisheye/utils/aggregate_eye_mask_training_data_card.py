@@ -1434,7 +1434,7 @@ def _build_eye_mask_training_data_card(
             ),
         )
         union_area_p50 = union_area_p50_usable if union_area_p50_usable is not None else union_area_p50_all
-        area_lr_ratio_p50 = _metric_from_row_or_summary(
+        area_lr_ratio_p50_profile = _metric_from_row_or_summary(
             row,
             summary,
             row_fields=(
@@ -1453,6 +1453,17 @@ def _build_eye_mask_training_data_card(
                 ("geometry", "area_ratio_left_right", "p50"),
                 ("geometry", "lr_area_ratio", "p50"),
             ),
+        )
+        area_lr_ratio_p50_derived = _safe_ratio(left_area_p50, right_area_p50)
+        area_lr_ratio_p50 = (
+            area_lr_ratio_p50_derived
+            if area_lr_ratio_p50_derived is not None
+            else area_lr_ratio_p50_profile
+        )
+        area_lr_ratio_metric_source = (
+            "derived_from_selected_area_p50"
+            if area_lr_ratio_p50_derived is not None
+            else "profile_ratio_p50"
         )
 
         quality_total_rois_values.append(total_rois)
@@ -1487,6 +1498,8 @@ def _build_eye_mask_training_data_card(
             "union_area_p50_usable": union_area_p50_usable,
             "union_area_p50_all": union_area_p50_all,
             "area_lr_ratio_p50": area_lr_ratio_p50,
+            "area_lr_ratio_p50_derived": area_lr_ratio_p50_derived,
+            "area_lr_ratio_p50_profile": area_lr_ratio_p50_profile,
         }
 
         composition_row: dict[str, Optional[str]] = {}
@@ -1537,6 +1550,10 @@ def _build_eye_mask_training_data_card(
                 "union_area_p50": union_area_p50,
                 "union_area_p50_usable": union_area_p50_usable,
                 "union_area_p50_all": union_area_p50_all,
+                "area_lr_ratio_p50": area_lr_ratio_p50,
+                "area_lr_ratio_p50_derived": area_lr_ratio_p50_derived,
+                "area_lr_ratio_p50_profile": area_lr_ratio_p50_profile,
+                "area_lr_ratio_metric_source": area_lr_ratio_metric_source,
                 "area_metric_source": (
                     "usable"
                     if any(

@@ -14,14 +14,14 @@ In scope:
 
 Out of scope:
 - revisiting completed historical detect/pose parity tasks in
-  `docs/eye_masks_detect_pose_parity_todo.md`.
+  prior parity waves (historical context only).
 - unrelated registry normalization or non-eye-mask training workflows.
 - dependency installation or environment mutation outside approved workflows.
 
 ## Source Of Truth
 
 - Backlog: `docs/eye_mask_parity_todo.md`
-- Historical context: `docs/eye_masks_detect_pose_parity_todo.md`
+- Historical context: prior eye-mask parity wave evidence (2026-02-22/23)
 - Registry storage baseline: `src/fisheye/registry/db.py`
 - Maintenance baseline: `src/fisheye/registry/maintenance.py`
 - Query/check surfaces:

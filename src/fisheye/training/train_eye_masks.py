@@ -276,7 +276,7 @@ def main(args: argparse.Namespace) -> None:
     model = YOLO(config.training_params.model)
 
     ZarrSegmentationTrainer.dataset_bundle = bundle
-    ZarrSegmentationTrainer.batch_size_override = config.training_params.batch
+    ZarrSegmentationTrainer.batch_size_override = config.training_params.batch_size
     ZarrSegmentationTrainer.num_workers_override = config.num_workers
     ZarrSegmentationTrainer.seg_loss_override = config.training_params.seg_loss
     ZarrSegmentationTrainer.bce_weight_override = config.training_params.bce_weight
@@ -301,7 +301,7 @@ def main(args: argparse.Namespace) -> None:
             data=args.config_path,
             name=args.run_name or "eye_mask_segmentation",
             epochs=config.training_params.epochs,
-            batch=config.training_params.batch,
+            batch=config.training_params.batch_size,
             imgsz=config.training_params.imgsz,
             lr0=config.training_params.lr0,
             momentum=config.training_params.momentum,

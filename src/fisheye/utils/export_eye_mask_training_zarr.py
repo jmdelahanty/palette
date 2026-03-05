@@ -17,7 +17,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import zarr
@@ -29,6 +29,25 @@ from fisheye.shared.detect_reason_codec import (
     read_reason_labels,
     write_reason_columns,
 )
+
+try:
+    from rich.console import Console
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        TaskProgressColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+except Exception:  # pragma: no cover - rich is optional
+    Console = None  # type: ignore
+    Progress = None  # type: ignore
+    TextColumn = None  # type: ignore
+    BarColumn = None  # type: ignore
+    TaskProgressColumn = None  # type: ignore
+    TimeElapsedColumn = None  # type: ignore
+    TimeRemainingColumn = None  # type: ignore
 
 EYE_ROW_GATE_POLICIES = ("all_rows", "usable_only", "usable_plus_explicit_negatives")
 
@@ -828,6 +847,20 @@ def _merge_chunks(chunks: Optional[Tuple[int, ...]], *, total_samples: int) -> O
     return tuple(normalized) if normalized else None
 
 
+def _copy_progress(total: int) -> Optional["Progress"]:
+    if total <= 0 or Progress is None:
+        return None
+    return Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("{task.completed}/{task.total} samples"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=Console() if Console is not None else None,
+    )
+
+
 def _read_row_selection(array_obj: zarr.Array, row_indices: np.ndarray) -> np.ndarray:
     indices = np.asarray(row_indices, dtype=np.int64).reshape(-1)
     tail_shape = tuple(int(v) for v in array_obj.shape[1:])
@@ -864,6 +897,32 @@ def _read_row_selection(array_obj: zarr.Array, row_indices: np.ndarray) -> np.nd
     if len(blocks) == 1:
         return blocks[0]
     return np.concatenate(blocks, axis=0)
+
+
+def _copy_rows_indexed(
+    src_array: zarr.Array,
+    dest_array: zarr.Array,
+    dest_start: int,
+    indices: np.ndarray,
+    *,
+    batch_size: int = 128,
+    transform: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    on_copied: Optional[Callable[[int], None]] = None,
+) -> None:
+    resolved_indices = np.asarray(indices, dtype=np.int64).reshape(-1)
+    if resolved_indices.size <= 0:
+        return
+    resolved_batch_size = max(1, int(batch_size))
+    total = int(resolved_indices.size)
+    for start in range(0, total, resolved_batch_size):
+        stop = min(start + resolved_batch_size, total)
+        idx_batch = resolved_indices[start:stop]
+        data_block = _read_row_selection(src_array, idx_batch)
+        if transform is not None:
+            data_block = transform(data_block)
+        dest_array[dest_start + start: dest_start + stop, ...] = data_block
+        if on_copied is not None:
+            on_copied(stop - start)
 
 
 def _validate_source_for_merge(
@@ -910,11 +969,12 @@ def _validate_source_for_merge(
         raise ValueError(f"{source_id}: masks_roi must be (N,C,H,W), got {masks_roi.shape}.")
     if int(masks_roi.shape[0]) != total_samples:
         raise ValueError(f"{source_id}: masks_roi length mismatch ({masks_roi.shape[0]} != {total_samples}).")
-    if expected_label_mode == "lr" and int(masks_roi.shape[1]) != 2:
+    source_channels = int(masks_roi.shape[1])
+    if expected_label_mode == "lr" and source_channels != 2:
         raise ValueError(f"{source_id}: label_mode=lr requires masks channel count 2, got {masks_roi.shape[1]}.")
-    if expected_label_mode == "union" and int(masks_roi.shape[1]) != 1:
+    if expected_label_mode == "union" and source_channels not in {1, 2}:
         raise ValueError(
-            f"{source_id}: label_mode=union requires masks channel count 1, got {masks_roi.shape[1]}."
+            f"{source_id}: label_mode=union requires source masks channel count 1 or 2, got {masks_roi.shape[1]}."
         )
     if int(masks_roi.shape[2]) != int(roi_images.shape[1]) or int(masks_roi.shape[3]) != int(roi_images.shape[2]):
         raise ValueError(
@@ -960,6 +1020,8 @@ def _validate_source_for_merge(
 def _validate_merge_schema_compatibility(
     reference: _ResolvedEyeMergeSource,
     candidate: _ResolvedEyeMergeSource,
+    *,
+    expected_label_mode: str,
 ) -> None:
     reference_id = reference.source_path.name
     candidate_id = candidate.source_path.name
@@ -986,11 +1048,18 @@ def _validate_merge_schema_compatibility(
             f"does not match {reference_id} {reference.bbox_norm.dtype}."
         )
 
-    if tuple(candidate.masks_roi.shape[1:]) != tuple(reference.masks_roi.shape[1:]):
-        raise ValueError(
-            f"{candidate_id}: masks_roi shape tail {candidate.masks_roi.shape[1:]} "
-            f"does not match {reference_id} {reference.masks_roi.shape[1:]}."
-        )
+    if expected_label_mode == "union":
+        if tuple(candidate.masks_roi.shape[2:]) != tuple(reference.masks_roi.shape[2:]):
+            raise ValueError(
+                f"{candidate_id}: masks_roi spatial shape {candidate.masks_roi.shape[2:]} "
+                f"does not match {reference_id} {reference.masks_roi.shape[2:]}."
+            )
+    else:
+        if tuple(candidate.masks_roi.shape[1:]) != tuple(reference.masks_roi.shape[1:]):
+            raise ValueError(
+                f"{candidate_id}: masks_roi shape tail {candidate.masks_roi.shape[1:]} "
+                f"does not match {reference_id} {reference.masks_roi.shape[1:]}."
+            )
     if candidate.masks_roi.dtype != reference.masks_roi.dtype:
         raise ValueError(
             f"{candidate_id}: masks_roi dtype {candidate.masks_roi.dtype} "
@@ -1126,6 +1195,7 @@ def export_merged_eye_mask_training_zarr_from_sources(
     split_seed: int = 42,
     row_gate_policy: str = "all_rows",
     explicit_negative_ratio: float = 0.25,
+    copy_batch_size: int = 128,
     overwrite: bool = False,
     validate: bool = True,
     registry: Optional[Path] = None,
@@ -1169,6 +1239,9 @@ def export_merged_eye_mask_training_zarr_from_sources(
         raise ValueError(f"Unsupported label_mode '{label_mode}'. Expected lr or union.")
     normalized_row_gate_policy = _normalize_row_gate_policy(row_gate_policy)
     normalized_explicit_negative_ratio = _normalize_explicit_negative_ratio(explicit_negative_ratio)
+    resolved_copy_batch_size = int(copy_batch_size)
+    if resolved_copy_batch_size <= 0:
+        raise ValueError(f"Invalid copy_batch_size '{copy_batch_size}'. Expected an integer > 0.")
     registry_path = Path(registry).expanduser().resolve() if registry is not None else None
     artifacts = _resolve_card_artifacts(
         out_zarr=out_path,
@@ -1214,7 +1287,11 @@ def export_merged_eye_mask_training_zarr_from_sources(
         )
     ref_source = resolved_sources[0]
     for source in resolved_sources[1:]:
-        _validate_merge_schema_compatibility(ref_source, source)
+        _validate_merge_schema_compatibility(
+            ref_source,
+            source,
+            expected_label_mode=normalized_label_mode,
+        )
 
     source_mask_prob_names = [source.mask_probs_name for source in resolved_sources]
     mask_probs_name = source_mask_prob_names[0]
@@ -1336,6 +1413,7 @@ def export_merged_eye_mask_training_zarr_from_sources(
             "explicit_negative_selected_rows": int(row_gate_explicit_negative_selected_rows),
         },
         "split_seed": int(split_seed),
+        "copy_batch_size": int(resolved_copy_batch_size),
         "training_set_id": artifacts.training_set_id,
         "aggregate_training_data_card": bool(aggregate_training_data_card),
         "data_card_no_plots": bool(data_card_no_plots),
@@ -1383,12 +1461,21 @@ def export_merged_eye_mask_training_zarr_from_sources(
     dst_eye_parent = dst_root.create_group("eye_masks_runs")
     dst_eye_parent.attrs["latest"] = run_name
     dst_eye = dst_eye_parent.create_group(run_name)
-    masks_shape = (total_samples, *tuple(int(v) for v in ref_source.masks_roi.shape[1:]))
+    mask_channel_count = 1 if normalized_label_mode == "union" else int(ref_source.masks_roi.shape[1])
+    masks_shape = (
+        total_samples,
+        int(mask_channel_count),
+        int(ref_source.masks_roi.shape[2]),
+        int(ref_source.masks_roi.shape[3]),
+    )
+    masks_chunks = _merge_chunks(getattr(ref_source.masks_roi, "chunks", None), total_samples=total_samples)
+    if masks_chunks is not None and len(masks_chunks) >= 2 and mask_channel_count == 1:
+        masks_chunks = (int(masks_chunks[0]), 1, *tuple(int(v) for v in masks_chunks[2:]))
     masks_dest = dst_eye.create_array(
         "masks_roi",
         shape=masks_shape,
         dtype=ref_source.masks_roi.dtype,
-        chunks=_merge_chunks(getattr(ref_source.masks_roi, "chunks", None), total_samples=total_samples),
+        chunks=masks_chunks,
         overwrite=True,
     )
     ellipse_params_shape = (total_samples, *tuple(int(v) for v in ref_source.ellipse_params.shape[1:]))
@@ -1409,39 +1496,123 @@ def export_merged_eye_mask_training_zarr_from_sources(
     )
     mask_probs_dest: Optional[zarr.Array] = None
     if mask_probs_name:
+        mask_probs_chunks = _merge_chunks(
+            getattr(resolved_sources[0].mask_probs_src, "chunks", None)
+            if resolved_sources[0].mask_probs_src is not None
+            else None,
+            total_samples=total_samples,
+        )
+        if mask_probs_chunks is not None and len(mask_probs_chunks) >= 2 and mask_channel_count == 1:
+            mask_probs_chunks = (int(mask_probs_chunks[0]), 1, *tuple(int(v) for v in mask_probs_chunks[2:]))
         mask_probs_dest = dst_eye.create_array(
             mask_probs_name,
             shape=masks_shape,
             dtype=resolved_sources[0].mask_probs_src.dtype if resolved_sources[0].mask_probs_src is not None else np.float32,
-            chunks=_merge_chunks(
-                getattr(resolved_sources[0].mask_probs_src, "chunks", None)
-                if resolved_sources[0].mask_probs_src is not None
-                else None,
-                total_samples=total_samples,
-            ),
+            chunks=mask_probs_chunks,
             overwrite=True,
         )
 
+    copy_passes = 6 + int(mask_probs_dest is not None)
+    copy_total = total_samples * copy_passes
+    copy_progress = _copy_progress(copy_total)
+    copy_task_id: Optional[int] = None
+    if copy_progress is not None:
+        copy_progress.start()
+        copy_task_id = copy_progress.add_task("Copying merged eye-mask samples", total=copy_total)
+
+    def _advance_copy(count: int) -> None:
+        if copy_progress is not None and copy_task_id is not None:
+            copy_progress.advance(copy_task_id, count)
+
+    def _collapse_union_channels(batch: np.ndarray) -> np.ndarray:
+        if normalized_label_mode != "union":
+            return batch
+        if batch.ndim != 4:
+            raise ValueError(f"Expected 4D mask batch for union collapse, got shape {batch.shape}.")
+        channel_count = int(batch.shape[1])
+        if channel_count == 1:
+            return batch
+        if channel_count == 2:
+            return np.max(batch, axis=1, keepdims=True)
+        raise ValueError(f"Cannot collapse union channels from shape {batch.shape}; expected C=1 or C=2.")
+
     offset = 0
-    for source in resolved_sources:
-        selected = np.asarray(source.selected_indices, dtype=np.int64)
-        next_offset = offset + int(selected.shape[0])
-        if next_offset > offset:
-            roi_images_dest[offset:next_offset, ...] = _read_row_selection(source.roi_images, selected)
-            bbox_dest[offset:next_offset, ...] = _read_row_selection(source.bbox_norm, selected)
-            if isinstance(source.crop_bbox, zarr.Array):
-                crop_bbox_dest[offset:next_offset, ...] = _read_row_selection(source.crop_bbox, selected)
-            else:
-                crop_bbox_dest[offset:next_offset, ...] = np.asarray(
-                    _read_row_selection(source.bbox_norm, selected),
-                    dtype=np.float32,
+    try:
+        for source in resolved_sources:
+            if copy_progress is not None and copy_task_id is not None:
+                copy_progress.update(copy_task_id, description=f"Copying {source.source_path.name}")
+
+            selected = np.asarray(source.selected_indices, dtype=np.int64)
+            next_offset = offset + int(selected.shape[0])
+            local_total = int(selected.shape[0])
+            if next_offset > offset:
+                _copy_rows_indexed(
+                    source.roi_images,
+                    roi_images_dest,
+                    offset,
+                    selected,
+                    batch_size=resolved_copy_batch_size,
+                    on_copied=_advance_copy,
                 )
-            masks_dest[offset:next_offset, ...] = _read_row_selection(source.masks_roi, selected)
-            ellipse_params_dest[offset:next_offset, ...] = _read_row_selection(source.ellipse_params, selected)
-            ellipse_success_dest[offset:next_offset, ...] = _read_row_selection(source.ellipse_success, selected)
-            if mask_probs_dest is not None and source.mask_probs_src is not None:
-                mask_probs_dest[offset:next_offset, ...] = _read_row_selection(source.mask_probs_src, selected)
-        offset = next_offset
+                _copy_rows_indexed(
+                    source.bbox_norm,
+                    bbox_dest,
+                    offset,
+                    selected,
+                    batch_size=resolved_copy_batch_size,
+                    on_copied=_advance_copy,
+                )
+                if isinstance(source.crop_bbox, zarr.Array):
+                    _copy_rows_indexed(
+                        source.crop_bbox,
+                        crop_bbox_dest,
+                        offset,
+                        selected,
+                        batch_size=resolved_copy_batch_size,
+                        on_copied=_advance_copy,
+                    )
+                else:
+                    crop_bbox_dest[offset:next_offset, ...] = bbox_dest[offset:next_offset, ...]
+                    _advance_copy(local_total)
+                _copy_rows_indexed(
+                    source.masks_roi,
+                    masks_dest,
+                    offset,
+                    selected,
+                    batch_size=resolved_copy_batch_size,
+                    transform=_collapse_union_channels,
+                    on_copied=_advance_copy,
+                )
+                _copy_rows_indexed(
+                    source.ellipse_params,
+                    ellipse_params_dest,
+                    offset,
+                    selected,
+                    batch_size=resolved_copy_batch_size,
+                    on_copied=_advance_copy,
+                )
+                _copy_rows_indexed(
+                    source.ellipse_success,
+                    ellipse_success_dest,
+                    offset,
+                    selected,
+                    batch_size=resolved_copy_batch_size,
+                    on_copied=_advance_copy,
+                )
+                if mask_probs_dest is not None and source.mask_probs_src is not None:
+                    _copy_rows_indexed(
+                        source.mask_probs_src,
+                        mask_probs_dest,
+                        offset,
+                        selected,
+                        batch_size=resolved_copy_batch_size,
+                        transform=_collapse_union_channels,
+                        on_copied=_advance_copy,
+                    )
+            offset = next_offset
+    finally:
+        if copy_progress is not None:
+            copy_progress.stop()
 
     dst_crop.create_array(
         "frame_indices",
@@ -1686,6 +1857,7 @@ def export_merged_eye_mask_training_zarr_from_sources(
             "data_card_no_plots": bool(data_card_no_plots),
             "registry_registration": registry_summary,
             "data_card_workflow": workflow_summary,
+            "copy_batch_size": int(resolved_copy_batch_size),
         }
     )
     if len(resolved_sources) == 1:
@@ -1712,6 +1884,7 @@ def export_merged_eye_mask_training_zarr(
     split_seed: int = 42,
     row_gate_policy: str = "all_rows",
     explicit_negative_ratio: float = 0.25,
+    copy_batch_size: int = 128,
     overwrite: bool = False,
     validate: bool = True,
     registry: Optional[Path] = None,
@@ -1741,6 +1914,7 @@ def export_merged_eye_mask_training_zarr(
         split_seed=int(split_seed),
         row_gate_policy=str(row_gate_policy),
         explicit_negative_ratio=float(explicit_negative_ratio),
+        copy_batch_size=int(copy_batch_size),
         overwrite=bool(overwrite),
         validate=bool(validate),
         registry=registry,
@@ -2205,6 +2379,12 @@ def build_parser() -> argparse.ArgumentParser:
             "--row-gate-policy=usable_plus_explicit_negatives."
         ),
     )
+    parser.add_argument(
+        "--copy-batch-size",
+        type=int,
+        default=128,
+        help="Batch size for indexed row-copy operations during merged export.",
+    )
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path for merged-export registration.")
     parser.add_argument(
         "--training-set-id",
@@ -2275,6 +2455,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         split_seed=int(args.split_seed),
         row_gate_policy=str(args.row_gate_policy),
         explicit_negative_ratio=float(args.explicit_negative_ratio),
+        copy_batch_size=int(args.copy_batch_size),
         overwrite=bool(args.overwrite),
         validate=not bool(args.no_validate),
         registry=args.registry,
