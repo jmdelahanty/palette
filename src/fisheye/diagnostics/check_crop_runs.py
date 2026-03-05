@@ -18,14 +18,21 @@ import numpy as np
 from rich.console import Console
 from rich.table import Table
 
+from fisheye.shared.zarr.stage_arrays import CROP_SPEC, array_specs_by_name, describe_array
+
+_CROP_ARRAYS = array_specs_by_name(CROP_SPEC)
+
 REQUIRED_ARRAYS = [
-    ("roi_images", "(n_rois, h, w) uint8"),
-    ("frame_indices", "(n_rois,) int32"),
-    ("frame_counts", "(n_frames,) int32"),
-    ("detection_indices", "(n_rois,) int32"),
-    ("roi_coordinates_full", "(n_rois, 2) int32"),
-    ("roi_coordinates_ds", "(n_rois, 2) int32"),
-    ("bbox_norm_coords", "(n_rois, 4) float32"),
+    (name, describe_array(_CROP_ARRAYS[name]))
+    for name in (
+        "roi_images",
+        "frame_indices",
+        "frame_counts",
+        "detection_indices",
+        "roi_coordinates_full",
+        "roi_coordinates_ds",
+        "bbox_norm_coords",
+    )
 ]
 
 REQUIRED_ATTRS = ["source_detect_run", "source_background_run"]

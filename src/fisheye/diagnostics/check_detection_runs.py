@@ -16,17 +16,18 @@ import zarr
 from rich.console import Console
 from rich.table import Table
 
+from fisheye.shared.zarr.stage_arrays import DETECT_SPEC, array_specs_by_name, describe_array
+
+_DETECT_ARRAYS = array_specs_by_name(DETECT_SPEC)
+
 REQUIRED_ARRAYS = [
-    ("frame_indices", "(n_detections,) int32"),
-    ("frame_counts", "(n_frames,) int32"),
-    ("n_detections", "(n_frames,) int32"),
-    ("bbox_norm_coords", "(n_detections, 4) float32"),
-    ("scores", "(n_detections,) float32"),
+    (name, describe_array(_DETECT_ARRAYS[name]))
+    for name in ("frame_indices", "frame_counts", "n_detections", "bbox_norm_coords", "scores")
 ]
 
 OPTIONAL_ARRAYS = [
-    ("class_ids", "(n_detections,) int32"),
-    ("centers_px", "(n_detections, 2) float32"),
+    (name, describe_array(_DETECT_ARRAYS[name]))
+    for name in ("class_ids", "centers_px")
 ]
 
 REQUIRED_ATTRS = ["method"]
