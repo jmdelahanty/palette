@@ -101,13 +101,9 @@ Purpose: track the concrete follow-up work from the detection dataset and SQLite
 
 ## Data Backfill Tasks
 
-- [ ] Backfill subject/protocol provenance where currently missing.
-  - Current observation: protocol hash and DPF are mostly missing in live registry rows.
-  - Goal: ensure `snapshot_status`, `protocol_hash`, `dpf_at_acquisition` are populated when available.
-  - Suggested workflow:
-    - Re-import/mirror stimulus metadata where needed.
-    - Run registry rescan.
-    - Verify coverage metrics.
+- [x] Backfill subject/protocol provenance where currently missing.
+  - Tracked in dedicated `docs/provenance_backfill_todo.md` with full investigation plan.
+  - Moved out of this TODO because it is a cross-cutting concern, not detection-specific.
 
 - [x] Normalize/retire legacy source dataset IDs and prevent reintroduction.
   - Source recording rows now use canonical IDs: `{session_uuid}:z<path-hash>`.
