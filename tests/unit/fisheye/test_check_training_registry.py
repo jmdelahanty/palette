@@ -23,6 +23,7 @@ from fisheye.utils.check_training_registry import (
     _run_id_style,
     _sum_manifest_rois,
     _status_with_details,
+    _summarize_detect_performance_rows,
     _summarize_detect_quality_rows,
     _summarize_eye_mask_performance_rows,
     _summarize_eye_mask_profile_rows,
@@ -1497,3 +1498,166 @@ def test_recording_steps_wide_view_respects_zarr_use_filter(tmp_path: Path, caps
     assert rc == 0
     assert "rec_steps_wide_training" in out
     assert "rec_steps_wide_analysis" not in out
+
+
+def test_detect_performance_summary_counts_and_distributions(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "detect_perf.zarr"
+    zarr_path.mkdir(parents=True, exist_ok=True)
+    mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    rows = [
+        {
+            "dataset_id": "a",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns,
+            "detection_method": "yolo",
+            "model_name": "model_v1.pt",
+            "coverage_percent": 95.0,
+            "inference_average_fps": 60.0,
+            "inference_avg_read_ms": 10.0,
+        },
+        {
+            "dataset_id": "b",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns,
+            "detection_method": "yolo",
+            "model_name": "model_v2.pt",
+            "coverage_percent": 85.0,
+            "inference_average_fps": 40.0,
+            "inference_avg_read_ms": 20.0,
+        },
+        {
+            "dataset_id": "c",
+            "zarr_path": str(zarr_path),
+            "zarr_mtime_ns": mtime_ns + 999,  # mismatched -> stale
+            "detection_method": "threshold",
+            "model_name": "unknown",
+            "coverage_percent": 70.0,
+            "inference_average_fps": 80.0,
+            "inference_avg_read_ms": 5.0,
+        },
+    ]
+    summary = _summarize_detect_performance_rows(rows)
+    assert summary.total_rows == 3
+    assert summary.stale_rows == 1
+    assert abs(summary.coverage_avg - 83.333) < 0.1
+    assert summary.coverage_min == 70.0
+    assert summary.coverage_max == 95.0
+    assert abs(summary.fps_avg - 60.0) < 0.1
+    assert summary.fps_min == 40.0
+    assert summary.fps_max == 80.0
+    assert abs(summary.read_ms_avg - 11.667) < 0.1
+    assert summary.read_ms_min == 5.0
+    assert summary.read_ms_max == 20.0
+    assert summary.method_counts == {"yolo": 2, "threshold": 1}
+    assert summary.model_counts == {"model_v1.pt": 1, "model_v2.pt": 1, "unknown": 1}
+
+
+def test_detect_performance_view_outputs_summary_and_details(tmp_path: Path, capsys) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_a = tmp_path / "rec_a.zarr"
+    zarr_b = tmp_path / "rec_b.zarr"
+    zarr_a.mkdir(parents=True, exist_ok=True)
+    zarr_b.mkdir(parents=True, exist_ok=True)
+    mtime_a = int(zarr_a.stat().st_mtime_ns)
+    mtime_b = int(zarr_b.stat().st_mtime_ns)
+    registry.upsert_dataset(
+        "dataset_a",
+        session_uuid="session_a",
+        zarr_path=zarr_a,
+        recording_id="recording_a",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_dataset(
+        "dataset_b",
+        session_uuid="session_b",
+        zarr_path=zarr_b,
+        recording_id="recording_b",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_detect_performance(
+        dataset_id="dataset_a",
+        detect_run="detect_a",
+        detect_created_utc="2026-02-24T00:00:00+00:00",
+        recording_id="recording_a",
+        zarr_use="analysis",
+        detection_method="yolo",
+        model_run_id=None,
+        model_set_id=None,
+        model_path="/models/v1.pt",
+        model_name="v1.pt",
+        coverage_percent=92.5,
+        frames_with_detections=925,
+        frames_zero_detections=75,
+        total_frames=1000,
+        mean_confidence=0.85,
+        min_confidence=0.3,
+        max_confidence=0.99,
+        inference_duration_seconds=120.0,
+        inference_average_fps=55.0,
+        inference_avg_batch_ms=15.0,
+        inference_avg_read_ms=8.0,
+        conf_threshold=0.25,
+        iou_threshold=0.45,
+        batch_size=32,
+        inference_width=640,
+        inference_height=640,
+        zarr_mtime_ns=mtime_a,
+    )
+    registry.upsert_detect_performance(
+        dataset_id="dataset_b",
+        detect_run="detect_b",
+        detect_created_utc="2026-02-24T00:05:00+00:00",
+        recording_id="recording_b",
+        zarr_use="analysis",
+        detection_method="yolo",
+        model_run_id=None,
+        model_set_id=None,
+        model_path="/models/v2.pt",
+        model_name="v2.pt",
+        coverage_percent=45.0,
+        frames_with_detections=450,
+        frames_zero_detections=550,
+        total_frames=1000,
+        mean_confidence=0.72,
+        min_confidence=0.2,
+        max_confidence=0.95,
+        inference_duration_seconds=200.0,
+        inference_average_fps=30.0,
+        inference_avg_batch_ms=25.0,
+        inference_avg_read_ms=18.0,
+        conf_threshold=0.25,
+        iou_threshold=0.45,
+        batch_size=32,
+        inference_width=640,
+        inference_height=640,
+        zarr_mtime_ns=mtime_b,
+    )
+    registry.close()
+
+    rc = check_training_registry_main(
+        [
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--view",
+            "detect-performance",
+            "--show-detect-performance",
+            "--no-rich",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Detect Performance" in out
+    assert "total rows: 2" in out
+    assert "stale rows: 0" in out
+    assert "coverage: avg=" in out
+    assert "fps: avg=" in out
+    assert "read_ms: avg=" in out
+    assert "methods: yolo=2" in out
+    assert "dataset_a" in out
+    assert "dataset_b" in out
+    assert "coverage: 92.5%" in out
+    assert "coverage: 45.0%" in out
+    assert "model: v1.pt" in out
+    assert "model: v2.pt" in out

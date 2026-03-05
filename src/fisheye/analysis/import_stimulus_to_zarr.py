@@ -749,8 +749,13 @@ def import_stimulus_to_zarr(
                 store_array(events_group, "values", values, {})
 
         # Protocol snapshot
-        if "/protocol_snapshot/protocol_json" in h5:
-            proto_bytes = h5["/protocol_snapshot/protocol_json"][()]
+        proto_key = None
+        if "/protocol_snapshot/protocol_definition_json" in h5:
+            proto_key = "/protocol_snapshot/protocol_definition_json"
+        elif "/protocol_snapshot/protocol_json" in h5:
+            proto_key = "/protocol_snapshot/protocol_json"
+        if proto_key is not None:
+            proto_bytes = h5[proto_key][()]
             if isinstance(proto_bytes, bytes):
                 run_group.attrs["protocol_json"] = proto_bytes.decode("utf-8")
             else:

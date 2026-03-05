@@ -12,8 +12,84 @@ Evaluates the quality of detection data from detect_runs by:
 import numpy as np
 import zarr
 import sys
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from .utils import identify_gaps, categorize_gaps, calculate_coverage_stats, Gap
+
+from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
+from ..registry.status_ledger import upsert_recording_step_status
+
+_DETECT_QUALITY_STATUS_SOURCE = "runtime_detect_quality"
+
+
+def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _emit_detect_quality_status(
+    *,
+    zarr_path: str,
+    quality_run_name: str,
+    source_detect_run: str,
+    quality_score: Dict[str, object],
+    console: Optional[object] = None,
+) -> None:
+    """Write a detect_quality step status row to the registry (non-fatal)."""
+    try:
+        zp = Path(zarr_path)
+        root = zarr.open(str(zp), mode="r")
+        dataset_id, session_uuid = resolve_dataset_id(root, zp)
+        recording_id = _normalize_attr(root.attrs.get("recording_id")) or _normalize_attr(session_uuid)
+        zarr_use = _normalize_attr(root.attrs.get("zarr_use"))
+        zarr_purpose = _normalize_attr(root.attrs.get("zarr_purpose"))
+
+        registry_path = RegistryPaths.from_env(Path.cwd()).path
+        registry = Registry(registry_path)
+        try:
+            registry.upsert_dataset(
+                dataset_id,
+                session_uuid=session_uuid,
+                zarr_path=zp,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+                zarr_purpose=zarr_purpose,
+            )
+            upsert_recording_step_status(
+                registry,
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                step_name="detect_quality",
+                status="ok",
+                run_name=quality_run_name,
+                method=None,
+                coverage_pct=None,
+                review_status_json=None,
+                details_json={
+                    "quality_grade": quality_score.get("grade"),
+                    "quality_score": quality_score.get("overall_score"),
+                    "clean_percentage": quality_score.get("coverage_score"),
+                    "source_detect_run": source_detect_run,
+                },
+                source=_DETECT_QUALITY_STATUS_SOURCE,
+                zarr_mtime_ns=_safe_zarr_mtime_ns(zp),
+            )
+        finally:
+            registry.close()
+    except Exception as exc:
+        if console is not None:
+            from rich.console import Console as _Console
+            if isinstance(console, _Console):
+                console.print(
+                    f"[yellow]Warning:[/yellow] failed to write recording step status "
+                    f"for detect_quality: {exc}"
+                )
+            else:
+                print(f"Warning: failed to write recording step status for detect_quality: {exc}")
+        else:
+            print(f"Warning: failed to write recording step status for detect_quality: {exc}")
 
 
 def _normalize_attr(value: object) -> Optional[str]:
@@ -590,6 +666,14 @@ def save_quality_report(
         print(f"  Jumps: {n_jump_detections}")
         if n_multi_detections > 0:
             print(f"  Multi-detection: {n_multi_detections}")
+
+    _emit_detect_quality_status(
+        zarr_path=zarr_path,
+        quality_run_name=run_name,
+        source_detect_run=source_run,
+        quality_score=quality_report["quality_score"],
+        console=console,
+    )
 
     return quality_group.path
 

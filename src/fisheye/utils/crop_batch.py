@@ -5,7 +5,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple, Dict, Any
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import zarr
 import yaml
@@ -361,6 +361,70 @@ def _resolve_targets(paths: List[Path], recursive: bool) -> List[Path]:
     return ordered
 
 
+def _discover_zarrs_from_registry(
+    *,
+    registry_path: Path,
+    scope_paths: Sequence[Path],
+    rig_id: Optional[str] = None,
+    arena_id: Optional[str] = None,
+    camera_id: Optional[str] = None,
+    path_contains: Optional[str] = None,
+    skip_existing: bool = False,
+) -> List[Path]:
+    """Query the registry for analysis zarr paths suitable for crop processing.
+
+    When *skip_existing* is True, recordings whose ``crop`` step status is
+    already ``'ok'`` are excluded at the SQL level.  Only recordings whose
+    ``detect`` step is ``'ok'`` are returned, ensuring the detection
+    prerequisite is met.
+    """
+    from fisheye.registry.db import Registry
+
+    registry = Registry(registry_path)
+    try:
+        query_kwargs: dict[str, Any] = dict(
+            zarr_use="analysis",
+            exclude_status="missing",
+            require_recording=True,
+            require_steps_ok=["detect"],
+            rig_id=rig_id,
+            arena_id=arena_id,
+            camera_id=camera_id,
+            path_contains=path_contains,
+        )
+        if skip_existing:
+            query_kwargs["exclude_step_ok"] = "crop"
+        rows = registry.query_datasets(**query_kwargs)
+    finally:
+        registry.close()
+
+    paths: list[Path] = []
+    for row in rows:
+        raw = row["zarr_path"]
+        if raw is None:
+            continue
+        zarr_path = Path(str(raw))
+        if not zarr_path.name.endswith("_analysis.zarr"):
+            continue
+        paths.append(zarr_path.resolve())
+
+    # Scope filter: if caller provided paths, keep only zarrs under those roots.
+    if scope_paths:
+        resolved_scopes = [str(p.expanduser().resolve()).rstrip("/") + "/" for p in scope_paths]
+        paths = [p for p in paths if any(str(p).startswith(s) for s in resolved_scopes)]
+
+    # Deduplicate and sort (match filesystem discovery contract).
+    seen: set[str] = set()
+    ordered: list[Path] = []
+    for p in paths:
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            ordered.append(p)
+    ordered.sort(key=lambda item: str(item))
+    return ordered
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Batch crop ROIs for Palette Zarr recordings.")
     parser.add_argument("paths", nargs="*", type=Path, help="Recording roots or zarr paths.")
@@ -457,6 +521,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--force-cpu", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--log-dir", type=Path, default=None, help="Directory for JSONL logs.")
+    # --- Registry discovery mode ---
+    parser.add_argument(
+        "--source",
+        choices=["filesystem", "registry"],
+        default="filesystem",
+        help="Discovery source: filesystem (default) or registry.",
+    )
+    parser.add_argument(
+        "--emit-paths",
+        action="store_true",
+        help="Print discovered zarr paths (one per line) and exit.",
+    )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help="Path to registry SQLite database (required when --source registry).",
+    )
+    parser.add_argument("--rig-id", type=str, help="Filter by rig_id (registry mode).")
+    parser.add_argument("--arena-id", type=str, help="Filter by arena_id (registry mode).")
+    parser.add_argument("--camera-id", type=str, help="Filter by camera_id (registry mode).")
+    parser.add_argument("--path-contains", type=str, help="Filter zarr_path by substring (registry mode).")
 
     args = parser.parse_args(argv)
 
@@ -468,10 +553,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         explicit_roots = _resolve_root(None)
 
     roots = _resolve_root(explicit_roots)
-    zarr_paths = _resolve_targets(roots, args.recursive)
-    if not zarr_paths:
-        print("No zarr files found.")
-        return 1
 
     config = _load_config(args.config)
     crop_cfg = config.get("crop", {}) or {}
@@ -486,6 +567,35 @@ def main(argv: Optional[List[str]] = None) -> int:
         external_use_sharding = True
     elif args.no_external_use_sharding:
         external_use_sharding = False
+
+    if args.source == "registry":
+        if not args.registry or not args.registry.exists():
+            print(
+                f"Error: registry database not found: {args.registry}",
+                file=sys.stderr,
+            )
+            return 1
+        skip_existing = not bool(args.force_new)
+        registry_zarrs = _discover_zarrs_from_registry(
+            registry_path=args.registry,
+            scope_paths=roots,
+            rig_id=args.rig_id,
+            arena_id=args.arena_id,
+            camera_id=args.camera_id,
+            path_contains=args.path_contains,
+            skip_existing=skip_existing,
+        )
+        if args.emit_paths:
+            for p in registry_zarrs:
+                print(p)
+            return 0
+        zarr_paths = registry_zarrs
+    else:
+        zarr_paths = _resolve_targets(roots, args.recursive)
+
+    if not zarr_paths:
+        print("No zarr files found.")
+        return 1
 
     plans = _build_plans(
         zarr_paths=zarr_paths,

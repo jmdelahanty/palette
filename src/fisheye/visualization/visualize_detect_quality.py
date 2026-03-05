@@ -39,6 +39,51 @@ def _safe_int(value: object, default: int = 0) -> int:
         return int(default)
 
 
+def _as_positive_int(value: object) -> Optional[int]:
+    try:
+        ivalue = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return ivalue if ivalue > 0 else None
+
+
+def _resolve_detect_dimensions(root: zarr.Group, detect_group: zarr.Group) -> Tuple[int, int]:
+    raw = root.get("raw_video")
+    if raw is not None and "images_ds" in raw:
+        images_ds = raw["images_ds"]
+        return int(images_ds.shape[2]), int(images_ds.shape[1])
+    if raw is not None and "images_full" in raw:
+        images_full = raw["images_full"]
+        return int(images_full.shape[2]), int(images_full.shape[1])
+
+    width = (
+        _as_positive_int(root.attrs.get("width"))
+        or _as_positive_int(root.attrs.get("video_width"))
+        or _as_positive_int(root.attrs.get("palette_video_width"))
+        or 640
+    )
+    height = (
+        _as_positive_int(root.attrs.get("height"))
+        or _as_positive_int(root.attrs.get("video_height"))
+        or _as_positive_int(root.attrs.get("palette_video_height"))
+        or 640
+    )
+
+    downsampled_resolution = None
+    if raw is not None:
+        downsampled_resolution = raw.attrs.get("downsampled_resolution")
+    if downsampled_resolution is None:
+        downsampled_resolution = detect_group.attrs.get("palette_downsampled_resolution")
+    if isinstance(downsampled_resolution, (list, tuple, np.ndarray)) and len(downsampled_resolution) == 2:
+        ds_h = _as_positive_int(downsampled_resolution[0])
+        ds_w = _as_positive_int(downsampled_resolution[1])
+        if ds_h and ds_w:
+            height = ds_h
+            width = ds_w
+
+    return int(width), int(height)
+
+
 def load_quality_report(zarr_path: str, 
                        detect_run: Optional[str] = None,
                        quality_run: Optional[str] = None) -> Tuple[Dict, Dict]:
@@ -118,12 +163,8 @@ def load_quality_report(zarr_path: str,
     else:
         frame_counts = np.bincount(frame_indices, minlength=num_frames)
     
-    # Get dimensions
-    if 'raw_video' in root:
-        images_ds = root['raw_video/images_ds']
-        height, width = images_ds.shape[1], images_ds.shape[2]
-    else:
-        width, height = 640, 640
+    # Get dimensions (supports metadata-only archives without raw_video/images_ds)
+    width, height = _resolve_detect_dimensions(root, detect_group)
     
     # Extract centroids (per detection)
     if bbox_coords.size:

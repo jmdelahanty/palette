@@ -1,10 +1,14 @@
-# Cluster Batching Guide (Detection / Background)
+# Cluster Batching Guide
 
-This guide summarizes best practices for running Palette detection/background
-jobs on a shared HPC filesystem and includes an example LSF `bsub` wrapper.
+This guide covers running Palette pipeline stages as batch jobs on an HPC
+cluster with LSF. All four stages — **detect**, **crop**, **keypoints**, and
+**eye masks** — support both filesystem discovery and registry-backed SQL
+pre-filtering.
 
 Related contract:
 - `docs/detect_batch_analysis_zarr_parallel_agents_contract.md`
+
+---
 
 ## Why batch jobs?
 
@@ -21,88 +25,456 @@ writes** instead of many short tasks.
 - Prefer **threads** for IO‑heavy steps (background/detect on sampled imports).
 - Avoid parallelizing more than the filesystem can sustain.
 
-## Heuristics that work well
+## Heuristics
 
 - If a task is **<5–10 minutes**, batch it.
 - If a task is **>30 minutes**, batch fewer recordings or submit one per job.
 - Use **max active jobs** to cap concurrency (LSF array `%` syntax).
 
-## Detect jobs (batch script)
+---
 
-Use the canonical batch entrypoint:
+## Pipeline stages and prerequisites
+
+The four batch pipelines form a DAG. Each stage requires its predecessors to
+have `recording_step_status = 'ok'` before it will process a recording:
 
 ```
+detect  →  crop  →  keypoints  →  eye_masks
+```
+
+| Stage      | Prerequisite steps          | Step name      | Skip-existing flag |
+|------------|----------------------------|----------------|-------------------|
+| detect     | *(none)*                   | `detect`       | `--overwrite`     |
+| crop       | `detect`                   | `crop`         | `--force-new`     |
+| keypoints  | `detect`, `crop`           | `keypoints`    | `--overwrite`     |
+| eye masks  | `crop`, `keypoints`        | `eye_masks`    | `--overwrite`     |
+
+When using `--source registry`, the batch runner queries the registry's
+`recording_step_status` table with SQL-level pre-filtering:
+
+- **`require_steps_ok`** — INNER JOIN ensures only recordings where all
+  prerequisite steps have status `'ok'` are returned.
+- **`exclude_step_ok`** — LEFT JOIN excludes recordings where this stage
+  already has status `'ok'` (skip-existing behavior). Disabled when the
+  overwrite/force-new flag is set.
+
+---
+
+## Discovery modes
+
+All four batch runners support two discovery modes via `--source`:
+
+### Filesystem mode (default)
+
+```bash
 scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings --recursive --dry-run --json
 ```
 
-Apply mode (registry-backed model resolution):
+Recursively finds `*_analysis.zarr` targets under the given root directory.
+No registry interaction at discovery time.
 
-```
+### Registry mode
+
+```bash
 scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings \
-  --recursive \
-  --apply \
+  --source registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --dry-run --json
+```
+
+Queries the registry database for analysis zarrs matching the scope, applies
+SQL-level prerequisite and skip-existing filters, then builds plans only for
+the resulting paths. This is faster than filesystem discovery on large trees
+and ensures only "ready" recordings are processed.
+
+**Registry filters** (available on all four runners):
+
+| Flag               | Description                                 |
+|--------------------|---------------------------------------------|
+| `--registry PATH`  | Path to the registry SQLite file            |
+| `--rig-id ID`      | Filter by rig identifier                    |
+| `--arena-id ID`    | Filter by arena identifier                  |
+| `--camera-id ID` / `--camera-id-filter ID` | Filter by camera identifier (see note) |
+| `--path-contains STR` | Substring match on zarr_path             |
+
+> **Note:** Detection and crop use `--camera-id`. Keypoints and eye masks use
+> `--camera-id-filter` to avoid ambiguity with the per-recording camera_id
+> argument those runners also accept.
+
+### Emit-paths mode
+
+All runners support `--emit-paths` which prints discovered zarr paths to
+stdout and exits immediately. The LSF submit scripts use this to build
+batch manifests:
+
+```bash
+scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings \
+  --source registry --emit-paths \
   --registry /nvme1/palette_registry.sqlite
+```
+
+---
+
+## 1. Detection batch
+
+### Python runner
+
+```bash
+# Dry run — preview plans
+scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings \
+  --recursive --dry-run --json
+
+# Apply — run detections with registry-backed model resolution
+scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings \
+  --recursive --apply \
+  --registry /nvme1/palette_registry.sqlite
+
+# Registry mode — only process recordings not yet detected
+scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings \
+  --source registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --apply
 ```
 
 It plans directly against `*_analysis.zarr` targets and skips archives that
 already have `detect_runs/latest` unless `--overwrite` is set.
 
-## Crop jobs (batch script)
+### LSF submit script
 
-We added a batch crop runner:
-
-```
-python -m fisheye.utils.crop_batch /nvme1/recordings --recursive --apply
-```
-
-Notes:
-- Defaults to `source_type=preferred` (uses review status or preferred chain).
-- Skips when the latest crop run already matches the resolved detection source
-  and ROI size (use `--force-new` to always create a new run).
-
-## LSF (bsub) wrapper
-
-Script: `scripts/submit_detect_batches_bsub.sh`
-
-Example:
-
-```
+```bash
 ./scripts/submit_detect_batches_bsub.sh \
   --root /nvme1/recordings \
+  --source registry \
   --batch-size 15 \
   --max-active 2 \
   --queue short \
   --ncores 4 \
   --mem-gb 16 \
   --registry /nvme1/palette_registry.sqlite \
-  --require-tuning
+  --require-tuning \
+  --dry-run
 ```
 
-This:
-- Finds all `*_analysis.zarr` targets under `--root`
-- Writes deterministic `recordings.txt` and `batch_*.txt` shard manifests
-- Splits into batches of `--batch-size`
-- Submits an LSF job array with at most `--max-active` running at once
-- Prints effective batch command/queue parameters in dry-run output
+**Key options:**
 
-Logs and batch files go under:
+| Flag               | Default | Description                                      |
+|--------------------|---------|--------------------------------------------------|
+| `--root`           | `/nvme1/recordings` | Root recordings directory             |
+| `--source`         | `filesystem` | Discovery source (`filesystem` or `registry`) |
+| `--batch-size`     | `10`    | Analysis zarrs per batch job                     |
+| `--max-active`     | `2`     | Max concurrent jobs in array                     |
+| `--queue`          | *(default)* | LSF queue name                               |
+| `--ncores`         | `4`     | Cores per job                                    |
+| `--mem-gb`         | `16`    | Memory per job in GB                             |
+| `--registry`       | `/nvme1/palette_registry.sqlite` | Registry path       |
+| `--config`         | `configs/fisheye/default.yaml` | Detection config     |
+| `--set-id`         | *(none)* | Detect model set filter                         |
+| `--require-tuning` | off     | Skip zarrs without detection_tuning              |
+| `--overwrite`      | off     | Rerun even if detect_runs/latest exists          |
+| `--dry-run`        | off     | Print manifests + commands; do not submit        |
+
+**Execution model:** Each batch job calls `run_detections_batch --apply` with
+a batch of zarr paths. Model resolution happens inside the batch runner.
+
+**Logs:** `<root>/logs/run_detections_batch/bsub_submissions/detect_<run_id>/`
+
+---
+
+## 2. Crop batch
+
+### Python runner
+
+```bash
+# Dry run
+scripts/py -m fisheye.utils.crop_batch /nvme1/recordings --recursive --dry-run
+
+# Apply
+scripts/py -m fisheye.utils.crop_batch /nvme1/recordings --recursive --apply
+
+# Registry mode — only crop recordings where detect is 'ok'
+scripts/py -m fisheye.utils.crop_batch /nvme1/recordings \
+  --source registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --apply
 ```
-/nvme1/recordings/logs/run_detections_batch/bsub_submissions/
+
+Notes:
+- Defaults to `source_type=preferred` (uses review status or preferred chain).
+- Skips when the latest crop run already matches the resolved detection source
+  and ROI size (use `--force-new` to always create a new run).
+- No ML model resolution — crop is a deterministic operation using existing
+  detections.
+
+### LSF submit script
+
+```bash
+./scripts/submit_crop_batches_bsub.sh \
+  --root /nvme1/recordings \
+  --source registry \
+  --batch-size 10 \
+  --max-active 2 \
+  --queue short \
+  --mem-gb 32 \
+  --registry /nvme1/palette_registry.sqlite \
+  --dry-run
 ```
+
+**Key options:**
+
+| Flag                       | Default | Description                               |
+|----------------------------|---------|-------------------------------------------|
+| `--root`                   | `/nvme1/recordings` | Root recordings directory     |
+| `--source`                 | `filesystem` | Discovery source                     |
+| `--batch-size`             | `10`    | Analysis zarrs per batch job              |
+| `--max-active`             | `2`     | Max concurrent jobs                       |
+| `--mem-gb`                 | `32`    | Memory per job in GB                      |
+| `--registry`               | `/nvme1/palette_registry.sqlite` | Registry path  |
+| `--config`                 | *(none)* | Crop config YAML                         |
+| `--source-type`            | *(auto)* | Detection source type                    |
+| `--acceleration`           | *(auto)* | `auto`, `gpu`, or `cpu`                  |
+| `--external-write-backend` | *(standard)* | `standard` or `kvikio`              |
+| `--external-roi-storage`   | *(compressed)* | `compressed` or `uncompressed`    |
+| `--force-new`              | off     | Always create new crop run (disables skip-existing) |
+| `--zarr-use`               | `analysis` | Zarr use filter                        |
+| `--dry-run`                | off     | Print manifests + commands; do not submit |
+
+**Execution model:** Each batch job calls `crop_batch --apply` with a batch
+of zarr paths. No per-recording model resolution — crop works directly on
+the zarr.
+
+**Logs:** `<root>/logs/crop_batch/bsub_submissions/crop_<run_id>/`
+
+---
+
+## 3. Keypoints batch
+
+### Python runner
+
+```bash
+# Registry mode — only run keypoints where detect + crop are 'ok'
+scripts/py -m fisheye.utils.run_keypoints_batch /nvme1/recordings \
+  --source registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --dry-run --json
+```
+
+### LSF submit script
+
+```bash
+./scripts/submit_keypoints_batches_bsub.sh \
+  --root /nvme1/recordings \
+  --source registry \
+  --batch-size 10 \
+  --max-active 2 \
+  --queue short \
+  --mem-gb 32 \
+  --registry /nvme1/palette_registry.sqlite \
+  --dry-run
+```
+
+**Key options:**
+
+| Flag                  | Default | Description                                  |
+|-----------------------|---------|----------------------------------------------|
+| `--root`              | `/nvme1/recordings` | Root recordings directory        |
+| `--source`            | `filesystem` | Discovery source                        |
+| `--batch-size`        | `10`    | Analysis zarrs per batch job                 |
+| `--max-active`        | `2`     | Max concurrent jobs                          |
+| `--mem-gb`            | `32`    | Memory per job in GB                         |
+| `--registry`          | `/nvme1/palette_registry.sqlite` | Registry path     |
+| `--set-id`            | *(none)* | Pose model set filter                       |
+| `--top-k`             | `5`     | Candidate provenance depth                   |
+| `--require-unique`    | off     | Fail if top model scores tie                 |
+| `--include-non-success` | off   | Include non-success runs in model resolution |
+| `--crop-run`          | *(auto)* | Explicit crop run name                      |
+| `--batch-size-kp`     | `256`   | Keypoint inference batch size                |
+| `--device`            | *(auto)* | Torch device override                       |
+| `--cpu`               | off     | Force CPU inference                          |
+| `--overwrite`         | off     | Rerun even if keypoints run exists           |
+| `--camera-id-filter`  | *(none)* | Filter by camera_id (registry source only)  |
+| `--dry-run`           | off     | Print manifests + commands; do not submit    |
+
+**Execution model:** Each batch job iterates over zarr paths in its batch
+file. For each zarr, it derives the recording directory and calls
+`run_keypoints_with_registry_model --recording-dir <dir>`. Model resolution
+happens per-recording at runtime.
+
+**Logs:** `<root>/logs/run_keypoints_batch/bsub_submissions/kp_<run_id>/`
+
+---
+
+## 4. Eye masks batch
+
+### Python runner
+
+```bash
+# Registry mode — only run eye masks where crop + keypoints are 'ok'
+scripts/py -m fisheye.utils.run_eye_masks_batch /nvme1/recordings \
+  --source registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --no-log \
+  --dry-run --json
+```
+
+### LSF submit script
+
+```bash
+./scripts/submit_eye_masks_batches_bsub.sh \
+  --root /nvme1/recordings \
+  --source registry \
+  --batch-size 10 \
+  --max-active 2 \
+  --queue short \
+  --mem-gb 32 \
+  --registry /nvme1/palette_registry.sqlite \
+  --dry-run
+```
+
+**Key options:**
+
+| Flag                       | Default | Description                              |
+|----------------------------|---------|------------------------------------------|
+| `--root`                   | `/nvme1/recordings` | Root recordings directory    |
+| `--source`                 | `filesystem` | Discovery source                    |
+| `--batch-size`             | `10`    | Analysis zarrs per batch job             |
+| `--max-active`             | `2`     | Max concurrent jobs                      |
+| `--mem-gb`                 | `32`    | Memory per job in GB                     |
+| `--registry`               | `/nvme1/palette_registry.sqlite` | Registry path |
+| `--set-id`                 | *(none)* | Eye mask model set filter               |
+| `--top-k`                  | `5`     | Candidate provenance depth               |
+| `--require-unique`         | off     | Fail if top model scores tie             |
+| `--include-non-success`    | off     | Include non-success runs in resolution   |
+| `--method`                 | *(auto)* | `yolo` or `unet`                        |
+| `--crop-run`               | *(auto)* | Explicit crop run name                  |
+| `--keypoints-run`          | *(auto)* | Explicit keypoints run name             |
+| `--batch-size-em`          | `128`   | Eye mask inference batch size            |
+| `--device`                 | *(auto)* | Torch device override                   |
+| `--cpu`                    | off     | Force CPU inference                      |
+| `--overwrite`              | off     | Rerun even if eye_masks run exists       |
+| `--camera-id-filter`       | *(none)* | Filter by camera_id (registry only)     |
+| `--dry-run`                | off     | Print manifests + commands; do not submit|
+
+**YOLO-specific options:** `--imgsz`, `--conf`, `--iou`, `--max-det`,
+`--mask-threshold`, `--adaptive-scale`, `--adaptive-cap`, `--no-retina-masks`,
+`--proto-upsample-factor`, `--legacy-masks`, `--verbose`
+
+**U-Net-specific options:** `--label-mode`, `--write-binary-masks`,
+`--no-use-crop`
+
+**Execution model:** Same as keypoints — each batch job iterates over zarr
+paths, derives the recording directory, and calls
+`run_eye_masks_with_registry_model --recording-dir <dir>`. Model resolution
+happens per-recording at runtime.
+
+**Logs:** `<root>/logs/run_eye_masks_batch/bsub_submissions/em_<run_id>/`
+
+---
+
+## Running the full pipeline with registry mode
+
+To process all four stages sequentially using registry-backed discovery:
+
+```bash
+# 1. Detection — no prerequisites
+./scripts/submit_detect_batches_bsub.sh \
+  --source registry --registry /nvme1/palette_registry.sqlite \
+  --batch-size 15 --max-active 2
+
+# 2. Crop — requires detect='ok'
+./scripts/submit_crop_batches_bsub.sh \
+  --source registry --registry /nvme1/palette_registry.sqlite \
+  --batch-size 10 --max-active 2
+
+# 3. Keypoints — requires detect='ok' and crop='ok'
+./scripts/submit_keypoints_batches_bsub.sh \
+  --source registry --registry /nvme1/palette_registry.sqlite \
+  --batch-size 10 --max-active 2
+
+# 4. Eye masks — requires crop='ok' and keypoints='ok'
+./scripts/submit_eye_masks_batches_bsub.sh \
+  --source registry --registry /nvme1/palette_registry.sqlite \
+  --batch-size 10 --max-active 2
+```
+
+Each stage automatically filters to only recordings that have completed all
+prerequisites. You can safely submit all four in quick succession — later
+stages will simply find zero targets if earlier stages haven't finished yet,
+then can be re-submitted.
+
+### Scoping to a subset
+
+All submit scripts accept registry filters:
+
+```bash
+./scripts/submit_detect_batches_bsub.sh \
+  --source registry \
+  --rig-id rig_01 \
+  --arena-id arena_A \
+  --path-contains 2025-01
+```
+
+---
+
+## How submit scripts work
+
+All four submit scripts follow the same pattern:
+
+1. **Discovery** — Run the Python batch module with `--emit-paths` to get a
+   list of zarr paths (either via filesystem glob or registry SQL query).
+2. **Manifest** — Split the discovered paths into batch files
+   (`batch_0001.txt`, `batch_0002.txt`, ...) and write `recordings.txt` +
+   `manifest_summary.json`.
+3. **Job script** — Generate a `run_batch.sh` script that reads a batch file
+   and processes each recording.
+4. **Submit** — Submit an LSF job array with `bsub`.
+
+### Run directory structure
+
+```
+<log_dir>/<prefix>_<run_id>/
+├── recordings.txt           # All discovered zarr paths
+├── discovered_paths.txt     # Raw output from --emit-paths (registry mode)
+├── manifest_summary.json    # Source, counts, batch size
+├── batch_0001.txt           # First batch of zarr paths
+├── batch_0002.txt           # Second batch
+├── ...
+├── run_batch.sh             # Generated job script
+├── <jobid>_1.out            # LSF stdout for batch 1
+├── <jobid>_1.err            # LSF stderr for batch 1
+└── ...
+```
+
+### Dry-run mode
+
+All scripts support `--dry-run` which performs discovery and manifest creation
+but does not submit to LSF. Use this to verify the target list before
+committing:
+
+```bash
+./scripts/submit_detect_batches_bsub.sh --source registry --dry-run
+```
+
+### Stable run IDs
+
+Use `--run-id` for deterministic reruns:
+
+```bash
+./scripts/submit_detect_batches_bsub.sh --run-id my_rerun_001 --dry-run
+```
+
+---
 
 ## How to check which scheduler you have
 
 On a login node:
 
-```
-which bsub
-which sbatch
-which qsub
+```bash
+which bsub    # LSF
+which sbatch  # Slurm
+which qsub    # PBS/Torque
 ```
 
-If `bsub` exists → LSF.
-If `sbatch` exists → Slurm.
-If `qsub` exists → PBS/Torque.
+If `bsub` exists → LSF (the submit scripts require this).
 
 ## Notes from HPC engineers (Zarr I/O)
 
@@ -117,21 +489,23 @@ Batch scripts use Rich progress bars by default. On headless schedulers this
 is safe, but the control characters can make log files noisy. To keep logs
 clean, disable Rich rendering:
 
-```
-RICH_DISABLE=1 python -m fisheye.utils.crop_batch ...
+```bash
+RICH_DISABLE=1 scripts/py -m fisheye.utils.crop_batch ...
 ```
 
 Or force a dumb terminal:
 
-```
-TERM=dumb python -m fisheye.utils.crop_batch ...
+```bash
+TERM=dumb scripts/py -m fisheye.utils.crop_batch ...
 ```
 
 ## Suggested defaults
 
-- `--batch-size 10–30`
-- `--max-active 1–2`
-- `--scheduler threads`
-- `--num-workers 4–8`
+| Parameter       | Detect | Crop  | Keypoints | Eye Masks |
+|-----------------|--------|-------|-----------|-----------|
+| `--batch-size`  | 10–30  | 10    | 10        | 10        |
+| `--max-active`  | 1–2    | 1–2   | 1–2       | 1–2       |
+| `--mem-gb`      | 16     | 32    | 32        | 32        |
+| `--ncores`      | 4      | 4     | 4         | 4         |
 
 Adjust upward only after monitoring I/O (`iostat`, `iotop`) and queue health.

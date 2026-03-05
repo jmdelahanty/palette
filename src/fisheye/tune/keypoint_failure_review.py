@@ -48,6 +48,55 @@ def _total_keypoints(refined: zarr.Group) -> int:
     return 0
 
 
+def _as_positive_int(value: object) -> Optional[int]:
+    try:
+        ivalue = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return ivalue if ivalue > 0 else None
+
+
+def _resolve_full_frame_dimensions(root: zarr.Group) -> tuple[int, int]:
+    raw = root.get("raw_video")
+    if raw is not None and "images_full" in raw:
+        full = raw["images_full"]
+        return int(full.shape[1]), int(full.shape[2])
+
+    width = (
+        _as_positive_int(root.attrs.get("width"))
+        or _as_positive_int(root.attrs.get("video_width"))
+        or _as_positive_int(root.attrs.get("palette_video_width"))
+        or _as_positive_int(root.attrs.get("source_full_width"))
+        or _as_positive_int(root.attrs.get("source_video_width"))
+    )
+    height = (
+        _as_positive_int(root.attrs.get("height"))
+        or _as_positive_int(root.attrs.get("video_height"))
+        or _as_positive_int(root.attrs.get("palette_video_height"))
+        or _as_positive_int(root.attrs.get("source_full_height"))
+        or _as_positive_int(root.attrs.get("source_video_height"))
+    )
+
+    if raw is not None:
+        original_resolution = raw.attrs.get("original_resolution")
+        if isinstance(original_resolution, (list, tuple, np.ndarray)) and len(original_resolution) == 2:
+            res_h = _as_positive_int(original_resolution[0])
+            res_w = _as_positive_int(original_resolution[1])
+            if height is None and res_h is not None:
+                height = res_h
+            if width is None and res_w is not None:
+                width = res_w
+
+        if "images_ds" in raw and (height is None or width is None):
+            ds = raw["images_ds"]
+            if height is None:
+                height = _as_positive_int(ds.shape[1])
+            if width is None:
+                width = _as_positive_int(ds.shape[2])
+
+    return int(height or 640), int(width or 640)
+
+
 def _load_failure_indices(refined: zarr.Group, include_all: bool = False) -> np.ndarray:
     if include_all:
         total = _total_keypoints(refined)
@@ -344,7 +393,7 @@ def launch_review(
     roi_coords = crop_group["roi_coordinates_full"]
     frame_indices = crop_group["frame_indices"][:]
 
-    full_h, full_w = root["raw_video/images_full"].shape[1:]
+    full_h, full_w = _resolve_full_frame_dimensions(root)
     norm_factor = np.array([full_w, full_h], dtype=np.float64)
 
     failures = _load_failure_indices(refined, include_all=include_all)

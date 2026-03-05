@@ -32,5 +32,9 @@ far exceeds the original stub scope described below. Current capabilities includ
 
 ## Remaining items
 
-- [ ] Add `--since <YYYY-MM-DD>` date filter.
-- [ ] Materialized views for common filters (evaluate need based on query performance).
+- [x] Add `--since <YYYY-MM-DD>` date filter. Completed 2026-02-27 in
+  `src/fisheye/registry/query.py` using `d.created_utc >= ?`.
+- [x] Materialized views for common filters (evaluate need based on query
+  performance). Deferred 2026-02-27: current scale (~114 rows in `datasets`)
+  does not justify materialized views; revisit if the registry grows past ~10k
+  rows or profiling shows sustained query bottlenecks.

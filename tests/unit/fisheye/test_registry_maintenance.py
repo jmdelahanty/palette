@@ -382,6 +382,17 @@ class _FakeGroup:
         return [name for name, value in self._children.items() if isinstance(value, _FakeGroup)]
 
 
+class _GetMissFakeGroup(_FakeGroup):
+    def add_group(self, name: str, *, attrs: Optional[Dict[str, object]] = None) -> "_GetMissFakeGroup":
+        group = _GetMissFakeGroup(attrs=attrs)
+        self._children[name] = group
+        return group
+
+    def get(self, key: str):
+        _ = key
+        return None
+
+
 class _FakeZarrModule:
     def __init__(self, roots_by_path: Dict[str, _FakeGroup]) -> None:
         self._roots_by_path = roots_by_path
@@ -3192,6 +3203,70 @@ def test_backfill_keypoint_profiles_dry_run_and_apply(
     assert float(row["usable_rate"]) == pytest.approx(0.75)
     assert str(row["genotype"]) == "Tg(elavl3:gcamp7f)"
     assert int(row["dpf_at_acquisition"]) == 7
+    registry.close()
+
+
+def test_backfill_keypoint_profiles_handles_missing_get_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_profile_get_miss" / "zarr" / "rec_profile_get_miss_training.zarr"
+    _create_fake_zarr_store(zarr_path)
+    root = _GetMissFakeGroup(attrs={"session_uuid": "keypoint_profile_session", "zarr_purpose": "training"})
+    analysis = root.add_group("analysis")
+    profile_parent = analysis.add_group("keypoint_profile_runs", attrs={"latest": "keypoint_profile_001"})
+    profile = profile_parent.add_group("keypoint_profile_001")
+    profile.attrs["profile_summary"] = {
+        "created_at_utc": "2026-02-24T00:00:00+00:00",
+        "dataset": {"recording_id": "recording_profile", "zarr_use": "training"},
+        "source": {
+            "keypoint_method": "traditional_pose",
+            "keypoint_path": "keypoints_runs/keypoints_001",
+            "keypoint_run": "keypoints_001",
+            "skeleton_id": "fish_v1",
+            "kpt_shape": [3, 3],
+        },
+        "quality": {
+            "rows_total": 4,
+            "rows_usable": 3,
+            "usable_keypoints_total": 9,
+            "usable_rate": 0.75,
+        },
+        "geometry": {
+            "triangle_area": {"stats": {"p10": 0.1, "p50": 0.2, "p90": 0.3}},
+            "min_angle": {"stats": {"p10": 10.0, "p50": 20.0, "p90": 30.0}},
+            "heading": {"stats": {"p10": -0.1, "p50": 0.0, "p90": 0.1}},
+        },
+        "composition": {"genotype": "Tg(elavl3:gcamp7f)", "dpf_at_acquisition": 7},
+    }
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): root}),
+    )
+    dataset_id = "dataset_profile_get_miss"
+    registry.upsert_dataset(
+        dataset_id=dataset_id,
+        session_uuid="session_profile_get_miss",
+        zarr_path=zarr_path,
+        recording_id="recording_profile_get_miss",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+
+    summary = _backfill_keypoint_profiles(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert summary["rows_inserted"] == 1
+    row = registry.conn.execute(
+        "SELECT profile_run FROM keypoint_data_profile_latest WHERE dataset_id = ?;",
+        (dataset_id,),
+    ).fetchone()
+    assert row is not None
+    assert str(row["profile_run"]) == "keypoint_profile_001"
     registry.close()
 
 

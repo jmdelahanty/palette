@@ -27,6 +27,7 @@ from ..detection.detect_keypoints_traditional import detect_keypoints as detect_
 from ..tracking.crop import crop_detections, infer_detection_source_type
 from ..tracking.assign_ids import assign_ids_spatial
 from ..refinement.refine_detect import create_refined_run
+from ..refinement.detect_quality import analyze_detect_quality, save_quality_report
 from ..refinement.refine_keypoints import create_refined_keypoint_run
 from ..shared.experiment_setup import infer_experiment_setup
 from ..shared.zarr.schema import validate_zarr_structure
@@ -131,8 +132,9 @@ class Pipeline:
     STAGE_ORDER = [
         'import',
         'downsample',
-        'background', 
+        'background',
         'detect',
+        'detect_quality',
         'refine',
         'crop',
         'keypoints',
@@ -148,7 +150,8 @@ class Pipeline:
         'downsample': ['import'],
         'background': ['import'],
         'detect': ['background'],
-        'refine': ['detect'],
+        'detect_quality': ['detect'],
+        'refine': ['detect_quality'],
         'crop': ['detect'],
         'keypoints': ['crop', 'background'],
         'keypoints_refine': ['keypoints'],
@@ -158,7 +161,7 @@ class Pipeline:
         'track': ['keypoints'],
     }
 
-    ANALYSIS_STAGES = {'background', 'detect', 'track', 'refine', 'keypoints_refine', 'refined_eye_masks'}
+    ANALYSIS_STAGES = {'background', 'detect', 'detect_quality', 'track', 'refine', 'keypoints_refine', 'refined_eye_masks'}
     DATA_STAGES = {'import', 'downsample'}
     
     def __init__(
@@ -365,9 +368,9 @@ class Pipeline:
             deps = self.STAGE_DEPENDENCIES.get(stage, [])
             for dep in deps:
                 if dep not in existing_stages:
-                    # Special case: refine only needs detect data, not video/background
+                    # Special case: refine/detect_quality only need detect data, not video/background
                     # If detect_runs exists, skip import/background/downsample dependencies
-                    if stage == 'refine' and dep in ['import', 'background', 'downsample']:
+                    if stage in ('refine', 'detect_quality') and dep in ['import', 'background', 'downsample']:
                         if 'detect' in existing_stages:
                             continue  # Skip video pipeline deps if detections exist
                     
@@ -386,6 +389,7 @@ class Pipeline:
             'downsample',
             'background',
             'detect',
+            'detect_quality',
             'refine',
             'crop',
             'keypoints',
@@ -405,6 +409,8 @@ class Pipeline:
                 self._run_background()
             elif stage == 'detect':
                 self._run_detect()
+            elif stage == 'detect_quality':
+                self._run_detect_quality()
             elif stage == 'crop':
                 self._run_crop()
             elif stage == 'keypoints':
@@ -800,7 +806,31 @@ class Pipeline:
         )
         
         self.console.print(f"[green]✓[/green] Detection refinement saved as [cyan]{run_name}[/cyan]")
-    
+
+    def _run_detect_quality(self) -> None:
+        """Run detection quality assessment stage."""
+        quality_params = self.pipeline_params.get('detect_quality', {})
+
+        report = analyze_detect_quality(
+            zarr_path=self.config.zarr_path,
+            jump_threshold=quality_params.get('jump_threshold', 100.0),
+            blip_gap_threshold=quality_params.get('blip_gap_threshold', 10),
+            threshold_mode=quality_params.get('threshold_mode', 'scaled'),
+            threshold_reference_width=quality_params.get('threshold_reference_width', 640.0),
+        )
+
+        save_quality_report(
+            zarr_path=self.config.zarr_path,
+            quality_report=report,
+            console=self.console,
+        )
+
+        score = report['quality_score']
+        self.console.print(
+            f"[green]✓[/green] Detection quality: grade [cyan]{score['grade']}[/cyan] "
+            f"(score {score['overall_score']:.1f})"
+        )
+
     def _run_assign_ids(self) -> None:
         """
         Run ID assignment stage.
@@ -1246,7 +1276,21 @@ class Pipeline:
                     return False
                 latest = root['detect_runs'].attrs.get('latest')
                 return latest is not None
-            
+
+            elif stage == 'detect_quality':
+                if 'detect_runs' not in root:
+                    return False
+                detect_latest = root['detect_runs'].attrs.get('latest')
+                if detect_latest is None:
+                    return False
+                detect_run = root['detect_runs'].get(detect_latest)
+                if detect_run is None:
+                    return False
+                qr = detect_run.get('quality_reports')
+                if qr is None:
+                    return False
+                return qr.attrs.get('latest') is not None
+
             elif stage == 'crop':
                 if 'crop_runs' not in root:
                     return False
@@ -1506,6 +1550,7 @@ Examples:
             'downsample',
             'background',
             'detect',
+            'detect_quality',
             'crop',
             'keypoints',
             'eye_masks',

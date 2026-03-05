@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -141,6 +142,130 @@ def _collect_unapproved_rows(
     return rows
 
 
+def _object_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = ? LIMIT 1;",
+        (str(name),),
+    ).fetchone()
+    return row is not None
+
+
+def _collect_unapproved_rows_from_registry(
+    registry_path: Path,
+    *,
+    zarr_use_filter: str,
+    approved_state: str,
+    path_contains: Optional[str],
+) -> List[UnapprovedRow]:
+    conn = sqlite3.connect(str(registry_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _object_exists(conn, "datasets"):
+            raise RuntimeError(f"{registry_path}: missing datasets table")
+
+        has_detect_quality_current = _object_exists(conn, "detect_quality_current")
+        if has_detect_quality_current:
+            sql = [
+                "WITH detect_choice AS (",
+                "  SELECT",
+                "    dqc.dataset_id AS dataset_id,",
+                "    dqc.refined_run AS refined_run,",
+                "    dqc.review_state AS review_state,",
+                "    dqc.review_intended_use AS review_intended_use,",
+                "    dqc.review_resolved_group AS review_resolved_group,",
+                "    ROW_NUMBER() OVER (",
+                "      PARTITION BY dqc.dataset_id",
+                "      ORDER BY",
+                "        COALESCE(dqc.review_timestamp_utc, dqc.refined_created_utc, dqc.quality_updated_utc) DESC,",
+                "        COALESCE(dqc.refined_created_utc, '') DESC,",
+                "        dqc.refined_run DESC",
+                "    ) AS _rn",
+                "  FROM detect_quality_current dqc",
+                ")",
+                "SELECT",
+                "  d.zarr_path AS zarr_path,",
+                "  d.zarr_use AS zarr_use,",
+                "  dc.refined_run AS latest_refined_run,",
+                "  dc.review_state AS review_state,",
+                "  dc.review_intended_use AS review_intended_use,",
+                "  dc.review_resolved_group AS review_resolved_group",
+                "FROM datasets d",
+                "LEFT JOIN detect_choice dc",
+                "  ON dc.dataset_id = d.dataset_id AND dc._rn = 1",
+                "WHERE d.zarr_path IS NOT NULL AND TRIM(d.zarr_path) != ''",
+                "  AND (d.status IS NULL OR d.status != 'missing')",
+            ]
+        else:
+            sql = [
+                "SELECT",
+                "  d.zarr_path AS zarr_path,",
+                "  d.zarr_use AS zarr_use,",
+                "  NULL AS latest_refined_run,",
+                "  NULL AS review_state,",
+                "  NULL AS review_intended_use,",
+                "  NULL AS review_resolved_group",
+                "FROM datasets d",
+                "WHERE d.zarr_path IS NOT NULL AND TRIM(d.zarr_path) != ''",
+                "  AND (d.status IS NULL OR d.status != 'missing')",
+            ]
+
+        params: List[object] = []
+        if zarr_use_filter != "any":
+            sql.append("  AND LOWER(COALESCE(d.zarr_use, '')) = ?")
+            params.append(str(zarr_use_filter).strip().lower())
+        if path_contains:
+            sql.append("  AND d.zarr_path LIKE ?")
+            params.append(f"%{str(path_contains)}%")
+        sql.append("ORDER BY d.zarr_path")
+
+        rows = conn.execute(" ".join(sql), params).fetchall()
+    finally:
+        conn.close()
+
+    approved_norm = str(approved_state).strip().lower()
+    out: List[UnapprovedRow] = []
+    for row in rows:
+        zarr_path = str(row["zarr_path"]).strip()
+        if not zarr_path:
+            continue
+
+        zarr_use = str(row["zarr_use"] or "unknown").strip().lower() or "unknown"
+        latest_refined_run = str(row["latest_refined_run"]).strip() if row["latest_refined_run"] is not None else None
+        latest_refined_run = latest_refined_run or None
+        review_state = str(row["review_state"]).strip() if row["review_state"] is not None else None
+        review_state = review_state or None
+        review_intended_use = (
+            str(row["review_intended_use"]).strip() if row["review_intended_use"] is not None else None
+        )
+        review_intended_use = review_intended_use or None
+        review_resolved_group = (
+            str(row["review_resolved_group"]).strip() if row["review_resolved_group"] is not None else None
+        )
+        review_resolved_group = review_resolved_group or None
+
+        if latest_refined_run is None:
+            reason = "no_detect_quality_row"
+        elif review_state is None:
+            reason = "review_state_missing"
+        elif review_state.strip().lower() != approved_norm:
+            reason = "review_state_not_approved"
+        else:
+            continue
+
+        out.append(
+            UnapprovedRow(
+                zarr_path=zarr_path,
+                zarr_use=zarr_use,
+                latest_refined_run=latest_refined_run,
+                review_state=review_state,
+                review_intended_use=review_intended_use,
+                review_resolved_group=review_resolved_group,
+                reason=reason,
+            )
+        )
+    return out
+
+
 def _write_text(paths: List[str], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     payload = "\n".join(paths)
@@ -202,16 +327,34 @@ def main(argv: Optional[List[str]] = None) -> int:
         type=Path,
         help="Optional TSV output with detailed status columns.",
     )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help="Optional registry sqlite path; when provided, list from registry instead of crawling files.",
+    )
+    parser.add_argument(
+        "--path-contains",
+        type=str,
+        help="Optional substring filter applied to zarr_path (primarily for registry mode).",
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON rows to stdout.")
     args = parser.parse_args(argv)
 
-    roots = _resolve_roots(args.paths)
-    rows = _collect_unapproved_rows(
-        roots,
-        recursive=bool(args.recursive),
-        zarr_use_filter=str(args.zarr_use),
-        approved_state=str(args.approved_state),
-    )
+    if args.registry is not None:
+        rows = _collect_unapproved_rows_from_registry(
+            Path(args.registry),
+            zarr_use_filter=str(args.zarr_use),
+            approved_state=str(args.approved_state),
+            path_contains=args.path_contains,
+        )
+    else:
+        roots = _resolve_roots(args.paths)
+        rows = _collect_unapproved_rows(
+            roots,
+            recursive=bool(args.recursive),
+            zarr_use_filter=str(args.zarr_use),
+            approved_state=str(args.approved_state),
+        )
 
     _write_text([row.zarr_path for row in rows], args.output)
     if args.details is not None:
@@ -229,4 +372,3 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
-

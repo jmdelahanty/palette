@@ -9,6 +9,8 @@ explicitly declare quality gate thresholds out of scope. This document fills
 that gap so gate behavior can be audited and compared across types without
 reading implementation code.
 
+Related TODO: `docs/keypoint_multi_skeleton_todo.md`
+
 ## Scope
 
 In scope:

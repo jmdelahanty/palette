@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
-from fisheye.utils.list_unapproved_analysis_zarrs import _collect_unapproved_rows
+from fisheye.utils.list_unapproved_analysis_zarrs import (
+    _collect_unapproved_rows,
+    _collect_unapproved_rows_from_registry,
+)
 
 
 def _write_zarr_json(path: Path, attrs: dict) -> None:
@@ -80,3 +84,82 @@ def test_collect_unapproved_rows_includes_no_latest_refined_run(tmp_path: Path) 
     assert row.zarr_path == str(no_latest)
     assert row.latest_refined_run is None
     assert row.reason == "no_latest_refined_run"
+
+
+def _write_registry_fixture(path: Path) -> None:
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE datasets (
+                dataset_id TEXT PRIMARY KEY,
+                zarr_path TEXT,
+                zarr_use TEXT,
+                status TEXT
+            );
+
+            CREATE TABLE detect_quality_current (
+                dataset_id TEXT,
+                refined_run TEXT,
+                refined_created_utc TEXT,
+                review_state TEXT,
+                review_intended_use TEXT,
+                review_resolved_group TEXT,
+                review_timestamp_utc TEXT,
+                quality_updated_utc TEXT
+            );
+            """
+        )
+        conn.executemany(
+            "INSERT INTO datasets(dataset_id, zarr_path, zarr_use, status) VALUES (?, ?, ?, ?)",
+            [
+                ("d_approved", "/nvme1/recordings/a/zarr/a_analysis.zarr", "analysis", None),
+                ("d_review", "/nvme1/recordings/b/zarr/b_analysis.zarr", "analysis", None),
+                ("d_missing_state", "/nvme1/recordings/c/zarr/c_analysis.zarr", "analysis", None),
+                ("d_no_quality", "/nvme1/recordings/d/zarr/d_analysis.zarr", "analysis", None),
+                ("d_training", "/nvme1/recordings/e/zarr/e_training.zarr", "training", None),
+                ("d_missing", "/nvme1/recordings/f/zarr/f_analysis.zarr", "analysis", "missing"),
+                ("d_other_root", "/tmp/other_root/g_analysis.zarr", "analysis", None),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO detect_quality_current(
+                dataset_id, refined_run, refined_created_utc, review_state, review_intended_use,
+                review_resolved_group, review_timestamp_utc, quality_updated_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("d_approved", "refined_1", "2026-01-01T00:00:00Z", "approved", "training", "manual", None, None),
+                ("d_review", "refined_2", "2026-01-02T00:00:00Z", "needs_review", "training", "interpolated", None, None),
+                ("d_missing_state", "refined_3", "2026-01-03T00:00:00Z", None, None, "interpolated", None, None),
+                ("d_training", "refined_4", "2026-01-04T00:00:00Z", "needs_review", "training", "interpolated", None, None),
+                ("d_missing", "refined_5", "2026-01-05T00:00:00Z", "needs_review", "training", "interpolated", None, None),
+                ("d_other_root", "refined_6", "2026-01-06T00:00:00Z", "needs_review", "training", "interpolated", None, None),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_collect_unapproved_rows_from_registry_filters_and_classifies(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _write_registry_fixture(registry_path)
+
+    rows = _collect_unapproved_rows_from_registry(
+        registry_path,
+        zarr_use_filter="analysis",
+        approved_state="approved",
+        path_contains="/nvme1/recordings",
+    )
+
+    by_path = {row.zarr_path: row for row in rows}
+    assert "/nvme1/recordings/a/zarr/a_analysis.zarr" not in by_path
+    assert "/nvme1/recordings/e/zarr/e_training.zarr" not in by_path
+    assert "/nvme1/recordings/f/zarr/f_analysis.zarr" not in by_path
+    assert "/tmp/other_root/g_analysis.zarr" not in by_path
+
+    assert by_path["/nvme1/recordings/b/zarr/b_analysis.zarr"].reason == "review_state_not_approved"
+    assert by_path["/nvme1/recordings/c/zarr/c_analysis.zarr"].reason == "review_state_missing"
+    assert by_path["/nvme1/recordings/d/zarr/d_analysis.zarr"].reason == "no_detect_quality_row"

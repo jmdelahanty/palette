@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ class ReviewPlan:
     refined_run: Optional[str]
     status: str
     reason: Optional[str] = None
+    review_state: Optional[str] = None
 
 
 def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
@@ -69,7 +71,198 @@ def _latest_run(parent: zarr.Group) -> Optional[str]:
     return sorted(names)[-1]
 
 
-def _build_plans(roots: List[Path], recursive: bool, refined_run: Optional[str]) -> List[ReviewPlan]:
+def _normalize_optional_text(raw: object) -> Optional[str]:
+    if raw is None:
+        return None
+    text = str(raw).strip().lower()
+    if not text:
+        return None
+    return text
+
+
+def _normalize_review_state(raw: object) -> Optional[str]:
+    state = raw.get("state") if isinstance(raw, dict) else raw
+    return _normalize_optional_text(state)
+
+
+def _normalize_scope_roots(paths: List[Path]) -> List[Path]:
+    roots: List[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        normalized = path.expanduser().resolve(strict=False)
+        key = str(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(normalized)
+    return roots
+
+
+def _is_in_scope(target: Path, scope_roots: List[Path]) -> bool:
+    if not scope_roots:
+        return True
+    normalized_target = target.expanduser().resolve(strict=False)
+    for root in scope_roots:
+        if root.suffix == ".zarr":
+            if normalized_target == root:
+                return True
+            continue
+        try:
+            normalized_target.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
+    for key in ("zarr_use", "zarr_purpose"):
+        raw = root.attrs.get(key)
+        if raw is None:
+            continue
+        value = str(raw).strip().lower()
+        if value in {"analysis", "training"}:
+            return value
+    name = zarr_path.name.lower()
+    if name.endswith("_analysis.zarr"):
+        return "analysis"
+    if name.endswith("_training.zarr"):
+        return "training"
+    return None
+
+
+def _build_plans_from_registry(
+    registry_path: Path,
+    roots: List[Path],
+    refined_run: Optional[str],
+    zarr_use: str,
+) -> List[ReviewPlan]:
+    scope_roots = _normalize_scope_roots(roots)
+    plans: List[ReviewPlan] = []
+    try:
+        with sqlite3.connect(str(registry_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            if refined_run:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        d.zarr_path AS zarr_path,
+                        kq.refined_run AS refined_run,
+                        kq.review_state AS review_state,
+                        d.zarr_use AS zarr_use
+                    FROM keypoint_quality kq
+                    JOIN datasets d ON d.dataset_id = kq.dataset_id
+                    WHERE kq.refined_run = ?
+                      AND (d.status IS NULL OR lower(d.status) != 'missing');
+                    """,
+                    (refined_run,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    WITH ranked AS (
+                        SELECT
+                            kqc.dataset_id AS dataset_id,
+                            kqc.refined_run AS refined_run,
+                            kqc.review_state AS review_state,
+                            d.zarr_path AS zarr_path,
+                            d.zarr_use AS zarr_use,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY kqc.dataset_id
+                                ORDER BY
+                                    COALESCE(kqc.review_timestamp_utc, kqc.refined_created_utc, kqc.quality_updated_utc) DESC,
+                                    COALESCE(kqc.refined_created_utc, '') DESC,
+                                    kqc.refined_run DESC
+                            ) AS _rn
+                        FROM keypoint_quality_current kqc
+                        JOIN datasets d ON d.dataset_id = kqc.dataset_id
+                        WHERE d.zarr_path IS NOT NULL
+                          AND TRIM(d.zarr_path) != ''
+                          AND (d.status IS NULL OR lower(d.status) != 'missing')
+                    )
+                    SELECT
+                        zarr_path,
+                        refined_run,
+                        review_state,
+                        zarr_use
+                    FROM ranked
+                    WHERE _rn = 1;
+                    """
+                ).fetchall()
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"Failed to query registry keypoint quality rows: {exc}") from exc
+
+    for row in rows:
+        raw_zarr_path = row["zarr_path"]
+        raw_refined_run = row["refined_run"]
+        review_state = _normalize_review_state(row["review_state"])
+
+        if raw_zarr_path is None:
+            plans.append(
+                ReviewPlan(
+                    zarr_path=Path("<unknown>"),
+                    refined_run=str(raw_refined_run) if raw_refined_run is not None else None,
+                    review_state=review_state,
+                    status="error",
+                    reason="missing zarr_path in registry row",
+                )
+            )
+            continue
+        if raw_refined_run is None:
+            plans.append(
+                ReviewPlan(
+                    zarr_path=Path(str(raw_zarr_path)).expanduser(),
+                    refined_run=None,
+                    review_state=review_state,
+                    status="error",
+                    reason="missing refined_run in registry row",
+                )
+            )
+            continue
+
+        zarr_path = Path(str(raw_zarr_path)).expanduser()
+        if not _is_in_scope(zarr_path, scope_roots):
+            plans.append(
+                ReviewPlan(
+                    zarr_path=zarr_path,
+                    refined_run=str(raw_refined_run),
+                    review_state=review_state,
+                    status="filtered",
+                    reason="outside requested scope",
+                )
+            )
+            continue
+
+        observed_use = _normalize_optional_text(row["zarr_use"])
+        if zarr_use != "any" and observed_use != zarr_use:
+            plans.append(
+                ReviewPlan(
+                    zarr_path=zarr_path,
+                    refined_run=str(raw_refined_run),
+                    review_state=review_state,
+                    status="filtered",
+                    reason=f"zarr_use={observed_use or 'unknown'}",
+                )
+            )
+            continue
+
+        plans.append(
+            ReviewPlan(
+                zarr_path=zarr_path,
+                refined_run=str(raw_refined_run),
+                review_state=review_state,
+                status="ok",
+            )
+        )
+    return sorted(plans, key=lambda p: str(p.zarr_path))
+
+
+def _build_plans(
+    roots: List[Path],
+    recursive: bool,
+    refined_run: Optional[str],
+    zarr_use: str,
+) -> List[ReviewPlan]:
     plans: List[ReviewPlan] = []
     for zarr_path in _iter_zarr(roots, recursive):
         try:
@@ -85,12 +278,26 @@ def _build_plans(roots: List[Path], recursive: bool, refined_run: Optional[str])
             )
             continue
 
+        observed_use = _infer_zarr_use(root, zarr_path)
+        if zarr_use != "any" and observed_use != zarr_use:
+            plans.append(
+                ReviewPlan(
+                    zarr_path=zarr_path,
+                    refined_run=None,
+                    review_state=None,
+                    status="filtered",
+                    reason=f"zarr_use={observed_use or 'unknown'}",
+                )
+            )
+            continue
+
         refined_parent = root.get("refined_keypoints_runs") or root.get("keypoints_refined_runs")
         if refined_parent is None:
             plans.append(
                 ReviewPlan(
                     zarr_path=zarr_path,
                     refined_run=None,
+                    review_state=None,
                     status="missing",
                     reason="no refined_keypoints_runs",
                 )
@@ -103,6 +310,7 @@ def _build_plans(roots: List[Path], recursive: bool, refined_run: Optional[str])
                 ReviewPlan(
                     zarr_path=zarr_path,
                     refined_run=None,
+                    review_state=None,
                     status="missing",
                     reason="no refined keypoints runs",
                 )
@@ -113,16 +321,20 @@ def _build_plans(roots: List[Path], recursive: bool, refined_run: Optional[str])
                 ReviewPlan(
                     zarr_path=zarr_path,
                     refined_run=run_name,
+                    review_state=None,
                     status="missing",
                     reason="refined keypoints run not found",
                 )
             )
             continue
 
+        run_group = refined_parent[run_name]
+        review_state = _normalize_review_state(run_group.attrs.get("keypoint_review_status"))
         plans.append(
             ReviewPlan(
                 zarr_path=zarr_path,
                 refined_run=run_name,
+                review_state=review_state,
                 status="ok",
             )
         )
@@ -145,6 +357,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Recording roots or Zarr paths to scan.",
     )
     parser.add_argument(
+        "--registry",
+        type=Path,
+        help=(
+            "Optional registry sqlite path. When provided, candidates are selected from "
+            "registry views/tables (no zarr filesystem scan)."
+        ),
+    )
+    parser.add_argument(
+        "--registry-only",
+        action="store_true",
+        help="Fail if registry-based selection cannot be used.",
+    )
+    parser.add_argument(
         "--recursive",
         action="store_true",
         help="Recursively scan for Zarrs under each root.",
@@ -159,6 +384,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--refined-run",
         type=str,
         help="Specific refined keypoint run name to use (default: latest per Zarr).",
+    )
+    parser.add_argument(
+        "--zarr-use",
+        choices=["analysis", "training", "any"],
+        default="any",
+        help="Filter zarr archives by use (default: any).",
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--retune", action="store_true", help="Run failure retune UI.")
@@ -257,15 +488,46 @@ def main(argv: Optional[List[str]] = None) -> int:
         for path in args.file_list:
             file_list_paths.extend(_load_paths_file(path))
 
+    roots: List[Path] = []
     if args.paths:
-        roots = list(args.paths) + file_list_paths
-    elif file_list_paths:
-        roots = file_list_paths
-    else:
+        roots.extend(args.paths)
+    if file_list_paths:
+        roots.extend(file_list_paths)
+    if not roots:
         env_root = os.environ.get("PALETTE_RECORDINGS_ROOT")
         roots = [Path(env_root)] if env_root else [Path("/nvme1/recordings")]
 
-    plans = _build_plans(roots, args.recursive, args.refined_run)
+    if args.registry_only and not args.registry:
+        print("--registry-only requires --registry.")
+        return 2
+
+    plans: List[ReviewPlan]
+    if args.registry:
+        try:
+            plans = _build_plans_from_registry(
+                Path(args.registry),
+                roots=roots,
+                refined_run=args.refined_run,
+                zarr_use=str(args.zarr_use),
+            )
+        except RuntimeError as exc:
+            if args.registry_only:
+                print(str(exc))
+                return 1
+            print(f"{exc}; falling back to filesystem scan.")
+            plans = _build_plans(
+                roots,
+                recursive=bool(args.recursive),
+                refined_run=args.refined_run,
+                zarr_use=str(args.zarr_use),
+            )
+    else:
+        plans = _build_plans(
+            roots,
+            recursive=bool(args.recursive),
+            refined_run=args.refined_run,
+            zarr_use=str(args.zarr_use),
+        )
 
     if not plans:
         print("No recordings found to review.")

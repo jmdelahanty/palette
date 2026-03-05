@@ -35,6 +35,11 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--dpf", type=int, help="Exact dpf_at_acquisition match.")
     parser.add_argument("--dpf-min", type=int, help="Minimum dpf_at_acquisition.")
     parser.add_argument("--dpf-max", type=int, help="Maximum dpf_at_acquisition.")
+    parser.add_argument(
+        "--since",
+        type=str,
+        help="Only datasets created on or after this date (YYYY-MM-DD).",
+    )
 
     parser.add_argument(
         "--provenance",
@@ -168,6 +173,8 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
         add_clause("AND p.dpf_at_acquisition >= ?", args.dpf_min)
     if args.dpf_max is not None:
         add_clause("AND p.dpf_at_acquisition <= ?", args.dpf_max)
+    if args.since:
+        add_clause("AND d.created_utc >= ?", args.since)
 
     provenance_mode = "missing" if args.missing else args.provenance
     if provenance_mode == "complete":

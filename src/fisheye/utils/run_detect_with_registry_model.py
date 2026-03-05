@@ -12,10 +12,99 @@ from typing import Any, Optional
 import zarr
 
 from fisheye.detection.detect_yolo import detect_yolo
-from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.registry.db import Registry, RegistryPaths, resolve_dataset_id
+from fisheye.registry.status_ledger import upsert_recording_step_status
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils.resolve_detect_model import Candidate, TargetProfile
 from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
+
+_DETECT_STATUS_SOURCE = "runtime_detect_with_registry_model"
+
+
+def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _normalize_attr(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "ignore")
+    return str(value)
+
+
+def _emit_detect_step_status(
+    *,
+    zarr_path: Path,
+    status: str,
+    run_name: Optional[str],
+    reason: Optional[str],
+    selected_model_path: Optional[str],
+    selected_run_id: Optional[str],
+    selected_set_id: Optional[str],
+) -> None:
+    """Write a detect step status row to the registry (non-fatal)."""
+    try:
+        root = zarr.open(str(zarr_path), mode="r")
+        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
+        recording_id = _normalize_attr(root.attrs.get("recording_id")) or _normalize_attr(session_uuid)
+        zarr_use = _normalize_attr(root.attrs.get("zarr_use"))
+        zarr_purpose = _normalize_attr(root.attrs.get("zarr_purpose"))
+
+        # Extract method and coverage from the detect run if available
+        method = None
+        coverage_pct = None
+        if run_name and status == "ok":
+            detect_runs = root.get("detect_runs")
+            if detect_runs is not None and run_name in detect_runs:
+                detect_group = detect_runs[run_name]
+                method = _normalize_attr(detect_group.attrs.get("detection_method"))
+                summary = detect_group.attrs.get("summary_statistics")
+                if isinstance(summary, dict):
+                    cov = summary.get("coverage_pct") or summary.get("coverage_percent")
+                    if cov is not None:
+                        try:
+                            coverage_pct = float(cov)
+                        except (TypeError, ValueError):
+                            pass
+
+        registry_path = RegistryPaths.from_env(Path.cwd()).path
+        registry = Registry(registry_path)
+        try:
+            registry.upsert_dataset(
+                dataset_id,
+                session_uuid=session_uuid,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+                zarr_purpose=zarr_purpose,
+            )
+            upsert_recording_step_status(
+                registry,
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                step_name="detect",
+                status=status,
+                run_name=run_name,
+                method=method,
+                coverage_pct=coverage_pct,
+                review_status_json=None,
+                details_json={
+                    "reason": reason,
+                    "selected_model_path": selected_model_path,
+                    "run_id": selected_run_id,
+                    "set_id": selected_set_id,
+                },
+                source=_DETECT_STATUS_SOURCE,
+                zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_path),
+            )
+        finally:
+            registry.close()
+    except Exception:
+        pass  # Non-fatal; batch runners log results via JSONL already
 
 
 @dataclass(frozen=True)
@@ -412,6 +501,15 @@ def run_detect_with_registry_model(
             overwrite_raw_video_metadata=bool(overwrite_raw_video_metadata),
         )
     except Exception as exc:
+        _emit_detect_step_status(
+            zarr_path=resolved_output_path,
+            status="error",
+            run_name=None,
+            reason="detect_inference_failed",
+            selected_model_path=selected_model_path,
+            selected_run_id=selected_run_id,
+            selected_set_id=selected_set_id,
+        )
         return _failure_result(
             reason="detect_inference_failed",
             error=str(exc),
@@ -449,6 +547,16 @@ def run_detect_with_registry_model(
             resolved_at_utc=resolved_at_utc,
             resolution_payload=payload,
         )
+
+    _emit_detect_step_status(
+        zarr_path=resolved_output_path,
+        status="ok",
+        run_name=run_name,
+        reason="detect_inference_ok",
+        selected_model_path=selected_model_path,
+        selected_run_id=selected_run_id,
+        selected_set_id=selected_set_id,
+    )
 
     return DetectRegistryResult(
         ok=True,

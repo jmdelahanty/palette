@@ -6,17 +6,26 @@ BATCH_SIZE=10
 MAX_ACTIVE=2
 QUEUE=""
 NCORES=4
-MEM_GB=16
-CONFIG="configs/fisheye/default.yaml"
+MEM_GB=32
 REGISTRY="/nvme1/palette_registry.sqlite"
-SCHEDULER="threads"
+CONFIG=""
+SOURCE_TYPE=""
+SOURCE_PATH=""
+PREFERRED_POLICY=""
+SCHEDULER=""
 NUM_WORKERS=""
-SET_ID=""
-TOP_K=5
-REQUIRE_UNIQUE=0
-INCLUDE_NON_SUCCESS=0
-REQUIRE_TUNING=0
-OVERWRITE=0
+ACCELERATION=""
+EXTERNAL_WRITE_BACKEND=""
+EXTERNAL_ROI_STORAGE=""
+EXTERNAL_USE_SHARDING=""
+EXTERNAL_ROI_CHUNK_SIZE=""
+EXTERNAL_ROI_SHARD_SIZE=""
+EXTERNAL_GPU_CHUNK_FRAMES=""
+REQUIRE_KVIKIO=0
+NO_GPU=0
+FORCE_CPU=0
+FORCE_NEW=0
+VERBOSE=0
 LOG_DIR=""
 RUN_ID_OVERRIDE=""
 DRY_RUN=0
@@ -25,10 +34,11 @@ RIG_ID=""
 ARENA_ID=""
 CAMERA_ID=""
 PATH_CONTAINS=""
+ZAR_USE="analysis"
 
 usage() {
   cat <<'USAGE'
-Usage: submit_detect_batches_bsub.sh [options]
+Usage: submit_crop_batches_bsub.sh [options]
 
 Options:
   --root PATH               Root recordings directory (default: /nvme1/recordings)
@@ -36,18 +46,28 @@ Options:
   --max-active N            Max concurrent jobs in array (default: 2)
   --queue NAME              LSF queue name
   --ncores N                Cores per job (default: 4)
-  --mem-gb N                Memory per job in GB (default: 16)
-  --config PATH             Detect config path (default: configs/fisheye/default.yaml)
+  --mem-gb N                Memory per job in GB (default: 32)
   --registry PATH           Registry sqlite path (default: /nvme1/palette_registry.sqlite)
-  --scheduler NAME          Legacy pass-through option for batch runner compatibility
-  --num-workers N           Legacy pass-through option for batch runner compatibility
-  --set-id ID               Optional detect set filter for registry model resolution
-  --top-k N                 Candidate provenance depth (default: 5)
-  --require-unique          Fail if top model scores tie
-  --include-non-success     Include non-success runs in model resolution
-  --require-tuning          Skip zarrs without detection_tuning
-  --overwrite               Run detection even if detect_runs/latest exists
-  --log-dir PATH            Submission logs (default: <root>/logs/run_detections_batch/bsub_submissions)
+  --config PATH             Crop config YAML path
+  --source-type TYPE        Detection source type (detect/filtered/interpolated/manual/preferred/auto)
+  --source-path PATH        Explicit detection source path
+  --preferred-policy POLICY Policy for preferred/auto source selection
+  --scheduler NAME          Dask scheduler (processes/threads/distributed)
+  --num-workers N           Dask worker count
+  --acceleration {auto,gpu,cpu}  GPU/CPU acceleration mode
+  --external-write-backend {standard,kvikio}  Write backend for external-video
+  --external-roi-storage {compressed,uncompressed}  ROI storage mode
+  --external-use-sharding   Enable sharding for external-video ROI writes
+  --external-roi-chunk-size N   Detection-axis chunk length
+  --external-roi-shard-size N   Detection-axis shard length
+  --external-gpu-chunk-frames N Frame count decoded per GPU crop chunk
+  --require-kvikio          Fail if kvikIO GDS writes cannot be enabled
+  --no-gpu                  Disable GPU
+  --force-cpu               Force CPU
+  --force-new               Always create new crop run (disables skip-existing)
+  --verbose                 Verbose logging
+  --zarr-use {analysis,training,any}  Zarr use filter (default: analysis)
+  --log-dir PATH            Submission logs (default: <root>/logs/crop_batch/bsub_submissions)
   --run-id ID               Optional stable run id for deterministic reruns
   --dry-run                 Print manifests + commands; do not submit
   --source {filesystem,registry}  Discovery source for analysis zarrs (default: filesystem)
@@ -67,16 +87,26 @@ while [[ $# -gt 0 ]]; do
     --queue) QUEUE="$2"; shift 2;;
     --ncores) NCORES="$2"; shift 2;;
     --mem-gb) MEM_GB="$2"; shift 2;;
-    --config) CONFIG="$2"; shift 2;;
     --registry) REGISTRY="$2"; shift 2;;
+    --config) CONFIG="$2"; shift 2;;
+    --source-type) SOURCE_TYPE="$2"; shift 2;;
+    --source-path) SOURCE_PATH="$2"; shift 2;;
+    --preferred-policy) PREFERRED_POLICY="$2"; shift 2;;
     --scheduler) SCHEDULER="$2"; shift 2;;
     --num-workers) NUM_WORKERS="$2"; shift 2;;
-    --set-id) SET_ID="$2"; shift 2;;
-    --top-k) TOP_K="$2"; shift 2;;
-    --require-unique) REQUIRE_UNIQUE=1; shift;;
-    --include-non-success) INCLUDE_NON_SUCCESS=1; shift;;
-    --require-tuning) REQUIRE_TUNING=1; shift;;
-    --overwrite) OVERWRITE=1; shift;;
+    --acceleration) ACCELERATION="$2"; shift 2;;
+    --external-write-backend) EXTERNAL_WRITE_BACKEND="$2"; shift 2;;
+    --external-roi-storage) EXTERNAL_ROI_STORAGE="$2"; shift 2;;
+    --external-use-sharding) EXTERNAL_USE_SHARDING="1"; shift;;
+    --external-roi-chunk-size) EXTERNAL_ROI_CHUNK_SIZE="$2"; shift 2;;
+    --external-roi-shard-size) EXTERNAL_ROI_SHARD_SIZE="$2"; shift 2;;
+    --external-gpu-chunk-frames) EXTERNAL_GPU_CHUNK_FRAMES="$2"; shift 2;;
+    --require-kvikio) REQUIRE_KVIKIO=1; shift;;
+    --no-gpu) NO_GPU=1; shift;;
+    --force-cpu) FORCE_CPU=1; shift;;
+    --force-new) FORCE_NEW=1; shift;;
+    --verbose) VERBOSE=1; shift;;
+    --zarr-use) ZAR_USE="$2"; shift 2;;
     --log-dir) LOG_DIR="$2"; shift 2;;
     --run-id) RUN_ID_OVERRIDE="$2"; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
@@ -91,7 +121,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$LOG_DIR" ]]; then
-  LOG_DIR="${ROOT}/logs/run_detections_batch/bsub_submissions"
+  LOG_DIR="${ROOT}/logs/crop_batch/bsub_submissions"
 fi
 
 if [[ -n "$RUN_ID_OVERRIDE" ]]; then
@@ -99,7 +129,7 @@ if [[ -n "$RUN_ID_OVERRIDE" ]]; then
 else
   RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 fi
-RUN_DIR="${LOG_DIR}/detect_${RUN_ID}"
+RUN_DIR="${LOG_DIR}/crop_${RUN_ID}"
 
 if [[ -e "$RUN_DIR" ]]; then
   echo "Run directory already exists: $RUN_DIR" >&2
@@ -108,8 +138,8 @@ if [[ -e "$RUN_DIR" ]]; then
 fi
 if ! mkdir -p "$RUN_DIR" 2>/dev/null; then
   if [[ "$DRY_RUN" == "1" ]]; then
-    FALLBACK_LOG_DIR="${TMPDIR:-/tmp}/palette/run_detections_batch/bsub_submissions"
-    RUN_DIR="${FALLBACK_LOG_DIR}/detect_${RUN_ID}"
+    FALLBACK_LOG_DIR="${TMPDIR:-/tmp}/palette/crop_batch/bsub_submissions"
+    RUN_DIR="${FALLBACK_LOG_DIR}/crop_${RUN_ID}"
     if [[ -e "$RUN_DIR" ]]; then
       echo "Fallback run directory already exists: $RUN_DIR" >&2
       echo "Choose a different --run-id or remove the existing run directory." >&2
@@ -126,15 +156,15 @@ fi
 
 if [[ "$SOURCE" == "registry" ]]; then
   # Use the Python batch module's --emit-paths mode for registry discovery.
-  DISCOVER_ARGS=(--source registry --emit-paths --registry "$REGISTRY" --no-log)
-  if [[ "$OVERWRITE" == "1" ]]; then DISCOVER_ARGS+=(--overwrite); fi
+  DISCOVER_ARGS=(--source registry --emit-paths --registry "$REGISTRY" --zarr-use "$ZAR_USE")
+  if [[ "$FORCE_NEW" == "1" ]]; then DISCOVER_ARGS+=(--force-new); fi
   if [[ -n "$RIG_ID" ]]; then DISCOVER_ARGS+=(--rig-id "$RIG_ID"); fi
   if [[ -n "$ARENA_ID" ]]; then DISCOVER_ARGS+=(--arena-id "$ARENA_ID"); fi
   if [[ -n "$CAMERA_ID" ]]; then DISCOVER_ARGS+=(--camera-id "$CAMERA_ID"); fi
   if [[ -n "$PATH_CONTAINS" ]]; then DISCOVER_ARGS+=(--path-contains "$PATH_CONTAINS"); fi
   DISCOVER_ARGS+=("$ROOT")
 
-  scripts/py -m fisheye.utils.run_detections_batch "${DISCOVER_ARGS[@]}" > "${RUN_DIR}/discovered_paths.txt"
+  scripts/py -m fisheye.utils.crop_batch "${DISCOVER_ARGS[@]}" > "${RUN_DIR}/discovered_paths.txt"
 
   scripts/py - "${RUN_DIR}/discovered_paths.txt" "$BATCH_SIZE" "$RUN_DIR" "$SOURCE" <<'PY'
 import json, math, sys
@@ -208,28 +238,26 @@ fi
 
 analysis_count=$(wc -l < "$RUN_DIR/recordings.txt" | tr -d ' ')
 
-EXTRA_ARGS=(--apply --no-dask-progress --registry "$REGISTRY" --top-k "$TOP_K" --config "$CONFIG")
-if [[ -n "$SCHEDULER" ]]; then
-  EXTRA_ARGS+=(--scheduler "$SCHEDULER")
-fi
-if [[ -n "$NUM_WORKERS" ]]; then
-  EXTRA_ARGS+=(--num-workers "$NUM_WORKERS")
-fi
-if [[ "$REQUIRE_TUNING" == "1" ]]; then
-  EXTRA_ARGS+=(--require-tuning)
-fi
-if [[ "$OVERWRITE" == "1" ]]; then
-  EXTRA_ARGS+=(--overwrite)
-fi
-if [[ -n "$SET_ID" ]]; then
-  EXTRA_ARGS+=(--set-id "$SET_ID")
-fi
-if [[ "$REQUIRE_UNIQUE" == "1" ]]; then
-  EXTRA_ARGS+=(--require-unique)
-fi
-if [[ "$INCLUDE_NON_SUCCESS" == "1" ]]; then
-  EXTRA_ARGS+=(--include-non-success)
-fi
+# Build per-batch args for crop_batch.
+EXTRA_ARGS=(--apply --zarr-use "$ZAR_USE")
+if [[ -n "$CONFIG" ]]; then EXTRA_ARGS+=(--config "$CONFIG"); fi
+if [[ -n "$SOURCE_TYPE" ]]; then EXTRA_ARGS+=(--source-type "$SOURCE_TYPE"); fi
+if [[ -n "$SOURCE_PATH" ]]; then EXTRA_ARGS+=(--source-path "$SOURCE_PATH"); fi
+if [[ -n "$PREFERRED_POLICY" ]]; then EXTRA_ARGS+=(--preferred-policy "$PREFERRED_POLICY"); fi
+if [[ -n "$SCHEDULER" ]]; then EXTRA_ARGS+=(--scheduler "$SCHEDULER"); fi
+if [[ -n "$NUM_WORKERS" ]]; then EXTRA_ARGS+=(--num-workers "$NUM_WORKERS"); fi
+if [[ -n "$ACCELERATION" ]]; then EXTRA_ARGS+=(--acceleration "$ACCELERATION"); fi
+if [[ -n "$EXTERNAL_WRITE_BACKEND" ]]; then EXTRA_ARGS+=(--external-write-backend "$EXTERNAL_WRITE_BACKEND"); fi
+if [[ -n "$EXTERNAL_ROI_STORAGE" ]]; then EXTRA_ARGS+=(--external-roi-storage "$EXTERNAL_ROI_STORAGE"); fi
+if [[ "$EXTERNAL_USE_SHARDING" == "1" ]]; then EXTRA_ARGS+=(--external-use-sharding); fi
+if [[ -n "$EXTERNAL_ROI_CHUNK_SIZE" ]]; then EXTRA_ARGS+=(--external-roi-chunk-size "$EXTERNAL_ROI_CHUNK_SIZE"); fi
+if [[ -n "$EXTERNAL_ROI_SHARD_SIZE" ]]; then EXTRA_ARGS+=(--external-roi-shard-size "$EXTERNAL_ROI_SHARD_SIZE"); fi
+if [[ -n "$EXTERNAL_GPU_CHUNK_FRAMES" ]]; then EXTRA_ARGS+=(--external-gpu-chunk-frames "$EXTERNAL_GPU_CHUNK_FRAMES"); fi
+if [[ "$REQUIRE_KVIKIO" == "1" ]]; then EXTRA_ARGS+=(--require-kvikio); fi
+if [[ "$NO_GPU" == "1" ]]; then EXTRA_ARGS+=(--no-gpu); fi
+if [[ "$FORCE_CPU" == "1" ]]; then EXTRA_ARGS+=(--force-cpu); fi
+if [[ "$FORCE_NEW" == "1" ]]; then EXTRA_ARGS+=(--force-new); fi
+if [[ "$VERBOSE" == "1" ]]; then EXTRA_ARGS+=(--verbose); fi
 
 printf -v EXTRA_ARGS_SHELL '%q ' "${EXTRA_ARGS[@]}"
 
@@ -252,11 +280,11 @@ if [[ "\${#recs[@]}" -eq 0 ]]; then
   echo "Empty batch file: \$BATCH_FILE"
   exit 0
 fi
-scripts/py -m fisheye.utils.run_detections_batch ${EXTRA_ARGS_SHELL}"\${recs[@]}"
+scripts/py -m fisheye.utils.crop_batch ${EXTRA_ARGS_SHELL}"\${recs[@]}"
 JOBSCRIPT
 chmod +x "$JOB_SCRIPT"
 
-BSUB_ARGS=(-J "detect_batch[1-${batch_count}]%${MAX_ACTIVE}" -n "$NCORES" -R "rusage[mem=${MEM_GB}G]" -oo "${RUN_DIR}/%J_%I.out" -eo "${RUN_DIR}/%J_%I.err")
+BSUB_ARGS=(-J "crop_batch[1-${batch_count}]%${MAX_ACTIVE}" -n "$NCORES" -R "rusage[mem=${MEM_GB}G]" -oo "${RUN_DIR}/%J_%I.out" -eo "${RUN_DIR}/%J_%I.err")
 if [[ -n "$QUEUE" ]]; then
   BSUB_ARGS+=(-q "$QUEUE")
 fi
@@ -266,7 +294,7 @@ BSUB_CMD+="bash "
 BSUB_CMD+="$(printf '%q' "$JOB_SCRIPT") "
 BSUB_CMD+="$(printf '%q' "$RUN_DIR")"
 
-printf -v DETECT_CMD 'scripts/py -m fisheye.utils.run_detections_batch %s<batch_zarr_paths>' "$EXTRA_ARGS_SHELL"
+printf -v CROP_CMD 'scripts/py -m fisheye.utils.crop_batch %s<batch_zarr_paths>' "$EXTRA_ARGS_SHELL"
 
 echo "Run dir: $RUN_DIR"
 echo "Source: $SOURCE"
@@ -280,7 +308,7 @@ echo "Queue: ${QUEUE:-<default>}"
 echo "Resources: ncores=$NCORES mem_gb=$MEM_GB"
 echo "Manifest file: $RUN_DIR/recordings.txt"
 echo "Batch files: $RUN_DIR/batch_*.txt"
-echo "Per-batch command: $DETECT_CMD"
+echo "Per-batch command: $CROP_CMD"
 echo "Submit command: $BSUB_CMD"
 
 if [[ "$DRY_RUN" == "1" ]]; then

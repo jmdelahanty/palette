@@ -218,6 +218,43 @@ def _coerce_mapping(value: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _open_child_group(parent: Any, key: str) -> Any:
+    store = getattr(parent, "store", None)
+    if store is None:
+        return None
+    parent_path = _decode_attr(getattr(parent, "path", None))
+    child_path = f"{parent_path}/{key}" if parent_path else key
+    zarr = _import_zarr()
+    try:
+        return zarr.open_group(store=store, path=child_path, mode="r")
+    except TypeError:
+        try:
+            return zarr.open_group(store, mode="r", path=child_path)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _get_group(parent: Any, key: str) -> Any:
+    child = None
+    getter = getattr(parent, "get", None)
+    if callable(getter):
+        try:
+            child = getter(key)
+        except Exception:
+            child = None
+    if child is not None:
+        return child
+    try:
+        child = parent[key]
+    except Exception:
+        child = None
+    if child is not None:
+        return child
+    return _open_child_group(parent, key)
+
+
 def _format_ratio(numerator: Optional[int], denominator: Optional[int]) -> Optional[float]:
     if numerator is None or denominator is None:
         return None
@@ -895,10 +932,10 @@ def _extract_keypoint_profile_rows(
     genotype: Optional[str],
     dpf_at_acquisition: Optional[int],
 ) -> List[Dict[str, Any]]:
-    analysis = root.get("analysis")
+    analysis = _get_group(root, "analysis")
     if analysis is None:
         return []
-    runs_parent = analysis.get("keypoint_profile_runs")
+    runs_parent = _get_group(analysis, "keypoint_profile_runs")
     if runs_parent is None:
         return []
 
@@ -910,9 +947,9 @@ def _extract_keypoint_profile_rows(
 
     rows: List[Dict[str, Any]] = []
     for profile_run in _keypoint_run_names(runs_parent):
-        if profile_run not in runs_parent:
+        run_group = _get_group(runs_parent, profile_run)
+        if run_group is None:
             continue
-        run_group = runs_parent[profile_run]
         summary = _coerce_mapping(run_group.attrs.get("profile_summary"))
         if not summary:
             continue
@@ -1868,6 +1905,11 @@ class Registry:
                 26,
                 "eye_mask_quality_registry",
                 self._migration_026_eye_mask_quality_registry,
+            ),
+            (
+                27,
+                "detect_quality_wide_view_columns",
+                self._migration_027_detect_quality_wide_view_columns,
             ),
         ]
 
@@ -4990,6 +5032,9 @@ class Registry:
                     MAX(CASE WHEN step_name = 'detect' THEN method END) AS detect_method,
                     MAX(CASE WHEN step_name = 'detect' THEN coverage_pct END) AS detect_coverage_pct,
                     MAX(CASE WHEN step_name = 'detect' THEN details_json END) AS detect_details_json,
+                    MAX(CASE WHEN step_name = 'detect_quality' THEN status END) AS detect_quality_status,
+                    MAX(CASE WHEN step_name = 'detect_quality' THEN run_name END) AS detect_quality_run_name,
+                    MAX(CASE WHEN step_name = 'detect_quality' THEN details_json END) AS detect_quality_details_json,
                     MAX(CASE WHEN step_name = 'refined_detect' THEN status END) AS refined_detect_status,
                     MAX(CASE WHEN step_name = 'refined_detect' THEN method END) AS refined_detect_method,
                     MAX(CASE WHEN step_name = 'refined_detect' THEN coverage_pct END) AS refined_detect_coverage_pct,
@@ -5124,17 +5169,20 @@ class Registry:
                         ) AS REAL
                     ) AS refined_keypoints_train_usable_pct,
                     COALESCE(
+                        CAST(json_extract(p.detect_quality_details_json, '$.quality_grade') AS TEXT),
                         CAST(json_extract(p.detect_details_json, '$.detect_quality_grade') AS TEXT),
                         CAST(json_extract(p.detect_details_json, '$.grade') AS TEXT)
                     ) AS detect_quality_grade,
                     CAST(
                         COALESCE(
+                            json_extract(p.detect_quality_details_json, '$.quality_score'),
                             json_extract(p.detect_details_json, '$.detect_quality_score'),
                             json_extract(p.detect_details_json, '$.score')
                         ) AS REAL
                     ) AS detect_quality_score,
                     CAST(
                         COALESCE(
+                            json_extract(p.detect_quality_details_json, '$.clean_percentage'),
                             json_extract(p.detect_details_json, '$.detect_quality_clean_percent'),
                             json_extract(p.detect_details_json, '$.clean_percent'),
                             json_extract(p.detect_details_json, '$.clean_percentage')
@@ -6748,6 +6796,10 @@ class Registry:
             WHERE _rn = 1;
             """
         )
+
+    def _migration_027_detect_quality_wide_view_columns(self) -> None:
+        """Re-create wide view to include detect_quality step columns."""
+        self._migration_020_recording_step_status_wide_view()
 
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
         existing = {
@@ -10503,11 +10555,16 @@ class Registry:
         arena_id: Optional[str] = None,
         model_input: Optional[str] = None,
         path_contains: Optional[str] = None,
+        status: Optional[str] = None,
+        exclude_status: Optional[str] = None,
+        require_recording: bool = False,
+        exclude_step_ok: Optional[str] = None,
+        require_steps_ok: Optional[Sequence[str]] = None,
         limit: Optional[int] = None,
     ) -> List[sqlite3.Row]:
         sql = [
             "SELECT d.dataset_id, d.session_uuid, d.zarr_path,",
-            "d.zarr_origin, d.zarr_use,",
+            "d.recording_id, d.zarr_origin, d.zarr_use, d.status,",
             "p.dish_design, p.fish_id, p.subject_count, p.fps, p.exposure, p.exposure_unit, p.frame_rate, p.gain,",
             "p.genotype, p.dpf_at_acquisition,",
             "p.video_codec, p.video_pix_fmt, p.format_title, p.format_comment, p.format_encoder,",
@@ -10519,9 +10576,28 @@ class Registry:
             "p.has_images_ds, p.has_images_ds_rgb, p.downsample_formats_json",
             "FROM datasets d",
             "LEFT JOIN provenance p ON d.dataset_id = p.dataset_id",
-            "WHERE 1=1",
         ]
         params: List[Any] = []
+
+        if exclude_step_ok is not None:
+            sql.append(
+                "LEFT JOIN recording_step_status rss_excl "
+                "ON d.dataset_id = rss_excl.dataset_id "
+                "AND rss_excl.step_name = ?"
+            )
+            params.append(str(exclude_step_ok).strip().lower())
+
+        if require_steps_ok is not None:
+            for i, step in enumerate(require_steps_ok):
+                alias = f"rss_req_{i}"
+                sql.append(
+                    f"INNER JOIN recording_step_status {alias} "
+                    f"ON d.dataset_id = {alias}.dataset_id "
+                    f"AND {alias}.step_name = ? AND {alias}.status = 'ok'"
+                )
+                params.append(str(step).strip().lower())
+
+        sql.append("WHERE 1=1")
 
         def add_clause(clause: str, value: Any) -> None:
             if value is None:
@@ -10579,6 +10655,14 @@ class Registry:
         if path_contains:
             sql.append("AND d.zarr_path LIKE ?")
             params.append(f"%{path_contains}%")
+        add_clause("AND d.status = ?", status)
+        if exclude_status is not None:
+            sql.append("AND (d.status IS NULL OR d.status != ?)")
+            params.append(exclude_status)
+        if require_recording:
+            sql.append("AND d.recording_id IS NOT NULL AND TRIM(d.recording_id) != ''")
+        if exclude_step_ok is not None:
+            sql.append("AND (rss_excl.status IS NULL OR rss_excl.status != 'ok')")
 
         sql.append("ORDER BY p.dish_design, p.fps, d.dataset_id")
         if limit is not None:

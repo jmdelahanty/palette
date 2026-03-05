@@ -251,8 +251,9 @@ Execution snapshot (2026-02-09, target DB `/nvme1/palette_registry.sqlite`):
 - [x] Should we store all detect runs or only the latest per dataset on first pass?
   - Recommendation: store all runs in table, expose latest via view.
   - Status: implemented — `_extract_detect_performance_rows()` stores all runs; latest exposed via `detect_performance_latest` view.
-- [ ] Should thresholds be policy-enforced now (alerts/gates) or observability-only?
-  - Recommendation: observability-only first.
+- [x] Should thresholds be policy-enforced now (alerts/gates) or observability-only?
+  - Decision: observability-only for now. `check_training_registry --view detect-performance` provides summary distributions (coverage/fps/read_ms avg/min/max, method/model counts, stale rows) and per-dataset detail tables. No pass/fail gate — the `detect_performance` table has no review_state fields, and 48 recordings is too thin for meaningful hard thresholds. Revisit gating after more data accumulates.
+  - Status: implemented (2026-02-26) — `detect-performance` view added to `check_training_registry` with `--show-detect-performance` detail flag, stale-row detection, and remediation hints pointing to `--backfill-detect-performance` / `--refresh-detect-performance`.
 - [x] Do we include non-source datasets (`derived_training_merge`) in this table?
   - Recommendation: source-recording datasets first; extend later if needed.
   - Status: implemented — default scope is source-analysis only; `--detect-performance-all-datasets` opt-in for broader scope.

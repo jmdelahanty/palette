@@ -3,6 +3,8 @@
 Purpose: define a canonical, reproducible summary payload for keypoint (pose)
 training datasets with parity to the detect training data-card flow.
 
+Related TODO: `docs/keypoint_multi_skeleton_todo.md`
+
 ## Scope
 
 In scope:

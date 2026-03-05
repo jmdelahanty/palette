@@ -6,16 +6,21 @@ BATCH_SIZE=10
 MAX_ACTIVE=2
 QUEUE=""
 NCORES=4
-MEM_GB=16
-CONFIG="configs/fisheye/default.yaml"
+MEM_GB=32
 REGISTRY="/nvme1/palette_registry.sqlite"
-SCHEDULER="threads"
-NUM_WORKERS=""
 SET_ID=""
 TOP_K=5
 REQUIRE_UNIQUE=0
 INCLUDE_NON_SUCCESS=0
-REQUIRE_TUNING=0
+CROP_RUN=""
+BATCH_SIZE_KP=256
+DEVICE=""
+IMGSZ=""
+CONF=""
+IOU=""
+MAX_DET=""
+MASK_THRESHOLD=""
+CPU=0
 OVERWRITE=0
 LOG_DIR=""
 RUN_ID_OVERRIDE=""
@@ -23,12 +28,12 @@ DRY_RUN=0
 SOURCE="filesystem"
 RIG_ID=""
 ARENA_ID=""
-CAMERA_ID=""
+CAMERA_ID_FILTER=""
 PATH_CONTAINS=""
 
 usage() {
   cat <<'USAGE'
-Usage: submit_detect_batches_bsub.sh [options]
+Usage: submit_keypoints_batches_bsub.sh [options]
 
 Options:
   --root PATH               Root recordings directory (default: /nvme1/recordings)
@@ -36,24 +41,29 @@ Options:
   --max-active N            Max concurrent jobs in array (default: 2)
   --queue NAME              LSF queue name
   --ncores N                Cores per job (default: 4)
-  --mem-gb N                Memory per job in GB (default: 16)
-  --config PATH             Detect config path (default: configs/fisheye/default.yaml)
+  --mem-gb N                Memory per job in GB (default: 32)
   --registry PATH           Registry sqlite path (default: /nvme1/palette_registry.sqlite)
-  --scheduler NAME          Legacy pass-through option for batch runner compatibility
-  --num-workers N           Legacy pass-through option for batch runner compatibility
-  --set-id ID               Optional detect set filter for registry model resolution
+  --set-id ID               Optional pose model set filter for registry model resolution
   --top-k N                 Candidate provenance depth (default: 5)
   --require-unique          Fail if top model scores tie
   --include-non-success     Include non-success runs in model resolution
-  --require-tuning          Skip zarrs without detection_tuning
-  --overwrite               Run detection even if detect_runs/latest exists
-  --log-dir PATH            Submission logs (default: <root>/logs/run_detections_batch/bsub_submissions)
+  --crop-run NAME           Optional explicit crop run name
+  --batch-size-kp N         Keypoint inference batch size (default: 256)
+  --device DEVICE           Torch device override
+  --imgsz N                 Pose inference image size override
+  --conf FLOAT              Confidence threshold override
+  --iou FLOAT               IoU threshold override
+  --max-det N               Max detections override
+  --mask-threshold FLOAT    Compatibility threshold override
+  --cpu                     Force CPU inference
+  --overwrite               Run keypoints even if keypoints run already exists
+  --log-dir PATH            Submission logs (default: <root>/logs/run_keypoints_batch/bsub_submissions)
   --run-id ID               Optional stable run id for deterministic reruns
   --dry-run                 Print manifests + commands; do not submit
   --source {filesystem,registry}  Discovery source for analysis zarrs (default: filesystem)
   --rig-id ID               Filter by rig_id (registry source only)
   --arena-id ID             Filter by arena_id (registry source only)
-  --camera-id ID            Filter by camera_id (registry source only)
+  --camera-id-filter ID     Filter by camera_id (registry source only)
   --path-contains STR       Substring match on zarr_path (registry source only)
   -h, --help                Show this message
 USAGE
@@ -67,15 +77,20 @@ while [[ $# -gt 0 ]]; do
     --queue) QUEUE="$2"; shift 2;;
     --ncores) NCORES="$2"; shift 2;;
     --mem-gb) MEM_GB="$2"; shift 2;;
-    --config) CONFIG="$2"; shift 2;;
     --registry) REGISTRY="$2"; shift 2;;
-    --scheduler) SCHEDULER="$2"; shift 2;;
-    --num-workers) NUM_WORKERS="$2"; shift 2;;
     --set-id) SET_ID="$2"; shift 2;;
     --top-k) TOP_K="$2"; shift 2;;
     --require-unique) REQUIRE_UNIQUE=1; shift;;
     --include-non-success) INCLUDE_NON_SUCCESS=1; shift;;
-    --require-tuning) REQUIRE_TUNING=1; shift;;
+    --crop-run) CROP_RUN="$2"; shift 2;;
+    --batch-size-kp) BATCH_SIZE_KP="$2"; shift 2;;
+    --device) DEVICE="$2"; shift 2;;
+    --imgsz) IMGSZ="$2"; shift 2;;
+    --conf) CONF="$2"; shift 2;;
+    --iou) IOU="$2"; shift 2;;
+    --max-det) MAX_DET="$2"; shift 2;;
+    --mask-threshold) MASK_THRESHOLD="$2"; shift 2;;
+    --cpu) CPU=1; shift;;
     --overwrite) OVERWRITE=1; shift;;
     --log-dir) LOG_DIR="$2"; shift 2;;
     --run-id) RUN_ID_OVERRIDE="$2"; shift 2;;
@@ -83,7 +98,7 @@ while [[ $# -gt 0 ]]; do
     --source) SOURCE="$2"; shift 2;;
     --rig-id) RIG_ID="$2"; shift 2;;
     --arena-id) ARENA_ID="$2"; shift 2;;
-    --camera-id) CAMERA_ID="$2"; shift 2;;
+    --camera-id-filter) CAMERA_ID_FILTER="$2"; shift 2;;
     --path-contains) PATH_CONTAINS="$2"; shift 2;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown arg: $1"; usage; exit 2;;
@@ -91,7 +106,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$LOG_DIR" ]]; then
-  LOG_DIR="${ROOT}/logs/run_detections_batch/bsub_submissions"
+  LOG_DIR="${ROOT}/logs/run_keypoints_batch/bsub_submissions"
 fi
 
 if [[ -n "$RUN_ID_OVERRIDE" ]]; then
@@ -99,7 +114,7 @@ if [[ -n "$RUN_ID_OVERRIDE" ]]; then
 else
   RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 fi
-RUN_DIR="${LOG_DIR}/detect_${RUN_ID}"
+RUN_DIR="${LOG_DIR}/kp_${RUN_ID}"
 
 if [[ -e "$RUN_DIR" ]]; then
   echo "Run directory already exists: $RUN_DIR" >&2
@@ -108,8 +123,8 @@ if [[ -e "$RUN_DIR" ]]; then
 fi
 if ! mkdir -p "$RUN_DIR" 2>/dev/null; then
   if [[ "$DRY_RUN" == "1" ]]; then
-    FALLBACK_LOG_DIR="${TMPDIR:-/tmp}/palette/run_detections_batch/bsub_submissions"
-    RUN_DIR="${FALLBACK_LOG_DIR}/detect_${RUN_ID}"
+    FALLBACK_LOG_DIR="${TMPDIR:-/tmp}/palette/run_keypoints_batch/bsub_submissions"
+    RUN_DIR="${FALLBACK_LOG_DIR}/kp_${RUN_ID}"
     if [[ -e "$RUN_DIR" ]]; then
       echo "Fallback run directory already exists: $RUN_DIR" >&2
       echo "Choose a different --run-id or remove the existing run directory." >&2
@@ -130,11 +145,11 @@ if [[ "$SOURCE" == "registry" ]]; then
   if [[ "$OVERWRITE" == "1" ]]; then DISCOVER_ARGS+=(--overwrite); fi
   if [[ -n "$RIG_ID" ]]; then DISCOVER_ARGS+=(--rig-id "$RIG_ID"); fi
   if [[ -n "$ARENA_ID" ]]; then DISCOVER_ARGS+=(--arena-id "$ARENA_ID"); fi
-  if [[ -n "$CAMERA_ID" ]]; then DISCOVER_ARGS+=(--camera-id "$CAMERA_ID"); fi
+  if [[ -n "$CAMERA_ID_FILTER" ]]; then DISCOVER_ARGS+=(--camera-id-filter "$CAMERA_ID_FILTER"); fi
   if [[ -n "$PATH_CONTAINS" ]]; then DISCOVER_ARGS+=(--path-contains "$PATH_CONTAINS"); fi
   DISCOVER_ARGS+=("$ROOT")
 
-  scripts/py -m fisheye.utils.run_detections_batch "${DISCOVER_ARGS[@]}" > "${RUN_DIR}/discovered_paths.txt"
+  scripts/py -m fisheye.utils.run_keypoints_batch "${DISCOVER_ARGS[@]}" > "${RUN_DIR}/discovered_paths.txt"
 
   scripts/py - "${RUN_DIR}/discovered_paths.txt" "$BATCH_SIZE" "$RUN_DIR" "$SOURCE" <<'PY'
 import json, math, sys
@@ -208,28 +223,20 @@ fi
 
 analysis_count=$(wc -l < "$RUN_DIR/recordings.txt" | tr -d ' ')
 
-EXTRA_ARGS=(--apply --no-dask-progress --registry "$REGISTRY" --top-k "$TOP_K" --config "$CONFIG")
-if [[ -n "$SCHEDULER" ]]; then
-  EXTRA_ARGS+=(--scheduler "$SCHEDULER")
-fi
-if [[ -n "$NUM_WORKERS" ]]; then
-  EXTRA_ARGS+=(--num-workers "$NUM_WORKERS")
-fi
-if [[ "$REQUIRE_TUNING" == "1" ]]; then
-  EXTRA_ARGS+=(--require-tuning)
-fi
-if [[ "$OVERWRITE" == "1" ]]; then
-  EXTRA_ARGS+=(--overwrite)
-fi
-if [[ -n "$SET_ID" ]]; then
-  EXTRA_ARGS+=(--set-id "$SET_ID")
-fi
-if [[ "$REQUIRE_UNIQUE" == "1" ]]; then
-  EXTRA_ARGS+=(--require-unique)
-fi
-if [[ "$INCLUDE_NON_SUCCESS" == "1" ]]; then
-  EXTRA_ARGS+=(--include-non-success)
-fi
+# Build per-recording args for run_keypoints_with_registry_model.
+EXTRA_ARGS=(--registry "$REGISTRY" --top-k "$TOP_K")
+if [[ -n "$SET_ID" ]]; then EXTRA_ARGS+=(--set-id "$SET_ID"); fi
+if [[ "$REQUIRE_UNIQUE" == "1" ]]; then EXTRA_ARGS+=(--require-unique); fi
+if [[ "$INCLUDE_NON_SUCCESS" == "1" ]]; then EXTRA_ARGS+=(--include-non-success); fi
+if [[ -n "$CROP_RUN" ]]; then EXTRA_ARGS+=(--crop-run "$CROP_RUN"); fi
+if [[ -n "$DEVICE" ]]; then EXTRA_ARGS+=(--device "$DEVICE"); fi
+if [[ -n "$IMGSZ" ]]; then EXTRA_ARGS+=(--imgsz "$IMGSZ"); fi
+if [[ -n "$CONF" ]]; then EXTRA_ARGS+=(--conf "$CONF"); fi
+if [[ -n "$IOU" ]]; then EXTRA_ARGS+=(--iou "$IOU"); fi
+if [[ -n "$MAX_DET" ]]; then EXTRA_ARGS+=(--max-det "$MAX_DET"); fi
+if [[ -n "$MASK_THRESHOLD" ]]; then EXTRA_ARGS+=(--mask-threshold "$MASK_THRESHOLD"); fi
+if [[ "$CPU" == "1" ]]; then EXTRA_ARGS+=(--cpu); fi
+EXTRA_ARGS+=(--batch-size "$BATCH_SIZE_KP")
 
 printf -v EXTRA_ARGS_SHELL '%q ' "${EXTRA_ARGS[@]}"
 
@@ -247,16 +254,30 @@ if [[ ! -f "\$BATCH_FILE" ]]; then
   echo "Missing batch file: \$BATCH_FILE" >&2
   exit 2
 fi
-mapfile -t recs < "\$BATCH_FILE"
-if [[ "\${#recs[@]}" -eq 0 ]]; then
+mapfile -t zarr_paths < "\$BATCH_FILE"
+if [[ "\${#zarr_paths[@]}" -eq 0 ]]; then
   echo "Empty batch file: \$BATCH_FILE"
   exit 0
 fi
-scripts/py -m fisheye.utils.run_detections_batch ${EXTRA_ARGS_SHELL}"\${recs[@]}"
+for zarr_path in "\${zarr_paths[@]}"; do
+  [[ -z "\$zarr_path" ]] && continue
+  # Derive recording_dir from zarr path (parent.parent if under zarr/ subdir).
+  zarr_parent="\$(dirname "\$zarr_path")"
+  if [[ "\$(basename "\$zarr_parent")" == "zarr" ]]; then
+    recording_dir="\$(dirname "\$zarr_parent")"
+  else
+    recording_dir="\$zarr_parent"
+  fi
+  echo "=== Processing: \$recording_dir ==="
+  scripts/py -m fisheye.utils.run_keypoints_with_registry_model --recording-dir "\$recording_dir" ${EXTRA_ARGS_SHELL}|| {
+    echo "FAILED: \$recording_dir" >&2
+    continue
+  }
+done
 JOBSCRIPT
 chmod +x "$JOB_SCRIPT"
 
-BSUB_ARGS=(-J "detect_batch[1-${batch_count}]%${MAX_ACTIVE}" -n "$NCORES" -R "rusage[mem=${MEM_GB}G]" -oo "${RUN_DIR}/%J_%I.out" -eo "${RUN_DIR}/%J_%I.err")
+BSUB_ARGS=(-J "kp_batch[1-${batch_count}]%${MAX_ACTIVE}" -n "$NCORES" -R "rusage[mem=${MEM_GB}G]" -oo "${RUN_DIR}/%J_%I.out" -eo "${RUN_DIR}/%J_%I.err")
 if [[ -n "$QUEUE" ]]; then
   BSUB_ARGS+=(-q "$QUEUE")
 fi
@@ -266,7 +287,7 @@ BSUB_CMD+="bash "
 BSUB_CMD+="$(printf '%q' "$JOB_SCRIPT") "
 BSUB_CMD+="$(printf '%q' "$RUN_DIR")"
 
-printf -v DETECT_CMD 'scripts/py -m fisheye.utils.run_detections_batch %s<batch_zarr_paths>' "$EXTRA_ARGS_SHELL"
+printf -v KP_CMD 'scripts/py -m fisheye.utils.run_keypoints_with_registry_model --recording-dir <dir> %s' "$EXTRA_ARGS_SHELL"
 
 echo "Run dir: $RUN_DIR"
 echo "Source: $SOURCE"
@@ -280,7 +301,7 @@ echo "Queue: ${QUEUE:-<default>}"
 echo "Resources: ncores=$NCORES mem_gb=$MEM_GB"
 echo "Manifest file: $RUN_DIR/recordings.txt"
 echo "Batch files: $RUN_DIR/batch_*.txt"
-echo "Per-batch command: $DETECT_CMD"
+echo "Per-recording command: $KP_CMD"
 echo "Submit command: $BSUB_CMD"
 
 if [[ "$DRY_RUN" == "1" ]]; then

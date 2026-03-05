@@ -118,7 +118,7 @@ Purpose: track the concrete follow-up work from the detection dataset and SQLite
 
 - [x] `prepare_detect_training` + `train_detection` produce deterministic, source-faithful dataset composition.
   - Status: implemented via `GlobalIndexManager._build_global_index` with `balanced`/`proportional`/`weighted` strategies and source-type mismatch enforcement.
-- [ ] Registry tables in active DB have non-zero rows for:
+- [x] Registry tables in active DB have non-zero rows for:
   - `datasets`
   - `provenance`
   - `detection_sources`

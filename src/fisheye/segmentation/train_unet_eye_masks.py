@@ -8,6 +8,7 @@ import json
 import time
 from dataclasses import asdict
 from pathlib import Path
+import re
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import math
@@ -470,6 +471,46 @@ def _create_run_directory(base_dir: Path, run_name: Optional[str]) -> Path:
     return run_dir
 
 
+def _sanitize_slug(value: Optional[str], fallback: str) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    return text or fallback
+
+
+def _resolve_output_base_dir(
+    *,
+    output_dir: Optional[str],
+    configured_project: Optional[str],
+    set_id: Optional[str],
+    config_path: Path,
+    console: Console,
+    nvme_root: Optional[Path] = None,
+) -> Path:
+    if output_dir:
+        return Path(output_dir).expanduser().resolve()
+
+    configured_text = str(configured_project or "").strip()
+    if configured_text:
+        configured_path = Path(configured_text).expanduser()
+        if configured_path.is_absolute():
+            return configured_path.resolve()
+        normalized = configured_text.replace("\\", "/").strip()
+        normalized = normalized[2:] if normalized.startswith("./") else normalized
+        if normalized.lower() not in {"runs/eye_masks"}:
+            return configured_path.resolve()
+
+    root = (nvme_root or Path("/nvme1")).expanduser()
+    if root.exists():
+        slug = _sanitize_slug(set_id, _sanitize_slug(config_path.stem, "eye_masks_training"))
+        project_dir = (root / "models" / "eye_masks" / slug).resolve()
+        console.print(f"[cyan]Using default model output directory:[/cyan] {project_dir}")
+        return project_dir
+
+    if configured_text:
+        return Path(configured_text).expanduser().resolve()
+    return Path("runs/eye_masks").resolve()
+
+
 def _save_checkpoint(
     path: Path,
     model: UNetSmall,
@@ -700,8 +741,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         raise ValueError("overlap_weight must be >= 0.0")
 
     default_run_name = f"unet_{(config.training_params.label_mode or 'union').lower()}"
+    project_base_dir = _resolve_output_base_dir(
+        output_dir=args.output_dir,
+        configured_project=train_params.project,
+        set_id=effective_set_id,
+        config_path=cfg_path,
+        console=console,
+    )
+    train_params.project = str(project_base_dir)
     run_dir = _create_run_directory(
-        Path(args.output_dir or train_params.project or "runs/eye_masks"),
+        project_base_dir,
         args.run_name or default_run_name,
     )
     registry_run_id = run_dir.name

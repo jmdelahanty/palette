@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import h5py
 import yaml
@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover - rich is optional
 @dataclass
 class EyeMaskPlan:
     recording_dir: Path
-    h5_path: Path
+    h5_path: Optional[Path]
     zarr_path: Path
     camera_id: Optional[str]
     status: str
@@ -280,7 +280,7 @@ def _plan_from_zarr(
     *,
     zarr_path: Path,
     recording_dir: Path,
-    h5_path: Path,
+    h5_path: Optional[Path],
     camera_id: Optional[str],
     skip_existing: bool,
     require_crop: bool,
@@ -476,6 +476,70 @@ def _build_plans_from_zarr(
             )
         )
     return plans
+
+
+def _discover_zarrs_from_registry(
+    *,
+    registry_path: Path,
+    scope_paths: Sequence[Path],
+    rig_id: Optional[str] = None,
+    arena_id: Optional[str] = None,
+    camera_id: Optional[str] = None,
+    path_contains: Optional[str] = None,
+    skip_existing: bool = False,
+) -> List[Path]:
+    """Query the registry for analysis zarr paths suitable for eye mask processing.
+
+    When *skip_existing* is True, recordings whose ``eye_masks`` step status is
+    already ``'ok'`` are excluded at the SQL level.  Only recordings whose
+    ``crop`` and ``keypoints`` steps are both ``'ok'`` are returned, ensuring
+    prerequisite pipeline stages are complete.
+    """
+    from fisheye.registry.db import Registry
+
+    registry = Registry(registry_path)
+    try:
+        query_kwargs: dict[str, Any] = dict(
+            zarr_use="analysis",
+            exclude_status="missing",
+            require_recording=True,
+            require_steps_ok=["crop", "keypoints"],
+            rig_id=rig_id,
+            arena_id=arena_id,
+            camera_id=camera_id,
+            path_contains=path_contains,
+        )
+        if skip_existing:
+            query_kwargs["exclude_step_ok"] = "eye_masks"
+        rows = registry.query_datasets(**query_kwargs)
+    finally:
+        registry.close()
+
+    paths: list[Path] = []
+    for row in rows:
+        raw = row["zarr_path"]
+        if raw is None:
+            continue
+        zarr_path = Path(str(raw))
+        if not zarr_path.name.endswith("_analysis.zarr"):
+            continue
+        paths.append(zarr_path.resolve())
+
+    # Scope filter: if caller provided paths, keep only zarrs under those roots.
+    if scope_paths:
+        resolved_scopes = [str(p.expanduser().resolve()).rstrip("/") + "/" for p in scope_paths]
+        paths = [p for p in paths if any(str(p).startswith(s) for s in resolved_scopes)]
+
+    # Deduplicate and sort (match filesystem discovery contract).
+    seen: set[str] = set()
+    ordered: list[Path] = []
+    for p in paths:
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            ordered.append(p)
+    ordered.sort(key=lambda item: str(item))
+    return ordered
 
 
 def _print_plan(plans: List[EyeMaskPlan]) -> None:
@@ -879,6 +943,31 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Directory for JSONL logs (default: $PALETTE_LOG_ROOT/run_eye_masks_batch or <recordings_root>/logs/run_eye_masks_batch).",
     )
     parser.add_argument("--no-log", action="store_true", help="Disable JSONL logging.")
+    # --- Registry discovery mode ---
+    parser.add_argument(
+        "--source",
+        choices=["filesystem", "registry"],
+        default="filesystem",
+        help="Discovery source: filesystem (default) or registry.",
+    )
+    parser.add_argument(
+        "--emit-paths",
+        action="store_true",
+        help="Print discovered zarr paths (one per line) and exit.",
+    )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        help="Path to registry SQLite database (required when --source registry).",
+    )
+    parser.add_argument("--rig-id", type=str, help="Filter by rig_id (registry mode).")
+    parser.add_argument("--arena-id", type=str, help="Filter by arena_id (registry mode).")
+    parser.add_argument(
+        "--camera-id-filter",
+        type=str,
+        help="Filter by camera_id in registry (registry mode). Named --camera-id-filter to avoid ambiguity with per-recording camera_id.",
+    )
+    parser.add_argument("--path-contains", type=str, help="Filter zarr_path by substring (registry mode).")
     parser.set_defaults(require_crop=True, require_keypoints=True)
 
     args = parser.parse_args(argv)
@@ -946,6 +1035,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             refine_missing_only=bool(args.refine_missing_only),
             zarr_use=args.zarr_use,
             json=bool(args.json),
+            source=args.source,
+            sql_prefilter=bool(args.source == "registry" and skip_existing),
         )
 
     config = _load_config(args.config)
@@ -958,23 +1049,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     require_keypoints = bool(args.require_keypoints) and not bool(args.no_require_keypoints)
 
     plans: List[EyeMaskPlan] = []
-    if roots:
-        plans.extend(
-            _build_plans(
-                roots,
-                args.recursive,
-                skip_existing=skip_existing,
-                require_crop=require_crop,
-                require_keypoints=require_keypoints,
-                refine_only=bool(args.refine_only),
-                zarr_use=str(args.zarr_use),
-                refine_missing_only=bool(args.refine_missing_only),
+    if args.source == "registry":
+        if not args.registry or not args.registry.exists():
+            print(
+                f"Error: registry database not found: {args.registry}",
+                file=sys.stderr,
             )
+            return 1
+        registry_zarrs = _discover_zarrs_from_registry(
+            registry_path=args.registry,
+            scope_paths=roots + explicit_zarrs,
+            rig_id=args.rig_id,
+            arena_id=args.arena_id,
+            camera_id=getattr(args, "camera_id_filter", None),
+            path_contains=args.path_contains,
+            skip_existing=skip_existing,
         )
-    if explicit_zarrs:
+        if args.emit_paths:
+            for p in registry_zarrs:
+                print(p)
+            return 0
         plans.extend(
             _build_plans_from_zarr(
-                explicit_zarrs,
+                registry_zarrs,
                 skip_existing=skip_existing,
                 require_crop=require_crop,
                 require_keypoints=require_keypoints,
@@ -983,6 +1080,32 @@ def main(argv: Optional[List[str]] = None) -> int:
                 refine_missing_only=bool(args.refine_missing_only),
             )
         )
+    else:
+        if roots:
+            plans.extend(
+                _build_plans(
+                    roots,
+                    args.recursive,
+                    skip_existing=skip_existing,
+                    require_crop=require_crop,
+                    require_keypoints=require_keypoints,
+                    refine_only=bool(args.refine_only),
+                    zarr_use=str(args.zarr_use),
+                    refine_missing_only=bool(args.refine_missing_only),
+                )
+            )
+        if explicit_zarrs:
+            plans.extend(
+                _build_plans_from_zarr(
+                    explicit_zarrs,
+                    skip_existing=skip_existing,
+                    require_crop=require_crop,
+                    require_keypoints=require_keypoints,
+                    refine_only=bool(args.refine_only),
+                    zarr_use=str(args.zarr_use),
+                    refine_missing_only=bool(args.refine_missing_only),
+                )
+            )
 
     if plans:
         seen: set[str] = set()

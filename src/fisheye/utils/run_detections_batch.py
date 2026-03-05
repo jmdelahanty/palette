@@ -10,7 +10,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+from typing import Any, Iterable, List, Optional, Sequence
 
 from fisheye.utils.run_detect_with_registry_model import run_detect_with_registry_model
 
@@ -162,6 +162,68 @@ def _discover_analysis_zarrs(paths: Sequence[Path], recursive: bool) -> List[Pat
                 continue
             seen.add(key)
             ordered.append(resolved)
+    ordered.sort(key=lambda item: str(item))
+    return ordered
+
+
+def _discover_analysis_zarrs_from_registry(
+    *,
+    registry_path: Path,
+    scope_paths: Sequence[Path],
+    rig_id: Optional[str] = None,
+    arena_id: Optional[str] = None,
+    camera_id: Optional[str] = None,
+    path_contains: Optional[str] = None,
+    skip_existing: bool = False,
+) -> List[Path]:
+    """Query the registry for analysis zarr paths, optionally scoped to directories.
+
+    When *skip_existing* is True, recordings whose ``detect`` step status is
+    already ``'ok'`` in the registry are excluded at the SQL level, avoiding
+    unnecessary filesystem I/O during plan building.
+    """
+    from fisheye.registry.db import Registry
+
+    registry = Registry(registry_path)
+    try:
+        query_kwargs: dict[str, Any] = dict(
+            zarr_use="analysis",
+            exclude_status="missing",
+            require_recording=True,
+            rig_id=rig_id,
+            arena_id=arena_id,
+            camera_id=camera_id,
+            path_contains=path_contains,
+        )
+        if skip_existing:
+            query_kwargs["exclude_step_ok"] = "detect"
+        rows = registry.query_datasets(**query_kwargs)
+    finally:
+        registry.close()
+
+    paths: list[Path] = []
+    for row in rows:
+        raw = row["zarr_path"]
+        if raw is None:
+            continue
+        zarr = Path(str(raw))
+        if not zarr.name.endswith("_analysis.zarr"):
+            continue
+        paths.append(zarr.resolve())
+
+    # Scope filter: if caller provided paths, keep only zarrs under those roots.
+    if scope_paths:
+        resolved_scopes = [str(p.expanduser().resolve()).rstrip("/") + "/" for p in scope_paths]
+        paths = [p for p in paths if any(str(p).startswith(s) for s in resolved_scopes)]
+
+    # Deduplicate and sort (match filesystem discovery contract).
+    seen: set[str] = set()
+    ordered: list[Path] = []
+    for p in paths:
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            ordered.append(p)
     ordered.sort(key=lambda item: str(item))
     return ordered
 
@@ -428,6 +490,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Text file with one root/recording/analysis-zarr path per line.",
     )
     parser.add_argument("--recursive", action="store_true", help="Recursively scan roots for *_analysis.zarr.")
+    parser.add_argument(
+        "--source",
+        choices=["filesystem", "registry"],
+        default="filesystem",
+        help="Discovery source for analysis zarrs (default: filesystem).",
+    )
+    parser.add_argument(
+        "--emit-paths",
+        action="store_true",
+        help="Print discovered zarr paths (one per line) and exit.",
+    )
 
     apply_group = parser.add_mutually_exclusive_group()
     apply_group.add_argument("--apply", action="store_true", help="Run detect for planned analysis zarrs.")
@@ -451,6 +524,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--require-unique", action="store_true", help="Fail if top model scores tie.")
     parser.add_argument("--top-k", type=int, default=5, help="Number of candidate models to persist in provenance.")
     parser.add_argument("--include-non-success", action="store_true", help="Allow non-success model rows in selection.")
+
+    parser.add_argument("--rig-id", type=str, default=None, help="Filter by rig_id (registry source only).")
+    parser.add_argument("--arena-id", type=str, default=None, help="Filter by arena_id (registry source only).")
+    parser.add_argument("--camera-id", type=str, default=None, help="Filter by camera_id (registry source only).")
+    parser.add_argument("--path-contains", type=str, default=None, help="Substring match on zarr_path (registry source only).")
 
     parser.add_argument("--config", type=str, default=None, help="Optional detect config path.")
     parser.add_argument("--conf", type=float, default=None, help="Optional detect confidence threshold override.")
@@ -536,11 +614,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "run_start",
                 zarr="-",
                 status="started",
+                source=args.source,
                 paths=[str(path) for path in inputs],
                 recursive=bool(args.recursive),
                 apply=bool(args.apply),
                 dry_run=not bool(args.apply),
                 overwrite=bool(args.overwrite),
+                sql_prefilter=bool(args.source == "registry" and skip_existing),
                 require_background=require_background,
                 require_tuning=bool(args.require_tuning),
                 registry=str(registry_path),
@@ -550,7 +630,32 @@ def main(argv: Optional[List[str]] = None) -> int:
                 top_k=int(args.top_k),
             )
 
-    zarr_paths = _discover_analysis_zarrs(inputs, recursive=bool(args.recursive))
+    if args.source == "registry":
+        if not registry_path.exists():
+            print(f"Registry not found: {registry_path}", file=sys.stderr)
+            if logger is not None:
+                logger.log("run_end", zarr="-", status="failed", reason="registry_not_found")
+                logger.close()
+            return 1
+        zarr_paths = _discover_analysis_zarrs_from_registry(
+            registry_path=registry_path,
+            scope_paths=inputs,
+            rig_id=args.rig_id,
+            arena_id=args.arena_id,
+            camera_id=args.camera_id,
+            path_contains=args.path_contains,
+            skip_existing=skip_existing,
+        )
+    else:
+        zarr_paths = _discover_analysis_zarrs(inputs, recursive=bool(args.recursive))
+
+    if args.emit_paths:
+        for p in zarr_paths:
+            print(p)
+        if logger is not None:
+            logger.log("emit_paths", zarr="-", status="ok", count=len(zarr_paths))
+            logger.close()
+        return 0
     plans = _build_plans(
         zarr_paths,
         skip_existing=skip_existing,

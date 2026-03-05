@@ -7,6 +7,7 @@ import sys
 
 import numpy as np
 import pytest
+from rich.console import Console
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
@@ -168,3 +169,46 @@ def test_train_unet_logs_registry_failed_on_dataset_load_error(tmp_path: Path, m
     assert calls[0]["run_id"] == "eye_mask_unet_registry_fail"
     assert calls[0]["final_metrics"]["stage"] == "dataset_load"
     assert calls[0]["final_metrics"]["error_type"] == "RuntimeError"
+
+
+def test_resolve_output_base_dir_prefers_cli_output_dir(tmp_path: Path) -> None:
+    console = Console()
+    explicit = tmp_path / "explicit_out"
+    resolved = mod._resolve_output_base_dir(
+        output_dir=str(explicit),
+        configured_project="runs/eye_masks",
+        set_id="eye_mask_set_v001",
+        config_path=tmp_path / "cfg.yaml",
+        console=console,
+        nvme_root=tmp_path / "nvme",
+    )
+    assert resolved == explicit.resolve()
+
+
+def test_resolve_output_base_dir_preserves_absolute_configured_project(tmp_path: Path) -> None:
+    console = Console()
+    configured = tmp_path / "custom_models"
+    resolved = mod._resolve_output_base_dir(
+        output_dir=None,
+        configured_project=str(configured),
+        set_id="eye_mask_set_v001",
+        config_path=tmp_path / "cfg.yaml",
+        console=console,
+        nvme_root=tmp_path / "nvme",
+    )
+    assert resolved == configured.resolve()
+
+
+def test_resolve_output_base_dir_promotes_legacy_runs_project_to_nvme_models(tmp_path: Path) -> None:
+    console = Console()
+    nvme_root = tmp_path / "nvme1"
+    nvme_root.mkdir(parents=True)
+    resolved = mod._resolve_output_base_dir(
+        output_dir=None,
+        configured_project="runs/eye_masks",
+        set_id="eye_mask_cedar_shadow_v001",
+        config_path=tmp_path / "cfg.yaml",
+        console=console,
+        nvme_root=nvme_root,
+    )
+    assert resolved == (nvme_root / "models" / "eye_masks" / "eye_mask_cedar_shadow_v001").resolve()

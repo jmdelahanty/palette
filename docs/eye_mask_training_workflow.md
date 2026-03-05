@@ -95,9 +95,9 @@ CONFIG="/nvme1/training/datasets/$SET_ID/$SET_ID.yaml"
 
 scripts/py -m fisheye.segmentation.train_unet_eye_masks "$CONFIG" \
   --run-name "${SET_ID}_unet" \
-  --output-dir "/nvme1/training/models/eye_masks/$SET_ID" \
+  --output-dir "/nvme1/models/eye_masks/$SET_ID" \
   --device cuda:0 \
-  --tb-logdir "/nvme1/training/models/eye_masks/$SET_ID/tensorboard" \
+  --tb-logdir "/nvme1/models/eye_masks/$SET_ID/tensorboard" \
   --no-compile
 ```
 
@@ -111,7 +111,7 @@ Registry parity behavior:
 
 ```bash
 scripts/py -m tensorboard.main \
-  --logdir "/nvme1/training/models/eye_masks/$SET_ID/tensorboard" \
+  --logdir "/nvme1/models/eye_masks/$SET_ID/tensorboard" \
   --port 6006 \
   --host 0.0.0.0
 ```

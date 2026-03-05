@@ -146,6 +146,23 @@ class EyeMaskPerformanceSummary:
 
 
 @dataclass
+class DetectPerformanceSummary:
+    total_rows: int
+    coverage_avg: Optional[float]
+    coverage_min: Optional[float]
+    coverage_max: Optional[float]
+    fps_avg: Optional[float]
+    fps_min: Optional[float]
+    fps_max: Optional[float]
+    read_ms_avg: Optional[float]
+    read_ms_min: Optional[float]
+    read_ms_max: Optional[float]
+    method_counts: Dict[str, int]
+    model_counts: Dict[str, int]
+    stale_rows: int
+
+
+@dataclass
 class EyeMaskProfileSummary:
     total_rows: int
     stale_rows: int
@@ -289,6 +306,8 @@ EYE_MASK_PROFILE_STALE_STATE_KEYS = (
 )
 EYE_MASK_SYNC_COMMAND = "scripts/py -m fisheye.utils.sync_eye_mask_profile_registry"
 EYE_MASK_REFRESH_COMMAND = "scripts/py -m fisheye.registry.maintenance --refresh-eye-mask-profiles"
+DETECT_PERFORMANCE_BACKFILL_COMMAND = "scripts/py -m fisheye.registry.maintenance --backfill-detect-performance"
+DETECT_PERFORMANCE_REFRESH_COMMAND = "scripts/py -m fisheye.registry.maintenance --refresh-detect-performance"
 BEHAVIOR_V1_REQUIRED_ARTIFACT_TYPES = {
     "h5_log",
     "camera_video",
@@ -2300,6 +2319,135 @@ def _summarize_eye_mask_profile_rows(rows: List[Dict[str, Any]]) -> EyeMaskProfi
     )
 
 
+def _load_detect_performance_rows(
+    registry: Registry,
+    *,
+    set_filter: Optional[str],
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    params: List[Any] = []
+    dataset_ids = _dataset_ids_for_set(registry, set_filter)
+    if dataset_ids is not None:
+        if not dataset_ids:
+            return []
+    if not _view_exists(registry, "detect_performance_latest"):
+        return []
+    sql = [
+        "SELECT",
+        "  dpl.dataset_id AS dataset_id,",
+        "  d.zarr_path AS zarr_path,",
+        "  d.zarr_use AS zarr_use,",
+        "  dpl.detect_run AS detect_run,",
+        "  dpl.detect_created_utc AS detect_created_utc,",
+        "  dpl.recording_id AS recording_id,",
+        "  dpl.detection_method AS detection_method,",
+        "  dpl.model_path AS model_path,",
+        "  dpl.model_name AS model_name,",
+        "  dpl.coverage_percent AS coverage_percent,",
+        "  dpl.frames_with_detections AS frames_with_detections,",
+        "  dpl.frames_zero_detections AS frames_zero_detections,",
+        "  dpl.total_frames AS total_frames,",
+        "  dpl.mean_confidence AS mean_confidence,",
+        "  dpl.inference_average_fps AS inference_average_fps,",
+        "  dpl.inference_avg_batch_ms AS inference_avg_batch_ms,",
+        "  dpl.inference_avg_read_ms AS inference_avg_read_ms,",
+        "  dpl.zarr_mtime_ns AS zarr_mtime_ns,",
+        "  dpl.updated_utc AS updated_utc",
+        "FROM detect_performance_latest dpl",
+        "LEFT JOIN datasets d ON d.dataset_id = dpl.dataset_id",
+        "WHERE 1=1",
+    ]
+    if dataset_ids is not None:
+        placeholders = ", ".join("?" for _ in dataset_ids)
+        sql.append(f"AND dpl.dataset_id IN ({placeholders})")
+        params.extend(dataset_ids)
+    sql.append("ORDER BY dpl.dataset_id, COALESCE(dpl.detect_created_utc, '')")
+    if limit and limit > 0:
+        sql.append("LIMIT ?")
+        params.append(int(limit))
+    rows = registry.conn.execute(" ".join(sql), params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _detect_performance_stale_reason(
+    row: Dict[str, Any],
+    *,
+    mtime_cache: Dict[str, Optional[int]],
+) -> Optional[str]:
+    expected_mtime = _coerce_int(row.get("zarr_mtime_ns"))
+    zarr_path = str(row.get("zarr_path") or "").strip()
+    if expected_mtime is None:
+        return "stale row: missing zarr_mtime_ns"
+    if not zarr_path:
+        return "stale row: missing zarr_path"
+    actual_mtime = _zarr_mtime_ns(zarr_path, mtime_cache=mtime_cache)
+    if actual_mtime is None:
+        return "stale row: zarr missing on disk"
+    if int(actual_mtime) != int(expected_mtime):
+        return "stale row: mtime mismatch"
+    return None
+
+
+def _summarize_detect_performance_rows(
+    rows: List[Dict[str, Any]],
+) -> DetectPerformanceSummary:
+    coverage_vals: List[float] = []
+    fps_vals: List[float] = []
+    read_ms_vals: List[float] = []
+    method_counts: Dict[str, int] = {}
+    model_counts: Dict[str, int] = {}
+    stale_rows = 0
+    mtime_cache: Dict[str, Optional[int]] = {}
+    for row in rows:
+        if _detect_performance_stale_reason(row, mtime_cache=mtime_cache) is not None:
+            stale_rows += 1
+        cov = _coerce_float(row.get("coverage_percent"))
+        if cov is not None:
+            coverage_vals.append(cov)
+        fps = _coerce_float(row.get("inference_average_fps"))
+        if fps is not None:
+            fps_vals.append(fps)
+        rms = _coerce_float(row.get("inference_avg_read_ms"))
+        if rms is not None:
+            read_ms_vals.append(rms)
+        method = str(row.get("detection_method") or "unknown").strip()
+        method_counts[method] = method_counts.get(method, 0) + 1
+        model = str(row.get("model_name") or "unknown").strip()
+        model_counts[model] = model_counts.get(model, 0) + 1
+    method_counts = dict(sorted(method_counts.items(), key=lambda item: (-item[1], item[0])))
+    model_counts = dict(sorted(model_counts.items(), key=lambda item: (-item[1], item[0])))
+    return DetectPerformanceSummary(
+        total_rows=len(rows),
+        coverage_avg=sum(coverage_vals) / len(coverage_vals) if coverage_vals else None,
+        coverage_min=min(coverage_vals) if coverage_vals else None,
+        coverage_max=max(coverage_vals) if coverage_vals else None,
+        fps_avg=sum(fps_vals) / len(fps_vals) if fps_vals else None,
+        fps_min=min(fps_vals) if fps_vals else None,
+        fps_max=max(fps_vals) if fps_vals else None,
+        read_ms_avg=sum(read_ms_vals) / len(read_ms_vals) if read_ms_vals else None,
+        read_ms_min=min(read_ms_vals) if read_ms_vals else None,
+        read_ms_max=max(read_ms_vals) if read_ms_vals else None,
+        method_counts=method_counts,
+        model_counts=model_counts,
+        stale_rows=stale_rows,
+    )
+
+
+def _detect_performance_remediation_lines(
+    summary: DetectPerformanceSummary,
+    *,
+    registry_path: Path,
+) -> List[str]:
+    backfill_cmd = f"{DETECT_PERFORMANCE_BACKFILL_COMMAND} --registry {registry_path} --apply"
+    refresh_cmd = f"{DETECT_PERFORMANCE_REFRESH_COMMAND} --registry {registry_path} --apply"
+    lines: List[str] = []
+    if summary.total_rows <= 0:
+        lines.append(f"remediation: no detect performance rows found; run `{backfill_cmd}`")
+    if summary.stale_rows > 0:
+        lines.append(f"remediation: stale detect performance rows detected; run `{refresh_cmd}`")
+    return lines
+
+
 def _eye_mask_performance_stale_reason(
     row: Dict[str, Any],
     *,
@@ -2497,6 +2645,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "onnx",
             "tensorrt",
             "detect-quality",
+            "detect-performance",
             "keypoint-quality",
             "keypoint-profile",
             "eye-mask-quality",
@@ -2508,8 +2657,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         help=(
             "Select output view: sets, datasets, recordings, recording-overview, "
             "recording-steps, recording-steps-wide, models, onnx, tensorrt, "
-            "detect-quality, keypoint-quality, keypoint-profile, eye-mask-quality, "
-            "eye-mask-performance, "
+            "detect-quality, detect-performance, keypoint-quality, keypoint-profile, "
+            "eye-mask-quality, eye-mask-performance, "
             "eye-mask-profile, or lineage (default: sets)."
         ),
     )
@@ -2527,6 +2676,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--show-detect-quality",
         action="store_true",
         help="Print detailed detect quality rows (summary is always shown).",
+    )
+    parser.add_argument(
+        "--show-detect-performance",
+        action="store_true",
+        help="Print detailed detect performance rows (summary is always shown).",
     )
     parser.add_argument(
         "--show-keypoint-quality",
@@ -2591,6 +2745,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     show_lineage = args.all or args.view == "lineage"
     show_detect_view = args.view == "detect-quality"
     show_detect_details = args.show_detect_quality or show_detect_view
+    show_detect_performance_view = args.view == "detect-performance"
+    show_detect_performance_details = args.show_detect_performance or show_detect_performance_view
     show_keypoint_view = args.view == "keypoint-quality"
     show_keypoint_details = args.show_keypoint_quality or show_keypoint_view
     show_keypoint_profile = args.view == "keypoint-profile"
@@ -2616,6 +2772,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         show_lineage = False
         show_detect_view = False
         show_detect_details = False
+        show_detect_performance_view = False
+        show_detect_performance_details = False
         show_keypoint_view = False
         show_keypoint_details = False
         show_keypoint_profile = False
@@ -2705,6 +2863,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         limit=detect_quality_limit,
     )
     detect_quality_summary = _summarize_detect_quality_rows(detect_quality_rows)
+    detect_performance_limit = args.limit if (show_detect_performance_view or show_detect_performance_details) else None
+    detect_performance_rows = _load_detect_performance_rows(
+        registry,
+        set_filter=args.set_id,
+        limit=detect_performance_limit,
+    )
+    detect_performance_summary = _summarize_detect_performance_rows(detect_performance_rows)
+    detect_performance_remediation = _detect_performance_remediation_lines(
+        detect_performance_summary,
+        registry_path=registry_path,
+    )
     keypoint_quality_limit = args.limit if (show_keypoint_details or show_keypoint_view) else None
     keypoint_quality_rows = _load_keypoint_quality_rows(
         registry,
@@ -2775,6 +2944,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     if not args.all and args.view == "detect-quality" and not detect_quality_rows:
         print("No detect quality rows found.")
+        return 1
+    if not args.all and args.view == "detect-performance" and not detect_performance_rows:
+        print("No detect performance rows found.")
+        for line in detect_performance_remediation:
+            print(f"  {line}")
         return 1
     if not args.all and args.view == "keypoint-quality" and not keypoint_quality_rows:
         print("No keypoint quality rows found.")
@@ -3255,6 +3429,81 @@ def main(argv: Optional[List[str]] = None) -> int:
                         reason,
                     )
                 console.print(detect_table)
+
+            detect_perf_lines = [
+                f"total rows: {detect_performance_summary.total_rows}",
+                f"stale rows: {detect_performance_summary.stale_rows}",
+            ]
+            if detect_performance_summary.coverage_avg is not None:
+                detect_perf_lines.append(
+                    f"coverage: avg={detect_performance_summary.coverage_avg:.1f}%, "
+                    f"min={detect_performance_summary.coverage_min:.1f}%, "
+                    f"max={detect_performance_summary.coverage_max:.1f}%"
+                )
+            if detect_performance_summary.fps_avg is not None:
+                detect_perf_lines.append(
+                    f"fps: avg={detect_performance_summary.fps_avg:.1f}, "
+                    f"min={detect_performance_summary.fps_min:.1f}, "
+                    f"max={detect_performance_summary.fps_max:.1f}"
+                )
+            if detect_performance_summary.read_ms_avg is not None:
+                detect_perf_lines.append(
+                    f"read_ms: avg={detect_performance_summary.read_ms_avg:.1f}, "
+                    f"min={detect_performance_summary.read_ms_min:.1f}, "
+                    f"max={detect_performance_summary.read_ms_max:.1f}"
+                )
+            if detect_performance_summary.method_counts:
+                method_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in detect_performance_summary.method_counts.items()
+                )
+                detect_perf_lines.append(f"methods: {method_text}")
+            if detect_performance_summary.model_counts:
+                model_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in detect_performance_summary.model_counts.items()
+                )
+                detect_perf_lines.append(f"models: {model_text}")
+            console.print("[bold]Detect Performance[/bold]")
+            for line in detect_perf_lines:
+                console.print(f"- {line}")
+            for line in detect_performance_remediation:
+                console.print(f"- {line}")
+            if show_detect_performance_details and detect_performance_rows:
+                dp_table = Table(title="Detect Performance Details", show_lines=False)
+                dp_table.add_column("Dataset", style="cyan")
+                dp_table.add_column("Use")
+                dp_table.add_column("Method")
+                dp_table.add_column("Coverage%", justify="right")
+                dp_table.add_column("FPS", justify="right")
+                dp_table.add_column("ReadMs", justify="right")
+                dp_table.add_column("Frames", justify="right")
+                dp_table.add_column("MeanConf", justify="right")
+                dp_table.add_column("Model")
+                dp_table.add_column("Stale")
+                detect_perf_mtime_cache: Dict[str, Optional[int]] = {}
+                for row in detect_performance_rows:
+                    stale = _detect_performance_stale_reason(
+                        row,
+                        mtime_cache=detect_perf_mtime_cache,
+                    )
+                    cov = _coerce_float(row.get("coverage_percent"))
+                    fps = _coerce_float(row.get("inference_average_fps"))
+                    rms = _coerce_float(row.get("inference_avg_read_ms"))
+                    conf = _coerce_float(row.get("mean_confidence"))
+                    dp_table.add_row(
+                        str(row.get("dataset_id") or "—"),
+                        str(row.get("zarr_use") or "—"),
+                        str(row.get("detection_method") or "—"),
+                        f"{float(cov):.1f}" if cov is not None else "—",
+                        f"{float(fps):.1f}" if fps is not None else "—",
+                        f"{float(rms):.1f}" if rms is not None else "—",
+                        str(row.get("total_frames") or "—"),
+                        f"{float(conf):.3f}" if conf is not None else "—",
+                        str(row.get("model_name") or "—"),
+                        "1" if stale is not None else "",
+                    )
+                console.print(dp_table)
 
             keypoint_lines = [
                 f"total rows: {keypoint_quality_summary.total_rows}",
@@ -3828,6 +4077,64 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print(f"      quality_stale: {1 if stale is not None else 0}")
                     print(f"      gate: {'PASS' if passes else 'EXCLUDE'}")
                     print(f"      reason: {reason or '—'}")
+
+            print("Detect Performance")
+            print(f"  total rows: {detect_performance_summary.total_rows}")
+            print(f"  stale rows: {detect_performance_summary.stale_rows}")
+            if detect_performance_summary.coverage_avg is not None:
+                print(
+                    f"  coverage: avg={detect_performance_summary.coverage_avg:.1f}%, "
+                    f"min={detect_performance_summary.coverage_min:.1f}%, "
+                    f"max={detect_performance_summary.coverage_max:.1f}%"
+                )
+            if detect_performance_summary.fps_avg is not None:
+                print(
+                    f"  fps: avg={detect_performance_summary.fps_avg:.1f}, "
+                    f"min={detect_performance_summary.fps_min:.1f}, "
+                    f"max={detect_performance_summary.fps_max:.1f}"
+                )
+            if detect_performance_summary.read_ms_avg is not None:
+                print(
+                    f"  read_ms: avg={detect_performance_summary.read_ms_avg:.1f}, "
+                    f"min={detect_performance_summary.read_ms_min:.1f}, "
+                    f"max={detect_performance_summary.read_ms_max:.1f}"
+                )
+            if detect_performance_summary.method_counts:
+                method_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in detect_performance_summary.method_counts.items()
+                )
+                print(f"  methods: {method_text}")
+            if detect_performance_summary.model_counts:
+                model_text = ", ".join(
+                    f"{name}={count}"
+                    for name, count in detect_performance_summary.model_counts.items()
+                )
+                print(f"  models: {model_text}")
+            for line in detect_performance_remediation:
+                print(f"  {line}")
+            if show_detect_performance_details and detect_performance_rows:
+                print("  details:")
+                detect_perf_mtime_cache: Dict[str, Optional[int]] = {}
+                for row in detect_performance_rows:
+                    stale = _detect_performance_stale_reason(
+                        row,
+                        mtime_cache=detect_perf_mtime_cache,
+                    )
+                    cov = _coerce_float(row.get("coverage_percent"))
+                    fps = _coerce_float(row.get("inference_average_fps"))
+                    rms = _coerce_float(row.get("inference_avg_read_ms"))
+                    conf = _coerce_float(row.get("mean_confidence"))
+                    print(f"    {row.get('dataset_id')}")
+                    print(f"      use: {row.get('zarr_use') or '—'}")
+                    print(f"      method: {row.get('detection_method') or '—'}")
+                    print(f"      coverage: {float(cov):.1f}%" if cov is not None else "      coverage: —")
+                    print(f"      fps: {float(fps):.1f}" if fps is not None else "      fps: —")
+                    print(f"      read_ms: {float(rms):.1f}" if rms is not None else "      read_ms: —")
+                    print(f"      total_frames: {row.get('total_frames') or '—'}")
+                    print(f"      mean_confidence: {float(conf):.3f}" if conf is not None else "      mean_confidence: —")
+                    print(f"      model: {row.get('model_name') or '—'}")
+                    print(f"      stale: {1 if stale is not None else 0}")
 
             print("Keypoint Quality")
             print(f"  total rows: {keypoint_quality_summary.total_rows}")
