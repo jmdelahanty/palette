@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -103,3 +104,95 @@ def test_process_and_write_chunk_open_uses_live_metadata(monkeypatch: pytest.Mon
     assert seen["mode"] == "a"
     assert seen["kwargs"].get("use_consolidated") is False
     assert int(run_group["masks_roi"][0].sum()) > 0
+
+
+def test_refresh_refined_eye_masks_registry_rows_targeted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    class _FakeRegistry:
+        def __init__(self, _path: Path):
+            pass
+
+        def upsert_dataset(self, dataset_id: str, **kwargs: Any) -> None:
+            calls["dataset_id"] = dataset_id
+            calls["upsert_kwargs"] = kwargs
+
+        def refresh_eye_mask_performance_for_dataset(self, dataset_id: str, **kwargs: Any) -> int:
+            calls["perf"] = (dataset_id, kwargs)
+            return 5
+
+        def refresh_eye_mask_quality_for_dataset(self, dataset_id: str, **kwargs: Any) -> int:
+            calls["quality"] = (dataset_id, kwargs)
+            return 3
+
+        def close(self) -> None:
+            calls["closed"] = True
+
+    class _Root:
+        attrs = {"recording_id": "rec_001", "zarr_use": "analysis", "zarr_purpose": "analysis"}
+
+    monkeypatch.setattr(mod, "Registry", _FakeRegistry)
+    monkeypatch.setattr(mod, "resolve_dataset_id", lambda _root, _path: ("dataset_001", "session_001"))
+    monkeypatch.setattr(
+        mod.RegistryPaths,
+        "from_env",
+        staticmethod(lambda _cwd: mod.RegistryPaths(path=tmp_path / "registry.sqlite")),
+    )
+
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    mod._refresh_refined_eye_masks_registry_rows(
+        root=_Root(),  # type: ignore[arg-type]
+        zarr_path=zarr_path,
+        console=None,
+    )
+
+    assert calls["dataset_id"] == "dataset_001"
+    assert calls["perf"][0] == "dataset_001"
+    assert calls["quality"][0] == "dataset_001"
+    assert calls["perf"][1]["zarr_path"] == zarr_path
+    assert calls["quality"][1]["zarr_path"] == zarr_path
+    assert calls["perf"][1]["recording_id"] == "rec_001"
+    assert calls["quality"][1]["recording_id"] == "rec_001"
+    assert calls["perf"][1]["zarr_use"] == "analysis"
+    assert calls["quality"][1]["zarr_use"] == "analysis"
+    assert calls["closed"] is True
+
+
+def test_main_emits_error_status_before_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    emitted: list[dict[str, Any]] = []
+
+    class _Root:
+        attrs = {"recording_id": "rec_001"}
+
+    monkeypatch.setattr(mod, "refine_eye_masks", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: _Root())
+
+    def _capture_emit(**kwargs: Any) -> None:
+        emitted.append(kwargs)
+
+    monkeypatch.setattr(mod, "_emit_refined_eye_masks_status", _capture_emit)
+
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main(
+            [
+                str(tmp_path / "recording_analysis.zarr"),
+                "--run-name",
+                "refined_eye_masks_test",
+            ]
+        )
+
+    assert excinfo.value.code == 1
+    assert emitted
+    payload = emitted[0]
+    assert payload["status"] == "error"
+    assert payload["run_name"] == "refined_eye_masks_test"
+    assert payload["method"] == "refine_eye_masks"
+    details = payload["details"]
+    assert details["reason"] == "runtime_error"
+    assert "boom" in details["error"]

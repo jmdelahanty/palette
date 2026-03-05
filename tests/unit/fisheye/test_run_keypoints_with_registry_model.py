@@ -194,6 +194,7 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     assert detect_kwargs.get("zarr_path") == str(output_path.resolve())
     assert detect_kwargs.get("model_path") == "/tmp/pose_model.pt"
     assert detect_kwargs.get("device") == "cpu"
+    assert Path(str(detect_kwargs.get("registry"))) == registry_path.resolve()
 
     assert calls.get("write_zarr_path") == output_path.resolve()
     assert calls.get("write_run_name") == "keypoints_001"

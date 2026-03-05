@@ -1285,6 +1285,7 @@ def _run_traditional(
     num_workers: Optional[int],
     quiet: bool,
     show_progress: bool,
+    registry: Optional[Path] = None,
 ) -> Dict[str, Any]:
     if quiet and Console is not None:
         with open(os.devnull, "w", encoding="utf-8") as devnull:
@@ -1296,6 +1297,7 @@ def _run_traditional(
                 num_workers=num_workers,
                 console=console,
                 show_progress=show_progress,
+                registry=registry,
             )
     return detect_keypoints(
         zarr_path=zarr_path,
@@ -1304,6 +1306,7 @@ def _run_traditional(
         num_workers=num_workers,
         console=None,
         show_progress=show_progress,
+        registry=registry,
     )
 
 
@@ -1312,6 +1315,7 @@ def _run_yolo(
     config: Dict[str, Any],
     quiet: bool,
     model_path_override: Optional[str] = None,
+    registry: Optional[Path] = None,
 ) -> str:
     params = config.get("keypoints", {})
     model_path = model_path_override or params.get("model") or params.get("model_path")
@@ -1333,6 +1337,7 @@ def _run_yolo(
                 max_det=params.get("max_det", 1),
                 mask_threshold=params.get("mask_threshold", 0.5),
                 verbose=params.get("verbose", False),
+                registry=registry,
                 console=console,
             )
     return detect_keypoints_yolo(
@@ -1348,6 +1353,7 @@ def _run_yolo(
         max_det=params.get("max_det", 1),
         mask_threshold=params.get("mask_threshold", 0.5),
         verbose=params.get("verbose", False),
+        registry=registry,
         console=None,
     )
 
@@ -1393,6 +1399,7 @@ def _run_plan(
     auto_approve_min_usable_rate: Optional[float] = None,
     auto_approve_intended_use: str = "full_recording",
     auto_approve_reviewer: Optional[str] = None,
+    registry_path_for_keypoints: Optional[Path] = None,
     registry_path_for_sync: Optional[Path] = None,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
@@ -1446,6 +1453,7 @@ def _run_plan(
                 config,
                 quiet=quiet,
                 model_path_override=(resolved_model.model_path if resolved_model else None),
+                registry=registry_path_for_keypoints,
             )
         else:
             _run_traditional(
@@ -1455,6 +1463,7 @@ def _run_plan(
                 num_workers=num_workers,
                 quiet=quiet,
                 show_progress=dask_progress and not json_output,
+                registry=registry_path_for_keypoints,
             )
             run_name = _latest_keypoints_run(plan.zarr_path)
             if not run_name:
@@ -2175,6 +2184,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     auto_approve_min_usable_rate=auto_approve_min_usable_rate,
                     auto_approve_intended_use=str(args.auto_approve_intended_use),
                     auto_approve_reviewer=args.auto_approve_reviewer,
+                    registry_path_for_keypoints=(resolved_registry_path or args.registry),
                     registry_path_for_sync=(resolved_registry_path or args.registry),
                 )
                 ok += 1
@@ -2218,6 +2228,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         auto_approve_min_usable_rate=auto_approve_min_usable_rate,
                         auto_approve_intended_use=str(args.auto_approve_intended_use),
                         auto_approve_reviewer=args.auto_approve_reviewer,
+                        registry_path_for_keypoints=(resolved_registry_path or args.registry),
                         registry_path_for_sync=(resolved_registry_path or args.registry),
                     )
                     ok += 1

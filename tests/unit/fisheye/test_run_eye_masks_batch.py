@@ -245,6 +245,11 @@ def test_run_plan_dispatch_and_payload(
     monkeypatch.setattr(mod, "_run_yolo", _yolo)
     monkeypatch.setattr(mod, "_run_unet", _unet)
     monkeypatch.setattr(mod, "_collect_stage_payload", _collect)
+    monkeypatch.setattr(
+        mod,
+        "_sync_eye_mask_registry_rows_after_run",
+        lambda **kwargs: {"synced": True, "dataset_id": "dataset_x"},  # noqa: ANN003
+    )
 
     plan = mod.EyeMaskPlan(
         recording_dir=tmp_path,
@@ -270,6 +275,7 @@ def test_run_plan_dispatch_and_payload(
     assert "duration_seconds" in result
     assert result["eye_masks"]["run_name"].startswith("eye_masks_")
     assert result["eye_masks"]["source_runs"]["source_keypoints_run"] == "keypoints_001"
+    assert result["registry_sync"]["synced"] is True
     assert "refined_eye_masks" not in result
 
 
@@ -296,6 +302,11 @@ def test_run_plan_refine_only_uses_latest_eye_mask_run(
 
     monkeypatch.setattr(mod, "_run_refine", _run_refine)
     monkeypatch.setattr(mod, "_collect_stage_payload", _collect)
+    monkeypatch.setattr(
+        mod,
+        "_sync_eye_mask_registry_rows_after_run",
+        lambda **kwargs: {"synced": True, "dataset_id": "dataset_x"},  # noqa: ANN003
+    )
 
     plan = mod.EyeMaskPlan(
         recording_dir=tmp_path,
@@ -319,6 +330,149 @@ def test_run_plan_refine_only_uses_latest_eye_mask_run(
     assert "eye_masks" not in result
     assert result["refined_eye_masks"]["group"] == "refined_eye_masks_runs"
     assert result["refined_eye_masks"]["run_name"] == "refined_eye_masks_011"
+    assert result["registry_sync"]["synced"] is True
+
+
+def test_sync_eye_mask_registry_rows_after_run_status_context_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(mod, "_resolve_step_status_context", lambda *_args, **_kwargs: None)
+
+    result = mod._sync_eye_mask_registry_rows_after_run(
+        zarr_path=tmp_path / "recording_analysis.zarr",
+        stage_payloads={},
+    )
+
+    assert result == {"synced": False, "reason": "status_context_unavailable"}
+
+
+def test_sync_eye_mask_registry_rows_after_run_writes_status_and_refreshes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        mod,
+        "_resolve_step_status_context",
+        lambda *_args, **_kwargs: {
+            "registry_path": tmp_path / "registry.sqlite",
+            "dataset_id": "dataset_001",
+            "recording_id": "recording_001",
+        },
+    )
+
+    class _Cursor:
+        def __init__(self, row: dict[str, object]):
+            self._row = row
+
+        def fetchone(self) -> dict[str, object]:
+            return self._row
+
+    class _Conn:
+        def execute(self, _sql: str, _params: tuple[str]) -> _Cursor:
+            return _Cursor({"recording_id": "recording_db", "zarr_use": "analysis"})
+
+    class _FakeRegistry:
+        def __init__(self, _path: Path):
+            self.conn = _Conn()
+
+        def refresh_eye_mask_performance_for_dataset(self, *_args, **_kwargs) -> int:
+            return 4
+
+        def refresh_eye_mask_quality_for_dataset(self, *_args, **_kwargs) -> int:
+            return 2
+
+        def close(self) -> None:
+            return None
+
+    step_calls: list[dict[str, object]] = []
+
+    def _fake_upsert(_registry, **kwargs):  # noqa: ANN001, ANN003
+        step_calls.append(kwargs)
+
+    monkeypatch.setattr(mod, "Registry", _FakeRegistry)
+    monkeypatch.setattr(mod, "upsert_recording_step_status", _fake_upsert)
+    monkeypatch.setattr(mod, "_zarr_mtime_ns", lambda _path: 123)
+
+    result = mod._sync_eye_mask_registry_rows_after_run(
+        zarr_path=tmp_path / "recording_analysis.zarr",
+        stage_payloads={
+            "eye_masks": {
+                "run_name": "eye_masks_001",
+                "method": "yolo_eye_segmentation",
+                "source_runs": {"source_crop_run": "crop_001"},
+                "successful_roi_pair_rate": 0.75,
+            },
+            "refined_eye_masks": {
+                "run_name": "refined_eye_masks_001",
+                "method": "refine_eye_masks",
+                "source_runs": {"source_eye_masks_run": "eye_masks_001"},
+                "successful_roi_pair_rate": 80.0,
+            },
+        },
+    )
+
+    assert result["synced"] is True
+    assert result["dataset_id"] == "dataset_001"
+    assert result["recording_id"] == "recording_db"
+    assert result["eye_mask_performance_rows"] == 4
+    assert result["eye_mask_quality_rows"] == 2
+    assert result["step_status_written"] == ["eye_masks", "refined_eye_masks"]
+    assert result["step_status_errors"] == {}
+    assert [call["step_name"] for call in step_calls] == ["eye_masks", "refined_eye_masks"]
+    assert step_calls[0]["coverage_pct"] == pytest.approx(75.0)
+    assert step_calls[1]["coverage_pct"] == pytest.approx(80.0)
+
+
+def test_sync_eye_mask_registry_rows_after_run_refresh_failure_is_non_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        mod,
+        "_resolve_step_status_context",
+        lambda *_args, **_kwargs: {
+            "registry_path": tmp_path / "registry.sqlite",
+            "dataset_id": "dataset_001",
+            "recording_id": "recording_001",
+        },
+    )
+
+    class _Cursor:
+        def __init__(self, row: dict[str, object]):
+            self._row = row
+
+        def fetchone(self) -> dict[str, object]:
+            return self._row
+
+    class _Conn:
+        def execute(self, _sql: str, _params: tuple[str]) -> _Cursor:
+            return _Cursor({"recording_id": "recording_db", "zarr_use": "analysis"})
+
+    class _FakeRegistry:
+        def __init__(self, _path: Path):
+            self.conn = _Conn()
+
+        def refresh_eye_mask_performance_for_dataset(self, *_args, **_kwargs) -> int:
+            raise RuntimeError("refresh boom")
+
+        def refresh_eye_mask_quality_for_dataset(self, *_args, **_kwargs) -> int:
+            return 0
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(mod, "Registry", _FakeRegistry)
+    monkeypatch.setattr(mod, "upsert_recording_step_status", lambda *_args, **_kwargs: None)
+
+    result = mod._sync_eye_mask_registry_rows_after_run(
+        zarr_path=tmp_path / "recording_analysis.zarr",
+        stage_payloads={"eye_masks": {"run_name": "eye_masks_001", "source_runs": {}}},
+    )
+
+    assert result["synced"] is False
+    assert result["reason"] == "refresh_failed"
+    assert "refresh boom" in str(result["error"])
 
 
 def test_main_json_failure_row_includes_failure_reason(

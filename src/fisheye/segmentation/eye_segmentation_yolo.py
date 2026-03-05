@@ -22,6 +22,9 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from skimage import measure
 
+from ..registry.db import Registry, resolve_dataset_id
+from ..registry.status_ledger import upsert_recording_step_status
+from ..registry.step_cascade import invalidate_downstream_steps
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
 from ..shared.row_alignment import assert_row_alignment
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -127,6 +130,135 @@ _PROCESS_MASK_PATCHED = False
 _ORIGINAL_PROCESS_MASK_NATIVE = None
 _PROTO_UPSAMPLE_FACTOR = 1
 _DEFAULT_LEGACY_MASKS = False
+_EYE_MASKS_STATUS_SOURCE = "runtime_eye_segmentation_yolo"
+
+
+def _status_text(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "ignore")
+    text = str(value).strip()
+    return text or None
+
+
+def _status_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _clean_details(details: Dict[str, object]) -> Dict[str, object]:
+    return {key: value for key, value in details.items() if value is not None}
+
+
+def _emit_eye_masks_status(
+    *,
+    registry: Optional[Registry],
+    root: zarr.Group,
+    zarr_path: Path,
+    status: str,
+    reason: str,
+    run_name: Optional[str],
+    requested_crop_run: Optional[str],
+    method_hint: Optional[str],
+    status_details: Optional[Dict[str, object]],
+    error_text: Optional[str],
+    console: Optional[Console],
+) -> None:
+    if registry is None:
+        return
+
+    try:
+        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
+        recording_id = _status_text(root.attrs.get("recording_id")) or _status_text(session_uuid)
+        zarr_use = _status_text(root.attrs.get("zarr_use"))
+        zarr_purpose = _status_text(root.attrs.get("zarr_purpose"))
+        registry.upsert_dataset(
+            dataset_id,
+            session_uuid=session_uuid,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+            zarr_purpose=zarr_purpose,
+        )
+
+        run_attrs: Dict[str, object] = {}
+        eye_parent = root.get("eye_masks_runs")
+        if run_name and eye_parent is not None and run_name in eye_parent:
+            run_attrs = dict(getattr(eye_parent[run_name], "attrs", {}))
+
+        method = _status_text(run_attrs.get("method")) or _status_text(method_hint)
+        pair_rate = _status_float(run_attrs.get("successful_roi_pair_rate"))
+        coverage_pct = None
+        if pair_rate is not None:
+            coverage_pct = float(pair_rate) * 100.0 if pair_rate <= 1.0 else float(pair_rate)
+
+        review_status_raw = run_attrs.get("eye_mask_review_status")
+        review_status = review_status_raw if isinstance(review_status_raw, dict) else None
+        details = _clean_details(
+            {
+                "reason": reason,
+                "source_crop_run": _status_text(run_attrs.get("source_crop_run")),
+                "source_keypoints_run": _status_text(
+                    run_attrs.get("source_keypoints_run") or run_attrs.get("source_keypoint_run")
+                ),
+                "source_keypoint_group": _status_text(run_attrs.get("source_keypoint_group")),
+                "successful_eyes": run_attrs.get("successful_eyes"),
+                "successful_roi_pairs": run_attrs.get("successful_roi_pairs"),
+                "total_rois": run_attrs.get("total_rois"),
+                "successful_roi_pair_rate": pair_rate,
+                "probability_stats": (
+                    run_attrs.get("probability_stats")
+                    if isinstance(run_attrs.get("probability_stats"), dict)
+                    else None
+                ),
+                "ellipse_soft_available": run_attrs.get("ellipse_soft_available"),
+                "requested_crop_run": _status_text(requested_crop_run),
+                "error": _status_text(error_text),
+            }
+        )
+        if isinstance(status_details, dict):
+            details.update(_clean_details(dict(status_details)))
+
+        upsert_recording_step_status(
+            registry,
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="eye_masks",
+            status=status,
+            run_name=run_name,
+            method=method,
+            coverage_pct=coverage_pct,
+            review_status_json=review_status,
+            details_json=details,
+            source=_EYE_MASKS_STATUS_SOURCE,
+            zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_path),
+        )
+        if status == "ok":
+            invalidate_downstream_steps(
+                registry,
+                dataset_id=dataset_id,
+                step_name="eye_masks",
+                source=_EYE_MASKS_STATUS_SOURCE,
+                recording_id=recording_id,
+                trigger_run_name=run_name,
+            )
+    except Exception as exc:
+        if console is not None:
+            console.print(
+                f"[yellow]Warning:[/yellow] failed to write recording step status for eye_masks: {exc}"
+            )
 
 
 def _shape_to_hw(shape) -> Tuple[int, int]:
@@ -669,6 +801,8 @@ def segment_eye_masks_yolo(
     legacy_masks: bool = False,
     verbose: bool = False,
     console: Optional[Console] = None,
+    registry: Optional[Registry] = None,
+    status_details: Optional[Dict[str, object]] = None,
 ) -> str:
     """Run a YOLO segmentation model to generate binary and probability eye masks.
 
@@ -715,6 +849,19 @@ def segment_eye_masks_yolo(
     total_rois = int(roi_images.shape[0])
     if total_rois == 0:
         console.print("[yellow]No ROIs available; nothing to segment[/yellow]")
+        _emit_eye_masks_status(
+            registry=registry,
+            root=root,
+            zarr_path=zarr_path,
+            status="missing",
+            reason="no_rois",
+            run_name=None,
+            requested_crop_run=_status_text(crop_run_name),
+            method_hint="yolo_eye_segmentation",
+            status_details=status_details,
+            error_text=None,
+            console=console,
+        )
         _PROTO_UPSAMPLE_FACTOR = 1
         return ""
 
@@ -1181,6 +1328,19 @@ def segment_eye_masks_yolo(
     console.print(
         f"[green]✓[/green] Eye masks saved as [cyan]eye_masks_runs/{resolved_run_name}[/cyan] "
         f"({total_successful_eyes} successful eyes, {successful_pairs}/{total_rois} ROI pairs) in {duration:.1f}s"
+    )
+    _emit_eye_masks_status(
+        registry=registry,
+        root=root,
+        zarr_path=zarr_path,
+        status="ok",
+        reason="present",
+        run_name=resolved_run_name,
+        requested_crop_run=_status_text(crop_run_name),
+        method_hint="yolo_eye_segmentation",
+        status_details=status_details,
+        error_text=None,
+        console=console,
     )
 
     _PROTO_UPSAMPLE_FACTOR = 1

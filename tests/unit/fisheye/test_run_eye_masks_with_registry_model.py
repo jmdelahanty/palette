@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import pytest
@@ -208,3 +209,91 @@ def test_main_runs_eye_mask_resolution_and_writes_provenance(
     assert payload.get("method") == "yolo"
     for key in ("contract", "command", "git", "environment", "platform", "parameters", "inputs", "artifacts"):
         assert key in payload
+
+
+def test_run_yolo_forwards_registry_and_status_details(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_segment_eye_masks_yolo(**kwargs: object) -> str:
+        captured.update(kwargs)
+        return "eye_masks_abc"
+
+    monkeypatch.setattr(mod, "_segment_eye_masks_yolo", _fake_segment_eye_masks_yolo)
+
+    args = argparse.Namespace(
+        run_name="eye_masks_custom",
+        crop_run="crop_001",
+        keypoints_run="kp_001",
+        batch_size=64,
+        device="cpu",
+        imgsz=512,
+        conf=0.1,
+        iou=0.5,
+        max_det=2,
+        mask_threshold=0.05,
+        adaptive_scale=0.6,
+        adaptive_cap=0.6,
+        no_retina_masks=False,
+        proto_upsample_factor=2,
+        legacy_masks=False,
+        verbose=False,
+    )
+    registry = object()
+    details = {"selected_run_id": "eye_train_01"}
+
+    run_name = mod._run_yolo(  # noqa: SLF001
+        tmp_path / "out.zarr",
+        "/tmp/eye_model.pt",
+        args,
+        registry=registry,  # type: ignore[arg-type]
+        status_details=details,
+    )
+
+    assert run_name == "eye_masks_abc"
+    assert captured.get("registry") is registry
+    assert captured.get("status_details") == details
+
+
+def test_run_unet_forwards_registry_and_status_details(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_infer_unet_eye_masks(
+        argv: list[str],
+        *,
+        registry: object | None = None,
+        status_details: dict[str, object] | None = None,
+    ) -> None:
+        captured["argv"] = list(argv)
+        captured["registry"] = registry
+        captured["status_details"] = dict(status_details or {})
+
+    monkeypatch.setattr(mod, "_infer_unet_eye_masks", _fake_infer_unet_eye_masks)
+    monkeypatch.setattr(mod, "_latest_eye_masks_run", lambda _path: "eye_masks_unet_001")
+
+    args = argparse.Namespace(
+        run_name="eye_masks_unet_custom",
+        crop_run="crop_001",
+        keypoints_run="kp_001",
+        batch_size=32,
+        device="cpu",
+        label_mode="union",
+        write_binary_masks=True,
+        no_use_crop=False,
+    )
+    registry = object()
+    details = {"selected_set_id": "eye_masks_set_123"}
+
+    run_name = mod._run_unet(  # noqa: SLF001
+        tmp_path / "out.zarr",
+        "/tmp/eye_unet.pt",
+        args,
+        registry=registry,  # type: ignore[arg-type]
+        status_details=details,
+    )
+
+    assert run_name == "eye_masks_unet_001"
+    assert captured.get("registry") is registry
+    assert captured.get("status_details") == details
+    argv = captured.get("argv")
+    assert isinstance(argv, list)
+    assert "--write-binary-masks" in argv

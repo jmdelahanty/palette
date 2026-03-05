@@ -220,6 +220,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         max_det=args.max_det,
         verbose=bool(args.verbose),
         mask_threshold=args.mask_threshold,
+        registry=registry_path,
     )
     if not run_name:
         raise RuntimeError("Keypoint inference did not create a run; model resolution provenance cannot be written.")

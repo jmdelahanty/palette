@@ -26,6 +26,9 @@ import dask
 from dask import delayed
 from dask.diagnostics import ProgressBar
 
+from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
+from ..registry.status_ledger import upsert_recording_step_status
+from ..registry.step_cascade import invalidate_downstream_steps
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr.schema import get_run_group
 from ..pose.schema import schema_from_package
@@ -41,6 +44,95 @@ from ..utils.system import get_environment_info
 
 
 TRADITIONAL_POSE_SCHEMA = schema_from_package("traditional_v1")
+_KEYPOINT_STEP_NAME = "keypoints"
+_KEYPOINT_STATUS_SOURCE = "runtime_keypoints_detect"
+
+
+def _status_text(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", "ignore").strip()
+    else:
+        text = str(value).strip()
+    return text or None
+
+
+def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _resolve_registry_path(registry: Optional[Path]) -> Optional[Path]:
+    if registry is not None:
+        return registry.expanduser().resolve()
+    inferred = RegistryPaths.from_env(Path.cwd()).path.expanduser().resolve()
+    if not inferred.exists():
+        return None
+    return inferred
+
+
+def _emit_keypoint_step_status(
+    *,
+    root: zarr.Group,
+    zarr_path: Path,
+    run_name: str,
+    method: Optional[str],
+    coverage_pct: Optional[float],
+    details: Dict[str, object],
+    console: Optional[Console],
+    registry: Optional[Path],
+) -> None:
+    registry_path = _resolve_registry_path(registry)
+    if registry_path is None:
+        return
+    try:
+        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
+        recording_id = _status_text(root.attrs.get("recording_id")) or _status_text(session_uuid)
+        zarr_use = _status_text(root.attrs.get("zarr_use"))
+        zarr_purpose = _status_text(root.attrs.get("zarr_purpose"))
+
+        registry_db = Registry(registry_path)
+        try:
+            registry_db.upsert_dataset(
+                dataset_id,
+                session_uuid=session_uuid,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+                zarr_purpose=zarr_purpose,
+            )
+            upsert_recording_step_status(
+                registry_db,
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                step_name=_KEYPOINT_STEP_NAME,
+                status="ok",
+                run_name=run_name,
+                method=method,
+                coverage_pct=coverage_pct,
+                details_json=details,
+                source=_KEYPOINT_STATUS_SOURCE,
+                zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_path),
+            )
+            invalidate_downstream_steps(
+                registry_db,
+                dataset_id=dataset_id,
+                step_name=_KEYPOINT_STEP_NAME,
+                source=_KEYPOINT_STATUS_SOURCE,
+                recording_id=recording_id,
+                trigger_run_name=run_name,
+            )
+        finally:
+            registry_db.close()
+    except Exception as exc:
+        if console is not None:
+            console.print(
+                f"[yellow]Warning:[/yellow] failed to write recording step status "
+                f"for {_KEYPOINT_STEP_NAME}: {exc}"
+            )
 
 
 # ========== Core Detection Functions ==========
@@ -441,6 +533,7 @@ def detect_keypoints(
     num_workers: Optional[int] = None,
     console: Optional[Console] = None,
     show_progress: bool = True,
+    registry: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
     Main function to detect keypoints in cropped ROIs.
@@ -939,9 +1032,32 @@ def detect_keypoints(
         border_style="green",
         padding=(1, 2)
     )
-    
+
     console.print("\n")
     console.print(panel)
+
+    status_details: Dict[str, object] = {
+        "reason": "present",
+        "run_group": "keypoints_runs",
+        "source_crop_run": latest_crop,
+        "source_detect_run": source_detect_run or "unknown",
+        "total_rois": int(total_rois),
+        "successful_detections": int(total_successful),
+        "failed_detections": int(total_failed),
+        "success_rate_percent": round(float(success_rate), 2),
+    }
+    if source_refined_run:
+        status_details["source_refined_run"] = source_refined_run
+    _emit_keypoint_step_status(
+        root=root,
+        zarr_path=Path(zarr_path).expanduser().resolve(),
+        run_name=run_group_name,
+        method=_status_text(keypoint_group.attrs.get("method")) or "traditional_pose",
+        coverage_pct=float(success_rate),
+        details=status_details,
+        console=console,
+        registry=registry,
+    )
     
     return summary_stats
 
@@ -987,6 +1103,12 @@ def main() -> None:
         default=None,
         help="Number of Dask workers (overrides config).",
     )
+    parser.add_argument(
+        "--registry",
+        type=Path,
+        default=None,
+        help="Optional registry SQLite path.",
+    )
     args = parser.parse_args()
 
     console = Console()
@@ -998,6 +1120,7 @@ def main() -> None:
         scheduler=args.scheduler,
         num_workers=args.num_workers,
         console=console,
+        registry=args.registry,
     )
 
 

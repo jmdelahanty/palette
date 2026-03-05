@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -13,6 +14,8 @@ import h5py
 import yaml
 import zarr
 
+from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.registry.status_ledger import upsert_recording_step_status
 from fisheye.refinement.refine_eye_masks import refine_eye_masks
 from fisheye.segmentation.eye_segmentation import segment_eye_masks as segment_eye_masks_traditional
 from fisheye.segmentation.eye_segmentation_yolo import segment_eye_masks_yolo
@@ -495,8 +498,6 @@ def _discover_zarrs_from_registry(
     ``crop`` and ``keypoints`` steps are both ``'ok'`` are returned, ensuring
     prerequisite pipeline stages are complete.
     """
-    from fisheye.registry.db import Registry
-
     registry = Registry(registry_path)
     try:
         query_kwargs: dict[str, Any] = dict(
@@ -644,6 +645,240 @@ def _decode_source_runs(attrs: Dict[str, Any]) -> Dict[str, Any]:
     return source_runs
 
 
+def _resolve_step_status_context(
+    zarr_path: Path,
+    *,
+    registry_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    resolved_zarr = zarr_path.expanduser().resolve()
+    resolved_registry_path = (
+        registry_path.expanduser().resolve()
+        if registry_path is not None
+        else RegistryPaths.from_env(Path.cwd()).path.expanduser().resolve()
+    )
+    if not resolved_registry_path.exists():
+        return None
+
+    registry = Registry(resolved_registry_path)
+    try:
+        path_hash = hashlib.sha256(str(resolved_zarr).encode("utf-8")).hexdigest()
+        row = registry.conn.execute(
+            """
+            SELECT dataset_id, recording_id
+            FROM datasets
+            WHERE path_hash = ?
+            ORDER BY COALESCE(last_seen_utc, '') DESC, dataset_id
+            LIMIT 1;
+            """,
+            (path_hash,),
+        ).fetchone()
+        if row is None:
+            row = registry.conn.execute(
+                """
+                SELECT dataset_id, recording_id
+                FROM datasets
+                WHERE zarr_path = ?
+                ORDER BY COALESCE(last_seen_utc, '') DESC, dataset_id
+                LIMIT 1;
+                """,
+                (str(resolved_zarr),),
+            ).fetchone()
+        if row is None:
+            row = registry.conn.execute(
+                """
+                SELECT dataset_id, recording_id
+                FROM datasets
+                WHERE lower(COALESCE(zarr_path, '')) = lower(?)
+                ORDER BY COALESCE(last_seen_utc, '') DESC, dataset_id
+                LIMIT 1;
+                """,
+                (str(resolved_zarr),),
+            ).fetchone()
+        if row is None:
+            return None
+        dataset_id = _normalize_attr(row["dataset_id"])
+        if not dataset_id:
+            return None
+        return {
+            "registry_path": resolved_registry_path,
+            "dataset_id": dataset_id,
+            "recording_id": _normalize_attr(row["recording_id"]),
+        }
+    finally:
+        registry.close()
+
+
+def _zarr_mtime_ns(path: Path) -> Optional[int]:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except Exception:
+        return None
+
+
+def _coverage_pct_from_stage_payload(stage_payload: Dict[str, Any]) -> Optional[float]:
+    for key in ("successful_roi_pair_rate", "success_rate", "coverage_pct"):
+        if key not in stage_payload:
+            continue
+        try:
+            value = float(stage_payload[key])
+        except (TypeError, ValueError):
+            continue
+        if value <= 1.0:
+            value *= 100.0
+        return value
+
+    summary = stage_payload.get("summary_statistics")
+    if isinstance(summary, dict):
+        for key in ("successful_roi_pair_rate", "success_rate_percent", "pass_rate_percent"):
+            if key not in summary:
+                continue
+            try:
+                value = float(summary[key])
+            except (TypeError, ValueError):
+                continue
+            if value <= 1.0:
+                value *= 100.0
+            return value
+    return None
+
+
+def _step_status_details_from_stage_payload(
+    stage_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    details: Dict[str, Any] = {
+        "reason": "present",
+        "latest_selector": "run_eye_masks_batch",
+    }
+    source_runs = stage_payload.get("source_runs")
+    if isinstance(source_runs, dict):
+        for key in (
+            "source_crop_run",
+            "source_detect_run",
+            "source_background_run",
+            "source_eye_masks_run",
+            "source_eye_masks_method",
+            "source_keypoint_group",
+            "source_keypoints_run",
+        ):
+            if source_runs.get(key) is not None:
+                details[key] = source_runs.get(key)
+
+    for key in ("total_rois", "successful_roi_pairs", "successful_roi_pair_rate"):
+        if stage_payload.get(key) is not None:
+            details[key] = stage_payload.get(key)
+
+    summary = stage_payload.get("summary_statistics")
+    if isinstance(summary, dict):
+        for key in ("total_rois", "successful_roi_pairs", "successful_roi_pair_rate"):
+            if summary.get(key) is not None and key not in details:
+                details[key] = summary.get(key)
+    return details
+
+
+def _sync_eye_mask_registry_rows_after_run(
+    *,
+    zarr_path: Path,
+    stage_payloads: Dict[str, Dict[str, Any]],
+    registry_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    context = _resolve_step_status_context(zarr_path, registry_path=registry_path)
+    if context is None:
+        return {"synced": False, "reason": "status_context_unavailable"}
+
+    registry = Registry(Path(str(context["registry_path"])))
+    try:
+        dataset_id = str(context["dataset_id"])
+        dataset_row = registry.conn.execute(
+            """
+            SELECT recording_id, zarr_use
+            FROM datasets
+            WHERE dataset_id = ?
+            LIMIT 1;
+            """,
+            (dataset_id,),
+        ).fetchone()
+        recording_id = (
+            _normalize_attr(dataset_row["recording_id"])
+            if dataset_row is not None
+            else _normalize_attr(context.get("recording_id"))
+        )
+        zarr_use = _normalize_attr(dataset_row["zarr_use"]) if dataset_row is not None else None
+
+        step_status_written: List[str] = []
+        step_status_errors: Dict[str, str] = {}
+        for step_name, payload in stage_payloads.items():
+            if not isinstance(payload, dict):
+                continue
+            run_name = _normalize_attr(payload.get("run_name"))
+            if not run_name:
+                continue
+            review_status = payload.get("review_status")
+            try:
+                upsert_recording_step_status(
+                    registry,
+                    dataset_id=dataset_id,
+                    recording_id=recording_id,
+                    step_name=step_name,
+                    status="ok",
+                    run_name=run_name,
+                    method=(
+                        _normalize_attr(payload.get("method"))
+                        or ("refine_eye_masks" if step_name == "refined_eye_masks" else "eye_masks")
+                    ),
+                    coverage_pct=_coverage_pct_from_stage_payload(payload),
+                    review_status_json=review_status if isinstance(review_status, dict) else None,
+                    details_json=_step_status_details_from_stage_payload(payload),
+                    source="run_eye_masks_batch_postrun_sync",
+                    zarr_mtime_ns=_zarr_mtime_ns(zarr_path),
+                )
+                step_status_written.append(step_name)
+            except Exception as exc:  # pragma: no cover - defensive
+                step_status_errors[step_name] = str(exc)
+
+        perf_rows: Optional[int] = None
+        quality_rows: Optional[int] = None
+        refresh_error: Optional[str] = None
+        try:
+            perf_rows = int(
+                registry.refresh_eye_mask_performance_for_dataset(
+                    dataset_id,
+                    zarr_path=zarr_path,
+                    recording_id=recording_id,
+                    zarr_use=zarr_use,
+                )
+            )
+            quality_rows = int(
+                registry.refresh_eye_mask_quality_for_dataset(
+                    dataset_id,
+                    zarr_path=zarr_path,
+                    recording_id=recording_id,
+                    zarr_use=zarr_use,
+                )
+            )
+        except Exception as exc:
+            refresh_error = str(exc)
+
+        result: Dict[str, Any] = {
+            "synced": not step_status_errors and refresh_error is None,
+            "dataset_id": dataset_id,
+            "recording_id": recording_id,
+            "step_status_written": step_status_written,
+            "step_status_errors": step_status_errors,
+            "eye_mask_performance_rows": perf_rows,
+            "eye_mask_quality_rows": quality_rows,
+        }
+        if refresh_error is not None:
+            result["reason"] = "refresh_failed"
+            result["error"] = refresh_error
+        elif step_status_errors:
+            result["reason"] = "step_status_upsert_failed"
+        return result
+    except Exception as exc:
+        return {"synced": False, "reason": "refresh_failed", "error": str(exc)}
+    finally:
+        registry.close()
+
+
 def _collect_stage_payload(zarr_path: Path, group_name: str, run_name: str) -> Dict[str, Any]:
     root = zarr.open(str(zarr_path), mode="r", use_consolidated=False)
     parent = root.get(group_name)
@@ -651,11 +886,18 @@ def _collect_stage_payload(zarr_path: Path, group_name: str, run_name: str) -> D
         raise RuntimeError(f"run not found after stage completion: {group_name}/{run_name}")
     run_group = parent[run_name]
     attrs = dict(run_group.attrs)
+    summary = attrs.get("summary_statistics")
+    summary_statistics = summary if isinstance(summary, dict) else {}
     return {
         "group": group_name,
         "run_name": run_name,
         "method": _normalize_attr(attrs.get("method")),
         "duration_seconds": attrs.get("duration_seconds"),
+        "total_rois": attrs.get("total_rois"),
+        "successful_roi_pairs": attrs.get("successful_roi_pairs"),
+        "successful_roi_pair_rate": attrs.get("successful_roi_pair_rate"),
+        "review_status": attrs.get("eye_mask_review_status"),
+        "summary_statistics": summary_statistics,
         "source_runs": _decode_source_runs(attrs),
     }
 
@@ -854,6 +1096,7 @@ def _run_plan(
     quiet: bool,
     refine: bool,
     refine_only: bool,
+    registry_path_for_sync: Optional[Path] = None,
 ) -> Dict[str, Any]:
     canonical_method = _canonical_method(method)
     payload: Dict[str, Any] = {
@@ -864,10 +1107,12 @@ def _run_plan(
         "status": "ok",
     }
     stage_start = time.perf_counter()
+    stage_payloads: Dict[str, Dict[str, Any]] = {}
     if refine_only:
         source_run = _latest_run(plan.zarr_path, "eye_masks_runs")
         refined_run = _run_refine(plan.zarr_path, config, source_run=source_run, quiet=quiet)
         payload["refined_eye_masks"] = _collect_stage_payload(plan.zarr_path, "refined_eye_masks_runs", refined_run)
+        stage_payloads["refined_eye_masks"] = payload["refined_eye_masks"]
     else:
         if canonical_method == "yolo":
             eye_run = _run_yolo(plan.zarr_path, config, quiet=quiet)
@@ -882,9 +1127,17 @@ def _run_plan(
                 quiet=quiet,
             )
         payload["eye_masks"] = _collect_stage_payload(plan.zarr_path, "eye_masks_runs", eye_run)
+        stage_payloads["eye_masks"] = payload["eye_masks"]
         if refine:
             refined_run = _run_refine(plan.zarr_path, config, source_run=eye_run, quiet=quiet)
             payload["refined_eye_masks"] = _collect_stage_payload(plan.zarr_path, "refined_eye_masks_runs", refined_run)
+            stage_payloads["refined_eye_masks"] = payload["refined_eye_masks"]
+
+    payload["registry_sync"] = _sync_eye_mask_registry_rows_after_run(
+        zarr_path=plan.zarr_path,
+        stage_payloads=stage_payloads,
+        registry_path=registry_path_for_sync,
+    )
 
     payload["duration_seconds"] = time.perf_counter() - stage_start
     return payload
@@ -1204,7 +1457,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                 quiet=quiet,
                 refine=bool(args.refine),
                 refine_only=bool(args.refine_only),
+                registry_path_for_sync=args.registry,
             )
+            sync_payload = result.get("registry_sync")
+            if (
+                isinstance(sync_payload, dict)
+                and not bool(sync_payload.get("synced"))
+                and not args.quiet
+                and not args.json
+            ):
+                reason = sync_payload.get("reason") or "registry_sync_failed"
+                error = sync_payload.get("error")
+                if error:
+                    print(f"Warning: registry sync incomplete for {plan.zarr_path} ({reason}: {error})")
+                else:
+                    print(f"Warning: registry sync incomplete for {plan.zarr_path} ({reason})")
             ok += 1
             if args.json:
                 print(json.dumps(result, sort_keys=True))

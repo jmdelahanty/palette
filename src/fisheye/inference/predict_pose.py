@@ -322,6 +322,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             iou=args.iou,
             max_det=args.max_det,
             verbose=args.verbose,
+            registry=(status_context.registry_path if status_context is not None else None),
             console=console,
         )
     except Exception as exc:
@@ -342,16 +343,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         raise
 
     if run_name:
-        method, coverage_pct, details = _collect_keypoint_run_payload(zarr_path, run_name)
-        _emit_keypoint_status(
-            context=status_context,
-            status="ok",
-            run_name=run_name,
-            method=method or "yolo_pose",
-            coverage_pct=coverage_pct,
-            details=details,
-            console=console,
-        )
         return
 
     _emit_keypoint_status(

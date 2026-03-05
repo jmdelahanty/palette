@@ -11,10 +11,13 @@ from typing import Any, Optional
 
 import zarr
 
-from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.registry.db import Registry, RegistryPaths, resolve_dataset_id
+from fisheye.registry.status_ledger import upsert_recording_step_status
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils.resolve_detect_model import Candidate, TargetProfile
 from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
+
+_EYE_MASKS_STATUS_SOURCE = "runtime_run_eye_masks_with_registry_model"
 
 
 def _resolve_output(recording_dir: Path, explicit_output: Optional[Path]) -> Path:
@@ -31,6 +34,90 @@ def _pick_best_candidate(candidates: list[Candidate], *, require_unique: bool) -
         if abs(candidates[0].weighted_score - candidates[1].weighted_score) < 1e-12:
             raise SystemExit("Top candidate score tied; rerun with --set-id to choose deterministically.")
     return best
+
+
+def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _normalize_attr(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "ignore")
+    text = str(value).strip()
+    return text or None
+
+
+def _classify_eye_masks_failure(exc: Exception) -> tuple[str, str]:
+    message = str(exc).lower()
+    if "missing crop_runs" in message or "unable to resolve crop run" in message:
+        return "missing", "crop_missing"
+    if "no rois available" in message or "roi image array is empty" in message:
+        return "missing", "no_rois"
+    if "zarr path not found" in message:
+        return "missing", "zarr_missing"
+    if "already exists" in message:
+        return "error", "run_exists"
+    if "model path not found" in message:
+        return "error", "model_missing"
+    return "error", "eye_masks_inference_failed"
+
+
+def _emit_eye_masks_failure_status(
+    *,
+    registry: Registry,
+    zarr_path: Path,
+    method: str,
+    status: str,
+    reason: str,
+    selected_model_path: Optional[str],
+    selected_run_id: Optional[str],
+    selected_set_id: Optional[str],
+    error_text: str,
+) -> None:
+    if not zarr_path.exists():
+        return
+    try:
+        root = zarr.open_group(str(zarr_path), mode="r")
+        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
+        recording_id = _normalize_attr(root.attrs.get("recording_id")) or _normalize_attr(session_uuid)
+        zarr_use = _normalize_attr(root.attrs.get("zarr_use"))
+        zarr_purpose = _normalize_attr(root.attrs.get("zarr_purpose"))
+        registry.upsert_dataset(
+            dataset_id,
+            session_uuid=session_uuid,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+            zarr_purpose=zarr_purpose,
+        )
+        details = {
+            "reason": reason,
+            "selected_model_path": selected_model_path,
+            "selected_run_id": selected_run_id,
+            "selected_set_id": selected_set_id,
+            "error": error_text,
+        }
+        details = {key: value for key, value in details.items() if value is not None}
+        upsert_recording_step_status(
+            registry,
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="eye_masks",
+            status=status,
+            run_name=None,
+            method=method,
+            coverage_pct=None,
+            details_json=details,
+            source=_EYE_MASKS_STATUS_SOURCE,
+            zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_path),
+        )
+    except Exception:
+        pass
 
 
 def _resolution_payload(
@@ -172,13 +259,25 @@ def _segment_eye_masks_yolo(**kwargs: Any) -> str:
     return segment_eye_masks_yolo(**kwargs)
 
 
-def _infer_unet_eye_masks(argv: list[str]) -> None:
+def _infer_unet_eye_masks(
+    argv: list[str],
+    *,
+    registry: Optional[Registry] = None,
+    status_details: Optional[dict[str, object]] = None,
+) -> None:
     from fisheye.segmentation.infer_unet_eye_masks import main as infer_unet_eye_masks_main
 
-    infer_unet_eye_masks_main(argv)
+    infer_unet_eye_masks_main(argv, registry=registry, status_details=status_details)
 
 
-def _run_yolo(output_path: Path, model_path: str, args: argparse.Namespace) -> str:
+def _run_yolo(
+    output_path: Path,
+    model_path: str,
+    args: argparse.Namespace,
+    *,
+    registry: Optional[Registry] = None,
+    status_details: Optional[dict[str, object]] = None,
+) -> str:
     run_name = _segment_eye_masks_yolo(
         zarr_path=str(output_path),
         model_path=model_path,
@@ -199,13 +298,22 @@ def _run_yolo(output_path: Path, model_path: str, args: argparse.Namespace) -> s
         legacy_masks=bool(args.legacy_masks),
         verbose=bool(args.verbose),
         console=None,
+        registry=registry,
+        status_details=status_details,
     )
     if not run_name:
         raise RuntimeError("YOLO eye-mask inference did not produce a run name.")
     return run_name
 
 
-def _run_unet(output_path: Path, model_path: str, args: argparse.Namespace) -> str:
+def _run_unet(
+    output_path: Path,
+    model_path: str,
+    args: argparse.Namespace,
+    *,
+    registry: Optional[Registry] = None,
+    status_details: Optional[dict[str, object]] = None,
+) -> str:
     unet_argv: list[str] = [str(output_path), str(model_path)]
     if args.run_name:
         unet_argv.extend(["--run-name", str(args.run_name)])
@@ -223,7 +331,7 @@ def _run_unet(output_path: Path, model_path: str, args: argparse.Namespace) -> s
         unet_argv.append("--write-binary-masks")
     if not args.no_use_crop:
         unet_argv.append("--use-crop")
-    _infer_unet_eye_masks(unet_argv)
+    _infer_unet_eye_masks(unet_argv, registry=registry, status_details=status_details)
     run_name = _latest_eye_masks_run(output_path)
     if not run_name:
         raise RuntimeError("U-Net eye-mask inference completed but no latest eye_masks run found.")
@@ -290,39 +398,91 @@ def main(argv: Optional[list[str]] = None) -> int:
             set_id_filter=args.set_id,
             include_non_success=bool(args.include_non_success),
         )
+
+        best = _pick_best_candidate(candidates, require_unique=bool(args.require_unique))
+        payload = _resolution_payload(
+            args=args,
+            argv=argv,
+            recording_dir=recording_dir,
+            output_path=output_path,
+            registry_path=registry_path,
+            recording_id=recording_id,
+            target=target,
+            selected=best,
+            candidates=candidates,
+            top_k=int(args.top_k),
+            method=str(args.method),
+        )
+
+        if args.json or args.dry_run:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        if args.dry_run:
+            return 0
+
+        selected_payload = payload.get("selected") if isinstance(payload.get("selected"), dict) else {}
+        selected_model_path = (
+            selected_payload.get("model_path")
+            if isinstance(selected_payload.get("model_path"), str)
+            else None
+        )
+        selected_run_id = (
+            selected_payload.get("run_id")
+            if isinstance(selected_payload.get("run_id"), str)
+            else None
+        )
+        selected_set_id = (
+            selected_payload.get("set_id")
+            if isinstance(selected_payload.get("set_id"), str)
+            else None
+        )
+        status_details = {
+            "resolution_reason": "registry_model_resolution",
+            "selected_model_path": selected_model_path,
+            "selected_run_id": selected_run_id,
+            "selected_set_id": selected_set_id,
+            "model_resolution_method": str(args.method),
+        }
+
+        try:
+            if args.method == "unet":
+                run_name = _run_unet(
+                    output_path,
+                    best.model_path,
+                    args,
+                    registry=registry,
+                    status_details=status_details,
+                )
+            else:
+                run_name = _run_yolo(
+                    output_path,
+                    best.model_path,
+                    args,
+                    registry=registry,
+                    status_details=status_details,
+                )
+        except Exception as exc:
+            fail_status, fail_reason = _classify_eye_masks_failure(exc)
+            _emit_eye_masks_failure_status(
+                registry=registry,
+                zarr_path=output_path,
+                method=str(args.method),
+                status=fail_status,
+                reason=fail_reason,
+                selected_model_path=selected_model_path,
+                selected_run_id=selected_run_id,
+                selected_set_id=selected_set_id,
+                error_text=str(exc),
+            )
+            raise
+
+        _write_model_resolution_provenance(
+            zarr_path=output_path,
+            run_name=run_name,
+            payload=payload,
+        )
     finally:
         registry.close()
 
-    best = _pick_best_candidate(candidates, require_unique=bool(args.require_unique))
-    payload = _resolution_payload(
-        args=args,
-        argv=argv,
-        recording_dir=recording_dir,
-        output_path=output_path,
-        registry_path=registry_path,
-        recording_id=recording_id,
-        target=target,
-        selected=best,
-        candidates=candidates,
-        top_k=int(args.top_k),
-        method=str(args.method),
-    )
-
-    if args.json or args.dry_run:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    if args.dry_run:
-        return 0
-
-    if args.method == "unet":
-        run_name = _run_unet(output_path, best.model_path, args)
-    else:
-        run_name = _run_yolo(output_path, best.model_path, args)
-
-    _write_model_resolution_provenance(
-        zarr_path=output_path,
-        run_name=run_name,
-        payload=payload,
-    )
     print("Model resolution provenance written")
     print(f"  output_zarr: {output_path}")
     print(f"  eye_masks_run: {run_name}")

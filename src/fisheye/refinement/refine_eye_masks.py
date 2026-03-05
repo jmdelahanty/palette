@@ -158,6 +158,61 @@ def _emit_refined_eye_masks_status(
             )
 
 
+def _refresh_refined_eye_masks_registry_rows(
+    *,
+    root: zarr.Group,
+    zarr_path: Path,
+    console: Optional[Console],
+) -> None:
+    """Refresh eye-mask performance/quality rows for one dataset (non-fatal)."""
+    try:
+        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
+        recording_id = _status_text(root.attrs.get("recording_id")) or _status_text(session_uuid)
+        zarr_use = _status_text(root.attrs.get("zarr_use")) or _status_text(root.attrs.get("zarr_purpose"))
+        zarr_purpose = _status_text(root.attrs.get("zarr_purpose"))
+
+        registry_path = RegistryPaths.from_env(Path.cwd()).path
+        registry = Registry(registry_path)
+        try:
+            registry.upsert_dataset(
+                dataset_id,
+                session_uuid=session_uuid,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+                zarr_purpose=zarr_purpose,
+            )
+            perf_rows = int(
+                registry.refresh_eye_mask_performance_for_dataset(
+                    dataset_id,
+                    zarr_path=zarr_path,
+                    recording_id=recording_id,
+                    zarr_use=zarr_use,
+                )
+            )
+            quality_rows = int(
+                registry.refresh_eye_mask_quality_for_dataset(
+                    dataset_id,
+                    zarr_path=zarr_path,
+                    recording_id=recording_id,
+                    zarr_use=zarr_use,
+                )
+            )
+        finally:
+            registry.close()
+        if console is not None:
+            console.print(
+                "[dim]Refreshed registry eye-mask rows "
+                f"(performance={perf_rows}, quality={quality_rows}) for dataset {dataset_id}[/dim]"
+            )
+    except Exception as exc:
+        if console is not None:
+            console.print(
+                "[yellow]Warning:[/yellow] failed to refresh eye-mask registry rows "
+                f"for refined_eye_masks: {exc}"
+            )
+
+
 def _get_zarr_array(zarr_path: str, array_path: str) -> zarr.Array:
     """Fetch (and memoize per process) a Zarr array for repeated chunk reads."""
     key = (zarr_path, array_path)
@@ -2400,9 +2455,10 @@ def refine_eye_masks(
     coverage_pct = _status_float(run_group.attrs.get("successful_roi_pair_rate"))
     if coverage_pct is not None and coverage_pct <= 1.0:
         coverage_pct *= 100.0
+    resolved_zarr_path = Path(zarr_path).expanduser().resolve()
     _emit_refined_eye_masks_status(
         root=root,
-        zarr_path=Path(zarr_path).expanduser().resolve(),
+        zarr_path=resolved_zarr_path,
         status="ok",
         run_name=resolved_run_name,
         method=_status_text(run_group.attrs.get("method")) or "refine_eye_masks",
@@ -2421,6 +2477,11 @@ def refine_eye_masks(
             "small_area_roi_pairs": stats.get("small_area_rois"),
             "probability_source": mask_prob_dataset or "none",
         },
+        console=console,
+    )
+    _refresh_refined_eye_masks_registry_rows(
+        root=root,
+        zarr_path=resolved_zarr_path,
         console=console,
     )
     return resolved_run_name
@@ -2526,6 +2587,29 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             allow_latest_keypoint_fallback=args.allow_latest_keypoint_fallback,
         )
     except Exception as exc:
+        resolved_zarr_path = Path(args.zarr_path).expanduser().resolve()
+        error_root: Optional[zarr.Group] = None
+        try:
+            error_root = zarr.open(str(resolved_zarr_path), mode="r", use_consolidated=False)
+        except Exception:
+            error_root = None
+        if error_root is not None:
+            _emit_refined_eye_masks_status(
+                root=error_root,
+                zarr_path=resolved_zarr_path,
+                status="error",
+                run_name=args.run_name,
+                method="refine_eye_masks",
+                coverage_pct=None,
+                review_status=None,
+                details={
+                    "reason": "runtime_error",
+                    "error": str(exc),
+                    "source_eye_masks_run": args.source_run,
+                    "source_keypoints_run": args.keypoint_run,
+                },
+                console=console,
+            )
         console.print(f"[red]✗[/red] Failed to refine eye masks: {exc}")
         raise SystemExit(1) from exc
 

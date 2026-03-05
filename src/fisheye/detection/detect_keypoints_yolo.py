@@ -25,6 +25,9 @@ from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from ultralytics import YOLO, __version__ as ultralytics_version
 
+from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
+from ..registry.status_ledger import upsert_recording_step_status
+from ..registry.step_cascade import invalidate_downstream_steps
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
@@ -32,6 +35,8 @@ from ..pose.schema import schema_from_package
 
 # Load the traditional 3-point pose schema (swim_bladder + left/right eyes)
 TRADITIONAL_POSE_SCHEMA = schema_from_package("traditional_v1")
+_KEYPOINT_STEP_NAME = "keypoints"
+_KEYPOINT_STATUS_SOURCE = "runtime_keypoints_detect"
 
 
 def _prepare_run_group(
@@ -48,6 +53,93 @@ def _prepare_run_group(
         console.print(f"Created run group: [cyan]keypoints_runs/{run_name}[/cyan]")
         return run_group, run_name
     return get_run_group(root, "keypoints", console=console, create_new=True)
+
+
+def _status_text(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", "ignore").strip()
+    else:
+        text = str(value).strip()
+    return text or None
+
+
+def _safe_zarr_mtime_ns(path: Path) -> Optional[int]:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _resolve_registry_path(registry: Optional[Path]) -> Optional[Path]:
+    if registry is not None:
+        return registry.expanduser().resolve()
+    inferred = RegistryPaths.from_env(Path.cwd()).path.expanduser().resolve()
+    if not inferred.exists():
+        return None
+    return inferred
+
+
+def _emit_keypoint_step_status(
+    *,
+    root: zarr.Group,
+    zarr_path: Path,
+    run_name: str,
+    method: Optional[str],
+    coverage_pct: Optional[float],
+    details: Dict[str, object],
+    console: Optional[Console],
+    registry: Optional[Path],
+) -> None:
+    registry_path = _resolve_registry_path(registry)
+    if registry_path is None:
+        return
+    try:
+        dataset_id, session_uuid = resolve_dataset_id(root, zarr_path)
+        recording_id = _status_text(root.attrs.get("recording_id")) or _status_text(session_uuid)
+        zarr_use = _status_text(root.attrs.get("zarr_use"))
+        zarr_purpose = _status_text(root.attrs.get("zarr_purpose"))
+
+        registry_db = Registry(registry_path)
+        try:
+            registry_db.upsert_dataset(
+                dataset_id,
+                session_uuid=session_uuid,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+                zarr_purpose=zarr_purpose,
+            )
+            upsert_recording_step_status(
+                registry_db,
+                dataset_id=dataset_id,
+                recording_id=recording_id,
+                step_name=_KEYPOINT_STEP_NAME,
+                status="ok",
+                run_name=run_name,
+                method=method,
+                coverage_pct=coverage_pct,
+                details_json=details,
+                source=_KEYPOINT_STATUS_SOURCE,
+                zarr_mtime_ns=_safe_zarr_mtime_ns(zarr_path),
+            )
+            invalidate_downstream_steps(
+                registry_db,
+                dataset_id=dataset_id,
+                step_name=_KEYPOINT_STEP_NAME,
+                source=_KEYPOINT_STATUS_SOURCE,
+                recording_id=recording_id,
+                trigger_run_name=run_name,
+            )
+        finally:
+            registry_db.close()
+    except Exception as exc:
+        if console is not None:
+            console.print(
+                f"[yellow]Warning:[/yellow] failed to write recording step status "
+                f"for {_KEYPOINT_STEP_NAME}: {exc}"
+            )
 
 
 def _create_output_arrays(group: zarr.Group, total_rois: int, chunk_hint: int) -> Dict[str, zarr.Array]:
@@ -277,6 +369,7 @@ def detect_keypoints_yolo(
     max_det: int = 1,
     verbose: bool = False,
     mask_threshold: float = 0.5,
+    registry: Optional[Path] = None,
     console: Optional[Console] = None,
 ) -> str:
     """Run YOLO pose inference and record outputs in ``keypoints_runs``.
@@ -673,6 +766,33 @@ def detect_keypoints_yolo(
         if override_data["duration"] is not None:
             run_group.attrs["refined_roi_generation_duration_seconds"] = float(override_data["duration"])
 
+    status_details: Dict[str, object] = {
+        "reason": "present",
+        "run_group": "keypoints_runs",
+        "source_crop_run": latest_crop,
+        "source_detect_run": source_detect_run or "unknown",
+        "total_rois": int(total_rois),
+        "successful_detections": int(success_total),
+        "failed_detections": int(failure_total),
+        "success_rate_percent": round(float(success_rate), 2),
+    }
+    if source_refined_run:
+        status_details["source_refined_run"] = source_refined_run
+    if override_data is not None:
+        status_details["refined_roi_overrides"] = int(override_data["count"])
+        status_details["refined_roi_source"] = str(override_data["path"])
+
+    _emit_keypoint_step_status(
+        root=root,
+        zarr_path=zarr_path.resolve(),
+        run_name=resolved_run_name,
+        method=_status_text(run_group.attrs.get("method")) or "yolo_pose",
+        coverage_pct=float(success_rate),
+        details=status_details,
+        console=console,
+        registry=registry,
+    )
+
     summary_lines = [
         "[green]✓[/green] Pose inference complete",
         "",
@@ -716,6 +836,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=0.5,
         help="Compatibility parameter recorded in run metadata (not used for pose decoding).",
     )
+    parser.add_argument("--registry", type=Path, default=None, help="Optional registry SQLite path.")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output")
     return parser
 
@@ -737,6 +858,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         max_det=args.max_det,
         verbose=args.verbose,
         mask_threshold=args.mask_threshold,
+        registry=args.registry,
     )
 
 

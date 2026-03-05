@@ -558,6 +558,7 @@ class Pipeline:
                 scheduler=self.config.scheduler,
                 num_workers=self.config.num_workers,
                 console=self.console,
+                registry=Path(str(self.config.registry_path)) if self.config.registry_path else None,
             )
 
             self.console.print(
@@ -584,6 +585,7 @@ class Pipeline:
                 max_det=params.get('max_det', 1),
                 mask_threshold=params.get('mask_threshold', 0.5),
                 verbose=params.get('verbose', False),
+                registry=Path(str(self.config.registry_path)) if self.config.registry_path else None,
                 console=self.console,
             )
 
