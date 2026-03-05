@@ -4,6 +4,9 @@ Purpose: define the canonical, operator-first contract for analysis processing p
 
 Date anchored: 2026-02-09.
 
+Related detect batch contract:
+- `docs/detect_batch_analysis_zarr_parallel_agents_contract.md`
+
 ## Goals
 
 - Keep stage responsibilities explicit and composable.

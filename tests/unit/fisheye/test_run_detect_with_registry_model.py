@@ -92,6 +92,113 @@ def test_write_model_resolution_provenance_updates_detect_run_attrs(
     assert "model_resolution" in provenance
 
 
+def _setup_resolution_mocks(monkeypatch: pytest.MonkeyPatch) -> mod.Candidate:
+    target = mod.TargetProfile(
+        recording_id="rec_001",
+        recording_type="behavior",
+        recording_subtype="screen",
+        behavior_mode="default",
+        rig_id="rig_1",
+        arena_id="arena_1",
+        camera_id="cam_1",
+        canvas_name="canvas_1",
+        protocol_name="protocol_a",
+        dish_design="cedar_shadow",
+        cross_id=None,
+        genotype=None,
+        dpf_at_acquisition=None,
+    )
+    best = mod.Candidate(
+        run_id="detect_run_123",
+        set_id="detect_set_123",
+        model_path="/tmp/detect_model.pt",
+        created_utc="2026-02-09T00:00:00+00:00",
+        status="success",
+        dataset_count=4,
+        weighted_score=0.99,
+        feature_match_counts={"rig_id": 4},
+        feature_weights_used=1.0,
+    )
+
+    class _FakeRegistry:
+        def __init__(self, _path: Path) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(mod, "Registry", _FakeRegistry)
+    monkeypatch.setattr(mod, "_resolve_recording_id", lambda *_args, **_kwargs: "rec_001")
+    monkeypatch.setattr(mod, "_load_target_profile", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(mod, "_load_candidates", lambda *_args, **_kwargs: [best])
+    return best
+
+
+def test_run_detect_with_registry_model_returns_dry_run_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    recording_dir = tmp_path / "recording"
+    cams_dir = recording_dir / "cams"
+    cams_dir.mkdir(parents=True, exist_ok=True)
+    video_path = cams_dir / "cam_2010093.mp4"
+    video_path.write_bytes(b"")
+    output_path = tmp_path / "out_analysis.zarr"
+    registry_path = tmp_path / "registry.sqlite"
+
+    best = _setup_resolution_mocks(monkeypatch)
+    monkeypatch.setattr(
+        mod,
+        "detect_yolo",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("detect_yolo should not run during dry-run")),
+    )
+
+    result = mod.run_detect_with_registry_model(
+        recording_dir=recording_dir,
+        output=output_path,
+        registry=registry_path,
+        set_id="detect_set_123",
+        include_non_success=True,
+        dry_run=True,
+    )
+
+    assert result.ok is True
+    assert result.status == "dry_run"
+    assert result.detect_run is None
+    assert result.video_path == str(video_path.resolve())
+    assert result.selected_model_path == best.model_path
+    assert result.selected_run_id == best.run_id
+    assert result.selected_set_id == best.set_id
+    assert isinstance(result.resolution_payload, dict)
+    assert result.resolution_payload.get("task") == "detect"
+
+
+def test_run_detect_with_registry_model_returns_failure_payload_when_detect_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    recording_dir = tmp_path / "recording"
+    cams_dir = recording_dir / "cams"
+    cams_dir.mkdir(parents=True, exist_ok=True)
+    (cams_dir / "cam_2010093.mp4").write_bytes(b"")
+
+    best = _setup_resolution_mocks(monkeypatch)
+    monkeypatch.setattr(mod, "detect_yolo", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("gpu oom")))
+
+    result = mod.run_detect_with_registry_model(
+        recording_dir=recording_dir,
+        output=tmp_path / "out_analysis.zarr",
+        registry=tmp_path / "registry.sqlite",
+    )
+
+    assert result.ok is False
+    assert result.status == "failed"
+    assert result.reason == "detect_inference_failed"
+    assert "dry-run" in (result.remediation or "")
+    assert result.selected_model_path == best.model_path
+    assert result.detect_run is None
+
+
 def test_main_runs_detect_resolution_and_writes_provenance(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

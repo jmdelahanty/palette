@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -16,6 +16,46 @@ from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils.resolve_detect_model import Candidate, TargetProfile
 from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
+
+
+@dataclass(frozen=True)
+class DetectRegistryResult:
+    ok: bool
+    status: str
+    recording_dir: str
+    output_zarr: str
+    registry_path: str
+    video_path: Optional[str] = None
+    reason: Optional[str] = None
+    error: Optional[str] = None
+    remediation: Optional[str] = None
+    selected_model_path: Optional[str] = None
+    selected_run_id: Optional[str] = None
+    selected_set_id: Optional[str] = None
+    detect_run: Optional[str] = None
+    resolved_at_utc: Optional[str] = None
+    resolution_payload: Optional[dict[str, Any]] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "ok": self.ok,
+            "status": self.status,
+            "recording_dir": self.recording_dir,
+            "output_zarr": self.output_zarr,
+            "registry_path": self.registry_path,
+            "video_path": self.video_path,
+            "reason": self.reason,
+            "error": self.error,
+            "remediation": self.remediation,
+            "selected_model_path": self.selected_model_path,
+            "selected_run_id": self.selected_run_id,
+            "selected_set_id": self.selected_set_id,
+            "detect_run": self.detect_run,
+            "resolved_at_utc": self.resolved_at_utc,
+        }
+        if self.resolution_payload is not None:
+            payload["resolution_payload"] = self.resolution_payload
+        return payload
 
 
 def _resolve_video(recording_dir: Path, explicit_video: Optional[Path]) -> Path:
@@ -154,6 +194,278 @@ def _write_model_resolution_provenance(
     detect_group.attrs.put(attrs)
 
 
+def _failure_result(
+    *,
+    reason: str,
+    error: str,
+    remediation: str,
+    recording_dir: Path,
+    output_path: Path,
+    registry_path: Path,
+    video_path: Optional[Path] = None,
+    selected_model_path: Optional[str] = None,
+    selected_run_id: Optional[str] = None,
+    selected_set_id: Optional[str] = None,
+    detect_run: Optional[str] = None,
+    resolved_at_utc: Optional[str] = None,
+    resolution_payload: Optional[dict[str, Any]] = None,
+) -> DetectRegistryResult:
+    return DetectRegistryResult(
+        ok=False,
+        status="failed",
+        reason=reason,
+        error=error,
+        remediation=remediation,
+        recording_dir=str(recording_dir),
+        output_zarr=str(output_path),
+        registry_path=str(registry_path),
+        video_path=str(video_path) if video_path is not None else None,
+        selected_model_path=selected_model_path,
+        selected_run_id=selected_run_id,
+        selected_set_id=selected_set_id,
+        detect_run=detect_run,
+        resolved_at_utc=resolved_at_utc,
+        resolution_payload=resolution_payload,
+    )
+
+
+def _build_payload_args(
+    *,
+    set_id: Optional[str],
+    require_unique: bool,
+    top_k: int,
+    include_non_success: bool,
+    dry_run: bool,
+    cpu: bool,
+    config: Optional[str],
+    conf: Optional[float],
+    iou: Optional[float],
+    max_det: Optional[int],
+    batch_size: Optional[int],
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        set_id=set_id,
+        require_unique=bool(require_unique),
+        top_k=int(top_k),
+        include_non_success=bool(include_non_success),
+        dry_run=bool(dry_run),
+        cpu=bool(cpu),
+        config=config,
+        conf=conf,
+        iou=iou,
+        max_det=max_det,
+        batch_size=batch_size,
+    )
+
+
+def run_detect_with_registry_model(
+    *,
+    recording_dir: Path,
+    video: Optional[Path] = None,
+    output: Optional[Path] = None,
+    registry: Optional[Path] = None,
+    set_id: Optional[str] = None,
+    require_unique: bool = False,
+    top_k: int = 5,
+    include_non_success: bool = False,
+    dry_run: bool = False,
+    config: Optional[str] = None,
+    conf: Optional[float] = None,
+    iou: Optional[float] = None,
+    max_det: Optional[int] = None,
+    batch_size: Optional[int] = None,
+    cpu: bool = False,
+    write_raw_video_metadata: bool = False,
+    overwrite_raw_video_metadata: bool = False,
+    argv: Optional[list[str]] = None,
+) -> DetectRegistryResult:
+    resolved_recording_dir = recording_dir.expanduser().resolve()
+    resolved_registry_path = (registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
+    resolved_output_path = _resolve_output(resolved_recording_dir, output)
+
+    try:
+        resolved_video_path = _resolve_video(resolved_recording_dir, video)
+    except SystemExit as exc:
+        return _failure_result(
+            reason="video_resolution_failed",
+            error=str(exc),
+            remediation="Ensure exactly one cams/*.mp4 exists, or pass --video explicitly.",
+            recording_dir=resolved_recording_dir,
+            output_path=resolved_output_path,
+            registry_path=resolved_registry_path,
+        )
+
+    try:
+        registry_db = Registry(resolved_registry_path)
+    except Exception as exc:
+        return _failure_result(
+            reason="registry_open_failed",
+            error=str(exc),
+            remediation="Verify --registry points to a readable palette registry SQLite file.",
+            recording_dir=resolved_recording_dir,
+            output_path=resolved_output_path,
+            registry_path=resolved_registry_path,
+            video_path=resolved_video_path,
+        )
+
+    try:
+        recording_id = _resolve_recording_id(
+            registry_db,
+            recording_id=None,
+            recording_dir=resolved_recording_dir,
+        )
+        target = _load_target_profile(registry_db, recording_id)
+        candidates = _load_candidates(
+            registry_db,
+            target=target,
+            task="detect",
+            set_id_filter=set_id,
+            include_non_success=bool(include_non_success),
+        )
+    except Exception as exc:
+        return _failure_result(
+            reason="model_resolution_failed",
+            error=str(exc),
+            remediation="Verify registry metadata for this recording and rerun with --include-non-success or --set-id as needed.",
+            recording_dir=resolved_recording_dir,
+            output_path=resolved_output_path,
+            registry_path=resolved_registry_path,
+            video_path=resolved_video_path,
+        )
+    finally:
+        registry_db.close()
+
+    try:
+        best = _pick_best_candidate(candidates, require_unique=bool(require_unique))
+    except SystemExit as exc:
+        return _failure_result(
+            reason="candidate_selection_failed",
+            error=str(exc),
+            remediation="Pass --set-id to pin a model set or remove --require-unique.",
+            recording_dir=resolved_recording_dir,
+            output_path=resolved_output_path,
+            registry_path=resolved_registry_path,
+            video_path=resolved_video_path,
+        )
+
+    payload_args = _build_payload_args(
+        set_id=set_id,
+        require_unique=bool(require_unique),
+        top_k=int(top_k),
+        include_non_success=bool(include_non_success),
+        dry_run=bool(dry_run),
+        cpu=bool(cpu),
+        config=config,
+        conf=conf,
+        iou=iou,
+        max_det=max_det,
+        batch_size=batch_size,
+    )
+
+    payload = _resolution_payload(
+        args=payload_args,
+        argv=argv,
+        recording_dir=resolved_recording_dir,
+        video_path=resolved_video_path,
+        output_path=resolved_output_path,
+        registry_path=resolved_registry_path,
+        recording_id=recording_id,
+        target=target,
+        selected=best,
+        candidates=candidates,
+        top_k=int(top_k),
+    )
+
+    selected_payload = payload.get("selected") if isinstance(payload.get("selected"), dict) else {}
+    selected_model_path = selected_payload.get("model_path") if isinstance(selected_payload.get("model_path"), str) else None
+    selected_run_id = selected_payload.get("run_id") if isinstance(selected_payload.get("run_id"), str) else None
+    selected_set_id = selected_payload.get("set_id") if isinstance(selected_payload.get("set_id"), str) else None
+    resolved_at_utc = payload.get("resolved_at_utc") if isinstance(payload.get("resolved_at_utc"), str) else None
+
+    if dry_run:
+        return DetectRegistryResult(
+            ok=True,
+            status="dry_run",
+            recording_dir=str(resolved_recording_dir),
+            output_zarr=str(resolved_output_path),
+            registry_path=str(resolved_registry_path),
+            video_path=str(resolved_video_path),
+            selected_model_path=selected_model_path,
+            selected_run_id=selected_run_id,
+            selected_set_id=selected_set_id,
+            resolved_at_utc=resolved_at_utc,
+            resolution_payload=payload,
+        )
+
+    try:
+        run_name = detect_yolo(
+            video_path=str(resolved_video_path),
+            model_path=best.model_path,
+            output_zarr=str(resolved_output_path),
+            config_path=config,
+            conf_threshold=conf,
+            iou_threshold=iou,
+            max_det=max_det,
+            batch_size=batch_size,
+            use_gpu=(False if cpu else None),
+            write_raw_video_metadata=bool(write_raw_video_metadata),
+            overwrite_raw_video_metadata=bool(overwrite_raw_video_metadata),
+        )
+    except Exception as exc:
+        return _failure_result(
+            reason="detect_inference_failed",
+            error=str(exc),
+            remediation="Inspect model/config inputs and rerun with --dry-run --json to verify resolved model selection.",
+            recording_dir=resolved_recording_dir,
+            output_path=resolved_output_path,
+            registry_path=resolved_registry_path,
+            video_path=resolved_video_path,
+            selected_model_path=selected_model_path,
+            selected_run_id=selected_run_id,
+            selected_set_id=selected_set_id,
+            resolved_at_utc=resolved_at_utc,
+            resolution_payload=payload,
+        )
+
+    try:
+        _write_model_resolution_provenance(
+            zarr_path=resolved_output_path,
+            run_name=run_name,
+            payload=payload,
+        )
+    except Exception as exc:
+        return _failure_result(
+            reason="provenance_write_failed",
+            error=str(exc),
+            remediation="Ensure output zarr is writable and detect_runs/<run> exists before retrying.",
+            recording_dir=resolved_recording_dir,
+            output_path=resolved_output_path,
+            registry_path=resolved_registry_path,
+            video_path=resolved_video_path,
+            selected_model_path=selected_model_path,
+            selected_run_id=selected_run_id,
+            selected_set_id=selected_set_id,
+            detect_run=run_name,
+            resolved_at_utc=resolved_at_utc,
+            resolution_payload=payload,
+        )
+
+    return DetectRegistryResult(
+        ok=True,
+        status="ok",
+        recording_dir=str(resolved_recording_dir),
+        output_zarr=str(resolved_output_path),
+        registry_path=str(resolved_registry_path),
+        video_path=str(resolved_video_path),
+        selected_model_path=selected_model_path,
+        selected_run_id=selected_run_id,
+        selected_set_id=selected_set_id,
+        detect_run=run_name,
+        resolved_at_utc=resolved_at_utc,
+        resolution_payload=payload,
+    )
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--recording-dir", type=Path, required=True, help="Recording directory to process.")
@@ -185,72 +497,51 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--json", action="store_true", help="Print resolved payload JSON.")
     args = parser.parse_args(argv)
 
-    recording_dir = args.recording_dir.expanduser().resolve()
-    registry_path = (args.registry or RegistryPaths.from_env(Path.cwd()).path).expanduser().resolve()
-    video_path = _resolve_video(recording_dir, args.video)
-    output_path = _resolve_output(recording_dir, args.output)
-
-    registry = Registry(registry_path)
-    try:
-        recording_id = _resolve_recording_id(
-            registry,
-            recording_id=None,
-            recording_dir=recording_dir,
-        )
-        target = _load_target_profile(registry, recording_id)
-        candidates = _load_candidates(
-            registry,
-            target=target,
-            task="detect",
-            set_id_filter=args.set_id,
-            include_non_success=bool(args.include_non_success),
-        )
-    finally:
-        registry.close()
-
-    best = _pick_best_candidate(candidates, require_unique=bool(args.require_unique))
-    payload = _resolution_payload(
-        args=args,
-        argv=argv,
-        recording_dir=recording_dir,
-        video_path=video_path,
-        output_path=output_path,
-        registry_path=registry_path,
-        recording_id=recording_id,
-        target=target,
-        selected=best,
-        candidates=candidates,
+    result = run_detect_with_registry_model(
+        recording_dir=args.recording_dir,
+        video=args.video,
+        output=args.output,
+        registry=args.registry,
+        set_id=args.set_id,
+        require_unique=bool(args.require_unique),
         top_k=int(args.top_k),
+        include_non_success=bool(args.include_non_success),
+        dry_run=bool(args.dry_run),
+        config=args.config,
+        conf=args.conf,
+        iou=args.iou,
+        max_det=args.max_det,
+        batch_size=args.batch_size,
+        cpu=bool(args.cpu),
+        write_raw_video_metadata=bool(args.write_raw_video_metadata),
+        overwrite_raw_video_metadata=bool(args.overwrite_raw_video_metadata),
+        argv=argv,
     )
 
     if args.json or args.dry_run:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    if args.dry_run:
+        if result.resolution_payload is not None:
+            print(json.dumps(result.resolution_payload, indent=2, sort_keys=True))
+        else:
+            print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+    if result.status == "dry_run":
         return 0
 
-    run_name = detect_yolo(
-        video_path=str(video_path),
-        model_path=best.model_path,
-        output_zarr=str(output_path),
-        config_path=args.config,
-        conf_threshold=args.conf,
-        iou_threshold=args.iou,
-        max_det=args.max_det,
-        batch_size=args.batch_size,
-        use_gpu=(False if args.cpu else None),
-        write_raw_video_metadata=bool(args.write_raw_video_metadata),
-        overwrite_raw_video_metadata=bool(args.overwrite_raw_video_metadata),
-    )
+    if not result.ok:
+        print("Detect run failed")
+        print(f"  recording_dir: {result.recording_dir}")
+        print(f"  output_zarr: {result.output_zarr}")
+        print(f"  reason: {result.reason or 'unknown'}")
+        if result.error:
+            print(f"  error: {result.error}")
+        if result.remediation:
+            print(f"  remediation: {result.remediation}")
+        return 1
 
-    _write_model_resolution_provenance(
-        zarr_path=output_path,
-        run_name=run_name,
-        payload=payload,
-    )
     print("Model resolution provenance written")
-    print(f"  output_zarr: {output_path}")
-    print(f"  detect_run: {run_name}")
-    print(f"  selected_model: {best.model_path}")
+    print(f"  output_zarr: {result.output_zarr}")
+    print(f"  detect_run: {result.detect_run}")
+    print(f"  selected_model: {result.selected_model_path}")
     return 0
 
 

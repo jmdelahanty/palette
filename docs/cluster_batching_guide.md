@@ -3,6 +3,9 @@
 This guide summarizes best practices for running Palette detection/background
 jobs on a shared HPC filesystem and includes an example LSF `bsub` wrapper.
 
+Related contract:
+- `docs/detect_batch_analysis_zarr_parallel_agents_contract.md`
+
 ## Why batch jobs?
 
 Zarr writes generate many small files and metadata updates. Submitting hundreds
@@ -26,14 +29,23 @@ writes** instead of many short tasks.
 
 ## Detect jobs (batch script)
 
-We added a batch runner:
+Use the canonical batch entrypoint:
 
 ```
-python src/fisheye/utils/run_detections_batch.py /nvme1/recordings --recursive --apply --no-dask-progress
+scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings --recursive --dry-run --json
 ```
 
-It skips zarrs that already have `detect_runs/latest`, unless `--overwrite` is
-set.
+Apply mode (registry-backed model resolution):
+
+```
+scripts/py -m fisheye.utils.run_detections_batch /nvme1/recordings \
+  --recursive \
+  --apply \
+  --registry /nvme1/palette_registry.sqlite
+```
+
+It plans directly against `*_analysis.zarr` targets and skips archives that
+already have `detect_runs/latest` unless `--overwrite` is set.
 
 ## Crop jobs (batch script)
 
@@ -62,14 +74,16 @@ Example:
   --queue short \
   --ncores 4 \
   --mem-gb 16 \
-  --scheduler threads \
+  --registry /nvme1/palette_registry.sqlite \
   --require-tuning
 ```
 
 This:
-- Finds all recordings under `--root`
+- Finds all `*_analysis.zarr` targets under `--root`
+- Writes deterministic `recordings.txt` and `batch_*.txt` shard manifests
 - Splits into batches of `--batch-size`
 - Submits an LSF job array with at most `--max-active` running at once
+- Prints effective batch command/queue parameters in dry-run output
 
 Logs and batch files go under:
 ```
