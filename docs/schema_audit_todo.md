@@ -351,17 +351,26 @@ Source: the array inventories in Section 2 above, cross-checked against
 - [x] ID assignment checker
 
 #### Phase 5: Reconcile zarr_structure.md
-- [ ] Diff `stage_arrays.py` specs against `zarr_structure.md` and resolve
+- [x] Diff `stage_arrays.py` specs against `zarr_structure.md` and resolve
       discrepancies (missing arrays, dtype mismatches, optional vs required).
-- [ ] Update `zarr_structure.md` header to reference `stage_arrays.py` as the
-      code-level counterpart.
-- [ ] Add detect quality section to `zarr_structure.md` (currently missing).
+      Completed 2026-02-27: reconciled `raw_video`, `detect`, `crop`,
+      `keypoints`, `eye_masks`, and `id_assignment` array tables.
+- [x] Update `zarr_structure.md` header to reference `stage_arrays.py` as the
+      code-level counterpart. Completed 2026-02-27.
+- [x] Add detect quality section to `zarr_structure.md` (currently missing).
+      Completed 2026-02-27: added
+      `detect_runs/<run>/quality_reports/<qrun>/` section.
 
 #### Phase 6: Retire stale schema.py artifacts
-- [ ] Remove or mark deprecated: `create_detection_arrays()` (creates 2 of 10
+- [x] Remove or mark deprecated: `create_detection_arrays()` (creates 2 of 10
       arrays), `create_tracking_arrays()` (legacy 21-column layout).
-- [ ] Update `ZARR_SCHEMA` dict to reference `stage_arrays.py` specs or
+      Completed 2026-02-27: both helpers now emit `DeprecationWarning` with
+      migration guidance to `stage_arrays.py`.
+- [x] Update `ZARR_SCHEMA` dict to reference `stage_arrays.py` specs or
       remove it in favor of the new module.
+      Completed 2026-02-27: `ZARR_SCHEMA` now includes
+      `array_contract_source=fisheye.shared.zarr.stage_arrays` and a
+      legacy-status marker.
 
 ### Lower priority (not blocked on stage_arrays.py)
 
@@ -379,7 +388,8 @@ Source: the array inventories in Section 2 above, cross-checked against
 
 ## Related docs
 - `src/fisheye/docs/zarr_structure.md` -- authoritative zarr layout spec
-- `src/fisheye/shared/zarr/schema.py` -- code-level zarr schema and helpers
+- `src/fisheye/shared/zarr/stage_arrays.py` -- code-level stage array contracts
+- `src/fisheye/shared/zarr/schema.py` -- legacy zarr schema helpers (metadata/group skeleton)
 - `src/fisheye/registry/db.py` -- registry database schema (migrations 1-27)
 - `docs/review_status_schema_unification_contract.md` -- review payload schema
 - `docs/detection_data_profile_schema_contract.md` -- detection profile schema

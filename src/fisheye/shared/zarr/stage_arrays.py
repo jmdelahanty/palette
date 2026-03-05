@@ -194,30 +194,32 @@ def validate_run(group: zarr.Group, spec: StageSpec) -> ValidationResult:
     errors: List[str] = []
     warnings: List[str] = []
 
-    _validate_specs(
-        group,
-        spec.specs,
-        group_label=spec.stage_name,
-        errors=errors,
-        warnings=warnings,
-    )
-
-    for subgroup_name, subgroup_specs in spec.subgroups.items():
-        if subgroup_name not in group:
-            errors.append(f"{spec.stage_name}: missing required subgroup '{subgroup_name}'")
-            continue
-        subgroup = group[subgroup_name]
-        if not isinstance(subgroup, zarr.Group):
-            errors.append(f"{spec.stage_name}: '{subgroup_name}' exists but is not a group")
-            continue
-
+    if spec.specs:
         _validate_specs(
-            subgroup,
-            subgroup_specs,
-            group_label=f"{spec.stage_name}/{subgroup_name}",
+            group,
+            spec.specs,
+            group_label=spec.stage_name,
             errors=errors,
             warnings=warnings,
         )
+
+    if spec.subgroups:
+        for subgroup_name, subgroup_specs in spec.subgroups.items():
+            if subgroup_name not in group:
+                errors.append(f"{spec.stage_name}: missing required subgroup '{subgroup_name}'")
+                continue
+            subgroup = group[subgroup_name]
+            if not isinstance(subgroup, zarr.Group):
+                errors.append(f"{spec.stage_name}: '{subgroup_name}' exists but is not a group")
+                continue
+
+            _validate_specs(
+                subgroup,
+                subgroup_specs,
+                group_label=f"{spec.stage_name}/{subgroup_name}",
+                errors=errors,
+                warnings=warnings,
+            )
 
     return ValidationResult(valid=not errors, errors=errors, warnings=warnings)
 
@@ -320,7 +322,7 @@ _REFINED_DETECT_ARRAYS: Tuple[ArraySpec, ...] = (
 REFINED_DETECT_SPEC = StageSpec(
     stage_name="refined_detect",
     zarr_group="refined_detect_runs/<run>/",
-    specs=_REFINED_DETECT_ARRAYS,
+    specs=(),
     subgroups={
         "filtered": _REFINED_DETECT_ARRAYS,
         "interpolated": _REFINED_DETECT_ARRAYS,

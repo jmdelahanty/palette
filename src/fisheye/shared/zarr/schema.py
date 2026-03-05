@@ -1,10 +1,13 @@
 """
 Standardized Zarr schema for the Palette ecosystem using Zarr v3.
 
-This schema defines the structure that all packages expect and produce.
+Legacy schema helpers for broad archive structure and metadata.
+
+Per-stage array contracts are maintained in `fisheye.shared.zarr.stage_arrays`.
 """
 
 from typing import Dict, Any, Optional, Tuple, List
+import warnings
 import zarr
 from zarr.storage import LocalStore
 import zarr.codecs
@@ -29,6 +32,8 @@ ZARR_SCHEMA_VERSION = "3.0.0"
 ZARR_SCHEMA = {
     "version": ZARR_SCHEMA_VERSION,
     "zarr_format": 3,
+    "status": "legacy-metadata",
+    "array_contract_source": "fisheye.shared.zarr.stage_arrays",
     "root_attributes": {
         "schema_version": "Schema version string (3.x)",
         "zarr_format": "Zarr format version (3)",
@@ -421,6 +426,12 @@ def create_detection_arrays(
     Returns:
         (n_detections, bbox_norm_coords)
     """
+    warnings.warn(
+        "create_detection_arrays() is legacy and incomplete for modern detect runs; "
+        "use stage-specific writers and fisheye.shared.zarr.stage_arrays contracts instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     ser = zarr.codecs.BytesCodec()
     lz4 = zarr.codecs.BloscCodec(cname="lz4", clevel=1, shuffle="bitshuffle")
 
@@ -461,6 +472,12 @@ def create_tracking_arrays(
     Returns:
         (n_detections, tracking_results)
     """
+    warnings.warn(
+        "create_tracking_arrays() is legacy and uses a historical 21-column layout; "
+        "prefer current stage-specific writers and contracts in fisheye.shared.zarr.stage_arrays.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     ser = zarr.codecs.BytesCodec()
     lz4 = zarr.codecs.BloscCodec(cname="lz4", clevel=1, shuffle="bitshuffle")
 

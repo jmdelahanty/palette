@@ -11,6 +11,7 @@ from fisheye.shared.zarr.stage_arrays import (
     DETECT_SPEC,
     EYE_MASKS_SPEC,
     KEYPOINTS_SPEC,
+    REFINED_DETECT_SPEC,
     STAGES,
     ArraySpec,
     StageSpec,
@@ -78,8 +79,8 @@ def _data_for_spec(spec: ArraySpec):
     return np.zeros(shape, dtype=dtype)
 
 
-def _write_required_arrays(group: zarr.Group, stage_spec: StageSpec) -> None:
-    for spec in stage_spec.specs:
+def _write_required_specs(group: zarr.Group, specs: Tuple[ArraySpec, ...]) -> None:
+    for spec in specs:
         if not spec.required:
             continue
         data = _data_for_spec(spec)
@@ -99,10 +100,18 @@ def _write_required_arrays(group: zarr.Group, stage_spec: StageSpec) -> None:
         group.create_array(spec.name, data=data, overwrite=True)
 
 
+def _write_required_arrays(group: zarr.Group, stage_spec: StageSpec) -> None:
+    _write_required_specs(group, stage_spec.specs)
+
+    for subgroup_name, subgroup_specs in stage_spec.subgroups.items():
+        subgroup = group.require_group(subgroup_name)
+        _write_required_specs(subgroup, subgroup_specs)
+
+
 def test_all_stage_specs_define_arrays() -> None:
     for name, stage_spec in STAGES.items():
         assert stage_spec.stage_name == name
-        assert stage_spec.specs
+        assert stage_spec.specs or stage_spec.subgroups
 
 
 def test_validate_run_accepts_detect_crop_keypoints_and_eye_masks_groups() -> None:
@@ -145,3 +154,22 @@ def test_validate_run_missing_optional_arrays_are_warnings() -> None:
     assert result.valid
     assert not result.errors
     assert any("optional array 'centers_px'" in msg for msg in result.warnings)
+
+
+def test_validate_run_refined_detect_subgroups_happy_path() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, REFINED_DETECT_SPEC)
+
+    result = validate_run(group, REFINED_DETECT_SPEC)
+    assert result.valid
+    assert not result.errors
+
+
+def test_validate_run_refined_detect_reports_missing_subgroup() -> None:
+    group = zarr.group()
+    filtered = group.require_group("filtered")
+    _write_required_specs(filtered, REFINED_DETECT_SPEC.subgroups["filtered"])
+
+    result = validate_run(group, REFINED_DETECT_SPEC)
+    assert not result.valid
+    assert any("missing required subgroup 'interpolated'" in msg for msg in result.errors)

@@ -1,9 +1,11 @@
 # Palette Zarr Layout (v3)
 
 This reference summarizes the structure produced by the modern Palette
-pipeline. It is the **authoritative** spec; the stage implementations
-should match it, and `fisheye.shared.zarr.schema` may lag behind until
-it is updated.
+pipeline. It is the **authoritative** human-readable spec.
+
+Machine-readable per-stage array contracts (required/optional arrays, dtypes,
+and shape templates) live in `fisheye.shared.zarr.stage_arrays` and should be
+treated as the runtime-validation counterpart to this document.
 
 ---
 
@@ -81,6 +83,8 @@ Arrays written during import (kvikIO or standard path):
 | ----- | ----- | ----- | ----- |
 | `images_full` | `(n_frames, H, W)` | `uint8` | Full-resolution frames (optional) |
 | `images_ds` | `(n_frames, H_ds, W_ds)` | `uint8` | Downsampled frames (optional) |
+| `images_ds_rgb` | `(n_frames, H_ds, W_ds, 3)` | `uint8` | Downsampled RGB frames (optional) |
+| `original_frame_indices` | `(n_import_frames,)` | `int32` | Present for sampled imports (`frame_step > 1`) |
 | `timestamps` | `(n_frames,)` | `float64` | Seconds since start (optional) |
 
 Attributes include import method, device, chunk/shard sizes, duration,
@@ -114,7 +118,7 @@ Outputs from blob/YOLO detection stages.
 | `n_detections` | `(n_frames,)` | `int32` | Alias of `frame_counts` (kept for legacy consumers) |
 | `bbox_norm_coords` | `(n_detections, 4)` | `float32` | Normalized `[cx, cy, w, h]` |
 | `scores` | `(n_detections,)` | `float32` | Confidence scores |
-| `class_ids` *(optional)* | `(n_detections,)` | `int32` | Detector class labels |
+| `class_ids` | `(n_detections,)` | `int32` | Detector class labels |
 | `centers_px` *(optional)* | `(n_detections, 2)` | `float32` | Pixel centers (blob) |
 
 Attributes store detector `method`, model identifiers, thresholds, duration,
@@ -141,8 +145,8 @@ ROIs back to frames.
 | `bbox_norm_coords` | `(n_rois, 4)` | `float32` | Normalized ROI bounding boxes (`[cx, cy, w, h]`) |
 | `frame_indices` | `(n_rois,)` | `int32` | Frame index per ROI |
 | `frame_counts` | `(n_frames,)` | `int32` | Count of ROIs per frame |
-| `detection_source` *(optional)* | `(n_rois,)` | `int8` | 0 = real detection, 1 = interpolated (copied from refined runs) |
-| `detection_indices` *(optional)* | `(n_rois,)` | `int32` | Index into source detect run |
+| `detection_source` | `(n_rois,)` | `int8` | 0 = real detection, 1 = interpolated (copied from refined runs) |
+| `detection_indices` | `(n_rois,)` | `int32` | Index into source detect run |
 
 Attributes:
 
@@ -176,7 +180,7 @@ Produced by the keypoint detection stage (traditional or YOLO-based).
 | `frame_indices` | `(n_rois,)` | `int32` | Inherit from corresponding crops |
 | `frame_counts` | `(n_frames,)` | `int32` | ROIs per frame (mirrors `n_rois`) |
 | `n_rois` | `(n_frames,)` | `int32` | Alias maintained for legacy callers |
-| `detection_indices` *(optional)* | `(n_rois,)` | `int32` | Index into `crop_runs/<run>/roi_images` |
+| `detection_indices` | `(n_rois,)` | `int32` | Index into `crop_runs/<run>/roi_images` |
 | `keypoints_roi` | `(n_rois, n_keypoints, 2)` | `float64` | Coordinates in ROI pixels |
 | `keypoints_img` | `(n_rois, n_keypoints, 2)` | `float64` | Full-image pixels |
 | `keypoints_norm` | `(n_rois, n_keypoints, 2)` | `float64` | Normalized [0,1] |
@@ -198,6 +202,20 @@ Attributes: `source_crop_run`, `source_background_run`, `source_detect_run`,
 `source_refined_run` (if available), `method`, `parameter_source`, `parameters`,
 `keypoint_labels`, `keypoint_confidence_labels`, `triangle_angle_order`,
 `triangle_angle_raw_order`, scheduler configuration, timing, QA summaries.
+
+---
+
+## `detect_runs/<run>/quality_reports/<qrun>/`
+
+Produced by `fisheye.refinement.detect_quality`.
+
+| Array | Shape | DType | Notes |
+| ----- | ----- | ----- | ----- |
+| `quality_flags` | `(n_frames,)` | `int8` | Frame-level quality labels |
+| `detection_quality_labels` | `(n_detections,)` | `int8` | Detection-level quality labels |
+
+Attributes include thresholds/modes used for artifact detection, summary counts
+of jumps/blips/gaps, and provenance references for the analyzed detect run.
 
 ---
 
@@ -226,7 +244,7 @@ Row lineage (`frame_indices`, `detection_indices`, `frame_counts`) follows:
 | `contour_right_len` | `(n_rois,)` | `int32` | Number of points for right eye contour |
 | `contours_left` | `(n_points, 2)` | `float32` | Concatenated left eye contours (x, y) |
 | `contours_right` | `(n_points, 2)` | `float32` | Concatenated right eye contours (x, y) |
-| `reason` *(optional)* | `(n_rois,)` | `string` | Per-ROI labels (`clean`, `keypoint_fail`, `no_region`, `overlap`, `too_close`, `too_far`, `incomplete`) |
+| `reason` | `(n_rois,)` | `string` | Per-ROI labels (`clean`, `keypoint_fail`, `no_region`, `overlap`, `too_close`, `too_far`, `incomplete`) |
 
 Attributes: `source_crop_run`, canonical `source_keypoints_run` *(legacy alias:
 `source_keypoint_run` may be present for migration compatibility)*,
@@ -463,9 +481,12 @@ Common arrays:
 
 | Array | Shape | DType | Notes |
 | ----- | ----- | ----- | ----- |
-| `identities` | `(n_detections,)` | `int32` | Assigned fish/ROI IDs |
+| `detection_ids` | `(n_detections,)` | `int32` | Assigned fish/ROI IDs |
 | `confidence` | `(n_detections,)` | `float32` | Assignment score |
-| `frame_indices` | `(n_detections,)` | `int32` | Optional copy of frame map |
+
+Legacy archives may contain additional helper arrays/attrs (for example
+per-mask counts), but the stage contract requires `detection_ids` and
+`confidence`.
 
 Attributes describe the assignment strategy, ROI definitions used,
 expected counts, and QA tallies (`assigned`, `unassigned`).
