@@ -25,6 +25,7 @@ import zarr
 from zarr.core.dtype import VariableLengthUTF8
 
 from fisheye.registry.db import Registry
+from fisheye.shared.detect_reason_codec import read_reason_labels
 from fisheye.utils import prepare_keypoint_training_from_registry as prepare_pose
 from fisheye.utils.system import build_invocation_record
 
@@ -84,6 +85,9 @@ class PoseMergeSourceSpec:
     dish_design: Optional[str]
     canvas_name: Optional[str]
     rig_id: Optional[str]
+    box_only_selected_mask: Optional[np.ndarray] = None
+    row_gate_box_only_true: Optional[int] = None
+    row_gate_box_only_selected: int = 0
 
 
 @dataclass
@@ -106,6 +110,7 @@ class PoseMergeResult:
     skeleton_signature: str
     row_gate_policy: str
     row_gate_counts: Dict[str, int]
+    keypoint_supervision_counts: Dict[str, int]
 
 
 def _utc_now() -> str:
@@ -142,6 +147,34 @@ def _as_text(value: Any) -> Optional[str]:
             return None
     text = str(value).strip()
     return text or None
+
+
+BOX_ONLY_REASON_TAG = "fish_present_no_keypoints"
+
+
+def _reason_has_tag(reason_value: object, tag: str) -> bool:
+    reason_text = _as_text(reason_value)
+    if reason_text is None:
+        return False
+    tag_norm = str(tag).strip().lower()
+    if not tag_norm:
+        return False
+    tokens = [
+        token.strip().lower()
+        for token in reason_text.replace(",", "|").replace(";", "|").split("|")
+        if token is not None
+    ]
+    return tag_norm in {token for token in tokens if token}
+
+
+def _read_reason_labels_safe(group: zarr.Group) -> Optional[np.ndarray]:
+    try:
+        labels = read_reason_labels(group)
+    except Exception:
+        labels = None
+    if labels is None:
+        return None
+    return np.asarray(labels, dtype=object)
 
 
 def _clean_slug(value: Optional[str], fallback: str) -> str:
@@ -450,9 +483,9 @@ def _resolve_row_gate_selection(
     success_arr: zarr.Array,
     row_gate_policy: str,
     source_zarr: Path,
-) -> Tuple[np.ndarray, Dict[str, Any]]:
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     policy = str(row_gate_policy).strip().lower()
-    if policy not in {"auto", "refined_usable", "raw_success"}:
+    if policy not in {"auto", "refined_usable", "raw_success", "raw_success_plus_box_only"}:
         raise ValueError(f"Unsupported row gate policy '{row_gate_policy}'.")
 
     raw_success = np.asarray(success_arr[:], dtype=np.bool_)
@@ -494,6 +527,7 @@ def _resolve_row_gate_selection(
     selected_refined_run = None
     selected_mask = raw_success.copy()
     usable_true = None
+    box_only_mask = np.zeros(int(sample_count), dtype=np.bool_)
 
     if policy in {"auto", "refined_usable"}:
         for _ts, refined_run, refined_group in refined_candidates:
@@ -518,7 +552,29 @@ def _resolve_row_gate_selection(
                 "refined usable_keypoints mask was found for the selected keypoint run."
             )
 
+    if policy == "raw_success_plus_box_only":
+        selected_policy = "raw_success_plus_box_only"
+        for _ts, refined_run, refined_group in refined_candidates:
+            reason_values = _read_reason_labels_safe(refined_group)
+            if reason_values is None:
+                continue
+            if int(reason_values.shape[0]) != int(sample_count):
+                raise ValueError(
+                    f"{source_zarr}: refined run '{refined_run}' reason label length mismatch "
+                    f"({reason_values.shape[0]} != {sample_count})."
+                )
+            tagged_mask = np.asarray(
+                [_reason_has_tag(value, BOX_ONLY_REASON_TAG) for value in reason_values],
+                dtype=np.bool_,
+            )
+            tagged_mask &= ~raw_success
+            box_only_mask = tagged_mask
+            selected_refined_run = refined_run
+            break
+        selected_mask = np.logical_or(raw_success, box_only_mask)
+
     selected_indices = np.where(selected_mask)[0].astype(np.int64, copy=False)
+    selected_box_only_mask = box_only_mask[selected_indices].astype(np.bool_, copy=False)
     stats = {
         "policy": selected_policy,
         "refined_run": selected_refined_run,
@@ -526,8 +582,10 @@ def _resolve_row_gate_selection(
         "total": int(sample_count),
         "raw_success_true": int(np.sum(raw_success)),
         "usable_true": usable_true,
+        "box_only_true": int(np.sum(box_only_mask)),
+        "box_only_selected": int(np.sum(selected_box_only_mask)),
     }
-    return selected_indices, stats
+    return selected_indices, selected_box_only_mask, stats
 
 
 def _discover_merge_sources(
@@ -657,7 +715,7 @@ def _discover_merge_sources(
         dataset_keypoint_shape = tuple(int(v) for v in keypoints_arr.shape[1:])
         dataset_keypoint_dtype = np.dtype(keypoints_arr.dtype)
 
-        selected_indices, gate_stats = _resolve_row_gate_selection(
+        selected_indices, selected_box_only_mask, gate_stats = _resolve_row_gate_selection(
             root=root,
             dataset_payload=dataset,
             keypoint_run=keypoint_run,
@@ -793,6 +851,8 @@ def _discover_merge_sources(
                 row_gate_usable_true=(
                     int(gate_stats["usable_true"]) if gate_stats.get("usable_true") is not None else None
                 ),
+                row_gate_box_only_true=int(gate_stats.get("box_only_true") or 0),
+                row_gate_box_only_selected=int(gate_stats.get("box_only_selected") or 0),
                 roi_path=f"crop_runs/{source_crop_run}/roi_images",
                 bbox_path=f"crop_runs/{source_crop_run}/bbox_norm_coords",
                 keypoints_path=keypoints_path,
@@ -811,6 +871,7 @@ def _discover_merge_sources(
                 dish_design=dish_design,
                 canvas_name=canvas_name,
                 rig_id=rig_id,
+                box_only_selected_mask=selected_box_only_mask,
             )
         )
 
@@ -979,6 +1040,13 @@ def _export_merged(
         chunks=vector_chunks,
         overwrite=True,
     )
+    box_only_dest = keypoint_group.require_array(
+        "keypoint_box_only",
+        shape=(total_samples,),
+        dtype=np.bool_,
+        chunks=vector_chunks,
+        overwrite=True,
+    )
     src_dataset_idx_dest = source_index_group.require_array(
         "source_dataset_idx",
         shape=(total_samples,),
@@ -1008,6 +1076,7 @@ def _export_merged(
     roi_h = int(roi_shape[0])
     roi_w = int(roi_shape[1])
     total_successful = 0
+    keypoint_supervision_counts: Dict[str, int] = {"full": 0, "box_only": 0}
     detection_source_counts: Dict[str, int] = {}
     offset = 0
     try:
@@ -1024,8 +1093,41 @@ def _export_merged(
             keypoints = keypoints_all[selected]
             success = success_all[selected]
             crop_bbox = bbox_all[selected]
-            pose_bbox = _pose_bbox_from_keypoints_px(keypoints, roi_h=roi_h, roi_w=roi_w)
             local_total = int(spec.sample_count)
+            box_only_mask = (
+                np.asarray(spec.box_only_selected_mask, dtype=np.bool_)
+                if spec.box_only_selected_mask is not None
+                else np.zeros(local_total, dtype=np.bool_)
+            )
+            if box_only_mask.shape[0] != local_total:
+                raise ValueError(
+                    f"{spec.source_zarr}: box_only mask length mismatch "
+                    f"({box_only_mask.shape[0]} != {local_total})."
+                )
+            full_mask = ~box_only_mask
+
+            keypoints_export = np.asarray(keypoints, dtype=keypoint_dtype).copy()
+            if np.any(box_only_mask):
+                # Placeholder finite coordinates; loader maps these rows to visibility=0.
+                keypoints_export[box_only_mask] = 0
+
+            pose_bbox = np.zeros((local_total, 4), dtype=np.float32)
+            full_idx = np.where(full_mask)[0]
+            if full_idx.size > 0:
+                pose_bbox_full = _pose_bbox_from_keypoints_px(
+                    keypoints[full_idx],
+                    roi_h=roi_h,
+                    roi_w=roi_w,
+                )
+                pose_bbox[full_idx] = pose_bbox_full
+            box_only_idx = np.where(box_only_mask)[0]
+            if box_only_idx.size > 0:
+                crop_bbox_box_only = crop_bbox[box_only_idx]
+                if not np.isfinite(crop_bbox_box_only).all():
+                    raise ValueError(
+                        f"{spec.source_zarr}: box-only rows include non-finite crop bbox values."
+                    )
+                pose_bbox[box_only_idx] = crop_bbox_box_only
 
             if spec.frame_indices_path:
                 source_frame_idx = np.asarray(root[spec.frame_indices_path][:], dtype=np.int64)
@@ -1057,19 +1159,22 @@ def _export_merged(
                 batch_size=copy_batch_size,
                 on_copied=_advance_copy,
             )
-            keypoints_dest[offset : offset + local_total] = keypoints
+            keypoints_dest[offset : offset + local_total] = keypoints_export
             _advance_copy(local_total)
             # Canonical pose bbox for training semantics.
             bbox_dest[offset : offset + local_total] = pose_bbox
             # Crop-stage bbox provenance for audit/debug.
             crop_bbox_dest[offset : offset + local_total] = crop_bbox
             success_dest[offset : offset + local_total] = success
+            box_only_dest[offset : offset + local_total] = box_only_mask
             frame_idx_dest[offset : offset + local_total] = np.arange(offset, offset + local_total, dtype=np.int64)
             det_source_dest[offset : offset + local_total] = detection_source
             src_dataset_idx_dest[offset : offset + local_total] = int(spec.ordinal)
             src_frame_idx_dest[offset : offset + local_total] = source_frame_idx
 
             total_successful += int(success.sum())
+            keypoint_supervision_counts["box_only"] += int(np.sum(box_only_mask))
+            keypoint_supervision_counts["full"] += int(np.sum(full_mask))
             uniques, counts = np.unique(detection_source, return_counts=True)
             for value, count in zip(uniques.tolist(), counts.tolist()):
                 key = str(int(value))
@@ -1124,7 +1229,7 @@ def _export_merged(
             "n_real_detections": int(np.sum(det_source_dest[:] == 0)),
             "n_interpolated_detections": int(np.sum(det_source_dest[:] != 0)),
             "source_count": int(len(source_specs)),
-            "bbox_norm_coords_semantics": "pose_from_keypoints_xywhn",
+            "bbox_norm_coords_semantics": "pose_xywhn_with_box_only_crop_fallback",
             "crop_bbox_norm_coords_semantics": "crop_stage_provenance_xywhn",
         }
     )
@@ -1143,6 +1248,11 @@ def _export_merged(
             ),
             "row_gate_applied": True,
             "row_gate_counts": dict(row_gate_counts),
+            "keypoint_supervision_counts": dict(keypoint_supervision_counts),
+            "keypoint_box_only_semantics": {
+                "false": "full_keypoint_supervision",
+                "true": "box_only_no_keypoint_coordinates",
+            },
         }
     )
 
@@ -1179,6 +1289,7 @@ def _export_merged(
             "applied_policy": next(iter(row_gate_counts.keys())) if len(row_gate_counts) == 1 else "mixed",
             "per_policy_counts": dict(row_gate_counts),
         },
+        "keypoint_supervision_counts": dict(keypoint_supervision_counts),
         "split": {
             "train_ratio": float(train_ratio),
             "val_ratio": float(val_ratio),
@@ -1233,6 +1344,7 @@ def _export_merged(
         skeleton_signature=merged_skeleton_signature,
         row_gate_policy=next(iter(row_gate_counts.keys())) if len(row_gate_counts) == 1 else "mixed",
         row_gate_counts=row_gate_counts,
+        keypoint_supervision_counts=dict(keypoint_supervision_counts),
     )
 
 
@@ -1292,6 +1404,11 @@ def validate_merged_keypoint_training_zarr(
     detection_source = np.asarray(crop["detection_source"][:])
     keypoints = np.asarray(kp["keypoints_roi"][:])
     detection_success = np.asarray(kp["detection_success"][:])
+    keypoint_box_only = (
+        np.asarray(kp["keypoint_box_only"][:], dtype=np.bool_)
+        if "keypoint_box_only" in kp
+        else np.zeros(int(keypoints.shape[0]), dtype=np.bool_)
+    )
 
     if roi.ndim < 3:
         errors.append(f"roi_images must have shape (N, ...), got {tuple(roi.shape)}.")
@@ -1331,6 +1448,10 @@ def validate_merged_keypoint_training_zarr(
         errors.append(f"detection_success must be 1D, got ndim={detection_success.ndim}.")
     if detection_success.ndim == 1 and int(detection_success.shape[0]) != total_samples:
         errors.append(f"detection_success length mismatch ({detection_success.shape[0]} != {total_samples}).")
+    if keypoint_box_only.ndim != 1:
+        errors.append(f"keypoint_box_only must be 1D, got ndim={keypoint_box_only.ndim}.")
+    if keypoint_box_only.ndim == 1 and int(keypoint_box_only.shape[0]) != total_samples:
+        errors.append(f"keypoint_box_only length mismatch ({keypoint_box_only.shape[0]} != {total_samples}).")
 
     if frame_indices.ndim != 1:
         errors.append(f"frame_indices must be 1D, got ndim={frame_indices.ndim}.")
@@ -1425,6 +1546,27 @@ def validate_merged_keypoint_training_zarr(
                         f"(merged={_format_skeleton_signature(skeleton_id=merged_identity[0], kpt_shape=merged_identity[1])}, "
                         f"source={_format_skeleton_signature(skeleton_id=source_identity[0], kpt_shape=source_identity[1])})."
                     )
+
+        supervision_counts = training_export.get("keypoint_supervision_counts")
+        if isinstance(supervision_counts, dict):
+            expected_full = int(np.sum(~keypoint_box_only))
+            expected_box_only = int(np.sum(keypoint_box_only))
+            if _as_text(supervision_counts.get("full")) is not None:
+                try:
+                    if int(supervision_counts.get("full")) != expected_full:
+                        errors.append(
+                            "training_export.keypoint_supervision_counts.full does not match keypoint_box_only."
+                        )
+                except Exception:
+                    errors.append("training_export.keypoint_supervision_counts.full must be an integer.")
+            if _as_text(supervision_counts.get("box_only")) is not None:
+                try:
+                    if int(supervision_counts.get("box_only")) != expected_box_only:
+                        errors.append(
+                            "training_export.keypoint_supervision_counts.box_only does not match keypoint_box_only."
+                        )
+                except Exception:
+                    errors.append("training_export.keypoint_supervision_counts.box_only must be an integer.")
 
     split_arrays: Dict[str, np.ndarray] = {}
     for name in ("train_indices", "val_indices", "test_indices"):
@@ -1539,6 +1681,10 @@ def validate_merged_keypoint_training_zarr(
         "total_samples": int(total_samples),
         "success_count": int(success_count),
         "failure_count": int(total_samples - success_count),
+        "keypoint_supervision_counts": {
+            "full": int(np.sum(~keypoint_box_only)),
+            "box_only": int(np.sum(keypoint_box_only)),
+        },
         "split_counts": {
             "train": int(train_idx.shape[0]),
             "val": int(val_idx.shape[0]),
@@ -1651,6 +1797,8 @@ def _build_merged_manifest_payload(
                 "row_gate_total": int(spec.row_gate_total),
                 "row_gate_raw_success_true": int(spec.row_gate_raw_success_true),
                 "row_gate_usable_true": spec.row_gate_usable_true,
+                "row_gate_box_only_true": int(spec.row_gate_box_only_true or 0),
+                "row_gate_box_only_selected": int(spec.row_gate_box_only_selected),
                 "source_crop_run": spec.source_crop_run,
                 "keypoint_run": spec.keypoint_run,
                 "skeleton_id": spec.skeleton_id,
@@ -1684,6 +1832,7 @@ def _build_merged_manifest_payload(
         "kpt_shape": list(merge_result.kpt_shape) if merge_result.kpt_shape is not None else None,
         "skeleton_signature": merge_result.skeleton_signature,
         "row_gate_policy": merge_result.row_gate_policy,
+        "keypoint_supervision_counts": dict(merge_result.keypoint_supervision_counts),
         "keypoints_array_path": f"keypoints_runs/{run_name}/keypoints_roi",
         "detection_success_path": f"keypoints_runs/{run_name}/detection_success",
         "keypoints_total": int(merge_result.total_samples),
@@ -1724,6 +1873,7 @@ def _build_merged_manifest_payload(
         "skeleton_signature": merge_result.skeleton_signature,
         "row_gate_policy": merge_result.row_gate_policy,
         "row_gate_counts": dict(merge_result.row_gate_counts),
+        "keypoint_supervision_counts": dict(merge_result.keypoint_supervision_counts),
         "keypoint_shape": list(merge_result.keypoint_shape),
         "keypoint_labels": list(merge_result.keypoint_labels),
         "split": {
@@ -1742,6 +1892,7 @@ def _build_merged_manifest_payload(
             "source_count": int(len(merge_result.source_specs)),
             "row_gate_policy": merge_result.row_gate_policy,
             "row_gate_counts": dict(merge_result.row_gate_counts),
+            "keypoint_supervision_counts": dict(merge_result.keypoint_supervision_counts),
         },
         "source_datasets": source_datasets_payload,
     }
@@ -1818,6 +1969,7 @@ def _write_merge_summary(
         "skeleton_signature": merge_result.skeleton_signature,
         "row_gate_policy": merge_result.row_gate_policy,
         "row_gate_counts": dict(merge_result.row_gate_counts),
+        "keypoint_supervision_counts": dict(merge_result.keypoint_supervision_counts),
         "keypoint_shape": list(merge_result.keypoint_shape),
         "keypoint_labels": list(merge_result.keypoint_labels),
         "counts": {
@@ -1848,6 +2000,8 @@ def _write_merge_summary(
                 "row_gate_total": int(spec.row_gate_total),
                 "row_gate_raw_success_true": int(spec.row_gate_raw_success_true),
                 "row_gate_usable_true": spec.row_gate_usable_true,
+                "row_gate_box_only_true": int(spec.row_gate_box_only_true or 0),
+                "row_gate_box_only_selected": int(spec.row_gate_box_only_selected),
                 "source_crop_run": spec.source_crop_run,
                 "keypoint_run": spec.keypoint_run,
                 "skeleton_id": spec.skeleton_id,
@@ -1900,11 +2054,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument(
         "--row-gate-policy",
-        choices=["auto", "refined_usable", "raw_success"],
+        choices=["auto", "refined_usable", "raw_success", "raw_success_plus_box_only"],
         default="auto",
         help=(
             "Row-level inclusion policy for merged export: "
-            "auto prefers refined usable_keypoints when available, otherwise raw detection_success."
+            "auto prefers refined usable_keypoints when available, otherwise raw detection_success. "
+            "raw_success_plus_box_only additionally keeps refined rows tagged fish_present_no_keypoints "
+            "as box-only supervision."
         ),
     )
     parser.add_argument(

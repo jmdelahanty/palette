@@ -346,11 +346,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument(
         "--merge-row-gate-policy",
-        choices=["auto", "refined_usable", "raw_success"],
+        choices=["auto", "refined_usable", "raw_success", "raw_success_plus_box_only"],
         default="auto",
         help=(
             "Row inclusion policy for merged pose export. "
-            "auto prefers refined usable_keypoints when present."
+            "auto prefers refined usable_keypoints when present; "
+            "raw_success_plus_box_only also includes fish_present_no_keypoints rows as box-only labels."
         ),
     )
     parser.add_argument(

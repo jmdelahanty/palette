@@ -14,6 +14,7 @@ from fisheye.utils.export_keypoint_training_zarr import (
     _format_skeleton_signature,
     _normalize_kpt_shape,
 )
+from fisheye.shared.detect_reason_codec import write_reason_columns
 
 
 def test_export_keypoint_skeleton_signature_helpers() -> None:
@@ -32,6 +33,7 @@ def _write_source_pose_zarr(
     skeleton_id: str,
     kpt_shape: tuple[int, int] = (3, 3),
     keypoint_count: int = 3,
+    refined_reasons: list[str] | None = None,
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
 
@@ -73,6 +75,50 @@ def _write_source_pose_zarr(
         data=np.array([True, True, False, True], dtype=np.bool_),
         chunks=(4,),
     )
+    if refined_reasons is not None:
+        refined_parent = root.create_group("refined_keypoints_runs")
+        refined_parent.attrs["latest"] = "refined_kp_pose_001"
+        refined = refined_parent.create_group("refined_kp_pose_001")
+        refined.attrs["source_keypoints_run"] = "kp_pose_001"
+        refined.attrs["source_crop_run"] = "crop_pose_001"
+        refined.attrs["created_utc"] = "2026-02-27T00:00:00+00:00"
+        refined.create_array(
+            "keypoints_roi",
+            data=np.zeros((4, int(keypoint_count), 2), dtype=np.float32),
+            chunks=(4, int(keypoint_count), 2),
+        )
+        refined.create_array(
+            "usable_keypoints",
+            data=np.array([True, True, False, True], dtype=np.bool_),
+            chunks=(4,),
+        )
+        write_reason_columns(
+            refined,
+            np.asarray(refined_reasons, dtype=object),
+            chunk_size=4,
+            include_reason_text=True,
+            overwrite=True,
+        )
+
+
+def _manifest_for_single_source(path: Path) -> dict:
+    return {
+        "input_format": "gray",
+        "source_type": "filtered",
+        "pose_schema": {
+            "kpt_shape": [3, 3],
+        },
+        "datasets": [
+            {
+                "name": "dataset_single",
+                "dataset_id": "dataset_single",
+                "zarr_path": str(path),
+                "input_format": "gray",
+                "source_crop_run": "crop_pose_001",
+                "keypoint_run": "kp_pose_001",
+            }
+        ],
+    }
 
 
 def _manifest_for_sources(path_a: Path, path_b: Path) -> dict:
@@ -140,3 +186,29 @@ def test_discover_merge_sources_rejects_mixed_skeleton_identities(tmp_path: Path
     assert "dataset_b" in message
     assert "skeleton_id=pose_skel_a" in message
     assert "skeleton_id=pose_skel_b" in message
+
+
+def test_discover_merge_sources_raw_success_plus_box_only_includes_tagged_rows(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "source_box_only.zarr"
+    _write_source_pose_zarr(
+        zarr_path,
+        skeleton_id="pose_skel_shared",
+        refined_reasons=["clean", "clean", "fish_present_no_keypoints", "clean"],
+    )
+    manifest = _manifest_for_single_source(zarr_path)
+
+    specs, _layout = _discover_merge_sources(
+        manifest,
+        expected_input_format="gray",
+        row_gate_policy="raw_success_plus_box_only",
+    )
+
+    assert len(specs) == 1
+    spec = specs[0]
+    assert spec.row_gate_policy == "raw_success_plus_box_only"
+    assert spec.sample_count == 4
+    assert spec.row_gate_raw_success_true == 3
+    assert spec.row_gate_box_only_true == 1
+    assert spec.row_gate_box_only_selected == 1
+    assert spec.box_only_selected_mask is not None
+    assert spec.box_only_selected_mask.tolist() == [False, False, True, False]

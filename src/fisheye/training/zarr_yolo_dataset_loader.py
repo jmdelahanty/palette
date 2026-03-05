@@ -797,6 +797,7 @@ class ZarrYOLODataset(Dataset):
         self.frame_index_cache = {}
         self.kp_roi_norm_cache = {}
         self.kp_success_cache = {}
+        self.kp_box_only_cache = {}
         self.kp_bbox_cache = {}
         self.kp_flat_cache = {}
         self.roi_size_cache = {}
@@ -871,9 +872,20 @@ class ZarrYOLODataset(Dataset):
                 kp_group = root[f'keypoints_runs/{kp_run_name}']
                 kp_roi = kp_group['keypoints_roi'][:].astype(np.float32)
                 kp_success = kp_group['detection_success'][:].astype(bool)
+                if "keypoint_box_only" in kp_group:
+                    kp_box_only = kp_group["keypoint_box_only"][:].astype(bool)
+                    if kp_box_only.shape[0] != kp_roi.shape[0]:
+                        raise ValueError(
+                            f"{Path(zarr_path).name}: keypoint_box_only length {kp_box_only.shape[0]} "
+                            f"does not match keypoints_roi length {kp_roi.shape[0]}"
+                        )
+                else:
+                    kp_box_only = np.zeros(kp_roi.shape[0], dtype=bool)
+                self.kp_box_only_cache[zarr_path] = kp_box_only
 
                 finite_mask = np.isfinite(kp_roi).all(axis=(1, 2))
-                valid_mask = kp_success & finite_mask
+                full_supervision_mask = ~kp_box_only
+                valid_full_mask = kp_success & finite_mask & full_supervision_mask
                 self.kp_roi_norm_cache[zarr_path] = np.zeros_like(kp_roi, dtype=np.float32)
 
                 if roi_w > 0 and roi_h > 0:
@@ -885,14 +897,27 @@ class ZarrYOLODataset(Dataset):
 
                 kp_roi_norm = np.clip(kp_roi_norm, 0.0, 1.0)
                 self.kp_roi_norm_cache[zarr_path] = kp_roi_norm
+                bbox_path = None
+                if metadata is not None and metadata.bbox_array_path:
+                    bbox_path = metadata.bbox_array_path
+                if not bbox_path:
+                    bbox_path = f"crop_runs/{latest_crop}/bbox_norm_coords"
+                crop_bbox = root[bbox_path][:].astype(np.float32)
+                if crop_bbox.shape[0] != kp_roi.shape[0]:
+                    raise ValueError(
+                        f"{Path(zarr_path).name}: bbox array length {crop_bbox.shape[0]} "
+                        f"does not match keypoints length {kp_roi.shape[0]}"
+                    )
+                valid_box_only_mask = kp_box_only & np.isfinite(crop_bbox).all(axis=1)
+                valid_mask = valid_full_mask | valid_box_only_mask
                 self.kp_success_cache[zarr_path] = valid_mask
 
-                # Compute bboxes only for valid rows to avoid all-NaN warnings
+                # Compute bboxes from keypoints for full rows and from crop bboxes for box-only rows.
                 kpts = kp_roi_norm.reshape(kp_roi_norm.shape[0], -1, 2)
                 bboxes = np.zeros((kpts.shape[0], 4), dtype=np.float32)
-                valid_idx = np.where(valid_mask)[0]
-                if valid_idx.size > 0:
-                    kpts_valid = kpts[valid_idx]
+                full_idx = np.where(valid_full_mask)[0]
+                if full_idx.size > 0:
+                    kpts_valid = kpts[full_idx]
                     min_xy = np.nanmin(kpts_valid, axis=1)
                     max_xy = np.nanmax(kpts_valid, axis=1)
                     span = max_xy - min_xy
@@ -900,14 +925,33 @@ class ZarrYOLODataset(Dataset):
                     center = np.clip((min_xy + max_xy) / 2.0, 0.0, 1.0)
                     bbox_wh = np.clip(span + margin, 1e-6, 1.0)
                     bboxes_valid = np.concatenate([center, bbox_wh], axis=1).astype(np.float32)
-                    bboxes[valid_idx] = bboxes_valid
+                    bboxes[full_idx] = bboxes_valid
+                box_only_idx = np.where(valid_box_only_mask)[0]
+                if box_only_idx.size > 0:
+                    bboxes[box_only_idx] = crop_bbox[box_only_idx]
                 self.kp_bbox_cache[zarr_path] = bboxes
 
                 visibility = np.full((kp_roi_norm.shape[0], kp_roi_norm.shape[1], 1), 2.0, dtype=np.float32)
-                kpts_with_vis = np.concatenate([kp_roi_norm, visibility], axis=2).reshape(kp_roi_norm.shape[0], -1)
+                if np.any(kp_box_only):
+                    visibility[kp_box_only, :, :] = 0.0
+                kp_for_labels = kp_roi_norm.copy()
+                if np.any(kp_box_only):
+                    # Box-only rows should not carry NaNs because _get_pose_data rejects NaN labels.
+                    kp_for_labels[kp_box_only] = np.nan_to_num(
+                        kp_for_labels[kp_box_only],
+                        nan=0.0,
+                        posinf=1.0,
+                        neginf=0.0,
+                    )
+                kpts_with_vis = np.concatenate([kp_for_labels, visibility], axis=2).reshape(
+                    kp_roi_norm.shape[0],
+                    -1,
+                )
                 self.kp_flat_cache[zarr_path] = kpts_with_vis
+                box_only_count = int(np.sum(valid_box_only_mask))
                 logger.info(
-                    f"  Cached {kp_roi_norm.shape[0]} keypoint entries from {Path(zarr_path).name} (run {kp_run_name})"
+                    f"  Cached {kp_roi_norm.shape[0]} keypoint entries from {Path(zarr_path).name} "
+                    f"(run {kp_run_name}, box_only={box_only_count})"
                 )
         
         # Build labels using cached data

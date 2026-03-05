@@ -61,6 +61,73 @@ def _write_detect_zarr(path: Path, *, num_frames: int = 2, frame_chunk: int = 1)
     )
 
 
+def _write_pose_merged_zarr_with_box_only(path: Path) -> None:
+    root = zarr.open_group(str(path), mode="w")
+    root.attrs["zarr_purpose"] = "training"
+
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs["latest"] = "merged_export_test"
+    crop = crop_parent.create_group("merged_export_test")
+    crop.attrs["detection_source_type"] = "filtered"
+    crop.attrs["includes_interpolated"] = False
+    crop.create_array(
+        "roi_images",
+        data=np.zeros((3, 32, 32), dtype=np.uint8),
+        chunks=(1, 32, 32),
+    )
+    crop.create_array(
+        "bbox_norm_coords",
+        data=np.array(
+            [
+                [0.5, 0.5, 0.2, 0.2],
+                [0.4, 0.6, 0.3, 0.2],
+                [0.6, 0.4, 0.2, 0.3],
+            ],
+            dtype=np.float32,
+        ),
+        chunks=(3, 4),
+    )
+    crop.create_array(
+        "frame_indices",
+        data=np.arange(3, dtype=np.int64),
+        chunks=(3,),
+    )
+    crop.create_array(
+        "detection_source",
+        data=np.zeros((3,), dtype=np.int8),
+        chunks=(3,),
+    )
+
+    kp_parent = root.create_group("keypoints_runs")
+    kp_parent.attrs["latest"] = "merged_export_test"
+    kp = kp_parent.create_group("merged_export_test")
+    kp.attrs["method"] = "merged_export"
+    kp.attrs["row_gate_applied"] = True
+    kp.attrs["source_crop_run"] = "merged_export_test"
+    kp.create_array(
+        "keypoints_roi",
+        data=np.array(
+            [
+                [[10.0, 10.0], [12.0, 12.0], [14.0, 14.0]],
+                [[np.nan, np.nan], [np.nan, np.nan], [np.nan, np.nan]],
+                [[8.0, 8.0], [9.0, 9.0], [10.0, 10.0]],
+            ],
+            dtype=np.float32,
+        ),
+        chunks=(3, 3, 2),
+    )
+    kp.create_array(
+        "detection_success",
+        data=np.array([True, False, True], dtype=np.bool_),
+        chunks=(3,),
+    )
+    kp.create_array(
+        "keypoint_box_only",
+        data=np.array([False, True, False], dtype=np.bool_),
+        chunks=(3,),
+    )
+
+
 def _build_config(
     zarr_path: Path,
     augmentation: dict | None = None,
@@ -155,3 +222,38 @@ def test_detect_chunk_cache_reuses_recent_chunk(tmp_path: Path) -> None:
 
     assert first_stats["chunk_cache_misses"] >= 1
     assert second_stats["chunk_cache_hits"] >= first_stats["chunk_cache_hits"] + 1
+
+
+def test_pose_loader_supports_box_only_rows_with_visibility_zero(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "pose_box_only.zarr"
+    _write_pose_merged_zarr_with_box_only(zarr_path)
+
+    cfg = ZarrDatasetConfig(
+        datasets={
+            "pose": {
+                "zarr_path": str(zarr_path),
+                "source_type": "filtered",
+                "input_format": "gray",
+                "split": {"train": 1.0, "val": 0.0},
+            }
+        },
+        task="pose",
+        random_seed=11,
+        sampling_strategy="proportional",
+    )
+    ds = create_zarr_dataset(cfg, mode="train")
+    assert len(ds) == 3
+
+    box_only_pos = next(i for i, (_path, det_idx) in enumerate(ds.indices) if int(det_idx) == 1)
+    sample = ds[box_only_pos]
+    assert sample["cls"].shape == (1,)
+    assert sample["bboxes"].shape == (1, 4)
+    assert np.allclose(sample["bboxes"][0], np.array([0.4, 0.6, 0.3, 0.2], dtype=np.float32))
+    assert not np.isnan(sample["keypoints"]).any()
+    vis = sample["keypoints"].reshape(1, 3, 3)[0, :, 2]
+    assert np.allclose(vis, np.zeros((3,), dtype=np.float32))
+
+    full_pos = next(i for i, (_path, det_idx) in enumerate(ds.indices) if int(det_idx) == 0)
+    full_sample = ds[full_pos]
+    full_vis = full_sample["keypoints"].reshape(1, 3, 3)[0, :, 2]
+    assert np.allclose(full_vis, np.full((3,), 2.0, dtype=np.float32))
