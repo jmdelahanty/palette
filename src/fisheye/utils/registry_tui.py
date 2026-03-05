@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
+from rich.text import Text as RichText
 
 try:
     from textual.app import App, ComposeResult
@@ -16,10 +18,24 @@ try:
 except ImportError:
     raise SystemExit("Textual is required. Install with: scripts/py -m pip install textual rich")
 
+try:
+    from fisheye.registry.step_cascade import STEP_DEPENDENTS, get_transitive_dependents
+    _HAS_STEP_CASCADE = True
+except Exception:
+    _HAS_STEP_CASCADE = False
+    STEP_DEPENDENTS: Dict[str, frozenset] = {}  # type: ignore[no-redef]
+
+    def get_transitive_dependents(step_name: str) -> frozenset:  # type: ignore[misc]
+        return frozenset()
+
 
 CURATED_VIEWS: List[Tuple[str, str]] = [
     ("datasets", "SELECT * FROM datasets ORDER BY created_utc DESC"),
     ("dataset_lineage_current", "SELECT * FROM dataset_lineage_current ORDER BY child_dataset_id, relationship_type, parent_dataset_id"),
+    ("step_status_wide", "SELECT * FROM recording_step_status_wide"),
+    ("step_overview", "SELECT * FROM recording_step_overview"),
+    ("recording_overview", "SELECT * FROM recording_overview"),
+    ("provenance", "SELECT * FROM provenance ORDER BY dataset_id"),
     ("training_sets", "SELECT * FROM training_sets ORDER BY created_utc DESC"),
     ("training_runs", "SELECT * FROM training_runs ORDER BY created_utc DESC"),
     ("training_models", "SELECT * FROM training_models ORDER BY created_utc DESC"),
@@ -27,8 +43,139 @@ CURATED_VIEWS: List[Tuple[str, str]] = [
     ("tensorrt_models", "SELECT * FROM tensorrt_models ORDER BY created_utc DESC"),
     ("keypoint_quality_current", "SELECT * FROM keypoint_quality_current ORDER BY quality_updated_utc DESC"),
     ("detect_quality_current", "SELECT * FROM detect_quality_current ORDER BY quality_updated_utc DESC"),
+    ("detect_perf", "SELECT * FROM detect_performance_latest"),
+    ("keypoint_perf", "SELECT * FROM keypoint_performance_latest"),
+    ("eye_mask_perf", "SELECT * FROM eye_mask_performance_latest"),
     ("pose_skeleton_specs", "SELECT * FROM pose_skeleton_specs ORDER BY created_utc DESC"),
 ]
+
+# ---------------------------------------------------------------------------
+# Status color-coding
+# ---------------------------------------------------------------------------
+
+_STATUS_STYLES: Dict[str, str] = {
+    "ok": "green",
+    "OK": "green",
+    "missing": "bold red",
+    "MISS": "bold red",
+    "absent": "dim",
+    "na": "dim",
+    "N/A": "dim",
+    "error": "bold yellow",
+    "failed": "bold yellow",
+}
+
+_STATUS_COLORIZED_VIEWS: frozenset = frozenset({
+    "step_status_wide",
+    "step_overview",
+    "recording_overview",
+    "detect_perf",
+    "keypoint_perf",
+    "eye_mask_perf",
+    "keypoint_quality_current",
+    "detect_quality_current",
+})
+
+
+def _style_cell_value(value: Any, view_name: str) -> Any:
+    """Return a Rich Text object with color styling for known status values."""
+    if view_name not in _STATUS_COLORIZED_VIEWS:
+        return "" if value is None else str(value)
+    s = "" if value is None else str(value)
+    lookup = s.strip()
+    style = _STATUS_STYLES.get(lookup)
+    if style:
+        return RichText(s, style=style)
+    upper = lookup.upper()
+    if upper.startswith("OK"):
+        return RichText(s, style="green")
+    if upper.startswith("MISS"):
+        return RichText(s, style="bold red")
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Column-aware filter parsing
+# ---------------------------------------------------------------------------
+
+
+def _parse_filter_expr(raw: str) -> Tuple[List[Tuple[str, str]], Optional[str]]:
+    """Parse filter text into column-specific filters and optional global substring.
+
+    Syntax examples:
+        "detect:miss"           -> column filter on cols matching "detect"
+        "status:ok crop:miss"   -> AND of two column filters
+        "cedar"                 -> global substring across all columns
+        "detect:miss cedar"     -> column filter AND global substring
+    """
+    tokens = raw.strip().split()
+    col_filters: List[Tuple[str, str]] = []
+    global_parts: List[str] = []
+    for token in tokens:
+        if ":" in token:
+            parts = token.split(":", 1)
+            col_name, col_val = parts[0].strip(), parts[1].strip()
+            if col_name and col_val:
+                col_filters.append((col_name.lower(), col_val.lower()))
+                continue
+        global_parts.append(token)
+    global_sub = " ".join(global_parts).lower() if global_parts else None
+    return col_filters, global_sub
+
+
+# ---------------------------------------------------------------------------
+# Step dependency visualization
+# ---------------------------------------------------------------------------
+
+# Maps the wide view's human-readable column names to step_cascade step names.
+_WIDE_COL_TO_STEP: Dict[str, str] = {
+    "import": "raw",
+    "bg full": "background",
+    "bg ds": "background",
+    "detect": "detect",
+    "detect quality": "detect_quality",
+    "refine detect": "refined_detect",
+    "detect group": "refined_detect",
+    "crop": "crop",
+    "keypoints": "keypoints",
+    "refined keypoints (analysis/train)": "refined_keypoints",
+    "eye masks": "eye_masks",
+    "refined eye masks": "refined_eye_masks",
+    "assign ids": "id_assignment",
+    "track": "tracks",
+    "stimulus": "stimulus",
+    "calib": "calibration",
+}
+
+_STEP_DEPENDENCY_VIEWS: frozenset = frozenset({
+    "step_status_wide",
+    "step_overview",
+})
+
+
+def _render_step_dependencies(step_name: str) -> List[str]:
+    """Render concise step dependency info for the details panel."""
+    if not _HAS_STEP_CASCADE or step_name not in STEP_DEPENDENTS:
+        return []
+    lines: List[str] = []
+    # Upstream
+    upstream = sorted(p for p, children in STEP_DEPENDENTS.items() if step_name in children)
+    if upstream:
+        lines.append(f"  {step_name} <- {', '.join(upstream)}")
+    # Direct dependents
+    direct = STEP_DEPENDENTS.get(step_name, frozenset())
+    if direct:
+        lines.append(f"  {step_name} -> {', '.join(sorted(direct))}")
+    # Cascade impact
+    transitive = get_transitive_dependents(step_name)
+    if transitive:
+        lines.append(f"  cascade: re-running {step_name} invalidates {len(transitive)} step(s)")
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Registry client
+# ---------------------------------------------------------------------------
 
 
 class RegistryClient:
@@ -168,6 +315,11 @@ class RegistryClient:
         return lines
 
 
+# ---------------------------------------------------------------------------
+# TUI application
+# ---------------------------------------------------------------------------
+
+
 class RegistryTUI(App[None]):
     CSS = """
     Screen {
@@ -203,6 +355,7 @@ class RegistryTUI(App[None]):
         Binding("n", "next_view", "Next View"),
         Binding("p", "prev_view", "Prev View"),
         Binding("c", "clear_filter", "Clear Filter"),
+        Binding("s", "cycle_sort", "Sort Column"),
     ]
 
     def __init__(self, *, registry_path: Path, start_view: Optional[str], row_limit: int, readonly: bool) -> None:
@@ -217,6 +370,9 @@ class RegistryTUI(App[None]):
         self.active_rows: List[Dict[str, Any]] = []
         self.display_rows: List[Dict[str, Any]] = []
         self.filter_text = ""
+        self.sort_column: Optional[str] = None
+        self.sort_reverse: bool = False
+        self._column_keys: List[str] = []
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -231,7 +387,7 @@ class RegistryTUI(App[None]):
                 yield Label("Relationships")
                 yield Static("Select a row to inspect links.", id="detail")
         with Vertical(id="status"):
-            yield Input(placeholder="Filter (substring across visible row values). Enter to apply.", id="filter_input")
+            yield Input(placeholder="Filter: text or column:value (e.g. detect:miss). Enter to apply.", id="filter_input")
             yield Static("", id="status_text")
         yield Footer()
 
@@ -261,6 +417,8 @@ class RegistryTUI(App[None]):
     def on_unmount(self) -> None:
         self.client.close()
 
+    # --- helpers ---
+
     def _set_status(self, text: str) -> None:
         self.query_one("#status_text", Static).update(text)
 
@@ -270,30 +428,115 @@ class RegistryTUI(App[None]):
             return label, f"TABLE::{payload}"
         return label, payload
 
+    def _build_status_text(self, cursor_row: Optional[int] = None) -> str:
+        """Build status bar text with view name, row counts, sort, filter."""
+        label, _ = self._active_view_name_and_sql()
+        parts = [f"View={label}"]
+        if cursor_row is not None:
+            parts.append(f"Row {cursor_row + 1}/{len(self.display_rows)}")
+        else:
+            parts.append(f"rows={len(self.display_rows)}")
+        parts.append(f"loaded={len(self.active_rows)}")
+        if self.sort_column:
+            arrow = "\u25b2" if not self.sort_reverse else "\u25bc"
+            parts.append(f"sort: {self.sort_column} {arrow}")
+        if self.filter_text:
+            parts.append(f"filter: '{self.filter_text}'")
+        return " | ".join(parts)
+
+    # --- filtering ---
+
     def _apply_filter(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        needle = self.filter_text.strip().lower()
+        needle = self.filter_text.strip()
         if not needle:
-            return rows
+            return list(rows)
+        col_filters, global_sub = _parse_filter_expr(needle)
         out: List[Dict[str, Any]] = []
         for row in rows:
-            text = " | ".join("" if v is None else str(v) for v in row.values()).lower()
-            if needle in text:
-                out.append(row)
+            # Column-specific filters (all must match)
+            col_match = True
+            for col_name, col_val in col_filters:
+                matched_any = False
+                for k, v in row.items():
+                    if col_name in k.lower():
+                        cell_text = "" if v is None else str(v).lower()
+                        if col_val in cell_text:
+                            matched_any = True
+                            break
+                if not matched_any:
+                    col_match = False
+                    break
+            if not col_match:
+                continue
+            # Global substring (across all columns)
+            if global_sub:
+                text = " | ".join("" if v is None else str(v) for v in row.values()).lower()
+                if global_sub not in text:
+                    continue
+            out.append(row)
         return out
+
+    # --- sorting ---
+
+    def _apply_sort(self) -> None:
+        """Sort display_rows by current sort_column and re-render."""
+        if not self.sort_column or not self.display_rows:
+            return
+        col = self.sort_column
+        if col not in self.display_rows[0]:
+            return
+
+        def sort_key(row: Dict[str, Any]) -> Tuple[int, Any]:
+            val = row.get(col)
+            if val is None:
+                return (1, "")
+            s = str(val).strip()
+            try:
+                return (0, float(s.rstrip("%")))
+            except (ValueError, TypeError):
+                return (0, s.lower())
+
+        self.display_rows.sort(key=sort_key, reverse=self.sort_reverse)
+        self._render_table()
+
+    def _update_sort_indicator(self) -> None:
+        """Show sort direction arrow on the sorted column header."""
+        table = self.query_one("#row_table", DataTable)
+        for col_key_obj in list(table.columns):
+            col_meta = table.columns[col_key_obj]
+            key_str = str(col_key_obj)
+            # Original label is the column key itself
+            original = key_str
+            if key_str == self.sort_column:
+                arrow = " \u25b2" if not self.sort_reverse else " \u25bc"
+                col_meta.label = RichText(original + arrow)
+            else:
+                col_meta.label = RichText(original)
+        table.refresh()
+
+    # --- view loading and rendering ---
 
     def _load_active_view(self) -> None:
         label, sql_or_table = self._active_view_name_and_sql()
-        if sql_or_table.startswith("TABLE::"):
-            table_name = sql_or_table.replace("TABLE::", "", 1)
-            rows = self.client.fetch_rows_for_name(table_name, limit=self.row_limit)
-        else:
-            rows = self.client.fetch_rows(sql_or_table, limit=self.row_limit)
+        try:
+            if sql_or_table.startswith("TABLE::"):
+                table_name = sql_or_table.replace("TABLE::", "", 1)
+                rows = self.client.fetch_rows_for_name(table_name, limit=self.row_limit)
+            else:
+                rows = self.client.fetch_rows(sql_or_table, limit=self.row_limit)
+        except sqlite3.OperationalError as exc:
+            rows = []
+            self._set_status(f"Error loading {label}: {exc}")
+            self.active_rows = rows
+            self.display_rows = rows
+            self._render_table()
+            return
         self.active_rows = rows
+        self.sort_column = None
+        self.sort_reverse = False
         self.display_rows = self._apply_filter(rows)
         self._render_table()
-        self._set_status(
-            f"View={label} rows={len(self.display_rows)} (loaded={len(self.active_rows)}, limit={self.row_limit})"
-        )
+        self._set_status(self._build_status_text())
 
     def _render_table(self) -> None:
         table = self.query_one("#row_table", DataTable)
@@ -304,10 +547,14 @@ class RegistryTUI(App[None]):
             self.query_one("#detail", Static).update("No rows matched.")
             return
         columns = list(self.display_rows[0].keys())
+        self._column_keys = columns
         for col in columns:
             table.add_column(str(col), key=str(col))
+        view_name = self._active_view_name_and_sql()[0]
         for row in self.display_rows:
-            table.add_row(*[("" if row.get(c) is None else str(row.get(c))) for c in columns])
+            table.add_row(*[_style_cell_value(row.get(c), view_name) for c in columns])
+        if self.sort_column:
+            self._update_sort_indicator()
         table.move_cursor(row=0, column=0)
         self._update_details_for_row(0)
 
@@ -322,7 +569,44 @@ class RegistryTUI(App[None]):
         lines.append("")
         lines.append("links:")
         lines.extend(self.client.fetch_relationships(view_name, row))
+
+        # Step dependency visualization
+        if _HAS_STEP_CASCADE and view_name in _STEP_DEPENDENCY_VIEWS:
+            blocking_steps = self._find_blocking_steps(view_name, row)
+            if blocking_steps:
+                lines.append("")
+                lines.append("step dependencies (blocking steps):")
+                for step in list(blocking_steps)[:3]:
+                    lines.extend(_render_step_dependencies(step))
+            else:
+                lines.append("")
+                lines.append("step dependencies: all tracked steps OK")
+
         self.query_one("#detail", Static).update("\n".join(lines))
+
+    def _find_blocking_steps(self, view_name: str, row: Dict[str, Any]) -> List[str]:
+        """Identify pipeline steps that are MISS/error in the current row."""
+        blocking: List[str] = []
+        seen: Set[str] = set()
+        if view_name == "step_status_wide":
+            for col_name, val in row.items():
+                val_str = str(val or "").strip().upper()
+                if val_str in ("MISS", "MISSING", "ERROR", "FAILED"):
+                    step = _WIDE_COL_TO_STEP.get(col_name.lower())
+                    if step and step not in seen:
+                        blocking.append(step)
+                        seen.add(step)
+        elif view_name == "step_overview":
+            csv_val = str(row.get("blocking_steps_csv") or "")
+            if csv_val:
+                for s in csv_val.split(","):
+                    s = s.strip()
+                    if s and s not in seen:
+                        blocking.append(s)
+                        seen.add(s)
+        return blocking
+
+    # --- event handlers ---
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         idx = int(event.list_view.index or 0)
@@ -334,22 +618,38 @@ class RegistryTUI(App[None]):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.cursor_row is None:
             return
-        self._update_details_for_row(int(event.cursor_row))
+        row_idx = int(event.cursor_row)
+        self._update_details_for_row(row_idx)
+        self._set_status(self._build_status_text(cursor_row=row_idx))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.cursor_row is None:
             return
         self._update_details_for_row(int(event.cursor_row))
 
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        """Sort by the clicked column. Toggle direction on repeated clicks."""
+        col_key = str(event.column_key)
+        if col_key == self.sort_column:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_column = col_key
+            self.sort_reverse = False
+        self._apply_sort()
+        self._set_status(self._build_status_text())
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "filter_input":
             return
         self.filter_text = str(event.value or "")
         self.display_rows = self._apply_filter(self.active_rows)
-        self._render_table()
-        self._set_status(
-            f"Filter applied: '{self.filter_text}' | rows={len(self.display_rows)} loaded={len(self.active_rows)}"
-        )
+        if self.sort_column:
+            self._apply_sort()
+        else:
+            self._render_table()
+        self._set_status(self._build_status_text())
+
+    # --- actions ---
 
     def action_refresh(self) -> None:
         self._load_active_view()
@@ -362,8 +662,11 @@ class RegistryTUI(App[None]):
         inp = self.query_one("#filter_input", Input)
         inp.value = ""
         self.display_rows = list(self.active_rows)
-        self._render_table()
-        self._set_status("Filter cleared.")
+        if self.sort_column:
+            self._apply_sort()
+        else:
+            self._render_table()
+        self._set_status(self._build_status_text())
 
     def action_next_view(self) -> None:
         if not self.view_entries:
@@ -378,6 +681,23 @@ class RegistryTUI(App[None]):
         self.active_view_index = (self.active_view_index - 1) % len(self.view_entries)
         self.query_one("#view_list", ListView).index = self.active_view_index
         self._load_active_view()
+
+    def action_cycle_sort(self) -> None:
+        """Cycle sort through columns for keyboard users."""
+        if not self.display_rows or not self._column_keys:
+            return
+        columns = self._column_keys
+        if self.sort_column is None or self.sort_column not in columns:
+            self.sort_column = columns[0]
+            self.sort_reverse = False
+        elif not self.sort_reverse:
+            self.sort_reverse = True
+        else:
+            idx = columns.index(self.sort_column)
+            self.sort_column = columns[(idx + 1) % len(columns)]
+            self.sort_reverse = False
+        self._apply_sort()
+        self._set_status(self._build_status_text())
 
 
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
