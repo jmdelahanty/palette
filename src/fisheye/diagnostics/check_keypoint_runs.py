@@ -17,21 +17,57 @@ import zarr
 from rich.console import Console
 from rich.table import Table
 
-KEYPOINT_ARRAYS = [
-    ("keypoints_roi", "(n_rois, n_keypoints, 2) float32/float64"),
-    ("keypoints_img", "(n_rois, n_keypoints, 2) float32/float64"),
-    ("keypoints_norm", "(n_rois, n_keypoints, 2) float32/float64"),
-    ("heading", "(n_rois,) float32/float64"),
-    ("confidence", "(n_rois,) float32/float64"),
+from fisheye.shared.zarr.stage_arrays import (
+    KEYPOINTS_SPEC,
+    REFINED_KEYPOINTS_SPEC,
+    array_specs_by_name,
+    describe_array,
+    validate_run,
+)
+
+KEYPOINT_ARRAYS = array_specs_by_name(KEYPOINTS_SPEC)
+REFINED_KEYPOINT_ARRAYS = array_specs_by_name(REFINED_KEYPOINTS_SPEC)
+
+REQUIRED_ARRAYS = [
+    (name, describe_array(spec))
+    for name, spec in KEYPOINT_ARRAYS.items()
+    if spec.required
+]
+OPTIONAL_ARRAYS = [
+    (name, describe_array(spec))
+    for name, spec in KEYPOINT_ARRAYS.items()
+    if not spec.required
+]
+REFINED_REQUIRED_ARRAYS = [
+    (name, describe_array(spec))
+    for name, spec in REFINED_KEYPOINT_ARRAYS.items()
+    if spec.required
+]
+REFINED_OPTIONAL_ARRAYS = [
+    (name, describe_array(spec))
+    for name, spec in REFINED_KEYPOINT_ARRAYS.items()
+    if not spec.required
 ]
 
-MAPPING_ARRAYS = [
-    ("frame_indices", "(n_rois,) int32"),
-    ("frame_counts", "(n_frames,) int32"),
-    ("detection_indices", "(n_rois,) int32"),
-]
+REQUIRED_ATTRS = {
+    "keypoints_runs": ["source_crop_run", "source_detect_run"],
+    "refined_keypoints_runs": ["source_crop_run", "source_detect_run", "source_keypoints_run"],
+}
 
-REQUIRED_ATTRS = ["source_crop_run", "source_detect_run"]
+_STAGE_SPEC = {
+    "keypoints_runs": KEYPOINTS_SPEC,
+    "refined_keypoints_runs": REFINED_KEYPOINTS_SPEC,
+}
+
+_STAGE_REQUIRED_ARRAYS = {
+    "keypoints_runs": REQUIRED_ARRAYS,
+    "refined_keypoints_runs": REFINED_REQUIRED_ARRAYS,
+}
+
+_STAGE_OPTIONAL_ARRAYS = {
+    "keypoints_runs": OPTIONAL_ARRAYS,
+    "refined_keypoints_runs": REFINED_OPTIONAL_ARRAYS,
+}
 
 
 def _check_stage(console: Console, parent: Optional[zarr.Group], stage_name: str) -> None:
@@ -50,44 +86,36 @@ def _check_stage(console: Console, parent: Optional[zarr.Group], stage_name: str
     console.print(f"\n[bold]{stage_name}[/bold] (latest: {latest or 'unknown'})")
     table = Table("Run", "Status", "Details", expand=True)
 
+    stage_spec = _STAGE_SPEC[stage_name]
+    required_arrays = _STAGE_REQUIRED_ARRAYS[stage_name]
+    optional_arrays = _STAGE_OPTIONAL_ARRAYS[stage_name]
+
     for run_name in run_names:
         group = parent[run_name]
         status = "[green]healthy[/green]"
         details: List[str] = []
 
-        n_rois = None
-        if "keypoints_roi" in group:
-            n_rois = group["keypoints_roi"].shape[0]
-            details.append(f"keypoints_roi: {group['keypoints_roi'].shape}")
-        else:
-            status = "[red]missing data[/red]"
-            details.append("missing 'keypoints_roi'")
+        result = validate_run(group, stage_spec)
+        if result.errors:
+            status = "[red]schema error[/red]"
+            details.extend(result.errors)
+        for warning in result.warnings:
+            details.append(f"[yellow]{warning}[/yellow]")
 
-        for array_name, desc in KEYPOINT_ARRAYS[1:]:
-            if array_name not in group:
+        for array_name, desc in required_arrays:
+            if array_name in group:
+                details.append(f"{array_name}: {group[array_name].shape}")
+            elif status != "[red]schema error[/red]":
                 status = "[red]missing data[/red]"
                 details.append(f"missing '{array_name}' ({desc})")
-                continue
-            shape = group[array_name].shape
-            details.append(f"{array_name}: {shape}")
-            if n_rois is not None and shape[0] != n_rois:
-                status = "[red]length mismatch[/red]"
-                details.append(f"{array_name} len {shape[0]} ≠ keypoints_roi {n_rois}")
+        for array_name, _ in optional_arrays:
+            if array_name in group:
+                details.append(f"{array_name}: {group[array_name].shape}")
 
-        for array_name, desc in MAPPING_ARRAYS:
-            if array_name not in group:
-                status = "[red]missing mapping[/red]"
-                details.append(f"missing '{array_name}' ({desc})")
-                continue
-            shape = group[array_name].shape
-            details.append(f"{array_name}: {shape}")
-            if n_rois is not None and array_name != "frame_counts" and shape[0] != n_rois:
-                status = "[red]length mismatch[/red]"
-                details.append(f"{array_name} len {shape[0]} ≠ keypoints_roi {n_rois}")
-
-        for attr in REQUIRED_ATTRS:
+        for attr in REQUIRED_ATTRS[stage_name]:
             if attr not in group.attrs:
-                status = "[yellow]missing attr[/yellow]"
+                if status == "[green]healthy[/green]":
+                    status = "[yellow]missing attr[/yellow]"
                 details.append(f"missing attr '{attr}'")
 
         if "source_crop_run" in group.attrs:
