@@ -7,6 +7,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import zarr
 import yaml
 
+from ..cli.shared_args import add_log_args
+from ..cli.shared_args import add_registry_discovery_args
 from ..shared.batch_logging import JsonLogger as SharedJsonLogger
 from ..shared.batch_logging import make_run_id
 from ..shared.batch_logging import utc_now
@@ -465,28 +467,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--no-gpu", action="store_true")
     parser.add_argument("--force-cpu", action="store_true")
     parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--log-dir", type=Path, default=None, help="Directory for JSONL logs.")
+    add_log_args(
+        parser,
+        log_dir_help="Directory for JSONL logs.",
+        include_no_log=False,
+    )
     # --- Registry discovery mode ---
-    parser.add_argument(
-        "--source",
-        choices=["filesystem", "registry"],
-        default="filesystem",
-        help="Discovery source: filesystem (default) or registry.",
-    )
-    parser.add_argument(
-        "--emit-paths",
-        action="store_true",
-        help="Print discovered zarr paths (one per line) and exit.",
-    )
-    parser.add_argument(
-        "--registry",
-        type=Path,
-        help="Path to registry SQLite database (required when --source registry).",
-    )
-    parser.add_argument("--rig-id", type=str, help="Filter by rig_id (registry mode).")
-    parser.add_argument("--arena-id", type=str, help="Filter by arena_id (registry mode).")
-    parser.add_argument("--camera-id", type=str, help="Filter by camera_id (registry mode).")
-    parser.add_argument("--path-contains", type=str, help="Filter zarr_path by substring (registry mode).")
+    add_registry_discovery_args(parser)
 
     args = parser.parse_args(argv)
 

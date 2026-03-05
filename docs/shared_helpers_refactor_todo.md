@@ -31,7 +31,7 @@ Current state after a fresh 3-agent scan of CRITICAL/HIGH/MEDIUM/LOW sections.
 | 2. Promote `open_zarr_root()` | [~] Partial | Helper exists, but adoption is limited and most call sites still use raw `zarr.open(...)`. |
 | 3. Data-card aggregation dedup | [ ] Not started | Detection/keypoint aggregate scripts still largely parallel implementations. |
 | 4. Model loading/device helper | [ ] Not started | YOLO model load/device placement remains copy-pasted across many files. |
-| 5. CLI shared argument builders | [ ] Not started | Batch/inference scripts still define repeated argparse groups inline. |
+| 5. CLI shared argument builders | [~] Partial | Added shared builders for apply/dry-run, logging, and registry discovery; migrated 4 core batch runners. |
 | 6. Plot save/finalize helper | [ ] Not started | `tight_layout/savefig/close` boilerplate remains duplicated. |
 | 7. Registry zarr discovery factory | [~] Partial | Added shared `zarr_discovery.py`; migrated discovery in detection/crop/keypoint/eye-mask runners. |
 | 8. Root/log-dir resolution | [~] Partial | Added shared `environment.py`; migrated root/log-dir helpers in 4 core batch runners. |
@@ -67,6 +67,8 @@ Current state after a fresh 3-agent scan of CRITICAL/HIGH/MEDIUM/LOW sections.
   `resolve_recording_roots()` and `resolve_log_dir()`.
 - Added `src/fisheye/shared/zarr_discovery.py` with shared registry-backed
   zarr discovery for paths and camera-aware entries.
+- Added `src/fisheye/cli/shared_args.py` with shared argparse builders for
+  apply/dry-run, logging args, and registry discovery args.
 - Migrated 4 core batch runners to shared helpers:
   - `utils/run_detections_batch.py`
   - `utils/crop_batch.py`
@@ -402,15 +404,13 @@ model.half()
 
 ### 5. CLI Shared Argument Builders
 
-- [ ] Create `fisheye/cli/shared_args.py` with reusable argument-group functions:
-  - `add_detection_args(parser)` — `--conf`, `--iou`, `--max-det` (8+ scripts)
-  - `add_model_args(parser)` — `--model`, `--device` (6+ scripts)
-  - `add_batch_args(parser)` — `--batch-size`, `--apply`/`--dry-run` (5+ scripts)
-  - `add_zarr_store_args(parser)` — `store` positional + `--run` (10+ diagnostic scripts)
-  - `add_registry_discovery_args(parser)` — `--source`, `--registry`,
-    `--rig-id`, `--arena-id`, `--camera-id`, `--path-contains`, `--emit-paths`
-    (4+ batch scripts)
-- [ ] Migrate existing scripts to use shared builders
+- [~] Create `fisheye/cli/shared_args.py` with reusable argument-group functions:
+  - Implemented: `add_apply_dry_run_args`, `add_log_args`,
+    `add_registry_discovery_args`.
+  - Remaining: `add_detection_args(parser)` (`--conf`, `--iou`, `--max-det`),
+    `add_model_args(parser)` (`--model`, `--device`), broader
+    `add_batch_args(parser)` coverage, and `add_zarr_store_args(parser)`.
+- [~] Migrate existing scripts to use shared builders
 
 **Affected files (non-exhaustive):**
 - `fisheye/detection/detect_keypoints_yolo.py`

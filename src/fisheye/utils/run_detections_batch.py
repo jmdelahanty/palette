@@ -11,6 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
 
+from fisheye.cli.shared_args import add_apply_dry_run_args
+from fisheye.cli.shared_args import add_log_args
+from fisheye.cli.shared_args import add_registry_discovery_args
 from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
 from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.environment import resolve_log_dir
@@ -432,21 +435,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Text file with one root/recording/analysis-zarr path per line.",
     )
     parser.add_argument("--recursive", action="store_true", help="Recursively scan roots for *_analysis.zarr.")
-    parser.add_argument(
-        "--source",
-        choices=["filesystem", "registry"],
-        default="filesystem",
-        help="Discovery source for analysis zarrs (default: filesystem).",
+    add_registry_discovery_args(
+        parser,
+        source_help="Discovery source for analysis zarrs (default: filesystem).",
+        registry_help="Optional registry sqlite path.",
+        rig_help="Filter by rig_id (registry source only).",
+        arena_help="Filter by arena_id (registry source only).",
+        camera_help="Filter by camera_id (registry source only).",
+        path_contains_help="Substring match on zarr_path (registry source only).",
     )
-    parser.add_argument(
-        "--emit-paths",
-        action="store_true",
-        help="Print discovered zarr paths (one per line) and exit.",
+    add_apply_dry_run_args(
+        parser,
+        apply_help="Run detect for planned analysis zarrs.",
+        dry_run_help="Show planned detections without running.",
     )
-
-    apply_group = parser.add_mutually_exclusive_group()
-    apply_group.add_argument("--apply", action="store_true", help="Run detect for planned analysis zarrs.")
-    apply_group.add_argument("--dry-run", action="store_true", help="Show planned detections without running.")
 
     parser.add_argument("--overwrite", action="store_true", help="Run detection even when detect runs already exist.")
     parser.add_argument("--require-background", action="store_true", help="Require background_runs/latest before detect.")
@@ -461,16 +463,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Require analysis_metadata attrs to include detection_tuning.",
     )
 
-    parser.add_argument("--registry", type=Path, help="Optional registry sqlite path.")
     parser.add_argument("--set-id", type=str, help="Optional detect set filter during model resolution.")
     parser.add_argument("--require-unique", action="store_true", help="Fail if top model scores tie.")
     parser.add_argument("--top-k", type=int, default=5, help="Number of candidate models to persist in provenance.")
     parser.add_argument("--include-non-success", action="store_true", help="Allow non-success model rows in selection.")
-
-    parser.add_argument("--rig-id", type=str, default=None, help="Filter by rig_id (registry source only).")
-    parser.add_argument("--arena-id", type=str, default=None, help="Filter by arena_id (registry source only).")
-    parser.add_argument("--camera-id", type=str, default=None, help="Filter by camera_id (registry source only).")
-    parser.add_argument("--path-contains", type=str, default=None, help="Substring match on zarr_path (registry source only).")
 
     parser.add_argument("--config", type=str, default=None, help="Optional detect config path.")
     parser.add_argument("--conf", type=float, default=None, help="Optional detect confidence threshold override.")
@@ -508,12 +504,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     parser.add_argument("--json", action="store_true", help="Emit JSON lines for plan/result rows.")
-    parser.add_argument(
-        "--log-dir",
-        type=Path,
-        help="Directory for JSONL logs (default: $PALETTE_LOG_ROOT/run_detections_batch or <root>/logs/run_detections_batch).",
+    add_log_args(
+        parser,
+        log_dir_help="Directory for JSONL logs (default: $PALETTE_LOG_ROOT/run_detections_batch or <root>/logs/run_detections_batch).",
     )
-    parser.add_argument("--no-log", action="store_true", help="Disable JSONL logging.")
 
     args = parser.parse_args(argv)
 

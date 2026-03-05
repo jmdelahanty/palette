@@ -13,6 +13,9 @@ import h5py
 import yaml
 import zarr
 
+from fisheye.cli.shared_args import add_apply_dry_run_args
+from fisheye.cli.shared_args import add_log_args
+from fisheye.cli.shared_args import add_registry_discovery_args
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.registry.status_ledger import upsert_recording_step_status
 from fisheye.refinement.refine_eye_masks import refine_eye_masks
@@ -1107,9 +1110,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Text file with one zarr or h5 path per line (comments with # allowed).",
     )
     parser.add_argument("--recursive", action="store_true", help="Recursively scan roots.")
-    apply_group = parser.add_mutually_exclusive_group()
-    apply_group.add_argument("--apply", action="store_true", help="Run eye-mask stages (default: dry-run).")
-    apply_group.add_argument("--dry-run", action="store_true", help="Show plans only (default behavior).")
+    add_apply_dry_run_args(
+        parser,
+        apply_help="Run eye-mask stages (default: dry-run).",
+        dry_run_help="Show plans only (default behavior).",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Run segmentation even when eye masks exist.")
     parser.add_argument("--require-crop", action="store_true", help="Require crop_runs latest to exist (default).")
     parser.add_argument("--no-require-crop", action="store_true", help="Allow run without crops.")
@@ -1139,37 +1144,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         default="all",
         help="Restrict target zarr scope when scanning paths/file-lists (default: all).",
     )
-    parser.add_argument(
-        "--log-dir",
-        type=Path,
-        help="Directory for JSONL logs (default: $PALETTE_LOG_ROOT/run_eye_masks_batch or <recordings_root>/logs/run_eye_masks_batch).",
+    add_log_args(
+        parser,
+        log_dir_help="Directory for JSONL logs (default: $PALETTE_LOG_ROOT/run_eye_masks_batch or <recordings_root>/logs/run_eye_masks_batch).",
     )
-    parser.add_argument("--no-log", action="store_true", help="Disable JSONL logging.")
     # --- Registry discovery mode ---
-    parser.add_argument(
-        "--source",
-        choices=["filesystem", "registry"],
-        default="filesystem",
-        help="Discovery source: filesystem (default) or registry.",
+    add_registry_discovery_args(
+        parser,
+        camera_flag="--camera-id-filter",
+        camera_dest="camera_id_filter",
+        camera_help="Filter by camera_id in registry (registry mode). Named --camera-id-filter to avoid ambiguity with per-recording camera_id.",
     )
-    parser.add_argument(
-        "--emit-paths",
-        action="store_true",
-        help="Print discovered zarr paths (one per line) and exit.",
-    )
-    parser.add_argument(
-        "--registry",
-        type=Path,
-        help="Path to registry SQLite database (required when --source registry).",
-    )
-    parser.add_argument("--rig-id", type=str, help="Filter by rig_id (registry mode).")
-    parser.add_argument("--arena-id", type=str, help="Filter by arena_id (registry mode).")
-    parser.add_argument(
-        "--camera-id-filter",
-        type=str,
-        help="Filter by camera_id in registry (registry mode). Named --camera-id-filter to avoid ambiguity with per-recording camera_id.",
-    )
-    parser.add_argument("--path-contains", type=str, help="Filter zarr_path by substring (registry mode).")
     parser.set_defaults(require_crop=True, require_keypoints=True)
 
     args = parser.parse_args(argv)

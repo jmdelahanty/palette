@@ -14,6 +14,9 @@ import numpy as np
 import yaml
 import zarr
 
+from fisheye.cli.shared_args import add_apply_dry_run_args
+from fisheye.cli.shared_args import add_log_args
+from fisheye.cli.shared_args import add_registry_discovery_args
 from fisheye.detection.detect_keypoints_traditional import detect_keypoints
 from fisheye.detection.detect_keypoints_yolo import detect_keypoints_yolo
 from fisheye.refinement.refine_keypoints import create_refined_keypoint_run
@@ -1532,16 +1535,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Recursively scan for recordings under each root.",
     )
-    apply_group = parser.add_mutually_exclusive_group()
-    apply_group.add_argument(
-        "--apply",
-        action="store_true",
-        help="Run keypoint detection (default: dry-run).",
-    )
-    apply_group.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show planned keypoint runs without computing (default behavior).",
+    add_apply_dry_run_args(
+        parser,
+        apply_help="Run keypoint detection (default: dry-run).",
+        dry_run_help="Show planned keypoint runs without computing (default behavior).",
     )
     parser.add_argument(
         "--overwrite",
@@ -1648,52 +1645,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Emit JSON lines for each plan/result.",
     )
-    parser.add_argument(
-        "--log-dir",
-        type=Path,
-        help="Directory for JSONL logs (default: $PALETTE_LOG_ROOT/run_keypoints_batch or <recordings_root>/logs/run_keypoints_batch).",
-    )
-    parser.add_argument(
-        "--no-log",
-        action="store_true",
-        help="Disable JSONL logging.",
+    add_log_args(
+        parser,
+        log_dir_help="Directory for JSONL logs (default: $PALETTE_LOG_ROOT/run_keypoints_batch or <recordings_root>/logs/run_keypoints_batch).",
     )
     # --- Registry discovery mode ---
-    parser.add_argument(
-        "--source",
-        choices=["filesystem", "registry"],
-        default="filesystem",
-        help="Discovery source: filesystem (default) or registry.",
-    )
-    parser.add_argument(
-        "--emit-paths",
-        action="store_true",
-        help="Print discovered zarr paths (one per line) and exit.",
-    )
-    parser.add_argument(
-        "--registry",
-        type=Path,
-        help="Path to registry SQLite database (required when --source registry).",
-    )
-    parser.add_argument(
-        "--rig-id",
-        type=str,
-        help="Filter by rig_id (registry mode).",
-    )
-    parser.add_argument(
-        "--arena-id",
-        type=str,
-        help="Filter by arena_id (registry mode).",
-    )
-    parser.add_argument(
-        "--camera-id-filter",
-        type=str,
-        help="Filter by camera_id in registry (registry mode). Named --camera-id-filter to avoid ambiguity with per-recording camera_id.",
-    )
-    parser.add_argument(
-        "--path-contains",
-        type=str,
-        help="Filter zarr_path by substring (registry mode).",
+    add_registry_discovery_args(
+        parser,
+        camera_flag="--camera-id-filter",
+        camera_dest="camera_id_filter",
+        camera_help="Filter by camera_id in registry (registry mode). Named --camera-id-filter to avoid ambiguity with per-recording camera_id.",
     )
     parser.add_argument(
         "--model-source",
