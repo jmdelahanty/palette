@@ -69,17 +69,13 @@ def _emit_detect_quality_status(
             print(f"Warning: failed to write recording step status for detect_quality: {exc}")
 
 
-def _normalize_attr(value: object) -> Optional[str]:
-    return normalize_attr(value)
-
-
 def _read_sampled_import_meta(root: zarr.Group) -> Tuple[bool, Dict[str, Any]]:
     raw = root.get("raw_video")
     if raw is None:
         return False, {}
     attrs = raw.attrs
-    import_mode = _normalize_attr(attrs.get("import_mode"))
-    import_purpose = _normalize_attr(attrs.get("import_purpose"))
+    import_mode = normalize_attr(attrs.get("import_mode"))
+    import_purpose = normalize_attr(attrs.get("import_purpose"))
     frame_step = attrs.get("frame_step")
     has_mapping = "original_frame_indices" in raw
 

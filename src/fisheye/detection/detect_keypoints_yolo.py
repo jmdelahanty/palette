@@ -55,10 +55,6 @@ def _prepare_run_group(
     return get_run_group(root, "keypoints", console=console, create_new=True)
 
 
-def _status_text(value: object) -> Optional[str]:
-    return normalize_attr(value)
-
-
 def _resolve_registry_path(registry: Optional[Path]) -> Optional[Path]:
     if registry is not None:
         return registry.expanduser().resolve()
@@ -743,7 +739,7 @@ def detect_keypoints_yolo(
         root=root,
         zarr_path=zarr_path.resolve(),
         run_name=resolved_run_name,
-        method=_status_text(run_group.attrs.get("method")) or "yolo_pose",
+        method=normalize_attr(run_group.attrs.get("method")) or "yolo_pose",
         coverage_pct=float(success_rate),
         details=status_details,
         console=console,

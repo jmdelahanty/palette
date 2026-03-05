@@ -48,10 +48,6 @@ _KEYPOINT_STEP_NAME = "keypoints"
 _KEYPOINT_STATUS_SOURCE = "runtime_keypoints_detect"
 
 
-def _status_text(value: object) -> Optional[str]:
-    return normalize_attr(value)
-
-
 def _resolve_registry_path(registry: Optional[Path]) -> Optional[Path]:
     if registry is not None:
         return registry.expanduser().resolve()
@@ -1009,7 +1005,7 @@ def detect_keypoints(
         root=root,
         zarr_path=Path(zarr_path).expanduser().resolve(),
         run_name=run_group_name,
-        method=_status_text(keypoint_group.attrs.get("method")) or "traditional_pose",
+        method=normalize_attr(keypoint_group.attrs.get("method")) or "traditional_pose",
         coverage_pct=float(success_rate),
         details=status_details,
         console=console,

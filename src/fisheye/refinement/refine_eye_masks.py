@@ -68,10 +68,6 @@ _ZARR_GROUP_CACHE: Dict[str, zarr.Group] = {}
 _ZARR_ARRAY_CACHE: Dict[Tuple[str, str], zarr.Array] = {}
 
 
-def _status_text(value: object) -> Optional[str]:
-    return normalize_attr(value)
-
-
 def _status_float(value: object) -> Optional[float]:
     return as_float(value)
 
@@ -2418,7 +2414,7 @@ def refine_eye_masks(
         zarr_path=resolved_zarr_path,
         status="ok",
         run_name=resolved_run_name,
-        method=_status_text(run_group.attrs.get("method")) or "refine_eye_masks",
+        method=normalize_attr(run_group.attrs.get("method")) or "refine_eye_masks",
         coverage_pct=coverage_pct,
         review_status=review_status if isinstance(review_status, dict) else None,
         details={

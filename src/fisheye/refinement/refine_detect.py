@@ -63,10 +63,6 @@ def _emit_refined_detect_status(
         trigger_run_name=run_name,
     )
 
-def _normalize_attr(value: object) -> Optional[str]:
-    return normalize_attr(value)
-
-
 def _parse_mapping(value: object) -> Optional[Dict[str, object]]:
     if isinstance(value, dict):
         return value
@@ -89,8 +85,8 @@ def _read_sampled_import_meta(root: zarr.Group) -> Tuple[bool, Dict[str, Any]]:
     if raw is None:
         return False, {}
     attrs = raw.attrs
-    import_mode = _normalize_attr(attrs.get("import_mode"))
-    import_purpose = _normalize_attr(attrs.get("import_purpose"))
+    import_mode = normalize_attr(attrs.get("import_mode"))
+    import_purpose = normalize_attr(attrs.get("import_purpose"))
     frame_step = attrs.get("frame_step")
     has_mapping = "original_frame_indices" in raw
 
@@ -152,12 +148,12 @@ def _resolve_detection_quality_labels(
     """Resolve per-detection quality labels and fail closed when required."""
     total = int(total_detections)
     quality_reports = detect_group.get("quality_reports")
-    requested_quality_run = _normalize_attr(quality_run)
+    requested_quality_run = normalize_attr(quality_run)
     resolved_quality_run = requested_quality_run
     quality_group: Optional[zarr.Group] = None
 
     if quality_reports is not None and resolved_quality_run is None:
-        resolved_quality_run = _normalize_attr(quality_reports.attrs.get("latest"))
+        resolved_quality_run = normalize_attr(quality_reports.attrs.get("latest"))
 
     missing_reason: Optional[str] = None
     if quality_reports is None:
@@ -1012,7 +1008,7 @@ def create_refined_run(
         status="ok",
         run_name=run_name,
         method=(
-            (_normalize_attr(refined_group.attrs.get("method")) if hasattr(refined_group, "attrs") else None)
+            (normalize_attr(refined_group.attrs.get("method")) if hasattr(refined_group, "attrs") else None)
             or refine_mode
         ),
         coverage_pct=comparison_stats.get("interpolated", {}).get("coverage_percent"),

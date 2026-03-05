@@ -135,10 +135,6 @@ _DEFAULT_LEGACY_MASKS = False
 _EYE_MASKS_STATUS_SOURCE = "runtime_eye_segmentation_yolo"
 
 
-def _status_text(value: object) -> Optional[str]:
-    return normalize_attr(value)
-
-
 def _status_float(value: object) -> Optional[float]:
     return as_float(value)
 
@@ -169,7 +165,7 @@ def _emit_eye_masks_status(
     if run_name and eye_parent is not None and run_name in eye_parent:
         run_attrs = dict(getattr(eye_parent[run_name], "attrs", {}))
 
-    method = _status_text(run_attrs.get("method")) or _status_text(method_hint)
+    method = normalize_attr(run_attrs.get("method")) or normalize_attr(method_hint)
     pair_rate = _status_float(run_attrs.get("successful_roi_pair_rate"))
     coverage_pct = None
     if pair_rate is not None:
@@ -180,11 +176,11 @@ def _emit_eye_masks_status(
     details = _clean_details(
         {
             "reason": reason,
-            "source_crop_run": _status_text(run_attrs.get("source_crop_run")),
-            "source_keypoints_run": _status_text(
+            "source_crop_run": normalize_attr(run_attrs.get("source_crop_run")),
+            "source_keypoints_run": normalize_attr(
                 run_attrs.get("source_keypoints_run") or run_attrs.get("source_keypoint_run")
             ),
-            "source_keypoint_group": _status_text(run_attrs.get("source_keypoint_group")),
+            "source_keypoint_group": normalize_attr(run_attrs.get("source_keypoint_group")),
             "successful_eyes": run_attrs.get("successful_eyes"),
             "successful_roi_pairs": run_attrs.get("successful_roi_pairs"),
             "total_rois": run_attrs.get("total_rois"),
@@ -195,8 +191,8 @@ def _emit_eye_masks_status(
                 else None
             ),
             "ellipse_soft_available": run_attrs.get("ellipse_soft_available"),
-            "requested_crop_run": _status_text(requested_crop_run),
-            "error": _status_text(error_text),
+            "requested_crop_run": normalize_attr(requested_crop_run),
+            "error": normalize_attr(error_text),
         }
     )
     if isinstance(status_details, dict):
@@ -820,7 +816,7 @@ def segment_eye_masks_yolo(
             status="missing",
             reason="no_rois",
             run_name=None,
-            requested_crop_run=_status_text(crop_run_name),
+            requested_crop_run=normalize_attr(crop_run_name),
             method_hint="yolo_eye_segmentation",
             status_details=status_details,
             error_text=None,
@@ -1300,7 +1296,7 @@ def segment_eye_masks_yolo(
         status="ok",
         reason="present",
         run_name=resolved_run_name,
-        requested_crop_run=_status_text(crop_run_name),
+        requested_crop_run=normalize_attr(crop_run_name),
         method_hint="yolo_eye_segmentation",
         status_details=status_details,
         error_text=None,

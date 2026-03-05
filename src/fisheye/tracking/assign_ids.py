@@ -26,10 +26,6 @@ from ..utils.system import get_environment_info
 _ID_ASSIGN_STATUS_SOURCE = "runtime_assign_ids"
 
 
-def _status_text(value: object) -> Optional[str]:
-    return normalize_attr(value)
-
-
 def _emit_tracking_step_statuses(
     *,
     root: zarr.Group,
@@ -333,10 +329,10 @@ def assign_ids_spatial(
     def _resolve_tracks_status(id_status: str) -> Tuple[str, str, Optional[str], Optional[str]]:
         tracks_parent = root.get("tracking_runs")
         if tracks_parent is not None:
-            latest_track = _status_text(tracks_parent.attrs.get("latest")) if hasattr(tracks_parent, "attrs") else None
+            latest_track = normalize_attr(tracks_parent.attrs.get("latest")) if hasattr(tracks_parent, "attrs") else None
             if latest_track and latest_track in tracks_parent:
                 track_group = tracks_parent[latest_track]
-                track_method = _status_text(track_group.attrs.get("method")) if hasattr(track_group, "attrs") else None
+                track_method = normalize_attr(track_group.attrs.get("method")) if hasattr(track_group, "attrs") else None
                 return "ok", "present", latest_track, track_method
         if id_status == "ok":
             return "missing", "run_missing", None, None
