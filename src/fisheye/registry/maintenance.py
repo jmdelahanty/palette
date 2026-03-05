@@ -12,7 +12,7 @@ from pathlib import PurePosixPath
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .db import (
     Registry,
@@ -4373,16 +4373,29 @@ def _extract_source_keypoints_run(group: object) -> Optional[str]:
     return _decode_text(group.attrs.get("source_keypoint_run"))  # type: ignore[attr-defined]
 
 
-def _resolve_refined_keypoints_group(
+def _extract_source_detect_run(group: object) -> Optional[str]:
+    if group is None or not hasattr(group, "attrs"):
+        return None
+    return _decode_text(group.attrs.get("source_detect_run"))  # type: ignore[attr-defined]
+
+
+def _extract_source_eye_masks_run(group: object) -> Optional[str]:
+    if group is None or not hasattr(group, "attrs"):
+        return None
+    return _decode_text(group.attrs.get("source_eye_masks_run"))  # type: ignore[attr-defined]
+
+
+def _resolve_group_for_source_run(
     parent: object,
     *,
-    source_keypoints_run: Optional[str],
+    source_run: Optional[str],
+    source_run_extractor: Callable[[object], Optional[str]],
 ) -> tuple[Optional[str], Optional[object], str, Optional[str], Optional[str]]:
     latest_run, latest_group, latest_selection = _resolve_latest_group(parent)
-    latest_source_run = _extract_source_keypoints_run(latest_group)
-    if source_keypoints_run is None:
+    latest_source_run = source_run_extractor(latest_group)
+    if source_run is None:
         return latest_run, latest_group, latest_selection, None, None
-    if latest_group is not None and latest_source_run == source_keypoints_run:
+    if latest_group is not None and latest_source_run == source_run:
         return latest_run, latest_group, f"source_match_{latest_selection}", None, None
 
     matches: List[str] = []
@@ -4391,7 +4404,7 @@ def _resolve_refined_keypoints_group(
             group = parent[name]  # type: ignore[index]
         except Exception:
             continue
-        if _extract_source_keypoints_run(group) == source_keypoints_run:
+        if source_run_extractor(group) == source_run:
             matches.append(name)
     if matches:
         matched_run = sorted(matches)[-1]
@@ -4405,6 +4418,18 @@ def _resolve_refined_keypoints_group(
             return None, None, "source_mismatch_missing_attr", latest_run, None
         return None, None, "source_mismatch", latest_run, latest_source_run
     return None, None, "none", None, None
+
+
+def _resolve_refined_keypoints_group(
+    parent: object,
+    *,
+    source_keypoints_run: Optional[str],
+) -> tuple[Optional[str], Optional[object], str, Optional[str], Optional[str]]:
+    return _resolve_group_for_source_run(
+        parent,
+        source_run=source_keypoints_run,
+        source_run_extractor=_extract_source_keypoints_run,
+    )
 
 
 def _extract_coverage_pct(group: object) -> Optional[float]:
@@ -4787,12 +4812,27 @@ def _build_recording_step_rows_from_root(
     detect_quality_details = _extract_detect_quality_details(detect_group)
 
     refined_detect_parent = root.get("refined_detect_runs") or root.get("refined_runs")  # type: ignore[attr-defined]
-    refined_detect_run, refined_detect_group, refined_detect_selection = _resolve_latest_group(refined_detect_parent)
+    (
+        refined_detect_run,
+        refined_detect_group,
+        refined_detect_selection,
+        refined_detect_latest_run,
+        refined_detect_latest_source_run,
+    ) = _resolve_group_for_source_run(
+        refined_detect_parent,
+        source_run=detect_run,
+        source_run_extractor=_extract_source_detect_run,
+    )
     refined_detect_status, refined_detect_reason = _step_status_from_presence(
         present=refined_detect_group is not None,
         is_production=is_production,
         prerequisite_statuses=(detect_status,),
     )
+    if refined_detect_group is None and detect_run and refined_detect_parent is not None:
+        if refined_detect_selection == "source_mismatch":
+            refined_detect_reason = "stale_vs_latest_detect"
+        elif refined_detect_selection == "source_mismatch_missing_attr":
+            refined_detect_reason = "missing_source_detect_run"
     refined_detect_method = _decode_text(
         refined_detect_group.attrs.get("method")  # type: ignore[union-attr]
     ) if refined_detect_group is not None else None
@@ -4883,12 +4923,28 @@ def _build_recording_step_rows_from_root(
     )
 
     eye_masks_parent = root.get("eye_masks_runs")  # type: ignore[attr-defined]
-    eye_masks_run, eye_masks_group, eye_masks_selection = _resolve_latest_group(eye_masks_parent)
+    eye_masks_expected_source_keypoints_run = refined_keypoints_run or keypoints_run
+    (
+        eye_masks_run,
+        eye_masks_group,
+        eye_masks_selection,
+        eye_masks_latest_run,
+        eye_masks_latest_source_run,
+    ) = _resolve_group_for_source_run(
+        eye_masks_parent,
+        source_run=eye_masks_expected_source_keypoints_run,
+        source_run_extractor=_extract_source_keypoints_run,
+    )
     eye_masks_status, eye_masks_reason = _step_status_from_presence(
         present=eye_masks_group is not None,
         is_production=is_production,
         prerequisite_statuses=(refined_keypoints_status, keypoints_status),
     )
+    if eye_masks_group is None and eye_masks_expected_source_keypoints_run and eye_masks_parent is not None:
+        if eye_masks_selection == "source_mismatch":
+            eye_masks_reason = "stale_vs_latest_keypoints"
+        elif eye_masks_selection == "source_mismatch_missing_attr":
+            eye_masks_reason = "missing_source_keypoints_run"
     eye_masks_method = _decode_text(
         eye_masks_group.attrs.get("method")  # type: ignore[union-attr]
     ) if eye_masks_group is not None else None
@@ -4899,14 +4955,27 @@ def _build_recording_step_rows_from_root(
             eye_masks_coverage = float(rate) * 100.0 if rate <= 1.0 else float(rate)
 
     refined_eye_masks_parent = root.get("refined_eye_masks_runs")  # type: ignore[attr-defined]
-    refined_eye_masks_run, refined_eye_masks_group, refined_eye_masks_selection = _resolve_latest_group(
-        refined_eye_masks_parent
+    (
+        refined_eye_masks_run,
+        refined_eye_masks_group,
+        refined_eye_masks_selection,
+        refined_eye_masks_latest_run,
+        refined_eye_masks_latest_source_run,
+    ) = _resolve_group_for_source_run(
+        refined_eye_masks_parent,
+        source_run=eye_masks_run,
+        source_run_extractor=_extract_source_eye_masks_run,
     )
     refined_eye_masks_status, refined_eye_masks_reason = _step_status_from_presence(
         present=refined_eye_masks_group is not None,
         is_production=is_production,
         prerequisite_statuses=(eye_masks_status,),
     )
+    if refined_eye_masks_group is None and eye_masks_run and refined_eye_masks_parent is not None:
+        if refined_eye_masks_selection == "source_mismatch":
+            refined_eye_masks_reason = "stale_vs_latest_eye_masks"
+        elif refined_eye_masks_selection == "source_mismatch_missing_attr":
+            refined_eye_masks_reason = "missing_source_eye_masks_run"
     refined_eye_masks_method = _decode_text(
         refined_eye_masks_group.attrs.get("method")  # type: ignore[union-attr]
     ) if refined_eye_masks_group is not None else None
@@ -4988,6 +5057,22 @@ def _build_recording_step_rows_from_root(
         "zarr_purpose": zarr_purpose,
         "pipeline_type": pipeline_type,
     }
+    refined_detect_details: Dict[str, object] = {
+        **common_details,
+        "reason": refined_detect_reason,
+        "latest_selector": refined_detect_selection,
+        "upstream": {"detect": detect_status},
+    }
+    if detect_run:
+        refined_detect_details["expected_source_detect_run"] = detect_run
+    refined_detect_source_run = _extract_source_detect_run(refined_detect_group)
+    if refined_detect_source_run:
+        refined_detect_details["source_detect_run"] = refined_detect_source_run
+    if refined_detect_latest_run:
+        refined_detect_details["latest_refined_detect_run"] = refined_detect_latest_run
+    if refined_detect_latest_source_run:
+        refined_detect_details["latest_refined_detect_source_run"] = refined_detect_latest_source_run
+
     refined_keypoints_details: Dict[str, object] = {
         **common_details,
         "reason": refined_keypoints_reason,
@@ -5003,6 +5088,40 @@ def _build_recording_step_rows_from_root(
         refined_keypoints_details["latest_refined_run"] = refined_keypoints_latest_run
     if refined_keypoints_latest_source_run:
         refined_keypoints_details["latest_refined_source_keypoints_run"] = refined_keypoints_latest_source_run
+    eye_masks_details: Dict[str, object] = {
+        **common_details,
+        "reason": eye_masks_reason,
+        "latest_selector": eye_masks_selection,
+        "upstream": {
+            "keypoints": keypoints_status,
+            "refined_keypoints": refined_keypoints_status,
+        },
+    }
+    if eye_masks_expected_source_keypoints_run:
+        eye_masks_details["expected_source_keypoints_run"] = eye_masks_expected_source_keypoints_run
+    eye_masks_source_run = _extract_source_keypoints_run(eye_masks_group)
+    if eye_masks_source_run:
+        eye_masks_details["source_keypoints_run"] = eye_masks_source_run
+    if eye_masks_latest_run:
+        eye_masks_details["latest_eye_masks_run"] = eye_masks_latest_run
+    if eye_masks_latest_source_run:
+        eye_masks_details["latest_eye_masks_source_keypoints_run"] = eye_masks_latest_source_run
+
+    refined_eye_masks_details: Dict[str, object] = {
+        **common_details,
+        "reason": refined_eye_masks_reason,
+        "latest_selector": refined_eye_masks_selection,
+        "upstream": {"eye_masks": eye_masks_status},
+    }
+    if eye_masks_run:
+        refined_eye_masks_details["expected_source_eye_masks_run"] = eye_masks_run
+    refined_eye_masks_source_run = _extract_source_eye_masks_run(refined_eye_masks_group)
+    if refined_eye_masks_source_run:
+        refined_eye_masks_details["source_eye_masks_run"] = refined_eye_masks_source_run
+    if refined_eye_masks_latest_run:
+        refined_eye_masks_details["latest_refined_eye_masks_run"] = refined_eye_masks_latest_run
+    if refined_eye_masks_latest_source_run:
+        refined_eye_masks_details["latest_refined_eye_masks_source_run"] = refined_eye_masks_latest_source_run
 
     rows: List[Dict[str, object]] = [
         _make_recording_step_row(
@@ -5075,12 +5194,7 @@ def _build_recording_step_rows_from_root(
             method=refined_detect_method,
             coverage_pct=refined_detect_coverage,
             review_status=detect_review_status,
-            details={
-                **common_details,
-                "reason": refined_detect_reason,
-                "latest_selector": refined_detect_selection,
-                "upstream": {"detect": detect_status},
-            },
+            details=refined_detect_details,
             source=source,
             zarr_mtime_ns=zarr_mtime_ns,
             updated_utc=_extract_updated_utc(refined_detect_group, fallback=fallback_updated_utc),
@@ -5147,15 +5261,7 @@ def _build_recording_step_rows_from_root(
             method=eye_masks_method,
             coverage_pct=eye_masks_coverage,
             review_status=None,
-            details={
-                **common_details,
-                "reason": eye_masks_reason,
-                "latest_selector": eye_masks_selection,
-                "upstream": {
-                    "keypoints": keypoints_status,
-                    "refined_keypoints": refined_keypoints_status,
-                },
-            },
+            details=eye_masks_details,
             source=source,
             zarr_mtime_ns=zarr_mtime_ns,
             updated_utc=_extract_updated_utc(eye_masks_group, fallback=fallback_updated_utc),
@@ -5169,12 +5275,7 @@ def _build_recording_step_rows_from_root(
             method=refined_eye_masks_method,
             coverage_pct=refined_eye_masks_coverage,
             review_status=refined_eye_masks_review_status,
-            details={
-                **common_details,
-                "reason": refined_eye_masks_reason,
-                "latest_selector": refined_eye_masks_selection,
-                "upstream": {"eye_masks": eye_masks_status},
-            },
+            details=refined_eye_masks_details,
             source=source,
             zarr_mtime_ns=zarr_mtime_ns,
             updated_utc=_extract_updated_utc(refined_eye_masks_group, fallback=fallback_updated_utc),

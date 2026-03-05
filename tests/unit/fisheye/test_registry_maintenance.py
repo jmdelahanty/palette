@@ -505,6 +505,8 @@ def _create_recording_step_status_zarr(path: Path) -> _FakeGroup:
         attrs={
             "created_utc": "2026-02-15T00:40:00+00:00",
             "method": "traditional_eye_segmentation",
+            "source_keypoints_run": "refined_kp_001",
+            "source_keypoint_group": "refined_keypoints_runs",
             "successful_roi_pair_rate": 0.75,
         },
     )
@@ -515,6 +517,7 @@ def _create_recording_step_status_zarr(path: Path) -> _FakeGroup:
         attrs={
             "created_utc": "2026-02-15T00:45:00+00:00",
             "method": "refine_eye_masks",
+            "source_eye_masks_run": "eye_masks_001",
             "successful_roi_pair_rate": 1.0,
             "eye_mask_review_status": {
                 "state": "approved",
@@ -4723,6 +4726,225 @@ def test_backfill_recording_step_status_marks_refined_keypoints_stale_when_sourc
     assert str(keypoints_row["status"]) == "ok"
     assert str(keypoints_row["run_name"]) == "kp_002"
     assert str(keypoints_row["method"]) == "yolo_pose"
+    registry.close()
+
+
+def test_backfill_recording_step_status_marks_refined_detect_stale_when_source_mismatches_latest_detect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_step_c" / "zarr" / "rec_step_c_analysis.zarr"
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    detect_parent = fake_root["detect_runs"]
+    detect_parent.add_group(
+        "detect_002",
+        attrs={"detect_timestamp_utc": "2026-02-15T02:00:00+00:00", "detection_method": "yolo"},
+    )
+    detect_parent.attrs["latest"] = "detect_002"
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_step_c",
+        session_uuid="session_step_c",
+        zarr_path=zarr_path,
+        recording_id="recording_step_c",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+
+    refined_row = registry.conn.execute(
+        """
+        SELECT status, run_name, coverage_pct, details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'refined_detect';
+        """,
+        ("dataset_step_c",),
+    ).fetchone()
+    assert refined_row is not None
+    assert str(refined_row["status"]) == "missing"
+    assert refined_row["run_name"] is None
+    assert refined_row["coverage_pct"] is None
+    refined_details = json.loads(str(refined_row["details_json"]))
+    assert refined_details["reason"] == "stale_vs_latest_detect"
+    assert refined_details["expected_source_detect_run"] == "detect_002"
+    assert refined_details["latest_refined_detect_run"] == "refined_detect_001"
+    assert refined_details["latest_refined_detect_source_run"] == "detect_001"
+
+    detect_row = registry.conn.execute(
+        """
+        SELECT status, run_name
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'detect';
+        """,
+        ("dataset_step_c",),
+    ).fetchone()
+    assert detect_row is not None
+    assert str(detect_row["status"]) == "ok"
+    assert str(detect_row["run_name"]) == "detect_002"
+    registry.close()
+
+
+def test_backfill_recording_step_status_marks_eye_masks_stale_when_source_mismatches_latest_keypoints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_step_d" / "zarr" / "rec_step_d_analysis.zarr"
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    keypoints_parent = fake_root["keypoints_runs"]
+    keypoints_parent.add_group(
+        "kp_002",
+        attrs={"created_utc": "2026-02-15T03:00:00+00:00", "method": "yolo_pose"},
+    )
+    keypoints_parent.attrs["latest"] = "kp_002"
+
+    refined_parent = fake_root["refined_keypoints_runs"]
+    refined_parent.add_group(
+        "refined_kp_002",
+        attrs={
+            "created_utc": "2026-02-15T03:05:00+00:00",
+            "method": "refine_keypoints",
+            "source_keypoints_run": "kp_002",
+            "summary_statistics": {"postprocess": {"total_rois": 4, "usable_keypoints": 4}},
+        },
+    )
+    refined_parent.attrs["latest"] = "refined_kp_002"
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_step_d",
+        session_uuid="session_step_d",
+        zarr_path=zarr_path,
+        recording_id="recording_step_d",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+
+    eye_masks_row = registry.conn.execute(
+        """
+        SELECT status, run_name, coverage_pct, details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'eye_masks';
+        """,
+        ("dataset_step_d",),
+    ).fetchone()
+    assert eye_masks_row is not None
+    assert str(eye_masks_row["status"]) == "missing"
+    assert eye_masks_row["run_name"] is None
+    assert eye_masks_row["coverage_pct"] is None
+    eye_masks_details = json.loads(str(eye_masks_row["details_json"]))
+    assert eye_masks_details["reason"] == "stale_vs_latest_keypoints"
+    assert eye_masks_details["expected_source_keypoints_run"] == "refined_kp_002"
+    assert eye_masks_details["latest_eye_masks_run"] == "eye_masks_001"
+    assert eye_masks_details["latest_eye_masks_source_keypoints_run"] == "refined_kp_001"
+
+    refined_keypoints_row = registry.conn.execute(
+        """
+        SELECT status, run_name
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'refined_keypoints';
+        """,
+        ("dataset_step_d",),
+    ).fetchone()
+    assert refined_keypoints_row is not None
+    assert str(refined_keypoints_row["status"]) == "ok"
+    assert str(refined_keypoints_row["run_name"]) == "refined_kp_002"
+    registry.close()
+
+
+def test_backfill_recording_step_status_marks_refined_eye_masks_stale_when_source_mismatches_latest_eye_masks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_step_e" / "zarr" / "rec_step_e_analysis.zarr"
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    eye_masks_parent = fake_root["eye_masks_runs"]
+    eye_masks_parent.add_group(
+        "eye_masks_002",
+        attrs={
+            "created_utc": "2026-02-15T04:00:00+00:00",
+            "method": "traditional_eye_segmentation",
+            "source_keypoints_run": "refined_kp_001",
+            "source_keypoint_group": "refined_keypoints_runs",
+            "successful_roi_pair_rate": 0.8,
+        },
+    )
+    eye_masks_parent.attrs["latest"] = "eye_masks_002"
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_step_e",
+        session_uuid="session_step_e",
+        zarr_path=zarr_path,
+        recording_id="recording_step_e",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+
+    refined_eye_row = registry.conn.execute(
+        """
+        SELECT status, run_name, coverage_pct, details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'refined_eye_masks';
+        """,
+        ("dataset_step_e",),
+    ).fetchone()
+    assert refined_eye_row is not None
+    assert str(refined_eye_row["status"]) == "missing"
+    assert refined_eye_row["run_name"] is None
+    assert refined_eye_row["coverage_pct"] is None
+    refined_eye_details = json.loads(str(refined_eye_row["details_json"]))
+    assert refined_eye_details["reason"] == "stale_vs_latest_eye_masks"
+    assert refined_eye_details["expected_source_eye_masks_run"] == "eye_masks_002"
+    assert refined_eye_details["latest_refined_eye_masks_run"] == "refined_eye_masks_001"
+    assert refined_eye_details["latest_refined_eye_masks_source_run"] == "eye_masks_001"
+
+    eye_masks_row = registry.conn.execute(
+        """
+        SELECT status, run_name
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'eye_masks';
+        """,
+        ("dataset_step_e",),
+    ).fetchone()
+    assert eye_masks_row is not None
+    assert str(eye_masks_row["status"]) == "ok"
+    assert str(eye_masks_row["run_name"]) == "eye_masks_002"
     registry.close()
 
 
