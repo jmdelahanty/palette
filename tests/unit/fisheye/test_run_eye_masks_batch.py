@@ -525,6 +525,116 @@ def test_main_preflight_validation_fails_before_planning(
         mod.main(["--apply", "--no-log", str(tmp_path)])
 
 
+def test_main_model_source_registry_skips_config_model_requirement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan = mod.EyeMaskPlan(
+        recording_dir=tmp_path / "recording_a",
+        h5_path=tmp_path / "recording_a" / "raw" / "recording_a.h5",
+        zarr_path=tmp_path / "recording_a" / "zarr" / "recording_a_analysis.zarr",
+        camera_id="1",
+        status="ok",
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    registry_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(mod, "_resolve_root", lambda _paths: [tmp_path])
+    monkeypatch.setattr(mod, "_load_config", lambda _path: {"eye_masks": {"method": "yolo"}})
+    monkeypatch.setattr(mod, "_build_plans", lambda *args, **kwargs: [plan])  # noqa: ARG005
+    monkeypatch.setattr(mod, "_build_plans_from_zarr", lambda *args, **kwargs: [])  # noqa: ARG005
+
+    rc = mod.main(
+        [
+            "--dry-run",
+            "--no-log",
+            "--model-source",
+            "registry",
+            "--registry",
+            str(registry_path),
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+
+
+def test_main_apply_model_source_registry_uses_registry_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan = mod.EyeMaskPlan(
+        recording_dir=tmp_path / "recording_a",
+        h5_path=tmp_path / "recording_a" / "raw" / "recording_a.h5",
+        zarr_path=tmp_path / "recording_a" / "zarr" / "recording_a_analysis.zarr",
+        camera_id="1",
+        status="ok",
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    registry_path.write_text("", encoding="utf-8")
+
+    called: list[list[str]] = []
+
+    def _fake_registry_runner(argv: list[str] | None = None) -> int:
+        called.append(list(argv or []))
+        return 0
+
+    monkeypatch.setattr(mod, "_resolve_root", lambda _paths: [tmp_path])
+    monkeypatch.setattr(
+        mod,
+        "_load_config",
+        lambda _path: {"eye_masks": {"method": "unet", "batch_size": 16, "use_crop": True}},
+    )
+    monkeypatch.setattr(mod, "_build_plans", lambda *args, **kwargs: [plan])  # noqa: ARG005
+    monkeypatch.setattr(mod, "_build_plans_from_zarr", lambda *args, **kwargs: [])  # noqa: ARG005
+    monkeypatch.setattr(mod, "run_eye_masks_with_registry_model_main", _fake_registry_runner)
+    monkeypatch.setattr(mod, "_latest_run", lambda *_args, **_kwargs: "eye_masks_001")
+    monkeypatch.setattr(
+        mod,
+        "_collect_stage_payload",
+        lambda _zarr_path, group_name, run_name: {
+            "group": group_name,
+            "run_name": run_name,
+            "method": "mock",
+            "duration_seconds": 0.1,
+            "source_runs": {},
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_sync_eye_mask_registry_rows_after_run",
+        lambda **_kwargs: {"synced": True},
+    )
+
+    rc = mod.main(
+        [
+            "--apply",
+            "--no-log",
+            "--method",
+            "unet",
+            "--model-source",
+            "registry",
+            "--registry",
+            str(registry_path),
+            "--model-set-id",
+            "eye_masks_set_001",
+            "--model-top-k",
+            "7",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    assert len(called) == 1
+    argv = called[0]
+    assert "--recording-dir" in argv
+    assert "--output" in argv
+    assert "--registry" in argv
+    assert "--method" in argv
+    assert "--set-id" in argv
+    assert "--top-k" in argv
+    assert "eye_masks_set_001" in argv
+    assert "7" in argv
+
+
 def test_main_refine_missing_only_requires_refine_only(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -534,6 +644,29 @@ def test_main_refine_missing_only_requires_refine_only(
 
     with pytest.raises(SystemExit, match="Use --refine-missing-only only with --refine-only."):
         mod.main(["--refine-missing-only", "--no-log", str(tmp_path)])
+
+
+def test_main_model_source_registry_rejects_traditional_segmentation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    registry_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(mod, "_resolve_root", lambda _paths: [tmp_path])
+    monkeypatch.setattr(mod, "_load_config", lambda _path: {"eye_masks": {"method": "traditional"}})
+
+    with pytest.raises(SystemExit, match="--model-source registry requires model-based eye mask method"):
+        mod.main(
+            [
+                "--apply",
+                "--no-log",
+                "--model-source",
+                "registry",
+                "--registry",
+                str(registry_path),
+                str(tmp_path),
+            ]
+        )
 
 
 def test_decode_source_runs_prefers_canonical_with_legacy_fallback() -> None:

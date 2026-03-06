@@ -1,5 +1,7 @@
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -29,7 +31,9 @@ from fisheye.shared.environment import resolve_log_dir as resolve_shared_log_dir
 from fisheye.shared.environment import resolve_recording_roots as resolve_shared_recording_roots
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
 from fisheye.shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
+from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 from fisheye.shared.zarr_discovery import discover_registry_zarrs as discover_shared_registry_zarrs
+from fisheye.utils.run_eye_masks_with_registry_model import main as run_eye_masks_with_registry_model_main
 
 try:
     from rich.console import Console
@@ -64,14 +68,6 @@ def _utc_now() -> str:
 
 class JsonLogger(SharedJsonLogger):
     pass
-
-
-def _normalize_attr(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "ignore")
-    return str(value)
 
 
 def _derive_camera_id(ipc_source_name: object) -> Optional[str]:
@@ -1114,6 +1110,127 @@ def _run_plan(
     return payload
 
 
+def _run_plan_with_registry_model(
+    plan: EyeMaskPlan,
+    *,
+    config: Dict[str, Any],
+    method: str,
+    quiet: bool,
+    refine: bool,
+    registry_path: Path,
+    model_set_id: Optional[str],
+    model_require_unique: bool,
+    model_top_k: int,
+    model_include_non_success: bool,
+    registry_path_for_sync: Optional[Path] = None,
+) -> Dict[str, Any]:
+    canonical_method = _canonical_method(method)
+    if canonical_method not in {"yolo", "unet"}:
+        raise ValueError(
+            f"Registry model source requires model-based eye mask method; got '{canonical_method}'."
+        )
+
+    params = config.get("eye_masks", {}) or {}
+    argv: List[str] = [
+        "--recording-dir",
+        str(plan.recording_dir),
+        "--output",
+        str(plan.zarr_path),
+        "--registry",
+        str(registry_path),
+        "--method",
+        canonical_method,
+        "--top-k",
+        str(int(model_top_k)),
+    ]
+    if model_set_id:
+        argv.extend(["--set-id", str(model_set_id)])
+    if model_require_unique:
+        argv.append("--require-unique")
+    if model_include_non_success:
+        argv.append("--include-non-success")
+    if params.get("run_name"):
+        argv.extend(["--run-name", str(params.get("run_name"))])
+    if params.get("crop_run"):
+        argv.extend(["--crop-run", str(params.get("crop_run"))])
+    if params.get("keypoints_run"):
+        argv.extend(["--keypoints-run", str(params.get("keypoints_run"))])
+    if params.get("batch_size") is not None:
+        argv.extend(["--batch-size", str(params.get("batch_size"))])
+    if params.get("device"):
+        argv.extend(["--device", str(params.get("device"))])
+
+    if canonical_method == "yolo":
+        if params.get("imgsz") is not None:
+            argv.extend(["--imgsz", str(params.get("imgsz"))])
+        if params.get("conf") is not None:
+            argv.extend(["--conf", str(params.get("conf"))])
+        if params.get("iou") is not None:
+            argv.extend(["--iou", str(params.get("iou"))])
+        if params.get("max_det") is not None:
+            argv.extend(["--max-det", str(params.get("max_det"))])
+        if params.get("mask_threshold") is not None:
+            argv.extend(["--mask-threshold", str(params.get("mask_threshold"))])
+        if params.get("adaptive_scale") is not None:
+            argv.extend(["--adaptive-scale", str(params.get("adaptive_scale"))])
+        if params.get("adaptive_cap") is not None:
+            argv.extend(["--adaptive-cap", str(params.get("adaptive_cap"))])
+        if params.get("use_retina_masks") is False:
+            argv.append("--no-retina-masks")
+        if params.get("proto_upsample_factor") is not None:
+            argv.extend(["--proto-upsample-factor", str(params.get("proto_upsample_factor"))])
+        if params.get("legacy_masks"):
+            argv.append("--legacy-masks")
+        if params.get("verbose"):
+            argv.append("--verbose")
+    else:
+        if params.get("label_mode"):
+            argv.extend(["--label-mode", str(params.get("label_mode"))])
+        if params.get("write_binary_masks"):
+            argv.append("--write-binary-masks")
+        if not bool(params.get("use_crop", True)):
+            argv.append("--no-use-crop")
+
+    stage_start = time.perf_counter()
+    stdout_capture = io.StringIO()
+    stderr_capture = io.StringIO()
+    with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
+        rc = run_eye_masks_with_registry_model_main(argv)
+    if rc != 0:
+        stderr_text = stderr_capture.getvalue().strip()
+        stdout_text = stdout_capture.getvalue().strip()
+        detail = stderr_text or stdout_text or f"exit_code={rc}"
+        raise RuntimeError(f"registry eye-mask runner failed: {detail}")
+
+    eye_run = _latest_run(plan.zarr_path, "eye_masks_runs")
+    if not eye_run:
+        raise RuntimeError("registry eye-mask runner completed but no latest eye_masks run found.")
+
+    payload: Dict[str, Any] = {
+        "recording": str(plan.recording_dir),
+        "zarr": str(plan.zarr_path),
+        "camera_id": plan.camera_id,
+        "method": canonical_method,
+        "status": "ok",
+    }
+    stage_payloads: Dict[str, Dict[str, Any]] = {}
+    payload["eye_masks"] = _collect_stage_payload(plan.zarr_path, "eye_masks_runs", eye_run)
+    stage_payloads["eye_masks"] = payload["eye_masks"]
+
+    if refine:
+        refined_run = _run_refine(plan.zarr_path, config, source_run=eye_run, quiet=quiet)
+        payload["refined_eye_masks"] = _collect_stage_payload(plan.zarr_path, "refined_eye_masks_runs", refined_run)
+        stage_payloads["refined_eye_masks"] = payload["refined_eye_masks"]
+
+    payload["registry_sync"] = _sync_eye_mask_registry_rows_after_run(
+        zarr_path=plan.zarr_path,
+        stage_payloads=stage_payloads,
+        registry_path=registry_path_for_sync,
+    )
+    payload["duration_seconds"] = time.perf_counter() - stage_start
+    return payload
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Batch run eye-mask segmentation and optional refinement.")
     parser.add_argument(
@@ -1173,6 +1290,33 @@ def main(argv: Optional[List[str]] = None) -> int:
         camera_flag="--camera-id-filter",
         camera_dest="camera_id_filter",
         camera_help="Filter by camera_id in registry (registry mode). Named --camera-id-filter to avoid ambiguity with per-recording camera_id.",
+    )
+    parser.add_argument(
+        "--model-source",
+        choices=["config", "registry"],
+        default="config",
+        help="Model resolution source for YOLO/U-Net eye masks: config (default) or registry.",
+    )
+    parser.add_argument(
+        "--model-set-id",
+        type=str,
+        help="Optional set_id filter when --model-source registry.",
+    )
+    parser.add_argument(
+        "--model-require-unique",
+        action="store_true",
+        help="When --model-source registry, fail plan resolution on top-score ties.",
+    )
+    parser.add_argument(
+        "--model-top-k",
+        type=int,
+        default=5,
+        help="Number of registry model candidates to capture in provenance payloads.",
+    )
+    parser.add_argument(
+        "--model-include-non-success",
+        action="store_true",
+        help="Include non-success training runs when resolving models from registry.",
     )
     parser.set_defaults(require_crop=True, require_keypoints=True)
 
@@ -1243,12 +1387,30 @@ def main(argv: Optional[List[str]] = None) -> int:
             json=bool(args.json),
             source=args.source,
             sql_prefilter=bool(args.source == "registry" and skip_existing),
+            model_source=args.model_source,
+            model_set_id=args.model_set_id,
+            model_require_unique=bool(args.model_require_unique),
+            model_top_k=int(args.model_top_k),
+            model_include_non_success=bool(args.model_include_non_success),
+        )
+
+    resolved_registry_path: Optional[Path] = None
+    if args.source == "registry" or args.model_source == "registry":
+        resolved_registry_path = (
+            args.registry.expanduser().resolve()
+            if args.registry
+            else RegistryPaths.from_env(Path.cwd()).path.expanduser().resolve()
         )
 
     config = _load_config(args.config)
     try:
         method = _resolve_method(config, args.method)
-        _validate_method_requirements(config, method, refine_only=bool(args.refine_only))
+        if args.model_source == "config":
+            _validate_method_requirements(config, method, refine_only=bool(args.refine_only))
+        elif not args.refine_only and method not in {"yolo", "unet"}:
+            raise ValueError(
+                f"--model-source registry requires model-based eye mask method, got '{method}'."
+            )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     require_crop = bool(args.require_crop) and not bool(args.no_require_crop)
@@ -1256,14 +1418,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     plans: List[EyeMaskPlan] = []
     if args.source == "registry":
-        if not args.registry or not args.registry.exists():
+        if resolved_registry_path is None or not resolved_registry_path.exists():
             print(
-                f"Error: registry database not found: {args.registry}",
+                f"Error: registry database not found: {resolved_registry_path}",
                 file=sys.stderr,
             )
             return 1
         registry_zarrs = _discover_zarrs_from_registry(
-            registry_path=args.registry,
+            registry_path=resolved_registry_path,
             scope_paths=roots + explicit_zarrs,
             rig_id=args.rig_id,
             arena_id=args.arena_id,
@@ -1401,17 +1563,36 @@ def main(argv: Optional[List[str]] = None) -> int:
     def _handle_plan(plan: EyeMaskPlan) -> None:
         nonlocal ok, failed
         try:
-            result = _run_plan(
-                plan,
-                config=config,
-                method=method,
-                scheduler=args.scheduler,
-                num_workers=args.num_workers,
-                quiet=quiet,
-                refine=bool(args.refine),
-                refine_only=bool(args.refine_only),
-                registry_path_for_sync=args.registry,
-            )
+            if args.model_source == "registry" and not args.refine_only:
+                if resolved_registry_path is None or not resolved_registry_path.exists():
+                    raise RuntimeError(
+                        f"registry database not found for model resolution: {resolved_registry_path}"
+                    )
+                result = _run_plan_with_registry_model(
+                    plan,
+                    config=config,
+                    method=method,
+                    quiet=quiet,
+                    refine=bool(args.refine),
+                    registry_path=resolved_registry_path,
+                    model_set_id=args.model_set_id,
+                    model_require_unique=bool(args.model_require_unique),
+                    model_top_k=int(args.model_top_k),
+                    model_include_non_success=bool(args.model_include_non_success),
+                    registry_path_for_sync=resolved_registry_path,
+                )
+            else:
+                result = _run_plan(
+                    plan,
+                    config=config,
+                    method=method,
+                    scheduler=args.scheduler,
+                    num_workers=args.num_workers,
+                    quiet=quiet,
+                    refine=bool(args.refine),
+                    refine_only=bool(args.refine_only),
+                    registry_path_for_sync=resolved_registry_path,
+                )
             sync_payload = result.get("registry_sync")
             if (
                 isinstance(sync_payload, dict)
