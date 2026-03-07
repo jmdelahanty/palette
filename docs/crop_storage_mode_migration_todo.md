@@ -96,8 +96,10 @@ Date anchored: 2026-03-06.
   `latest_materialized`, `latest_any`, or review status.
 - [x] Wire cache support into YOLO keypoint inference, YOLO eye-mask
   inference, and keypoint retry.
-- [ ] Benchmark `geometry_live` against the cache-backed path on at least one
-  representative archive.
+- [x] Attempt a smoke-archive `geometry_live` benchmark.
+  Result on `2026-03-07`: abandoned after more than `10 minutes` with little
+  visible progress, which is sufficient evidence that large-frame sequential ROI
+  inference should strongly prefer the cache-backed path.
 - [x] Benchmark materialized vs geometry-cache-build vs geometry-cache-reuse on
   the smoke archive.
   Result on `2026-03-07`: after inheriting the crop run ROI layout into the
@@ -228,6 +230,8 @@ Date anchored: 2026-03-06.
 - [ ] What should trigger `roi_cache_policy=auto`:
   source resolution, measured decode throughput, repeated downstream reuse, or
   explicit workflow intent?
+- [ ] For large-frame archives, should `roi_cache_policy=auto` skip live
+  probing entirely and go straight to cache-backed execution?
 - [ ] Does `roi_cache_policy=auto` need stage-aware behavior
   (for example, sequential keypoints -> eye masks) or is a single archive-level
   heuristic enough?

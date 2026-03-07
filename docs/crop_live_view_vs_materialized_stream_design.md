@@ -403,8 +403,12 @@ Interpretation:
 - warm-cache performance is no longer the blocker,
 - first-use cache materialization cost is still real and should be treated as a
   deliberate throughput tradeoff,
-- `roi_cache_policy=auto` and a pure `geometry_live` benchmark still need to be
-  validated before changing the default archival policy.
+- a subsequent `geometry_live` smoke attempt was abandoned after more than
+  `10 minutes` with little visible progress, which is strong evidence that pure
+  live reconstruction is not an acceptable hot path for this archive shape,
+- `roi_cache_policy=auto` should strongly prefer cache-backed execution for
+  large-frame archives like this one rather than waiting for repeated live-read
+  confirmation on every run.
 
 ## Latest Pointer Policy
 
@@ -560,8 +564,9 @@ Largely complete for the main ROI-model paths.
 3. Caches stay outside canonical archives by default.
 4. Cache identity depends on archive/run/signature lineage and does not affect
    `latest` pointers, review status, or training artifact semantics.
-5. Remaining work is to tune `roi_cache_policy=auto`, benchmark
-   `geometry_live`, and validate on more than one archive.
+5. Remaining work is to tune `roi_cache_policy=auto` more precisely and validate
+   on more than one archive. On the smoke archive, `geometry_live` already
+   appears too slow to be a practical ROI-inference mode.
 
 ### Phase 4: Migrate training/export, viewers, and validators
 
@@ -606,6 +611,8 @@ should become the default for some or all workflows.
 - What should drive `roi_cache_policy=auto`:
   source resolution, measured decode throughput, repeated downstream reuse, or
   an explicit workflow flag?
+- For large-frame archives similar to the smoke benchmark, should `auto` simply
+  default to cache-backed execution without attempting live ROI reads first?
 - Which review/tuning workflows are latency-sensitive enough to require cache
   creation rather than direct live decode?
 - Should runtime caches live under per-recording scratch space, a shared global
