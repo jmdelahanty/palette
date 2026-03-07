@@ -9,7 +9,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 import h5py
 import yaml
@@ -33,6 +33,19 @@ from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
 from fisheye.shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 from fisheye.shared.zarr_discovery import discover_registry_zarrs as discover_shared_registry_zarrs
+from fisheye.utils.batch_registry_model_resolution import ResolvedModel
+from fisheye.utils.batch_registry_model_resolution import (
+    resolve_registry_models_for_plans as resolve_shared_registry_models_for_plans,
+)
+from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
+from fisheye.utils.zarr_recording_context import infer_recording_context
+from fisheye.utils.run_eye_masks_with_registry_model import _pick_best_candidate as _pick_eye_mask_candidate
+from fisheye.utils.run_eye_masks_with_registry_model import (
+    _resolution_payload as _build_eye_mask_resolution_payload,
+)
+from fisheye.utils.run_eye_masks_with_registry_model import (
+    _write_model_resolution_provenance as _write_eye_mask_model_resolution_provenance,
+)
 from fisheye.utils.run_eye_masks_with_registry_model import main as run_eye_masks_with_registry_model_main
 
 try:
@@ -62,12 +75,10 @@ class EyeMaskPlan:
     keypoints_present: bool = False
 
 
-def _utc_now() -> str:
-    return utc_now()
+_utc_now = utc_now
 
 
-class JsonLogger(SharedJsonLogger):
-    pass
+JsonLogger = SharedJsonLogger
 
 
 def _derive_camera_id(ipc_source_name: object) -> Optional[str]:
@@ -102,8 +113,7 @@ def _resolve_log_dir(arg_log_dir: Optional[Path], roots: List[Path]) -> Path:
     return resolve_shared_log_dir(arg_log_dir, roots, log_subdir="run_eye_masks_batch")
 
 
-def _run_id() -> str:
-    return make_run_id()
+_run_id = make_run_id
 
 
 def _progress(console: Optional[Console], total: int):
@@ -442,7 +452,7 @@ def _build_plans_from_zarr(
     for zarr_path in zarr_paths:
         if not _zarr_matches_target_use(zarr_path, zarr_use):
             continue
-        recording_dir = _infer_recording_dir(zarr_path)
+        recording_dir = infer_recording_context(zarr_path).recording_dir
         h5_path = _find_h5(recording_dir, zarr_path.stem)
         camera_id = _read_camera_id(h5_path) if h5_path else None
         plans.append(
@@ -899,6 +909,8 @@ def _run_traditional(
             "use_retina_masks",
             "proto_upsample_factor",
             "legacy_masks",
+            "roi_cache_policy",
+            "roi_cache_dir",
             "verbose",
         }
     }
@@ -921,9 +933,15 @@ def _run_traditional(
     )
 
 
-def _run_yolo(zarr_path: Path, config: Dict[str, Any], quiet: bool) -> str:
+def _run_yolo(
+    zarr_path: Path,
+    config: Dict[str, Any],
+    quiet: bool,
+    *,
+    model_path_override: Optional[str] = None,
+) -> str:
     params = config.get("eye_masks", {}) or {}
-    model_path = params.get("model_path") or params.get("model")
+    model_path = model_path_override or params.get("model_path") or params.get("model")
     if not model_path:
         raise ValueError("YOLO eye masks require 'model_path' or 'model' in config.")
     if quiet and Console is not None:
@@ -947,6 +965,8 @@ def _run_yolo(zarr_path: Path, config: Dict[str, Any], quiet: bool) -> str:
                 use_retina_masks=params.get("use_retina_masks", True),
                 proto_upsample_factor=params.get("proto_upsample_factor", 2),
                 legacy_masks=params.get("legacy_masks", False),
+                roi_cache_policy=params.get("roi_cache_policy", "auto"),
+                roi_cache_dir=params.get("roi_cache_dir"),
                 verbose=params.get("verbose", False),
                 console=console,
             )
@@ -968,15 +988,23 @@ def _run_yolo(zarr_path: Path, config: Dict[str, Any], quiet: bool) -> str:
         use_retina_masks=params.get("use_retina_masks", True),
         proto_upsample_factor=params.get("proto_upsample_factor", 2),
         legacy_masks=params.get("legacy_masks", False),
+        roi_cache_policy=params.get("roi_cache_policy", "auto"),
+        roi_cache_dir=params.get("roi_cache_dir"),
         verbose=params.get("verbose", False),
         console=None,
     )
 
 
-def _run_unet(zarr_path: Path, config: Dict[str, Any]) -> str:
+def _run_unet(
+    zarr_path: Path,
+    config: Dict[str, Any],
+    *,
+    checkpoint_override: Optional[str] = None,
+) -> str:
     params = config.get("eye_masks", {}) or {}
     checkpoint = (
-        params.get("checkpoint")
+        checkpoint_override
+        or params.get("checkpoint")
         or params.get("checkpoint_path")
         or params.get("model_path")
         or params.get("model")
@@ -1001,6 +1029,10 @@ def _run_unet(zarr_path: Path, config: Dict[str, Any]) -> str:
         argv.extend(["--keypoints-run", str(params.get("keypoints_run"))])
     if params.get("write_binary_masks"):
         argv.append("--write-binary-masks")
+    if params.get("roi_cache_policy"):
+        argv.extend(["--roi-cache-policy", str(params.get("roi_cache_policy"))])
+    if params.get("roi_cache_dir"):
+        argv.extend(["--roi-cache-dir", str(params.get("roi_cache_dir"))])
     if params.get("use_crop"):
         argv.append("--use-crop")
 
@@ -1050,6 +1082,115 @@ def _run_refine(zarr_path: Path, config: Dict[str, Any], source_run: Optional[st
         area_filter_mode=params.get("area_filter_mode", "either"),
         force_refine_traditional=bool(params.get("force_refine_traditional", False)),
         allow_latest_keypoint_fallback=bool(params.get("allow_latest_keypoint_fallback", False)),
+    )
+
+
+def _resolve_registry_model_for_plan(
+    *,
+    plan: EyeMaskPlan,
+    registry_path: Path,
+    set_id_filter: Optional[str],
+    require_unique: bool,
+    top_k: int,
+    include_non_success: bool,
+    method: str,
+    config: Dict[str, Any],
+) -> ResolvedModel:
+    params = config.get("eye_masks", {}) or {}
+    context = infer_recording_context(plan.zarr_path)
+    registry = Registry(registry_path)
+    try:
+        recording_id = _resolve_recording_id(
+            registry,
+            recording_id=context.recording_id,
+            recording_dir=context.recording_dir,
+        )
+        target = _load_target_profile(registry, recording_id)
+        candidates = _load_candidates(
+            registry,
+            target=target,
+            task="eye_masks",
+            set_id_filter=set_id_filter,
+            include_non_success=include_non_success,
+        )
+    finally:
+        registry.close()
+
+    best = _pick_eye_mask_candidate(candidates, require_unique=require_unique)
+    payload_args = argparse.Namespace(
+        set_id=set_id_filter,
+        require_unique=bool(require_unique),
+        top_k=int(top_k),
+        include_non_success=bool(include_non_success),
+        dry_run=False,
+        method=method,
+        run_name=params.get("run_name"),
+        crop_run=params.get("crop_run"),
+        keypoints_run=params.get("keypoints_run"),
+        batch_size=params.get("batch_size"),
+        device=params.get("device"),
+        imgsz=params.get("imgsz"),
+        conf=params.get("conf"),
+        iou=params.get("iou"),
+        max_det=params.get("max_det"),
+        mask_threshold=params.get("mask_threshold"),
+        adaptive_scale=params.get("adaptive_scale"),
+        adaptive_cap=params.get("adaptive_cap"),
+        no_retina_masks=(params.get("use_retina_masks") is False),
+        proto_upsample_factor=params.get("proto_upsample_factor"),
+        legacy_masks=bool(params.get("legacy_masks")),
+        verbose=bool(params.get("verbose")),
+        roi_cache_policy=params.get("roi_cache_policy"),
+        roi_cache_dir=params.get("roi_cache_dir"),
+        label_mode=params.get("label_mode"),
+        write_binary_masks=bool(params.get("write_binary_masks")),
+        no_use_crop=not bool(params.get("use_crop", True)),
+        json=False,
+    )
+    payload = _build_eye_mask_resolution_payload(
+        args=payload_args,
+        argv=None,
+        recording_dir=plan.recording_dir,
+        output_path=plan.zarr_path,
+        registry_path=registry_path,
+        recording_id=recording_id,
+        target=target,
+        selected=best,
+        candidates=candidates,
+        top_k=int(top_k),
+        method=str(method),
+    )
+    return ResolvedModel(model_path=str(best.model_path), payload=payload)
+
+
+def _resolve_registry_models_for_plans(
+    *,
+    plans: Sequence[EyeMaskPlan],
+    registry_path: Path,
+    set_id_filter: Optional[str],
+    require_unique: bool,
+    top_k: int,
+    include_non_success: bool,
+    method: str,
+    config: Dict[str, Any],
+    on_event: Optional[Callable[[dict[str, object]], None]] = None,
+) -> tuple[dict[str, ResolvedModel], dict[str, str]]:
+    def _resolve(plan: EyeMaskPlan) -> ResolvedModel:
+        return _resolve_registry_model_for_plan(
+            plan=plan,
+            registry_path=registry_path,
+            set_id_filter=set_id_filter,
+            require_unique=require_unique,
+            top_k=top_k,
+            include_non_success=include_non_success,
+            method=method,
+            config=config,
+        )
+
+    return resolve_shared_registry_models_for_plans(
+        plans=plans,
+        resolve_plan=_resolve,
+        on_event=on_event,
     )
 
 
@@ -1123,6 +1264,7 @@ def _run_plan_with_registry_model(
     model_top_k: int,
     model_include_non_success: bool,
     registry_path_for_sync: Optional[Path] = None,
+    resolved_model: Optional[ResolvedModel] = None,
 ) -> Dict[str, Any]:
     canonical_method = _canonical_method(method)
     if canonical_method not in {"yolo", "unet"}:
@@ -1130,81 +1272,109 @@ def _run_plan_with_registry_model(
             f"Registry model source requires model-based eye mask method; got '{canonical_method}'."
         )
 
-    params = config.get("eye_masks", {}) or {}
-    argv: List[str] = [
-        "--recording-dir",
-        str(plan.recording_dir),
-        "--output",
-        str(plan.zarr_path),
-        "--registry",
-        str(registry_path),
-        "--method",
-        canonical_method,
-        "--top-k",
-        str(int(model_top_k)),
-    ]
-    if model_set_id:
-        argv.extend(["--set-id", str(model_set_id)])
-    if model_require_unique:
-        argv.append("--require-unique")
-    if model_include_non_success:
-        argv.append("--include-non-success")
-    if params.get("run_name"):
-        argv.extend(["--run-name", str(params.get("run_name"))])
-    if params.get("crop_run"):
-        argv.extend(["--crop-run", str(params.get("crop_run"))])
-    if params.get("keypoints_run"):
-        argv.extend(["--keypoints-run", str(params.get("keypoints_run"))])
-    if params.get("batch_size") is not None:
-        argv.extend(["--batch-size", str(params.get("batch_size"))])
-    if params.get("device"):
-        argv.extend(["--device", str(params.get("device"))])
-
-    if canonical_method == "yolo":
-        if params.get("imgsz") is not None:
-            argv.extend(["--imgsz", str(params.get("imgsz"))])
-        if params.get("conf") is not None:
-            argv.extend(["--conf", str(params.get("conf"))])
-        if params.get("iou") is not None:
-            argv.extend(["--iou", str(params.get("iou"))])
-        if params.get("max_det") is not None:
-            argv.extend(["--max-det", str(params.get("max_det"))])
-        if params.get("mask_threshold") is not None:
-            argv.extend(["--mask-threshold", str(params.get("mask_threshold"))])
-        if params.get("adaptive_scale") is not None:
-            argv.extend(["--adaptive-scale", str(params.get("adaptive_scale"))])
-        if params.get("adaptive_cap") is not None:
-            argv.extend(["--adaptive-cap", str(params.get("adaptive_cap"))])
-        if params.get("use_retina_masks") is False:
-            argv.append("--no-retina-masks")
-        if params.get("proto_upsample_factor") is not None:
-            argv.extend(["--proto-upsample-factor", str(params.get("proto_upsample_factor"))])
-        if params.get("legacy_masks"):
-            argv.append("--legacy-masks")
-        if params.get("verbose"):
-            argv.append("--verbose")
-    else:
-        if params.get("label_mode"):
-            argv.extend(["--label-mode", str(params.get("label_mode"))])
-        if params.get("write_binary_masks"):
-            argv.append("--write-binary-masks")
-        if not bool(params.get("use_crop", True)):
-            argv.append("--no-use-crop")
-
     stage_start = time.perf_counter()
-    stdout_capture = io.StringIO()
-    stderr_capture = io.StringIO()
-    with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
-        rc = run_eye_masks_with_registry_model_main(argv)
-    if rc != 0:
-        stderr_text = stderr_capture.getvalue().strip()
-        stdout_text = stdout_capture.getvalue().strip()
-        detail = stderr_text or stdout_text or f"exit_code={rc}"
-        raise RuntimeError(f"registry eye-mask runner failed: {detail}")
+    params = config.get("eye_masks", {}) or {}
+    if resolved_model is not None:
+        if canonical_method == "unet":
+            eye_run = _run_unet(
+                plan.zarr_path,
+                config,
+                checkpoint_override=resolved_model.model_path,
+            )
+        else:
+            eye_run = _run_yolo(
+                plan.zarr_path,
+                config,
+                quiet=quiet,
+                model_path_override=resolved_model.model_path,
+            )
+        _write_eye_mask_model_resolution_provenance(
+            zarr_path=plan.zarr_path,
+            run_name=eye_run,
+            payload=resolved_model.payload,
+        )
+    else:
+        argv: List[str] = [
+            "--recording-dir",
+            str(plan.recording_dir),
+            "--output",
+            str(plan.zarr_path),
+            "--registry",
+            str(registry_path),
+            "--method",
+            canonical_method,
+            "--top-k",
+            str(int(model_top_k)),
+        ]
+        if model_set_id:
+            argv.extend(["--set-id", str(model_set_id)])
+        if model_require_unique:
+            argv.append("--require-unique")
+        if model_include_non_success:
+            argv.append("--include-non-success")
+        if params.get("run_name"):
+            argv.extend(["--run-name", str(params.get("run_name"))])
+        if params.get("crop_run"):
+            argv.extend(["--crop-run", str(params.get("crop_run"))])
+        if params.get("keypoints_run"):
+            argv.extend(["--keypoints-run", str(params.get("keypoints_run"))])
+        if params.get("batch_size") is not None:
+            argv.extend(["--batch-size", str(params.get("batch_size"))])
+        if params.get("device"):
+            argv.extend(["--device", str(params.get("device"))])
 
-    eye_run = _latest_run(plan.zarr_path, "eye_masks_runs")
-    if not eye_run:
-        raise RuntimeError("registry eye-mask runner completed but no latest eye_masks run found.")
+        if canonical_method == "yolo":
+            if params.get("imgsz") is not None:
+                argv.extend(["--imgsz", str(params.get("imgsz"))])
+            if params.get("conf") is not None:
+                argv.extend(["--conf", str(params.get("conf"))])
+            if params.get("iou") is not None:
+                argv.extend(["--iou", str(params.get("iou"))])
+            if params.get("max_det") is not None:
+                argv.extend(["--max-det", str(params.get("max_det"))])
+            if params.get("mask_threshold") is not None:
+                argv.extend(["--mask-threshold", str(params.get("mask_threshold"))])
+            if params.get("adaptive_scale") is not None:
+                argv.extend(["--adaptive-scale", str(params.get("adaptive_scale"))])
+            if params.get("adaptive_cap") is not None:
+                argv.extend(["--adaptive-cap", str(params.get("adaptive_cap"))])
+            if params.get("use_retina_masks") is False:
+                argv.append("--no-retina-masks")
+            if params.get("proto_upsample_factor") is not None:
+                argv.extend(["--proto-upsample-factor", str(params.get("proto_upsample_factor"))])
+            if params.get("legacy_masks"):
+                argv.append("--legacy-masks")
+            if params.get("roi_cache_policy"):
+                argv.extend(["--roi-cache-policy", str(params.get("roi_cache_policy"))])
+            if params.get("roi_cache_dir"):
+                argv.extend(["--roi-cache-dir", str(params.get("roi_cache_dir"))])
+            if params.get("verbose"):
+                argv.append("--verbose")
+        else:
+            if params.get("label_mode"):
+                argv.extend(["--label-mode", str(params.get("label_mode"))])
+            if params.get("write_binary_masks"):
+                argv.append("--write-binary-masks")
+            if params.get("roi_cache_policy"):
+                argv.extend(["--roi-cache-policy", str(params.get("roi_cache_policy"))])
+            if params.get("roi_cache_dir"):
+                argv.extend(["--roi-cache-dir", str(params.get("roi_cache_dir"))])
+            if not bool(params.get("use_crop", True)):
+                argv.append("--no-use-crop")
+
+        stdout_capture = io.StringIO()
+        stderr_capture = io.StringIO()
+        with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
+            rc = run_eye_masks_with_registry_model_main(argv)
+        if rc != 0:
+            stderr_text = stderr_capture.getvalue().strip()
+            stdout_text = stdout_capture.getvalue().strip()
+            detail = stderr_text or stdout_text or f"exit_code={rc}"
+            raise RuntimeError(f"registry eye-mask runner failed: {detail}")
+
+        eye_run = _latest_run(plan.zarr_path, "eye_masks_runs")
+        if not eye_run:
+            raise RuntimeError("registry eye-mask runner completed but no latest eye_masks run found.")
 
     payload: Dict[str, Any] = {
         "recording": str(plan.recording_dir),
@@ -1216,6 +1386,19 @@ def _run_plan_with_registry_model(
     stage_payloads: Dict[str, Dict[str, Any]] = {}
     payload["eye_masks"] = _collect_stage_payload(plan.zarr_path, "eye_masks_runs", eye_run)
     stage_payloads["eye_masks"] = payload["eye_masks"]
+    if resolved_model is not None:
+        selected = (
+            resolved_model.payload.get("selected", {})
+            if isinstance(resolved_model.payload.get("selected"), dict)
+            else {}
+        )
+        payload["model_resolution"] = {
+            "mode": "registry",
+            "selected_model_path": selected.get("model_path"),
+            "selected_run_id": selected.get("run_id"),
+            "selected_set_id": selected.get("set_id"),
+            "selected_score": selected.get("score"),
+        }
 
     if refine:
         refined_run = _run_refine(plan.zarr_path, config, source_run=eye_run, quiet=quiet)
@@ -1555,8 +1738,97 @@ def main(argv: Optional[List[str]] = None) -> int:
             continue
         runnable_plans.append(plan)
 
+    resolved_models_by_plan: dict[str, ResolvedModel] = {}
+    if args.model_source == "registry" and not args.refine_only and runnable_plans:
+        if resolved_registry_path is None or not resolved_registry_path.exists():
+            print(
+                f"Error: registry database not found for model resolution: {resolved_registry_path}",
+                file=sys.stderr,
+            )
+            return 1
+        if not args.json and not args.quiet:
+            print(f"Pre-resolving registry models for {len(runnable_plans)} recording plan(s)...")
+
+        def _emit_model_resolution_event(event_payload: dict[str, object]) -> None:
+            event_name = str(event_payload.get("event", "model_resolution_event"))
+            if logger is not None:
+                logger.log(
+                    event_name,
+                    **{k: v for k, v in event_payload.items() if k != "event"},
+                )
+            if args.json or args.quiet:
+                return
+            index = event_payload.get("index")
+            total = event_payload.get("total")
+            prefix = f"[{index}/{total}] " if index is not None and total is not None else ""
+            if event_name == "model_resolution_start":
+                print(f"{prefix}Resolving model for {event_payload.get('recording')}")
+                return
+            if event_name == "model_resolution_cached":
+                print(
+                    f"{prefix}Using cached model for {event_payload.get('recording')}: "
+                    f"{event_payload.get('selected_model_path')}"
+                )
+                return
+            if event_name == "model_resolution_ok":
+                print(
+                    f"{prefix}Resolved model for {event_payload.get('recording')}: "
+                    f"{event_payload.get('selected_model_path')}"
+                )
+                return
+            if event_name == "model_resolution_failed":
+                print(
+                    f"{prefix}Model resolution failed for {event_payload.get('zarr')}: "
+                    f"{event_payload.get('error')}"
+                )
+
+        resolved_models_by_plan, resolution_errors = _resolve_registry_models_for_plans(
+            plans=runnable_plans,
+            registry_path=resolved_registry_path,
+            set_id_filter=args.model_set_id,
+            require_unique=bool(args.model_require_unique),
+            top_k=int(args.model_top_k),
+            include_non_success=bool(args.model_include_non_success),
+            method=method,
+            config=config,
+            on_event=_emit_model_resolution_event,
+        )
+        if logger is not None:
+            logger.log(
+                "model_resolution_summary",
+                total=len(runnable_plans),
+                resolved=len(resolved_models_by_plan),
+                failed=len(resolution_errors),
+            )
+        if not args.json and not args.quiet:
+            print(
+                "Model resolution summary: "
+                f"resolved={len(resolved_models_by_plan)} failed={len(resolution_errors)}"
+            )
+        if resolution_errors:
+            runnable_after_resolution: List[EyeMaskPlan] = []
+            for plan in runnable_plans:
+                key = str(plan.zarr_path.resolve())
+                error = resolution_errors.get(key)
+                if error is None:
+                    runnable_after_resolution.append(plan)
+                    continue
+                failed += 1
+                row = {
+                    "status": "failed",
+                    "zarr": str(plan.zarr_path),
+                    "error": f"model resolution failed: {error}",
+                }
+                if args.json:
+                    print(json.dumps(row, sort_keys=True))
+                else:
+                    print(f"Eye masks failed for {plan.zarr_path}: model resolution failed: {error}")
+                if logger is not None:
+                    logger.log("eye_masks_failed", **row)
+            runnable_plans = runnable_after_resolution
+
     console = Console() if (Console is not None and not args.json and not args.quiet) else None
-    progress = _progress(console if not args.json else None, total=len(runnable_plans))
+    progress = None
     quiet = bool(args.quiet or args.json)
     task_label = "Refining eye masks" if args.refine_only else "Running eye masks"
 
@@ -1564,10 +1836,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         nonlocal ok, failed
         try:
             if args.model_source == "registry" and not args.refine_only:
-                if resolved_registry_path is None or not resolved_registry_path.exists():
-                    raise RuntimeError(
-                        f"registry database not found for model resolution: {resolved_registry_path}"
-                    )
                 result = _run_plan_with_registry_model(
                     plan,
                     config=config,
@@ -1580,6 +1848,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     model_top_k=int(args.model_top_k),
                     model_include_non_success=bool(args.model_include_non_success),
                     registry_path_for_sync=resolved_registry_path,
+                    resolved_model=resolved_models_by_plan.get(str(plan.zarr_path.resolve())),
                 )
             else:
                 result = _run_plan(
@@ -1628,7 +1897,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 logger.log("eye_masks_failed", **row)
 
     if progress is None:
-        for plan in runnable_plans:
+        total_plans = len(runnable_plans)
+        for idx, plan in enumerate(runnable_plans, start=1):
+            if console is not None:
+                console.print(
+                    f"[bold cyan][{idx}/{total_plans}] {task_label}[/bold cyan] "
+                    f"[dim]{plan.recording_dir}[/dim]"
+                )
             _handle_plan(plan)
     else:
         with progress:

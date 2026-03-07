@@ -20,6 +20,7 @@ from ..registry.db import Registry, resolve_dataset_id
 from ..registry.status_ledger import upsert_recording_step_status
 from ..registry.step_cascade import invalidate_downstream_steps
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
+from ..shared.crop_image_source import CropImageSource
 from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.row_alignment import assert_row_alignment
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -33,9 +34,11 @@ def _compression_kwargs(array: zarr.Array) -> Dict[str, object]:
     """Return compression kwargs compatible with both Zarr v2 and v3."""
     kwargs: Dict[str, object] = {}
 
-    compressors = getattr(array, "compressors", None)
-    if compressors:
-        kwargs["compressors"] = compressors
+    sentinel = object()
+    compressors = getattr(array, "compressors", sentinel)
+    if compressors is not sentinel:
+        if compressors:
+            kwargs["compressors"] = compressors
     else:
         try:
             compressor = array.compressor  # Zarr v2 API
@@ -88,7 +91,7 @@ def _validate_input_row_alignment(
     assert_row_alignment(
         total_rois,
         (
-            (f"crop_runs/{crop_run}/roi_images", crop_group["roi_images"]),
+            (f"crop_runs/{crop_run}/roi_images", crop_group.get("roi_images")),
             (f"crop_runs/{crop_run}/frame_indices", crop_group.get("frame_indices")),
             (f"crop_runs/{crop_run}/detection_indices", crop_group.get("detection_indices")),
             (f"crop_runs/{crop_run}/detection_source", crop_group.get("detection_source")),
@@ -259,25 +262,24 @@ def _load_checkpoint(path: Path, device: torch.device) -> Tuple[UNetSmall, Dict[
 def _write_mask_probs(
     run_group: zarr.Group,
     model: UNetSmall,
-    roi_array: zarr.Array,
+    roi_source: CropImageSource,
     batch_size: int,
     device: torch.device,
     label_mode: str,
     console: Console,
     write_binary: bool,
 ) -> Tuple[int, bool]:
-    total_rois = int(roi_array.shape[0])
-    height = int(roi_array.shape[-2])
-    width = int(roi_array.shape[-1])
+    total_rois = int(roi_source.total_rois)
+    height, width = map(int, roi_source.roi_shape)
     prob_channels = 1 if label_mode == "union" else 2
 
+    roi_array = roi_source.roi_array
     chunk_size = getattr(roi_array, "chunks", None)
-    chunk_rois = (
-        max(1, min(512, chunk_size[0]))
-        if (chunk_size and len(chunk_size) == roi_array.ndim)
-        else min(512, max(1, total_rois))
-    )
-    compression_kwargs = _compression_kwargs(roi_array)
+    if chunk_size and hasattr(roi_array, "ndim") and len(chunk_size) == int(getattr(roi_array, "ndim")):
+        chunk_rois = max(1, min(512, int(chunk_size[0])))
+    else:
+        chunk_rois = min(512, max(1, total_rois))
+    compression_kwargs = _compression_kwargs(roi_array) if roi_array is not None else {}
 
     expected_shape = (total_rois, prob_channels, height, width)
 
@@ -319,7 +321,7 @@ def _write_mask_probs(
     with progress, torch.no_grad():
         for start in range(0, total_rois, batch_size):
             stop = min(start + batch_size, total_rois)
-            roi_np = np.asarray(roi_array[start:stop])
+            roi_np = roi_source.read_slice(start, stop)
             roi_np = _normalise_roi_batch(roi_np)
             imgs = torch.from_numpy(roi_np).to(device, non_blocking=True)
             if device.type == "cuda":
@@ -376,7 +378,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         description="Infer eye-mask probabilities using a trained U-Net segmenter."
     )
     parser.add_argument("zarr_path", help="Path to Palette Zarr archive.")
-    parser.add_argument("checkpoint", help="Path to trained U-Net checkpoint (.pt).")
+    parser.add_argument("checkpoint", nargs="?", help="Path to trained U-Net checkpoint (.pt).")
+    parser.add_argument(
+        "--checkpoint",
+        dest="checkpoint_option",
+        help="Path to trained U-Net checkpoint (.pt).",
+    )
     parser.add_argument(
         "--eye-mask-run",
         help="Existing eye mask run to clone metadata from (optional).",
@@ -419,6 +426,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also threshold and store uint8 masks alongside probabilities.",
     )
+    parser.add_argument(
+        "--roi-cache-policy",
+        choices=("never", "auto", "always"),
+        default="auto",
+        help="Temporary ROI cache policy for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument(
+        "--roi-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional scratch directory for temporary ROI caches.",
+    )
     return parser
 
 
@@ -447,7 +466,10 @@ def main(
     console = Console()
     console.print("[bold cyan]Running U-Net eye-mask inference[/bold cyan]\n")
 
-    checkpoint_path = Path(args.checkpoint).expanduser().resolve()
+    checkpoint_value = args.checkpoint_option or args.checkpoint
+    if not checkpoint_value:
+        raise ValueError("U-Net eye-mask inference requires a checkpoint path.")
+    checkpoint_path = Path(checkpoint_value).expanduser().resolve()
     device = _resolve_device(args.device)
     model, checkpoint = _load_checkpoint(checkpoint_path, device)
     label_mode = args.label_mode or checkpoint.get("label_mode", "union")
@@ -468,20 +490,15 @@ def main(
             source_run_name = latest
             src_run = eye_parent[latest]
 
-    crop_parent = root.get("crop_runs")
     crop_run = args.crop_run
     crop_resolved_from = "cli_arg" if crop_run else "unset"
+    crop_parent = root.get("crop_runs")
     available_crop_runs = _sorted_group_keys(crop_parent)
 
     if src_run is not None:
         crop_run = crop_run or src_run.attrs.get("source_crop_run")
         if crop_run:
             crop_resolved_from = "source_run_attr"
-    elif args.use_crop:
-        if crop_parent is not None:
-            crop_run = crop_run or crop_parent.attrs.get("latest")
-            if crop_run:
-                crop_resolved_from = "crop_latest_attr"
     if (
         crop_run
         and crop_parent is not None
@@ -499,48 +516,44 @@ def main(
         and crop_resolved_from != "cli_arg"
     ):
         crop_run = None
-    if not crop_run and available_crop_runs:
-        crop_run = available_crop_runs[-1]
-        crop_resolved_from = "crop_group_latest"
-    if not crop_run or crop_parent is None or crop_run not in crop_parent:
-        raise ValueError(
-            "Unable to resolve crop run for ROI images (use --crop-run or provide --eye-mask-run). "
-            f"Available crop runs: {', '.join(available_crop_runs) if available_crop_runs else 'none'}."
-        )
 
-    crop_group = root[f"crop_runs/{crop_run}"]
-    roi_path = f"crop_runs/{crop_run}/roi_images"
-    if roi_path not in root:
-        raise ValueError(f"ROI images array '{roi_path}' missing from Zarr store.")
+    crop_source = CropImageSource.open(
+        root,
+        crop_run=str(crop_run) if crop_run is not None else None,
+        zarr_path=zarr_path,
+        roi_cache_policy=args.roi_cache_policy,
+        roi_cache_dir=args.roi_cache_dir,
+        console=console,
+    )
+    crop_group = crop_source.crop_group
+    crop_run_name = crop_source.crop_run_name
+    if crop_resolved_from == "unset":
+        crop_resolved_from = "crop_source_resolver"
 
     console.print(
-        f"[dim]Resolved crop run: {crop_run} "
+        f"[dim]Resolved crop run: {crop_run_name} "
         f"(source={crop_resolved_from})[/dim]"
     )
 
-    roi_array = root[roi_path]
-    total_rois = int(roi_array.shape[0])
+    total_rois = int(crop_source.total_rois)
     if total_rois == 0:
-        _emit_eye_masks_status(
-            registry=registry,
-            root=root,
-            zarr_path=zarr_path,
-            status="missing",
-            reason="no_rois",
-            run_name=None,
-            requested_crop_run=normalize_attr(crop_run),
-            method_hint="unet_eye_mask_segmenter",
-            status_details=status_details,
-            error_text=None,
-            console=console,
-        )
+        try:
+            _emit_eye_masks_status(
+                registry=registry,
+                root=root,
+                zarr_path=zarr_path,
+                status="missing",
+                reason="no_rois",
+                run_name=None,
+                requested_crop_run=normalize_attr(crop_run_name),
+                method_hint="unet_eye_mask_segmenter",
+                status_details=status_details,
+                error_text=None,
+                console=console,
+            )
+        finally:
+            crop_source.close()
         raise ValueError("ROI image array is empty; nothing to segment.")
-
-    _validate_input_row_alignment(
-        crop_group=crop_group,
-        crop_run=str(crop_run),
-        total_rois=total_rois,
-    )
 
     env_info = get_environment_info(
         include_all_packages=False,
@@ -556,10 +569,12 @@ def main(
         "write_binary_masks": bool(args.write_binary_masks),
         "device": str(device),
         "use_crop": bool(args.use_crop),
+        "roi_cache_policy": str(args.roi_cache_policy),
+        "roi_cache_dir": str(args.roi_cache_dir) if args.roi_cache_dir else None,
     }
     source_runs: Dict[str, str] = {}
-    if crop_run:
-        source_runs["crop"] = crop_run
+    if crop_run_name:
+        source_runs["crop"] = crop_run_name
     if source_run_name:
         source_runs["eye_masks"] = source_run_name
 
@@ -575,68 +590,78 @@ def main(
             "segmenter_label_mode": label_mode,
         },
     )
+    try:
+        _validate_input_row_alignment(
+            crop_group=crop_group,
+            crop_run=str(crop_run_name),
+            total_rois=total_rois,
+        )
 
-    def _copy_metadata_array(array_name: str) -> None:
-        if array_name not in crop_group:
-            console.print(f"[yellow]Crop run missing '{array_name}'; new eye-mask run will skip it.[/yellow]")
-            return
-        src = crop_group[array_name]
-        data = src[:]
-        chunks = getattr(src, "chunks", None)
-        if not chunks:
-            chunks = tuple(max(1, min(dim, 1024)) for dim in data.shape)
-        else:
-            chunk_list = []
-            for axis, dim in enumerate(data.shape):
-                chunk_val = chunks[axis] if axis < len(chunks) else chunks[-1]
-                chunk_list.append(int(max(1, min(dim, chunk_val))))
-            chunks = tuple(chunk_list)
-        if array_name in run_group:
-            del run_group[array_name]
+        def _copy_metadata_array(array_name: str) -> None:
+            if array_name not in crop_group:
+                console.print(f"[yellow]Crop run missing '{array_name}'; new eye-mask run will skip it.[/yellow]")
+                return
+            src = crop_group[array_name]
+            data = src[:]
+            chunks = getattr(src, "chunks", None)
+            if not chunks:
+                chunks = tuple(max(1, min(dim, 1024)) for dim in data.shape)
+            else:
+                chunk_list = []
+                for axis, dim in enumerate(data.shape):
+                    chunk_val = chunks[axis] if axis < len(chunks) else chunks[-1]
+                    chunk_list.append(int(max(1, min(dim, chunk_val))))
+                chunks = tuple(chunk_list)
+            if array_name in run_group:
+                del run_group[array_name]
+            run_group.create_array(
+                array_name,
+                data=data,
+                chunks=chunks,
+                overwrite=True,
+            )
+
+        _copy_metadata_array("frame_indices")
+        _copy_metadata_array("detection_indices")
+        _copy_metadata_array("frame_counts")
+
+        crop_detection_source = crop_group.get("detection_source")
+        if crop_detection_source is not None and crop_detection_source.shape[0] != total_rois:
+            raise ValueError(
+                f"Crop run detection_source length {crop_detection_source.shape[0]} does not match ROI count {total_rois}"
+            )
+        detection_source = (
+            crop_detection_source[:].astype(np.int8, copy=False)
+            if crop_detection_source is not None
+            else np.zeros(total_rois, dtype=np.int8)
+        )
         run_group.create_array(
-            array_name,
-            data=data,
-            chunks=chunks,
+            "detection_source",
+            data=detection_source,
+            chunks=(min(1024, total_rois),),
             overwrite=True,
         )
+        if crop_detection_source is not None:
+            console.print("[dim]Copied per-ROI detection lineage (detection_source) from crop run[/dim]")
+        else:
+            console.print(
+                "[yellow]Crop run missing per-ROI detection lineage (detection_source); defaulting to zeros.[/yellow]"
+            )
 
-    _copy_metadata_array("frame_indices")
-    _copy_metadata_array("detection_indices")
-    _copy_metadata_array("frame_counts")
-
-    crop_detection_source = crop_group.get("detection_source")
-    if crop_detection_source is not None and crop_detection_source.shape[0] != total_rois:
-        raise ValueError(
-            f"Crop run detection_source length {crop_detection_source.shape[0]} does not match ROI count {total_rois}"
+        start_time = time.perf_counter()
+        stored_channels, wrote_binary = _write_mask_probs(
+            run_group,
+            model,
+            crop_source,
+            int(args.batch_size),
+            device,
+            label_mode,
+            console,
+            write_binary=bool(args.write_binary_masks),
         )
-    detection_source = (
-        crop_detection_source[:].astype(np.int8, copy=False)
-        if crop_detection_source is not None
-        else np.zeros(total_rois, dtype=np.int8)
-    )
-    run_group.create_array(
-        "detection_source",
-        data=detection_source,
-        chunks=(min(1024, total_rois),),
-        overwrite=True,
-    )
-    if crop_detection_source is not None:
-        console.print("[dim]Copied detection_source from crop run[/dim]")
-    else:
-        console.print("[yellow]Crop run missing detection_source; defaulting to zeros.[/yellow]")
-
-    start_time = time.perf_counter()
-    stored_channels, wrote_binary = _write_mask_probs(
-        run_group,
-        model,
-        roi_array,
-        int(args.batch_size),
-        device,
-        label_mode,
-        console,
-        write_binary=bool(args.write_binary_masks),
-    )
-    duration = time.perf_counter() - start_time
+        duration = time.perf_counter() - start_time
+    finally:
+        crop_source.close()
 
     git_info = get_git_info()
 
@@ -684,8 +709,14 @@ def main(
             "source_eye_masks_run": source_run_name,
             "source_detect_run": crop_group.attrs.get("source_detect_run", "unknown"),
             **build_source_keypoints_attrs(resolved_keypoints_run, include_legacy_alias=True),
-            "source_crop_run": crop_run,
+            "source_crop_run": crop_run_name,
             "detection_source_path": crop_group.attrs.get("detection_source_path"),
+            "source_crop_storage_mode": crop_source.storage_mode,
+            "source_crop_signature": normalize_attr(crop_group.attrs.get("crop_signature")),
+            "source_crop_revision": crop_group.attrs.get("crop_revision"),
+            "source_roi_read_mode": crop_source.roi_read_mode,
+            "roi_cache_policy": crop_source.roi_cache_policy,
+            "source_roi_cache_used": bool(crop_source.roi_cache_used),
             "source_checkpoint": str(checkpoint_path),
             "source_checkpoint_best_val_dice": float(checkpoint.get("best_val_dice", float("nan"))),
             "total_rois": int(total_rois),
@@ -703,6 +734,10 @@ def main(
             "hostname": env_info["platform"].get("hostname", "unknown"),
         }
     )
+    if crop_source.roi_cache_key is not None:
+        run_group.attrs["source_roi_cache_key"] = crop_source.roi_cache_key
+    if crop_source.roi_cache_path is not None:
+        run_group.attrs["source_roi_cache_path"] = crop_source.roi_cache_path
     created_timestamp = datetime.now(timezone.utc).isoformat()
     provenance_record = build_stage_provenance(
         stage="eye_masks",
@@ -729,13 +764,18 @@ def main(
             "device": str(device),
             "label_mode": label_mode,
             "write_binary_masks": bool(args.write_binary_masks),
+            "roi_cache_policy": crop_source.roi_cache_policy,
         },
         inputs={
             "source_eye_masks_run": source_run_name,
-            "source_crop_run": crop_run,
+            "source_crop_run": crop_run_name,
             "source_keypoints_run": resolved_keypoints_run,
-            "frame_source": crop_group.attrs.get("video_source_type", "zarr"),
-            "source_video_path": crop_group.attrs.get("video_source_path"),
+            "frame_source": crop_source.frame_source_kind,
+            "source_video_path": crop_source.frame_source_path or crop_group.attrs.get("video_source_path"),
+            "source_crop_storage_mode": crop_source.storage_mode,
+            "source_crop_signature": normalize_attr(crop_group.attrs.get("crop_signature")),
+            "source_crop_revision": crop_group.attrs.get("crop_revision"),
+            "source_roi_read_mode": crop_source.roi_read_mode,
         },
         artifacts={
             "checkpoint_path": str(checkpoint_path),
@@ -765,7 +805,7 @@ def main(
         status="ok",
         reason="present",
         run_name=resolved_run_name,
-        requested_crop_run=normalize_attr(crop_run),
+        requested_crop_run=normalize_attr(crop_run_name),
         method_hint="unet_eye_mask_segmenter",
         status_details=status_details,
         error_text=None,

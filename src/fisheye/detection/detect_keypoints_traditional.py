@@ -27,6 +27,7 @@ from dask import delayed
 from dask.diagnostics import ProgressBar
 
 from ..registry.db import RegistryPaths
+from ..shared.crop_image_source import resolve_materialized_crop_run
 from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
@@ -46,6 +47,47 @@ from ..utils.system import get_environment_info
 TRADITIONAL_POSE_SCHEMA = schema_from_package("traditional_v1")
 _KEYPOINT_STEP_NAME = "keypoints"
 _KEYPOINT_STATUS_SOURCE = "runtime_keypoints_detect"
+
+
+def _resolve_traditional_crop_background_inputs(
+    root: zarr.Group,
+    *,
+    zarr_path: str | Path | None = None,
+) -> tuple[zarr.Group, str, str]:
+    _crop_parent, crop_group, crop_run_name = resolve_materialized_crop_run(root, zarr_path=zarr_path)
+
+    background_parent = root.get("background_runs")
+    if background_parent is None:
+        raise ValueError("Background stage not run. Run background before keypoints.")
+    latest_background = normalize_attr(background_parent.attrs.get("latest"))
+    if not latest_background or latest_background not in background_parent:
+        raise ValueError("Traditional keypoint detection requires background_runs.latest.")
+    background_group = background_parent[latest_background]
+    if "background_full" not in background_group:
+        raise ValueError(
+            f"Traditional keypoint detection requires background_runs/{latest_background}/background_full."
+        )
+
+    if "roi_images" not in crop_group:
+        raise ValueError(
+            f"Traditional keypoint detection requires crop_runs/{crop_run_name}/roi_images."
+        )
+    if "roi_coordinates_full" not in crop_group:
+        raise ValueError(
+            f"Traditional keypoint detection requires crop_runs/{crop_run_name}/roi_coordinates_full."
+        )
+    if "frame_indices" not in crop_group:
+        raise ValueError(
+            f"Traditional keypoint detection requires crop_runs/{crop_run_name}/frame_indices."
+        )
+
+    raw_video = root.get("raw_video")
+    if raw_video is None or "images_full" not in raw_video:
+        raise ValueError(
+            "Traditional keypoint detection requires imported full-resolution frames at raw_video/images_full."
+        )
+
+    return crop_group, crop_run_name, latest_background
 
 
 def _resolve_registry_path(registry: Optional[Path]) -> Optional[Path]:
@@ -323,10 +365,10 @@ def process_keypoint_chunk_delayed(
     keypoint_group = root[keypoint_group_path]
     
     # Get latest crop and background runs
-    latest_crop = root['crop_runs'].attrs['latest']
-    latest_background = root['background_runs'].attrs['latest']
-    
-    crop_group = root[f'crop_runs/{latest_crop}']
+    crop_group, latest_crop, latest_background = _resolve_traditional_crop_background_inputs(
+        root,
+        zarr_path=zarr_path,
+    )
     roi_images = crop_group['roi_images']
     roi_coords_full = crop_group['roi_coordinates_full']
     
@@ -538,9 +580,10 @@ def detect_keypoints(
     keypoint_group, run_group_name = get_run_group(root, 'keypoints', console)
     
     # Store metadata
-    latest_crop = root['crop_runs'].attrs['latest']
-    latest_background = root['background_runs'].attrs['latest']
-    crop_group = root[f'crop_runs/{latest_crop}']
+    crop_group, latest_crop, latest_background = _resolve_traditional_crop_background_inputs(
+        root,
+        zarr_path=zarr_path,
+    )
     source_detect_run = crop_group.attrs.get('source_detect_run')
     source_refined_run = crop_group.attrs.get('source_refined_run')
 

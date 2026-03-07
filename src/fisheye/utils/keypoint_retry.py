@@ -14,8 +14,10 @@ from rich.console import Console
 from ultralytics import YOLO, __version__ as ultralytics_version
 
 from ..registry.db import RegistryPaths
+from ..shared.crop_image_source import CropImageSource
 from ..shared.detect_reason_codec import read_reason_labels
 from ..shared.registry_stage_complete import emit_stage_completion
+from ..shared.type_conversions import normalize_attr as _as_text
 from ..shared.zarr.schema import get_run_group
 from ..detection.detect_keypoints_yolo import (
     _compute_heading,
@@ -50,13 +52,6 @@ def _pick_refined_parent(root: zarr.Group) -> Optional[zarr.Group]:
     if refined is not None:
         return refined
     return root.get("keypoints_refined_runs")
-
-
-def _as_text(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
 
 
 def _load_raw_failure_indices(refined: zarr.Group) -> np.ndarray:
@@ -273,6 +268,8 @@ def retry_failed_keypoints_yolo(
     mask_threshold: float = 0.5,
     include_fish_present_no_keypoints: bool = False,
     force_new: bool = False,
+    roi_cache_policy: str = "auto",
+    roi_cache_dir: Optional[Path] = None,
     console: Optional[Console] = None,
     registry: Optional[Path] = None,
 ) -> Dict[str, Any]:
@@ -393,291 +390,310 @@ def retry_failed_keypoints_yolo(
             "reused_existing": True,
         }
 
-    crop_run_name = _as_text(source_run.attrs.get("source_crop_run"))
-    if not crop_run_name:
-        crop_parent = root.get("crop_runs")
-        if crop_parent is None:
-            raise ValueError("No crop_runs found; cannot retry keypoints.")
-        crop_run_name = _as_text(crop_parent.attrs.get("latest"))
-    if not crop_run_name:
-        raise ValueError("Unable to resolve crop run for keypoint retry.")
-    crop_group = root[f"crop_runs/{crop_run_name}"]
-    roi_images = crop_group["roi_images"]
-    roi_coords = np.asarray(crop_group["roi_coordinates_full"][:], dtype=np.float64)
-    total_rois = int(roi_images.shape[0])
-    if np.max(target_indices, initial=-1) >= total_rois:
-        raise ValueError("Retry indices exceed crop ROI count; source/refined runs are misaligned.")
-    roi_h, roi_w = roi_images.shape[1:3]
-
-    override_data = _prepare_refined_roi_overrides(
+    requested_crop_run = _as_text(source_run.attrs.get("source_crop_run"))
+    crop_source = CropImageSource.open(
         root,
-        crop_group,
-        total_rois,
-        (roi_h, roi_w),
-        console,
+        crop_run=requested_crop_run,
+        zarr_path=resolved_zarr,
+        roi_cache_policy=roi_cache_policy,
+        roi_cache_dir=roi_cache_dir,
+        console=console,
     )
-    frame_indices_override: Optional[np.ndarray] = None
-    if override_data is not None:
-        idx = np.asarray(override_data["indices"], dtype=np.int64)
-        roi_coords[idx] = np.asarray(override_data["coords"], dtype=np.float64)
-        frame_override = override_data.get("frame_indices")
-        if frame_override is not None and "frame_indices" in source_run:
-            frame_indices_src = np.asarray(source_run["frame_indices"][:], dtype=np.int64)
-            frame_indices_src[idx] = np.asarray(frame_override, dtype=np.int64)
-            frame_indices_override = frame_indices_src.astype("i4", copy=False)
-
-    model = YOLO(str(model_path_obj))
-    if device:
-        model.to(device)
     try:
-        model_device = str(next(model.model.parameters()).device)
-    except (AttributeError, StopIteration):
-        model_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        crop_run_name = crop_source.crop_run_name
+        crop_group = crop_source.crop_group
+        roi_coords = np.asarray(crop_source.roi_coordinates_full, dtype=np.float64)
+        total_rois = int(crop_source.total_rois)
+        if np.max(target_indices, initial=-1) >= total_rois:
+            raise ValueError("Retry indices exceed crop ROI count; source/refined runs are misaligned.")
+        roi_h, roi_w = map(int, crop_source.roi_shape)
 
-    retry_group, retry_run_name = get_run_group(root, "keypoints", console=console, create_new=True)
-    _copy_run_arrays(source_run, retry_group)
-    retry_group.attrs.put(dict(source_run.attrs))
-    if frame_indices_override is not None:
-        frame_chunks = source_run["frame_indices"].chunks if "frame_indices" in source_run else None
-        kwargs: Dict[str, Any] = {"overwrite": True}
-        if frame_chunks is not None:
-            kwargs["chunks"] = frame_chunks
-        retry_group.create_array("frame_indices", data=frame_indices_override, **kwargs)
-
-    chunk_len = min(max(int(batch_size) * 4, 1), total_rois) if total_rois > 0 else 1
-    attempted_arr = _ensure_retry_mask(retry_group, "re_predicted_attempted", total_rois, chunk_len)
-    success_arr = _ensure_retry_mask(retry_group, "re_predicted_success", total_rois, chunk_len)
-    used_arr = _ensure_retry_mask(retry_group, "re_predicted_used", total_rois, chunk_len)
-
-    kp_roi_arr = retry_group["keypoints_roi"]
-    kp_img_arr = retry_group["keypoints_img"]
-    kp_norm_arr = retry_group["keypoints_norm"]
-    heading_arr = retry_group["heading"]
-    confidence_arr = retry_group["confidence"]
-    keypoint_conf_arr = retry_group["keypoint_confidences"]
-    detection_success_arr = retry_group["detection_success"]
-    heading_finite_arr = retry_group["heading_finite"]
-    heading_usable_arr = retry_group["heading_usable"]
-    detection_source_arr = retry_group.get("detection_source")
-    effective_threshold_arr = retry_group.get("effective_threshold")
-    effective_se2_radius_arr = retry_group.get("effective_se2_radius")
-
-    try:
-        full_h, full_w = root["raw_video/images_full"].shape[1:3]
-    except Exception:
-        full_w = int(root.attrs.get("video_width") or root.attrs.get("width") or roi_w)
-        full_h = int(root.attrs.get("video_height") or root.attrs.get("height") or roi_h)
-    norm_factor = np.array([full_w, full_h], dtype=np.float64)
-
-    attempted_flags = np.zeros(total_rois, dtype=bool)
-    success_flags = np.zeros(total_rois, dtype=bool)
-    used_flags = np.zeros(total_rois, dtype=bool)
-    replaced_count = 0
-
-    start_time = time.time()
-    for start in range(0, int(target_indices.size), int(batch_size)):
-        end = min(start + int(batch_size), int(target_indices.size))
-        batch_indices = np.asarray(target_indices[start:end], dtype=np.int64)
-        batch_coords = roi_coords[batch_indices]
-        batch_roi_np = np.asarray(roi_images[batch_indices])
-
+        override_data = _prepare_refined_roi_overrides(
+            root,
+            crop_group,
+            total_rois,
+            (roi_h, roi_w),
+            console,
+        )
+        frame_indices_override: Optional[np.ndarray] = None
         if override_data is not None:
-            override_map = np.asarray(override_data["map"], dtype=np.int64)
-            override_rois = np.asarray(override_data["rois"])
-            local_map = override_map[batch_indices]
-            valid = local_map >= 0
-            if np.any(valid):
-                batch_roi_np[valid] = override_rois[local_map[valid]]
+            idx = np.asarray(override_data["indices"], dtype=np.int64)
+            roi_coords[idx] = np.asarray(override_data["coords"], dtype=np.float64)
+            frame_override = override_data.get("frame_indices")
+            if frame_override is not None and "frame_indices" in source_run:
+                frame_indices_src = np.asarray(source_run["frame_indices"][:], dtype=np.int64)
+                frame_indices_src[idx] = np.asarray(frame_override, dtype=np.int64)
+                frame_indices_override = frame_indices_src.astype("i4", copy=False)
 
-        results = model.predict(
-            _repeat_to_rgb(batch_roi_np),
-            imgsz=imgsz or max(roi_h, roi_w),
-            conf=conf,
-            iou=iou,
-            max_det=max_det,
-            device=device,
-            verbose=verbose,
-            stream=False,
-        )
+        model = YOLO(str(model_path_obj))
+        if device:
+            model.to(device)
+        try:
+            model_device = str(next(model.model.parameters()).device)
+        except (AttributeError, StopIteration):
+            model_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        attempted_flags[batch_indices] = True
-        for local_idx, (res, top_left) in enumerate(zip(results, batch_coords)):
-            roi_idx = int(batch_indices[local_idx])
-            det_idx = _select_detection(res)
-            if det_idx is None:
-                continue
-            keypoints = getattr(res, "keypoints", None)
-            if keypoints is None or keypoints.xy is None:
-                continue
-            kp_xy = keypoints.xy
-            if kp_xy is None or kp_xy.ndim != 3 or kp_xy.shape[0] == 0:
-                continue
+        retry_group, retry_run_name = get_run_group(root, "keypoints", console=console, create_new=True)
+        _copy_run_arrays(source_run, retry_group)
+        retry_group.attrs.put(dict(source_run.attrs))
+        if frame_indices_override is not None:
+            frame_chunks = source_run["frame_indices"].chunks if "frame_indices" in source_run else None
+            kwargs: Dict[str, Any] = {"overwrite": True}
+            if frame_chunks is not None:
+                kwargs["chunks"] = frame_chunks
+            retry_group.create_array("frame_indices", data=frame_indices_override, **kwargs)
 
-            kp = kp_xy[det_idx].detach().cpu().numpy()
-            if kp.shape[0] < 3:
-                continue
+        chunk_len = min(max(int(batch_size) * 4, 1), total_rois) if total_rois > 0 else 1
+        attempted_arr = _ensure_retry_mask(retry_group, "re_predicted_attempted", total_rois, chunk_len)
+        success_arr = _ensure_retry_mask(retry_group, "re_predicted_success", total_rois, chunk_len)
+        used_arr = _ensure_retry_mask(retry_group, "re_predicted_used", total_rois, chunk_len)
 
-            kp[:, 0] = np.clip(kp[:, 0], 0.0, roi_w - 1)
-            kp[:, 1] = np.clip(kp[:, 1], 0.0, roi_h - 1)
-            top_left_arr = np.asarray(top_left, dtype=np.float64)
-            kp_img = kp + np.array([top_left_arr[0], top_left_arr[1]], dtype=np.float64)
-            kp_norm = kp_img / norm_factor
-            heading = _compute_heading(kp[0], kp[1], kp[2])
-            kp_conf = _extract_keypoint_confidences(keypoints, det_idx, n_keypoints=3)
+        kp_roi_arr = retry_group["keypoints_roi"]
+        kp_img_arr = retry_group["keypoints_img"]
+        kp_norm_arr = retry_group["keypoints_norm"]
+        heading_arr = retry_group["heading"]
+        confidence_arr = retry_group["confidence"]
+        keypoint_conf_arr = retry_group["keypoint_confidences"]
+        detection_success_arr = retry_group["detection_success"]
+        heading_finite_arr = retry_group["heading_finite"]
+        heading_usable_arr = retry_group["heading_usable"]
+        detection_source_arr = retry_group.get("detection_source")
+        effective_threshold_arr = retry_group.get("effective_threshold")
+        effective_se2_radius_arr = retry_group.get("effective_se2_radius")
 
-            boxes = getattr(res, "boxes", None)
-            if boxes is not None and boxes.conf is not None and boxes.conf.numel() > 0:
-                det_conf = float(boxes.conf[det_idx].detach().cpu())
+        try:
+            full_h, full_w = root["raw_video/images_full"].shape[1:3]
+        except Exception:
+            full_w = int(root.attrs.get("video_width") or root.attrs.get("width") or roi_w)
+            full_h = int(root.attrs.get("video_height") or root.attrs.get("height") or roi_h)
+        norm_factor = np.array([full_w, full_h], dtype=np.float64)
+
+        attempted_flags = np.zeros(total_rois, dtype=bool)
+        success_flags = np.zeros(total_rois, dtype=bool)
+        used_flags = np.zeros(total_rois, dtype=bool)
+        replaced_count = 0
+
+        start_time = time.time()
+        for start in range(0, int(target_indices.size), int(batch_size)):
+            end = min(start + int(batch_size), int(target_indices.size))
+            batch_indices = np.asarray(target_indices[start:end], dtype=np.int64)
+            batch_coords = roi_coords[batch_indices]
+            batch_roi_np = crop_source.read_indices(batch_indices)
+
+            if override_data is not None:
+                override_map = np.asarray(override_data["map"], dtype=np.int64)
+                override_rois = np.asarray(override_data["rois"])
+                local_map = override_map[batch_indices]
+                valid = local_map >= 0
+                if np.any(valid):
+                    batch_roi_np[valid] = override_rois[local_map[valid]]
+
+            results = model.predict(
+                _repeat_to_rgb(batch_roi_np),
+                imgsz=imgsz or max(roi_h, roi_w),
+                conf=conf,
+                iou=iou,
+                max_det=max_det,
+                device=device,
+                verbose=verbose,
+                stream=False,
+            )
+
+            attempted_flags[batch_indices] = True
+            for local_idx, (res, top_left) in enumerate(zip(results, batch_coords)):
+                roi_idx = int(batch_indices[local_idx])
+                det_idx = _select_detection(res)
+                if det_idx is None:
+                    continue
+                keypoints = getattr(res, "keypoints", None)
+                if keypoints is None or keypoints.xy is None:
+                    continue
+                kp_xy = keypoints.xy
+                if kp_xy is None or kp_xy.ndim != 3 or kp_xy.shape[0] == 0:
+                    continue
+
+                kp = kp_xy[det_idx].detach().cpu().numpy()
+                if kp.shape[0] < 3:
+                    continue
+
+                kp[:, 0] = np.clip(kp[:, 0], 0.0, roi_w - 1)
+                kp[:, 1] = np.clip(kp[:, 1], 0.0, roi_h - 1)
+                top_left_arr = np.asarray(top_left, dtype=np.float64)
+                kp_img = kp + np.array([top_left_arr[0], top_left_arr[1]], dtype=np.float64)
+                kp_norm = kp_img / norm_factor
+                heading = _compute_heading(kp[0], kp[1], kp[2])
+                kp_conf = _extract_keypoint_confidences(keypoints, det_idx, n_keypoints=3)
+
+                boxes = getattr(res, "boxes", None)
+                if boxes is not None and boxes.conf is not None and boxes.conf.numel() > 0:
+                    det_conf = float(boxes.conf[det_idx].detach().cpu())
+                else:
+                    conf_arr = getattr(keypoints, "conf", None)
+                    det_conf = float(conf_arr[det_idx].detach().cpu().mean()) if conf_arr is not None else 0.0
+
+                kp_roi_arr[roi_idx] = kp
+                kp_img_arr[roi_idx] = kp_img
+                kp_norm_arr[roi_idx] = kp_norm
+                heading_arr[roi_idx] = float(heading)
+                confidence_arr[roi_idx] = det_conf
+                keypoint_conf_arr[roi_idx] = kp_conf
+                detection_success_arr[roi_idx] = True
+
+                heading_finite = bool(np.isfinite(heading))
+                heading_finite_arr[roi_idx] = heading_finite
+                if detection_source_arr is not None:
+                    det_src = int(detection_source_arr[roi_idx])
+                else:
+                    det_src = 0
+                heading_usable_arr[roi_idx] = bool(heading_finite and det_src == 0)
+                if effective_threshold_arr is not None:
+                    effective_threshold_arr[roi_idx] = np.nan
+                if effective_se2_radius_arr is not None:
+                    effective_se2_radius_arr[roi_idx] = np.nan
+
+                success_flags[roi_idx] = True
+                used_flags[roi_idx] = True
+                replaced_count += 1
+
+        attempted_arr[:] = attempted_flags
+        success_arr[:] = success_flags
+        used_arr[:] = used_flags
+
+        detection_success = np.asarray(detection_success_arr[:], dtype=bool)
+        success_total = int(np.count_nonzero(detection_success))
+        failure_total = int(total_rois - success_total)
+        success_rate = (float(success_total) / float(total_rois) * 100.0) if total_rois > 0 else 0.0
+
+        confidence_values = np.asarray(confidence_arr[:], dtype=np.float64)
+        finite_conf = confidence_values[np.isfinite(confidence_values)]
+        mean_conf = float(np.mean(finite_conf)) if finite_conf.size > 0 else 0.0
+
+        if "frame_indices" in retry_group:
+            frame_indices = np.asarray(retry_group["frame_indices"][:], dtype=np.int64)
+            if "n_rois" in retry_group:
+                total_frames = int(retry_group["n_rois"].shape[0])
+            elif frame_indices.size > 0:
+                total_frames = int(frame_indices.max() + 1)
             else:
-                conf_arr = getattr(keypoints, "conf", None)
-                det_conf = float(conf_arr[det_idx].detach().cpu().mean()) if conf_arr is not None else 0.0
+                total_frames = 0
+            success_counts = (
+                np.bincount(frame_indices[detection_success], minlength=total_frames).astype("i4", copy=False)
+                if total_frames > 0
+                else np.zeros(0, dtype="i4")
+            )
+            chunks = (min(max(1, int(batch_size) * 4), success_counts.shape[0]),) if success_counts.size > 0 else None
+            retry_group.create_array("n_keypoints", data=success_counts, chunks=chunks, overwrite=True)
 
-            kp_roi_arr[roi_idx] = kp
-            kp_img_arr[roi_idx] = kp_img
-            kp_norm_arr[roi_idx] = kp_norm
-            heading_arr[roi_idx] = float(heading)
-            confidence_arr[roi_idx] = det_conf
-            keypoint_conf_arr[roi_idx] = kp_conf
-            detection_success_arr[roi_idx] = True
+        run_attrs = dict(retry_group.attrs)
+        now_utc = datetime.now(timezone.utc).isoformat()
+        run_attrs["keypoints_timestamp_utc"] = now_utc
+        run_attrs["method"] = _as_text(run_attrs.get("method")) or "yolo_pose"
+        run_attrs["model_path"] = str(model_path_obj)
+        run_attrs["model_name"] = model_path_obj.name
+        run_attrs["ultralytics_version"] = ultralytics_version
+        run_attrs["device"] = model_device
+        run_attrs["source_crop_run"] = crop_run_name
+        run_attrs["source_crop_storage_mode"] = crop_source.storage_mode
+        run_attrs["source_roi_read_mode"] = crop_source.roi_read_mode
+        run_attrs["roi_cache_policy"] = crop_source.roi_cache_policy
+        run_attrs["source_roi_cache_used"] = bool(crop_source.roi_cache_used)
+        if crop_source.roi_cache_key:
+            run_attrs["source_roi_cache_key"] = crop_source.roi_cache_key
+        if crop_source.roi_cache_path:
+            run_attrs["source_roi_cache_path"] = crop_source.roi_cache_path
+        run_attrs["source_keypoints_run"] = source_run_name
+        run_attrs["source_refined_keypoints_run"] = refined_run_name
+        run_attrs["retry_fingerprint"] = retry_fingerprint
+        run_attrs["retry_selector"] = "failed_only"
+        run_attrs["retry_policy"] = "replace_on_success_only"
+        run_attrs["retry_target_count"] = int(target_indices.size)
+        run_attrs["retry_replaced_count"] = int(replaced_count)
+        run_attrs["retry_excluded_reason_tags"] = list(excluded_reason_tags)
+        run_attrs["keypoints_processed"] = int(total_rois)
+        run_attrs["success_rate"] = round(float(success_rate), 2)
+        run_attrs["inference_duration_seconds"] = float(time.time() - start_time)
+        run_attrs["summary_statistics"] = {
+            "total_rois": int(total_rois),
+            "successful_detections": int(success_total),
+            "failed_detections": int(failure_total),
+            "success_rate_percent": round(float(success_rate), 2),
+            "mean_confidence": mean_conf,
+            "retry": {
+                "selector": "failed_only",
+                "policy": "replace_on_success_only",
+                "source_keypoints_run": source_run_name,
+                "source_refined_run": refined_run_name,
+                "targeted_failures": int(target_indices.size),
+                "replaced_successes": int(replaced_count),
+            },
+        }
 
-            heading_finite = bool(np.isfinite(heading))
-            heading_finite_arr[roi_idx] = heading_finite
-            if detection_source_arr is not None:
-                det_src = int(detection_source_arr[roi_idx])
-            else:
-                det_src = 0
-            heading_usable_arr[roi_idx] = bool(heading_finite and det_src == 0)
-            if effective_threshold_arr is not None:
-                effective_threshold_arr[roi_idx] = np.nan
-            if effective_se2_radius_arr is not None:
-                effective_se2_radius_arr[roi_idx] = np.nan
-
-            success_flags[roi_idx] = True
-            used_flags[roi_idx] = True
-            replaced_count += 1
-
-    attempted_arr[:] = attempted_flags
-    success_arr[:] = success_flags
-    used_arr[:] = used_flags
-
-    detection_success = np.asarray(detection_success_arr[:], dtype=bool)
-    success_total = int(np.count_nonzero(detection_success))
-    failure_total = int(total_rois - success_total)
-    success_rate = (float(success_total) / float(total_rois) * 100.0) if total_rois > 0 else 0.0
-
-    confidence_values = np.asarray(confidence_arr[:], dtype=np.float64)
-    finite_conf = confidence_values[np.isfinite(confidence_values)]
-    mean_conf = float(np.mean(finite_conf)) if finite_conf.size > 0 else 0.0
-
-    if "frame_indices" in retry_group:
-        frame_indices = np.asarray(retry_group["frame_indices"][:], dtype=np.int64)
-        if "n_rois" in retry_group:
-            total_frames = int(retry_group["n_rois"].shape[0])
-        elif frame_indices.size > 0:
-            total_frames = int(frame_indices.max() + 1)
-        else:
-            total_frames = 0
-        success_counts = (
-            np.bincount(frame_indices[detection_success], minlength=total_frames).astype("i4", copy=False)
-            if total_frames > 0
-            else np.zeros(0, dtype="i4")
+        params = dict(run_attrs.get("parameters") or {})
+        params.update(
+            {
+                "batch_size": int(batch_size),
+                "imgsz": imgsz or max(roi_h, roi_w),
+                "conf": float(conf),
+                "iou": float(iou),
+                "max_det": int(max_det),
+                "mask_threshold": float(mask_threshold),
+                "device": model_device,
+                "retry_failed_only": True,
+                "retry_selector": "failed_only",
+                "retry_policy": "replace_on_success_only",
+                "retry_source_keypoints_run": source_run_name,
+                "retry_source_refined_run": refined_run_name,
+                "roi_cache_policy": crop_source.roi_cache_policy,
+            }
         )
-        chunks = (min(max(1, int(batch_size) * 4), success_counts.shape[0]),) if success_counts.size > 0 else None
-        retry_group.create_array("n_keypoints", data=success_counts, chunks=chunks, overwrite=True)
+        run_attrs["parameters"] = params
+        retry_group.attrs.put(run_attrs)
 
-    run_attrs = dict(retry_group.attrs)
-    now_utc = datetime.now(timezone.utc).isoformat()
-    run_attrs["keypoints_timestamp_utc"] = now_utc
-    run_attrs["method"] = _as_text(run_attrs.get("method")) or "yolo_pose"
-    run_attrs["model_path"] = str(model_path_obj)
-    run_attrs["model_name"] = model_path_obj.name
-    run_attrs["ultralytics_version"] = ultralytics_version
-    run_attrs["device"] = model_device
-    run_attrs["source_keypoints_run"] = source_run_name
-    run_attrs["source_refined_keypoints_run"] = refined_run_name
-    run_attrs["retry_fingerprint"] = retry_fingerprint
-    run_attrs["retry_selector"] = "failed_only"
-    run_attrs["retry_policy"] = "replace_on_success_only"
-    run_attrs["retry_target_count"] = int(target_indices.size)
-    run_attrs["retry_replaced_count"] = int(replaced_count)
-    run_attrs["retry_excluded_reason_tags"] = list(excluded_reason_tags)
-    run_attrs["keypoints_processed"] = int(total_rois)
-    run_attrs["success_rate"] = round(float(success_rate), 2)
-    run_attrs["inference_duration_seconds"] = float(time.time() - start_time)
-    run_attrs["summary_statistics"] = {
-        "total_rois": int(total_rois),
-        "successful_detections": int(success_total),
-        "failed_detections": int(failure_total),
-        "success_rate_percent": round(float(success_rate), 2),
-        "mean_confidence": mean_conf,
-        "retry": {
-            "selector": "failed_only",
-            "policy": "replace_on_success_only",
+        status_details: Dict[str, object] = {
+            "reason": "present",
+            "run_group": "keypoints_runs",
+            "source_crop_run": crop_run_name,
+            "source_crop_storage_mode": crop_source.storage_mode,
+            "source_roi_read_mode": crop_source.roi_read_mode,
+            "roi_cache_policy": crop_source.roi_cache_policy,
+            "roi_cache_used": bool(crop_source.roi_cache_used),
             "source_keypoints_run": source_run_name,
             "source_refined_run": refined_run_name,
-            "targeted_failures": int(target_indices.size),
-            "replaced_successes": int(replaced_count),
-        },
-    }
-
-    params = dict(run_attrs.get("parameters") or {})
-    params.update(
-        {
-            "batch_size": int(batch_size),
-            "imgsz": imgsz or max(roi_h, roi_w),
-            "conf": float(conf),
-            "iou": float(iou),
-            "max_det": int(max_det),
-            "mask_threshold": float(mask_threshold),
-            "device": model_device,
-            "retry_failed_only": True,
             "retry_selector": "failed_only",
             "retry_policy": "replace_on_success_only",
-            "retry_source_keypoints_run": source_run_name,
-            "retry_source_refined_run": refined_run_name,
+            "retry_target_count": int(target_indices.size),
+            "retry_replaced_count": int(replaced_count),
+            "total_rois": int(total_rois),
+            "successful_detections": int(success_total),
+            "failed_detections": int(failure_total),
+            "success_rate_percent": round(float(success_rate), 2),
         }
-    )
-    run_attrs["parameters"] = params
-    retry_group.attrs.put(run_attrs)
+        _emit_retry_step_status(
+            root=root,
+            zarr_path=resolved_zarr,
+            run_name=retry_run_name,
+            method=_as_text(run_attrs.get("method")) or "yolo_pose",
+            coverage_pct=float(success_rate),
+            details=status_details,
+            console=console,
+            registry=registry,
+        )
 
-    status_details: Dict[str, object] = {
-        "reason": "present",
-        "run_group": "keypoints_runs",
-        "source_keypoints_run": source_run_name,
-        "source_refined_run": refined_run_name,
-        "retry_selector": "failed_only",
-        "retry_policy": "replace_on_success_only",
-        "retry_target_count": int(target_indices.size),
-        "retry_replaced_count": int(replaced_count),
-        "total_rois": int(total_rois),
-        "successful_detections": int(success_total),
-        "failed_detections": int(failure_total),
-        "success_rate_percent": round(float(success_rate), 2),
-    }
-    _emit_retry_step_status(
-        root=root,
-        zarr_path=resolved_zarr,
-        run_name=retry_run_name,
-        method=_as_text(run_attrs.get("method")) or "yolo_pose",
-        coverage_pct=float(success_rate),
-        details=status_details,
-        console=console,
-        registry=registry,
-    )
-
-    return {
-        "run_name": retry_run_name,
-        "source_keypoints_run": source_run_name,
-        "source_refined_run": refined_run_name,
-        "retry_target_count": int(target_indices.size),
-        "retry_replaced_count": int(replaced_count),
-        "retry_fingerprint": retry_fingerprint,
-        "retry_policy": "replace_on_success_only",
-        "retry_selector": "failed_only",
-        "updated": True,
-        "created_new_run": True,
-        "reused_existing": False,
-    }
+        return {
+            "run_name": retry_run_name,
+            "source_keypoints_run": source_run_name,
+            "source_refined_run": refined_run_name,
+            "retry_target_count": int(target_indices.size),
+            "retry_replaced_count": int(replaced_count),
+            "retry_fingerprint": retry_fingerprint,
+            "retry_policy": "replace_on_success_only",
+            "retry_selector": "failed_only",
+            "updated": True,
+            "created_new_run": True,
+            "reused_existing": False,
+        }
+    finally:
+        crop_source.close()
 
 
 __all__ = ["retry_failed_keypoints_yolo"]

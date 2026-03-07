@@ -210,6 +210,18 @@ Examples:
         action="store_true",
         help="Disable retina/soft-mask hooks and use only Ultralytics binary masks (compatibility mode)",
     )
+    parser.add_argument(
+        "--roi-cache-policy",
+        choices=("never", "auto", "always"),
+        default="auto",
+        help="Temporary ROI cache policy for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument(
+        "--roi-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional scratch directory for temporary ROI caches.",
+    )
     parser.set_defaults(use_retina_masks=True, legacy_masks=False)
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output")
     return parser
@@ -238,6 +250,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             use_retina_masks=args.use_retina_masks if not args.legacy_masks else False,
             proto_upsample_factor=args.proto_upsample_factor,
             legacy_masks=args.legacy_masks,
+            roi_cache_policy=args.roi_cache_policy,
+            roi_cache_dir=args.roi_cache_dir,
             verbose=args.verbose,
             console=console,
         )

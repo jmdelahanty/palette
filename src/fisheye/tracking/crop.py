@@ -15,10 +15,10 @@ to avoid accumulating large results in driver memory.
 
 import time
 import json
-import hashlib
 import zarr
 import os
 import sys
+import subprocess
 from queue import Queue
 from zarr.codecs import BloscCodec
 import numpy as np
@@ -38,6 +38,8 @@ from ..shared.refined_detect_review import (
     resolve_refined_detect_group,
 )
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.crop_signature import build_crop_signature
+from ..shared.type_conversions import normalize_attr
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
@@ -79,7 +81,11 @@ try:
     import decord
     from decord import VideoReader, cpu, gpu
     _DECORD_AVAILABLE = True
-except ImportError:
+except Exception:
+    decord = None  # type: ignore
+    VideoReader = None  # type: ignore
+    cpu = None  # type: ignore
+    gpu = None  # type: ignore
     _DECORD_AVAILABLE = False
 
 import cv2  # For CPU fallback in gpu decoding
@@ -106,28 +112,140 @@ def check_gpu_crop_available() -> Tuple[bool, str]:
     return True, "GPU cropping available"
 
 
-def _hash_parameters(params: object) -> Optional[str]:
-    if params is None:
+_VALID_CROP_STORAGE_MODES = {"materialized", "geometry_only"}
+
+
+def _normalize_crop_storage_mode(value: object) -> str:
+    text = str(value or "materialized").strip().lower()
+    if text not in _VALID_CROP_STORAGE_MODES:
+        choices = ", ".join(sorted(_VALID_CROP_STORAGE_MODES))
+        raise ValueError(f"Invalid crop_storage_mode '{text}'. Expected one of: {choices}")
+    return text
+
+
+def _infer_crop_run_storage_mode(run_group: zarr.Group) -> str:
+    explicit = run_group.attrs.get("crop_storage_mode")
+    if explicit is not None:
+        text = str(explicit).strip().lower()
+        if text in _VALID_CROP_STORAGE_MODES:
+            return text
+    if "roi_images" in run_group:
+        return "materialized"
+    return "geometry_only"
+
+
+def _coerce_existing_crop_pointer(
+    crop_parent: zarr.Group,
+    value: object,
+    *,
+    exclude_run_name: Optional[str] = None,
+) -> Optional[str]:
+    if value is None:
         return None
-    try:
-        payload = json.dumps(params, sort_keys=True, default=str).encode("utf-8")
-    except (TypeError, ValueError):
-        payload = str(params).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+    text = str(value).strip()
+    if not text or text == exclude_run_name:
+        return None
+    if text not in crop_parent:
+        return None
+    return text
 
 
-def _build_crop_signature(attrs: Dict[str, object]) -> Dict[str, object]:
-    return {
-        "signature_version": 1,
-        "detection_source_path": attrs.get("detection_source_path"),
-        "detection_source_type": attrs.get("detection_source_type"),
-        "detection_preferred_policy": attrs.get("detection_preferred_policy"),
-        "source_detect_run": attrs.get("source_detect_run"),
-        "source_refined_run": attrs.get("source_refined_run"),
-        "roi_size": attrs.get("roi_size"),
-        "parameter_source": attrs.get("parameter_source"),
-        "parameters_hash": _hash_parameters(attrs.get("parameters")),
-    }
+def _set_or_clear_crop_parent_attr(
+    crop_parent: zarr.Group,
+    name: str,
+    value: Optional[str],
+) -> None:
+    if value is None:
+        if name in crop_parent.attrs:
+            del crop_parent.attrs[name]
+        return
+    crop_parent.attrs[name] = value
+
+
+def _finalize_crop_parent_pointers(
+    crop_parent: zarr.Group,
+    *,
+    run_name: str,
+    crop_storage_mode: str,
+    success: bool,
+    previous_latest: object,
+    previous_latest_materialized: object,
+    previous_latest_any: object,
+) -> None:
+    if success:
+        if crop_storage_mode == "materialized":
+            latest = run_name
+            latest_materialized = run_name
+            latest_any = run_name
+        else:
+            latest_materialized = _coerce_existing_crop_pointer(
+                crop_parent,
+                previous_latest_materialized,
+                exclude_run_name=run_name,
+            )
+            if latest_materialized is None:
+                latest_materialized = _coerce_existing_crop_pointer(
+                    crop_parent,
+                    previous_latest,
+                    exclude_run_name=run_name,
+                )
+                if latest_materialized is not None and _infer_crop_run_storage_mode(crop_parent[latest_materialized]) != "materialized":
+                    latest_materialized = None
+            latest = latest_materialized
+            latest_any = run_name
+    else:
+        latest = _coerce_existing_crop_pointer(
+            crop_parent,
+            previous_latest,
+            exclude_run_name=run_name,
+        )
+        latest_materialized = _coerce_existing_crop_pointer(
+            crop_parent,
+            previous_latest_materialized,
+            exclude_run_name=run_name,
+        )
+        latest_any = _coerce_existing_crop_pointer(
+            crop_parent,
+            previous_latest_any,
+            exclude_run_name=run_name,
+        )
+
+    _set_or_clear_crop_parent_attr(crop_parent, "latest", latest)
+    _set_or_clear_crop_parent_attr(crop_parent, "latest_materialized", latest_materialized)
+    _set_or_clear_crop_parent_attr(crop_parent, "latest_any", latest_any)
+
+
+def _compute_roi_coordinates(
+    bbox_coords: np.ndarray,
+    roi_sz: Tuple[int, int],
+    video_shape: Tuple[int, int],
+    *,
+    scale_factor: Optional[float] = None,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Return top-left ROI coordinates in full-res and optional ds space."""
+    roi_h, roi_w = int(roi_sz[0]), int(roi_sz[1])
+    video_h, video_w = int(video_shape[0]), int(video_shape[1])
+    bbox_coords_array = bbox_coords
+    if _CUPY_AVAILABLE and isinstance(bbox_coords_array, cp.ndarray):
+        bbox_coords_array = cp.asnumpy(bbox_coords_array)
+    elif _TORCH_AVAILABLE and isinstance(bbox_coords_array, torch.Tensor):
+        bbox_coords_array = bbox_coords_array.detach().cpu().numpy()
+    elif hasattr(bbox_coords_array, "get") and callable(getattr(bbox_coords_array, "get")):
+        bbox_coords_array = bbox_coords_array.get()
+    centers = np.round(
+        np.asarray(bbox_coords_array[:, :2], dtype=np.float32) * np.array([video_w, video_h], dtype=np.float32)
+    ).astype(np.int32, copy=False)
+    coords_full = np.empty((centers.shape[0], 2), dtype=np.int32)
+    coords_full[:, 0] = centers[:, 0] - (roi_w // 2)
+    coords_full[:, 1] = centers[:, 1] - (roi_h // 2)
+
+    coords_ds: Optional[np.ndarray] = None
+    if scale_factor is not None:
+        coords_ds = np.empty_like(coords_full)
+        coords_ds[:, 0] = (coords_full[:, 0].astype(np.float32) * float(scale_factor)).astype(np.int32, copy=False)
+        coords_ds[:, 1] = (coords_full[:, 1].astype(np.float32) * float(scale_factor)).astype(np.int32, copy=False)
+
+    return coords_full, coords_ds
 
 
 def _build_crop_stage_provenance(
@@ -576,6 +694,71 @@ def crop_batch_cpu(
     }
 
 
+def crop_batch_cpu_from_top_left(
+    video_path: str,
+    frame_indices: np.ndarray,
+    roi_coordinates_full: np.ndarray,
+    roi_sz: Tuple[int, int],
+    video_shape: Tuple[int, int],
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
+    """Crop a batch of detections using stored ROI top-left coordinates on CPU."""
+    cap = cv2.VideoCapture(str(video_path))
+
+    decode_start = time.perf_counter()
+    unique_frames = np.unique(frame_indices)
+    frame_cache = {}
+
+    for frame_idx in unique_frames:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
+        ret, frame = cap.read()
+        if ret:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frame_cache[int(frame_idx)] = gray
+    decode_seconds = time.perf_counter() - decode_start
+
+    cap.release()
+
+    num_crops = len(frame_indices)
+    roi_h, roi_w = roi_sz
+    H, W = video_shape
+
+    crops = np.zeros((num_crops, roi_h, roi_w), dtype=np.uint8)
+    coords = np.zeros((num_crops, 2), dtype=np.int32)
+
+    compute_start = time.perf_counter()
+    for i, (frame_idx, coord) in enumerate(zip(frame_indices, roi_coordinates_full)):
+        frame = frame_cache.get(int(frame_idx))
+        if frame is None:
+            continue
+
+        x1 = int(coord[0])
+        y1 = int(coord[1])
+        x2 = x1 + roi_w
+        y2 = y1 + roi_h
+
+        coords[i] = (x1, y1)
+
+        if 0 <= x1 and x2 <= W and 0 <= y1 and y2 <= H:
+            crops[i] = frame[y1:y2, x1:x2]
+        else:
+            vy1 = max(0, y1); vy2 = min(H, y2)
+            vx1 = max(0, x1); vx2 = min(W, x2)
+
+            if vy2 > vy1 and vx2 > vx1:
+                py1 = max(0, -y1)
+                px1 = max(0, -x1)
+                py2 = py1 + (vy2 - vy1)
+                px2 = px1 + (vx2 - vx1)
+
+                crops[i, py1:py2, px1:px2] = frame[vy1:vy2, vx1:vx2]
+    compute_seconds = time.perf_counter() - compute_start
+
+    return crops, coords, {
+        "decode_seconds": float(decode_seconds),
+        "compute_seconds": float(compute_seconds),
+    }
+
+
 def _process_chunk_gpu(
     chunk_idx: int,
     chunk_frames: List[int],
@@ -660,6 +843,85 @@ def _process_chunk_gpu(
     return chunk_idx, det_indices_np, crops_cpu, coords_full_cpu, chunk_time
 
 
+def _process_chunk_gpu_from_top_left(
+    chunk_idx: int,
+    chunk_frames: List[int],
+    frames_gpu: "torch.Tensor",
+    frame_to_roi: Dict[int, List[int]],
+    roi_coordinates_full: np.ndarray,
+    roi_sz: Tuple[int, int],
+    video_shape: Tuple[int, int],
+    *,
+    return_device: bool = False,
+) -> Tuple[int, np.ndarray, Any, np.ndarray, float]:
+    """Process a contiguous chunk of frames on GPU using stored ROI top-left coordinates."""
+    start = time.perf_counter()
+    frames_gray = frames_gpu.to(torch.float16).mean(dim=-1).to(torch.uint8)
+    H, W = video_shape
+
+    chunk_roi_indices: List[int] = []
+    chunk_coords_full: List[Tuple[int, int]] = []
+    chunk_rois: List[torch.Tensor] = []
+
+    for local_idx, frame_idx in enumerate(chunk_frames):
+        roi_list = frame_to_roi.get(int(frame_idx))
+        if not roi_list:
+            continue
+
+        frame_tensor = frames_gray[local_idx]
+        for roi_idx in roi_list:
+            coord = roi_coordinates_full[roi_idx]
+            x1 = int(coord[0])
+            y1 = int(coord[1])
+            x2 = x1 + roi_sz[1]
+            y2 = y1 + roi_sz[0]
+
+            chunk_roi_indices.append(roi_idx)
+            chunk_coords_full.append((x1, y1))
+
+            if 0 <= x1 and x2 <= W and 0 <= y1 and y2 <= H:
+                roi_tensor = frame_tensor[y1:y2, x1:x2].clone()
+            else:
+                roi_tensor = torch.zeros((roi_sz[0], roi_sz[1]), dtype=torch.uint8, device=frame_tensor.device)
+                vy1 = max(0, y1); vy2 = min(H, y2)
+                vx1 = max(0, x1); vx2 = min(W, x2)
+                if vy2 > vy1 and vx2 > vx1:
+                    py1 = max(0, -y1); py2 = py1 + (vy2 - vy1)
+                    px1 = max(0, -x1); px2 = px1 + (vx2 - vx1)
+                    roi_tensor[py1:py2, px1:px2] = frame_tensor[vy1:vy2, vx1:vx2]
+
+            chunk_rois.append(roi_tensor)
+
+    chunk_time = time.perf_counter() - start
+
+    if not chunk_rois:
+        if return_device:
+            return (
+                chunk_idx,
+                np.array([], dtype=np.int64),
+                torch.empty((0, roi_sz[0], roi_sz[1]), dtype=torch.uint8, device=frames_gray.device),
+                np.empty((0, 2), dtype=np.int32),
+                chunk_time,
+            )
+        return (
+            chunk_idx,
+            np.array([], dtype=np.int64),
+            np.empty((0, roi_sz[0], roi_sz[1]), dtype=np.uint8),
+            np.empty((0, 2), dtype=np.int32),
+            chunk_time,
+        )
+
+    crops_gpu = torch.stack(chunk_rois, dim=0)
+    coords_full_cpu = np.array(chunk_coords_full, dtype=np.int32)
+    roi_indices_np = np.array(chunk_roi_indices, dtype=np.int64)
+    if return_device:
+        return chunk_idx, roi_indices_np, crops_gpu, coords_full_cpu, chunk_time
+
+    crops_cpu = crops_gpu.cpu().numpy()
+
+    return chunk_idx, roi_indices_np, crops_cpu, coords_full_cpu, chunk_time
+
+
 def _contiguous_detection_slice(det_ids: np.ndarray) -> Optional[slice]:
     """Return contiguous slice if det_ids form [start, start+1, ..., end-1]."""
     if det_ids.size == 0:
@@ -673,6 +935,397 @@ def _contiguous_detection_slice(det_ids: np.ndarray) -> Optional[slice]:
     if not np.all(det_ids == np.arange(start, stop, dtype=det_ids.dtype)):
         return None
     return slice(start, stop)
+
+
+def materialize_external_roi_cache(
+    *,
+    cache_path: str | Path,
+    video_path: str | Path,
+    frame_indices: np.ndarray,
+    roi_coordinates_full: np.ndarray,
+    roi_sz: Tuple[int, int],
+    video_shape: Tuple[int, int],
+    console: Optional[Console] = None,
+    write_backend: str = "kvikio",
+    roi_storage: str = "uncompressed",
+    use_sharding: bool = False,
+    roi_chunk_size: int = 1024,
+    roi_shard_size: Optional[int] = None,
+    gpu_chunk_frames: int = 96,
+    require_kvikio: bool = False,
+    prefer_gpu: bool = True,
+    verbose: bool = False,
+) -> Dict[str, Any]:
+    """Materialize ROI pixels into a temporary cache using the external crop workflow."""
+    cache_path = Path(cache_path).expanduser().resolve()
+    video_path = Path(video_path).expanduser().resolve()
+    frame_indices_np = _ensure_numpy_array(frame_indices, dtype=np.int64, name="frame_indices")
+    roi_coordinates_np = _ensure_numpy_array(
+        roi_coordinates_full,
+        dtype=np.int32,
+        name="roi_coordinates_full",
+    )
+    total_rois = int(frame_indices_np.shape[0])
+    if roi_coordinates_np.shape[0] != total_rois:
+        raise ValueError(
+            f"roi_coordinates_full length {roi_coordinates_np.shape[0]} does not match frame_indices length {total_rois}"
+        )
+
+    backend_norm = str(write_backend or "standard").strip().lower()
+    storage_norm = str(roi_storage or "compressed").strip().lower()
+    if backend_norm not in {"standard", "kvikio"}:
+        backend_norm = "standard"
+    if storage_norm not in {"compressed", "uncompressed"}:
+        storage_norm = "compressed"
+    roi_chunk_len = max(1, min(int(roi_chunk_size), max(1, total_rois)))
+    shard_len = max(roi_chunk_len, int(roi_shard_size)) if roi_shard_size is not None else max(roi_chunk_len, roi_chunk_len * 8)
+    shard_len = min(shard_len, max(1, total_rois))
+    gpu_chunk_frames = max(1, int(gpu_chunk_frames))
+
+    use_gpu = False
+    gpu_reason = "GPU disabled"
+    if prefer_gpu:
+        use_gpu, gpu_reason = check_gpu_crop_available()
+
+    use_kvikio_writes = False
+    fallback_reason: Optional[str] = None
+    store = None
+    if require_kvikio and backend_norm != "kvikio":
+        raise ValueError("require_kvikio requires write_backend='kvikio'")
+
+    if backend_norm == "kvikio":
+        if not use_gpu:
+            fallback_reason = "gpu_unavailable"
+        elif not _KVIKIO_AVAILABLE:
+            fallback_reason = "kvikio_unavailable"
+        elif not _CUPY_AVAILABLE:
+            fallback_reason = "cupy_unavailable"
+        else:
+            kvikio_defaults.set(
+                {
+                    "num_threads": 8,
+                    "task_size": 32 * 1024 * 1024,
+                    "bounce_buffer_size": 64 * 1024 * 1024,
+                    "gds_threshold": 1024,
+                }
+            )
+            zarr.config.enable_gpu()
+            store = kvikio.zarr.GDSStore(str(cache_path))
+            cache_root = zarr.open_group(store=store, mode="a")
+            use_kvikio_writes = True
+    if require_kvikio and not use_kvikio_writes:
+        detail = fallback_reason or "kvikio_write_path_not_available"
+        raise RuntimeError(f"kvikio required for ROI cache writes but unavailable ({detail})")
+    if not use_kvikio_writes:
+        cache_root = zarr.open_group(str(cache_path), mode="a")
+
+    effective_backend = "kvikio_gds" if use_kvikio_writes else "standard_zarr"
+    if console is not None:
+        accel_label = "gpu" if use_gpu else "cpu"
+        detail = f"backend={effective_backend}, acceleration={accel_label}, source={video_path.name}"
+        if fallback_reason:
+            detail += f", fallback={fallback_reason}"
+        console.print(f"[dim]Temporary ROI cache materialization: {detail}[/dim]")
+
+    roi_compressor = (
+        BloscCodec(typesize=1, cname='lz4', clevel=1, shuffle="bitshuffle")
+        if storage_norm == "compressed"
+        else None
+    )
+    roi_create_kwargs: Dict[str, Any] = {
+        "shape": (total_rois, *roi_sz),
+        "chunks": (roi_chunk_len, roi_sz[0], roi_sz[1]),
+        "dtype": "uint8",
+        "overwrite": True,
+        "compressors": roi_compressor,
+    }
+    if bool(use_sharding):
+        roi_create_kwargs["shards"] = (shard_len, roi_sz[0], roi_sz[1])
+    roi_images = cache_root.create_array("roi_images", **roi_create_kwargs)
+
+    decode_seconds = 0.0
+    compute_seconds = 0.0
+    write_seconds = 0.0
+    start_time = time.perf_counter()
+    video_reader = None
+    try:
+        if total_rois == 0:
+            return {
+                "total_rois": 0,
+                "write_backend_requested": backend_norm,
+                "write_backend_effective": "kvikio_gds" if use_kvikio_writes else "standard_zarr",
+                "acceleration": "gpu" if use_gpu else "cpu",
+                "fallback_reason": fallback_reason,
+            }
+
+        if use_gpu:
+            decord.bridge.set_bridge('torch')
+            video_reader = VideoReader(str(video_path), ctx=gpu(0))
+            frame_to_roi: Dict[int, List[int]] = {}
+            for roi_idx, frame_idx in enumerate(frame_indices_np):
+                frame_to_roi.setdefault(int(frame_idx), []).append(int(roi_idx))
+
+            frame_min = int(frame_indices_np.min())
+            frame_max = int(frame_indices_np.max())
+            chunk_starts = list(range(frame_min, frame_max + 1, gpu_chunk_frames))
+            progress_every = max(1, len(chunk_starts) // 20) if chunk_starts else 1
+            processed_total = 0
+            for chunk_idx, chunk_start in enumerate(chunk_starts):
+                chunk_end = min(chunk_start + gpu_chunk_frames, frame_max + 1)
+                chunk_frames = list(range(chunk_start, chunk_end))
+                if not any(frame in frame_to_roi for frame in chunk_frames):
+                    continue
+
+                decode_start = time.perf_counter()
+                frames_gpu = video_reader.get_batch(chunk_frames)
+                decode_seconds += time.perf_counter() - decode_start
+                compute_start = time.perf_counter()
+                _, roi_ids, crops_buf, _coords_cpu, _chunk_time = _process_chunk_gpu_from_top_left(
+                    chunk_idx,
+                    chunk_frames,
+                    frames_gpu,
+                    frame_to_roi,
+                    roi_coordinates_np,
+                    roi_sz,
+                    video_shape,
+                    return_device=use_kvikio_writes,
+                )
+                compute_seconds += time.perf_counter() - compute_start
+                del frames_gpu
+
+                processed = int(roi_ids.size)
+                if not processed:
+                    continue
+
+                write_start = time.perf_counter()
+                if use_kvikio_writes:
+                    roi_slice = _contiguous_detection_slice(roi_ids)
+                    if roi_slice is not None:
+                        cupy_crops = cp.from_dlpack(crops_buf.contiguous())
+                        roi_images[roi_slice] = cupy_crops
+                        cp.cuda.Stream.null.synchronize()
+                        del cupy_crops
+                    else:
+                        crops_cpu_fallback = crops_buf.cpu().numpy()
+                        roi_images[roi_ids] = crops_cpu_fallback
+                        del crops_cpu_fallback
+                else:
+                    roi_images[roi_ids] = crops_buf
+                write_seconds += time.perf_counter() - write_start
+                processed_total += processed
+                if console is not None and (
+                    processed_total == total_rois
+                    or (chunk_idx + 1) % progress_every == 0
+                ):
+                    pct = (processed_total / total_rois) * 100 if total_rois > 0 else 100.0
+                    console.print(
+                        f"[dim]  Cache progress: {processed_total:,}/{total_rois:,} ROIs ({pct:.1f}%)[/dim]"
+                    )
+        else:
+            batches = create_crop_batches(frame_indices_np, max_frames_per_batch=32)
+            progress_every = max(1, len(batches) // 20) if batches else 1
+            processed_total = 0
+            for batch_idx, roi_ids in enumerate(batches):
+                crops, _coords, batch_profile = crop_batch_cpu_from_top_left(
+                    str(video_path),
+                    frame_indices_np[roi_ids],
+                    roi_coordinates_np[roi_ids],
+                    roi_sz,
+                    video_shape,
+                )
+                decode_seconds += float(batch_profile.get("decode_seconds", 0.0))
+                compute_seconds += float(batch_profile.get("compute_seconds", 0.0))
+                write_start = time.perf_counter()
+                roi_images[roi_ids] = crops
+                write_seconds += time.perf_counter() - write_start
+                processed_total += int(len(roi_ids))
+                if console is not None and (
+                    processed_total == total_rois
+                    or (batch_idx + 1) % progress_every == 0
+                ):
+                    pct = (processed_total / total_rois) * 100 if total_rois > 0 else 100.0
+                    console.print(
+                        f"[dim]  Cache progress: {processed_total:,}/{total_rois:,} ROIs ({pct:.1f}%)[/dim]"
+                    )
+    finally:
+        if video_reader is not None:
+            video_reader = None
+        if _TORCH_AVAILABLE and use_gpu and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+
+    duration = time.perf_counter() - start_time
+    return {
+        "total_rois": total_rois,
+        "duration_seconds": duration,
+        "decode_seconds": float(decode_seconds),
+        "compute_seconds": float(compute_seconds),
+        "write_seconds": float(write_seconds),
+        "write_backend_requested": backend_norm,
+        "write_backend_effective": effective_backend,
+        "acceleration": "gpu" if use_gpu else "cpu",
+        "fallback_reason": fallback_reason,
+        "roi_chunk_len": int(roi_chunk_len),
+        "roi_shard_len": int(shard_len),
+        "roi_storage": storage_norm,
+        "roi_use_sharding": bool(use_sharding),
+        "gpu_chunk_frames": int(gpu_chunk_frames),
+        "video_path": str(video_path),
+        "cache_path": str(cache_path),
+        "verbose": bool(verbose),
+    }
+
+
+def _load_external_roi_cache_inputs(
+    *,
+    source_zarr_path: str | Path,
+    crop_run_name: str,
+) -> Dict[str, Any]:
+    source_zarr_path = Path(source_zarr_path).expanduser().resolve()
+    root = zarr.open_group(str(source_zarr_path), mode="r")
+    crop_parent = root.get("crop_runs")
+    if crop_parent is None:
+        raise KeyError(f"Missing crop_runs in {source_zarr_path}")
+    if crop_run_name not in crop_parent:
+        raise KeyError(f"Crop run '{crop_run_name}' not found in {source_zarr_path}")
+    crop_group = crop_parent[crop_run_name]
+
+    if "frame_indices" not in crop_group:
+        raise KeyError(f"Crop run '{crop_run_name}' is missing frame_indices")
+    if "roi_coordinates_full" not in crop_group:
+        raise KeyError(f"Crop run '{crop_run_name}' is missing roi_coordinates_full")
+
+    roi_size_attr = crop_group.attrs.get("roi_size")
+    if isinstance(roi_size_attr, (list, tuple)) and len(roi_size_attr) == 2:
+        roi_sz = (int(roi_size_attr[0]), int(roi_size_attr[1]))
+    elif "roi_images" in crop_group and len(crop_group["roi_images"].shape) >= 3:
+        roi_images_shape = crop_group["roi_images"].shape
+        roi_sz = (int(roi_images_shape[1]), int(roi_images_shape[2]))
+    else:
+        raise ValueError(f"Crop run '{crop_run_name}' is missing roi_size metadata")
+
+    height = crop_group.attrs.get("height", root.attrs.get("height"))
+    width = crop_group.attrs.get("width", root.attrs.get("width"))
+    if height is None or width is None:
+        raise ValueError(
+            f"Unable to determine video shape for crop run '{crop_run_name}' in {source_zarr_path}"
+        )
+
+    video_path = (
+        crop_group.attrs.get("source_video_path")
+        or crop_group.attrs.get("video_source_path")
+        or root.attrs.get("source_video_path")
+        or root.attrs.get("video_source_path")
+    )
+    if not video_path:
+        raise ValueError(
+            f"Unable to determine source video path for crop run '{crop_run_name}' in {source_zarr_path}"
+        )
+
+    return {
+        "video_path": str(video_path),
+        "frame_indices": np.asarray(crop_group["frame_indices"][:], dtype=np.int64),
+        "roi_coordinates_full": np.asarray(crop_group["roi_coordinates_full"][:], dtype=np.int32),
+        "roi_sz": roi_sz,
+        "video_shape": (int(height), int(width)),
+    }
+
+
+def materialize_external_roi_cache_for_crop_run(
+    *,
+    cache_path: str | Path,
+    source_zarr_path: str | Path,
+    crop_run_name: str,
+    console: Optional[Console] = None,
+    write_backend: str = "kvikio",
+    roi_storage: str = "uncompressed",
+    use_sharding: bool = False,
+    roi_chunk_size: int = 1024,
+    roi_shard_size: Optional[int] = None,
+    gpu_chunk_frames: int = 96,
+    require_kvikio: bool = False,
+    prefer_gpu: bool = True,
+    verbose: bool = False,
+    isolate_process: bool = True,
+) -> Dict[str, Any]:
+    cache_path = Path(cache_path).expanduser().resolve()
+    source_zarr_path = Path(source_zarr_path).expanduser().resolve()
+
+    if not isolate_process:
+        inputs = _load_external_roi_cache_inputs(
+            source_zarr_path=source_zarr_path,
+            crop_run_name=crop_run_name,
+        )
+        return materialize_external_roi_cache(
+            cache_path=cache_path,
+            console=console,
+            write_backend=write_backend,
+            roi_storage=roi_storage,
+            use_sharding=use_sharding,
+            roi_chunk_size=roi_chunk_size,
+            roi_shard_size=roi_shard_size,
+            gpu_chunk_frames=gpu_chunk_frames,
+            require_kvikio=require_kvikio,
+            prefer_gpu=prefer_gpu,
+            verbose=verbose,
+            **inputs,
+        )
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "fisheye.tracking.crop",
+        "--roi-cache-worker",
+        "--source-zarr",
+        str(source_zarr_path),
+        "--source-crop-run",
+        str(crop_run_name),
+        "--cache-path",
+        str(cache_path),
+        "--write-backend",
+        str(write_backend),
+        "--roi-storage",
+        str(roi_storage),
+        "--roi-chunk-size",
+        str(int(roi_chunk_size)),
+        "--gpu-chunk-frames",
+        str(int(gpu_chunk_frames)),
+    ]
+    if roi_shard_size is not None:
+        cmd.extend(["--roi-shard-size", str(int(roi_shard_size))])
+    if use_sharding:
+        cmd.append("--use-sharding")
+    if require_kvikio:
+        cmd.append("--require-kvikio")
+    if prefer_gpu:
+        cmd.append("--prefer-gpu")
+    else:
+        cmd.append("--no-prefer-gpu")
+    if verbose:
+        cmd.append("--verbose")
+
+    if console is not None:
+        console.print("[dim]Spawning isolated ROI cache worker process[/dim]")
+    completed = subprocess.run(cmd, check=False)
+    if completed.returncode != 0:
+        raise RuntimeError(f"ROI cache worker failed with exit code {completed.returncode}")
+
+    cache_root = zarr.open_group(str(cache_path), mode="r")
+    worker_result = cache_root.attrs.get("roi_cache_worker_result")
+    if isinstance(worker_result, Mapping):
+        return dict(worker_result)
+
+    return {
+        "cache_path": str(cache_path),
+        "write_backend_requested": normalize_attr(cache_root.attrs.get("cache_write_backend_requested")),
+        "write_backend_effective": normalize_attr(cache_root.attrs.get("cache_write_backend_effective")),
+        "acceleration": normalize_attr(cache_root.attrs.get("cache_acceleration")),
+        "fallback_reason": normalize_attr(cache_root.attrs.get("cache_fallback_reason")),
+    }
 
 
 def crop_from_external_video(
@@ -693,6 +1346,7 @@ def crop_from_external_video(
     external_roi_shard_size: Optional[int] = None,
     external_gpu_chunk_frames: int = 96,
     external_require_kvikio: bool = False,
+    crop_storage_mode: str = "materialized",
     verbose: bool = False
 ) -> Dict[str, Any]:
     """
@@ -739,6 +1393,13 @@ def crop_from_external_video(
         raise RuntimeError(f"kvikio required for crop writes but unavailable ({detail})")
     if not use_kvikio_writes:
         root = zarr.open(zarr_path, mode='a')
+    crop_storage_mode = _normalize_crop_storage_mode(crop_storage_mode)
+    crop_parent_before = root.get("crop_runs")
+    previous_latest = crop_parent_before.attrs.get("latest") if crop_parent_before is not None else None
+    previous_latest_materialized = (
+        crop_parent_before.attrs.get("latest_materialized") if crop_parent_before is not None else None
+    )
+    previous_latest_any = crop_parent_before.attrs.get("latest_any") if crop_parent_before is not None else None
     
     video_reader = None
     crop_group: Optional[zarr.Group] = None
@@ -774,6 +1435,17 @@ def crop_from_external_video(
         # Create crop group
         from ..shared.zarr.schema import get_run_group
         crop_group, run_name = get_run_group(root, 'crop', console)
+        crop_parent = root.get("crop_runs")
+        if crop_parent is not None and run_name is not None:
+            _finalize_crop_parent_pointers(
+                crop_parent,
+                run_name=run_name,
+                crop_storage_mode=crop_storage_mode,
+                success=False,
+                previous_latest=previous_latest,
+                previous_latest_materialized=previous_latest_materialized,
+                previous_latest_any=previous_latest_any,
+            )
         
         # Create output arrays
         roi_chunk_len = max(1, min(int(external_roi_chunk_size), total_detections))
@@ -797,10 +1469,11 @@ def crop_from_external_video(
         }
         if bool(external_use_sharding):
             roi_create_kwargs["shards"] = (roi_shard_len, roi_sz[0], roi_sz[1])
-        crop_group.create_array(
-            'roi_images',
-            **roi_create_kwargs,
-        )
+        if crop_storage_mode == "materialized":
+            crop_group.create_array(
+                'roi_images',
+                **roi_create_kwargs,
+            )
         
         crop_group.create_array(
             'roi_coordinates_full',
@@ -831,6 +1504,8 @@ def crop_from_external_video(
             'stage': 'crop',
             'pipeline_type': 'fisheye_tracking',
             'status': 'running',
+            'crop_storage_mode': crop_storage_mode,
+            'crop_revision': 0,
             
             # === Video Source ===
             'video_source_type': 'external',
@@ -930,8 +1605,8 @@ def crop_from_external_video(
             num_frames=num_frames
         )
         
-        # Initialize video reader
-        if actual_use_gpu:
+        # Geometry-only runs do not decode frames, so avoid touching the video reader.
+        if crop_storage_mode != "geometry_only" and actual_use_gpu:
             console.print("[green]Initializing GPU video decoder...[/green]")
             try:
                 decord.bridge.set_bridge('torch')
@@ -944,7 +1619,7 @@ def crop_from_external_video(
                 crop_group.attrs['device'] = 'cpu'
                 if _DECORD_AVAILABLE:
                     decord.bridge.set_bridge('native')
-        if not actual_use_gpu:
+        if crop_storage_mode != "geometry_only" and not actual_use_gpu:
             console.print("[cyan]Using CPU video decoder...[/cyan]")
 
         provenance_record = _build_crop_stage_provenance(
@@ -953,6 +1628,7 @@ def crop_from_external_video(
             env_info=env_info,
             parameters={
                 "roi_size": list(roi_sz),
+                "crop_storage_mode": crop_storage_mode,
                 "acceleration": crop_group.attrs.get("acceleration"),
                 "write_backend_requested": crop_group.attrs.get("write_backend_requested"),
                 "write_backend_effective": crop_group.attrs.get("write_backend_effective"),
@@ -976,6 +1652,58 @@ def crop_from_external_video(
             },
         )
         write_stage_provenance(crop_group, provenance_record)
+
+        if crop_storage_mode == "geometry_only":
+            coords_full, _ = _compute_roi_coordinates(
+                bbox_coords,
+                roi_sz,
+                video_shape,
+                scale_factor=None,
+            )
+            crop_group['roi_coordinates_full'][:] = coords_full
+
+            duration = time.perf_counter() - start_time
+            frames_with_crops = int(np.sum(crop_group['frame_counts'][:] > 0))
+            percent_cropped = (frames_with_crops / num_frames) * 100 if num_frames > 0 else 0
+
+            crop_group.attrs['summary_statistics'] = {
+                'total_frames': num_frames,
+                'frames_with_crops': frames_with_crops,
+                'total_rois_cropped': total_detections,
+                'percent_frames_with_crops': round(percent_cropped, 2),
+                'roi_size': list(roi_sz),
+                'roi_pixels_materialized': False,
+            }
+            crop_group.attrs['duration_seconds'] = duration
+            crop_group.attrs['avg_batch_ms'] = 0.0
+            crop_group.attrs['timing_profile'] = {
+                'decode_seconds': 0.0,
+                'compute_seconds': 0.0,
+                'zarr_write_seconds': 0.0,
+                'other_seconds': float(duration),
+                'decode_percent': 0.0,
+                'compute_percent': 0.0,
+                'zarr_write_percent': 0.0,
+                'other_percent': 100.0,
+                'complete': True,
+            }
+
+            console.print("[green]✓[/green] Geometry-only crop run created")
+            console.print(f"[cyan]  Time: {duration:.1f}s[/cyan]")
+            console.print(f"[cyan]  Total ROIs: {total_detections:,}[/cyan]")
+            console.print(f"[cyan]  Crop storage mode: {crop_storage_mode}[/cyan]")
+
+            success = True
+            return {
+                'total_crops': total_detections,
+                'frames_with_crops': frames_with_crops,
+                'percent_cropped': percent_cropped,
+                'duration_seconds': duration,
+                'run_name': run_name,
+                'detection_source_type': source_type,
+                'detection_source_path': source_path,
+                'crop_storage_mode': crop_storage_mode,
+            }
         
         total_processed = 0
         batch_times: List[float] = []
@@ -1184,7 +1912,8 @@ def crop_from_external_video(
             'duration_seconds': duration,
             'run_name': run_name,
             'detection_source_type': source_type,
-            'detection_source_path': source_path
+            'detection_source_path': source_path,
+            'crop_storage_mode': crop_storage_mode,
         }
     except KeyboardInterrupt:
         error_message = "Interrupted by user"
@@ -1243,6 +1972,17 @@ def crop_from_external_video(
                     crop_group.attrs['error_message'] = error_message
                 if verbose:
                     console.print("[debug] Crop run marked as failed")
+            crop_parent = root.get("crop_runs")
+            if crop_parent is not None and run_name is not None:
+                _finalize_crop_parent_pointers(
+                    crop_parent,
+                    run_name=run_name,
+                    crop_storage_mode=crop_storage_mode,
+                    success=bool(success),
+                    previous_latest=previous_latest,
+                    previous_latest_materialized=previous_latest_materialized,
+                    previous_latest_any=previous_latest_any,
+                )
 
 def get_detection_source_info(
     root: zarr.Group,
@@ -1494,6 +2234,7 @@ def get_crop_parameters(
     crop_params.setdefault('roi_sz', [512, 512])
     crop_params.setdefault('acceleration', 'auto')
     crop_params.setdefault('gpu_min_detections', 200)
+    crop_params.setdefault('crop_storage_mode', 'materialized')
     
     param_source = 'config_default'
     
@@ -1657,7 +2398,7 @@ def crop_and_store_chunk_delayed(
         Tiny dict with counts/indices for bookkeeping.
     """
     root = zarr.open(zarr_path, mode='a')
-    
+
     # Find the target crop group via root attrs (set by driver before dispatch)
     crop_group_path = root.attrs.get('current_crop_group_path')
     if crop_group_path is None:
@@ -1774,6 +2515,7 @@ def crop_detections(
     external_roi_shard_size: Optional[int] = None,
     external_gpu_chunk_frames: Optional[int] = None,
     external_require_kvikio: Optional[bool] = None,
+    crop_storage_mode: Optional[str] = None,
     use_gpu_allowed: bool = True,
     force_cpu: bool = False,
     verbose: bool = False
@@ -1802,6 +2544,7 @@ def crop_detections(
         external_roi_shard_size: Detection-axis shard length for ROI arrays
         external_gpu_chunk_frames: Number of decoded frames per GPU crop chunk
         external_require_kvikio: Require kvikIO backend for external writes
+        crop_storage_mode: Crop persistence mode ('materialized' or 'geometry_only')
         use_gpu_allowed: Whether GPU usage is permitted globally
         force_cpu: Force CPU processing regardless of availability
         verbose: Enable additional logging and disable progress bars
@@ -1833,6 +2576,10 @@ def crop_detections(
 
     # Get crop parameters
     crop_params, param_source = get_crop_parameters(root, config, console)
+    crop_storage_mode_resolved = _normalize_crop_storage_mode(
+        crop_storage_mode if crop_storage_mode is not None else crop_params.get('crop_storage_mode', 'materialized')
+    )
+    crop_params['crop_storage_mode'] = crop_storage_mode_resolved
     roi_sz = tuple(crop_params.get('roi_sz', [512, 512]))
     
     # Determine video source
@@ -1875,7 +2622,15 @@ def crop_detections(
                 else:
                     decision_note = f"auto mode threshold not met ({total_detections:,} < {gpu_threshold})"
 
-        if use_gpu:
+        if crop_storage_mode_resolved == "geometry_only":
+            console.print("[green]✓ Using geometry-only crop writing[/green]")
+            console.print("[dim]  Skipping frame decode and ROI pixel extraction[/dim]")
+            if use_gpu:
+                console.print(f"[dim]  GPU-capable path available ({decision_note})[/dim]")
+                console.print(f"[dim]  Device: {torch.cuda.get_device_name(0)}[/dim]")
+            else:
+                console.print(f"[dim]  {decision_note}[/dim]")
+        elif use_gpu:
             console.print(f"[green]✓ Using GPU-accelerated cropping[/green]")
             console.print(f"[dim]  {decision_note}[/dim]")
             console.print(f"[dim]  Device: {torch.cuda.get_device_name(0)}[/dim]")
@@ -1909,11 +2664,17 @@ def crop_detections(
         if shard_len is not None:
             shard_len = max(chunk_len, shard_len)
 
-        console.print(
-            f"[dim]  Write backend={backend}, roi_storage={storage}, "
-            f"sharding={use_sharding_value}, chunk={chunk_len}, shard={shard_len or '-'}, "
-            f"gpu_frames={gpu_chunk_frames}, require_kvikio={require_kvikio}[/dim]"
-        )
+        if crop_storage_mode_resolved == "geometry_only":
+            console.print(
+                "[dim]  Metadata-only write path; ROI image backend settings are inactive "
+                f"(configured backend={backend}, storage={storage})[/dim]"
+            )
+        else:
+            console.print(
+                f"[dim]  Write backend={backend}, roi_storage={storage}, "
+                f"sharding={use_sharding_value}, chunk={chunk_len}, shard={shard_len or '-'}, "
+                f"gpu_frames={gpu_chunk_frames}, require_kvikio={require_kvikio}[/dim]"
+            )
 
         # Use external video cropping
         external_result = crop_from_external_video(
@@ -1934,6 +2695,7 @@ def crop_detections(
             external_roi_shard_size=shard_len,
             external_gpu_chunk_frames=gpu_chunk_frames,
             external_require_kvikio=require_kvikio,
+            crop_storage_mode=crop_storage_mode_resolved,
             verbose=verbose
         )
         external_run_name = external_result.get('run_name') if isinstance(external_result, dict) else None
@@ -1975,6 +2737,7 @@ def crop_detections(
                 'detection_source_type': source_type,
                 'detection_source_path': source_path,
                 'video_source_type': 'external',
+                'crop_storage_mode': crop_storage_mode_resolved,
             },
             console=console,
         )
@@ -2000,7 +2763,26 @@ def crop_detections(
 
     # Create run group
     from ..shared.zarr.schema import get_run_group
+    crop_parent_before = root.get("crop_runs")
+    previous_latest = crop_parent_before.attrs.get("latest") if crop_parent_before is not None else None
+    previous_latest_materialized = (
+        crop_parent_before.attrs.get("latest_materialized") if crop_parent_before is not None else None
+    )
+    previous_latest_any = crop_parent_before.attrs.get("latest_any") if crop_parent_before is not None else None
     crop_group, run_group_name = get_run_group(root, 'crop', console)
+    success = False
+    error_message: Optional[str] = None
+    crop_parent = root.get("crop_runs")
+    if crop_parent is not None:
+        _finalize_crop_parent_pointers(
+            crop_parent,
+            run_name=run_group_name,
+            crop_storage_mode=crop_storage_mode_resolved,
+            success=False,
+            previous_latest=previous_latest,
+            previous_latest_materialized=previous_latest_materialized,
+            previous_latest_any=previous_latest_any,
+        )
 
     num_images = get_total_frames(root, source_group)
     if num_images is None:
@@ -2057,8 +2839,12 @@ def crop_detections(
     crop_group.attrs.update({
         # === Core Identifiers ===
         'created_at_utc': datetime.now(timezone.utc).isoformat(),
+        'started_at_utc': datetime.now(timezone.utc).isoformat(),
         'stage': 'crop',
         'pipeline_type': 'fisheye_tracking',
+        'status': 'running',
+        'crop_storage_mode': crop_storage_mode_resolved,
+        'crop_revision': 0,
         
         # === Video Source ===
         'video_source_type': 'zarr',
@@ -2169,14 +2955,16 @@ def crop_detections(
     compressor = BloscCodec(typesize=1, cname='lz4', clevel=1, shuffle="bitshuffle")
 
     # Create output arrays in crop group
-    roi_images = crop_group.create_array(
-        'roi_images',
-        shape=(total_detections, *roi_sz),
-        chunks=(min(chunk_size, total_detections), roi_sz[0], roi_sz[1]),
-        dtype='uint8',
-        overwrite=True,
-        compressors=compressor
-    )
+    roi_images = None
+    if crop_storage_mode_resolved == "materialized":
+        roi_images = crop_group.create_array(
+            'roi_images',
+            shape=(total_detections, *roi_sz),
+            chunks=(min(chunk_size, total_detections), roi_sz[0], roi_sz[1]),
+            dtype='uint8',
+            overwrite=True,
+            compressors=compressor
+        )
     
     roi_coordinates_full = crop_group.create_array(
         'roi_coordinates_full',
@@ -2205,6 +2993,102 @@ def crop_detections(
         total_detections=total_detections,
         num_frames=num_images
     )
+
+    if crop_storage_mode_resolved == "geometry_only":
+        coords_full, coords_ds = _compute_roi_coordinates(
+            bbox_coords,
+            roi_sz,
+            full_img_shape,
+            scale_factor=scale_factor,
+        )
+        crop_group['roi_coordinates_full'][:] = coords_full
+        if coords_ds is not None:
+            crop_group['roi_coordinates_ds'][:] = coords_ds
+
+        frames_with_crops = int(np.sum(crop_group['frame_counts'][:] > 0))
+        percent_cropped = (frames_with_crops / num_images) * 100 if num_images > 0 else 0
+        duration = time.perf_counter() - start_time
+        summary_stats = {
+            'total_frames': num_images,
+            'frames_with_crops': frames_with_crops,
+            'total_rois_cropped': total_detections,
+            'percent_frames_with_crops': round(percent_cropped, 2),
+            'roi_size': list(roi_sz),
+            'scale_factor': float(scale_factor),
+            'roi_pixels_materialized': False,
+        }
+        crop_group.attrs['summary_statistics'] = summary_stats
+        crop_group.attrs['duration_seconds'] = duration
+
+        completion_text = f"""[green]✓[/green] Geometry-only crop run created
+
+[bold]Performance:[/bold]
+  Time: {duration:.1f}s ({duration/60:.1f} min)
+
+[bold]Output:[/bold]
+  Path: {zarr_path}
+  Detection source: {source_type}
+  Storage mode: {crop_storage_mode_resolved}
+
+[bold]Arrays created:[/bold]
+  - crop_runs/{run_group_name}/roi_coordinates_full: ({total_detections}, 2)
+  - crop_runs/{run_group_name}/roi_coordinates_ds: ({total_detections}, 2)
+  - crop_runs/{run_group_name}/bbox_norm_coords: ({total_detections}, 4)
+  - crop_runs/{run_group_name}/frame_indices: ({total_detections},)
+  - crop_runs/{run_group_name}/frame_counts: ({num_images},)
+  - crop_runs/{run_group_name}/detection_indices: ({total_detections},)"""
+        if 'detection_source' in crop_group:
+            completion_text += f"\n  - crop_runs/{run_group_name}/detection_source: ({total_detections},)"
+
+        console.print(Panel(
+            Align.center(completion_text),
+            title="[bold green]Cropping Complete[/bold green]",
+            border_style="green"
+        ))
+
+        success = True
+        crop_group.attrs['status'] = 'completed'
+        crop_group.attrs['completed_at_utc'] = datetime.now(timezone.utc).isoformat()
+        crop_group.attrs.pop('error_message', None)
+        crop_group.attrs.pop('failed_at_utc', None)
+        if crop_parent is not None:
+            _finalize_crop_parent_pointers(
+                crop_parent,
+                run_name=run_group_name,
+                crop_storage_mode=crop_storage_mode_resolved,
+                success=True,
+                previous_latest=previous_latest,
+                previous_latest_materialized=previous_latest_materialized,
+                previous_latest_any=previous_latest_any,
+            )
+        _emit_crop_step_status(
+            root=root,
+            zarr_path=zarr_path,
+            status='ok',
+            run_name=run_group_name,
+            method=source_type,
+            coverage_pct=percent_cropped,
+            review_status=(crop_group.attrs.get('crop_review_status') if isinstance(crop_group.attrs.get('crop_review_status'), dict) else None),
+            details={
+                'reason': 'present',
+                'run_state': str(crop_group.attrs.get('status')).strip().lower() if crop_group.attrs.get('status') is not None else None,
+                'detection_source_type': source_type,
+                'detection_source_path': source_path,
+                'video_source_type': 'zarr',
+                'crop_storage_mode': crop_storage_mode_resolved,
+            },
+            console=console,
+        )
+        return {
+            'total_crops': total_detections,
+            'frames_with_crops': frames_with_crops,
+            'percent_cropped': percent_cropped,
+            'duration_seconds': duration,
+            'detection_source_type': source_type,
+            'detection_source_path': source_path,
+            'run_name': run_group_name,
+            'crop_storage_mode': crop_storage_mode_resolved,
+        }
 
     # Store path to this crop group in root for workers to find
     root.attrs['current_crop_group_path'] = crop_group.path
@@ -2369,6 +3253,21 @@ def crop_detections(
         border_style="green"
     ))
 
+    success = True
+    crop_group.attrs['status'] = 'completed'
+    crop_group.attrs['completed_at_utc'] = datetime.now(timezone.utc).isoformat()
+    crop_group.attrs.pop('error_message', None)
+    crop_group.attrs.pop('failed_at_utc', None)
+    if crop_parent is not None:
+        _finalize_crop_parent_pointers(
+            crop_parent,
+            run_name=run_group_name,
+            crop_storage_mode=crop_storage_mode_resolved,
+            success=True,
+            previous_latest=previous_latest,
+            previous_latest_materialized=previous_latest_materialized,
+            previous_latest_any=previous_latest_any,
+        )
     _emit_crop_step_status(
         root=root,
         zarr_path=zarr_path,
@@ -2383,22 +3282,112 @@ def crop_detections(
             'detection_source_type': source_type,
             'detection_source_path': source_path,
             'video_source_type': 'zarr',
+            'crop_storage_mode': crop_storage_mode_resolved,
         },
         console=console,
     )
-
     return {
         'total_crops': total_detections,
         'frames_with_crops': frames_with_crops,
         'percent_cropped': percent_cropped,
         'duration_seconds': duration,
         'detection_source_type': source_type,
-        'detection_source_path': source_path
+        'detection_source_path': source_path,
+        'run_name': run_group_name,
+        'crop_storage_mode': crop_storage_mode_resolved,
     }
+
+
+def _roi_cache_worker_main(argv: Optional[List[str]] = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Materialize temporary ROI cache from an external video source")
+    parser.add_argument("--roi-cache-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--source-zarr", required=True, type=str)
+    parser.add_argument("--source-crop-run", required=True, type=str)
+    parser.add_argument("--cache-path", required=True, type=str)
+    parser.add_argument("--write-backend", default="kvikio", choices=["standard", "kvikio"])
+    parser.add_argument("--roi-storage", default="uncompressed", choices=["compressed", "uncompressed"])
+    parser.add_argument("--use-sharding", action="store_true")
+    parser.add_argument("--roi-chunk-size", type=int, default=1024)
+    parser.add_argument("--roi-shard-size", type=int, default=None)
+    parser.add_argument("--gpu-chunk-frames", type=int, default=96)
+    parser.add_argument("--require-kvikio", action="store_true")
+    parser.add_argument("--prefer-gpu", action="store_true")
+    parser.add_argument("--no-prefer-gpu", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
+    args = parser.parse_args(argv)
+
+    if args.prefer_gpu and args.no_prefer_gpu:
+        raise SystemExit("Choose either --prefer-gpu or --no-prefer-gpu, not both.")
+    prefer_gpu = True
+    if args.no_prefer_gpu:
+        prefer_gpu = False
+    elif args.prefer_gpu:
+        prefer_gpu = True
+
+    console = Console()
+    try:
+        inputs = _load_external_roi_cache_inputs(
+            source_zarr_path=args.source_zarr,
+            crop_run_name=args.source_crop_run,
+        )
+        result = materialize_external_roi_cache(
+            cache_path=args.cache_path,
+            console=console,
+            write_backend=args.write_backend,
+            roi_storage=args.roi_storage,
+            use_sharding=args.use_sharding,
+            roi_chunk_size=args.roi_chunk_size,
+            roi_shard_size=args.roi_shard_size,
+            gpu_chunk_frames=args.gpu_chunk_frames,
+            require_kvikio=args.require_kvikio,
+            prefer_gpu=prefer_gpu,
+            verbose=args.verbose,
+            **inputs,
+        )
+        cache_root = zarr.open_group(str(Path(args.cache_path).expanduser().resolve()), mode="a")
+        cache_root.attrs.update(
+            {
+                "cache_write_backend_requested": result.get("write_backend_requested"),
+                "cache_write_backend_effective": result.get("write_backend_effective"),
+                "cache_acceleration": result.get("acceleration"),
+                "cache_fallback_reason": result.get("fallback_reason"),
+                "cache_decode_seconds": result.get("decode_seconds"),
+                "cache_compute_seconds": result.get("compute_seconds"),
+                "cache_write_seconds": result.get("write_seconds"),
+                "cache_duration_seconds": result.get("duration_seconds"),
+                "cache_roi_chunk_len": result.get("roi_chunk_len"),
+                "cache_roi_shard_len": result.get("roi_shard_len"),
+                "cache_roi_storage": result.get("roi_storage"),
+                "cache_roi_use_sharding": result.get("roi_use_sharding"),
+                "cache_gpu_chunk_frames": result.get("gpu_chunk_frames"),
+                "roi_cache_worker_result": json.dumps(result, sort_keys=True, default=str),
+            }
+        )
+        cache_root.attrs["roi_cache_worker_mode"] = "subprocess"
+        store = getattr(cache_root, "store", None)
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
+    except Exception as exc:
+        console.print(f"[red]ROI cache worker failed:[/red] {exc}")
+        console.print_exception()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
 
 
 def main():
     """CLI entry point."""
+    if "--roi-cache-worker" in sys.argv:
+        return _roi_cache_worker_main()
+
     import argparse
     import yaml
     
@@ -2429,6 +3418,13 @@ def main():
     parser.add_argument("--acceleration", type=str, default=None,
                        choices=['auto', 'gpu', 'cpu'],
                        help="Acceleration mode for external video cropping")
+    parser.add_argument(
+        "--crop-storage-mode",
+        type=str,
+        default=None,
+        choices=["materialized", "geometry_only"],
+        help="Crop persistence mode for the new run.",
+    )
     parser.add_argument(
         "--external-write-backend",
         type=str,
@@ -2539,6 +3535,7 @@ def main():
             external_roi_shard_size=args.external_roi_shard_size,
             external_gpu_chunk_frames=args.external_gpu_chunk_frames,
             external_require_kvikio=args.require_kvikio,
+            crop_storage_mode=args.crop_storage_mode,
             use_gpu_allowed=not args.no_gpu,
             force_cpu=args.force_cpu,
             verbose=args.verbose

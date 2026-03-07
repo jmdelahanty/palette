@@ -91,6 +91,8 @@ def _resolution_payload(
             "iou": args.iou,
             "max_det": args.max_det,
             "mask_threshold": args.mask_threshold,
+            "roi_cache_policy": args.roi_cache_policy,
+            "roi_cache_dir": str(args.roi_cache_dir) if args.roi_cache_dir else None,
         },
         inputs={
             "recording_dir": str(recording_dir),
@@ -160,6 +162,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--iou", type=float, default=0.5, help="Optional IoU threshold override.")
     parser.add_argument("--max-det", type=int, default=1, help="Optional max detections override.")
     parser.add_argument("--mask-threshold", type=float, default=0.5, help="Optional compatibility threshold.")
+    parser.add_argument(
+        "--roi-cache-policy",
+        choices=("never", "auto", "always"),
+        default="auto",
+        help="Temporary ROI cache policy for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument(
+        "--roi-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional scratch directory for temporary ROI caches.",
+    )
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference.")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output.")
     parser.add_argument("--json", action="store_true", help="Print resolved payload JSON.")
@@ -220,6 +234,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         max_det=args.max_det,
         verbose=bool(args.verbose),
         mask_threshold=args.mask_threshold,
+        roi_cache_policy=args.roi_cache_policy,
+        roi_cache_dir=args.roi_cache_dir,
         registry=registry_path,
     )
     if not run_name:

@@ -236,6 +236,8 @@ def test_run_yolo_forwards_registry_and_status_details(monkeypatch: pytest.Monke
         no_retina_masks=False,
         proto_upsample_factor=2,
         legacy_masks=False,
+        roi_cache_policy="always",
+        roi_cache_dir=tmp_path / "roi-cache",
         verbose=False,
     )
     registry = object()
@@ -252,6 +254,8 @@ def test_run_yolo_forwards_registry_and_status_details(monkeypatch: pytest.Monke
     assert run_name == "eye_masks_abc"
     assert captured.get("registry") is registry
     assert captured.get("status_details") == details
+    assert captured.get("roi_cache_policy") == "always"
+    assert captured.get("roi_cache_dir") == tmp_path / "roi-cache"
 
 
 def test_run_unet_forwards_registry_and_status_details(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -278,6 +282,8 @@ def test_run_unet_forwards_registry_and_status_details(monkeypatch: pytest.Monke
         device="cpu",
         label_mode="union",
         write_binary_masks=True,
+        roi_cache_policy="always",
+        roi_cache_dir=tmp_path / "roi-cache",
         no_use_crop=False,
     )
     registry = object()
@@ -297,3 +303,7 @@ def test_run_unet_forwards_registry_and_status_details(monkeypatch: pytest.Monke
     argv = captured.get("argv")
     assert isinstance(argv, list)
     assert "--write-binary-masks" in argv
+    assert "--roi-cache-policy" in argv
+    assert "--roi-cache-dir" in argv
+    assert "always" in argv
+    assert str(tmp_path / "roi-cache") in argv

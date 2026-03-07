@@ -607,12 +607,21 @@ def test_run_yolo_prefers_model_path_override(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(mod, "detect_keypoints_yolo", _fake_detect_keypoints_yolo)
     run_name = mod._run_yolo(
         "recording_analysis.zarr",
-        {"keypoints": {"model": "/models/from_config.pt", "batch_size": 64}},
+        {
+            "keypoints": {
+                "model": "/models/from_config.pt",
+                "batch_size": 64,
+                "roi_cache_policy": "always",
+                "roi_cache_dir": "/tmp/roi-cache",
+            }
+        },
         quiet=False,
         model_path_override="/models/from_registry.pt",
     )
     assert run_name == "keypoints_001"
     assert captured["model_path"] == "/models/from_registry.pt"
+    assert captured["roi_cache_policy"] == "always"
+    assert captured["roi_cache_dir"] == "/tmp/roi-cache"
 
 
 def test_resolve_registry_models_for_plans_collects_resolution_errors(

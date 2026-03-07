@@ -24,6 +24,23 @@ from ..shared.stage_provenance import build_stage_provenance, write_stage_proven
 from ..utils.system import get_git_info, get_platform_info
 from ..refinement.detect_quality import analyze_detect_quality, save_quality_report
 
+def _require_imported_detection_inputs(root: zarr.Group, latest_bg_run: str) -> None:
+    raw_video = root.get("raw_video")
+    if raw_video is None or "images_ds" not in raw_video:
+        raise ValueError(
+            "Traditional detection requires imported downsampled frames at raw_video/images_ds."
+        )
+
+    background_parent = root.get("background_runs")
+    if background_parent is None or latest_bg_run not in background_parent:
+        raise ValueError(
+            f"Traditional detection requires background_runs/{latest_bg_run}."
+        )
+    if "background_ds" not in background_parent[latest_bg_run]:
+        raise ValueError(
+            f"Traditional detection requires background_runs/{latest_bg_run}/background_ds."
+        )
+
 
 def get_detection_parameters(
     root: zarr.Group,
@@ -189,6 +206,8 @@ def detect_chunk_delayed(zarr_path: str, chunk_slice: slice, detect_params: Dict
     all_bbox_norms = []
     all_frame_indices = []
 
+    _require_imported_detection_inputs(root, latest_bg_run)
+
     for i in range(chunk_len):
         frame_idx = frame_start + i
         
@@ -266,6 +285,7 @@ def detect_fish(
     platform_info = get_platform_info(collect_ip=False, disk_path=zarr_path)
     
     latest_bg_run = root['background_runs'].attrs['latest']
+    _require_imported_detection_inputs(root, latest_bg_run)
     console.print(f"Using background: [cyan]{latest_bg_run}[/cyan]")
     
     # Create detect runs group

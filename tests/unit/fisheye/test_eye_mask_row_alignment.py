@@ -80,7 +80,6 @@ def test_yolo_alignment_rejects_detection_indices_mismatch() -> None:
 def test_unet_alignment_rejects_detection_source_mismatch() -> None:
     crop_group = _FakeGroup(
         {
-            "roi_images": np.zeros((3, 10, 10), dtype=np.uint8),
             "frame_indices": np.zeros((3,), dtype=np.int32),
             "detection_indices": np.zeros((3,), dtype=np.int32),
             "detection_source": np.zeros((2,), dtype=np.int8),
@@ -92,6 +91,22 @@ def test_unet_alignment_rejects_detection_source_mismatch() -> None:
             crop_run="crop_001",
             total_rois=3,
         )
+
+
+def test_unet_alignment_allows_geometry_only_crop_group() -> None:
+    crop_group = _FakeGroup(
+        {
+            "frame_indices": np.zeros((2,), dtype=np.int32),
+            "detection_indices": np.zeros((2,), dtype=np.int32),
+            "detection_source": np.zeros((2,), dtype=np.int8),
+        }
+    )
+
+    validate_unet_alignment(
+        crop_group=crop_group,
+        crop_run="crop_geometry",
+        total_rois=2,
+    )
 
 
 def test_refine_alignment_rejects_probability_row_mismatch() -> None:

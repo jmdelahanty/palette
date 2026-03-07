@@ -1576,10 +1576,12 @@ def refine_eye_masks(
 
     if "detection_source" in src_run:
         src_detection_source = src_run["detection_source"][:].astype(np.int8, copy=False)
-        console.print("[dim]Copied detection_source from source run[/dim]")
+        console.print("[dim]Copied per-ROI detection lineage (detection_source) from source run[/dim]")
     else:
         src_detection_source = np.zeros(total_rois, dtype=np.int8)
-        console.print("[yellow]Source run missing detection_source; defaulting to zeros.[/yellow]")
+        console.print(
+            "[yellow]Source run missing per-ROI detection lineage (detection_source); defaulting to zeros.[/yellow]"
+        )
     run_group.create_array(
         "detection_source",
         data=src_detection_source,

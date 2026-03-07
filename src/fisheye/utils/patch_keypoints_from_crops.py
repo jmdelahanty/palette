@@ -465,6 +465,8 @@ def _patch_keypoints_run(
     attrs["patched_keypoint_total"] = int(patched_idx.size)
     attrs["patched_keypoint_frame_total"] = int(patched_frames.size)
     attrs["keypoint_patch_last_utc"] = patch_entry["timestamp_utc"]
+    attrs["source_crop_signature"] = crop_group.attrs.get("crop_signature")
+    attrs["source_crop_revision"] = crop_group.attrs.get("crop_revision")
     keypoints_group.attrs.put(attrs)
 
     return {

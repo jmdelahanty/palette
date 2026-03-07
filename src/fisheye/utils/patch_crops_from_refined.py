@@ -17,6 +17,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import zarr
 
+from ..shared.crop_signature import bump_crop_revision
 from ..shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
@@ -215,6 +216,9 @@ def _patch_crop_run(
     *,
     apply: bool,
     patch_context: Optional[Dict[str, object]] = None,
+    detection_source_path: Optional[str] = None,
+    detection_source_type: Optional[str] = None,
+    source_refined_run: Optional[str] = None,
 ) -> Dict[str, object]:
     frame_indices = detect_group["frame_indices"][:].astype(np.int64, copy=False)
     bbox_norm = detect_group["bbox_norm_coords"][:]
@@ -300,6 +304,17 @@ def _patch_crop_run(
     attrs["patched_detection_total"] = int(patched_det.size)
     attrs["patched_frame_total"] = int(patched_frames.size)
     attrs["crop_patch_last_utc"] = patch_entry["timestamp_utc"]
+    if detection_source_path:
+        attrs["detection_source_path"] = str(detection_source_path)
+    if detection_source_type:
+        attrs["detection_source_type"] = str(detection_source_type)
+    if source_refined_run:
+        attrs["source_refined_run"] = str(source_refined_run)
+    bump_crop_revision(
+        attrs,
+        reason="manual_bbox_patch",
+        timestamp_utc=str(patch_entry["timestamp_utc"]),
+    )
     crop_group.attrs.put(attrs)
 
     return {
@@ -398,6 +413,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             plan.frames,
             apply=args.apply,
             patch_context=patch_context,
+            detection_source_path=detect_path,
+            detection_source_type=detect_label,
+            source_refined_run=refined_run,
         )
         print(
             f"  crop_run={crop_run} refined_run={refined_run} "

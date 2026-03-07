@@ -16,6 +16,7 @@ from ..shared.environment import resolve_log_dir
 from ..shared.environment import resolve_recording_roots
 from ..shared.zarr_discovery import discover_registry_zarrs
 from ..tracking.crop import (
+    _normalize_crop_storage_mode,
     crop_detections,
     get_detection_source_info,
     get_crop_parameters,
@@ -43,8 +44,10 @@ class CropPlan:
     source_type: Optional[str] = None
     source_path: Optional[str] = None
     roi_size: Optional[Tuple[int, int]] = None
+    crop_storage_mode: Optional[str] = None
     preferred_policy: Optional[str] = None
     latest_crop: Optional[str] = None
+    latest_pointer: Optional[str] = None
     latest_signature: Optional[Dict[str, object]] = None
 
 
@@ -62,12 +65,8 @@ def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
     return None
 
 
-def _utc_now() -> str:
-    return utc_now()
-
-
-class JsonLogger(SharedJsonLogger):
-    pass
+_utc_now = utc_now
+JsonLogger = SharedJsonLogger
 
 
 def _resolve_root(paths: Optional[List[Path]]) -> List[Path]:
@@ -78,8 +77,7 @@ def _resolve_log_dir(arg_log_dir: Optional[Path], roots: List[Path]) -> Path:
     return resolve_log_dir(arg_log_dir, roots, log_subdir="crop_batch")
 
 
-def _run_id() -> str:
-    return make_run_id()
+_run_id = make_run_id
 
 
 def _progress(console: Optional[Console], total: int):
@@ -166,22 +164,43 @@ def _normalize_roi(value: object) -> Optional[Tuple[int, int]]:
     return None
 
 
-def _latest_crop_signature(root: zarr.Group) -> Tuple[Optional[str], Optional[Dict[str, object]]]:
+def _infer_crop_run_storage_mode(crop_group: zarr.Group) -> str:
+    explicit = _normalize_str(crop_group.attrs.get("crop_storage_mode"))
+    if explicit in {"materialized", "geometry_only"}:
+        return explicit
+    if "roi_images" in crop_group:
+        return "materialized"
+    return "geometry_only"
+
+
+def _latest_crop_signature(
+    root: zarr.Group,
+    *,
+    crop_storage_mode: str,
+) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, object]]]:
     crop_parent = root.get("crop_runs")
     if crop_parent is None:
-        return None, None
-    latest = crop_parent.attrs.get("latest")
+        return None, None, None
+    latest_pointer = "latest_any" if crop_storage_mode == "geometry_only" else "latest_materialized"
+    latest = crop_parent.attrs.get(latest_pointer)
+    if not latest and crop_storage_mode == "materialized":
+        latest_pointer = "latest"
+        latest = crop_parent.attrs.get("latest")
+    elif not latest and crop_storage_mode == "geometry_only":
+        latest_pointer = "latest"
+        latest = crop_parent.attrs.get("latest")
     if not latest or latest not in crop_parent:
-        return None, None
+        return None, latest_pointer, None
     crop_group = crop_parent[latest]
     signature = {
         "detection_source_path": crop_group.attrs.get("detection_source_path"),
         "detection_source_type": crop_group.attrs.get("detection_source_type"),
         "detection_preferred_policy": crop_group.attrs.get("detection_preferred_policy"),
         "roi_size": crop_group.attrs.get("roi_size"),
+        "crop_storage_mode": _infer_crop_run_storage_mode(crop_group),
         "status": crop_group.attrs.get("status"),
     }
-    return str(latest), signature
+    return str(latest), latest_pointer, signature
 
 
 def _diff_signature(
@@ -202,6 +221,10 @@ def _diff_signature(
     existing_roi = _normalize_roi(existing.get("roi_size"))
     if desired_roi != existing_roi:
         diffs.append("roi_size")
+    desired_storage_mode = _normalize_str(desired.get("crop_storage_mode"))
+    existing_storage_mode = _normalize_str(existing.get("crop_storage_mode"))
+    if desired_storage_mode != existing_storage_mode:
+        diffs.append("crop_storage_mode")
     if compare_policy:
         desired_policy = _normalize_str(desired.get("detection_preferred_policy"))
         existing_policy = _normalize_str(existing.get("detection_preferred_policy"))
@@ -217,6 +240,7 @@ def _build_plan(
     source_path: Optional[str],
     preferred_policy: Optional[str],
     force_new: bool,
+    crop_storage_mode: Optional[str],
 ) -> CropPlan:
     if not zarr_path.exists():
         return CropPlan(zarr_path=zarr_path, status="missing", reason="zarr not found")
@@ -239,15 +263,22 @@ def _build_plan(
 
     crop_params, _ = get_crop_parameters(root, config, console=None)
     roi_size = tuple(crop_params.get("roi_sz", [512, 512]))
+    desired_crop_storage_mode = _normalize_crop_storage_mode(
+        crop_storage_mode if crop_storage_mode is not None else crop_params.get("crop_storage_mode", "materialized")
+    )
 
     desired = {
         "detection_source_path": resolved_path,
         "detection_source_type": resolved_type,
         "detection_preferred_policy": preferred_policy,
         "roi_size": roi_size,
+        "crop_storage_mode": desired_crop_storage_mode,
     }
 
-    latest_crop, latest_signature = _latest_crop_signature(root)
+    latest_crop, latest_pointer, latest_signature = _latest_crop_signature(
+        root,
+        crop_storage_mode=desired_crop_storage_mode,
+    )
     status = "ok"
     reason = None
 
@@ -276,8 +307,10 @@ def _build_plan(
         source_type=resolved_type,
         source_path=resolved_path,
         roi_size=roi_size,
+        crop_storage_mode=desired_crop_storage_mode,
         preferred_policy=preferred_policy,
         latest_crop=latest_crop,
+        latest_pointer=latest_pointer,
         latest_signature=latest_signature,
     )
 
@@ -290,6 +323,7 @@ def _build_plans(
     preferred_policy: Optional[str],
     force_new: bool,
     zarr_use_filter: str,
+    crop_storage_mode: Optional[str],
 ) -> List[CropPlan]:
     plans: List[CropPlan] = []
     for zarr_path in zarr_paths:
@@ -324,6 +358,7 @@ def _build_plans(
                 source_path=source_path,
                 preferred_policy=preferred_policy,
                 force_new=force_new,
+                crop_storage_mode=crop_storage_mode,
             )
         )
     return plans
@@ -390,6 +425,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Fail fast on first missing/error recording during apply.",
     )
     parser.add_argument("--force-new", action="store_true", help="Always create a new crop run.")
+    parser.add_argument(
+        "--crop-storage-mode",
+        choices=["materialized", "geometry_only"],
+        default=None,
+        help="Crop persistence mode for newly written crop runs.",
+    )
     parser.add_argument(
         "--source-type",
         type=str,
@@ -537,6 +578,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         preferred_policy=preferred_policy,
         force_new=bool(args.force_new),
         zarr_use_filter=str(args.zarr_use),
+        crop_storage_mode=args.crop_storage_mode,
     )
 
     if not args.apply:
@@ -552,18 +594,25 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"  source_path: {plan.source_path}")
             if plan.roi_size:
                 print(f"  roi_size: {plan.roi_size[0]}x{plan.roi_size[1]}")
+            if plan.crop_storage_mode:
+                print(f"  crop_storage_mode: {plan.crop_storage_mode}")
             if plan.latest_crop:
                 print(f"  latest_crop: {plan.latest_crop}")
+                if plan.latest_pointer:
+                    print(f"  latest_pointer: {plan.latest_pointer}")
                 if plan.latest_signature:
                     latest_path = plan.latest_signature.get("detection_source_path")
                     latest_type = plan.latest_signature.get("detection_source_type")
                     latest_roi = plan.latest_signature.get("roi_size")
+                    latest_storage_mode = plan.latest_signature.get("crop_storage_mode")
                     if latest_path or latest_type:
                         print(f"  latest_source: {latest_type} ({latest_path})")
                     if latest_roi:
                         roi = _normalize_roi(latest_roi)
                         if roi:
                             print(f"  latest_roi_size: {roi[0]}x{roi[1]}")
+                    if latest_storage_mode:
+                        print(f"  latest_crop_storage_mode: {latest_storage_mode}")
         counts = {"ok": 0, "skipped": 0, "missing": 0}
         for plan in plans:
             counts[plan.status] = counts.get(plan.status, 0) + 1
@@ -588,6 +637,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         strict=bool(args.strict),
         external_write_backend=args.external_write_backend,
         external_roi_storage=args.external_roi_storage,
+        crop_storage_mode=args.crop_storage_mode,
         require_kvikio=bool(args.require_kvikio),
     )
 
@@ -622,6 +672,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 source_path=plan.source_path,
                 roi_size=list(plan.roi_size) if plan.roi_size else None,
                 preferred_policy=plan.preferred_policy,
+                crop_storage_mode=plan.crop_storage_mode,
             )
             try:
                 results = crop_detections(
@@ -641,6 +692,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     external_roi_shard_size=args.external_roi_shard_size,
                     external_gpu_chunk_frames=args.external_gpu_chunk_frames,
                     external_require_kvikio=args.require_kvikio,
+                    crop_storage_mode=plan.crop_storage_mode,
                     use_gpu_allowed=not args.no_gpu,
                     force_cpu=args.force_cpu,
                     verbose=args.verbose,
@@ -659,6 +711,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     total_crops=results.get("total_crops"),
                     detection_source_type=results.get("detection_source_type"),
                     detection_source_path=results.get("detection_source_path"),
+                    crop_storage_mode=results.get("crop_storage_mode"),
                 )
         if progress:
             progress.advance(task_id)

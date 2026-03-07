@@ -275,6 +275,18 @@ Examples:
     parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
     parser.add_argument("--iou", type=float, default=0.5, help="IoU threshold for NMS")
     parser.add_argument("--max-det", type=int, default=1, help="Max detections per ROI")
+    parser.add_argument(
+        "--roi-cache-policy",
+        choices=("never", "auto", "always"),
+        default="auto",
+        help="Temporary ROI cache policy for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument(
+        "--roi-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional scratch directory for temporary ROI caches.",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output")
     return parser
 
@@ -299,6 +311,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             conf=args.conf,
             iou=args.iou,
             max_det=args.max_det,
+            roi_cache_policy=args.roi_cache_policy,
+            roi_cache_dir=args.roi_cache_dir,
             verbose=args.verbose,
             registry=(status_context.registry_path if status_context is not None else None),
             console=console,

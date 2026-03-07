@@ -333,14 +333,14 @@ CROP_SPEC = StageSpec(
     stage_name="crop",
     zarr_group="crop_runs/<run>/",
     specs=(
-        ArraySpec("roi_images", "uint8", ("n_rois", "h", "w")),
+        ArraySpec("roi_images", "uint8", ("n_rois", "h", "w"), required=False),
         ArraySpec("roi_coordinates_full", "int32", ("n_rois", 2)),
-        ArraySpec("roi_coordinates_ds", "int32", ("n_rois", 2)),
+        ArraySpec("roi_coordinates_ds", "int32", ("n_rois", 2), required=False),
         ArraySpec("bbox_norm_coords", "float32", ("n_rois", 4)),
         ArraySpec("frame_indices", "int32", ("n_rois",)),
         ArraySpec("frame_counts", "int32", ("n_frames",)),
         ArraySpec("detection_indices", "int32", ("n_rois",)),
-        ArraySpec("detection_source", "int8", ("n_rois",)),
+        ArraySpec("detection_source", "int8", ("n_rois",), required=False),
     ),
 )
 
@@ -506,12 +506,25 @@ REFINED_EYE_MASKS_SPEC = StageSpec(
     subgroups={"metrics": _REFINED_EYE_MASK_METRICS},
 )
 
-ID_ASSIGNMENT_SPEC = StageSpec(
-    stage_name="id_assignment",
-    zarr_group="id_assignment_runs/<run>/",
+ARENA_ASSIGNMENT_SPEC = StageSpec(
+    stage_name="arena_assignment",
+    zarr_group="arena_assignment_runs/<run>/",
     specs=(
-        ArraySpec("detection_ids", "int32", ("n_detections",)),
+        ArraySpec("arena_ids", "int32", ("n_detections",)),
         ArraySpec("confidence", "float32", ("n_detections",)),
+    ),
+)
+
+TRACKING_SPEC = StageSpec(
+    stage_name="tracking",
+    zarr_group="tracking_runs/<run>/",
+    specs=(
+        ArraySpec("track_ids", "int32", ("n_detections",)),
+        ArraySpec("arena_ids", "int32", ("n_detections",)),
+        ArraySpec("frame_indices", "int32", ("n_detections",)),
+        ArraySpec("source_row_indices", "int32", ("n_detections",)),
+        ArraySpec("track_ids_present", "int32", ("n_tracks",)),
+        ArraySpec("track_arena_ids", "int32", ("n_tracks",)),
     ),
 )
 
@@ -526,7 +539,8 @@ STAGES: Dict[str, StageSpec] = {
     REFINED_KEYPOINTS_SPEC.stage_name: REFINED_KEYPOINTS_SPEC,
     EYE_MASKS_SPEC.stage_name: EYE_MASKS_SPEC,
     REFINED_EYE_MASKS_SPEC.stage_name: REFINED_EYE_MASKS_SPEC,
-    ID_ASSIGNMENT_SPEC.stage_name: ID_ASSIGNMENT_SPEC,
+    ARENA_ASSIGNMENT_SPEC.stage_name: ARENA_ASSIGNMENT_SPEC,
+    TRACKING_SPEC.stage_name: TRACKING_SPEC,
 }
 
 __all__ = [
@@ -543,7 +557,8 @@ __all__ = [
     "REFINED_KEYPOINTS_SPEC",
     "EYE_MASKS_SPEC",
     "REFINED_EYE_MASKS_SPEC",
-    "ID_ASSIGNMENT_SPEC",
+    "ARENA_ASSIGNMENT_SPEC",
+    "TRACKING_SPEC",
     "STAGES",
     "array_specs_by_name",
     "describe_array",

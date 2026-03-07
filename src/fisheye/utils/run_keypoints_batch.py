@@ -26,13 +26,19 @@ from fisheye.shared.batch_logging import make_run_id
 from fisheye.shared.environment import resolve_log_dir as resolve_shared_log_dir
 from fisheye.shared.environment import resolve_recording_roots as resolve_shared_recording_roots
 from fisheye.shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
+from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 from fisheye.shared.zarr_discovery import discover_registry_zarr_entries as discover_shared_registry_zarr_entries
 from fisheye.utils.auto_keypoint_review import AutoReviewPolicy, apply_auto_review
+from fisheye.utils.batch_registry_model_resolution import ResolvedModel
+from fisheye.utils.batch_registry_model_resolution import (
+    resolve_registry_models_for_plans as resolve_shared_registry_models_for_plans,
+)
 from fisheye.utils.keypoint_retry import retry_failed_keypoints_yolo
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils import refine_keypoints_batch as refine_keypoints_batch_mod
 from fisheye.utils.resolve_detect_model import Candidate
 from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
+from fisheye.utils.zarr_recording_context import infer_recording_context
 from fisheye.utils.run_keypoints_with_registry_model import (
     _write_model_resolution_provenance as _write_keypoint_model_resolution_provenance,
 )
@@ -65,19 +71,12 @@ class KeypointPlan:
 
 
 @dataclass(frozen=True)
-class ResolvedModel:
-    model_path: str
-    payload: Dict[str, Any]
-
-
-@dataclass(frozen=True)
 class RegistryZarrEntry:
     zarr_path: Path
     camera_id: Optional[str]
 
 
-class JsonLogger(SharedJsonLogger):
-    pass
+JsonLogger = SharedJsonLogger
 
 
 def _jsonable(value: Any) -> Any:
@@ -94,14 +93,6 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
     return value
-
-
-def _normalize_attr(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "ignore")
-    return str(value)
 
 
 def _derive_camera_id(ipc_source_name: object) -> Optional[str]:
@@ -136,8 +127,7 @@ def _resolve_log_dir(arg_log_dir: Optional[Path], roots: List[Path]) -> Path:
     return resolve_shared_log_dir(arg_log_dir, roots, log_subdir="run_keypoints_batch")
 
 
-def _run_id() -> str:
-    return make_run_id()
+_run_id = make_run_id
 
 
 def _progress(console: Optional[Console], total: int):
@@ -909,7 +899,7 @@ def _build_plans_from_zarr(
 ) -> List[KeypointPlan]:
     plans: List[KeypointPlan] = []
     for zarr_path in zarr_paths:
-        recording_dir = _infer_recording_dir(zarr_path)
+        recording_dir = infer_recording_context(zarr_path).recording_dir
         h5_path = _find_h5(recording_dir, zarr_path.stem)
         camera_id = _read_camera_id(h5_path) if h5_path else None
         plans.append(
@@ -1067,13 +1057,16 @@ def _resolve_registry_model_for_plan(
     iou: Optional[float],
     max_det: Optional[int],
     mask_threshold: Optional[float],
+    roi_cache_policy: Optional[str],
+    roi_cache_dir: Optional[str],
 ) -> ResolvedModel:
+    context = infer_recording_context(plan.zarr_path)
     registry = Registry(registry_path)
     try:
         recording_id = _resolve_recording_id(
             registry,
-            recording_id=None,
-            recording_dir=plan.recording_dir,
+            recording_id=context.recording_id,
+            recording_dir=context.recording_dir,
         )
         target = _load_target_profile(registry, recording_id)
         candidates = _load_candidates(
@@ -1103,6 +1096,8 @@ def _resolve_registry_model_for_plan(
         iou=iou,
         max_det=max_det,
         mask_threshold=mask_threshold,
+        roi_cache_policy=roi_cache_policy,
+        roi_cache_dir=roi_cache_dir,
     )
     payload = build_model_resolution_payload(
         tool="fisheye.utils.run_keypoints_batch",
@@ -1146,95 +1141,32 @@ def _resolve_registry_models_for_plans(
     on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> tuple[Dict[str, ResolvedModel], Dict[str, str]]:
     params = config.get("keypoints", {})
-    resolved: Dict[str, ResolvedModel] = {}
-    errors: Dict[str, str] = {}
-    resolved_by_recording: Dict[str, ResolvedModel] = {}
-    errors_by_recording: Dict[str, str] = {}
-    total = len(plans)
-    for index, plan in enumerate(plans, start=1):
-        key = str(plan.zarr_path.resolve())
-        recording_key = str(plan.recording_dir.resolve())
-        base_event: Dict[str, Any] = {
-            "index": index,
-            "total": total,
-            "recording": str(plan.recording_dir),
-            "zarr": str(plan.zarr_path),
-            "camera_id": plan.camera_id,
-        }
-        cached = resolved_by_recording.get(recording_key)
-        if cached is not None:
-            resolved[key] = cached
-            selected = cached.payload.get("selected")
-            selected_payload = selected if isinstance(selected, dict) else {}
-            if on_event is not None:
-                on_event(
-                    {
-                        **base_event,
-                        "event": "model_resolution_cached",
-                        "selected_model_path": cached.model_path,
-                        "selected_run_id": selected_payload.get("run_id"),
-                        "selected_set_id": selected_payload.get("set_id"),
-                    }
-                )
-            continue
-        cached_error = errors_by_recording.get(recording_key)
-        if cached_error is not None:
-            errors[key] = cached_error
-            if on_event is not None:
-                on_event(
-                    {
-                        **base_event,
-                        "event": "model_resolution_failed",
-                        "error": cached_error,
-                    }
-                )
-            continue
-        if on_event is not None:
-            on_event({**base_event, "event": "model_resolution_start"})
-        try:
-            model = _resolve_registry_model_for_plan(
-                plan=plan,
-                registry_path=registry_path,
-                set_id_filter=set_id_filter,
-                require_unique=require_unique,
-                top_k=top_k,
-                include_non_success=include_non_success,
-                crop_run=params.get("crop_run"),
-                batch_size=params.get("batch_size", 256),
-                device=params.get("device"),
-                imgsz=params.get("imgsz"),
-                conf=params.get("conf", 0.25),
-                iou=params.get("iou", 0.5),
-                max_det=params.get("max_det", 1),
-                mask_threshold=params.get("mask_threshold", 0.5),
-            )
-            resolved[key] = model
-            resolved_by_recording[recording_key] = model
-            selected = model.payload.get("selected")
-            selected_payload = selected if isinstance(selected, dict) else {}
-            if on_event is not None:
-                on_event(
-                    {
-                        **base_event,
-                        "event": "model_resolution_ok",
-                        "selected_model_path": model.model_path,
-                        "selected_run_id": selected_payload.get("run_id"),
-                        "selected_set_id": selected_payload.get("set_id"),
-                    }
-                )
-        except Exception as exc:
-            message = str(exc)
-            errors[key] = message
-            errors_by_recording[recording_key] = message
-            if on_event is not None:
-                on_event(
-                    {
-                        **base_event,
-                        "event": "model_resolution_failed",
-                        "error": message,
-                    }
-                )
-    return resolved, errors
+
+    def _resolve(plan: KeypointPlan) -> ResolvedModel:
+        return _resolve_registry_model_for_plan(
+            plan=plan,
+            registry_path=registry_path,
+            set_id_filter=set_id_filter,
+            require_unique=require_unique,
+            top_k=top_k,
+            include_non_success=include_non_success,
+            crop_run=params.get("crop_run"),
+            batch_size=params.get("batch_size", 256),
+            device=params.get("device"),
+            imgsz=params.get("imgsz"),
+            conf=params.get("conf", 0.25),
+            iou=params.get("iou", 0.5),
+            max_det=params.get("max_det", 1),
+            mask_threshold=params.get("mask_threshold", 0.5),
+            roi_cache_policy=params.get("roi_cache_policy"),
+            roi_cache_dir=params.get("roi_cache_dir"),
+        )
+
+    return resolve_shared_registry_models_for_plans(
+        plans=plans,
+        resolve_plan=_resolve,
+        on_event=on_event,
+    )
 
 
 def _run_traditional(
@@ -1295,6 +1227,8 @@ def _run_yolo(
                 iou=params.get("iou", 0.5),
                 max_det=params.get("max_det", 1),
                 mask_threshold=params.get("mask_threshold", 0.5),
+                roi_cache_policy=params.get("roi_cache_policy", "auto"),
+                roi_cache_dir=params.get("roi_cache_dir"),
                 verbose=params.get("verbose", False),
                 registry=registry,
                 console=console,
@@ -1311,6 +1245,8 @@ def _run_yolo(
         iou=params.get("iou", 0.5),
         max_det=params.get("max_det", 1),
         mask_threshold=params.get("mask_threshold", 0.5),
+        roi_cache_policy=params.get("roi_cache_policy", "auto"),
+        roi_cache_dir=params.get("roi_cache_dir"),
         verbose=params.get("verbose", False),
         registry=registry,
         console=None,
@@ -1348,6 +1284,8 @@ def _run_yolo_retry_failed_only(
                 max_det=params.get("max_det", 1),
                 verbose=params.get("verbose", False),
                 mask_threshold=params.get("mask_threshold", 0.5),
+                roi_cache_policy=params.get("roi_cache_policy", "auto"),
+                roi_cache_dir=params.get("roi_cache_dir"),
                 include_fish_present_no_keypoints=include_fish_present_no_keypoints,
                 force_new=force_new,
                 registry=registry,
@@ -1366,6 +1304,8 @@ def _run_yolo_retry_failed_only(
         max_det=params.get("max_det", 1),
         verbose=params.get("verbose", False),
         mask_threshold=params.get("mask_threshold", 0.5),
+        roi_cache_policy=params.get("roi_cache_policy", "auto"),
+        roi_cache_dir=params.get("roi_cache_dir"),
         include_fish_present_no_keypoints=include_fish_present_no_keypoints,
         force_new=force_new,
         registry=registry,
@@ -2302,12 +2242,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             runnable_plans = runnable_after_resolution
 
     console = Console() if (Console is not None and not args.json and not args.quiet) else None
-    progress = _progress(console if not args.json else None, total=len(runnable_plans))
+    progress = None
     quiet = bool(args.quiet or args.json)
     task_label = "Refining keypoints" if args.refine_only else "Running keypoints"
 
     if progress is None:
-        for plan in runnable_plans:
+        total_plans = len(runnable_plans)
+        for idx, plan in enumerate(runnable_plans, start=1):
+            if console is not None:
+                console.print(
+                    f"[bold cyan][{idx}/{total_plans}] {task_label}[/bold cyan] "
+                    f"[dim]{plan.recording_dir}[/dim]"
+                )
             try:
                 result = _run_plan(
                     plan,

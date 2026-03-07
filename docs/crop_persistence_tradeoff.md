@@ -28,3 +28,6 @@
 - Add a pipeline flag: crop_mode = persist | on_demand.
 - Cache only selected frames (e.g., misses or interpolated detections).
 - Support lite Zarr with detections + metadata; compute crops on demand.
+
+## Related Discussion
+- See `crop_live_view_vs_materialized_stream_design.md` for a fuller architecture and registry-focused treatment of live-crop-first + optional materialization.

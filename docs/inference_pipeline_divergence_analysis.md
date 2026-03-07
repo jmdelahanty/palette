@@ -86,27 +86,28 @@ and has **two independent resize mechanisms**:
 2. Decord CPU — `VideoReader(path, ctx=cpu())`
 3. OpenCV fallback — `cv2.VideoCapture(path)`
 
-**Resize mechanism 1 — `video.resize` (manual pre-resize):**
+**Resize mechanism 1 — legacy `video.resize` (manual pre-resize):**
 
-Configured in YAML under `video.resize` (e.g., `[640, 640]`). Applied *before*
-YOLO sees the frame:
+Configured in YAML under `video.resize` (`[width, height]` legacy order).
+In current detection code this is a fallback-only path:
 
-- Decord GPU path: `F.interpolate(chunk, size=resize_dims, mode='bilinear')`
-  (`detect_yolo.py:841-846`)
-- Decord CPU path: `cv2.resize(frame, tuple(resize_dims))` per frame
-  (`detect_yolo.py:867-869`)
-- OpenCV path: `cv2.resize(frame, tuple(resize_dims))`
-  (`detect_yolo.py:914-915`)
+- Applied only when canonical detection sizing is not set
+  (`detection.resize_dims`, CLI `--resize-dims`, or legacy `--imgsz`)
+- Ignored when canonical detection sizing is set
 
-This is a **squish resize** — it forces frames to exact `[w, h]` dimensions
-with **no aspect ratio preservation**. The current `yolo_detect_config.yaml`
-sets this to `[640, 640]`.
+Current default config (`configs/fisheye/yolo_detect_config.yaml`) uses:
 
-**Resize mechanism 2 — `imgsz` (YOLO internal letterbox):**
+- `detection.resize_dims: [640, 640]`
+- `video.resize: null`
 
-Passed to `model.predict(..., imgsz=imgsz)` (`detect_yolo.py:462-463`).
-Ultralytics internally applies **aspect-ratio-preserving letterboxing** with
-gray padding to fit the image into the target size.
+When active, this is a **squish resize** — it forces exact `[w, h]` dimensions
+with no aspect-ratio preservation.
+
+**Resize mechanism 2 — canonical `resize_dims` mapped to YOLO `imgsz`:**
+
+Canonical `[h, w]` detection sizing is normalized and passed as YOLO `imgsz`.
+For numpy/list inputs, Ultralytics then applies its internal
+aspect-ratio-preserving letterbox behavior.
 
 **Other preprocessing:**
 - BGR-to-RGB conversion (OpenCV backend only): `cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)`
@@ -134,11 +135,11 @@ gray padding to fit the image into the target size.
 ## 4. `imgsz` Resolution Logic — Current Behavior
 
 None of the engines read `imgsz` from the model's own metadata. Here is what
-each engine does when the user does not provide `imgsz`:
+each engine does when the user does not provide a CLI sizing override:
 
 | Engine | Default `imgsz` behavior | Code location |
 |--------|-------------------------|---------------|
-| **Detection** | Falls through to Ultralytics default (640) | `detect_yolo.py:373` — `_normalize_imgsz(None)` returns `None`, so `imgsz` is omitted from `predict_kwargs` |
+| **Detection** | Uses config-driven `detection.resize_dims` / `detection.imgsz` when present; otherwise falls through to Ultralytics default (640). The shipped config sets `detection.resize_dims: [640, 640]`, so most runs explicitly apply 640 via config rather than relying on the implicit fallback. | `detect_yolo.py:441-481`, `configs/fisheye/yolo_detect_config.yaml:25` |
 | **Keypoints** | `max(roi_h, roi_w)` | `detect_keypoints_yolo.py:396` |
 | **Eye Masks** | `max(roi_h, roi_w)` | `eye_segmentation_yolo.py:833-834` |
 
@@ -150,22 +151,24 @@ of the engines query this value.
 
 ## 5. Identified Divergences
 
-### 5a. Detection has two stacking resize operations
+### 5a. Legacy pre-resize path can still introduce aspect-ratio distortion
 
-The `video.resize` squish and `imgsz` letterbox can both be active
-simultaneously. If `yolo_detect_config.yaml` has `video.resize: [640, 640]` and
-the user also passes `--imgsz 640`:
+The strongest distortion risk today is the legacy `video.resize` fallback path,
+which performs a squish resize before inference when canonical detection sizing
+is not set.
 
-1. Frame is squished from original aspect ratio to 640x640 (distorted)
-2. YOLO letterboxes 640x640 to 640x640 (no-op, but the distortion persists)
+Current detection logic does **not** stack canonical `resize_dims/imgsz` and
+`video.resize` by default; when canonical detection sizing is set,
+`video.resize` is ignored.
 
-If the original video is not square, the fish are distorted before the model
-ever sees them. The model was likely trained on letterboxed (not squished) data,
-so this is a **training/inference mismatch**.
+Distortion risk remains if users rely on legacy pre-resize for non-square input
+frames.
 
 ### 5b. `imgsz` fallback differs between detection and crop-based pipelines
 
-- Detection defaults to Ultralytics' built-in 640
+- Detection typically runs at configured 640 (`detection.resize_dims: [640, 640]`
+  in the shipped config); if sizing is omitted from both CLI and config, it
+  falls through to Ultralytics' built-in 640
 - Keypoints/eye-masks default to `max(roi_h, roi_w)` — which depends on
   cropping parameters and has nothing to do with what the model was trained at
 
@@ -176,8 +179,9 @@ during training.
 
 ### 5c. No engine reads `imgsz` from the model
 
-This is the root cause of both 5a and 5b. The model knows its trained input
-size, but the inference code never asks.
+This is the root cause of 5b and a broader source of training/inference size
+mismatch risk. The model knows its trained input size, but inference code does
+not currently query it.
 
 ### 5d. Duplicated grayscale-to-RGB conversion
 
@@ -259,15 +263,17 @@ should be avoided.
 
 ### 7d. Recommendation
 
-**Use rectangular inference (`rect=True`) for detection on video frames.** This
-is a one-argument change to `model.predict()` and reclaims nearly all the
-padding overhead while preserving aspect ratio exactly.
+**Use rectangular inference (`rect=True`) for detection where Ultralytics is
+fed numpy/list frames, and validate equivalent behavior on the Decord-GPU
+`torch.Tensor` path before making it the global default.** This preserves aspect
+ratio and can recover most padding overhead.
 
-**For ROI crops** (keypoints, eye masks), standard letterboxing is fine. The
-crops are small and close to square, so padding overhead is already minimal.
+**For ROI crops** (keypoints, eye masks), standard letterboxing is typically
+fine. The crops are small and close to square, so padding overhead is usually
+modest.
 
-**Remove the manual `video.resize` squish.** It solves a performance problem
-that `rect=True` solves correctly without introducing distortion.
+**De-emphasize the manual `video.resize` squish path.** Keep it only as explicit
+legacy fallback, not as a preferred default.
 
 The key mental model: **padding is cheap, distortion is expensive.** A few
 percent of wasted FLOPs on gray pixels is almost always preferable to changing
@@ -291,27 +297,36 @@ share the same aspect ratio and will get the same rectangular padding.
 
 ### P1. Auto-read `imgsz` from model metadata (all engines)
 
-Add a shared helper that queries the model's trained `imgsz`:
+Add a shared helper that queries the model's trained `imgsz` and preserves
+either square or rectangular `[h, w]` metadata:
 
 ```python
-def resolve_imgsz(model: YOLO, user_imgsz: Optional[int] = None) -> int:
+def resolve_imgsz(
+    model: YOLO,
+    user_imgsz: Optional[int | list[int] | tuple[int, int]] = None,
+) -> int | list[int]:
     """Return user override, or the model's trained imgsz."""
-    if user_imgsz is not None:
-        return user_imgsz
-    try:
-        return int(model.overrides['imgsz'])
-    except (KeyError, TypeError, ValueError):
-        pass
-    try:
-        return int(model.model.args['imgsz'])
-    except (KeyError, TypeError, ValueError, AttributeError):
-        pass
+    normalized_user = _normalize_imgsz(user_imgsz)
+    if normalized_user is not None:
+        return normalized_user
+
+    model_args = getattr(getattr(model, "model", None), "args", None)
+    raw_candidates = [
+        getattr(model, "overrides", {}).get("imgsz"),
+        model_args.get("imgsz") if isinstance(model_args, dict) else getattr(model_args, "imgsz", None),
+    ]
+    for raw in raw_candidates:
+        normalized = _normalize_imgsz(raw)
+        if normalized is not None:
+            return normalized
+
     return 640  # Ultralytics default
 ```
 
 All three engines would call this after loading the model, replacing their
 current fallback logic. This ensures the model always receives inputs at the
-resolution it was trained on unless explicitly overridden.
+resolution it was trained on unless explicitly overridden, including models
+trained with rectangular `[h, w]` sizes.
 
 ### P2. Remove `video.resize` from detection (or make it aspect-ratio-aware)
 
@@ -347,3 +362,171 @@ inputs consistently.
 | **High** | P2 — Remove/fix `video.resize` | Prevents silent aspect-ratio distortion in detection |
 | **Low** | P3 — Shared `_repeat_to_rgb` | Code dedup; no behavioral impact |
 | **Low** | P4 — Shared `_normalize_imgsz` | Code dedup; minor consistency improvement |
+
+---
+
+## 10. Pre-Materialized Crops vs. Live Cropping: Critical Evaluation
+
+This section evaluates whether the current architecture — pre-materializing ROI
+crops into Zarr (`crop_runs/<run>/roi_images`) — is a sound tradeoff versus
+computing crops on demand from full frames and detection bounding boxes.
+
+### 10a. What the crop datastream actually costs
+
+**Code complexity:**
+
+| Component | Lines | Purpose |
+|-----------|-------|---------|
+| `tracking/crop.py` | ~2,560 | Core crop creation (GPU/CPU paths, Dask parallelism, kvikIO, provenance) |
+| `utils/crop_batch.py` | ~680 | Batch runner with signature-based staleness detection |
+| `registry/step_cascade.py` | ~50 | Cascade invalidation when crops change |
+| `shared/keypoint_stale.py` | ~200 | Granular staleness marking for downstream stages |
+
+That is **~3,500 lines** of infrastructure to maintain a cache. This is not
+"store some pixels" — it is a full lifecycle management system with GPU decode
+paths, Dask-distributed writes, signature hashing, cascade invalidation, and
+provenance tracking.
+
+**Storage cost:**
+
+Each crop is `(roi_h, roi_w)` uint8 — typically 512x512 = 262 KB per crop.
+For a recording with 100K detections, that is ~26 GB of crop data (before lz4
+compression, which typically achieves ~60-70% of original for uint8 image data).
+This is stored *in addition to* the source video.
+
+**Operational cost:**
+
+In the standard batch path, detection changes (new model, refined bboxes,
+interpolation) generally trigger full crop regeneration. The batch runner
+detects staleness via signature comparison and reruns the crop stage, after
+which downstream keypoints are typically invalidated and must be re-run.
+
+That said, the repo does have targeted repair utilities for limited subset
+updates (for example, patching selected crops or recomputing refined/interpolated
+ROIs), so "no incremental update path" would be too strong as a blanket claim.
+
+### 10b. How crops are actually consumed
+
+A practical read-pattern summary is:
+
+| Consumer class | Typical read pattern |
+|----------|-------------|
+| Core inference stages (YOLO/traditional keypoints, segmentation) | Usually single-pass per stage run |
+| Training exports / merged artifact builders | Usually one pass per export job |
+| Training loaders (merged datasets) | Repeated reads across epochs |
+| Tuning/diagnostics/visualization tools | Repeated or random on-demand reads |
+
+So the "read once then idle" characterization is accurate for some production
+pipelines, but not for all repo workflows. There are meaningful recurring
+consumers (tuners, diagnostics, visualizers, and dataset loaders) that can read
+`roi_images` multiple times depending on usage.
+
+The storage-duplication argument still stands, but should be framed as
+workload-dependent rather than universal.
+### 10c. Steelmanning the case for live cropping
+
+Your boss's position is stronger than the initial framing suggests. Here is why:
+
+**1. The "reuse" argument does not hold for inference.**
+
+The core justification for pre-materialized crops was "I wouldn't have to
+perform a 2-stage network." But the current architecture already performs two
+stages sequentially — detection, then crop, then pose inference. The crop step
+just happens to persist its output to disk between stages. Replacing it with an
+in-memory crop-and-forward would eliminate I/O without changing the computational
+cost. The detection bboxes and frame indices are already stored in the Zarr;
+computing `frame[y1:y2, x1:x2]` from a decoded frame is negligible compared to
+model inference time.
+
+**2. The "reproducibility" argument has a gap.**
+
+Pre-materialized crops guarantee "same pixels every run" only if you never
+regenerate them. But the architecture requires full regeneration whenever
+detections change — and detections change frequently (new models, refinement,
+interpolation). After regeneration, the crop run has a new timestamp and new
+pixels. The reproducibility guarantee is already scoped to a specific run, which
+is exactly what you would get from a deterministic live-crop function that takes
+(frame, bbox, roi_size) → crop.
+
+**3. The training argument is real, but the current pipeline is still coupled to
+per-recording crops.**
+
+Training ultimately benefits from merged training artifacts, but the current
+export/preparation path still sources ROI tensors from per-recording
+`crop_runs/roi_images`. So while a future export step could crop on the fly
+from video + bboxes and still emit the same merged training zarr, that is not
+how the repo works today. Eliminating per-recording crop storage would require
+refactoring the upstream export/build pipeline, not just changing the final
+training reader.
+
+**4. The TensorRT argument is valid but narrower than the current dependency
+graph.**
+
+Crop-based TensorRT models do need stable crop datasets for calibration and
+validation. In principle that could be satisfied by a merged training zarr
+alone, but in the current codebase those merged artifacts are still built from
+per-recording materialized crops. So this is a plausible future simplification,
+not something the present pipeline already supports.
+
+**5. The infrastructure tax is real and compounds.**
+
+3,500 lines of crop lifecycle code is a significant maintenance surface. Every
+schema change, every new detection source type, every new storage backend must
+account for crop materialization. The cascade invalidation system exists
+*because* of the materialized cache — if crops were computed on demand, there
+would be nothing to invalidate.
+
+### 10d. Where live cropping would struggle
+
+**Random frame access in compressed video is slow.** Crops require decoding
+specific frames from video. Sequential access (processing all frames in order)
+is fast with Decord/OpenCV, but random access (training shuffles samples across
+frames) requires seeking, which is expensive for inter-frame codecs like H.264.
+This is the strongest argument for materialization and applies most directly to
+training/merged-artifact workflows. In the current repo it also matters for
+some per-recording review/tuning tools that jump around ROIs, even though the
+main sequential inference path is a better fit for live cropping.
+
+**Full frames may not be in the Zarr.** The current schema makes
+`raw_video/images_full` optional. Some recordings may only have the external
+video file or downsampled frames. Live cropping would need a reliable path back
+to source pixels, which may mean keeping the video file path in metadata (it
+already is, as `video_source_path` in crop run attrs).
+
+### 10e. Verdict
+
+**Per-recording `crop_runs/roi_images` materialization remains technically
+sound, but looks over-provisioned as a universal default.**
+
+It remains a strong fit when:
+
+- ROI tensors are reused heavily (interactive tuning/review loops)
+- reproducibility requires persisted ROI pixels for a specific run
+- workflows depend on tools that currently require `roi_images`
+
+It is weaker as a default when:
+
+- workloads are primarily one-pass inference
+- per-recording crop runs are generated once and rarely revisited
+- storage and lifecycle complexity dominate the runtime savings
+
+### 10f. Recommended direction
+
+1. **Add a compatibility phase before any default switch.** Today, multiple
+   components still hard-require `crop_runs/<run>/roi_images` (YOLO
+   keypoints/eye masks, traditional pipelines, tuners, and several diagnostics).
+
+2. **Introduce live cropping as an opt-in inference path first.** Start with the
+   core sequential path (detection -> keypoints/eye masks), validate correctness
+   and throughput, then expand to adjacent tools.
+
+3. **Keep crop materialization as an explicit export/cache operation.** The merged
+   training zarr remains the right long-lived artifact for repeated training
+   epochs.
+
+4. **Retain optional per-recording materialization for heavy review/tuning loops.**
+   Treat this as an explicit cache (`--materialize-crops`), not a universal
+   default.
+
+5. **Add retention/GC policy for materialized crop runs.** Bound storage
+   duplication and clean stale cache runs automatically.

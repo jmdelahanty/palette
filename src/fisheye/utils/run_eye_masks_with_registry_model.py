@@ -163,6 +163,8 @@ def _resolution_payload(
             "proto_upsample_factor": args.proto_upsample_factor,
             "legacy_masks": bool(args.legacy_masks),
             "verbose": bool(args.verbose),
+            "roi_cache_policy": args.roi_cache_policy,
+            "roi_cache_dir": str(args.roi_cache_dir) if args.roi_cache_dir else None,
             "label_mode": args.label_mode,
             "write_binary_masks": bool(args.write_binary_masks),
             "no_use_crop": bool(args.no_use_crop),
@@ -273,6 +275,8 @@ def _run_yolo(
         use_retina_masks=(not bool(args.no_retina_masks)),
         proto_upsample_factor=args.proto_upsample_factor,
         legacy_masks=bool(args.legacy_masks),
+        roi_cache_policy=args.roi_cache_policy,
+        roi_cache_dir=args.roi_cache_dir,
         verbose=bool(args.verbose),
         console=None,
         registry=registry,
@@ -306,6 +310,10 @@ def _run_unet(
         unet_argv.extend(["--label-mode", str(args.label_mode)])
     if args.write_binary_masks:
         unet_argv.append("--write-binary-masks")
+    if args.roi_cache_policy:
+        unet_argv.extend(["--roi-cache-policy", str(args.roi_cache_policy)])
+    if args.roi_cache_dir:
+        unet_argv.extend(["--roi-cache-dir", str(args.roi_cache_dir)])
     if not args.no_use_crop:
         unet_argv.append("--use-crop")
     _infer_unet_eye_masks(unet_argv, registry=registry, status_details=status_details)
@@ -348,6 +356,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--no-retina-masks", action="store_true", help="YOLO-only: disable retina masks.")
     parser.add_argument("--proto-upsample-factor", type=int, default=2, help="YOLO-only proto upsample factor.")
     parser.add_argument("--legacy-masks", action="store_true", help="YOLO-only legacy mask conversion path.")
+    parser.add_argument(
+        "--roi-cache-policy",
+        choices=("never", "auto", "always"),
+        default="auto",
+        help="Temporary ROI cache policy for geometry-only crop runs.",
+    )
+    parser.add_argument(
+        "--roi-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional scratch directory for temporary ROI caches.",
+    )
     parser.add_argument("--verbose", action="store_true", help="YOLO-only verbose Ultralytics output.")
 
     parser.add_argument("--label-mode", choices=("union", "lr"), default=None, help="U-Net-only label-mode override.")

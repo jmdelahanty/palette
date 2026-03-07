@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import argparse
-import json
-import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any
 
 import zarr
+
+from ..shared.crop_signature import build_crop_signature
 
 
 def _select_crop_run(parent: zarr.Group, requested: Optional[str]) -> str:
@@ -26,30 +26,6 @@ def _select_crop_run(parent: zarr.Group, requested: Optional[str]) -> str:
     if not names:
         raise RuntimeError("No crop runs available.")
     return sorted(names)[-1]
-
-
-def _hash_parameters(params: object) -> Optional[str]:
-    if params is None:
-        return None
-    try:
-        payload = json.dumps(params, sort_keys=True, default=str).encode("utf-8")
-    except (TypeError, ValueError):
-        payload = str(params).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _build_crop_signature(attrs: Dict[str, Any]) -> Dict[str, object]:
-    return {
-        "signature_version": 1,
-        "detection_source_path": attrs.get("detection_source_path"),
-        "detection_source_type": attrs.get("detection_source_type"),
-        "detection_preferred_policy": attrs.get("detection_preferred_policy"),
-        "source_detect_run": attrs.get("source_detect_run"),
-        "source_refined_run": attrs.get("source_refined_run"),
-        "roi_size": attrs.get("roi_size"),
-        "parameter_source": attrs.get("parameter_source"),
-        "parameters_hash": _hash_parameters(attrs.get("parameters")),
-    }
 
 
 def main(argv: Optional[list[str]] = None) -> int:

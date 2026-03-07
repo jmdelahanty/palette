@@ -26,6 +26,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRe
 from ultralytics import YOLO, __version__ as ultralytics_version
 
 from ..registry.db import RegistryPaths
+from ..shared.crop_image_source import CropImageSource
 from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
@@ -322,6 +323,8 @@ def detect_keypoints_yolo(
     max_det: int = 1,
     verbose: bool = False,
     mask_threshold: float = 0.5,
+    roi_cache_policy: str = "auto",
+    roi_cache_dir: Optional[Path] = None,
     registry: Optional[Path] = None,
     console: Optional[Console] = None,
 ) -> str:
@@ -351,25 +354,26 @@ def detect_keypoints_yolo(
     model_path_resolved = model_path.resolve()
 
     root = zarr.open(str(zarr_path), mode="a")
-    if "crop_runs" not in root:
-        raise ValueError("Zarr archive is missing crop_runs; run cropping first")
+    crop_source = CropImageSource.open(
+        root,
+        crop_run=crop_run,
+        zarr_path=zarr_path,
+        roi_cache_policy=roi_cache_policy,
+        roi_cache_dir=roi_cache_dir,
+        console=console,
+    )
+    crop_group = crop_source.crop_group
+    latest_crop = crop_source.crop_run_name
 
-    latest_crop = crop_run or root["crop_runs"].attrs.get("latest")
-    if latest_crop is None:
-        raise ValueError("No crop run found; cannot perform pose inference")
-    crop_group = root[f"crop_runs/{latest_crop}"]
-
-    roi_images = crop_group["roi_images"]
-    roi_coords = crop_group["roi_coordinates_full"][:]
-    frame_indices = crop_group.get("frame_indices")
-    frame_indices = frame_indices[:] if frame_indices is not None else np.zeros(len(roi_coords), dtype=np.int32)
-
-    total_rois = roi_images.shape[0]
+    roi_coords = crop_source.roi_coordinates_full.copy()
+    frame_indices = crop_source.frame_indices.astype(np.int64, copy=True)
+    total_rois = crop_source.total_rois
     if total_rois == 0:
         console.print("[yellow]No ROIs found in crop run; nothing to process[/yellow]")
+        crop_source.close()
         return ""
 
-    roi_h, roi_w = roi_images.shape[1:3]
+    roi_h, roi_w = crop_source.roi_shape
     source_detect_run = crop_group.attrs.get("source_detect_run")
     source_refined_run = crop_group.attrs.get("source_refined_run")
     override_data = _prepare_refined_roi_overrides(
@@ -515,7 +519,7 @@ def detect_keypoints_yolo(
         for start in range(0, total_rois, batch_size):
             end = min(start + batch_size, total_rois)
             batch_coords = roi_coords[start:end]
-            batch_roi_np = np.asarray(roi_images[start:end])
+            batch_roi_np = crop_source.read_slice(start, end)
             if override_map is not None and override_rois is not None:
                 local_map = override_map[start:end]
                 valid = local_map >= 0
@@ -646,6 +650,12 @@ def detect_keypoints_yolo(
         "ultralytics_version": ultralytics_version,
         "device": model_device,
         "source_crop_run": latest_crop,
+        "source_crop_storage_mode": crop_source.storage_mode,
+        "source_crop_signature": normalize_attr(crop_group.attrs.get("crop_signature")),
+        "source_crop_revision": crop_group.attrs.get("crop_revision"),
+        "source_roi_read_mode": crop_source.roi_read_mode,
+        "roi_cache_policy": crop_source.roi_cache_policy,
+        "source_roi_cache_used": bool(crop_source.roi_cache_used),
         "source_detect_run": source_detect_run or "unknown",
         "keypoints_processed": total_rois,
         "success_rate": round(success_rate, 2),
@@ -673,6 +683,10 @@ def detect_keypoints_yolo(
         "inference_duration_seconds": float(total_time),
         "inference_poses_per_second": float(inference_rate),
     })
+    if crop_source.roi_cache_key:
+        run_group.attrs["source_roi_cache_key"] = crop_source.roi_cache_key
+    if crop_source.roi_cache_path:
+        run_group.attrs["source_roi_cache_path"] = crop_source.roi_cache_path
     if source_refined_run:
         run_group.attrs["source_refined_run"] = source_refined_run
     provenance_record = build_stage_provenance(
@@ -698,10 +712,17 @@ def detect_keypoints_yolo(
         parameters=dict(run_group.attrs.get("parameters") or {}),
         inputs={
             "source_crop_run": latest_crop,
+            "source_crop_storage_mode": crop_source.storage_mode,
+            "source_crop_signature": normalize_attr(crop_group.attrs.get("crop_signature")),
+            "source_crop_revision": crop_group.attrs.get("crop_revision"),
+            "source_roi_read_mode": crop_source.roi_read_mode,
+            "roi_cache_policy": crop_source.roi_cache_policy,
+            "roi_cache_used": bool(crop_source.roi_cache_used),
+            "roi_cache_key": crop_source.roi_cache_key,
             "source_detect_run": source_detect_run or "unknown",
             "source_refined_run": source_refined_run,
-            "frame_source": crop_group.attrs.get("video_source_type", "zarr"),
-            "source_video_path": crop_group.attrs.get("video_source_path"),
+            "frame_source": crop_source.frame_source_kind,
+            "source_video_path": crop_source.frame_source_path or crop_group.attrs.get("video_source_path"),
         },
         artifacts={
             "model_path": str(model_path_resolved),
@@ -723,6 +744,12 @@ def detect_keypoints_yolo(
         "reason": "present",
         "run_group": "keypoints_runs",
         "source_crop_run": latest_crop,
+        "source_crop_storage_mode": crop_source.storage_mode,
+        "source_crop_signature": normalize_attr(crop_group.attrs.get("crop_signature")),
+        "source_crop_revision": crop_group.attrs.get("crop_revision"),
+        "source_roi_read_mode": crop_source.roi_read_mode,
+        "roi_cache_policy": crop_source.roi_cache_policy,
+        "roi_cache_used": bool(crop_source.roi_cache_used),
         "source_detect_run": source_detect_run or "unknown",
         "total_rois": int(total_rois),
         "successful_detections": int(success_total),
@@ -735,16 +762,19 @@ def detect_keypoints_yolo(
         status_details["refined_roi_overrides"] = int(override_data["count"])
         status_details["refined_roi_source"] = str(override_data["path"])
 
-    _emit_keypoint_step_status(
-        root=root,
-        zarr_path=zarr_path.resolve(),
-        run_name=resolved_run_name,
-        method=normalize_attr(run_group.attrs.get("method")) or "yolo_pose",
-        coverage_pct=float(success_rate),
-        details=status_details,
-        console=console,
-        registry=registry,
-    )
+    try:
+        _emit_keypoint_step_status(
+            root=root,
+            zarr_path=zarr_path.resolve(),
+            run_name=resolved_run_name,
+            method=normalize_attr(run_group.attrs.get("method")) or "yolo_pose",
+            coverage_pct=float(success_rate),
+            details=status_details,
+            console=console,
+            registry=registry,
+        )
+    finally:
+        crop_source.close()
 
     summary_lines = [
         "[green]✓[/green] Pose inference complete",
@@ -790,6 +820,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Compatibility parameter recorded in run metadata (not used for pose decoding).",
     )
     parser.add_argument("--registry", type=Path, default=None, help="Optional registry SQLite path.")
+    parser.add_argument(
+        "--roi-cache-policy",
+        choices=("never", "auto", "always"),
+        default="auto",
+        help="Temporary ROI cache policy for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument(
+        "--roi-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional scratch directory for temporary ROI caches.",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output")
     return parser
 
@@ -811,6 +853,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         max_det=args.max_det,
         verbose=args.verbose,
         mask_threshold=args.mask_threshold,
+        roi_cache_policy=args.roi_cache_policy,
+        roi_cache_dir=args.roi_cache_dir,
         registry=args.registry,
     )
 

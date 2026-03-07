@@ -775,9 +775,11 @@ def segment_eye_masks(
         overwrite=True,
     )
     if crop_detection_source is not None:
-        console.print("[dim]Copied detection_source from crop run[/dim]")
+        console.print("[dim]Copied per-ROI detection lineage (detection_source) from crop run[/dim]")
     else:
-        console.print("[yellow]Crop run missing detection_source; defaulting to zeros.[/yellow]")
+        console.print(
+            "[yellow]Crop run missing per-ROI detection lineage (detection_source); defaulting to zeros.[/yellow]"
+        )
 
     _copy_lineage_arrays_from_crop_with_keypoint_fallback(
         run_group=run_group,

@@ -176,6 +176,35 @@ def test_build_plans_from_zarr_filters_by_zarr_use(tmp_path: Path) -> None:
     assert plans[0].zarr_path == training_path
 
 
+def test_build_plans_from_zarr_uses_source_recording_context_for_copied_archive(tmp_path: Path) -> None:
+    source_recording = tmp_path / "source_recording"
+    source_video = source_recording / "cams" / "cam_1.mp4"
+    source_video.parent.mkdir(parents=True, exist_ok=True)
+    source_video.write_bytes(b"")
+
+    copied_path = tmp_path / "smoke" / "copied_analysis.zarr"
+    copied_root = zarr.open_group(str(copied_path), mode="w")
+    copied_root.attrs["source_video_path"] = str(source_video.resolve())
+    analysis_metadata = copied_root.require_group("analysis_metadata")
+    analysis_metadata.attrs["session_uuid"] = "2026-01-28T19-22-28Z_arena_1"
+    _create_latest_run(copied_root, "crop_runs", "crop_001")
+    _create_latest_run(copied_root, "keypoints_runs", "keypoints_001")
+
+    plans = mod._build_plans_from_zarr(
+        [copied_path],
+        skip_existing=True,
+        require_crop=True,
+        require_keypoints=True,
+        refine_only=False,
+        zarr_use="analysis",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].status == "ok"
+    assert plans[0].recording_dir == source_recording.resolve()
+    assert plans[0].zarr_path == copied_path
+
+
 def test_resolve_method_prefers_override() -> None:
     cfg = {"eye_masks": {"method": "traditional"}}
     assert mod._resolve_method(cfg, "yolo") == "yolo"
@@ -558,7 +587,7 @@ def test_main_model_source_registry_skips_config_model_requirement(
     assert rc == 0
 
 
-def test_main_apply_model_source_registry_uses_registry_runner(
+def test_main_apply_model_source_registry_uses_pre_resolved_model(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -572,45 +601,62 @@ def test_main_apply_model_source_registry_uses_registry_runner(
     registry_path = tmp_path / "registry.sqlite"
     registry_path.write_text("", encoding="utf-8")
 
-    called: list[list[str]] = []
-
-    def _fake_registry_runner(argv: list[str] | None = None) -> int:
-        called.append(list(argv or []))
-        return 0
-
     monkeypatch.setattr(mod, "_resolve_root", lambda _paths: [tmp_path])
     monkeypatch.setattr(
         mod,
         "_load_config",
-        lambda _path: {"eye_masks": {"method": "unet", "batch_size": 16, "use_crop": True}},
+        lambda _path: {
+            "eye_masks": {
+                "method": "yolo",
+                "batch_size": 16,
+                "use_crop": True,
+                "roi_cache_policy": "always",
+                "roi_cache_dir": "/tmp/roi-cache",
+            }
+        },
     )
     monkeypatch.setattr(mod, "_build_plans", lambda *args, **kwargs: [plan])  # noqa: ARG005
     monkeypatch.setattr(mod, "_build_plans_from_zarr", lambda *args, **kwargs: [])  # noqa: ARG005
-    monkeypatch.setattr(mod, "run_eye_masks_with_registry_model_main", _fake_registry_runner)
-    monkeypatch.setattr(mod, "_latest_run", lambda *_args, **_kwargs: "eye_masks_001")
     monkeypatch.setattr(
         mod,
-        "_collect_stage_payload",
-        lambda _zarr_path, group_name, run_name: {
-            "group": group_name,
-            "run_name": run_name,
-            "method": "mock",
-            "duration_seconds": 0.1,
-            "source_runs": {},
-        },
+        "_resolve_registry_models_for_plans",
+        lambda **_kwargs: (  # noqa: ARG005
+            {
+                str(plan.zarr_path.resolve()): mod.ResolvedModel(
+                    model_path="/models/eye_masks_yolo.pt",
+                    payload={
+                        "selected": {
+                            "run_id": "eye_run_001",
+                            "set_id": "eye_masks_set_001",
+                            "model_path": "/models/eye_masks_yolo.pt",
+                        }
+                    },
+                )
+            },
+            {},
+        ),
     )
-    monkeypatch.setattr(
-        mod,
-        "_sync_eye_mask_registry_rows_after_run",
-        lambda **_kwargs: {"synced": True},
-    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_run_plan_with_registry_model(*args, **kwargs):  # noqa: ANN002, ANN003
+        captured["resolved_model"] = kwargs.get("resolved_model")
+        return {
+            "recording": str(plan.recording_dir),
+            "zarr": str(plan.zarr_path),
+            "status": "ok",
+            "method": "yolo",
+            "registry_sync": {"synced": True},
+        }
+
+    monkeypatch.setattr(mod, "_run_plan_with_registry_model", _fake_run_plan_with_registry_model)
 
     rc = mod.main(
         [
             "--apply",
             "--no-log",
             "--method",
-            "unet",
+            "yolo",
             "--model-source",
             "registry",
             "--registry",
@@ -623,16 +669,130 @@ def test_main_apply_model_source_registry_uses_registry_runner(
         ]
     )
     assert rc == 0
-    assert len(called) == 1
-    argv = called[0]
-    assert "--recording-dir" in argv
-    assert "--output" in argv
-    assert "--registry" in argv
-    assert "--method" in argv
-    assert "--set-id" in argv
-    assert "--top-k" in argv
-    assert "eye_masks_set_001" in argv
-    assert "7" in argv
+    resolved_model = captured.get("resolved_model")
+    assert isinstance(resolved_model, mod.ResolvedModel)
+    assert resolved_model.model_path == "/models/eye_masks_yolo.pt"
+
+
+def test_main_apply_model_source_registry_for_unet_uses_pre_resolved_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan = mod.EyeMaskPlan(
+        recording_dir=tmp_path / "recording_b",
+        h5_path=tmp_path / "recording_b" / "raw" / "recording_b.h5",
+        zarr_path=tmp_path / "recording_b" / "zarr" / "recording_b_analysis.zarr",
+        camera_id="2",
+        status="ok",
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    registry_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(mod, "_resolve_root", lambda _paths: [tmp_path])
+    monkeypatch.setattr(
+        mod,
+        "_load_config",
+        lambda _path: {
+            "eye_masks": {
+                "method": "unet",
+                "checkpoint": "/tmp/unet.pt",
+                "batch_size": 24,
+                "use_crop": True,
+                "roi_cache_policy": "always",
+                "roi_cache_dir": "/tmp/unet-roi-cache",
+            }
+        },
+    )
+    monkeypatch.setattr(mod, "_build_plans", lambda *args, **kwargs: [plan])  # noqa: ARG005
+    monkeypatch.setattr(mod, "_build_plans_from_zarr", lambda *args, **kwargs: [])  # noqa: ARG005
+    monkeypatch.setattr(
+        mod,
+        "_resolve_registry_models_for_plans",
+        lambda **_kwargs: (  # noqa: ARG005
+            {
+                str(plan.zarr_path.resolve()): mod.ResolvedModel(
+                    model_path="/models/eye_masks_unet.pt",
+                    payload={
+                        "selected": {
+                            "run_id": "eye_run_002",
+                            "set_id": "eye_masks_set_002",
+                            "model_path": "/models/eye_masks_unet.pt",
+                        }
+                    },
+                )
+            },
+            {},
+        ),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_run_plan_with_registry_model(*args, **kwargs):  # noqa: ANN002, ANN003
+        captured["resolved_model"] = kwargs.get("resolved_model")
+        return {
+            "recording": str(plan.recording_dir),
+            "zarr": str(plan.zarr_path),
+            "status": "ok",
+            "method": "unet",
+            "registry_sync": {"synced": True},
+        }
+
+    monkeypatch.setattr(mod, "_run_plan_with_registry_model", _fake_run_plan_with_registry_model)
+
+    rc = mod.main(
+        [
+            "--apply",
+            "--no-log",
+            "--method",
+            "unet",
+            "--model-source",
+            "registry",
+            "--registry",
+            str(registry_path),
+            "--model-set-id",
+            "eye_masks_set_002",
+            str(tmp_path),
+        ]
+    )
+
+    assert rc == 0
+    resolved_model = captured.get("resolved_model")
+    assert isinstance(resolved_model, mod.ResolvedModel)
+    assert resolved_model.model_path == "/models/eye_masks_unet.pt"
+
+
+def test_run_unet_forwards_roi_cache_args(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_infer(argv: list[str] | None = None) -> None:
+        captured["argv"] = list(argv or [])
+
+    monkeypatch.setattr(mod, "infer_unet_eye_masks_main", _fake_infer)
+    monkeypatch.setattr(mod, "_latest_run", lambda *_args, **_kwargs: "eye_masks_unet_003")
+
+    run_name = mod._run_unet(
+        tmp_path / "recording_analysis.zarr",
+        {
+            "eye_masks": {
+                "checkpoint": "/tmp/unet.pt",
+                "batch_size": 32,
+                "roi_cache_policy": "always",
+                "roi_cache_dir": "/tmp/unet-roi-cache",
+            }
+        },
+    )
+
+    assert run_name == "eye_masks_unet_003"
+    argv = captured.get("argv")
+    assert isinstance(argv, list)
+    assert "--checkpoint" in argv
+    assert "--roi-cache-policy" in argv
+    assert "--roi-cache-dir" in argv
+    assert "always" in argv
+    assert "/tmp/unet-roi-cache" in argv
 
 
 def test_main_refine_missing_only_requires_refine_only(

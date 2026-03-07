@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
-
 from fisheye.utils import run_detections_batch as mod
 
 
-def _write_root_metadata(zarr_path: Path) -> None:
+def _write_root_metadata(zarr_path: Path, attrs: dict[str, object] | None = None) -> None:
     zarr_path.mkdir(parents=True, exist_ok=True)
     (zarr_path / "zarr.json").write_text(
         json.dumps(
             {
-                "attributes": {},
+                "attributes": attrs or {},
                 "zarr_format": 3,
                 "consolidated_metadata": None,
                 "node_type": "group",
@@ -109,7 +107,7 @@ def test_build_plans_applies_status_reason_taxonomy(tmp_path: Path) -> None:
     assert missing_plan.reason == mod.REASON_CAMS_DIR_MISSING
 
 
-def test_main_apply_invokes_registry_runner_and_returns_failure(monkeypatch, tmp_path: Path) -> None:
+def test_main_apply_uses_pre_resolved_model_and_returns_failure(monkeypatch, tmp_path: Path) -> None:
     registry_path = tmp_path / "registry.sqlite"
     registry_path.write_text("", encoding="utf-8")
 
@@ -131,14 +129,36 @@ def test_main_apply_invokes_registry_runner_and_returns_failure(monkeypatch, tmp
     monkeypatch.setattr(mod, "_discover_analysis_zarrs", lambda *_args, **_kwargs: [zarr_path.resolve()])
     monkeypatch.setattr(mod, "_build_plans", lambda *_args, **_kwargs: [plan])
 
+    monkeypatch.setattr(
+        mod,
+        "_resolve_registry_models_for_plans",
+        lambda **_kwargs: (  # noqa: ARG005
+            {
+                str(zarr_path.resolve()): mod.ResolvedModel(
+                    model_path="/tmp/model.pt",
+                    payload={
+                        "selected": {
+                            "run_id": "run_1",
+                            "set_id": "set_1",
+                            "model_path": "/tmp/model.pt",
+                        }
+                    },
+                )
+            },
+            {},
+        ),
+    )
+
     calls: list[dict[str, object]] = []
 
-    def _fake_runner(**kwargs):  # noqa: ANN003
+    def _fake_run_detect_plan(**kwargs):  # noqa: ANN003
         calls.append(kwargs)
-        return SimpleNamespace(
+        return mod.DetectRegistryResult(
             ok=False,
+            status="failed",
             recording_dir=str(recording_dir.resolve()),
             output_zarr=str(zarr_path.resolve()),
+            registry_path=str(registry_path.resolve()),
             reason="detect_inference_failed",
             error="oom",
             remediation="retry",
@@ -149,16 +169,40 @@ def test_main_apply_invokes_registry_runner_and_returns_failure(monkeypatch, tmp
             detect_run=None,
         )
 
-    monkeypatch.setattr(mod, "run_detect_with_registry_model", _fake_runner)
+    monkeypatch.setattr(mod, "_run_detect_plan", _fake_run_detect_plan)
 
     rc = mod.main(["--apply", "--json", "--no-log", "--registry", str(registry_path), str(tmp_path)])
 
     assert rc == 1
     assert len(calls) == 1
-    assert calls[0]["recording_dir"] == recording_dir.resolve()
-    assert calls[0]["video"] == video_path.resolve()
-    assert calls[0]["output"] == zarr_path.resolve()
-    assert calls[0]["registry"] == registry_path.resolve()
+    assert calls[0]["plan"].recording_dir == recording_dir.resolve()
+    assert calls[0]["plan"].video_path == video_path.resolve()
+    assert calls[0]["plan"].zarr_path == zarr_path.resolve()
+    assert calls[0]["registry_path"] == registry_path.resolve()
+    assert calls[0]["resolved_model"].model_path == "/tmp/model.pt"
+
+
+def test_build_plan_for_zarr_uses_source_video_path_from_copied_archive(tmp_path: Path) -> None:
+    source_recording = tmp_path / "source_recording"
+    source_video = source_recording / "cams" / "cam_1.mp4"
+    source_video.parent.mkdir(parents=True, exist_ok=True)
+    source_video.write_bytes(b"")
+
+    zarr_path = tmp_path / "smoke" / "copied_analysis.zarr"
+    _write_root_metadata(zarr_path, attrs={"source_video_path": str(source_video.resolve())})
+    _write_group_attrs(zarr_path, "analysis_metadata", {"detection_tuning": {"enabled": True}})
+    _write_group_attrs(zarr_path, "detect_runs", {"latest": None})
+
+    plan = mod._build_plan_for_zarr(  # noqa: SLF001
+        zarr_path=zarr_path,
+        skip_existing=False,
+        require_background=False,
+        require_tuning=False,
+    )
+
+    assert plan.status == mod.STATUS_OK
+    assert plan.recording_dir == source_recording.resolve()
+    assert plan.video_path == source_video.resolve()
 
 
 def test_main_dry_run_marks_registry_missing(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -180,10 +224,10 @@ def test_main_dry_run_marks_registry_missing(monkeypatch, tmp_path: Path, capsys
     monkeypatch.setattr(mod, "_discover_analysis_zarrs", lambda *_args, **_kwargs: [zarr_path.resolve()])
     monkeypatch.setattr(mod, "_build_plans", lambda *_args, **_kwargs: [plan])
 
-    def _unexpected_runner(**_kwargs):
-        raise AssertionError("run_detect_with_registry_model should not be called in dry-run")
+    def _unexpected_resolve(**_kwargs):
+        raise AssertionError("_resolve_registry_models_for_plans should not be called in dry-run")
 
-    monkeypatch.setattr(mod, "run_detect_with_registry_model", _unexpected_runner)
+    monkeypatch.setattr(mod, "_resolve_registry_models_for_plans", _unexpected_resolve)
 
     missing_registry = tmp_path / "missing_registry.sqlite"
     rc = mod.main(["--dry-run", "--json", "--no-log", "--registry", str(missing_registry), str(tmp_path)])

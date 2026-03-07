@@ -179,6 +179,10 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
             "pose_set_123",
             "--include-non-success",
             "--cpu",
+            "--roi-cache-policy",
+            "always",
+            "--roi-cache-dir",
+            str(tmp_path / "roi-cache"),
         ]
     )
 
@@ -194,6 +198,8 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     assert detect_kwargs.get("zarr_path") == str(output_path.resolve())
     assert detect_kwargs.get("model_path") == "/tmp/pose_model.pt"
     assert detect_kwargs.get("device") == "cpu"
+    assert detect_kwargs.get("roi_cache_policy") == "always"
+    assert detect_kwargs.get("roi_cache_dir") == tmp_path / "roi-cache"
     assert Path(str(detect_kwargs.get("registry"))) == registry_path.resolve()
 
     assert calls.get("write_zarr_path") == output_path.resolve()
@@ -201,5 +207,8 @@ def test_main_runs_pose_resolution_and_writes_provenance(monkeypatch: pytest.Mon
     payload = calls.get("write_payload")
     assert isinstance(payload, dict)
     assert payload.get("task") == "pose"
+    parameters = payload.get("parameters")
+    assert isinstance(parameters, dict)
+    assert parameters.get("roi_cache_policy") == "always"
     for key in ("contract", "command", "git", "environment", "platform", "parameters", "inputs", "artifacts"):
         assert key in payload

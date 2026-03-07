@@ -25,7 +25,7 @@ from ..preprocessing.background import compute_background
 from ..detection.detect_traditional import detect_fish
 from ..detection.detect_keypoints_traditional import detect_keypoints as detect_keypoints_traditional
 from ..tracking.crop import crop_detections, infer_detection_source_type
-from ..tracking.assign_ids import assign_ids_spatial
+from ..tracking.arena_assignment import assign_arenas_spatial
 from ..refinement.refine_detect import create_refined_run
 from ..refinement.detect_quality import analyze_detect_quality, save_quality_report
 from ..refinement.refine_keypoints import create_refined_keypoint_run
@@ -355,7 +355,7 @@ class Pipeline:
                     existing_stages.add('background')
                 if 'detect_runs' in root and root['detect_runs'].attrs.get('latest'):
                     existing_stages.add('detect')
-                if 'id_assignment_runs' in root and root['id_assignment_runs'].attrs.get('latest'):
+                if 'arena_assignment_runs' in root and root['arena_assignment_runs'].attrs.get('latest'):
                     existing_stages.add('assign_ids')
             except:
                 pass
@@ -584,6 +584,8 @@ class Pipeline:
                 iou=params.get('iou', 0.5),
                 max_det=params.get('max_det', 1),
                 mask_threshold=params.get('mask_threshold', 0.5),
+                roi_cache_policy=params.get('roi_cache_policy', 'auto'),
+                roi_cache_dir=params.get('roi_cache_dir'),
                 verbose=params.get('verbose', False),
                 registry=Path(str(self.config.registry_path)) if self.config.registry_path else None,
                 console=self.console,
@@ -629,6 +631,8 @@ class Pipeline:
                 use_retina_masks=params.get('use_retina_masks', True),
                 proto_upsample_factor=params.get('proto_upsample_factor', 2),
                 legacy_masks=params.get('legacy_masks', False),
+                roi_cache_policy=params.get('roi_cache_policy', 'auto'),
+                roi_cache_dir=params.get('roi_cache_dir'),
                 verbose=params.get('verbose', False),
                 console=self.console,
             )
@@ -657,6 +661,8 @@ class Pipeline:
                     'use_retina_masks',
                     'proto_upsample_factor',
                     'legacy_masks',
+                    'roi_cache_policy',
+                    'roi_cache_dir',
                     'verbose',
                 }
             }
@@ -835,7 +841,7 @@ class Pipeline:
 
     def _run_assign_ids(self) -> None:
         """
-        Run ID assignment stage.
+        Run arena assignment stage.
         
         For single-dish experiments: Automatically uses dish mask as single ROI
         For multi-dish experiments: Requires sub-dish ROI definitions
@@ -911,7 +917,7 @@ class Pipeline:
         # Run assign_ids
         self.console.print(f"\n[bold cyan]Running ID Assignment ({setup_type} mode)[/bold cyan]\n")
         
-        results = assign_ids_spatial(
+        results = assign_arenas_spatial(
             zarr_path=self.config.zarr_path,
             config=self.pipeline_params,
             console=self.console
@@ -1107,10 +1113,10 @@ class Pipeline:
                                 f"  [dim]└─ {n_real:,} real + {n_interp:,} interpolated[/dim]"
                             )
                 
-                # ID assignment results
-                if 'id_assignment_runs' in root and root['id_assignment_runs'].attrs.get('latest'):
-                    latest_assign = root['id_assignment_runs'].attrs['latest']
-                    assign_group = root[f'id_assignment_runs/{latest_assign}']
+                # Arena assignment results
+                if 'arena_assignment_runs' in root and root['arena_assignment_runs'].attrs.get('latest'):
+                    latest_assign = root['arena_assignment_runs'].attrs['latest']
+                    assign_group = root[f'arena_assignment_runs/{latest_assign}']
                     if 'summary_statistics' in assign_group.attrs:
                         stats = assign_group.attrs['summary_statistics']
                         assigned = stats.get('assigned_detections', 0)
@@ -1325,9 +1331,9 @@ class Pipeline:
                 return group is not None and group.attrs.get('latest') is not None
             
             elif stage == 'assign_ids':
-                if 'id_assignment_runs' not in root:
+                if 'arena_assignment_runs' not in root:
                     return False
-                latest = root['id_assignment_runs'].attrs.get('latest')
+                latest = root['arena_assignment_runs'].attrs.get('latest')
                 return latest is not None
             
             elif stage == 'refine':

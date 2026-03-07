@@ -156,6 +156,18 @@ def test_validate_run_missing_optional_arrays_are_warnings() -> None:
     assert any("optional array 'centers_px'" in msg for msg in result.warnings)
 
 
+def test_validate_run_accepts_geometry_only_crop_group() -> None:
+    group = zarr.group()
+    _write_required_arrays(group, CROP_SPEC)
+
+    result = validate_run(group, CROP_SPEC)
+    assert result.valid
+    assert not result.errors
+    assert any("optional array 'roi_images'" in msg for msg in result.warnings)
+    assert any("optional array 'roi_coordinates_ds'" in msg for msg in result.warnings)
+    assert any("optional array 'detection_source'" in msg for msg in result.warnings)
+
+
 def test_validate_run_refined_detect_subgroups_happy_path() -> None:
     group = zarr.group()
     _write_required_arrays(group, REFINED_DETECT_SPEC)
