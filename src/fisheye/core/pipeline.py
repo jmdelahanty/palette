@@ -728,6 +728,8 @@ class Pipeline:
             success_min_eye_area_px=params.get('success_min_eye_area_px', 50.0),
             force_refine_traditional=bool(params.get('force_refine_traditional', False)),
             allow_latest_keypoint_fallback=bool(params.get('allow_latest_keypoint_fallback', False)),
+            probability_threshold=params.get('probability_threshold'),
+            write_refined_probabilities=bool(params.get('write_refined_probabilities', False)),
         )
 
         self.console.print(f"[green]✓[/green] Eye-mask refinement saved as [cyan]{run_name}[/cyan]")

@@ -9,6 +9,7 @@ import zarr
 
 from fisheye.visualization.visualize_eye_mask_patches import (
     _apply_eye_mask_review_status,
+    _apply_recommended_probability_threshold,
     _append_flagged_frame,
     _build_eye_row,
     _extract_primary_reject_reason,
@@ -266,6 +267,31 @@ def test_apply_eye_mask_review_status_writes_contract_attrs(tmp_path: Path) -> N
     assert "timestamp" in status
     assert payload["state"] == "approved"
     assert refined_parent.attrs["eye_mask_review_status_latest"] == "refined_eye_masks_001"
+
+
+def test_apply_recommended_probability_threshold_writes_source_run_metadata(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    eye_parent = root.create_group("eye_masks_runs")
+    source_run = eye_parent.create_group("eye_masks_001")
+
+    payload = _apply_recommended_probability_threshold(
+        source_run,
+        threshold=0.62,
+        reviewer="reviewer_a",
+        notes="previewed in patch viewer",
+        source_refined_run="refined_eye_masks_001",
+    )
+
+    assert source_run.attrs["recommended_probability_threshold"] == pytest.approx(0.62)
+    review_payload = dict(source_run.attrs["recommended_probability_threshold_review"])
+    assert review_payload["threshold"] == pytest.approx(0.62)
+    assert review_payload["reviewer"] == "reviewer_a"
+    assert review_payload["notes"] == "previewed in patch viewer"
+    assert review_payload["source_refined_eye_masks_run"] == "refined_eye_masks_001"
+    assert review_payload["source"] == "visualize_eye_mask_patches"
+    assert "timestamp" in review_payload
+    assert payload["threshold"] == pytest.approx(0.62)
 
 
 def test_mouse_modifier_state_decodes_ctrl_shift_lmb() -> None:

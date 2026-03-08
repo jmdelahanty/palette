@@ -113,6 +113,54 @@ Writes:
    - `scripts/py -m fisheye.tune.eye_mask_review <archive>.zarr --manual`
    - `scripts/py -m fisheye.tune.eye_mask_review <archive>.zarr --audit`
 
+## Patch Review Probability Preview
+
+For model-based eye-mask review, `visualize_eye_mask_patches.py` remains a
+binary-mask edit/review tool, but it can now load source probability masks as a
+preview aid.
+
+Current intended behavior:
+
+- The viewer prefers source probabilities from `mask_probs_roi_refined` or
+  `mask_probs_roi` on the source `eye_masks_runs/<run>`.
+- It uses `fisheye.shared.mask_source.load_mask_bundle(...)` so the preview
+  handles:
+  - direct float probabilities
+  - quantized `uint8` probabilities decoded back to semantic `[0,1]`
+  - existing binary `masks_roi` fallback when probabilities are unavailable
+- A threshold slider updates the preview only:
+  - probability heatmap
+  - thresholded binary preview
+- The viewer does **not** apply thresholded masks into `refined_eye_masks_runs`.
+- Instead, the viewer saves only metadata on the source eye-mask run:
+  - `recommended_probability_threshold`
+  - `recommended_probability_threshold_review`
+
+Why this split is recommended:
+
+- Operators want to visually discover a useful threshold from probability
+  fields.
+- Refinement should remain the only stage that converts probabilities into
+  canonical binary refined masks.
+- This keeps the review UI from becoming a second refinement/write path.
+- Using the shared mask loader keeps dtype/encoding behavior consistent with the
+  rest of the stack.
+
+Refinement threshold precedence:
+
+1. Explicit CLI `--probability-threshold`
+2. Source-eye-mask-run `recommended_probability_threshold`
+3. Default `0.45`
+
+UI recommendation:
+
+- Show both the probability heatmap and the thresholded binary preview when
+  probabilities exist.
+- If no probability arrays are present, hide/disable the threshold slider and
+  continue with the current binary-only review flow.
+- For refined runs, prefer source probability arrays for threshold preview if
+  the refined run itself is binary-only.
+
 ## Quick Verification Commands
 
 1. List recent eye-mask runs and runtime metadata.

@@ -90,8 +90,34 @@ Eye segmentation runs can now be post-processed with `python -m fisheye.refineme
   `source_*_run`, `source_eye_masks_method`, `eye_labels`, summary stats)
 - Writes canonical keypoint lineage attr `source_keypoints_run` (legacy
   `source_keypoint_run` may be mirrored for migration compatibility)
+- Treats binary ROI masks as the canonical refined artifact.
+  `mask_probs_roi_refined` is optional and should only be written when
+  explicitly requested.
 
 This keeps the original masks untouched for provenance while providing a refined alternative that matches keypoint labels.
+
+Refinement threshold policy:
+
+- Refinement converts probability masks into binary refined masks using an
+  explicit threshold when provided via `--probability-threshold`.
+- When the CLI flag is omitted, refinement resolves the threshold in this order:
+  - `eye_masks_runs/<source>.attrs["recommended_probability_threshold"]`
+  - default `0.45`
+- The threshold actually used for the run is recorded in refined-run attrs as
+  `mask_probability_threshold`, along with
+  `mask_probability_threshold_source`, so readers do not have to guess how
+  binary masks were derived.
+
+Viewer/review policy:
+
+- `visualize_eye_mask_patches.py` may expose source probability masks with a
+  threshold slider for preview and calibration.
+- That viewer should save only recommendation metadata on the source eye-mask
+  run (`recommended_probability_threshold`,
+  `recommended_probability_threshold_review`).
+- The viewer should not directly write threshold-derived refined masks; the
+  refinement stage remains the only stage that applies the threshold to produce
+  canonical binary refined masks.
 
 By default, traditional segmentations use a fast path that preserves the source masks and ellipse fits and skips smoothing/component enforcement. Use `--force-refine-traditional` to opt into the full refinement pass.
 
@@ -104,7 +130,22 @@ After refinement, use `python -m fisheye.tune.eye_mask_review --retune/--manual`
 For the full operator checklist (tuning, rerun, refinement, retune, manual correction, audit), see `src/fisheye/docs/eye_mask_tuning_workflow.md`.
 
 > ℹ️ **Optional datasets.**  
-> - YOLO-based segmentation writes an additional `mask_probs_roi` dataset with float16 probabilities.  
+> - Segmentation runs may write an additional `mask_probs_roi` dataset storing
+>   semantic probabilities in `[0, 1]`.
+> - Raw eye-mask outputs stay ROI-local. They should not be treated as
+>   canonical full-frame masks.
+> - For U-Net inference, `label_mode=union` produces a single ROI-local channel
+>   and refinement can later split that signal into left/right refined outputs.
+> - Current physical encodings are:
+>   - `float16`/`float32`: direct probability storage
+>   - `uint8`: linear quantization with decode rule `p = stored / 255`
+> - Operational guidance:
+>   - analysis-oriented runs should default to quantized `uint8`
+>     probability storage,
+>   - higher-fidelity or training-oriented artifacts should prefer `float16`
+>     probability storage.
+> - New runs should record `probabilities_dtype` and
+>   `probabilities_encoding` attrs so readers do not need to guess.
 > - Soft-ellipse moments from YOLO runs are stored in `ellipse_params_soft` (float32) when available; check the run attribute `ellipse_soft_available`.  
 > Downstream consumers should treat these datasets as optional and guard on their presence (e.g., `if "mask_probs_roi" in run_group`).
 

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import zarr
 
 from fisheye.refinement import refine_eye_masks as mod
 
@@ -196,3 +197,59 @@ def test_main_emits_error_status_before_exit(
     details = payload["details"]
     assert details["reason"] == "runtime_error"
     assert "boom" in details["error"]
+
+
+def test_build_arg_parser_defaults_to_binary_refined_output() -> None:
+    parser = mod._build_arg_parser()
+    args = parser.parse_args(["demo.zarr"])
+
+    assert args.probability_threshold is None
+    assert args.write_refined_probabilities is False
+
+
+def test_build_arg_parser_accepts_refined_probability_flags() -> None:
+    parser = mod._build_arg_parser()
+    args = parser.parse_args(
+        [
+            "demo.zarr",
+            "--probability-threshold",
+            "0.5",
+            "--write-refined-probabilities",
+        ]
+    )
+
+    assert args.probability_threshold == pytest.approx(0.5)
+    assert args.write_refined_probabilities is True
+
+
+def test_resolve_probability_threshold_prefers_cli_arg(tmp_path: Path) -> None:
+    root = zarr.open_group(str(tmp_path / "archive.zarr"), mode="w")
+    run = root.create_group("eye_masks_run")
+    run.attrs[mod._RECOMMENDED_PROBABILITY_THRESHOLD_ATTR] = 0.61
+
+    threshold, source = mod._resolve_probability_threshold(source_run=run, explicit_threshold=0.33)
+
+    assert threshold == pytest.approx(0.33)
+    assert source == "cli_arg"
+
+
+def test_resolve_probability_threshold_uses_recommended_metadata_when_cli_missing(tmp_path: Path) -> None:
+    root = zarr.open_group(str(tmp_path / "archive.zarr"), mode="w")
+    run = root.create_group("eye_masks_run")
+    run.attrs[mod._RECOMMENDED_PROBABILITY_THRESHOLD_ATTR] = 0.58
+
+    threshold, source = mod._resolve_probability_threshold(source_run=run, explicit_threshold=None)
+
+    assert threshold == pytest.approx(0.58)
+    assert source == f"source_run_attr:{mod._RECOMMENDED_PROBABILITY_THRESHOLD_ATTR}"
+
+
+def test_resolve_probability_threshold_falls_back_to_default_for_invalid_metadata(tmp_path: Path) -> None:
+    root = zarr.open_group(str(tmp_path / "archive.zarr"), mode="w")
+    run = root.create_group("eye_masks_run")
+    run.attrs[mod._RECOMMENDED_PROBABILITY_THRESHOLD_ATTR] = 9.9
+
+    threshold, source = mod._resolve_probability_threshold(source_run=run, explicit_threshold=None)
+
+    assert threshold == pytest.approx(mod._DEFAULT_PROBABILITY_THRESHOLD)
+    assert source == "default"

@@ -58,7 +58,8 @@ _SDF_SIGMA = 1.0
 _MORPH_CLOSING_RADIUS = 1
 _MORPH_OPENING_RADIUS = 0
 _MIN_OBJECT_AREA = 12
-_PROBABILITY_THRESHOLD = 0.45
+_DEFAULT_PROBABILITY_THRESHOLD = 0.45
+_RECOMMENDED_PROBABILITY_THRESHOLD_ATTR = "recommended_probability_threshold"
 _AREA_FILTER_Z_DEFAULT = 2.0
 _AREA_FILTER_MODE_DEFAULT = "either"
 _SUCCESS_MIN_EYE_AREA_PX_DEFAULT = 50.0
@@ -74,6 +75,29 @@ def _status_float(value: object) -> Optional[float]:
 
 def _coerce_positive_float(value: object) -> Optional[float]:
     return coerce_positive_float(value)
+
+
+def _resolve_probability_threshold(
+    *,
+    source_run: zarr.Group,
+    explicit_threshold: Optional[float],
+) -> Tuple[float, str]:
+    if explicit_threshold is not None:
+        threshold = float(explicit_threshold)
+        source = "cli_arg"
+    else:
+        recommended = source_run.attrs.get(_RECOMMENDED_PROBABILITY_THRESHOLD_ATTR)
+        recommended_float = _coerce_positive_float(recommended)
+        if recommended_float is not None and 0.0 <= recommended_float <= 1.0:
+            threshold = recommended_float
+            source = f"source_run_attr:{_RECOMMENDED_PROBABILITY_THRESHOLD_ATTR}"
+        else:
+            threshold = float(_DEFAULT_PROBABILITY_THRESHOLD)
+            source = "default"
+
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("probability_threshold must be within [0, 1].")
+    return float(threshold), source
 
 
 def _emit_refined_eye_masks_status(
@@ -698,6 +722,7 @@ def _compute_roi_metrics(
     ellipse_params: np.ndarray,
     contours: Tuple[Optional[np.ndarray], Optional[np.ndarray]],
     probs_out: Optional[np.ndarray],
+    probability_threshold: float = _DEFAULT_PROBABILITY_THRESHOLD,
 ) -> Dict[str, object]:
     refined_left = left_mask.astype(bool, copy=False)
     refined_right = right_mask.astype(bool, copy=False)
@@ -780,7 +805,7 @@ def _compute_roi_metrics(
             prob_mean[idx] = float(mask_vals.mean())
             prob_max[idx] = float(mask_vals.max())
             prob_var[idx] = float(mask_vals.var()) if mask_vals.size > 1 else 0.0
-            prob_high[idx] = float(np.count_nonzero(mask_vals >= _PROBABILITY_THRESHOLD) / mask_vals.size)
+            prob_high[idx] = float(np.count_nonzero(mask_vals >= probability_threshold) / mask_vals.size)
 
     return {
         "refined_areas": refined_areas.astype(np.float32),
@@ -896,7 +921,9 @@ def _refine_roi(
     keypoints_roi: np.ndarray,
     heading_deg: float,
     success_flag: bool,
-    mask_probs: Optional[np.ndarray] = None
+    mask_probs: Optional[np.ndarray] = None,
+    *,
+    probability_threshold: float = _DEFAULT_PROBABILITY_THRESHOLD,
 ) -> ROIOutput:
     """Refine a single ROI's mask assignment."""
 
@@ -989,6 +1016,7 @@ def _refine_roi(
             ellipse_params,
             contours,
             None,
+            probability_threshold,
         )
 
         final_reason = reason
@@ -1114,8 +1142,8 @@ def _refine_roi(
         if probs_arr.shape[0] >= 2:
             left_prob = probs_arr[left_instance_idx]
             right_prob = probs_arr[right_instance_idx]
-            left_mask = left_mask | (left_prob >= _PROBABILITY_THRESHOLD)
-            right_mask = right_mask | (right_prob >= _PROBABILITY_THRESHOLD)
+            left_mask = left_mask | (left_prob >= probability_threshold)
+            right_mask = right_mask | (right_prob >= probability_threshold)
             used_probabilities = True
 
     if left_mask.sum() == 0 and right_mask.sum() == 0:
@@ -1196,6 +1224,7 @@ def _refine_roi(
         ellipse_params,
         (contours[0], contours[1]),
         probs_out,
+        probability_threshold,
     )
 
     return ROIOutput(
@@ -1225,6 +1254,7 @@ def _process_refine_chunk(
     stop: int,
     *,
     fast_path: bool = False,
+    probability_threshold: float = _DEFAULT_PROBABILITY_THRESHOLD,
     source_ellipse_params_path: Optional[str] = None,
     source_ellipse_success_path: Optional[str] = None,
     source_eye_sep_path: Optional[str] = None,
@@ -1290,6 +1320,7 @@ def _process_refine_chunk(
                         heading,
                         success_flag,
                         mask_probs=mask_probs_roi,
+                        probability_threshold=probability_threshold,
                     ),
                 )
             )
@@ -1309,6 +1340,7 @@ def _process_and_write_chunk(
     *,
     write_probabilities: bool,
     fast_path: bool = False,
+    probability_threshold: float = _DEFAULT_PROBABILITY_THRESHOLD,
     source_ellipse_params_path: Optional[str] = None,
     source_ellipse_success_path: Optional[str] = None,
     source_eye_sep_path: Optional[str] = None,
@@ -1325,6 +1357,7 @@ def _process_and_write_chunk(
         start,
         stop,
         fast_path=fast_path,
+        probability_threshold=probability_threshold,
         source_ellipse_params_path=source_ellipse_params_path,
         source_ellipse_success_path=source_ellipse_success_path,
         source_eye_sep_path=source_eye_sep_path,
@@ -1381,6 +1414,8 @@ def refine_eye_masks(
     success_min_eye_area_px: Optional[float] = _SUCCESS_MIN_EYE_AREA_PX_DEFAULT,
     force_refine_traditional: bool = False,
     allow_latest_keypoint_fallback: bool = False,
+    probability_threshold: Optional[float] = None,
+    write_refined_probabilities: bool = False,
 ) -> str:
     """Refine an eye-mask run and return the name of the new run."""
 
@@ -1392,7 +1427,6 @@ def refine_eye_masks(
         area_filter_mode = _AREA_FILTER_MODE_DEFAULT
     area_filter_z = _coerce_positive_float(area_filter_z)
     success_min_eye_area_px = _coerce_positive_float(success_min_eye_area_px)
-
     chunk_size = max(1, int(chunk_size))
 
     zarr_path = str(Path(zarr_path))
@@ -1408,9 +1442,17 @@ def refine_eye_masks(
         raise ValueError("Source eye mask run not found.")
     src_run = eye_parent[src_run_name]
     source_method = str(src_run.attrs.get("method", "unknown"))
+    probability_threshold, probability_threshold_source = _resolve_probability_threshold(
+        source_run=src_run,
+        explicit_threshold=probability_threshold,
+    )
     console.print(
         f"Refining eye masks from [cyan]eye_masks_runs/{src_run_name}[/cyan] "
         f"(method={source_method})"
+    )
+    console.print(
+        f"Using probability threshold [cyan]{probability_threshold:.2f}[/cyan] "
+        f"(source={probability_threshold_source})"
     )
 
     crop_run_name = src_run.attrs.get("source_crop_run") or root.get("crop_runs", {}).attrs.get("latest")
@@ -1442,12 +1484,12 @@ def refine_eye_masks(
 
     console.print(
         "Loading mask bundle (prefer_probs=True, threshold="
-        f"{_PROBABILITY_THRESHOLD})..."
+        f"{probability_threshold})..."
     )
     load_start = time.perf_counter()
     bundle = load_mask_bundle(
         src_run,
-        threshold=_PROBABILITY_THRESHOLD,
+        threshold=probability_threshold,
         prefer_probs=True,
         materialize=False,
         lazy=True,
@@ -1538,7 +1580,7 @@ def refine_eye_masks(
     if mask_prob_dataset:
         console.print(
             f"Probability source: [cyan]eye_masks_runs/{src_run_name}/{mask_prob_dataset}[/cyan] "
-            f"(threshold={_PROBABILITY_THRESHOLD})"
+            f"(threshold={probability_threshold})"
         )
     else:
         console.print("Probability source: [yellow]none[/yellow]; using binary masks only.")
@@ -1559,6 +1601,7 @@ def refine_eye_masks(
     source_reason_path = f"eye_masks_runs/{src_run_name}/reason" if "reason" in src_run else None
 
     has_mask_probs = probs_data is not None and not use_fast_path
+    write_refined_probabilities = bool(write_refined_probabilities) and has_mask_probs
 
     _validate_input_row_alignment(
         total_rois=total_rois,
@@ -1711,7 +1754,7 @@ def refine_eye_masks(
 
     run_group_path = f"{REFINED_STAGE_NAME}_runs/{resolved_run_name}"
 
-    if has_mask_probs:
+    if write_refined_probabilities:
         compression_kwargs = (
             _compression_kwargs(binary_reference) if binary_reference is not None else {}
         )
@@ -1779,8 +1822,9 @@ def refine_eye_masks(
                     success_path,
                     start,
                     stop,
-                    write_probabilities=has_mask_probs,
+                    write_probabilities=write_refined_probabilities,
                     fast_path=use_fast_path,
+                    probability_threshold=probability_threshold,
                     source_ellipse_params_path=source_ellipse_params_path,
                     source_ellipse_success_path=source_ellipse_success_path,
                     source_eye_sep_path=source_eye_sep_path,
@@ -2171,7 +2215,7 @@ def refine_eye_masks(
         "symmetry_sum_mean": symmetry_sum_mean,
         "separation_delta_mean": separation_delta_mean,
         "probability_mean_mean": prob_mean_mean.tolist(),
-        "probability_threshold": float(_PROBABILITY_THRESHOLD),
+        "probability_threshold": float(probability_threshold),
         "reason_counts": reason_counts,
         "probability_usage_rate": float(np.count_nonzero(probabilities_used_metrics) / total_rois) if total_rois else 0.0,
         "filtered_left": stats["filtered_left"],
@@ -2246,7 +2290,8 @@ def refine_eye_masks(
     environment_summary = env_info.get("environment")
     duration = time.perf_counter() - stage_start
 
-    probabilities_available = bool(has_mask_probs) or wrote_any_probs
+    probabilities_available = bool(has_mask_probs)
+    refined_probabilities_written = bool(write_refined_probabilities) and bool(wrote_any_probs)
 
     smoothing_mode = "off" if use_fast_path else _SMOOTHING_MODE
     smoothing_enabled = (smoothing_mode or "").lower() != "off"
@@ -2264,9 +2309,10 @@ def refine_eye_masks(
         "channels_modified": int(stats["smoothed_channels"]),
         "components_reassigned": int(stats["components_reassigned"]),
         "probabilities_available": probabilities_available,
-        "probability_threshold": float(_PROBABILITY_THRESHOLD) if probabilities_available else None,
+        "probability_threshold": float(probability_threshold) if probabilities_available else None,
         "probability_splits": int(stats["probability_split"]),
         "probability_source": mask_prob_dataset or "none",
+        "refined_probabilities_written": refined_probabilities_written,
     }
 
     scheduler_info: Optional[Dict[str, object]] = None
@@ -2302,9 +2348,11 @@ def refine_eye_masks(
 
     mask_parameters = {
         "chunk_size": chunk_size,
-        "probability_threshold": float(_PROBABILITY_THRESHOLD),
+        "probability_threshold": float(probability_threshold),
+        "probability_threshold_source": probability_threshold_source,
         "probabilities_available": probabilities_available,
-        "mask_probability_source": mask_prob_dataset or ("refined" if wrote_any_probs else "none"),
+        "refined_probabilities_written": refined_probabilities_written,
+        "mask_probability_source": mask_prob_dataset or "none",
         "mask_binary_source": mask_binary_source or "unknown",
         "mask_bundle": mask_bundle_provenance,
         "smoothing": smoothing_info,
@@ -2374,8 +2422,10 @@ def refine_eye_masks(
         "eye_labels": eye_labels,
         "smoothing": smoothing_info,
         "mask_probabilities_available": probabilities_available,
-        "mask_probability_threshold": float(_PROBABILITY_THRESHOLD) if probabilities_available else None,
-        "mask_probability_source": mask_prob_dataset or ("refined" if wrote_any_probs else "none"),
+        "mask_probability_threshold": float(probability_threshold) if probabilities_available else None,
+        "mask_probability_threshold_source": probability_threshold_source,
+        "mask_probability_source": mask_prob_dataset or "none",
+        "refined_probabilities_written": refined_probabilities_written,
         "mask_probability_policy": "union_prob",
         "mask_binary_source": mask_binary_source or "unknown",
         "mask_binary_identity": bundle.binary_identity,
@@ -2509,6 +2559,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run full refinement even for traditional eye-mask runs (enables smoothing/component enforcement).",
     )
+    parser.add_argument(
+        "--probability-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Threshold used when converting probability masks into binary refined masks. "
+            "When omitted, refinement uses source-run recommended_probability_threshold if present, "
+            f"otherwise defaults to {_DEFAULT_PROBABILITY_THRESHOLD:.2f}."
+        ),
+    )
+    parser.add_argument(
+        "--write-refined-probabilities",
+        action="store_true",
+        help="Also write mask_probs_roi_refined. By default refined runs persist binary masks only.",
+    )
     return parser
 
 
@@ -2540,6 +2605,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             success_min_eye_area_px=args.success_min_eye_area_px,
             force_refine_traditional=args.force_refine_traditional,
             allow_latest_keypoint_fallback=args.allow_latest_keypoint_fallback,
+            probability_threshold=args.probability_threshold,
+            write_refined_probabilities=args.write_refined_probabilities,
         )
     except Exception as exc:
         resolved_zarr_path = Path(args.zarr_path).expanduser().resolve()

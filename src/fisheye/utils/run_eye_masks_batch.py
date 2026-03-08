@@ -1029,6 +1029,10 @@ def _run_unet(
         argv.extend(["--keypoints-run", str(params.get("keypoints_run"))])
     if params.get("write_binary_masks"):
         argv.append("--write-binary-masks")
+    if params.get("mask_probs_chunk_rois") is not None:
+        argv.extend(["--mask-probs-chunk-rois", str(params.get("mask_probs_chunk_rois"))])
+    if params.get("mask_probs_dtype") is not None:
+        argv.extend(["--mask-probs-dtype", str(params.get("mask_probs_dtype"))])
     if params.get("roi_cache_policy"):
         argv.extend(["--roi-cache-policy", str(params.get("roi_cache_policy"))])
     if params.get("roi_cache_dir"):
@@ -1066,6 +1070,8 @@ def _run_refine(zarr_path: Path, config: Dict[str, Any], source_run: Optional[st
                 area_filter_mode=params.get("area_filter_mode", "either"),
                 force_refine_traditional=bool(params.get("force_refine_traditional", False)),
                 allow_latest_keypoint_fallback=bool(params.get("allow_latest_keypoint_fallback", False)),
+                probability_threshold=params.get("probability_threshold"),
+                write_refined_probabilities=bool(params.get("write_refined_probabilities", False)),
             )
     return refine_eye_masks(
         zarr_path=str(zarr_path),
@@ -1082,6 +1088,8 @@ def _run_refine(zarr_path: Path, config: Dict[str, Any], source_run: Optional[st
         area_filter_mode=params.get("area_filter_mode", "either"),
         force_refine_traditional=bool(params.get("force_refine_traditional", False)),
         allow_latest_keypoint_fallback=bool(params.get("allow_latest_keypoint_fallback", False)),
+        probability_threshold=params.get("probability_threshold"),
+        write_refined_probabilities=bool(params.get("write_refined_probabilities", False)),
     )
 
 
@@ -1355,6 +1363,10 @@ def _run_plan_with_registry_model(
                 argv.extend(["--label-mode", str(params.get("label_mode"))])
             if params.get("write_binary_masks"):
                 argv.append("--write-binary-masks")
+            if params.get("mask_probs_chunk_rois") is not None:
+                argv.extend(["--mask-probs-chunk-rois", str(params.get("mask_probs_chunk_rois"))])
+            if params.get("mask_probs_dtype") is not None:
+                argv.extend(["--mask-probs-dtype", str(params.get("mask_probs_dtype"))])
             if params.get("roi_cache_policy"):
                 argv.extend(["--roi-cache-policy", str(params.get("roi_cache_policy"))])
             if params.get("roi_cache_dir"):

@@ -31,13 +31,13 @@ treated as the runtime-validation counterpart to this document.
 - `refined_keypoints_runs/`
 - `refined_eye_masks_runs/`
 - `refined_online_runs/`
-- `tracking_runs/` *(legacy/optional)*
-- `id_assignment_runs/`
+- `tracking_runs/`
+- `arena_assignment_runs/`
 - `calibration/`
 - `analysis/`
 - `analysis_metadata/`
 
-Every `*_runs` group carries:
+Most `*_runs` groups carry:
 
 - `attrs["latest"]` → most recent run name.
 - Child run groups named `<stage>_<YYYY-MM-DD_hh-mm-ss>` (possibly with a
@@ -45,7 +45,11 @@ Every `*_runs` group carries:
 - Run attributes capturing provenance (`provenance` dict with command,
   timestamps, git/environment snapshots), upstream run references
   (`source_detect_run`, `source_crop_run`, etc.), configuration snapshots,
-  and `duration_seconds`.
+  and often `duration_seconds`.
+
+Lightweight stages such as `tracking_runs/` may omit some of the broader
+timing-oriented attrs while still recording canonical lineage and summary
+statistics.
 
 ---
 
@@ -231,8 +235,8 @@ Row lineage (`frame_indices`, `detection_indices`, `frame_counts`) follows:
 | `frame_indices` *(legacy-optional)* | `(n_rois,)` | `int32` | ROI frame mapping (new runs should copy from source crop run; missing in some legacy runs) |
 | `frame_counts` *(legacy-optional)* | `(n_frames,)` | `int32` | Count of ROIs per frame (new runs should match source crop run) |
 | `detection_indices` *(legacy-optional)* | `(n_rois,)` | `int32` | Index into source detect rows via `crop_runs/<run>/detection_indices` |
-| `masks_roi` | `(n_rois, 2, H, W)` | `uint8` | Binary masks (left/right) |
-| `mask_probs_roi` *(optional)* | `(n_rois, 2, H, W)` | `float16/float32` | Raw probabilities |
+| `masks_roi` *(optional)* | `(n_rois, C, H, W)` | `uint8` | Binary ROI-local masks. `C=1` for union, `C=2` for left/right. |
+| `mask_probs_roi` *(optional)* | `(n_rois, C, H, W)` | `float16/float32/uint8` | Semantic ROI-local probabilities in `[0,1]`; `C=1` for union, `C=2` for left/right. Analysis U-Net runs default to quantized `uint8`; if stored as `uint8`, decode with `p = stored / 255`. |
 | `mask_scores` *(optional)* | `(n_rois,)` | `float32` | Confidence per ROI |
 | `ellipse_params` | `(n_rois, 2, 5)` | `float32` | `[cx, cy, major, minor, angle]` in ROI pixels |
 | `ellipse_success` | `(n_rois, 2)` | `bool` | Ellipse fit success per eye |
@@ -251,7 +255,28 @@ Attributes: `source_crop_run`, canonical `source_keypoints_run` *(legacy alias:
 `source_keypoint_group` (defaults to `refined_keypoints_runs` when present), `method`,
 model info, thresholds, separation limits, `successful_eyes`,
 `successful_roi_pairs`, `reason_counts`, `ellipse_angle_units`,
-`ellipse_fit_method`, `eye_labels`, `duration_seconds`.
+`ellipse_fit_method`, `eye_labels`, `segmenter_label_mode`,
+`mask_probs_chunk_rois`, `duration_seconds`,
+optional threshold-calibration metadata:
+- `recommended_probability_threshold`
+- `recommended_probability_threshold_review`
+
+Probability-storage attrs when `mask_probs_roi` exists:
+
+- `probabilities_dtype`: physical storage dtype for `mask_probs_roi`
+- `probabilities_encoding`:
+  - `unit_float` for direct float probabilities
+  - `linear_uint8_0_255` for quantized `uint8` probabilities
+
+Reader contract:
+
+- `mask_probs_roi` is ROI-local, not full-frame.
+- `masks_roi` is ROI-local, not full-frame.
+- Readers should interpret the dataset semantically as probabilities in
+  `[0,1]` regardless of physical dtype.
+- Full-frame placement should be derived from `source_crop_run` geometry.
+- Analysis-oriented runs may use `segmenter_label_mode="union"` with a single
+  channel and let refinement assign left/right identity later.
 
 Lineage compatibility policy for eye-mask runs:
 
@@ -445,7 +470,7 @@ from `source_eye_masks_run`; see `docs/eye_mask_row_mapping_contract.md`.
 | `frame_indices` *(legacy-optional)* | `(n_rois,)` | `int32` | Copied from source eye-mask run (new runs should include) |
 | `frame_counts` *(legacy-optional)* | `(n_frames,)` | `int32` | Copied from source eye-mask run (new runs should include) |
 | `detection_indices` *(legacy-optional)* | `(n_rois,)` | `int32` | Copied from source eye-mask run (new runs should include when upstream exists) |
-| `mask_probs_roi_refined` *(optional)* | `(n_rois, 2, H, W)` | `float16` | Refined probabilities (when available and full refinement runs) |
+| `mask_probs_roi_refined` *(optional)* | `(n_rois, 2, H, W)` | `float16` | Optional refined ROI-local left/right probabilities in `[0,1]`; new refined runs are binary-first and only write this dataset when explicitly requested. |
 | `contour_left_ptr` | `(n_rois,)` | `int32` | Pointer into `contours_left` |
 | `contour_left_len` | `(n_rois,)` | `int32` | Number of points for left eye contour |
 | `contour_right_ptr` | `(n_rois,)` | `int32` | Pointer into `contours_right` |
@@ -470,6 +495,24 @@ canonical `source_keypoints_run` with optional legacy alias
 source (used for traditional segmentation unless
 `force_refine_traditional=true`).
 
+Important refined-output policy:
+
+- `masks_roi` is the canonical refined artifact.
+- `mask_probs_roi_refined` is optional debug/high-fidelity output.
+- Refined runs record the threshold used to derive binary masks from
+  probability inputs via `mask_probability_threshold`.
+- Refined runs also record `mask_probability_threshold_source` describing
+  whether that threshold came from:
+  - explicit CLI input
+  - source-run recommendation metadata
+  - the default fallback
+
+Semantic note:
+
+- Refined eye-mask outputs remain ROI-local.
+- A refined run may promote a raw union-mask source into explicit left/right
+  channels using keypoint-informed refinement.
+
 Refinement keypoint-source binding is strict by default:
 
 - Resolution order is `--keypoint-run` -> source lineage attrs on source eye-mask run
@@ -485,23 +528,63 @@ maps `retune_id` values to the parameter sets applied during batch retuning.
 
 ---
 
-## `id_assignment_runs/`
+## `arena_assignment_runs/`
 
-Generated by `fisheye.tracking.assign_ids` and friends.
+Generated by `fisheye.tracking.arena_assignment` and friends.
 
 Common arrays:
 
 | Array | Shape | DType | Notes |
 | ----- | ----- | ----- | ----- |
-| `detection_ids` | `(n_detections,)` | `int32` | Assigned fish/ROI IDs |
-| `confidence` | `(n_detections,)` | `float32` | Assignment score |
+| `arena_ids` | `(n_detections,)` | `int32` | Assigned arena/ROI IDs |
+| `n_detections_per_arena` | `(n_frames, n_arenas)` | `int32` | Per-frame counts for each arena |
 
-Legacy archives may contain additional helper arrays/attrs (for example
-per-mask counts), but the stage contract requires `detection_ids` and
-`confidence`.
+Run attrs include the assignment source, arena definitions, and summary counts.
 
-Attributes describe the assignment strategy, ROI definitions used,
+Attributes describe the assignment strategy, arena definitions used,
 expected counts, and QA tallies (`assigned`, `unassigned`).
+
+---
+
+## `tracking_runs/`
+
+Generated by `fisheye.tracking.single_subject_per_arena` through
+`fisheye.tracking.arena_assignment` for the current one-subject-per-arena
+workflow.
+
+Common arrays:
+
+| Array | Shape | DType | Notes |
+| ----- | ----- | ----- | ----- |
+| `track_ids` | `(n_detections,)` | `int32` | Run-local track ID per source row. `-1` means unassigned. |
+| `arena_ids` | `(n_detections,)` | `int32` | Arena assignment mirrored from the bound arena-assignment run. |
+| `frame_indices` | `(n_detections,)` | `int32` | Source frame index per row for auditing/debugging. |
+| `source_row_indices` | `(n_detections,)` | `int32` | `0..n_rows-1` index into the exact tracked rowset. |
+| `track_ids_present` | `(n_tracks,)` | `int32` | Sorted list of emitted real track IDs. |
+| `track_arena_ids` | `(n_tracks,)` | `int32` | Arena ID for each emitted track. Parallel to `track_ids_present`. |
+
+Important attrs:
+
+- `tracking_method`: currently `single_subject_per_arena`
+- `source_detect_run`
+- `source_refined_run` when applicable
+- `source_arena_assignment_run`
+- `source_rowset_path`
+- `track_namespace`: currently `local_per_run`
+- `unassigned_track_id`: currently `-1`
+- `conflict_policy`: currently `fail`
+- `num_tracks`
+- `n_assigned_rows`
+- `n_unassigned_rows`
+- `unassigned_row_rate_percent`
+- `tracking_qc_state`: current runtime values are `ok` or `warn`
+- `tracking_warn_threshold_rows`, `tracking_warn_threshold_percent`
+- `tracking_block_threshold_rows`, `tracking_block_threshold_percent`
+- `summary_statistics`
+
+Unassigned rows remain explicit in `tracking_runs/` as `track_id == -1` for QA
+and provenance. They are excluded from public `analysis/track_kinematics_runs`
+outputs by default unless the diagnostic `--include-unassigned` path is used.
 
 ---
 
@@ -693,17 +776,17 @@ These are different because:
 3. Scaling positions between spaces does NOT preserve physical distances
 4. A 1-pixel movement in texture space ≠ 12.6× the distance of 1 pixel in camera space
 
-### `analysis/movement_runs/`
+### `analysis/track_kinematics_runs/`
 
-Movement analysis results organized by type:
+Track kinematics results organized by type:
 
-**Structure**: `analysis/movement_runs/<online|offline>/<run_name>/`
+**Structure**: `analysis/track_kinematics_runs/<online|offline>/<run_name>/`
 
 **Run Attributes**:
 - `method`: Analysis method used
-  - `movement_analysis_online`: Raw online data (transformed to camera space)
-  - `movement_analysis_online_refined`: Refined online data (texture space)
-  - `movement_analysis_offline`: Offline detection data
+  - `track_kinematics_online`: Raw online data (transformed to camera space)
+  - `track_kinematics_online_refined`: Refined online data (texture space)
+  - `track_kinematics_offline`: Offline detection data
 - `created_at_utc`: Analysis timestamp
 - `fps`: Frame rate used
 - `smoothing_seconds`: Temporal smoothing window
@@ -714,7 +797,9 @@ Movement analysis results organized by type:
 - `inputs`: Source data references
   - Online refined: `refined_online_run`, `stimulus_run`, `chaser_index`
   - Online raw: `stimulus_run`, `chaser_index`
-  - Offline: `detection_run`, `keypoint_run`, optional `chaser_metrics` dict (metrics run, stimulus run, chaser index)
+  - Offline: `detection_run`, `keypoint_run`, `source_tracking_run`, `source_arena_assignment_run`, optional `chaser_metrics` dict (metrics run, stimulus run, chaser index)
+- Offline runs also persist `source_tracking_run` and
+  `source_arena_assignment_run` as top-level attrs for direct lineage lookup.
 - `summary`: Per-track summary statistics
 - `total_distance_px`, `total_distance_mm`: Aggregate distances
 
@@ -725,7 +810,7 @@ Movement analysis results organized by type:
 - `has_offline` (`bool`): Indicates frames with valid chaser metrics.
 - `distance_to_target_px`, `distance_to_target_mm` (`float32`): Chaser→target separation per frame.
 - `distance_to_target_interpolated_px`, `distance_to_target_interpolated_mm` (`float32`, optional): Raw distances with short NaN gaps (duration ≤ `distance_interpolation_seconds` × FPS) filled via linear interpolation.
-- `distance_to_target_smoothed_px`, `distance_to_target_smoothed_mm` (`float32`, optional): Moving-average smoothing applied to the interpolated series using the movement run's `fps` and `smoothing_seconds`.
+- `distance_to_target_smoothed_px`, `distance_to_target_smoothed_mm` (`float32`, optional): Moving-average smoothing applied to the interpolated series using the track-kinematics run's `fps` and `smoothing_seconds`.
 - `chaser_position_px`, `chaser_positions_px` (`float32`, `[N, 2]`): Chaser centroid in camera pixels (duplicate naming retained for compatibility).
 - `fish_centroid_px`, `fish_centroids_px` (`float32`, `[N, 2]`): Target centroid in camera pixels.
 - `angle_signed_deg`, `angle_unsigned_deg`, `heading_deg` (`float32`): Per-frame angular metrics from `compute_chaser_fish_metrics`.
@@ -738,7 +823,7 @@ Each track stores the ordered samples for that ID:
 - `positions_px`, `positions_mm` (`float32`, `[N, 2]`)
 - `instantaneous_speed_px`, `instantaneous_speed_mm`, `smoothed_speed_px`, `smoothed_speed_mm`
 - `instantaneous_speed_filtered_px`, `instantaneous_speed_filtered_mm` *(optional)*: Speeds using displacement pre-smoothing (saved in speed/movement runs)
-- `heading_degrees`, `heading_radians`, `smoothed_heading_degrees`, `smoothed_heading_radians`
+- `heading_degrees`, `heading_radians`, `delta_heading_degrees`, `angular_velocity_deg_s`, `smoothed_heading_degrees`, `smoothed_heading_radians`
 - `acceleration_px`, `acceleration_mm`, `smoothed_acceleration_px`, `smoothed_acceleration_mm`
 - `distance_per_frame_px`, `distance_per_frame_mm`, `cumulative_distance_px`, `cumulative_distance_mm`
 - `distance_per_frame_raw_px`, `distance_per_frame_raw_mm`: Pre-smoothing frame-to-frame displacement (pixels / converted millimeters)

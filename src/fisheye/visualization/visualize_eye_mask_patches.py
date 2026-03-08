@@ -30,6 +30,7 @@ import cv2
 import numpy as np
 import zarr
 
+from ..shared.mask_source import load_mask_bundle
 from ..shared.provenance_attrs import resolve_source_keypoints_run
 
 cv2.setNumThreads(8)
@@ -55,6 +56,10 @@ MASK_COLORS_BGR: Tuple[Tuple[int, int, int], ...] = (
 MAJOR_AXIS_COLOR = (255, 255, 0)  # cyan
 MINOR_AXIS_COLOR = (0, 0, 255)    # red
 KEYPOINT_COLOR = (255, 0, 255)    # magenta
+DEFAULT_RECOMMENDED_PROBABILITY_THRESHOLD = 0.45
+PROBABILITY_TRACKBAR_MAX = 100
+PROBABILITY_TRACKBAR_NAME = "Thr x100"
+RECOMMENDED_PROBABILITY_THRESHOLD_ATTR = "recommended_probability_threshold"
 CENTER_SOURCE_LABELS: Dict[str, str] = {
     "keypoint": "KP",
     "ellipse": "ELL",
@@ -191,6 +196,68 @@ def _format_review_status(status: object) -> str:
     if suffix_parts:
         return f"{state} ({'/'.join(suffix_parts)})"
     return state
+
+
+def _coerce_probability_threshold(value: object, *, default: float = DEFAULT_RECOMMENDED_PROBABILITY_THRESHOLD) -> float:
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not 0.0 <= threshold <= 1.0:
+        return float(default)
+    return threshold
+
+
+def _to_numpy_roi_slice(arr: object, roi_idx: int) -> np.ndarray:
+    if arr is None:
+        raise ValueError("Probability array is missing.")
+    roi = arr[roi_idx]
+    compute = getattr(roi, "compute", None)
+    if callable(compute):
+        roi = compute()
+    return np.asarray(roi)
+
+
+def _select_probability_preview_channel(
+    probs_row: np.ndarray,
+    *,
+    eye_idx: int,
+) -> Tuple[np.ndarray, str]:
+    probs_row = np.asarray(probs_row, dtype=np.float32)
+    if probs_row.ndim == 2:
+        return probs_row, "Prob"
+    if probs_row.ndim != 3:
+        raise ValueError(f"Expected probability ROI slice with 2 or 3 dims, got shape {probs_row.shape}.")
+    if probs_row.shape[0] == 1:
+        return probs_row[0], "Union Prob"
+    if eye_idx < probs_row.shape[0]:
+        return probs_row[eye_idx], "Prob"
+    return probs_row[0], "Prob"
+
+
+def _apply_recommended_probability_threshold(
+    source_run: zarr.Group,
+    *,
+    threshold: float,
+    reviewer: Optional[str],
+    notes: Optional[str],
+    source_refined_run: Optional[str],
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {
+        "threshold": float(threshold),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": "visualize_eye_mask_patches",
+    }
+    if reviewer:
+        payload["reviewer"] = reviewer
+    if notes:
+        payload["notes"] = notes
+    if source_refined_run:
+        payload["source_refined_eye_masks_run"] = source_refined_run
+
+    source_run.attrs[RECOMMENDED_PROBABILITY_THRESHOLD_ATTR] = float(threshold)
+    source_run.attrs["recommended_probability_threshold_review"] = payload
+    return payload
 
 
 def _resolve_registry_dataset_row(
@@ -684,6 +751,12 @@ def _get_latest_run(root: zarr.Group, parent_name: str) -> str:
     return str(keys[-1])
 
 
+def _probability_heatmap_panel(prob_patch: np.ndarray) -> np.ndarray:
+    prob_patch = np.clip(np.asarray(prob_patch, dtype=np.float32), 0.0, 1.0)
+    prob_u8 = np.round(prob_patch * 255.0).astype(np.uint8)
+    return cv2.applyColorMap(prob_u8, cv2.COLORMAP_TURBO)
+
+
 def _build_eye_row(
     roi_img: np.ndarray,
     mask_eye: np.ndarray,
@@ -697,6 +770,9 @@ def _build_eye_row(
     show_ellipse_overlay: bool = True,
     keypoint_xy: Optional[Tuple[float, float]] = None,
     show_keypoint_overlay: bool = False,
+    probability_eye: Optional[np.ndarray] = None,
+    probability_label: Optional[str] = None,
+    probability_threshold: float = DEFAULT_RECOMMENDED_PROBABILITY_THRESHOLD,
 ) -> np.ndarray:
     x0, x1, y0, y1 = _extract_patch_bounds(roi_img.shape, center_xy, padding)
     crop_patch = np.asarray(roi_img[y0:y1, x0:x1], dtype=np.uint8)
@@ -704,6 +780,14 @@ def _build_eye_row(
 
     crop_panel = cv2.cvtColor(crop_patch, cv2.COLOR_GRAY2BGR)
     mask_panel = cv2.cvtColor(mask_patch * 255, cv2.COLOR_GRAY2BGR)
+    prob_panel = None
+    threshold_panel = None
+
+    if probability_eye is not None:
+        prob_patch = np.asarray(probability_eye[y0:y1, x0:x1], dtype=np.float32)
+        prob_panel = _probability_heatmap_panel(prob_patch)
+        threshold_patch = (prob_patch >= float(probability_threshold)).astype(np.uint8)
+        threshold_panel = cv2.cvtColor(threshold_patch * 255, cv2.COLOR_GRAY2BGR)
 
     fit_panel = crop_panel.copy()
     color = MASK_COLORS_BGR[eye_idx % len(MASK_COLORS_BGR)]
@@ -754,8 +838,17 @@ def _build_eye_row(
     panel_mask = _labeled_panel(mask_panel, f"{eye_label} Mask")
     panel_fit = _labeled_panel(fit_panel, f"{eye_label} Fit")
     panel_full = _labeled_panel(full_panel, f"{eye_label} Full ROI")
-
-    return _stack_h([panel_crop, panel_mask, panel_fit, panel_full], gap=6)
+    panels = [panel_crop, panel_mask]
+    if prob_panel is not None and threshold_panel is not None:
+        panels.append(_labeled_panel(prob_panel, f"{eye_label} {probability_label or 'Prob'}"))
+        panels.append(
+            _labeled_panel(
+                threshold_panel,
+                f"{eye_label} Thr@{float(probability_threshold):.2f}",
+            )
+        )
+    panels.extend([panel_fit, panel_full])
+    return _stack_h(panels, gap=6)
 
 
 def _build_eye_row_with_editor(
@@ -775,6 +868,9 @@ def _build_eye_row_with_editor(
     show_ellipse_overlay: bool = True,
     keypoint_xy: Optional[Tuple[float, float]] = None,
     show_keypoint_overlay: bool = False,
+    probability_eye: Optional[np.ndarray] = None,
+    probability_label: Optional[str] = None,
+    probability_threshold: float = DEFAULT_RECOMMENDED_PROBABILITY_THRESHOLD,
 ) -> Tuple[np.ndarray, Dict[str, int]]:
     x0, x1, y0, y1 = _extract_patch_bounds(roi_img.shape, center_xy, padding)
     crop_patch = np.asarray(roi_img[y0:y1, x0:x1], dtype=np.uint8)
@@ -782,6 +878,14 @@ def _build_eye_row_with_editor(
 
     crop_panel = cv2.cvtColor(crop_patch, cv2.COLOR_GRAY2BGR)
     mask_panel = cv2.cvtColor(mask_patch * 255, cv2.COLOR_GRAY2BGR)
+    prob_panel = None
+    threshold_panel = None
+
+    if probability_eye is not None:
+        prob_patch = np.asarray(probability_eye[y0:y1, x0:x1], dtype=np.float32)
+        prob_panel = _probability_heatmap_panel(prob_patch)
+        threshold_patch = (prob_patch >= float(probability_threshold)).astype(np.uint8)
+        threshold_panel = cv2.cvtColor(threshold_patch * 255, cv2.COLOR_GRAY2BGR)
 
     fit_panel = crop_panel.copy()
     color = MASK_COLORS_BGR[eye_idx % len(MASK_COLORS_BGR)]
@@ -874,11 +978,21 @@ def _build_eye_row_with_editor(
             cv2.LINE_AA,
         )
 
-    panels = [panel_crop, panel_mask, panel_fit, panel_edit, panel_full]
+    panels = [panel_crop, panel_mask]
+    if prob_panel is not None and threshold_panel is not None:
+        panels.append(_labeled_panel(prob_panel, f"{eye_label} {probability_label or 'Prob'}"))
+        panels.append(
+            _labeled_panel(
+                threshold_panel,
+                f"{eye_label} Thr@{float(probability_threshold):.2f}",
+            )
+        )
+    panels.extend([panel_fit, panel_edit, panel_full])
     row = _stack_h(panels, gap=6)
 
     widths = [panel.shape[1] for panel in panels]
-    edit_x = widths[0] + widths[1] + widths[2] + (6 * 3)
+    edit_panel_index = panels.index(panel_edit)
+    edit_x = sum(widths[:edit_panel_index]) + (6 * edit_panel_index)
     edit_meta = {
         "eye_idx": int(eye_idx),
         "x": int(edit_x),
@@ -1044,6 +1158,35 @@ def create_viewer(
         raise RuntimeError(f"Refined run '{refined_run}' not found.")
     refined = refined_parent[refined_run]
 
+    source_eye_run_name = refined.attrs.get("source_eye_masks_run")
+    source_eye_parent = root.get("eye_masks_runs")
+    source_eye_run: Optional[zarr.Group] = None
+    probability_data: Optional[object] = None
+    probability_dataset_names: List[str] = []
+    if isinstance(source_eye_parent, zarr.Group) and isinstance(source_eye_run_name, str) and source_eye_run_name in source_eye_parent:
+        source_eye_run = source_eye_parent[source_eye_run_name]
+        try:
+            probability_bundle = load_mask_bundle(
+                source_eye_run,
+                threshold=DEFAULT_RECOMMENDED_PROBABILITY_THRESHOLD,
+                prefer_probs=True,
+                materialize=False,
+                lazy=True,
+            )
+            if probability_bundle.probs is not None:
+                probability_data = probability_bundle.probs
+                probability_dataset_names = [
+                    str(name)
+                    for name in probability_bundle.provenance.get("source", [])
+                    if str(name) in {"mask_probs_roi", "mask_probs_roi_refined"}
+                ]
+                if int(probability_data.shape[0]) != int(refined["masks_roi"].shape[0]):
+                    probability_data = None
+                    probability_dataset_names = []
+        except Exception:
+            probability_data = None
+            probability_dataset_names = []
+
     resolved_crop = crop_run or refined.attrs.get("source_crop_run")
     if not isinstance(resolved_crop, str):
         resolved_crop = _get_latest_run(root, "crop_runs")
@@ -1102,6 +1245,13 @@ def create_viewer(
 
     window_name = "Eye Mask Patch Viewer"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    recommended_threshold = _coerce_probability_threshold(
+        source_eye_run.attrs.get(RECOMMENDED_PROBABILITY_THRESHOLD_ATTR) if source_eye_run is not None else None,
+        default=_coerce_probability_threshold(
+            source_eye_run.attrs.get("mask_probability_threshold") if source_eye_run is not None else None,
+            default=DEFAULT_RECOMMENDED_PROBABILITY_THRESHOLD,
+        ),
+    )
 
     def _noop(_val: int) -> None:
         return
@@ -1117,6 +1267,14 @@ def create_viewer(
         MAX_SCALE_PERCENT,
         _noop,
     )
+    if probability_data is not None:
+        cv2.createTrackbar(
+            PROBABILITY_TRACKBAR_NAME,
+            window_name,
+            int(round(recommended_threshold * PROBABILITY_TRACKBAR_MAX)),
+            PROBABILITY_TRACKBAR_MAX,
+            _noop,
+        )
 
     state: Dict[str, object] = {
         "loaded_roi_idx": -1,
@@ -1135,6 +1293,9 @@ def create_viewer(
         "cursor_patch_xy": None,
         "source_reason_compact": "n/a",
         "source_reject_reason": None,
+        "probability_preview_enabled": bool(probability_data is not None),
+        "probability_row": None,
+        "recommended_probability_threshold": float(recommended_threshold),
     }
 
     def _refresh_source_reason_state(roi_idx: int) -> None:
@@ -1166,6 +1327,10 @@ def create_viewer(
         state["loaded_roi_idx"] = int(roi_idx)
         state["roi_img"] = np.asarray(roi_images[roi_idx], dtype=np.uint8)
         state["edit_masks_row"] = np.asarray(masks_roi[roi_idx], dtype=np.uint8).copy()
+        if probability_data is not None:
+            state["probability_row"] = _to_numpy_roi_slice(probability_data, int(roi_idx))
+        else:
+            state["probability_row"] = None
         state["dirty"] = False
         state["cursor_eye"] = None
         state["cursor_patch_xy"] = None
@@ -1280,6 +1445,9 @@ def create_viewer(
     print("  x: toggle brush mode (paint/erase)")
     print("  e: toggle ellipse/axis overlay")
     print("  h: toggle keypoint crosshair overlay")
+    if probability_data is not None:
+        print("  t: toggle probability preview panels")
+        print("  w: save recommended probability threshold metadata for refinement")
     print("  Mouse while drawing: hold Shift to temporarily invert brush mode")
     print("  1/2: choose active eye")
     print("  c: clear all eye masks for current ROI (unsaved until 's')")
@@ -1298,6 +1466,13 @@ def create_viewer(
     else:
         print("Registry auto-sync: disabled")
     print(f"Current review status: {review_label}")
+    if probability_data is not None:
+        dataset_label = ", ".join(probability_dataset_names) if probability_dataset_names else "probability masks"
+        print(
+            "Probability preview source: "
+            f"eye_masks_runs/{source_eye_run_name}/{dataset_label} "
+            f"(recommended_threshold={recommended_threshold:.2f})"
+        )
 
     while True:
         roi_idx = cv2.getTrackbarPos("ROI", window_name)
@@ -1305,9 +1480,15 @@ def create_viewer(
         scale = max(25, cv2.getTrackbarPos("Scale %", window_name))
         zoom = max(1, cv2.getTrackbarPos("Edit Zoom", window_name))
         brush = max(BRUSH_MIN, cv2.getTrackbarPos("Brush", window_name))
+        probability_threshold = (
+            float(cv2.getTrackbarPos(PROBABILITY_TRACKBAR_NAME, window_name)) / float(PROBABILITY_TRACKBAR_MAX)
+            if probability_data is not None
+            else float(state.get("recommended_probability_threshold", DEFAULT_RECOMMENDED_PROBABILITY_THRESHOLD))
+        )
         state["display_scale"] = float(scale) / 100.0
         show_ellipse_overlay = bool(state.get("show_ellipse_overlay", True))
         show_keypoint_overlay = bool(state.get("show_keypoint_overlay", False))
+        probability_preview_enabled = bool(state.get("probability_preview_enabled", False)) and probability_data is not None
 
         loaded_roi_idx = int(state.get("loaded_roi_idx", -1))
         if loaded_roi_idx != roi_idx:
@@ -1317,6 +1498,7 @@ def create_viewer(
 
         roi_img = np.asarray(state["roi_img"], dtype=np.uint8)
         masks_row = np.asarray(state["edit_masks_row"], dtype=np.uint8)
+        probability_row = state.get("probability_row")
         ellipse_row = np.asarray(ellipse_params[roi_idx], dtype=np.float32)
         ellipse_ok_row = np.asarray(ellipse_success[roi_idx], dtype=bool)
         kp_row = np.asarray(keypoints_roi[roi_idx], dtype=np.float32) if keypoints_roi is not None else None
@@ -1344,6 +1526,13 @@ def create_viewer(
             eye_label = f"{label} [{center_source_label}]"
             eye_center_sources.append(center_source)
             keypoint_xy = _extract_eye_keypoint_xy(kp_row, eye_idx)
+            probability_eye = None
+            probability_label = None
+            if probability_preview_enabled and probability_row is not None:
+                probability_eye, probability_label = _select_probability_preview_channel(
+                    np.asarray(probability_row),
+                    eye_idx=eye_idx,
+                )
             cursor_eye = state.get("cursor_eye")
             cursor_xy = state.get("cursor_patch_xy")
             row, edit_meta = _build_eye_row_with_editor(
@@ -1362,6 +1551,9 @@ def create_viewer(
                 show_ellipse_overlay=show_ellipse_overlay,
                 keypoint_xy=keypoint_xy,
                 show_keypoint_overlay=show_keypoint_overlay,
+                probability_eye=probability_eye,
+                probability_label=probability_label,
+                probability_threshold=probability_threshold,
             )
             eye_rows.append(row)
             eye_metas.append(edit_meta)
@@ -1401,7 +1593,16 @@ def create_viewer(
         )
         cv2.putText(
             header,
-            f"Source reject={source_reject}  source reason tags={source_reason_compact}",
+            (
+                f"Source reject={source_reject}  source reason tags={source_reason_compact}"
+                + (
+                    f"  prob_preview={'on' if probability_preview_enabled else 'off'} "
+                    f"thr={probability_threshold:.2f} "
+                    f"saved={float(state.get('recommended_probability_threshold', recommended_threshold)):.2f}"
+                    if probability_data is not None
+                    else ""
+                )
+            ),
             (8, 43),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.48,
@@ -1444,6 +1645,13 @@ def create_viewer(
             new_overlay = not bool(state.get("show_keypoint_overlay", False))
             state["show_keypoint_overlay"] = new_overlay
             print(f"Keypoint overlay: {'on' if new_overlay else 'off'}")
+        elif key in (ord("t"),):
+            if probability_data is None:
+                print("No probability masks available for preview.")
+                continue
+            new_preview = not bool(state.get("probability_preview_enabled", False))
+            state["probability_preview_enabled"] = new_preview
+            print(f"Probability preview: {'on' if new_preview else 'off'}")
         elif key in (ord("]"), ord("="), ord("+")):
             brush_value = _adjust_brush_size(BRUSH_STEP)
             print(f"Brush size: {brush_value}px")
@@ -1568,6 +1776,27 @@ def create_viewer(
                     print(f"{prefix}: {detail}")
             except Exception as exc:
                 print(f"Failed to set eye_mask_review_status: {exc}")
+        elif key in (ord("w"),):
+            if probability_data is None or source_eye_run is None or not isinstance(source_eye_run_name, str):
+                print("No source probability run available for threshold metadata.")
+                continue
+            try:
+                reviewer_name = reviewer or os.environ.get("USER") or os.environ.get("USERNAME")
+                payload = _apply_recommended_probability_threshold(
+                    source_eye_run,
+                    threshold=probability_threshold,
+                    reviewer=reviewer_name,
+                    notes=review_notes,
+                    source_refined_run=refined_run,
+                )
+                state["recommended_probability_threshold"] = float(probability_threshold)
+                print(
+                    "Saved recommended probability threshold "
+                    f"{float(probability_threshold):.2f} to eye_masks_runs/{source_eye_run_name}"
+                )
+                print(f"Threshold metadata: {payload}")
+            except Exception as exc:
+                print(f"Failed to save recommended probability threshold: {exc}")
 
     cv2.destroyWindow(window_name)
 
