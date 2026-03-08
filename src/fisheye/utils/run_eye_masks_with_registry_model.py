@@ -167,6 +167,8 @@ def _resolution_payload(
             "roi_cache_dir": str(args.roi_cache_dir) if args.roi_cache_dir else None,
             "label_mode": args.label_mode,
             "write_binary_masks": bool(args.write_binary_masks),
+            "mask_probs_chunk_rois": args.mask_probs_chunk_rois,
+            "mask_probs_dtype": args.mask_probs_dtype,
             "no_use_crop": bool(args.no_use_crop),
         },
         inputs={
@@ -310,6 +312,10 @@ def _run_unet(
         unet_argv.extend(["--label-mode", str(args.label_mode)])
     if args.write_binary_masks:
         unet_argv.append("--write-binary-masks")
+    if args.mask_probs_chunk_rois is not None:
+        unet_argv.extend(["--mask-probs-chunk-rois", str(args.mask_probs_chunk_rois)])
+    if args.mask_probs_dtype is not None:
+        unet_argv.extend(["--mask-probs-dtype", str(args.mask_probs_dtype)])
     if args.roi_cache_policy:
         unet_argv.extend(["--roi-cache-policy", str(args.roi_cache_policy)])
     if args.roi_cache_dir:
@@ -343,7 +349,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--run-name", type=str, default=None, help="Optional explicit eye_masks run name.")
     parser.add_argument("--crop-run", type=str, default=None, help="Optional explicit crop run name.")
     parser.add_argument("--keypoints-run", type=str, default=None, help="Optional explicit keypoints run name.")
-    parser.add_argument("--batch-size", type=int, default=128, help="Inference batch size override.")
+    parser.add_argument("--batch-size", type=int, default=256, help="Inference batch size override.")
     parser.add_argument("--device", type=str, default=None, help="Optional torch device override.")
 
     parser.add_argument("--imgsz", type=int, default=None, help="YOLO-only image size override.")
@@ -372,6 +378,18 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     parser.add_argument("--label-mode", choices=("union", "lr"), default=None, help="U-Net-only label-mode override.")
     parser.add_argument("--write-binary-masks", action="store_true", help="U-Net-only: write thresholded masks.")
+    parser.add_argument(
+        "--mask-probs-chunk-rois",
+        type=int,
+        default=32,
+        help="U-Net-only ROI chunk length override for mask_probs_roi and masks_roi outputs (default: 32).",
+    )
+    parser.add_argument(
+        "--mask-probs-dtype",
+        choices=("float16", "uint8"),
+        default="uint8",
+        help="U-Net-only storage dtype for mask_probs_roi (default: uint8 for analysis runs).",
+    )
     parser.add_argument("--no-use-crop", action="store_true", help="U-Net-only: do not pass --use-crop.")
     parser.add_argument("--json", action="store_true", help="Print resolved payload JSON.")
     args = parser.parse_args(argv)

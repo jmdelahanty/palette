@@ -59,6 +59,68 @@ Why this order:
 - GroupNorm is usually more robust at smaller effective batch sizes.
 - Dropout is optional regularization after core stability is confirmed.
 
+## Output / Storage Policy
+
+Recommended operational policy:
+
+- For analysis inference, prefer `label_mode=union` when downstream refinement
+  will assign left/right identity from keypoints.
+- Keep mask outputs ROI-local rather than persisting full-frame masks.
+- Treat probability semantics and physical storage encoding separately:
+  - semantic value: probability in `[0,1]`
+  - physical encoding: `float16` or quantized `uint8`
+
+Recommended defaults:
+
+- Analysis runs:
+  - `label_mode=union`
+  - `batch_size=256` on the current RTX A6000 analysis host
+  - `mask_probs_chunk_rois=32`
+  - `mask_probs_dtype=uint8`
+  - perform ROI normalization on GPU after transfer rather than on CPU
+- Higher-fidelity artifacts or workflows that need soft probabilities with less
+  quantization:
+  - keep `mask_probs_dtype=float16`
+  - lower batch sizes may still be preferred when GPU memory is shared or
+    stability headroom matters more than peak throughput
+
+Encoding contract:
+
+- `float16`/`float32`: direct probability storage
+- `uint8`: linear quantization with decode rule `p = stored / 255`
+- prefer `uint8` over `int8` for quantized probabilities because probability
+  values are nonnegative and map naturally to `0..255`
+- Writers should emit `probabilities_dtype` and `probabilities_encoding`
+  attrs so downstream readers can normalize back to `[0,1]`
+
+This lets analysis archives use smaller/faster probability storage without
+changing the semantic contract seen by refinement, visualization, or training
+export readers.
+
+Observed benchmark outcome on the `2026-01-28T19-22-28Z_arena_1_DefaultScreen`
+smoke archive:
+
+- warm-cache `geometry_only` U-Net inference with
+  `batch_size=256`, `mask_probs_chunk_rois=32`, `mask_probs_dtype=uint8`, and
+  GPU-side normalization reached about `106s` wall time for `23,287` ROIs
+- `sync_after_forward` is now the dominant timing stage, which means queued
+  U-Net GPU compute is the main remaining bottleneck
+- ROI reads and probability writes are no longer the limiting cost on this
+  workload after the cache-layout and `uint8`/GPU-normalization changes
+
+Operational implication:
+
+- analysis-time optimization work should now focus on the inference backend /
+  model compute path before pursuing more aggressive cache I/O changes
+
+Decision rule:
+
+- choose the physical storage dtype based on operational needs
+  (write bandwidth, archive size, fidelity needs),
+- keep the semantic contract explicit so readers always know whether a stored
+  array represents direct float probabilities or quantized probabilities that
+  must be decoded back to `[0,1]`.
+
 ## Suggested Experiment Matrix
 
 Minimum set:

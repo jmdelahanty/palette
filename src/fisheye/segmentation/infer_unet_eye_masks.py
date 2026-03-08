@@ -21,6 +21,7 @@ from ..registry.status_ledger import upsert_recording_step_status
 from ..registry.step_cascade import invalidate_downstream_steps
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
 from ..shared.crop_image_source import CropImageSource
+from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.row_alignment import assert_row_alignment
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
@@ -230,6 +231,54 @@ def _normalise_roi_batch(batch: np.ndarray) -> np.ndarray:
     return batch
 
 
+def _normalise_roi_tensor(batch: torch.Tensor) -> torch.Tensor:
+    if batch.ndim == 3:
+        batch = batch.unsqueeze(1)
+    if batch.ndim != 4:
+        raise ValueError(f"Unexpected ROI batch shape {tuple(batch.shape)}")
+    if batch.shape[1] not in (1, 3):
+        raise ValueError(f"Unsupported ROI channel count: {int(batch.shape[1])}")
+
+    if not batch.is_floating_point():
+        max_value = float(torch.iinfo(batch.dtype).max)
+        batch = batch.to(dtype=torch.float32)
+        if max_value > 0:
+            batch = batch / max_value
+    else:
+        batch = batch.to(dtype=torch.float32)
+        if batch.numel():
+            max_val = torch.nan_to_num(batch, nan=0.0, posinf=float("inf"), neginf=float("-inf")).amax()
+            batch = batch / torch.maximum(max_val, torch.tensor(1.0, device=batch.device, dtype=torch.float32))
+
+    batch = torch.nan_to_num(batch, nan=0.0, posinf=1.0, neginf=0.0)
+    batch = torch.clamp(batch, 0.0, 1.0)
+    if batch.device.type == "cuda":
+        batch = batch.contiguous(memory_format=torch.channels_last)
+    return batch
+
+
+def _probabilities_from_logits(
+    logits: torch.Tensor,
+    *,
+    mask_probs_dtype: str = "float16",
+) -> np.ndarray:
+    probs = torch.sigmoid(logits)
+    probs = torch.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0)
+    probs = torch.clamp(probs, 0.0, 1.0)
+    if mask_probs_dtype == "uint8":
+        probs = torch.round(probs * 255.0).to(dtype=torch.uint8)
+    else:
+        probs = probs.to(dtype=torch.float16)
+    return probs.cpu().numpy()
+
+
+def _serialize_probabilities(probs: np.ndarray, *, mask_probs_dtype: str) -> np.ndarray:
+    if mask_probs_dtype == "uint8":
+        probs_float = probs.astype(np.float32, copy=False)
+        return np.rint(probs_float * 255.0).clip(0.0, 255.0).astype(np.uint8)
+    return probs.astype(np.float16, copy=False)
+
+
 def _json_ready_meta(meta: List[Dict[str, object]]) -> List[Dict[str, object]]:
     result: List[Dict[str, object]] = []
     for item in meta:
@@ -268,18 +317,22 @@ def _write_mask_probs(
     label_mode: str,
     console: Console,
     write_binary: bool,
+    mask_probs_chunk_rois: Optional[int] = None,
+    mask_probs_dtype: str = "uint8",
+    timing_profiler: Optional[InferenceTimingProfiler] = None,
 ) -> Tuple[int, bool]:
     total_rois = int(roi_source.total_rois)
     height, width = map(int, roi_source.roi_shape)
     prob_channels = 1 if label_mode == "union" else 2
+    default_chunk_rois = min(32, max(1, total_rois))
 
     roi_array = roi_source.roi_array
     chunk_size = getattr(roi_array, "chunks", None)
-    if chunk_size and hasattr(roi_array, "ndim") and len(chunk_size) == int(getattr(roi_array, "ndim")):
-        chunk_rois = max(1, min(512, int(chunk_size[0])))
-    else:
-        chunk_rois = min(512, max(1, total_rois))
+    chunk_rois = default_chunk_rois
+    if mask_probs_chunk_rois is not None:
+        chunk_rois = max(1, min(int(mask_probs_chunk_rois), max(1, total_rois)))
     compression_kwargs = _compression_kwargs(roi_array) if roi_array is not None else {}
+    stored_prob_dtype = np.dtype(np.uint8 if mask_probs_dtype == "uint8" else np.float16)
 
     expected_shape = (total_rois, prob_channels, height, width)
 
@@ -287,7 +340,7 @@ def _write_mask_probs(
         "mask_probs_roi",
         shape=expected_shape,
         chunks=(chunk_rois, prob_channels, height, width),
-        dtype="float16",
+        dtype=stored_prob_dtype,
         **compression_kwargs,
         overwrite=True,
     )
@@ -318,14 +371,27 @@ def _write_mask_probs(
     )
     task = progress.add_task("[cyan]Running inference[/cyan]", total=total_rois)
 
+    def _sync_cuda(stage: str, *, items: int) -> None:
+        if profiler.enabled and device.type == "cuda":
+            with profiler.time(stage, items=items):
+                torch.cuda.synchronize(device)
+
     with progress, torch.no_grad():
         for start in range(0, total_rois, batch_size):
             stop = min(start + batch_size, total_rois)
-            roi_np = roi_source.read_slice(start, stop)
-            roi_np = _normalise_roi_batch(roi_np)
-            imgs = torch.from_numpy(roi_np).to(device, non_blocking=True)
-            if device.type == "cuda":
-                imgs = imgs.contiguous(memory_format=torch.channels_last)
+            batch_count = stop - start
+            profiler = timing_profiler or InferenceTimingProfiler(enabled=False)
+
+            with profiler.time("roi_read", items=batch_count):
+                roi_np = roi_source.read_slice(start, stop)
+
+            _sync_cuda("sync_before_h2d", items=batch_count)
+            with profiler.time("h2d_copy", items=batch_count):
+                imgs = torch.from_numpy(roi_np).to(device, non_blocking=True)
+            _sync_cuda("sync_after_h2d", items=batch_count)
+            with profiler.time("input_normalize", items=batch_count):
+                imgs = _normalise_roi_tensor(imgs)
+            _sync_cuda("sync_after_normalize", items=batch_count)
 
             amp_module = getattr(torch, "amp", None)
             if device.type == "cuda" and amp_module is not None and hasattr(amp_module, "autocast"):
@@ -335,41 +401,60 @@ def _write_mask_probs(
             else:
                 autocast_cm = nullcontext()
 
-            with autocast_cm:
-                logits = model(imgs)
+            _sync_cuda("sync_before_forward", items=batch_count)
+            with profiler.time("model_forward", items=batch_count):
+                with autocast_cm:
+                    logits = model(imgs)
+            _sync_cuda("sync_after_forward", items=batch_count)
 
-            probs = torch.sigmoid(logits).float().cpu().numpy()
+            _sync_cuda("sync_before_d2h", items=batch_count)
+            with profiler.time("d2h_copy", items=batch_count):
+                probs = _probabilities_from_logits(logits, mask_probs_dtype=mask_probs_dtype)
+            _sync_cuda("sync_after_d2h", items=batch_count)
 
             if probs.ndim == 3:
                 probs = probs[:, None, :, :]
 
-            channels = probs.shape[1]
-            if label_mode == "union":
-                if channels == 1:
-                    pass
-                elif channels == 2:
-                    probs = np.max(probs, axis=1, keepdims=True)
+            with profiler.time("output_postprocess", items=batch_count):
+                channels = probs.shape[1]
+                if label_mode == "union":
+                    if channels == 1:
+                        pass
+                    elif channels == 2:
+                        probs = np.max(probs, axis=1, keepdims=True)
+                    else:
+                        raise ValueError(
+                            f"Union model produced {channels} channels; expected 1 or 2."
+                        )
+                else:  # label_mode == "lr"
+                    if channels == 1:
+                        raise ValueError(
+                            "LR model produced a single probability channel; retrain or specify --label-mode=union."
+                        )
+                    elif channels != 2:
+                        raise ValueError(
+                            f"LR model produced {channels} channels; expected 2."
+                        )
+
+                if mask_probs_dtype == "uint8":
+                    if probs.dtype != np.uint8:
+                        probs_out = _serialize_probabilities(probs, mask_probs_dtype=mask_probs_dtype)
+                    else:
+                        probs_out = probs
                 else:
-                    raise ValueError(
-                        f"Union model produced {channels} channels; expected 1 or 2."
-                    )
-            else:  # label_mode == "lr"
-                if channels == 1:
-                    raise ValueError(
-                        "LR model produced a single probability channel; retrain or specify --label-mode=union."
-                    )
-                elif channels != 2:
-                    raise ValueError(
-                        f"LR model produced {channels} channels; expected 2."
-                    )
+                    probs = np.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float16, copy=False)
+                    probs_out = probs
 
-            probs = np.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0)
-            probs = np.clip(probs, 0.0, 1.0).astype(np.float16, copy=False)
-
-            mask_probs[start:stop] = probs
+            with profiler.time("output_write_probs", items=batch_count):
+                mask_probs[start:stop] = probs_out
             if masks_roi is not None:
-                masks_roi[start:stop] = (probs >= 0.5).astype(np.uint8, copy=False)
-            progress.advance(task, stop - start)
+                with profiler.time("output_write_binary", items=batch_count):
+                    if mask_probs_dtype == "uint8":
+                        masks_roi[start:stop] = (probs_out >= 128).astype(np.uint8, copy=False)
+                    else:
+                        masks_roi[start:stop] = (probs_out >= 0.5).astype(np.uint8, copy=False)
+            with profiler.time("progress_update", items=batch_count):
+                progress.advance(task, stop - start)
     return prob_channels, masks_roi is not None
 
 
@@ -409,8 +494,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=64,
-        help="Batch size used during inference (default: 64).",
+        default=256,
+        help="Batch size used during inference (default: 256).",
     )
     parser.add_argument(
         "--device",
@@ -437,6 +522,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional scratch directory for temporary ROI caches.",
+    )
+    parser.add_argument(
+        "--mask-probs-chunk-rois",
+        type=int,
+        default=32,
+        help="ROI chunk length override for mask_probs_roi and masks_roi outputs (default: 32).",
+    )
+    parser.add_argument(
+        "--mask-probs-dtype",
+        choices=("float16", "uint8"),
+        default="uint8",
+        help="Storage dtype for mask_probs_roi (default: uint8 for analysis runs).",
+    )
+    parser.add_argument(
+        "--profile-timings",
+        action="store_true",
+        help="Collect per-stage timing diagnostics and store them in the output run attrs.",
     )
     return parser
 
@@ -567,8 +669,11 @@ def main(
         "batch_size": int(args.batch_size),
         "label_mode": label_mode,
         "write_binary_masks": bool(args.write_binary_masks),
+        "mask_probs_chunk_rois": int(args.mask_probs_chunk_rois),
+        "mask_probs_dtype": str(args.mask_probs_dtype),
         "device": str(device),
         "use_crop": bool(args.use_crop),
+        "profile_timings": bool(args.profile_timings),
         "roi_cache_policy": str(args.roi_cache_policy),
         "roi_cache_dir": str(args.roi_cache_dir) if args.roi_cache_dir else None,
     }
@@ -590,6 +695,7 @@ def main(
             "segmenter_label_mode": label_mode,
         },
     )
+    timing_profiler = InferenceTimingProfiler(enabled=bool(args.profile_timings))
     try:
         _validate_input_row_alignment(
             crop_group=crop_group,
@@ -658,6 +764,9 @@ def main(
             label_mode,
             console,
             write_binary=bool(args.write_binary_masks),
+            mask_probs_chunk_rois=args.mask_probs_chunk_rois,
+            mask_probs_dtype=str(args.mask_probs_dtype),
+            timing_profiler=timing_profiler,
         )
         duration = time.perf_counter() - start_time
     finally:
@@ -720,20 +829,38 @@ def main(
             "source_checkpoint": str(checkpoint_path),
             "source_checkpoint_best_val_dice": float(checkpoint.get("best_val_dice", float("nan"))),
             "total_rois": int(total_rois),
-            "probabilities_dtype": "float16",
+            "probabilities_dtype": str(args.mask_probs_dtype),
+            "probabilities_encoding": "linear_uint8_0_255" if args.mask_probs_dtype == "uint8" else "unit_float",
             "probabilities_channels": int(stored_channels),
             "probabilities_source": "mask_probs_roi",
             "mask_probability_threshold": 0.5,
+            "mask_probs_chunk_rois": int(run_group["mask_probs_roi"].chunks[0]) if "mask_probs_roi" in run_group else None,
             "inference_device": str(device),
             "inference_batch_size": int(args.batch_size),
             "inference_duration_seconds": float(duration),
             "duration_seconds": float(duration),
+            "profile_timings_enabled": bool(args.profile_timings),
             "dataset_meta": dataset_meta,
             "git_commit": git_info.get("commit_hash", "unknown"),
             "git_branch": git_info.get("branch", "unknown"),
             "hostname": env_info["platform"].get("hostname", "unknown"),
         }
     )
+    if timing_profiler.enabled:
+        run_group.attrs["timing_profile"] = timing_profiler.summary(
+            total_items=int(total_rois),
+            wall_seconds=float(duration),
+            notes=[
+                "roi_read measures ROI slice fetch from the active crop image source.",
+                "sync_before_* and sync_after_* measure explicit CUDA synchronize calls used to attribute queued GPU work deterministically.",
+                "input_normalize now runs after the device transfer so dtype conversion, scaling, and clipping can execute on GPU.",
+                "h2d_copy and model_forward are measured separately for the U-Net loop.",
+                "d2h_copy includes sigmoid + clamp + dtype conversion (float16 or uint8) + transfer of logits back to CPU/NumPy.",
+                "output_write_probs measures Zarr writes for mask probability arrays.",
+                "output_write_binary measures Zarr writes for optional thresholded binary masks.",
+                "progress_update measures outer progress-bar updates and related loop bookkeeping.",
+            ],
+        )
     if crop_source.roi_cache_key is not None:
         run_group.attrs["source_roi_cache_key"] = crop_source.roi_cache_key
     if crop_source.roi_cache_path is not None:
@@ -764,6 +891,10 @@ def main(
             "device": str(device),
             "label_mode": label_mode,
             "write_binary_masks": bool(args.write_binary_masks),
+            "mask_probs_chunk_rois": int(run_group.attrs.get("mask_probs_chunk_rois"))
+            if run_group.attrs.get("mask_probs_chunk_rois") is not None
+            else None,
+            "mask_probs_dtype": str(args.mask_probs_dtype),
             "roi_cache_policy": crop_source.roi_cache_policy,
         },
         inputs={
@@ -798,6 +929,10 @@ def main(
         f"[cyan]eye_masks_runs/{resolved_run_name}/mask_probs_roi[/cyan] "
         f"({total_rois:,} ROIs processed in {duration:.1f}s)."
     )
+    if timing_profiler.enabled:
+        console.print("[bold]Timing Profile:[/bold]")
+        for line in timing_profiler.render_lines(total_items=total_rois, wall_seconds=duration, limit=6):
+            console.print(f"[dim]{line}[/dim]")
     _emit_eye_masks_status(
         registry=registry,
         root=root,

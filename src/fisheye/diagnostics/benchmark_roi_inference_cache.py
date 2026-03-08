@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from typing import Any, Iterable, Optional, Sequence
 import zarr
 
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.crop_image_source import resolve_materialized_crop_run
 from fisheye.utils.resolve_detect_model import Candidate, _load_candidates, _load_target_profile, _resolve_recording_id
 from fisheye.utils.zarr_recording_context import infer_recording_context
@@ -237,6 +239,7 @@ def _build_keypoint_command(
     batch_size: int,
     device: Optional[str],
     imgsz: Optional[int],
+    profile_timings: bool,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -261,6 +264,8 @@ def _build_keypoint_command(
         cmd.extend(["--device", device])
     if imgsz is not None:
         cmd.extend(["--imgsz", str(imgsz)])
+    if profile_timings:
+        cmd.append("--profile-timings")
     return cmd
 
 
@@ -276,6 +281,9 @@ def _build_eye_mask_command(
     batch_size: int,
     device: Optional[str],
     write_binary_masks: bool,
+    mask_probs_chunk_rois: Optional[int],
+    mask_probs_dtype: str,
+    profile_timings: bool,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -301,6 +309,12 @@ def _build_eye_mask_command(
         cmd.extend(["--device", device])
     if write_binary_masks:
         cmd.append("--write-binary-masks")
+    if mask_probs_chunk_rois is not None:
+        cmd.extend(["--mask-probs-chunk-rois", str(mask_probs_chunk_rois)])
+    if mask_probs_dtype:
+        cmd.extend(["--mask-probs-dtype", str(mask_probs_dtype)])
+    if profile_timings:
+        cmd.append("--profile-timings")
     return cmd
 
 
@@ -340,7 +354,27 @@ def _stage_metrics(
         "source_roi_cache_path": _normalize_text(attrs.get("source_roi_cache_path")),
         "source_roi_cache_key": _normalize_text(attrs.get("source_roi_cache_key")),
         "roi_cache_policy": _normalize_text(attrs.get("roi_cache_policy")),
+        "timing_profile": attrs.get("timing_profile"),
     }
+
+
+def _top_timing_stage(metrics: dict[str, Any]) -> Optional[str]:
+    profile = metrics.get("timing_profile")
+    if not isinstance(profile, dict):
+        return None
+    stages = profile.get("stages")
+    if not isinstance(stages, dict) or not stages:
+        return None
+    try:
+        stage_name, payload = max(
+            stages.items(),
+            key=lambda item: float(item[1].get("total_seconds", 0.0)) if isinstance(item[1], dict) else 0.0,
+        )
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return f"{stage_name}={float(payload.get('total_seconds', 0.0)):.2f}s"
 
 
 def _run_command(cmd: Sequence[str]) -> dict[str, Any]:
@@ -353,6 +387,41 @@ def _run_command(cmd: Sequence[str]) -> dict[str, Any]:
         "wall_seconds": float(elapsed),
         "status": "ok" if completed.returncode == 0 else "failed",
     }
+
+
+def _prepare_scenario_cache(
+    *,
+    scenario: ScenarioSpec,
+    zarr_path: Path,
+) -> dict[str, Any]:
+    if scenario.roi_cache_dir is None:
+        return {"prepared": False}
+
+    if scenario.name == SCENARIO_GEOMETRY_CACHE_BUILD and scenario.roi_cache_dir.exists():
+        shutil.rmtree(scenario.roi_cache_dir, ignore_errors=True)
+
+    if scenario.name != SCENARIO_GEOMETRY_CACHE_REUSE:
+        return {"prepared": False}
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    crop_source = CropImageSource.open(
+        root,
+        crop_run=scenario.crop_run,
+        zarr_path=zarr_path,
+        roi_cache_policy="always",
+        roi_cache_dir=scenario.roi_cache_dir,
+        console=None,
+    )
+    try:
+        return {
+            "prepared": True,
+            "cache_created": bool(crop_source.roi_cache_created),
+            "cache_used": bool(crop_source.roi_cache_used),
+            "cache_path": crop_source.roi_cache_path,
+            "cache_key": crop_source.roi_cache_key,
+        }
+    finally:
+        crop_source.close()
 
 
 def _default_output_json() -> Path:
@@ -387,10 +456,27 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--skip-eye-masks", action="store_true", help="Benchmark keypoints only.")
     parser.add_argument("--keypoint-batch-size", type=int, default=256, help="Batch size for pose inference.")
-    parser.add_argument("--eye-batch-size", type=int, default=64, help="Batch size for U-Net eye masks.")
+    parser.add_argument("--eye-batch-size", type=int, default=256, help="Batch size for U-Net eye masks.")
+    parser.add_argument(
+        "--eye-mask-chunk-rois",
+        type=int,
+        default=None,
+        help="Optional ROI chunk length override for U-Net mask_probs_roi outputs.",
+    )
+    parser.add_argument(
+        "--eye-mask-probs-dtype",
+        choices=("float16", "uint8"),
+        default="uint8",
+        help="Storage dtype for U-Net mask_probs_roi outputs during benchmarking (default: uint8).",
+    )
     parser.add_argument("--device", type=str, default=None, help="Optional shared device override.")
     parser.add_argument("--imgsz", type=int, default=None, help="Optional pose imgsz override.")
     parser.add_argument("--write-binary-masks", action="store_true", help="Write binary eye masks during U-Net benchmark.")
+    parser.add_argument(
+        "--profile-timings",
+        action="store_true",
+        help="Enable per-stage timing diagnostics inside the benchmarked inference stages.",
+    )
     parser.add_argument("--benchmark-id", type=str, default=None, help="Optional stable prefix for run names and cache root.")
     parser.add_argument("--output-json", type=Path, default=None, help="Output JSON path.")
     return parser
@@ -479,6 +565,17 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "roi_cache_dir": str(spec.roi_cache_dir) if spec.roi_cache_dir is not None else None,
             "description": spec.description,
         }
+        cache_prep = _prepare_scenario_cache(
+            scenario=spec,
+            zarr_path=zarr_path,
+        )
+        scenario_result["cache_prepare"] = cache_prep
+        if cache_prep.get("prepared"):
+            print(
+                "  cache_prepare: "
+                f"created={cache_prep.get('cache_created')} "
+                f"cache_used={cache_prep.get('cache_used')}"
+            )
 
         key_run_name = f"bench_{benchmark_id}_{spec.name}_keypoints"
         key_cmd = _build_keypoint_command(
@@ -491,6 +588,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             batch_size=int(args.keypoint_batch_size),
             device=args.device,
             imgsz=args.imgsz,
+            profile_timings=bool(args.profile_timings),
         )
         key_exec = _run_command(key_cmd)
         scenario_result["keypoints"] = key_exec
@@ -507,6 +605,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 f"read_mode={scenario_result['keypoints']['metrics']['source_roi_read_mode']} "
                 f"cache_used={scenario_result['keypoints']['metrics']['source_roi_cache_used']}"
             )
+            top_stage = _top_timing_stage(scenario_result["keypoints"]["metrics"])
+            if top_stage:
+                print(f"    timing_top: {top_stage}")
         else:
             print(f"  keypoints: failed (returncode={key_exec['returncode']})")
             results.append(scenario_result)
@@ -528,6 +629,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             batch_size=int(args.eye_batch_size),
             device=args.device,
             write_binary_masks=bool(args.write_binary_masks),
+            mask_probs_chunk_rois=args.eye_mask_chunk_rois,
+            mask_probs_dtype=args.eye_mask_probs_dtype,
+            profile_timings=bool(args.profile_timings),
         )
         eye_exec = _run_command(eye_cmd)
         scenario_result["eye_masks"] = eye_exec
@@ -544,6 +648,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 f"read_mode={scenario_result['eye_masks']['metrics']['source_roi_read_mode']} "
                 f"cache_used={scenario_result['eye_masks']['metrics']['source_roi_cache_used']}"
             )
+            top_stage = _top_timing_stage(scenario_result["eye_masks"]["metrics"])
+            if top_stage:
+                print(f"    timing_top: {top_stage}")
         else:
             print(f"  eye_masks: failed (returncode={eye_exec['returncode']})")
 
@@ -563,10 +670,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "geometry_crop_run": crop_runs.geometry_run,
             "keypoint_batch_size": int(args.keypoint_batch_size),
             "eye_batch_size": int(args.eye_batch_size),
+            "eye_mask_chunk_rois": int(args.eye_mask_chunk_rois) if args.eye_mask_chunk_rois else None,
             "device": args.device,
             "imgsz": args.imgsz,
             "skip_eye_masks": bool(args.skip_eye_masks),
             "write_binary_masks": bool(args.write_binary_masks),
+            "profile_timings": bool(args.profile_timings),
         },
         "resolved_models": {
             "pose": None if pose_candidate is None else {

@@ -460,6 +460,14 @@ Recommended policy:
   cropping into the training loop.
 - Temporary ROI caches used for fast inference should remain distinct from
   durable training artifacts.
+- Analysis eye-mask inference should default to quantized `uint8`
+  probability storage for `mask_probs_roi`.
+- On the current RTX A6000 analysis host, analysis U-Net inference should
+  currently default to `batch_size=256`, `mask_probs_chunk_rois=32`, and
+  GPU-side ROI normalization.
+- Eye-mask training or high-fidelity artifacts should prefer direct float
+  probability storage (`float16`) when soft probabilities are part of the
+  artifact contract.
 
 ## Archive Role Policy
 
@@ -473,6 +481,18 @@ different products with different guarantees.
   the contract,
 - may carry cached or materialized image data when useful, but that should not
   be the required baseline contract.
+- should keep eye-mask outputs ROI-local rather than persisting full-frame mask
+  rasters as the canonical artifact.
+- may prefer `label_mode=union` for analysis-time U-Net runs when downstream
+  refinement will assign left/right identity.
+- may use storage-optimized encodings for dense ROI-model outputs when the
+  semantic contract remains explicit.
+  Example: `mask_probs_roi` can be stored as quantized `uint8` with
+  `probabilities_encoding=linear_uint8_0_255` while still meaning
+  probabilities in `[0,1]`.
+- current smoke benchmarks indicate that with those defaults, warm-cache
+  geometry-only U-Net inference is no longer I/O-bound; the dominant remaining
+  cost is queued GPU compute completion after the forward pass.
 
 ### Training artifacts
 
@@ -480,6 +500,8 @@ different products with different guarantees.
 - should persist the actual ROI/image tensors used for training,
 - should be stable, portable, versioned, and self-documenting,
 - should not depend on live video decode during the training loop.
+- should prefer higher-fidelity mask probability storage when soft targets are
+  carried forward as part of the artifact contract.
 
 This makes the duplication boundary explicit: duplication is desirable when it
 creates an immutable, documented training artifact, and undesirable when it is
