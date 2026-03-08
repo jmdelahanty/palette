@@ -197,6 +197,70 @@ def _resolve_source_keypoints_run_for_unet(
     return latest_keypoints_run
 
 
+def _resolve_existing_keypoint_source_for_unet(
+    root: zarr.Group,
+    *,
+    explicit_keypoints_run: Optional[str],
+    source_attrs: Optional[Mapping[str, object]],
+    latest_keypoints_run: Optional[str],
+    crop_run_name: Optional[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve an existing keypoint lineage target for an eye-mask run.
+
+    Preference order:
+    1. Explicit run if it exists.
+    2. Source attrs if they reference an existing run/group.
+    3. Latest raw keypoint run if it exists.
+    4. Most recent raw/refined keypoint run matching the same crop run.
+    """
+
+    refined = root.get("refined_keypoints_runs")
+    raw = root.get("keypoints_runs")
+
+    def _run_exists(parent: Optional[zarr.Group], run_name: Optional[str]) -> bool:
+        return parent is not None and run_name is not None and str(run_name) in parent
+
+    def _crop_matches(parent: Optional[zarr.Group], run_name: str) -> bool:
+        if parent is None or run_name not in parent or crop_run_name is None:
+            return False
+        attrs = getattr(parent[run_name], "attrs", {})
+        return normalize_attr(attrs.get("source_crop_run")) == normalize_attr(crop_run_name)
+
+    if explicit_keypoints_run:
+        run_name = str(explicit_keypoints_run)
+        if _run_exists(refined, run_name):
+            return run_name, "refined_keypoints_runs"
+        if _run_exists(raw, run_name):
+            return run_name, "keypoints_runs"
+
+    source_group = normalize_attr(source_attrs.get("source_keypoint_group")) if source_attrs else None
+    source_run = normalize_attr(resolve_source_keypoints_run(source_attrs)) if source_attrs else None
+    if source_group and source_run:
+        parent = root.get(str(source_group))
+        if _run_exists(parent, str(source_run)):
+            return str(source_run), str(source_group)
+    if source_run:
+        if _run_exists(refined, str(source_run)):
+            return str(source_run), "refined_keypoints_runs"
+        if _run_exists(raw, str(source_run)):
+            return str(source_run), "keypoints_runs"
+
+    if latest_keypoints_run and _run_exists(raw, str(latest_keypoints_run)):
+        return str(latest_keypoints_run), "keypoints_runs"
+
+    if crop_run_name is not None:
+        raw_keys = _sorted_group_keys(raw)
+        for run_name in reversed(raw_keys):
+            if _crop_matches(raw, run_name):
+                return run_name, "keypoints_runs"
+        refined_keys = _sorted_group_keys(refined)
+        for run_name in reversed(refined_keys):
+            if _crop_matches(refined, run_name):
+                return run_name, "refined_keypoints_runs"
+
+    return None, None
+
+
 def _resolve_device(device_str: Optional[str]) -> torch.device:
     if device_str is None:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -803,11 +867,26 @@ def main(
     latest_keypoints = None
     if keypoints_parent is not None:
         latest_keypoints = keypoints_parent.attrs.get("latest")
-    resolved_keypoints_run = _resolve_source_keypoints_run_for_unet(
+    requested_keypoints_run = _resolve_source_keypoints_run_for_unet(
         explicit_keypoints_run=args.keypoints_run,
         source_attrs=src_attrs,
         latest_keypoints_run=latest_keypoints,
     )
+    resolved_keypoints_run, resolved_keypoint_group = _resolve_existing_keypoint_source_for_unet(
+        root,
+        explicit_keypoints_run=args.keypoints_run,
+        source_attrs=src_attrs,
+        latest_keypoints_run=latest_keypoints,
+        crop_run_name=str(crop_run_name) if crop_run_name is not None else None,
+    )
+    if requested_keypoints_run and resolved_keypoints_run != requested_keypoints_run:
+        console.print(
+            "[yellow]Requested/source keypoint lineage did not resolve to an existing run; "
+            f"using {resolved_keypoint_group}/{resolved_keypoints_run} instead.[/yellow]"
+            if resolved_keypoints_run and resolved_keypoint_group
+            else "[yellow]Requested/source keypoint lineage did not resolve to an existing run; "
+            "omitting keypoint lineage attrs.[/yellow]"
+        )
 
     run_group.attrs.update(src_attrs)
     run_group.attrs.update(
@@ -818,6 +897,7 @@ def main(
             "source_eye_masks_run": source_run_name,
             "source_detect_run": crop_group.attrs.get("source_detect_run", "unknown"),
             **build_source_keypoints_attrs(resolved_keypoints_run, include_legacy_alias=True),
+            "source_keypoint_group": resolved_keypoint_group,
             "source_crop_run": crop_run_name,
             "detection_source_path": crop_group.attrs.get("detection_source_path"),
             "source_crop_storage_mode": crop_source.storage_mode,

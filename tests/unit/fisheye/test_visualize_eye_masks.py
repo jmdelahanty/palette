@@ -85,3 +85,66 @@ def test_ellipse_curve_returns_empty_for_invalid_params() -> None:
         orientation_deg=0.0,
     )
     assert curve.shape == (0, 2)
+
+
+class _FakeCropSource:
+    def __init__(self, rois: np.ndarray) -> None:
+        self._rois = np.asarray(rois)
+        self.total_rois = int(self._rois.shape[0])
+
+    def read_slice(self, start: int, end: int) -> np.ndarray:
+        return np.asarray(self._rois[start:end])
+
+
+class _MaskVariantStub:
+    def __init__(self, masks: np.ndarray) -> None:
+        self.name = "stub"
+        self.group_path = "eye_masks_runs/stub"
+        self.masks = np.asarray(masks, dtype=np.uint8)
+        self.mask_probs = None
+        self.ellipse_params = None
+        self.ellipse_success = None
+        self.eye_labels = ["mask"]
+        self.display_names = ["Mask"]
+        self.channel_colors = [np.array([1.0, 0.0, 0.0], dtype=np.float32)]
+        self.channel_hex = ["#ff0000"]
+        self.is_refined = False
+        self.unrefined_note = None
+        self.summary_lines = []
+
+    @property
+    def channel_count(self) -> int:
+        return int(self.masks.shape[1])
+
+
+def test_eye_mask_viewer_reads_roi_from_crop_source() -> None:
+    rois = np.arange(2 * 4 * 4, dtype=np.uint8).reshape(2, 4, 4)
+    crop_source = _FakeCropSource(rois)
+    masks = np.zeros((2, 1, 4, 4), dtype=np.uint8)
+    masks[1, 0, 1:3, 1:3] = 1
+    success = np.array([True, True], dtype=bool)
+    keypoints = np.array(
+        [
+            [[1.0, 1.0], [2.0, 2.0]],
+            [[0.5, 0.5], [3.0, 3.0]],
+        ],
+        dtype=np.float32,
+    )
+    viewer = EyeMaskViewer(
+        root=None,  # type: ignore[arg-type]
+        variants=[_MaskVariantStub(masks)],
+        crop_source=crop_source,  # type: ignore[arg-type]
+        success_flags=success,
+        keypoints=keypoints,
+        keypoint_labels=["left", "right"],
+    )
+
+    _overlay, summary, _axes, _ellipse, _probs, base, mask_list, _variant, _kp, _valid = (
+        viewer.make_overlay(1, 0)
+    )
+
+    assert base.shape == (4, 4)
+    assert np.isclose(base.max(), 1.0)
+    assert np.isclose(base.min(), 0.0)
+    assert mask_list[0].sum() == 4
+    assert "ROI 2/2" in summary

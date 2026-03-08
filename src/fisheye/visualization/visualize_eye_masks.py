@@ -22,6 +22,7 @@ import zarr
 from matplotlib.patches import Patch
 from matplotlib.widgets import Button, Slider
 
+from ..shared.crop_image_source import CropImageSource
 from ..shared.mask_source import load_mask_bundle
 
 
@@ -353,7 +354,7 @@ class EyeMaskViewer:
         self,
         root: zarr.Group,
         variants: Sequence[MaskVariant],
-        roi_images: np.ndarray,
+        crop_source: CropImageSource,
         success_flags: np.ndarray,
         keypoints: np.ndarray,
         keypoint_labels: Sequence[str],
@@ -362,8 +363,8 @@ class EyeMaskViewer:
             raise ValueError("No mask variants available to visualize.")
         self.root = root
         self.variants = list(variants)
-        self.roi_images = roi_images
-        self.total = int(self.roi_images.shape[0])
+        self.crop_source = crop_source
+        self.total = int(self.crop_source.total_rois)
         self.success_flags = success_flags
         self.keypoints = np.asarray(keypoints)
         if self.keypoints.shape[0] != self.total:
@@ -503,7 +504,7 @@ class EyeMaskViewer:
         np.ndarray,
     ]:
         variant = self.variants[variant_idx]
-        roi = np.asarray(self.roi_images[idx])
+        roi = np.asarray(self.crop_source.read_slice(idx, idx + 1)[0])
         base = normalize_roi(roi)
         overlay = np.dstack([base, base, base])
 
@@ -621,15 +622,15 @@ def create_viewer(
     keypoint_run = get_latest_run(root, "keypoints", keypoint_run)
 
     crop_group = root[f"crop_runs/{crop_run}"]
-    roi_images = crop_group["roi_images"]
+    crop_source = CropImageSource.open(root, crop_run=crop_run, zarr_path=zarr_path)
     frame_indices_ds = crop_group.get("frame_indices")
     frame_indices: Optional[np.ndarray] = None
     if frame_indices_ds is not None:
         frame_indices = np.asarray(frame_indices_ds[:], dtype=np.int64)
-        if frame_indices.shape[0] != roi_images.shape[0]:
+        if frame_indices.shape[0] != crop_source.total_rois:
             raise ValueError(
                 "crop frame_indices length ({}) does not match roi_images rows ({}).".format(
-                    frame_indices.shape[0], roi_images.shape[0]
+                    frame_indices.shape[0], crop_source.total_rois
                 )
             )
 
@@ -667,7 +668,7 @@ def create_viewer(
         group_path = f"refined_eye_masks_runs/{name}"
         variants.append(build_mask_variant(root, group_path, f"Refined: {name}"))
 
-    viewer = EyeMaskViewer(root, variants, roi_images, success_flags, keypoints, keypoint_labels)
+    viewer = EyeMaskViewer(root, variants, crop_source, success_flags, keypoints, keypoint_labels)
 
     fig = plt.figure(figsize=(12, 6))
     gs = fig.add_gridspec(3, 3, height_ratios=[1, 0.35, 0.12], width_ratios=[1, 1, 1])
@@ -1057,7 +1058,10 @@ def create_viewer(
     fig.canvas.manager.set_window_title(
         f"Eye Mask Viewer | eye_run={eye_run}, crop_run={crop_run}, keypoint_run={keypoint_run}"
     )
-    plt.show()
+    try:
+        plt.show()
+    finally:
+        crop_source.close()
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Visualize eye mask segmentation results.")

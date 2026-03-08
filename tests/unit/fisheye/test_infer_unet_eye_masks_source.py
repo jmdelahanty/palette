@@ -63,6 +63,11 @@ def _make_geometry_only_archive(tmp_path: Path) -> Path:
     crop.create_array("frame_indices", data=np.array([0, 1], dtype=np.int32), overwrite=True)
     crop.create_array("detection_indices", data=np.array([0, 1], dtype=np.int32), overwrite=True)
     crop.create_array("detection_source", data=np.array([0, 0], dtype=np.int8), overwrite=True)
+
+    keypoints_parent = root.create_group("keypoints_runs")
+    keypoints_parent.attrs["latest"] = "kp_valid"
+    kp_valid = keypoints_parent.create_group("kp_valid")
+    kp_valid.attrs["source_crop_run"] = "crop_geometry"
     return zarr_path
 
 
@@ -142,6 +147,8 @@ def test_infer_unet_eye_masks_supports_geometry_only_crop_runs_with_temporary_ca
             str(zarr_path),
             "--checkpoint",
             str(checkpoint_path),
+            "--keypoints-run",
+            "kp_missing",
             "--roi-cache-policy",
             "always",
             "--roi-cache-dir",
@@ -165,6 +172,8 @@ def test_infer_unet_eye_masks_supports_geometry_only_crop_runs_with_temporary_ca
     assert seen["mask_probs_dtype"] == "uint8"
 
     assert run_group.attrs["source_crop_run"] == "crop_geometry"
+    assert run_group.attrs["source_keypoint_run"] == "kp_valid"
+    assert run_group.attrs["source_keypoint_group"] == "keypoints_runs"
     assert run_group.attrs["source_crop_storage_mode"] == "geometry_only"
     assert run_group.attrs["source_roi_read_mode"] == "temporary_cache"
     assert run_group.attrs["roi_cache_policy"] == "always"
