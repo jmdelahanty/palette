@@ -222,6 +222,13 @@ def test_build_arg_parser_accepts_refined_probability_flags() -> None:
     assert args.write_refined_probabilities is True
 
 
+def test_build_arg_parser_accepts_distributed_scheduler() -> None:
+    parser = mod._build_arg_parser()
+    args = parser.parse_args(["demo.zarr", "--scheduler", "distributed"])
+
+    assert args.scheduler == "distributed"
+
+
 def test_resolve_probability_threshold_prefers_cli_arg(tmp_path: Path) -> None:
     root = zarr.open_group(str(tmp_path / "archive.zarr"), mode="w")
     run = root.create_group("eye_masks_run")

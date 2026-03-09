@@ -1050,7 +1050,9 @@ def _run_unet(
 def _run_refine(zarr_path: Path, config: Dict[str, Any], source_run: Optional[str], quiet: bool) -> str:
     params = config.get("refine_eye_masks", {}) or {}
     scheduler = str(params.get("scheduler", "processes")).lower()
-    if scheduler not in {"threads", "processes"}:
+    if scheduler in {"single-thread", "single_thread"}:
+        scheduler = "single-threaded"
+    if scheduler not in {"threads", "processes", "distributed", "single-threaded"}:
         scheduler = "processes"
     if quiet and Console is not None:
         with open(os.devnull, "w", encoding="utf-8") as devnull:

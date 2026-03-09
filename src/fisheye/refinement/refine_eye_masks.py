@@ -34,6 +34,16 @@ import zarr
 from zarr.core.dtype import VariableLengthUTF8
 from dask import delayed
 from dask.diagnostics import ProgressBar
+
+try:
+    from dask.distributed import Client, LocalCluster
+
+    HAVE_DISTRIBUTED = True
+except ImportError:
+    LocalCluster = None  # type: ignore
+    Client = None  # type: ignore
+    HAVE_DISTRIBUTED = False
+
 from rich.console import Console
 from scipy.ndimage import distance_transform_edt, gaussian_filter, median_filter
 from skimage import measure, morphology
@@ -1818,12 +1828,14 @@ def refine_eye_masks(
         )
 
     scheduler_key = (scheduler or "processes").lower()
-    if scheduler_key not in {"threads", "processes"}:
+    if scheduler_key in {"single-thread", "single_thread"}:
+        scheduler_key = "single-threaded"
+    if scheduler_key not in {"threads", "processes", "distributed", "single-threaded"}:
         console.print(f"[yellow]Unknown scheduler '{scheduler_key}', defaulting to 'threads'.[/yellow]")
         scheduler_key = "threads"
 
     compute_kwargs: Dict[str, object] = {"scheduler": scheduler_key}
-    if num_workers is not None:
+    if num_workers is not None and scheduler_key != "distributed":
         compute_kwargs["num_workers"] = int(num_workers)
 
     if isinstance(binary_data, da.Array):
@@ -1872,10 +1884,35 @@ def refine_eye_masks(
             cumulative = stop
 
     chunk_results: List[List[Tuple[int, ROIOutput]]] = []
+    cluster = None
+    client = None
     if tasks:
         console.print(f"[cyan]Submitting {len(tasks)} chunk(s) to Dask ({scheduler_key})[/cyan]")
-        with ProgressBar():
-            chunk_results = list(dask.compute(*tasks, **compute_kwargs))
+        try:
+            if scheduler_key == "distributed":
+                if not HAVE_DISTRIBUTED:
+                    raise RuntimeError(
+                        "Dask distributed is not available. Install dask[distributed] "
+                        "or choose a different scheduler (e.g. 'processes' or 'threads')."
+                    )
+                cluster_kwargs: Dict[str, object] = {}
+                if num_workers is not None:
+                    cluster_kwargs["n_workers"] = int(num_workers)
+                cluster = LocalCluster(**cluster_kwargs)
+                client = Client(cluster)
+                dashboard_link = getattr(client, "dashboard_link", None)
+                if dashboard_link:
+                    console.print(f"[cyan]Dask dashboard:[/cyan] [link={dashboard_link}]{dashboard_link}[/link]")
+                futures = client.compute(tasks)
+                chunk_results = list(client.gather(futures))
+            else:
+                with ProgressBar():
+                    chunk_results = list(dask.compute(*tasks, **compute_kwargs))
+        finally:
+            if client is not None:
+                client.close()
+            if cluster is not None:
+                cluster.close()
 
     del binary_data
     if probs_data is not None:
@@ -2598,7 +2635,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--scheduler",
-        choices=["threads", "processes"],
+        choices=["threads", "processes", "distributed", "single-threaded"],
         default="processes",
         help="Dask scheduler to use for refinement (default: processes).",
     )

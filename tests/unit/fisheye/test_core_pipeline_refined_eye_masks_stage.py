@@ -57,7 +57,7 @@ def test_run_refined_eye_masks_respects_enabled_flag(monkeypatch, tmp_path: Path
     pipeline._run_refined_eye_masks()
 
 
-def test_run_refined_eye_masks_passes_config_and_normalizes_scheduler(
+def test_run_refined_eye_masks_passes_config_and_preserves_supported_scheduler(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -93,7 +93,7 @@ def test_run_refined_eye_masks_passes_config_and_normalizes_scheduler(
     assert captured["run_name"] == "refined_001"
     assert captured["keypoint_run"] == "kp_001"
     assert captured["chunk_size"] == 256
-    assert captured["scheduler"] == "processes"
+    assert captured["scheduler"] == "distributed"
     assert captured["num_workers"] == 7
     assert captured["area_filter_z"] == 3.5
     assert captured["area_filter_mode"] == "both"

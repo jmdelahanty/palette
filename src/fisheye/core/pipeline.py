@@ -701,7 +701,9 @@ class Pipeline:
             return
 
         scheduler = str(params.get('scheduler') or self.config.scheduler or 'processes').lower()
-        if scheduler not in {'threads', 'processes'}:
+        if scheduler in {'single-thread', 'single_thread'}:
+            scheduler = 'single-threaded'
+        if scheduler not in {'threads', 'processes', 'distributed', 'single-threaded'}:
             self.console.print(
                 f"[yellow]Unsupported refine_eye_masks scheduler '{scheduler}', using 'processes'[/yellow]"
             )
