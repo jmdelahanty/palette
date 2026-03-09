@@ -88,7 +88,11 @@ Eye segmentation runs can now be post-processed with `python -m fisheye.refineme
 - Emits a new `refined_eye_masks_runs/<run_name>` containing the same arrays as the traditional segmenter (`masks_roi`, ellipse metrics, contour tables, etc.)
 - Fits refined eye ellipses with the same OpenCV external-contour + `cv2.fitEllipse` path used by the patch-review viewer, which is materially more stable on union-derived left/right masks than the previous `skimage EllipseModel` fit
 - Records provenance in the run attributes (`method="refine_eye_masks"`,
-  `source_*_run`, `source_eye_masks_method`, `eye_labels`, summary stats)
+  `source_*_run`, `source_eye_masks_method`, `eye_labels`, summary stats),
+  including explicit ellipse-fit metadata:
+  - `ellipse_fit_backend="opencv"`
+  - `ellipse_fit_method="cv2.fitEllipse"`
+  - `ellipse_contour_mode="external_pixel_contour"`
 - Writes canonical keypoint lineage attr `source_keypoints_run` (legacy
   `source_keypoint_run` may be mirrored for migration compatibility)
 - Treats binary ROI masks as the canonical refined artifact.

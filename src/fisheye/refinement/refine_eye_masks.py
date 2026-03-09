@@ -61,6 +61,10 @@ _MORPH_OPENING_RADIUS = 0
 _MIN_OBJECT_AREA = 12
 _DEFAULT_PROBABILITY_THRESHOLD = 0.45
 _RECOMMENDED_PROBABILITY_THRESHOLD_ATTR = "recommended_probability_threshold"
+_ELLIPSE_FIT_BACKEND = "opencv"
+_ELLIPSE_FIT_METHOD = "cv2.fitEllipse"
+_ELLIPSE_CONTOUR_MODE = "external_pixel_contour"
+_ELLIPSE_CONTOUR_EXTRACTION = "cv2.findContours(RETR_EXTERNAL, CHAIN_APPROX_NONE)"
 _AREA_FILTER_Z_DEFAULT = 2.0
 _AREA_FILTER_MODE_DEFAULT = "either"
 _SUCCESS_MIN_EYE_AREA_PX_DEFAULT = 50.0
@@ -2419,6 +2423,12 @@ def refine_eye_masks(
         "components_reassigned": int(stats["components_reassigned"]),
         "probability_split": int(stats["probability_split"]),
         "metrics_version": 1,
+        "ellipse_fit": {
+            "backend": _ELLIPSE_FIT_BACKEND,
+            "method": _ELLIPSE_FIT_METHOD,
+            "contour_mode": _ELLIPSE_CONTOUR_MODE,
+            "contour_extraction": _ELLIPSE_CONTOUR_EXTRACTION,
+        },
         "area_filter": area_filter_info,
         "success_area_filter": small_area_filter_info,
     }
@@ -2489,6 +2499,9 @@ def refine_eye_masks(
         "mask_binary_identity": bundle.binary_identity,
         "mask_probability_identity": bundle.probs_identity or "none",
         "mask_bundle_provenance": mask_bundle_provenance,
+        "ellipse_fit_backend": _ELLIPSE_FIT_BACKEND,
+        "ellipse_fit_method": _ELLIPSE_FIT_METHOD,
+        "ellipse_contour_mode": _ELLIPSE_CONTOUR_MODE,
         "success_min_eye_area_px": success_min_eye_area_px,
         "min_eye_area_success_px": success_min_eye_area_px,
         "traditional_fast_path": bool(use_fast_path),

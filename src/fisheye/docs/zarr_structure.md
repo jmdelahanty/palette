@@ -255,7 +255,9 @@ Attributes: `source_crop_run`, canonical `source_keypoints_run` *(legacy alias:
 `source_keypoint_group` (defaults to `refined_keypoints_runs` when present), `method`,
 model info, thresholds, separation limits, `successful_eyes`,
 `successful_roi_pairs`, `reason_counts`, `ellipse_angle_units`,
-`ellipse_fit_method` (currently `opencv_fitellipse` for refined runs), `eye_labels`, `segmenter_label_mode`,
+`ellipse_fit_backend` (currently `opencv` for refined runs),
+`ellipse_fit_method` (currently `cv2.fitEllipse` for refined runs),
+`ellipse_contour_mode` (currently `external_pixel_contour` for refined runs), `eye_labels`, `segmenter_label_mode`,
 `mask_probs_chunk_rois`, `duration_seconds`,
 optional threshold-calibration metadata:
 - `recommended_probability_threshold`
