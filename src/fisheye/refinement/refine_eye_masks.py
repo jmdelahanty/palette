@@ -20,6 +20,7 @@ import argparse
 import math
 import sys
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import dask
 import dask.array as da
 import numpy as np
+import cv2
 import zarr
 from zarr.core.dtype import VariableLengthUTF8
 from dask import delayed
@@ -35,7 +37,6 @@ from dask.diagnostics import ProgressBar
 from rich.console import Console
 from scipy.ndimage import distance_transform_edt, gaussian_filter, median_filter
 from skimage import measure, morphology
-from skimage.measure import EllipseModel
 from collections import Counter
 
 from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
@@ -372,13 +373,14 @@ def _append_reason_tag(reason: Optional[str], tag: str) -> str:
 
 
 def _extract_contour(mask: np.ndarray, min_points: int) -> Optional[np.ndarray]:
-    contours = measure.find_contours(mask.astype(float), 0.5)
+    mask_u8 = (np.asarray(mask, dtype=np.uint8) > 0).astype(np.uint8)
+    contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
         return None
-    contour = max(contours, key=lambda c: c.shape[0])
+    contour = max(contours, key=cv2.contourArea).reshape(-1, 2).astype(np.float32)
     if contour.shape[0] < min_points:
         return None
-    return contour[:, ::-1]  # Convert to (x, y)
+    return contour
 
 def _largest_component(mask: np.ndarray) -> np.ndarray:
     """Return the largest 8-connected component of a boolean mask."""
@@ -649,63 +651,82 @@ def _split_mask_by_heading(
     return left_mask, right_mask
 
 
-def _measure_mask(mask: np.ndarray, min_contour_points: int = 5) -> Tuple[bool, np.ndarray, np.ndarray, Optional[np.ndarray]]:
-    """Extract metrics from a binary mask using least-squares ellipse fitting."""
+def _measure_mask(
+    mask: np.ndarray,
+    min_contour_points: int = 5,
+) -> Tuple[bool, np.ndarray, np.ndarray, Optional[np.ndarray], Optional[str]]:
+    """Extract metrics from a binary mask using OpenCV ellipse fitting."""
 
     if mask.sum() == 0:
         ellipse = np.full(5, np.nan, dtype=np.float32)
         centroid = np.full(2, np.nan, dtype=np.float32)
-        return False, ellipse, centroid, None
+        return False, ellipse, centroid, None, "empty_mask"
 
     # Extract contour first (already in x, y format)
     contour = _extract_contour(mask.astype(float), min_contour_points)
     if contour is None:
         ellipse = np.full(5, np.nan, dtype=np.float32)
         centroid = np.full(2, np.nan, dtype=np.float32)
-        return False, ellipse, centroid, None
+        return False, ellipse, centroid, None, "contour_missing"
 
     contour = contour.astype(np.float32)
 
-    # Fit ellipse to contour using least-squares (more stable than moments)
-    ellipse_model = EllipseModel()
-    success = ellipse_model.estimate(contour)
+    ys, xs = np.nonzero(mask.astype(np.uint8))
+    if ys.size > 0:
+        centroid = np.array([float(xs.mean()), float(ys.mean())], dtype=np.float32)
+    else:
+        centroid = np.full(2, np.nan, dtype=np.float32)
 
-    if not success or ellipse_model.params is None:
-        # Fallback: use centroid from mask, return NaN for ellipse params
-        region_mask = mask.astype(np.uint8)
-        props = measure.regionprops(region_mask)
-        if props:
-            centroid = np.array([float(props[0].centroid[1]), float(props[0].centroid[0])], dtype=np.float32)
-        else:
-            centroid = np.full(2, np.nan, dtype=np.float32)
+    try:
+        (xc, yc), (axis_a, axis_b), angle = cv2.fitEllipse(contour)
+    except cv2.error:
         ellipse = np.full(5, np.nan, dtype=np.float32)
-        return False, ellipse, centroid, contour
+        return False, ellipse, centroid, contour, "ellipse_estimate_failed"
 
-    # EllipseModel.params = (xc, yc, a, b, theta)
-    # a, b are semi-axes; theta is rotation angle in radians
-    xc, yc, a, b, theta = ellipse_model.params
+    major = float(axis_a)
+    minor = float(axis_b)
+    theta = float(angle)
+    if major < minor:
+        major, minor = minor, major
+        theta += 90.0
+    theta = float((theta + 180.0) % 180.0)
 
-    # Canonicalize ellipse parameters so major >= minor across refined outputs.
-    if a < b:
-        a, b = b, a
-        theta = theta + (math.pi / 2.0)
+    if not all(np.isfinite([xc, yc, major, minor, theta])) or major <= 0.0 or minor <= 0.0:
+        ellipse = np.full(5, np.nan, dtype=np.float32)
+        return False, ellipse, centroid, contour, "ellipse_invalid_params"
 
     centroid = np.array([float(xc), float(yc)], dtype=np.float32)
 
-    # Convert semi-axes to full axis lengths (to match existing schema)
-    # and angle to degrees
     ellipse = np.array(
         [
             float(xc),
             float(yc),
-            float(2 * a),  # major_axis_length (full length)
-            float(2 * b),  # minor_axis_length (full length)
-            float(np.rad2deg(theta)),  # angle in degrees
+            major,
+            minor,
+            theta,
         ],
         dtype=np.float32,
     )
 
-    return True, ellipse, centroid, contour
+    return True, ellipse, centroid, contour, None
+
+
+def _append_ellipse_failure_tags(
+    reason: Optional[str],
+    *,
+    left_failure: Optional[str],
+    right_failure: Optional[str],
+) -> Optional[str]:
+    tagged = reason
+    if left_failure is not None:
+        tagged = _append_reason_tag(tagged, "ellipse_fail_left")
+        tagged = _append_reason_tag(tagged, f"{left_failure}_left")
+    if right_failure is not None:
+        tagged = _append_reason_tag(tagged, "ellipse_fail_right")
+        tagged = _append_reason_tag(tagged, f"{right_failure}_right")
+    if left_failure is not None or right_failure is not None:
+        tagged = _append_reason_tag(tagged, "ellipse_fail_pair")
+    return tagged
 
 
 def _compute_roi_metrics(
@@ -972,6 +993,7 @@ def _refine_roi(
                 ellipse,
                 centroid,
                 contour,
+                _failure_reason,
             ) = _measure_mask(mask_bool.astype(np.uint8))
             ellipse_success[eye_idx] = success
             ellipse_params[eye_idx] = ellipse
@@ -1174,18 +1196,27 @@ def _refine_roi(
     masks_out[1] = right_mask_connected.astype(np.uint8)
 
     contours: List[Optional[np.ndarray]] = [None, None]
+    ellipse_failure_reasons: List[Optional[str]] = [None, None]
     for eye_idx, mask in enumerate((left_mask_connected, right_mask_connected)):
         (
             success,
             ellipse,
             centroid,
             contour,
+            failure_reason,
         ) = _measure_mask(mask.astype(np.uint8))
 
         ellipse_success[eye_idx] = success
         ellipse_params[eye_idx] = ellipse
         centroids[eye_idx] = centroid
         contours[eye_idx] = contour
+        ellipse_failure_reasons[eye_idx] = failure_reason
+
+    reason = _append_ellipse_failure_tags(
+        reason,
+        left_failure=ellipse_failure_reasons[0],
+        right_failure=ellipse_failure_reasons[1],
+    )
 
     if np.all(ellipse_success):
         eye_separation = float(
@@ -1663,6 +1694,9 @@ def refine_eye_masks(
         "small_area_rois": 0,
         "small_area_left": 0,
         "small_area_right": 0,
+        "ellipse_fail_left": 0,
+        "ellipse_fail_right": 0,
+        "ellipse_fail_pairs": 0,
     }
 
     chunk_rois = min(512, total_rois) if total_rois > 0 else 1
@@ -2024,11 +2058,31 @@ def refine_eye_masks(
         stats["small_area_rois"] = 0
 
     effective_success = ellipse_success_metrics & ~small_area_flags
+    ellipse_fail_left_flags = ~ellipse_success_metrics[:, 0]
+    ellipse_fail_right_flags = ~ellipse_success_metrics[:, 1]
+    ellipse_fail_pair_flags = ellipse_fail_left_flags | ellipse_fail_right_flags
+    for idx in np.nonzero(ellipse_fail_left_flags)[0]:
+        reason_strings[idx] = _append_reason_tag(reason_strings[idx], "ellipse_fail_left")
+    for idx in np.nonzero(ellipse_fail_right_flags)[0]:
+        reason_strings[idx] = _append_reason_tag(reason_strings[idx], "ellipse_fail_right")
+    for idx in np.nonzero(ellipse_fail_pair_flags)[0]:
+        reason_strings[idx] = _append_reason_tag(reason_strings[idx], "ellipse_fail_pair")
+    stats["ellipse_fail_left"] = int(ellipse_fail_left_flags.sum())
+    stats["ellipse_fail_right"] = int(ellipse_fail_right_flags.sum())
+    stats["ellipse_fail_pairs"] = int(ellipse_fail_pair_flags.sum())
     if total_rois > 0:
         run_group["ellipse_success"][:] = effective_success.astype(bool, copy=False)
 
     reason_array = np.array(reason_strings, dtype=object)
     reason_counts = dict(Counter(reason_strings))
+    reason_tag_counts = dict(
+        Counter(
+            part
+            for item in reason_strings
+            for part in (str(item).split("|") if item else ["<empty>"])
+            if part
+        )
+    )
 
     symmetry_sum_metrics = np.full(total_rois, np.nan, dtype=np.float32)
     symmetry_abs_diff_metrics = np.full(total_rois, np.nan, dtype=np.float32)
@@ -2217,10 +2271,14 @@ def refine_eye_masks(
         "probability_mean_mean": prob_mean_mean.tolist(),
         "probability_threshold": float(probability_threshold),
         "reason_counts": reason_counts,
+        "reason_tag_counts": reason_tag_counts,
         "probability_usage_rate": float(np.count_nonzero(probabilities_used_metrics) / total_rois) if total_rois else 0.0,
         "filtered_left": stats["filtered_left"],
         "filtered_right": stats["filtered_right"],
         "filtered_roi_pairs": stats["filtered_rois"],
+        "ellipse_fail_left": stats["ellipse_fail_left"],
+        "ellipse_fail_right": stats["ellipse_fail_right"],
+        "ellipse_fail_pairs": stats["ellipse_fail_pairs"],
         "small_area_left": stats["small_area_left"],
         "small_area_right": stats["small_area_right"],
         "small_area_roi_pairs": stats["small_area_rois"],
@@ -2442,6 +2500,7 @@ def refine_eye_masks(
         "hostname": env_info["platform"].get("hostname", "unknown"),
         "metrics_summary": metrics_summary,
         "summary_statistics": {"refine": stats},
+        "reason_tag_counts": reason_tag_counts,
     }
 
     source_provenance = src_run.attrs.get("provenance")

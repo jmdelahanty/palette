@@ -86,6 +86,7 @@ Eye segmentation runs can now be post-processed with `python -m fisheye.refineme
 - Enforces strict row-alignment preflight checks (`roi_images`, keypoint arrays, `masks_roi`, and optional mapping/probability arrays) before writing outputs
 - Reassigns pixels to anatomical left/right using keypoint geometry (with heading-based fallback)
 - Emits a new `refined_eye_masks_runs/<run_name>` containing the same arrays as the traditional segmenter (`masks_roi`, ellipse metrics, contour tables, etc.)
+- Fits refined eye ellipses with the same OpenCV external-contour + `cv2.fitEllipse` path used by the patch-review viewer, which is materially more stable on union-derived left/right masks than the previous `skimage EllipseModel` fit
 - Records provenance in the run attributes (`method="refine_eye_masks"`,
   `source_*_run`, `source_eye_masks_method`, `eye_labels`, summary stats)
 - Writes canonical keypoint lineage attr `source_keypoints_run` (legacy
@@ -120,6 +121,8 @@ Viewer/review policy:
   canonical binary refined masks.
 
 By default, traditional segmentations use a fast path that preserves the source masks and ellipse fits and skips smoothing/component enforcement. Use `--force-refine-traditional` to opt into the full refinement pass.
+
+Smoke validation note: on the geometry-only smoke archive, switching refined ellipse fitting from `skimage EllipseModel` to the OpenCV reviewer path improved `successful_roi_pairs` from roughly `1908/23287` to `23216/23287`, indicating the prior bottleneck was fitter stability rather than raw union-mask quality.
 
 If legacy archives are missing keypoint lineage attrs, pass
 `--keypoint-run <run>` explicitly. `--allow-latest-keypoint-fallback` is
