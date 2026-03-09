@@ -52,7 +52,9 @@ def test_refine_eye_masks_root_open_uses_live_metadata(monkeypatch: pytest.Monke
     assert seen["kwargs"].get("use_consolidated") is False
 
 
-def test_process_and_write_chunk_open_uses_live_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_and_write_chunk_open_uses_live_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     roi_output = mod.ROIOutput(
         masks=np.ones((2, 3, 3), dtype=np.uint8),
         ellipse_params=np.zeros((2, 5), dtype=np.float32),
@@ -87,11 +89,16 @@ def test_process_and_write_chunk_open_uses_live_metadata(monkeypatch: pytest.Mon
         "_process_refine_chunk",
         lambda *args, **kwargs: [(0, roi_output)],
     )
+    monkeypatch.setattr(
+        mod,
+        "_write_chunk_metrics",
+        lambda *args, **kwargs: None,
+    )
 
-    results = mod._process_and_write_chunk(
-        binary_chunk=np.zeros((1, 2, 3, 3), dtype=np.uint8),
-        probs_chunk=None,
+    result = mod._process_and_write_chunk(
         zarr_path="demo.zarr",
+        source_masks_path="unused/masks",
+        source_probs_path=None,
         run_group_path="refined_eye_masks_runs/refined_001",
         keypoints_path="unused/keypoints",
         heading_path="unused/heading",
@@ -101,7 +108,7 @@ def test_process_and_write_chunk_open_uses_live_metadata(monkeypatch: pytest.Mon
         write_probabilities=False,
     )
 
-    assert len(results) == 1
+    assert result is None
     assert seen["mode"] == "a"
     assert seen["kwargs"].get("use_consolidated") is False
     assert int(run_group["masks_roi"][0].sum()) > 0
@@ -229,34 +236,31 @@ def test_build_arg_parser_accepts_distributed_scheduler() -> None:
     assert args.scheduler == "distributed"
 
 
-def test_resolve_probability_threshold_prefers_cli_arg(tmp_path: Path) -> None:
-    root = zarr.open_group(str(tmp_path / "archive.zarr"), mode="w")
-    run = root.create_group("eye_masks_run")
-    run.attrs[mod._RECOMMENDED_PROBABILITY_THRESHOLD_ATTR] = 0.61
+def test_resolve_probability_threshold_prefers_cli_arg() -> None:
+    class _Run:
+        attrs = {mod._RECOMMENDED_PROBABILITY_THRESHOLD_ATTR: 0.61}
 
-    threshold, source = mod._resolve_probability_threshold(source_run=run, explicit_threshold=0.33)
+    threshold, source = mod._resolve_probability_threshold(source_run=_Run(), explicit_threshold=0.33)
 
     assert threshold == pytest.approx(0.33)
     assert source == "cli_arg"
 
 
-def test_resolve_probability_threshold_uses_recommended_metadata_when_cli_missing(tmp_path: Path) -> None:
-    root = zarr.open_group(str(tmp_path / "archive.zarr"), mode="w")
-    run = root.create_group("eye_masks_run")
-    run.attrs[mod._RECOMMENDED_PROBABILITY_THRESHOLD_ATTR] = 0.58
+def test_resolve_probability_threshold_uses_recommended_metadata_when_cli_missing() -> None:
+    class _Run:
+        attrs = {mod._RECOMMENDED_PROBABILITY_THRESHOLD_ATTR: 0.58}
 
-    threshold, source = mod._resolve_probability_threshold(source_run=run, explicit_threshold=None)
+    threshold, source = mod._resolve_probability_threshold(source_run=_Run(), explicit_threshold=None)
 
     assert threshold == pytest.approx(0.58)
     assert source == f"source_run_attr:{mod._RECOMMENDED_PROBABILITY_THRESHOLD_ATTR}"
 
 
-def test_resolve_probability_threshold_falls_back_to_default_for_invalid_metadata(tmp_path: Path) -> None:
-    root = zarr.open_group(str(tmp_path / "archive.zarr"), mode="w")
-    run = root.create_group("eye_masks_run")
-    run.attrs[mod._RECOMMENDED_PROBABILITY_THRESHOLD_ATTR] = 9.9
+def test_resolve_probability_threshold_falls_back_to_default_for_invalid_metadata() -> None:
+    class _Run:
+        attrs = {mod._RECOMMENDED_PROBABILITY_THRESHOLD_ATTR: 9.9}
 
-    threshold, source = mod._resolve_probability_threshold(source_run=run, explicit_threshold=None)
+    threshold, source = mod._resolve_probability_threshold(source_run=_Run(), explicit_threshold=None)
 
     assert threshold == pytest.approx(mod._DEFAULT_PROBABILITY_THRESHOLD)
     assert source == "default"

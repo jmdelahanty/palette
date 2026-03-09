@@ -36,12 +36,13 @@ from dask import delayed
 from dask.diagnostics import ProgressBar
 
 try:
-    from dask.distributed import Client, LocalCluster
+    from dask.distributed import Client, LocalCluster, wait
 
     HAVE_DISTRIBUTED = True
 except ImportError:
     LocalCluster = None  # type: ignore
     Client = None  # type: ignore
+    wait = None  # type: ignore
     HAVE_DISTRIBUTED = False
 
 from rich.console import Console
@@ -50,6 +51,7 @@ from skimage import measure, morphology
 from collections import Counter
 
 from ..registry.db import Registry, RegistryPaths, resolve_dataset_id
+from ..shared.detect_reason_codec import write_reason_columns
 from ..shared.mask_source import load_mask_bundle
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
 from ..shared.registry_stage_complete import emit_stage_completion, extract_dataset_metadata
@@ -79,6 +81,8 @@ _AREA_FILTER_Z_DEFAULT = 2.0
 _AREA_FILTER_MODE_DEFAULT = "either"
 _SUCCESS_MIN_EYE_AREA_PX_DEFAULT = 50.0
 _REFINED_EYE_MASKS_STATUS_SOURCE = "runtime_refine_eye_masks"
+_LOCAL_REASON_STAGING_DATASET = "reason_local"
+_GLOBAL_REASON_TAGS = ("filtered_left", "filtered_right", "filtered_pair")
 
 _ZARR_GROUP_CACHE: Dict[str, zarr.Group] = {}
 _ZARR_ARRAY_CACHE: Dict[Tuple[str, str], zarr.Array] = {}
@@ -86,6 +90,14 @@ _ZARR_ARRAY_CACHE: Dict[Tuple[str, str], zarr.Array] = {}
 
 def _status_float(value: object) -> Optional[float]:
     return as_float(value)
+
+
+def _resolve_worker_chunk_rois(*, total_rois: int, chunk_size: int) -> int:
+    """Align worker-written Zarr chunks to the scheduled task width."""
+    requested = max(1, int(chunk_size))
+    if total_rois <= 0:
+        return 1
+    return max(1, min(int(total_rois), requested))
 
 
 def _coerce_positive_float(value: object) -> Optional[float]:
@@ -386,6 +398,55 @@ def _append_reason_tag(reason: Optional[str], tag: str) -> str:
     return f"{reason}|{tag}"
 
 
+def _reason_tags(reason: Optional[str]) -> List[str]:
+    if reason in (None, ""):
+        return []
+    return [part for part in str(reason).split("|") if part]
+
+
+def _finalize_worker_local_reason(
+    reason: Optional[str],
+    *,
+    refined_areas: np.ndarray,
+    success_min_eye_area_px: Optional[float],
+) -> str:
+    """Apply worker-local tags before global dataset filters are known."""
+    final_reason = str(reason) if reason not in (None, "") else "refined"
+    threshold = _coerce_positive_float(success_min_eye_area_px)
+    if threshold is None:
+        return final_reason
+
+    small_area_flags = np.asarray(refined_areas, dtype=np.float32) < float(threshold)
+    if bool(small_area_flags[0]):
+        final_reason = _append_reason_tag(final_reason, "small_area_left")
+    if bool(small_area_flags[1]):
+        final_reason = _append_reason_tag(final_reason, "small_area_right")
+    if bool(np.any(small_area_flags)):
+        final_reason = _append_reason_tag(final_reason, "small_area_pair")
+    return final_reason
+
+
+def _apply_driver_global_reason_tags(
+    reason_values: np.ndarray,
+    *,
+    filter_flags: np.ndarray,
+    pair_filter_flags: np.ndarray,
+) -> np.ndarray:
+    """Append only the driver-global filter tags after dataset-wide stats are known."""
+    values = np.asarray(reason_values, dtype=object).reshape(-1)
+    if values.shape[0] == 0:
+        return values
+
+    out = values.copy()
+    for idx in np.nonzero(filter_flags[:, 0])[0]:
+        out[idx] = _append_reason_tag(str(out[idx]), _GLOBAL_REASON_TAGS[0])
+    for idx in np.nonzero(filter_flags[:, 1])[0]:
+        out[idx] = _append_reason_tag(str(out[idx]), _GLOBAL_REASON_TAGS[1])
+    for idx in np.nonzero(pair_filter_flags)[0]:
+        out[idx] = _append_reason_tag(str(out[idx]), _GLOBAL_REASON_TAGS[2])
+    return np.asarray(out, dtype=object)
+
+
 def _extract_contour(mask: np.ndarray, min_points: int) -> Optional[np.ndarray]:
     mask_u8 = (np.asarray(mask, dtype=np.uint8) > 0).astype(np.uint8)
     contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
@@ -585,6 +646,53 @@ class ROIOutput:
     probability_max: Optional[np.ndarray] = None  # (2,) float32
     probability_var: Optional[np.ndarray] = None  # (2,) float32
     probability_high_fraction: Optional[np.ndarray] = None  # (2,) float32
+
+def _compute_local_refine_stats(
+    *,
+    local_reason_array: np.ndarray,
+    smoothing_flags: np.ndarray,
+    pixels_reassigned: np.ndarray,
+    probabilities_used: np.ndarray,
+) -> Dict[str, int]:
+    """Rebuild local refine counters from staged arrays after worker completion."""
+    stats_delta = {
+        "refined": 0,
+        "fallback_heading": 0,
+        "copied_original": 0,
+        "keypoint_fail": 0,
+        "empty_union": 0,
+        "smoothed_rois": 0,
+        "smoothed_channels": 0,
+        "components_reassigned": 0,
+        "probability_split": 0,
+        "assigned_by_keypoint": 0,
+    }
+
+    for reason in np.asarray(local_reason_array, dtype=object).reshape(-1):
+        tags = set(_reason_tags(str(reason)))
+        if "assigned_by_keypoint" in tags:
+            stats_delta["assigned_by_keypoint"] += 1
+        if "heading_split" in tags:
+            stats_delta["fallback_heading"] += 1
+            stats_delta["refined"] += 1
+        elif "keypoint_fail" in tags:
+            stats_delta["keypoint_fail"] += 1
+            stats_delta["copied_original"] += 1
+        elif "empty_union" in tags:
+            stats_delta["empty_union"] += 1
+            stats_delta["copied_original"] += 1
+        elif "copied_original" in tags:
+            stats_delta["copied_original"] += 1
+        else:
+            stats_delta["refined"] += 1
+
+    smoothing_arr = np.asarray(smoothing_flags, dtype=np.uint8)
+    if smoothing_arr.size > 0:
+        stats_delta["smoothed_rois"] = int(np.count_nonzero(np.any(smoothing_arr > 0, axis=1)))
+        stats_delta["smoothed_channels"] = int(np.count_nonzero(smoothing_arr))
+    stats_delta["components_reassigned"] = int(np.asarray(pixels_reassigned, dtype=np.int64).sum())
+    stats_delta["probability_split"] = int(np.count_nonzero(np.asarray(probabilities_used, dtype=bool)))
+    return stats_delta
 
 
 def _prepare_run_group(root: zarr.Group, run_name: Optional[str], console: Console) -> Tuple[zarr.Group, str]:
@@ -951,6 +1059,49 @@ def _build_passthrough_output(
         **metrics,
     )
 
+
+def _load_source_mask_slices(
+    zarr_path: str,
+    *,
+    start: int,
+    stop: int,
+    source_masks_path: Optional[str],
+    source_probs_path: Optional[str],
+    probability_threshold: float,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Load one source chunk directly from Zarr for worker-local refinement."""
+    slice_obj = slice(start, stop)
+
+    probs_np: Optional[np.ndarray] = None
+    if source_probs_path is not None:
+        raw_probs = np.asarray(_get_zarr_array(zarr_path, source_probs_path)[slice_obj])
+        source_dtype = raw_probs.dtype
+        probs_np = raw_probs.astype(np.float32, copy=False)
+        if np.issubdtype(source_dtype, np.integer):
+            max_value = float(np.iinfo(source_dtype).max)
+            if max_value > 1.0:
+                probs_np /= max_value
+        probs_np = np.nan_to_num(probs_np, nan=0.0, posinf=1.0, neginf=0.0)
+        probs_np = np.clip(probs_np, 0.0, 1.0, out=probs_np)
+        if probs_np.ndim == 3:
+            probs_np = probs_np[:, None, :, :]
+        elif probs_np.ndim != 4:
+            raise ValueError(f"Unexpected probability mask shape {probs_np.shape}")
+
+    if source_masks_path is not None:
+        masks_np = np.asarray(_get_zarr_array(zarr_path, source_masks_path)[slice_obj])
+        if masks_np.ndim == 3:
+            masks_np = masks_np[:, None, :, :]
+        elif masks_np.ndim != 4:
+            raise ValueError(f"Unexpected source mask shape {masks_np.shape}")
+        masks_np = (masks_np > 0).astype(np.uint8, copy=False)
+        return masks_np, probs_np
+
+    if probs_np is None:
+        raise ValueError("Source chunk loader requires either masks_roi or probability masks.")
+    return (probs_np >= probability_threshold).astype(np.uint8, copy=False), probs_np
+
+
 def _refine_roi(
     source_masks: np.ndarray,
     keypoints_roi: np.ndarray,
@@ -1289,9 +1440,9 @@ def _refine_roi(
 
 
 def _process_refine_chunk(
-    binary_chunk: np.ndarray,
-    probs_chunk: Optional[np.ndarray],
     zarr_path: str,
+    source_masks_path: Optional[str],
+    source_probs_path: Optional[str],
     keypoints_path: str,
     heading_path: str,
     success_path: str,
@@ -1308,8 +1459,14 @@ def _process_refine_chunk(
     """Process a batch of ROI indices and return their refinement outputs."""
     slice_obj = slice(start, stop)
 
-    masks_np = np.array(binary_chunk, dtype=np.uint8, copy=False)
-    mask_probs_np = np.array(probs_chunk, dtype=np.float32, copy=False) if probs_chunk is not None else None
+    masks_np, mask_probs_np = _load_source_mask_slices(
+        zarr_path,
+        start=start,
+        stop=stop,
+        source_masks_path=source_masks_path,
+        source_probs_path=source_probs_path,
+        probability_threshold=probability_threshold,
+    )
 
     keypoints_np = np.asarray(_get_zarr_array(zarr_path, keypoints_path)[slice_obj])
     heading_np = np.asarray(_get_zarr_array(zarr_path, heading_path)[slice_obj])
@@ -1372,10 +1529,228 @@ def _process_refine_chunk(
     return results
 
 
+def _write_chunk_metrics(
+    run_group: zarr.Group,
+    *,
+    start: int,
+    stop: int,
+    results: List[Tuple[int, ROIOutput]],
+    success_min_eye_area_px: Optional[float],
+) -> None:
+    """Write worker-local metrics for one chunk."""
+    if not results:
+        return
+
+    metrics_group = run_group["metrics"]
+    chunk_len = stop - start
+    refined_area_chunk = np.stack([roi_output.refined_areas for _, roi_output in results], axis=0).astype(
+        np.float32,
+        copy=False,
+    )
+    source_area_chunk = np.stack([roi_output.source_areas for _, roi_output in results], axis=0).astype(
+        np.float32,
+        copy=False,
+    )
+    union_refined_chunk = np.array([roi_output.refined_union_area for _, roi_output in results], dtype=np.float32)
+    union_source_chunk = np.array([roi_output.source_union_area for _, roi_output in results], dtype=np.float32)
+    centroid_error_chunk = np.stack([roi_output.centroid_errors for _, roi_output in results], axis=0).astype(
+        np.float32,
+        copy=False,
+    )
+    symmetry_offset_chunk = np.stack([roi_output.symmetry_offsets for _, roi_output in results], axis=0).astype(
+        np.float32,
+        copy=False,
+    )
+    separation_refined_chunk = np.array([roi_output.eye_separation for _, roi_output in results], dtype=np.float32)
+    separation_keypoint_chunk = np.array(
+        [roi_output.keypoint_separation for _, roi_output in results],
+        dtype=np.float32,
+    )
+    separation_delta_chunk = np.array([roi_output.separation_delta for _, roi_output in results], dtype=np.float32)
+    axis_ratio_chunk = np.stack([roi_output.axis_ratio for _, roi_output in results], axis=0).astype(
+        np.float32,
+        copy=False,
+    )
+    circularity_chunk = np.stack([roi_output.circularity for _, roi_output in results], axis=0).astype(
+        np.float32,
+        copy=False,
+    )
+
+    prob_mean_chunk = np.full((chunk_len, 2), np.nan, dtype=np.float32)
+    prob_max_chunk = np.full((chunk_len, 2), np.nan, dtype=np.float32)
+    prob_var_chunk = np.full((chunk_len, 2), np.nan, dtype=np.float32)
+    prob_high_chunk = np.full((chunk_len, 2), np.nan, dtype=np.float32)
+    local_reasons: List[str] = []
+    connectivity_flags_chunk = np.zeros(chunk_len, dtype=np.uint8)
+    smoothing_flags_chunk = np.zeros((chunk_len, 2), dtype=np.uint8)
+    pixels_reassigned_chunk = np.zeros(chunk_len, dtype=np.int32)
+    probabilities_used_chunk = np.zeros(chunk_len, dtype=bool)
+
+    for idx, (_, roi_output) in enumerate(results):
+        local_reasons.append(
+            _finalize_worker_local_reason(
+                roi_output.reason,
+                refined_areas=roi_output.refined_areas,
+                success_min_eye_area_px=success_min_eye_area_px,
+            )
+        )
+        if roi_output.probability_mean is not None:
+            prob_mean_chunk[idx] = np.asarray(roi_output.probability_mean, dtype=np.float32)
+            prob_max_chunk[idx] = np.asarray(roi_output.probability_max, dtype=np.float32)
+            prob_var_chunk[idx] = np.asarray(roi_output.probability_var, dtype=np.float32)
+            prob_high_chunk[idx] = np.asarray(roi_output.probability_high_fraction, dtype=np.float32)
+
+        connectivity_flag = 0
+        if roi_output.smoothing_changed[0]:
+            connectivity_flag |= 1
+        if roi_output.smoothing_changed[1]:
+            connectivity_flag |= 2
+        if roi_output.reassigned_pixels:
+            connectivity_flag |= 4
+        if roi_output.used_probabilities:
+            connectivity_flag |= 8
+        connectivity_flags_chunk[idx] = connectivity_flag
+        smoothing_flags_chunk[idx] = roi_output.smoothing_changed.astype(np.uint8, copy=False)
+        pixels_reassigned_chunk[idx] = int(roi_output.reassigned_pixels)
+        probabilities_used_chunk[idx] = bool(roi_output.used_probabilities)
+
+    area_ratio_lr_chunk = np.divide(
+        refined_area_chunk[:, 0],
+        np.maximum(refined_area_chunk[:, 1], 1e-6),
+        dtype=np.float32,
+    )
+    area_diff_lr_chunk = refined_area_chunk[:, 0] - refined_area_chunk[:, 1]
+    area_delta_vs_source_chunk = refined_area_chunk - source_area_chunk
+    area_ratio_vs_source_chunk = refined_area_chunk / np.maximum(source_area_chunk, 1e-6)
+    union_delta_chunk = union_refined_chunk - union_source_chunk
+    union_ratio_chunk = union_refined_chunk / np.maximum(union_source_chunk, 1e-6)
+
+    symmetry_sum_chunk = np.full(chunk_len, np.nan, dtype=np.float32)
+    symmetry_abs_diff_chunk = np.full(chunk_len, np.nan, dtype=np.float32)
+    symmetry_mask = np.all(np.isfinite(symmetry_offset_chunk), axis=1)
+    symmetry_sum_chunk[symmetry_mask] = symmetry_offset_chunk[symmetry_mask].sum(axis=1)
+    symmetry_abs_diff_chunk[symmetry_mask] = np.abs(
+        np.abs(symmetry_offset_chunk[symmetry_mask, 0]) - np.abs(symmetry_offset_chunk[symmetry_mask, 1])
+    )
+
+    metrics_group["area_refined"][start:stop] = refined_area_chunk
+    metrics_group["area_source"][start:stop] = source_area_chunk
+    metrics_group["area_union_refined"][start:stop] = union_refined_chunk
+    metrics_group["area_union_source"][start:stop] = union_source_chunk
+    metrics_group["area_ratio_left_right"][start:stop] = area_ratio_lr_chunk.astype(np.float32, copy=False)
+    metrics_group["area_diff_left_right"][start:stop] = area_diff_lr_chunk.astype(np.float32, copy=False)
+    metrics_group["area_delta_vs_source"][start:stop] = area_delta_vs_source_chunk.astype(np.float32, copy=False)
+    metrics_group["area_ratio_vs_source"][start:stop] = area_ratio_vs_source_chunk.astype(np.float32, copy=False)
+    metrics_group["area_union_delta"][start:stop] = union_delta_chunk.astype(np.float32, copy=False)
+    metrics_group["area_union_ratio"][start:stop] = union_ratio_chunk.astype(np.float32, copy=False)
+    metrics_group["centroid_error"][start:stop] = centroid_error_chunk
+    metrics_group["symmetry_offsets"][start:stop] = symmetry_offset_chunk
+    metrics_group["symmetry_sum"][start:stop] = symmetry_sum_chunk.astype(np.float32, copy=False)
+    metrics_group["symmetry_abs_diff"][start:stop] = symmetry_abs_diff_chunk.astype(np.float32, copy=False)
+    metrics_group["separation_refined"][start:stop] = separation_refined_chunk
+    metrics_group["separation_keypoint"][start:stop] = separation_keypoint_chunk
+    metrics_group["separation_delta"][start:stop] = separation_delta_chunk
+    metrics_group["axis_ratio"][start:stop] = axis_ratio_chunk
+    metrics_group["circularity"][start:stop] = circularity_chunk
+    metrics_group["connectivity_flags"][start:stop] = connectivity_flags_chunk
+    metrics_group["smoothing_flags"][start:stop] = smoothing_flags_chunk
+    metrics_group["pixels_reassigned"][start:stop] = pixels_reassigned_chunk
+    metrics_group["probabilities_used"][start:stop] = probabilities_used_chunk
+    metrics_group["probability_mean"][start:stop] = prob_mean_chunk
+    metrics_group["probability_max"][start:stop] = prob_max_chunk
+    metrics_group["probability_var"][start:stop] = prob_var_chunk
+    metrics_group["probability_high_fraction"][start:stop] = prob_high_chunk
+    metrics_group[_LOCAL_REASON_STAGING_DATASET][start:stop] = np.asarray(local_reasons, dtype=object)
+
+
+def _write_contours_from_masks(
+    run_group: zarr.Group,
+    *,
+    total_rois: int,
+    chunk_rois: int,
+) -> None:
+    """Build contour stores from final masks in a driver-side post-pass."""
+    left_ptr = np.full((total_rois,), -1, dtype=np.int64)
+    left_len = np.zeros((total_rois,), dtype=np.int32)
+    right_ptr = np.full((total_rois,), -1, dtype=np.int64)
+    right_len = np.zeros((total_rois,), dtype=np.int32)
+
+    left_points: List[np.ndarray] = []
+    right_points: List[np.ndarray] = []
+    left_total = 0
+    right_total = 0
+
+    masks_arr = run_group["masks_roi"]
+    for start in range(0, total_rois, chunk_rois):
+        stop = min(total_rois, start + chunk_rois)
+        mask_chunk = np.asarray(masks_arr[start:stop], dtype=np.uint8)
+        for local_idx, masks_row in enumerate(mask_chunk):
+            global_idx = start + local_idx
+            left_contour = _extract_contour(masks_row[0], min_points=5)
+            if left_contour is not None:
+                contour_len = int(left_contour.shape[0])
+                left_ptr[global_idx] = left_total
+                left_len[global_idx] = contour_len
+                left_points.append(left_contour.astype(np.float32, copy=False))
+                left_total += contour_len
+
+            right_contour = _extract_contour(masks_row[1], min_points=5)
+            if right_contour is not None:
+                contour_len = int(right_contour.shape[0])
+                right_ptr[global_idx] = right_total
+                right_len[global_idx] = contour_len
+                right_points.append(right_contour.astype(np.float32, copy=False))
+                right_total += contour_len
+
+    left_concat = np.concatenate(left_points, axis=0).astype(np.float32) if left_points else np.zeros((0, 2), dtype=np.float32)
+    right_concat = (
+        np.concatenate(right_points, axis=0).astype(np.float32) if right_points else np.zeros((0, 2), dtype=np.float32)
+    )
+    left_store = left_concat if left_concat.size > 0 else np.zeros((1, 2), dtype=np.float32)
+    right_store = right_concat if right_concat.size > 0 else np.zeros((1, 2), dtype=np.float32)
+
+    run_group.create_array(
+        "contour_left_ptr",
+        data=left_ptr,
+        chunks=(chunk_rois,),
+        overwrite=True,
+    )
+    run_group.create_array(
+        "contour_left_len",
+        data=left_len,
+        chunks=(chunk_rois,),
+        overwrite=True,
+    )
+    run_group.create_array(
+        "contour_right_ptr",
+        data=right_ptr,
+        chunks=(chunk_rois,),
+        overwrite=True,
+    )
+    run_group.create_array(
+        "contour_right_len",
+        data=right_len,
+        chunks=(chunk_rois,),
+        overwrite=True,
+    )
+    run_group.create_array(
+        "contours_left",
+        data=left_store,
+        chunks=(max(1, min(4096, left_store.shape[0])), 2),
+        overwrite=True,
+    )
+    run_group.create_array(
+        "contours_right",
+        data=right_store,
+        chunks=(max(1, min(4096, right_store.shape[0])), 2),
+        overwrite=True,
+    )
+
+
 def _process_and_write_chunk(
-    binary_chunk: np.ndarray,
-    probs_chunk: Optional[np.ndarray],
     zarr_path: str,
+    source_masks_path: Optional[str],
+    source_probs_path: Optional[str],
     run_group_path: str,
     keypoints_path: str,
     heading_path: str,
@@ -1386,16 +1761,17 @@ def _process_and_write_chunk(
     write_probabilities: bool,
     fast_path: bool = False,
     probability_threshold: float = _DEFAULT_PROBABILITY_THRESHOLD,
+    success_min_eye_area_px: Optional[float] = None,
     source_ellipse_params_path: Optional[str] = None,
     source_ellipse_success_path: Optional[str] = None,
     source_eye_sep_path: Optional[str] = None,
     source_reason_path: Optional[str] = None,
-) -> List[Tuple[int, ROIOutput]]:
-    """Process a chunk, write outputs into Zarr arrays, and return ROI results."""
+) -> None:
+    """Process a chunk and write outputs into Zarr arrays."""
     results = _process_refine_chunk(
-        binary_chunk,
-        probs_chunk,
         zarr_path,
+        source_masks_path,
+        source_probs_path,
         keypoints_path,
         heading_path,
         success_path,
@@ -1409,7 +1785,7 @@ def _process_and_write_chunk(
         source_reason_path=source_reason_path,
     )
     if not results:
-        return results
+        return
 
     _, first_output = results[0]
     _, roi_h, roi_w = first_output.masks.shape
@@ -1439,7 +1815,14 @@ def _process_and_write_chunk(
     if write_probabilities and probs_chunk_out is not None:
         run_group["mask_probs_roi_refined"][start:stop] = probs_chunk_out.astype(np.float16)
 
-    return results
+    _write_chunk_metrics(
+        run_group,
+        start=start,
+        stop=stop,
+        results=results,
+        success_min_eye_area_px=success_min_eye_area_px,
+    )
+    return
 
 
 def refine_eye_masks(
@@ -1643,10 +2026,14 @@ def refine_eye_masks(
     source_eye_sep_path = (
         f"eye_masks_runs/{src_run_name}/eye_separation" if "eye_separation" in src_run else None
     )
+    source_masks_path = f"eye_masks_runs/{src_run_name}/masks_roi" if "masks_roi" in src_run else None
     source_reason_path = f"eye_masks_runs/{src_run_name}/reason" if "reason" in src_run else None
 
     has_mask_probs = probs_data is not None and not use_fast_path
     write_refined_probabilities = bool(write_refined_probabilities) and has_mask_probs
+    source_probs_path = (
+        f"eye_masks_runs/{src_run_name}/{mask_prob_dataset}" if has_mask_probs and mask_prob_dataset else None
+    )
 
     _validate_input_row_alignment(
         total_rois=total_rois,
@@ -1677,16 +2064,6 @@ def refine_eye_masks(
         overwrite=True,
     )
 
-    left_ptr = np.full((total_rois,), -1, dtype=np.int64)
-    left_len = np.zeros((total_rois,), dtype=np.int32)
-    right_ptr = np.full((total_rois,), -1, dtype=np.int64)
-    right_len = np.zeros((total_rois,), dtype=np.int32)
-
-    left_points: List[np.ndarray] = []
-    right_points: List[np.ndarray] = []
-    left_total = 0
-    right_total = 0
-
     stats = {
         "total": total_rois,
         "refined": 0,
@@ -1713,7 +2090,32 @@ def refine_eye_masks(
         "ellipse_fail_pairs": 0,
     }
 
-    chunk_rois = min(512, total_rois) if total_rois > 0 else 1
+    # Worker tasks write disjoint row slices directly into these arrays. Keep the
+    # first-axis chunking aligned to the task width so adjacent workers never
+    # race on the same storage chunk when chunk_size < 512.
+    chunk_rois = _resolve_worker_chunk_rois(total_rois=total_rois, chunk_size=chunk_size)
+
+    def _prepare_group_dataset(
+        group: zarr.Group,
+        name: str,
+        *,
+        shape: Tuple[int, ...],
+        chunks: Tuple[int, ...],
+        dtype: np.dtype,
+        fill_value: float | int | bool = 0,
+        **kwargs: object,
+    ) -> zarr.Array:
+        if name in group:
+            del group[name]
+        return group.create_array(
+            name,
+            shape=shape,
+            chunks=chunks,
+            dtype=dtype,
+            fill_value=fill_value,
+            overwrite=True,
+            **kwargs,
+        )
 
     def _prepare_dataset(
         name: str,
@@ -1724,15 +2126,13 @@ def refine_eye_masks(
         fill_value: float | int | bool = 0,
         **kwargs: object,
     ) -> zarr.Array:
-        if name in run_group:
-            del run_group[name]
-        return run_group.create_array(
+        return _prepare_group_dataset(
+            run_group,
             name,
             shape=shape,
             chunks=chunks,
             dtype=dtype,
             fill_value=fill_value,
-            overwrite=True,
             **kwargs,
         )
 
@@ -1762,6 +2162,119 @@ def refine_eye_masks(
         chunks=(chunk_rois,),
         dtype=np.dtype(np.float32),
         fill_value=np.float32(np.nan),
+    )
+
+    if "metrics" in run_group:
+        del run_group["metrics"]
+    metrics_group = run_group.create_group("metrics")
+
+    def _prepare_metrics_dataset(
+        name: str,
+        *,
+        shape: Tuple[int, ...],
+        chunks: Tuple[int, ...],
+        dtype: np.dtype,
+        fill_value: float | int | bool = 0,
+    ) -> zarr.Array:
+        return _prepare_group_dataset(
+            metrics_group,
+            name,
+            shape=shape,
+            chunks=chunks,
+            dtype=dtype,
+            fill_value=fill_value,
+        )
+
+    float2_shape = (total_rois, 2)
+    float2_chunks = (chunk_rois, 2)
+    float1_shape = (total_rois,)
+    float1_chunks = (chunk_rois,)
+
+    for name, shape, chunks, fill_value in (
+        ("area_refined", float2_shape, float2_chunks, np.float32(0.0)),
+        ("area_source", float2_shape, float2_chunks, np.float32(0.0)),
+        ("area_zscore", float2_shape, float2_chunks, np.float32(np.nan)),
+        ("area_delta_vs_source", float2_shape, float2_chunks, np.float32(np.nan)),
+        ("area_ratio_vs_source", float2_shape, float2_chunks, np.float32(np.nan)),
+        ("centroid_error", float2_shape, float2_chunks, np.float32(np.nan)),
+        ("symmetry_offsets", float2_shape, float2_chunks, np.float32(np.nan)),
+        ("axis_ratio", float2_shape, float2_chunks, np.float32(np.nan)),
+        ("circularity", float2_shape, float2_chunks, np.float32(np.nan)),
+        ("probability_mean", float2_shape, float2_chunks, np.float32(np.nan)),
+        ("probability_max", float2_shape, float2_chunks, np.float32(np.nan)),
+        ("probability_var", float2_shape, float2_chunks, np.float32(np.nan)),
+        ("probability_high_fraction", float2_shape, float2_chunks, np.float32(np.nan)),
+    ):
+        _prepare_metrics_dataset(
+            name,
+            shape=shape,
+            chunks=chunks,
+            dtype=np.dtype(np.float32),
+            fill_value=fill_value,
+        )
+
+    for name, fill_value in (
+        ("area_union_refined", np.float32(0.0)),
+        ("area_union_source", np.float32(0.0)),
+        ("area_ratio_left_right", np.float32(np.nan)),
+        ("area_diff_left_right", np.float32(np.nan)),
+        ("area_union_delta", np.float32(np.nan)),
+        ("area_union_ratio", np.float32(np.nan)),
+        ("symmetry_sum", np.float32(np.nan)),
+        ("symmetry_abs_diff", np.float32(np.nan)),
+        ("separation_refined", np.float32(np.nan)),
+        ("separation_keypoint", np.float32(np.nan)),
+        ("separation_delta", np.float32(np.nan)),
+    ):
+        _prepare_metrics_dataset(
+            name,
+            shape=float1_shape,
+            chunks=float1_chunks,
+            dtype=np.dtype(np.float32),
+            fill_value=fill_value,
+        )
+
+    _prepare_metrics_dataset(
+        "connectivity_flags",
+        shape=float1_shape,
+        chunks=float1_chunks,
+        dtype=np.dtype(np.uint8),
+        fill_value=0,
+    )
+    _prepare_metrics_dataset(
+        "smoothing_flags",
+        shape=float2_shape,
+        chunks=float2_chunks,
+        dtype=np.dtype(np.uint8),
+        fill_value=0,
+    )
+    _prepare_metrics_dataset(
+        "pixels_reassigned",
+        shape=float1_shape,
+        chunks=float1_chunks,
+        dtype=np.dtype(np.int32),
+        fill_value=0,
+    )
+    _prepare_metrics_dataset(
+        "probabilities_used",
+        shape=float1_shape,
+        chunks=float1_chunks,
+        dtype=np.dtype(bool),
+        fill_value=False,
+    )
+    _prepare_metrics_dataset(
+        "filter_flags",
+        shape=float2_shape,
+        chunks=float2_chunks,
+        dtype=np.dtype(bool),
+        fill_value=False,
+    )
+    _prepare_metrics_dataset(
+        _LOCAL_REASON_STAGING_DATASET,
+        shape=float1_shape,
+        chunks=float1_chunks,
+        dtype=VariableLengthUTF8(),
+        fill_value="",
     )
 
     def _copy_from_source(
@@ -1806,9 +2319,7 @@ def refine_eye_masks(
         compression_kwargs = (
             _compression_kwargs(binary_reference) if binary_reference is not None else {}
         )
-        chunk_spec = getattr(binary_reference, "chunks", None) if binary_reference is not None else None
-        if not chunk_spec:
-            chunk_spec = (chunk_rois, 2, roi_h, roi_w)
+        chunk_spec = (chunk_rois, 2, roi_h, roi_w)
         compression_source = None
         if binary_reference is not None:
             compression_source = getattr(binary_reference, "path", None)
@@ -1845,27 +2356,17 @@ def refine_eye_masks(
 
     tasks: List[object] = []
     if total_rois > 0:
-        binary_chunks = binary_data.to_delayed().reshape((-1,)).tolist()
-        if has_mask_probs and probs_data is not None:
-            probs_chunks = probs_data.to_delayed().reshape((-1,)).tolist()
-        else:
-            probs_chunks = [None] * len(binary_chunks)
-
         chunk_offsets = list(binary_data.chunks[0])
-        if len(chunk_offsets) != len(binary_chunks):
-            raise RuntimeError(
-                f"Unexpected chunk alignment (offsets={len(chunk_offsets)}, chunks={len(binary_chunks)})"
-            )
         cumulative = 0
-        for idx, (binary_chunk, probs_chunk) in enumerate(zip(binary_chunks, probs_chunks)):
+        for idx, chunk_len in enumerate(chunk_offsets):
             chunk_len = int(chunk_offsets[idx])
             start = cumulative
             stop = start + chunk_len
             tasks.append(
                 delayed(_process_and_write_chunk)(
-                    binary_chunk,
-                    probs_chunk,
                     zarr_path,
+                    source_masks_path,
+                    source_probs_path,
                     run_group_path,
                     keypoints_path,
                     heading_path,
@@ -1875,6 +2376,7 @@ def refine_eye_masks(
                     write_probabilities=write_refined_probabilities,
                     fast_path=use_fast_path,
                     probability_threshold=probability_threshold,
+                    success_min_eye_area_px=success_min_eye_area_px,
                     source_ellipse_params_path=source_ellipse_params_path,
                     source_ellipse_success_path=source_ellipse_success_path,
                     source_eye_sep_path=source_eye_sep_path,
@@ -1883,7 +2385,6 @@ def refine_eye_masks(
             )
             cumulative = stop
 
-    chunk_results: List[List[Tuple[int, ROIOutput]]] = []
     cluster = None
     client = None
     if tasks:
@@ -1904,10 +2405,13 @@ def refine_eye_masks(
                 if dashboard_link:
                     console.print(f"[cyan]Dask dashboard:[/cyan] [link={dashboard_link}]{dashboard_link}[/link]")
                 futures = client.compute(tasks)
-                chunk_results = list(client.gather(futures))
+                wait(futures)
+                failed = [future for future in futures if getattr(future, "status", None) == "error"]
+                if failed:
+                    failed[0].result()
             else:
                 with ProgressBar():
-                    chunk_results = list(dask.compute(*tasks, **compute_kwargs))
+                    dask.compute(*tasks, **compute_kwargs)
         finally:
             if client is not None:
                 client.close()
@@ -1918,123 +2422,33 @@ def refine_eye_masks(
     if probs_data is not None:
         del probs_data
 
-    gathered_results: List[Tuple[int, ROIOutput]] = []
-    for chunk in chunk_results:
-        gathered_results.extend(chunk)
-
-    gathered_results.sort(key=lambda item: item[0])
-
-    wrote_any_probs = False
-
-    refined_area_metrics = np.zeros((total_rois, 2), dtype=np.float32)
-    source_area_metrics = np.zeros((total_rois, 2), dtype=np.float32)
-    ellipse_success_metrics = np.zeros((total_rois, 2), dtype=bool)
-    union_refined_metrics = np.zeros(total_rois, dtype=np.float32)
-    union_source_metrics = np.zeros(total_rois, dtype=np.float32)
-    centroid_error_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
-    symmetry_offset_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
-    separation_refined_metrics = np.full(total_rois, np.nan, dtype=np.float32)
-    separation_keypoint_metrics = np.full(total_rois, np.nan, dtype=np.float32)
-    separation_delta_metrics = np.full(total_rois, np.nan, dtype=np.float32)
-    axis_ratio_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
-    circularity_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
-    prob_mean_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
-    prob_max_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
-    prob_var_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
-    prob_high_metrics = np.full((total_rois, 2), np.nan, dtype=np.float32)
-    connectivity_flags_metrics = np.zeros(total_rois, dtype=np.uint8)
-    smoothing_flags_metrics = np.zeros((total_rois, 2), dtype=np.uint8)
-    pixels_reassigned_metrics = np.zeros(total_rois, dtype=np.int32)
-    probabilities_used_metrics = np.zeros(total_rois, dtype=bool)
-    reason_strings: List[str] = [""] * total_rois
-
-    for global_idx, result in gathered_results:
-        if result.probabilities is not None:
-            wrote_any_probs = True
-        if result.smoothing_changed.any():
-            stats["smoothed_rois"] += 1
-            stats["smoothed_channels"] += int(result.smoothing_changed.sum())
-
-        if result.reassigned_pixels:
-            stats["components_reassigned"] += int(result.reassigned_pixels)
-        if result.used_probabilities:
-            stats["probability_split"] += 1
-
-        refined_area_metrics[global_idx] = result.refined_areas
-        source_area_metrics[global_idx] = result.source_areas
-        ellipse_success_metrics[global_idx] = result.ellipse_success.astype(bool, copy=False)
-        union_refined_metrics[global_idx] = result.refined_union_area
-        union_source_metrics[global_idx] = result.source_union_area
-        centroid_error_metrics[global_idx] = result.centroid_errors
-        symmetry_offset_metrics[global_idx] = result.symmetry_offsets
-        separation_refined_metrics[global_idx] = result.eye_separation
-        separation_keypoint_metrics[global_idx] = result.keypoint_separation
-        separation_delta_metrics[global_idx] = result.separation_delta
-        axis_ratio_metrics[global_idx] = result.axis_ratio
-        circularity_metrics[global_idx] = result.circularity
-        if result.probability_mean is not None:
-            prob_mean_metrics[global_idx] = result.probability_mean
-            prob_max_metrics[global_idx] = result.probability_max
-            prob_var_metrics[global_idx] = result.probability_var
-            prob_high_metrics[global_idx] = result.probability_high_fraction
-        connectivity_flag = 0
-        if result.smoothing_changed[0]:
-            connectivity_flag |= 1
-        if result.smoothing_changed[1]:
-            connectivity_flag |= 2
-        if result.reassigned_pixels:
-            connectivity_flag |= 4
-        if result.used_probabilities:
-            connectivity_flag |= 8
-        connectivity_flags_metrics[global_idx] = connectivity_flag
-        smoothing_flags_metrics[global_idx] = result.smoothing_changed.astype(np.uint8)
-        pixels_reassigned_metrics[global_idx] = int(result.reassigned_pixels)
-        probabilities_used_metrics[global_idx] = bool(result.used_probabilities)
-
-        if result.contours[0] is not None:
-            contour = result.contours[0]
-            contour_len = contour.shape[0]
-            left_ptr[global_idx] = left_total
-            left_len[global_idx] = contour_len
-            left_points.append(contour)
-            left_total += contour_len
-        if result.contours[1] is not None:
-            contour = result.contours[1]
-            contour_len = contour.shape[0]
-            right_ptr[global_idx] = right_total
-            right_len[global_idx] = contour_len
-            right_points.append(contour)
-            right_total += contour_len
-
-        reason = result.reason or "refined"
-        reason_strings[global_idx] = reason
-        reason_tags = set(reason.split("|")) if reason else set()
-        if "assigned_by_keypoint" in reason_tags:
-            stats["assigned_by_keypoint"] += 1
-        if "heading_split" in reason_tags:
-            stats["fallback_heading"] += 1
-            stats["refined"] += 1
-        elif "keypoint_fail" in reason_tags:
-            stats["keypoint_fail"] += 1
-            stats["copied_original"] += 1
-        elif "empty_union" in reason_tags:
-            stats["empty_union"] += 1
-            stats["copied_original"] += 1
-        elif "copied_original" in reason_tags:
-            stats["copied_original"] += 1
-        else:
-            stats["refined"] += 1
-
-    area_ratio_lr = np.divide(
-        refined_area_metrics[:, 0],
-        np.maximum(refined_area_metrics[:, 1], 1e-6),
-        dtype=np.float32,
+    refined_area_metrics = np.asarray(metrics_group["area_refined"][:], dtype=np.float32)
+    source_area_metrics = np.asarray(metrics_group["area_source"][:], dtype=np.float32)
+    ellipse_success_metrics = np.asarray(run_group["ellipse_success"][:], dtype=bool)
+    union_refined_metrics = np.asarray(metrics_group["area_union_refined"][:], dtype=np.float32)
+    union_source_metrics = np.asarray(metrics_group["area_union_source"][:], dtype=np.float32)
+    centroid_error_metrics = np.asarray(metrics_group["centroid_error"][:], dtype=np.float32)
+    symmetry_offset_metrics = np.asarray(metrics_group["symmetry_offsets"][:], dtype=np.float32)
+    symmetry_sum_metrics = np.asarray(metrics_group["symmetry_sum"][:], dtype=np.float32)
+    symmetry_abs_diff_metrics = np.asarray(metrics_group["symmetry_abs_diff"][:], dtype=np.float32)
+    separation_delta_metrics = np.asarray(metrics_group["separation_delta"][:], dtype=np.float32)
+    prob_mean_metrics = np.asarray(metrics_group["probability_mean"][:], dtype=np.float32)
+    prob_max_metrics = np.asarray(metrics_group["probability_max"][:], dtype=np.float32)
+    prob_var_metrics = np.asarray(metrics_group["probability_var"][:], dtype=np.float32)
+    prob_high_metrics = np.asarray(metrics_group["probability_high_fraction"][:], dtype=np.float32)
+    smoothing_flags_metrics = np.asarray(metrics_group["smoothing_flags"][:], dtype=np.uint8)
+    pixels_reassigned_metrics = np.asarray(metrics_group["pixels_reassigned"][:], dtype=np.int32)
+    probabilities_used_metrics = np.asarray(metrics_group["probabilities_used"][:], dtype=bool)
+    local_reason_array = np.asarray(metrics_group[_LOCAL_REASON_STAGING_DATASET][:], dtype=object)
+    local_stats = _compute_local_refine_stats(
+        local_reason_array=local_reason_array,
+        smoothing_flags=smoothing_flags_metrics,
+        pixels_reassigned=pixels_reassigned_metrics,
+        probabilities_used=probabilities_used_metrics,
     )
-    area_diff_lr = refined_area_metrics[:, 0] - refined_area_metrics[:, 1]
-    area_delta_vs_source = refined_area_metrics - source_area_metrics
-    area_ratio_vs_source = refined_area_metrics / np.maximum(source_area_metrics, 1e-6)
-    union_delta = union_refined_metrics - union_source_metrics
-    union_ratio = union_refined_metrics / np.maximum(union_source_metrics, 1e-6)
+    for key, value in local_stats.items():
+        stats[key] += int(value)
+    wrote_any_probs = bool(write_refined_probabilities) and total_rois > 0
 
     area_mean = np.full(2, np.nan, dtype=np.float32)
     area_std = np.full(2, np.nan, dtype=np.float32)
@@ -2060,15 +2474,6 @@ def refine_eye_masks(
         else:
             pair_filter_flags = np.any(filter_flags, axis=1)
 
-        filtered_left_indices = np.nonzero(filter_flags[:, 0])[0]
-        filtered_right_indices = np.nonzero(filter_flags[:, 1])[0]
-        for idx in filtered_left_indices:
-            reason_strings[idx] = _append_reason_tag(reason_strings[idx], "filtered_left")
-        for idx in filtered_right_indices:
-            reason_strings[idx] = _append_reason_tag(reason_strings[idx], "filtered_right")
-        for idx in np.nonzero(pair_filter_flags)[0]:
-            reason_strings[idx] = _append_reason_tag(reason_strings[idx], "filtered_pair")
-
         stats["filtered_left"] = int(filter_flags[:, 0].sum())
         stats["filtered_right"] = int(filter_flags[:, 1].sum())
         stats["filtered_rois"] = int(pair_filter_flags.sum())
@@ -2083,13 +2488,6 @@ def refine_eye_masks(
         small_area_flags = refined_area_metrics < float(success_min_eye_area_px)
         small_area_pair_flags = np.any(small_area_flags, axis=1)
 
-        for idx in np.nonzero(small_area_flags[:, 0])[0]:
-            reason_strings[idx] = _append_reason_tag(reason_strings[idx], "small_area_left")
-        for idx in np.nonzero(small_area_flags[:, 1])[0]:
-            reason_strings[idx] = _append_reason_tag(reason_strings[idx], "small_area_right")
-        for idx in np.nonzero(small_area_pair_flags)[0]:
-            reason_strings[idx] = _append_reason_tag(reason_strings[idx], "small_area_pair")
-
         stats["small_area_left"] = int(small_area_flags[:, 0].sum())
         stats["small_area_right"] = int(small_area_flags[:, 1].sum())
         stats["small_area_rois"] = int(small_area_pair_flags.sum())
@@ -2102,19 +2500,21 @@ def refine_eye_masks(
     ellipse_fail_left_flags = ~ellipse_success_metrics[:, 0]
     ellipse_fail_right_flags = ~ellipse_success_metrics[:, 1]
     ellipse_fail_pair_flags = ellipse_fail_left_flags | ellipse_fail_right_flags
-    for idx in np.nonzero(ellipse_fail_left_flags)[0]:
-        reason_strings[idx] = _append_reason_tag(reason_strings[idx], "ellipse_fail_left")
-    for idx in np.nonzero(ellipse_fail_right_flags)[0]:
-        reason_strings[idx] = _append_reason_tag(reason_strings[idx], "ellipse_fail_right")
-    for idx in np.nonzero(ellipse_fail_pair_flags)[0]:
-        reason_strings[idx] = _append_reason_tag(reason_strings[idx], "ellipse_fail_pair")
     stats["ellipse_fail_left"] = int(ellipse_fail_left_flags.sum())
     stats["ellipse_fail_right"] = int(ellipse_fail_right_flags.sum())
     stats["ellipse_fail_pairs"] = int(ellipse_fail_pair_flags.sum())
     if total_rois > 0:
         run_group["ellipse_success"][:] = effective_success.astype(bool, copy=False)
 
-    reason_array = np.array(reason_strings, dtype=object)
+    metrics_group["area_zscore"][:] = area_zscores.astype(np.float32, copy=False)
+    metrics_group["filter_flags"][:] = filter_flags.astype(bool, copy=False)
+
+    reason_array = _apply_driver_global_reason_tags(
+        local_reason_array,
+        filter_flags=filter_flags,
+        pair_filter_flags=pair_filter_flags,
+    )
+    reason_strings = np.asarray(reason_array, dtype=object).astype(str).tolist()
     reason_counts = dict(Counter(reason_strings))
     reason_tag_counts = dict(
         Counter(
@@ -2124,172 +2524,15 @@ def refine_eye_masks(
             if part
         )
     )
-
-    symmetry_sum_metrics = np.full(total_rois, np.nan, dtype=np.float32)
-    symmetry_abs_diff_metrics = np.full(total_rois, np.nan, dtype=np.float32)
-    symmetry_mask = np.all(np.isfinite(symmetry_offset_metrics), axis=1)
-    symmetry_sum_metrics[symmetry_mask] = symmetry_offset_metrics[symmetry_mask].sum(axis=1)
-    symmetry_abs_diff_metrics[symmetry_mask] = np.abs(
-        np.abs(symmetry_offset_metrics[symmetry_mask, 0]) - np.abs(symmetry_offset_metrics[symmetry_mask, 1])
+    if _LOCAL_REASON_STAGING_DATASET in metrics_group:
+        del metrics_group[_LOCAL_REASON_STAGING_DATASET]
+    write_reason_columns(
+        metrics_group,
+        reason_array,
+        chunk_rois,
+        include_reason_text=True,
+        overwrite=True,
     )
-
-    if "metrics" in run_group:
-        del run_group["metrics"]
-    metrics_group = run_group.create_group("metrics")
-
-    metrics_group.create_array(
-        "area_refined",
-        data=refined_area_metrics.astype(np.float32),
-        chunks=(chunk_rois, 2),
-    )
-    metrics_group.create_array(
-        "area_source",
-        data=source_area_metrics.astype(np.float32),
-        chunks=(chunk_rois, 2),
-    )
-    metrics_group.create_array(
-        "area_union_refined",
-        data=union_refined_metrics.astype(np.float32),
-        chunks=(chunk_rois,),
-    )
-    metrics_group.create_array(
-        "area_union_source",
-        data=union_source_metrics.astype(np.float32),
-        chunks=(chunk_rois,),
-    )
-    metrics_group.create_array(
-        "area_zscore",
-        data=area_zscores.astype(np.float32),
-        chunks=(chunk_rois, 2),
-    )
-    metrics_group.create_array(
-        "area_ratio_left_right",
-        data=area_ratio_lr.astype(np.float32),
-        chunks=(chunk_rois,),
-    )
-    metrics_group.create_array(
-        "area_diff_left_right",
-        data=area_diff_lr.astype(np.float32),
-        chunks=(chunk_rois,),
-    )
-    metrics_group.create_array(
-        "area_delta_vs_source",
-        data=area_delta_vs_source.astype(np.float32),
-        chunks=(chunk_rois, 2),
-    )
-    metrics_group.create_array(
-        "area_ratio_vs_source",
-        data=area_ratio_vs_source.astype(np.float32),
-        chunks=(chunk_rois, 2),
-    )
-    metrics_group.create_array(
-        "area_union_delta",
-        data=union_delta.astype(np.float32),
-        chunks=(chunk_rois,),
-    )
-    metrics_group.create_array(
-        "area_union_ratio",
-        data=union_ratio.astype(np.float32),
-        chunks=(chunk_rois,),
-    )
-    metrics_group.create_array(
-        "centroid_error",
-        data=centroid_error_metrics.astype(np.float32),
-        chunks=(chunk_rois, 2),
-    )
-    metrics_group.create_array(
-        "symmetry_offsets",
-        data=symmetry_offset_metrics.astype(np.float32),
-        chunks=(chunk_rois, 2),
-    )
-    metrics_group.create_array(
-        "symmetry_sum",
-        data=symmetry_sum_metrics.astype(np.float32),
-        chunks=(chunk_rois,),
-    )
-    metrics_group.create_array(
-        "symmetry_abs_diff",
-        data=symmetry_abs_diff_metrics.astype(np.float32),
-        chunks=(chunk_rois,),
-    )
-    metrics_group.create_array(
-        "separation_refined",
-        data=separation_refined_metrics.astype(np.float32),
-        chunks=(chunk_rois,),
-    )
-    metrics_group.create_array(
-        "separation_keypoint",
-        data=separation_keypoint_metrics.astype(np.float32),
-        chunks=(chunk_rois,),
-    )
-    metrics_group.create_array(
-        "separation_delta",
-        data=separation_delta_metrics.astype(np.float32),
-        chunks=(chunk_rois,),
-    )
-    metrics_group.create_array(
-        "axis_ratio",
-        data=axis_ratio_metrics.astype(np.float32),
-        chunks=(chunk_rois, 2),
-    )
-    metrics_group.create_array(
-        "circularity",
-        data=circularity_metrics.astype(np.float32),
-        chunks=(chunk_rois, 2),
-    )
-    metrics_group.create_array(
-        "connectivity_flags",
-        data=connectivity_flags_metrics.astype(np.uint8, copy=False),
-        chunks=(chunk_rois,),
-    )
-    metrics_group.create_array(
-        "smoothing_flags",
-        data=smoothing_flags_metrics.astype(np.uint8, copy=False),
-        chunks=(chunk_rois, 2),
-    )
-    metrics_group.create_array(
-        "pixels_reassigned",
-        data=pixels_reassigned_metrics.astype(np.int32),
-        chunks=(chunk_rois,),
-    )
-    metrics_group.create_array(
-        "probabilities_used",
-        data=probabilities_used_metrics.astype(bool, copy=False),
-        chunks=(chunk_rois,),
-    )
-    metrics_group.create_array(
-        "filter_flags",
-        data=filter_flags.astype(bool, copy=False),
-        chunks=(chunk_rois, 2),
-    )
-    metrics_group.create_array(
-        "probability_mean",
-        data=prob_mean_metrics.astype(np.float32),
-        chunks=(chunk_rois, 2),
-    )
-    metrics_group.create_array(
-        "probability_max",
-        data=prob_max_metrics.astype(np.float32),
-        chunks=(chunk_rois, 2),
-    )
-    metrics_group.create_array(
-        "probability_var",
-        data=prob_var_metrics.astype(np.float32),
-        chunks=(chunk_rois, 2),
-    )
-    metrics_group.create_array(
-        "probability_high_fraction",
-        data=prob_high_metrics.astype(np.float32),
-        chunks=(chunk_rois, 2),
-    )
-    reason_ds = metrics_group.create_array(
-        "reason",
-        shape=(total_rois,),
-        chunks=(chunk_rois,),
-        dtype=VariableLengthUTF8(),
-        fill_value="",
-    )
-    reason_ds[:] = reason_array
 
     centroid_mean = np.nanmean(centroid_error_metrics, axis=0) if np.isfinite(centroid_error_metrics).any() else np.full(2, np.nan, dtype=np.float32)
     symmetry_sum_mean = float(np.nanmean(symmetry_sum_metrics)) if np.isfinite(symmetry_sum_metrics).any() else float("nan")
@@ -2327,49 +2570,7 @@ def refine_eye_masks(
         "area_filter_mode": area_filter_mode,
         "success_min_eye_area_px": success_min_eye_area_px,
     }
-
-    left_concat = np.concatenate(left_points, axis=0).astype(np.float32) if left_points else np.zeros((0, 2), dtype=np.float32)
-    right_concat = np.concatenate(right_points, axis=0).astype(np.float32) if right_points else np.zeros((0, 2), dtype=np.float32)
-
-    left_store = left_concat if left_concat.size > 0 else np.zeros((1, 2), dtype=np.float32)
-    right_store = right_concat if right_concat.size > 0 else np.zeros((1, 2), dtype=np.float32)
-
-    run_group.create_array(
-        "contour_left_ptr",
-        data=left_ptr,
-        chunks=(chunk_rois,),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "contour_left_len",
-        data=left_len,
-        chunks=(chunk_rois,),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "contour_right_ptr",
-        data=right_ptr,
-        chunks=(chunk_rois,),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "contour_right_len",
-        data=right_len,
-        chunks=(chunk_rois,),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "contours_left",
-        data=left_store,
-        chunks=(max(1, min(4096, left_store.shape[0])), 2),
-        overwrite=True,
-    )
-    run_group.create_array(
-        "contours_right",
-        data=right_store,
-        chunks=(max(1, min(4096, right_store.shape[0])), 2),
-        overwrite=True,
-    )
+    _write_contours_from_masks(run_group, total_rois=total_rois, chunk_rois=chunk_rois)
 
     source_method = src_run.attrs.get("method", "unknown")
     source_eye_labels = list(src_run.attrs.get("eye_labels", ["eye_0", "eye_1"]))
