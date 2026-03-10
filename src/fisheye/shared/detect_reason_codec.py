@@ -7,7 +7,7 @@ import zarr
 from zarr.core.dtype import VariableLengthUTF8
 
 REASON_BYTES_ENCODING = "utf8-null-terminated"
-REASON_BYTES_MIN_WIDTH = 16
+REASON_BYTES_MIN_WIDTH = 64
 
 
 def _labels_from_detection_source(detection_source: np.ndarray) -> np.ndarray:

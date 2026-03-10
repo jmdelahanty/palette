@@ -22,6 +22,8 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "2")
 import numpy as np
 import zarr
 
+from ..shared.detect_reason_codec import read_reason_labels
+
 
 _DEFAULT_SUCCESS_MIN_EYE_AREA_PX = 50.0
 
@@ -36,10 +38,19 @@ def _get_latest_refined_run(root: zarr.Group) -> str:
     return latest
 
 
-def _count_reason_tags(reason_arr: Optional[zarr.Array]) -> Dict[str, int]:
-    if reason_arr is None:
+def _read_reason_labels(refined: zarr.Group) -> Optional[np.ndarray]:
+    metrics = refined.get("metrics")
+    if isinstance(metrics, zarr.Group):
+        labels = read_reason_labels(metrics)
+        if labels is not None:
+            return labels
+    return read_reason_labels(refined)
+
+
+def _count_reason_tags(refined: zarr.Group) -> Dict[str, int]:
+    raw = _read_reason_labels(refined)
+    if raw is None:
         return {}
-    raw = reason_arr[:]
     counts: Counter[str] = Counter()
     for value in raw:
         if value is None:
@@ -60,13 +71,6 @@ def _count_ints(arr: Optional[zarr.Array]) -> Dict[str, int]:
     data = np.asarray(arr[:])
     vals, counts = np.unique(data, return_counts=True)
     return {str(int(v)): int(c) for v, c in zip(vals.tolist(), counts.tolist())}
-
-
-def _get_reason_array(refined: zarr.Group) -> Optional[zarr.Array]:
-    metrics = refined.get("metrics")
-    if isinstance(metrics, zarr.Group) and "reason" in metrics:
-        return metrics["reason"]
-    return None
 
 
 def _get_sep_limits(root: zarr.Group, refined: zarr.Group) -> tuple[Optional[float], Optional[float]]:
@@ -150,6 +154,27 @@ def _load_area_refined(refined: zarr.Group) -> Optional[np.ndarray]:
     return area_refined[:, :2]
 
 
+def _load_eye_separation(refined: zarr.Group) -> np.ndarray:
+    eye_separation_arr = refined.get("eye_separation")
+    if eye_separation_arr is not None:
+        return np.asarray(eye_separation_arr[:], dtype=np.float32)
+
+    ellipse_success = np.asarray(refined["ellipse_success"][:], dtype=bool)
+    ellipse_params = np.asarray(refined["ellipse_params"][:], dtype=np.float32)
+    if ellipse_success.ndim != 2 or ellipse_success.shape[1] < 2:
+        raise RuntimeError("ellipse_success must have shape (n, >=2) to derive eye_separation.")
+    if ellipse_params.ndim != 3 or ellipse_params.shape[1] < 2 or ellipse_params.shape[2] < 2:
+        raise RuntimeError("ellipse_params must have shape (n, >=2, >=2) to derive eye_separation.")
+
+    separation = np.full((ellipse_success.shape[0],), np.nan, dtype=np.float32)
+    finite = np.all(np.isfinite(ellipse_params[:, :2, :2]), axis=(1, 2))
+    valid = np.all(ellipse_success[:, :2], axis=1) & finite
+    if np.any(valid):
+        delta = ellipse_params[valid, 0, :2] - ellipse_params[valid, 1, :2]
+        separation[valid] = np.linalg.norm(delta, axis=1).astype(np.float32)
+    return separation
+
+
 def _compute_success_mask(
     ellipse_success: np.ndarray,
     eye_separation: np.ndarray,
@@ -189,7 +214,7 @@ def _update_postprocess_summary(
         )
 
     ellipse_success = np.asarray(refined["ellipse_success"][:], dtype=bool)
-    eye_separation = np.asarray(refined["eye_separation"][:], dtype=np.float32)
+    eye_separation = _load_eye_separation(refined)
     min_sep, max_sep = _get_sep_limits(root, refined)
     area_refined = _load_area_refined(refined)
     min_eye_area_px = _resolve_success_min_eye_area_px(refined)
@@ -209,8 +234,7 @@ def _update_postprocess_summary(
     successful_pair_rate = (float(successful_pairs) / float(total_rois)) if total_rois else 0.0
     success_rate = (successful_pairs / total_rois * 100.0) if total_rois else 0.0
 
-    reason_arr = _get_reason_array(refined)
-    reason_counts = _count_reason_tags(reason_arr)
+    reason_counts = _count_reason_tags(refined)
     manual_corrections = int(reason_counts.get("manual_correction", 0))
 
     retune_id_counts = _count_ints(refined.get("retune_id"))
@@ -249,9 +273,11 @@ def _update_postprocess_summary(
     else:
         summary_out = {"refine": refined.attrs.get("refine_stats", {})}
 
+    previous_post = summary_out.get("postprocess")
     summary_out["postprocess"] = post_stats
     summary_out["reason_counts"] = reason_counts
-    summary_out["postprocess_updated_utc"] = datetime.now(timezone.utc).isoformat()
+    if previous_post != post_stats or "postprocess_updated_utc" not in summary_out:
+        summary_out["postprocess_updated_utc"] = datetime.now(timezone.utc).isoformat()
     refined.attrs["summary_statistics"] = summary_out
 
     if print_summary:

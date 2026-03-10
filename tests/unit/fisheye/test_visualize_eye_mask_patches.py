@@ -7,6 +7,8 @@ import numpy as np
 import pytest
 import zarr
 
+from fisheye.shared.detect_reason_codec import decode_reason_bytes, write_reason_columns
+from fisheye.visualization import visualize_eye_mask_patches as patches_mod
 from fisheye.visualization.visualize_eye_mask_patches import (
     _apply_eye_mask_review_status,
     _apply_recommended_probability_threshold,
@@ -17,6 +19,7 @@ from fisheye.visualization.visualize_eye_mask_patches import (
     _fit_ellipse_from_mask,
     _format_reason_tags_compact,
     _load_frame_flags,
+    _merge_reason,
     _mouse_modifier_state,
     _refresh_refined_eye_mask_metrics,
     _reason_tags_from_value,
@@ -332,6 +335,14 @@ def test_reason_helpers_compact_display_and_none_handling() -> None:
     assert compact == "manual_correction|patch_viewer_edit|overlap|+2"
 
 
+def test_merge_reason_preserves_existing_order_and_deduplicates() -> None:
+    merged = _merge_reason(
+        "legacy_tag|patch_viewer_edit|legacy_tag",
+        ["manual_correction", "patch_viewer_edit", "overlap"],
+    )
+    assert merged == "legacy_tag|patch_viewer_edit|manual_correction|overlap"
+
+
 def test_fit_ellipse_from_mask_canonicalizes_major_minor() -> None:
     mask = np.zeros((64, 64), dtype=np.uint8)
     cv2 = pytest.importorskip("cv2")
@@ -371,6 +382,8 @@ def test_save_roi_mask_edits_updates_arrays(tmp_path: Path) -> None:
         ellipse_success_arr=ellipse_success,
         eye_separation_arr=eye_sep,
         reason_arr=None,
+        reason_bytes_arr=None,
+        reason_group=None,
     )
 
     assert result["channel_count"] == 2
@@ -379,3 +392,85 @@ def test_save_roi_mask_edits_updates_arrays(tmp_path: Path) -> None:
     assert bool(np.asarray(ellipse_success[0])[0])
     assert bool(np.asarray(ellipse_success[0])[1])
     assert float(np.asarray(eye_sep[0])) > 0.0
+
+
+def test_save_roi_mask_edits_syncs_reason_bytes(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_reason_bytes.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    refined_parent = root.create_group("refined_eye_masks_runs")
+    refined = refined_parent.create_group("refined_eye_masks_001")
+    metrics = refined.create_group("metrics")
+    masks_arr = refined.create_array("masks_roi", shape=(1, 2, 32, 32), dtype="u1")
+    ellipse_params = refined.create_array("ellipse_params", shape=(1, 2, 5), dtype="f4")
+    ellipse_success = refined.create_array("ellipse_success", shape=(1, 2), dtype=bool)
+    eye_sep = refined.create_array("eye_separation", shape=(1,), dtype="f4")
+
+    write_reason_columns(
+        metrics,
+        np.asarray(["legacy_tag|patch_viewer_edit"], dtype=object),
+        chunk_size=1,
+        include_reason_text=True,
+        overwrite=True,
+    )
+
+    edited = np.zeros((2, 32, 32), dtype=np.uint8)
+    cv2 = pytest.importorskip("cv2")
+    cv2.circle(edited[0], (10, 16), 5, 1, -1)
+    cv2.circle(edited[1], (22, 16), 5, 1, -1)
+
+    _save_roi_mask_edits(
+        root=root,
+        refined=refined,
+        roi_idx=0,
+        masks_row=edited,
+        masks_arr=masks_arr,
+        ellipse_params_arr=ellipse_params,
+        ellipse_success_arr=ellipse_success,
+        eye_separation_arr=eye_sep,
+        reason_arr=metrics["reason"],
+        reason_bytes_arr=metrics["reason_bytes"],
+        reason_group=metrics,
+    )
+
+    expected = "legacy_tag|patch_viewer_edit|manual_correction"
+    assert str(metrics["reason"][0]) == expected
+    decoded = decode_reason_bytes(np.asarray(metrics["reason_bytes"][:], dtype=np.uint8)).tolist()
+    assert decoded == [expected]
+    assert int(metrics["reason_bytes"].shape[1]) >= 64
+    assert int(metrics.attrs["reason_bytes_width"]) >= 64
+
+
+def test_save_roi_mask_edits_uses_fitted_ellipse_centers_for_separation(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_separation_source.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    refined_parent = root.create_group("refined_eye_masks_runs")
+    refined = refined_parent.create_group("refined_eye_masks_001")
+    masks_arr = refined.create_array("masks_roi", shape=(1, 2, 8, 8), dtype="u1")
+    ellipse_params = refined.create_array("ellipse_params", shape=(1, 2, 5), dtype="f4")
+    ellipse_success = refined.create_array("ellipse_success", shape=(1, 2), dtype=bool)
+    eye_sep = refined.create_array("eye_separation", shape=(1,), dtype="f4")
+
+    returns = iter(
+        [
+            (np.asarray([10.0, 12.0, 8.0, 4.0, 0.0], dtype=np.float32), True, None, (0.0, 0.0)),
+            (np.asarray([34.0, 15.0, 8.0, 4.0, 0.0], dtype=np.float32), True, None, (3.0, 4.0)),
+        ]
+    )
+    monkeypatch.setattr(patches_mod, "_fit_ellipse_from_mask", lambda _mask: next(returns))
+
+    result = _save_roi_mask_edits(
+        root=root,
+        refined=refined,
+        roi_idx=0,
+        masks_row=np.zeros((2, 8, 8), dtype=np.uint8),
+        masks_arr=masks_arr,
+        ellipse_params_arr=ellipse_params,
+        ellipse_success_arr=ellipse_success,
+        eye_separation_arr=eye_sep,
+        reason_arr=None,
+        reason_bytes_arr=None,
+        reason_group=None,
+    )
+
+    assert float(result["eye_separation"]) == pytest.approx(24.186773, abs=1e-5)
+    assert float(np.asarray(eye_sep[0])) == pytest.approx(24.186773, abs=1e-5)

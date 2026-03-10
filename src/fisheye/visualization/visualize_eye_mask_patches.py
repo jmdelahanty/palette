@@ -30,6 +30,7 @@ import cv2
 import numpy as np
 import zarr
 
+from ..shared.detect_reason_codec import decode_reason_bytes, write_reason_columns
 from ..shared.mask_source import load_mask_bundle
 from ..shared.provenance_attrs import resolve_source_keypoints_run
 
@@ -558,9 +559,73 @@ def _stack_v(panels: Sequence[np.ndarray], gap: int = 8) -> np.ndarray:
 
 
 def _merge_reason(existing: str, tags: Sequence[str]) -> str:
-    existing_tags = [tag for tag in existing.split("|") if tag]
-    merged = sorted(set(existing_tags + list(tags)))
+    merged: List[str] = []
+    seen: set[str] = set()
+    for tag in [*existing.split("|"), *[str(value) for value in tags]]:
+        cleaned = str(tag).strip()
+        if not cleaned or cleaned in seen:
+            continue
+        merged.append(cleaned)
+        seen.add(cleaned)
     return "|".join(merged) if merged else "clean"
+
+
+def _read_reason_value(
+    *,
+    reason_arr: Optional[zarr.Array],
+    reason_bytes_arr: Optional[zarr.Array],
+    roi_idx: int,
+) -> str:
+    if isinstance(reason_arr, zarr.Array):
+        raw_value = reason_arr[roi_idx]
+        return "" if raw_value is None else str(raw_value)
+    if isinstance(reason_bytes_arr, zarr.Array):
+        encoded = np.asarray(reason_bytes_arr[roi_idx:roi_idx + 1], dtype=np.uint8)
+        if encoded.shape[0] == 1:
+            return str(decode_reason_bytes(encoded)[0])
+    return ""
+
+
+def _write_reason_value(
+    *,
+    reason_group: Optional[zarr.Group],
+    reason_arr: Optional[zarr.Array],
+    reason_bytes_arr: Optional[zarr.Array],
+    roi_idx: int,
+    reason_value: str,
+) -> None:
+    if not isinstance(reason_bytes_arr, zarr.Array):
+        if isinstance(reason_arr, zarr.Array):
+            reason_arr[roi_idx:roi_idx + 1] = np.array([reason_value], dtype=object)
+        return
+    if not isinstance(reason_group, zarr.Group):
+        raise RuntimeError("reason_group is required to rewrite synchronized reason_bytes columns.")
+
+    if isinstance(reason_arr, zarr.Array):
+        labels = np.asarray(reason_arr[:], dtype=object)
+    else:
+        labels = decode_reason_bytes(np.asarray(reason_bytes_arr[:], dtype=np.uint8))
+    labels = np.asarray(labels, dtype=object)
+    labels[roi_idx] = reason_value
+
+    chunk_size = int(labels.shape[0]) or 1
+    row_chunks = getattr(reason_bytes_arr, "chunks", None)
+    if isinstance(row_chunks, tuple) and row_chunks:
+        chunk_size = max(1, int(row_chunks[0]))
+    elif isinstance(reason_arr, zarr.Array):
+        reason_chunks = getattr(reason_arr, "chunks", None)
+        if isinstance(reason_chunks, tuple) and reason_chunks:
+            chunk_size = max(1, int(reason_chunks[0]))
+        elif isinstance(reason_chunks, int):
+            chunk_size = max(1, int(reason_chunks))
+
+    write_reason_columns(
+        reason_group,
+        labels,
+        chunk_size=chunk_size,
+        include_reason_text=isinstance(reason_arr, zarr.Array),
+        overwrite=True,
+    )
 
 
 def _reason_tags_from_value(reason_value: object) -> List[str]:
@@ -1046,28 +1111,34 @@ def _save_roi_mask_edits(
     ellipse_success_arr: zarr.Array,
     eye_separation_arr: Optional[zarr.Array],
     reason_arr: Optional[zarr.Array],
+    reason_bytes_arr: Optional[zarr.Array],
+    reason_group: Optional[zarr.Group] = None,
 ) -> Dict[str, object]:
     channel_count = int(masks_row.shape[0])
     new_params = np.full((channel_count, 5), np.nan, dtype=np.float32)
     new_success = np.zeros((channel_count,), dtype=bool)
-    centroids: List[Optional[Tuple[float, float]]] = []
 
     for eye_idx in range(channel_count):
         params, success, contour_xy, centroid = _fit_ellipse_from_mask(masks_row[eye_idx])
         new_params[eye_idx] = params
         new_success[eye_idx] = bool(success)
-        centroids.append(centroid)
         if eye_idx == 0:
             _update_contour_arrays(refined, roi_idx, contour_xy, side="left")
         elif eye_idx == 1:
             _update_contour_arrays(refined, roi_idx, contour_xy, side="right")
 
     separation = float("nan")
-    if channel_count >= 2 and centroids[0] is not None and centroids[1] is not None:
+    if (
+        channel_count >= 2
+        and bool(new_success[0])
+        and bool(new_success[1])
+        and np.all(np.isfinite(new_params[0, :2]))
+        and np.all(np.isfinite(new_params[1, :2]))
+    ):
         separation = float(
             np.hypot(
-                centroids[0][0] - centroids[1][0],
-                centroids[0][1] - centroids[1][1],
+                float(new_params[0, 0]) - float(new_params[1, 0]),
+                float(new_params[0, 1]) - float(new_params[1, 1]),
             )
         )
 
@@ -1098,12 +1169,22 @@ def _save_roi_mask_edits(
     if eye_separation_arr is not None and channel_count >= 2:
         eye_separation_arr[roi_idx] = separation
 
-    if reason_arr is not None:
-        existing = str(reason_arr[roi_idx]) if reason_arr[roi_idx] is not None else ""
+    if reason_arr is not None or reason_bytes_arr is not None:
+        existing = _read_reason_value(
+            reason_arr=reason_arr,
+            reason_bytes_arr=reason_bytes_arr,
+            roi_idx=roi_idx,
+        )
         tags = ["manual_correction", "patch_viewer_edit"]
         if reject_reason:
             tags.append(reject_reason)
-        reason_arr[roi_idx:roi_idx + 1] = np.array([_merge_reason(existing, tags)], dtype=object)
+        _write_reason_value(
+            reason_group=reason_group,
+            reason_arr=reason_arr,
+            reason_bytes_arr=reason_bytes_arr,
+            roi_idx=roi_idx,
+            reason_value=_merge_reason(existing, tags),
+        )
 
     return {
         "channel_count": channel_count,
@@ -1202,9 +1283,13 @@ def create_viewer(
     ellipse_success = refined["ellipse_success"]
     eye_separation = refined.get("eye_separation")
     metrics_group = refined.get("metrics")
-    reason_arr = metrics_group.get("reason") if isinstance(metrics_group, zarr.Group) else None
-    if not isinstance(reason_arr, zarr.Array):
+    reason_group: Optional[zarr.Group] = metrics_group if isinstance(metrics_group, zarr.Group) else None
+    reason_arr = reason_group.get("reason") if isinstance(reason_group, zarr.Group) else None
+    reason_bytes_arr = reason_group.get("reason_bytes") if isinstance(reason_group, zarr.Group) else None
+    if not isinstance(reason_arr, zarr.Array) and not isinstance(reason_bytes_arr, zarr.Array):
+        reason_group = refined
         reason_arr = refined.get("reason")
+        reason_bytes_arr = refined.get("reason_bytes")
 
     total_rois = int(roi_images.shape[0])
     if total_rois <= 0:
@@ -1299,8 +1384,12 @@ def create_viewer(
     }
 
     def _refresh_source_reason_state(roi_idx: int) -> None:
-        if isinstance(reason_arr, zarr.Array):
-            raw_value = reason_arr[roi_idx]
+        raw_value = _read_reason_value(
+            reason_arr=reason_arr if isinstance(reason_arr, zarr.Array) else None,
+            reason_bytes_arr=reason_bytes_arr if isinstance(reason_bytes_arr, zarr.Array) else None,
+            roi_idx=roi_idx,
+        )
+        if raw_value:
             reason_tags = _reason_tags_from_value(raw_value)
             source_reject = _extract_primary_reject_reason(reason_tags)
             state["source_reason_compact"] = _format_reason_tags_compact(reason_tags)
@@ -1688,12 +1777,16 @@ def create_viewer(
                 ellipse_success_arr=ellipse_success,
                 eye_separation_arr=eye_separation if isinstance(eye_separation, zarr.Array) else None,
                 reason_arr=reason_arr if isinstance(reason_arr, zarr.Array) else None,
+                reason_bytes_arr=reason_bytes_arr if isinstance(reason_bytes_arr, zarr.Array) else None,
+                reason_group=reason_group if isinstance(reason_group, zarr.Group) else None,
             )
+            if isinstance(reason_group, zarr.Group):
+                next_reason_arr = reason_group.get("reason")
+                next_reason_bytes_arr = reason_group.get("reason_bytes")
+                reason_arr = next_reason_arr if isinstance(next_reason_arr, zarr.Array) else None
+                reason_bytes_arr = next_reason_bytes_arr if isinstance(next_reason_bytes_arr, zarr.Array) else None
             _refresh_source_reason_state(int(roi_idx))
-            try:
-                _refresh_refined_eye_mask_metrics(root, refined)
-            except Exception as exc:
-                print(f"Warning: failed to refresh refined metrics after save: {exc}")
+            _refresh_refined_eye_mask_metrics(root, refined)
             state["dirty"] = False
             print(
                 f"Saved ROI {roi_idx}: {result['successful_eyes']}/{result['channel_count']} eyes fit "
