@@ -6,13 +6,15 @@ import json
 import os
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import yaml
+
+from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
 
 
 @dataclass(frozen=True)
@@ -64,8 +66,7 @@ def _import_zarr():
     return zarr
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_utc_now = utc_now
 
 
 def _ensure_parent(path: Path) -> None:
@@ -122,14 +123,7 @@ def _as_int(value: Any) -> Optional[int]:
         return None
 
 
-def _decode_attr(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, (bytes, bytearray)):
-        text = value.decode("utf-8", "ignore").strip()
-    else:
-        text = str(value).strip()
-    return text or None
+_decode_attr = _shared_decode_attr
 
 
 def _normalize_task_type(value: Any) -> Optional[str]:
@@ -143,6 +137,11 @@ def _normalize_task_type(value: Any) -> Optional[str]:
         "pose": "pose",
         "keypoint": "pose",
         "keypoints": "pose",
+        "eye_masks": "eye_masks",
+        "eyemasks": "eye_masks",
+        "subject_masks": "subject_masks",
+        "subjectmasks": "subject_masks",
+        "segmentation": "subject_masks",
     }
     return alias.get(norm)
 
@@ -158,6 +157,10 @@ def _infer_task_type_from_text(value: Any) -> Optional[str]:
         return "pose"
     if norm.startswith("keypoint_") or norm.startswith("keypoints_") or "keypoint" in norm:
         return "pose"
+    if norm.startswith("eye_mask_") or "eye_mask" in norm or "eyemask" in norm:
+        return "eye_masks"
+    if norm.startswith("subject_mask_") or "subject_mask" in norm or "subjectmask" in norm:
+        return "subject_masks"
     return None
 
 
@@ -1069,6 +1072,449 @@ def _resolve_source_keypoints_run(attrs: Mapping[str, Any]) -> Optional[str]:
     return _decode_attr(attrs.get("source_keypoint_run"))
 
 
+def _coerce_text_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if hasattr(value, "tolist"):
+        try:
+            value = value.tolist()
+        except Exception:
+            pass
+    if isinstance(value, (bytes, bytearray, str)):
+        text = _decode_attr(value)
+        return [text] if text else []
+    if isinstance(value, Sequence):
+        values: List[str] = []
+        for item in value:
+            text = _decode_attr(item)
+            if text:
+                values.append(text)
+        return values
+    return []
+
+
+def _coerce_bool_list(value: Any) -> List[bool]:
+    if value is None:
+        return []
+    if hasattr(value, "tolist"):
+        try:
+            value = value.tolist()
+        except Exception:
+            pass
+    if isinstance(value, np.ndarray):
+        try:
+            value = value.tolist()
+        except Exception:
+            return []
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+        return [bool(item) for item in value]
+    return []
+
+
+def _extract_review_fields(
+    review_status: Optional[Mapping[str, Any]],
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+    if not review_status:
+        return None, None, None, None, None
+    return (
+        _decode_attr(review_status.get("state")) or _decode_attr(review_status.get("review_state")),
+        _decode_attr(review_status.get("method")) or _decode_attr(review_status.get("review_method")),
+        _decode_attr(review_status.get("intended_use")) or _decode_attr(review_status.get("review_intended_use")),
+        _decode_attr(review_status.get("reviewer")) or _decode_attr(review_status.get("review_reviewer")),
+        _decode_attr(review_status.get("timestamp_utc"))
+        or _decode_attr(review_status.get("timestamp"))
+        or _decode_attr(review_status.get("review_timestamp_utc"))
+        or _decode_attr(review_status.get("reviewed_at_utc"))
+        or _decode_attr(review_status.get("reviewed_at")),
+    )
+
+
+def _derive_review_lifecycle(
+    *,
+    review_state: Optional[str],
+    stale_state: Optional[str] = None,
+    stale_reason: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    stale_state_norm = str(stale_state).strip().lower() if stale_state else None
+    if stale_state_norm == "stale":
+        return "stale", stale_reason or "source_subject_mask_stale"
+    review_state_norm = str(review_state).strip().lower() if review_state else None
+    if review_state_norm in {"pending", "needs_review", "review"}:
+        return "in_progress", review_state
+    if review_state_norm in {"approved", "rejected"}:
+        return review_state_norm, review_state
+    return None, None
+
+
+def _subject_component_family(component_name: Optional[str]) -> Optional[str]:
+    name = _decode_attr(component_name)
+    if not name:
+        return None
+    if name in {"eye_left", "eye_right", "eyes_union"}:
+        return "eyes"
+    return name
+
+
+def _extract_subject_mask_total_rois(run_group: zarr.Group, attrs: Mapping[str, Any]) -> Optional[int]:
+    total_rois = _as_int(attrs.get("total_rois"))
+    if total_rois is not None:
+        return total_rois
+    for key in ("masks_roi", "frame_indices", "detection_indices"):
+        arr = _get_group(run_group, key)
+        shape = getattr(arr, "shape", None)
+        if shape:
+            try:
+                return int(shape[0])
+            except Exception:
+                pass
+    frame_counts = _get_group(run_group, "frame_counts")
+    if frame_counts is not None:
+        try:
+            values = np.asarray(frame_counts[:])
+            return int(values.sum())
+        except Exception:
+            return None
+    return None
+
+
+def _extract_subject_mask_presence(
+    run_group: zarr.Group,
+    *,
+    mask_labels: Sequence[str],
+    total_rois: Optional[int],
+) -> Tuple[Optional[int], Dict[str, int]]:
+    counts_by_label = {str(label): 0 for label in mask_labels}
+    any_present_rows: Optional[int] = None
+
+    metrics = _get_group(run_group, "metrics")
+    mask_present = _get_group(metrics, "mask_present") if metrics is not None else None
+    if mask_present is not None:
+        try:
+            values = np.asarray(mask_present[:], dtype=bool)
+            if values.ndim == 2 and values.shape[1] >= len(mask_labels):
+                any_present_rows = int(values[:, : len(mask_labels)].any(axis=1).sum())
+                for index, label in enumerate(mask_labels):
+                    counts_by_label[str(label)] = int(values[:, index].sum())
+                return any_present_rows, counts_by_label
+        except Exception:
+            pass
+
+    masks_roi = _get_group(run_group, "masks_roi")
+    if masks_roi is not None:
+        try:
+            values = np.asarray(masks_roi[:])
+            if values.ndim == 4 and values.shape[1] >= len(mask_labels):
+                present = values[:, : len(mask_labels), :, :].reshape(values.shape[0], len(mask_labels), -1).any(axis=2)
+                any_present_rows = int(present.any(axis=1).sum())
+                for index, label in enumerate(mask_labels):
+                    counts_by_label[str(label)] = int(present[:, index].sum())
+                return any_present_rows, counts_by_label
+        except Exception:
+            pass
+
+    if total_rois is not None and total_rois >= 0:
+        return 0, counts_by_label
+    return None, counts_by_label
+
+
+def _extract_subject_mask_performance_rows(
+    root: zarr.Group,
+    *,
+    zarr_path: Path,
+    recording_id: Optional[str],
+    zarr_use: Optional[str],
+) -> List[Dict[str, Any]]:
+    try:
+        zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    except Exception:
+        zarr_mtime_ns = None
+    updated_utc = _utc_now()
+    latest_subject_mask_run = _resolve_latest_group_name(root.get("subject_mask_runs"))
+
+    rows: List[Dict[str, Any]] = []
+    for stage_group in ("subject_mask_runs", "refined_subject_masks_runs"):
+        parent = root.get(stage_group)
+        if parent is None:
+            continue
+        for run_name in _eye_mask_run_names(parent):
+            if run_name not in parent:
+                continue
+            run_group = parent[run_name]
+            attrs = dict(run_group.attrs)
+            provenance = _coerce_mapping(attrs.get("provenance")) or {}
+            summary_statistics = _coerce_mapping(attrs.get("summary_statistics"))
+            reason_counts = _coerce_mapping(attrs.get("reason_counts"))
+            review_status = _coerce_mapping(
+                attrs.get("refined_subject_mask_review_status")
+                if stage_group == "refined_subject_masks_runs"
+                else attrs.get("subject_mask_review_status")
+            ) or _coerce_mapping(attrs.get("subject_mask_review_status"))
+            component_review_statuses = _coerce_mapping(attrs.get("component_review_statuses")) or {}
+
+            run_created_utc = (
+                _decode_attr(attrs.get("created_utc"))
+                or _decode_attr(attrs.get("timestamp_utc"))
+                or _decode_attr(provenance.get("created_at_utc"))
+            )
+            method = _decode_attr(attrs.get("method")) or _decode_attr(provenance.get("method"))
+            if not method and stage_group == "refined_subject_masks_runs":
+                method = "refine_subject_masks"
+
+            review_state, review_method, review_intended_use, review_reviewer, review_timestamp_utc = (
+                _extract_review_fields(review_status)
+            )
+
+            source_subject_mask_run = _decode_attr(attrs.get("source_subject_mask_run"))
+            source_subject_mask_method = _decode_attr(attrs.get("source_subject_mask_method"))
+            source_subject_mask_stale = _coerce_mapping(attrs.get("source_subject_mask_stale"))
+            source_subject_mask_stale_state = (
+                _decode_attr(source_subject_mask_stale.get("state")) if source_subject_mask_stale else None
+            )
+            source_subject_mask_stale_reason = (
+                _decode_attr(source_subject_mask_stale.get("reason")) if source_subject_mask_stale else None
+            )
+            source_subject_mask_stale_timestamp_utc = (
+                _decode_attr(source_subject_mask_stale.get("timestamp_utc"))
+                or _decode_attr(source_subject_mask_stale.get("timestamp"))
+                or _decode_attr(source_subject_mask_stale.get("stale_at_utc"))
+                or _decode_attr(source_subject_mask_stale.get("stale_at"))
+                if source_subject_mask_stale
+                else None
+            )
+            provenance_parameters = _coerce_mapping(provenance.get("parameters")) or {}
+            provenance_inputs = _coerce_mapping(provenance.get("inputs")) or {}
+            run_semantics = _decode_attr(attrs.get("run_semantics")) or _decode_attr(
+                provenance_parameters.get("run_semantics")
+            )
+            probability_semantics = _decode_attr(attrs.get("probability_semantics")) or _decode_attr(
+                provenance_parameters.get("probability_semantics")
+            )
+            tuning_source = _decode_attr(attrs.get("tuning_source")) or _decode_attr(
+                provenance_parameters.get("tuning_source")
+            )
+            tuning_timestamp = _decode_attr(attrs.get("tuning_timestamp")) or _decode_attr(
+                provenance_parameters.get("tuning_timestamp")
+            )
+            source_background_run = _decode_attr(attrs.get("source_background_run")) or _decode_attr(
+                provenance_inputs.get("source_background_run")
+            )
+            source_background_array = _decode_attr(attrs.get("source_background_array")) or _decode_attr(
+                provenance_inputs.get("source_background_array")
+            )
+            source_dish_mask_array = _decode_attr(attrs.get("source_dish_mask_array")) or _decode_attr(
+                provenance_inputs.get("source_dish_mask_array")
+            )
+            if (
+                source_subject_mask_stale_state is None
+                and stage_group == "refined_subject_masks_runs"
+                and latest_subject_mask_run
+                and source_subject_mask_run
+                and source_subject_mask_run != latest_subject_mask_run
+            ):
+                source_subject_mask_stale_state = "stale"
+                source_subject_mask_stale_reason = "latest_subject_mask_run_mismatch"
+
+            lifecycle_state, lifecycle_reason = _derive_review_lifecycle(
+                review_state=review_state,
+                stale_state=source_subject_mask_stale_state,
+                stale_reason=source_subject_mask_stale_reason,
+            )
+
+            mask_labels = _coerce_text_list(attrs.get("mask_labels"))
+            available_flags: List[bool] = []
+            available_channels = _get_group(run_group, "available_channels")
+            if available_channels is not None:
+                try:
+                    available_flags = _coerce_bool_list(available_channels[:])
+                except Exception:
+                    available_flags = []
+            if mask_labels:
+                if not available_flags:
+                    available_flags = [True] * len(mask_labels)
+                if len(available_flags) < len(mask_labels):
+                    available_flags.extend([False] * (len(mask_labels) - len(available_flags)))
+                available_flags = available_flags[: len(mask_labels)]
+            available_components = [label for label, flag in zip(mask_labels, available_flags) if flag]
+            unavailable_components = [label for label, flag in zip(mask_labels, available_flags) if not flag]
+            component_review_states = {
+                str(label): state
+                for label, payload in component_review_statuses.items()
+                if (state := (_decode_attr((_coerce_mapping(payload) or {}).get("state")) or _decode_attr((_coerce_mapping(payload) or {}).get("review_state"))))
+            }
+
+            eye_component_mode: Optional[str] = None
+            if "eye_left" in mask_labels or "eye_right" in mask_labels:
+                eye_component_mode = "lr"
+            elif "eyes_union" in mask_labels:
+                eye_component_mode = "union"
+
+            total_rois = _extract_subject_mask_total_rois(run_group, attrs)
+            rows_with_any_mask, _ = _extract_subject_mask_presence(
+                run_group,
+                mask_labels=mask_labels,
+                total_rois=total_rois,
+            )
+            coverage_percent = None
+            if rows_with_any_mask is not None and total_rois is not None:
+                ratio = _format_ratio(rows_with_any_mask, total_rois)
+                coverage_percent = float(ratio) * 100.0 if ratio is not None else None
+
+            duration_seconds = _as_float(attrs.get("duration_seconds"))
+            rois_per_second = None
+            if duration_seconds is not None and duration_seconds > 0 and total_rois is not None:
+                rois_per_second = float(total_rois) / float(duration_seconds)
+
+            rows.append(
+                {
+                    "stage_group": stage_group,
+                    "run_name": str(run_name),
+                    "run_created_utc": run_created_utc,
+                    "recording_id": recording_id,
+                    "zarr_use": zarr_use,
+                    "subject_mask_method": method,
+                    "label_schema_id": _decode_attr(attrs.get("label_schema_id")),
+                    "source_crop_run": _decode_attr(attrs.get("source_crop_run")),
+                    "source_keypoint_group": _decode_attr(attrs.get("source_keypoint_group")),
+                    "source_keypoints_run": _resolve_source_keypoints_run(attrs),
+                    "source_subject_mask_run": source_subject_mask_run,
+                    "source_subject_mask_method": source_subject_mask_method,
+                    "run_semantics": run_semantics,
+                    "probability_semantics": probability_semantics,
+                    "source_background_run": source_background_run,
+                    "source_background_array": source_background_array,
+                    "source_dish_mask_array": source_dish_mask_array,
+                    "tuning_source": tuning_source,
+                    "tuning_timestamp": tuning_timestamp,
+                    "total_rois": total_rois,
+                    "rows_with_any_mask": rows_with_any_mask,
+                    "coverage_percent": coverage_percent,
+                    "duration_seconds": duration_seconds,
+                    "rois_per_second": rois_per_second,
+                    "available_component_count": len(available_components),
+                    "available_components_json": _json_dumps(available_components),
+                    "unavailable_components_json": _json_dumps(unavailable_components),
+                    "component_review_states_json": _json_dumps(component_review_states),
+                    "eye_component_mode": eye_component_mode,
+                    "reason_counts_json": _json_dumps(reason_counts),
+                    "summary_statistics_json": _json_dumps(summary_statistics),
+                    "review_state": review_state,
+                    "review_method": review_method,
+                    "review_intended_use": review_intended_use,
+                    "review_reviewer": review_reviewer,
+                    "review_timestamp_utc": review_timestamp_utc,
+                    "source_subject_mask_stale_state": source_subject_mask_stale_state,
+                    "source_subject_mask_stale_reason": source_subject_mask_stale_reason,
+                    "source_subject_mask_stale_timestamp_utc": source_subject_mask_stale_timestamp_utc,
+                    "source_subject_mask_stale_json": _json_dumps(source_subject_mask_stale),
+                    "lifecycle_state": lifecycle_state,
+                    "lifecycle_reason": lifecycle_reason,
+                    "zarr_mtime_ns": zarr_mtime_ns,
+                    "updated_utc": updated_utc,
+                }
+            )
+
+    return rows
+
+
+def _extract_subject_mask_component_quality_rows(
+    root: zarr.Group,
+    *,
+    zarr_path: Path,
+    recording_id: Optional[str],
+    zarr_use: Optional[str],
+) -> List[Dict[str, Any]]:
+    performance_rows = _extract_subject_mask_performance_rows(
+        root,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        zarr_use=zarr_use,
+    )
+    rows: List[Dict[str, Any]] = []
+    for performance in performance_rows:
+        stage_group = str(performance.get("stage_group") or "")
+        run_name = str(performance.get("run_name") or "")
+        parent = root.get(stage_group)
+        if parent is None or run_name not in parent:
+            continue
+        run_group = parent[run_name]
+        attrs = dict(run_group.attrs)
+        mask_labels = _coerce_text_list(attrs.get("mask_labels"))
+        if not mask_labels:
+            continue
+
+        available_flags: List[bool] = []
+        available_channels = _get_group(run_group, "available_channels")
+        if available_channels is not None:
+            try:
+                available_flags = _coerce_bool_list(available_channels[:])
+            except Exception:
+                available_flags = []
+        if not available_flags:
+            available_flags = [True] * len(mask_labels)
+        if len(available_flags) < len(mask_labels):
+            available_flags.extend([False] * (len(mask_labels) - len(available_flags)))
+        available_flags = available_flags[: len(mask_labels)]
+
+        total_rois = _as_int(performance.get("total_rois"))
+        _, counts_by_label = _extract_subject_mask_presence(
+            run_group,
+            mask_labels=mask_labels,
+            total_rois=total_rois,
+        )
+        component_review_statuses = _coerce_mapping(attrs.get("component_review_statuses")) or {}
+        stale_state = _decode_attr(performance.get("source_subject_mask_stale_state"))
+        stale_reason = _decode_attr(performance.get("source_subject_mask_stale_reason"))
+
+        for index, component_name in enumerate(mask_labels):
+            available = bool(available_flags[index]) if index < len(available_flags) else False
+            review_payload = _coerce_mapping(component_review_statuses.get(component_name))
+            review_state, review_method, review_intended_use, review_reviewer, review_timestamp_utc = (
+                _extract_review_fields(review_payload)
+            )
+            rows_with_component_mask = counts_by_label.get(component_name)
+            rows_with_component_mask_rate = _format_ratio(rows_with_component_mask, total_rois)
+            lifecycle_state: Optional[str]
+            lifecycle_reason: Optional[str]
+            if not available:
+                lifecycle_state, lifecycle_reason = "na", "component_unavailable"
+            else:
+                lifecycle_state, lifecycle_reason = _derive_review_lifecycle(
+                    review_state=review_state,
+                    stale_state=stale_state,
+                    stale_reason=stale_reason,
+                )
+
+            rows.append(
+                {
+                    "stage_group": stage_group,
+                    "run_name": run_name,
+                    "component_name": component_name,
+                    "component_family": _subject_component_family(component_name),
+                    "run_created_utc": performance.get("run_created_utc"),
+                    "recording_id": performance.get("recording_id"),
+                    "zarr_use": performance.get("zarr_use"),
+                    "subject_mask_method": performance.get("subject_mask_method"),
+                    "label_schema_id": performance.get("label_schema_id"),
+                    "eye_component_mode": performance.get("eye_component_mode"),
+                    "source_subject_mask_run": performance.get("source_subject_mask_run"),
+                    "available": int(available),
+                    "review_state": review_state,
+                    "review_method": review_method,
+                    "review_intended_use": review_intended_use,
+                    "review_reviewer": review_reviewer,
+                    "review_timestamp_utc": review_timestamp_utc,
+                    "total_rois": total_rois,
+                    "rows_with_component_mask": rows_with_component_mask,
+                    "rows_with_component_mask_rate": rows_with_component_mask_rate,
+                    "lifecycle_state": lifecycle_state,
+                    "lifecycle_reason": lifecycle_reason,
+                    "quality_updated_utc": performance.get("updated_utc") or _utc_now(),
+                    "zarr_mtime_ns": performance.get("zarr_mtime_ns"),
+                }
+            )
+    return rows
+
+
 def _extract_eye_mask_performance_rows(
     root: zarr.Group,
     *,
@@ -1703,16 +2149,7 @@ def _infer_zarr_origin_use(
     return zarr_origin, zarr_use
 
 
-def _as_text(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, (bytes, bytearray)):
-        try:
-            value = value.decode("utf-8")
-        except Exception:
-            return None
-    text = str(value).strip()
-    return text if text else None
+_as_text = _shared_decode_attr
 
 
 def _normalize_path_text(value: Any) -> Optional[str]:
@@ -1951,6 +2388,36 @@ class Registry:
                 29,
                 "keypoint_quality_current_latest_source_preference",
                 self._migration_029_keypoint_quality_current_latest_source_preference,
+            ),
+            (
+                30,
+                "tracking_unassigned_warning_wide_view",
+                self._migration_030_tracking_unassigned_warning_wide_view,
+            ),
+            (
+                31,
+                "tracking_qc_state_wide_view",
+                self._migration_031_tracking_qc_state_wide_view,
+            ),
+            (
+                32,
+                "subject_mask_registry",
+                self._migration_032_subject_mask_registry,
+            ),
+            (
+                33,
+                "subject_mask_registry_semantics_columns",
+                self._migration_033_subject_mask_registry_semantics_columns,
+            ),
+            (
+                34,
+                "dataset_context_current_view",
+                self._migration_034_dataset_context_current_view,
+            ),
+            (
+                35,
+                "recording_step_status_latest_dataset_context_current",
+                self._migration_035_recording_step_status_latest_dataset_context_current,
             ),
         ]
 
@@ -2785,7 +3252,7 @@ class Registry:
                 r.artifact_schema_id AS artifact_schema_id,
                 COALESCE(
                     NULLIF(TRIM(r.dish_design), ''),
-                    GROUP_CONCAT(DISTINCT NULLIF(TRIM(p.dish_design), ''))
+                    GROUP_CONCAT(DISTINCT NULLIF(TRIM(dcc.dish_design), ''))
                 ) AS dish_design,
                 r.rig_id AS rig_id,
                 r.arena_id AS arena_id,
@@ -2801,7 +3268,7 @@ class Registry:
                 COALESCE(MAX(d.last_seen_utc), r.updated_utc, r.created_utc) AS last_seen_utc
             FROM recordings r
             LEFT JOIN datasets d ON d.recording_id = r.recording_id
-            LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
+            LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = d.dataset_id
             GROUP BY
                 r.recording_id,
                 r.session_uuid,
@@ -3095,7 +3562,7 @@ class Registry:
                 r.artifact_schema_id AS artifact_schema_id,
                 COALESCE(
                     NULLIF(TRIM(r.dish_design), ''),
-                    GROUP_CONCAT(DISTINCT NULLIF(TRIM(p.dish_design), ''))
+                    GROUP_CONCAT(DISTINCT NULLIF(TRIM(dcc.dish_design), ''))
                 ) AS dish_design,
                 r.rig_id AS rig_id,
                 r.arena_id AS arena_id,
@@ -3111,7 +3578,7 @@ class Registry:
                 COALESCE(MAX(d.last_seen_utc), r.updated_utc, r.created_utc) AS last_seen_utc
             FROM recordings r
             LEFT JOIN datasets d ON d.recording_id = r.recording_id
-            LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
+            LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = d.dataset_id
             GROUP BY
                 r.recording_id,
                 r.session_uuid,
@@ -3533,15 +4000,15 @@ class Registry:
                     d.zarr_path AS zarr_path,
                     d.artifact_kind AS artifact_kind,
                     d.status AS dataset_status,
-                    p.rig_id AS rig_id,
-                    p.arena_id AS arena_id,
-                    p.camera_id AS camera_id,
-                    p.canvas_name AS canvas_name,
-                    p.dish_design AS dish_design,
-                    p.protocol_name AS protocol_name,
-                    p.cross_id AS cross_id,
-                    p.genotype AS genotype,
-                    p.dpf_at_acquisition AS dpf_at_acquisition,
+                    dcc.rig_id AS rig_id,
+                    dcc.arena_id AS arena_id,
+                    dcc.camera_id AS camera_id,
+                    dcc.canvas_name AS canvas_name,
+                    dcc.dish_design AS dish_design,
+                    dcc.protocol_name AS protocol_name,
+                    dcc.cross_id AS cross_id,
+                    dcc.genotype AS genotype,
+                    dcc.dpf_at_acquisition AS dpf_at_acquisition,
                     ROW_NUMBER() OVER (
                         PARTITION BY dpl.recording_id
                         ORDER BY
@@ -3550,7 +4017,7 @@ class Registry:
                     ) AS _rn
                 FROM detect_performance_latest dpl
                 LEFT JOIN datasets d ON d.dataset_id = dpl.dataset_id
-                LEFT JOIN provenance p ON p.dataset_id = dpl.dataset_id
+                LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = dpl.dataset_id
                 WHERE dpl.recording_id IS NOT NULL
             )
             SELECT
@@ -3671,15 +4138,15 @@ class Registry:
                     d.zarr_path AS zarr_path,
                     d.artifact_kind AS artifact_kind,
                     d.status AS dataset_status,
-                    p.rig_id AS rig_id,
-                    p.arena_id AS arena_id,
-                    p.camera_id AS camera_id,
-                    p.canvas_name AS canvas_name,
-                    p.dish_design AS dish_design,
-                    p.protocol_name AS protocol_name,
-                    p.cross_id AS cross_id,
-                    p.genotype AS genotype,
-                    p.dpf_at_acquisition AS dpf_at_acquisition,
+                    dcc.rig_id AS rig_id,
+                    dcc.arena_id AS arena_id,
+                    dcc.camera_id AS camera_id,
+                    dcc.canvas_name AS canvas_name,
+                    dcc.dish_design AS dish_design,
+                    dcc.protocol_name AS protocol_name,
+                    dcc.cross_id AS cross_id,
+                    dcc.genotype AS genotype,
+                    dcc.dpf_at_acquisition AS dpf_at_acquisition,
                     ROW_NUMBER() OVER (
                         PARTITION BY dmpl.recording_id
                         ORDER BY
@@ -3688,7 +4155,7 @@ class Registry:
                     ) AS _rn
                 FROM detect_model_performance_latest dmpl
                 LEFT JOIN datasets d ON d.dataset_id = dmpl.dataset_id
-                LEFT JOIN provenance p ON p.dataset_id = dmpl.dataset_id
+                LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = dmpl.dataset_id
                 WHERE dmpl.recording_id IS NOT NULL
             )
             SELECT
@@ -4092,15 +4559,15 @@ class Registry:
                     d.zarr_path AS zarr_path,
                     d.artifact_kind AS artifact_kind,
                     d.status AS dataset_status,
-                    p.rig_id AS rig_id,
-                    p.arena_id AS arena_id,
-                    p.camera_id AS camera_id,
-                    p.canvas_name AS canvas_name,
-                    p.dish_design AS dish_design,
-                    p.protocol_name AS protocol_name,
-                    p.cross_id AS cross_id,
-                    p.genotype AS genotype,
-                    p.dpf_at_acquisition AS dpf_at_acquisition,
+                    dcc.rig_id AS rig_id,
+                    dcc.arena_id AS arena_id,
+                    dcc.camera_id AS camera_id,
+                    dcc.canvas_name AS canvas_name,
+                    dcc.dish_design AS dish_design,
+                    dcc.protocol_name AS protocol_name,
+                    dcc.cross_id AS cross_id,
+                    dcc.genotype AS genotype,
+                    dcc.dpf_at_acquisition AS dpf_at_acquisition,
                     ROW_NUMBER() OVER (
                         PARTITION BY cqc.recording_id
                         ORDER BY
@@ -4110,7 +4577,7 @@ class Registry:
                     ) AS _rn
                 FROM crop_quality_current cqc
                 LEFT JOIN datasets d ON d.dataset_id = cqc.dataset_id
-                LEFT JOIN provenance p ON p.dataset_id = cqc.dataset_id
+                LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = cqc.dataset_id
                 WHERE cqc.recording_id IS NOT NULL
             )
             SELECT
@@ -4319,15 +4786,15 @@ class Registry:
                     d.zarr_path AS zarr_path,
                     d.artifact_kind AS artifact_kind,
                     d.status AS dataset_status,
-                    p.rig_id AS rig_id,
-                    p.arena_id AS arena_id,
-                    p.camera_id AS camera_id,
-                    p.canvas_name AS canvas_name,
-                    p.dish_design AS dish_design,
-                    p.protocol_name AS protocol_name,
-                    p.cross_id AS cross_id,
-                    p.genotype AS genotype,
-                    p.dpf_at_acquisition AS dpf_at_acquisition,
+                    dcc.rig_id AS rig_id,
+                    dcc.arena_id AS arena_id,
+                    dcc.camera_id AS camera_id,
+                    dcc.canvas_name AS canvas_name,
+                    dcc.dish_design AS dish_design,
+                    dcc.protocol_name AS protocol_name,
+                    dcc.cross_id AS cross_id,
+                    dcc.genotype AS genotype,
+                    dcc.dpf_at_acquisition AS dpf_at_acquisition,
                     ROW_NUMBER() OVER (
                         PARTITION BY empl.recording_id, empl.stage_group
                         ORDER BY
@@ -4336,7 +4803,7 @@ class Registry:
                     ) AS _rn
                 FROM eye_mask_performance_latest empl
                 LEFT JOIN datasets d ON d.dataset_id = empl.dataset_id
-                LEFT JOIN provenance p ON p.dataset_id = empl.dataset_id
+                LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = empl.dataset_id
                 WHERE empl.recording_id IS NOT NULL
             )
             SELECT
@@ -4690,15 +5157,15 @@ class Registry:
                     d.zarr_path AS zarr_path,
                     d.artifact_kind AS artifact_kind,
                     d.status AS dataset_status,
-                    p.rig_id AS rig_id,
-                    p.arena_id AS arena_id,
-                    p.camera_id AS camera_id,
-                    p.canvas_name AS canvas_name,
-                    p.dish_design AS dish_design,
-                    p.protocol_name AS protocol_name,
-                    p.cross_id AS cross_id,
-                    p.genotype AS genotype,
-                    p.dpf_at_acquisition AS dpf_at_acquisition,
+                    dcc.rig_id AS rig_id,
+                    dcc.arena_id AS arena_id,
+                    dcc.camera_id AS camera_id,
+                    dcc.canvas_name AS canvas_name,
+                    dcc.dish_design AS dish_design,
+                    dcc.protocol_name AS protocol_name,
+                    dcc.cross_id AS cross_id,
+                    dcc.genotype AS genotype,
+                    dcc.dpf_at_acquisition AS dpf_at_acquisition,
                     ROW_NUMBER() OVER (
                         PARTITION BY kpl.recording_id
                         ORDER BY
@@ -4707,7 +5174,7 @@ class Registry:
                     ) AS _rn
                 FROM keypoint_performance_latest kpl
                 LEFT JOIN datasets d ON d.dataset_id = kpl.dataset_id
-                LEFT JOIN provenance p ON p.dataset_id = kpl.dataset_id
+                LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = kpl.dataset_id
                 WHERE kpl.recording_id IS NOT NULL
             )
             SELECT
@@ -4868,22 +5335,22 @@ class Registry:
             """
             CREATE VIEW recording_step_status_latest AS
             SELECT
-                COALESCE(NULLIF(trim(rss.recording_id), ''), d.recording_id) AS recording_id,
+                COALESCE(NULLIF(trim(rss.recording_id), ''), dcc.recording_id) AS recording_id,
                 rss.dataset_id,
-                d.session_uuid AS session_uuid,
-                d.zarr_path AS zarr_path,
-                d.zarr_use AS zarr_use,
-                d.artifact_kind AS artifact_kind,
-                d.status AS dataset_status,
-                p.rig_id AS rig_id,
-                p.arena_id AS arena_id,
-                p.camera_id AS camera_id,
-                p.canvas_name AS canvas_name,
-                p.dish_design AS dish_design,
-                p.protocol_name AS protocol_name,
-                p.cross_id AS cross_id,
-                p.genotype AS genotype,
-                p.dpf_at_acquisition AS dpf_at_acquisition,
+                dcc.session_uuid AS session_uuid,
+                dcc.zarr_path AS zarr_path,
+                dcc.zarr_use AS zarr_use,
+                dcc.artifact_kind AS artifact_kind,
+                dcc.dataset_status AS dataset_status,
+                dcc.rig_id AS rig_id,
+                dcc.arena_id AS arena_id,
+                dcc.camera_id AS camera_id,
+                dcc.canvas_name AS canvas_name,
+                dcc.dish_design AS dish_design,
+                dcc.protocol_name AS protocol_name,
+                dcc.cross_id AS cross_id,
+                dcc.genotype AS genotype,
+                dcc.dpf_at_acquisition AS dpf_at_acquisition,
                 rss.step_name,
                 rss.status,
                 rss.run_name,
@@ -4895,8 +5362,7 @@ class Registry:
                 rss.zarr_mtime_ns,
                 rss.updated_utc
             FROM recording_step_status rss
-            LEFT JOIN datasets d ON d.dataset_id = rss.dataset_id
-            LEFT JOIN provenance p ON p.dataset_id = rss.dataset_id;
+            LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = rss.dataset_id;
             """
         )
 
@@ -4960,9 +5426,9 @@ class Registry:
                     SUM(CASE WHEN step_name = 'refined_eye_masks' AND status = 'ok' THEN 1 ELSE 0 END) AS refined_eye_masks_ok_count,
                     SUM(CASE WHEN step_name = 'refined_eye_masks' AND status != 'ok' THEN 1 ELSE 0 END)
                         AS refined_eye_masks_non_ok_count,
-                    SUM(CASE WHEN step_name = 'id_assignment' AND status = 'ok' THEN 1 ELSE 0 END) AS id_assignment_ok_count,
-                    SUM(CASE WHEN step_name = 'id_assignment' AND status != 'ok' THEN 1 ELSE 0 END)
-                        AS id_assignment_non_ok_count,
+                    SUM(CASE WHEN step_name = 'arena_assignment' AND status = 'ok' THEN 1 ELSE 0 END) AS arena_assignment_ok_count,
+                    SUM(CASE WHEN step_name = 'arena_assignment' AND status != 'ok' THEN 1 ELSE 0 END)
+                        AS arena_assignment_non_ok_count,
                     SUM(CASE WHEN step_name = 'tracks' AND status = 'ok' THEN 1 ELSE 0 END) AS tracks_ok_count,
                     SUM(CASE WHEN step_name = 'tracks' AND status != 'ok' THEN 1 ELSE 0 END) AS tracks_non_ok_count,
                     SUM(CASE WHEN step_name = 'stimulus' AND status = 'ok' THEN 1 ELSE 0 END) AS stimulus_ok_count,
@@ -5020,8 +5486,8 @@ class Registry:
                 ps.eye_masks_non_ok_count,
                 ps.refined_eye_masks_ok_count,
                 ps.refined_eye_masks_non_ok_count,
-                ps.id_assignment_ok_count,
-                ps.id_assignment_non_ok_count,
+                ps.arena_assignment_ok_count,
+                ps.arena_assignment_non_ok_count,
                 ps.tracks_ok_count,
                 ps.tracks_non_ok_count,
                 ps.stimulus_ok_count,
@@ -5106,8 +5572,9 @@ class Registry:
                     MAX(CASE WHEN step_name = 'refined_eye_masks' THEN status END) AS refined_eye_masks_status,
                     MAX(CASE WHEN step_name = 'refined_eye_masks' THEN review_status_json END) AS refined_eye_masks_review_json,
                     MAX(CASE WHEN step_name = 'refined_eye_masks' THEN details_json END) AS refined_eye_masks_details_json,
-                    MAX(CASE WHEN step_name = 'id_assignment' THEN status END) AS id_assignment_status,
+                    MAX(CASE WHEN step_name = 'arena_assignment' THEN status END) AS arena_assignment_status,
                     MAX(CASE WHEN step_name = 'tracks' THEN status END) AS tracks_status,
+                    MAX(CASE WHEN step_name = 'tracks' THEN details_json END) AS tracks_details_json,
                     MAX(CASE WHEN step_name = 'stimulus' THEN status END) AS stimulus_status,
                     MAX(CASE WHEN step_name = 'stimulus' THEN details_json END) AS stimulus_details_json,
                     MAX(CASE WHEN step_name = 'calibration' THEN status END) AS calibration_status,
@@ -5198,8 +5665,48 @@ class Registry:
                     END AS refined_keypoints_success_effective,
                     CASE WHEN p.eye_masks_status = 'ok' THEN 1 ELSE 0 END AS eye_masks_present,
                     CASE WHEN p.refined_eye_masks_status = 'ok' THEN 1 ELSE 0 END AS refined_eye_masks_present,
-                    CASE WHEN p.id_assignment_status = 'ok' THEN 1 ELSE 0 END AS assign_ids_present,
+                    CASE WHEN p.arena_assignment_status = 'ok' THEN 1 ELSE 0 END AS arena_assignment_present,
                     CASE WHEN p.tracks_status = 'ok' THEN 1 ELSE 0 END AS track_present,
+                    CAST(
+                        COALESCE(
+                            json_extract(p.tracks_details_json, '$.n_unassigned_rows'),
+                            json_extract(p.tracks_details_json, '$.summary_statistics.n_unassigned_rows')
+                        ) AS INTEGER
+                    ) AS track_unassigned_rows,
+                    CAST(
+                        COALESCE(
+                            json_extract(p.tracks_details_json, '$.unassigned_row_rate_percent'),
+                            json_extract(p.tracks_details_json, '$.summary_statistics.unassigned_row_rate_percent')
+                        ) AS REAL
+                    ) AS track_unassigned_rate_percent,
+                    CAST(
+                        COALESCE(
+                            json_extract(p.tracks_details_json, '$.tracking_warn_threshold_rows'),
+                            json_extract(p.tracks_details_json, '$.summary_statistics.tracking_warn_threshold_rows'),
+                            1
+                        ) AS INTEGER
+                    ) AS track_warn_threshold_rows,
+                    CAST(
+                        COALESCE(
+                            json_extract(p.tracks_details_json, '$.tracking_warn_threshold_percent'),
+                            json_extract(p.tracks_details_json, '$.summary_statistics.tracking_warn_threshold_percent'),
+                            0.0
+                        ) AS REAL
+                    ) AS track_warn_threshold_percent,
+                    CAST(
+                        COALESCE(
+                            json_extract(p.tracks_details_json, '$.tracking_block_threshold_rows'),
+                            json_extract(p.tracks_details_json, '$.summary_statistics.tracking_block_threshold_rows'),
+                            10
+                        ) AS INTEGER
+                    ) AS track_block_threshold_rows,
+                    CAST(
+                        COALESCE(
+                            json_extract(p.tracks_details_json, '$.tracking_block_threshold_percent'),
+                            json_extract(p.tracks_details_json, '$.summary_statistics.tracking_block_threshold_percent'),
+                            1.0
+                        ) AS REAL
+                    ) AS track_block_threshold_percent,
                     CASE WHEN p.calibration_status = 'ok' THEN 1 ELSE 0 END AS calibration_present,
                     CAST(
                         COALESCE(
@@ -5293,7 +5800,20 @@ class Registry:
                         WHEN d.detect_quality_score IS NOT NULL
                             THEN printf('%.1f', d.detect_quality_score)
                         ELSE ''
-                    END AS detect_quality_head
+                    END AS detect_quality_head,
+                    COALESCE(
+                        NULLIF(
+                            lower(trim(CAST(json_extract(d.tracks_details_json, '$.tracking_qc_state') AS TEXT))),
+                            ''
+                        ),
+                        CASE
+                            WHEN COALESCE(d.track_unassigned_rows, 0) <= 0 THEN 'ok'
+                            WHEN d.track_unassigned_rows >= COALESCE(d.track_warn_threshold_rows, 1)
+                                OR COALESCE(d.track_unassigned_rate_percent, 0.0) > COALESCE(d.track_warn_threshold_percent, 0.0)
+                                THEN 'warn'
+                            ELSE 'ok'
+                        END
+                    ) AS track_qc_state
                 FROM derived d
             )
             SELECT
@@ -5579,8 +6099,22 @@ class Registry:
                     WHEN r.eye_review_state IS NOT NULL THEN r.eye_review_state
                     ELSE '—'
                 END AS "Eye Mask Review",
-                CASE WHEN r.assign_ids_present = 1 THEN 'OK' ELSE 'MISS' END AS "Assign IDs",
-                CASE WHEN r.track_present = 1 THEN 'OK' ELSE 'MISS' END AS "Track",
+                CASE WHEN r.arena_assignment_present = 1 THEN 'OK' ELSE 'MISS' END AS "Arena Assignment",
+                CASE
+                    WHEN r.track_present != 1 THEN 'MISS'
+                    WHEN lower(COALESCE(r.track_qc_state, '')) IN ('warn', 'block') AND r.track_unassigned_rate_percent IS NOT NULL THEN
+                        'WARN ('
+                        || CAST(r.track_unassigned_rows AS TEXT)
+                        || ' unassigned, '
+                        || printf('%.1f%%', r.track_unassigned_rate_percent)
+                        || ')'
+                    WHEN lower(COALESCE(r.track_qc_state, '')) IN ('warn', 'block') AND r.track_unassigned_rows IS NOT NULL THEN
+                        'WARN ('
+                        || CAST(r.track_unassigned_rows AS TEXT)
+                        || ' unassigned)'
+                    WHEN lower(COALESCE(r.track_qc_state, '')) IN ('warn', 'block') THEN 'WARN'
+                    ELSE 'OK'
+                END AS "Track",
                 CAST(r.stimulus_runs AS TEXT) || ' (' || CASE WHEN r.stimulus_runs > 0 THEN 'OK' ELSE 'MISS' END || ')' AS "Stimulus",
                 CASE WHEN r.calibration_present = 1 THEN 'OK' ELSE 'MISS' END AS "Calib",
                 CASE
@@ -6918,6 +7452,809 @@ class Registry:
     def _migration_029_keypoint_quality_current_latest_source_preference(self) -> None:
         self._refresh_keypoint_quality_current_view()
 
+    def _migration_030_tracking_unassigned_warning_wide_view(self) -> None:
+        """Re-create wide view to expose tracking unassigned-row warnings."""
+        self._migration_020_recording_step_status_wide_view()
+
+    def _migration_031_tracking_qc_state_wide_view(self) -> None:
+        """Re-create wide view to expose structured tracking QA state."""
+        self._migration_020_recording_step_status_wide_view()
+
+    def _migration_032_subject_mask_registry(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subject_mask_performance (
+                dataset_id TEXT NOT NULL,
+                stage_group TEXT NOT NULL,
+                run_name TEXT NOT NULL,
+                run_created_utc TEXT,
+                recording_id TEXT,
+                zarr_use TEXT,
+                subject_mask_method TEXT,
+                label_schema_id TEXT,
+                source_crop_run TEXT,
+                source_keypoint_group TEXT,
+                source_keypoints_run TEXT,
+                source_subject_mask_run TEXT,
+                source_subject_mask_method TEXT,
+                run_semantics TEXT,
+                probability_semantics TEXT,
+                source_background_run TEXT,
+                source_background_array TEXT,
+                source_dish_mask_array TEXT,
+                tuning_source TEXT,
+                tuning_timestamp TEXT,
+                total_rois INTEGER,
+                rows_with_any_mask INTEGER,
+                coverage_percent REAL,
+                duration_seconds REAL,
+                rois_per_second REAL,
+                available_component_count INTEGER,
+                available_components_json TEXT,
+                unavailable_components_json TEXT,
+                component_review_states_json TEXT,
+                eye_component_mode TEXT,
+                reason_counts_json TEXT,
+                summary_statistics_json TEXT,
+                review_state TEXT,
+                review_method TEXT,
+                review_intended_use TEXT,
+                review_reviewer TEXT,
+                review_timestamp_utc TEXT,
+                source_subject_mask_stale_state TEXT,
+                source_subject_mask_stale_reason TEXT,
+                source_subject_mask_stale_timestamp_utc TEXT,
+                source_subject_mask_stale_json TEXT,
+                lifecycle_state TEXT,
+                lifecycle_reason TEXT,
+                zarr_mtime_ns INTEGER,
+                updated_utc TEXT,
+                PRIMARY KEY (dataset_id, stage_group, run_name),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subject_mask_component_quality (
+                dataset_id TEXT NOT NULL,
+                stage_group TEXT NOT NULL,
+                run_name TEXT NOT NULL,
+                component_name TEXT NOT NULL,
+                component_family TEXT,
+                run_created_utc TEXT,
+                recording_id TEXT,
+                zarr_use TEXT,
+                subject_mask_method TEXT,
+                label_schema_id TEXT,
+                eye_component_mode TEXT,
+                source_subject_mask_run TEXT,
+                available INTEGER,
+                review_state TEXT,
+                review_method TEXT,
+                review_intended_use TEXT,
+                review_reviewer TEXT,
+                review_timestamp_utc TEXT,
+                total_rois INTEGER,
+                rows_with_component_mask INTEGER,
+                rows_with_component_mask_rate REAL,
+                lifecycle_state TEXT,
+                lifecycle_reason TEXT,
+                quality_updated_utc TEXT,
+                zarr_mtime_ns INTEGER,
+                PRIMARY KEY (dataset_id, stage_group, run_name, component_name),
+                FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE CASCADE
+            );
+            """
+        )
+        self._ensure_columns(
+            "subject_mask_performance",
+            {
+                "run_created_utc": "TEXT",
+                "recording_id": "TEXT",
+                "zarr_use": "TEXT",
+                "subject_mask_method": "TEXT",
+                "label_schema_id": "TEXT",
+                "source_crop_run": "TEXT",
+                "source_keypoint_group": "TEXT",
+                "source_keypoints_run": "TEXT",
+                "source_subject_mask_run": "TEXT",
+                "source_subject_mask_method": "TEXT",
+                "run_semantics": "TEXT",
+                "probability_semantics": "TEXT",
+                "source_background_run": "TEXT",
+                "source_background_array": "TEXT",
+                "source_dish_mask_array": "TEXT",
+                "tuning_source": "TEXT",
+                "tuning_timestamp": "TEXT",
+                "total_rois": "INTEGER",
+                "rows_with_any_mask": "INTEGER",
+                "coverage_percent": "REAL",
+                "duration_seconds": "REAL",
+                "rois_per_second": "REAL",
+                "available_component_count": "INTEGER",
+                "available_components_json": "TEXT",
+                "unavailable_components_json": "TEXT",
+                "component_review_states_json": "TEXT",
+                "eye_component_mode": "TEXT",
+                "reason_counts_json": "TEXT",
+                "summary_statistics_json": "TEXT",
+                "review_state": "TEXT",
+                "review_method": "TEXT",
+                "review_intended_use": "TEXT",
+                "review_reviewer": "TEXT",
+                "review_timestamp_utc": "TEXT",
+                "source_subject_mask_stale_state": "TEXT",
+                "source_subject_mask_stale_reason": "TEXT",
+                "source_subject_mask_stale_timestamp_utc": "TEXT",
+                "source_subject_mask_stale_json": "TEXT",
+                "lifecycle_state": "TEXT",
+                "lifecycle_reason": "TEXT",
+                "zarr_mtime_ns": "INTEGER",
+                "updated_utc": "TEXT",
+            },
+        )
+        self._ensure_columns(
+            "subject_mask_component_quality",
+            {
+                "component_family": "TEXT",
+                "run_created_utc": "TEXT",
+                "recording_id": "TEXT",
+                "zarr_use": "TEXT",
+                "subject_mask_method": "TEXT",
+                "label_schema_id": "TEXT",
+                "eye_component_mode": "TEXT",
+                "source_subject_mask_run": "TEXT",
+                "available": "INTEGER",
+                "review_state": "TEXT",
+                "review_method": "TEXT",
+                "review_intended_use": "TEXT",
+                "review_reviewer": "TEXT",
+                "review_timestamp_utc": "TEXT",
+                "total_rois": "INTEGER",
+                "rows_with_component_mask": "INTEGER",
+                "rows_with_component_mask_rate": "REAL",
+                "lifecycle_state": "TEXT",
+                "lifecycle_reason": "TEXT",
+                "quality_updated_utc": "TEXT",
+                "zarr_mtime_ns": "INTEGER",
+            },
+        )
+
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_subject_mask_perf_recording ON subject_mask_performance(recording_id, stage_group, run_created_utc DESC);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_subject_mask_perf_stage_method ON subject_mask_performance(stage_group, subject_mask_method);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_subject_mask_perf_source ON subject_mask_performance(source_keypoints_run, source_subject_mask_run);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_subject_mask_perf_review ON subject_mask_performance(review_state, review_intended_use, lifecycle_state);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_subject_mask_component_dataset_id ON subject_mask_component_quality(dataset_id);"
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_subject_mask_component_gate
+            ON subject_mask_component_quality(review_state, review_intended_use, component_name, available);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_subject_mask_component_stage
+            ON subject_mask_component_quality(stage_group, component_name, subject_mask_method);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_subject_mask_component_recording
+            ON subject_mask_component_quality(recording_id, stage_group, component_name, run_created_utc DESC);
+            """
+        )
+
+    def _migration_033_subject_mask_registry_semantics_columns(self) -> None:
+        """Reconcile subject-mask registry schema after legacy bootstrap registries."""
+        self._migration_032_subject_mask_registry()
+        cur = self.conn.cursor()
+
+        cur.execute("DROP VIEW IF EXISTS subject_mask_performance_latest;")
+        cur.execute(
+            """
+            CREATE VIEW subject_mask_performance_latest AS
+            WITH ranked AS (
+                SELECT
+                    smp.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY smp.dataset_id, smp.stage_group
+                        ORDER BY
+                            COALESCE(smp.run_created_utc, smp.updated_utc) DESC,
+                            smp.run_name DESC
+                    ) AS _rn
+                FROM subject_mask_performance smp
+            )
+            SELECT
+                dataset_id,
+                stage_group,
+                run_name,
+                run_created_utc,
+                recording_id,
+                zarr_use,
+                subject_mask_method,
+                label_schema_id,
+                source_crop_run,
+                source_keypoint_group,
+                source_keypoints_run,
+                source_subject_mask_run,
+                source_subject_mask_method,
+                run_semantics,
+                probability_semantics,
+                source_background_run,
+                source_background_array,
+                source_dish_mask_array,
+                tuning_source,
+                tuning_timestamp,
+                total_rois,
+                rows_with_any_mask,
+                coverage_percent,
+                duration_seconds,
+                rois_per_second,
+                available_component_count,
+                available_components_json,
+                unavailable_components_json,
+                component_review_states_json,
+                eye_component_mode,
+                reason_counts_json,
+                summary_statistics_json,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                source_subject_mask_stale_state,
+                source_subject_mask_stale_reason,
+                source_subject_mask_stale_timestamp_utc,
+                source_subject_mask_stale_json,
+                lifecycle_state,
+                lifecycle_reason,
+                zarr_mtime_ns,
+                updated_utc
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+        cur.execute("DROP VIEW IF EXISTS recording_subject_mask_performance_latest;")
+        cur.execute(
+            """
+            CREATE VIEW recording_subject_mask_performance_latest AS
+            WITH ranked AS (
+                SELECT
+                    smpl.*,
+                    d.zarr_path AS zarr_path,
+                    d.artifact_kind AS artifact_kind,
+                    d.status AS dataset_status,
+                    dcc.rig_id AS rig_id,
+                    dcc.arena_id AS arena_id,
+                    dcc.camera_id AS camera_id,
+                    dcc.canvas_name AS canvas_name,
+                    dcc.dish_design AS dish_design,
+                    dcc.protocol_name AS protocol_name,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY smpl.recording_id, smpl.stage_group
+                        ORDER BY
+                            COALESCE(smpl.run_created_utc, smpl.updated_utc) DESC,
+                            smpl.run_name DESC
+                    ) AS _rn
+                FROM subject_mask_performance_latest smpl
+                LEFT JOIN datasets d ON d.dataset_id = smpl.dataset_id
+                LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = smpl.dataset_id
+                WHERE smpl.recording_id IS NOT NULL
+            )
+            SELECT
+                recording_id,
+                dataset_id,
+                stage_group,
+                run_name,
+                run_created_utc,
+                zarr_use,
+                subject_mask_method,
+                label_schema_id,
+                source_crop_run,
+                source_keypoint_group,
+                source_keypoints_run,
+                source_subject_mask_run,
+                source_subject_mask_method,
+                run_semantics,
+                probability_semantics,
+                source_background_run,
+                source_background_array,
+                source_dish_mask_array,
+                tuning_source,
+                tuning_timestamp,
+                total_rois,
+                rows_with_any_mask,
+                coverage_percent,
+                duration_seconds,
+                rois_per_second,
+                available_component_count,
+                available_components_json,
+                unavailable_components_json,
+                component_review_states_json,
+                eye_component_mode,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                source_subject_mask_stale_state,
+                source_subject_mask_stale_reason,
+                source_subject_mask_stale_timestamp_utc,
+                source_subject_mask_stale_json,
+                lifecycle_state,
+                lifecycle_reason,
+                zarr_path,
+                artifact_kind,
+                dataset_status,
+                rig_id,
+                arena_id,
+                camera_id,
+                canvas_name,
+                dish_design,
+                protocol_name,
+                zarr_mtime_ns,
+                updated_utc
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+        cur.execute("DROP VIEW IF EXISTS subject_mask_component_quality_current;")
+        cur.execute(
+            """
+            CREATE VIEW subject_mask_component_quality_current AS
+            WITH ranked AS (
+                SELECT
+                    smcq.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY smcq.dataset_id, smcq.stage_group, smcq.component_name
+                        ORDER BY
+                            COALESCE(smcq.review_timestamp_utc, smcq.run_created_utc, smcq.quality_updated_utc) DESC,
+                            COALESCE(smcq.run_created_utc, '') DESC,
+                            smcq.run_name DESC
+                    ) AS _rn
+                FROM subject_mask_component_quality smcq
+            )
+            SELECT
+                dataset_id,
+                stage_group,
+                run_name,
+                component_name,
+                component_family,
+                run_created_utc,
+                recording_id,
+                zarr_use,
+                subject_mask_method,
+                label_schema_id,
+                eye_component_mode,
+                source_subject_mask_run,
+                available,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                total_rois,
+                rows_with_component_mask,
+                rows_with_component_mask_rate,
+                lifecycle_state,
+                lifecycle_reason,
+                quality_updated_utc,
+                zarr_mtime_ns
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+        cur.execute("DROP VIEW IF EXISTS subject_mask_component_quality_overview;")
+        cur.execute(
+            """
+            CREATE VIEW subject_mask_component_quality_overview AS
+            SELECT
+                smcqc.dataset_id AS dataset_id,
+                d.zarr_path AS zarr_path,
+                d.zarr_origin AS zarr_origin,
+                d.zarr_use AS zarr_use,
+                d.zarr_use AS zarr_purpose,
+                d.artifact_kind AS artifact_kind,
+                d.status AS dataset_status,
+                smcqc.stage_group AS stage_group,
+                smcqc.run_name AS run_name,
+                smcqc.component_name AS component_name,
+                smcqc.component_family AS component_family,
+                smcqc.run_created_utc AS run_created_utc,
+                smcqc.recording_id AS recording_id,
+                smcqc.subject_mask_method AS subject_mask_method,
+                smcqc.label_schema_id AS label_schema_id,
+                smcqc.eye_component_mode AS eye_component_mode,
+                smcqc.source_subject_mask_run AS source_subject_mask_run,
+                smcqc.available AS available,
+                smcqc.review_state AS review_state,
+                smcqc.review_method AS review_method,
+                smcqc.review_intended_use AS review_intended_use,
+                smcqc.review_reviewer AS review_reviewer,
+                smcqc.review_timestamp_utc AS review_timestamp_utc,
+                smcqc.total_rois AS total_rois,
+                smcqc.rows_with_component_mask AS rows_with_component_mask,
+                smcqc.rows_with_component_mask_rate AS rows_with_component_mask_rate,
+                smcqc.lifecycle_state AS lifecycle_state,
+                smcqc.lifecycle_reason AS lifecycle_reason,
+                smcqc.quality_updated_utc AS quality_updated_utc,
+                smcqc.zarr_mtime_ns AS zarr_mtime_ns,
+                CASE
+                    WHEN smcqc.zarr_mtime_ns IS NULL THEN 1
+                    ELSE 0
+                END AS quality_stale
+            FROM subject_mask_component_quality_current smcqc
+            LEFT JOIN datasets d ON d.dataset_id = smcqc.dataset_id;
+            """
+        )
+
+        cur.execute("DROP VIEW IF EXISTS recording_subject_mask_component_quality_overview;")
+        cur.execute(
+            """
+            CREATE VIEW recording_subject_mask_component_quality_overview AS
+            WITH ranked AS (
+                SELECT
+                    smcqo.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY smcqo.recording_id, smcqo.stage_group, smcqo.component_name
+                        ORDER BY
+                            COALESCE(smcqo.review_timestamp_utc, smcqo.run_created_utc, smcqo.quality_updated_utc) DESC,
+                            COALESCE(smcqo.run_created_utc, '') DESC,
+                            smcqo.run_name DESC,
+                            smcqo.dataset_id DESC
+                    ) AS _rn
+                FROM subject_mask_component_quality_overview smcqo
+                WHERE smcqo.recording_id IS NOT NULL
+            )
+            SELECT
+                recording_id,
+                dataset_id,
+                zarr_path,
+                zarr_origin,
+                zarr_use,
+                zarr_purpose,
+                artifact_kind,
+                dataset_status,
+                stage_group,
+                run_name,
+                component_name,
+                component_family,
+                run_created_utc,
+                subject_mask_method,
+                label_schema_id,
+                eye_component_mode,
+                source_subject_mask_run,
+                available,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                total_rois,
+                rows_with_component_mask,
+                rows_with_component_mask_rate,
+                lifecycle_state,
+                lifecycle_reason,
+                quality_updated_utc,
+                zarr_mtime_ns,
+                quality_stale
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+    def _migration_034_dataset_context_current_view(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DROP VIEW IF EXISTS dataset_context_current;")
+        cur.execute(
+            """
+            CREATE VIEW dataset_context_current AS
+            WITH recording_subject_summary AS (
+                SELECT
+                    rso.recording_id AS recording_id,
+                    COUNT(DISTINCT NULLIF(TRIM(rso.subject_id), '')) AS subject_count_recorded,
+                    CASE
+                        WHEN COUNT(DISTINCT NULLIF(TRIM(rso.subject_id), '')) = 1
+                        THEN MIN(NULLIF(TRIM(rso.subject_id), ''))
+                        ELSE NULL
+                    END AS subject_id,
+                    CASE
+                        WHEN COUNT(DISTINCT NULLIF(TRIM(rso.dish_id), '')) = 1
+                        THEN MIN(NULLIF(TRIM(rso.dish_id), ''))
+                        ELSE NULL
+                    END AS dish_id,
+                    CASE
+                        WHEN COUNT(DISTINCT NULLIF(TRIM(rso.cross_id), '')) = 1
+                        THEN MIN(NULLIF(TRIM(rso.cross_id), ''))
+                        ELSE NULL
+                    END AS cross_id,
+                    CASE
+                        WHEN COUNT(DISTINCT NULLIF(TRIM(rso.genotype), '')) = 1
+                        THEN MIN(NULLIF(TRIM(rso.genotype), ''))
+                        ELSE NULL
+                    END AS genotype,
+                    CASE
+                        WHEN COUNT(DISTINCT NULLIF(TRIM(rso.line_strain), '')) = 1
+                        THEN MIN(NULLIF(TRIM(rso.line_strain), ''))
+                        ELSE NULL
+                    END AS line_strain,
+                    CASE
+                        WHEN COUNT(DISTINCT NULLIF(TRIM(rso.species), '')) = 1
+                        THEN MIN(NULLIF(TRIM(rso.species), ''))
+                        ELSE NULL
+                    END AS species,
+                    CASE
+                        WHEN COUNT(DISTINCT NULLIF(TRIM(rso.sex), '')) = 1
+                        THEN MIN(NULLIF(TRIM(rso.sex), ''))
+                        ELSE NULL
+                    END AS sex,
+                    CASE
+                        WHEN COUNT(DISTINCT rso.dpf_at_acquisition) = 1
+                        THEN MIN(rso.dpf_at_acquisition)
+                        ELSE NULL
+                    END AS dpf_at_acquisition,
+                    (
+                        SELECT json_group_array(value)
+                        FROM (
+                            SELECT DISTINCT NULLIF(TRIM(rso2.subject_id), '') AS value
+                            FROM recording_subject_overview rso2
+                            WHERE rso2.recording_id = rso.recording_id
+                              AND NULLIF(TRIM(rso2.subject_id), '') IS NOT NULL
+                            ORDER BY value
+                        )
+                    ) AS subject_ids_json,
+                    (
+                        SELECT json_group_array(value)
+                        FROM (
+                            SELECT DISTINCT NULLIF(TRIM(rso2.dish_id), '') AS value
+                            FROM recording_subject_overview rso2
+                            WHERE rso2.recording_id = rso.recording_id
+                              AND NULLIF(TRIM(rso2.dish_id), '') IS NOT NULL
+                            ORDER BY value
+                        )
+                    ) AS dish_ids_json,
+                    (
+                        SELECT json_group_array(value)
+                        FROM (
+                            SELECT DISTINCT NULLIF(TRIM(rso2.cross_id), '') AS value
+                            FROM recording_subject_overview rso2
+                            WHERE rso2.recording_id = rso.recording_id
+                              AND NULLIF(TRIM(rso2.cross_id), '') IS NOT NULL
+                            ORDER BY value
+                        )
+                    ) AS cross_ids_json,
+                    (
+                        SELECT json_group_array(value)
+                        FROM (
+                            SELECT DISTINCT NULLIF(TRIM(rso2.genotype), '') AS value
+                            FROM recording_subject_overview rso2
+                            WHERE rso2.recording_id = rso.recording_id
+                              AND NULLIF(TRIM(rso2.genotype), '') IS NOT NULL
+                            ORDER BY value
+                        )
+                    ) AS genotypes_json,
+                    (
+                        SELECT json_group_array(value)
+                        FROM (
+                            SELECT DISTINCT NULLIF(TRIM(rso2.line_strain), '') AS value
+                            FROM recording_subject_overview rso2
+                            WHERE rso2.recording_id = rso.recording_id
+                              AND NULLIF(TRIM(rso2.line_strain), '') IS NOT NULL
+                            ORDER BY value
+                        )
+                    ) AS line_strains_json,
+                    (
+                        SELECT json_group_array(value)
+                        FROM (
+                            SELECT DISTINCT NULLIF(TRIM(rso2.species), '') AS value
+                            FROM recording_subject_overview rso2
+                            WHERE rso2.recording_id = rso.recording_id
+                              AND NULLIF(TRIM(rso2.species), '') IS NOT NULL
+                            ORDER BY value
+                        )
+                    ) AS species_values_json,
+                    (
+                        SELECT json_group_array(value)
+                        FROM (
+                            SELECT DISTINCT NULLIF(TRIM(rso2.sex), '') AS value
+                            FROM recording_subject_overview rso2
+                            WHERE rso2.recording_id = rso.recording_id
+                              AND NULLIF(TRIM(rso2.sex), '') IS NOT NULL
+                            ORDER BY value
+                        )
+                    ) AS sex_values_json,
+                    (
+                        SELECT json_group_array(value)
+                        FROM (
+                            SELECT DISTINCT rso2.dpf_at_acquisition AS value
+                            FROM recording_subject_overview rso2
+                            WHERE rso2.recording_id = rso.recording_id
+                              AND rso2.dpf_at_acquisition IS NOT NULL
+                            ORDER BY value
+                        )
+                    ) AS dpf_values_json
+                FROM recording_subject_overview rso
+                GROUP BY rso.recording_id
+            )
+            SELECT
+                d.dataset_id AS dataset_id,
+                d.recording_id AS recording_id,
+                d.session_uuid AS session_uuid,
+                d.zarr_path AS zarr_path,
+                d.artifact_kind AS artifact_kind,
+                d.zarr_origin AS zarr_origin,
+                d.zarr_use AS zarr_use,
+                d.status AS dataset_status,
+                d.last_seen_utc AS last_seen_utc,
+                r.recording_name AS recording_name,
+                r.recording_path AS recording_path,
+                r.started_utc AS recording_started_utc,
+                r.recording_type AS recording_type,
+                r.recording_subtype AS recording_subtype,
+                r.behavior_mode AS behavior_mode,
+                r.artifact_schema_id AS artifact_schema_id,
+                COALESCE(NULLIF(TRIM(r.rig_id), ''), NULLIF(TRIM(p.rig_id), '')) AS rig_id,
+                COALESCE(NULLIF(TRIM(r.arena_id), ''), NULLIF(TRIM(p.arena_id), '')) AS arena_id,
+                COALESCE(NULLIF(TRIM(r.camera_id), ''), NULLIF(TRIM(p.camera_id), '')) AS camera_id,
+                COALESCE(NULLIF(TRIM(r.canvas_name), ''), NULLIF(TRIM(p.canvas_name), '')) AS canvas_name,
+                COALESCE(NULLIF(TRIM(r.protocol_name), ''), NULLIF(TRIM(p.protocol_name), '')) AS protocol_name,
+                COALESCE(NULLIF(TRIM(r.dish_design), ''), NULLIF(TRIM(p.dish_design), '')) AS dish_design,
+                p.protocol_hash AS protocol_hash,
+                p.snapshot_status AS snapshot_status,
+                p.snapshot_missing_json AS snapshot_missing_json,
+                p.fps AS fps,
+                p.video_codec AS video_codec,
+                p.video_pix_fmt AS video_pix_fmt,
+                p.compression_name AS compression_name,
+                p.compression_level AS compression_level,
+                p.exposure AS exposure,
+                p.exposure_unit AS exposure_unit,
+                p.gain AS gain,
+                p.frame_rate AS frame_rate,
+                p.camera_model AS camera_model,
+                p.camera_serial AS camera_serial,
+                p.has_images_ds AS has_images_ds,
+                p.has_images_ds_rgb AS has_images_ds_rgb,
+                p.downsample_formats_json AS downsample_formats_json,
+                p.subject_count AS subject_count_snapshot,
+                rss.subject_count_recorded AS subject_count_recorded,
+                COALESCE(rss.subject_count_recorded, p.subject_count) AS subject_count_effective,
+                CASE
+                    WHEN rss.recording_id IS NOT NULL THEN 'normalized'
+                    WHEN (
+                        NULLIF(TRIM(p.fish_id), '') IS NOT NULL
+                        OR NULLIF(TRIM(p.dish_id), '') IS NOT NULL
+                        OR NULLIF(TRIM(p.cross_id), '') IS NOT NULL
+                        OR NULLIF(TRIM(p.genotype), '') IS NOT NULL
+                        OR p.dpf_at_acquisition IS NOT NULL
+                        OR p.subject_count IS NOT NULL
+                    ) THEN 'provenance'
+                    ELSE 'missing'
+                END AS subject_context_source,
+                COALESCE(rss.subject_id, NULLIF(TRIM(p.fish_id), '')) AS subject_id,
+                COALESCE(rss.dish_id, NULLIF(TRIM(p.dish_id), '')) AS dish_id,
+                COALESCE(rss.cross_id, NULLIF(TRIM(p.cross_id), '')) AS cross_id,
+                COALESCE(rss.genotype, NULLIF(TRIM(p.genotype), '')) AS genotype,
+                COALESCE(rss.line_strain, NULLIF(TRIM(p.line_strain), '')) AS line_strain,
+                COALESCE(rss.species, NULLIF(TRIM(p.species), '')) AS species,
+                COALESCE(rss.sex, NULLIF(TRIM(p.sex), '')) AS sex,
+                COALESCE(rss.dpf_at_acquisition, p.dpf_at_acquisition) AS dpf_at_acquisition,
+                COALESCE(
+                    rss.subject_ids_json,
+                    CASE
+                        WHEN NULLIF(TRIM(p.fish_id), '') IS NOT NULL THEN json_array(NULLIF(TRIM(p.fish_id), ''))
+                        ELSE NULL
+                    END
+                ) AS subject_ids_json,
+                COALESCE(
+                    rss.dish_ids_json,
+                    CASE
+                        WHEN NULLIF(TRIM(p.dish_id), '') IS NOT NULL THEN json_array(NULLIF(TRIM(p.dish_id), ''))
+                        ELSE NULL
+                    END
+                ) AS dish_ids_json,
+                COALESCE(
+                    rss.cross_ids_json,
+                    CASE
+                        WHEN NULLIF(TRIM(p.cross_id), '') IS NOT NULL THEN json_array(NULLIF(TRIM(p.cross_id), ''))
+                        ELSE NULL
+                    END
+                ) AS cross_ids_json,
+                COALESCE(
+                    rss.genotypes_json,
+                    CASE
+                        WHEN NULLIF(TRIM(p.genotype), '') IS NOT NULL THEN json_array(NULLIF(TRIM(p.genotype), ''))
+                        ELSE NULL
+                    END
+                ) AS genotypes_json,
+                COALESCE(
+                    rss.line_strains_json,
+                    CASE
+                        WHEN NULLIF(TRIM(p.line_strain), '') IS NOT NULL THEN json_array(NULLIF(TRIM(p.line_strain), ''))
+                        ELSE NULL
+                    END
+                ) AS line_strains_json,
+                COALESCE(
+                    rss.species_values_json,
+                    CASE
+                        WHEN NULLIF(TRIM(p.species), '') IS NOT NULL THEN json_array(NULLIF(TRIM(p.species), ''))
+                        ELSE NULL
+                    END
+                ) AS species_values_json,
+                COALESCE(
+                    rss.sex_values_json,
+                    CASE
+                        WHEN NULLIF(TRIM(p.sex), '') IS NOT NULL THEN json_array(NULLIF(TRIM(p.sex), ''))
+                        ELSE NULL
+                    END
+                ) AS sex_values_json,
+                COALESCE(
+                    rss.dpf_values_json,
+                    CASE
+                        WHEN p.dpf_at_acquisition IS NOT NULL THEN json_array(p.dpf_at_acquisition)
+                        ELSE NULL
+                    END
+                ) AS dpf_values_json
+            FROM datasets d
+            LEFT JOIN recordings r ON r.recording_id = d.recording_id
+            LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
+            LEFT JOIN recording_subject_summary rss ON rss.recording_id = d.recording_id;
+            """
+        )
+
+    def _migration_035_recording_step_status_latest_dataset_context_current(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DROP VIEW IF EXISTS recording_step_status_latest;")
+        cur.execute(
+            """
+            CREATE VIEW recording_step_status_latest AS
+            SELECT
+                COALESCE(NULLIF(trim(rss.recording_id), ''), dcc.recording_id) AS recording_id,
+                rss.dataset_id,
+                dcc.session_uuid AS session_uuid,
+                dcc.zarr_path AS zarr_path,
+                dcc.zarr_use AS zarr_use,
+                dcc.artifact_kind AS artifact_kind,
+                dcc.dataset_status AS dataset_status,
+                dcc.rig_id AS rig_id,
+                dcc.arena_id AS arena_id,
+                dcc.camera_id AS camera_id,
+                dcc.canvas_name AS canvas_name,
+                dcc.dish_design AS dish_design,
+                dcc.protocol_name AS protocol_name,
+                dcc.cross_id AS cross_id,
+                dcc.genotype AS genotype,
+                dcc.dpf_at_acquisition AS dpf_at_acquisition,
+                rss.step_name,
+                rss.status,
+                rss.run_name,
+                rss.method,
+                rss.coverage_pct,
+                rss.review_status_json,
+                rss.details_json,
+                rss.source,
+                rss.zarr_mtime_ns,
+                rss.updated_utc
+            FROM recording_step_status rss
+            LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = rss.dataset_id;
+            """
+        )
+
     def _ensure_columns(self, table: str, columns: Dict[str, str]) -> None:
         existing = {
             row["name"]
@@ -7119,12 +8456,26 @@ class Registry:
         zarr_purpose: Optional[str] = None,
     ) -> None:
         acquisition = acquisition or {}
+        recording_context_row = self.conn.execute(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM datasets d
+                INNER JOIN recordings r ON r.recording_id = d.recording_id
+                WHERE d.dataset_id = ?
+            ) AS has_recording_context;
+            """,
+            (dataset_id,),
+        ).fetchone()
+        write_legacy_recording_context_snapshot = not bool(
+            recording_context_row is not None and int(recording_context_row["has_recording_context"] or 0) == 1
+        )
         payload = {
             "dataset_id": dataset_id,
             "fish_id": provenance.get("fish_id"),
             "subject_count": provenance.get("subject_count"),
             "dish_id": provenance.get("dish_id"),
-            "dish_design": acquisition.get("dish_design"),
+            "dish_design": acquisition.get("dish_design") if write_legacy_recording_context_snapshot else None,
             "cross_id": provenance.get("cross_id"),
             "line_strain": provenance.get("line_strain"),
             "genotype": provenance.get("genotype"),
@@ -7132,10 +8483,10 @@ class Registry:
             "species": provenance.get("species"),
             "sex": provenance.get("sex"),
             "dpf_at_acquisition": provenance.get("dpf_at_acquisition"),
-            "rig_id": context.get("rig_id"),
-            "arena_id": context.get("arena_id"),
-            "camera_id": context.get("camera_id"),
-            "canvas_name": context.get("canvas_name"),
+            "rig_id": context.get("rig_id") if write_legacy_recording_context_snapshot else None,
+            "arena_id": context.get("arena_id") if write_legacy_recording_context_snapshot else None,
+            "camera_id": context.get("camera_id") if write_legacy_recording_context_snapshot else None,
+            "canvas_name": context.get("canvas_name") if write_legacy_recording_context_snapshot else None,
             "fps": acquisition.get("fps"),
             "video_codec": acquisition.get("video_codec"),
             "video_pix_fmt": acquisition.get("video_pix_fmt"),
@@ -7171,13 +8522,31 @@ class Registry:
             "has_images_ds": acquisition.get("has_images_ds"),
             "has_images_ds_rgb": acquisition.get("has_images_ds_rgb"),
             "downsample_formats_json": acquisition.get("downsample_formats_json"),
-            "protocol_name": protocol_name,
+            "protocol_name": protocol_name if write_legacy_recording_context_snapshot else None,
             "protocol_hash": protocol_hash,
             "snapshot_status": provenance.get("snapshot_status"),
             "snapshot_missing_json": _json_dumps(provenance.get("snapshot_missing")),
         }
-        self.conn.execute(
+        if write_legacy_recording_context_snapshot:
+            recording_context_update_sql = """
+                dish_design=excluded.dish_design,
+                rig_id=excluded.rig_id,
+                arena_id=excluded.arena_id,
+                camera_id=excluded.camera_id,
+                canvas_name=excluded.canvas_name,
+                protocol_name=excluded.protocol_name,
             """
+        else:
+            recording_context_update_sql = """
+                dish_design=COALESCE(provenance.dish_design, excluded.dish_design),
+                rig_id=COALESCE(provenance.rig_id, excluded.rig_id),
+                arena_id=COALESCE(provenance.arena_id, excluded.arena_id),
+                camera_id=COALESCE(provenance.camera_id, excluded.camera_id),
+                canvas_name=COALESCE(provenance.canvas_name, excluded.canvas_name),
+                protocol_name=COALESCE(provenance.protocol_name, excluded.protocol_name),
+            """
+        self.conn.execute(
+            f"""
             INSERT INTO provenance (
                 dataset_id, fish_id, subject_count, dish_id, dish_design, cross_id, line_strain, genotype, parents_json,
                 species, sex, dpf_at_acquisition, rig_id, arena_id, camera_id, canvas_name,
@@ -7206,7 +8575,6 @@ class Registry:
                 fish_id=excluded.fish_id,
                 subject_count=excluded.subject_count,
                 dish_id=excluded.dish_id,
-                dish_design=excluded.dish_design,
                 cross_id=excluded.cross_id,
                 line_strain=excluded.line_strain,
                 genotype=excluded.genotype,
@@ -7214,10 +8582,7 @@ class Registry:
                 species=excluded.species,
                 sex=excluded.sex,
                 dpf_at_acquisition=excluded.dpf_at_acquisition,
-                rig_id=excluded.rig_id,
-                arena_id=excluded.arena_id,
-                camera_id=excluded.camera_id,
-                canvas_name=excluded.canvas_name,
+                {recording_context_update_sql}
                 fps=excluded.fps,
                 video_codec=excluded.video_codec,
                 video_pix_fmt=excluded.video_pix_fmt,
@@ -7253,7 +8618,6 @@ class Registry:
                 has_images_ds=excluded.has_images_ds,
                 has_images_ds_rgb=excluded.has_images_ds_rgb,
                 downsample_formats_json=excluded.downsample_formats_json,
-                protocol_name=excluded.protocol_name,
                 protocol_hash=excluded.protocol_hash,
                 snapshot_status=excluded.snapshot_status,
                 snapshot_missing_json=excluded.snapshot_missing_json;
@@ -7815,6 +9179,291 @@ class Registry:
                 lifecycle_reason=excluded.lifecycle_reason,
                 zarr_mtime_ns=excluded.zarr_mtime_ns,
                 updated_utc=excluded.updated_utc;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
+    def upsert_subject_mask_performance(
+        self,
+        *,
+        dataset_id: str,
+        stage_group: str,
+        run_name: str,
+        run_created_utc: Optional[str],
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+        subject_mask_method: Optional[str],
+        label_schema_id: Optional[str],
+        source_crop_run: Optional[str],
+        source_keypoint_group: Optional[str],
+        source_keypoints_run: Optional[str],
+        source_subject_mask_run: Optional[str],
+        source_subject_mask_method: Optional[str],
+        run_semantics: Optional[str],
+        probability_semantics: Optional[str],
+        source_background_run: Optional[str],
+        source_background_array: Optional[str],
+        source_dish_mask_array: Optional[str],
+        tuning_source: Optional[str],
+        tuning_timestamp: Optional[str],
+        total_rois: Optional[int],
+        rows_with_any_mask: Optional[int],
+        coverage_percent: Optional[float],
+        duration_seconds: Optional[float],
+        rois_per_second: Optional[float],
+        available_component_count: Optional[int],
+        available_components_json: Optional[str],
+        unavailable_components_json: Optional[str],
+        component_review_states_json: Optional[str],
+        eye_component_mode: Optional[str],
+        reason_counts_json: Optional[str],
+        summary_statistics_json: Optional[str],
+        review_state: Optional[str] = None,
+        review_method: Optional[str] = None,
+        review_intended_use: Optional[str] = None,
+        review_reviewer: Optional[str] = None,
+        review_timestamp_utc: Optional[str] = None,
+        source_subject_mask_stale_state: Optional[str] = None,
+        source_subject_mask_stale_reason: Optional[str] = None,
+        source_subject_mask_stale_timestamp_utc: Optional[str] = None,
+        source_subject_mask_stale_json: Optional[str] = None,
+        lifecycle_state: Optional[str] = None,
+        lifecycle_reason: Optional[str] = None,
+        zarr_mtime_ns: Optional[int] = None,
+        updated_utc: Optional[str] = None,
+    ) -> None:
+        payload = {
+            "dataset_id": str(dataset_id),
+            "stage_group": str(stage_group),
+            "run_name": str(run_name),
+            "run_created_utc": run_created_utc,
+            "recording_id": recording_id,
+            "zarr_use": zarr_use,
+            "subject_mask_method": subject_mask_method,
+            "label_schema_id": label_schema_id,
+            "source_crop_run": source_crop_run,
+            "source_keypoint_group": source_keypoint_group,
+            "source_keypoints_run": source_keypoints_run,
+            "source_subject_mask_run": source_subject_mask_run,
+            "source_subject_mask_method": source_subject_mask_method,
+            "run_semantics": run_semantics,
+            "probability_semantics": probability_semantics,
+            "source_background_run": source_background_run,
+            "source_background_array": source_background_array,
+            "source_dish_mask_array": source_dish_mask_array,
+            "tuning_source": tuning_source,
+            "tuning_timestamp": tuning_timestamp,
+            "total_rois": total_rois,
+            "rows_with_any_mask": rows_with_any_mask,
+            "coverage_percent": coverage_percent,
+            "duration_seconds": duration_seconds,
+            "rois_per_second": rois_per_second,
+            "available_component_count": available_component_count,
+            "available_components_json": available_components_json,
+            "unavailable_components_json": unavailable_components_json,
+            "component_review_states_json": component_review_states_json,
+            "eye_component_mode": eye_component_mode,
+            "reason_counts_json": reason_counts_json,
+            "summary_statistics_json": summary_statistics_json,
+            "review_state": review_state,
+            "review_method": review_method,
+            "review_intended_use": review_intended_use,
+            "review_reviewer": review_reviewer,
+            "review_timestamp_utc": review_timestamp_utc,
+            "source_subject_mask_stale_state": source_subject_mask_stale_state,
+            "source_subject_mask_stale_reason": source_subject_mask_stale_reason,
+            "source_subject_mask_stale_timestamp_utc": source_subject_mask_stale_timestamp_utc,
+            "source_subject_mask_stale_json": source_subject_mask_stale_json,
+            "lifecycle_state": lifecycle_state,
+            "lifecycle_reason": lifecycle_reason,
+            "zarr_mtime_ns": zarr_mtime_ns,
+            "updated_utc": updated_utc or _utc_now(),
+        }
+        self.conn.execute(
+            """
+            INSERT INTO subject_mask_performance (
+                dataset_id, stage_group, run_name, run_created_utc, recording_id, zarr_use,
+                subject_mask_method, label_schema_id,
+                source_crop_run, source_keypoint_group, source_keypoints_run,
+                source_subject_mask_run, source_subject_mask_method,
+                run_semantics, probability_semantics,
+                source_background_run, source_background_array, source_dish_mask_array,
+                tuning_source, tuning_timestamp,
+                total_rois, rows_with_any_mask, coverage_percent,
+                duration_seconds, rois_per_second,
+                available_component_count, available_components_json, unavailable_components_json,
+                component_review_states_json, eye_component_mode,
+                reason_counts_json, summary_statistics_json,
+                review_state, review_method, review_intended_use, review_reviewer, review_timestamp_utc,
+                source_subject_mask_stale_state, source_subject_mask_stale_reason,
+                source_subject_mask_stale_timestamp_utc, source_subject_mask_stale_json,
+                lifecycle_state, lifecycle_reason,
+                zarr_mtime_ns, updated_utc
+            )
+            VALUES (
+                :dataset_id, :stage_group, :run_name, :run_created_utc, :recording_id, :zarr_use,
+                :subject_mask_method, :label_schema_id,
+                :source_crop_run, :source_keypoint_group, :source_keypoints_run,
+                :source_subject_mask_run, :source_subject_mask_method,
+                :run_semantics, :probability_semantics,
+                :source_background_run, :source_background_array, :source_dish_mask_array,
+                :tuning_source, :tuning_timestamp,
+                :total_rois, :rows_with_any_mask, :coverage_percent,
+                :duration_seconds, :rois_per_second,
+                :available_component_count, :available_components_json, :unavailable_components_json,
+                :component_review_states_json, :eye_component_mode,
+                :reason_counts_json, :summary_statistics_json,
+                :review_state, :review_method, :review_intended_use, :review_reviewer, :review_timestamp_utc,
+                :source_subject_mask_stale_state, :source_subject_mask_stale_reason,
+                :source_subject_mask_stale_timestamp_utc, :source_subject_mask_stale_json,
+                :lifecycle_state, :lifecycle_reason,
+                :zarr_mtime_ns, :updated_utc
+            )
+            ON CONFLICT(dataset_id, stage_group, run_name) DO UPDATE SET
+                run_created_utc=excluded.run_created_utc,
+                recording_id=excluded.recording_id,
+                zarr_use=excluded.zarr_use,
+                subject_mask_method=excluded.subject_mask_method,
+                label_schema_id=excluded.label_schema_id,
+                source_crop_run=excluded.source_crop_run,
+                source_keypoint_group=excluded.source_keypoint_group,
+                source_keypoints_run=excluded.source_keypoints_run,
+                source_subject_mask_run=excluded.source_subject_mask_run,
+                source_subject_mask_method=excluded.source_subject_mask_method,
+                run_semantics=excluded.run_semantics,
+                probability_semantics=excluded.probability_semantics,
+                source_background_run=excluded.source_background_run,
+                source_background_array=excluded.source_background_array,
+                source_dish_mask_array=excluded.source_dish_mask_array,
+                tuning_source=excluded.tuning_source,
+                tuning_timestamp=excluded.tuning_timestamp,
+                total_rois=excluded.total_rois,
+                rows_with_any_mask=excluded.rows_with_any_mask,
+                coverage_percent=excluded.coverage_percent,
+                duration_seconds=excluded.duration_seconds,
+                rois_per_second=excluded.rois_per_second,
+                available_component_count=excluded.available_component_count,
+                available_components_json=excluded.available_components_json,
+                unavailable_components_json=excluded.unavailable_components_json,
+                component_review_states_json=excluded.component_review_states_json,
+                eye_component_mode=excluded.eye_component_mode,
+                reason_counts_json=excluded.reason_counts_json,
+                summary_statistics_json=excluded.summary_statistics_json,
+                review_state=excluded.review_state,
+                review_method=excluded.review_method,
+                review_intended_use=excluded.review_intended_use,
+                review_reviewer=excluded.review_reviewer,
+                review_timestamp_utc=excluded.review_timestamp_utc,
+                source_subject_mask_stale_state=excluded.source_subject_mask_stale_state,
+                source_subject_mask_stale_reason=excluded.source_subject_mask_stale_reason,
+                source_subject_mask_stale_timestamp_utc=excluded.source_subject_mask_stale_timestamp_utc,
+                source_subject_mask_stale_json=excluded.source_subject_mask_stale_json,
+                lifecycle_state=excluded.lifecycle_state,
+                lifecycle_reason=excluded.lifecycle_reason,
+                zarr_mtime_ns=excluded.zarr_mtime_ns,
+                updated_utc=excluded.updated_utc;
+            """,
+            payload,
+        )
+        self.conn.commit()
+
+    def upsert_subject_mask_component_quality(
+        self,
+        *,
+        dataset_id: str,
+        stage_group: str,
+        run_name: str,
+        component_name: str,
+        component_family: Optional[str],
+        run_created_utc: Optional[str],
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+        subject_mask_method: Optional[str],
+        label_schema_id: Optional[str],
+        eye_component_mode: Optional[str],
+        source_subject_mask_run: Optional[str],
+        available: Optional[int],
+        review_state: Optional[str],
+        review_method: Optional[str],
+        review_intended_use: Optional[str],
+        review_reviewer: Optional[str],
+        review_timestamp_utc: Optional[str],
+        total_rois: Optional[int],
+        rows_with_component_mask: Optional[int],
+        rows_with_component_mask_rate: Optional[float],
+        lifecycle_state: Optional[str] = None,
+        lifecycle_reason: Optional[str] = None,
+        quality_updated_utc: Optional[str] = None,
+        zarr_mtime_ns: Optional[int] = None,
+    ) -> None:
+        payload = {
+            "dataset_id": str(dataset_id),
+            "stage_group": str(stage_group),
+            "run_name": str(run_name),
+            "component_name": str(component_name),
+            "component_family": component_family,
+            "run_created_utc": run_created_utc,
+            "recording_id": recording_id,
+            "zarr_use": zarr_use,
+            "subject_mask_method": subject_mask_method,
+            "label_schema_id": label_schema_id,
+            "eye_component_mode": eye_component_mode,
+            "source_subject_mask_run": source_subject_mask_run,
+            "available": available,
+            "review_state": review_state,
+            "review_method": review_method,
+            "review_intended_use": review_intended_use,
+            "review_reviewer": review_reviewer,
+            "review_timestamp_utc": review_timestamp_utc,
+            "total_rois": total_rois,
+            "rows_with_component_mask": rows_with_component_mask,
+            "rows_with_component_mask_rate": rows_with_component_mask_rate,
+            "lifecycle_state": lifecycle_state,
+            "lifecycle_reason": lifecycle_reason,
+            "quality_updated_utc": quality_updated_utc or _utc_now(),
+            "zarr_mtime_ns": zarr_mtime_ns,
+        }
+        self.conn.execute(
+            """
+            INSERT INTO subject_mask_component_quality (
+                dataset_id, stage_group, run_name, component_name, component_family,
+                run_created_utc, recording_id, zarr_use, subject_mask_method, label_schema_id,
+                eye_component_mode, source_subject_mask_run, available,
+                review_state, review_method, review_intended_use, review_reviewer, review_timestamp_utc,
+                total_rois, rows_with_component_mask, rows_with_component_mask_rate,
+                lifecycle_state, lifecycle_reason, quality_updated_utc, zarr_mtime_ns
+            )
+            VALUES (
+                :dataset_id, :stage_group, :run_name, :component_name, :component_family,
+                :run_created_utc, :recording_id, :zarr_use, :subject_mask_method, :label_schema_id,
+                :eye_component_mode, :source_subject_mask_run, :available,
+                :review_state, :review_method, :review_intended_use, :review_reviewer, :review_timestamp_utc,
+                :total_rois, :rows_with_component_mask, :rows_with_component_mask_rate,
+                :lifecycle_state, :lifecycle_reason, :quality_updated_utc, :zarr_mtime_ns
+            )
+            ON CONFLICT(dataset_id, stage_group, run_name, component_name) DO UPDATE SET
+                component_family=excluded.component_family,
+                run_created_utc=excluded.run_created_utc,
+                recording_id=excluded.recording_id,
+                zarr_use=excluded.zarr_use,
+                subject_mask_method=excluded.subject_mask_method,
+                label_schema_id=excluded.label_schema_id,
+                eye_component_mode=excluded.eye_component_mode,
+                source_subject_mask_run=excluded.source_subject_mask_run,
+                available=excluded.available,
+                review_state=excluded.review_state,
+                review_method=excluded.review_method,
+                review_intended_use=excluded.review_intended_use,
+                review_reviewer=excluded.review_reviewer,
+                review_timestamp_utc=excluded.review_timestamp_utc,
+                total_rois=excluded.total_rois,
+                rows_with_component_mask=excluded.rows_with_component_mask,
+                rows_with_component_mask_rate=excluded.rows_with_component_mask_rate,
+                lifecycle_state=excluded.lifecycle_state,
+                lifecycle_reason=excluded.lifecycle_reason,
+                quality_updated_utc=excluded.quality_updated_utc,
+                zarr_mtime_ns=excluded.zarr_mtime_ns;
             """,
             payload,
         )
@@ -8916,6 +10565,152 @@ class Registry:
                     payload,
                 )
 
+    def replace_subject_mask_performance(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM subject_mask_performance WHERE dataset_id = ?;", (str(dataset_id),))
+            for record in records:
+                payload = dict(record)
+                payload["dataset_id"] = str(dataset_id)
+                payload.setdefault("updated_utc", _utc_now())
+                for key in (
+                    "recording_id",
+                    "zarr_use",
+                    "subject_mask_method",
+                    "label_schema_id",
+                    "source_crop_run",
+                    "source_keypoint_group",
+                    "source_keypoints_run",
+                    "source_subject_mask_run",
+                    "source_subject_mask_method",
+                    "run_semantics",
+                    "probability_semantics",
+                    "source_background_run",
+                    "source_background_array",
+                    "source_dish_mask_array",
+                    "tuning_source",
+                    "tuning_timestamp",
+                    "total_rois",
+                    "rows_with_any_mask",
+                    "coverage_percent",
+                    "duration_seconds",
+                    "rois_per_second",
+                    "available_component_count",
+                    "available_components_json",
+                    "unavailable_components_json",
+                    "component_review_states_json",
+                    "eye_component_mode",
+                    "reason_counts_json",
+                    "summary_statistics_json",
+                    "review_state",
+                    "review_method",
+                    "review_intended_use",
+                    "review_reviewer",
+                    "review_timestamp_utc",
+                    "source_subject_mask_stale_state",
+                    "source_subject_mask_stale_reason",
+                    "source_subject_mask_stale_timestamp_utc",
+                    "source_subject_mask_stale_json",
+                    "lifecycle_state",
+                    "lifecycle_reason",
+                    "zarr_mtime_ns",
+                ):
+                    payload.setdefault(key, None)
+                self.conn.execute(
+                    """
+                    INSERT INTO subject_mask_performance (
+                        dataset_id, stage_group, run_name, run_created_utc, recording_id, zarr_use,
+                        subject_mask_method, label_schema_id,
+                        source_crop_run, source_keypoint_group, source_keypoints_run,
+                        source_subject_mask_run, source_subject_mask_method,
+                        run_semantics, probability_semantics,
+                        source_background_run, source_background_array, source_dish_mask_array,
+                        tuning_source, tuning_timestamp,
+                        total_rois, rows_with_any_mask, coverage_percent,
+                        duration_seconds, rois_per_second,
+                        available_component_count, available_components_json, unavailable_components_json,
+                        component_review_states_json, eye_component_mode,
+                        reason_counts_json, summary_statistics_json,
+                        review_state, review_method, review_intended_use, review_reviewer, review_timestamp_utc,
+                        source_subject_mask_stale_state, source_subject_mask_stale_reason,
+                        source_subject_mask_stale_timestamp_utc, source_subject_mask_stale_json,
+                        lifecycle_state, lifecycle_reason,
+                        zarr_mtime_ns, updated_utc
+                    )
+                    VALUES (
+                        :dataset_id, :stage_group, :run_name, :run_created_utc, :recording_id, :zarr_use,
+                        :subject_mask_method, :label_schema_id,
+                        :source_crop_run, :source_keypoint_group, :source_keypoints_run,
+                        :source_subject_mask_run, :source_subject_mask_method,
+                        :run_semantics, :probability_semantics,
+                        :source_background_run, :source_background_array, :source_dish_mask_array,
+                        :tuning_source, :tuning_timestamp,
+                        :total_rois, :rows_with_any_mask, :coverage_percent,
+                        :duration_seconds, :rois_per_second,
+                        :available_component_count, :available_components_json, :unavailable_components_json,
+                        :component_review_states_json, :eye_component_mode,
+                        :reason_counts_json, :summary_statistics_json,
+                        :review_state, :review_method, :review_intended_use, :review_reviewer, :review_timestamp_utc,
+                        :source_subject_mask_stale_state, :source_subject_mask_stale_reason,
+                        :source_subject_mask_stale_timestamp_utc, :source_subject_mask_stale_json,
+                        :lifecycle_state, :lifecycle_reason,
+                        :zarr_mtime_ns, :updated_utc
+                    );
+                    """,
+                    payload,
+                )
+
+    def replace_subject_mask_component_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM subject_mask_component_quality WHERE dataset_id = ?;", (str(dataset_id),))
+            for record in records:
+                payload = dict(record)
+                payload["dataset_id"] = str(dataset_id)
+                payload.setdefault("quality_updated_utc", _utc_now())
+                payload.setdefault("zarr_mtime_ns", None)
+                for key in (
+                    "component_family",
+                    "run_created_utc",
+                    "recording_id",
+                    "zarr_use",
+                    "subject_mask_method",
+                    "label_schema_id",
+                    "eye_component_mode",
+                    "source_subject_mask_run",
+                    "available",
+                    "review_state",
+                    "review_method",
+                    "review_intended_use",
+                    "review_reviewer",
+                    "review_timestamp_utc",
+                    "total_rois",
+                    "rows_with_component_mask",
+                    "rows_with_component_mask_rate",
+                    "lifecycle_state",
+                    "lifecycle_reason",
+                ):
+                    payload.setdefault(key, None)
+                self.conn.execute(
+                    """
+                    INSERT INTO subject_mask_component_quality (
+                        dataset_id, stage_group, run_name, component_name, component_family,
+                        run_created_utc, recording_id, zarr_use, subject_mask_method, label_schema_id,
+                        eye_component_mode, source_subject_mask_run, available,
+                        review_state, review_method, review_intended_use, review_reviewer, review_timestamp_utc,
+                        total_rois, rows_with_component_mask, rows_with_component_mask_rate,
+                        lifecycle_state, lifecycle_reason, quality_updated_utc, zarr_mtime_ns
+                    )
+                    VALUES (
+                        :dataset_id, :stage_group, :run_name, :component_name, :component_family,
+                        :run_created_utc, :recording_id, :zarr_use, :subject_mask_method, :label_schema_id,
+                        :eye_component_mode, :source_subject_mask_run, :available,
+                        :review_state, :review_method, :review_intended_use, :review_reviewer, :review_timestamp_utc,
+                        :total_rois, :rows_with_component_mask, :rows_with_component_mask_rate,
+                        :lifecycle_state, :lifecycle_reason, :quality_updated_utc, :zarr_mtime_ns
+                    );
+                    """,
+                    payload,
+                )
+
     def refresh_detect_performance_for_dataset(
         self,
         dataset_id: str,
@@ -9002,6 +10797,50 @@ class Registry:
             zarr_use=zarr_use,
         )
         self.replace_eye_mask_quality(dataset_id, rows)
+        return len(rows)
+
+    def refresh_subject_mask_performance_for_dataset(
+        self,
+        dataset_id: str,
+        *,
+        zarr_path: Path,
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+    ) -> int:
+        zarr = _import_zarr()
+        try:
+            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+        except TypeError:
+            root = zarr.open_group(str(zarr_path), mode="r")
+        rows = _extract_subject_mask_performance_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_subject_mask_performance(dataset_id, rows)
+        return len(rows)
+
+    def refresh_subject_mask_component_quality_for_dataset(
+        self,
+        dataset_id: str,
+        *,
+        zarr_path: Path,
+        recording_id: Optional[str],
+        zarr_use: Optional[str],
+    ) -> int:
+        zarr = _import_zarr()
+        try:
+            root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+        except TypeError:
+            root = zarr.open_group(str(zarr_path), mode="r")
+        rows = _extract_subject_mask_component_quality_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_subject_mask_component_quality(dataset_id, rows)
         return len(rows)
 
     def replace_detect_quality(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
@@ -9595,6 +11434,20 @@ class Registry:
             zarr_use=zarr_use,
         )
         self.replace_eye_mask_quality(dataset_id, eye_mask_quality_rows)
+        subject_mask_performance_rows = _extract_subject_mask_performance_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_subject_mask_performance(dataset_id, subject_mask_performance_rows)
+        subject_mask_component_quality_rows = _extract_subject_mask_component_quality_rows(
+            root,
+            zarr_path=zarr_path,
+            recording_id=recording_id,
+            zarr_use=zarr_use,
+        )
+        self.replace_subject_mask_component_quality(dataset_id, subject_mask_component_quality_rows)
         return dataset_id
 
     def record_training_run(
@@ -10712,26 +12565,32 @@ class Registry:
         limit: Optional[int] = None,
     ) -> List[sqlite3.Row]:
         sql = [
-            "SELECT d.dataset_id, d.session_uuid, d.zarr_path,",
-            "d.recording_id, d.zarr_origin, d.zarr_use, d.status,",
-            "p.dish_design, p.fish_id, p.subject_count, p.fps, p.exposure, p.exposure_unit, p.frame_rate, p.gain,",
-            "p.genotype, p.dpf_at_acquisition,",
-            "p.video_codec, p.video_pix_fmt, p.format_title, p.format_comment, p.format_encoder,",
+            "SELECT dcc.dataset_id, dcc.session_uuid, dcc.zarr_path,",
+            "dcc.recording_id, dcc.zarr_origin, dcc.zarr_use, dcc.dataset_status AS status,",
+            "dcc.dish_design, dcc.subject_id AS fish_id, dcc.subject_id AS subject_id,",
+            "dcc.subject_count_effective AS subject_count,",
+            "dcc.subject_count_snapshot, dcc.subject_count_recorded, dcc.subject_context_source,",
+            "dcc.fps, dcc.exposure, dcc.exposure_unit, dcc.frame_rate, dcc.gain,",
+            "dcc.cross_id, dcc.genotype, dcc.line_strain, dcc.species, dcc.sex, dcc.dpf_at_acquisition,",
+            "dcc.protocol_name, dcc.protocol_hash,",
+            "dcc.video_codec, dcc.video_pix_fmt, p.format_title, p.format_comment, p.format_encoder,",
             "p.encoder_name, p.encoder_codec, p.encoder_preset, p.encoder_tuning, p.encoder_rc,",
             "p.encoder_bpp, p.encoder_target_bps, p.encoder_res, p.encoder_res_width, p.encoder_res_height,",
             "p.encoder_fps, p.encoder_color, p.encoder_params_json,",
-            "p.compression_name, p.compression_level,",
-            "p.camera_model, p.camera_serial, p.camera_id, p.rig_id, p.arena_id, p.canvas_name,",
-            "p.has_images_ds, p.has_images_ds_rgb, p.downsample_formats_json",
-            "FROM datasets d",
-            "LEFT JOIN provenance p ON d.dataset_id = p.dataset_id",
+            "dcc.compression_name, dcc.compression_level,",
+            "dcc.camera_model, dcc.camera_serial, dcc.camera_id, dcc.rig_id, dcc.arena_id, dcc.canvas_name,",
+            "dcc.has_images_ds, dcc.has_images_ds_rgb, dcc.downsample_formats_json,",
+            "dcc.subject_ids_json, dcc.dish_ids_json, dcc.cross_ids_json, dcc.genotypes_json,",
+            "dcc.line_strains_json, dcc.species_values_json, dcc.sex_values_json, dcc.dpf_values_json",
+            "FROM dataset_context_current dcc",
+            "LEFT JOIN provenance p ON dcc.dataset_id = p.dataset_id",
         ]
         params: List[Any] = []
 
         if exclude_step_ok is not None:
             sql.append(
                 "LEFT JOIN recording_step_status rss_excl "
-                "ON d.dataset_id = rss_excl.dataset_id "
+                "ON dcc.dataset_id = rss_excl.dataset_id "
                 "AND rss_excl.step_name = ?"
             )
             params.append(str(exclude_step_ok).strip().lower())
@@ -10741,7 +12600,7 @@ class Registry:
                 alias = f"rss_req_{i}"
                 sql.append(
                     f"INNER JOIN recording_step_status {alias} "
-                    f"ON d.dataset_id = {alias}.dataset_id "
+                    f"ON dcc.dataset_id = {alias}.dataset_id "
                     f"AND {alias}.step_name = ? AND {alias}.status = 'ok'"
                 )
                 params.append(str(step).strip().lower())
@@ -10754,25 +12613,34 @@ class Registry:
             sql.append(clause)
             params.append(value)
 
-        add_clause("AND p.dish_design = ?", dish_design)
+        add_clause("AND dcc.dish_design = ?", dish_design)
         if dish_design_like:
-            sql.append("AND p.dish_design LIKE ?")
+            sql.append("AND dcc.dish_design LIKE ?")
             params.append(f"%{dish_design_like}%")
-        add_clause("AND p.fish_id = ?", fish_id)
-        add_clause("AND p.subject_count >= ?", subject_count_min)
-        add_clause("AND p.subject_count <= ?", subject_count_max)
-        add_clause("AND d.zarr_origin = ?", _normalize_zarr_origin(zarr_origin))
-        add_clause("AND d.zarr_use = ?", _normalize_zarr_use(zarr_use))
-        add_clause("AND p.fps >= ?", fps_min)
-        add_clause("AND p.fps <= ?", fps_max)
-        add_clause("AND p.exposure >= ?", exposure_min)
-        add_clause("AND p.exposure <= ?", exposure_max)
-        add_clause("AND p.frame_rate >= ?", frame_rate_min)
-        add_clause("AND p.frame_rate <= ?", frame_rate_max)
-        add_clause("AND p.gain >= ?", gain_min)
-        add_clause("AND p.gain <= ?", gain_max)
-        add_clause("AND p.video_codec = ?", video_codec)
-        add_clause("AND p.video_pix_fmt = ?", video_pix_fmt)
+        if fish_id is not None:
+            fish_id_text = str(fish_id).strip()
+            sql.append(
+                "AND (dcc.subject_id = ? "
+                "OR EXISTS ("
+                "SELECT 1 FROM json_each(COALESCE(dcc.subject_ids_json, '[]')) "
+                "WHERE CAST(json_each.value AS TEXT) = ?"
+                "))"
+            )
+            params.extend([fish_id_text, fish_id_text])
+        add_clause("AND dcc.subject_count_effective >= ?", subject_count_min)
+        add_clause("AND dcc.subject_count_effective <= ?", subject_count_max)
+        add_clause("AND dcc.zarr_origin = ?", _normalize_zarr_origin(zarr_origin))
+        add_clause("AND dcc.zarr_use = ?", _normalize_zarr_use(zarr_use))
+        add_clause("AND dcc.fps >= ?", fps_min)
+        add_clause("AND dcc.fps <= ?", fps_max)
+        add_clause("AND dcc.exposure >= ?", exposure_min)
+        add_clause("AND dcc.exposure <= ?", exposure_max)
+        add_clause("AND dcc.frame_rate >= ?", frame_rate_min)
+        add_clause("AND dcc.frame_rate <= ?", frame_rate_max)
+        add_clause("AND dcc.gain >= ?", gain_min)
+        add_clause("AND dcc.gain <= ?", gain_max)
+        add_clause("AND dcc.video_codec = ?", video_codec)
+        add_clause("AND dcc.video_pix_fmt = ?", video_pix_fmt)
         add_clause("AND p.format_encoder = ?", format_encoder)
         add_clause("AND p.format_title = ?", format_title)
         add_clause("AND p.format_comment = ?", format_comment)
@@ -10781,39 +12649,39 @@ class Registry:
         add_clause("AND p.encoder_preset = ?", encoder_preset)
         add_clause("AND p.encoder_tuning = ?", encoder_tuning)
         add_clause("AND p.encoder_rc = ?", encoder_rc)
-        add_clause("AND p.compression_name = ?", compression_name)
-        add_clause("AND p.camera_model = ?", camera_model)
-        add_clause("AND p.camera_serial = ?", camera_serial)
-        add_clause("AND p.camera_id = ?", camera_id)
-        add_clause("AND p.rig_id = ?", rig_id)
-        add_clause("AND p.arena_id = ?", arena_id)
+        add_clause("AND dcc.compression_name = ?", compression_name)
+        add_clause("AND dcc.camera_model = ?", camera_model)
+        add_clause("AND dcc.camera_serial = ?", camera_serial)
+        add_clause("AND dcc.camera_id = ?", camera_id)
+        add_clause("AND dcc.rig_id = ?", rig_id)
+        add_clause("AND dcc.arena_id = ?", arena_id)
         if model_input is not None:
             mode = str(model_input).strip().lower()
             if mode == "gray":
                 sql.append(
-                    "AND (COALESCE(p.has_images_ds, 0) = 1 "
-                    "OR p.downsample_formats_json LIKE '%\"gray\"%')"
+                    "AND (COALESCE(dcc.has_images_ds, 0) = 1 "
+                    "OR dcc.downsample_formats_json LIKE '%\"gray\"%')"
                 )
             elif mode == "rgb":
                 sql.append(
-                    "AND (COALESCE(p.has_images_ds_rgb, 0) = 1 "
-                    "OR p.downsample_formats_json LIKE '%\"rgb\"%')"
+                    "AND (COALESCE(dcc.has_images_ds_rgb, 0) = 1 "
+                    "OR dcc.downsample_formats_json LIKE '%\"rgb\"%')"
                 )
             else:
                 raise ValueError(f"Unsupported model_input '{model_input}'. Expected 'gray' or 'rgb'.")
         if path_contains:
-            sql.append("AND d.zarr_path LIKE ?")
+            sql.append("AND dcc.zarr_path LIKE ?")
             params.append(f"%{path_contains}%")
-        add_clause("AND d.status = ?", status)
+        add_clause("AND dcc.dataset_status = ?", status)
         if exclude_status is not None:
-            sql.append("AND (d.status IS NULL OR d.status != ?)")
+            sql.append("AND (dcc.dataset_status IS NULL OR dcc.dataset_status != ?)")
             params.append(exclude_status)
         if require_recording:
-            sql.append("AND d.recording_id IS NOT NULL AND TRIM(d.recording_id) != ''")
+            sql.append("AND dcc.recording_id IS NOT NULL AND TRIM(dcc.recording_id) != ''")
         if exclude_step_ok is not None:
             sql.append("AND (rss_excl.status IS NULL OR rss_excl.status != 'ok')")
 
-        sql.append("ORDER BY p.dish_design, p.fps, d.dataset_id")
+        sql.append("ORDER BY dcc.dish_design, dcc.fps, dcc.dataset_id")
         if limit is not None:
             sql.append("LIMIT ?")
             params.append(int(limit))

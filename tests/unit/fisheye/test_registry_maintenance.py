@@ -25,6 +25,8 @@ from fisheye.registry.maintenance import (
     _backfill_eye_mask_performance,
     _backfill_keypoint_performance,
     _backfill_recording_step_status,
+    _backfill_subject_mask_component_quality,
+    _backfill_subject_mask_performance,
     _backfill_recording_entities,
     _backfill_subject_dish_cross_entities,
     _backfill_subjects,
@@ -342,6 +344,110 @@ def _create_eye_mask_performance_zarr(path: Path) -> None:
     }
 
 
+def _create_subject_mask_registry_zarr(path: Path) -> None:
+    root = zarr.open_group(str(path), mode="w")
+    root.attrs["session_uuid"] = "subject_mask_registry_session"
+    raw = root.create_group("raw_video")
+    raw.create_array("images_ds", data=np.zeros((4, 8, 8), dtype=np.uint8), chunks=(1, 8, 8))
+
+    subject_parent = root.create_group("subject_mask_runs")
+    subject_parent.attrs["latest"] = "subject_masks_001"
+    subject_run = subject_parent.create_group("subject_masks_001")
+    subject_run.attrs["created_utc"] = "2026-02-12T00:00:00+00:00"
+    subject_run.attrs["method"] = "subject_mask_threshold_lr_v1"
+    subject_run.attrs["run_semantics"] = "traditional_subject_body_inference"
+    subject_run.attrs["probability_semantics"] = "normalized_background_diff"
+    subject_run.attrs["label_schema_id"] = "subject_v1_lr"
+    subject_run.attrs["mask_labels"] = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    subject_run.attrs["source_crop_run"] = "crop_001"
+    subject_run.attrs["source_background_run"] = "background_001"
+    subject_run.attrs["source_background_array"] = "background_full"
+    subject_run.attrs["source_dish_mask_array"] = "images_ds"
+    subject_run.attrs["source_keypoint_group"] = "refined_keypoints_runs"
+    subject_run.attrs["source_keypoints_run"] = "refined_kp_001"
+    subject_run.attrs["tuning_source"] = "analysis_metadata.subject_mask_tuning.components.subject_body"
+    subject_run.attrs["tuning_timestamp"] = "2026-02-12T00:04:00+00:00"
+    subject_run.attrs["total_rois"] = 4
+    subject_run.attrs["duration_seconds"] = 2.0
+    subject_run.attrs["subject_mask_review_status"] = {
+        "state": "approved",
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "pytest",
+        "timestamp_utc": "2026-02-12T00:05:00+00:00",
+    }
+    subject_run.attrs["component_review_statuses"] = {
+        "eye_left": {"state": "approved", "intended_use": "training"},
+        "eye_right": {"state": "approved", "intended_use": "training"},
+    }
+    subject_run.create_array(
+        "available_channels",
+        data=np.array([False, True, True, False], dtype=np.bool_),
+        chunks=(4,),
+    )
+    subject_metrics = subject_run.create_group("metrics")
+    subject_metrics.create_array(
+        "mask_present",
+        data=np.array(
+            [
+                [False, True, True, False],
+                [False, True, True, False],
+                [False, True, True, False],
+                [False, True, True, False],
+            ],
+            dtype=np.bool_,
+        ),
+        chunks=(4, 4),
+    )
+
+    refined_parent = root.create_group("refined_subject_masks_runs")
+    refined_parent.attrs["latest"] = "refined_subject_masks_001"
+    refined_run = refined_parent.create_group("refined_subject_masks_001")
+    refined_run.attrs["created_utc"] = "2026-02-12T00:10:00+00:00"
+    refined_run.attrs["method"] = "refine_subject_masks"
+    refined_run.attrs["label_schema_id"] = "subject_v1_lr"
+    refined_run.attrs["mask_labels"] = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    refined_run.attrs["source_subject_mask_run"] = "subject_masks_001"
+    refined_run.attrs["source_subject_mask_method"] = "subject_mask_threshold_lr_v1"
+    refined_run.attrs["source_crop_run"] = "crop_001"
+    refined_run.attrs["source_keypoint_group"] = "refined_keypoints_runs"
+    refined_run.attrs["source_keypoints_run"] = "refined_kp_001"
+    refined_run.attrs["total_rois"] = 4
+    refined_run.attrs["duration_seconds"] = 1.0
+    refined_run.attrs["refined_subject_mask_review_status"] = {
+        "state": "approved",
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "pytest",
+        "timestamp_utc": "2026-02-12T00:15:00+00:00",
+    }
+    refined_run.attrs["component_review_statuses"] = {
+        "subject_body": {"state": "approved", "intended_use": "training"},
+        "eye_left": {"state": "approved", "intended_use": "training"},
+        "eye_right": {"state": "approved", "intended_use": "training"},
+        "swim_bladder": {"state": "needs_review", "intended_use": "training"},
+    }
+    refined_run.create_array(
+        "available_channels",
+        data=np.array([True, True, True, True], dtype=np.bool_),
+        chunks=(4,),
+    )
+    refined_metrics = refined_run.create_group("metrics")
+    refined_metrics.create_array(
+        "mask_present",
+        data=np.array(
+            [
+                [True, True, True, True],
+                [True, True, True, True],
+                [True, True, True, False],
+                [True, True, True, False],
+            ],
+            dtype=np.bool_,
+        ),
+        chunks=(4, 4),
+    )
+
+
 class _FakeArray:
     def __init__(self, data: np.ndarray) -> None:
         self._data = np.asarray(data)
@@ -528,16 +634,100 @@ def _create_recording_step_status_zarr(path: Path) -> _FakeGroup:
         },
     )
 
-    id_parent = root.add_group("id_assignment_runs", attrs={"latest": "id_assign_001"})
-    id_parent.add_group(
-        "id_assign_001",
+    subject_masks_parent = root.add_group("subject_mask_runs", attrs={"latest": "subject_masks_001"})
+    subject_masks_run = subject_masks_parent.add_group(
+        "subject_masks_001",
+        attrs={
+            "created_utc": "2026-02-15T00:47:00+00:00",
+            "method": "subject_mask_threshold_lr_v1",
+            "run_semantics": "traditional_subject_body_inference",
+            "probability_semantics": "normalized_background_diff",
+            "label_schema_id": "subject_v1_lr",
+            "mask_labels": ["subject_body", "eye_left", "eye_right", "swim_bladder"],
+            "source_background_run": "background_001",
+            "source_background_array": "background_full",
+            "source_dish_mask_array": "images_ds",
+            "tuning_source": "analysis_metadata.subject_mask_tuning.components.subject_body",
+            "tuning_timestamp": "2026-02-15T00:46:30+00:00",
+            "subject_mask_review_status": {
+                "state": "approved",
+                "intended_use": "training",
+                "reviewer": "pytest",
+                "timestamp_utc": "2026-02-15T00:48:00+00:00",
+            },
+            "component_review_statuses": {
+                "subject_body": {"state": "approved"},
+                "eye_left": {"state": "approved"},
+                "eye_right": {"state": "approved"},
+            },
+        },
+    )
+    subject_masks_run.add_array("frame_counts", np.array([1, 1, 1, 1], dtype=np.int32))
+    subject_masks_run.add_array("available_channels", np.array([True, True, True, False], dtype=np.bool_))
+
+    refined_subject_masks_parent = root.add_group(
+        "refined_subject_masks_runs",
+        attrs={"latest": "refined_subject_masks_001"},
+    )
+    refined_subject_masks_run = refined_subject_masks_parent.add_group(
+        "refined_subject_masks_001",
+        attrs={
+            "created_utc": "2026-02-15T00:49:00+00:00",
+            "method": "refine_subject_masks",
+            "source_subject_mask_run": "subject_masks_001",
+            "label_schema_id": "subject_v1_lr",
+            "mask_labels": ["subject_body", "eye_left", "eye_right", "swim_bladder"],
+            "refined_subject_mask_review_status": {
+                "state": "approved",
+                "intended_use": "training",
+                "reviewer": "pytest",
+                "timestamp_utc": "2026-02-15T00:50:00+00:00",
+            },
+            "component_review_statuses": {
+                "subject_body": {"state": "approved"},
+                "eye_left": {"state": "approved"},
+                "eye_right": {"state": "approved"},
+                "swim_bladder": {"state": "approved"},
+            },
+        },
+    )
+    refined_subject_masks_run.add_array("frame_counts", np.array([1, 1, 1, 1], dtype=np.int32))
+    refined_subject_masks_run.add_array("available_channels", np.array([True, True, True, True], dtype=np.bool_))
+
+    arena_parent = root.add_group("arena_assignment_runs", attrs={"latest": "arena_assignment_001"})
+    arena_parent.add_group(
+        "arena_assignment_001",
         attrs={"created_utc": "2026-02-15T00:50:00+00:00", "method": "hungarian"},
     )
 
     tracks_parent = root.add_group("tracking_runs", attrs={"latest": "tracks_001"})
     tracks_parent.add_group(
         "tracks_001",
-        attrs={"created_utc": "2026-02-15T00:55:00+00:00", "method": "trackpy"},
+        attrs={
+            "created_utc": "2026-02-15T00:55:00+00:00",
+            "method": "trackpy",
+            "num_tracks": 3,
+            "n_assigned_rows": 3,
+            "n_unassigned_rows": 1,
+            "unassigned_row_rate_percent": 25.0,
+            "tracking_qc_state": "warn",
+            "tracking_warn_threshold_rows": 1,
+            "tracking_warn_threshold_percent": 0.0,
+            "tracking_block_threshold_rows": 10,
+            "tracking_block_threshold_percent": 1.0,
+            "summary_statistics": {
+                "n_rows": 4,
+                "n_tracks": 3,
+                "n_assigned_rows": 3,
+                "n_unassigned_rows": 1,
+                "unassigned_row_rate_percent": 25.0,
+                "tracking_qc_state": "warn",
+                "tracking_warn_threshold_rows": 1,
+                "tracking_warn_threshold_percent": 0.0,
+                "tracking_block_threshold_rows": 10,
+                "tracking_block_threshold_percent": 1.0,
+            },
+        },
     )
 
     analysis = root.add_group("analysis")
@@ -554,6 +744,7 @@ def _create_recording_step_status_zarr(path: Path) -> _FakeGroup:
             "dish_mask": {"ready": True},
             "detection_tuning": {"ready": True},
             "keypoint_tuning": {"ready": True},
+            "subject_mask_tuning": {"ready": True},
             "eye_mask_tuning": {"ready": True},
             "subdish_mask_tuning": {"ready": True},
         }
@@ -922,6 +1113,106 @@ def test_schema_has_eye_mask_quality_table_views_and_indexes(tmp_path: Path) -> 
     registry.close()
 
 
+def test_schema_has_subject_mask_performance_table_views_and_indexes(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    table = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'subject_mask_performance';
+        """
+    ).fetchone()
+    assert table is not None
+
+    views = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'view' AND name IN (
+            'subject_mask_performance_latest',
+            'recording_subject_mask_performance_latest'
+        );
+        """
+    ).fetchall()
+    view_names = {str(row["name"]) for row in views}
+    assert view_names == {
+        "subject_mask_performance_latest",
+        "recording_subject_mask_performance_latest",
+    }
+
+    idx = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'index' AND name IN (
+            'idx_subject_mask_perf_recording',
+            'idx_subject_mask_perf_stage_method',
+            'idx_subject_mask_perf_source',
+            'idx_subject_mask_perf_review'
+        );
+        """
+    ).fetchall()
+    idx_names = {str(row["name"]) for row in idx}
+    assert idx_names == {
+        "idx_subject_mask_perf_recording",
+        "idx_subject_mask_perf_stage_method",
+        "idx_subject_mask_perf_source",
+        "idx_subject_mask_perf_review",
+    }
+    registry.close()
+
+
+def test_schema_has_subject_mask_component_quality_table_views_and_indexes(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    table = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'subject_mask_component_quality';
+        """
+    ).fetchone()
+    assert table is not None
+
+    views = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'view' AND name IN (
+            'subject_mask_component_quality_current',
+            'subject_mask_component_quality_overview',
+            'recording_subject_mask_component_quality_overview'
+        );
+        """
+    ).fetchall()
+    view_names = {str(row["name"]) for row in views}
+    assert view_names == {
+        "subject_mask_component_quality_current",
+        "subject_mask_component_quality_overview",
+        "recording_subject_mask_component_quality_overview",
+    }
+
+    idx = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'index' AND name IN (
+            'idx_subject_mask_component_dataset_id',
+            'idx_subject_mask_component_gate',
+            'idx_subject_mask_component_stage',
+            'idx_subject_mask_component_recording'
+        );
+        """
+    ).fetchall()
+    idx_names = {str(row["name"]) for row in idx}
+    assert idx_names == {
+        "idx_subject_mask_component_dataset_id",
+        "idx_subject_mask_component_gate",
+        "idx_subject_mask_component_stage",
+        "idx_subject_mask_component_recording",
+    }
+    registry.close()
+
+
 def test_schema_has_phase2_subject_dish_cross_tables(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     expected_tables = {
@@ -976,6 +1267,20 @@ def test_schema_has_recording_subject_overview_view(tmp_path: Path) -> None:
     ).fetchall()
     assert len(rows) == 1
     assert str(rows[0]["name"]) == "recording_subject_overview"
+    registry.close()
+
+
+def test_schema_has_dataset_context_current_view(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    rows = registry.conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'view' AND name = 'dataset_context_current';
+        """
+    ).fetchall()
+    assert len(rows) == 1
+    assert str(rows[0]["name"]) == "dataset_context_current"
     registry.close()
 
 
@@ -1090,6 +1395,599 @@ def test_recording_step_status_latest_view_includes_dataset_context(tmp_path: Pa
     assert row["camera_id"] == "cam_1"
     assert row["step_name"] == "detect"
     assert row["status"] == "ok"
+    registry.close()
+
+
+def test_recording_step_status_latest_prefers_recording_and_normalized_lineage_context(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_ctx",
+        session_uuid="session_ctx",
+        zarr_path=tmp_path / "recording_ctx_training.zarr",
+        recording_id="recording_ctx",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_provenance(
+        "dataset_ctx",
+        provenance={
+            "fish_id": "legacy_subject",
+            "cross_id": "legacy_cross",
+            "genotype": "legacy_genotype",
+            "dpf_at_acquisition": 9,
+        },
+        context={
+            "rig_id": "rig_legacy",
+            "arena_id": "arena_legacy",
+            "camera_id": "camera_legacy",
+            "canvas_name": "canvas_legacy",
+        },
+        protocol_name="protocol_legacy",
+        protocol_hash=None,
+        acquisition={"dish_design": "dish_design_legacy"},
+        zarr_purpose="training",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, started_utc,
+            recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+            rig_id, arena_id, camera_id, canvas_name, protocol_name, dish_design,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_ctx",
+            "session_ctx",
+            "recording_ctx",
+            str(tmp_path / "recordings" / "recording_ctx"),
+            "2026-03-13T00:00:00+00:00",
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+            "rig_recording",
+            "arena_recording",
+            "camera_recording",
+            "canvas_recording",
+            "protocol_recording",
+            "dish_design_recording",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO crosses (cross_id, genotype, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("cross_ctx", "genotype_ctx"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO dishes (dish_id, cross_id, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("dish_ctx", "cross_ctx"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO subjects (subject_id, dish_id, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("subject_ctx", "dish_ctx"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_subjects (
+            recording_id, subject_id, dataset_id, dish_id, cross_id, dpf_at_acquisition,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("recording_ctx", "subject_ctx", "dataset_ctx", "dish_ctx", "cross_ctx", 8),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id, recording_id, step_name, status, run_name, source, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_ctx",
+            "recording_ctx",
+            "detect",
+            "ok",
+            "detect_ctx",
+            "unit_test",
+            "2026-03-13T00:10:00+00:00",
+        ),
+    )
+    registry.conn.commit()
+
+    row = registry.conn.execute(
+        """
+        SELECT
+            recording_id,
+            dataset_id,
+            rig_id,
+            arena_id,
+            camera_id,
+            canvas_name,
+            dish_design,
+            protocol_name,
+            cross_id,
+            genotype,
+            dpf_at_acquisition
+        FROM recording_step_status_latest
+        WHERE dataset_id = ? AND step_name = ?;
+        """,
+        ("dataset_ctx", "detect"),
+    ).fetchone()
+    assert row is not None
+    assert row["recording_id"] == "recording_ctx"
+    assert row["rig_id"] == "rig_recording"
+    assert row["arena_id"] == "arena_recording"
+    assert row["camera_id"] == "camera_recording"
+    assert row["canvas_name"] == "canvas_recording"
+    assert row["dish_design"] == "dish_design_recording"
+    assert row["protocol_name"] == "protocol_recording"
+    assert row["cross_id"] == "cross_ctx"
+    assert row["genotype"] == "genotype_ctx"
+    assert int(row["dpf_at_acquisition"]) == 8
+    registry.close()
+
+
+def _seed_source_recording_with_canonical_context(
+    registry: Registry,
+    *,
+    root: Path,
+    dataset_id: str = "dataset_ctx",
+    recording_id: str = "recording_ctx",
+    session_uuid: str = "session_ctx",
+) -> Path:
+    zarr_path = root / f"{recording_id}_training.zarr"
+    zarr_path.mkdir(parents=True, exist_ok=True)
+    registry.upsert_dataset(
+        dataset_id=dataset_id,
+        session_uuid=session_uuid,
+        zarr_path=zarr_path,
+        recording_id=recording_id,
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_provenance(
+        dataset_id,
+        provenance={
+            "fish_id": "legacy_subject",
+            "cross_id": "legacy_cross",
+            "genotype": "legacy_genotype",
+            "dpf_at_acquisition": 9,
+        },
+        context={
+            "rig_id": "rig_legacy",
+            "arena_id": "arena_legacy",
+            "camera_id": "camera_legacy",
+            "canvas_name": "canvas_legacy",
+        },
+        protocol_name="protocol_legacy",
+        protocol_hash=None,
+        acquisition={"dish_design": "dish_design_legacy"},
+        zarr_purpose="training",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, started_utc,
+            recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+            rig_id, arena_id, camera_id, canvas_name, protocol_name, dish_design,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            recording_id,
+            session_uuid,
+            recording_id,
+            str(root / "recordings" / recording_id),
+            "2026-03-13T00:00:00+00:00",
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+            "rig_recording",
+            "arena_recording",
+            "camera_recording",
+            "canvas_recording",
+            "protocol_recording",
+            "dish_design_recording",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO crosses (cross_id, genotype, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("cross_ctx", "genotype_ctx"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO dishes (dish_id, cross_id, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("dish_ctx", "cross_ctx"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO subjects (subject_id, dish_id, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("subject_ctx", "dish_ctx"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_subjects (
+            recording_id, subject_id, dataset_id, dish_id, cross_id, dpf_at_acquisition,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (recording_id, "subject_ctx", dataset_id, "dish_ctx", "cross_ctx", 8),
+    )
+    registry.conn.commit()
+    return zarr_path
+
+
+def test_recording_step_status_wide_prefers_canonical_context(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    _seed_source_recording_with_canonical_context(registry, root=tmp_path)
+    registry.conn.execute(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id, recording_id, step_name, status, run_name, source, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_ctx",
+            "recording_ctx",
+            "detect",
+            "ok",
+            "detect_ctx",
+            "unit_test",
+            "2026-03-13T00:10:00+00:00",
+        ),
+    )
+    registry.conn.commit()
+
+    row = registry.conn.execute(
+        """
+        SELECT "Recording", "Camera", "Use"
+        FROM recording_step_status_wide
+        WHERE "Recording" = ?;
+        """,
+        ("recording_ctx",),
+    ).fetchone()
+    assert row is not None
+    assert row["Recording"] == "recording_ctx"
+    assert row["Camera"] == "camera_recording"
+    assert row["Use"] == "training"
+    registry.close()
+
+
+def test_recording_overview_falls_back_to_dataset_context_current_dish_design(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_ctx",
+        session_uuid="session_ctx",
+        zarr_path=tmp_path / "recording_ctx_training.zarr",
+        recording_id="recording_ctx",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_provenance(
+        "dataset_ctx",
+        provenance={"snapshot_status": "complete"},
+        context={},
+        protocol_name=None,
+        protocol_hash=None,
+        acquisition={"dish_design": "dish_design_legacy"},
+        zarr_purpose="training",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, started_utc,
+            recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+            dish_design, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_ctx",
+            "session_ctx",
+            "recording_ctx",
+            str(tmp_path / "recordings" / "recording_ctx"),
+            "2026-03-13T00:00:00+00:00",
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+            None,
+        ),
+    )
+    registry.conn.commit()
+
+    row = registry.conn.execute(
+        """
+        SELECT recording_id, dish_design
+        FROM recording_overview
+        WHERE recording_id = ?;
+        """,
+        ("recording_ctx",),
+    ).fetchone()
+    assert row is not None
+    assert row["recording_id"] == "recording_ctx"
+    assert row["dish_design"] == "dish_design_legacy"
+    registry.close()
+
+
+def test_recording_performance_views_prefer_dataset_context_current(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = _seed_source_recording_with_canonical_context(registry, root=tmp_path)
+    zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
+    registry.upsert_detect_performance(
+        dataset_id="dataset_ctx",
+        detect_run="detect_ctx",
+        detect_created_utc="2026-03-13T00:15:00+00:00",
+        recording_id="recording_ctx",
+        zarr_use="training",
+        detection_method="yolo",
+        model_run_id="model_run_ctx",
+        model_set_id="model_set_ctx",
+        model_path="/tmp/model_ctx.pt",
+        model_name="model_ctx",
+        coverage_percent=75.0,
+        frames_with_detections=7,
+        frames_zero_detections=3,
+        total_frames=10,
+        mean_confidence=0.9,
+        min_confidence=0.1,
+        max_confidence=0.99,
+        inference_duration_seconds=1.0,
+        inference_average_fps=10.0,
+        inference_avg_batch_ms=5.0,
+        inference_avg_read_ms=1.0,
+        conf_threshold=0.25,
+        iou_threshold=0.5,
+        batch_size=4,
+        inference_width=640,
+        inference_height=640,
+        zarr_mtime_ns=zarr_mtime_ns,
+        updated_utc="2026-03-13T00:16:00+00:00",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO crop_quality (
+            dataset_id, crop_run, recording_id, zarr_use, crop_created_utc,
+            source_detect_run, detection_source_type, total_rois,
+            frames_with_crops, total_frames, percent_frames_with_crops,
+            review_state, review_intended_use, zarr_mtime_ns, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_ctx",
+            "crop_ctx",
+            "recording_ctx",
+            "training",
+            "2026-03-13T00:20:00+00:00",
+            "detect_ctx",
+            "filtered",
+            12,
+            9,
+            10,
+            90.0,
+            "approved",
+            "training",
+            zarr_mtime_ns,
+            "2026-03-13T00:21:00+00:00",
+        ),
+    )
+    registry.upsert_keypoint_performance(
+        dataset_id="dataset_ctx",
+        keypoint_run="keypoint_ctx",
+        keypoint_created_utc="2026-03-13T00:25:00+00:00",
+        recording_id="recording_ctx",
+        zarr_use="training",
+        keypoint_method="pose_model",
+        model_run_id="kp_model_run",
+        model_set_id="kp_model_set",
+        model_path="/tmp/keypoint_model.pt",
+        model_name="keypoint_model",
+        source_crop_run="crop_ctx",
+        source_detect_run="detect_ctx",
+        source_refined_run=None,
+        total_rois=12,
+        successful_detections=11,
+        failed_detections=1,
+        success_rate_percent=91.7,
+        frames_with_keypoints=10,
+        mean_confidence=0.88,
+        duration_seconds=2.0,
+        inference_duration_seconds=1.5,
+        keypoints_per_second=6.0,
+        inference_average_fps=8.0,
+        batch_size=2,
+        imgsz="640",
+        conf_threshold=0.25,
+        iou_threshold=0.5,
+        summary_statistics_json=json.dumps({"summary": "ok"}),
+        zarr_mtime_ns=zarr_mtime_ns,
+        updated_utc="2026-03-13T00:26:00+00:00",
+    )
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_ctx",
+        stage_group="refined_eye_masks_runs",
+        run_name="eye_mask_ctx",
+        run_created_utc="2026-03-13T00:30:00+00:00",
+        recording_id="recording_ctx",
+        zarr_use="training",
+        method="refine_eye_masks",
+        source_crop_run="crop_ctx",
+        source_keypoint_group="keypoints_runs",
+        source_keypoints_run="keypoint_ctx",
+        source_eye_masks_run="eye_masks_ctx",
+        source_eye_masks_method="traditional",
+        total_rois=12,
+        successful_eyes=22,
+        successful_roi_pairs=10,
+        successful_roi_pair_rate=0.83,
+        duration_seconds=2.5,
+        rois_per_second=4.8,
+        inference_duration_seconds=1.2,
+        inference_average_fps=6.0,
+        reason_counts_json=json.dumps({"clean": 10}),
+        summary_statistics_json=json.dumps({"geometry": {"eye_separation": {"stats": {"p50": 5.1}}}}),
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="pytest",
+        review_timestamp_utc="2026-03-13T00:31:00+00:00",
+        zarr_mtime_ns=zarr_mtime_ns,
+        updated_utc="2026-03-13T00:32:00+00:00",
+    )
+    registry.upsert_subject_mask_performance(
+        dataset_id="dataset_ctx",
+        stage_group="refined_subject_masks_runs",
+        run_name="subject_mask_ctx",
+        run_created_utc="2026-03-13T00:35:00+00:00",
+        recording_id="recording_ctx",
+        zarr_use="training",
+        subject_mask_method="refine_subject_masks",
+        label_schema_id="schema_ctx",
+        source_crop_run="crop_ctx",
+        source_keypoint_group="keypoints_runs",
+        source_keypoints_run="keypoint_ctx",
+        source_subject_mask_run="subject_masks_ctx",
+        source_subject_mask_method="traditional",
+        run_semantics=None,
+        probability_semantics=None,
+        source_background_run=None,
+        source_background_array=None,
+        source_dish_mask_array=None,
+        tuning_source=None,
+        tuning_timestamp=None,
+        total_rois=12,
+        rows_with_any_mask=10,
+        coverage_percent=83.3,
+        duration_seconds=2.8,
+        rois_per_second=4.2,
+        available_component_count=2,
+        available_components_json=json.dumps(["body", "eyes"]),
+        unavailable_components_json=json.dumps([]),
+        component_review_states_json=json.dumps({"body": "approved"}),
+        eye_component_mode="paired",
+        reason_counts_json=json.dumps({"clean": 10}),
+        summary_statistics_json=json.dumps({"summary": "ok"}),
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="pytest",
+        review_timestamp_utc="2026-03-13T00:36:00+00:00",
+        zarr_mtime_ns=zarr_mtime_ns,
+        updated_utc="2026-03-13T00:37:00+00:00",
+    )
+
+    detect_row = registry.conn.execute(
+        """
+        SELECT rig_id, arena_id, camera_id, canvas_name, dish_design, protocol_name, cross_id, genotype, dpf_at_acquisition
+        FROM recording_detect_performance_latest
+        WHERE recording_id = ?;
+        """,
+        ("recording_ctx",),
+    ).fetchone()
+    detect_model_row = registry.conn.execute(
+        """
+        SELECT rig_id, camera_id, protocol_name, dish_design
+        FROM recording_detect_model_performance_latest
+        WHERE recording_id = ?;
+        """,
+        ("recording_ctx",),
+    ).fetchone()
+    crop_row = registry.conn.execute(
+        """
+        SELECT rig_id, camera_id, protocol_name, dish_design, cross_id, genotype, dpf_at_acquisition
+        FROM recording_crop_quality_current
+        WHERE recording_id = ?;
+        """,
+        ("recording_ctx",),
+    ).fetchone()
+    keypoint_row = registry.conn.execute(
+        """
+        SELECT rig_id, camera_id, protocol_name, dish_design, cross_id, genotype, dpf_at_acquisition
+        FROM recording_keypoint_performance_latest
+        WHERE recording_id = ?;
+        """,
+        ("recording_ctx",),
+    ).fetchone()
+    eye_mask_row = registry.conn.execute(
+        """
+        SELECT rig_id, camera_id, protocol_name, dish_design, cross_id, genotype, dpf_at_acquisition
+        FROM recording_eye_mask_performance_latest
+        WHERE recording_id = ? AND stage_group = ?;
+        """,
+        ("recording_ctx", "refined_eye_masks_runs"),
+    ).fetchone()
+    subject_mask_row = registry.conn.execute(
+        """
+        SELECT rig_id, camera_id, protocol_name, dish_design
+        FROM recording_subject_mask_performance_latest
+        WHERE recording_id = ? AND stage_group = ?;
+        """,
+        ("recording_ctx", "refined_subject_masks_runs"),
+    ).fetchone()
+    assert detect_row is not None
+    assert detect_model_row is not None
+    assert crop_row is not None
+    assert keypoint_row is not None
+    assert eye_mask_row is not None
+    assert subject_mask_row is not None
+    assert detect_row["rig_id"] == "rig_recording"
+    assert detect_row["arena_id"] == "arena_recording"
+    assert detect_row["camera_id"] == "camera_recording"
+    assert detect_row["canvas_name"] == "canvas_recording"
+    assert detect_row["dish_design"] == "dish_design_recording"
+    assert detect_row["protocol_name"] == "protocol_recording"
+    assert detect_row["cross_id"] == "cross_ctx"
+    assert detect_row["genotype"] == "genotype_ctx"
+    assert int(detect_row["dpf_at_acquisition"]) == 8
+    assert detect_model_row["camera_id"] == "camera_recording"
+    assert detect_model_row["protocol_name"] == "protocol_recording"
+    assert detect_model_row["dish_design"] == "dish_design_recording"
+    assert crop_row["camera_id"] == "camera_recording"
+    assert crop_row["protocol_name"] == "protocol_recording"
+    assert crop_row["dish_design"] == "dish_design_recording"
+    assert crop_row["cross_id"] == "cross_ctx"
+    assert crop_row["genotype"] == "genotype_ctx"
+    assert int(crop_row["dpf_at_acquisition"]) == 8
+    assert keypoint_row["camera_id"] == "camera_recording"
+    assert keypoint_row["protocol_name"] == "protocol_recording"
+    assert keypoint_row["dish_design"] == "dish_design_recording"
+    assert keypoint_row["cross_id"] == "cross_ctx"
+    assert keypoint_row["genotype"] == "genotype_ctx"
+    assert int(keypoint_row["dpf_at_acquisition"]) == 8
+    assert eye_mask_row["camera_id"] == "camera_recording"
+    assert eye_mask_row["protocol_name"] == "protocol_recording"
+    assert eye_mask_row["dish_design"] == "dish_design_recording"
+    assert eye_mask_row["cross_id"] == "cross_ctx"
+    assert eye_mask_row["genotype"] == "genotype_ctx"
+    assert int(eye_mask_row["dpf_at_acquisition"]) == 8
+    assert subject_mask_row["camera_id"] == "camera_recording"
+    assert subject_mask_row["protocol_name"] == "protocol_recording"
+    assert subject_mask_row["dish_design"] == "dish_design_recording"
     registry.close()
 
 
@@ -1308,7 +2206,7 @@ def test_recording_step_status_wide_view_formats_check_recording_steps_columns(t
             "unit_test",
             "2026-02-23T01:00:08+00:00",
         ),
-        ("dataset_a", "recording_a", "id_assignment", "missing", None, None, None, None, None, "unit_test", "2026-02-23T01:00:09+00:00"),
+        ("dataset_a", "recording_a", "arena_assignment", "missing", None, None, None, None, None, "unit_test", "2026-02-23T01:00:09+00:00"),
         ("dataset_a", "recording_a", "tracks", "absent", None, None, None, None, None, "unit_test", "2026-02-23T01:00:10+00:00"),
         (
             "dataset_a",
@@ -1380,7 +2278,7 @@ def test_recording_step_status_wide_view_formats_check_recording_steps_columns(t
     assert row["Eye Masks"] == "OK"
     assert row["Refined Eye Masks"] == "OK"
     assert row["Eye Mask Review"] == "approved (manual, training)"
-    assert row["Assign IDs"] == "MISS"
+    assert row["Arena Assignment"] == "MISS"
     assert row["Track"] == "MISS"
     assert row["Stimulus"] == "3 (OK)"
     assert row["Calib"] == "OK"
@@ -1390,6 +2288,142 @@ def test_recording_step_status_wide_view_formats_check_recording_steps_columns(t
     assert row["keypoint_tuning"] == "OK"
     assert row["eye_mask_tuning"] == "OK"
     assert row["subdish_mask_tuning"] == "N/A"
+    registry.close()
+
+
+def test_recording_step_status_wide_view_tracks_warn_on_unassigned_rows(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_track_warn",
+        session_uuid="session_track_warn",
+        zarr_path=tmp_path / "recording_track_warn_analysis.zarr",
+        recording_id="recording_track_warn",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_provenance(
+        "dataset_track_warn",
+        provenance={},
+        context={"camera_id": "cam_warn"},
+        protocol_name=None,
+        protocol_hash=None,
+        acquisition={},
+        zarr_purpose="analysis",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id,
+            recording_id,
+            step_name,
+            status,
+            run_name,
+            details_json,
+            source,
+            updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_track_warn",
+            "recording_track_warn",
+            "tracks",
+            "ok",
+            "tracks_001",
+            json.dumps(
+                {
+                    "n_assigned_rows": 399,
+                    "n_unassigned_rows": 1,
+                    "unassigned_row_rate_percent": 0.25,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ),
+            "unit_test",
+            "2026-02-23T02:00:00+00:00",
+        ),
+    )
+    registry.conn.commit()
+
+    row = registry.conn.execute(
+        """
+        SELECT "Track"
+        FROM recording_step_status_wide
+        WHERE "Recording" = ?;
+        """,
+        ("recording_track_warn",),
+    ).fetchone()
+    assert row is not None
+    assert row["Track"] == "WARN (1 unassigned, 0.3%)"
+    registry.close()
+
+
+def test_recording_step_status_wide_view_tracks_warn_even_for_high_unassigned_rate(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_track_block",
+        session_uuid="session_track_block",
+        zarr_path=tmp_path / "recording_track_block_analysis.zarr",
+        recording_id="recording_track_block",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_provenance(
+        "dataset_track_block",
+        provenance={},
+        context={"camera_id": "cam_block"},
+        protocol_name=None,
+        protocol_hash=None,
+        acquisition={},
+        zarr_purpose="analysis",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id,
+            recording_id,
+            step_name,
+            status,
+            run_name,
+            details_json,
+            source,
+            updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_track_block",
+            "recording_track_block",
+            "tracks",
+            "ok",
+            "tracks_001",
+            json.dumps(
+                {
+                    "n_assigned_rows": 3,
+                    "n_unassigned_rows": 1,
+                    "unassigned_row_rate_percent": 25.0,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ),
+            "unit_test",
+            "2026-02-23T02:05:00+00:00",
+        ),
+    )
+    registry.conn.commit()
+
+    row = registry.conn.execute(
+        """
+        SELECT "Track"
+        FROM recording_step_status_wide
+        WHERE "Recording" = ?;
+        """,
+        ("recording_track_block",),
+    ).fetchone()
+    assert row is not None
+    assert row["Track"] == "WARN (1 unassigned, 25.0%)"
     registry.close()
 
 
@@ -1471,6 +2505,598 @@ def test_recording_subject_overview_exposes_genotype_and_dpf(tmp_path: Path) -> 
     assert int(row["dpf_at_acquisition"]) == 8
     assert row["protocol_name"] == "protocol_a"
     assert row["recording_type"] == "behavior"
+    registry.close()
+
+
+def test_dataset_context_current_prefers_recording_and_normalized_subject_context(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_a",
+        session_uuid="session_a",
+        zarr_path=tmp_path / "recording_a_training.zarr",
+        recording_id="recording_a",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_provenance(
+        "dataset_a",
+        provenance={
+            "fish_id": "legacy_fish_a",
+            "dish_id": "dish_legacy",
+            "cross_id": "cross_legacy",
+            "genotype": "legacy_genotype",
+            "line_strain": "legacy_line",
+            "dpf_at_acquisition": 9,
+            "subject_count": 7,
+            "snapshot_status": "complete",
+        },
+        context={
+            "rig_id": "rig_provenance",
+            "arena_id": "arena_provenance",
+            "camera_id": "camera_provenance",
+            "canvas_name": "canvas_provenance",
+        },
+        protocol_name="protocol_provenance",
+        protocol_hash="hash_a",
+        acquisition={
+            "dish_design": "dish_design_provenance",
+            "fps": 120.0,
+        },
+        zarr_purpose="training",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, started_utc,
+            recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+            rig_id, arena_id, camera_id, canvas_name, protocol_name, dish_design,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_a",
+            "session_a",
+            "recording_a",
+            str(tmp_path / "recordings" / "recording_a"),
+            "2026-03-13T00:00:00+00:00",
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+            "rig_recording",
+            "arena_recording",
+            "camera_recording",
+            "canvas_recording",
+            "protocol_recording",
+            "dish_design_recording",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO crosses (cross_id, genotype, line_strain, created_utc, updated_utc)
+        VALUES (?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("cross_a", "genotype_a", "line_a"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO dishes (dish_id, cross_id, species, created_utc, updated_utc)
+        VALUES (?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("dish_a", "cross_a", "danio_rerio"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO subjects (subject_id, dish_id, species, sex, created_utc, updated_utc)
+        VALUES (?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("subject_a", "dish_a", "danio_rerio", "unknown"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_subjects (
+            recording_id, subject_id, dataset_id, dish_id, cross_id, dpf_at_acquisition,
+            genotype, line_strain, species, sex, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_a",
+            "subject_a",
+            "dataset_a",
+            "dish_a",
+            "cross_a",
+            8,
+            "genotype_a",
+            "line_a",
+            "danio_rerio",
+            "unknown",
+        ),
+    )
+    registry.conn.commit()
+
+    row = registry.conn.execute(
+        """
+        SELECT *
+        FROM dataset_context_current
+        WHERE dataset_id = ?;
+        """,
+        ("dataset_a",),
+    ).fetchone()
+    assert row is not None
+    assert row["rig_id"] == "rig_recording"
+    assert row["arena_id"] == "arena_recording"
+    assert row["camera_id"] == "camera_recording"
+    assert row["canvas_name"] == "canvas_recording"
+    assert row["protocol_name"] == "protocol_recording"
+    assert row["dish_design"] == "dish_design_recording"
+    assert row["subject_context_source"] == "normalized"
+    assert int(row["subject_count_snapshot"]) == 7
+    assert int(row["subject_count_recorded"]) == 1
+    assert int(row["subject_count_effective"]) == 1
+    assert row["subject_id"] == "subject_a"
+    assert row["dish_id"] == "dish_a"
+    assert row["cross_id"] == "cross_a"
+    assert row["genotype"] == "genotype_a"
+    assert row["line_strain"] == "line_a"
+    assert row["species"] == "danio_rerio"
+    assert row["sex"] == "unknown"
+    assert int(row["dpf_at_acquisition"]) == 8
+    assert json.loads(str(row["subject_ids_json"])) == ["subject_a"]
+    assert json.loads(str(row["dish_ids_json"])) == ["dish_a"]
+    assert json.loads(str(row["cross_ids_json"])) == ["cross_a"]
+    assert json.loads(str(row["genotypes_json"])) == ["genotype_a"]
+    assert json.loads(str(row["dpf_values_json"])) == [8]
+    assert row["protocol_hash"] == "hash_a"
+    registry.close()
+
+
+def test_dataset_context_current_handles_multi_subject_recordings(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_multi",
+        session_uuid="session_multi",
+        zarr_path=tmp_path / "recording_multi_analysis.zarr",
+        recording_id="recording_multi",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_provenance(
+        "dataset_multi",
+        provenance={"subject_count": 2, "snapshot_status": "complete"},
+        context={},
+        protocol_name=None,
+        protocol_hash=None,
+        acquisition={},
+        zarr_purpose="analysis",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_multi",
+            "session_multi",
+            "recording_multi",
+            str(tmp_path / "recordings" / "recording_multi"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+        ),
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO crosses (cross_id, genotype, line_strain, created_utc, updated_utc)
+        VALUES (?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        [
+            ("cross_a", "genotype_a", "line_a"),
+            ("cross_b", "genotype_b", "line_b"),
+        ],
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO dishes (dish_id, cross_id, species, created_utc, updated_utc)
+        VALUES (?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        [
+            ("dish_a", "cross_a", "danio_rerio"),
+            ("dish_b", "cross_b", "danio_rerio"),
+        ],
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO subjects (subject_id, dish_id, species, sex, created_utc, updated_utc)
+        VALUES (?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        [
+            ("subject_a", "dish_a", "danio_rerio", "unknown"),
+            ("subject_b", "dish_b", "danio_rerio", "unknown"),
+        ],
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO recording_subjects (
+            recording_id, subject_id, dataset_id, dish_id, cross_id, dpf_at_acquisition,
+            genotype, line_strain, species, sex, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        [
+            (
+                "recording_multi",
+                "subject_a",
+                "dataset_multi",
+                "dish_a",
+                "cross_a",
+                7,
+                "genotype_a",
+                "line_a",
+                "danio_rerio",
+                "unknown",
+            ),
+            (
+                "recording_multi",
+                "subject_b",
+                "dataset_multi",
+                "dish_b",
+                "cross_b",
+                8,
+                "genotype_b",
+                "line_b",
+                "danio_rerio",
+                "unknown",
+            ),
+        ],
+    )
+    registry.conn.commit()
+
+    row = registry.conn.execute(
+        """
+        SELECT *
+        FROM dataset_context_current
+        WHERE dataset_id = ?;
+        """,
+        ("dataset_multi",),
+    ).fetchone()
+    assert row is not None
+    assert row["subject_context_source"] == "normalized"
+    assert int(row["subject_count_recorded"]) == 2
+    assert int(row["subject_count_effective"]) == 2
+    assert row["subject_id"] is None
+    assert row["dish_id"] is None
+    assert row["cross_id"] is None
+    assert row["genotype"] is None
+    assert row["line_strain"] is None
+    assert row["dpf_at_acquisition"] is None
+    assert json.loads(str(row["subject_ids_json"])) == ["subject_a", "subject_b"]
+    assert json.loads(str(row["dish_ids_json"])) == ["dish_a", "dish_b"]
+    assert json.loads(str(row["cross_ids_json"])) == ["cross_a", "cross_b"]
+    assert json.loads(str(row["genotypes_json"])) == ["genotype_a", "genotype_b"]
+    assert json.loads(str(row["dpf_values_json"])) == [7, 8]
+    registry.close()
+
+
+def test_dataset_context_current_falls_back_to_provenance_context(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_legacy",
+        session_uuid="session_legacy",
+        zarr_path=tmp_path / "legacy.zarr",
+        recording_id="recording_legacy",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_provenance(
+        "dataset_legacy",
+        provenance={
+            "fish_id": "legacy_fish",
+            "dish_id": "legacy_dish",
+            "cross_id": "legacy_cross",
+            "genotype": "legacy_genotype",
+            "line_strain": "legacy_line",
+            "species": "danio_rerio",
+            "sex": "unknown",
+            "dpf_at_acquisition": 6,
+            "subject_count": 1,
+            "snapshot_status": "partial",
+        },
+        context={
+            "rig_id": "rig_legacy",
+            "arena_id": "arena_legacy",
+            "camera_id": "camera_legacy",
+            "canvas_name": "canvas_legacy",
+        },
+        protocol_name="protocol_legacy",
+        protocol_hash="hash_legacy",
+        acquisition={
+            "dish_design": "dish_design_legacy",
+            "fps": 90.0,
+            "video_codec": "h264",
+        },
+        zarr_purpose="analysis",
+    )
+
+    row = registry.conn.execute(
+        """
+        SELECT *
+        FROM dataset_context_current
+        WHERE dataset_id = ?;
+        """,
+        ("dataset_legacy",),
+    ).fetchone()
+    assert row is not None
+    assert row["recording_name"] is None
+    assert row["rig_id"] == "rig_legacy"
+    assert row["arena_id"] == "arena_legacy"
+    assert row["camera_id"] == "camera_legacy"
+    assert row["canvas_name"] == "canvas_legacy"
+    assert row["protocol_name"] == "protocol_legacy"
+    assert row["dish_design"] == "dish_design_legacy"
+    assert row["subject_context_source"] == "provenance"
+    assert row["subject_id"] == "legacy_fish"
+    assert row["dish_id"] == "legacy_dish"
+    assert row["cross_id"] == "legacy_cross"
+    assert row["genotype"] == "legacy_genotype"
+    assert row["line_strain"] == "legacy_line"
+    assert row["species"] == "danio_rerio"
+    assert row["sex"] == "unknown"
+    assert int(row["dpf_at_acquisition"]) == 6
+    assert int(row["subject_count_snapshot"]) == 1
+    assert row["subject_count_recorded"] is None
+    assert int(row["subject_count_effective"]) == 1
+    assert json.loads(str(row["subject_ids_json"])) == ["legacy_fish"]
+    assert json.loads(str(row["dish_ids_json"])) == ["legacy_dish"]
+    assert json.loads(str(row["cross_ids_json"])) == ["legacy_cross"]
+    assert json.loads(str(row["genotypes_json"])) == ["legacy_genotype"]
+    assert json.loads(str(row["dpf_values_json"])) == [6]
+    registry.close()
+
+
+def test_upsert_provenance_keeps_legacy_recording_context_snapshot_without_recording_row(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_snapshot",
+        session_uuid="session_snapshot",
+        zarr_path=tmp_path / "snapshot.zarr",
+        recording_id="recording_snapshot",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    registry.upsert_provenance(
+        "dataset_snapshot",
+        provenance={"fish_id": "legacy_subject", "snapshot_status": "complete"},
+        context={
+            "rig_id": "rig_snapshot",
+            "arena_id": "arena_snapshot",
+            "camera_id": "camera_snapshot",
+            "canvas_name": "canvas_snapshot",
+        },
+        protocol_name="protocol_snapshot",
+        protocol_hash="hash_snapshot",
+        acquisition={"dish_design": "dish_design_snapshot"},
+        zarr_purpose="analysis",
+    )
+
+    row = registry.conn.execute(
+        """
+        SELECT rig_id, arena_id, camera_id, canvas_name, protocol_name, dish_design
+        FROM provenance
+        WHERE dataset_id = ?;
+        """,
+        ("dataset_snapshot",),
+    ).fetchone()
+    assert row is not None
+    assert row["rig_id"] == "rig_snapshot"
+    assert row["arena_id"] == "arena_snapshot"
+    assert row["camera_id"] == "camera_snapshot"
+    assert row["canvas_name"] == "canvas_snapshot"
+    assert row["protocol_name"] == "protocol_snapshot"
+    assert row["dish_design"] == "dish_design_snapshot"
+    registry.close()
+
+
+def test_upsert_provenance_does_not_create_duplicate_recording_context_when_recording_exists(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_canonical",
+        session_uuid="session_canonical",
+        zarr_path=tmp_path / "canonical.zarr",
+        recording_id="recording_canonical",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path,
+            recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+            rig_id, arena_id, camera_id, canvas_name, protocol_name, dish_design,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_canonical",
+            "session_canonical",
+            "recording_canonical",
+            str(tmp_path / "recordings" / "recording_canonical"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+            "rig_recording",
+            "arena_recording",
+            "camera_recording",
+            "canvas_recording",
+            "protocol_recording",
+            "dish_design_recording",
+        ),
+    )
+
+    registry.upsert_provenance(
+        "dataset_canonical",
+        provenance={"fish_id": "legacy_subject", "snapshot_status": "complete"},
+        context={
+            "rig_id": "rig_should_not_write",
+            "arena_id": "arena_should_not_write",
+            "camera_id": "camera_should_not_write",
+            "canvas_name": "canvas_should_not_write",
+        },
+        protocol_name="protocol_should_not_write",
+        protocol_hash="hash_canonical",
+        acquisition={"dish_design": "dish_design_should_not_write"},
+        zarr_purpose="analysis",
+    )
+
+    prov_row = registry.conn.execute(
+        """
+        SELECT rig_id, arena_id, camera_id, canvas_name, protocol_name, dish_design, protocol_hash
+        FROM provenance
+        WHERE dataset_id = ?;
+        """,
+        ("dataset_canonical",),
+    ).fetchone()
+    assert prov_row is not None
+    assert prov_row["rig_id"] is None
+    assert prov_row["arena_id"] is None
+    assert prov_row["camera_id"] is None
+    assert prov_row["canvas_name"] is None
+    assert prov_row["protocol_name"] is None
+    assert prov_row["dish_design"] is None
+    assert prov_row["protocol_hash"] == "hash_canonical"
+
+    ctx_row = registry.conn.execute(
+        """
+        SELECT rig_id, arena_id, camera_id, canvas_name, protocol_name, dish_design
+        FROM dataset_context_current
+        WHERE dataset_id = ?;
+        """,
+        ("dataset_canonical",),
+    ).fetchone()
+    assert ctx_row is not None
+    assert ctx_row["rig_id"] == "rig_recording"
+    assert ctx_row["arena_id"] == "arena_recording"
+    assert ctx_row["camera_id"] == "camera_recording"
+    assert ctx_row["canvas_name"] == "canvas_recording"
+    assert ctx_row["protocol_name"] == "protocol_recording"
+    assert ctx_row["dish_design"] == "dish_design_recording"
+    registry.close()
+
+
+def test_upsert_provenance_freezes_existing_legacy_recording_context_after_recording_backfill(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_freeze",
+        session_uuid="session_freeze",
+        zarr_path=tmp_path / "freeze.zarr",
+        recording_id="recording_freeze",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_provenance(
+        "dataset_freeze",
+        provenance={"fish_id": "legacy_subject", "snapshot_status": "partial"},
+        context={
+            "rig_id": "rig_legacy",
+            "arena_id": "arena_legacy",
+            "camera_id": "camera_legacy",
+            "canvas_name": "canvas_legacy",
+        },
+        protocol_name="protocol_legacy",
+        protocol_hash="hash_before",
+        acquisition={"dish_design": "dish_design_legacy"},
+        zarr_purpose="analysis",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path,
+            recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+            rig_id, arena_id, camera_id, canvas_name, protocol_name, dish_design,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_freeze",
+            "session_freeze",
+            "recording_freeze",
+            str(tmp_path / "recordings" / "recording_freeze"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+            "rig_recording",
+            "arena_recording",
+            "camera_recording",
+            "canvas_recording",
+            "protocol_recording",
+            "dish_design_recording",
+        ),
+    )
+
+    registry.upsert_provenance(
+        "dataset_freeze",
+        provenance={"fish_id": "legacy_subject", "snapshot_status": "complete"},
+        context={
+            "rig_id": "rig_new",
+            "arena_id": "arena_new",
+            "camera_id": "camera_new",
+            "canvas_name": "canvas_new",
+        },
+        protocol_name="protocol_new",
+        protocol_hash="hash_after",
+        acquisition={"dish_design": "dish_design_new"},
+        zarr_purpose="analysis",
+    )
+
+    prov_row = registry.conn.execute(
+        """
+        SELECT rig_id, arena_id, camera_id, canvas_name, protocol_name, dish_design, protocol_hash, snapshot_status
+        FROM provenance
+        WHERE dataset_id = ?;
+        """,
+        ("dataset_freeze",),
+    ).fetchone()
+    assert prov_row is not None
+    assert prov_row["rig_id"] == "rig_legacy"
+    assert prov_row["arena_id"] == "arena_legacy"
+    assert prov_row["camera_id"] == "camera_legacy"
+    assert prov_row["canvas_name"] == "canvas_legacy"
+    assert prov_row["protocol_name"] == "protocol_legacy"
+    assert prov_row["dish_design"] == "dish_design_legacy"
+    assert prov_row["protocol_hash"] == "hash_after"
+    assert prov_row["snapshot_status"] == "complete"
+
+    ctx_row = registry.conn.execute(
+        """
+        SELECT rig_id, arena_id, camera_id, canvas_name, protocol_name, dish_design
+        FROM dataset_context_current
+        WHERE dataset_id = ?;
+        """,
+        ("dataset_freeze",),
+    ).fetchone()
+    assert ctx_row is not None
+    assert ctx_row["rig_id"] == "rig_recording"
+    assert ctx_row["arena_id"] == "arena_recording"
+    assert ctx_row["camera_id"] == "camera_recording"
+    assert ctx_row["canvas_name"] == "canvas_recording"
+    assert ctx_row["protocol_name"] == "protocol_recording"
+    assert ctx_row["dish_design"] == "dish_design_recording"
     registry.close()
 
 
@@ -2068,7 +3694,7 @@ def test_integrity_accepts_derived_dataset_single_parent_matching_recording_id(t
     registry.close()
 
 
-def test_integrity_flags_source_protocol_name_mismatch(tmp_path: Path) -> None:
+def test_integrity_ignores_source_protocol_name_legacy_snapshot_mismatch(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     source = tmp_path / "source.zarr"
     registry.upsert_dataset(
@@ -2100,7 +3726,7 @@ def test_integrity_flags_source_protocol_name_mismatch(tmp_path: Path) -> None:
 
     issues = _check_registry_integrity(registry)
     codes = {issue.code for issue in issues}
-    assert "source_protocol_name_mismatch" in codes
+    assert "source_protocol_name_mismatch" not in codes
     registry.close()
 
 
@@ -2140,7 +3766,7 @@ def test_integrity_flags_source_subject_count_invalid(tmp_path: Path) -> None:
     registry.close()
 
 
-def test_integrity_flags_source_dish_design_mismatch(tmp_path: Path) -> None:
+def test_integrity_ignores_source_dish_design_legacy_snapshot_mismatch(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     source = tmp_path / "source.zarr"
     registry.upsert_dataset(
@@ -2183,7 +3809,7 @@ def test_integrity_flags_source_dish_design_mismatch(tmp_path: Path) -> None:
 
     issues = _check_registry_integrity(registry)
     codes = {issue.code for issue in issues}
-    assert "source_dish_design_mismatch" in codes
+    assert "source_dish_design_mismatch" not in codes
     registry.close()
 
 
@@ -4438,6 +6064,224 @@ def test_backfill_eye_mask_performance_summary_includes_stale_counters_when_zero
     registry.close()
 
 
+def test_backfill_subject_mask_performance_dry_run_and_apply(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_subject_a" / "zarr" / "rec_subject_a_analysis.zarr"
+    _create_subject_mask_registry_zarr(zarr_path)
+    dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
+        (dataset_id,),
+    )
+    registry.conn.execute("DELETE FROM subject_mask_performance WHERE dataset_id = ?;", (dataset_id,))
+    registry.conn.commit()
+
+    dry = _backfill_subject_mask_performance(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert dry["datasets_scanned"] == 1
+    assert dry["rows_inserted"] == 2
+    assert dry["rows_updated"] == 0
+    assert dry["rows_deleted"] == 0
+    assert dry["rows_stale"] == 0
+
+    applied = _backfill_subject_mask_performance(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert applied["rows_inserted"] == 2
+    rows = registry.conn.execute(
+        """
+        SELECT
+            stage_group,
+            run_name,
+            subject_mask_method,
+            run_semantics,
+            probability_semantics,
+            source_background_run,
+            source_background_array,
+            source_dish_mask_array,
+            tuning_source,
+            tuning_timestamp,
+            label_schema_id,
+            available_component_count,
+            eye_component_mode,
+            coverage_percent,
+            review_state,
+            lifecycle_state
+        FROM subject_mask_performance_latest
+        WHERE dataset_id = ?
+        ORDER BY stage_group;
+        """,
+        (dataset_id,),
+    ).fetchall()
+    assert len(rows) == 2
+    by_stage = {str(row["stage_group"]): row for row in rows}
+    assert str(by_stage["subject_mask_runs"]["run_name"]) == "subject_masks_001"
+    assert str(by_stage["subject_mask_runs"]["subject_mask_method"]) == "subject_mask_threshold_lr_v1"
+    assert str(by_stage["subject_mask_runs"]["run_semantics"]) == "traditional_subject_body_inference"
+    assert str(by_stage["subject_mask_runs"]["probability_semantics"]) == "normalized_background_diff"
+    assert str(by_stage["subject_mask_runs"]["source_background_run"]) == "background_001"
+    assert str(by_stage["subject_mask_runs"]["source_background_array"]) == "background_full"
+    assert str(by_stage["subject_mask_runs"]["source_dish_mask_array"]) == "images_ds"
+    assert (
+        str(by_stage["subject_mask_runs"]["tuning_source"])
+        == "analysis_metadata.subject_mask_tuning.components.subject_body"
+    )
+    assert str(by_stage["subject_mask_runs"]["tuning_timestamp"]) == "2026-02-12T00:04:00+00:00"
+    assert str(by_stage["subject_mask_runs"]["label_schema_id"]) == "subject_v1_lr"
+    assert int(by_stage["subject_mask_runs"]["available_component_count"]) == 2
+    assert str(by_stage["subject_mask_runs"]["eye_component_mode"]) == "lr"
+    assert float(by_stage["subject_mask_runs"]["coverage_percent"]) == pytest.approx(100.0)
+    assert str(by_stage["subject_mask_runs"]["review_state"]) == "approved"
+    assert str(by_stage["subject_mask_runs"]["lifecycle_state"]) == "approved"
+    assert str(by_stage["refined_subject_masks_runs"]["run_name"]) == "refined_subject_masks_001"
+    assert str(by_stage["refined_subject_masks_runs"]["subject_mask_method"]) == "refine_subject_masks"
+    assert int(by_stage["refined_subject_masks_runs"]["available_component_count"]) == 4
+    assert str(by_stage["refined_subject_masks_runs"]["lifecycle_state"]) == "approved"
+    registry.close()
+
+
+def test_backfill_subject_mask_component_quality_dry_run_and_apply(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_subject_b" / "zarr" / "rec_subject_b_analysis.zarr"
+    _create_subject_mask_registry_zarr(zarr_path)
+    dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
+    registry.conn.execute(
+        "UPDATE datasets SET zarr_use = 'analysis' WHERE dataset_id = ?;",
+        (dataset_id,),
+    )
+    registry.conn.execute("DELETE FROM subject_mask_component_quality WHERE dataset_id = ?;", (dataset_id,))
+    registry.conn.commit()
+
+    dry = _backfill_subject_mask_component_quality(
+        registry,
+        dry_run=True,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert dry["datasets_scanned"] == 1
+    assert dry["rows_inserted"] == 8
+    assert dry["rows_updated"] == 0
+    assert dry["rows_deleted"] == 0
+
+    applied = _backfill_subject_mask_component_quality(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert applied["rows_inserted"] == 8
+    rows = registry.conn.execute(
+        """
+        SELECT
+            stage_group,
+            component_name,
+            component_family,
+            available,
+            review_state,
+            rows_with_component_mask_rate,
+            lifecycle_state
+        FROM subject_mask_component_quality_current
+        WHERE dataset_id = ?
+        ORDER BY stage_group, component_name;
+        """,
+        (dataset_id,),
+    ).fetchall()
+    assert len(rows) == 8
+    by_key = {(str(row["stage_group"]), str(row["component_name"])): row for row in rows}
+    raw_body = by_key[("subject_mask_runs", "subject_body")]
+    assert int(raw_body["available"]) == 0
+    assert raw_body["review_state"] is None
+    assert str(raw_body["lifecycle_state"]) == "na"
+    raw_left = by_key[("subject_mask_runs", "eye_left")]
+    assert str(raw_left["component_family"]) == "eyes"
+    assert int(raw_left["available"]) == 1
+    assert str(raw_left["review_state"]) == "approved"
+    assert float(raw_left["rows_with_component_mask_rate"]) == pytest.approx(1.0)
+    refined_swim = by_key[("refined_subject_masks_runs", "swim_bladder")]
+    assert int(refined_swim["available"]) == 1
+    assert str(refined_swim["review_state"]) == "needs_review"
+    assert float(refined_swim["rows_with_component_mask_rate"]) == pytest.approx(0.5)
+    assert str(refined_swim["lifecycle_state"]) == "in_progress"
+    registry.close()
+
+
+def test_backfill_subject_mask_registry_marks_refined_rows_stale_when_latest_raw_changes(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_subject_c" / "zarr" / "rec_subject_c_analysis.zarr"
+    _create_subject_mask_registry_zarr(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    subject_parent = root["subject_mask_runs"]
+    subject_parent.attrs["latest"] = "subject_masks_002"
+    subject_new = subject_parent.create_group("subject_masks_002")
+    subject_new.attrs["created_utc"] = "2026-02-12T00:20:00+00:00"
+    subject_new.attrs["method"] = "subject_mask_threshold_lr_v1"
+    subject_new.attrs["label_schema_id"] = "subject_v1_lr"
+    subject_new.attrs["mask_labels"] = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    subject_new.attrs["total_rois"] = 4
+    subject_new.create_array(
+        "available_channels",
+        data=np.array([True, True, True, True], dtype=np.bool_),
+        chunks=(4,),
+    )
+    subject_new_metrics = subject_new.create_group("metrics")
+    subject_new_metrics.create_array(
+        "mask_present",
+        data=np.ones((4, 4), dtype=np.bool_),
+        chunks=(4, 4),
+    )
+
+    dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
+    registry.conn.execute("DELETE FROM subject_mask_performance WHERE dataset_id = ?;", (dataset_id,))
+    registry.conn.execute("DELETE FROM subject_mask_component_quality WHERE dataset_id = ?;", (dataset_id,))
+    registry.conn.commit()
+
+    _backfill_subject_mask_performance(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    _backfill_subject_mask_component_quality(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+
+    refined_perf = registry.conn.execute(
+        """
+        SELECT source_subject_mask_stale_state, lifecycle_state
+        FROM subject_mask_performance
+        WHERE dataset_id = ? AND stage_group = 'refined_subject_masks_runs';
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert refined_perf is not None
+    assert str(refined_perf["source_subject_mask_stale_state"]) == "stale"
+    assert str(refined_perf["lifecycle_state"]) == "stale"
+
+    refined_component = registry.conn.execute(
+        """
+        SELECT lifecycle_state
+        FROM subject_mask_component_quality
+        WHERE dataset_id = ?
+          AND stage_group = 'refined_subject_masks_runs'
+          AND component_name = 'eye_left';
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert refined_component is not None
+    assert str(refined_component["lifecycle_state"]) == "stale"
+    registry.close()
+
+
 def test_backfill_eye_mask_performance_scope_defaults_to_source_analysis(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     analysis_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
@@ -4531,13 +6375,13 @@ def test_backfill_recording_step_status_dry_run_no_write(
         zarr_use_filter="all",
     )
     assert summary["datasets_scanned"] == 1
-    assert summary["rows_inserted"] == 18
+    assert summary["rows_inserted"] == 21
     assert summary["rows_updated"] == 0
     assert summary["rows_skipped"] == 0
 
     rows_by_status = summary["rows_by_status"]
     assert isinstance(rows_by_status, dict)
-    assert int(rows_by_status["ok"]) == 18
+    assert int(rows_by_status["ok"]) == 21
     assert int(rows_by_status["missing"]) == 0
     assert int(rows_by_status["absent"]) == 0
     assert int(rows_by_status["na"]) == 0
@@ -4582,10 +6426,10 @@ def test_backfill_recording_step_status_apply_and_convergent(
         recording_ids=None,
         zarr_use_filter="all",
     )
-    assert applied["rows_inserted"] == 18
+    assert applied["rows_inserted"] == 21
     assert applied["rows_updated"] == 0
     assert applied["rows_skipped"] == 0
-    assert applied["history_rows_inserted"] == 18
+    assert applied["history_rows_inserted"] == 21
 
     rows = registry.conn.execute(
         """
@@ -4596,7 +6440,7 @@ def test_backfill_recording_step_status_apply_and_convergent(
         """,
         ("dataset_step_a",),
     ).fetchall()
-    assert len(rows) == 18
+    assert len(rows) == 21
     by_step = {str(row["step_name"]): row for row in rows}
     assert set(by_step.keys()) == {
         "background",
@@ -4607,15 +6451,18 @@ def test_backfill_recording_step_status_apply_and_convergent(
         "dish_mask",
         "eye_masks",
         "eye_mask_tuning",
-        "id_assignment",
+        "arena_assignment",
         "keypoints",
         "keypoint_tuning",
         "raw",
         "refined_detect",
         "refined_eye_masks",
         "refined_keypoints",
+        "refined_subject_masks",
         "stimulus",
         "subdish_mask_tuning",
+        "subject_mask_tuning",
+        "subject_masks",
         "tracks",
     }
     assert all(str(row["status"]) == "ok" for row in rows)
@@ -4637,9 +6484,67 @@ def test_backfill_recording_step_status_apply_and_convergent(
     assert float(detect_details["detect_quality_score"]) == pytest.approx(98.4)
     assert float(detect_details["detect_quality_clean_percent"]) == pytest.approx(97.0)
     assert int(detect_details["detect_quality_artifacts"]) == 3
-    assert str(by_step["id_assignment"]["run_name"]) == "id_assign_001"
+    tracks_details_row = registry.conn.execute(
+        """
+        SELECT details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'tracks';
+        """,
+        ("dataset_step_a",),
+    ).fetchone()
+    assert tracks_details_row is not None
+    tracks_details = json.loads(str(tracks_details_row["details_json"]))
+    assert int(tracks_details["num_tracks"]) == 3
+    assert int(tracks_details["n_assigned_rows"]) == 3
+    assert int(tracks_details["n_unassigned_rows"]) == 1
+    assert float(tracks_details["unassigned_row_rate_percent"]) == pytest.approx(25.0)
+    assert tracks_details["tracking_qc_state"] == "warn"
+    assert int(tracks_details["tracking_warn_threshold_rows"]) == 1
+    assert float(tracks_details["tracking_block_threshold_percent"]) == pytest.approx(1.0)
+    assert str(by_step["arena_assignment"]["run_name"]) == "arena_assignment_001"
     assert str(by_step["stimulus"]["run_name"]) == "stimulus_001"
     assert str(by_step["tracks"]["run_name"]) == "tracks_001"
+    assert str(by_step["subject_masks"]["run_name"]) == "subject_masks_001"
+    assert str(by_step["subject_masks"]["method"]) == "subject_mask_threshold_lr_v1"
+    assert float(by_step["subject_masks"]["coverage_pct"]) == pytest.approx(100.0)
+    assert str(by_step["refined_subject_masks"]["run_name"]) == "refined_subject_masks_001"
+    assert str(by_step["refined_subject_masks"]["method"]) == "refine_subject_masks"
+
+    subject_details_row = registry.conn.execute(
+        """
+        SELECT details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'subject_masks';
+        """,
+        ("dataset_step_a",),
+    ).fetchone()
+    assert subject_details_row is not None
+    subject_details = json.loads(str(subject_details_row["details_json"]))
+    assert subject_details["label_schema_id"] == "subject_v1_lr"
+    assert subject_details["eye_component_mode"] == "lr"
+    assert subject_details["available_components"] == ["subject_body", "eye_left", "eye_right"]
+    assert subject_details["unavailable_components"] == ["swim_bladder"]
+    assert subject_details["component_review_states"]["subject_body"] == "approved"
+
+    refined_subject_details_row = registry.conn.execute(
+        """
+        SELECT details_json, review_status_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'refined_subject_masks';
+        """,
+        ("dataset_step_a",),
+    ).fetchone()
+    assert refined_subject_details_row is not None
+    refined_subject_details = json.loads(str(refined_subject_details_row["details_json"]))
+    assert refined_subject_details["source_subject_mask_run"] == "subject_masks_001"
+    assert refined_subject_details["available_components"] == [
+        "subject_body",
+        "eye_left",
+        "eye_right",
+        "swim_bladder",
+    ]
+    refined_subject_review = json.loads(str(refined_subject_details_row["review_status_json"]))
+    assert refined_subject_review["state"] == "approved"
 
     repeat = _backfill_recording_step_status(
         registry,
@@ -4650,14 +6555,14 @@ def test_backfill_recording_step_status_apply_and_convergent(
     )
     assert repeat["rows_inserted"] == 0
     assert repeat["rows_updated"] == 0
-    assert repeat["rows_skipped"] == 18
+    assert repeat["rows_skipped"] == 21
     assert repeat["history_rows_inserted"] == 0
 
     history_count = registry.conn.execute(
         "SELECT COUNT(*) AS n FROM recording_step_status_history WHERE dataset_id = ?;",
         ("dataset_step_a",),
     ).fetchone()
-    assert history_count is not None and int(history_count["n"]) == 18
+    assert history_count is not None and int(history_count["n"]) == 21
     registry.close()
 
 
@@ -4948,6 +6853,79 @@ def test_backfill_recording_step_status_marks_refined_eye_masks_stale_when_sourc
     registry.close()
 
 
+def test_backfill_recording_step_status_marks_refined_subject_masks_stale_when_source_mismatches_latest_subject_masks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_step_f" / "zarr" / "rec_step_f_analysis.zarr"
+    fake_root = _create_recording_step_status_zarr(zarr_path)
+    subject_masks_parent = fake_root["subject_mask_runs"]
+    subject_masks_parent.add_group(
+        "subject_masks_002",
+        attrs={
+            "created_utc": "2026-02-15T05:00:00+00:00",
+            "method": "subject_mask_threshold_lr_v1",
+            "label_schema_id": "subject_v1_lr",
+            "mask_labels": ["subject_body", "eye_left", "eye_right", "swim_bladder"],
+        },
+    ).add_array("available_channels", np.array([True, True, True, True], dtype=np.bool_))
+    subject_masks_parent["subject_masks_002"].add_array("frame_counts", np.array([1, 1, 1, 1], dtype=np.int32))
+    subject_masks_parent.attrs["latest"] = "subject_masks_002"
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+
+    registry.upsert_dataset(
+        dataset_id="dataset_step_f",
+        session_uuid="session_step_f",
+        zarr_path=zarr_path,
+        recording_id="recording_step_f",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    _backfill_recording_step_status(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        recording_ids=None,
+        zarr_use_filter="all",
+    )
+
+    refined_subject_row = registry.conn.execute(
+        """
+        SELECT status, run_name, coverage_pct, details_json
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'refined_subject_masks';
+        """,
+        ("dataset_step_f",),
+    ).fetchone()
+    assert refined_subject_row is not None
+    assert str(refined_subject_row["status"]) == "missing"
+    assert refined_subject_row["run_name"] is None
+    assert refined_subject_row["coverage_pct"] is None
+    refined_subject_details = json.loads(str(refined_subject_row["details_json"]))
+    assert refined_subject_details["reason"] == "stale_vs_latest_subject_masks"
+    assert refined_subject_details["expected_source_subject_mask_run"] == "subject_masks_002"
+    assert refined_subject_details["latest_refined_subject_masks_run"] == "refined_subject_masks_001"
+    assert refined_subject_details["latest_refined_subject_masks_source_run"] == "subject_masks_001"
+
+    subject_masks_row = registry.conn.execute(
+        """
+        SELECT status, run_name
+        FROM recording_step_status
+        WHERE dataset_id = ? AND step_name = 'subject_masks';
+        """,
+        ("dataset_step_f",),
+    ).fetchone()
+    assert subject_masks_row is not None
+    assert str(subject_masks_row["status"]) == "ok"
+    assert str(subject_masks_row["run_name"]) == "subject_masks_002"
+    registry.close()
+
+
 def test_backfill_recording_step_status_scoped_filters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4986,7 +6964,7 @@ def test_backfill_recording_step_status_scoped_filters(
         recording_ids=("recording_scope_a",),
         zarr_use_filter="all",
     )
-    assert by_recording["rows_inserted"] == 18
+    assert by_recording["rows_inserted"] == 21
     assert by_recording["datasets_skipped_recording_filter"] == 1
 
     by_use = _backfill_recording_step_status(
@@ -4996,7 +6974,7 @@ def test_backfill_recording_step_status_scoped_filters(
         recording_ids=None,
         zarr_use_filter="analysis",
     )
-    assert by_use["rows_inserted"] == 18
+    assert by_use["rows_inserted"] == 21
     assert by_use["datasets_skipped_zarr_use_filter"] == 1
 
     by_scope = _backfill_recording_step_status(
@@ -5006,7 +6984,7 @@ def test_backfill_recording_step_status_scoped_filters(
         recording_ids=None,
         zarr_use_filter="all",
     )
-    assert by_scope["rows_inserted"] == 18
+    assert by_scope["rows_inserted"] == 21
     assert by_scope["datasets_skipped_path"] == 1
 
     current_count = registry.conn.execute(
@@ -5218,6 +7196,147 @@ def test_registry_schema_version_bootstrap_for_existing_registry(tmp_path: Path)
     row = reopened.conn.execute("SELECT MAX(version) AS version FROM schema_version;").fetchone()
     assert row is not None
     assert int(row["version"]) == latest_version
+    reopened.close()
+
+
+def test_subject_mask_registry_semantics_columns_migrate_existing_registry(tmp_path: Path) -> None:
+    path = tmp_path / "registry.sqlite"
+    with sqlite3.connect(str(path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE schema_version (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_utc TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO schema_version (version, name, applied_utc)
+            VALUES (32, 'subject_mask_registry', '2026-03-10T00:00:00+00:00');
+            """
+        )
+        conn.execute("PRAGMA user_version = 32;")
+        conn.execute(
+            """
+            CREATE TABLE datasets (
+                dataset_id TEXT PRIMARY KEY,
+                zarr_path TEXT,
+                zarr_origin TEXT,
+                zarr_use TEXT,
+                artifact_kind TEXT,
+                status TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE provenance (
+                dataset_id TEXT PRIMARY KEY,
+                rig_id TEXT,
+                arena_id TEXT,
+                camera_id TEXT,
+                canvas_name TEXT,
+                dish_design TEXT,
+                protocol_name TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE subject_mask_performance (
+                dataset_id TEXT NOT NULL,
+                stage_group TEXT NOT NULL,
+                run_name TEXT NOT NULL,
+                run_created_utc TEXT,
+                recording_id TEXT,
+                zarr_use TEXT,
+                subject_mask_method TEXT,
+                label_schema_id TEXT,
+                source_crop_run TEXT,
+                source_keypoint_group TEXT,
+                source_keypoints_run TEXT,
+                source_subject_mask_run TEXT,
+                source_subject_mask_method TEXT,
+                total_rois INTEGER,
+                rows_with_any_mask INTEGER,
+                coverage_percent REAL,
+                duration_seconds REAL,
+                rois_per_second REAL,
+                available_component_count INTEGER,
+                available_components_json TEXT,
+                unavailable_components_json TEXT,
+                component_review_states_json TEXT,
+                eye_component_mode TEXT,
+                reason_counts_json TEXT,
+                summary_statistics_json TEXT,
+                review_state TEXT,
+                review_method TEXT,
+                review_intended_use TEXT,
+                review_reviewer TEXT,
+                review_timestamp_utc TEXT,
+                source_subject_mask_stale_state TEXT,
+                source_subject_mask_stale_reason TEXT,
+                source_subject_mask_stale_timestamp_utc TEXT,
+                source_subject_mask_stale_json TEXT,
+                lifecycle_state TEXT,
+                lifecycle_reason TEXT,
+                zarr_mtime_ns INTEGER,
+                updated_utc TEXT,
+                PRIMARY KEY (dataset_id, stage_group, run_name)
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE subject_mask_component_quality (
+                dataset_id TEXT NOT NULL,
+                stage_group TEXT NOT NULL,
+                run_name TEXT NOT NULL,
+                component_name TEXT NOT NULL,
+                component_family TEXT,
+                run_created_utc TEXT,
+                recording_id TEXT,
+                zarr_use TEXT,
+                subject_mask_method TEXT,
+                label_schema_id TEXT,
+                eye_component_mode TEXT,
+                source_subject_mask_run TEXT,
+                available INTEGER,
+                review_state TEXT,
+                review_method TEXT,
+                review_intended_use TEXT,
+                review_reviewer TEXT,
+                review_timestamp_utc TEXT,
+                total_rois INTEGER,
+                rows_with_component_mask INTEGER,
+                rows_with_component_mask_rate REAL,
+                lifecycle_state TEXT,
+                lifecycle_reason TEXT,
+                quality_updated_utc TEXT,
+                zarr_mtime_ns INTEGER,
+                PRIMARY KEY (dataset_id, stage_group, run_name, component_name)
+            );
+            """
+        )
+        conn.commit()
+
+    reopened = Registry(path)
+    columns = {
+        str(row["name"])
+        for row in reopened.conn.execute("PRAGMA table_info(subject_mask_performance);").fetchall()
+    }
+    assert "run_semantics" in columns
+    assert "probability_semantics" in columns
+    assert "source_background_run" in columns
+    assert "source_background_array" in columns
+    assert "source_dish_mask_array" in columns
+    assert "tuning_source" in columns
+    assert "tuning_timestamp" in columns
+    row = reopened.conn.execute("SELECT MAX(version) AS version FROM schema_version;").fetchone()
+    assert row is not None
+    assert int(row["version"]) == max(version for version, _name, _fn in reopened._schema_migrations())
     reopened.close()
 
 

@@ -232,3 +232,224 @@ def test_query_datasets_require_steps_ok_none_is_noop(tmp_path: Path) -> None:
     assert all_ids == default_ids == {"ds_a", "ds_b"}
 
     registry.close()
+
+
+def test_query_datasets_prefers_dataset_context_current_for_context_and_lineage(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_ctx",
+        session_uuid="session_ctx",
+        zarr_path=tmp_path / "dataset_ctx.zarr",
+        recording_id="recording_ctx",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_provenance(
+        "dataset_ctx",
+        provenance={
+            "fish_id": "legacy_subject",
+            "genotype": "legacy_genotype",
+            "dpf_at_acquisition": 9,
+            "subject_count": 7,
+        },
+        context={
+            "rig_id": "rig_legacy",
+            "arena_id": "arena_legacy",
+            "camera_id": "camera_legacy",
+            "canvas_name": "canvas_legacy",
+        },
+        protocol_name="protocol_legacy",
+        protocol_hash="hash_ctx",
+        acquisition={
+            "dish_design": "dish_design_legacy",
+            "fps": 120.0,
+        },
+        zarr_purpose="analysis",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path,
+            recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+            rig_id, arena_id, camera_id, canvas_name, protocol_name, dish_design,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_ctx",
+            "session_ctx",
+            "recording_ctx",
+            str(tmp_path / "recordings" / "recording_ctx"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+            "rig_recording",
+            "arena_recording",
+            "camera_recording",
+            "canvas_recording",
+            "protocol_recording",
+            "dish_design_recording",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO crosses (cross_id, genotype, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("cross_ctx", "genotype_ctx"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO dishes (dish_id, cross_id, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("dish_ctx", "cross_ctx"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO subjects (subject_id, dish_id, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("subject_ctx", "dish_ctx"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_subjects (
+            recording_id, subject_id, dataset_id, dish_id, cross_id, dpf_at_acquisition,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("recording_ctx", "subject_ctx", "dataset_ctx", "dish_ctx", "cross_ctx", 8),
+    )
+    registry.conn.commit()
+
+    rows = registry.query_datasets(
+        dish_design="dish_design_recording",
+        fish_id="subject_ctx",
+        camera_id="camera_recording",
+        rig_id="rig_recording",
+        arena_id="arena_recording",
+    )
+    legacy_rows = registry.query_datasets(
+        dish_design="dish_design_legacy",
+        camera_id="camera_legacy",
+    )
+    registry.close()
+
+    assert [row["dataset_id"] for row in rows] == ["dataset_ctx"]
+    row = rows[0]
+    assert row["dish_design"] == "dish_design_recording"
+    assert row["fish_id"] == "subject_ctx"
+    assert row["subject_id"] == "subject_ctx"
+    assert int(row["subject_count"]) == 1
+    assert int(row["subject_count_snapshot"]) == 7
+    assert int(row["subject_count_recorded"]) == 1
+    assert row["subject_context_source"] == "normalized"
+    assert row["camera_id"] == "camera_recording"
+    assert row["rig_id"] == "rig_recording"
+    assert row["arena_id"] == "arena_recording"
+    assert row["canvas_name"] == "canvas_recording"
+    assert row["protocol_name"] == "protocol_recording"
+    assert row["genotype"] == "genotype_ctx"
+    assert int(row["dpf_at_acquisition"]) == 8
+    assert json.loads(str(row["subject_ids_json"])) == ["subject_ctx"]
+    assert legacy_rows == []
+
+
+def test_query_datasets_fish_id_matches_multi_subject_lineage_membership(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_multi",
+        session_uuid="session_multi",
+        zarr_path=tmp_path / "dataset_multi.zarr",
+        recording_id="recording_multi",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_provenance(
+        "dataset_multi",
+        provenance={"subject_count": 2},
+        context={},
+        protocol_name=None,
+        protocol_hash=None,
+        acquisition={},
+        zarr_purpose="analysis",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path,
+            recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_multi",
+            "session_multi",
+            "recording_multi",
+            str(tmp_path / "recordings" / "recording_multi"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+        ),
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO crosses (cross_id, genotype, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        [
+            ("cross_a", "genotype_a"),
+            ("cross_b", "genotype_b"),
+        ],
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO dishes (dish_id, cross_id, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        [
+            ("dish_a", "cross_a"),
+            ("dish_b", "cross_b"),
+        ],
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO subjects (subject_id, dish_id, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        [
+            ("subject_a", "dish_a"),
+            ("subject_b", "dish_b"),
+        ],
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO recording_subjects (
+            recording_id, subject_id, dataset_id, dish_id, cross_id, dpf_at_acquisition,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        [
+            ("recording_multi", "subject_a", "dataset_multi", "dish_a", "cross_a", 7),
+            ("recording_multi", "subject_b", "dataset_multi", "dish_b", "cross_b", 8),
+        ],
+    )
+    registry.conn.commit()
+
+    rows = registry.query_datasets(fish_id="subject_b")
+    registry.close()
+
+    assert [row["dataset_id"] for row in rows] == ["dataset_multi"]
+    row = rows[0]
+    assert row["fish_id"] is None
+    assert row["subject_id"] is None
+    assert int(row["subject_count"]) == 2
+    assert row["subject_context_source"] == "normalized"
+    assert json.loads(str(row["subject_ids_json"])) == ["subject_a", "subject_b"]

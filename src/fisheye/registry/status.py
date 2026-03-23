@@ -86,18 +86,18 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     missing_dpf = _fetch_count(
         cursor,
         """
-        SELECT COUNT(*) FROM provenance
+        SELECT COUNT(*) FROM dataset_context_current
         WHERE dpf_at_acquisition IS NULL;
         """,
     )
     missing_context = _fetch_count(
         cursor,
         """
-        SELECT COUNT(*) FROM provenance
-        WHERE rig_id IS NULL
-           OR arena_id IS NULL
-           OR camera_id IS NULL
-           OR canvas_name IS NULL;
+        SELECT COUNT(*) FROM dataset_context_current
+        WHERE rig_id IS NULL OR TRIM(rig_id) = ''
+           OR arena_id IS NULL OR TRIM(arena_id) = ''
+           OR camera_id IS NULL OR TRIM(camera_id) = ''
+           OR canvas_name IS NULL OR TRIM(canvas_name) = '';
         """,
     )
 
@@ -123,17 +123,21 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         if args.list_issues:
             where = (
                 "WHERE p.snapshot_status IS NULL OR p.snapshot_status != 'complete' "
-                "OR p.protocol_hash IS NULL OR p.dpf_at_acquisition IS NULL "
-                "OR p.rig_id IS NULL OR p.arena_id IS NULL OR p.camera_id IS NULL OR p.canvas_name IS NULL"
+                "OR p.protocol_hash IS NULL OR dcc.dpf_at_acquisition IS NULL "
+                "OR dcc.rig_id IS NULL OR TRIM(dcc.rig_id) = '' "
+                "OR dcc.arena_id IS NULL OR TRIM(dcc.arena_id) = '' "
+                "OR dcc.camera_id IS NULL OR TRIM(dcc.camera_id) = '' "
+                "OR dcc.canvas_name IS NULL OR TRIM(dcc.canvas_name) = ''"
             )
 
         rows = cursor.execute(
             f"""
             SELECT d.dataset_id, d.zarr_path, d.status,
                    p.snapshot_status, p.snapshot_missing_json,
-                   p.protocol_name, p.dpf_at_acquisition
+                   dcc.protocol_name, dcc.dpf_at_acquisition
             FROM datasets d
             LEFT JOIN provenance p ON d.dataset_id = p.dataset_id
+            LEFT JOIN dataset_context_current dcc ON d.dataset_id = dcc.dataset_id
             {where}
             ORDER BY d.dataset_id
             {limit_clause};

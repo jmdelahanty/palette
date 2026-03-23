@@ -12,6 +12,8 @@ from fisheye.utils.check_training_registry import (
     RecordingVocabRow,
     _detect_quality_exclusion_reason,
     _fetch_exports,
+    _load_dataset_rows,
+    _load_recording_rows,
     _load_onnx_rows,
     _load_tensorrt_rows,
     _format_recording_vocab_inline,
@@ -30,6 +32,68 @@ from fisheye.utils.check_training_registry import (
     _summarize_keypoint_profile_rows,
     _summarize_keypoint_quality_rows,
 )
+
+
+def test_load_dataset_rows_prefers_canonical_recording_context(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        registry.upsert_dataset(
+            dataset_id="dataset_ctx",
+            session_uuid="session_ctx",
+            zarr_path=tmp_path / "dataset_ctx.zarr",
+            recording_id="recording_ctx",
+            artifact_kind="source_recording",
+        )
+        registry.upsert_provenance(
+            "dataset_ctx",
+            provenance={"snapshot_status": "complete"},
+            context={},
+            protocol_name=None,
+            protocol_hash="hash_ctx",
+            acquisition={},
+            zarr_purpose="analysis",
+        )
+        registry.conn.execute(
+            """
+            INSERT INTO recordings (
+                recording_id, session_uuid, recording_name, recording_path,
+                recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+                rig_id, arena_id, camera_id, created_utc, updated_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+            """,
+            (
+                "recording_ctx",
+                "session_ctx",
+                "recording_ctx",
+                str(tmp_path / "recordings" / "recording_ctx"),
+                "behavior",
+                "free",
+                "free",
+                "behavior_v1",
+                "rig_recording",
+                "arena_recording",
+                "camera_recording",
+            ),
+        )
+        registry.conn.execute(
+            """
+            UPDATE provenance
+            SET rig_id = ?, arena_id = ?, camera_id = ?
+            WHERE dataset_id = ?;
+            """,
+            ("rig_legacy", "arena_legacy", "camera_legacy", "dataset_ctx"),
+        )
+        registry.conn.commit()
+
+        rows = _load_dataset_rows(registry, set_filter=None, limit=None)
+    finally:
+        registry.close()
+
+    assert len(rows) == 1
+    assert rows[0].dataset_id == "dataset_ctx"
+    assert rows[0].rig_id == "rig_recording"
+    assert rows[0].arena_id == "arena_recording"
+    assert rows[0].camera_id == "camera_recording"
 
 
 def test_metrics_summary_from_json_prefers_common_fields() -> None:
@@ -1170,6 +1234,116 @@ def test_recording_overview_view_works_without_training_sets(tmp_path: Path, cap
     assert "rec_ov_001" in out
 
 
+def test_load_dataset_rows_prefers_dataset_context_current_for_recording_context(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_ctx",
+        session_uuid="session_ctx",
+        zarr_path=tmp_path / "ctx.zarr",
+        recording_id="recording_ctx",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_provenance(
+        "dataset_ctx",
+        provenance={},
+        context={},
+        protocol_name=None,
+        protocol_hash=None,
+        acquisition={},
+        zarr_purpose="training",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path,
+            recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+            rig_id, arena_id, camera_id, created_utc, updated_utc
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_ctx",
+            "session_ctx",
+            "recording_ctx",
+            str(tmp_path / "recordings" / "recording_ctx"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+            "rig_recording",
+            "arena_recording",
+            "camera_recording",
+        ),
+    )
+    registry.conn.execute(
+        """
+        UPDATE provenance
+        SET rig_id = ?, arena_id = ?, camera_id = ?
+        WHERE dataset_id = ?;
+        """,
+        ("rig_legacy", "arena_legacy", "camera_legacy", "dataset_ctx"),
+    )
+    registry.conn.commit()
+
+    rows = _load_dataset_rows(registry)
+    registry.close()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.dataset_id == "dataset_ctx"
+    assert row.rig_id == "rig_recording"
+    assert row.arena_id == "arena_recording"
+    assert row.camera_id == "camera_recording"
+
+
+def test_load_recording_rows_uses_dataset_context_current_fallback_for_dish_design(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_ctx",
+        session_uuid="session_ctx",
+        zarr_path=tmp_path / "ctx.zarr",
+        recording_id="recording_ctx",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_provenance(
+        "dataset_ctx",
+        provenance={},
+        context={},
+        protocol_name=None,
+        protocol_hash=None,
+        acquisition={"dish_design": "dish_design_legacy"},
+        zarr_purpose="training",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path,
+            recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+            dish_design, created_utc, updated_utc
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_ctx",
+            "session_ctx",
+            "recording_ctx",
+            str(tmp_path / "recordings" / "recording_ctx"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+            None,
+        ),
+    )
+
+    rows = _load_recording_rows(registry)
+    registry.close()
+
+    assert len(rows) == 1
+    assert rows[0].recording_id == "recording_ctx"
+    assert rows[0].dish_design == "dish_design_legacy"
+
+
 def test_recording_steps_view_outputs_overview_rows(tmp_path: Path, capsys) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
@@ -1333,7 +1507,7 @@ def test_recording_steps_wide_view_outputs_rows(tmp_path: Path, capsys) -> None:
             (
                 "dataset_steps_wide",
                 "rec_steps_wide_001",
-                "id_assignment",
+                "arena_assignment",
                 "missing",
                 None,
                 None,

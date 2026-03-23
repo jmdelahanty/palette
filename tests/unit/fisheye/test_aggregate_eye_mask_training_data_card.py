@@ -24,6 +24,75 @@ def _seed_dataset(registry: Registry, *, dataset_id: str, recording_id: str, zar
     )
 
 
+def _seed_legacy_provenance_context(
+    registry: Registry,
+    *,
+    dataset_id: str,
+    rig_id: str,
+    arena_id: str,
+    camera_id: str,
+    canvas_name: str,
+    protocol_name: str,
+    dish_design: str,
+) -> None:
+    registry.upsert_provenance(
+        dataset_id,
+        provenance={"snapshot_status": "complete"},
+        context={
+            "rig_id": rig_id,
+            "arena_id": arena_id,
+            "camera_id": camera_id,
+            "canvas_name": canvas_name,
+        },
+        protocol_name=protocol_name,
+        protocol_hash="hash_ctx",
+        acquisition={"dish_design": dish_design},
+        zarr_purpose="analysis",
+    )
+
+
+def _seed_recording_context(
+    registry: Registry,
+    *,
+    recording_id: str,
+    session_uuid: str,
+    root: Path,
+    rig_id: str,
+    arena_id: str,
+    camera_id: str,
+    canvas_name: str,
+    protocol_name: str,
+    dish_design: str,
+) -> None:
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path,
+            recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+            rig_id, arena_id, camera_id, canvas_name, protocol_name, dish_design,
+            created_utc, updated_utc
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            recording_id,
+            session_uuid,
+            recording_id,
+            str(root / "recordings" / recording_id),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+            rig_id,
+            arena_id,
+            camera_id,
+            canvas_name,
+            protocol_name,
+            dish_design,
+        ),
+    )
+    registry.conn.commit()
+
+
 def _seed_subject_lineage(
     registry: Registry,
     *,
@@ -382,6 +451,77 @@ def test_aggregate_eye_mask_data_card_fallback_from_performance_latest(
     assert payload["audit_freshness"]["profile_source"] == "performance_latest_fallback"
     assert payload["quality"]["successful_roi_pair_rate_overall"] == pytest.approx(0.85)
     assert payload["geometry"]["eye_separation_p50_dataset_stats"]["p50"] == pytest.approx(5.1)
+
+
+def test_query_eye_mask_performance_fallback_prefers_dataset_context_current(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        zarr_a = tmp_path / "a_training.zarr"
+        _seed_dataset(registry, dataset_id="dataset_a", recording_id="rec_a", zarr_path=zarr_a)
+        _seed_legacy_provenance_context(
+            registry,
+            dataset_id="dataset_a",
+            rig_id="rig_legacy",
+            arena_id="arena_legacy",
+            camera_id="camera_legacy",
+            canvas_name="canvas_legacy",
+            protocol_name="protocol_legacy",
+            dish_design="dish_design_legacy",
+        )
+        _seed_recording_context(
+            registry,
+            recording_id="rec_a",
+            session_uuid="dataset_a_session",
+            root=tmp_path,
+            rig_id="rig_recording",
+            arena_id="arena_recording",
+            camera_id="camera_recording",
+            canvas_name="canvas_recording",
+            protocol_name="protocol_recording",
+            dish_design="dish_design_recording",
+        )
+        registry.upsert_eye_mask_performance(
+            dataset_id="dataset_a",
+            stage_group="refined_eye_masks_runs",
+            run_name="refined_eye_masks_001",
+            run_created_utc="2026-02-25T00:00:00+00:00",
+            recording_id="rec_a",
+            zarr_use="training",
+            method="refine_eye_masks",
+            source_crop_run="crop_001",
+            source_keypoint_group="keypoints_runs",
+            source_keypoints_run="keypoints_001",
+            source_eye_masks_run="eye_masks_001",
+            source_eye_masks_method="traditional_eye_segmentation",
+            total_rois=120,
+            successful_eyes=220,
+            successful_roi_pairs=102,
+            successful_roi_pair_rate=0.85,
+            duration_seconds=20.0,
+            rois_per_second=6.0,
+            inference_duration_seconds=None,
+            inference_average_fps=6.0,
+            reason_counts_json=json.dumps({"clean": 110}),
+            summary_statistics_json=json.dumps({"geometry": {"eye_separation": {"stats": {"p50": 5.1}}}}),
+            review_state="approved",
+            review_method="manual",
+            review_intended_use="training",
+            review_reviewer="pytest",
+            review_timestamp_utc="2026-02-25T00:05:00+00:00",
+            zarr_mtime_ns=int(zarr_a.stat().st_mtime_ns),
+        )
+
+        rows = mod._query_eye_mask_performance_fallback(registry, dataset_ids=["dataset_a"])  # noqa: SLF001
+    finally:
+        registry.close()
+
+    row = rows["dataset_a"]
+    assert row["rig_id"] == "rig_recording"
+    assert row["arena_id"] == "arena_recording"
+    assert row["camera_id"] == "camera_recording"
+    assert row["canvas_name"] == "canvas_recording"
+    assert row["protocol_name"] == "protocol_recording"
+    assert row["dish_design"] == "dish_design_recording"
 
 
 def test_aggregate_eye_mask_data_card_profile_mtime_mismatch_policy(

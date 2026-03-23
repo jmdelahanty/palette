@@ -14,6 +14,7 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.batch_logging import utc_now
 from fisheye.registry.db import Registry, RegistryPaths
 
 try:  # Optional until plotting utility lands.
@@ -63,8 +64,7 @@ class PoseSchema:
     skeleton: tuple[tuple[int, int], ...]
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_utc_now = utc_now
 
 
 def _normalize_text(value: Any) -> Optional[str]:
@@ -413,7 +413,7 @@ def _build_dpf_histogram(
     }
 
 
-def _query_provenance_rows(
+def _query_dataset_context_rows(
     registry: Registry,
     *,
     dataset_ids: Sequence[str],
@@ -423,7 +423,7 @@ def _query_provenance_rows(
     placeholders = ", ".join("?" for _ in dataset_ids)
     sql = (
         "SELECT dataset_id, rig_id, camera_id, arena_id, dish_design, canvas_name, protocol_name "
-        "FROM provenance "
+        "FROM dataset_context_current "
         f"WHERE dataset_id IN ({placeholders});"
     )
     rows = registry.conn.execute(sql, tuple(dataset_ids)).fetchall()
@@ -1379,7 +1379,7 @@ def _build_keypoint_training_data_card(
         dataset_refs=refs,
         quality_rows_by_dataset=quality_rows_by_dataset,
     )
-    provenance_rows = _query_provenance_rows(registry, dataset_ids=dataset_ids)
+    context_rows = _query_dataset_context_rows(registry, dataset_ids=dataset_ids)
     subject_lineage_coverage, lineage_rows = _evaluate_subject_lineage_coverage(
         registry,
         dataset_ids=dataset_ids,
@@ -1469,7 +1469,7 @@ def _build_keypoint_training_data_card(
     for ref in refs:
         quality_row = quality_rows_by_dataset.get(ref.dataset_id)
         profile_row = profile_rows_by_dataset.get(ref.dataset_id)
-        provenance = provenance_rows.get(ref.dataset_id, {})
+        dataset_context = context_rows.get(ref.dataset_id, {})
         manifest_row = ref.manifest_row
 
         keypoint_method = (
@@ -1483,22 +1483,22 @@ def _build_keypoint_training_data_card(
             {
                 "rig_id": (
                     _normalize_text(profile_row.get("rig_id")) if profile_row is not None else None
-                ) or _normalize_text(provenance.get("rig_id")) or _normalize_text(manifest_row.get("rig_id")),
+                ) or _normalize_text(dataset_context.get("rig_id")) or _normalize_text(manifest_row.get("rig_id")),
                 "camera_id": (
                     _normalize_text(profile_row.get("camera_id")) if profile_row is not None else None
-                ) or _normalize_text(provenance.get("camera_id")) or _normalize_text(manifest_row.get("camera_id")),
+                ) or _normalize_text(dataset_context.get("camera_id")) or _normalize_text(manifest_row.get("camera_id")),
                 "arena_id": (
                     _normalize_text(profile_row.get("arena_id")) if profile_row is not None else None
-                ) or _normalize_text(provenance.get("arena_id")) or _normalize_text(manifest_row.get("arena_id")),
+                ) or _normalize_text(dataset_context.get("arena_id")) or _normalize_text(manifest_row.get("arena_id")),
                 "dish_design": (
                     _normalize_text(profile_row.get("dish_design")) if profile_row is not None else None
-                ) or _normalize_text(provenance.get("dish_design")) or _normalize_text(manifest_row.get("dish_design")),
+                ) or _normalize_text(dataset_context.get("dish_design")) or _normalize_text(manifest_row.get("dish_design")),
                 "canvas_name": (
                     _normalize_text(profile_row.get("canvas_name")) if profile_row is not None else None
-                ) or _normalize_text(provenance.get("canvas_name")) or _normalize_text(manifest_row.get("canvas_name")),
+                ) or _normalize_text(dataset_context.get("canvas_name")) or _normalize_text(manifest_row.get("canvas_name")),
                 "protocol_name": (
                     _normalize_text(profile_row.get("protocol_name")) if profile_row is not None else None
-                ) or _normalize_text(provenance.get("protocol_name")) or _normalize_text(manifest_row.get("protocol_name")),
+                ) or _normalize_text(dataset_context.get("protocol_name")) or _normalize_text(manifest_row.get("protocol_name")),
                 "keypoint_method": keypoint_method,
             }
         )

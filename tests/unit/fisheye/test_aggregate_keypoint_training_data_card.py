@@ -89,6 +89,48 @@ def _seed_dataset(registry: Registry, *, dataset_id: str, recording_id: str, zar
     )
 
 
+def _seed_recording_context(
+    registry: Registry,
+    *,
+    recording_id: str,
+    session_uuid: str,
+    root: Path,
+    rig_id: str,
+    arena_id: str,
+    camera_id: str,
+    canvas_name: str,
+    protocol_name: str,
+    dish_design: str,
+) -> None:
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path,
+            recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+            rig_id, arena_id, camera_id, canvas_name, protocol_name, dish_design,
+            created_utc, updated_utc
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            recording_id,
+            session_uuid,
+            recording_id,
+            str(root / "recordings" / recording_id),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+            rig_id,
+            arena_id,
+            camera_id,
+            canvas_name,
+            protocol_name,
+            dish_design,
+        ),
+    )
+    registry.conn.commit()
+
+
 def _seed_keypoint_quality(
     registry: Registry,
     *,
@@ -947,6 +989,36 @@ def test_missing_profile_rows_fail_closed_unless_fallback_enabled(
     )
     assert rc_fallback == 0
     assert output_path.exists()
+
+
+def test_query_dataset_context_rows_prefers_canonical_recording_context(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    try:
+        zarr_path = tmp_path / "pose_training.zarr"
+        _seed_dataset(registry, dataset_id="dataset_pose", recording_id="rec_pose", zarr_path=zarr_path)
+        _seed_recording_context(
+            registry,
+            recording_id="rec_pose",
+            session_uuid="dataset_pose_session",
+            root=tmp_path,
+            rig_id="rig_recording",
+            arena_id="arena_recording",
+            camera_id="camera_recording",
+            canvas_name="canvas_recording",
+            protocol_name="protocol_recording",
+            dish_design="dish_design_recording",
+        )
+
+        rows = mod._query_dataset_context_rows(registry, dataset_ids=["dataset_pose"])  # noqa: SLF001
+    finally:
+        registry.close()
+
+    assert rows["dataset_pose"]["rig_id"] == "rig_recording"
+    assert rows["dataset_pose"]["arena_id"] == "arena_recording"
+    assert rows["dataset_pose"]["camera_id"] == "camera_recording"
+    assert rows["dataset_pose"]["canvas_name"] == "canvas_recording"
+    assert rows["dataset_pose"]["protocol_name"] == "protocol_recording"
+    assert rows["dataset_pose"]["dish_design"] == "dish_design_recording"
 
 
 def test_profile_mtime_mismatch_fail_closed_unless_allowed(

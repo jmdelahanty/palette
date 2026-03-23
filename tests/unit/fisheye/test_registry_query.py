@@ -145,6 +145,97 @@ def _seed_registry_for_subject_filters(registry_path: Path) -> None:
     registry.close()
 
 
+def _seed_registry_for_canonical_context_filters(registry_path: Path) -> None:
+    registry = Registry(registry_path)
+    registry.upsert_dataset(
+        "dataset_ctx",
+        session_uuid="session_ctx",
+        zarr_path=registry_path.parent / "ctx.zarr",
+        recording_id="recording_ctx",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_provenance(
+        "dataset_ctx",
+        provenance={
+            "fish_id": "legacy_subject",
+            "genotype": "legacy_genotype",
+            "dpf_at_acquisition": 9,
+            "subject_count": 1,
+        },
+        context={
+            "rig_id": "rig_legacy",
+            "arena_id": "arena_legacy",
+            "camera_id": "camera_legacy",
+            "canvas_name": "canvas_legacy",
+        },
+        protocol_name="protocol_legacy",
+        protocol_hash=None,
+        acquisition={"dish_design": "dish_design_legacy"},
+        zarr_purpose="analysis",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path,
+            recording_type, recording_subtype, behavior_mode, artifact_schema_id,
+            rig_id, arena_id, camera_id, canvas_name, protocol_name, dish_design,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_ctx",
+            "session_ctx",
+            "recording_ctx",
+            str(registry_path.parent / "recording_ctx"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+            "rig_recording",
+            "arena_recording",
+            "camera_recording",
+            "canvas_recording",
+            "protocol_recording",
+            "dish_design_recording",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO crosses (cross_id, genotype, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("cross_ctx", "genotype_ctx"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO dishes (dish_id, cross_id, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("dish_ctx", "cross_ctx"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO subjects (subject_id, dish_id, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("subject_ctx", "dish_ctx"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_subjects (
+            recording_id, subject_id, dataset_id, dish_id, cross_id, dpf_at_acquisition,
+            created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("recording_ctx", "subject_ctx", "dataset_ctx", "dish_ctx", "cross_ctx", 8),
+    )
+    registry.conn.commit()
+    registry.close()
+
+
 def _seed_registry_for_detect_filters(registry_path: Path) -> None:
     registry = Registry(registry_path)
     for (
@@ -1470,6 +1561,52 @@ def test_registry_query_rejects_invalid_dpf_range(tmp_path: Path) -> None:
         assert "--dpf-min must be <= --dpf-max." in str(exc)
     else:  # pragma: no cover - defensive branch
         raise AssertionError("Expected SystemExit for invalid DPF range.")
+
+
+def test_registry_query_camera_and_dish_filters_use_canonical_dataset_context(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_canonical_context_filters(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--camera-id",
+            "camera_recording",
+            "--dish-design",
+            "dish_design_recording",
+            "--fish-id",
+            "subject_ctx",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [row["dataset_id"] for row in payload] == ["dataset_ctx"]
+    row = payload[0]
+    assert row["camera_id"] == "camera_recording"
+    assert row["rig_id"] == "rig_recording"
+    assert row["arena_id"] == "arena_recording"
+    assert row["dish_design"] == "dish_design_recording"
+    assert row["protocol_name"] == "protocol_recording"
+    assert row["genotype"] == "genotype_ctx"
+    assert row["dpf_at_acquisition"] == 8
+
+    rc_legacy = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--camera-id",
+            "camera_legacy",
+            "--json",
+        ]
+    )
+    assert rc_legacy == 0
+    legacy_payload = json.loads(capsys.readouterr().out)
+    assert legacy_payload == []
 
 
 def test_registry_query_filters_by_detect_coverage_min(tmp_path: Path, capsys) -> None:

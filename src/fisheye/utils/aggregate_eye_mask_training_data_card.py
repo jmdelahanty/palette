@@ -14,6 +14,7 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.batch_logging import utc_now
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.utils import plot_eye_mask_training_data_card as plot_data_card
 
@@ -48,8 +49,7 @@ class SubjectLineageCoverage:
     coverage_unavailable_reason: Optional[str]
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_utc_now = utc_now
 
 
 def _normalize_text(value: Any) -> Optional[str]:
@@ -607,16 +607,16 @@ def _query_eye_mask_performance_fallback(
     sql = (
         "SELECT "
         "  emp.*, "
-        "  p.rig_id AS rig_id, "
-        "  p.camera_id AS camera_id, "
-        "  p.arena_id AS arena_id, "
-        "  p.dish_design AS dish_design, "
-        "  p.canvas_name AS canvas_name, "
-        "  p.protocol_name AS protocol_name, "
-        "  p.genotype AS genotype, "
-        "  p.dpf_at_acquisition AS dpf_at_acquisition "
+        "  dcc.rig_id AS rig_id, "
+        "  dcc.camera_id AS camera_id, "
+        "  dcc.arena_id AS arena_id, "
+        "  dcc.dish_design AS dish_design, "
+        "  dcc.canvas_name AS canvas_name, "
+        "  dcc.protocol_name AS protocol_name, "
+        "  dcc.genotype AS genotype, "
+        "  dcc.dpf_at_acquisition AS dpf_at_acquisition "
         "FROM eye_mask_performance_latest emp "
-        "LEFT JOIN provenance p ON p.dataset_id = emp.dataset_id "
+        "LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = emp.dataset_id "
         f"WHERE emp.dataset_id IN ({placeholders}) "
         "AND emp.stage_group IN ('refined_eye_masks_runs', 'eye_masks_runs') "
         "ORDER BY "

@@ -181,40 +181,46 @@ def _resolve_recording_id(
 def _load_target_profile(registry: Registry, recording_id: str) -> TargetProfile:
     row = registry.conn.execute(
         """
+        WITH source_context AS (
+            SELECT
+                d.recording_id AS recording_id,
+                MAX(NULLIF(TRIM(dcc.rig_id), '')) AS rig_id,
+                MAX(NULLIF(TRIM(dcc.arena_id), '')) AS arena_id,
+                MAX(NULLIF(TRIM(dcc.camera_id), '')) AS camera_id,
+                MAX(NULLIF(TRIM(dcc.canvas_name), '')) AS canvas_name,
+                MAX(NULLIF(TRIM(dcc.protocol_name), '')) AS protocol_name,
+                MAX(NULLIF(TRIM(dcc.dish_design), '')) AS dish_design,
+                MAX(NULLIF(TRIM(dcc.cross_id), '')) AS cross_id,
+                MAX(NULLIF(TRIM(dcc.genotype), '')) AS genotype,
+                MAX(dcc.dpf_at_acquisition) AS dpf_at_acquisition
+            FROM datasets d
+            LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = d.dataset_id
+            WHERE d.recording_id = ?
+              AND d.artifact_kind = 'source_recording'
+            GROUP BY d.recording_id
+        )
         SELECT
             r.recording_id,
             r.recording_type,
             r.recording_subtype,
             r.behavior_mode,
-            r.rig_id,
-            r.arena_id,
-            r.camera_id,
-            r.canvas_name,
-            r.protocol_name,
-            r.dish_design
+            COALESCE(NULLIF(TRIM(r.rig_id), ''), sc.rig_id) AS rig_id,
+            COALESCE(NULLIF(TRIM(r.arena_id), ''), sc.arena_id) AS arena_id,
+            COALESCE(NULLIF(TRIM(r.camera_id), ''), sc.camera_id) AS camera_id,
+            COALESCE(NULLIF(TRIM(r.canvas_name), ''), sc.canvas_name) AS canvas_name,
+            COALESCE(NULLIF(TRIM(r.protocol_name), ''), sc.protocol_name) AS protocol_name,
+            COALESCE(NULLIF(TRIM(r.dish_design), ''), sc.dish_design) AS dish_design,
+            sc.cross_id AS cross_id,
+            sc.genotype AS genotype,
+            sc.dpf_at_acquisition AS dpf_at_acquisition
         FROM recordings r
+        LEFT JOIN source_context sc ON sc.recording_id = r.recording_id
         WHERE r.recording_id = ?;
         """,
-        (recording_id,),
+        (recording_id, recording_id),
     ).fetchone()
     if row is None:
         raise SystemExit(f"Recording not found in recordings table: {recording_id}")
-
-    prov = registry.conn.execute(
-        """
-        SELECT
-            MAX(NULLIF(TRIM(p.protocol_name), '')) AS protocol_name,
-            MAX(NULLIF(TRIM(p.dish_design), '')) AS dish_design,
-            MAX(NULLIF(TRIM(p.cross_id), '')) AS cross_id,
-            MAX(NULLIF(TRIM(p.genotype), '')) AS genotype,
-            MAX(p.dpf_at_acquisition) AS dpf_at_acquisition
-        FROM datasets d
-        LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
-        WHERE d.recording_id = ?
-          AND d.artifact_kind = 'source_recording';
-        """,
-        (recording_id,),
-    ).fetchone()
 
     return TargetProfile(
         recording_id=str(row["recording_id"]),
@@ -225,11 +231,11 @@ def _load_target_profile(registry: Registry, recording_id: str) -> TargetProfile
         arena_id=_norm_text(row["arena_id"]),
         camera_id=_norm_text(row["camera_id"]),
         canvas_name=_norm_text(row["canvas_name"]),
-        protocol_name=_norm_text((row["protocol_name"] or prov["protocol_name"]) if prov else row["protocol_name"]),
-        dish_design=_norm_text((row["dish_design"] or prov["dish_design"]) if prov else row["dish_design"]),
-        cross_id=_norm_text(prov["cross_id"]) if prov else None,
-        genotype=_norm_text(prov["genotype"]) if prov else None,
-        dpf_at_acquisition=_norm_int(prov["dpf_at_acquisition"]) if prov else None,
+        protocol_name=_norm_text(row["protocol_name"]),
+        dish_design=_norm_text(row["dish_design"]),
+        cross_id=_norm_text(row["cross_id"]),
+        genotype=_norm_text(row["genotype"]),
+        dpf_at_acquisition=_norm_int(row["dpf_at_acquisition"]),
     )
 
 
@@ -291,21 +297,20 @@ def _load_source_rows_for_set(registry: Registry, dataset_ids: list[str]) -> lis
     sql = f"""
     SELECT
         d.dataset_id,
-        r.recording_type AS recording_type,
-        r.recording_subtype AS recording_subtype,
-        r.behavior_mode AS behavior_mode,
-        COALESCE(NULLIF(TRIM(r.rig_id), ''), NULLIF(TRIM(p.rig_id), '')) AS rig_id,
-        COALESCE(NULLIF(TRIM(r.arena_id), ''), NULLIF(TRIM(p.arena_id), '')) AS arena_id,
-        COALESCE(NULLIF(TRIM(r.camera_id), ''), NULLIF(TRIM(p.camera_id), '')) AS camera_id,
-        COALESCE(NULLIF(TRIM(r.canvas_name), ''), NULLIF(TRIM(p.canvas_name), '')) AS canvas_name,
-        COALESCE(NULLIF(TRIM(r.protocol_name), ''), NULLIF(TRIM(p.protocol_name), '')) AS protocol_name,
-        COALESCE(NULLIF(TRIM(r.dish_design), ''), NULLIF(TRIM(p.dish_design), '')) AS dish_design,
-        NULLIF(TRIM(p.cross_id), '') AS cross_id,
-        NULLIF(TRIM(p.genotype), '') AS genotype,
-        p.dpf_at_acquisition AS dpf_at_acquisition
+        dcc.recording_type AS recording_type,
+        dcc.recording_subtype AS recording_subtype,
+        dcc.behavior_mode AS behavior_mode,
+        dcc.rig_id AS rig_id,
+        dcc.arena_id AS arena_id,
+        dcc.camera_id AS camera_id,
+        dcc.canvas_name AS canvas_name,
+        dcc.protocol_name AS protocol_name,
+        dcc.dish_design AS dish_design,
+        dcc.cross_id AS cross_id,
+        dcc.genotype AS genotype,
+        dcc.dpf_at_acquisition AS dpf_at_acquisition
     FROM datasets d
-    LEFT JOIN recordings r ON r.recording_id = d.recording_id
-    LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
+    LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = d.dataset_id
     WHERE d.dataset_id IN ({placeholders})
       AND d.artifact_kind = 'source_recording';
     """
