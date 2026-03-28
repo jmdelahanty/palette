@@ -2783,7 +2783,9 @@ def test_dataset_context_current_handles_multi_subject_recordings(tmp_path: Path
     registry.close()
 
 
-def test_dataset_context_current_falls_back_to_provenance_context(tmp_path: Path) -> None:
+def test_dataset_context_current_exposes_legacy_provenance_biology_as_compatibility_only(
+    tmp_path: Path,
+) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     registry.upsert_dataset(
         dataset_id="dataset_legacy",
@@ -2839,23 +2841,31 @@ def test_dataset_context_current_falls_back_to_provenance_context(tmp_path: Path
     assert row["canvas_name"] == "canvas_legacy"
     assert row["protocol_name"] == "protocol_legacy"
     assert row["dish_design"] == "dish_design_legacy"
-    assert row["subject_context_source"] == "provenance"
-    assert row["subject_id"] == "legacy_fish"
-    assert row["dish_id"] == "legacy_dish"
-    assert row["cross_id"] == "legacy_cross"
-    assert row["genotype"] == "legacy_genotype"
-    assert row["line_strain"] == "legacy_line"
-    assert row["species"] == "danio_rerio"
-    assert row["sex"] == "unknown"
-    assert int(row["dpf_at_acquisition"]) == 6
+    assert row["subject_context_source"] == "legacy_provenance"
+    assert row["legacy_fish_id"] == "legacy_fish"
+    assert row["legacy_dish_id"] == "legacy_dish"
+    assert row["legacy_cross_id"] == "legacy_cross"
+    assert row["legacy_genotype"] == "legacy_genotype"
+    assert row["legacy_line_strain"] == "legacy_line"
+    assert row["legacy_species"] == "danio_rerio"
+    assert row["legacy_sex"] == "unknown"
+    assert int(row["legacy_dpf_at_acquisition"]) == 6
+    assert row["subject_id"] is None
+    assert row["dish_id"] is None
+    assert row["cross_id"] is None
+    assert row["genotype"] is None
+    assert row["line_strain"] is None
+    assert row["species"] is None
+    assert row["sex"] is None
+    assert row["dpf_at_acquisition"] is None
     assert int(row["subject_count_snapshot"]) == 1
     assert row["subject_count_recorded"] is None
     assert int(row["subject_count_effective"]) == 1
-    assert json.loads(str(row["subject_ids_json"])) == ["legacy_fish"]
-    assert json.loads(str(row["dish_ids_json"])) == ["legacy_dish"]
-    assert json.loads(str(row["cross_ids_json"])) == ["legacy_cross"]
-    assert json.loads(str(row["genotypes_json"])) == ["legacy_genotype"]
-    assert json.loads(str(row["dpf_values_json"])) == [6]
+    assert row["subject_ids_json"] is None
+    assert row["dish_ids_json"] is None
+    assert row["cross_ids_json"] is None
+    assert row["genotypes_json"] is None
+    assert row["dpf_values_json"] is None
     registry.close()
 
 
@@ -3310,6 +3320,276 @@ def test_backfill_subject_dish_cross_entities_from_source_provenance(tmp_path: P
     registry.close()
 
 
+def test_backfill_subject_dish_cross_entities_prefers_normalized_lineage_over_conflicting_provenance(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    dataset_id = "session_a:z111"
+    recording_id = "session_a"
+    registry.upsert_dataset(
+        dataset_id=dataset_id,
+        session_uuid=recording_id,
+        zarr_path=tmp_path / "recordings" / recording_id / "zarr" / f"{recording_id}.zarr",
+        recording_id=recording_id,
+        artifact_kind="source_recording",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            recording_id,
+            recording_id,
+            recording_id,
+            str(tmp_path / "recordings" / recording_id),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO crosses (cross_id, genotype, line_strain, created_utc, updated_utc)
+        VALUES (?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("cross_canonical", "geno_canonical", "line_canonical"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO dishes (dish_id, cross_id, species, created_utc, updated_utc)
+        VALUES (?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("dish_canonical", "cross_canonical", "danio_rerio"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_subjects (
+            recording_id, subject_id, dataset_id, dish_id, cross_id, dpf_at_acquisition,
+            species, sex, genotype, line_strain, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            recording_id,
+            "subject_canonical",
+            dataset_id,
+            "dish_canonical",
+            "cross_canonical",
+            7,
+            "danio_rerio",
+            "unknown",
+            "geno_subject",
+            "line_subject",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO provenance (
+            dataset_id, fish_id, dish_id, cross_id, line_strain, genotype, species,
+            sex, dpf_at_acquisition, subject_count, snapshot_status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            dataset_id,
+            "legacy_subject",
+            "dish_legacy",
+            "cross_legacy",
+            "line_legacy",
+            "geno_legacy",
+            "legacy_species",
+            "legacy_sex",
+            9,
+            1,
+            "complete",
+        ),
+    )
+    registry.conn.commit()
+
+    summary = _backfill_subject_dish_cross_entities(registry, dry_run=False)
+    assert summary["source_rows_scanned"] == 1
+    assert summary["recording_subject_rows_seen"] == 1
+    assert summary["recording_subjects_unique_seen"] == 1
+    assert summary["recording_subjects_would_insert"] == 0
+
+    subject_row = registry.conn.execute(
+        """
+        SELECT subject_id, dish_id, cross_id, dpf_at_acquisition, species, sex, genotype, line_strain
+        FROM recording_subjects
+        WHERE recording_id = ?;
+        """,
+        (recording_id,),
+    ).fetchone()
+    assert subject_row is not None
+    assert subject_row["subject_id"] == "subject_canonical"
+    assert subject_row["dish_id"] == "dish_canonical"
+    assert subject_row["cross_id"] == "cross_canonical"
+    assert int(subject_row["dpf_at_acquisition"]) == 7
+    assert subject_row["species"] == "danio_rerio"
+    assert subject_row["sex"] == "unknown"
+    assert subject_row["genotype"] == "geno_subject"
+    assert subject_row["line_strain"] == "line_subject"
+
+    legacy_subject_count = registry.conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM recording_subjects
+        WHERE recording_id = ? AND subject_id = ?;
+        """,
+        (recording_id, "legacy_subject"),
+    ).fetchone()[0]
+    assert legacy_subject_count == 0
+
+    legacy_cross_count = registry.conn.execute(
+        "SELECT COUNT(*) FROM crosses WHERE cross_id = ?;",
+        ("cross_legacy",),
+    ).fetchone()[0]
+    legacy_dish_count = registry.conn.execute(
+        "SELECT COUNT(*) FROM dishes WHERE dish_id = ?;",
+        ("dish_legacy",),
+    ).fetchone()[0]
+    assert legacy_cross_count == 0
+    assert legacy_dish_count == 0
+
+    cross_row = registry.conn.execute(
+        """
+        SELECT genotype, line_strain
+        FROM crosses
+        WHERE cross_id = ?;
+        """,
+        ("cross_canonical",),
+    ).fetchone()
+    assert cross_row is not None
+    assert cross_row["genotype"] == "geno_canonical"
+    assert cross_row["line_strain"] == "line_canonical"
+    registry.close()
+
+
+def test_backfill_subject_dish_cross_entities_enriches_matching_normalized_subject_from_provenance(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    dataset_id = "session_b:z111"
+    recording_id = "session_b"
+    registry.upsert_dataset(
+        dataset_id=dataset_id,
+        session_uuid=recording_id,
+        zarr_path=tmp_path / "recordings" / recording_id / "zarr" / f"{recording_id}.zarr",
+        recording_id=recording_id,
+        artifact_kind="source_recording",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            recording_id,
+            recording_id,
+            recording_id,
+            str(tmp_path / "recordings" / recording_id),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_subjects (
+            recording_id, subject_id, dataset_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            recording_id,
+            "subject_matching",
+            dataset_id,
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO provenance (
+            dataset_id, fish_id, dish_id, cross_id, line_strain, genotype, species,
+            sex, dpf_at_acquisition, subject_count, snapshot_status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            dataset_id,
+            "subject_matching",
+            "dish_matching",
+            "cross_matching",
+            "line_matching",
+            "geno_matching",
+            "danio_rerio",
+            "unknown",
+            6,
+            1,
+            "complete",
+        ),
+    )
+    registry.conn.commit()
+
+    summary = _backfill_subject_dish_cross_entities(registry, dry_run=False)
+    assert summary["source_rows_scanned"] == 1
+    assert summary["crosses_would_insert"] == 1
+    assert summary["dishes_would_insert"] == 1
+    assert summary["recording_subjects_would_insert"] == 0
+
+    cross_row = registry.conn.execute(
+        """
+        SELECT cross_id, genotype, line_strain
+        FROM crosses
+        WHERE cross_id = ?;
+        """,
+        ("cross_matching",),
+    ).fetchone()
+    assert cross_row is not None
+    assert cross_row["genotype"] == "geno_matching"
+    assert cross_row["line_strain"] == "line_matching"
+
+    dish_row = registry.conn.execute(
+        """
+        SELECT dish_id, cross_id, species
+        FROM dishes
+        WHERE dish_id = ?;
+        """,
+        ("dish_matching",),
+    ).fetchone()
+    assert dish_row is not None
+    assert dish_row["cross_id"] == "cross_matching"
+    assert dish_row["species"] == "danio_rerio"
+
+    subject_row = registry.conn.execute(
+        """
+        SELECT subject_id, dish_id, cross_id, dpf_at_acquisition, species, sex, genotype, line_strain, metadata_json
+        FROM recording_subjects
+        WHERE recording_id = ? AND subject_id = ?;
+        """,
+        (recording_id, "subject_matching"),
+    ).fetchone()
+    assert subject_row is not None
+    assert subject_row["dish_id"] == "dish_matching"
+    assert subject_row["cross_id"] == "cross_matching"
+    assert int(subject_row["dpf_at_acquisition"]) == 6
+    assert subject_row["species"] == "danio_rerio"
+    assert subject_row["sex"] == "unknown"
+    assert subject_row["genotype"] == "geno_matching"
+    assert subject_row["line_strain"] == "line_matching"
+    metadata = json.loads(str(subject_row["metadata_json"]))
+    assert metadata["source"] == "recording_subjects"
+    registry.close()
+
+
 def test_backfill_subjects_from_recording_subjects(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "session_a" / "zarr" / "session_a_training.zarr"
@@ -3455,6 +3735,255 @@ def test_backfill_subjects_reports_dish_conflict(tmp_path: Path) -> None:
     assert summary["subject_rows_scanned"] == 2
     assert summary["subject_ids_unique_seen"] == 1
     assert summary["subjects_conflict_dish_id"] == 1
+    registry.close()
+
+
+def test_backfill_subjects_supports_same_subject_across_multiple_recordings(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.conn.execute(
+        """
+        INSERT INTO dishes (dish_id, created_utc, updated_utc)
+        VALUES (?, datetime('now'), datetime('now'));
+        """,
+        ("dish_shared",),
+    )
+    for index in (1, 2):
+        dataset_id = f"dataset_{index}"
+        recording_id = f"recording_{index}"
+        registry.upsert_dataset(
+            dataset_id=dataset_id,
+            session_uuid=recording_id,
+            zarr_path=tmp_path / f"{dataset_id}.zarr",
+            recording_id=recording_id,
+            artifact_kind="source_recording",
+        )
+        registry.conn.execute(
+            """
+            INSERT INTO recordings (
+                recording_id, session_uuid, recording_name, recording_path, recording_type,
+                recording_subtype, behavior_mode, artifact_schema_id, created_utc, updated_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+            """,
+            (
+                recording_id,
+                recording_id,
+                recording_id,
+                str(tmp_path / "recordings" / recording_id),
+                "behavior",
+                "free",
+                "free",
+                "behavior_v1",
+            ),
+        )
+        registry.conn.execute(
+            """
+            INSERT INTO recording_subjects (
+                recording_id, subject_id, dataset_id, dish_id, species, sex, created_utc, updated_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+            """,
+            (
+                recording_id,
+                "subject_shared",
+                dataset_id,
+                "dish_shared",
+                "danio_rerio",
+                "unknown",
+            ),
+        )
+    registry.conn.commit()
+
+    summary = _backfill_subjects(registry, dry_run=False)
+    assert summary["subject_rows_scanned"] == 2
+    assert summary["subject_ids_unique_seen"] == 1
+    assert summary["subjects_would_insert"] == 1
+
+    row = registry.conn.execute(
+        """
+        SELECT subject_id, dish_id, species, sex, metadata_json
+        FROM subjects
+        WHERE subject_id = ?;
+        """,
+        ("subject_shared",),
+    ).fetchone()
+    assert row is not None
+    assert row["dish_id"] == "dish_shared"
+    assert row["species"] == "danio_rerio"
+    assert row["sex"] == "unknown"
+    metadata = json.loads(str(row["metadata_json"]))
+    assert metadata["source"] == "recording_subjects"
+    assert metadata["row_count"] == 2
+    assert metadata["recording_ids"] == ["recording_1", "recording_2"]
+    registry.close()
+
+
+def test_backfill_subjects_supports_multiple_subjects_in_one_recording(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_multi",
+        session_uuid="recording_multi",
+        zarr_path=tmp_path / "dataset_multi.zarr",
+        recording_id="recording_multi",
+        artifact_kind="source_recording",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_multi",
+            "recording_multi",
+            "recording_multi",
+            str(tmp_path / "recordings" / "recording_multi"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+        ),
+    )
+    for dish_id in ("dish_a", "dish_b"):
+        registry.conn.execute(
+            """
+            INSERT INTO dishes (dish_id, created_utc, updated_utc)
+            VALUES (?, datetime('now'), datetime('now'));
+            """,
+            (dish_id,),
+        )
+    for subject_id, dish_id in (("subject_a", "dish_a"), ("subject_b", "dish_b")):
+        registry.conn.execute(
+            """
+            INSERT INTO recording_subjects (
+                recording_id, subject_id, dataset_id, dish_id, species, sex, created_utc, updated_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+            """,
+            (
+                "recording_multi",
+                subject_id,
+                "dataset_multi",
+                dish_id,
+                "danio_rerio",
+                "unknown",
+            ),
+        )
+    registry.conn.commit()
+
+    summary = _backfill_subjects(registry, dry_run=False)
+    assert summary["subject_rows_scanned"] == 2
+    assert summary["subject_ids_unique_seen"] == 2
+    rows = registry.conn.execute(
+        """
+        SELECT subject_id
+        FROM subjects
+        ORDER BY subject_id;
+        """
+    ).fetchall()
+    assert [str(row["subject_id"]) for row in rows] == ["subject_a", "subject_b"]
+    registry.close()
+
+
+def test_backfill_subjects_ignores_conflicting_legacy_fish_id_alias(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        dataset_id="dataset_alias",
+        session_uuid="recording_alias",
+        zarr_path=tmp_path / "dataset_alias.zarr",
+        recording_id="recording_alias",
+        artifact_kind="source_recording",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_alias",
+            "recording_alias",
+            "recording_alias",
+            str(tmp_path / "recordings" / "recording_alias"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO dishes (dish_id, created_utc, updated_utc)
+        VALUES (?, datetime('now'), datetime('now'));
+        """,
+        ("dish_canonical",),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO provenance (
+            dataset_id, fish_id, dish_id, species, sex, snapshot_status
+        )
+        VALUES (?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_alias",
+            "legacy_subject",
+            "dish_legacy",
+            "legacy_species",
+            "legacy_sex",
+            "complete",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_subjects (
+            recording_id, subject_id, dataset_id, dish_id, species, sex, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_alias",
+            "subject_canonical",
+            "dataset_alias",
+            "dish_canonical",
+            "danio_rerio",
+            "unknown",
+        ),
+    )
+    registry.conn.commit()
+
+    summary = _backfill_subjects(registry, dry_run=False)
+    assert summary["subject_rows_scanned"] == 1
+    assert summary["subject_ids_unique_seen"] == 1
+
+    subject_row = registry.conn.execute(
+        """
+        SELECT subject_id, dish_id, species, sex, metadata_json
+        FROM subjects
+        WHERE subject_id = ?;
+        """,
+        ("subject_canonical",),
+    ).fetchone()
+    assert subject_row is not None
+    assert subject_row["dish_id"] == "dish_canonical"
+    assert subject_row["species"] == "danio_rerio"
+    assert subject_row["sex"] == "unknown"
+    metadata = json.loads(str(subject_row["metadata_json"]))
+    assert metadata["source"] == "recording_subjects"
+
+    legacy_count = registry.conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM subjects
+        WHERE subject_id = ?;
+        """,
+        ("legacy_subject",),
+    ).fetchone()[0]
+    assert legacy_count == 0
     registry.close()
 
 
@@ -3950,6 +4479,155 @@ def test_integrity_flags_recording_subject_missing_subject(tmp_path: Path) -> No
     issues = _check_registry_integrity(registry)
     codes = {issue.code for issue in issues}
     assert "recording_subject_missing_subject" in codes
+    registry.close()
+
+
+def test_integrity_allows_same_subject_across_recordings_with_different_observed_dishes(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.conn.executemany(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        [
+            (
+                "recording_a",
+                "recording_a",
+                "recording_a",
+                str(tmp_path / "recordings" / "recording_a"),
+                "behavior",
+                "free",
+                "free",
+                "behavior_v1",
+            ),
+            (
+                "recording_b",
+                "recording_b",
+                "recording_b",
+                str(tmp_path / "recordings" / "recording_b"),
+                "behavior",
+                "free",
+                "free",
+                "behavior_v1",
+            ),
+        ],
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO crosses (cross_id, genotype, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        [
+            ("cross_a", "wt"),
+            ("cross_b", "mut"),
+        ],
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO dishes (dish_id, cross_id, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        [
+            ("dish_a", "cross_a"),
+            ("dish_b", "cross_b"),
+        ],
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO subjects (
+            subject_id, dish_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("subject_shared", "dish_a"),
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO recording_subjects (
+            recording_id, subject_id, dish_id, cross_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        [
+            ("recording_a", "subject_shared", "dish_a", "cross_a"),
+            ("recording_b", "subject_shared", "dish_b", "cross_b"),
+        ],
+    )
+    registry.conn.commit()
+
+    issues = _check_registry_integrity(registry)
+    codes = {issue.code for issue in issues}
+    assert "recording_subject_dish_mismatch_subject" not in codes
+    assert "recording_subject_cross_mismatch_dish" not in codes
+    registry.close()
+
+
+def test_integrity_flags_recording_subject_cross_mismatch_dish(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.conn.execute(
+        """
+        INSERT INTO recordings (
+            recording_id, session_uuid, recording_name, recording_path, recording_type,
+            recording_subtype, behavior_mode, artifact_schema_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        (
+            "recording_a",
+            "recording_a",
+            "recording_a",
+            str(tmp_path / "recordings" / "recording_a"),
+            "behavior",
+            "free",
+            "free",
+            "behavior_v1",
+        ),
+    )
+    registry.conn.executemany(
+        """
+        INSERT INTO crosses (cross_id, genotype, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        [
+            ("cross_a", "wt"),
+            ("cross_b", "mut"),
+        ],
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO dishes (dish_id, cross_id, created_utc, updated_utc)
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("dish_a", "cross_a"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO subjects (
+            subject_id, dish_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, datetime('now'), datetime('now'));
+        """,
+        ("subject_a", "dish_a"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_subjects (
+            recording_id, subject_id, dish_id, cross_id, created_utc, updated_utc
+        )
+        VALUES (?, ?, ?, ?, datetime('now'), datetime('now'));
+        """,
+        ("recording_a", "subject_a", "dish_a", "cross_b"),
+    )
+    registry.conn.commit()
+
+    issues = _check_registry_integrity(registry)
+    codes = {issue.code for issue in issues}
+    assert "recording_subject_cross_mismatch_dish" in codes
     registry.close()
 
 

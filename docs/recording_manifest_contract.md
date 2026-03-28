@@ -15,6 +15,20 @@ files that are later ingested into the palette registry.
 - This manifest contract ensures recordings can be normalized and validated
   consistently during `--backfill-recording-entities` and `--check-integrity`.
 
+## Biological Identity Naming
+
+`recording_manifest.json` is primarily a recording-context contract. It does not
+define the canonical biological subject namespace for the registry.
+
+Rules:
+
+- canonical registry biological identity is `subject_id`
+- legacy acquisition/snapshot metadata may still use `fish_id`
+- if source Zarr or provenance snapshot metadata provides `fish_id`, registry
+  normalization should map that value into `subject_id`
+- `fish_id` remains a compatibility/source name during migration, not a second
+  canonical registry identity namespace
+
 ## Required Fields
 
 These keys should always be present in `recording_manifest.json`:
@@ -63,6 +77,7 @@ Constraint:
 Example known schema:
 
 - `artifact_schema_id="behavior_v1"`
+- `artifact_schema_id="video_only_v1"`
 
 For `behavior_v1`, integrity currently checks required artifact types:
 
@@ -70,6 +85,18 @@ For `behavior_v1`, integrity currently checks required artifact types:
 - `camera_video`
 - `camera_metadata_csv`
 - `timing_profile_csv`
+
+For `video_only_v1`, the recording may be imported from MP4 without an H5.
+Recommended manifest content:
+
+- include the same recording identity fields when known (`session_uuid`,
+  `recording_name`, `rig_id`, `arena_id`, `camera_id`, `canvas_name`,
+  `protocol_name_from_definition`)
+- include `dish_design` when manually known
+- include at least one `camera_video` entry under `files.cams`
+
+`video_only_v1` does not currently trigger the `behavior_v1` required-artifact
+integrity check, so missing H5/CSV sidecars are tolerated.
 
 ## Zarr Artifact Naming Convention
 
@@ -128,6 +155,27 @@ Notes:
   "camera_id": "scope_cam_01",
   "canvas_name": "MicroscopyEmbedded",
   "protocol_name_from_definition": "MicroscopyEmbeddedBehavior"
+}
+```
+
+### Video-only manual intake
+
+```json
+{
+  "session_uuid": "2026-03-09_colleague_set_001",
+  "recording_name": "colleague_set_001",
+  "recording_type": "behavior",
+  "recording_subtype": "free",
+  "behavior_mode": "free",
+  "artifact_schema_id": "video_only_v1",
+  "dish_design": "cedar",
+  "rig_id": "omnifin0",
+  "arena_id": "arena_1",
+  "camera_id": "2010093",
+  "protocol_name_from_definition": "ManualProtocol",
+  "files": {
+    "cams": ["cams/Cam2010093.mp4"]
+  }
 }
 ```
 

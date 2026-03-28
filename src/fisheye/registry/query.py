@@ -27,7 +27,11 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
 
     parser.add_argument("--dish-id", type=str, help="Exact dish_id match.")
     parser.add_argument("--cross-id", type=str, help="Exact cross_id match.")
-    parser.add_argument("--fish-id", type=str, help="Exact fish_id match.")
+    parser.add_argument(
+        "--fish-id",
+        type=str,
+        help="Exact subject_id match; also matches legacy fish_id compatibility aliases.",
+    )
     parser.add_argument("--strain", type=str, help="Substring match for line_strain.")
     parser.add_argument("--protocol", type=str, help="Exact protocol_name match.")
     parser.add_argument("--protocol-hash", type=str, help="Exact protocol_hash match.")
@@ -107,19 +111,19 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
         "d.session_uuid",
         "d.zarr_path",
         "d.status",
-        "p.dish_id",
-        "p.cross_id",
-        "p.fish_id",
-        "p.line_strain",
-        "p.genotype",
-        "p.dpf_at_acquisition",
-        "p.protocol_name",
-        "p.protocol_hash",
-        "p.snapshot_status",
-        "p.rig_id",
-        "p.arena_id",
-        "p.camera_id",
-        "p.canvas_name",
+        "dcc.dish_id",
+        "dcc.cross_id",
+        "COALESCE(dcc.subject_id, dcc.legacy_fish_id) AS fish_id",
+        "dcc.line_strain",
+        "dcc.genotype",
+        "dcc.dpf_at_acquisition",
+        "dcc.protocol_name",
+        "dcc.protocol_hash",
+        "dcc.snapshot_status",
+        "dcc.rig_id",
+        "dcc.arena_id",
+        "dcc.camera_id",
+        "dcc.canvas_name",
     ]
     if needs_training_join:
         select_cols.extend(
@@ -136,6 +140,7 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
 
     sql.append(f"SELECT {', '.join(select_cols)}")
     sql.append("FROM datasets d")
+    sql.append("LEFT JOIN dataset_context_current dcc ON d.dataset_id = dcc.dataset_id")
     sql.append("LEFT JOIN provenance p ON d.dataset_id = p.dataset_id")
     if needs_training_join:
         sql.append("LEFT JOIN set_members sm ON sm.dataset_id = d.dataset_id")
@@ -147,6 +152,45 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
         sql.append(clause)
         params.append(value)
 
+    def add_exact_or_json_membership(
+        *,
+        scalar_column: str,
+        json_column: str,
+        value: Any,
+        cast_type: str = "TEXT",
+    ) -> None:
+        sql.append(
+            f"AND ({scalar_column} = ? OR EXISTS ("
+            f"SELECT 1 FROM json_each(COALESCE({json_column}, '[]')) "
+            f"WHERE CAST(json_each.value AS {cast_type}) = ?"
+            "))"
+        )
+        params.extend([value, value])
+
+    def add_like_or_json_membership(*, scalar_column: str, json_column: str, pattern: str) -> None:
+        sql.append(
+            f"AND ({scalar_column} LIKE ? OR EXISTS ("
+            f"SELECT 1 FROM json_each(COALESCE({json_column}, '[]')) "
+            f"WHERE CAST(json_each.value AS TEXT) LIKE ?"
+            "))"
+        )
+        params.extend([pattern, pattern])
+
+    def add_numeric_or_json_range(
+        *,
+        scalar_column: str,
+        json_column: str,
+        operator: str,
+        value: Any,
+    ) -> None:
+        sql.append(
+            f"AND ({scalar_column} {operator} ? OR EXISTS ("
+            f"SELECT 1 FROM json_each(COALESCE({json_column}, '[]')) "
+            f"WHERE CAST(json_each.value AS INTEGER) {operator} ?"
+            "))"
+        )
+        params.extend([value, value])
+
     if args.dataset_id:
         add_clause("AND d.dataset_id = ?", args.dataset_id)
     if args.status:
@@ -155,70 +199,101 @@ def _build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
         add_clause("AND d.zarr_path LIKE ?", f"%{args.path_contains}%")
 
     if args.dish_id:
-        add_clause("AND p.dish_id = ?", args.dish_id)
+        add_exact_or_json_membership(
+            scalar_column="dcc.dish_id",
+            json_column="dcc.dish_ids_json",
+            value=args.dish_id,
+        )
     if args.cross_id:
-        add_clause("AND p.cross_id = ?", args.cross_id)
+        add_exact_or_json_membership(
+            scalar_column="dcc.cross_id",
+            json_column="dcc.cross_ids_json",
+            value=args.cross_id,
+        )
     if args.fish_id:
-        add_clause("AND p.fish_id = ?", args.fish_id)
+        add_exact_or_json_membership(
+            scalar_column="COALESCE(dcc.subject_id, dcc.legacy_fish_id)",
+            json_column="dcc.subject_ids_json",
+            value=args.fish_id,
+        )
     if args.strain:
-        add_clause("AND p.line_strain LIKE ?", f"%{args.strain}%")
+        add_like_or_json_membership(
+            scalar_column="dcc.line_strain",
+            json_column="dcc.line_strains_json",
+            pattern=f"%{args.strain}%",
+        )
     if args.protocol:
-        add_clause("AND p.protocol_name = ?", args.protocol)
+        add_clause("AND dcc.protocol_name = ?", args.protocol)
     if args.protocol_hash:
-        add_clause("AND p.protocol_hash = ?", args.protocol_hash)
+        add_clause("AND dcc.protocol_hash = ?", args.protocol_hash)
 
     if args.dpf is not None:
-        add_clause("AND p.dpf_at_acquisition = ?", args.dpf)
+        add_exact_or_json_membership(
+            scalar_column="dcc.dpf_at_acquisition",
+            json_column="dcc.dpf_values_json",
+            value=args.dpf,
+            cast_type="INTEGER",
+        )
     if args.dpf_min is not None:
-        add_clause("AND p.dpf_at_acquisition >= ?", args.dpf_min)
+        add_numeric_or_json_range(
+            scalar_column="dcc.dpf_at_acquisition",
+            json_column="dcc.dpf_values_json",
+            operator=">=",
+            value=args.dpf_min,
+        )
     if args.dpf_max is not None:
-        add_clause("AND p.dpf_at_acquisition <= ?", args.dpf_max)
+        add_numeric_or_json_range(
+            scalar_column="dcc.dpf_at_acquisition",
+            json_column="dcc.dpf_values_json",
+            operator="<=",
+            value=args.dpf_max,
+        )
     if args.since:
         add_clause("AND d.created_utc >= ?", args.since)
 
     provenance_mode = "missing" if args.missing else args.provenance
     if provenance_mode == "complete":
-        sql.append("AND p.snapshot_status = 'complete'")
-        sql.append("AND p.protocol_hash IS NOT NULL AND p.protocol_hash != ''")
-        sql.append("AND p.dpf_at_acquisition IS NOT NULL")
+        sql.append("AND dcc.snapshot_status = 'complete'")
+        sql.append("AND dcc.protocol_hash IS NOT NULL AND dcc.protocol_hash != ''")
+        sql.append("AND dcc.dpf_at_acquisition IS NOT NULL")
     elif provenance_mode == "partial":
-        sql.append("AND p.snapshot_status = 'partial'")
+        sql.append("AND dcc.snapshot_status = 'partial'")
     elif provenance_mode == "missing":
         sql.append(
-            "AND (p.dataset_id IS NULL OR p.snapshot_status IS NULL OR p.snapshot_status = '' "
-            "OR p.protocol_hash IS NULL OR p.protocol_hash = '' OR p.dpf_at_acquisition IS NULL)"
+            "AND (p.dataset_id IS NULL OR dcc.snapshot_status IS NULL OR dcc.snapshot_status = '' "
+            "OR dcc.protocol_hash IS NULL OR dcc.protocol_hash = '' OR dcc.dpf_at_acquisition IS NULL)"
         )
 
     if args.rig_id:
-        add_clause("AND p.rig_id = ?", args.rig_id)
+        add_clause("AND dcc.rig_id = ?", args.rig_id)
     if args.arena_id:
-        add_clause("AND p.arena_id = ?", args.arena_id)
+        add_clause("AND dcc.arena_id = ?", args.arena_id)
     if args.camera_id:
-        add_clause("AND p.camera_id = ?", args.camera_id)
+        add_clause("AND dcc.camera_id = ?", args.camera_id)
     if args.canvas_name:
-        add_clause("AND p.canvas_name = ?", args.canvas_name)
+        add_clause("AND dcc.canvas_name = ?", args.canvas_name)
     if args.model_input == "gray":
         sql.append(
-            "AND (COALESCE(p.has_images_ds, 0) = 1 OR p.downsample_formats_json LIKE '%\"gray\"%')"
+            "AND (COALESCE(dcc.has_images_ds, 0) = 1 OR dcc.downsample_formats_json LIKE '%\"gray\"%')"
         )
     elif args.model_input == "rgb":
         sql.append(
-            "AND (COALESCE(p.has_images_ds_rgb, 0) = 1 OR p.downsample_formats_json LIKE '%\"rgb\"%')"
+            "AND (COALESCE(dcc.has_images_ds_rgb, 0) = 1 OR dcc.downsample_formats_json LIKE '%\"rgb\"%')"
         )
 
     if args.require_context:
         sql.append(
-            "AND p.rig_id IS NOT NULL AND p.rig_id != '' "
-            "AND p.arena_id IS NOT NULL AND p.arena_id != '' "
-            "AND p.camera_id IS NOT NULL AND p.camera_id != '' "
-            "AND p.canvas_name IS NOT NULL AND p.canvas_name != ''"
+            "AND dcc.rig_id IS NOT NULL AND dcc.rig_id != '' "
+            "AND dcc.arena_id IS NOT NULL AND dcc.arena_id != '' "
+            "AND dcc.camera_id IS NOT NULL AND dcc.camera_id != '' "
+            "AND dcc.canvas_name IS NOT NULL AND dcc.canvas_name != ''"
         )
     if args.missing_context:
         sql.append(
-            "AND (p.rig_id IS NULL OR p.rig_id = '' "
-            "OR p.arena_id IS NULL OR p.arena_id = '' "
-            "OR p.camera_id IS NULL OR p.camera_id = '' "
-            "OR p.canvas_name IS NULL OR p.canvas_name = '')"
+            "AND (dcc.rig_id IS NULL OR dcc.rig_id = '' "
+            "OR dcc.arena_id IS NULL OR dcc.arena_id = '' "
+            "OR dcc.camera_id IS NULL OR dcc.camera_id = '' "
+            "OR dcc.canvas_name IS NULL OR dcc.canvas_name = '')"
         )
 
     if args.set_id:

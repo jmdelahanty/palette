@@ -25,9 +25,12 @@ from .db import (
     _extract_keypoint_performance_rows,
     _extract_keypoint_profile_rows,
     _extract_keypoint_quality_rows,
+    _extract_subject_mask_component_quality_rows,
+    _extract_subject_mask_performance_rows,
     _import_zarr,
 )
 from fisheye.shared.experiment_setup import subdish_required
+from fisheye.tracking.single_subject_per_arena import build_tracking_qc_fields
 
 DEFAULT_ALLOWED_RECORDING_TYPES = {
     "behavior",
@@ -44,6 +47,7 @@ RECORDING_TUNING_STEP_NAMES: tuple[str, ...] = (
     "dish_mask",
     "detection_tuning",
     "keypoint_tuning",
+    "subject_mask_tuning",
     "eye_mask_tuning",
     "subdish_mask_tuning",
 )
@@ -57,7 +61,9 @@ RECORDING_STEP_NAMES: tuple[str, ...] = (
     "refined_keypoints",
     "eye_masks",
     "refined_eye_masks",
-    "id_assignment",
+    "subject_masks",
+    "refined_subject_masks",
+    "arena_assignment",
     "tracks",
     "stimulus",
     "calibration",
@@ -349,6 +355,20 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--backfill-subject-mask-performance",
+        action="store_true",
+        help=(
+            "Backfill subject_mask_performance rows for source recording datasets that currently have no subject-mask performance rows."
+        ),
+    )
+    parser.add_argument(
+        "--backfill-subject-mask-component-quality",
+        action="store_true",
+        help=(
+            "Backfill subject_mask_component_quality rows for source recording datasets that currently have no subject-mask component rows."
+        ),
+    )
+    parser.add_argument(
         "--backfill-recording-step-status",
         action="store_true",
         help=(
@@ -434,6 +454,20 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Refresh eye_mask_performance rows for all datasets in scope and remove stale rows."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-subject-mask-performance",
+        action="store_true",
+        help=(
+            "Refresh subject_mask_performance rows for all source recording datasets in scope and remove stale rows."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-subject-mask-component-quality",
+        action="store_true",
+        help=(
+            "Refresh subject_mask_component_quality rows for all source recording datasets in scope and remove stale rows."
         ),
     )
     parser.add_argument(
@@ -985,174 +1019,288 @@ def _backfill_subject_dish_cross_entities(
         if scope_roots and not _matches_scope(zarr_path, scope_roots):
             continue
         summary["source_rows_scanned"] += 1
-        cross_id = str(row["cross_id"]).strip() if row["cross_id"] is not None else ""
-        dish_id = str(row["dish_id"]).strip() if row["dish_id"] is not None else ""
         recording_id = str(row["recording_id"]).strip() if row["recording_id"] is not None else ""
-        subject_id = str(row["fish_id"]).strip() if row["fish_id"] is not None else ""
-        species = str(row["species"]).strip() if row["species"] is not None else None
-        sex = str(row["sex"]).strip() if row["sex"] is not None else None
-        genotype = str(row["genotype"]).strip() if row["genotype"] is not None else None
-        line_strain = str(row["line_strain"]).strip() if row["line_strain"] is not None else None
+        legacy_subject_id = str(row["fish_id"]).strip() if row["fish_id"] is not None else ""
+        legacy_dish_id = str(row["dish_id"]).strip() if row["dish_id"] is not None else ""
+        legacy_cross_id = str(row["cross_id"]).strip() if row["cross_id"] is not None else ""
+        legacy_species = str(row["species"]).strip() if row["species"] is not None else ""
+        legacy_sex = str(row["sex"]).strip() if row["sex"] is not None else ""
+        legacy_genotype = str(row["genotype"]).strip() if row["genotype"] is not None else ""
+        legacy_line_strain = str(row["line_strain"]).strip() if row["line_strain"] is not None else ""
         parents_json = str(row["parents_json"]) if row["parents_json"] is not None else None
-        dpf_at_acquisition = row["dpf_at_acquisition"]
-
-        if cross_id:
-            summary["crosses_seen"] += 1
-            if cross_id not in seen_cross_ids:
-                seen_cross_ids.add(cross_id)
-                summary["crosses_unique_seen"] += 1
-                existing = registry.conn.execute(
-                    "SELECT 1 FROM crosses WHERE cross_id = ? LIMIT 1;",
-                    (cross_id,),
-                ).fetchone()
-                if existing is None:
-                    summary["crosses_would_insert"] += 1
-                    summary["crosses_upserted"] += 1
-            if not dry_run:
-                registry.conn.execute(
-                    """
-                    INSERT INTO crosses (
-                        cross_id, line_strain, genotype, parents_json, metadata_json, created_utc, updated_utc
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(cross_id) DO UPDATE SET
-                        line_strain=COALESCE(excluded.line_strain, crosses.line_strain),
-                        genotype=COALESCE(excluded.genotype, crosses.genotype),
-                        parents_json=COALESCE(excluded.parents_json, crosses.parents_json),
-                        metadata_json=COALESCE(excluded.metadata_json, crosses.metadata_json),
-                        updated_utc=excluded.updated_utc;
-                    """,
-                    (
-                        cross_id,
-                        line_strain or None,
-                        genotype or None,
-                        parents_json,
-                        json.dumps(
-                            {
-                                "source": "provenance",
-                                "dataset_id": dataset_id,
-                            },
-                            sort_keys=True,
-                        ),
-                        now,
-                        now,
-                    ),
-                )
-
-        if dish_id:
-            summary["dishes_seen"] += 1
-            if dish_id not in seen_dish_ids:
-                seen_dish_ids.add(dish_id)
-                summary["dishes_unique_seen"] += 1
-                existing = registry.conn.execute(
-                    "SELECT 1 FROM dishes WHERE dish_id = ? LIMIT 1;",
-                    (dish_id,),
-                ).fetchone()
-                if existing is None:
-                    summary["dishes_would_insert"] += 1
-                    summary["dishes_upserted"] += 1
-            if not dry_run:
-                registry.conn.execute(
-                    """
-                    INSERT INTO dishes (
-                        dish_id, cross_id, species, metadata_json, created_utc, updated_utc
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(dish_id) DO UPDATE SET
-                        cross_id=COALESCE(excluded.cross_id, dishes.cross_id),
-                        species=COALESCE(excluded.species, dishes.species),
-                        metadata_json=COALESCE(excluded.metadata_json, dishes.metadata_json),
-                        updated_utc=excluded.updated_utc;
-                    """,
-                    (
-                        dish_id,
-                        cross_id or None,
-                        species,
-                        json.dumps(
-                            {
-                                "source": "provenance",
-                                "dataset_id": dataset_id,
-                            },
-                            sort_keys=True,
-                        ),
-                        now,
-                        now,
-                    ),
-                )
-
-        if not recording_id:
-            summary["rows_skipped_missing_recording_id"] += 1
-            continue
-        if not subject_id:
-            summary["rows_skipped_missing_subject_id"] += 1
-            continue
-        summary["recording_subject_rows_seen"] += 1
-        subject_key = (recording_id, subject_id)
-        if subject_key not in seen_recording_subject_keys:
-            seen_recording_subject_keys.add(subject_key)
-            summary["recording_subjects_unique_seen"] += 1
-            existing = registry.conn.execute(
-                """
-                SELECT 1
-                FROM recording_subjects
-                WHERE recording_id = ? AND subject_id = ?
-                LIMIT 1;
-                """,
-                (recording_id, subject_id),
-            ).fetchone()
-            if existing is None:
-                summary["recording_subjects_would_insert"] += 1
-                summary["recording_subjects_upserted"] += 1
-        if dry_run:
-            continue
         snapshot_missing_payload = None
         if row["snapshot_missing_json"] is not None:
             try:
                 snapshot_missing_payload = json.loads(str(row["snapshot_missing_json"]))
             except Exception:
                 snapshot_missing_payload = row["snapshot_missing_json"]
-        metadata = {
-            "source": "provenance",
-            "dataset_id": dataset_id,
-            "subject_count": row["subject_count"],
-            "snapshot_status": row["snapshot_status"],
-            "snapshot_missing": snapshot_missing_payload,
-        }
-        registry.conn.execute(
+
+        normalized_rows = registry.conn.execute(
             """
-            INSERT INTO recording_subjects (
-                recording_id, subject_id, dataset_id, dish_id, cross_id, dpf_at_acquisition,
-                species, sex, genotype, line_strain, metadata_json, created_utc, updated_utc
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(recording_id, subject_id) DO UPDATE SET
-                dataset_id=COALESCE(excluded.dataset_id, recording_subjects.dataset_id),
-                dish_id=COALESCE(excluded.dish_id, recording_subjects.dish_id),
-                cross_id=COALESCE(excluded.cross_id, recording_subjects.cross_id),
-                dpf_at_acquisition=COALESCE(excluded.dpf_at_acquisition, recording_subjects.dpf_at_acquisition),
-                species=COALESCE(excluded.species, recording_subjects.species),
-                sex=COALESCE(excluded.sex, recording_subjects.sex),
-                genotype=COALESCE(excluded.genotype, recording_subjects.genotype),
-                line_strain=COALESCE(excluded.line_strain, recording_subjects.line_strain),
-                metadata_json=COALESCE(excluded.metadata_json, recording_subjects.metadata_json),
-                updated_utc=excluded.updated_utc;
-            """,
-            (
-                recording_id,
+            SELECT
                 subject_id,
-                dataset_id,
-                dish_id or None,
-                cross_id or None,
+                dish_id,
+                cross_id,
                 dpf_at_acquisition,
                 species,
                 sex,
                 genotype,
-                line_strain,
-                json.dumps(metadata, sort_keys=True),
-                now,
-                now,
-            ),
-        )
+                line_strain
+            FROM recording_subjects
+            WHERE dataset_id = ?
+               OR (dataset_id IS NULL AND ? <> '' AND recording_id = ?)
+            ORDER BY subject_id;
+            """,
+            (dataset_id, recording_id, recording_id),
+        ).fetchall()
+
+        lineage_rows: list[dict[str, Any]] = []
+        if normalized_rows:
+            for normalized_row in normalized_rows:
+                subject_id = (
+                    str(normalized_row["subject_id"]).strip()
+                    if normalized_row["subject_id"] is not None
+                    else ""
+                )
+                allow_legacy_fallback = not legacy_subject_id or legacy_subject_id == subject_id
+                lineage_rows.append(
+                    {
+                        "subject_id": subject_id,
+                        "dish_id": (
+                            str(normalized_row["dish_id"]).strip()
+                            if normalized_row["dish_id"] is not None
+                            else ""
+                        )
+                        or (legacy_dish_id if allow_legacy_fallback else ""),
+                        "cross_id": (
+                            str(normalized_row["cross_id"]).strip()
+                            if normalized_row["cross_id"] is not None
+                            else ""
+                        )
+                        or (legacy_cross_id if allow_legacy_fallback else ""),
+                        "species": (
+                            str(normalized_row["species"]).strip()
+                            if normalized_row["species"] is not None
+                            else ""
+                        )
+                        or (legacy_species if allow_legacy_fallback else ""),
+                        "sex": (
+                            str(normalized_row["sex"]).strip()
+                            if normalized_row["sex"] is not None
+                            else ""
+                        )
+                        or (legacy_sex if allow_legacy_fallback else ""),
+                        "genotype": (
+                            str(normalized_row["genotype"]).strip()
+                            if normalized_row["genotype"] is not None
+                            else ""
+                        )
+                        or (legacy_genotype if allow_legacy_fallback else ""),
+                        "line_strain": (
+                            str(normalized_row["line_strain"]).strip()
+                            if normalized_row["line_strain"] is not None
+                            else ""
+                        )
+                        or (legacy_line_strain if allow_legacy_fallback else ""),
+                        "dpf_at_acquisition": (
+                            normalized_row["dpf_at_acquisition"]
+                            if normalized_row["dpf_at_acquisition"] is not None
+                            else (row["dpf_at_acquisition"] if allow_legacy_fallback else None)
+                        ),
+                        "source": "recording_subjects",
+                    }
+                )
+        else:
+            lineage_rows.append(
+                {
+                    "subject_id": legacy_subject_id,
+                    "dish_id": legacy_dish_id,
+                    "cross_id": legacy_cross_id,
+                    "species": legacy_species,
+                    "sex": legacy_sex,
+                    "genotype": legacy_genotype,
+                    "line_strain": legacy_line_strain,
+                    "dpf_at_acquisition": row["dpf_at_acquisition"],
+                    "source": "provenance_compat",
+                }
+            )
+
+        for lineage_row in lineage_rows:
+            cross_id = str(lineage_row["cross_id"]).strip() if lineage_row["cross_id"] is not None else ""
+            dish_id = str(lineage_row["dish_id"]).strip() if lineage_row["dish_id"] is not None else ""
+            subject_id = (
+                str(lineage_row["subject_id"]).strip() if lineage_row["subject_id"] is not None else ""
+            )
+            species = (
+                str(lineage_row["species"]).strip() if lineage_row["species"] is not None else None
+            )
+            sex = str(lineage_row["sex"]).strip() if lineage_row["sex"] is not None else None
+            genotype = (
+                str(lineage_row["genotype"]).strip() if lineage_row["genotype"] is not None else None
+            )
+            line_strain = (
+                str(lineage_row["line_strain"]).strip()
+                if lineage_row["line_strain"] is not None
+                else None
+            )
+            dpf_at_acquisition = lineage_row["dpf_at_acquisition"]
+            metadata_source = str(lineage_row["source"])
+
+            if cross_id:
+                summary["crosses_seen"] += 1
+                if cross_id not in seen_cross_ids:
+                    seen_cross_ids.add(cross_id)
+                    summary["crosses_unique_seen"] += 1
+                    existing = registry.conn.execute(
+                        "SELECT 1 FROM crosses WHERE cross_id = ? LIMIT 1;",
+                        (cross_id,),
+                    ).fetchone()
+                    if existing is None:
+                        summary["crosses_would_insert"] += 1
+                        summary["crosses_upserted"] += 1
+                if not dry_run:
+                    registry.conn.execute(
+                        """
+                        INSERT INTO crosses (
+                            cross_id, line_strain, genotype, parents_json, metadata_json, created_utc, updated_utc
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(cross_id) DO UPDATE SET
+                            line_strain=COALESCE(crosses.line_strain, excluded.line_strain),
+                            genotype=COALESCE(crosses.genotype, excluded.genotype),
+                            parents_json=COALESCE(crosses.parents_json, excluded.parents_json),
+                            metadata_json=COALESCE(crosses.metadata_json, excluded.metadata_json),
+                            updated_utc=excluded.updated_utc;
+                        """,
+                        (
+                            cross_id,
+                            line_strain or None,
+                            genotype or None,
+                            parents_json,
+                            json.dumps(
+                                {
+                                    "source": metadata_source,
+                                    "dataset_id": dataset_id,
+                                },
+                                sort_keys=True,
+                            ),
+                            now,
+                            now,
+                        ),
+                    )
+
+            if dish_id:
+                summary["dishes_seen"] += 1
+                if dish_id not in seen_dish_ids:
+                    seen_dish_ids.add(dish_id)
+                    summary["dishes_unique_seen"] += 1
+                    existing = registry.conn.execute(
+                        "SELECT 1 FROM dishes WHERE dish_id = ? LIMIT 1;",
+                        (dish_id,),
+                    ).fetchone()
+                    if existing is None:
+                        summary["dishes_would_insert"] += 1
+                        summary["dishes_upserted"] += 1
+                if not dry_run:
+                    registry.conn.execute(
+                        """
+                        INSERT INTO dishes (
+                            dish_id, cross_id, species, metadata_json, created_utc, updated_utc
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(dish_id) DO UPDATE SET
+                            cross_id=COALESCE(dishes.cross_id, excluded.cross_id),
+                            species=COALESCE(dishes.species, excluded.species),
+                            metadata_json=COALESCE(dishes.metadata_json, excluded.metadata_json),
+                            updated_utc=excluded.updated_utc;
+                        """,
+                        (
+                            dish_id,
+                            cross_id or None,
+                            species,
+                            json.dumps(
+                                {
+                                    "source": metadata_source,
+                                    "dataset_id": dataset_id,
+                                },
+                                sort_keys=True,
+                            ),
+                            now,
+                            now,
+                        ),
+                    )
+
+            if not recording_id:
+                summary["rows_skipped_missing_recording_id"] += 1
+                continue
+            if not subject_id:
+                summary["rows_skipped_missing_subject_id"] += 1
+                continue
+            summary["recording_subject_rows_seen"] += 1
+            subject_key = (recording_id, subject_id)
+            if subject_key not in seen_recording_subject_keys:
+                seen_recording_subject_keys.add(subject_key)
+                summary["recording_subjects_unique_seen"] += 1
+                existing = registry.conn.execute(
+                    """
+                    SELECT 1
+                    FROM recording_subjects
+                    WHERE recording_id = ? AND subject_id = ?
+                    LIMIT 1;
+                    """,
+                    (recording_id, subject_id),
+                ).fetchone()
+                if existing is None:
+                    summary["recording_subjects_would_insert"] += 1
+                    summary["recording_subjects_upserted"] += 1
+            if dry_run:
+                continue
+
+            metadata = {
+                "source": metadata_source,
+                "dataset_id": dataset_id,
+                "subject_count": row["subject_count"],
+                "snapshot_status": row["snapshot_status"],
+                "snapshot_missing": snapshot_missing_payload,
+            }
+            registry.conn.execute(
+                """
+                INSERT INTO recording_subjects (
+                    recording_id, subject_id, dataset_id, dish_id, cross_id, dpf_at_acquisition,
+                    species, sex, genotype, line_strain, metadata_json, created_utc, updated_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(recording_id, subject_id) DO UPDATE SET
+                    dataset_id=COALESCE(recording_subjects.dataset_id, excluded.dataset_id),
+                    dish_id=COALESCE(recording_subjects.dish_id, excluded.dish_id),
+                    cross_id=COALESCE(recording_subjects.cross_id, excluded.cross_id),
+                    dpf_at_acquisition=COALESCE(
+                        recording_subjects.dpf_at_acquisition,
+                        excluded.dpf_at_acquisition
+                    ),
+                    species=COALESCE(recording_subjects.species, excluded.species),
+                    sex=COALESCE(recording_subjects.sex, excluded.sex),
+                    genotype=COALESCE(recording_subjects.genotype, excluded.genotype),
+                    line_strain=COALESCE(recording_subjects.line_strain, excluded.line_strain),
+                    metadata_json=COALESCE(recording_subjects.metadata_json, excluded.metadata_json),
+                    updated_utc=excluded.updated_utc;
+                """,
+                (
+                    recording_id,
+                    subject_id,
+                    dataset_id,
+                    dish_id or None,
+                    cross_id or None,
+                    dpf_at_acquisition,
+                    species,
+                    sex,
+                    genotype,
+                    line_strain,
+                    json.dumps(metadata, sort_keys=True),
+                    now,
+                    now,
+                ),
+            )
     if not dry_run:
         registry.conn.commit()
     return summary
@@ -1174,13 +1322,9 @@ def _backfill_subjects(
             rs.dish_id AS rs_dish_id,
             rs.species AS rs_species,
             rs.sex AS rs_sex,
-            d.zarr_path,
-            p.dish_id AS p_dish_id,
-            p.species AS p_species,
-            p.sex AS p_sex
+            d.zarr_path
         FROM recording_subjects rs
         LEFT JOIN datasets d ON d.dataset_id = rs.dataset_id
-        LEFT JOIN provenance p ON p.dataset_id = rs.dataset_id
         ORDER BY rs.subject_id, rs.recording_id;
         """
     ).fetchall()
@@ -1229,21 +1373,9 @@ def _backfill_subjects(
             summary["rows_skipped_missing_subject_id"] += 1
             continue
 
-        dish_id = (
-            str(row["rs_dish_id"]).strip() if row["rs_dish_id"] is not None else ""
-        ) or (
-            str(row["p_dish_id"]).strip() if row["p_dish_id"] is not None else ""
-        )
-        species = (
-            str(row["rs_species"]).strip() if row["rs_species"] is not None else ""
-        ) or (
-            str(row["p_species"]).strip() if row["p_species"] is not None else ""
-        )
-        sex = (
-            str(row["rs_sex"]).strip() if row["rs_sex"] is not None else ""
-        ) or (
-            str(row["p_sex"]).strip() if row["p_sex"] is not None else ""
-        )
+        dish_id = str(row["rs_dish_id"]).strip() if row["rs_dish_id"] is not None else ""
+        species = str(row["rs_species"]).strip() if row["rs_species"] is not None else ""
+        sex = str(row["rs_sex"]).strip() if row["rs_sex"] is not None else ""
 
         record = observations.setdefault(
             subject_id,
@@ -1315,7 +1447,7 @@ def _backfill_subjects(
             continue
 
         metadata_payload = {
-            "source": "recording_subjects+provenance",
+            "source": "recording_subjects",
             "row_count": int(observed["row_count"]),
             "recording_ids": sorted(str(item) for item in observed["recording_ids"] if item),
             "observed_dish_ids": observed_dish_ids,
@@ -4105,6 +4237,77 @@ def _eye_mask_performance_row_signature(row: Dict[str, object]) -> tuple[object,
     )
 
 
+def _subject_mask_performance_row_signature(row: Dict[str, object]) -> tuple[object, ...]:
+    return (
+        row.get("run_created_utc"),
+        row.get("recording_id"),
+        row.get("zarr_use"),
+        row.get("subject_mask_method"),
+        row.get("label_schema_id"),
+        row.get("source_crop_run"),
+        row.get("source_keypoint_group"),
+        row.get("source_keypoints_run"),
+        row.get("source_subject_mask_run"),
+        row.get("source_subject_mask_method"),
+        row.get("run_semantics"),
+        row.get("probability_semantics"),
+        row.get("source_background_run"),
+        row.get("source_background_array"),
+        row.get("source_dish_mask_array"),
+        row.get("tuning_source"),
+        row.get("tuning_timestamp"),
+        row.get("total_rois"),
+        row.get("rows_with_any_mask"),
+        row.get("coverage_percent"),
+        row.get("duration_seconds"),
+        row.get("rois_per_second"),
+        row.get("available_component_count"),
+        row.get("available_components_json"),
+        row.get("unavailable_components_json"),
+        row.get("component_review_states_json"),
+        row.get("eye_component_mode"),
+        row.get("reason_counts_json"),
+        row.get("summary_statistics_json"),
+        row.get("review_state"),
+        row.get("review_method"),
+        row.get("review_intended_use"),
+        row.get("review_reviewer"),
+        row.get("review_timestamp_utc"),
+        row.get("source_subject_mask_stale_state"),
+        row.get("source_subject_mask_stale_reason"),
+        row.get("source_subject_mask_stale_timestamp_utc"),
+        row.get("source_subject_mask_stale_json"),
+        row.get("lifecycle_state"),
+        row.get("lifecycle_reason"),
+        row.get("zarr_mtime_ns"),
+    )
+
+
+def _subject_mask_component_quality_row_signature(row: Dict[str, object]) -> tuple[object, ...]:
+    return (
+        row.get("component_family"),
+        row.get("run_created_utc"),
+        row.get("recording_id"),
+        row.get("zarr_use"),
+        row.get("subject_mask_method"),
+        row.get("label_schema_id"),
+        row.get("eye_component_mode"),
+        row.get("source_subject_mask_run"),
+        row.get("available"),
+        row.get("review_state"),
+        row.get("review_method"),
+        row.get("review_intended_use"),
+        row.get("review_reviewer"),
+        row.get("review_timestamp_utc"),
+        row.get("total_rois"),
+        row.get("rows_with_component_mask"),
+        row.get("rows_with_component_mask_rate"),
+        row.get("lifecycle_state"),
+        row.get("lifecycle_reason"),
+        row.get("zarr_mtime_ns"),
+    )
+
+
 def _backfill_eye_mask_performance(
     registry: Registry,
     *,
@@ -4266,6 +4469,305 @@ def _backfill_eye_mask_performance(
     return summary
 
 
+def _backfill_subject_mask_performance(
+    registry: Registry,
+    *,
+    dry_run: bool,
+    scope_paths: Optional[Sequence[Path]],
+    refresh: bool,
+) -> Dict[str, int]:
+    rows = registry.conn.execute(
+        """
+        SELECT dataset_id, zarr_path, recording_id, zarr_use
+        FROM datasets
+        WHERE (status IS NULL OR lower(status) != 'missing')
+          AND lower(COALESCE(artifact_kind, '')) = 'source_recording'
+        ORDER BY dataset_id;
+        """
+    ).fetchall()
+    scope_roots = _normalize_scope_paths(scope_paths)
+    zarr = _import_zarr()
+    summary: Dict[str, int] = {
+        "datasets_scanned": 0,
+        "datasets_skipped_existing": 0,
+        "datasets_missing": 0,
+        "datasets_errors": 0,
+        "datasets_no_performance": 0,
+        "rows_stale": 0,
+        "rows_in_progress": 0,
+        "rows_inserted": 0,
+        "rows_updated": 0,
+        "rows_skipped": 0,
+        "rows_deleted": 0,
+    }
+
+    for row in rows:
+        dataset_id = str(row["dataset_id"])
+        zarr_path = Path(str(row["zarr_path"])).expanduser()
+        recording_id = str(row["recording_id"]) if row["recording_id"] else None
+        zarr_use = str(row["zarr_use"]) if row["zarr_use"] else None
+        if not _matches_scope(str(zarr_path), scope_roots):
+            continue
+        summary["datasets_scanned"] += 1
+        if not _is_zarr_root_path(zarr_path):
+            summary["datasets_missing"] += 1
+            continue
+
+        existing_rows = registry.conn.execute(
+            "SELECT * FROM subject_mask_performance WHERE dataset_id = ?;",
+            (dataset_id,),
+        ).fetchall()
+        if not refresh and existing_rows:
+            summary["datasets_skipped_existing"] += 1
+            summary["rows_skipped"] += len(existing_rows)
+            continue
+
+        try:
+            try:
+                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+            except TypeError:
+                root = zarr.open_group(str(zarr_path), mode="r")
+            extracted_rows = _extract_subject_mask_performance_rows(
+                root,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+            )
+        except Exception:
+            summary["datasets_errors"] += 1
+            continue
+
+        if not extracted_rows:
+            summary["datasets_no_performance"] += 1
+        for extracted in extracted_rows:
+            lifecycle_state = str(extracted.get("lifecycle_state") or "").strip().lower()
+            if lifecycle_state == "stale":
+                summary["rows_stale"] += 1
+            elif lifecycle_state == "in_progress":
+                summary["rows_in_progress"] += 1
+
+        existing_by_key: Dict[tuple[str, str], Dict[str, object]] = {
+            (str(existing["stage_group"]), str(existing["run_name"])): {key: existing[key] for key in existing.keys()}
+            for existing in existing_rows
+        }
+        extracted_by_key: Dict[tuple[str, str], Dict[str, object]] = {
+            (str(extracted["stage_group"]), str(extracted["run_name"])): extracted for extracted in extracted_rows
+        }
+
+        for key, extracted in extracted_by_key.items():
+            existing = existing_by_key.get(key)
+            if existing is None:
+                summary["rows_inserted"] += 1
+                continue
+            existing_sig = _subject_mask_performance_row_signature(existing)
+            extracted_sig = _subject_mask_performance_row_signature(extracted)
+            if existing_sig == extracted_sig:
+                summary["rows_skipped"] += 1
+            else:
+                summary["rows_updated"] += 1
+
+        if refresh:
+            for key in existing_by_key:
+                if key not in extracted_by_key:
+                    summary["rows_deleted"] += 1
+
+        if dry_run:
+            continue
+        if refresh:
+            registry.replace_subject_mask_performance(dataset_id, extracted_rows)
+        else:
+            for extracted in extracted_rows:
+                registry.upsert_subject_mask_performance(
+                    dataset_id=dataset_id,
+                    stage_group=str(extracted["stage_group"]),
+                    run_name=str(extracted["run_name"]),
+                    run_created_utc=extracted.get("run_created_utc"),
+                    recording_id=extracted.get("recording_id"),
+                    zarr_use=extracted.get("zarr_use"),
+                    subject_mask_method=extracted.get("subject_mask_method"),
+                    label_schema_id=extracted.get("label_schema_id"),
+                    source_crop_run=extracted.get("source_crop_run"),
+                    source_keypoint_group=extracted.get("source_keypoint_group"),
+                    source_keypoints_run=extracted.get("source_keypoints_run"),
+                    source_subject_mask_run=extracted.get("source_subject_mask_run"),
+                    source_subject_mask_method=extracted.get("source_subject_mask_method"),
+                    run_semantics=extracted.get("run_semantics"),
+                    probability_semantics=extracted.get("probability_semantics"),
+                    source_background_run=extracted.get("source_background_run"),
+                    source_background_array=extracted.get("source_background_array"),
+                    source_dish_mask_array=extracted.get("source_dish_mask_array"),
+                    tuning_source=extracted.get("tuning_source"),
+                    tuning_timestamp=extracted.get("tuning_timestamp"),
+                    total_rois=extracted.get("total_rois"),
+                    rows_with_any_mask=extracted.get("rows_with_any_mask"),
+                    coverage_percent=extracted.get("coverage_percent"),
+                    duration_seconds=extracted.get("duration_seconds"),
+                    rois_per_second=extracted.get("rois_per_second"),
+                    available_component_count=extracted.get("available_component_count"),
+                    available_components_json=extracted.get("available_components_json"),
+                    unavailable_components_json=extracted.get("unavailable_components_json"),
+                    component_review_states_json=extracted.get("component_review_states_json"),
+                    eye_component_mode=extracted.get("eye_component_mode"),
+                    reason_counts_json=extracted.get("reason_counts_json"),
+                    summary_statistics_json=extracted.get("summary_statistics_json"),
+                    review_state=extracted.get("review_state"),
+                    review_method=extracted.get("review_method"),
+                    review_intended_use=extracted.get("review_intended_use"),
+                    review_reviewer=extracted.get("review_reviewer"),
+                    review_timestamp_utc=extracted.get("review_timestamp_utc"),
+                    source_subject_mask_stale_state=extracted.get("source_subject_mask_stale_state"),
+                    source_subject_mask_stale_reason=extracted.get("source_subject_mask_stale_reason"),
+                    source_subject_mask_stale_timestamp_utc=extracted.get("source_subject_mask_stale_timestamp_utc"),
+                    source_subject_mask_stale_json=extracted.get("source_subject_mask_stale_json"),
+                    lifecycle_state=extracted.get("lifecycle_state"),
+                    lifecycle_reason=extracted.get("lifecycle_reason"),
+                    zarr_mtime_ns=extracted.get("zarr_mtime_ns"),
+                    updated_utc=extracted.get("updated_utc"),
+                )
+
+    return summary
+
+
+def _backfill_subject_mask_component_quality(
+    registry: Registry,
+    *,
+    dry_run: bool,
+    scope_paths: Optional[Sequence[Path]],
+    refresh: bool,
+) -> Dict[str, int]:
+    rows = registry.conn.execute(
+        """
+        SELECT dataset_id, zarr_path, recording_id, zarr_use
+        FROM datasets
+        WHERE (status IS NULL OR lower(status) != 'missing')
+          AND lower(COALESCE(artifact_kind, '')) = 'source_recording'
+        ORDER BY dataset_id;
+        """
+    ).fetchall()
+    scope_roots = _normalize_scope_paths(scope_paths)
+    zarr = _import_zarr()
+    summary: Dict[str, int] = {
+        "datasets_scanned": 0,
+        "datasets_skipped_existing": 0,
+        "datasets_missing": 0,
+        "datasets_errors": 0,
+        "datasets_no_quality": 0,
+        "rows_inserted": 0,
+        "rows_updated": 0,
+        "rows_skipped": 0,
+        "rows_deleted": 0,
+    }
+
+    for row in rows:
+        dataset_id = str(row["dataset_id"])
+        zarr_path = Path(str(row["zarr_path"])).expanduser()
+        recording_id = str(row["recording_id"]) if row["recording_id"] else None
+        zarr_use = str(row["zarr_use"]) if row["zarr_use"] else None
+        if not _matches_scope(str(zarr_path), scope_roots):
+            continue
+        summary["datasets_scanned"] += 1
+        if not _is_zarr_root_path(zarr_path):
+            summary["datasets_missing"] += 1
+            continue
+
+        existing_rows = registry.conn.execute(
+            "SELECT * FROM subject_mask_component_quality WHERE dataset_id = ?;",
+            (dataset_id,),
+        ).fetchall()
+        if not refresh and existing_rows:
+            summary["datasets_skipped_existing"] += 1
+            summary["rows_skipped"] += len(existing_rows)
+            continue
+
+        try:
+            try:
+                root = zarr.open_group(str(zarr_path), mode="r", consolidated=False)
+            except TypeError:
+                root = zarr.open_group(str(zarr_path), mode="r")
+            extracted_rows = _extract_subject_mask_component_quality_rows(
+                root,
+                zarr_path=zarr_path,
+                recording_id=recording_id,
+                zarr_use=zarr_use,
+            )
+        except Exception:
+            summary["datasets_errors"] += 1
+            continue
+
+        if not extracted_rows:
+            summary["datasets_no_quality"] += 1
+
+        existing_by_key: Dict[tuple[str, str, str], Dict[str, object]] = {
+            (
+                str(existing["stage_group"]),
+                str(existing["run_name"]),
+                str(existing["component_name"]),
+            ): {key: existing[key] for key in existing.keys()}
+            for existing in existing_rows
+        }
+        extracted_by_key: Dict[tuple[str, str, str], Dict[str, object]] = {
+            (
+                str(extracted["stage_group"]),
+                str(extracted["run_name"]),
+                str(extracted["component_name"]),
+            ): extracted
+            for extracted in extracted_rows
+        }
+
+        for key, extracted in extracted_by_key.items():
+            existing = existing_by_key.get(key)
+            if existing is None:
+                summary["rows_inserted"] += 1
+                continue
+            existing_sig = _subject_mask_component_quality_row_signature(existing)
+            extracted_sig = _subject_mask_component_quality_row_signature(extracted)
+            if existing_sig == extracted_sig:
+                summary["rows_skipped"] += 1
+            else:
+                summary["rows_updated"] += 1
+
+        if refresh:
+            for key in existing_by_key:
+                if key not in extracted_by_key:
+                    summary["rows_deleted"] += 1
+
+        if dry_run:
+            continue
+        if refresh:
+            registry.replace_subject_mask_component_quality(dataset_id, extracted_rows)
+        else:
+            for extracted in extracted_rows:
+                registry.upsert_subject_mask_component_quality(
+                    dataset_id=dataset_id,
+                    stage_group=str(extracted["stage_group"]),
+                    run_name=str(extracted["run_name"]),
+                    component_name=str(extracted["component_name"]),
+                    component_family=extracted.get("component_family"),
+                    run_created_utc=extracted.get("run_created_utc"),
+                    recording_id=extracted.get("recording_id"),
+                    zarr_use=extracted.get("zarr_use"),
+                    subject_mask_method=extracted.get("subject_mask_method"),
+                    label_schema_id=extracted.get("label_schema_id"),
+                    eye_component_mode=extracted.get("eye_component_mode"),
+                    source_subject_mask_run=extracted.get("source_subject_mask_run"),
+                    available=extracted.get("available"),
+                    review_state=extracted.get("review_state"),
+                    review_method=extracted.get("review_method"),
+                    review_intended_use=extracted.get("review_intended_use"),
+                    review_reviewer=extracted.get("review_reviewer"),
+                    review_timestamp_utc=extracted.get("review_timestamp_utc"),
+                    total_rois=extracted.get("total_rois"),
+                    rows_with_component_mask=extracted.get("rows_with_component_mask"),
+                    rows_with_component_mask_rate=extracted.get("rows_with_component_mask_rate"),
+                    lifecycle_state=extracted.get("lifecycle_state"),
+                    lifecycle_reason=extracted.get("lifecycle_reason"),
+                    quality_updated_utc=extracted.get("quality_updated_utc"),
+                    zarr_mtime_ns=extracted.get("zarr_mtime_ns"),
+                )
+
+    return summary
+
+
 def _decode_text(value: object) -> Optional[str]:
     if value is None:
         return None
@@ -4385,6 +4887,12 @@ def _extract_source_eye_masks_run(group: object) -> Optional[str]:
     return _decode_text(group.attrs.get("source_eye_masks_run"))  # type: ignore[attr-defined]
 
 
+def _extract_source_subject_mask_run(group: object) -> Optional[str]:
+    if group is None or not hasattr(group, "attrs"):
+        return None
+    return _decode_text(group.attrs.get("source_subject_mask_run"))  # type: ignore[attr-defined]
+
+
 def _resolve_group_for_source_run(
     parent: object,
     *,
@@ -4467,6 +4975,142 @@ def _extract_coverage_pct(group: object) -> Optional[float]:
                 continue
         return float(present) / float(total) * 100.0
     return None
+
+
+def _extract_text_list(value: object) -> List[str]:
+    if value is None:
+        return []
+    if hasattr(value, "tolist"):
+        try:
+            value = value.tolist()
+        except Exception:
+            pass
+    if isinstance(value, (str, bytes)):
+        decoded = _decode_text(value)
+        return [decoded] if decoded else []
+    if isinstance(value, (list, tuple)):
+        items: List[str] = []
+        for item in value:
+            decoded = _decode_text(item)
+            if decoded:
+                items.append(decoded)
+        return items
+    return []
+
+
+def _extract_mask_present_rate(group: object) -> Optional[float]:
+    if group is None or not hasattr(group, "get"):
+        return None
+    try:
+        metrics = group.get("metrics")  # type: ignore[attr-defined]
+    except Exception:
+        metrics = None
+    if metrics is None or not hasattr(metrics, "get"):
+        return None
+    try:
+        mask_present = metrics.get("mask_present")  # type: ignore[attr-defined]
+    except Exception:
+        mask_present = None
+    if mask_present is None:
+        return None
+    try:
+        values = mask_present[:]
+    except Exception:
+        return None
+    try:
+        total = int(values.shape[0])  # type: ignore[attr-defined]
+    except Exception:
+        try:
+            total = len(values)  # type: ignore[arg-type]
+        except Exception:
+            total = 0
+    if total <= 0:
+        return None
+    try:
+        present = int(values.any(axis=1).sum())  # type: ignore[attr-defined]
+        return float(present) / float(total) * 100.0
+    except Exception:
+        pass
+
+    present = 0
+    try:
+        for row in values:  # type: ignore[assignment]
+            row_present = False
+            for item in row:
+                if bool(item):
+                    row_present = True
+                    break
+            if row_present:
+                present += 1
+    except Exception:
+        return None
+    return float(present) / float(total) * 100.0
+
+
+def _extract_subject_mask_coverage_pct(group: object) -> Optional[float]:
+    coverage = _extract_coverage_pct(group)
+    if coverage is not None:
+        return coverage
+    return _extract_mask_present_rate(group)
+
+
+def _extract_subject_mask_component_details(group: object) -> Dict[str, object]:
+    if group is None or not hasattr(group, "attrs"):
+        return {}
+
+    attrs = group.attrs  # type: ignore[attr-defined]
+    mask_labels = _extract_text_list(attrs.get("mask_labels"))
+    if not mask_labels:
+        return {}
+
+    available_components = list(mask_labels)
+    unavailable_components: List[str] = []
+    try:
+        available_arr = group.get("available_channels")  # type: ignore[attr-defined]
+    except Exception:
+        available_arr = None
+    if available_arr is not None:
+        try:
+            available_values = available_arr[:]
+            if hasattr(available_values, "tolist"):
+                available_values = available_values.tolist()
+            flags = [bool(value) for value in available_values]
+        except Exception:
+            flags = []
+        if flags:
+            padded_flags = list(flags[: len(mask_labels)])
+            if len(padded_flags) < len(mask_labels):
+                padded_flags.extend([False] * (len(mask_labels) - len(padded_flags)))
+            available_components = [label for label, flag in zip(mask_labels, padded_flags) if flag]
+            unavailable_components = [label for label, flag in zip(mask_labels, padded_flags) if not flag]
+
+    component_review_states: Dict[str, str] = {}
+    component_review_statuses = _coerce_mapping_value(attrs.get("component_review_statuses")) or {}
+    for label in mask_labels:
+        payload = _coerce_mapping_value(component_review_statuses.get(label))
+        if payload is None:
+            continue
+        state = _decode_text(payload.get("state")) or _decode_text(payload.get("review_state"))
+        if state:
+            component_review_states[label] = state
+
+    eye_component_mode: Optional[str] = None
+    if "eye_left" in mask_labels or "eye_right" in mask_labels:
+        eye_component_mode = "lr"
+    elif "eyes_union" in mask_labels:
+        eye_component_mode = "union"
+
+    details: Dict[str, object] = {
+        "label_schema_id": _decode_text(attrs.get("label_schema_id")),
+        "mask_labels": mask_labels,
+        "available_components": available_components,
+        "unavailable_components": unavailable_components,
+    }
+    if eye_component_mode:
+        details["eye_component_mode"] = eye_component_mode
+    if component_review_states:
+        details["component_review_states"] = component_review_states
+    return details
 
 
 def _extract_detect_method(detect_group: object) -> Optional[str]:
@@ -4616,6 +5260,97 @@ def _extract_refined_keypoints_coverage_pct(refined_group: object) -> Optional[f
         return float(usable) / float(total) * 100.0
     except Exception:
         return None
+
+
+def _extract_tracking_summary_details(tracks_group: object) -> Dict[str, object]:
+    if tracks_group is None or not hasattr(tracks_group, "attrs"):
+        return {}
+
+    attrs = tracks_group.attrs  # type: ignore[attr-defined]
+    summary = _coerce_mapping_value(attrs.get("summary_statistics")) or {}
+
+    n_tracks = _coerce_int_value(summary.get("n_tracks"))
+    if n_tracks is None:
+        n_tracks = _coerce_int_value(attrs.get("num_tracks"))
+
+    n_assigned_rows = _coerce_int_value(summary.get("n_assigned_rows"))
+    n_unassigned_rows = _coerce_int_value(summary.get("n_unassigned_rows"))
+    if n_unassigned_rows is None:
+        n_unassigned_rows = _coerce_int_value(attrs.get("n_unassigned_rows"))
+
+    n_rows = _coerce_int_value(summary.get("n_rows"))
+    if n_assigned_rows is None and n_rows is not None and n_unassigned_rows is not None:
+        n_assigned_rows = max(0, int(n_rows) - int(n_unassigned_rows))
+
+    unassigned_row_rate_percent = _coerce_float_value(summary.get("unassigned_row_rate_percent"))
+    if unassigned_row_rate_percent is None:
+        unassigned_row_rate_percent = _coerce_float_value(attrs.get("unassigned_row_rate_percent"))
+    if (
+        unassigned_row_rate_percent is None
+        and n_unassigned_rows is not None
+        and n_rows is not None
+        and n_rows > 0
+    ):
+        unassigned_row_rate_percent = float(n_unassigned_rows) / float(n_rows) * 100.0
+
+    tracking_qc_state = _decode_text(summary.get("tracking_qc_state"))
+    if tracking_qc_state is None:
+        tracking_qc_state = _decode_text(attrs.get("tracking_qc_state"))
+    if tracking_qc_state == "block":
+        tracking_qc_state = "warn"
+    tracking_warn_threshold_rows = _coerce_int_value(summary.get("tracking_warn_threshold_rows"))
+    if tracking_warn_threshold_rows is None:
+        tracking_warn_threshold_rows = _coerce_int_value(attrs.get("tracking_warn_threshold_rows"))
+    tracking_warn_threshold_percent = _coerce_float_value(summary.get("tracking_warn_threshold_percent"))
+    if tracking_warn_threshold_percent is None:
+        tracking_warn_threshold_percent = _coerce_float_value(attrs.get("tracking_warn_threshold_percent"))
+    tracking_block_threshold_rows = _coerce_int_value(summary.get("tracking_block_threshold_rows"))
+    if tracking_block_threshold_rows is None:
+        tracking_block_threshold_rows = _coerce_int_value(attrs.get("tracking_block_threshold_rows"))
+    tracking_block_threshold_percent = _coerce_float_value(summary.get("tracking_block_threshold_percent"))
+    if tracking_block_threshold_percent is None:
+        tracking_block_threshold_percent = _coerce_float_value(attrs.get("tracking_block_threshold_percent"))
+
+    if n_unassigned_rows is not None:
+        computed_qc = build_tracking_qc_fields(
+            n_unassigned_rows=int(n_unassigned_rows),
+            unassigned_row_rate_percent=unassigned_row_rate_percent,
+            warn_threshold_rows=tracking_warn_threshold_rows if tracking_warn_threshold_rows is not None else 1,
+            warn_threshold_percent=tracking_warn_threshold_percent if tracking_warn_threshold_percent is not None else 0.0,
+            block_threshold_rows=tracking_block_threshold_rows if tracking_block_threshold_rows is not None else 10,
+            block_threshold_percent=tracking_block_threshold_percent if tracking_block_threshold_percent is not None else 1.0,
+        )
+        if tracking_qc_state is None:
+            tracking_qc_state = str(computed_qc["tracking_qc_state"])
+        if tracking_warn_threshold_rows is None:
+            tracking_warn_threshold_rows = int(computed_qc["tracking_warn_threshold_rows"])
+        if tracking_warn_threshold_percent is None:
+            tracking_warn_threshold_percent = float(computed_qc["tracking_warn_threshold_percent"])
+        if tracking_block_threshold_rows is None:
+            tracking_block_threshold_rows = int(computed_qc["tracking_block_threshold_rows"])
+        if tracking_block_threshold_percent is None:
+            tracking_block_threshold_percent = float(computed_qc["tracking_block_threshold_percent"])
+
+    details: Dict[str, object] = {}
+    if n_tracks is not None:
+        details["num_tracks"] = int(n_tracks)
+    if n_assigned_rows is not None:
+        details["n_assigned_rows"] = int(n_assigned_rows)
+    if n_unassigned_rows is not None:
+        details["n_unassigned_rows"] = int(n_unassigned_rows)
+    if unassigned_row_rate_percent is not None:
+        details["unassigned_row_rate_percent"] = float(unassigned_row_rate_percent)
+    if tracking_qc_state is not None:
+        details["tracking_qc_state"] = tracking_qc_state
+    if tracking_warn_threshold_rows is not None:
+        details["tracking_warn_threshold_rows"] = int(tracking_warn_threshold_rows)
+    if tracking_warn_threshold_percent is not None:
+        details["tracking_warn_threshold_percent"] = float(tracking_warn_threshold_percent)
+    if tracking_block_threshold_rows is not None:
+        details["tracking_block_threshold_rows"] = int(tracking_block_threshold_rows)
+    if tracking_block_threshold_percent is not None:
+        details["tracking_block_threshold_percent"] = float(tracking_block_threshold_percent)
+    return details
 
 
 def _extract_updated_utc(group: object, *, fallback: str) -> str:
@@ -4992,27 +5727,85 @@ def _build_recording_step_rows_from_root(
         if rate is not None:
             refined_eye_masks_coverage = float(rate) * 100.0 if rate <= 1.0 else float(rate)
 
-    id_assignment_parent = root.get("id_assignment_runs")  # type: ignore[attr-defined]
-    id_assignment_run, id_assignment_group, id_assignment_selection = _resolve_latest_group(id_assignment_parent)
-    id_assignment_status, id_assignment_reason = _step_status_from_presence(
-        present=id_assignment_group is not None,
+    subject_masks_parent = root.get("subject_mask_runs")  # type: ignore[attr-defined]
+    subject_masks_run, subject_masks_group, subject_masks_selection = _resolve_latest_group(subject_masks_parent)
+    subject_masks_status, subject_masks_reason = _step_status_from_presence(
+        present=subject_masks_group is not None,
+        is_production=is_production,
+        prerequisite_statuses=(crop_status,),
+    )
+    subject_masks_method = _decode_text(
+        subject_masks_group.attrs.get("method")  # type: ignore[union-attr]
+    ) if subject_masks_group is not None else None
+    subject_masks_review_status = (
+        _coerce_mapping_value(subject_masks_group.attrs.get("subject_mask_review_status"))  # type: ignore[attr-defined]
+        if subject_masks_group is not None
+        else None
+    )
+    subject_masks_coverage = _extract_subject_mask_coverage_pct(subject_masks_group)
+    subject_masks_component_details = _extract_subject_mask_component_details(subject_masks_group)
+
+    refined_subject_masks_parent = root.get("refined_subject_masks_runs")  # type: ignore[attr-defined]
+    (
+        refined_subject_masks_run,
+        refined_subject_masks_group,
+        refined_subject_masks_selection,
+        refined_subject_masks_latest_run,
+        refined_subject_masks_latest_source_run,
+    ) = _resolve_group_for_source_run(
+        refined_subject_masks_parent,
+        source_run=subject_masks_run,
+        source_run_extractor=_extract_source_subject_mask_run,
+    )
+    refined_subject_masks_status, refined_subject_masks_reason = _step_status_from_presence(
+        present=refined_subject_masks_group is not None,
+        is_production=is_production,
+        prerequisite_statuses=(subject_masks_status,),
+    )
+    if refined_subject_masks_group is None and subject_masks_run and refined_subject_masks_parent is not None:
+        if refined_subject_masks_selection == "source_mismatch":
+            refined_subject_masks_reason = "stale_vs_latest_subject_masks"
+        elif refined_subject_masks_selection == "source_mismatch_missing_attr":
+            refined_subject_masks_reason = "missing_source_subject_mask_run"
+    refined_subject_masks_method = _decode_text(
+        refined_subject_masks_group.attrs.get("method")  # type: ignore[union-attr]
+    ) if refined_subject_masks_group is not None else None
+    if not refined_subject_masks_method and refined_subject_masks_group is not None:
+        refined_subject_masks_method = "refine_subject_masks"
+    refined_subject_masks_review_status = None
+    if refined_subject_masks_group is not None:
+        refined_subject_masks_review_status = _coerce_mapping_value(
+            refined_subject_masks_group.attrs.get("refined_subject_mask_review_status")  # type: ignore[attr-defined]
+        )
+        if refined_subject_masks_review_status is None:
+            refined_subject_masks_review_status = _coerce_mapping_value(
+                refined_subject_masks_group.attrs.get("subject_mask_review_status")  # type: ignore[attr-defined]
+            )
+    refined_subject_masks_coverage = _extract_subject_mask_coverage_pct(refined_subject_masks_group)
+    refined_subject_masks_component_details = _extract_subject_mask_component_details(refined_subject_masks_group)
+
+    arena_assignment_parent = root.get("arena_assignment_runs")  # type: ignore[attr-defined]
+    arena_assignment_run, arena_assignment_group, arena_assignment_selection = _resolve_latest_group(arena_assignment_parent)
+    arena_assignment_status, arena_assignment_reason = _step_status_from_presence(
+        present=arena_assignment_group is not None,
         is_production=is_production,
         prerequisite_statuses=(refined_keypoints_status, keypoints_status),
     )
-    id_assignment_method = _decode_text(
-        id_assignment_group.attrs.get("method")  # type: ignore[union-attr]
-    ) if id_assignment_group is not None else None
+    arena_assignment_method = _decode_text(
+        arena_assignment_group.attrs.get("method")  # type: ignore[union-attr]
+    ) if arena_assignment_group is not None else None
 
     tracks_parent = root.get("tracking_runs")  # type: ignore[attr-defined]
     tracks_run, tracks_group, tracks_selection = _resolve_latest_group(tracks_parent)
     tracks_status, tracks_reason = _step_status_from_presence(
         present=tracks_group is not None,
         is_production=is_production,
-        prerequisite_statuses=(id_assignment_status,),
+        prerequisite_statuses=(arena_assignment_status,),
     )
     tracks_method = _decode_text(
         tracks_group.attrs.get("method")  # type: ignore[union-attr]
     ) if tracks_group is not None else None
+    tracks_summary_details = _extract_tracking_summary_details(tracks_group)
 
     stimulus_runs = 0
     stimulus_run: Optional[str] = None
@@ -5122,6 +5915,31 @@ def _build_recording_step_rows_from_root(
         refined_eye_masks_details["latest_refined_eye_masks_run"] = refined_eye_masks_latest_run
     if refined_eye_masks_latest_source_run:
         refined_eye_masks_details["latest_refined_eye_masks_source_run"] = refined_eye_masks_latest_source_run
+
+    subject_masks_details: Dict[str, object] = {
+        **common_details,
+        "reason": subject_masks_reason,
+        "latest_selector": subject_masks_selection,
+        "upstream": {"crop": crop_status},
+        **subject_masks_component_details,
+    }
+
+    refined_subject_masks_details: Dict[str, object] = {
+        **common_details,
+        "reason": refined_subject_masks_reason,
+        "latest_selector": refined_subject_masks_selection,
+        "upstream": {"subject_masks": subject_masks_status},
+        **refined_subject_masks_component_details,
+    }
+    if subject_masks_run:
+        refined_subject_masks_details["expected_source_subject_mask_run"] = subject_masks_run
+    refined_subject_masks_source_run = _extract_source_subject_mask_run(refined_subject_masks_group)
+    if refined_subject_masks_source_run:
+        refined_subject_masks_details["source_subject_mask_run"] = refined_subject_masks_source_run
+    if refined_subject_masks_latest_run:
+        refined_subject_masks_details["latest_refined_subject_masks_run"] = refined_subject_masks_latest_run
+    if refined_subject_masks_latest_source_run:
+        refined_subject_masks_details["latest_refined_subject_masks_source_run"] = refined_subject_masks_latest_source_run
 
     rows: List[Dict[str, object]] = [
         _make_recording_step_row(
@@ -5283,16 +6101,44 @@ def _build_recording_step_rows_from_root(
         _make_recording_step_row(
             dataset_id=dataset_id,
             recording_id=recording_id,
-            step_name="id_assignment",
-            status=id_assignment_status,
-            run_name=id_assignment_run,
-            method=id_assignment_method,
+            step_name="subject_masks",
+            status=subject_masks_status,
+            run_name=subject_masks_run,
+            method=subject_masks_method,
+            coverage_pct=subject_masks_coverage,
+            review_status=subject_masks_review_status,
+            details=subject_masks_details,
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(subject_masks_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="refined_subject_masks",
+            status=refined_subject_masks_status,
+            run_name=refined_subject_masks_run,
+            method=refined_subject_masks_method,
+            coverage_pct=refined_subject_masks_coverage,
+            review_status=refined_subject_masks_review_status,
+            details=refined_subject_masks_details,
+            source=source,
+            zarr_mtime_ns=zarr_mtime_ns,
+            updated_utc=_extract_updated_utc(refined_subject_masks_group, fallback=fallback_updated_utc),
+        ),
+        _make_recording_step_row(
+            dataset_id=dataset_id,
+            recording_id=recording_id,
+            step_name="arena_assignment",
+            status=arena_assignment_status,
+            run_name=arena_assignment_run,
+            method=arena_assignment_method,
             coverage_pct=None,
             review_status=None,
             details={
                 **common_details,
-                "reason": id_assignment_reason,
-                "latest_selector": id_assignment_selection,
+                "reason": arena_assignment_reason,
+                "latest_selector": arena_assignment_selection,
                 "upstream": {
                     "keypoints": keypoints_status,
                     "refined_keypoints": refined_keypoints_status,
@@ -5300,7 +6146,7 @@ def _build_recording_step_rows_from_root(
             },
             source=source,
             zarr_mtime_ns=zarr_mtime_ns,
-            updated_utc=_extract_updated_utc(id_assignment_group, fallback=fallback_updated_utc),
+            updated_utc=_extract_updated_utc(arena_assignment_group, fallback=fallback_updated_utc),
         ),
         _make_recording_step_row(
             dataset_id=dataset_id,
@@ -5315,7 +6161,8 @@ def _build_recording_step_rows_from_root(
                 **common_details,
                 "reason": tracks_reason,
                 "latest_selector": tracks_selection,
-                "upstream": {"id_assignment": id_assignment_status},
+                "upstream": {"arena_assignment": arena_assignment_status},
+                **tracks_summary_details,
             },
             source=source,
             zarr_mtime_ns=zarr_mtime_ns,
@@ -6267,18 +7114,13 @@ def _check_registry_integrity(registry: Registry) -> List[IntegrityIssue]:
                 )
             )
 
-    # Subject/protocol consistency for source recordings (current schema).
+    # Source-recording subject-count sanity for legacy provenance snapshots.
     source_consistency_rows = registry.conn.execute(
         """
         SELECT
             d.dataset_id,
-            r.protocol_name AS recording_protocol_name,
-            p.protocol_name AS provenance_protocol_name,
-            r.dish_design AS recording_dish_design,
-            p.dish_design AS provenance_dish_design,
             p.subject_count
         FROM datasets d
-        LEFT JOIN recordings r ON r.recording_id = d.recording_id
         LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
         WHERE d.artifact_kind = 'source_recording'
         ORDER BY d.dataset_id;
@@ -6286,52 +7128,6 @@ def _check_registry_integrity(registry: Registry) -> List[IntegrityIssue]:
     ).fetchall()
     for row in source_consistency_rows:
         dataset_id = str(row["dataset_id"])
-        recording_protocol = (
-            str(row["recording_protocol_name"]).strip()
-            if row["recording_protocol_name"] is not None
-            else ""
-        )
-        provenance_protocol = (
-            str(row["provenance_protocol_name"]).strip()
-            if row["provenance_protocol_name"] is not None
-            else ""
-        )
-        if recording_protocol and provenance_protocol and recording_protocol != provenance_protocol:
-            issues.append(
-                IntegrityIssue(
-                    code="source_protocol_name_mismatch",
-                    run_id=dataset_id,
-                    detail=(
-                        f"dataset_id={dataset_id} recording.protocol_name={recording_protocol} "
-                        f"!= provenance.protocol_name={provenance_protocol}"
-                    ),
-                )
-            )
-        recording_dish_design = (
-            str(row["recording_dish_design"]).strip()
-            if row["recording_dish_design"] is not None
-            else ""
-        )
-        provenance_dish_design = (
-            str(row["provenance_dish_design"]).strip()
-            if row["provenance_dish_design"] is not None
-            else ""
-        )
-        if (
-            recording_dish_design
-            and provenance_dish_design
-            and recording_dish_design != provenance_dish_design
-        ):
-            issues.append(
-                IntegrityIssue(
-                    code="source_dish_design_mismatch",
-                    run_id=dataset_id,
-                    detail=(
-                        f"dataset_id={dataset_id} recording.dish_design={recording_dish_design} "
-                        f"!= provenance.dish_design={provenance_dish_design}"
-                    ),
-                )
-            )
         subject_count = row["subject_count"]
         if subject_count is not None:
             try:
@@ -6399,33 +7195,6 @@ def _check_registry_integrity(registry: Registry) -> List[IntegrityIssue]:
                     code="subject_missing_dish",
                     run_id=subject_id or None,
                     detail=f"subject_id={subject_id} references missing dish_id={dish_id}",
-                )
-            )
-
-        subject_dish_mismatch_rows = registry.conn.execute(
-            """
-            SELECT rs.recording_id, rs.subject_id, rs.dish_id AS rs_dish_id, s.dish_id AS subject_dish_id
-            FROM recording_subjects rs
-            JOIN subjects s ON s.subject_id = rs.subject_id
-            WHERE rs.dish_id IS NOT NULL
-              AND s.dish_id IS NOT NULL
-              AND rs.dish_id != s.dish_id
-            ORDER BY rs.recording_id, rs.subject_id;
-            """
-        ).fetchall()
-        for row in subject_dish_mismatch_rows:
-            recording_id = str(row["recording_id"] or "")
-            subject_id = str(row["subject_id"] or "")
-            rs_dish_id = str(row["rs_dish_id"] or "")
-            subject_dish_id = str(row["subject_dish_id"] or "")
-            issues.append(
-                IntegrityIssue(
-                    code="recording_subject_dish_mismatch_subject",
-                    run_id=recording_id or None,
-                    detail=(
-                        f"recording_id={recording_id} subject_id={subject_id} "
-                        f"recording_subjects.dish_id={rs_dish_id} subjects.dish_id={subject_dish_id}"
-                    ),
                 )
             )
 
@@ -6917,6 +7686,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.backfill_keypoint_performance
         and not args.backfill_crop_quality
         and not args.backfill_eye_mask_performance
+        and not args.backfill_subject_mask_performance
+        and not args.backfill_subject_mask_component_quality
         and not args.backfill_recording_step_status
         and not args.refresh_keypoint_profiles
         and not args.refresh_eye_mask_profiles
@@ -6927,6 +7698,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         and not args.refresh_keypoint_performance
         and not args.refresh_crop_quality
         and not args.refresh_eye_mask_performance
+        and not args.refresh_subject_mask_performance
+        and not args.refresh_subject_mask_component_quality
         and not args.check_integrity
         and not args.vacuum
     ):
@@ -6942,6 +7715,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "--backfill-dataset-lineage, "
             "--backfill-detect-quality, --backfill-detect-performance, --backfill-keypoint-performance, "
             "--backfill-crop-quality, --backfill-eye-mask-performance, "
+            "--backfill-subject-mask-performance, --backfill-subject-mask-component-quality, "
             "--backfill-recording-step-status, "
             "--refresh-keypoint-profiles, --refresh-keypoint-quality, "
             "--refresh-eye-mask-quality, "
@@ -6949,6 +7723,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "--refresh-detect-quality, --refresh-detect-performance, "
             "--refresh-keypoint-performance, "
             "--refresh-crop-quality, --refresh-eye-mask-performance, "
+            "--refresh-subject-mask-performance, --refresh-subject-mask-component-quality, "
             "--check-integrity, and/or --vacuum."
         )
 
@@ -7656,6 +8431,76 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 f"no_performance={summary['datasets_no_performance']} "
                 f"stale={summary['rows_stale']} "
                 f"in_progress={summary['rows_in_progress']} "
+                f"skipped_existing={summary['datasets_skipped_existing']}"
+            )
+            if args.dry_run:
+                print(
+                    "Dry run: would apply "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+            else:
+                print(
+                    "Applied "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+
+        if args.backfill_subject_mask_performance or args.refresh_subject_mask_performance:
+            summary = _backfill_subject_mask_performance(
+                registry,
+                dry_run=bool(args.dry_run),
+                scope_paths=scope_paths or None,
+                refresh=bool(args.refresh_subject_mask_performance),
+            )
+            mode = "refresh" if args.refresh_subject_mask_performance else "backfill"
+            print(
+                f"Subject-mask performance {mode}: "
+                "scope=source-recording-all-uses "
+                f"scanned={summary['datasets_scanned']} "
+                f"missing={summary['datasets_missing']} "
+                f"errors={summary['datasets_errors']} "
+                f"no_performance={summary['datasets_no_performance']} "
+                f"stale={summary['rows_stale']} "
+                f"in_progress={summary['rows_in_progress']} "
+                f"skipped_existing={summary['datasets_skipped_existing']}"
+            )
+            if args.dry_run:
+                print(
+                    "Dry run: would apply "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+            else:
+                print(
+                    "Applied "
+                    f"inserted={summary['rows_inserted']} "
+                    f"updated={summary['rows_updated']} "
+                    f"deleted={summary['rows_deleted']} "
+                    f"unchanged={summary['rows_skipped']} row(s)."
+                )
+
+        if args.backfill_subject_mask_component_quality or args.refresh_subject_mask_component_quality:
+            summary = _backfill_subject_mask_component_quality(
+                registry,
+                dry_run=bool(args.dry_run),
+                scope_paths=scope_paths or None,
+                refresh=bool(args.refresh_subject_mask_component_quality),
+            )
+            mode = "refresh" if args.refresh_subject_mask_component_quality else "backfill"
+            print(
+                f"Subject-mask component quality {mode}: "
+                "scope=source-recording-all-uses "
+                f"scanned={summary['datasets_scanned']} "
+                f"missing={summary['datasets_missing']} "
+                f"errors={summary['datasets_errors']} "
+                f"no_quality={summary['datasets_no_quality']} "
                 f"skipped_existing={summary['datasets_skipped_existing']}"
             )
             if args.dry_run:

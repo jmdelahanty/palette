@@ -147,6 +147,17 @@ Important naming decision:
 - legacy `fish_id` should be treated as a compatibility alias or source import
   field, not a second canonical identity namespace.
 
+Operator-facing interpretation:
+
+- normalized registry tables, canonical views, and integrity rules should speak
+  in terms of `subject_id`.
+- acquisition-era snapshots may still carry `fish_id`; during migration that
+  value may remain readable only as a compatibility field such as
+  `legacy_fish_id`.
+- query surfaces may keep `fish_id` as a compatibility filter name for users,
+  but it should resolve to canonical `subject_id` first and only fall back to
+  legacy provenance aliases when normalized subject lineage is absent.
+
 `recording_subjects` remains necessary because the same `subject_id` may appear
 in multiple recordings, and some attributes are recording-specific:
 
@@ -265,7 +276,9 @@ Recommended shape:
 - dataset identity fields from `datasets`,
 - recording context fields from `recordings`,
 - technical snapshot fields from `provenance`,
-- biological summary fields derived from `recording_subject_overview`.
+- biological summary fields derived from `recording_subject_overview`,
+- explicit legacy compatibility fields for acquisition snapshots that have not
+  yet been normalized, for example `legacy_fish_id`.
 
 Biological summary should support both:
 
@@ -280,11 +293,22 @@ Examples:
 - `cross_ids_json`
 - `genotypes_json`
 - `dpf_values_json`
+- compatibility-only `legacy_fish_id`, `legacy_dish_id`, `legacy_cross_id`,
+  `legacy_genotype`, `legacy_dpf_at_acquisition`
 - convenience scalar `subject_id`, `dish_id`, `cross_id`, `genotype`,
   `dpf_at_acquisition` only when a single distinct value exists
 
 This avoids forcing a false single-value biology model onto multi-subject
 recordings.
+
+Recommended subject-context semantics:
+
+- `subject_context_source='normalized'` means canonical lineage came from
+  `recording_subjects` / `recording_subject_overview`.
+- `subject_context_source='legacy_provenance'` means no normalized lineage was
+  available and only compatibility snapshot biology exists.
+- canonical biological fields should remain null when only
+  `legacy_provenance` data is present.
 
 ### 3) Make status and profile views read from context views
 

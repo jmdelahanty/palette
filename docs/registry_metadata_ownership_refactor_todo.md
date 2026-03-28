@@ -32,7 +32,7 @@ Date anchored: 2026-03-13.
   to `recordings`.
 - [ ] Decide whether `subject_count` remains a compatibility snapshot field in
   `provenance` or is fully replaced by derived subject-count views.
-- [ ] Document the canonical meaning of `subject_id` vs legacy `fish_id`.
+- [x] Document the canonical meaning of `subject_id` vs legacy `fish_id`.
 
 ## Phase 1: Additive Context Views
 
@@ -88,12 +88,12 @@ Date anchored: 2026-03-13.
 
 ## Phase 4: Biological Identity Migration
 
-- [ ] Formalize `subject_id` as the canonical biological identity key.
+- [x] Formalize `subject_id` as the canonical biological identity key.
 - [ ] Treat legacy `fish_id` as:
   - compatibility import field,
   - query alias where needed,
   - non-canonical long-term.
-- [ ] Update maintenance/backfill code so normalized lineage is the primary
+- [x] Update maintenance/backfill code so normalized lineage is the primary
   source of truth for:
   - `dish_id`
   - `cross_id`
@@ -102,9 +102,9 @@ Date anchored: 2026-03-13.
   - `species`
   - `sex`
   - `dpf_at_acquisition`
-- [ ] Stop treating denormalized copies of those fields in `provenance` as
+- [x] Stop treating denormalized copies of those fields in `provenance` as
   co-equal canonical query fields.
-- [ ] Add migration/backfill tests for:
+- [x] Add migration/backfill tests for:
   - same subject across multiple recordings,
   - one recording with multiple subjects,
   - conflicting legacy `fish_id` / `subject_id` inputs.

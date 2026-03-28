@@ -453,3 +453,53 @@ def test_query_datasets_fish_id_matches_multi_subject_lineage_membership(tmp_pat
     assert int(row["subject_count"]) == 2
     assert row["subject_context_source"] == "normalized"
     assert json.loads(str(row["subject_ids_json"])) == ["subject_a", "subject_b"]
+
+
+def test_query_datasets_fish_id_uses_legacy_provenance_alias_when_normalized_subject_missing(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_legacy",
+        session_uuid="session_legacy",
+        zarr_path=tmp_path / "dataset_legacy.zarr",
+        recording_id="recording_legacy",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_provenance(
+        "dataset_legacy",
+        provenance={
+            "fish_id": "legacy_subject",
+            "dish_id": "legacy_dish",
+            "cross_id": "legacy_cross",
+            "genotype": "legacy_genotype",
+            "dpf_at_acquisition": 6,
+            "subject_count": 1,
+            "snapshot_status": "partial",
+        },
+        context={
+            "rig_id": "rig_legacy",
+            "arena_id": "arena_legacy",
+            "camera_id": "camera_legacy",
+            "canvas_name": "canvas_legacy",
+        },
+        protocol_name="protocol_legacy",
+        protocol_hash="hash_legacy",
+        acquisition={"dish_design": "dish_design_legacy"},
+        zarr_purpose="analysis",
+    )
+    registry.conn.commit()
+
+    rows = registry.query_datasets(fish_id="legacy_subject")
+    registry.close()
+
+    assert [row["dataset_id"] for row in rows] == ["dataset_legacy"]
+    row = rows[0]
+    assert row["fish_id"] == "legacy_subject"
+    assert row["subject_id"] is None
+    assert row["subject_context_source"] == "legacy_provenance"
+    assert row["cross_id"] is None
+    assert row["genotype"] is None
+    assert row["dpf_at_acquisition"] is None
+    assert row["subject_ids_json"] is None

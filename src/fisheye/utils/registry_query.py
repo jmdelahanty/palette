@@ -1152,7 +1152,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--registry", type=Path, help="Optional registry SQLite path.")
     parser.add_argument("--dish-design", type=str, help="Exact dish design match.")
     parser.add_argument("--dish-design-like", type=str, help="Substring match for dish design.")
-    parser.add_argument("--fish-id", type=str, help="Exact fish_id match.")
+    parser.add_argument(
+        "--fish-id",
+        type=str,
+        help="Exact subject_id match; also matches legacy fish_id compatibility aliases.",
+    )
     parser.add_argument("--subject-count-min", type=int)
     parser.add_argument("--subject-count-max", type=int)
     parser.add_argument("--zarr-use", type=str, help="Exact zarr use match (training/analysis/inference/export/archive).")

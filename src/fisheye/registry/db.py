@@ -8143,73 +8143,33 @@ class Registry:
                         OR NULLIF(TRIM(p.genotype), '') IS NOT NULL
                         OR p.dpf_at_acquisition IS NOT NULL
                         OR p.subject_count IS NOT NULL
-                    ) THEN 'provenance'
+                    ) THEN 'legacy_provenance'
                     ELSE 'missing'
                 END AS subject_context_source,
-                COALESCE(rss.subject_id, NULLIF(TRIM(p.fish_id), '')) AS subject_id,
-                COALESCE(rss.dish_id, NULLIF(TRIM(p.dish_id), '')) AS dish_id,
-                COALESCE(rss.cross_id, NULLIF(TRIM(p.cross_id), '')) AS cross_id,
-                COALESCE(rss.genotype, NULLIF(TRIM(p.genotype), '')) AS genotype,
-                COALESCE(rss.line_strain, NULLIF(TRIM(p.line_strain), '')) AS line_strain,
-                COALESCE(rss.species, NULLIF(TRIM(p.species), '')) AS species,
-                COALESCE(rss.sex, NULLIF(TRIM(p.sex), '')) AS sex,
-                COALESCE(rss.dpf_at_acquisition, p.dpf_at_acquisition) AS dpf_at_acquisition,
-                COALESCE(
-                    rss.subject_ids_json,
-                    CASE
-                        WHEN NULLIF(TRIM(p.fish_id), '') IS NOT NULL THEN json_array(NULLIF(TRIM(p.fish_id), ''))
-                        ELSE NULL
-                    END
-                ) AS subject_ids_json,
-                COALESCE(
-                    rss.dish_ids_json,
-                    CASE
-                        WHEN NULLIF(TRIM(p.dish_id), '') IS NOT NULL THEN json_array(NULLIF(TRIM(p.dish_id), ''))
-                        ELSE NULL
-                    END
-                ) AS dish_ids_json,
-                COALESCE(
-                    rss.cross_ids_json,
-                    CASE
-                        WHEN NULLIF(TRIM(p.cross_id), '') IS NOT NULL THEN json_array(NULLIF(TRIM(p.cross_id), ''))
-                        ELSE NULL
-                    END
-                ) AS cross_ids_json,
-                COALESCE(
-                    rss.genotypes_json,
-                    CASE
-                        WHEN NULLIF(TRIM(p.genotype), '') IS NOT NULL THEN json_array(NULLIF(TRIM(p.genotype), ''))
-                        ELSE NULL
-                    END
-                ) AS genotypes_json,
-                COALESCE(
-                    rss.line_strains_json,
-                    CASE
-                        WHEN NULLIF(TRIM(p.line_strain), '') IS NOT NULL THEN json_array(NULLIF(TRIM(p.line_strain), ''))
-                        ELSE NULL
-                    END
-                ) AS line_strains_json,
-                COALESCE(
-                    rss.species_values_json,
-                    CASE
-                        WHEN NULLIF(TRIM(p.species), '') IS NOT NULL THEN json_array(NULLIF(TRIM(p.species), ''))
-                        ELSE NULL
-                    END
-                ) AS species_values_json,
-                COALESCE(
-                    rss.sex_values_json,
-                    CASE
-                        WHEN NULLIF(TRIM(p.sex), '') IS NOT NULL THEN json_array(NULLIF(TRIM(p.sex), ''))
-                        ELSE NULL
-                    END
-                ) AS sex_values_json,
-                COALESCE(
-                    rss.dpf_values_json,
-                    CASE
-                        WHEN p.dpf_at_acquisition IS NOT NULL THEN json_array(p.dpf_at_acquisition)
-                        ELSE NULL
-                    END
-                ) AS dpf_values_json
+                NULLIF(TRIM(p.fish_id), '') AS legacy_fish_id,
+                NULLIF(TRIM(p.dish_id), '') AS legacy_dish_id,
+                NULLIF(TRIM(p.cross_id), '') AS legacy_cross_id,
+                NULLIF(TRIM(p.genotype), '') AS legacy_genotype,
+                NULLIF(TRIM(p.line_strain), '') AS legacy_line_strain,
+                NULLIF(TRIM(p.species), '') AS legacy_species,
+                NULLIF(TRIM(p.sex), '') AS legacy_sex,
+                p.dpf_at_acquisition AS legacy_dpf_at_acquisition,
+                rss.subject_id AS subject_id,
+                rss.dish_id AS dish_id,
+                rss.cross_id AS cross_id,
+                rss.genotype AS genotype,
+                rss.line_strain AS line_strain,
+                rss.species AS species,
+                rss.sex AS sex,
+                rss.dpf_at_acquisition AS dpf_at_acquisition,
+                rss.subject_ids_json AS subject_ids_json,
+                rss.dish_ids_json AS dish_ids_json,
+                rss.cross_ids_json AS cross_ids_json,
+                rss.genotypes_json AS genotypes_json,
+                rss.line_strains_json AS line_strains_json,
+                rss.species_values_json AS species_values_json,
+                rss.sex_values_json AS sex_values_json,
+                rss.dpf_values_json AS dpf_values_json
             FROM datasets d
             LEFT JOIN recordings r ON r.recording_id = d.recording_id
             LEFT JOIN provenance p ON p.dataset_id = d.dataset_id
@@ -12567,7 +12527,7 @@ class Registry:
         sql = [
             "SELECT dcc.dataset_id, dcc.session_uuid, dcc.zarr_path,",
             "dcc.recording_id, dcc.zarr_origin, dcc.zarr_use, dcc.dataset_status AS status,",
-            "dcc.dish_design, dcc.subject_id AS fish_id, dcc.subject_id AS subject_id,",
+            "dcc.dish_design, COALESCE(dcc.subject_id, dcc.legacy_fish_id) AS fish_id, dcc.subject_id AS subject_id,",
             "dcc.subject_count_effective AS subject_count,",
             "dcc.subject_count_snapshot, dcc.subject_count_recorded, dcc.subject_context_source,",
             "dcc.fps, dcc.exposure, dcc.exposure_unit, dcc.frame_rate, dcc.gain,",
@@ -12620,7 +12580,7 @@ class Registry:
         if fish_id is not None:
             fish_id_text = str(fish_id).strip()
             sql.append(
-                "AND (dcc.subject_id = ? "
+                "AND (COALESCE(dcc.subject_id, dcc.legacy_fish_id) = ? "
                 "OR EXISTS ("
                 "SELECT 1 FROM json_each(COALESCE(dcc.subject_ids_json, '[]')) "
                 "WHERE CAST(json_each.value AS TEXT) = ?"
