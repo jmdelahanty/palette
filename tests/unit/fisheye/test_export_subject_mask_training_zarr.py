@@ -1,0 +1,270 @@
+"""Tests for merged subject-mask-training export and validation."""
+
+import json
+from pathlib import Path
+import sys
+
+import numpy as np
+import zarr
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
+
+from fisheye.registry.db import Registry
+from fisheye.utils import check_training_registry as registry_view
+from fisheye.utils.export_subject_mask_training_zarr import (
+    SubjectMergeSourceSpec,
+    export_merged_subject_mask_training_zarr,
+    export_merged_subject_mask_training_zarr_from_sources,
+    validate_merged_subject_mask_training_zarr,
+)
+
+
+def _write_source_subject_zarr(
+    path: Path,
+    *,
+    dataset_id: str,
+    session_uuid: str,
+    label_schema_id: str = "subject_v1_lr",
+    frame_start: int = 100,
+    include_body: bool = False,
+    include_swim_bladder: bool = False,
+) -> None:
+    root = zarr.open_group(str(path), mode="w")
+    root.attrs["dataset_id"] = dataset_id
+    root.attrs["session_uuid"] = session_uuid
+
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs["latest"] = "crop_001"
+    crop = crop_parent.create_group("crop_001")
+    crop.create_array(
+        "roi_images",
+        data=np.zeros((4, 16, 16), dtype=np.uint8),
+        chunks=(2, 16, 16),
+    )
+    crop.create_array(
+        "bbox_norm_coords",
+        data=np.zeros((4, 4), dtype=np.float32),
+        chunks=(4, 4),
+    )
+    crop.create_array(
+        "crop_bbox_norm_coords",
+        data=np.zeros((4, 4), dtype=np.float32),
+        chunks=(4, 4),
+    )
+    crop.create_array(
+        "frame_indices",
+        data=np.arange(frame_start, frame_start + 4, dtype=np.int64),
+        chunks=(4,),
+    )
+    crop.create_array(
+        "detection_source",
+        data=np.array([0, 1, 0, 0], dtype=np.int8),
+        chunks=(4,),
+    )
+
+    subject_parent = root.create_group("subject_mask_runs")
+    subject_parent.attrs["latest"] = "subject_masks_001"
+    subject = subject_parent.create_group("subject_masks_001")
+    subject.attrs["source_crop_run"] = "crop_001"
+    subject.attrs["label_schema_id"] = label_schema_id
+    if label_schema_id == "subject_v1_lr":
+        labels = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+        available = np.array(
+            [include_body, True, True, include_swim_bladder],
+            dtype=np.bool_,
+        )
+        masks = np.zeros((4, 4, 16, 16), dtype=np.uint8)
+        masks[:, 1, 4:7, 4:7] = 1
+        masks[:, 2, 4:7, 9:12] = 1
+        if include_body:
+            masks[:, 0, 2:10, 2:14] = 1
+        if include_swim_bladder:
+            masks[:, 3, 5:8, 7:10] = 1
+    else:
+        labels = ["subject_body", "eyes_union", "swim_bladder"]
+        available = np.array(
+            [include_body, True, include_swim_bladder],
+            dtype=np.bool_,
+        )
+        masks = np.zeros((4, 3, 16, 16), dtype=np.uint8)
+        masks[:, 1, 4:7, 4:7] = 1
+        masks[:, 1, 4:7, 9:12] = 1
+        if include_body:
+            masks[:, 0, 2:10, 2:14] = 1
+        if include_swim_bladder:
+            masks[:, 2, 5:8, 7:10] = 1
+
+    subject.attrs["mask_labels"] = labels
+    subject.create_array("masks_roi", data=masks, chunks=(2, len(labels), 16, 16))
+    subject.create_array("available_channels", data=available, chunks=(len(labels),))
+
+
+def test_export_merged_subject_mask_training_zarr_then_validate(tmp_path: Path) -> None:
+    source_path = tmp_path / "source_subject_lr.zarr"
+    out_path = tmp_path / "merged_subject_lr.zarr"
+    _write_source_subject_zarr(
+        source_path,
+        dataset_id="subject_source_a",
+        session_uuid="subject_source_a",
+    )
+
+    summary = export_merged_subject_mask_training_zarr(
+        source_path,
+        out_path,
+        subject_label_schema="subject_v1_lr",
+        overwrite=True,
+    )
+
+    assert summary["total_samples"] == 4
+    assert summary["channels"] == 4
+    assert summary["coverage_class"] == "eyes_only"
+
+    recheck = validate_merged_subject_mask_training_zarr(
+        out_path,
+        expected_input_format="gray",
+        expected_total_samples=4,
+        expected_label_schema_id="subject_v1_lr",
+    )
+    assert recheck["total_samples"] == 4
+    assert recheck["channels"] == 4
+
+    root = zarr.open_group(str(out_path), mode="r")
+    latest = str(root["subject_mask_runs"].attrs["latest"])
+    run = root[f"subject_mask_runs/{latest}"]
+    target_valid = np.asarray(run["target_valid_channels"][:], dtype=np.bool_)
+    assert target_valid.shape == (4, 4)
+    assert target_valid[:, 0].tolist() == [False, False, False, False]
+    assert target_valid[:, 1].tolist() == [True, True, True, True]
+    assert target_valid[:, 2].tolist() == [True, True, True, True]
+    assert target_valid[:, 3].tolist() == [False, False, False, False]
+
+    export_meta = root.attrs["training_export"]
+    assert export_meta["channel_supervision_summary"]["contains_only_eye_masks"] is True
+    assert export_meta["channel_supervision_summary"]["supervised_row_counts"] == {
+        "subject_body": 0,
+        "eye_left": 4,
+        "eye_right": 4,
+        "swim_bladder": 0,
+    }
+
+
+def test_export_subject_mask_lr_to_union_collapses_eyes_and_preserves_unsupervised_channels(tmp_path: Path) -> None:
+    source_path = tmp_path / "source_subject_lr.zarr"
+    out_path = tmp_path / "merged_subject_union.zarr"
+    _write_source_subject_zarr(
+        source_path,
+        dataset_id="subject_source_a",
+        session_uuid="subject_source_a",
+    )
+
+    summary = export_merged_subject_mask_training_zarr(
+        source_path,
+        out_path,
+        subject_label_schema="subject_v1_union",
+        overwrite=True,
+    )
+
+    assert summary["channels"] == 3
+    assert summary["coverage_class"] == "eyes_only"
+
+    recheck = validate_merged_subject_mask_training_zarr(
+        out_path,
+        expected_input_format="gray",
+        expected_total_samples=4,
+        expected_label_schema_id="subject_v1_union",
+    )
+    assert recheck["channels"] == 3
+
+    root = zarr.open_group(str(out_path), mode="r")
+    latest = str(root["subject_mask_runs"].attrs["latest"])
+    masks = np.asarray(root[f"subject_mask_runs/{latest}/masks_roi"][:], dtype=np.uint8)
+    valid = np.asarray(root[f"subject_mask_runs/{latest}/target_valid_channels"][:], dtype=np.bool_)
+    assert masks.shape == (4, 3, 16, 16)
+    assert valid[:, 0].tolist() == [False, False, False, False]
+    assert valid[:, 1].tolist() == [True, True, True, True]
+    assert valid[:, 2].tolist() == [False, False, False, False]
+    assert int(np.sum(masks[:, 1])) > 0
+
+
+def test_subject_mask_export_registry_marks_set_as_eyes_only(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    source_a = tmp_path / "source_a.zarr"
+    source_b = tmp_path / "source_b.zarr"
+    out_path = tmp_path / "merged_subject_set.zarr"
+    _write_source_subject_zarr(
+        source_a,
+        dataset_id="subject_source_a",
+        session_uuid="subject_source_a",
+        frame_start=100,
+    )
+    _write_source_subject_zarr(
+        source_b,
+        dataset_id="subject_source_b",
+        session_uuid="subject_source_b",
+        frame_start=200,
+    )
+
+    registry = Registry(registry_path)
+    registry.upsert_dataset(
+        "subject_source_a",
+        session_uuid="subject_source_a",
+        zarr_path=source_a,
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_dataset(
+        "subject_source_b",
+        session_uuid="subject_source_b",
+        zarr_path=source_b,
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_training_set(
+        set_id="subject_masks_my_set_v001",
+        name="subject mask set",
+        task_type="subject_masks",
+        query_filter={"task_type": "subject_masks"},
+        dataset_ids=["subject_source_a", "subject_source_b"],
+        invocation={"task_type": "subject_masks"},
+    )
+    registry.close()
+
+    summary = export_merged_subject_mask_training_zarr_from_sources(
+        source_specs=[
+            SubjectMergeSourceSpec(source_zarr=source_a),
+            SubjectMergeSourceSpec(source_zarr=source_b),
+        ],
+        out_zarr=out_path,
+        subject_label_schema="subject_v1_lr",
+        overwrite=True,
+        registry=registry_path,
+        training_set_id="subject_masks_my_set_v001",
+        training_set_name="subject mask set",
+    )
+    assert summary["total_samples"] == 8
+    assert summary["contains_only_eye_masks"] is True
+
+    db = Registry(registry_path)
+    set_row = db.conn.execute(
+        "SELECT task_type, invocation_json, dataset_ids_json FROM training_sets WHERE set_id = ?",
+        ("subject_masks_my_set_v001",),
+    ).fetchone()
+    assert set_row is not None
+    assert set_row["task_type"] == "subject_masks"
+    set_invocation = json.loads(set_row["invocation_json"])
+    assert set_invocation["subject_mask_training_summary"]["coverage_class"] == "eyes_only"
+    assert set_invocation["subject_mask_training_summary"]["contains_only_eye_masks"] is True
+    dataset_ids = sorted(json.loads(set_row["dataset_ids_json"]))
+    assert dataset_ids == sorted(
+        [
+            "subject_source_a",
+            "subject_source_b",
+            "subject_masks_my_set_v001_merged",
+        ]
+    )
+
+    set_rows = registry_view._load_set_rows(db, "subject_masks_my_set_v001", limit=10)  # noqa: SLF001
+    assert len(set_rows) == 1
+    assert set_rows[0].task_type == "subject_masks"
+    assert set_rows[0].data_summary == "eyes only"
+    db.close()

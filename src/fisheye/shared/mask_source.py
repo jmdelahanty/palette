@@ -23,12 +23,22 @@ class MaskBundle:
 
 def _to_float01(arr: np.ndarray) -> np.ndarray:
     if isinstance(arr, da.Array):
+        source_dtype = arr.dtype
         arr = arr.astype(np.float32)
+        if np.issubdtype(source_dtype, np.integer):
+            max_value = float(np.iinfo(source_dtype).max)
+            if max_value > 1.0:
+                arr = arr / max_value
         arr = da.where(da.isnan(arr), 0.0, arr)
         arr = da.where(da.logical_and(da.isinf(arr), arr > 0), 1.0, arr)
         arr = da.where(da.logical_and(da.isinf(arr), arr < 0), 0.0, arr)
         return da.clip(arr, 0.0, 1.0)
+    source_dtype = arr.dtype
     arr = arr.astype(np.float32, copy=False)
+    if np.issubdtype(source_dtype, np.integer):
+        max_value = float(np.iinfo(source_dtype).max)
+        if max_value > 1.0:
+            arr /= max_value
     arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
     return np.clip(arr, 0.0, 1.0, out=arr)
 

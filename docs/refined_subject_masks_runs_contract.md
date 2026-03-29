@@ -1,0 +1,426 @@
+# Refined Subject Masks Runs Contract (Draft v1)
+<!-- contract-meta
+version: 1
+status: draft
+last_verified: 2026-03-10
+-->
+
+Purpose: define the runtime/storage contract for editable, refined
+subject-mask artifacts that can hold canonical component masks for body and swim
+bladder now, while leaving a clean future path to unify eye refinement under
+the same component model later.
+
+## Scope
+
+- Define `refined_subject_masks_runs/<run>` as the canonical refined/editable
+  subject-mask stage.
+- Support refined body masks and refined swim-bladder masks.
+- Support component-scoped review and reasons.
+- Reserve space for component-specific derived geometry such as contours,
+  centroids, and centerline/spline-related outputs.
+
+## Non-goals
+
+- Replacing `refined_eye_masks_runs` in v1.
+- Defining the final exact geometry array schema for body contours or splines.
+- Defining `subject_shape_runs`.
+- Defining merged training artifact layout.
+
+## Relationship To Existing Stages
+
+Near-term canonical relationship:
+
+```text
+crop_runs/<run>
+  -> subject_mask_runs/<run>
+  -> refined_subject_masks_runs/<run>
+  -> subject_shape_runs/<run>          # future
+```
+
+Eye-specialized path remains:
+
+```text
+crop_runs/<run>
+  -> subject_mask_runs/<run>
+  -> refined_eye_masks_runs/<run>
+```
+
+Policy:
+
+- `refined_subject_masks_runs` is the refined stage for generic subject-mask
+  components.
+- `refined_eye_masks_runs` remains the specialized refined stage for eye
+  geometry until the unification path is ready.
+- Future unification should align eye refinement under the subject-mask
+  component model without forcing a destructive migration now.
+
+## Canonical Label Scope
+
+Recommended minimum v1 component scope:
+
+- `subject_body`
+- `swim_bladder`
+
+Optional later:
+
+- `eyes_union`
+- `eye_left`
+- `eye_right`
+
+Writers must always persist:
+
+- `label_schema_id`
+- `mask_labels`
+- `available_channels`
+
+Readers must never infer component meaning from channel index alone.
+
+## Evolution Policy
+
+This contract is intended to support:
+
+1. refined body/swim-bladder masks while eyes remain specialized elsewhere,
+2. fuller multi-component refined subject masks later, and
+3. eventual eye alignment under the subject-mask component model.
+
+V1 directly supports case 1 and is shaped to permit cases 2 and 3 later
+without changing the stage family name.
+
+## Output Layout
+
+```text
+refined_subject_masks_runs/
+  attrs:
+    latest                                  "<run_id>"
+  <run_id>/
+    frame_indices                           (N,) int32           # recommended
+    frame_counts                            (F,) int32           # recommended
+    detection_indices                       (N,) int32           # recommended
+    detection_source                        (N,) int8
+    masks_roi                               (N, C, H, W) uint8
+    available_channels                      (C,) bool
+    edit_applied                            (N, C) bool
+    metrics/
+      mask_present                          (N, C) bool
+      area_px                               (N, C) float32
+    components/
+      <component_name>/
+        reason_bytes                        (N, width) uint8     # recommended
+        reason                              (N,) string          # optional mirror
+        mask_present                        (N,) bool            # recommended
+        area_px                             (N,) float32         # recommended
+        geometry_valid                      (N,) bool            # optional
+        edit_applied                        (N,) bool            # recommended
+        geometry/                           # optional extension point
+          ...
+```
+
+## `refined_subject_masks_runs/<latest>`
+
+Required arrays:
+
+- `detection_source`
+  - shape: `(N,)`
+  - expected to align with the source crop run
+- `masks_roi`
+  - shape: `(N, C, H, W)`
+  - canonical refined binary masks
+- `available_channels`
+  - shape: `(C,)`
+  - run-level declaration of which components are semantically available in the
+    refined run
+- `edit_applied`
+  - shape: `(N, C)`
+  - true when the refined mask row/channel was changed relative to the source
+    subject-mask run
+
+Required `metrics/` arrays:
+
+- `mask_present`
+  - shape: `(N, C)`
+- `area_px`
+  - shape: `(N, C)`
+
+Recommended lineage arrays:
+
+- `frame_indices`
+- `frame_counts`
+- `detection_indices`
+
+## Required attrs
+
+- `source_subject_mask_run`
+- `source_crop_run`
+- `label_schema_id`
+- `mask_labels`
+- `output_semantics = "multilabel"`
+- `refinement_semantics = "canonical_component_masks"`
+- `method`
+- `created_at_utc`
+- `duration_seconds`
+
+Required review attrs:
+
+- `refined_subject_mask_review_status`
+- `component_review_statuses`
+
+Optional attrs:
+
+- `source_keypoints_run`
+- `source_keypoint_group`
+- `source_refined_eye_masks_run`
+- `source_subject_shape_run`
+- `summary_statistics`
+- `component_summary_statistics`
+
+## `available_channels` semantics
+
+`available_channels` means the refined run contains semantically valid refined
+data for that component at all.
+
+Meaning:
+
+- `available_channels[c] == true` means component `c` is intentionally present
+  in this refined run
+- `available_channels[c] == false` means component `c` is a placeholder channel
+  and must not be treated as a true negative
+
+Required invariants:
+
+- if `available_channels[c] == false`, then `masks_roi[:, c]` must be all-zero
+- if `available_channels[c] == false`, then `edit_applied[:, c]` must be all-false
+- if `available_channels[c] == false`, then `metrics/mask_present[:, c]` must be all-false
+
+## `edit_applied` semantics
+
+`edit_applied[n, c]` records whether the refined channel for row `n` differs
+from the source subject-mask channel in a way that should be treated as a human
+or deterministic refinement, rather than a plain copy-through.
+
+This field is intended to support:
+
+- QA summaries
+- training provenance
+- future review UI filtering
+
+It does not by itself imply manual editing; the review payload should carry the
+review method.
+
+## Review Payloads
+
+Run-level review payload:
+
+- `refined_subject_mask_review_status`
+
+Component-level review payload mapping:
+
+- `component_review_statuses`
+
+Canonical review keys:
+
+- `state`
+- `method`
+- `intended_use`
+- `reviewer`
+- `notes`
+- `timestamp_utc`
+
+Example:
+
+```json
+{
+  "refined_subject_mask_review_status": {
+    "state": "approved",
+    "method": "manual",
+    "intended_use": "training",
+    "reviewer": "alice",
+    "timestamp_utc": "2026-03-10T20:15:00Z"
+  },
+  "component_review_statuses": {
+    "subject_body": {
+      "state": "approved",
+      "method": "manual",
+      "intended_use": "training",
+      "timestamp_utc": "2026-03-10T20:14:00Z"
+    },
+    "swim_bladder": {
+      "state": "needs_review",
+      "method": "manual",
+      "intended_use": "training",
+      "timestamp_utc": "2026-03-10T20:14:30Z"
+    }
+  }
+}
+```
+
+## Component Subgroups
+
+`components/<component_name>/` is the standard extension point for
+component-specific refinement metadata.
+
+Recommended arrays per available component:
+
+- `reason_bytes`
+  - shape: `(N, width)`
+  - null-terminated UTF-8 primary encoding
+- `reason`
+  - shape: `(N,)`
+  - optional string mirror
+- `mask_present`
+  - shape: `(N,)`
+- `area_px`
+  - shape: `(N,)`
+- `edit_applied`
+  - shape: `(N,)`
+
+Optional arrays:
+
+- `geometry_valid`
+  - shape: `(N,)`
+- component-specific quality flags
+- component-specific review artifacts
+
+Why per-component subgroups:
+
+- body and swim bladder will not share identical derived geometry
+- eye refinement is even more specialized
+- this avoids freezing the whole stage around one component’s geometry layout
+
+## Geometry Extension Policy
+
+Component-specific geometry should live under:
+
+- `components/<component>/geometry/`
+
+This contract intentionally leaves the exact geometry array names open for
+follow-on contracts.
+
+Expected future examples:
+
+### `subject_body`
+
+- contour tables
+- centroid and axis summaries
+- centerline seeds
+- spline control points or sampled centerline points
+- body-orientation summaries
+
+### `swim_bladder`
+
+- contour tables
+- centroid
+- ellipse/blob summaries
+
+Geometry policy:
+
+- refined component masks remain the canonical source artifact
+- geometry derived from those masks should carry its own validity flags
+- downstream `subject_shape_runs` should consume refined body masks or refined
+  body geometry, not raw `subject_mask_runs`
+
+## Reason Encoding Policy
+
+If `reason_bytes` is present for a component subgroup, writers should also set:
+
+- `reason_encoding = "utf8-null-terminated"`
+- `reason_bytes_width = <int>`
+- `reason_bytes_null_terminated = true`
+- `reason_fallback_order = ["reason_bytes", "reason", "detection_source"]`
+
+Recommended reason tags may include:
+
+- `clean`
+- `manual_correction`
+- `manual_creation`
+- `incomplete`
+- `missing_component`
+- `geometry_issue`
+- `overlap`
+- `ambiguous_boundary`
+
+These are examples, not a frozen vocabulary yet.
+
+## Body / Swim-Bladder Expectations In V1
+
+Recommended minimum v1 support:
+
+- `subject_body` refined masks may be available
+- `swim_bladder` refined masks may be available
+- either component may be unavailable without invalidating the whole run
+
+That means the stage must support cases like:
+
+- body-only refinement run
+- swim-bladder-only refinement run
+- body + swim-bladder refinement run
+
+without inventing separate stage families.
+
+## Relationship To `refined_eye_masks_runs`
+
+`refined_eye_masks_runs` remains authoritative for refined eye geometry in v1.
+
+`refined_subject_masks_runs` should therefore not be required to duplicate:
+
+- eye ellipses
+- eye separation
+- left/right assignment
+- current eye-specific QA rollups
+
+If eye channels appear later inside `refined_subject_masks_runs`, that should
+be treated as an aligned component view, not an immediate replacement for
+`refined_eye_masks_runs`.
+
+## Registry Implications
+
+This stage should eventually project to the registry at two levels:
+
+1. coarse step presence
+   - `step_name = "refined_subject_masks"`
+2. component-level refined availability and review state
+   - `subject_body`
+   - `swim_bladder`
+   - later eye component(s) if added
+
+The registry must be able to distinguish:
+
+- raw subject-mask availability
+- refined body/swim-bladder availability
+- specialized refined eye availability
+
+## Migration Policy
+
+Recommended transition:
+
+1. keep `refined_eye_masks_runs` unchanged
+2. introduce `refined_subject_masks_runs` for body/swim bladder
+3. align registry and review payloads across refined stages
+4. only then evaluate how eye refinement should unify with the subject-mask
+   component model
+
+This contract is intentionally non-destructive.
+
+## Validation Invariants
+
+- all row-aligned arrays share the same first dimension `N`
+- `masks_roi.shape[1] == available_channels.shape[0] == edit_applied.shape[1]`
+- `metrics/mask_present.shape == metrics/area_px.shape == (N, C)`
+- if a component subgroup exists, its per-row arrays must have first dimension `N`
+- unavailable channels must remain zero/false across mask/edit/metrics arrays
+
+## Open Questions
+
+- Should `components/<component>/mask_present` and `area_px` remain duplicated
+  from `metrics/`, or should one be derived-only?
+- Should body contour/spline geometry live directly here, or only in a later
+  `subject_shape_runs` stage with this stage remaining mask-centric?
+- If eye channels are added later, do they store only refined masks here, or
+  also mirrored eye-specific geometry references?
+
+## Related Docs
+
+- [subject_mask_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_runs_contract.md)
+- [subject_mask_registry_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_registry_contract.md)
+- [subject_mask_refinement_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_refinement_todo.md)
+- [review_status_schema_unification_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/review_status_schema_unification_contract.md)
+- [pose_kinematics_run_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/pose_kinematics_run_design.md)
