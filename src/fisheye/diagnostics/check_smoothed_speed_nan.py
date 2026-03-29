@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report NaNs in smoothed_speed_mm for movement runs."""
+"""Report NaNs in smoothed_speed_mm for track kinematics runs."""
 
 from __future__ import annotations
 
@@ -12,14 +12,14 @@ import zarr
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Check movement run tracks for NaNs in smoothed_speed_mm."
+        description="Check track kinematics run tracks for NaNs in smoothed_speed_mm."
     )
     parser.add_argument("store", type=Path, help="Path to Palette Zarr store")
     parser.add_argument(
         "--run",
         dest="run_name",
         help=(
-            "Movement run name (accepts online/<run> or offline/<run>). Defaults to the latest offline run."
+            "Track kinematics run name (accepts online/<run> or offline/<run>). Defaults to the latest offline run."
         ),
     )
     return parser.parse_args()
@@ -27,9 +27,9 @@ def parse_args() -> argparse.Namespace:
 
 def resolve_run(root: zarr.Group, name: str | None) -> tuple[zarr.Group, str]:
     try:
-        movement_parent = root["analysis"]["movement_runs"]
+        movement_parent = root["analysis"]["track_kinematics_runs"]
     except KeyError as exc:
-        raise SystemExit("analysis/movement_runs missing from store") from exc
+        raise SystemExit("analysis/track_kinematics_runs missing from store") from exc
 
     def pick_latest(group: zarr.Group, prefix: str) -> tuple[zarr.Group, str]:
         latest = group.attrs.get("latest")
@@ -44,13 +44,13 @@ def resolve_run(root: zarr.Group, name: str | None) -> tuple[zarr.Group, str]:
             prefix, tail = name.split("/", 1)
             subgroup = movement_parent.get(prefix)
             if subgroup is None or tail not in subgroup:
-                raise SystemExit(f"Run '{name}' not found under analysis/movement_runs")
+                raise SystemExit(f"Run '{name}' not found under analysis/track_kinematics_runs")
             return subgroup[tail], name
         for prefix in ("offline", "online"):
             subgroup = movement_parent.get(prefix)
             if subgroup is not None and name in subgroup:
                 return subgroup[name], f"{prefix}/{name}"
-        raise SystemExit(f"Run '{name}' not found under analysis/movement_runs")
+        raise SystemExit(f"Run '{name}' not found under analysis/track_kinematics_runs")
 
     offline_parent = movement_parent.get("offline")
     if offline_parent is not None:
@@ -60,7 +60,7 @@ def resolve_run(root: zarr.Group, name: str | None) -> tuple[zarr.Group, str]:
     if online_parent is not None:
         return pick_latest(online_parent, "online")
 
-    raise SystemExit("No movement runs available")
+    raise SystemExit("No track kinematics runs available")
 
 
 def inspect_run(group: zarr.Group) -> None:

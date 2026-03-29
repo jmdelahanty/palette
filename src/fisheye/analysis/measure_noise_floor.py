@@ -23,16 +23,16 @@ from rich.table import Table
 from fisheye.shared.zarr.schema import get_run_group
 
 
-def load_movement_run(
+def load_track_kinematics_run(
     zarr_path: str,
-    movement_run: Optional[str] = None,
+    track_kinematics_run: Optional[str] = None,
     console: Optional[Console] = None,
 ) -> Tuple[zarr.Group, Dict[str, zarr.Group]]:
-    """Load movement run data from zarr archive.
+    """Load track kinematics run data from a zarr archive.
 
     Args:
         zarr_path: Path to zarr archive
-        movement_run: Movement run name (defaults to latest offline)
+        track_kinematics_run: Track kinematics run name (defaults to latest offline)
         console: Rich console for output
 
     Returns:
@@ -43,36 +43,40 @@ def load_movement_run(
 
     root = zarr.open(str(zarr_path), mode="r")
 
-    # Try to find offline movement run
-    if movement_run is None:
+    # Try to find the latest offline track kinematics run.
+    if track_kinematics_run is None:
         # Look for latest offline run
-        if "analysis" in root and "movement_runs" in root["analysis"]:
-            movement_parent = root["analysis"]["movement_runs"]
+        if "analysis" in root and "track_kinematics_runs" in root["analysis"]:
+            movement_parent = root["analysis"]["track_kinematics_runs"]
             if "offline" in movement_parent:
                 offline_group = movement_parent["offline"]
-                movement_run = offline_group.attrs.get("latest")
-                if movement_run:
-                    console.print(f"[cyan]Using latest offline run:[/cyan] {movement_run}")
+                track_kinematics_run = offline_group.attrs.get("latest")
+                if track_kinematics_run:
+                    console.print(
+                        f"[cyan]Using latest offline track kinematics run:[/cyan] {track_kinematics_run}"
+                    )
                 else:
-                    raise ValueError("No offline movement runs found")
+                    raise ValueError("No offline track kinematics runs found")
             else:
-                raise ValueError("No offline movement runs found")
+                raise ValueError("No offline track kinematics runs found")
         else:
-            raise ValueError("No movement_runs found in archive")
+            raise ValueError("No track_kinematics_runs found in archive")
 
     # Load the run
-    if "analysis" in root and "movement_runs" in root["analysis"]:
-        movement_parent = root["analysis"]["movement_runs"]
+    if "analysis" in root and "track_kinematics_runs" in root["analysis"]:
+        movement_parent = root["analysis"]["track_kinematics_runs"]
         if "offline" in movement_parent:
             offline_group = movement_parent["offline"]
-            if movement_run in offline_group:
-                run_group = offline_group[movement_run]
+            if track_kinematics_run in offline_group:
+                run_group = offline_group[track_kinematics_run]
             else:
-                raise ValueError(f"Movement run '{movement_run}' not found in offline runs")
+                raise ValueError(
+                    f"Track kinematics run '{track_kinematics_run}' not found in offline runs"
+                )
         else:
-            raise ValueError("No offline movement runs found")
+            raise ValueError("No offline track kinematics runs found")
     else:
-        raise ValueError("No movement_runs found in archive")
+        raise ValueError("No track_kinematics_runs found in archive")
 
     # Load tracks
     tracks_dict = {}
@@ -82,7 +86,7 @@ def load_movement_run(
             tracks_dict[track_id] = tracks_group[track_id]
         console.print(f"[cyan]Loaded {len(tracks_dict)} tracks[/cyan]")
     else:
-        raise ValueError("No tracks found in movement run")
+        raise ValueError("No tracks found in the track kinematics run")
 
     return run_group, tracks_dict
 
@@ -309,9 +313,10 @@ def main():
         help="Path to zarr archive",
     )
     parser.add_argument(
-        "--movement-run",
+        "--track-kinematics-run",
+        dest="track_kinematics_run",
         type=str,
-        help="Movement run name (defaults to latest offline)",
+        help="Track kinematics run name (defaults to latest offline)",
     )
     parser.add_argument(
         "--max-stationary-speed",
@@ -333,9 +338,9 @@ def main():
     try:
         # Load movement data
         console.print(f"[bold]Loading movement data from:[/bold] {args.zarr_path}")
-        run_group, tracks_dict = load_movement_run(
+        run_group, tracks_dict = load_track_kinematics_run(
             args.zarr_path,
-            args.movement_run,
+            args.track_kinematics_run,
             console,
         )
 

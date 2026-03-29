@@ -152,27 +152,27 @@ def _collect_pipeline_provenance(root: Any) -> Dict[str, Any]:
             f"Keypoint run '{key_run}' references crop '{key_source_crop}' but latest crop is '{crop_run}'."
         )
 
-    id_parent = root.get("id_assignment_runs")
-    id_run, id_group = _resolve_latest_run(id_parent)
-    id_rows = _safe_len_dataset(id_group, "detection_ids")
-    id_source_detect = id_group.attrs.get("source_detect_run") if id_group is not None else None
-    id_source_refined = id_group.attrs.get("source_refined_run") if id_group is not None else None
-    if id_source_detect and detect_run and id_source_detect != detect_run:
+    arena_parent = root.get("arena_assignment_runs")
+    arena_run, arena_group = _resolve_latest_run(arena_parent)
+    arena_rows = _safe_len_dataset(arena_group, "arena_ids")
+    arena_source_detect = arena_group.attrs.get("source_detect_run") if arena_group is not None else None
+    arena_source_refined = arena_group.attrs.get("source_refined_run") if arena_group is not None else None
+    if arena_source_detect and detect_run and arena_source_detect != detect_run:
         issues.append(
-            f"ID assignment run '{id_run}' references detect '{id_source_detect}' but latest detect is '{detect_run}'."
+            f"Arena assignment run '{arena_run}' references detect '{arena_source_detect}' but latest detect is '{detect_run}'."
         )
-    if id_source_refined and refined_run and id_source_refined != refined_run:
+    if arena_source_refined and refined_run and arena_source_refined != refined_run:
         issues.append(
-            f"ID assignment run '{id_run}' references refined detect '{id_source_refined}' but latest refined detect is '{refined_run}'."
+            f"Arena assignment run '{arena_run}' references refined detect '{arena_source_refined}' but latest refined detect is '{refined_run}'."
         )
 
     if refined_rows is not None and key_rows is not None and refined_rows != key_rows:
         issues.append(
             f"Refined detection count ({refined_rows}) != keypoint heading count ({key_rows})."
         )
-    if refined_rows is not None and id_rows is not None and refined_rows != id_rows:
+    if refined_rows is not None and arena_rows is not None and refined_rows != arena_rows:
         issues.append(
-            f"Refined detection count ({refined_rows}) != ID assignment count ({id_rows})."
+            f"Refined detection count ({refined_rows}) != arena assignment count ({arena_rows})."
         )
     if crop_rois is not None and refined_rows is not None and crop_rois != refined_rows:
         issues.append(
@@ -185,21 +185,21 @@ def _collect_pipeline_provenance(root: Any) -> Dict[str, Any]:
             "refined_detect": refined_run,
             "crop": crop_run,
             "keypoints": key_run,
-            "id_assignment": id_run,
+            "arena_assignment": arena_run,
         },
         "row_counts": {
             "detect": detect_rows,
             "refined_detect": refined_rows,
             "crop": crop_rois,
             "keypoints": key_rows,
-            "id_assignment": id_rows,
+            "arena_assignment": arena_rows,
         },
         "sources": {
             "refined_detect_source_detect": refined_source_detect,
             "crop_source": crop_source,
             "keypoints_source_crop": key_source_crop,
-            "id_source_detect": id_source_detect,
-            "id_source_refined": id_source_refined,
+            "arena_source_detect": arena_source_detect,
+            "arena_source_refined": arena_source_refined,
         },
         "issues": issues,
     }
@@ -371,11 +371,11 @@ class ChaserPhaseAnalyzer:
         return detect_group, detect_path, source_detect_run
 
     def _resolve_detection_mask(self) -> Optional[np.ndarray]:
-        """Return detection mask for the requested ROI ID, using id assignment runs if available."""
+        """Return detection mask for the requested ROI ID, using arena assignment runs if available."""
         if self.roi_id is None:
             return None
 
-        candidates = ("id_assignment_runs", "id_assignments")
+        candidates = ("arena_assignment_runs",)
         for parent_name in candidates:
             if parent_name not in self.root:
                 continue
@@ -392,25 +392,25 @@ class ChaserPhaseAnalyzer:
                 source_detect = assign_group.attrs.get("source_detect_run")
                 if self.source_detect_run and source_detect != self.source_detect_run:
                     continue
-                if "detection_ids" not in assign_group:
+                if "arena_ids" not in assign_group:
                     continue
 
-                detection_ids = assign_group["detection_ids"][:]
-                if detection_ids.shape[0] != self.bbox_norm_coords.shape[0]:
+                arena_ids = assign_group["arena_ids"][:]
+                if arena_ids.shape[0] != self.bbox_norm_coords.shape[0]:
                     if self.verbose:
                         print(
-                            "Warning: detection_ids length does not match detections for "
-                            f"assignment run '{run_name}'. ROI filter disabled."
+                            "Warning: arena_ids length does not match detections for "
+                            f"arena assignment run '{run_name}'. ROI filter disabled."
                         )
                     return None
 
                 if self.verbose:
                     print(f"Filtering detections using ROI {self.roi_id} from {parent_name}/{run_name}")
-                return detection_ids == self.roi_id
+                return arena_ids == self.roi_id
 
         if self.verbose:
             print(
-                f"Warning: ROI {self.roi_id} requested but no matching ID assignment run "
+                f"Warning: ROI {self.roi_id} requested but no matching arena assignment run "
                 "was found. Using the first detection per frame instead."
             )
         return None

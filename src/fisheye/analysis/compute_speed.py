@@ -1,11 +1,11 @@
 # src/fisheye/analysis/compute_speed.py
-"""Compute per-ID speeds from detection runs in a Palette Zarr archive.
+"""Compute per-arena speeds from detection runs in a Palette Zarr archive.
 
 Usage (basic)::
 
     python -m fisheye.analysis.compute_speed /path/to/archive.zarr
 
-The script reads detections (optionally with assigned IDs), converts bounding-box
+The script reads detections (optionally with arena assignments), converts bounding-box
 centres to pixel coordinates, and computes instantaneous and smoothed speeds for
 each individual. Results are written to ``analysis/speed_runs/<run_name>`` unless
 ``--no-write`` is supplied.
@@ -90,7 +90,7 @@ def resolve_dimensions(root: zarr.Group) -> Tuple[int, int]:
     raise ValueError("Unable to determine video dimensions from Zarr metadata.")
 
 
-def load_detection_ids(
+def load_arena_ids(
     root: zarr.Group,
     detect_length: int,
     console: Console,
@@ -99,7 +99,7 @@ def load_detection_ids(
     return_metadata: bool = False,
 ) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, Optional[str]]]]:
     """
-    Return detection IDs aligned with the detections.
+    Return arena IDs aligned with the detections.
 
     When ``return_metadata`` is True, the function returns a tuple of ``(ids, metadata)``
     so callers can inspect the provenance of the assignment.
@@ -108,21 +108,21 @@ def load_detection_ids(
         default_ids = np.zeros(detect_length, dtype=np.int32)
         if return_metadata:
             return default_ids, {
-                "assign_run": None,
+                "arena_assignment_run": None,
                 "source_detect_run": None,
                 "source_refined_run": None,
                 "assignment_source": None,
             }
         return default_ids
 
-    if "id_assignment_runs" not in root:
-        console.print("[yellow]No ID assignment runs found; treating detections as one track.[/yellow]")
+    if "arena_assignment_runs" not in root:
+        console.print("[yellow]No arena assignment runs found; treating detections as one track.[/yellow]")
         return _default_response()
 
-    group = root["id_assignment_runs"]
+    group = root["arena_assignment_runs"]
     run = group.attrs.get("latest")
-    if not run or f"{run}/detection_ids" not in group:
-        console.print("[yellow]ID assignment missing detection_ids; treating detections as one track.[/yellow]")
+    if not run or f"{run}/arena_ids" not in group:
+        console.print("[yellow]Arena assignment missing arena_ids; treating detections as one track.[/yellow]")
         return _default_response()
 
     assign_grp = group[run]
@@ -131,27 +131,27 @@ def load_detection_ids(
     assignment_source = assign_grp.attrs.get("assignment_source")
     if expected_detect_run and source_detect and source_detect != expected_detect_run:
         console.print(
-            f"[yellow]Warning:[/yellow] Detection run '{expected_detect_run}' differs from ID assignment source '{source_detect}'."
+            f"[yellow]Warning:[/yellow] Detection run '{expected_detect_run}' differs from arena assignment source '{source_detect}'."
         )
     if expected_refined_run and source_refined and source_refined != expected_refined_run:
         console.print(
-            f"[yellow]Warning:[/yellow] Refined run '{expected_refined_run}' differs from ID assignment source '{source_refined}'."
+            f"[yellow]Warning:[/yellow] Refined run '{expected_refined_run}' differs from arena assignment source '{source_refined}'."
         )
 
-    detection_ids = assign_grp["detection_ids"][:]
-    if detection_ids.shape[0] != detect_length:
+    arena_ids = assign_grp["arena_ids"][:]
+    if arena_ids.shape[0] != detect_length:
         raise ValueError(
-            f"detection_ids length ({detection_ids.shape[0]}) does not match detection rows ({detect_length})."
+            f"arena_ids length ({arena_ids.shape[0]}) does not match detection rows ({detect_length})."
         )
     if return_metadata:
         metadata = {
-            "assign_run": run,
+            "arena_assignment_run": run,
             "source_detect_run": source_detect,
             "source_refined_run": source_refined,
             "assignment_source": assignment_source,
         }
-        return detection_ids, metadata
-    return detection_ids
+        return arena_ids, metadata
+    return arena_ids
 
 
 def get_detection_group(
@@ -210,7 +210,7 @@ def get_detection_group(
     return run_name, detect_parent[run_name], False, None
 
 
-def map_refined_detection_ids(
+def map_refined_arena_ids(
     refined_group: zarr.Group,
     refined_frames: np.ndarray,
     refined_bboxes: np.ndarray,
@@ -219,7 +219,7 @@ def map_refined_detection_ids(
     console: Console,
 ) -> np.ndarray:
     """
-    Map refined detection rows back to detection IDs from the source detect run.
+    Map refined detection rows back to arena IDs from the source detect run.
 
     Interpolated detections inherit IDs from neighbouring detections by forward/back fill.
     """
@@ -233,13 +233,13 @@ def map_refined_detection_ids(
     detect_group = root["detect_runs"][source_detect]
     orig_frames = detect_group["frame_indices"][:].astype(np.int64, copy=False)
     orig_bboxes = detect_group["bbox_norm_coords"][:]
-    detection_ids = load_detection_ids(root, orig_frames.size, console, expected_detect_run=source_detect)
+    arena_ids = load_arena_ids(root, orig_frames.size, console, expected_detect_run=source_detect)
 
     frame_to_candidates: Dict[int, List[Dict[str, object]]] = {}
     for idx, frame in enumerate(orig_frames):
         key = int(frame)
         frame_to_candidates.setdefault(key, []).append(
-            {"bbox": orig_bboxes[idx], "id": int(detection_ids[idx]), "used": False}
+            {"bbox": orig_bboxes[idx], "id": int(arena_ids[idx]), "used": False}
         )
 
     mapped_ids = np.full(refined_frames.shape[0], -1, dtype=np.int32)
@@ -711,10 +711,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     detection_source = detect_group["detection_source"][:] if "detection_source" in detect_group else None
 
     if is_refined:
-        detection_ids = None
+        arena_ids = None
         id_metadata: Dict[str, Optional[str]] = {}
         try:
-            detection_ids, id_metadata = load_detection_ids(
+            arena_ids, id_metadata = load_arena_ids(
                 root,
                 bbox_norm.shape[0],
                 console,
@@ -723,23 +723,23 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 return_metadata=True,
             )
         except ValueError:
-            detection_ids = None
+            arena_ids = None
             id_metadata = {}
 
         assignments_match_refined = (
-            detection_ids is not None
+            arena_ids is not None
             and id_metadata.get("assignment_source") == "refined_interpolated"
             and id_metadata.get("source_refined_run") == detect_run_name
         )
 
-        if assignments_match_refined and detection_ids is not None:
-            console.print("[green]Using ID assignments stored with the refined detections.[/green]")
+        if assignments_match_refined and arena_ids is not None:
+            console.print("[green]Using arena assignments stored with the refined detections.[/green]")
         else:
-            if detection_ids is not None:
-                console.print("[yellow]Stored IDs do not align with refined detections; remapping from raw detections.[/yellow]")
+            if arena_ids is not None:
+                console.print("[yellow]Stored arena assignments do not align with refined detections; remapping from raw detections.[/yellow]")
             else:
-                console.print("[yellow]No stored refined IDs found; remapping from raw detections.[/yellow]")
-            detection_ids = map_refined_detection_ids(
+                console.print("[yellow]No stored refined arena assignments found; remapping from raw detections.[/yellow]")
+            arena_ids = map_refined_arena_ids(
                 root["refined_detect_runs"][detect_run_name],
                 frame_indices,
                 bbox_norm,
@@ -748,13 +748,13 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 console,
             )
     else:
-        detection_ids = load_detection_ids(root, bbox_norm.shape[0], console, expected_detect_run=detect_run_name)
+        arena_ids = load_arena_ids(root, bbox_norm.shape[0], console, expected_detect_run=detect_run_name)
 
-    unique_ids = np.unique(detection_ids)
+    unique_ids = np.unique(arena_ids)
     if args.skip_unassigned:
         unique_ids = unique_ids[unique_ids >= 0]
     if unique_ids.size == 0:
-        raise ValueError("No valid detection IDs found after filtering.")
+        raise ValueError("No valid arena IDs found after filtering.")
 
     fps = float(args.fps) if args.fps else find_fps(root, console)
     if fps <= 0:
@@ -776,7 +776,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     hysteresis_min = None if args.no_hysteresis else args.hysteresis_min_frames
 
     for det_id in unique_ids:
-        mask = detection_ids == det_id
+        mask = arena_ids == det_id
         if not mask.any():
             continue
         frames = frame_indices[mask]

@@ -26,9 +26,9 @@ Each run produces:
 
 Stimulus response analysis is a **pure consumer** of identity-resolved data.
 It does not perform identity resolution and has no knowledge of the
-`id_assignment` pipeline.
+`arena_assignment` pipeline.
 
-Movement runs already consume `id_assignment_runs` and store consolidated,
+Track-kinematics runs already consume `arena_assignment_runs` and store consolidated,
 per-fish tracks under `tracks/id_<fish_id>/`. By the time data reaches this
 run, `fish_id` is a settled biological identity — not a tracker label.
 
@@ -43,7 +43,7 @@ resolution, which then cascade-invalidates everything below it.
 ### Provenance chain
 
 ```
-id_assignment ──► movement ──► bouts ─┐
+arena_assignment ──► track_kinematics ──► bouts ─┐
                                       ├──► stimulus_response
               stimulus ──────────────┘
               eye_angles ────────────┘
@@ -53,7 +53,7 @@ This run stores references to its direct inputs:
 
 | Attribute | Points to |
 |-----------|-----------|
-| `source_movement_run` | `analysis/movement_runs/<type>/<run>/` |
+| `source_track_kinematics_run` | `analysis/track_kinematics_runs/<type>/<run>/` |
 | `source_stimulus_run` | `analysis/stimulus_runs/<run>/` |
 | `source_bout_run` | `analysis/swim_bout_runs/<run>/` (optional) |
 | `source_eye_angle_run` | `analysis/eye_angle_runs/<run>/` (optional) |
@@ -68,7 +68,7 @@ The stimulus response step is a dependent of `tracks` in the step dependency
 graph (`step_cascade.py`). When any upstream step changes:
 
 ```
-id_assignment changes
+arena_assignment changes
   → movement marked "missing", recomputed
     → bouts marked "missing", recomputed
       → stimulus_response marked "missing", recomputed
@@ -82,7 +82,7 @@ id_assignment changes
 analysis/stimulus_response_runs/<run_name>/
 │
 ├── attrs:
-│   ├── source_movement_run       str
+│   ├── source_track_kinematics_run       str
 │   ├── source_stimulus_run       str
 │   ├── source_bout_run           str (optional)
 │   ├── source_eye_angle_run      str (optional)

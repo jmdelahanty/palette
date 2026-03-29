@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Detect swim bouts from all 4 speed processing levels in movement tracks.
+Detect swim bouts from all 4 speed processing levels in track kinematics tracks.
 
-This script reads pre-computed speed data from movement tracks (raw, filtered,
-smoothed, averaged) and detects swim bouts using the same threshold across all
-levels. Results are stored hierarchically under a single run name with 4 subgroups.
+This script reads pre-computed speed data from track kinematics tracks (raw,
+filtered, smoothed, averaged) and detects swim bouts using the same threshold
+across all levels. Results are stored hierarchically under a single run name
+with 4 subgroups.
 
 Storage structure:
     analysis/swim_bout_runs/<run_name>/
@@ -21,7 +22,7 @@ Storage structure:
     │   ├── bouts
     │   └── metadata
     ├── default_level = "speed_smoothed" (attr)
-    └── run_metadata (attrs: threshold, source_movement_run, etc.)
+    └── run_metadata (attrs: threshold, source_track_kinematics_run, etc.)
 
 Usage (basic):
     python -m fisheye.analysis.detect_bouts_multi_level /path/to/archive.zarr
@@ -31,7 +32,7 @@ Usage (basic):
 Usage (with options):
     python -m fisheye.analysis.detect_bouts_multi_level /path/to/archive.zarr \\
         --run-name custom_run \\
-        --movement-run latest \\
+        --track-kinematics-run latest \\
         --threshold-mm 5.0
 """
 
@@ -559,17 +560,17 @@ def _detect_bouts_from_peaks(
     return bouts
 
 
-def _load_movement_track_speeds(
+def _load_track_kinematics_track_speeds(
     zarr_path: Path,
-    movement_run: str,
+    track_kinematics_run: str,
     track_id: int = 0,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, any]]:
     """
-    Load all 4 speed levels from a movement track.
+    Load all 4 speed levels from a track kinematics track.
 
     Args:
         zarr_path: Path to capture zarr
-        movement_run: Movement run name (or "latest")
+        track_kinematics_run: Track kinematics run name (or "latest")
         track_id: Track ID to load
 
     Returns:
@@ -579,34 +580,38 @@ def _load_movement_track_speeds(
     """
     root = zarr.open(str(zarr_path), mode='r')
 
-    # Navigate to movement_runs
-    if 'analysis' not in root or 'movement_runs' not in root['analysis']:
-        raise ValueError(f"No movement_runs found in {zarr_path}")
+    # Navigate to track_kinematics_runs
+    if 'analysis' not in root or 'track_kinematics_runs' not in root['analysis']:
+        raise ValueError(f"No track_kinematics_runs found in {zarr_path}")
 
-    movement_runs = root['analysis']['movement_runs']
+    track_kinematics_runs = root['analysis']['track_kinematics_runs']
 
-    if 'offline' not in movement_runs:
-        raise ValueError("No offline movement_runs found")
+    if 'offline' not in track_kinematics_runs:
+        raise ValueError("No offline track_kinematics_runs found")
 
-    offline_group = movement_runs['offline']
+    offline_group = track_kinematics_runs['offline']
 
     # Resolve "latest" if needed
-    if movement_run == "latest":
-        movement_run = offline_group.attrs.get('latest')
-        if movement_run is None:
-            raise ValueError("No 'latest' offline movement run found")
+    if track_kinematics_run == "latest":
+        track_kinematics_run = offline_group.attrs.get('latest')
+        if track_kinematics_run is None:
+            raise ValueError("No 'latest' offline track kinematics run found")
 
-    if movement_run not in offline_group:
-        raise ValueError(f"Movement run '{movement_run}' not found in offline runs")
+    if track_kinematics_run not in offline_group:
+        raise ValueError(
+            f"Track kinematics run '{track_kinematics_run}' not found in offline runs"
+        )
 
-    run_group = offline_group[movement_run]
+    run_group = offline_group[track_kinematics_run]
 
     # Load track data
     tracks_group = run_group['tracks']
     track_key = f"id_{track_id}"
 
     if track_key not in tracks_group:
-        raise ValueError(f"Track {track_key} not found in movement run {movement_run}")
+        raise ValueError(
+            f"Track {track_key} not found in track kinematics run {track_kinematics_run}"
+        )
 
     track_group = tracks_group[track_key]
 
@@ -633,7 +638,7 @@ def _load_movement_track_speeds(
         'fps': run_group.attrs.get('fps', 60.0),
         'pixel_to_mm': run_group.attrs.get('pixel_to_mm'),
         'n_frames': len(speeds['frames']),
-        'movement_run': movement_run,
+        'track_kinematics_run': track_kinematics_run,
         'track_id': track_id,
         'positions_mm': positions_mm,
         'positions_px': positions_px,
@@ -645,7 +650,7 @@ def _load_movement_track_speeds(
 def detect_and_save_bouts(
     zarr_path: Path,
     run_name: Optional[str],
-    movement_run: str = "latest",
+    track_kinematics_run: str = "latest",
     track_id: int = 0,
     method: str = "threshold",
     threshold_mm: float = 2.0,
@@ -661,7 +666,7 @@ def detect_and_save_bouts(
     Args:
         zarr_path: Path to capture zarr
         run_name: Name for this bout detection run (auto-generated if None)
-        movement_run: Movement run name (or "latest")
+        track_kinematics_run: Track kinematics run name (or "latest")
         track_id: Track ID to analyze
         method: Detection method ("threshold" or "peak")
         threshold_mm: Speed threshold in mm/s (for threshold method)
@@ -679,7 +684,7 @@ def detect_and_save_bouts(
     print(f"MULTI-LEVEL SWIM BOUT DETECTION")
     print(f"{'='*60}")
     print(f"Capture: {zarr_path.name}")
-    print(f"Movement run: {movement_run}")
+    print(f"Track kinematics run: {track_kinematics_run}")
     print(f"Track ID: {track_id}")
     print(f"Method: {method}")
     if method == "threshold":
@@ -692,15 +697,17 @@ def detect_and_save_bouts(
     print()
 
     # Load speed data
-    print("Loading movement track data...")
-    speeds, metadata = _load_movement_track_speeds(zarr_path, movement_run, track_id)
+    print("Loading track kinematics track data...")
+    speeds, metadata = _load_track_kinematics_track_speeds(
+        zarr_path, track_kinematics_run, track_id
+    )
 
     fps = metadata['fps']
     frames = speeds['frames']
 
     print(f"  FPS: {fps}")
     print(f"  Frames: {metadata['n_frames']}")
-    print(f"  Movement run: {metadata['movement_run']}")
+    print(f"  Track kinematics run: {metadata['track_kinematics_run']}")
     print()
 
     # Detect bouts for each speed level
@@ -798,7 +805,7 @@ def detect_and_save_bouts(
         run_group.attrs['min_peak_height'] = min_peak_height if min_peak_height is not None else float('nan')
         run_group.attrs['rel_height'] = rel_height
 
-    run_group.attrs['source_movement_run'] = metadata['movement_run']
+    run_group.attrs['source_track_kinematics_run'] = metadata['track_kinematics_run']
     run_group.attrs['track_id'] = track_id
     run_group.attrs['fps'] = fps
     run_group.attrs['pixel_to_mm'] = metadata.get('pixel_to_mm', float('nan'))
@@ -885,10 +892,11 @@ def main():
     )
 
     parser.add_argument(
-        '--movement-run',
+        '--track-kinematics-run',
+        dest='track_kinematics_run',
         type=str,
         default='latest',
-        help='Movement run name (default: latest)',
+        help='Track kinematics run name (default: latest)',
     )
 
     parser.add_argument(
@@ -961,7 +969,7 @@ def main():
     run_name = detect_and_save_bouts(
         zarr_path=zarr_path,
         run_name=args.run_name,
-        movement_run=args.movement_run,
+        track_kinematics_run=args.track_kinematics_run,
         track_id=args.track_id,
         method=args.method,
         threshold_mm=args.threshold_mm,

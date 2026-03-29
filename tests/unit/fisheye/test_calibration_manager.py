@@ -3,7 +3,7 @@ import pytest
 import zarr
 
 from fisheye.analysis.calibration_manager import CalibrationManager
-from fisheye.analysis.movement_analysis import resolve_calibration
+from fisheye.analysis.track_kinematics import resolve_calibration
 
 
 def test_save_and_load_calibration_with_stimulus_offsets(tmp_path):

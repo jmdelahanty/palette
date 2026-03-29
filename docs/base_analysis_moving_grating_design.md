@@ -13,7 +13,7 @@ in the zarr for quick retrieval, dashboard display, and cross-recording aggregat
 
 ### Tracking data (per fish, per frame)
 
-From `analysis/movement_runs/<run>/tracks/id_<track_id>/`:
+From `analysis/track_kinematics_runs/<run>/tracks/id_<track_id>/`:
 
 | Array | Description |
 |-------|-------------|
@@ -154,7 +154,7 @@ the grating?"
 ```
 analysis/grating_response_runs/<run_name>/
 ├── attrs:
-│   ├── source_movement_run: str
+│   ├── source_track_kinematics_run: str
 │   ├── source_stimulus_run: str
 │   ├── source_bout_run: str (optional)
 │   ├── created_utc: str

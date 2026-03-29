@@ -17,6 +17,8 @@ import zarr
 from rich.console import Console
 from rich.table import Table
 
+from fisheye.shared.zarr_helpers import resolve_zarr_run
+
 
 def _decode_strings(values: np.ndarray) -> np.ndarray:
     """Decode byte arrays (or mixed types) to plain Python strings."""
@@ -33,26 +35,6 @@ def _decode_strings(values: np.ndarray) -> np.ndarray:
                 decoded.append(str(item))
         return np.asarray(decoded, dtype=str)
     return values.astype(str)
-
-
-def _resolve_run(stimulus_parent: zarr.Group, requested: Optional[str]) -> str:
-    if requested and requested != "latest":
-        if requested not in stimulus_parent:
-            raise ValueError(
-                f"Stimulus run '{requested}' not found. Available: {', '.join(stimulus_parent.keys())}"
-            )
-        return requested
-
-    latest = stimulus_parent.attrs.get("latest")
-    if isinstance(latest, bytes):
-        latest = latest.decode("utf-8", "ignore")
-    if isinstance(latest, str) and latest in stimulus_parent:
-        return latest
-
-    run_names = sorted(stimulus_parent.keys())
-    if not run_names:
-        raise ValueError("No stimulus runs available in analysis/stimulus_runs")
-    return run_names[-1]
 
 
 def _load_enum_mapping(analysis_group: zarr.Group, name: str) -> Dict[int, str]:
@@ -190,12 +172,15 @@ def main() -> None:
 
     root = zarr.open(str(args.zarr_path), mode="r")
     analysis_group = root.require_group("analysis")
-    stimulus_parent = analysis_group.require_group("stimulus_runs")
-
-    run_name = _resolve_run(stimulus_parent, args.stimulus_run)
+    run_group, run_name = resolve_zarr_run(
+        root,
+        ("analysis", "stimulus_runs"),
+        args.stimulus_run,
+        fallback_to_sorted="last",
+        latest_aliases=("latest",),
+        run_label="Stimulus run",
+    )
     console.print(f"[bold]Inspecting stimulus run:[/bold] {run_name}")
-
-    run_group = stimulus_parent[run_name]
     event_mapping = _load_enum_mapping(analysis_group, "events")
     events = _load_events(run_group)
     total = len(next(iter(events.values()))) if events else 0

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check offline movement runs for NaNs in distance_to_target_smoothed_mm."""
+"""Check offline track kinematics runs for NaNs in distance_to_target_smoothed_mm."""
 
 from __future__ import annotations
 
@@ -9,11 +9,13 @@ from pathlib import Path
 import numpy as np
 import zarr
 
+from fisheye.shared.zarr_helpers import resolve_zarr_run
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Report NaN counts in distance_to_target_smoothed_mm for offline movement runs."
+            "Report NaN counts in distance_to_target_smoothed_mm for offline track kinematics runs."
         )
     )
     parser.add_argument("store", type=Path, help="Path to Palette Zarr store")
@@ -21,7 +23,7 @@ def parse_args() -> argparse.Namespace:
         "--run",
         dest="run_name",
         help=(
-            "Specific run under analysis/movement_runs/offline. Defaults to the group's 'latest'."
+            "Specific run under analysis/track_kinematics_runs/offline. Defaults to the group's 'latest'."
         ),
     )
     return parser.parse_args()
@@ -29,25 +31,19 @@ def parse_args() -> argparse.Namespace:
 
 def resolve_offline_run(root: zarr.Group, name: str | None) -> tuple[zarr.Group, str]:
     try:
-        offline_parent = root["analysis"]["movement_runs"]["offline"]
-    except KeyError as exc:
-        raise SystemExit("analysis/movement_runs/offline not found in store") from exc
-
-    run_name = name or offline_parent.attrs.get("latest")
-    if not run_name:
-        raise SystemExit("No run specified and offline group has no 'latest' attribute")
-    if run_name not in offline_parent:
-        available = ", ".join(sorted(offline_parent.group_keys()))
-        raise SystemExit(
-            f"Run '{run_name}' not found under analysis/movement_runs/offline. Available: {available or '(none)'}"
+        return resolve_zarr_run(
+            root,
+            ("analysis", "track_kinematics_runs", "offline"),
+            name,
+            run_label="Run",
         )
-
-    return offline_parent[run_name], run_name
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def inspect_run(group: zarr.Group) -> int:
     if "distance_to_target_smoothed_mm" not in group:
-        print("distance_to_target_smoothed_mm missing; rerun movement_analysis with smoothing > 0")
+        print("distance_to_target_smoothed_mm missing; rerun track_kinematics with smoothing > 0")
         return -1
 
     array = np.asarray(group["distance_to_target_smoothed_mm"], dtype=np.float32)

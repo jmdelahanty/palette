@@ -31,6 +31,8 @@ from typing import Optional
 
 import numpy as np
 
+from fisheye.shared.zarr_helpers import resolve_zarr_run
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -91,23 +93,12 @@ def main() -> None:
     # Open zarr
     root = zarr.open(str(args.zarr_path), mode="r")
 
-    if "analysis" not in root or "stimulus_runs" not in root["analysis"]:
-        raise ValueError("No stimulus runs found in zarr archive.")
-
-    runs_group = root["analysis"]["stimulus_runs"]
-
-    # Get run name
-    if args.run_name:
-        run_name = args.run_name
-    else:
-        run_name = runs_group.attrs.get("latest")
-        if not run_name:
-            raise ValueError("No 'latest' run found. Specify --run-name explicitly.")
-
-    if run_name not in runs_group:
-        raise ValueError(f"Run '{run_name}' not found in stimulus_runs.")
-
-    run = runs_group[run_name]
+    run, run_name = resolve_zarr_run(
+        root,
+        ("analysis", "stimulus_runs"),
+        args.run_name,
+        run_label="Stimulus run",
+    )
 
     echo(f"[bold cyan]{'=' * 70}[/bold cyan]")
     echo(f"[bold]Diagnose Camera→Chaser Mapping[/bold]")

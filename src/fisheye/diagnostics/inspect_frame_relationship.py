@@ -18,24 +18,7 @@ from rich.console import Console
 from rich.table import Table
 
 from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
-
-
-def _resolve_run(stim_parent: zarr.Group, requested: Optional[str]) -> str:
-    if requested and requested != "latest":
-        if requested not in stim_parent:
-            raise ValueError(f"Stimulus run '{requested}' not found under analysis/stimulus_runs")
-        return requested
-
-    latest = stim_parent.attrs.get("latest")
-    if isinstance(latest, bytes):
-        latest = latest.decode("utf-8", "ignore")
-    if isinstance(latest, str) and latest in stim_parent:
-        return latest
-
-    run_names = sorted(stim_parent.keys())
-    if not run_names:
-        raise ValueError("No stimulus runs available in analysis/stimulus_runs")
-    return run_names[-1]
+from fisheye.shared.zarr_helpers import resolve_zarr_run
 
 
 def _resolve_field(array: np.ndarray, *candidates: str) -> str:
@@ -110,12 +93,15 @@ def main() -> None:
     console = Console()
 
     root = zarr.open(str(args.zarr_path), mode="r")
-    analysis = root.require_group("analysis")
-    stim_parent = analysis.require_group("stimulus_runs")
-
-    run_name = _resolve_run(stim_parent, args.stimulus_run)
+    run_group, run_name = resolve_zarr_run(
+        root,
+        ("analysis", "stimulus_runs"),
+        args.stimulus_run,
+        fallback_to_sorted="last",
+        latest_aliases=("latest",),
+        run_label="Stimulus run",
+    )
     console.print(f"[bold]Inspecting stimulus run:[/bold] {run_name}")
-    run_group = stim_parent[run_name]
 
     meta_group = run_group.require_group("video_metadata")
     frame_metadata, _ = load_structured_dataset(meta_group, "frame_metadata")

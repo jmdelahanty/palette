@@ -76,7 +76,7 @@ def test_get_transitive_dependents_detect() -> None:
         "refined_keypoints",
         "eye_masks",
         "refined_eye_masks",
-        "id_assignment",
+        "arena_assignment",
         "tracks",
     })
     assert result == expected
@@ -87,7 +87,7 @@ def test_get_transitive_dependents_refined_keypoints() -> None:
     expected = frozenset({
         "eye_masks",
         "refined_eye_masks",
-        "id_assignment",
+        "arena_assignment",
         "tracks",
     })
     assert result == expected
@@ -99,7 +99,7 @@ def test_get_transitive_dependents_keypoints() -> None:
         "refined_keypoints",
         "eye_masks",
         "refined_eye_masks",
-        "id_assignment",
+        "arena_assignment",
         "tracks",
     })
     assert result == expected
@@ -124,7 +124,7 @@ def test_invalidate_downstream_marks_missing(tmp_path: Path) -> None:
     registry = _create_registry(tmp_path)
     for step in ["detect", "refined_detect", "crop", "keypoints",
                   "refined_keypoints", "eye_masks", "refined_eye_masks",
-                  "id_assignment", "tracks", "detect_quality"]:
+                  "arena_assignment", "tracks", "detect_quality"]:
         _seed_step(registry, step, "ok")
 
     result = invalidate_downstream_steps(
@@ -138,7 +138,7 @@ def test_invalidate_downstream_marks_missing(tmp_path: Path) -> None:
 
     assert "detect" not in result["steps_invalidated"]
     for step in ["refined_detect", "crop", "keypoints", "refined_keypoints",
-                  "eye_masks", "refined_eye_masks", "id_assignment", "tracks",
+                  "eye_masks", "refined_eye_masks", "arena_assignment", "tracks",
                   "detect_quality"]:
         assert step in result["steps_invalidated"], f"{step} should be invalidated"
         assert _get_step_status(registry, step) == "missing"

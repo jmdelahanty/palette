@@ -15,41 +15,7 @@ from typing import Optional
 import numpy as np
 import zarr
 
-
-def _load_latest_stimulus_run(root: zarr.Group) -> tuple[zarr.Group, str]:
-    """Return the stimulus run group and its name (preferring attrs['latest'])."""
-    analysis = root.get("analysis")
-    if analysis is None or "stimulus_runs" not in analysis:
-        raise KeyError("analysis/stimulus_runs group not found in Zarr archive.")
-
-    runs = analysis["stimulus_runs"]
-    run_name = runs.attrs.get("latest")
-    if run_name:
-        run_name = str(run_name)
-    else:
-        keys = sorted(runs.group_keys())
-        if not keys:
-            raise KeyError("No runs available under analysis/stimulus_runs.")
-        run_name = keys[0]
-
-    if run_name not in runs:
-        raise KeyError(f"Stimulus run '{run_name}' not found in analysis/stimulus_runs.")
-
-    return runs[run_name], run_name
-
-
-def _resolve_stimulus_run(root: zarr.Group, name: Optional[str]) -> tuple[zarr.Group, str]:
-    if name is None:
-        return _load_latest_stimulus_run(root)
-
-    analysis = root.get("analysis")
-    if analysis is None or "stimulus_runs" not in analysis:
-        raise KeyError("analysis/stimulus_runs group not found in Zarr archive.")
-
-    runs = analysis["stimulus_runs"]
-    if name not in runs:
-        raise KeyError(f"Stimulus run '{name}' not found in analysis/stimulus_runs.")
-    return runs[name], name
+from fisheye.shared.zarr_helpers import resolve_zarr_run
 
 
 def _extract_columnar(root: zarr.Group, dataset: str) -> np.ndarray:
@@ -67,7 +33,13 @@ def analyze_alignment(
 ) -> None:
     """Run alignment diagnostics and print a textual report."""
     store = zarr.open(zarr_path, mode="r")
-    run_group, chosen_name = _resolve_stimulus_run(store, run_name)
+    run_group, chosen_name = resolve_zarr_run(
+        store,
+        ("analysis", "stimulus_runs"),
+        run_name,
+        fallback_to_sorted="first",
+        run_label="Stimulus run",
+    )
 
     fa_group = run_group.get("frame_alignment")
     if fa_group is None:

@@ -31,7 +31,7 @@ def _format_float(value: float) -> str:
 
 def analyze_heatmap_inputs(
     zarr_path: Path,
-    movement_run_name: Optional[str],
+    track_kinematics_run_name: Optional[str],
     stimulus_run_name: Optional[str],
 ) -> None:
     console = Console()
@@ -42,11 +42,11 @@ def analyze_heatmap_inputs(
     if analysis is None:
         raise ValueError("Archive missing 'analysis' group.")
 
-    movement_parent = analysis.get("movement_runs")
+    movement_parent = analysis.get("track_kinematics_runs")
     if movement_parent is None or not movement_parent:
-        raise ValueError("No movement runs found under analysis/movement_runs.")
-    movement_run_group, movement_run_name = _resolve_latest(
-        movement_parent, movement_run_name, "movement_run", console
+        raise ValueError("No track kinematics runs found under analysis/track_kinematics_runs.")
+    movement_run_group, track_kinematics_run_name = _resolve_latest(
+        movement_parent, track_kinematics_run_name, "track_kinematics_run", console
     )
 
     stimulus_parent = analysis.get("stimulus_runs")
@@ -65,7 +65,7 @@ def analyze_heatmap_inputs(
         raise ValueError("Stimulus metadata missing 'triggering_camera_frame_id'.")
     camera_frames_all = camera_frames_all.astype(np.int64, copy=False)
 
-    console.log("[bold]Loading movement run positions...[/bold]")
+    console.log("[bold]Loading track kinematics run positions...[/bold]")
     frames, positions = _collect_positions(movement_run_group)
 
     periods = _determine_periods(events, stim_to_camera, camera_frames_all, console)
@@ -112,7 +112,7 @@ def analyze_heatmap_inputs(
         )
 
     console.log(
-        f"[green]Inspection complete for movement run '{movement_run_name}' "
+        f"[green]Inspection complete for track kinematics run '{track_kinematics_run_name}' "
         f"and stimulus run '{stimulus_run_name}'.[/green]"
     )
 
@@ -122,7 +122,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         description="Inspect the spatial inputs used when plotting training heatmaps from a Palette Zarr archive."
     )
     parser.add_argument("zarr_path", type=Path, help="Path to the Palette Zarr archive.")
-    parser.add_argument("--movement-run", help="Specific movement run name (defaults to latest).")
+    parser.add_argument(
+        "--track-kinematics-run",
+        dest="track_kinematics_run",
+        help="Specific track kinematics run name (defaults to latest).",
+    )
     parser.add_argument("--stimulus-run", help="Specific stimulus run name under analysis/stimulus_runs.")
     return parser.parse_args(argv)
 
@@ -131,11 +135,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
     analyze_heatmap_inputs(
         zarr_path=args.zarr_path,
-        movement_run_name=args.movement_run,
+        track_kinematics_run_name=args.track_kinematics_run,
         stimulus_run_name=args.stimulus_run,
     )
 
 
 if __name__ == "__main__":  # pragma: no cover
     main()
-

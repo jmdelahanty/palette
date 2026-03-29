@@ -11,28 +11,18 @@ from typing import Optional
 import numpy as np
 import zarr
 
-
-def _resolve_run(root: zarr.Group, run_name: Optional[str]) -> tuple[zarr.Group, str]:
-    analysis = root.get("analysis")
-    if analysis is None or "stimulus_runs" not in analysis:
-        raise KeyError("analysis/stimulus_runs missing.")
-    runs = analysis["stimulus_runs"]
-    if run_name:
-        if run_name not in runs:
-            raise KeyError(f"Stimulus run '{run_name}' not found.")
-        return runs[run_name], run_name
-    latest = runs.attrs.get("latest")
-    if latest and latest in runs:
-        return runs[latest], latest
-    keys = sorted(runs.group_keys())
-    if not keys:
-        raise KeyError("No stimulus runs present.")
-    return runs[keys[-1]], keys[-1]
+from fisheye.shared.zarr_helpers import resolve_zarr_run
 
 
 def analyze_periodicity(zarr_path: Path, run_name: Optional[str], max_period: int) -> None:
     root = zarr.open(zarr_path, mode="r")
-    run, run_id = _resolve_run(root, run_name)
+    run, run_id = resolve_zarr_run(
+        root,
+        ("analysis", "stimulus_runs"),
+        run_name,
+        fallback_to_sorted="last",
+        run_label="Stimulus run",
+    )
     print(f"Checking chaser periodicity for run: {run_id}")
 
     meta = run["video_metadata"]["frame_metadata"]
