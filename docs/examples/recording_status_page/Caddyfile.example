@@ -1,0 +1,31 @@
+# Example Caddy config for exposing the recording status page with auth/TLS.
+#
+# Adjust:
+# - hostname
+# - password hash
+# - email / TLS policy if needed
+#
+# Keep the Python app bound to:
+#   127.0.0.1:8765
+
+status.palette.example.org {
+    encode zstd gzip
+
+    # Replace with your own bcrypt hash:
+    #   caddy hash-password --plaintext 'your-password'
+    basicauth {
+        operator $2a$14$REPLACE_WITH_BCRYPT_HASH
+    }
+
+    reverse_proxy 127.0.0.1:8765
+}
+
+# For lab-internal use without public certs, an alternative is:
+#
+# status.palette.internal {
+#     tls internal
+#     basicauth {
+#         operator $2a$14$REPLACE_WITH_BCRYPT_HASH
+#     }
+#     reverse_proxy 127.0.0.1:8765
+# }

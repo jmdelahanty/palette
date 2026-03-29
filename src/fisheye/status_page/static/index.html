@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Palette Recording Status</title>
+    <link rel="stylesheet" href="/static/status_page.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header>
+        <h1>Recording Status Page</h1>
+        <p class="subtitle">Live registry-backed status (Phase 1).</p>
+      </header>
+
+      <section class="card">
+        <h2>Server Health</h2>
+        <p id="health-line" class="muted">Checking...</p>
+        <pre id="health-json" class="payload"></pre>
+      </section>
+
+      <section class="card">
+        <h2>Summary</h2>
+        <pre id="summary-json" class="payload">Loading...</pre>
+      </section>
+
+      <section class="card">
+        <h2>Wide Status Preview</h2>
+        <form id="wide-filter-form" class="filters">
+          <label>
+            Search
+            <input id="filter-q" type="text" placeholder="recording/camera/status text" />
+          </label>
+          <label>
+            Use
+            <select id="filter-use">
+              <option value="">all</option>
+              <option value="analysis">analysis</option>
+              <option value="training">training</option>
+            </select>
+          </label>
+          <label class="inline">
+            <input id="filter-blocking" type="checkbox" />
+            only issues
+          </label>
+          <button type="submit">Apply</button>
+        </form>
+        <div class="legend" aria-label="status legend">
+          <span class="legend-item status-ok">OK</span>
+          <span class="legend-item status-miss">MISS</span>
+          <span class="legend-item status-error">ERROR/FAIL</span>
+          <span class="legend-item status-na">N/A</span>
+        </div>
+        <p id="wide-meta" class="muted">Loading...</p>
+        <p id="refresh-meta" class="muted">Heartbeat: waiting...</p>
+        <div id="wide-table-wrap" class="table-wrap"></div>
+      </section>
+
+      <section class="card">
+        <h2>Selected Dataset</h2>
+        <p id="detail-meta" class="muted">Click a wide-row entry to load detail/history.</p>
+        <div id="detail-wrap" class="table-wrap"></div>
+      </section>
+
+      <section class="card">
+        <h2>Status History</h2>
+        <p id="history-meta" class="muted">No dataset selected.</p>
+        <div id="history-wrap" class="table-wrap"></div>
+      </section>
+    </main>
+    <script src="/static/status_page.js"></script>
+  </body>
+</html>
