@@ -26,7 +26,9 @@ import zarr
 from zarr.core.dtype import VariableLengthUTF8
 
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.detect_reason_codec import read_reason_labels
+from fisheye.shared.type_conversions import normalize_attr as _shared_as_text
 from fisheye.utils import prepare_keypoint_training_from_registry as prepare_pose
 from fisheye.utils.system import build_invocation_record
 
@@ -114,8 +116,7 @@ class PoseMergeResult:
     keypoint_supervision_counts: Dict[str, int]
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_utc_now = utc_now
 
 
 def _sha256(path: Path) -> str:
@@ -138,16 +139,7 @@ def _ensure_suffix(value: str, suffix: str) -> str:
     return text if text.endswith(suffix) else f"{text}{suffix}"
 
 
-def _as_text(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, (bytes, bytearray)):
-        try:
-            value = value.decode("utf-8", "ignore")
-        except Exception:
-            return None
-    text = str(value).strip()
-    return text or None
+_as_text = _shared_as_text
 
 
 BOX_ONLY_REASON_TAG = "fish_present_no_keypoints"
@@ -410,42 +402,48 @@ def _resolve_dataset_skeleton_identity(
     kp_pose_schema = _as_mapping(kp_group.attrs.get("pose_schema"))
 
     skeleton_id = (
-        _as_text(dataset_payload.get("skeleton_id"))
-        or (_as_text(dataset_pose_schema.get("skeleton_id")) if dataset_pose_schema is not None else None)
-        or _as_text(kp_group.attrs.get("skeleton_id"))
+        _as_text(kp_group.attrs.get("skeleton_id"))
         or (_as_text(kp_pose_schema.get("skeleton_id")) if kp_pose_schema is not None else None)
+        or _as_text(dataset_payload.get("skeleton_id"))
+        or (_as_text(dataset_pose_schema.get("skeleton_id")) if dataset_pose_schema is not None else None)
         or manifest_skeleton_id
     )
     if skeleton_id is None:
-        dataset_schema_name = _as_text(dataset_pose_schema.get("name")) if dataset_pose_schema is not None else None
         kp_schema_name = _as_text(kp_pose_schema.get("name")) if kp_pose_schema is not None else None
-        resolved_name = dataset_schema_name or kp_schema_name
+        dataset_schema_name = _as_text(dataset_pose_schema.get("name")) if dataset_pose_schema is not None else None
+        resolved_name = kp_schema_name or dataset_schema_name
         if resolved_name:
             skeleton_id = f"pose_schema:{resolved_name}"
 
-    resolved_kpt_shape = (
+    runtime_kpt_shape = _normalize_kpt_shape(kp_group.attrs.get("kpt_shape")) or (
+        _normalize_kpt_shape(kp_pose_schema.get("kpt_shape")) if kp_pose_schema is not None else None
+    )
+    preferred_kpt_shape = (
         _normalize_kpt_shape(dataset_payload.get("kpt_shape"))
         or (_normalize_kpt_shape(dataset_pose_schema.get("kpt_shape")) if dataset_pose_schema is not None else None)
-        or _normalize_kpt_shape(kp_group.attrs.get("kpt_shape"))
-        or (_normalize_kpt_shape(kp_pose_schema.get("kpt_shape")) if kp_pose_schema is not None else None)
+        or manifest_kpt_shape
     )
 
-    if manifest_kpt_shape is not None and manifest_kpt_shape[0] != keypoint_count:
-        raise ValueError(
-            f"{source_zarr}: manifest pose_schema kpt_shape={list(manifest_kpt_shape)} "
-            f"does not match keypoint run '{keypoint_run}' keypoints_roi K={keypoint_count}."
-        )
-    if resolved_kpt_shape is None and manifest_kpt_shape is not None and manifest_kpt_shape[0] == keypoint_count:
-        resolved_kpt_shape = manifest_kpt_shape
-    if resolved_kpt_shape is None:
-        inferred_dims = manifest_kpt_shape[1] if manifest_kpt_shape is not None else 2
-        resolved_kpt_shape = (int(keypoint_count), int(inferred_dims))
-    if resolved_kpt_shape[0] != int(keypoint_count):
+    if runtime_kpt_shape is not None and runtime_kpt_shape[0] != int(keypoint_count):
         raise ValueError(
             f"{source_zarr}: keypoint run '{keypoint_run}' resolved "
-            f"{_format_skeleton_signature(skeleton_id=skeleton_id, kpt_shape=resolved_kpt_shape)} "
+            f"{_format_skeleton_signature(skeleton_id=skeleton_id, kpt_shape=runtime_kpt_shape)} "
             f"but keypoints_roi has K={keypoint_count}."
         )
+    if preferred_kpt_shape is not None and preferred_kpt_shape[0] != keypoint_count:
+        raise ValueError(
+            f"{source_zarr}: manifest/dataset pose_schema kpt_shape={list(preferred_kpt_shape)} "
+            f"does not match keypoint run '{keypoint_run}' keypoints_roi K={keypoint_count}."
+        )
+
+    resolved_dims = None
+    if preferred_kpt_shape is not None:
+        resolved_dims = int(preferred_kpt_shape[1])
+    elif runtime_kpt_shape is not None:
+        resolved_dims = int(runtime_kpt_shape[1])
+    if resolved_dims is None or resolved_dims <= 0:
+        resolved_dims = 2
+    resolved_kpt_shape = (int(keypoint_count), int(resolved_dims))
 
     signature = _format_skeleton_signature(skeleton_id=skeleton_id, kpt_shape=resolved_kpt_shape)
     return skeleton_id, resolved_kpt_shape, signature
@@ -749,7 +747,10 @@ def _discover_merge_sources(
                     f"{source_zarr}: keypoint dtype mismatch {dataset_keypoint_dtype} != {keypoint_dtype}."
                 )
 
-        labels = kp_group.attrs.get("keypoint_labels")
+        annotation_group = kp_group
+        annotation_run = keypoint_run
+        annotation_parent_name = "keypoints_runs"
+        labels = annotation_group.attrs.get("keypoint_labels")
         normalized_labels = [str(item) for item in labels] if isinstance(labels, list) else []
         if keypoint_labels is None:
             keypoint_labels = normalized_labels or ["swim_bladder", "eye_left", "eye_right"]
@@ -788,6 +789,13 @@ def _discover_merge_sources(
                 keypoints_path = f"{refined_parent_name}/{refined_run_name}/keypoints_roi"
                 dataset_keypoint_shape = tuple(int(v) for v in refined_keypoints_arr.shape[1:])
                 dataset_keypoint_dtype = np.dtype(refined_keypoints_arr.dtype)
+                annotation_group = refined_group
+                annotation_run = refined_run_name
+                annotation_parent_name = refined_parent_name
+                labels = annotation_group.attrs.get("keypoint_labels")
+                normalized_labels = [str(item) for item in labels] if isinstance(labels, list) else []
+                if keypoint_labels is None:
+                    keypoint_labels = normalized_labels or ["swim_bladder", "eye_left", "eye_right"]
             if "usable_keypoints" in refined_group:
                 refined_success_arr = refined_group["usable_keypoints"]
                 if int(refined_success_arr.shape[0]) != source_sample_count:
@@ -807,9 +815,9 @@ def _discover_merge_sources(
 
         dataset_skeleton_id, dataset_kpt_shape, dataset_signature = _resolve_dataset_skeleton_identity(
             dataset_payload=dataset,
-            kp_group=kp_group,
+            kp_group=annotation_group,
             source_zarr=source_zarr,
-            keypoint_run=keypoint_run,
+            keypoint_run=f"{annotation_parent_name}/{annotation_run}",
             keypoint_count=int(dataset_keypoint_shape[0]),
             manifest_skeleton_id=manifest_skeleton_id,
             manifest_kpt_shape=manifest_kpt_shape,
