@@ -21,3 +21,7 @@ nvme1/
 runs/
 notes.md
 keypoint_frame_flags.json
+
+# Local extracted/reference PNGs
+/*.png
+/src/fisheye/utils/*.png
