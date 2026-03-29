@@ -316,6 +316,41 @@ scripts/py -m fisheye.utils.run_eye_masks_batch /nvme1/recordings \
   --dry-run --json
 ```
 
+```bash
+# Registry mode + registry model resolution (U-Net example)
+scripts/py -m fisheye.utils.run_eye_masks_batch /nvme1/recordings \
+  --source registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --model-source registry \
+  --method unet \
+  --model-top-k 5 \
+  --dry-run --json
+```
+
+```bash
+# Apply with registry model resolution (YOLO example)
+scripts/py -m fisheye.utils.run_eye_masks_batch /nvme1/recordings \
+  --source registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --model-source registry \
+  --method yolo \
+  --model-set-id eye_mask_cedar_shadow_omnifin0_auto_gray_union_b9164009_v001 \
+  --overwrite \
+  --apply --json
+```
+
+```bash
+# Recommended (your current workflow): U-Net + registry model resolution
+scripts/py -m fisheye.utils.run_eye_masks_batch /nvme1/recordings \
+  --source registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --model-source registry \
+  --method unet \
+  --model-set-id eye_mask_cedar_shadow_omnifin0_auto_gray_union_b9164009_v001 \
+  --overwrite \
+  --apply --json
+```
+
 ### LSF submit script
 
 ```bash
@@ -361,6 +396,15 @@ scripts/py -m fisheye.utils.run_eye_masks_batch /nvme1/recordings \
 
 **U-Net-specific options:** `--label-mode`, `--write-binary-masks`,
 `--no-use-crop`
+
+**Python runner registry-model options:** `--model-source {config,registry}` (default: `config`),
+`--model-set-id`, `--model-top-k`, `--model-require-unique`,
+`--model-include-non-success`
+
+**Option name mapping (LSF submit script → Python runner):**
+`--set-id` → `--model-set-id`, `--top-k` → `--model-top-k`,
+`--require-unique` → `--model-require-unique`,
+`--include-non-success` → `--model-include-non-success`
 
 **Execution model:** Same as keypoints — each batch job iterates over zarr
 paths, derives the recording directory, and calls
