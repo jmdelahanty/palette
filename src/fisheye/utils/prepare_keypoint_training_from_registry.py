@@ -740,6 +740,7 @@ def _build_query_filter_payload(
         "input_format": args.input_format,
         "model_input": model_input,
         "keypoint_run": args.keypoint_run,
+        "skeleton_id": args.skeleton_id,
         "min_usable_keypoints_rate": args.min_usable_keypoints_rate,
         "require_review_state": args.require_review_state,
         "require_review_intended_use": args.require_review_intended_use,
@@ -864,6 +865,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         type=str,
         default="latest_traditional",
         help="Keypoint run selector (e.g. latest, latest_traditional, latest_yolo, or explicit run name).",
+    )
+    parser.add_argument(
+        "--skeleton-id",
+        type=str,
+        help=(
+            "Require the effective annotation source to resolve to this skeleton_id "
+            "(for example pose_skel_traditional_v2)."
+        ),
     )
     parser.add_argument("--base-config", type=Path, default=Path("configs/fisheye/pose_config.yaml"))
     parser.add_argument("--out-config", type=Path)
@@ -999,6 +1008,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     )
     selected_quality_rows_by_dataset: Dict[str, Mapping[str, Any]] = {}
     quality_exclusions: List[Dict[str, Any]] = []
+    skeleton_exclusions: List[Dict[str, Any]] = []
     if quality_gate_active:
         dataset_ids_all = [str(row["dataset_id"]) for row in rows if row["dataset_id"]]
         strict_method = None
@@ -1364,14 +1374,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         annotation_keypoints_arr = annotation_group["keypoints_roi"]
         annotation_keypoint_shape = tuple(int(v) for v in annotation_keypoints_arr.shape)
         annotation_keypoint_count = int(annotation_keypoint_shape[1])
-        if inferred_keypoint_labels is None:
-            labels = _resolve_keypoint_labels(annotation_group)
-            if labels:
-                inferred_keypoint_labels = labels
-        if inferred_keypoint_skeleton is None:
-            edges = _resolve_keypoint_skeleton(annotation_group)
-            if edges:
-                inferred_keypoint_skeleton = edges
 
         dataset_skeleton_id, dataset_kpt_shape = _resolve_dataset_skeleton_identity(
             kp_group=annotation_group,
@@ -1383,6 +1385,23 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             kpt_shape=dataset_kpt_shape,
         )
         dataset_label = str(row["dataset_id"] or zarr_path.name)
+        if args.skeleton_id is not None and dataset_skeleton_id != args.skeleton_id:
+            skeleton_exclusions.append(
+                {
+                    "dataset_id": dataset_id_text or dataset_label,
+                    "zarr_path": str(zarr_path),
+                    "reason": f"skeleton_id_mismatch:{dataset_skeleton_id or 'missing'}!={args.skeleton_id}",
+                }
+            )
+            continue
+        if inferred_keypoint_labels is None:
+            labels = _resolve_keypoint_labels(annotation_group)
+            if labels:
+                inferred_keypoint_labels = labels
+        if inferred_keypoint_skeleton is None:
+            edges = _resolve_keypoint_skeleton(annotation_group)
+            if edges:
+                inferred_keypoint_skeleton = edges
         dataset_member = (
             f"{dataset_label} (zarr={zarr_path.name}, "
             f"annotation_source={annotation_source['parent_name']}/{annotation_source['run_name']})"
@@ -1551,6 +1570,18 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         if row["dataset_id"]:
             dataset_ids.append(str(row["dataset_id"]))
 
+    if skeleton_exclusions:
+        print(f"Skeleton filter excluded {len(skeleton_exclusions)} dataset(s):")
+        for exclusion in skeleton_exclusions[:20]:
+            print(f"  - {exclusion['dataset_id']} [{exclusion['reason']}] {exclusion['zarr_path']}")
+        if len(skeleton_exclusions) > 20:
+            print(f"  ... {len(skeleton_exclusions) - 20} more exclusion(s) omitted.")
+
+    if not manifest_datasets:
+        if args.skeleton_id is not None:
+            raise SystemExit("No datasets remain after skeleton filtering.")
+        raise SystemExit("No datasets remain after keypoint training selection.")
+
     base_config["datasets"] = dataset_entries
     base_config["task"] = "pose"
     if args.imgsz is not None:
@@ -1623,7 +1654,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 "zarr_path": exclusion["zarr_path"],
                 "reason": exclusion["reason"],
             }
-            for exclusion in quality_exclusions
+            for exclusion in [*quality_exclusions, *skeleton_exclusions]
         ],
         "invocation": invocation_payload,
     }

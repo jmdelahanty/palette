@@ -67,6 +67,25 @@ scripts/py -m fisheye.utils.prepare_keypoint_training_from_registry \
   --dry-run
 ```
 
+If your approved training pool spans more than one skeleton lineage, add an
+explicit selector so preflight keeps only the intended annotation source instead
+of failing on mixed skeleton signatures. For the current 5-point traditional
+reviewed runs:
+
+```bash
+scripts/py -m fisheye.utils.prepare_keypoint_training_from_registry \
+  --registry /nvme1/palette_registry.sqlite \
+  --dish-design cedar \
+  --source-type filtered \
+  --input-format gray \
+  --model-input gray \
+  --keypoint-run latest_traditional \
+  --skeleton-id pose_skel_traditional_v2 \
+  --require-review-state approved \
+  --require-review-intended-use training \
+  --dry-run
+```
+
 Troubleshooting:
 
 - If preflight fails with `keypoint_quality row is stale for filesystem mtime`, refresh registry quality rows and rerun:

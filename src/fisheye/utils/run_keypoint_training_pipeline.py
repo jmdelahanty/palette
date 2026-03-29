@@ -270,6 +270,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         default="latest_traditional",
         help="Keypoint run selector (e.g. latest, latest_traditional, latest_yolo, or explicit run name).",
     )
+    parser.add_argument(
+        "--skeleton-id",
+        type=str,
+        help="Require the effective keypoint annotation source to match this skeleton_id.",
+    )
     parser.add_argument("--base-config", type=Path, default=Path("configs/fisheye/pose_config.yaml"))
     parser.add_argument("--out-config", type=Path)
     parser.add_argument("--out-manifest", type=Path)
@@ -577,6 +582,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     _add_arg(prepare_cli, "--input-format", args.input_format)
     _add_arg(prepare_cli, "--model-input", args.model_input)
     _add_arg(prepare_cli, "--keypoint-run", args.keypoint_run)
+    _add_arg(prepare_cli, "--skeleton-id", args.skeleton_id)
     _add_arg(prepare_cli, "--base-config", args.base_config)
     _add_arg(prepare_cli, "--out-config", args.out_config)
     _add_arg(prepare_cli, "--out-manifest", args.out_manifest)

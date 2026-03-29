@@ -251,6 +251,36 @@ def test_passes_cross_method_review_fallback_flag_to_preflight(tmp_path: Path, m
     assert "--allow-cross-method-review-fallback" in calls["prepare"]
 
 
+def test_passes_skeleton_id_to_preflight(tmp_path: Path, monkeypatch) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, tmp_path / "dataset_1.zarr")
+    manifest_path = tmp_path / "pose.manifest.json"
+    calls: dict[str, list[str]] = {}
+
+    def fake_prepare(cli: list[str]) -> int:
+        calls["prepare"] = list(cli)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text('{"set_id":"pose_set_v001"}', encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(pipeline.prepare_from_registry, "main", fake_prepare)
+
+    rc = pipeline.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--out-manifest",
+            str(manifest_path),
+            "--skeleton-id",
+            "pose_skel_traditional_v2",
+        ]
+    )
+    assert rc == 0
+    prepare_cli = calls["prepare"]
+    assert "--skeleton-id" in prepare_cli
+    assert "pose_skel_traditional_v2" in prepare_cli
+
+
 def test_train_after_merged_export_uses_merged_outputs(tmp_path: Path, monkeypatch) -> None:
     registry_path = tmp_path / "registry.sqlite"
     _seed_registry(registry_path, tmp_path / "dataset_1.zarr")
