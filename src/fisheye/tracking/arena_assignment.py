@@ -1,9 +1,9 @@
-# src/fisheye/tracking/assign_ids.py
+# src/fisheye/tracking/arena_assignment.py
 """
-Fish ID assignment for multi-fish tracking.
+Arena assignment for multi-fish tracking.
 
-Currently implements spatial assignment (one fish per ROI).
-TODO: Add trajectory-based tracking for free-swimming fish.
+Currently implements spatial arena assignment (one subject per ROI).
+TODO: Add trajectory-based tracking for free-swimming fish within arenas.
 """
 
 import numpy as np
@@ -21,9 +21,13 @@ from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
+from .single_subject_per_arena import (
+    TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA,
+    write_single_subject_per_arena_tracking_run,
+)
 from ..utils.system import get_environment_info
 
-_ID_ASSIGN_STATUS_SOURCE = "runtime_assign_ids"
+_ARENA_ASSIGN_STATUS_SOURCE = "runtime_arena_assignment"
 
 
 def _emit_tracking_step_statuses(
@@ -47,15 +51,15 @@ def _emit_tracking_step_statuses(
     emit_stage_completion(
         root,
         zarr_file,
-        step_name="id_assignment",
+        step_name="arena_assignment",
         status=id_status,
-        source=_ID_ASSIGN_STATUS_SOURCE,
+        source=_ARENA_ASSIGN_STATUS_SOURCE,
         run_name=id_run_name,
         method=id_method,
         coverage_pct=id_coverage_pct,
         details_json={**id_details, "reason": id_reason},
         console=console,
-        warning_label="assign_ids/tracks",
+        warning_label="arena_assignment/tracks",
         auto_registry_from_env=True,
         require_env_registry_exists=False,
         invalidate_on_ok=False,
@@ -65,13 +69,13 @@ def _emit_tracking_step_statuses(
         zarr_file,
         step_name="tracks",
         status=tracks_status,
-        source=_ID_ASSIGN_STATUS_SOURCE,
+        source=_ARENA_ASSIGN_STATUS_SOURCE,
         run_name=tracks_run_name,
         method=tracks_method,
         coverage_pct=None,
         details_json={**tracks_details, "reason": tracks_reason},
         console=console,
-        warning_label="assign_ids/tracks",
+        warning_label="arena_assignment/tracks",
         auto_registry_from_env=True,
         require_env_registry_exists=False,
         invalidate_on_ok=False,
@@ -280,13 +284,13 @@ def get_single_dish_roi_from_mask(root: zarr.Group, console: Console) -> Optiona
     return None
 
 
-def assign_ids_spatial(
+def assign_arenas_spatial(
     zarr_path: str,
     config: Dict[str, Any],
     console: Optional[Console] = None
 ) -> Dict[str, Any]:
     """
-    Assign IDs to detections based on spatial location (sub-dish ROIs).
+    Assign detections to arenas based on spatial location (sub-dish ROIs).
     
     This method assigns a unique ID to each detection based on which
     predefined ROI it falls into. Suitable for experiments where fish
@@ -321,7 +325,7 @@ def assign_ids_spatial(
     if console is None:
         console = Console()
     
-    console.rule("[bold]Stage: Spatial ID Assignment[/bold]")
+    console.rule("[bold]Stage: Spatial Arena Assignment[/bold]")
     start_time = time.perf_counter()
     
     root = zarr.open(zarr_path, mode='a')
@@ -340,7 +344,7 @@ def assign_ids_spatial(
     
     # Check prerequisites
     if 'detect_runs' not in root:
-        raise ValueError("Detection stage not run. Run detect before assign_ids.")
+        raise ValueError("Detection stage not run. Run detect before arena assignment.")
     
     # Check experiment setup metadata
     experiment_setup = root.attrs.get('experiment_setup', {})
@@ -397,7 +401,7 @@ def assign_ids_spatial(
                 tracks_reason=tracks_reason,
                 tracks_run_name=tracks_run_name,
                 tracks_method=tracks_method,
-                tracks_details={"upstream": {"id_assignment": "missing"}},
+                tracks_details={"upstream": {"arena_assignment": "missing"}},
                 console=console,
             )
             return {'total_detections': 0, 'assigned': 0, 'unassigned': 0}
@@ -443,7 +447,7 @@ def assign_ids_spatial(
                 tracks_reason=tracks_reason,
                 tracks_run_name=tracks_run_name,
                 tracks_method=tracks_method,
-                tracks_details={"upstream": {"id_assignment": "missing"}},
+                tracks_details={"upstream": {"arena_assignment": "missing"}},
                 console=console,
             )
             return {'total_detections': 0, 'assigned': 0, 'unassigned': 0}
@@ -458,10 +462,10 @@ def assign_ids_spatial(
             console.print(f"  Expected {expected_rois} dishes, found {actual_rois} ROIs")
             console.print(f"  Proceeding with {actual_rois} ROIs...")
     
-    console.print(f"\nAssigning IDs based on [cyan]{len(subdish_masks)}[/cyan] ROI(s) ({param_source})")
+    console.print(f"\nAssigning arenas based on [cyan]{len(subdish_masks)}[/cyan] ROI(s) ({param_source})")
     
     # Create run group
-    assign_group, run_group_name = get_run_group(root, 'id_assignment', console)
+    assign_group, run_group_name = get_run_group(root, 'arena_assignment', console)
     
     # Select detection data, preferring refined detections when available
     refined_parent = root.get('refined_detect_runs')
@@ -487,11 +491,11 @@ def assign_ids_spatial(
     
     if detection_group is None:
         if 'detect_runs' not in root:
-            raise ValueError("Detection stage not run. Run detect before assign_ids.")
+            raise ValueError("Detection stage not run. Run detect before arena assignment.")
         detect_parent = root['detect_runs']
         latest_detect_run = detect_parent.attrs.get('latest')
         if not latest_detect_run or latest_detect_run not in detect_parent:
-            raise ValueError("No valid detection runs found for ID assignment.")
+            raise ValueError("No valid detection runs found for arena assignment.")
         detection_group = detect_parent[latest_detect_run]
         source_detect_run = latest_detect_run
         assignment_source = 'detect_raw'
@@ -505,10 +509,11 @@ def assign_ids_spatial(
     
     # Store metadata
     metadata_dict = {
-        'assign_ids_timestamp_utc': datetime.now(timezone.utc).isoformat(),
+        'arena_assignment_timestamp_utc': datetime.now(timezone.utc).isoformat(),
+        'method': 'spatial',
         'parameters': {
-            'num_masks': len(subdish_masks), 
-            'masks': subdish_masks,
+            'num_arenas': len(subdish_masks),
+            'arenas': subdish_masks,
             'setup_type': setup_type,
             'experiment_setup': experiment_setup
         },
@@ -516,7 +521,7 @@ def assign_ids_spatial(
         'source_detect_run': source_detect_run,
         'assignment_method': 'spatial',
         'assignment_source': assignment_source,
-        'num_masks': len(subdish_masks)
+        'num_arenas': len(subdish_masks)
     }
     if refined_run_name:
         metadata_dict['source_refined_run'] = refined_run_name
@@ -549,10 +554,10 @@ def assign_ids_spatial(
     bbox_coords_px[:, 0] *= ds_img_shape[1]  # center_x
     bbox_coords_px[:, 1] *= ds_img_shape[0]  # center_y
     
-    # Initialize detection IDs array (-1 = unassigned)
-    detection_ids = np.full(len(bbox_coords), -1, dtype=np.int32)
+    # Initialize arena IDs array (-1 = unassigned)
+    arena_ids = np.full(len(bbox_coords), -1, dtype=np.int32)
     
-    # Assign IDs based on which sub-dish mask each detection falls into
+    # Assign arena IDs based on which sub-dish mask each detection falls into
     for mask in subdish_masks:
         mask_id = mask['id']
         x, y, w, h = mask['roi_pixels']
@@ -565,53 +570,53 @@ def assign_ids_spatial(
             (bbox_coords_px[:, 1] < y + h)
         )
         
-        detection_ids[in_mask] = mask_id
+        arena_ids[in_mask] = mask_id
     
-    # Save detection IDs
+    # Save arena IDs
     assign_group.create_array(
-        'detection_ids',
-        data=detection_ids,
-        chunks=(min(1000, len(detection_ids)),),
+        'arena_ids',
+        data=arena_ids,
+        chunks=(min(1000, len(arena_ids)),),
         overwrite=True
     )
     
-    # Calculate per-mask detection counts per frame
+    # Calculate per-arena detection counts per frame
     n_masks = len(subdish_masks)
     per_mask_counts = np.zeros((num_frames, n_masks), dtype=np.int32)
     mask_id_to_idx = {mask['id']: idx for idx, mask in enumerate(subdish_masks)}
     
-    if detection_ids.size > 0:
+    if arena_ids.size > 0:
         for mask_id, column_idx in mask_id_to_idx.items():
-            mask_hits = detection_ids == mask_id
+            mask_hits = arena_ids == mask_id
             if np.any(mask_hits):
                 counts = np.bincount(frame_indices[mask_hits], minlength=num_frames)
                 per_mask_counts[:, column_idx] = counts[:num_frames]
     
-    # Save per-mask counts
+    # Save per-arena counts
     assign_group.create_array(
-        'n_detections_per_mask',
+        'n_detections_per_arena',
         data=per_mask_counts,
         chunks=(min(100, num_frames) if num_frames > 0 else 1, n_masks),
         overwrite=True
     )
     
-    # Store sub-dish mask definitions for reference
-    assign_group.attrs['subdish_masks'] = subdish_masks
+    # Store arena definitions for reference
+    assign_group.attrs['arena_definitions'] = subdish_masks
     
     # Calculate statistics
-    n_assigned = np.sum(detection_ids != -1)
-    n_unassigned = np.sum(detection_ids == -1)
-    assignment_rate = (n_assigned / len(detection_ids) * 100) if len(detection_ids) > 0 else 0
+    n_assigned = np.sum(arena_ids != -1)
+    n_unassigned = np.sum(arena_ids == -1)
+    assignment_rate = (n_assigned / len(arena_ids) * 100) if len(arena_ids) > 0 else 0
     
     # Per-mask statistics
     mask_stats = []
     for mask in subdish_masks:
         mask_id = mask['id']
         column_idx = mask_id_to_idx[mask_id]
-        n_in_mask = np.sum(detection_ids == mask_id)
+        n_in_mask = np.sum(arena_ids == mask_id)
         frames_with_detections = int(np.sum(per_mask_counts[:, column_idx] > 0))
         mask_stats.append({
-            'mask_id': mask_id,
+            'arena_id': mask_id,
             'total_detections': int(n_in_mask),
             'frames_with_detections': frames_with_detections,
             'coverage_percent': round((frames_with_detections / num_frames * 100), 2) if num_frames > 0 else 0.0
@@ -620,12 +625,12 @@ def assign_ids_spatial(
     duration = time.perf_counter() - start_time
     
     summary_stats = {
-        'total_detections': int(len(detection_ids)),
+        'total_detections': int(len(arena_ids)),
         'assigned_detections': int(n_assigned),
         'unassigned_detections': int(n_unassigned),
         'assignment_rate_percent': round(assignment_rate, 2),
-        'num_masks': n_masks,
-        'per_mask_statistics': mask_stats,
+        'num_arenas': n_masks,
+        'per_arena_statistics': mask_stats,
         'setup_type': setup_type,
         'total_frames': num_frames
     }
@@ -643,7 +648,7 @@ def assign_ids_spatial(
         provenance_inputs['source_refined_run'] = refined_run_name
 
     provenance_record = build_stage_provenance(
-        stage='id_assignment',
+        stage='arena_assignment',
         command=' '.join(sys.argv),
         created_at_utc=datetime.now(timezone.utc).isoformat(),
         version=env_info['git'].get('short_hash') or env_info['git'].get('commit_hash'),
@@ -665,7 +670,7 @@ def assign_ids_spatial(
         parameters={
             'assignment_method': 'spatial',
             'parameter_source': param_source,
-            'num_masks': len(subdish_masks),
+            'num_arenas': len(subdish_masks),
             'setup_type': setup_type,
             'experiment_setup': experiment_setup,
         },
@@ -684,12 +689,71 @@ def assign_ids_spatial(
     })
     
     # Mark latest
-    parent_group = root['id_assignment_runs']
+    parent_group = root['arena_assignment_runs']
     parent_group.attrs['latest'] = run_group_name
-    
+
+    source_rowset_path = (
+        f"refined_detect_runs/{refined_run_name}/interpolated"
+        if refined_run_name
+        else f"detect_runs/{source_detect_run}"
+    )
+
+    try:
+        track_run_name, _track_group, tracking_summary = (
+            write_single_subject_per_arena_tracking_run(
+                root=root,
+                arena_ids=arena_ids,
+                frame_indices=frame_indices,
+                source_detect_run=str(source_detect_run),
+                source_refined_run=str(refined_run_name) if refined_run_name else None,
+                source_arena_assignment_run=run_group_name,
+                source_rowset_path=source_rowset_path,
+                conflict_policy="fail",
+                console=console,
+            )
+        )
+        tracks_status = "ok"
+        tracks_reason = "present"
+        tracks_method = TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA
+    except Exception as exc:
+        track_run_name = None
+        tracking_summary = {}
+        tracks_status = "error"
+        tracks_reason = "tracking_generation_failed"
+        tracks_method = TRACKING_METHOD_SINGLE_SUBJECT_PER_ARENA
+        _emit_tracking_step_statuses(
+            root=root,
+            zarr_path=zarr_path,
+            id_status="ok",
+            id_reason="present",
+            id_run_name=run_group_name,
+            id_method="spatial",
+            id_coverage_pct=float(summary_stats.get("assignment_rate_percent", 0.0)),
+            id_details={
+                "setup_type": setup_type,
+                "assignment_source": assignment_source,
+                "source_detect_run": source_detect_run,
+                "source_refined_run": refined_run_name,
+                "num_arenas": len(subdish_masks),
+                "assigned_detections": int(n_assigned),
+                "unassigned_detections": int(n_unassigned),
+            },
+            tracks_status=tracks_status,
+            tracks_reason=tracks_reason,
+            tracks_run_name=track_run_name,
+            tracks_method=tracks_method,
+            tracks_details={
+                "upstream": {"arena_assignment": "ok"},
+                "source_arena_assignment_run": run_group_name,
+                "error": str(exc),
+            },
+            console=console,
+        )
+        raise
+
     # Completion panel
     mask_summary = "\n".join([
-        f"    {'Dish' if setup_type == 'single_dish' else 'Mask'} {s['mask_id']}: {s['total_detections']} detections ({s['coverage_percent']:.1f}% frames)"
+        f"    {'Dish' if setup_type == 'single_dish' else 'Arena'} {s['arena_id']}: {s['total_detections']} detections ({s['coverage_percent']:.1f}% frames)"
         for s in mask_stats
     ])
     
@@ -701,14 +765,14 @@ def assign_ids_spatial(
     
     assignment_label = "refined/interpolated" if assignment_source == 'refined_interpolated' else 'raw detections'
     source_lines = [
-        f"  Assignment source: {assignment_label}",
+        f"  Arena assignment source: {assignment_label}",
         f"  Detect run: detect_runs/{source_detect_run}"
     ]
     if refined_run_name:
         source_lines.append(f"  Refined run: refined_detect_runs/{refined_run_name}")
     source_block = "\n".join(source_lines)
     
-    completion_text = f"""[green]✓[/green] ID assignment completed
+    completion_text = f"""[green]✓[/green] Arena assignment completed
     
 [bold]Setup:[/bold]
   Mode: {setup_type}
@@ -721,21 +785,22 @@ def assign_ids_spatial(
   Time: {duration:.1f}s
 
 [bold]Results:[/bold]
-  Assigned: {n_assigned}/{len(detection_ids)} ({assignment_rate:.1f}%)
+  Assigned: {n_assigned}/{len(arena_ids)} ({assignment_rate:.1f}%)
   Unassigned: {n_unassigned}
 {validation_text}
   
-[bold]Per-ROI Summary:[/bold]
+[bold]Per-Arena Summary:[/bold]
 {mask_summary}
 
 [bold]Output:[/bold]
   Path: {zarr_path}
-  Group: id_assignment_runs/{run_group_name}
-  Arrays: detection_ids, n_detections_per_mask"""
+  Group: arena_assignment_runs/{run_group_name}
+  Arrays: arena_ids, n_detections_per_arena
+  Tracking: tracking_runs/{track_run_name} ({tracks_method})"""
     
     panel = Panel(
         completion_text,
-        title="[bold]ID Assignment Complete[/bold]",
+        title="[bold]Arena Assignment Complete[/bold]",
         border_style="green",
         padding=(1, 2)
     )
@@ -743,7 +808,6 @@ def assign_ids_spatial(
     console.print("\n")
     console.print(panel)
 
-    tracks_status, tracks_reason, tracks_run_name, tracks_method = _resolve_tracks_status("ok")
     _emit_tracking_step_statuses(
         root=root,
         zarr_path=zarr_path,
@@ -757,17 +821,27 @@ def assign_ids_spatial(
             "assignment_source": assignment_source,
             "source_detect_run": source_detect_run,
             "source_refined_run": refined_run_name,
-            "num_masks": len(subdish_masks),
+            "num_arenas": len(subdish_masks),
             "assigned_detections": int(n_assigned),
             "unassigned_detections": int(n_unassigned),
         },
         tracks_status=tracks_status,
         tracks_reason=tracks_reason,
-        tracks_run_name=tracks_run_name,
+        tracks_run_name=track_run_name,
         tracks_method=tracks_method,
         tracks_details={
-            "upstream": {"id_assignment": "ok"},
-            "source_run": tracks_run_name,
+            "upstream": {"arena_assignment": "ok"},
+            "source_run": track_run_name,
+            "source_arena_assignment_run": run_group_name,
+            "num_tracks": int(tracking_summary.get("n_tracks", 0)),
+            "n_assigned_rows": int(tracking_summary.get("n_assigned_rows", 0)),
+            "n_unassigned_rows": int(tracking_summary.get("n_unassigned_rows", 0)),
+            "unassigned_row_rate_percent": float(tracking_summary.get("unassigned_row_rate_percent", 0.0)),
+            "tracking_qc_state": tracking_summary.get("tracking_qc_state"),
+            "tracking_warn_threshold_rows": int(tracking_summary.get("tracking_warn_threshold_rows", 1)),
+            "tracking_warn_threshold_percent": float(tracking_summary.get("tracking_warn_threshold_percent", 0.0)),
+            "tracking_block_threshold_rows": int(tracking_summary.get("tracking_block_threshold_rows", 10)),
+            "tracking_block_threshold_percent": float(tracking_summary.get("tracking_block_threshold_percent", 1.0)),
         },
         console=console,
     )
@@ -777,13 +851,13 @@ def assign_ids_spatial(
 
 # TODO: Implement trajectory-based tracking for free-swimming fish OR INTEGRATE SLEAP
 # 
-# def assign_ids_trajectory(
+# def assign_tracks_trajectory(
 #     zarr_path: str,
 #     config: Dict[str, Any],
 #     console: Optional[Console] = None
 # ) -> Dict[str, Any]:
 #     """
-#     Assign IDs to detections using trajectory tracking.
+#     Assign track IDs to detections using trajectory tracking.
 #     
 #     This method tracks individual fish across frames by matching
 #     keypoints and building trajectories. Suitable for experiments
@@ -813,7 +887,7 @@ if __name__ == "__main__":
     import argparse
     import yaml
     
-    parser = argparse.ArgumentParser(description="Assign IDs to fish detections")
+    parser = argparse.ArgumentParser(description="Assign arena IDs to fish detections")
     parser.add_argument("zarr_path", help="Path to zarr archive")
     parser.add_argument("--config", default="configs/fisheye/default.yaml",
                        help="Configuration file")
@@ -826,11 +900,11 @@ if __name__ == "__main__":
     
     console = Console()
     
-    # Run spatial ID assignment
-    results = assign_ids_spatial(
+    # Run spatial arena assignment
+    results = assign_arenas_spatial(
         args.zarr_path,
         config,
         console=console
     )
     
-    console.print(f"\n[green]Assigned IDs to {results['assigned_detections']} detections[/green]")
+    console.print(f"\n[green]Assigned arenas to {results['assigned_detections']} detections[/green]")

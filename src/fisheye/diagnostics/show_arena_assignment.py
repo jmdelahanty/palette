@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Summarize ID-assignment provenance and consistency within a Palette Zarr archive.
+Summarize arena-assignment provenance and consistency within a Palette Zarr archive.
 
-For each run in ``id_assignment_runs`` this script reports the detection sources,
+For each run in ``arena_assignment_runs`` this script reports the detection sources,
 array lengths, ROI counts, and highlights mismatches between detection rows and
-stored `detection_ids`.
+stored `arena_ids`.
 """
 
 from __future__ import annotations
@@ -65,30 +65,30 @@ def _select_run_names(run_names: Sequence[str], latest: Optional[str], limit: Op
     return selected
 
 
-def show_id_assignment_runs(zarr_path: Path, limit: Optional[int]) -> None:
+def show_arena_assignment_runs(zarr_path: Path, limit: Optional[int]) -> None:
     console = Console()
-    console.print(f"[bold]Inspecting ID assignment runs in:[/bold] {zarr_path}")
+    console.print(f"[bold]Inspecting arena assignment runs in:[/bold] {zarr_path}")
 
     root = zarr.open(str(zarr_path), mode="r")
-    if "id_assignment_runs" not in root:
-        console.print("[yellow]Archive contains no id_assignment_runs group.[/yellow]")
+    if "arena_assignment_runs" not in root:
+        console.print("[yellow]Archive contains no arena_assignment_runs group.[/yellow]")
         return
 
-    parent = root["id_assignment_runs"]
+    parent = root["arena_assignment_runs"]
     run_names = _sorted_group_keys(parent)
     if not run_names:
-        console.print("[yellow]No ID assignment runs recorded.[/yellow]")
+        console.print("[yellow]No arena assignment runs recorded.[/yellow]")
         return
 
     latest = parent.attrs.get("latest")
     selected_runs = _select_run_names(run_names, latest, limit)
 
-    table = Table(title="ID Assignment Runs", show_lines=False, box=None)
+    table = Table(title="Arena Assignment Runs", show_lines=False, box=None)
     table.add_column("Run", style="cyan")
     table.add_column("Detect Run", style="green")
     table.add_column("Refined Run", style="green")
     table.add_column("Assignment", style="magenta")
-    table.add_column("IDs", justify="right")
+    table.add_column("Arena IDs", justify="right")
     table.add_column("Detections", justify="right")
     table.add_column("Δ", justify="right")
     table.add_column("Masks", justify="right")
@@ -104,11 +104,11 @@ def show_id_assignment_runs(zarr_path: Path, limit: Optional[int]) -> None:
         detect_run = run_group.attrs.get("source_detect_run")
         refined_run = run_group.attrs.get("source_refined_run")
         assignment_source = run_group.attrs.get("assignment_source", "unknown")
-        num_masks = run_group.attrs.get("num_masks")
+        num_masks = run_group.attrs.get("num_arenas")
 
         detection_ids_len = 0
-        if "detection_ids" in run_group:
-            detection_ids_len = int(run_group["detection_ids"].shape[0])
+        if "arena_ids" in run_group:
+            detection_ids_len = int(run_group["arena_ids"].shape[0])
 
         detect_path, detection_group = _resolve_detection_group(root, run_group)
         detection_rows: Optional[int] = None
@@ -155,7 +155,7 @@ def show_id_assignment_runs(zarr_path: Path, limit: Optional[int]) -> None:
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Show provenance and consistency of ID assignment runs."
+        description="Show provenance and consistency of arena assignment runs."
     )
     parser.add_argument("zarr_path", type=Path, help="Path to Palette Zarr archive.")
     parser.add_argument(
@@ -168,7 +168,7 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
     args = parse_args(argv)
-    show_id_assignment_runs(args.zarr_path, args.limit)
+    show_arena_assignment_runs(args.zarr_path, args.limit)
 
 
 if __name__ == "__main__":  # pragma: no cover
