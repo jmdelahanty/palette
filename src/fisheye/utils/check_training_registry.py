@@ -8,10 +8,12 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.shared.type_conversions import status_text as _shared_status_text
 
 try:  # optional rich dependency
     from rich.console import Console
@@ -27,6 +29,8 @@ class SetRow:
     name: Optional[str]
     created_utc: Optional[str]
     dataset_count: Optional[int]
+    task_type: Optional[str]
+    data_summary: Optional[str]
     skeleton_id: Optional[str]
     manifest_path: Optional[str]
     config_path: Optional[str]
@@ -316,10 +320,50 @@ BEHAVIOR_V1_REQUIRED_ARTIFACT_TYPES = {
 }
 
 
-def _status_text(value: Optional[bool]) -> str:
-    if value is None:
-        return "—"
-    return "OK" if value else "MISS"
+_status_text = partial(_shared_status_text, unavailable="—")
+
+
+def _json_dict(raw: Any) -> Optional[Dict[str, Any]]:
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "ignore")
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return None
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _subject_mask_summary_text(invocation: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not isinstance(invocation, dict):
+        return None
+    summary = invocation.get("subject_mask_training_summary")
+    if not isinstance(summary, dict):
+        return None
+    coverage_class = str(summary.get("coverage_class") or "").strip().lower()
+    if coverage_class == "eyes_only":
+        return "eyes only"
+    available_labels = summary.get("available_labels")
+    if isinstance(available_labels, list):
+        labels = [str(item) for item in available_labels if item]
+        if labels:
+            return ", ".join(labels)
+    mask_labels = summary.get("mask_labels")
+    supervised = summary.get("supervised_row_counts")
+    if isinstance(mask_labels, list) and isinstance(supervised, dict):
+        labels = [str(label) for label in mask_labels if int(supervised.get(str(label), 0) or 0) > 0]
+        if labels:
+            return ", ".join(labels)
+    return coverage_class or None
 
 
 def _status_rich(value: Optional[bool]) -> str:
@@ -671,7 +715,7 @@ def _nms_summary(
 
 def _load_set_rows(registry: Registry, set_filter: Optional[str], limit: Optional[int]) -> List[SetRow]:
     sql = [
-        "SELECT set_id, name, dataset_ids_json, created_utc",
+        "SELECT set_id, name, task_type, dataset_ids_json, invocation_json, created_utc",
         "FROM training_sets",
     ]
     params: List[Any] = []
@@ -687,12 +731,15 @@ def _load_set_rows(registry: Registry, set_filter: Optional[str], limit: Optiona
     results: List[SetRow] = []
     for row in rows:
         latest = _fetch_latest_run(registry, row["set_id"])
+        invocation = _json_dict(row["invocation_json"])
         results.append(
             SetRow(
                 set_id=row["set_id"],
                 name=row["name"],
                 created_utc=row["created_utc"],
                 dataset_count=_parse_count(row["dataset_ids_json"]),
+                task_type=row["task_type"],
+                data_summary=_subject_mask_summary_text(invocation),
                 skeleton_id=latest.get("skeleton_id"),
                 manifest_path=latest.get("manifest_path"),
                 config_path=latest.get("config_path"),
@@ -997,7 +1044,7 @@ def _dataset_ids_for_set(registry: Registry, set_id: Optional[str]) -> Optional[
 def _load_dataset_rows(
     registry: Registry,
     *,
-    set_filter: Optional[str],
+    set_filter: Optional[str] = None,
     limit: Optional[int] = None,
 ) -> List[DatasetRow]:
     sql = [
@@ -1011,13 +1058,13 @@ def _load_dataset_rows(
         "d.zarr_origin,",
         "d.zarr_use,",
         "d.last_seen_utc,",
-        "p.rig_id,",
-        "p.arena_id,",
-        "p.camera_id,",
+        "dcc.rig_id,",
+        "dcc.arena_id,",
+        "dcc.camera_id,",
         "COALESCE(lp.parent_count, 0) AS parent_count,",
         "COALESCE(lc.child_count, 0) AS child_count",
         "FROM datasets d",
-        "LEFT JOIN provenance p ON p.dataset_id = d.dataset_id",
+        "LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = d.dataset_id",
         "LEFT JOIN (",
         "  SELECT child_dataset_id, COUNT(*) AS parent_count",
         "  FROM dataset_lineage_current",
@@ -1630,7 +1677,7 @@ def _load_detect_quality_rows(
 def _load_recording_rows(
     registry: Registry,
     *,
-    set_filter: Optional[str],
+    set_filter: Optional[str] = None,
     limit: Optional[int] = None,
 ) -> List[RecordingRow]:
     sql = [
@@ -1656,11 +1703,10 @@ def _load_recording_rows(
         "FROM recordings r",
         "LEFT JOIN (",
         "  SELECT",
-        "    d.recording_id,",
-        "    GROUP_CONCAT(DISTINCT NULLIF(TRIM(p.dish_design), '')) AS dish_design_csv",
-        "  FROM datasets d",
-        "  LEFT JOIN provenance p ON p.dataset_id = d.dataset_id",
-        "  GROUP BY d.recording_id",
+        "    dcc.recording_id,",
+        "    GROUP_CONCAT(DISTINCT NULLIF(TRIM(dcc.dish_design), '')) AS dish_design_csv",
+        "  FROM dataset_context_current dcc",
+        "  GROUP BY dcc.recording_id",
         ") pd ON pd.recording_id = r.recording_id",
         "LEFT JOIN (",
         "  SELECT",
@@ -2976,7 +3022,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             table.add_column("Set ID", style="cyan")
             table.add_column("Name", style="magenta")
             table.add_column("Created")
+            table.add_column("Task")
             table.add_column("Datasets", justify="right")
+            table.add_column("Labels")
             table.add_column("Latest Training Run")
             table.add_column("Skeleton")
             table.add_column("Manifest")
@@ -2986,7 +3034,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     row.set_id,
                     row.name or "—",
                     _format_time(row.created_utc),
+                    row.task_type or "—",
                     str(row.dataset_count) if row.dataset_count is not None else "—",
+                    row.data_summary or "—",
                     row.run_id or "—",
                     row.skeleton_id or "—",
                     _status_rich(_path_ok(row.manifest_path)),
@@ -3717,7 +3767,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(row.set_id)
                 print(f"  name: {row.name or '—'}")
                 print(f"  created: {_format_time(row.created_utc)}")
+                print(f"  task: {row.task_type or '—'}")
                 print(f"  datasets: {row.dataset_count if row.dataset_count is not None else '—'}")
+                print(f"  labels: {row.data_summary or '—'}")
                 print(f"  latest_run: {row.run_id or '—'}")
                 print(f"  skeleton: {row.skeleton_id or '—'}")
                 print(f"  manifest: {_status_text(_path_ok(row.manifest_path))}")
