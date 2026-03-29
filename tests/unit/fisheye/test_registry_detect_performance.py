@@ -9,7 +9,7 @@ import zarr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from fisheye.registry.db import Registry, _extract_detect_quality_rows
+from fisheye.registry.db import Registry, _extract_detect_performance_rows, _extract_detect_quality_rows
 
 
 def _create_detect_archive(path: Path, *, session_uuid: str) -> None:
@@ -122,6 +122,23 @@ def _build_fake_detect_quality_root(*, timestamp_key: str = "timestamp_utc") -> 
     return root
 
 
+def _build_fake_detect_performance_root() -> _FakeGroup:
+    root = _FakeGroup()
+    detect_parent = root.add_group("detect_runs")
+    detect_parent.add_group(
+        "detect_001",
+        attrs={
+            "created_at_utc": "2026-02-10T00:10:00+00:00",
+            "detect_timestamp_utc": "2026-02-10T00:09:00+00:00",
+            "created_utc": "2026-02-10T00:08:00+00:00",
+            "timestamp_utc": "2026-02-10T00:07:00+00:00",
+            "detection_method": "yolo",
+            "provenance": {"created_at_utc": "2026-02-10T00:06:00+00:00"},
+        },
+    ).add_array("frame_counts", np.array([1, 0, 1, 1], dtype=np.int32))
+    return root
+
+
 def _detect_quality_record(
     *,
     refined_run: str,
@@ -164,6 +181,27 @@ def test_extract_detect_quality_rows_populates_shared_review_fields(tmp_path: Pa
     assert row["review_timestamp_utc"] == "2026-02-10T00:01:00+00:00"
     assert row["review_resolved_group"] == "filtered"
     assert row["interpolated_detections_rate"] == 0.25
+
+
+def test_extract_detect_performance_rows_prefers_created_at_utc(tmp_path: Path) -> None:
+    rows = _extract_detect_performance_rows(
+        _build_fake_detect_performance_root(),
+        zarr_path=tmp_path,
+        recording_id="recording_detect",
+        zarr_use="analysis",
+    )
+    assert len(rows) == 1
+    assert rows[0]["detect_created_utc"] == "2026-02-10T00:10:00+00:00"
+
+
+def test_extract_detect_quality_rows_prefers_created_at_utc(tmp_path: Path) -> None:
+    root = _build_fake_detect_quality_root()
+    refined = root["refined_detect_runs"]["refined_001"]
+    refined.attrs["created_at_utc"] = "2026-02-10T00:10:00+00:00"
+    refined.attrs["refinement_timestamp"] = "2026-02-10T00:09:00+00:00"
+    rows = _extract_detect_quality_rows(root, zarr_path=tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["refined_created_utc"] == "2026-02-10T00:10:00+00:00"
 
 
 def test_detect_quality_legacy_timestamp_alias_maps_to_review_timestamp_utc(tmp_path: Path) -> None:

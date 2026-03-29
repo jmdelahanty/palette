@@ -355,7 +355,10 @@ def _extract_keypoint_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List
             {
                 "refined_run": str(refined_run),
                 "refined_created_utc": _decode_attr(
-                    refined_group.attrs.get("created_utc") or refined_group.attrs.get("timestamp_utc")
+                    refined_group.attrs.get("created_at_utc")
+                    or refined_group.attrs.get("refinement_timestamp")
+                    or refined_group.attrs.get("created_utc")
+                    or refined_group.attrs.get("timestamp_utc")
                 ),
                 "source_keypoint_run": source_keypoint_run,
                 "keypoint_method": keypoint_method,
@@ -473,7 +476,8 @@ def _extract_detect_quality_rows(root: zarr.Group, *, zarr_path: Path) -> List[D
             {
                 "refined_run": str(refined_run),
                 "refined_created_utc": _decode_attr(
-                    refined_group.attrs.get("refinement_timestamp")
+                    refined_group.attrs.get("created_at_utc")
+                    or refined_group.attrs.get("refinement_timestamp")
                     or refined_group.attrs.get("created_utc")
                     or refined_group.attrs.get("timestamp_utc")
                 ),
@@ -691,7 +695,8 @@ def _extract_detect_performance_rows(
         model_resolution_selected = _coerce_mapping(model_resolution.get("selected")) or {}
 
         detect_created_utc = (
-            _decode_attr(detect_group.attrs.get("detect_timestamp_utc"))
+            _decode_attr(detect_group.attrs.get("created_at_utc"))
+            or _decode_attr(detect_group.attrs.get("detect_timestamp_utc"))
             or _decode_attr(detect_group.attrs.get("created_utc"))
             or _decode_attr(detect_group.attrs.get("timestamp_utc"))
             or _decode_attr(provenance.get("created_at_utc"))
@@ -805,7 +810,8 @@ def _extract_keypoint_performance_rows(
         model_resolution_selected = _coerce_mapping(model_resolution.get("selected")) or {}
 
         keypoint_created_utc = (
-            _decode_attr(attrs.get("keypoints_timestamp_utc"))
+            _decode_attr(attrs.get("created_at_utc"))
+            or _decode_attr(attrs.get("keypoints_timestamp_utc"))
             or _decode_attr(attrs.get("created_utc"))
             or _decode_attr(attrs.get("timestamp_utc"))
             or _decode_attr(provenance.get("created_at_utc"))
@@ -973,13 +979,13 @@ def _extract_keypoint_profile_rows(
         heading_stats = _coerce_mapping(geometry_map.get("heading")) or {}
 
         row_recording_id = (
-            _decode_attr(dataset_map.get("recording_id"))
-            or _decode_attr(run_group.attrs.get("source_recording_id"))
+            _decode_attr(run_group.attrs.get("source_recording_id"))
+            or _decode_attr(dataset_map.get("recording_id"))
             or recording_id
         )
         row_zarr_use = (
-            _decode_attr(dataset_map.get("zarr_use"))
-            or _decode_attr(run_group.attrs.get("source_zarr_use"))
+            _decode_attr(run_group.attrs.get("source_zarr_use"))
+            or _decode_attr(dataset_map.get("zarr_use"))
             or zarr_use
         )
 
@@ -995,27 +1001,27 @@ def _extract_keypoint_profile_rows(
                 "recording_id": row_recording_id,
                 "zarr_use": row_zarr_use,
                 "keypoint_method": (
-                    _decode_attr(source_map.get("keypoint_method"))
-                    or _decode_attr(run_group.attrs.get("source_keypoint_method"))
+                    _decode_attr(run_group.attrs.get("source_keypoint_method"))
+                    or _decode_attr(source_map.get("keypoint_method"))
                 ),
                 "source_keypoint_path": (
-                    _decode_attr(source_map.get("keypoint_path"))
-                    or _decode_attr(run_group.attrs.get("source_keypoint_path"))
+                    _decode_attr(run_group.attrs.get("source_keypoint_path"))
+                    or _decode_attr(source_map.get("keypoint_path"))
                 ),
                 "source_keypoint_run": (
-                    _decode_attr(source_map.get("keypoint_run"))
-                    or _decode_attr(run_group.attrs.get("source_keypoint_run"))
+                    _decode_attr(run_group.attrs.get("source_keypoint_run"))
+                    or _decode_attr(source_map.get("keypoint_run"))
                 ),
                 "skeleton_id": (
-                    _decode_attr(source_map.get("skeleton_id"))
-                    or _decode_attr(run_group.attrs.get("source_skeleton_id"))
+                    _decode_attr(run_group.attrs.get("source_skeleton_id"))
+                    or _decode_attr(source_map.get("skeleton_id"))
                 ),
                 "kpt_shape": _normalize_kpt_shape_text(
-                    source_map.get("kpt_shape") or run_group.attrs.get("source_kpt_shape")
+                    run_group.attrs.get("source_kpt_shape") or source_map.get("kpt_shape")
                 ),
                 "profile_created_utc": (
-                    _decode_attr(summary.get("created_at_utc"))
-                    or _decode_attr(run_group.attrs.get("created_at_utc"))
+                    _decode_attr(run_group.attrs.get("created_at_utc"))
+                    or _decode_attr(summary.get("created_at_utc"))
                 ),
                 "zarr_mtime_ns": zarr_mtime_ns,
                 "updated_utc": updated_utc,
@@ -1251,12 +1257,19 @@ def _extract_subject_mask_performance_rows(
             ) or _coerce_mapping(attrs.get("subject_mask_review_status"))
             component_review_statuses = _coerce_mapping(attrs.get("component_review_statuses")) or {}
 
+            provenance_parameters = _coerce_mapping(provenance.get("parameters")) or {}
+            provenance_inputs = _coerce_mapping(provenance.get("inputs")) or {}
             run_created_utc = (
-                _decode_attr(attrs.get("created_utc"))
+                _decode_attr(attrs.get("created_at_utc"))
+                or _decode_attr(attrs.get("created_utc"))
                 or _decode_attr(attrs.get("timestamp_utc"))
                 or _decode_attr(provenance.get("created_at_utc"))
             )
-            method = _decode_attr(attrs.get("method")) or _decode_attr(provenance.get("method"))
+            method = (
+                _decode_attr(attrs.get("method"))
+                or _decode_attr(provenance_parameters.get("method"))
+                or _decode_attr(provenance.get("method"))
+            )
             if not method and stage_group == "refined_subject_masks_runs":
                 method = "refine_subject_masks"
 
@@ -1264,8 +1277,12 @@ def _extract_subject_mask_performance_rows(
                 _extract_review_fields(review_status)
             )
 
-            source_subject_mask_run = _decode_attr(attrs.get("source_subject_mask_run"))
-            source_subject_mask_method = _decode_attr(attrs.get("source_subject_mask_method"))
+            source_subject_mask_run = _decode_attr(attrs.get("source_subject_mask_run")) or _decode_attr(
+                provenance_inputs.get("source_subject_mask_run")
+            )
+            source_subject_mask_method = _decode_attr(attrs.get("source_subject_mask_method")) or _decode_attr(
+                provenance_inputs.get("source_subject_mask_method")
+            )
             source_subject_mask_stale = _coerce_mapping(attrs.get("source_subject_mask_stale"))
             source_subject_mask_stale_state = (
                 _decode_attr(source_subject_mask_stale.get("state")) if source_subject_mask_stale else None
@@ -1281,8 +1298,6 @@ def _extract_subject_mask_performance_rows(
                 if source_subject_mask_stale
                 else None
             )
-            provenance_parameters = _coerce_mapping(provenance.get("parameters")) or {}
-            provenance_inputs = _coerce_mapping(provenance.get("inputs")) or {}
             run_semantics = _decode_attr(attrs.get("run_semantics")) or _decode_attr(
                 provenance_parameters.get("run_semantics")
             )
@@ -1373,9 +1388,15 @@ def _extract_subject_mask_performance_rows(
                     "zarr_use": zarr_use,
                     "subject_mask_method": method,
                     "label_schema_id": _decode_attr(attrs.get("label_schema_id")),
-                    "source_crop_run": _decode_attr(attrs.get("source_crop_run")),
-                    "source_keypoint_group": _decode_attr(attrs.get("source_keypoint_group")),
-                    "source_keypoints_run": _resolve_source_keypoints_run(attrs),
+                    "source_crop_run": _decode_attr(attrs.get("source_crop_run")) or _decode_attr(
+                        provenance_inputs.get("source_crop_run")
+                    ),
+                    "source_keypoint_group": _decode_attr(attrs.get("source_keypoint_group")) or _decode_attr(
+                        provenance_inputs.get("source_keypoint_group")
+                    ),
+                    "source_keypoints_run": _resolve_source_keypoints_run(attrs)
+                    or _decode_attr(provenance_inputs.get("source_keypoints_run"))
+                    or _decode_attr(provenance_inputs.get("source_keypoint_run")),
                     "source_subject_mask_run": source_subject_mask_run,
                     "source_subject_mask_method": source_subject_mask_method,
                     "run_semantics": run_semantics,
@@ -1545,7 +1566,8 @@ def _extract_eye_mask_performance_rows(
             source_keypoint_stale = _coerce_mapping(attrs.get("source_keypoint_stale"))
 
             run_created_utc = (
-                _decode_attr(attrs.get("created_utc"))
+                _decode_attr(attrs.get("created_at_utc"))
+                or _decode_attr(attrs.get("created_utc"))
                 or _decode_attr(attrs.get("timestamp_utc"))
                 or _decode_attr(provenance.get("created_at_utc"))
             )
@@ -6377,7 +6399,43 @@ class Registry:
             CREATE VIEW detection_data_profile_latest AS
             WITH ranked AS (
                 SELECT
-                    ddp.*,
+                    ddp.dataset_id AS dataset_id,
+                    ddp.profile_run AS profile_run,
+                    dcc.recording_id AS recording_id,
+                    dcc.zarr_use AS zarr_use,
+                    ddp.detection_type AS detection_type,
+                    ddp.detection_path AS detection_path,
+                    ddp.profile_created_utc AS profile_created_utc,
+                    ddp.zarr_mtime_ns AS zarr_mtime_ns,
+                    ddp.updated_utc AS updated_utc,
+                    ddp.frames_total AS frames_total,
+                    ddp.frames_with_detections AS frames_with_detections,
+                    ddp.coverage_percent AS coverage_percent,
+                    ddp.detections_total AS detections_total,
+                    ddp.detections_per_frame_p50 AS detections_per_frame_p50,
+                    ddp.detections_per_frame_p90 AS detections_per_frame_p90,
+                    ddp.w_p10 AS w_p10,
+                    ddp.w_p50 AS w_p50,
+                    ddp.w_p90 AS w_p90,
+                    ddp.h_p10 AS h_p10,
+                    ddp.h_p50 AS h_p50,
+                    ddp.h_p90 AS h_p90,
+                    ddp.area_p10 AS area_p10,
+                    ddp.area_p50 AS area_p50,
+                    ddp.area_p90 AS area_p90,
+                    ddp.aspect_ratio_p10 AS aspect_ratio_p10,
+                    ddp.aspect_ratio_p50 AS aspect_ratio_p50,
+                    ddp.aspect_ratio_p90 AS aspect_ratio_p90,
+                    ddp.edge_proximity_rate AS edge_proximity_rate,
+                    dcc.rig_id AS rig_id,
+                    dcc.camera_id AS camera_id,
+                    dcc.arena_id AS arena_id,
+                    dcc.dish_design AS dish_design,
+                    dcc.canvas_name AS canvas_name,
+                    dcc.protocol_name AS protocol_name,
+                    dcc.genotype AS genotype,
+                    dcc.dpf_at_acquisition AS dpf_at_acquisition,
+                    ddp.profile_json AS profile_json,
                     ROW_NUMBER() OVER (
                         PARTITION BY ddp.dataset_id
                         ORDER BY
@@ -6385,6 +6443,7 @@ class Registry:
                             ddp.profile_run DESC
                     ) AS _rn
                 FROM detection_data_profile ddp
+                LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = ddp.dataset_id
             )
             SELECT
                 dataset_id,
@@ -6612,7 +6671,42 @@ class Registry:
             CREATE VIEW keypoint_data_profile_latest AS
             WITH ranked AS (
                 SELECT
-                    kdp.*,
+                    kdp.dataset_id AS dataset_id,
+                    kdp.profile_run AS profile_run,
+                    dcc.recording_id AS recording_id,
+                    dcc.zarr_use AS zarr_use,
+                    kdp.keypoint_method AS keypoint_method,
+                    kdp.source_keypoint_path AS source_keypoint_path,
+                    kdp.source_keypoint_run AS source_keypoint_run,
+                    kdp.skeleton_id AS skeleton_id,
+                    kdp.kpt_shape AS kpt_shape,
+                    kdp.profile_created_utc AS profile_created_utc,
+                    kdp.zarr_mtime_ns AS zarr_mtime_ns,
+                    kdp.updated_utc AS updated_utc,
+                    kdp.rows_total AS rows_total,
+                    kdp.rows_usable AS rows_usable,
+                    kdp.usable_keypoints_total AS usable_keypoints_total,
+                    kdp.usable_rate AS usable_rate,
+                    kdp.confidence_valid_rate AS confidence_valid_rate,
+                    kdp.geometry_valid_rate AS geometry_valid_rate,
+                    kdp.triangle_area_p10 AS triangle_area_p10,
+                    kdp.triangle_area_p50 AS triangle_area_p50,
+                    kdp.triangle_area_p90 AS triangle_area_p90,
+                    kdp.min_angle_p10 AS min_angle_p10,
+                    kdp.min_angle_p50 AS min_angle_p50,
+                    kdp.min_angle_p90 AS min_angle_p90,
+                    kdp.heading_p10 AS heading_p10,
+                    kdp.heading_p50 AS heading_p50,
+                    kdp.heading_p90 AS heading_p90,
+                    dcc.rig_id AS rig_id,
+                    dcc.camera_id AS camera_id,
+                    dcc.arena_id AS arena_id,
+                    dcc.dish_design AS dish_design,
+                    dcc.canvas_name AS canvas_name,
+                    dcc.protocol_name AS protocol_name,
+                    dcc.genotype AS genotype,
+                    dcc.dpf_at_acquisition AS dpf_at_acquisition,
+                    kdp.profile_json AS profile_json,
                     ROW_NUMBER() OVER (
                         PARTITION BY kdp.dataset_id, COALESCE(kdp.keypoint_method, '')
                         ORDER BY
@@ -6620,6 +6714,7 @@ class Registry:
                             kdp.profile_run DESC
                     ) AS _rn
                 FROM keypoint_data_profile kdp
+                LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = kdp.dataset_id
             )
             SELECT
                 dataset_id,
@@ -6902,7 +6997,73 @@ class Registry:
             CREATE VIEW eye_mask_data_profile_latest AS
             WITH ranked AS (
                 SELECT
-                    emdp.*,
+                    emdp.dataset_id AS dataset_id,
+                    emdp.profile_run AS profile_run,
+                    dcc.recording_id AS recording_id,
+                    dcc.zarr_use AS zarr_use,
+                    emdp.stage_group AS stage_group,
+                    emdp.eye_mask_method AS eye_mask_method,
+                    emdp.source_eye_mask_path AS source_eye_mask_path,
+                    emdp.source_eye_mask_run AS source_eye_mask_run,
+                    emdp.source_keypoint_path AS source_keypoint_path,
+                    emdp.source_keypoint_run AS source_keypoint_run,
+                    emdp.source_crop_run AS source_crop_run,
+                    emdp.profile_created_utc AS profile_created_utc,
+                    emdp.zarr_mtime_ns AS zarr_mtime_ns,
+                    emdp.updated_utc AS updated_utc,
+                    emdp.rows_total AS rows_total,
+                    emdp.rows_usable AS rows_usable,
+                    emdp.usable_rate AS usable_rate,
+                    emdp.reviewed_rate AS reviewed_rate,
+                    emdp.excluded_rate AS excluded_rate,
+                    emdp.exclusion_reasons_json AS exclusion_reasons_json,
+                    emdp.ellipse_success_rate AS ellipse_success_rate,
+                    emdp.pair_success_rate AS pair_success_rate,
+                    emdp.area_p10 AS area_p10,
+                    emdp.area_p50 AS area_p50,
+                    emdp.area_p90 AS area_p90,
+                    emdp.left_area_p10 AS left_area_p10,
+                    emdp.left_area_p50 AS left_area_p50,
+                    emdp.left_area_p90 AS left_area_p90,
+                    emdp.right_area_p10 AS right_area_p10,
+                    emdp.right_area_p50 AS right_area_p50,
+                    emdp.right_area_p90 AS right_area_p90,
+                    emdp.union_area_p10 AS union_area_p10,
+                    emdp.union_area_p50 AS union_area_p50,
+                    emdp.union_area_p90 AS union_area_p90,
+                    emdp.area_lr_ratio_p10 AS area_lr_ratio_p10,
+                    emdp.area_lr_ratio_p50 AS area_lr_ratio_p50,
+                    emdp.area_lr_ratio_p90 AS area_lr_ratio_p90,
+                    emdp.major_axis_p10 AS major_axis_p10,
+                    emdp.major_axis_p50 AS major_axis_p50,
+                    emdp.major_axis_p90 AS major_axis_p90,
+                    emdp.minor_axis_p10 AS minor_axis_p10,
+                    emdp.minor_axis_p50 AS minor_axis_p50,
+                    emdp.minor_axis_p90 AS minor_axis_p90,
+                    emdp.aspect_ratio_p10 AS aspect_ratio_p10,
+                    emdp.aspect_ratio_p50 AS aspect_ratio_p50,
+                    emdp.aspect_ratio_p90 AS aspect_ratio_p90,
+                    emdp.eye_separation_p10 AS eye_separation_p10,
+                    emdp.eye_separation_p50 AS eye_separation_p50,
+                    emdp.eye_separation_p90 AS eye_separation_p90,
+                    emdp.edge_proximity_rate AS edge_proximity_rate,
+                    emdp.review_state AS review_state,
+                    emdp.review_method AS review_method,
+                    emdp.review_intended_use AS review_intended_use,
+                    emdp.review_timestamp_utc AS review_timestamp_utc,
+                    emdp.source_keypoint_stale_state AS source_keypoint_stale_state,
+                    emdp.source_keypoint_stale_reason AS source_keypoint_stale_reason,
+                    emdp.source_keypoint_stale_timestamp_utc AS source_keypoint_stale_timestamp_utc,
+                    emdp.source_keypoint_stale_json AS source_keypoint_stale_json,
+                    dcc.rig_id AS rig_id,
+                    dcc.camera_id AS camera_id,
+                    dcc.arena_id AS arena_id,
+                    dcc.dish_design AS dish_design,
+                    dcc.canvas_name AS canvas_name,
+                    dcc.protocol_name AS protocol_name,
+                    dcc.genotype AS genotype,
+                    dcc.dpf_at_acquisition AS dpf_at_acquisition,
+                    emdp.profile_json AS profile_json,
                     ROW_NUMBER() OVER (
                         PARTITION BY emdp.dataset_id, COALESCE(emdp.stage_group, ''), COALESCE(emdp.eye_mask_method, '')
                         ORDER BY
@@ -6910,6 +7071,7 @@ class Registry:
                             emdp.profile_run DESC
                     ) AS _rn
                 FROM eye_mask_data_profile emdp
+                LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = emdp.dataset_id
             )
             SELECT
                 dataset_id,
@@ -9429,6 +9591,83 @@ class Registry:
         )
         self.conn.commit()
 
+    def _profile_duplicate_context_write_policy(self, dataset_id: str) -> Tuple[bool, bool]:
+        row = self.conn.execute(
+            """
+            SELECT
+                EXISTS(
+                    SELECT 1
+                    FROM datasets d
+                    INNER JOIN recordings r ON r.recording_id = d.recording_id
+                    WHERE d.dataset_id = ?
+                ) AS has_recording_context,
+                EXISTS(
+                    SELECT 1
+                    FROM dataset_context_current dcc
+                    WHERE dcc.dataset_id = ?
+                      AND dcc.subject_context_source = 'normalized'
+                ) AS has_normalized_subject_context;
+            """,
+            (str(dataset_id), str(dataset_id)),
+        ).fetchone()
+        has_recording_context = bool(
+            row is not None and int(row["has_recording_context"] or 0) == 1
+        )
+        has_normalized_subject_context = bool(
+            row is not None and int(row["has_normalized_subject_context"] or 0) == 1
+        )
+        return (not has_recording_context, not has_normalized_subject_context)
+
+    @staticmethod
+    def _apply_profile_duplicate_context_write_policy(
+        payload: Dict[str, Any],
+        *,
+        write_legacy_recording_context_snapshot: bool,
+        write_legacy_biology_snapshot: bool,
+    ) -> Dict[str, Any]:
+        normalized = dict(payload)
+        if not write_legacy_recording_context_snapshot:
+            for field in (
+                "rig_id",
+                "camera_id",
+                "arena_id",
+                "dish_design",
+                "canvas_name",
+                "protocol_name",
+            ):
+                normalized[field] = None
+        if not write_legacy_biology_snapshot:
+            for field in ("genotype", "dpf_at_acquisition"):
+                normalized[field] = None
+        return normalized
+
+    @staticmethod
+    def _profile_duplicate_context_update_sql(
+        table_name: str,
+        *,
+        write_legacy_recording_context_snapshot: bool,
+        write_legacy_biology_snapshot: bool,
+    ) -> str:
+        fragments: List[str] = []
+        for field in (
+            "rig_id",
+            "camera_id",
+            "arena_id",
+            "dish_design",
+            "canvas_name",
+            "protocol_name",
+        ):
+            if write_legacy_recording_context_snapshot:
+                fragments.append(f"{field}=excluded.{field},")
+            else:
+                fragments.append(f"{field}=COALESCE({table_name}.{field}, excluded.{field}),")
+        for field in ("genotype", "dpf_at_acquisition"):
+            if write_legacy_biology_snapshot:
+                fragments.append(f"{field}=excluded.{field},")
+            else:
+                fragments.append(f"{field}=COALESCE({table_name}.{field}, excluded.{field}),")
+        return "\n                ".join(fragments)
+
     def upsert_detection_data_profile(
         self,
         *,
@@ -9470,47 +9709,59 @@ class Registry:
         zarr_mtime_ns: Optional[int] = None,
         updated_utc: Optional[str] = None,
     ) -> None:
-        payload = {
-            "dataset_id": str(dataset_id),
-            "profile_run": str(profile_run),
-            "recording_id": recording_id,
-            "zarr_use": zarr_use,
-            "detection_type": detection_type,
-            "detection_path": detection_path,
-            "profile_created_utc": profile_created_utc,
-            "zarr_mtime_ns": zarr_mtime_ns,
-            "updated_utc": updated_utc or _utc_now(),
-            "frames_total": frames_total,
-            "frames_with_detections": frames_with_detections,
-            "coverage_percent": coverage_percent,
-            "detections_total": detections_total,
-            "detections_per_frame_p50": detections_per_frame_p50,
-            "detections_per_frame_p90": detections_per_frame_p90,
-            "w_p10": w_p10,
-            "w_p50": w_p50,
-            "w_p90": w_p90,
-            "h_p10": h_p10,
-            "h_p50": h_p50,
-            "h_p90": h_p90,
-            "area_p10": area_p10,
-            "area_p50": area_p50,
-            "area_p90": area_p90,
-            "aspect_ratio_p10": aspect_ratio_p10,
-            "aspect_ratio_p50": aspect_ratio_p50,
-            "aspect_ratio_p90": aspect_ratio_p90,
-            "edge_proximity_rate": edge_proximity_rate,
-            "rig_id": rig_id,
-            "camera_id": camera_id,
-            "arena_id": arena_id,
-            "dish_design": dish_design,
-            "canvas_name": canvas_name,
-            "protocol_name": protocol_name,
-            "genotype": genotype,
-            "dpf_at_acquisition": dpf_at_acquisition,
-            "profile_json": profile_json,
-        }
+        write_legacy_recording_context_snapshot, write_legacy_biology_snapshot = (
+            self._profile_duplicate_context_write_policy(str(dataset_id))
+        )
+        duplicate_context_update_sql = self._profile_duplicate_context_update_sql(
+            "detection_data_profile",
+            write_legacy_recording_context_snapshot=write_legacy_recording_context_snapshot,
+            write_legacy_biology_snapshot=write_legacy_biology_snapshot,
+        )
+        payload = self._apply_profile_duplicate_context_write_policy(
+            {
+                "dataset_id": str(dataset_id),
+                "profile_run": str(profile_run),
+                "recording_id": recording_id,
+                "zarr_use": zarr_use,
+                "detection_type": detection_type,
+                "detection_path": detection_path,
+                "profile_created_utc": profile_created_utc,
+                "zarr_mtime_ns": zarr_mtime_ns,
+                "updated_utc": updated_utc or _utc_now(),
+                "frames_total": frames_total,
+                "frames_with_detections": frames_with_detections,
+                "coverage_percent": coverage_percent,
+                "detections_total": detections_total,
+                "detections_per_frame_p50": detections_per_frame_p50,
+                "detections_per_frame_p90": detections_per_frame_p90,
+                "w_p10": w_p10,
+                "w_p50": w_p50,
+                "w_p90": w_p90,
+                "h_p10": h_p10,
+                "h_p50": h_p50,
+                "h_p90": h_p90,
+                "area_p10": area_p10,
+                "area_p50": area_p50,
+                "area_p90": area_p90,
+                "aspect_ratio_p10": aspect_ratio_p10,
+                "aspect_ratio_p50": aspect_ratio_p50,
+                "aspect_ratio_p90": aspect_ratio_p90,
+                "edge_proximity_rate": edge_proximity_rate,
+                "rig_id": rig_id,
+                "camera_id": camera_id,
+                "arena_id": arena_id,
+                "dish_design": dish_design,
+                "canvas_name": canvas_name,
+                "protocol_name": protocol_name,
+                "genotype": genotype,
+                "dpf_at_acquisition": dpf_at_acquisition,
+                "profile_json": profile_json,
+            },
+            write_legacy_recording_context_snapshot=write_legacy_recording_context_snapshot,
+            write_legacy_biology_snapshot=write_legacy_biology_snapshot,
+        )
         self.conn.execute(
-            """
+            f"""
             INSERT INTO detection_data_profile (
                 dataset_id, profile_run, recording_id, zarr_use,
                 detection_type, detection_path, profile_created_utc,
@@ -9568,14 +9819,7 @@ class Registry:
                 aspect_ratio_p50=excluded.aspect_ratio_p50,
                 aspect_ratio_p90=excluded.aspect_ratio_p90,
                 edge_proximity_rate=excluded.edge_proximity_rate,
-                rig_id=excluded.rig_id,
-                camera_id=excluded.camera_id,
-                arena_id=excluded.arena_id,
-                dish_design=excluded.dish_design,
-                canvas_name=excluded.canvas_name,
-                protocol_name=excluded.protocol_name,
-                genotype=excluded.genotype,
-                dpf_at_acquisition=excluded.dpf_at_acquisition,
+                {duplicate_context_update_sql}
                 profile_json=excluded.profile_json;
             """,
             payload,
@@ -9622,46 +9866,58 @@ class Registry:
         zarr_mtime_ns: Optional[int] = None,
         updated_utc: Optional[str] = None,
     ) -> None:
-        payload = {
-            "dataset_id": str(dataset_id),
-            "profile_run": str(profile_run),
-            "recording_id": recording_id,
-            "zarr_use": zarr_use,
-            "keypoint_method": keypoint_method,
-            "source_keypoint_path": source_keypoint_path,
-            "source_keypoint_run": source_keypoint_run,
-            "skeleton_id": skeleton_id,
-            "kpt_shape": kpt_shape,
-            "profile_created_utc": profile_created_utc,
-            "zarr_mtime_ns": zarr_mtime_ns,
-            "updated_utc": updated_utc or _utc_now(),
-            "rows_total": rows_total,
-            "rows_usable": rows_usable,
-            "usable_keypoints_total": usable_keypoints_total,
-            "usable_rate": usable_rate,
-            "confidence_valid_rate": confidence_valid_rate,
-            "geometry_valid_rate": geometry_valid_rate,
-            "triangle_area_p10": triangle_area_p10,
-            "triangle_area_p50": triangle_area_p50,
-            "triangle_area_p90": triangle_area_p90,
-            "min_angle_p10": min_angle_p10,
-            "min_angle_p50": min_angle_p50,
-            "min_angle_p90": min_angle_p90,
-            "heading_p10": heading_p10,
-            "heading_p50": heading_p50,
-            "heading_p90": heading_p90,
-            "rig_id": rig_id,
-            "camera_id": camera_id,
-            "arena_id": arena_id,
-            "dish_design": dish_design,
-            "canvas_name": canvas_name,
-            "protocol_name": protocol_name,
-            "genotype": genotype,
-            "dpf_at_acquisition": dpf_at_acquisition,
-            "profile_json": profile_json,
-        }
+        write_legacy_recording_context_snapshot, write_legacy_biology_snapshot = (
+            self._profile_duplicate_context_write_policy(str(dataset_id))
+        )
+        duplicate_context_update_sql = self._profile_duplicate_context_update_sql(
+            "keypoint_data_profile",
+            write_legacy_recording_context_snapshot=write_legacy_recording_context_snapshot,
+            write_legacy_biology_snapshot=write_legacy_biology_snapshot,
+        )
+        payload = self._apply_profile_duplicate_context_write_policy(
+            {
+                "dataset_id": str(dataset_id),
+                "profile_run": str(profile_run),
+                "recording_id": recording_id,
+                "zarr_use": zarr_use,
+                "keypoint_method": keypoint_method,
+                "source_keypoint_path": source_keypoint_path,
+                "source_keypoint_run": source_keypoint_run,
+                "skeleton_id": skeleton_id,
+                "kpt_shape": kpt_shape,
+                "profile_created_utc": profile_created_utc,
+                "zarr_mtime_ns": zarr_mtime_ns,
+                "updated_utc": updated_utc or _utc_now(),
+                "rows_total": rows_total,
+                "rows_usable": rows_usable,
+                "usable_keypoints_total": usable_keypoints_total,
+                "usable_rate": usable_rate,
+                "confidence_valid_rate": confidence_valid_rate,
+                "geometry_valid_rate": geometry_valid_rate,
+                "triangle_area_p10": triangle_area_p10,
+                "triangle_area_p50": triangle_area_p50,
+                "triangle_area_p90": triangle_area_p90,
+                "min_angle_p10": min_angle_p10,
+                "min_angle_p50": min_angle_p50,
+                "min_angle_p90": min_angle_p90,
+                "heading_p10": heading_p10,
+                "heading_p50": heading_p50,
+                "heading_p90": heading_p90,
+                "rig_id": rig_id,
+                "camera_id": camera_id,
+                "arena_id": arena_id,
+                "dish_design": dish_design,
+                "canvas_name": canvas_name,
+                "protocol_name": protocol_name,
+                "genotype": genotype,
+                "dpf_at_acquisition": dpf_at_acquisition,
+                "profile_json": profile_json,
+            },
+            write_legacy_recording_context_snapshot=write_legacy_recording_context_snapshot,
+            write_legacy_biology_snapshot=write_legacy_biology_snapshot,
+        )
         self.conn.execute(
-            """
+            f"""
             INSERT INTO keypoint_data_profile (
                 dataset_id, profile_run, recording_id, zarr_use,
                 keypoint_method, source_keypoint_path, source_keypoint_run,
@@ -9716,14 +9972,7 @@ class Registry:
                 heading_p10=excluded.heading_p10,
                 heading_p50=excluded.heading_p50,
                 heading_p90=excluded.heading_p90,
-                rig_id=excluded.rig_id,
-                camera_id=excluded.camera_id,
-                arena_id=excluded.arena_id,
-                dish_design=excluded.dish_design,
-                canvas_name=excluded.canvas_name,
-                protocol_name=excluded.protocol_name,
-                genotype=excluded.genotype,
-                dpf_at_acquisition=excluded.dpf_at_acquisition,
+                {duplicate_context_update_sql}
                 profile_json=excluded.profile_json;
             """,
             payload,
@@ -9801,77 +10050,89 @@ class Registry:
         zarr_mtime_ns: Optional[int] = None,
         updated_utc: Optional[str] = None,
     ) -> None:
-        payload = {
-            "dataset_id": str(dataset_id),
-            "profile_run": str(profile_run),
-            "recording_id": recording_id,
-            "zarr_use": zarr_use,
-            "stage_group": stage_group,
-            "eye_mask_method": eye_mask_method,
-            "source_eye_mask_path": source_eye_mask_path,
-            "source_eye_mask_run": source_eye_mask_run,
-            "source_keypoint_path": source_keypoint_path,
-            "source_keypoint_run": source_keypoint_run,
-            "source_crop_run": source_crop_run,
-            "profile_created_utc": profile_created_utc,
-            "zarr_mtime_ns": zarr_mtime_ns,
-            "updated_utc": updated_utc or _utc_now(),
-            "rows_total": rows_total,
-            "rows_usable": rows_usable,
-            "usable_rate": usable_rate,
-            "reviewed_rate": reviewed_rate,
-            "excluded_rate": excluded_rate,
-            "exclusion_reasons_json": exclusion_reasons_json,
-            "ellipse_success_rate": ellipse_success_rate,
-            "pair_success_rate": pair_success_rate,
-            "area_p10": area_p10,
-            "area_p50": area_p50,
-            "area_p90": area_p90,
-            "left_area_p10": left_area_p10,
-            "left_area_p50": left_area_p50,
-            "left_area_p90": left_area_p90,
-            "right_area_p10": right_area_p10,
-            "right_area_p50": right_area_p50,
-            "right_area_p90": right_area_p90,
-            "union_area_p10": union_area_p10,
-            "union_area_p50": union_area_p50,
-            "union_area_p90": union_area_p90,
-            "area_lr_ratio_p10": area_lr_ratio_p10,
-            "area_lr_ratio_p50": area_lr_ratio_p50,
-            "area_lr_ratio_p90": area_lr_ratio_p90,
-            "major_axis_p10": major_axis_p10,
-            "major_axis_p50": major_axis_p50,
-            "major_axis_p90": major_axis_p90,
-            "minor_axis_p10": minor_axis_p10,
-            "minor_axis_p50": minor_axis_p50,
-            "minor_axis_p90": minor_axis_p90,
-            "aspect_ratio_p10": aspect_ratio_p10,
-            "aspect_ratio_p50": aspect_ratio_p50,
-            "aspect_ratio_p90": aspect_ratio_p90,
-            "eye_separation_p10": eye_separation_p10,
-            "eye_separation_p50": eye_separation_p50,
-            "eye_separation_p90": eye_separation_p90,
-            "edge_proximity_rate": edge_proximity_rate,
-            "review_state": review_state,
-            "review_method": review_method,
-            "review_intended_use": review_intended_use,
-            "review_timestamp_utc": review_timestamp_utc,
-            "source_keypoint_stale_state": source_keypoint_stale_state,
-            "source_keypoint_stale_reason": source_keypoint_stale_reason,
-            "source_keypoint_stale_timestamp_utc": source_keypoint_stale_timestamp_utc,
-            "source_keypoint_stale_json": source_keypoint_stale_json,
-            "rig_id": rig_id,
-            "camera_id": camera_id,
-            "arena_id": arena_id,
-            "dish_design": dish_design,
-            "canvas_name": canvas_name,
-            "protocol_name": protocol_name,
-            "genotype": genotype,
-            "dpf_at_acquisition": dpf_at_acquisition,
-            "profile_json": profile_json,
-        }
+        write_legacy_recording_context_snapshot, write_legacy_biology_snapshot = (
+            self._profile_duplicate_context_write_policy(str(dataset_id))
+        )
+        duplicate_context_update_sql = self._profile_duplicate_context_update_sql(
+            "eye_mask_data_profile",
+            write_legacy_recording_context_snapshot=write_legacy_recording_context_snapshot,
+            write_legacy_biology_snapshot=write_legacy_biology_snapshot,
+        )
+        payload = self._apply_profile_duplicate_context_write_policy(
+            {
+                "dataset_id": str(dataset_id),
+                "profile_run": str(profile_run),
+                "recording_id": recording_id,
+                "zarr_use": zarr_use,
+                "stage_group": stage_group,
+                "eye_mask_method": eye_mask_method,
+                "source_eye_mask_path": source_eye_mask_path,
+                "source_eye_mask_run": source_eye_mask_run,
+                "source_keypoint_path": source_keypoint_path,
+                "source_keypoint_run": source_keypoint_run,
+                "source_crop_run": source_crop_run,
+                "profile_created_utc": profile_created_utc,
+                "zarr_mtime_ns": zarr_mtime_ns,
+                "updated_utc": updated_utc or _utc_now(),
+                "rows_total": rows_total,
+                "rows_usable": rows_usable,
+                "usable_rate": usable_rate,
+                "reviewed_rate": reviewed_rate,
+                "excluded_rate": excluded_rate,
+                "exclusion_reasons_json": exclusion_reasons_json,
+                "ellipse_success_rate": ellipse_success_rate,
+                "pair_success_rate": pair_success_rate,
+                "area_p10": area_p10,
+                "area_p50": area_p50,
+                "area_p90": area_p90,
+                "left_area_p10": left_area_p10,
+                "left_area_p50": left_area_p50,
+                "left_area_p90": left_area_p90,
+                "right_area_p10": right_area_p10,
+                "right_area_p50": right_area_p50,
+                "right_area_p90": right_area_p90,
+                "union_area_p10": union_area_p10,
+                "union_area_p50": union_area_p50,
+                "union_area_p90": union_area_p90,
+                "area_lr_ratio_p10": area_lr_ratio_p10,
+                "area_lr_ratio_p50": area_lr_ratio_p50,
+                "area_lr_ratio_p90": area_lr_ratio_p90,
+                "major_axis_p10": major_axis_p10,
+                "major_axis_p50": major_axis_p50,
+                "major_axis_p90": major_axis_p90,
+                "minor_axis_p10": minor_axis_p10,
+                "minor_axis_p50": minor_axis_p50,
+                "minor_axis_p90": minor_axis_p90,
+                "aspect_ratio_p10": aspect_ratio_p10,
+                "aspect_ratio_p50": aspect_ratio_p50,
+                "aspect_ratio_p90": aspect_ratio_p90,
+                "eye_separation_p10": eye_separation_p10,
+                "eye_separation_p50": eye_separation_p50,
+                "eye_separation_p90": eye_separation_p90,
+                "edge_proximity_rate": edge_proximity_rate,
+                "review_state": review_state,
+                "review_method": review_method,
+                "review_intended_use": review_intended_use,
+                "review_timestamp_utc": review_timestamp_utc,
+                "source_keypoint_stale_state": source_keypoint_stale_state,
+                "source_keypoint_stale_reason": source_keypoint_stale_reason,
+                "source_keypoint_stale_timestamp_utc": source_keypoint_stale_timestamp_utc,
+                "source_keypoint_stale_json": source_keypoint_stale_json,
+                "rig_id": rig_id,
+                "camera_id": camera_id,
+                "arena_id": arena_id,
+                "dish_design": dish_design,
+                "canvas_name": canvas_name,
+                "protocol_name": protocol_name,
+                "genotype": genotype,
+                "dpf_at_acquisition": dpf_at_acquisition,
+                "profile_json": profile_json,
+            },
+            write_legacy_recording_context_snapshot=write_legacy_recording_context_snapshot,
+            write_legacy_biology_snapshot=write_legacy_biology_snapshot,
+        )
         self.conn.execute(
-            """
+            f"""
             INSERT INTO eye_mask_data_profile (
                 dataset_id, profile_run, recording_id, zarr_use,
                 stage_group, eye_mask_method,
@@ -9979,14 +10240,7 @@ class Registry:
                 source_keypoint_stale_reason=excluded.source_keypoint_stale_reason,
                 source_keypoint_stale_timestamp_utc=excluded.source_keypoint_stale_timestamp_utc,
                 source_keypoint_stale_json=excluded.source_keypoint_stale_json,
-                rig_id=excluded.rig_id,
-                camera_id=excluded.camera_id,
-                arena_id=excluded.arena_id,
-                dish_design=excluded.dish_design,
-                canvas_name=excluded.canvas_name,
-                protocol_name=excluded.protocol_name,
-                genotype=excluded.genotype,
-                dpf_at_acquisition=excluded.dpf_at_acquisition,
+                {duplicate_context_update_sql}
                 profile_json=excluded.profile_json;
             """,
             payload,
@@ -10244,14 +10498,31 @@ class Registry:
                 )
 
     def replace_detection_data_profile(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        write_legacy_recording_context_snapshot, write_legacy_biology_snapshot = (
+            self._profile_duplicate_context_write_policy(str(dataset_id))
+        )
         with self.conn:
             self.conn.execute("DELETE FROM detection_data_profile WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
                 payload.setdefault("updated_utc", _utc_now())
-                payload.setdefault("genotype", None)
-                payload.setdefault("dpf_at_acquisition", None)
+                for key in (
+                    "rig_id",
+                    "camera_id",
+                    "arena_id",
+                    "dish_design",
+                    "canvas_name",
+                    "protocol_name",
+                    "genotype",
+                    "dpf_at_acquisition",
+                ):
+                    payload.setdefault(key, None)
+                payload = self._apply_profile_duplicate_context_write_policy(
+                    payload,
+                    write_legacy_recording_context_snapshot=write_legacy_recording_context_snapshot,
+                    write_legacy_biology_snapshot=write_legacy_biology_snapshot,
+                )
                 self.conn.execute(
                     """
                     INSERT INTO detection_data_profile (
@@ -10289,14 +10560,31 @@ class Registry:
                 )
 
     def replace_keypoint_data_profile(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        write_legacy_recording_context_snapshot, write_legacy_biology_snapshot = (
+            self._profile_duplicate_context_write_policy(str(dataset_id))
+        )
         with self.conn:
             self.conn.execute("DELETE FROM keypoint_data_profile WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
                 payload = dict(record)
                 payload["dataset_id"] = str(dataset_id)
                 payload.setdefault("updated_utc", _utc_now())
-                payload.setdefault("genotype", None)
-                payload.setdefault("dpf_at_acquisition", None)
+                for key in (
+                    "rig_id",
+                    "camera_id",
+                    "arena_id",
+                    "dish_design",
+                    "canvas_name",
+                    "protocol_name",
+                    "genotype",
+                    "dpf_at_acquisition",
+                ):
+                    payload.setdefault(key, None)
+                payload = self._apply_profile_duplicate_context_write_policy(
+                    payload,
+                    write_legacy_recording_context_snapshot=write_legacy_recording_context_snapshot,
+                    write_legacy_biology_snapshot=write_legacy_biology_snapshot,
+                )
                 self.conn.execute(
                     """
                     INSERT INTO keypoint_data_profile (
@@ -10332,6 +10620,9 @@ class Registry:
                 )
 
     def replace_eye_mask_data_profile(self, dataset_id: str, records: Iterable[Dict[str, Any]]) -> None:
+        write_legacy_recording_context_snapshot, write_legacy_biology_snapshot = (
+            self._profile_duplicate_context_write_policy(str(dataset_id))
+        )
         with self.conn:
             self.conn.execute("DELETE FROM eye_mask_data_profile WHERE dataset_id = ?;", (str(dataset_id),))
             for record in records:
@@ -10365,6 +10656,11 @@ class Registry:
                     "dpf_at_acquisition",
                 ):
                     payload.setdefault(key, None)
+                payload = self._apply_profile_duplicate_context_write_policy(
+                    payload,
+                    write_legacy_recording_context_snapshot=write_legacy_recording_context_snapshot,
+                    write_legacy_biology_snapshot=write_legacy_biology_snapshot,
+                )
                 self.conn.execute(
                     """
                     INSERT INTO eye_mask_data_profile (

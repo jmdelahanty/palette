@@ -159,7 +159,7 @@ def test_sync_keypoint_profile_registry_apply_upserts_latest_row(tmp_path: Path,
         row = dict(rows[0])
         assert row["dataset_id"] == "dataset_a"
         assert row["profile_run"] == "keypoint_profile_2026-02-12_03-00-00"
-        assert row["recording_id"] == "recording_a"
+        assert row["recording_id"] == "dataset_a_recording"
         assert row["zarr_use"] == "training"
         assert row["keypoint_method"] == "traditional_pose"
         assert row["source_keypoint_path"] == "refined_keypoints_runs/refined_keypoints_2026-02-12"
@@ -175,8 +175,113 @@ def test_sync_keypoint_profile_registry_apply_upserts_latest_row(tmp_path: Path,
         assert row["triangle_area_p50"] == pytest.approx(0.02)
         assert row["min_angle_p50"] == pytest.approx(20.0)
         assert row["heading_p50"] == pytest.approx(0.0)
-        assert row["genotype"] == "Tg(elavl3:gcamp7f)"
-        assert int(row["dpf_at_acquisition"]) == 7
+        assert row["genotype"] is None
+        assert row["dpf_at_acquisition"] is None
+
+        raw_row = registry.conn.execute(
+            """
+            SELECT *
+            FROM keypoint_data_profile
+            WHERE dataset_id = ?;
+            """,
+            ("dataset_a",),
+        ).fetchone()
+        assert raw_row is not None
+        assert raw_row["recording_id"] == "recording_a"
+        assert raw_row["genotype"] == "Tg(elavl3:gcamp7f)"
+        assert int(raw_row["dpf_at_acquisition"]) == 7
+    finally:
+        registry.close()
+
+
+def test_sync_keypoint_profile_registry_prefers_run_attrs_for_source_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    zarr_path = tmp_path / "dataset_lineage_training.zarr"
+    zarr_path.mkdir(parents=True)
+    _seed_dataset_row(
+        registry_path,
+        dataset_id="dataset_lineage",
+        zarr_path=zarr_path,
+        zarr_use="training",
+    )
+
+    summary = _summary_payload(
+        dataset_id="dataset_lineage",
+        recording_id="summary_recording",
+        zarr_use="summary_use",
+    )
+    source = dict(summary["source"])  # type: ignore[index]
+    source["keypoint_path"] = "summary/keypoints/path"
+    source["keypoint_method"] = "summary_method"
+    source["keypoint_run"] = "summary_run"
+    source["skeleton_id"] = "summary_skeleton"
+    source["kpt_shape"] = [99, 99]
+    summary["source"] = source
+    summary["created_at_utc"] = "2026-02-12T01:00:00+00:00"
+
+    monkeypatch.setattr(sync_module, "_open_root", lambda _: object())
+    monkeypatch.setattr(
+        sync_module,
+        "_latest_profile_summary",
+        lambda _root: ("keypoint_profile_2026-02-12_06-00-00", summary, None),
+    )
+    monkeypatch.setattr(
+        sync_module,
+        "_load_profile_run_attrs",
+        lambda _root, _profile_run: {
+            "created_at_utc": "2026-02-12T06:00:00+00:00",
+            "source_recording_id": "attrs_recording",
+            "source_zarr_use": "attrs_use",
+            "source_keypoint_path": "refined_keypoints_runs/refined_keypoints_attrs",
+            "source_keypoint_method": "traditional_pose",
+            "source_keypoint_run": "keypoints_attrs",
+            "source_skeleton_id": "fish_v2",
+            "source_kpt_shape": [3, 2],
+        },
+    )
+
+    rc = sync_module.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--dataset-id",
+            "dataset_lineage",
+            "--apply",
+        ]
+    )
+    assert rc == 0
+
+    registry = Registry(registry_path)
+    try:
+        rows = registry.query_keypoint_data_profile_latest(dataset_ids=["dataset_lineage"])
+        assert len(rows) == 1
+        row = dict(rows[0])
+        assert row["keypoint_method"] == "traditional_pose"
+        assert row["source_keypoint_path"] == "refined_keypoints_runs/refined_keypoints_attrs"
+        assert row["source_keypoint_run"] == "keypoints_attrs"
+        assert row["skeleton_id"] == "fish_v2"
+        assert row["kpt_shape"] == "[3,2]"
+
+        raw_row = registry.conn.execute(
+            """
+            SELECT *
+            FROM keypoint_data_profile
+            WHERE dataset_id = ?;
+            """,
+            ("dataset_lineage",),
+        ).fetchone()
+        assert raw_row is not None
+        assert raw_row["recording_id"] == "attrs_recording"
+        assert raw_row["zarr_use"] == "attrs_use"
+        assert raw_row["profile_created_utc"] == "2026-02-12T06:00:00+00:00"
+        assert raw_row["keypoint_method"] == "traditional_pose"
+        assert raw_row["source_keypoint_path"] == "refined_keypoints_runs/refined_keypoints_attrs"
+        assert raw_row["source_keypoint_run"] == "keypoints_attrs"
+        assert raw_row["skeleton_id"] == "fish_v2"
+        assert raw_row["kpt_shape"] == "[3,2]"
     finally:
         registry.close()
 
@@ -293,8 +398,20 @@ def test_sync_keypoint_profile_registry_falls_back_to_provenance_subject_fields(
         rows = registry.query_keypoint_data_profile_latest(dataset_ids=["dataset_d"])
         assert len(rows) == 1
         row = dict(rows[0])
-        assert row["genotype"] == "Tg(test:line)"
-        assert int(row["dpf_at_acquisition"]) == 9
+        assert row["genotype"] is None
+        assert row["dpf_at_acquisition"] is None
+
+        raw_row = registry.conn.execute(
+            """
+            SELECT *
+            FROM keypoint_data_profile
+            WHERE dataset_id = ?;
+            """,
+            ("dataset_d",),
+        ).fetchone()
+        assert raw_row is not None
+        assert raw_row["genotype"] is None
+        assert raw_row["dpf_at_acquisition"] is None
     finally:
         registry.close()
 

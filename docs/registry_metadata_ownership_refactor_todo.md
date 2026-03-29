@@ -111,7 +111,7 @@ Date anchored: 2026-03-13.
 
 ## Phase 5: Profile / Projection Cleanup
 
-- [ ] Stop adding repeated context columns as authoritative writers in:
+- [x] Stop adding repeated context columns as authoritative writers in:
   - `detection_data_profile`
   - `keypoint_data_profile`
   - `eye_mask_data_profile`
@@ -124,33 +124,52 @@ Date anchored: 2026-03-13.
   - `source_eye_mask_run`
 - [ ] Move repeated context reads in profile latest/current views to joins
   against `dataset_context_current`.
-- [ ] Mark repeated context columns in profile tables as deprecated in docs once
+- [x] Move repeated context reads in `detection_data_profile_latest` and
+  `recording_detection_data_profile_latest` to joins against
+  `dataset_context_current`.
+- [x] Move repeated context reads in `keypoint_data_profile_latest` and
+  `recording_keypoint_data_profile_latest` to joins against
+  `dataset_context_current`.
+- [x] Move repeated context reads in `eye_mask_data_profile_latest` and
+  `recording_eye_mask_data_profile_latest` to joins against
+  `dataset_context_current`.
+- [x] Mark repeated context columns in profile tables as deprecated in docs once
   readers stop depending on them.
 
 ## Phase 6: Provenance / Lineage Contract Tightening
 
-- [ ] Audit stage writers to ensure canonical run provenance remains the source
+- [x] Audit stage writers to ensure canonical run provenance remains the source
   of truth for derivation lineage.
+  - [x] Make the shared stage-provenance writer mirror canonical
+    `created_at_utc` onto run attrs so staged runs expose one canonical
+    timestamp in addition to legacy aliases.
 - [ ] Ensure registry projections copy only query-critical lineage from run
   provenance.
-- [ ] Add explicit tests for end-to-end lineage questions such as:
+  - [x] Make profile-sync registry imports prefer canonical run attrs over
+    embedded `profile_summary.source` lineage when both are present.
+  - [x] Make subject-mask performance extraction prefer canonical run attrs
+    over legacy provenance payload lineage, including `created_at_utc`.
+  - [x] Make remaining detect/keypoint/eye-mask performance and
+    detect/keypoint quality extractors prefer `created_at_utc` over older
+    timestamp aliases and provenance fallbacks.
+- [x] Add explicit tests for end-to-end lineage questions such as:
   - subject mask run -> keypoint run,
   - keypoint run -> crop run,
   - crop run -> detect run,
   - detect run -> source recording dataset.
-- [ ] Document which lineage pointers are allowed in registry projections and
+- [x] Document which lineage pointers are allowed in registry projections and
   which must remain on-disk only.
 
 ## Phase 7: Integrity Simplification
 
-- [ ] Remove or downgrade integrity checks whose only purpose is defending
+- [x] Remove or downgrade integrity checks whose only purpose is defending
   duplicate canonical ownership.
-- [ ] Replace them with checks for:
+- [x] Replace them with checks for:
   - missing canonical owner rows,
   - broken FK-like lineage links,
   - ambiguity bugs in `dataset_context_current`,
   - invalid subject/dish/cross lineage joins.
-- [ ] Keep integrity checks for:
+- [x] Keep integrity checks for:
   - missing `subjects`,
   - missing `dishes`,
   - broken `recording_subjects`,

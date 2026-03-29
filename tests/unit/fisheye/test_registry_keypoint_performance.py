@@ -8,7 +8,7 @@ import zarr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from fisheye.registry.db import Registry
+from fisheye.registry.db import Registry, _extract_keypoint_performance_rows
 
 
 def _create_keypoint_archive(path: Path, *, session_uuid: str) -> None:
@@ -145,3 +145,24 @@ def test_register_from_root_handles_archive_without_keypoint_runs(tmp_path: Path
     assert count is not None
     assert int(count["n"]) == 0
     registry.close()
+
+
+def test_extract_keypoint_performance_rows_prefers_created_at_utc(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "keypoint_created_at_analysis.zarr"
+    _create_keypoint_archive(zarr_path, session_uuid="keypoint_created_at_uuid")
+    root = zarr.open_group(str(zarr_path), mode="a")
+    run = root["keypoints_runs"]["keypoints_new"]
+    run.attrs["created_at_utc"] = "2026-02-09T00:10:00+00:00"
+    run.attrs["created_utc"] = "2026-02-09T00:08:00+00:00"
+    run.attrs["timestamp_utc"] = "2026-02-09T00:07:00+00:00"
+    run.attrs["provenance"] = {"created_at_utc": "2026-02-09T00:06:00+00:00"}
+
+    rows = _extract_keypoint_performance_rows(
+        zarr.open_group(str(zarr_path), mode="r"),
+        zarr_path=zarr_path,
+        recording_id="keypoint_created_at_uuid",
+        zarr_use="analysis",
+    )
+
+    latest_row = next(row for row in rows if str(row["keypoint_run"]) == "keypoints_new")
+    assert latest_row["keypoint_created_utc"] == "2026-02-09T00:10:00+00:00"

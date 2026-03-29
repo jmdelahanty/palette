@@ -172,6 +172,24 @@ def _latest_profile_summary(root: zarr.Group) -> tuple[Optional[str], Optional[d
     return run_name, summary, None
 
 
+def _load_profile_run_attrs(root: zarr.Group, profile_run: Optional[str]) -> dict[str, Any]:
+    if profile_run is None:
+        return {}
+    try:
+        analysis = _get_group(root, "analysis")
+        if analysis is None:
+            return {}
+        runs_parent = _get_group(analysis, "eye_mask_profile_runs")
+        if runs_parent is None:
+            return {}
+        run_group = _get_group(runs_parent, str(profile_run))
+        if run_group is None:
+            return {}
+        return dict(run_group.attrs)
+    except Exception:
+        return {}
+
+
 def _build_profile_payload(
     *,
     dataset_id: str,
@@ -181,6 +199,7 @@ def _build_profile_payload(
     fallback_dpf_at_acquisition: Optional[int],
     profile_run: str,
     summary: Mapping[str, Any],
+    run_attrs: Optional[Mapping[str, Any]],
     zarr_path: Path,
 ) -> dict[str, Any]:
     dataset_map = _coerce_mapping(summary.get("dataset")) or {}
@@ -191,6 +210,7 @@ def _build_profile_payload(
     composition_map = _coerce_mapping(summary.get("composition")) or {}
     freshness_map = _coerce_mapping(summary.get("freshness")) or {}
     review_map = _coerce_mapping(source_map.get("review")) or {}
+    run_attrs_map = dict(run_attrs) if isinstance(run_attrs, Mapping) else {}
     stale_map = (
         _coerce_mapping(source_map.get("source_keypoint_stale"))
         or _coerce_mapping(summary.get("source_keypoint_stale"))
@@ -236,35 +256,62 @@ def _build_profile_payload(
     return {
         "dataset_id": dataset_id,
         "profile_run": profile_run,
-        "recording_id": _normalize_text(dataset_map.get("recording_id")) or fallback_recording_id,
-        "zarr_use": _normalize_text(dataset_map.get("zarr_use")) or fallback_zarr_use,
+        "recording_id": (
+            _normalize_text(run_attrs_map.get("source_recording_id"))
+            or _normalize_text(dataset_map.get("recording_id"))
+            or fallback_recording_id
+        ),
+        "zarr_use": (
+            _normalize_text(run_attrs_map.get("source_zarr_use"))
+            or _normalize_text(dataset_map.get("zarr_use"))
+            or fallback_zarr_use
+        ),
         "stage_group": (
-            _normalize_text(source_map.get("stage_group"))
+            _normalize_text(run_attrs_map.get("source_stage_group"))
+            or _normalize_text(source_map.get("stage_group"))
             or _normalize_text(source_map.get("eye_stage_group"))
             or _normalize_text(source_map.get("source_eye_stage"))
         ),
         "eye_mask_method": (
-            _normalize_text(source_map.get("eye_mask_method"))
+            _normalize_text(run_attrs_map.get("source_eye_mask_method"))
+            or _normalize_text(source_map.get("eye_mask_method"))
             or _normalize_text(source_map.get("method"))
         ),
         "source_eye_mask_path": (
-            _normalize_text(source_map.get("eye_mask_path"))
+            _normalize_text(run_attrs_map.get("source_eye_mask_path"))
+            or _normalize_text(source_map.get("eye_mask_path"))
             or _normalize_text(source_map.get("source_eye_mask_path"))
         ),
         "source_eye_mask_run": (
-            _normalize_text(source_map.get("eye_mask_run"))
+            _normalize_text(run_attrs_map.get("source_eye_mask_run"))
+            or _normalize_text(run_attrs_map.get("source_eye_masks_run"))
+            or _normalize_text(source_map.get("eye_mask_run"))
             or _normalize_text(source_map.get("source_eye_mask_run"))
+            or _normalize_text(source_map.get("eye_masks_run"))
+            or _normalize_text(source_map.get("source_eye_masks_run"))
         ),
         "source_keypoint_path": (
-            _normalize_text(source_map.get("keypoint_path"))
+            _normalize_text(run_attrs_map.get("source_keypoint_path"))
+            or _normalize_text(source_map.get("keypoint_path"))
             or _normalize_text(source_map.get("source_keypoint_path"))
         ),
         "source_keypoint_run": (
-            _normalize_text(source_map.get("keypoint_run"))
+            _normalize_text(run_attrs_map.get("source_keypoints_run"))
+            or _normalize_text(run_attrs_map.get("source_keypoint_run"))
+            or _normalize_text(source_map.get("source_keypoints_run"))
+            or _normalize_text(source_map.get("keypoints_run"))
+            or _normalize_text(source_map.get("keypoint_run"))
             or _normalize_text(source_map.get("source_keypoint_run"))
         ),
-        "source_crop_run": _normalize_text(source_map.get("source_crop_run")),
-        "profile_created_utc": _normalize_text(summary.get("created_at_utc")),
+        "source_crop_run": (
+            _normalize_text(run_attrs_map.get("source_crop_run"))
+            or _normalize_text(source_map.get("source_crop_run"))
+            or _normalize_text(source_map.get("crop_run"))
+        ),
+        "profile_created_utc": (
+            _normalize_text(run_attrs_map.get("created_at_utc"))
+            or _normalize_text(summary.get("created_at_utc"))
+        ),
         "rows_total": _as_int(_first_non_null(quality_map, "rows_total", "total_rows", "total_rois")),
         "rows_usable": _as_int(
             _first_non_null(
@@ -706,6 +753,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     fallback_dpf_at_acquisition=_as_int(row.get("dpf_at_acquisition")),
                     profile_run=str(profile_run),
                     summary=summary,
+                    run_attrs=_load_profile_run_attrs(root, profile_run),
                     zarr_path=zarr_path,
                 )
 

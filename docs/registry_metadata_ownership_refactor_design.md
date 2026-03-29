@@ -205,10 +205,15 @@ Stage lineage remains canonical on disk in run attrs.
 Required behavior:
 
 - every stage writes canonical run provenance,
+- the shared provenance writer mirrors canonical `created_at_utc` onto the
+  run attrs so registry readers do not need stage-specific timestamp rules,
 - provenance records direct inputs,
 - source run references remain explicit,
 - registry projections may copy query-critical lineage pointers only when they
   are derived directly from canonical run attrs.
+- when both run attrs and embedded summary payloads carry lineage, registry
+  sync/import code must prefer the run attrs and use summary fields only as a
+  compatibility fallback for older runs that predate the canonical attrs.
 
 This means columns such as these remain acceptable in projection tables when
 needed for queryability:
@@ -216,8 +221,37 @@ needed for queryability:
 - `source_detect_run`
 - `source_refined_run`
 - `source_crop_run`
-- `source_keypoint_run`
-- `source_eye_mask_run`
+- `source_keypoint_group`
+- canonical `source_keypoints_run` with legacy `source_keypoint_run` supported
+  only as a read fallback
+- `source_eye_masks_run`
+- `source_subject_mask_run`
+- `source_subject_mask_method`
+- `source_recording_id`
+- `source_zarr_use`
+- `model_run_id`
+- `model_set_id`
+- `model_path`
+- `model_name`
+
+Allowed projection rule:
+
+- registry projection tables may carry only the immediate upstream run pointers
+  and minimal source-dataset identifiers needed to answer lineage questions in
+  SQL.
+- projection code must derive those fields directly from canonical run attrs
+  first, then fall back to legacy embedded provenance payloads only for older
+  runs that predate the canonical attrs.
+
+On-disk-only provenance rule:
+
+- full `provenance` payloads remain on disk and must not be copied wholesale
+  into registry tables.
+- command strings, git/environment/platform snapshots, large parameter bags,
+  and non-query-critical input details such as video paths, cache paths, and
+  frame-source internals remain on-disk provenance only.
+- registry tables may expose those details only through refreshable debug views
+  or explicit repair tooling, never as another canonical metadata layer.
 
 These are not the problem. The problem is copying unrelated recording or
 biological context into every projection table.
@@ -318,6 +352,35 @@ pulling context fields directly from `provenance`:
 - `recording_step_status_latest`
 - `recording_step_status_wide`
 - dataset latest/current profile views
+
+### 4) Deprecate Duplicated Profile-Table Context Columns
+
+The profile tables may keep compatibility-only snapshots of duplicated context
+columns, but they are no longer canonical owners.
+
+Deprecated compatibility-only profile columns:
+
+- `rig_id`
+- `camera_id`
+- `arena_id`
+- `dish_design`
+- `canvas_name`
+- `protocol_name`
+- `genotype`
+- `dpf_at_acquisition`
+
+This applies to:
+
+- `detection_data_profile`
+- `keypoint_data_profile`
+- `eye_mask_data_profile`
+
+Writer rule:
+
+- if canonical recording context or normalized lineage is not yet available,
+  writers may populate these columns as legacy compatibility snapshots,
+- once canonical owners exist, new profile rows stop writing these fields and
+  updates freeze any pre-existing legacy snapshot instead of overwriting it.
 - operator registry query surfaces
 
 ## Profile / Projection Table Policy

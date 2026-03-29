@@ -2624,12 +2624,17 @@ def _extract_eye_mask_profile_rows_fallback(
         profile_json = _canonical_json_text(summary)
         attrs_recording_id = _decode_text(attrs.get("source_recording_id")) if attrs is not None else None
         attrs_zarr_use = _decode_text(attrs.get("source_zarr_use")) if attrs is not None else None
+        attrs_stage_group = _decode_text(attrs.get("source_stage_group")) if attrs is not None else None
         attrs_method = _decode_text(attrs.get("source_eye_mask_method")) if attrs is not None else None
+        attrs_source_eye_mask_path = _decode_text(attrs.get("source_eye_mask_path")) if attrs is not None else None
+        attrs_source_eye_mask_run = _decode_text(attrs.get("source_eye_mask_run")) if attrs is not None else None
         attrs_source_eye_masks_run = _decode_text(attrs.get("source_eye_masks_run")) if attrs is not None else None
         attrs_source_refined_eye_masks_run = (
             _decode_text(attrs.get("source_refined_eye_masks_run")) if attrs is not None else None
         )
         attrs_source_crop_run = _decode_text(attrs.get("source_crop_run")) if attrs is not None else None
+        attrs_source_keypoint_path = _decode_text(attrs.get("source_keypoint_path")) if attrs is not None else None
+        attrs_source_keypoint_run = _decode_text(attrs.get("source_keypoint_run")) if attrs is not None else None
         attrs_source_keypoints_run = _decode_text(attrs.get("source_keypoints_run")) if attrs is not None else None
         attrs_profile_created = _decode_text(attrs.get("created_at_utc")) if attrs is not None else None
 
@@ -2637,17 +2642,71 @@ def _extract_eye_mask_profile_rows_fallback(
             {
                 "dataset_id": str(dataset_id),
                 "profile_run": str(profile_run),
-                "recording_id": _decode_text(dataset_map.get("recording_id")) or attrs_recording_id or recording_id,
-                "zarr_use": _decode_text(dataset_map.get("zarr_use")) or attrs_zarr_use or zarr_use,
-                "eye_mask_method": _decode_text(source_map.get("eye_mask_method")) or attrs_method,
-                "source_eye_masks_run": _decode_text(source_map.get("eye_masks_run")) or attrs_source_eye_masks_run,
-                "source_refined_eye_masks_run": (
-                    _decode_text(source_map.get("refined_eye_masks_run"))
-                    or attrs_source_refined_eye_masks_run
+                "recording_id": attrs_recording_id or _decode_text(dataset_map.get("recording_id")) or recording_id,
+                "zarr_use": attrs_zarr_use or _decode_text(dataset_map.get("zarr_use")) or zarr_use,
+                "stage_group": (
+                    attrs_stage_group
+                    or _decode_text(source_map.get("stage_group"))
+                    or _decode_text(source_map.get("eye_stage_group"))
+                    or _decode_text(source_map.get("source_eye_stage"))
                 ),
-                "source_crop_run": _decode_text(source_map.get("crop_run")) or attrs_source_crop_run,
-                "source_keypoints_run": _decode_text(source_map.get("keypoints_run")) or attrs_source_keypoints_run,
-                "profile_created_utc": _decode_text(summary.get("created_at_utc")) or attrs_profile_created,
+                "eye_mask_method": (
+                    attrs_method
+                    or _decode_text(source_map.get("eye_mask_method"))
+                    or _decode_text(source_map.get("method"))
+                ),
+                "source_eye_mask_path": (
+                    attrs_source_eye_mask_path
+                    or _decode_text(source_map.get("eye_mask_path"))
+                    or _decode_text(source_map.get("source_eye_mask_path"))
+                ),
+                "source_eye_mask_run": (
+                    attrs_source_eye_mask_run
+                    or attrs_source_eye_masks_run
+                    or _decode_text(source_map.get("eye_mask_run"))
+                    or _decode_text(source_map.get("source_eye_mask_run"))
+                    or _decode_text(source_map.get("eye_masks_run"))
+                    or _decode_text(source_map.get("source_eye_masks_run"))
+                ),
+                "source_eye_masks_run": (
+                    attrs_source_eye_masks_run
+                    or attrs_source_eye_mask_run
+                    or _decode_text(source_map.get("eye_masks_run"))
+                    or _decode_text(source_map.get("source_eye_masks_run"))
+                    or _decode_text(source_map.get("eye_mask_run"))
+                    or _decode_text(source_map.get("source_eye_mask_run"))
+                ),
+                "source_refined_eye_masks_run": (
+                    attrs_source_refined_eye_masks_run
+                    or _decode_text(source_map.get("refined_eye_masks_run"))
+                ),
+                "source_crop_run": (
+                    attrs_source_crop_run
+                    or _decode_text(source_map.get("source_crop_run"))
+                    or _decode_text(source_map.get("crop_run"))
+                ),
+                "source_keypoint_path": (
+                    attrs_source_keypoint_path
+                    or _decode_text(source_map.get("keypoint_path"))
+                    or _decode_text(source_map.get("source_keypoint_path"))
+                ),
+                "source_keypoint_run": (
+                    attrs_source_keypoints_run
+                    or attrs_source_keypoint_run
+                    or _decode_text(source_map.get("source_keypoints_run"))
+                    or _decode_text(source_map.get("keypoints_run"))
+                    or _decode_text(source_map.get("keypoint_run"))
+                    or _decode_text(source_map.get("source_keypoint_run"))
+                ),
+                "source_keypoints_run": (
+                    attrs_source_keypoints_run
+                    or attrs_source_keypoint_run
+                    or _decode_text(source_map.get("source_keypoints_run"))
+                    or _decode_text(source_map.get("keypoints_run"))
+                    or _decode_text(source_map.get("keypoint_run"))
+                    or _decode_text(source_map.get("source_keypoint_run"))
+                ),
+                "profile_created_utc": attrs_profile_created or _decode_text(summary.get("created_at_utc")),
                 "rows_total": rows_total,
                 "rows_usable": rows_usable,
                 "usable_rate": usable_rate,
@@ -6577,6 +6636,7 @@ def _check_registry_integrity(registry: Registry) -> List[IntegrityIssue]:
     }
 
     required_views = (
+        "dataset_context_current",
         "dataset_lineage_current",
         "merged_training_datasets",
         "recording_overview",
@@ -6657,6 +6717,24 @@ def _check_registry_integrity(registry: Registry) -> List[IntegrityIssue]:
                 )
             )
             table_ok[table_name] = False
+
+    def _relation_queryable(kind: str, name: str) -> bool:
+        exists_row = registry.conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = ? AND name = ?
+            LIMIT 1;
+            """,
+            (kind, name),
+        ).fetchone()
+        if exists_row is None:
+            return False
+        try:
+            registry.conn.execute(f"SELECT COUNT(*) FROM {name};").fetchone()
+        except Exception:
+            return False
+        return True
 
     # Every training run should have a training_models row after migration.
     missing_dm_rows = registry.conn.execute(
@@ -7077,8 +7155,33 @@ def _check_registry_integrity(registry: Registry) -> List[IntegrityIssue]:
                         code="keypoint_quality_divergent",
                         run_id=dataset_id,
                         detail=f"dataset_id={dataset_id} refined_run={refined_run}",
-                    )
                 )
+            )
+
+    if view_ok.get("dataset_context_current", False):
+        dcc_cardinality_rows = registry.conn.execute(
+            """
+            SELECT d.dataset_id, COUNT(dcc.dataset_id) AS row_count
+            FROM datasets d
+            LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = d.dataset_id
+            GROUP BY d.dataset_id
+            HAVING COUNT(dcc.dataset_id) != 1
+            ORDER BY d.dataset_id;
+            """
+        ).fetchall()
+        for row in dcc_cardinality_rows:
+            dataset_id = str(row["dataset_id"] or "")
+            row_count = int(row["row_count"] or 0)
+            issues.append(
+                IntegrityIssue(
+                    code="dataset_context_current_cardinality_mismatch",
+                    run_id=dataset_id or None,
+                    detail=(
+                        f"dataset_id={dataset_id} appears {row_count} time(s) in dataset_context_current; "
+                        "expected exactly 1 row per dataset"
+                    ),
+                )
+            )
 
     # Source recording datasets should link to an existing recording.
     source_rows = registry.conn.execute(
@@ -7221,6 +7324,264 @@ def _check_registry_integrity(registry: Registry) -> List[IntegrityIssue]:
                     detail=(
                         f"recording_id={recording_id} subject_id={subject_id} "
                         f"recording_subjects.cross_id={rs_cross_id} dishes.cross_id={dish_cross_id}"
+                    ),
+                )
+            )
+
+    if _relation_queryable("table", "detect_quality") and _relation_queryable("table", "detect_performance"):
+        missing_detect_projection_rows = registry.conn.execute(
+            """
+            SELECT dq.dataset_id, dq.refined_run, dq.source_detect_run
+            FROM detect_quality dq
+            LEFT JOIN detect_performance dp
+              ON dp.dataset_id = dq.dataset_id
+             AND dp.detect_run = dq.source_detect_run
+            WHERE TRIM(COALESCE(dq.source_detect_run, '')) != ''
+              AND dp.detect_run IS NULL
+            ORDER BY dq.dataset_id, dq.refined_run;
+            """
+        ).fetchall()
+        for row in missing_detect_projection_rows:
+            dataset_id = str(row["dataset_id"] or "")
+            refined_run = str(row["refined_run"] or "")
+            source_detect_run = str(row["source_detect_run"] or "")
+            issues.append(
+                IntegrityIssue(
+                    code="detect_quality_missing_source_detect_projection",
+                    run_id=f"{dataset_id}:{refined_run}" if dataset_id or refined_run else None,
+                    detail=(
+                        f"dataset_id={dataset_id} refined_run={refined_run} "
+                        f"source_detect_run={source_detect_run} has no matching detect_performance row"
+                    ),
+                )
+            )
+
+    if _relation_queryable("table", "keypoint_performance") and _relation_queryable("table", "crop_quality"):
+        missing_crop_projection_rows = registry.conn.execute(
+            """
+            SELECT kp.dataset_id, kp.keypoint_run, kp.source_crop_run
+            FROM keypoint_performance kp
+            LEFT JOIN crop_quality cq
+              ON cq.dataset_id = kp.dataset_id
+             AND cq.crop_run = kp.source_crop_run
+            WHERE TRIM(COALESCE(kp.source_crop_run, '')) != ''
+              AND cq.crop_run IS NULL
+            ORDER BY kp.dataset_id, kp.keypoint_run;
+            """
+        ).fetchall()
+        for row in missing_crop_projection_rows:
+            dataset_id = str(row["dataset_id"] or "")
+            keypoint_run = str(row["keypoint_run"] or "")
+            source_crop_run = str(row["source_crop_run"] or "")
+            issues.append(
+                IntegrityIssue(
+                    code="keypoint_performance_missing_source_crop_projection",
+                    run_id=f"{dataset_id}:{keypoint_run}" if dataset_id or keypoint_run else None,
+                    detail=(
+                        f"dataset_id={dataset_id} keypoint_run={keypoint_run} "
+                        f"source_crop_run={source_crop_run} has no matching crop_quality row"
+                    ),
+                )
+            )
+
+    if _relation_queryable("table", "keypoint_performance") and _relation_queryable("table", "detect_performance"):
+        missing_keypoint_detect_rows = registry.conn.execute(
+            """
+            SELECT kp.dataset_id, kp.keypoint_run, kp.source_detect_run
+            FROM keypoint_performance kp
+            LEFT JOIN detect_performance dp
+              ON dp.dataset_id = kp.dataset_id
+             AND dp.detect_run = kp.source_detect_run
+            WHERE TRIM(COALESCE(kp.source_detect_run, '')) != ''
+              AND dp.detect_run IS NULL
+            ORDER BY kp.dataset_id, kp.keypoint_run;
+            """
+        ).fetchall()
+        for row in missing_keypoint_detect_rows:
+            dataset_id = str(row["dataset_id"] or "")
+            keypoint_run = str(row["keypoint_run"] or "")
+            source_detect_run = str(row["source_detect_run"] or "")
+            issues.append(
+                IntegrityIssue(
+                    code="keypoint_performance_missing_source_detect_projection",
+                    run_id=f"{dataset_id}:{keypoint_run}" if dataset_id or keypoint_run else None,
+                    detail=(
+                        f"dataset_id={dataset_id} keypoint_run={keypoint_run} "
+                        f"source_detect_run={source_detect_run} has no matching detect_performance row"
+                    ),
+                )
+            )
+
+    if _relation_queryable("table", "keypoint_quality") and _relation_queryable("table", "keypoint_performance"):
+        missing_keypoint_projection_rows = registry.conn.execute(
+            """
+            SELECT kq.dataset_id, kq.refined_run, kq.source_keypoint_run
+            FROM keypoint_quality kq
+            LEFT JOIN keypoint_performance kp
+              ON kp.dataset_id = kq.dataset_id
+             AND kp.keypoint_run = kq.source_keypoint_run
+            WHERE TRIM(COALESCE(kq.source_keypoint_run, '')) != ''
+              AND kp.keypoint_run IS NULL
+            ORDER BY kq.dataset_id, kq.refined_run;
+            """
+        ).fetchall()
+        for row in missing_keypoint_projection_rows:
+            dataset_id = str(row["dataset_id"] or "")
+            refined_run = str(row["refined_run"] or "")
+            source_keypoint_run = str(row["source_keypoint_run"] or "")
+            issues.append(
+                IntegrityIssue(
+                    code="keypoint_quality_missing_source_keypoint_projection",
+                    run_id=f"{dataset_id}:{refined_run}" if dataset_id or refined_run else None,
+                    detail=(
+                        f"dataset_id={dataset_id} refined_run={refined_run} "
+                        f"source_keypoint_run={source_keypoint_run} has no matching keypoint_performance row"
+                    ),
+                )
+            )
+
+    if (
+        _relation_queryable("table", "eye_mask_performance")
+        and _relation_queryable("table", "keypoint_performance")
+        and _relation_queryable("table", "keypoint_quality")
+    ):
+        missing_eye_keypoint_rows = registry.conn.execute(
+            """
+            SELECT emp.dataset_id, emp.stage_group, emp.run_name, emp.source_keypoints_run
+            FROM eye_mask_performance emp
+            WHERE TRIM(COALESCE(emp.source_keypoints_run, '')) != ''
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM keypoint_performance kp
+                    WHERE kp.dataset_id = emp.dataset_id
+                      AND kp.keypoint_run = emp.source_keypoints_run
+                )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM keypoint_quality kq
+                    WHERE kq.dataset_id = emp.dataset_id
+                      AND kq.refined_run = emp.source_keypoints_run
+                )
+            ORDER BY emp.dataset_id, emp.stage_group, emp.run_name;
+            """
+        ).fetchall()
+        for row in missing_eye_keypoint_rows:
+            dataset_id = str(row["dataset_id"] or "")
+            stage_group = str(row["stage_group"] or "")
+            run_name = str(row["run_name"] or "")
+            source_keypoints_run = str(row["source_keypoints_run"] or "")
+            issues.append(
+                IntegrityIssue(
+                    code="eye_mask_performance_missing_source_keypoint_projection",
+                    run_id=f"{dataset_id}:{stage_group}:{run_name}" if dataset_id or run_name else None,
+                    detail=(
+                        f"dataset_id={dataset_id} stage_group={stage_group} run_name={run_name} "
+                        f"source_keypoints_run={source_keypoints_run} has no matching keypoint projection row"
+                    ),
+                )
+            )
+
+    if _relation_queryable("table", "eye_mask_performance"):
+        missing_eye_source_rows = registry.conn.execute(
+            """
+            SELECT emp.dataset_id, emp.run_name, emp.source_eye_masks_run
+            FROM eye_mask_performance emp
+            WHERE emp.stage_group = 'refined_eye_masks_runs'
+              AND TRIM(COALESCE(emp.source_eye_masks_run, '')) != ''
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM eye_mask_performance src
+                    WHERE src.dataset_id = emp.dataset_id
+                      AND src.stage_group = 'eye_masks_runs'
+                      AND src.run_name = emp.source_eye_masks_run
+                )
+            ORDER BY emp.dataset_id, emp.run_name;
+            """
+        ).fetchall()
+        for row in missing_eye_source_rows:
+            dataset_id = str(row["dataset_id"] or "")
+            run_name = str(row["run_name"] or "")
+            source_eye_masks_run = str(row["source_eye_masks_run"] or "")
+            issues.append(
+                IntegrityIssue(
+                    code="eye_mask_performance_missing_source_eye_mask_projection",
+                    run_id=f"{dataset_id}:refined_eye_masks_runs:{run_name}" if dataset_id or run_name else None,
+                    detail=(
+                        f"dataset_id={dataset_id} run_name={run_name} "
+                        f"source_eye_masks_run={source_eye_masks_run} has no matching eye_mask_performance row"
+                    ),
+                )
+            )
+
+    if (
+        _relation_queryable("table", "subject_mask_performance")
+        and _relation_queryable("table", "keypoint_performance")
+        and _relation_queryable("table", "keypoint_quality")
+    ):
+        missing_subject_keypoint_rows = registry.conn.execute(
+            """
+            SELECT smp.dataset_id, smp.stage_group, smp.run_name, smp.source_keypoints_run
+            FROM subject_mask_performance smp
+            WHERE TRIM(COALESCE(smp.source_keypoints_run, '')) != ''
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM keypoint_performance kp
+                    WHERE kp.dataset_id = smp.dataset_id
+                      AND kp.keypoint_run = smp.source_keypoints_run
+                )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM keypoint_quality kq
+                    WHERE kq.dataset_id = smp.dataset_id
+                      AND kq.refined_run = smp.source_keypoints_run
+                )
+            ORDER BY smp.dataset_id, smp.stage_group, smp.run_name;
+            """
+        ).fetchall()
+        for row in missing_subject_keypoint_rows:
+            dataset_id = str(row["dataset_id"] or "")
+            stage_group = str(row["stage_group"] or "")
+            run_name = str(row["run_name"] or "")
+            source_keypoints_run = str(row["source_keypoints_run"] or "")
+            issues.append(
+                IntegrityIssue(
+                    code="subject_mask_performance_missing_source_keypoint_projection",
+                    run_id=f"{dataset_id}:{stage_group}:{run_name}" if dataset_id or run_name else None,
+                    detail=(
+                        f"dataset_id={dataset_id} stage_group={stage_group} run_name={run_name} "
+                        f"source_keypoints_run={source_keypoints_run} has no matching keypoint projection row"
+                    ),
+                )
+            )
+
+    if _relation_queryable("table", "subject_mask_performance"):
+        missing_subject_source_rows = registry.conn.execute(
+            """
+            SELECT smp.dataset_id, smp.run_name, smp.source_subject_mask_run
+            FROM subject_mask_performance smp
+            WHERE smp.stage_group = 'refined_subject_masks_runs'
+              AND TRIM(COALESCE(smp.source_subject_mask_run, '')) != ''
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM subject_mask_performance src
+                    WHERE src.dataset_id = smp.dataset_id
+                      AND src.stage_group = 'subject_mask_runs'
+                      AND src.run_name = smp.source_subject_mask_run
+                )
+            ORDER BY smp.dataset_id, smp.run_name;
+            """
+        ).fetchall()
+        for row in missing_subject_source_rows:
+            dataset_id = str(row["dataset_id"] or "")
+            run_name = str(row["run_name"] or "")
+            source_subject_mask_run = str(row["source_subject_mask_run"] or "")
+            issues.append(
+                IntegrityIssue(
+                    code="subject_mask_performance_missing_source_subject_mask_projection",
+                    run_id=f"{dataset_id}:refined_subject_masks_runs:{run_name}" if dataset_id or run_name else None,
+                    detail=(
+                        f"dataset_id={dataset_id} run_name={run_name} "
+                        f"source_subject_mask_run={source_subject_mask_run} has no matching subject_mask_performance row"
                     ),
                 )
             )

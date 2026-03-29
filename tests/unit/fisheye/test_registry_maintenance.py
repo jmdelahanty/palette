@@ -13,7 +13,7 @@ import zarr
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from fisheye.registry.db import Registry
+from fisheye.registry.db import Registry, _extract_eye_mask_performance_rows, _extract_subject_mask_performance_rows
 from fisheye.registry.maintenance import (
     _backfill_keypoint_profiles,
     _backfill_eye_mask_profiles,
@@ -53,11 +53,13 @@ from fisheye.registry.maintenance import (
     _delete_paths,
     _is_safe_artifact_path,
     _normalize_run_ids,
+    _extract_eye_mask_profile_rows_for_maintenance,
     _resolve_existing_run_ids,
     _reconcile_stale_in_progress_runs,
     _normalize_status_values,
     main as maintenance_main,
 )
+from fisheye.shared.stage_provenance import build_stage_provenance
 
 
 def _create_quality_zarr(path: Path) -> None:
@@ -434,6 +436,199 @@ def _create_subject_mask_registry_zarr(path: Path) -> None:
     )
     refined_metrics = refined_run.create_group("metrics")
     refined_metrics.create_array(
+        "mask_present",
+        data=np.array(
+            [
+                [True, True, True, True],
+                [True, True, True, True],
+                [True, True, True, False],
+                [True, True, True, False],
+            ],
+            dtype=np.bool_,
+        ),
+        chunks=(4, 4),
+    )
+
+
+def _create_end_to_end_lineage_zarr(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    root = zarr.open_group(str(path), mode="w")
+    root.attrs["session_uuid"] = "lineage_rec_uuid"
+    root.attrs["zarr_use"] = "analysis"
+    raw = root.create_group("raw_video")
+    raw.create_array("images_ds", data=np.zeros((4, 8, 8), dtype=np.uint8), chunks=(1, 8, 8))
+
+    detect_parent = root.create_group("detect_runs")
+    detect_parent.attrs["latest"] = "detect_001"
+    detect = detect_parent.create_group("detect_001")
+    detect.attrs["detect_timestamp_utc"] = "2026-03-12T00:00:00+00:00"
+    detect.attrs["detection_method"] = "yolo"
+    detect.attrs["model_path"] = "/tmp/model.pt"
+    detect.attrs["model_name"] = "model.pt"
+    detect.attrs["inference_average_fps"] = 80.0
+    detect.attrs["parameters"] = {"conf_threshold": 0.4, "iou_threshold": 0.8, "batch_size": 16}
+    detect.create_array("frame_counts", data=np.array([1, 0, 1, 0], dtype=np.int32), chunks=(4,))
+
+    refined_detect_parent = root.create_group("refined_detect_runs")
+    refined_detect_parent.attrs["latest"] = "refined_detect_001"
+    refined_detect = refined_detect_parent.create_group("refined_detect_001")
+    refined_detect.attrs["source_detect_run"] = "detect_001"
+    refined_detect.attrs["manual_detect_review_status"] = {
+        "state": "approved",
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "pytest",
+        "timestamp_utc": "2026-03-12T00:05:00+00:00",
+    }
+
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs["latest"] = "crop_001"
+    crop = crop_parent.create_group("crop_001")
+    crop.attrs["created_at_utc"] = "2026-03-12T00:10:00+00:00"
+    crop.attrs["detection_source_type"] = "manual"
+    crop.attrs["detection_source_path"] = "refined_detect_runs/refined_detect_001/manual"
+    crop.attrs["source_detect_run"] = "detect_001"
+    crop.attrs["source_refined_run"] = "refined_detect_001"
+    crop.attrs["includes_interpolated"] = False
+    crop.attrs["n_real_detections"] = 4
+    crop.attrs["n_interpolated_detections"] = 0
+    crop.attrs["summary_statistics"] = {
+        "total_frames": 4,
+        "frames_with_crops": 4,
+        "total_rois_cropped": 4,
+        "percent_frames_with_crops": 100.0,
+    }
+    crop.attrs["crop_review_status"] = {
+        "state": "approved",
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "pytest",
+        "timestamp_utc": "2026-03-12T00:15:00+00:00",
+    }
+    crop.create_array("frame_counts", data=np.array([1, 1, 1, 1], dtype=np.int32), chunks=(4,))
+    crop.create_array("bbox_norm_coords", data=np.zeros((4, 4), dtype=np.float32), chunks=(4, 4))
+    crop.create_array("roi_images", data=np.zeros((4, 8, 8), dtype=np.uint8), chunks=(1, 8, 8))
+    crop.create_array("detection_source", data=np.array([0, 0, 0, 0], dtype=np.int8), chunks=(4,))
+
+    kp_parent = root.create_group("keypoints_runs")
+    kp_parent.attrs["latest"] = "kp_001"
+    kp = kp_parent.create_group("kp_001")
+    kp.attrs["keypoints_timestamp_utc"] = "2026-03-12T00:20:00+00:00"
+    kp.attrs["method"] = "yolo_pose"
+    kp.attrs["model_path"] = "/tmp/pose.pt"
+    kp.attrs["source_crop_run"] = "crop_001"
+    kp.attrs["source_detect_run"] = "detect_001"
+    kp.attrs["source_refined_run"] = "refined_detect_001"
+    kp.attrs["duration_seconds"] = 2.0
+    kp.attrs["inference_duration_seconds"] = 1.5
+    kp.attrs["inference_poses_per_second"] = 2.0
+    kp.attrs["inference_average_fps"] = 5.0
+    kp.attrs["parameters"] = {
+        "batch_size": 16,
+        "imgsz": 640,
+        "conf_threshold": 0.3,
+        "iou_threshold": 0.7,
+    }
+    kp.attrs["summary_statistics"] = {
+        "total_rois": 4,
+        "successful_detections": 3,
+        "failed_detections": 1,
+        "success_rate_percent": 75.0,
+        "frames_with_keypoints": 3,
+        "mean_confidence": 0.91,
+    }
+    kp.create_array("keypoints_roi", data=np.zeros((4, 3, 2), dtype=np.float32), chunks=(1, 3, 2))
+
+    refined_kp_parent = root.create_group("refined_keypoints_runs")
+    refined_kp_parent.attrs["latest"] = "refined_kp_001"
+    refined_kp = refined_kp_parent.create_group("refined_kp_001")
+    refined_kp.attrs["source_keypoints_run"] = "kp_001"
+    refined_kp.attrs["created_utc"] = "2026-03-12T00:25:00+00:00"
+    refined_kp.attrs["keypoint_review_status"] = {
+        "state": "approved",
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "pytest",
+        "timestamp_utc": "2026-03-12T00:26:00+00:00",
+    }
+    refined_kp.create_array(
+        "usable_keypoints",
+        data=np.array([True, True, True, False], dtype=np.bool_),
+        chunks=(4,),
+    )
+
+    subject_parent = root.create_group("subject_mask_runs")
+    subject_parent.attrs["latest"] = "subject_masks_001"
+    subject_run = subject_parent.create_group("subject_masks_001")
+    subject_run.attrs["created_utc"] = "2026-03-12T00:30:00+00:00"
+    subject_run.attrs["method"] = "subject_mask_threshold_lr_v1"
+    subject_run.attrs["run_semantics"] = "traditional_subject_body_inference"
+    subject_run.attrs["probability_semantics"] = "normalized_background_diff"
+    subject_run.attrs["label_schema_id"] = "subject_v1_lr"
+    subject_run.attrs["mask_labels"] = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    subject_run.attrs["source_crop_run"] = "crop_001"
+    subject_run.attrs["source_background_run"] = "background_001"
+    subject_run.attrs["source_background_array"] = "background_full"
+    subject_run.attrs["source_dish_mask_array"] = "images_ds"
+    subject_run.attrs["source_keypoint_group"] = "refined_keypoints_runs"
+    subject_run.attrs["source_keypoints_run"] = "refined_kp_001"
+    subject_run.attrs["total_rois"] = 4
+    subject_run.attrs["duration_seconds"] = 2.0
+    subject_run.attrs["subject_mask_review_status"] = {
+        "state": "approved",
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "pytest",
+        "timestamp_utc": "2026-03-12T00:31:00+00:00",
+    }
+    subject_run.create_array(
+        "available_channels",
+        data=np.array([False, True, True, False], dtype=np.bool_),
+        chunks=(4,),
+    )
+    subject_metrics = subject_run.create_group("metrics")
+    subject_metrics.create_array(
+        "mask_present",
+        data=np.array(
+            [
+                [False, True, True, False],
+                [False, True, True, False],
+                [False, True, True, False],
+                [False, True, True, False],
+            ],
+            dtype=np.bool_,
+        ),
+        chunks=(4, 4),
+    )
+
+    refined_subject_parent = root.create_group("refined_subject_masks_runs")
+    refined_subject_parent.attrs["latest"] = "refined_subject_masks_001"
+    refined_subject = refined_subject_parent.create_group("refined_subject_masks_001")
+    refined_subject.attrs["created_utc"] = "2026-03-12T00:35:00+00:00"
+    refined_subject.attrs["method"] = "refine_subject_masks"
+    refined_subject.attrs["label_schema_id"] = "subject_v1_lr"
+    refined_subject.attrs["mask_labels"] = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    refined_subject.attrs["source_subject_mask_run"] = "subject_masks_001"
+    refined_subject.attrs["source_subject_mask_method"] = "subject_mask_threshold_lr_v1"
+    refined_subject.attrs["source_crop_run"] = "crop_001"
+    refined_subject.attrs["source_keypoint_group"] = "refined_keypoints_runs"
+    refined_subject.attrs["source_keypoints_run"] = "refined_kp_001"
+    refined_subject.attrs["total_rois"] = 4
+    refined_subject.attrs["duration_seconds"] = 1.0
+    refined_subject.attrs["refined_subject_mask_review_status"] = {
+        "state": "approved",
+        "method": "manual",
+        "intended_use": "training",
+        "reviewer": "pytest",
+        "timestamp_utc": "2026-03-12T00:36:00+00:00",
+    }
+    refined_subject.create_array(
+        "available_channels",
+        data=np.array([True, True, True, True], dtype=np.bool_),
+        chunks=(4,),
+    )
+    refined_subject_metrics = refined_subject.create_group("metrics")
+    refined_subject_metrics.create_array(
         "mask_present",
         data=np.array(
             [
@@ -4430,6 +4625,234 @@ def test_integrity_flags_required_view_missing_recording_subject_overview(tmp_pa
     registry.close()
 
 
+def test_integrity_flags_required_view_missing_dataset_context_current(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.conn.execute("DROP VIEW IF EXISTS dataset_context_current;")
+    registry.conn.commit()
+
+    issues = _check_registry_integrity(registry)
+    issue_codes = {(issue.code, issue.run_id) for issue in issues}
+    assert ("required_view_missing", "dataset_context_current") in issue_codes
+    registry.close()
+
+
+def test_integrity_flags_dataset_context_current_cardinality_mismatch(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_a",
+        session_uuid="dataset_a",
+        zarr_path=tmp_path / "dataset_a.zarr",
+    )
+    registry.conn.execute("DROP VIEW IF EXISTS dataset_context_current;")
+    registry.conn.execute(
+        """
+        CREATE VIEW dataset_context_current AS
+        SELECT dataset_id FROM datasets
+        UNION ALL
+        SELECT dataset_id FROM datasets;
+        """
+    )
+    registry.conn.commit()
+
+    issues = _check_registry_integrity(registry)
+    issue_codes = {issue.code for issue in issues}
+    assert "dataset_context_current_cardinality_mismatch" in issue_codes
+    registry.close()
+
+
+def test_integrity_flags_missing_source_run_projections(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_a",
+        session_uuid="dataset_a",
+        zarr_path=tmp_path / "dataset_a.zarr",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO detect_quality (dataset_id, refined_run, source_detect_run)
+        VALUES (?, ?, ?);
+        """,
+        ("dataset_a", "refined_detect_missing", "detect_missing"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO keypoint_performance (
+            dataset_id, keypoint_run, source_crop_run, source_detect_run
+        )
+        VALUES (?, ?, ?, ?);
+        """,
+        ("dataset_a", "keypoints_missing", "crop_missing", "detect_missing_for_keypoints"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO keypoint_quality (dataset_id, refined_run, source_keypoint_run)
+        VALUES (?, ?, ?);
+        """,
+        ("dataset_a", "refined_keypoints_missing", "keypoints_source_missing"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO eye_mask_performance (
+            dataset_id, stage_group, run_name, source_keypoints_run
+        )
+        VALUES (?, ?, ?, ?);
+        """,
+        ("dataset_a", "eye_masks_runs", "eye_masks_missing", "keypoints_missing_for_eye_masks"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO eye_mask_performance (
+            dataset_id, stage_group, run_name, source_eye_masks_run
+        )
+        VALUES (?, ?, ?, ?);
+        """,
+        ("dataset_a", "refined_eye_masks_runs", "refined_eye_masks_missing", "eye_masks_source_missing"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO subject_mask_performance (
+            dataset_id, stage_group, run_name, source_keypoints_run
+        )
+        VALUES (?, ?, ?, ?);
+        """,
+        ("dataset_a", "subject_mask_runs", "subject_masks_missing", "keypoints_missing_for_subject_masks"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO subject_mask_performance (
+            dataset_id, stage_group, run_name, source_subject_mask_run
+        )
+        VALUES (?, ?, ?, ?);
+        """,
+        (
+            "dataset_a",
+            "refined_subject_masks_runs",
+            "refined_subject_masks_missing",
+            "subject_masks_source_missing",
+        ),
+    )
+    registry.conn.commit()
+
+    issues = _check_registry_integrity(registry)
+    issue_codes = {issue.code for issue in issues}
+    assert "detect_quality_missing_source_detect_projection" in issue_codes
+    assert "keypoint_performance_missing_source_crop_projection" in issue_codes
+    assert "keypoint_performance_missing_source_detect_projection" in issue_codes
+    assert "keypoint_quality_missing_source_keypoint_projection" in issue_codes
+    assert "eye_mask_performance_missing_source_keypoint_projection" in issue_codes
+    assert "eye_mask_performance_missing_source_eye_mask_projection" in issue_codes
+    assert "subject_mask_performance_missing_source_keypoint_projection" in issue_codes
+    assert "subject_mask_performance_missing_source_subject_mask_projection" in issue_codes
+    registry.close()
+
+
+def test_integrity_accepts_valid_source_run_projections(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_a",
+        session_uuid="dataset_a",
+        zarr_path=tmp_path / "dataset_a.zarr",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO detect_performance (dataset_id, detect_run)
+        VALUES (?, ?);
+        """,
+        ("dataset_a", "detect_001"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO detect_quality (dataset_id, refined_run, source_detect_run)
+        VALUES (?, ?, ?);
+        """,
+        ("dataset_a", "refined_detect_001", "detect_001"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO crop_quality (dataset_id, crop_run, source_detect_run)
+        VALUES (?, ?, ?);
+        """,
+        ("dataset_a", "crop_001", "detect_001"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO keypoint_performance (
+            dataset_id, keypoint_run, source_crop_run, source_detect_run
+        )
+        VALUES (?, ?, ?, ?);
+        """,
+        ("dataset_a", "keypoints_001", "crop_001", "detect_001"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO keypoint_quality (dataset_id, refined_run, source_keypoint_run)
+        VALUES (?, ?, ?);
+        """,
+        ("dataset_a", "refined_keypoints_001", "keypoints_001"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO eye_mask_performance (
+            dataset_id, stage_group, run_name, source_keypoints_run
+        )
+        VALUES (?, ?, ?, ?);
+        """,
+        ("dataset_a", "eye_masks_runs", "eye_masks_001", "refined_keypoints_001"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO eye_mask_performance (
+            dataset_id, stage_group, run_name, source_keypoints_run, source_eye_masks_run
+        )
+        VALUES (?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_a",
+            "refined_eye_masks_runs",
+            "refined_eye_masks_001",
+            "refined_keypoints_001",
+            "eye_masks_001",
+        ),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO subject_mask_performance (
+            dataset_id, stage_group, run_name, source_keypoints_run
+        )
+        VALUES (?, ?, ?, ?);
+        """,
+        ("dataset_a", "subject_mask_runs", "subject_masks_001", "refined_keypoints_001"),
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO subject_mask_performance (
+            dataset_id, stage_group, run_name, source_keypoints_run, source_subject_mask_run
+        )
+        VALUES (?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_a",
+            "refined_subject_masks_runs",
+            "refined_subject_masks_001",
+            "refined_keypoints_001",
+            "subject_masks_001",
+        ),
+    )
+    registry.conn.commit()
+
+    issues = _check_registry_integrity(registry)
+    issue_codes = {issue.code for issue in issues}
+    assert "detect_quality_missing_source_detect_projection" not in issue_codes
+    assert "keypoint_performance_missing_source_crop_projection" not in issue_codes
+    assert "keypoint_performance_missing_source_detect_projection" not in issue_codes
+    assert "keypoint_quality_missing_source_keypoint_projection" not in issue_codes
+    assert "eye_mask_performance_missing_source_keypoint_projection" not in issue_codes
+    assert "eye_mask_performance_missing_source_eye_mask_projection" not in issue_codes
+    assert "subject_mask_performance_missing_source_keypoint_projection" not in issue_codes
+    assert "subject_mask_performance_missing_source_subject_mask_projection" not in issue_codes
+    registry.close()
+
+
 def test_integrity_flags_recording_subject_missing_subject(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     registry.conn.execute(
@@ -5578,6 +6001,85 @@ def test_backfill_keypoint_profiles_handles_missing_get_lookup(
     registry.close()
 
 
+def test_backfill_keypoint_profiles_prefers_profile_run_attrs_for_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "rec_profile_attrs" / "zarr" / "rec_profile_attrs_training.zarr"
+    fake_root = _create_keypoint_profile_zarr(zarr_path, zarr_use="training")
+    analysis = fake_root.get("analysis")
+    assert analysis is not None
+    runs_parent = analysis.get("keypoint_profile_runs")
+    assert runs_parent is not None
+    profile = runs_parent.get("keypoint_profile_001")
+    assert profile is not None
+
+    summary = dict(profile.attrs["profile_summary"])  # type: ignore[index]
+    dataset = dict(summary["dataset"])  # type: ignore[index]
+    dataset["recording_id"] = "summary_recording"
+    dataset["zarr_use"] = "summary_use"
+    source = dict(summary["source"])  # type: ignore[index]
+    source["keypoint_method"] = "summary_method"
+    source["keypoint_path"] = "summary/keypoints/path"
+    source["keypoint_run"] = "summary_keypoints"
+    source["skeleton_id"] = "summary_skeleton"
+    source["kpt_shape"] = [99, 99]
+    summary["dataset"] = dataset
+    summary["source"] = source
+    summary["created_at_utc"] = "2026-02-24T01:00:00+00:00"
+    profile.attrs["profile_summary"] = summary
+    profile.attrs["created_at_utc"] = "2026-02-24T06:00:00+00:00"
+    profile.attrs["source_recording_id"] = "attrs_recording"
+    profile.attrs["source_zarr_use"] = "attrs_use"
+    profile.attrs["source_keypoint_method"] = "attrs_method"
+    profile.attrs["source_keypoint_path"] = "refined_keypoints_runs/refined_keypoints_attrs"
+    profile.attrs["source_keypoint_run"] = "keypoints_attrs"
+    profile.attrs["source_skeleton_id"] = "fish_v2"
+    profile.attrs["source_kpt_shape"] = [3, 2]
+
+    monkeypatch.setattr(
+        "fisheye.registry.maintenance._import_zarr",
+        lambda: _FakeZarrModule({str(zarr_path): fake_root}),
+    )
+    dataset_id = "dataset_profile_attrs"
+    registry.upsert_dataset(
+        dataset_id=dataset_id,
+        session_uuid="session_profile_attrs",
+        zarr_path=zarr_path,
+        recording_id="recording_profile_attrs",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+
+    summary_result = _backfill_keypoint_profiles(
+        registry,
+        dry_run=False,
+        scope_paths=None,
+        refresh=False,
+    )
+    assert summary_result["rows_inserted"] == 1
+
+    row = registry.conn.execute(
+        """
+        SELECT *
+        FROM keypoint_data_profile
+        WHERE dataset_id = ?;
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert row is not None
+    assert row["recording_id"] == "attrs_recording"
+    assert row["zarr_use"] == "attrs_use"
+    assert row["profile_created_utc"] == "2026-02-24T06:00:00+00:00"
+    assert row["keypoint_method"] == "attrs_method"
+    assert row["source_keypoint_path"] == "refined_keypoints_runs/refined_keypoints_attrs"
+    assert row["source_keypoint_run"] == "keypoints_attrs"
+    assert row["skeleton_id"] == "fish_v2"
+    assert row["kpt_shape"] == "[3,2]"
+    registry.close()
+
+
 def test_backfill_keypoint_profiles_scope_defaults_to_source_all_uses(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5772,6 +6274,68 @@ def test_backfill_eye_mask_profiles_dry_run_and_apply(
     assert row is not None
     assert str(row["profile_run"]) == "eye_mask_profile_001"
     registry.close()
+
+
+def test_extract_eye_mask_profile_rows_for_maintenance_prefers_profile_run_attrs_for_lineage(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recordings" / "rec_eye_profile_attrs" / "zarr" / "rec_eye_profile_attrs_training.zarr"
+    _create_fake_zarr_store(zarr_path)
+    root = _FakeGroup(attrs={"session_uuid": "eye_profile_attrs"})
+    analysis = root.add_group("analysis")
+    runs_parent = analysis.add_group("eye_mask_profile_runs", attrs={"latest": "eye_mask_profile_001"})
+    profile = runs_parent.add_group("eye_mask_profile_001")
+    profile.attrs["profile_summary"] = {
+        "created_at_utc": "2026-02-25T01:00:00+00:00",
+        "dataset": {"recording_id": "summary_recording", "zarr_use": "summary_use"},
+        "source": {
+            "stage_group": "summary_stage",
+            "eye_mask_path": "summary/eye_masks/path",
+            "eye_mask_run": "summary_eye_masks",
+            "eye_mask_method": "summary_method",
+            "source_keypoint_path": "summary/keypoints/path",
+            "source_keypoint_run": "summary_keypoints",
+            "source_crop_run": "summary_crop",
+        },
+        "quality": {"rows_total": 10, "rows_usable": 8, "usable_rate": 0.8},
+        "geometry": {},
+        "spatial": {},
+        "composition": {},
+    }
+    profile.attrs["created_at_utc"] = "2026-02-25T06:00:00+00:00"
+    profile.attrs["source_recording_id"] = "attrs_recording"
+    profile.attrs["source_zarr_use"] = "attrs_use"
+    profile.attrs["source_stage_group"] = "refined_eye_masks_runs"
+    profile.attrs["source_eye_mask_path"] = "refined_eye_masks_runs/refined_eye_masks_attrs"
+    profile.attrs["source_eye_mask_run"] = "refined_eye_masks_attrs"
+    profile.attrs["source_eye_masks_run"] = "refined_eye_masks_attrs"
+    profile.attrs["source_eye_mask_method"] = "traditional"
+    profile.attrs["source_keypoint_path"] = "refined_keypoints_runs/refined_keypoints_attrs"
+    profile.attrs["source_keypoints_run"] = "refined_keypoints_attrs"
+    profile.attrs["source_crop_run"] = "crop_attrs"
+
+    rows = _extract_eye_mask_profile_rows_for_maintenance(
+        root,
+        zarr_path=zarr_path,
+        dataset_id="dataset_eye_profile_attrs",
+        recording_id="fallback_recording",
+        zarr_use="fallback_use",
+        genotype=None,
+        dpf_at_acquisition=None,
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["recording_id"] == "attrs_recording"
+    assert row["zarr_use"] == "attrs_use"
+    assert row["stage_group"] == "refined_eye_masks_runs"
+    assert row["eye_mask_method"] == "traditional"
+    assert row["source_eye_mask_path"] == "refined_eye_masks_runs/refined_eye_masks_attrs"
+    assert row["source_eye_mask_run"] == "refined_eye_masks_attrs"
+    assert row["source_eye_masks_run"] == "refined_eye_masks_attrs"
+    assert row["source_keypoint_path"] == "refined_keypoints_runs/refined_keypoints_attrs"
+    assert row["source_keypoint_run"] == "refined_keypoints_attrs"
+    assert row["source_keypoints_run"] == "refined_keypoints_attrs"
+    assert row["source_crop_run"] == "crop_attrs"
+    assert row["profile_created_utc"] == "2026-02-25T06:00:00+00:00"
 
 
 def test_refresh_eye_mask_profiles_deletes_stale_rows_and_is_idempotent(
@@ -6714,6 +7278,25 @@ def test_backfill_eye_mask_performance_dry_run_and_apply(tmp_path: Path) -> None
     registry.close()
 
 
+def test_extract_eye_mask_performance_rows_prefers_created_at_utc(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "eye_mask_created_at_analysis.zarr"
+    _create_eye_mask_performance_zarr(zarr_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    root["eye_masks_runs"]["eye_masks_001"].attrs["created_at_utc"] = "2026-02-11T00:11:00+00:00"
+    root["refined_eye_masks_runs"]["refined_eye_masks_001"].attrs["created_at_utc"] = "2026-02-11T00:12:00+00:00"
+
+    rows = _extract_eye_mask_performance_rows(
+        zarr.open_group(str(zarr_path), mode="r"),
+        zarr_path=zarr_path,
+        recording_id="eye_mask_created_at_uuid",
+        zarr_use="analysis",
+    )
+
+    by_stage = {str(row["stage_group"]): row for row in rows}
+    assert by_stage["eye_masks_runs"]["run_created_utc"] == "2026-02-11T00:11:00+00:00"
+    assert by_stage["refined_eye_masks_runs"]["run_created_utc"] == "2026-02-11T00:12:00+00:00"
+
+
 def test_backfill_eye_mask_performance_summary_includes_stale_counters_when_zero(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "recordings" / "rec_a" / "zarr" / "rec_a_analysis.zarr"
@@ -6740,6 +7323,135 @@ def test_backfill_eye_mask_performance_summary_includes_stale_counters_when_zero
     assert dry["rows_stale"] == 0
     assert dry["rows_in_progress"] == 0
     registry.close()
+
+
+def test_extract_subject_mask_performance_rows_falls_back_to_provenance_payload(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "subject_mask_provenance_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    parent = root.create_group("subject_mask_runs")
+    parent.attrs["latest"] = "subject_masks_sam3_001"
+    run = parent.create_group("subject_masks_sam3_001")
+    run.attrs["label_schema_id"] = "subject_v1_union"
+    run.attrs["mask_labels"] = ["subject_body", "eyes_union", "swim_bladder"]
+    run.attrs["provenance"] = build_stage_provenance(
+        stage="subject_masks",
+        created_at_utc="2026-03-01T00:00:00+00:00",
+        parameters={
+            "method": "sam3_interactive_keypoints_detect_box_body_v1",
+            "run_semantics": "sam_body_mask_inference",
+        },
+        inputs={
+            "source_crop_run": "crop_001",
+            "source_keypoint_group": "refined_keypoints_runs",
+            "source_keypoints_run": "refined_kp_001",
+            "sam_checkpoint_path": "/tmp/sam3.pt",
+            "sam3_root": "/tmp/sam3",
+        },
+        git={"commit": "a" * 40, "branch": "main"},
+        environment={},
+    )
+    run.create_array(
+        "masks_roi",
+        data=np.array(
+            [
+                [
+                    [[1, 0], [0, 0]],
+                    [[0, 0], [0, 0]],
+                    [[0, 0], [0, 0]],
+                ],
+                [
+                    [[1, 1], [0, 0]],
+                    [[0, 0], [0, 0]],
+                    [[0, 0], [0, 0]],
+                ],
+            ],
+            dtype=np.uint8,
+        ),
+    )
+    run.create_array("available_channels", data=np.array([True, False, False], dtype=np.bool_))
+    metrics = run.create_group("metrics")
+    metrics.create_array(
+        "mask_present",
+        data=np.array(
+            [
+                [True, False, False],
+                [True, False, False],
+            ],
+            dtype=np.bool_,
+        ),
+    )
+
+    rows = _extract_subject_mask_performance_rows(
+        root,
+        zarr_path=zarr_path,
+        recording_id="recording_sam3_ctx",
+        zarr_use="analysis",
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["subject_mask_method"] == "sam3_interactive_keypoints_detect_box_body_v1"
+    assert row["run_semantics"] == "sam_body_mask_inference"
+    assert row["source_crop_run"] == "crop_001"
+    assert row["source_keypoint_group"] == "refined_keypoints_runs"
+    assert row["source_keypoints_run"] == "refined_kp_001"
+
+
+def test_extract_subject_mask_performance_rows_prefers_run_attrs_for_lineage(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "subject_mask_attrs_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    parent = root.create_group("refined_subject_masks_runs")
+    parent.attrs["latest"] = "refined_subject_masks_001"
+    run = parent.create_group("refined_subject_masks_001")
+    run.attrs["created_at_utc"] = "2026-03-02T06:00:00+00:00"
+    run.attrs["method"] = "refine_subject_masks"
+    run.attrs["label_schema_id"] = "subject_v1_lr"
+    run.attrs["mask_labels"] = ["subject_body", "eye_left", "eye_right"]
+    run.attrs["source_crop_run"] = "crop_attrs"
+    run.attrs["source_keypoint_group"] = "refined_keypoints_runs"
+    run.attrs["source_keypoints_run"] = "refined_kp_attrs"
+    run.attrs["source_subject_mask_run"] = "subject_masks_attrs"
+    run.attrs["source_subject_mask_method"] = "sam_body_mask_inference"
+    run.attrs["run_semantics"] = "refined_subject_mask_review"
+    run.attrs["probability_semantics"] = "normalized_background_diff"
+    run.attrs["provenance"] = build_stage_provenance(
+        stage="refined_subject_masks",
+        created_at_utc="2026-03-02T01:00:00+00:00",
+        parameters={
+            "method": "provenance_method",
+            "run_semantics": "provenance_semantics",
+            "probability_semantics": "provenance_probability",
+        },
+        inputs={
+            "source_crop_run": "crop_provenance",
+            "source_keypoint_group": "keypoints_runs",
+            "source_keypoints_run": "kp_provenance",
+            "source_subject_mask_run": "subject_masks_provenance",
+            "source_subject_mask_method": "subject_mask_method_provenance",
+        },
+        git={"commit": "b" * 40, "branch": "main"},
+        environment={},
+    )
+
+    rows = _extract_subject_mask_performance_rows(
+        root,
+        zarr_path=zarr_path,
+        recording_id="recording_subject_attrs",
+        zarr_use="analysis",
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["run_created_utc"] == "2026-03-02T06:00:00+00:00"
+    assert row["subject_mask_method"] == "refine_subject_masks"
+    assert row["label_schema_id"] == "subject_v1_lr"
+    assert row["source_crop_run"] == "crop_attrs"
+    assert row["source_keypoint_group"] == "refined_keypoints_runs"
+    assert row["source_keypoints_run"] == "refined_kp_attrs"
+    assert row["source_subject_mask_run"] == "subject_masks_attrs"
+    assert row["source_subject_mask_method"] == "sam_body_mask_inference"
+    assert row["run_semantics"] == "refined_subject_mask_review"
+    assert row["probability_semantics"] == "normalized_background_diff"
 
 
 def test_backfill_subject_mask_performance_dry_run_and_apply(tmp_path: Path) -> None:
@@ -6822,6 +7534,107 @@ def test_backfill_subject_mask_performance_dry_run_and_apply(tmp_path: Path) -> 
     assert str(by_stage["refined_subject_masks_runs"]["subject_mask_method"]) == "refine_subject_masks"
     assert int(by_stage["refined_subject_masks_runs"]["available_component_count"]) == 4
     assert str(by_stage["refined_subject_masks_runs"]["lifecycle_state"]) == "approved"
+    registry.close()
+
+
+def test_register_from_root_preserves_end_to_end_subject_mask_lineage_chain(tmp_path: Path) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    zarr_path = tmp_path / "recordings" / "lineage_rec" / "zarr" / "lineage_rec_analysis.zarr"
+    _create_end_to_end_lineage_zarr(zarr_path)
+
+    dataset_id = registry.register_from_root(zarr.open_group(str(zarr_path), mode="r"), zarr_path)
+
+    dataset_row = registry.conn.execute(
+        """
+        SELECT recording_id, artifact_kind, zarr_use
+        FROM datasets
+        WHERE dataset_id = ?;
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert dataset_row is not None
+    assert str(dataset_row["recording_id"]) == "lineage_rec_uuid"
+    assert str(dataset_row["artifact_kind"]) == "source_recording"
+    assert str(dataset_row["zarr_use"]) == "analysis"
+
+    subject_row = registry.conn.execute(
+        """
+        SELECT run_name, source_keypoints_run, source_crop_run
+        FROM subject_mask_performance_latest
+        WHERE dataset_id = ? AND stage_group = 'subject_mask_runs';
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert subject_row is not None
+    assert str(subject_row["run_name"]) == "subject_masks_001"
+    assert str(subject_row["source_keypoints_run"]) == "refined_kp_001"
+    assert str(subject_row["source_crop_run"]) == "crop_001"
+
+    refined_subject_row = registry.conn.execute(
+        """
+        SELECT run_name, source_subject_mask_run, source_keypoints_run, source_crop_run
+        FROM subject_mask_performance_latest
+        WHERE dataset_id = ? AND stage_group = 'refined_subject_masks_runs';
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert refined_subject_row is not None
+    assert str(refined_subject_row["run_name"]) == "refined_subject_masks_001"
+    assert str(refined_subject_row["source_subject_mask_run"]) == "subject_masks_001"
+    assert str(refined_subject_row["source_keypoints_run"]) == "refined_kp_001"
+    assert str(refined_subject_row["source_crop_run"]) == "crop_001"
+
+    keypoint_quality_row = registry.conn.execute(
+        """
+        SELECT refined_run, source_keypoint_run
+        FROM keypoint_quality_current
+        WHERE dataset_id = ?;
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert keypoint_quality_row is not None
+    assert str(keypoint_quality_row["refined_run"]) == "refined_kp_001"
+    assert str(keypoint_quality_row["source_keypoint_run"]) == "kp_001"
+
+    keypoint_row = registry.conn.execute(
+        """
+        SELECT keypoint_run, source_crop_run, source_detect_run, source_refined_run
+        FROM keypoint_performance_latest
+        WHERE dataset_id = ?;
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert keypoint_row is not None
+    assert str(keypoint_row["keypoint_run"]) == "kp_001"
+    assert str(keypoint_row["source_crop_run"]) == "crop_001"
+    assert str(keypoint_row["source_detect_run"]) == "detect_001"
+    assert str(keypoint_row["source_refined_run"]) == "refined_detect_001"
+
+    crop_row = registry.conn.execute(
+        """
+        SELECT crop_run, source_detect_run, source_refined_run
+        FROM crop_quality_current
+        WHERE dataset_id = ?;
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert crop_row is not None
+    assert str(crop_row["crop_run"]) == "crop_001"
+    assert str(crop_row["source_detect_run"]) == "detect_001"
+    assert str(crop_row["source_refined_run"]) == "refined_detect_001"
+
+    detect_row = registry.conn.execute(
+        """
+        SELECT detect_run, recording_id
+        FROM detect_performance_latest
+        WHERE dataset_id = ?;
+        """,
+        (dataset_id,),
+    ).fetchone()
+    assert detect_row is not None
+    assert str(detect_row["detect_run"]) == "detect_001"
+    assert str(detect_row["recording_id"]) == "lineage_rec_uuid"
+
     registry.close()
 
 

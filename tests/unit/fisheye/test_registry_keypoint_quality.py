@@ -331,6 +331,29 @@ def test_keypoint_quality_extracts_shared_review_fields_and_legacy_timestamp_ali
     assert row["review_timestamp_utc"] == "2026-02-08T00:00:00+00:00"
 
 
+def test_keypoint_quality_prefers_created_at_utc(tmp_path: Path) -> None:
+    root = _FakeGroup()
+    keypoints_parent = root.add_group("keypoints_runs")
+    keypoint_run = keypoints_parent.add_group("kp_001", attrs={"method": "traditional_pose"})
+    keypoint_run.add_array("keypoints_roi", np.zeros((4, 3, 2), dtype=np.float32))
+
+    refined_parent = root.add_group("refined_keypoints_runs")
+    refined = refined_parent.add_group(
+        "refined_001",
+        attrs={
+            "source_keypoints_run": "kp_001",
+            "created_at_utc": "2026-02-08T00:10:00+00:00",
+            "created_utc": "2026-02-08T00:08:00+00:00",
+            "timestamp_utc": "2026-02-08T00:07:00+00:00",
+        },
+    )
+    refined.add_array("usable_keypoints", np.array([True, True, True, False], dtype=np.bool_))
+
+    rows = _extract_keypoint_quality_rows(root, zarr_path=tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["refined_created_utc"] == "2026-02-08T00:10:00+00:00"
+
+
 def test_replace_keypoint_quality_auto_adds_review_columns_for_legacy_table(tmp_path: Path) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     registry.upsert_dataset("dataset_keypoint", session_uuid="dataset_keypoint", zarr_path=tmp_path / "kp.zarr")

@@ -164,13 +164,106 @@ def test_sync_detection_profile_registry_apply_upserts_latest_row(tmp_path: Path
         row = dict(rows[0])
         assert row["dataset_id"] == "dataset_a"
         assert row["profile_run"] == "detection_profile_2026-02-12_03-00-00"
-        assert row["recording_id"] == "recording_a"
+        assert row["recording_id"] == "dataset_a_recording"
         assert row["zarr_use"] == "training"
         assert row["detection_type"] == "manual"
         assert row["coverage_percent"] == pytest.approx(95.0)
         assert row["detections_total"] == 950
-        assert row["genotype"] == "Tg(elavl3:gcamp7f)"
-        assert int(row["dpf_at_acquisition"]) == 7
+        assert row["genotype"] is None
+        assert row["dpf_at_acquisition"] is None
+
+        raw_row = registry.conn.execute(
+            """
+            SELECT *
+            FROM detection_data_profile
+            WHERE dataset_id = ?;
+            """,
+            ("dataset_a",),
+        ).fetchone()
+        assert raw_row is not None
+        assert raw_row["recording_id"] == "recording_a"
+        assert raw_row["genotype"] == "Tg(elavl3:gcamp7f)"
+        assert int(raw_row["dpf_at_acquisition"]) == 7
+    finally:
+        registry.close()
+
+
+def test_sync_detection_profile_registry_prefers_run_attrs_for_source_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    zarr_path = tmp_path / "dataset_lineage_training.zarr"
+    zarr_path.mkdir(parents=True)
+    _seed_dataset_row(
+        registry_path,
+        dataset_id="dataset_lineage",
+        zarr_path=zarr_path,
+        zarr_use="training",
+    )
+
+    summary = _summary_payload(
+        dataset_id="dataset_lineage",
+        recording_id="summary_recording",
+        zarr_use="summary_use",
+    )
+    source = dict(summary["source"])  # type: ignore[index]
+    source["detection_path"] = "summary/detection/path"
+    source["detection_type"] = "summary_detection"
+    summary["source"] = source
+    summary["created_at_utc"] = "2026-02-12T01:00:00+00:00"
+
+    monkeypatch.setattr(sync_module, "_open_root", lambda _: object())
+    monkeypatch.setattr(
+        sync_module,
+        "_latest_profile_summary",
+        lambda _root: ("detection_profile_2026-02-12_06-00-00", summary, None),
+    )
+    monkeypatch.setattr(
+        sync_module,
+        "_load_profile_run_attrs",
+        lambda _root, _profile_run: {
+            "created_at_utc": "2026-02-12T06:00:00+00:00",
+            "source_recording_id": "attrs_recording",
+            "source_zarr_use": "attrs_use",
+            "source_detection_path": "refined_detect_runs/refined_detect_attrs/manual",
+            "source_detection_type": "manual",
+        },
+    )
+
+    rc = sync_module.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--dataset-id",
+            "dataset_lineage",
+            "--apply",
+        ]
+    )
+    assert rc == 0
+
+    registry = Registry(registry_path)
+    try:
+        rows = registry.query_detection_data_profile_latest(dataset_ids=["dataset_lineage"])
+        assert len(rows) == 1
+        row = dict(rows[0])
+        assert row["detection_type"] == "manual"
+        assert row["detection_path"] == "refined_detect_runs/refined_detect_attrs/manual"
+
+        raw_row = registry.conn.execute(
+            """
+            SELECT *
+            FROM detection_data_profile
+            WHERE dataset_id = ?;
+            """,
+            ("dataset_lineage",),
+        ).fetchone()
+        assert raw_row is not None
+        assert raw_row["recording_id"] == "attrs_recording"
+        assert raw_row["zarr_use"] == "attrs_use"
+        assert raw_row["profile_created_utc"] == "2026-02-12T06:00:00+00:00"
+        assert raw_row["detection_type"] == "manual"
+        assert raw_row["detection_path"] == "refined_detect_runs/refined_detect_attrs/manual"
     finally:
         registry.close()
 
@@ -287,8 +380,20 @@ def test_sync_detection_profile_registry_falls_back_to_provenance_subject_fields
         rows = registry.query_detection_data_profile_latest(dataset_ids=["dataset_d"])
         assert len(rows) == 1
         row = dict(rows[0])
-        assert row["genotype"] == "Tg(test:line)"
-        assert int(row["dpf_at_acquisition"]) == 9
+        assert row["genotype"] is None
+        assert row["dpf_at_acquisition"] is None
+
+        raw_row = registry.conn.execute(
+            """
+            SELECT *
+            FROM detection_data_profile
+            WHERE dataset_id = ?;
+            """,
+            ("dataset_d",),
+        ).fetchone()
+        assert raw_row is not None
+        assert raw_row["genotype"] is None
+        assert raw_row["dpf_at_acquisition"] is None
     finally:
         registry.close()
 

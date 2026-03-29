@@ -189,7 +189,7 @@ def test_sync_eye_mask_profile_registry_apply_upserts_latest_row(
         row = dict(rows[0])
         assert row["dataset_id"] == "dataset_a"
         assert row["profile_run"] == "eye_mask_profile_2026-02-25_03-00-00"
-        assert row["recording_id"] == "recording_a"
+        assert row["recording_id"] == "dataset_a_recording"
         assert row["zarr_use"] == "training"
         assert row["stage_group"] == "refined_eye_masks_runs"
         assert row["eye_mask_method"] == "traditional"
@@ -200,8 +200,123 @@ def test_sync_eye_mask_profile_registry_apply_upserts_latest_row(
         assert row["union_area_p50"] == pytest.approx(390.0)
         assert row["area_lr_ratio_p50"] == pytest.approx(0.97)
         assert row["source_keypoint_stale_state"] == "fresh"
-        assert row["genotype"] == "Tg(elavl3:gcamp7f)"
-        assert int(row["dpf_at_acquisition"]) == 7
+        assert row["genotype"] is None
+        assert row["dpf_at_acquisition"] is None
+
+        raw_row = registry.conn.execute(
+            """
+            SELECT *
+            FROM eye_mask_data_profile
+            WHERE dataset_id = ?;
+            """,
+            ("dataset_a",),
+        ).fetchone()
+        assert raw_row is not None
+        assert raw_row["recording_id"] == "recording_a"
+        assert raw_row["genotype"] == "Tg(elavl3:gcamp7f)"
+        assert int(raw_row["dpf_at_acquisition"]) == 7
+    finally:
+        registry.close()
+
+
+def test_sync_eye_mask_profile_registry_prefers_run_attrs_for_source_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    zarr_path = tmp_path / "dataset_lineage_training.zarr"
+    zarr_path.mkdir(parents=True)
+    _seed_dataset_row(
+        registry_path,
+        dataset_id="dataset_lineage",
+        zarr_path=zarr_path,
+        zarr_use="training",
+    )
+
+    summary = _summary_payload(
+        dataset_id="dataset_lineage",
+        recording_id="summary_recording",
+        zarr_use="summary_use",
+    )
+    source = dict(summary["source"])  # type: ignore[index]
+    source["stage_group"] = "summary_stage_group"
+    source["eye_mask_path"] = "summary/eye_mask/path"
+    source["eye_mask_run"] = "summary_eye_run"
+    source["eye_mask_method"] = "summary_method"
+    source["source_keypoint_path"] = "summary/keypoint/path"
+    source["source_keypoint_run"] = "summary_keypoint_run"
+    source["source_crop_run"] = "summary_crop_run"
+    summary["source"] = source
+    summary["created_at_utc"] = "2026-02-25T01:00:00+00:00"
+
+    monkeypatch.setattr(sync_module, "_open_root", lambda _: object())
+    monkeypatch.setattr(
+        sync_module,
+        "_latest_profile_summary",
+        lambda _root: ("eye_mask_profile_2026-02-25_06-00-00", summary, None),
+    )
+    monkeypatch.setattr(
+        sync_module,
+        "_load_profile_run_attrs",
+        lambda _root, _profile_run: {
+            "created_at_utc": "2026-02-25T06:00:00+00:00",
+            "source_recording_id": "attrs_recording",
+            "source_zarr_use": "attrs_use",
+            "source_stage_group": "refined_eye_masks_runs",
+            "source_eye_mask_path": "refined_eye_masks_runs/refined_eye_masks_attrs",
+            "source_eye_mask_run": "refined_eye_masks_attrs",
+            "source_eye_mask_method": "traditional",
+            "source_keypoint_path": "refined_keypoints_runs/refined_keypoints_attrs",
+            "source_keypoints_run": "refined_keypoints_attrs",
+            "source_crop_run": "crop_attrs",
+        },
+    )
+
+    rc = sync_module.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--dataset-id",
+            "dataset_lineage",
+            "--apply",
+        ]
+    )
+    assert rc == 0
+
+    registry = Registry(registry_path)
+    try:
+        rows = registry.query_eye_mask_data_profile_latest(dataset_ids=["dataset_lineage"])
+        assert len(rows) == 1
+        row = dict(rows[0])
+        assert row["stage_group"] == "refined_eye_masks_runs"
+        assert row["eye_mask_method"] == "traditional"
+        assert row["source_eye_mask_path"] == "refined_eye_masks_runs/refined_eye_masks_attrs"
+        assert row["source_eye_mask_run"] == "refined_eye_masks_attrs"
+        assert row["source_keypoint_path"] == "refined_keypoints_runs/refined_keypoints_attrs"
+        assert row["source_keypoint_run"] == "refined_keypoints_attrs"
+        assert row["source_crop_run"] == "crop_attrs"
+        assert row["source_keypoint_stale_state"] == "fresh"
+
+        raw_row = registry.conn.execute(
+            """
+            SELECT *
+            FROM eye_mask_data_profile
+            WHERE dataset_id = ?;
+            """,
+            ("dataset_lineage",),
+        ).fetchone()
+        assert raw_row is not None
+        assert raw_row["recording_id"] == "attrs_recording"
+        assert raw_row["zarr_use"] == "attrs_use"
+        assert raw_row["profile_created_utc"] == "2026-02-25T06:00:00+00:00"
+        assert raw_row["stage_group"] == "refined_eye_masks_runs"
+        assert raw_row["eye_mask_method"] == "traditional"
+        assert raw_row["source_eye_mask_path"] == "refined_eye_masks_runs/refined_eye_masks_attrs"
+        assert raw_row["source_eye_mask_run"] == "refined_eye_masks_attrs"
+        assert raw_row["source_keypoint_path"] == "refined_keypoints_runs/refined_keypoints_attrs"
+        assert raw_row["source_keypoint_run"] == "refined_keypoints_attrs"
+        assert raw_row["source_crop_run"] == "crop_attrs"
+        assert raw_row["source_keypoint_stale_state"] == "fresh"
     finally:
         registry.close()
 
@@ -407,8 +522,20 @@ def test_sync_eye_mask_profile_registry_falls_back_to_provenance_subject_fields(
         rows = registry.query_eye_mask_data_profile_latest(dataset_ids=["dataset_e"])
         assert len(rows) == 1
         row = dict(rows[0])
-        assert row["genotype"] == "Tg(test:line)"
-        assert int(row["dpf_at_acquisition"]) == 9
+        assert row["genotype"] is None
+        assert row["dpf_at_acquisition"] is None
+
+        raw_row = registry.conn.execute(
+            """
+            SELECT *
+            FROM eye_mask_data_profile
+            WHERE dataset_id = ?;
+            """,
+            ("dataset_e",),
+        ).fetchone()
+        assert raw_row is not None
+        assert raw_row["genotype"] is None
+        assert raw_row["dpf_at_acquisition"] is None
     finally:
         registry.close()
 

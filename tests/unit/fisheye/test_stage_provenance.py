@@ -122,6 +122,7 @@ def test_write_stage_provenance_writes_top_level_git_by_default() -> None:
     write_stage_provenance(group, payload)
 
     assert group.attrs["provenance"]["contract"]["name"] == STAGE_PROVENANCE_CONTRACT_NAME
+    assert group.attrs["created_at_utc"] == "2026-02-20T00:00:00+00:00"
     assert group.attrs["git_commit"] == "e" * 40
     assert group.attrs["git_branch"] == "main"
 
@@ -139,5 +140,21 @@ def test_write_stage_provenance_can_skip_top_level_git_mirror() -> None:
     write_stage_provenance(group, payload, include_top_level_git=False)
 
     assert "provenance" in group.attrs
+    assert group.attrs["created_at_utc"] == "2026-02-20T00:00:00+00:00"
     assert "git_commit" not in group.attrs
     assert "git_branch" not in group.attrs
+
+
+def test_write_stage_provenance_overwrites_stale_created_at_utc_with_canonical_payload() -> None:
+    group = _FakeGroup()
+    group.attrs["created_at_utc"] = "2026-02-19T00:00:00+00:00"
+    payload = build_stage_provenance(
+        stage="eye_masks",
+        created_at_utc="2026-02-20T00:00:00+00:00",
+        parameters={"method": "traditional_eye_segmentation"},
+        inputs={"source_crop_run": "crop_001"},
+    )
+
+    write_stage_provenance(group, payload)
+
+    assert group.attrs["created_at_utc"] == "2026-02-20T00:00:00+00:00"

@@ -187,6 +187,9 @@ def write_stage_provenance(
     """Write canonical stage provenance and optional top-level git attrs."""
     normalized = get_stage_provenance({"provenance": dict(payload)})
     run_group.attrs["provenance"] = normalized
+    created_at_utc = normalized.get("created_at_utc")
+    if created_at_utc is not None:
+        run_group.attrs["created_at_utc"] = created_at_utc
 
     if not include_top_level_git:
         return

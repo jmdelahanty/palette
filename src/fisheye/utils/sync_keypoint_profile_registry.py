@@ -145,6 +145,24 @@ def _latest_profile_summary(root: zarr.Group) -> tuple[Optional[str], Optional[d
     return run_name, summary, None
 
 
+def _load_profile_run_attrs(root: zarr.Group, profile_run: Optional[str]) -> dict[str, Any]:
+    if profile_run is None:
+        return {}
+    try:
+        analysis = _get_group(root, "analysis")
+        if analysis is None:
+            return {}
+        runs_parent = _get_group(analysis, "keypoint_profile_runs")
+        if runs_parent is None:
+            return {}
+        run_group = _get_group(runs_parent, str(profile_run))
+        if run_group is None:
+            return {}
+        return dict(run_group.attrs)
+    except Exception:
+        return {}
+
+
 def _geometry_percentile(
     geometry: Mapping[str, Any],
     *,
@@ -169,6 +187,7 @@ def _build_profile_payload(
     fallback_dpf_at_acquisition: Optional[int],
     profile_run: str,
     summary: Mapping[str, Any],
+    run_attrs: Optional[Mapping[str, Any]],
     zarr_path: Path,
 ) -> dict[str, Any]:
     dataset = summary.get("dataset")
@@ -182,6 +201,7 @@ def _build_profile_payload(
     quality_map = dict(quality) if isinstance(quality, Mapping) else {}
     geometry_map = dict(geometry) if isinstance(geometry, Mapping) else {}
     composition_map = dict(composition) if isinstance(composition, Mapping) else {}
+    run_attrs_map = dict(run_attrs) if isinstance(run_attrs, Mapping) else {}
 
     try:
         zarr_mtime_ns = int(zarr_path.stat().st_mtime_ns)
@@ -195,14 +215,41 @@ def _build_profile_payload(
     return {
         "dataset_id": dataset_id,
         "profile_run": profile_run,
-        "recording_id": _normalize_text(dataset_map.get("recording_id")) or fallback_recording_id,
-        "zarr_use": _normalize_text(dataset_map.get("zarr_use")) or fallback_zarr_use,
-        "keypoint_method": _normalize_text(source_map.get("keypoint_method")),
-        "source_keypoint_path": _normalize_text(source_map.get("keypoint_path")),
-        "source_keypoint_run": _normalize_text(source_map.get("keypoint_run")),
-        "skeleton_id": _normalize_text(source_map.get("skeleton_id")),
-        "kpt_shape": _to_kpt_shape_text(source_map.get("kpt_shape")),
-        "profile_created_utc": _normalize_text(summary.get("created_at_utc")),
+        "recording_id": (
+            _normalize_text(run_attrs_map.get("source_recording_id"))
+            or _normalize_text(dataset_map.get("recording_id"))
+            or fallback_recording_id
+        ),
+        "zarr_use": (
+            _normalize_text(run_attrs_map.get("source_zarr_use"))
+            or _normalize_text(dataset_map.get("zarr_use"))
+            or fallback_zarr_use
+        ),
+        "keypoint_method": (
+            _normalize_text(run_attrs_map.get("source_keypoint_method"))
+            or _normalize_text(source_map.get("keypoint_method"))
+        ),
+        "source_keypoint_path": (
+            _normalize_text(run_attrs_map.get("source_keypoint_path"))
+            or _normalize_text(source_map.get("keypoint_path"))
+        ),
+        "source_keypoint_run": (
+            _normalize_text(run_attrs_map.get("source_keypoint_run"))
+            or _normalize_text(source_map.get("keypoint_run"))
+        ),
+        "skeleton_id": (
+            _normalize_text(run_attrs_map.get("source_skeleton_id"))
+            or _normalize_text(source_map.get("skeleton_id"))
+        ),
+        "kpt_shape": _to_kpt_shape_text(
+            run_attrs_map.get("source_kpt_shape")
+            if run_attrs_map.get("source_kpt_shape") is not None
+            else source_map.get("kpt_shape")
+        ),
+        "profile_created_utc": (
+            _normalize_text(run_attrs_map.get("created_at_utc"))
+            or _normalize_text(summary.get("created_at_utc"))
+        ),
         "rows_total": _as_int(quality_map.get("rows_total")),
         "rows_usable": _as_int(quality_map.get("rows_usable")),
         "usable_keypoints_total": _as_int(quality_map.get("usable_keypoints_total")),
@@ -403,6 +450,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     fallback_dpf_at_acquisition=_as_int(row.get("dpf_at_acquisition")),
                     profile_run=str(profile_run),
                     summary=summary,
+                    run_attrs=_load_profile_run_attrs(root, profile_run),
                     zarr_path=zarr_path,
                 )
                 if args.apply:

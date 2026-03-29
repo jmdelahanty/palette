@@ -131,6 +131,24 @@ def _latest_profile_summary(root: zarr.Group) -> tuple[Optional[str], Optional[d
     return run_name, summary, None
 
 
+def _load_profile_run_attrs(root: zarr.Group, profile_run: Optional[str]) -> dict[str, Any]:
+    if profile_run is None:
+        return {}
+    try:
+        analysis = _get_group(root, "analysis")
+        if analysis is None:
+            return {}
+        runs_parent = _get_group(analysis, "detection_profile_runs")
+        if runs_parent is None:
+            return {}
+        run_group = _get_group(runs_parent, str(profile_run))
+        if run_group is None:
+            return {}
+        return dict(run_group.attrs)
+    except Exception:
+        return {}
+
+
 def _geometry_percentile(
     geometry: Mapping[str, Any],
     *,
@@ -152,6 +170,7 @@ def _build_profile_payload(
     fallback_dpf_at_acquisition: Optional[int],
     profile_run: str,
     summary: Mapping[str, Any],
+    run_attrs: Optional[Mapping[str, Any]],
     zarr_path: Path,
 ) -> dict[str, Any]:
     dataset = summary.get("dataset")
@@ -169,6 +188,7 @@ def _build_profile_payload(
     geometry_map = dict(geometry) if isinstance(geometry, Mapping) else {}
     spatial_map = dict(spatial) if isinstance(spatial, Mapping) else {}
     composition_map = dict(composition) if isinstance(composition, Mapping) else {}
+    run_attrs_map = dict(run_attrs) if isinstance(run_attrs, Mapping) else {}
     detections_per_frame = counts_map.get("detections_per_frame")
     detections_per_frame_map = dict(detections_per_frame) if isinstance(detections_per_frame, Mapping) else {}
 
@@ -184,11 +204,28 @@ def _build_profile_payload(
     return {
         "dataset_id": dataset_id,
         "profile_run": profile_run,
-        "recording_id": _normalize_text(dataset_map.get("recording_id")) or fallback_recording_id,
-        "zarr_use": _normalize_text(dataset_map.get("zarr_use")) or fallback_zarr_use,
-        "detection_type": _normalize_text(source_map.get("detection_type")),
-        "detection_path": _normalize_text(source_map.get("detection_path")),
-        "profile_created_utc": _normalize_text(summary.get("created_at_utc")),
+        "recording_id": (
+            _normalize_text(run_attrs_map.get("source_recording_id"))
+            or _normalize_text(dataset_map.get("recording_id"))
+            or fallback_recording_id
+        ),
+        "zarr_use": (
+            _normalize_text(run_attrs_map.get("source_zarr_use"))
+            or _normalize_text(dataset_map.get("zarr_use"))
+            or fallback_zarr_use
+        ),
+        "detection_type": (
+            _normalize_text(run_attrs_map.get("source_detection_type"))
+            or _normalize_text(source_map.get("detection_type"))
+        ),
+        "detection_path": (
+            _normalize_text(run_attrs_map.get("source_detection_path"))
+            or _normalize_text(source_map.get("detection_path"))
+        ),
+        "profile_created_utc": (
+            _normalize_text(run_attrs_map.get("created_at_utc"))
+            or _normalize_text(summary.get("created_at_utc"))
+        ),
         "frames_total": _as_int(coverage_map.get("frames_total")),
         "frames_with_detections": _as_int(coverage_map.get("frames_with_detections")),
         "coverage_percent": _as_float(coverage_map.get("coverage_percent")),
@@ -357,6 +394,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     fallback_dpf_at_acquisition=_as_int(row.get("dpf_at_acquisition")),
                     profile_run=str(profile_run),
                     summary=summary,
+                    run_attrs=_load_profile_run_attrs(root, profile_run),
                     zarr_path=zarr_path,
                 )
                 if args.apply:
