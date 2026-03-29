@@ -3,7 +3,7 @@
 Add or update experiment setup metadata in a Zarr file.
 
 This tool allows you to specify the number of dishes and expected fish
-per dish for an experiment. This metadata is used by the assign_ids stage
+per dish for an experiment. This metadata is used by the arena assignment stage
 to automatically determine whether to use single-dish or multi-dish tracking.
 
 Usage:
@@ -117,13 +117,13 @@ def configure_setup(zarr_path: str, num_dishes: int, fish_per_dish: int,
         # Show next steps
         if setup_type == 'single_dish':
             console.print("\n[cyan]Next steps:[/cyan]")
-            console.print("  - The assign_ids stage will automatically use the dish mask as a single ROI")
+            console.print("  - The arena assignment stage will automatically use the dish mask as a single ROI")
             console.print("  - No need to run subdish mask tuner")
         else:
             console.print("\n[cyan]Next steps:[/cyan]")
             console.print("  1. Run the subdish mask tuner:")
             console.print(f"     python -m fisheye {zarr_path} --tune subdish")
-            console.print("  2. Then run assign_ids stage:")
+            console.print("  2. Then run the arena assignment stage:")
             console.print(f"     python tracker.py {zarr_path} --stage assign_ids")
         
         return True

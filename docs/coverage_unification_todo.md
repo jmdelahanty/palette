@@ -34,7 +34,7 @@ stage-specific attributes.
 - Crops: `tracking/crop.py`
 - Keypoints: `detect_keypoints_traditional.py`, `refine_keypoints.py`
 - Eye masks: `refine_eye_masks.py` (and any mask review/tune step)
-- Tracking: `tracking/assign_ids.py` (optional if track coverage is needed)
+- Tracking: `tracking/arena_assignment.py` (optional if track coverage is needed)
 
 ## Current keypoints coverage/success attrs (for reference)
 
@@ -90,7 +90,7 @@ stage-specific attributes.
 - `diagnostics/crop_dry_run.py`
 - `utils/zarr_inspector.py`
 - Visualization: `visualize_refined_detections.py`, `visualize_detect_quality.py`,
-  `visualize_online_movement.py`
+  `visualize_online_tracking.py`
   - `visualize_refined_detections.py` now supports manual-stage display when
     present and a non-interactive `render_refinement_pipeline_png(...)` helper
     used by finalized artifact generation.

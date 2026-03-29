@@ -5,7 +5,7 @@ Regenerate ROI crops for interpolated detections in a refined detection run.
 This script reads `refined_detect_runs/<run>/interpolated`, identifies detections
 marked as interpolated (`detection_source == 1`), and crops the corresponding
 regions from `raw_video/images_full`. The regenerated crops are stored alongside
-the refined run so downstream stages (keypoints, ID assignment, etc.) can prefer
+the refined run so downstream stages (keypoints, arena assignment, etc.) can prefer
 them over the original false-positive crops.
 """
 
