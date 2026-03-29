@@ -5,6 +5,8 @@ from typing import Iterable, Optional
 
 import zarr
 
+from .type_conversions import normalize_attr as _normalize_attr
+
 
 DEFAULT_DETECT_GROUP_PREFERENCE = ("manual", "interpolated", "filtered", "raw")
 
@@ -14,15 +16,6 @@ class RefinedDetectResolution:
     label: Optional[str]
     group: Optional[str]
     source_detect_run: Optional[str]
-
-
-def _normalize_attr(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "ignore")
-    text = str(value).strip()
-    return text or None
 
 
 def resolve_refined_detect_group(

@@ -27,6 +27,7 @@ from rich.console import Console
 from rich.table import Table
 
 from fisheye.analysis.chaser_state_interpolator import load_structured_dataset
+from fisheye.shared.zarr_helpers import resolve_zarr_run
 
 
 @dataclass(frozen=True)
@@ -55,29 +56,6 @@ def _pick_field(names: Sequence[str], candidates: Iterable[str]) -> Optional[str
 def _as_float(array: np.ndarray) -> np.ndarray:
     """Convert to float64 for stable math while preserving mask semantics."""
     return np.asarray(array, dtype=np.float64)
-
-
-def _resolve_stimulus_run(root: zarr.Group, run_name: Optional[str]) -> Tuple[str, zarr.Group]:
-    """Resolve the analysis/stimulus_runs entry to inspect."""
-    if "analysis" not in root or "stimulus_runs" not in root["analysis"]:
-        raise ValueError("analysis/stimulus_runs group not found in archive.")
-    runs_group = root["analysis/stimulus_runs"]
-    if run_name:
-        if run_name not in runs_group:
-            raise ValueError(f"Run '{run_name}' not found under analysis/stimulus_runs.")
-        return run_name, runs_group[run_name]
-
-    latest = runs_group.attrs.get("latest")
-    if isinstance(latest, bytes):
-        latest = latest.decode("utf-8", errors="ignore")
-    if isinstance(latest, str) and latest in runs_group:
-        return latest, runs_group[latest]
-
-    # Fall back to alphabetical ordering if latest is unavailable.
-    available = sorted(runs_group.group_keys())
-    if not available:
-        raise ValueError("analysis/stimulus_runs is empty; specify --run explicitly.")
-    return available[-1], runs_group[available[-1]]
 
 
 def _load_bounding_boxes(run_group: zarr.Group) -> np.ndarray:
@@ -248,7 +226,13 @@ def main() -> None:
     console = Console()
 
     root = zarr.open(str(args.zarr_path), mode="r")
-    run_name, run_group = _resolve_stimulus_run(root, args.run_name)
+    run_group, run_name = resolve_zarr_run(
+        root,
+        ("analysis", "stimulus_runs"),
+        args.run_name,
+        fallback_to_sorted="last",
+        run_label="Stimulus run",
+    )
     bboxes = _load_bounding_boxes(run_group)
     if bboxes.size == 0:
         console.print(f"[yellow]bounding_boxes dataset is empty for run '{run_name}'.[/yellow]")
