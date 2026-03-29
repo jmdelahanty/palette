@@ -8,6 +8,7 @@ an ASCII tree of the proposed folder layout.
 """
 
 import argparse
+import csv
 import json
 import os
 import re
@@ -87,6 +88,14 @@ def _derive_camera_id(ipc_source_name: object) -> Optional[str]:
     if match:
         return match.group(1)
     digits = re.findall(r"\d+", text)
+    return digits[-1] if digits else None
+
+
+def _derive_camera_id_from_path(path: Path) -> Optional[str]:
+    match = re.search(r"Cam(\d+)", path.name, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+    digits = re.findall(r"\d+", path.stem)
     return digits[-1] if digits else None
 
 
@@ -203,6 +212,156 @@ def _unique_planned(files: List[PlannedFile]) -> List[PlannedFile]:
         seen.add(planned.source)
         unique.append(planned)
     return unique
+
+
+def _resolve_video_only_source_path(
+    raw_value: str,
+    *,
+    source_root: Path,
+    metadata_csv_path: Path,
+) -> Path:
+    candidate = Path(raw_value).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+
+    source_candidate = (source_root / candidate).resolve()
+    if source_candidate.exists():
+        return source_candidate
+
+    csv_candidate = (metadata_csv_path.parent / candidate).resolve()
+    if csv_candidate.exists():
+        return csv_candidate
+
+    return source_candidate
+
+
+def _load_video_only_rows(
+    metadata_csv_path: Path,
+    *,
+    source_root: Path,
+) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    with metadata_csv_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for raw_row in reader:
+            if not raw_row:
+                continue
+            row = {
+                str(key).strip(): str(value).strip()
+                for key, value in raw_row.items()
+                if key is not None and value is not None and str(value).strip()
+            }
+            if not row:
+                continue
+
+            source_video_raw = (
+                row.get("source_video")
+                or row.get("video_path")
+                or row.get("camera_video")
+            )
+            if not source_video_raw:
+                raise ValueError(
+                    f"Metadata CSV row is missing source_video/video_path/camera_video: {raw_row}"
+                )
+            source_video = _resolve_video_only_source_path(
+                source_video_raw,
+                source_root=source_root,
+                metadata_csv_path=metadata_csv_path,
+            )
+            row["source_video"] = str(source_video)
+
+            optional_camera_csv = (
+                row.get("source_camera_metadata_csv")
+                or row.get("camera_metadata_csv")
+            )
+            if optional_camera_csv:
+                resolved_csv = _resolve_video_only_source_path(
+                    optional_camera_csv,
+                    source_root=source_root,
+                    metadata_csv_path=metadata_csv_path,
+                )
+                row["source_camera_metadata_csv"] = str(resolved_csv)
+
+            rows.append(row)
+    return rows
+
+
+def _build_video_only_plan(
+    row: Dict[str, str],
+    *,
+    dest_root: Path,
+    rename_cams: bool,
+) -> RecordingPlan:
+    video_path = Path(row["source_video"]).expanduser().resolve()
+    camera_id = row.get("camera_id") or _derive_camera_id_from_path(video_path)
+    session_uuid = row.get("session_uuid") or row.get("recording_id") or video_path.stem
+    recording_name = row.get("recording_name") or session_uuid or video_path.stem
+    folder_name = _sanitize_for_filename(recording_name)
+    dest_dir = dest_root / folder_name
+
+    session_tag = _sanitize_for_filename(session_uuid)
+    if rename_cams and camera_id:
+        cam_base = f"Cam{camera_id}_{session_tag}"
+        video_dest_name = f"{cam_base}{video_path.suffix.lower() or '.mp4'}"
+    else:
+        video_dest_name = video_path.name
+    cam_files = [PlannedFile(video_path, video_dest_name)]
+    optional_camera_csv = row.get("source_camera_metadata_csv")
+    if optional_camera_csv:
+        camera_csv_path = Path(optional_camera_csv).expanduser().resolve()
+        if rename_cams and camera_id:
+            cam_files.append(PlannedFile(camera_csv_path, f"Cam{camera_id}_{session_tag}_meta.csv"))
+        else:
+            cam_files.append(PlannedFile(camera_csv_path, camera_csv_path.name))
+
+    meta: Dict[str, str] = {
+        "session_uuid": session_uuid,
+        "recording_id": row.get("recording_id") or session_uuid,
+        "recording_name": recording_name,
+        "recording_type": row.get("recording_type") or "behavior",
+        "recording_subtype": row.get("recording_subtype") or "free",
+        "behavior_mode": row.get("behavior_mode") or "free",
+        "artifact_schema_id": row.get("artifact_schema_id") or "video_only_v1",
+    }
+    for key in (
+        "session_start_iso8601_utc",
+        "dish_design",
+        "rig_id",
+        "arena_id",
+        "camera_id",
+        "canvas_name",
+        "protocol_name",
+        "protocol_name_from_definition",
+        "genotype",
+        "dpf_at_acquisition",
+        "num_dishes",
+        "fish_per_dish",
+    ):
+        value = row.get(key)
+        if value:
+            meta[key] = value
+    if "protocol_name_from_definition" not in meta and row.get("protocol_name"):
+        meta["protocol_name_from_definition"] = row["protocol_name"]
+    if camera_id and "camera_id" not in meta:
+        meta["camera_id"] = str(camera_id)
+
+    missing: List[str] = []
+    if not video_path.exists():
+        missing.append(video_path.name)
+    if not row.get("dish_design"):
+        missing.append("dish_design (missing in metadata CSV)")
+
+    return RecordingPlan(
+        name=folder_name,
+        source_dir=video_path.parent,
+        dest_dir=dest_dir,
+        raw_files=[],
+        cam_files=_unique_planned(cam_files),
+        derived_files=[],
+        camera_id=str(camera_id) if camera_id else None,
+        meta=meta,
+        missing=missing,
+    )
 
 
 def _choose_session_tag(meta: Dict[str, str], h5_path: Path) -> str:
@@ -782,6 +941,17 @@ def main() -> int:
         action="store_true",
         help="Write recording_manifest.json into each recording folder during --apply.",
     )
+    parser.add_argument(
+        "--video-only",
+        action="store_true",
+        help="Organize MP4-only recordings using metadata from --metadata-csv instead of H5 discovery.",
+    )
+    parser.add_argument(
+        "--metadata-csv",
+        type=Path,
+        default=None,
+        help="CSV describing video-only recordings. Required with --video-only.",
+    )
 
     args = parser.parse_args()
 
@@ -792,6 +962,17 @@ def main() -> int:
     if not source.exists():
         print(f"Source path does not exist: {source}", file=sys.stderr)
         return 1
+
+    if args.video_only:
+        if args.metadata_csv is None:
+            print("--metadata-csv is required with --video-only.", file=sys.stderr)
+            return 1
+        if args.process_all:
+            print("--process-all is not supported with --video-only.", file=sys.stderr)
+            return 1
+        if args.require_done:
+            print("--require-done is not supported with --video-only.", file=sys.stderr)
+            return 1
 
     if args.process_all:
         sources = sorted([path for path in source.iterdir() if path.is_dir()])
@@ -853,47 +1034,60 @@ def main() -> int:
                     )
                 continue
 
-        h5_files = _find_h5_files(source_path, args.recursive)
-        if not h5_files:
-            print(f"No .h5 files found in {source_path}.")
-            if not args.recursive:
-                print("Hint: use --recursive if H5 files live in subfolders.")
-            continue
-
-        cam_root = args.cam_root
-        if cam_root is None and args.recursive:
-            cam_root = source_path
-
         snapshot_payload: Optional[Dict[str, object]] = None
-        snapshot_path: Optional[Path] = args.snapshot
-        if snapshot_path is None:
-            default_json = source_path / "recording_snapshot.json"
-            default_plain = source_path / "recording_snapshot"
-            if default_json.exists():
-                snapshot_path = default_json
-            elif default_plain.exists():
-                snapshot_path = default_plain
+        plans: List[RecordingPlan]
+        if args.video_only:
+            try:
+                rows = _load_video_only_rows(args.metadata_csv.expanduser().resolve(), source_root=source_path)
+            except Exception as exc:
+                print(f"Failed to read metadata CSV: {exc}", file=sys.stderr)
+                return 1
+            plans = [
+                _build_video_only_plan(row, dest_root=args.dest_root, rename_cams=args.rename_cams)
+                for row in rows
+            ]
+            print(f"Found {len(plans)} video-only recording(s) from metadata CSV.")
+        else:
+            h5_files = _find_h5_files(source_path, args.recursive)
+            if not h5_files:
+                print(f"No .h5 files found in {source_path}.")
+                if not args.recursive:
+                    print("Hint: use --recursive if H5 files live in subfolders.")
+                continue
 
-        if snapshot_path is not None:
-            if not snapshot_path.exists():
-                print(f"Snapshot path does not exist: {snapshot_path}", file=sys.stderr)
-            else:
-                try:
-                    snapshot_payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
-                except Exception as exc:
-                    print(f"Failed to read snapshot JSON: {exc}", file=sys.stderr)
-                    snapshot_payload = None
+            cam_root = args.cam_root
+            if cam_root is None and args.recursive:
+                cam_root = source_path
+
+            snapshot_path: Optional[Path] = args.snapshot
+            if snapshot_path is None:
+                default_json = source_path / "recording_snapshot.json"
+                default_plain = source_path / "recording_snapshot"
+                if default_json.exists():
+                    snapshot_path = default_json
+                elif default_plain.exists():
+                    snapshot_path = default_plain
+
+            if snapshot_path is not None:
+                if not snapshot_path.exists():
+                    print(f"Snapshot path does not exist: {snapshot_path}", file=sys.stderr)
                 else:
-                    if not isinstance(snapshot_payload, dict):
-                        print("Snapshot JSON must be an object at the top level.", file=sys.stderr)
+                    try:
+                        snapshot_payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                    except Exception as exc:
+                        print(f"Failed to read snapshot JSON: {exc}", file=sys.stderr)
                         snapshot_payload = None
+                    else:
+                        if not isinstance(snapshot_payload, dict):
+                            print("Snapshot JSON must be an object at the top level.", file=sys.stderr)
+                            snapshot_payload = None
 
-        plans = [
-            _build_plan(h5_path, args.dest_root, cam_root, args.rename_cams)
-            for h5_path in h5_files
-        ]
+            plans = [
+                _build_plan(h5_path, args.dest_root, cam_root, args.rename_cams)
+                for h5_path in h5_files
+            ]
 
-        print(f"Found {len(plans)} H5 recording(s).")
+            print(f"Found {len(plans)} H5 recording(s).")
         for plan in plans:
             for line in _format_recording_summary(plan):
                 print(line)
