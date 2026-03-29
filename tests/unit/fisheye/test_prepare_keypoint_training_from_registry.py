@@ -98,6 +98,11 @@ def _create_minimal_pose_zarr(
     skeleton_id: str | None = "pose_skel_traditional_v1",
     kpt_shape: tuple[int, int] | None = (3, 3),
     pose_schema_name: str | None = "traditional_v1",
+    refined_run_name: str = "refined_pose_001",
+    refined_keypoint_count: int | None = None,
+    refined_skeleton_id: str | None = None,
+    refined_runtime_kpt_shape: tuple[int, int] | None = None,
+    refined_pose_schema_name: str | None = None,
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
     root.attrs["session_uuid"] = session_uuid
@@ -154,16 +159,53 @@ def _create_minimal_pose_zarr(
 
     if create_refined_run:
         refined_parent = root.create_group("refined_keypoints_runs")
-        refined_parent.attrs["latest"] = "refined_pose_001"
-        refined_group = refined_parent.create_group("refined_pose_001")
+        refined_parent.attrs["latest"] = refined_run_name
+        refined_group = refined_parent.create_group(refined_run_name)
         refined_group.attrs["source_keypoints_run"] = "kp_pose_001"
         refined_group.attrs["created_utc"] = "2026-02-07T00:00:00+00:00"
+        resolved_refined_keypoint_count = int(
+            refined_keypoint_count if refined_keypoint_count is not None else keypoint_count
+        )
+        resolved_refined_shape = (
+            refined_runtime_kpt_shape
+            if refined_runtime_kpt_shape is not None
+            else (resolved_refined_keypoint_count, 2)
+        )
+        resolved_refined_schema_name = refined_pose_schema_name or pose_schema_name
+        resolved_refined_skeleton_id = refined_skeleton_id or skeleton_id
+        refined_group.attrs["keypoint_labels"] = [
+            f"refined_kpt_{idx}" for idx in range(resolved_refined_keypoint_count)
+        ]
+        if resolved_refined_skeleton_id is not None:
+            refined_group.attrs["skeleton_id"] = resolved_refined_skeleton_id
+        if resolved_refined_shape is not None:
+            refined_group.attrs["kpt_shape"] = [
+                int(resolved_refined_shape[0]),
+                int(resolved_refined_shape[1]),
+            ]
+        if resolved_refined_schema_name is not None or resolved_refined_shape is not None:
+            refined_pose_schema_payload = {}
+            if resolved_refined_schema_name is not None:
+                refined_pose_schema_payload["name"] = str(resolved_refined_schema_name)
+            if resolved_refined_skeleton_id is not None:
+                refined_pose_schema_payload["skeleton_id"] = str(resolved_refined_skeleton_id)
+            if resolved_refined_shape is not None:
+                refined_pose_schema_payload["kpt_shape"] = [
+                    int(resolved_refined_shape[0]),
+                    int(resolved_refined_shape[1]),
+                ]
+            refined_group.attrs["pose_schema"] = refined_pose_schema_payload
         if review_state is not None or review_intended_use is not None:
             refined_group.attrs["keypoint_review_status"] = {
                 "state": review_state or "approved",
                 "intended_use": review_intended_use or "training",
                 "timestamp": "2026-02-07T00:00:00+00:00",
             }
+        refined_group.create_array(
+            "keypoints_roi",
+            data=np.zeros((keypoints_rows, resolved_refined_keypoint_count, 2), dtype=np.float32),
+            chunks=(1, resolved_refined_keypoint_count, 2),
+        )
         usable = np.array(
             [True] * max(refined_usable_rows, 0) + [False] * max(keypoints_rows - refined_usable_rows, 0),
             dtype=np.bool_,
@@ -880,3 +922,75 @@ def test_prepare_keypoint_from_registry_fails_on_mixed_skeleton_signatures(
     assert "session_pose_b" in message
     assert "skeleton_id=pose_skel_a" in message
     assert "skeleton_id=pose_skel_b" in message
+
+
+def test_prepare_keypoint_from_registry_prefers_refined_annotation_source_skeleton(
+    monkeypatch, tmp_path: Path
+) -> None:
+    zarr_path = tmp_path / "pose_sample.zarr"
+    _create_minimal_pose_zarr(
+        zarr_path,
+        keypoints_rows=4,
+        roi_rows=4,
+        success_rows=4,
+        include_success_rate=True,
+        create_refined_run=True,
+        refined_usable_rows=3,
+        review_state="approved",
+        review_intended_use="training",
+        skeleton_id="pose_skel_traditional_v1",
+        kpt_shape=(3, 3),
+        pose_schema_name="traditional_v1",
+        refined_run_name="refined_pose_v2_001",
+        refined_keypoint_count=5,
+        refined_skeleton_id="pose_skel_traditional_v2",
+        refined_runtime_kpt_shape=(5, 2),
+        refined_pose_schema_name="traditional_v2",
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_path)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    out_config = tmp_path / "pose_config.yaml"
+    out_manifest = tmp_path / "pose_manifest.json"
+    rc = wrapper.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--base-config",
+            str(base_config_path),
+            "--source-type",
+            "manual",
+            "--input-format",
+            "gray",
+            "--require-review-state",
+            "approved",
+            "--require-review-intended-use",
+            "training",
+            "--min-usable-keypoints-rate",
+            "0.70",
+            "--out-config",
+            str(out_config),
+            "--out-manifest",
+            str(out_manifest),
+        ]
+    )
+    assert rc == 0
+
+    cfg = yaml.safe_load(out_config.read_text(encoding="utf-8"))
+    assert cfg["kpt_shape"] == [5, 3]
+
+    manifest = json.loads(out_manifest.read_text(encoding="utf-8"))
+    assert manifest["pose_schema"]["skeleton_id"] == "pose_skel_traditional_v2"
+    assert manifest["pose_schema"]["kpt_shape"] == [5, 3]
+    dataset = manifest["datasets"][0]
+    assert dataset["annotation_source_kind"] == "refined"
+    assert dataset["annotation_source_parent"] == "refined_keypoints_runs"
+    assert dataset["annotation_source_run"] == "refined_pose_v2_001"
+    assert dataset["keypoints_array_path"] == "refined_keypoints_runs/refined_pose_v2_001/keypoints_roi"
+    assert dataset["detection_success_path"] == "refined_keypoints_runs/refined_pose_v2_001/usable_keypoints"
+    assert dataset["skeleton_id"] == "pose_skel_traditional_v2"
+    assert dataset["kpt_shape"] == [5, 3]

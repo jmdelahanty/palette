@@ -37,6 +37,11 @@ def _write_source_pose_zarr(
     kpt_shape: tuple[int, int] = (3, 3),
     keypoint_count: int = 3,
     refined_reasons: list[str] | None = None,
+    refined_run_name: str = "refined_kp_pose_001",
+    refined_skeleton_id: str | None = None,
+    refined_runtime_kpt_shape: tuple[int, int] | None = None,
+    refined_keypoint_count: int | None = None,
+    refined_pose_schema_name: str | None = None,
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
 
@@ -78,17 +83,45 @@ def _write_source_pose_zarr(
         data=np.array([True, True, False, True], dtype=np.bool_),
         chunks=(4,),
     )
-    if refined_reasons is not None:
+    if (
+        refined_reasons is not None
+        or refined_skeleton_id is not None
+        or refined_runtime_kpt_shape is not None
+        or refined_keypoint_count is not None
+        or refined_pose_schema_name is not None
+    ):
         refined_parent = root.create_group("refined_keypoints_runs")
-        refined_parent.attrs["latest"] = "refined_kp_pose_001"
-        refined = refined_parent.create_group("refined_kp_pose_001")
+        refined_parent.attrs["latest"] = refined_run_name
+        refined = refined_parent.create_group(refined_run_name)
         refined.attrs["source_keypoints_run"] = "kp_pose_001"
         refined.attrs["source_crop_run"] = "crop_pose_001"
         refined.attrs["created_utc"] = "2026-02-27T00:00:00+00:00"
+        resolved_refined_keypoint_count = int(
+            refined_keypoint_count if refined_keypoint_count is not None else keypoint_count
+        )
+        resolved_refined_shape = (
+            refined_runtime_kpt_shape
+            if refined_runtime_kpt_shape is not None
+            else (resolved_refined_keypoint_count, 2)
+        )
+        resolved_refined_skeleton_id = refined_skeleton_id or skeleton_id
+        resolved_refined_schema_name = (
+            refined_pose_schema_name or f"{resolved_refined_skeleton_id}_schema"
+        )
+        refined.attrs["skeleton_id"] = resolved_refined_skeleton_id
+        refined.attrs["kpt_shape"] = [int(resolved_refined_shape[0]), int(resolved_refined_shape[1])]
+        refined.attrs["pose_schema"] = {
+            "name": resolved_refined_schema_name,
+            "skeleton_id": resolved_refined_skeleton_id,
+            "kpt_shape": [int(resolved_refined_shape[0]), int(resolved_refined_shape[1])],
+        }
+        refined.attrs["keypoint_labels"] = [
+            f"refined_kpt_{idx}" for idx in range(resolved_refined_keypoint_count)
+        ]
         refined.create_array(
             "keypoints_roi",
-            data=np.zeros((4, int(keypoint_count), 2), dtype=np.float32),
-            chunks=(4, int(keypoint_count), 2),
+            data=np.zeros((4, resolved_refined_keypoint_count, 2), dtype=np.float32),
+            chunks=(4, resolved_refined_keypoint_count, 2),
         )
         refined.create_array(
             "usable_keypoints",
@@ -215,6 +248,44 @@ def test_discover_merge_sources_raw_success_plus_box_only_includes_tagged_rows(t
     assert spec.row_gate_box_only_selected == 1
     assert spec.box_only_selected_mask is not None
     assert spec.box_only_selected_mask.tolist() == [False, False, True, False]
+
+
+def test_discover_merge_sources_prefers_refined_annotation_skeleton_identity(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "source_refined_v2.zarr"
+    _write_source_pose_zarr(
+        zarr_path,
+        skeleton_id="pose_skel_traditional_v1",
+        kpt_shape=(3, 3),
+        keypoint_count=3,
+        refined_run_name="refined_kp_pose_v2_001",
+        refined_skeleton_id="pose_skel_traditional_v2",
+        refined_runtime_kpt_shape=(5, 2),
+        refined_keypoint_count=5,
+        refined_pose_schema_name="traditional_v2",
+    )
+    manifest = _manifest_for_single_source(zarr_path)
+    manifest["pose_schema"] = {
+        "skeleton_id": "pose_skel_traditional_v2",
+        "kpt_shape": [5, 3],
+    }
+    manifest["datasets"][0]["refined_keypoint_run"] = "refined_kp_pose_v2_001"
+
+    specs, layout = _discover_merge_sources(
+        manifest,
+        expected_input_format="gray",
+        row_gate_policy="auto",
+    )
+
+    assert len(specs) == 1
+    spec = specs[0]
+    assert spec.row_gate_policy == "refined_usable"
+    assert spec.row_gate_refined_run == "refined_kp_pose_v2_001"
+    assert spec.keypoints_path == "refined_keypoints_runs/refined_kp_pose_v2_001/keypoints_roi"
+    assert spec.success_path == "refined_keypoints_runs/refined_kp_pose_v2_001/usable_keypoints"
+    assert spec.skeleton_id == "pose_skel_traditional_v2"
+    assert spec.kpt_shape == (5, 3)
+    assert layout["skeleton_id"] == "pose_skel_traditional_v2"
+    assert tuple(layout["kpt_shape"]) == (5, 3)
 
 
 def _write_min_manifest(path: Path, *, set_id: str = "pose_set_v001") -> None:
