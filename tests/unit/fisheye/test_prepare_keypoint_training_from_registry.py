@@ -986,6 +986,13 @@ def test_prepare_keypoint_from_registry_prefers_refined_annotation_source_skelet
     manifest = json.loads(out_manifest.read_text(encoding="utf-8"))
     assert manifest["pose_schema"]["skeleton_id"] == "pose_skel_traditional_v2"
     assert manifest["pose_schema"]["kpt_shape"] == [5, 3]
+    assert manifest["pose_schema"]["keypoint_labels"] == [
+        "refined_kpt_0",
+        "refined_kpt_1",
+        "refined_kpt_2",
+        "refined_kpt_3",
+        "refined_kpt_4",
+    ]
     dataset = manifest["datasets"][0]
     assert dataset["annotation_source_kind"] == "refined"
     assert dataset["annotation_source_parent"] == "refined_keypoints_runs"
@@ -994,3 +1001,92 @@ def test_prepare_keypoint_from_registry_prefers_refined_annotation_source_skelet
     assert dataset["detection_success_path"] == "refined_keypoints_runs/refined_pose_v2_001/usable_keypoints"
     assert dataset["skeleton_id"] == "pose_skel_traditional_v2"
     assert dataset["kpt_shape"] == [5, 3]
+
+
+def test_prepare_keypoint_from_registry_filters_to_requested_skeleton(
+    monkeypatch, tmp_path: Path
+) -> None:
+    zarr_v1 = tmp_path / "pose_v1.zarr"
+    zarr_v2 = tmp_path / "pose_v2.zarr"
+    _create_minimal_pose_zarr(
+        zarr_v1,
+        session_uuid="session_pose_v1",
+        create_refined_run=True,
+        refined_usable_rows=3,
+        review_state="approved",
+        review_intended_use="training",
+        skeleton_id="pose_skel_traditional_v1",
+        kpt_shape=(3, 3),
+        pose_schema_name="traditional_v1",
+        refined_run_name="refined_pose_v1_001",
+        refined_keypoint_count=3,
+        refined_skeleton_id="pose_skel_traditional_v1",
+        refined_runtime_kpt_shape=(3, 2),
+        refined_pose_schema_name="traditional_v1",
+    )
+    _create_minimal_pose_zarr(
+        zarr_v2,
+        session_uuid="session_pose_v2",
+        create_refined_run=True,
+        refined_usable_rows=3,
+        review_state="approved",
+        review_intended_use="training",
+        skeleton_id="pose_skel_traditional_v1",
+        kpt_shape=(3, 3),
+        pose_schema_name="traditional_v1",
+        refined_run_name="refined_pose_v2_001",
+        refined_keypoint_count=5,
+        refined_skeleton_id="pose_skel_traditional_v2",
+        refined_runtime_kpt_shape=(5, 2),
+        refined_pose_schema_name="traditional_v2",
+    )
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry(registry_path, zarr_v1)
+    _seed_registry(registry_path, zarr_v2)
+    base_config_path = tmp_path / "pose_base.yaml"
+    _write_base_pose_config(base_config_path)
+    _mock_invocation_sources(monkeypatch)
+    monkeypatch.setenv("PALETTE_TRAINING_DATASETS_ROOT", str(tmp_path / "datasets"))
+
+    out_manifest = tmp_path / "pose_manifest.json"
+    rc = wrapper.main(
+        [
+            "--registry",
+            str(registry_path),
+            "--base-config",
+            str(base_config_path),
+            "--source-type",
+            "filtered",
+            "--input-format",
+            "gray",
+            "--require-review-state",
+            "approved",
+            "--require-review-intended-use",
+            "training",
+            "--min-usable-keypoints-rate",
+            "0.70",
+            "--skeleton-id",
+            "pose_skel_traditional_v2",
+            "--out-manifest",
+            str(out_manifest),
+        ]
+    )
+    assert rc == 0
+
+    manifest = json.loads(out_manifest.read_text(encoding="utf-8"))
+    assert manifest["query_filter"]["skeleton_id"] == "pose_skel_traditional_v2"
+    assert manifest["pose_schema"]["keypoint_labels"] == [
+        "refined_kpt_0",
+        "refined_kpt_1",
+        "refined_kpt_2",
+        "refined_kpt_3",
+        "refined_kpt_4",
+    ]
+    assert [dataset["dataset_id"] for dataset in manifest["datasets"]] == ["session_pose_v2"]
+    assert manifest["quality_exclusions"] == [
+        {
+            "dataset_id": "session_pose_v1",
+            "zarr_path": str(zarr_v1),
+            "reason": "skeleton_id_mismatch:pose_skel_traditional_v1!=pose_skel_traditional_v2",
+        }
+    ]
