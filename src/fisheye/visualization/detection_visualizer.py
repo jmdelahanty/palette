@@ -932,31 +932,31 @@ def main(args):
                     "Pass --video /path/to/video.mp4 if the original file is stored elsewhere."
                 )
 
-        # Load detection IDs (without validating yet - we'll check against the appropriate detection source)
+        # Load arena assignments (without validating yet - we'll check against the appropriate detection source)
         detection_ids = None
         raw_detection_ids = None
         id_source_run = None
         id_source_refined_run = None
         latest_id_run = None
-        if 'id_assignment_runs' in zarr_root:
-            latest_id_run = zarr_root['id_assignment_runs'].attrs.get('latest')
+        if 'arena_assignment_runs' in zarr_root:
+            latest_id_run = zarr_root['arena_assignment_runs'].attrs.get('latest')
             if latest_id_run:
-                id_group = zarr_root[f'id_assignment_runs/{latest_id_run}']
-                if 'detection_ids' in id_group:
-                    raw_detection_ids = id_group['detection_ids'][:]
-                    print(f"Loaded detection IDs from {latest_id_run}")
+                id_group = zarr_root[f'arena_assignment_runs/{latest_id_run}']
+                if 'arena_ids' in id_group:
+                    raw_detection_ids = id_group['arena_ids'][:]
+                    print(f"Loaded arena assignments from {latest_id_run}")
 
-                    # Print ID distribution
+                    # Print arena distribution
                     unique_ids, counts = np.unique(raw_detection_ids, return_counts=True)
-                    print(f"  ID distribution: {dict(zip(unique_ids, counts))}")
+                    print(f"  Arena distribution: {dict(zip(unique_ids, counts))}")
 
                     # Get provenance info
                     id_source_run = id_group.attrs.get('source_detect_run')
                     id_source_refined_run = id_group.attrs.get('source_refined_run')
             else:
-                print("No completed ID assignment runs found")
+                print("No completed arena assignment runs found")
         else:
-            print("No ID assignment data found. Will only display bounding boxes.")
+            print("No arena assignment data found. Will only display bounding boxes.")
 
         # Initialize detection source variables (will be set based on what we're using)
         bbox_coords = None
@@ -1034,7 +1034,7 @@ def main(args):
 
                         refined_available = True
 
-                        # Check if IDs match refined detections
+                        # Check if arena assignments match refined detections
                         ids_match_refined = (raw_detection_ids is not None and len(raw_detection_ids) == total_refined)
                         source_matches_refined = False
                         if id_source_refined_run:
@@ -1047,12 +1047,12 @@ def main(args):
                             )
 
                         if ids_match_refined:
-                            print(f"  ✓ IDs match refined detection count ({len(raw_detection_ids)} == {total_refined})")
+                            print(f"  ✓ Arena assignments match refined detection count ({len(raw_detection_ids)} == {total_refined})")
                             if source_matches_refined:
-                                print(f"  ✓ ID source run matches refined detections")
+                                print(f"  ✓ Arena assignment source run matches refined detections")
                             else:
                                 source_label = id_source_refined_run or id_source_run
-                                print(f"  ⚠️ ID source run is '{source_label}' but using anyway since count matches")
+                                print(f"  ⚠️ Arena assignment source run is '{source_label}' but using anyway since count matches")
 
                             # Use refined as primary source
                             print(f"\n✅ Using refined detections as primary source\n")
@@ -1064,11 +1064,11 @@ def main(args):
                             refined_enabled = False  # Not showing as overlay since it's primary
                         else:
                             print(
-                                f"  ⚠️ IDs do not match refined detections "
-                                f"(IDs: {len(raw_detection_ids) if raw_detection_ids is not None else 0}, Refined: {total_refined})"
+                                f"  ⚠️ Arena assignments do not match refined detections "
+                                f"(Assignments: {len(raw_detection_ids) if raw_detection_ids is not None else 0}, Refined: {total_refined})"
                             )
                             if args.refined_only:
-                                print("  Using refined detections as primary (forced by --refined-only); IDs disabled.")
+                                print("  Using refined detections as primary (forced by --refined-only); arena assignments disabled.")
                                 bbox_coords = refined_bbox_coords
                                 frame_indices = refined_frame_indices
                                 using_refined_as_primary = True
@@ -1095,20 +1095,20 @@ def main(args):
             using_refined_as_primary = False
             primary_detection_source = None
 
-            # Validate IDs against original detections
+            # Validate arena assignments against original detections
             if raw_detection_ids is not None:
                 # Check provenance
                 if id_source_run and id_source_run != latest_detect_run:
-                    print(f"  ⚠️ ID source run '{id_source_run}' does not match detect run '{latest_detect_run}'")
-                    print(f"     IDs will not be displayed")
+                    print(f"  ⚠️ Arena assignment source run '{id_source_run}' does not match detect run '{latest_detect_run}'")
+                    print(f"     Arena assignments will not be displayed")
                     detection_ids = None
                 # Check size
                 elif len(raw_detection_ids) != len(bbox_coords):
-                    print(f"  ⚠️ ID count ({len(raw_detection_ids)}) does not match detection count ({len(bbox_coords)})")
-                    print(f"     IDs will not be displayed")
+                    print(f"  ⚠️ Arena assignment count ({len(raw_detection_ids)}) does not match detection count ({len(bbox_coords)})")
+                    print(f"     Arena assignments will not be displayed")
                     detection_ids = None
                 else:
-                    print(f"  ✓ IDs validated against original detections")
+                    print(f"  ✓ Arena assignments validated against original detections")
                     detection_ids = raw_detection_ids
 
         # Build frame to detection mapping for primary source

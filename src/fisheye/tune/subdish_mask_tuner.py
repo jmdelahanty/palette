@@ -1,9 +1,9 @@
 # src/fisheye/tune/subdish_mask_tuner.py
 """
-Interactive tuner for defining multiple sub-dish masks for spatial ID assignment.
+Interactive tuner for defining multiple sub-dish masks for spatial arena assignment.
 
 Allows users to draw rectangular regions where individual fish are expected,
-which are then used by the assign_ids stage to assign consistent IDs.
+which are then used by the arena assignment stage to assign consistent arena IDs.
 """
 
 import cv2
@@ -274,7 +274,7 @@ def main(zarr_path: str, use_full_res: bool = False, frame_idx: Optional[int] = 
                 print("  " + "="*56)
                 print("\n  Next steps:")
                 print("    1. Run: python -m fisheye data.zarr --stages assign_ids")
-                print("    2. Or run full pipeline including assign_ids")
+                print("    2. Or run full pipeline including arena assignment")
                 print()
                 break
             else:
@@ -297,7 +297,7 @@ def main(zarr_path: str, use_full_res: bool = False, frame_idx: Optional[int] = 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Interactive tuner for defining sub-dish masks for spatial ID assignment"
+        description="Interactive tuner for defining sub-dish masks for spatial arena assignment"
     )
     parser.add_argument("zarr_path", type=str, 
                        help="Path to zarr archive")

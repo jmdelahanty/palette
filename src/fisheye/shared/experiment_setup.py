@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
+from .type_conversions import normalize_attr as _normalize_attr
+
 
 @dataclass(frozen=True)
 class ExperimentSetupInfo:
@@ -14,14 +16,6 @@ class ExperimentSetupInfo:
     num_dishes: Optional[int]
     source: str
     has_experiment_setup: bool
-
-
-def _normalize_attr(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "ignore")
-    return str(value)
 
 
 def _coerce_int(value: Any) -> Optional[int]:
@@ -86,6 +80,6 @@ def infer_experiment_setup(attrs: Mapping[str, Any]) -> ExperimentSetupInfo:
 
 
 def subdish_required(attrs: Mapping[str, Any]) -> bool:
-    """Return True if sub-dish masks are required for spatial ID assignment."""
+    """Return True if sub-dish masks are required for spatial arena assignment."""
     info = infer_experiment_setup(attrs)
     return info.setup_type != "single_dish"

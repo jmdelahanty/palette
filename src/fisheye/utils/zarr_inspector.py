@@ -16,6 +16,8 @@ from rich import box
 from rich.columns import Columns
 from rich.syntax import Syntax
 
+from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
+
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
 REFINED_KEYPOINT_GROUP = "refined_keypoints_runs"
@@ -75,14 +77,6 @@ def _refined_detect_mode(run):
     return "unknown"
 
 
-def _normalize_attr(value):
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "ignore")
-    return str(value)
-
-
 def _format_review_status(status: Optional[dict]) -> str:
     if not isinstance(status, dict):
         return "none"
@@ -124,7 +118,7 @@ def show_parameter_provenance(zarr_path, console):
             'keypoints': 'keypoints_runs',
             'refine_keypoints': REFINED_KEYPOINT_GROUP,
             'track': 'tracking_runs',
-            'assign_ids': 'id_assignment_runs',
+            'arena_assignment': 'arena_assignment_runs',
         }
         tuning_key_map = {
             'detect': 'detection_tuning',
@@ -210,7 +204,7 @@ def show_quick_summary(zarr_path, console):
         root = zarr.open(zarr_path, mode='r')
         
         # Count completed stages
-        stages = ['import', 'background', 'detect', 'refine_detect', 'crop', 'keypoints', 'track', 'assign_ids']
+        stages = ['import', 'background', 'detect', 'refine_detect', 'crop', 'keypoints', 'track', 'arena_assignment']
         completed = []
         
         if 'raw_video' in root and 'images_full' in root['raw_video']:
@@ -229,8 +223,8 @@ def show_quick_summary(zarr_path, console):
             completed.append('keypoints')
         if 'tracking_runs' in root and root['tracking_runs'].attrs.get('latest'):
             completed.append('track')
-        if 'id_assignment_runs' in root and root['id_assignment_runs'].attrs.get('latest'):
-            completed.append('assign_ids')
+        if 'arena_assignment_runs' in root and root['arena_assignment_runs'].attrs.get('latest'):
+            completed.append('arena_assignment')
         
         # Get detection coverage if available
         coverage_str = "N/A"
@@ -1255,22 +1249,22 @@ def display_tracking_metadata(zarr_path, console):
         return False
 
 
-def display_id_assignment_metadata(zarr_path, console):
-    """Display ID assignment run metadata."""
+def display_arena_assignment_metadata(zarr_path, console):
+    """Display arena assignment run metadata."""
     try:
         import zarr
         root = zarr.open(zarr_path, mode='r')
 
-        if 'id_assignment_runs' not in root:
+        if 'arena_assignment_runs' not in root:
             return False
 
-        id_runs = root['id_assignment_runs']
+        id_runs = root['arena_assignment_runs']
         run_names = [name for name in id_runs.group_keys()]
 
         if not run_names:
             return False
 
-        summary_table = Table(title=" ID Assignment Runs", box=box.ROUNDED)
+        summary_table = Table(title=" Arena Assignment Runs", box=box.ROUNDED)
         summary_table.add_column("Run", style="cyan")
         summary_table.add_column("Timestamp", style="yellow")
         summary_table.add_column("Setup Type", style="magenta")
@@ -1286,7 +1280,7 @@ def display_id_assignment_metadata(zarr_path, console):
 
             run_display = f"{run_name} [bold green]★[/bold green]" if run_name == latest_run else run_name
 
-            timestamp = format_timestamp(attrs.get('assign_ids_timestamp_utc', ''))
+            timestamp = format_timestamp(attrs.get('arena_assignment_timestamp_utc', ''))
             setup_type = stats.get('setup_type', 'unknown')
             assigned = stats.get('assigned_detections', 0)
             total = stats.get('total_detections', 0)
@@ -1310,7 +1304,7 @@ def display_id_assignment_metadata(zarr_path, console):
         return True
 
     except Exception as e:
-        console.print(f"[yellow]Could not load ID assignment metadata: {e}[/yellow]")
+        console.print(f"[yellow]Could not load arena assignment metadata: {e}[/yellow]")
         return False
 
 
@@ -1420,8 +1414,8 @@ def inspect_video_zarr(zarr_path, mode='normal', show_full_env=False, focus_stag
         elif focus_stage == 'track':
             stage_shown = display_tracking_metadata(zarr_path, console)
             
-        elif focus_stage == 'assign_ids':
-            stage_shown = display_id_assignment_metadata(zarr_path, console)
+        elif focus_stage == 'arena_assignment':
+            stage_shown = display_arena_assignment_metadata(zarr_path, console)
             
         elif focus_stage == 'import':
             # Show import/raw_video info
@@ -1429,7 +1423,7 @@ def inspect_video_zarr(zarr_path, mode='normal', show_full_env=False, focus_stag
             
         else:
             console.print(f"[yellow]Unknown stage: {focus_stage}[/yellow]")
-            console.print("[dim]Valid stages: import, background, detect, refined_detect, crop, keypoints, track, assign_ids[/dim]")
+            console.print("[dim]Valid stages: import, background, detect, refined_detect, crop, keypoints, track, arena_assignment[/dim]")
         
         if not stage_shown:
             console.print(f"[yellow]Stage '{focus_stage}' has not been run yet[/yellow]")
@@ -1767,7 +1761,7 @@ Examples:
                        help="Display complete environment information JSON")
     parser.add_argument(
         "--stage",
-        help="Focus on specific stage (import, background, detect, refined_detect, crop, keypoints, track, assign_ids).",
+        help="Focus on specific stage (import, background, detect, refined_detect, crop, keypoints, track, arena_assignment).",
     )
     
     args = parser.parse_args()

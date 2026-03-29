@@ -35,12 +35,12 @@
 - **Import Pipeline (`src/fisheye/analysis/import_stimulus_to_zarr.py`):**
   - Option A: generate and store mask datasets during import to Zarr.
   - Option B: store arena config parameters and compute masks lazily inside analysis modules.
-- **Metrics Computation (`compute_chaser_fish_metrics.py`, `movement_analysis.py`, `swim_bout_statistics.py`):**
+- **Metrics Computation (`compute_chaser_fish_metrics.py`, `track_kinematics.py`, `swim_bout_statistics.py`):**
   - Load masks on-demand; cache per-run to avoid repeated HDF5 reads.
   - Add distance arrays to existing per-frame/per-fish data structures before writing to Zarr.
 - **Visualization (`visualize_experiment_timeline.py`, `visualize_detect_quality.py`, etc.):**
   - Overlay mask boundaries on plots for QA.
-- **Tracking (`assign_ids.py`, `refine_detect.py`):**
+- **Tracking (`arena_assignment.py`, `refine_detect.py`):**
   - Optional use: mask can filter out detections outside arena prior to linking.
 
 ## Validation Strategy
