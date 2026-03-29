@@ -21,6 +21,8 @@ nvme1/
 runs/
 notes.md
 keypoint_frame_flags.json
+retune_flags*
+retune_frame_flags*
 
 # Local extracted/reference PNGs
 /*.png
