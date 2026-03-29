@@ -13,7 +13,7 @@ Date anchored: 2026-02-11.
 - [x] Crimson contracts updated: `crimson_keypoint_read_contract.md` references `heading_finite`/`heading_usable`.
 - [ ] Phase 3 remaining: run one-time backfill on production archives (utility exists but has not been executed against live data).
 - [ ] Phase 4 remaining: verify `docs/keypoint_review_policy.md` and `src/fisheye/docs/provenance_workflow.md` no longer reference `heading_valid`.
-  - Note: `heading_valid` still appears as local Python variable names in `eye_angle_analysis.py` and `movement_analysis.py` (not Zarr array writes — non-blocking).
+  - Note: `heading_valid` still appears as local Python variable names in `eye_angle_analysis.py` and `track_kinematics.py` (not Zarr array writes — non-blocking).
 
 ## Decision
 

@@ -67,6 +67,34 @@ scripts/py -m fisheye.utils.prepare_keypoint_training_from_registry \
   --dry-run
 ```
 
+Troubleshooting:
+
+- If preflight fails with `keypoint_quality row is stale for filesystem mtime`, refresh registry quality rows and rerun:
+
+```bash
+scripts/py -m fisheye.registry.maintenance \
+  --registry /nvme1/palette_registry.sqlite \
+  --refresh-keypoint-quality
+```
+
+- If preflight fails with `stale keypoint_quality row: expected refined_run ..., observed ...` and the archive contains both an older refined run and a later migrated refined run for the same `source_keypoints_run`, the current resolver in `prepare_keypoint_training_from_registry.py` can pick the wrong refined run when `created_utc` ties. Current workaround:
+  1. repair the migrated refined runs in batch:
+
+```bash
+scripts/py -m fisheye.utils.repair_keypoint_training_refined_run_ties \
+  --registry /nvme1/palette_registry.sqlite
+```
+
+This repair utility matches migrated refined runs using the `traditional_v2_seed`
+name pattern, so it covers both plain names like `..._traditional_v2_seed` and
+numbered variants like `..._traditional_v2_seed_001`.
+
+  2. rerun `--refresh-keypoint-quality`
+  3. rerun preflight
+
+- Needed Palette patch:
+  `prepare_keypoint_training_from_registry.py` should break refined-run ties the same way the registry `keypoint_quality_current` view does, instead of sorting only on `created_utc`.
+
 ## 3) One-Command Pipeline Flow
 
 Preflight + merged export + train:

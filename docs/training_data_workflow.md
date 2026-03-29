@@ -139,7 +139,7 @@ Notes:
 ### 3) Refine + QC detections
 ```bash
 python -m fisheye.refinement.refine_detect /path/to/output/detect_runs.zarr
-python -m fisheye.tracking.assign_ids /path/to/output/detect_runs.zarr
+python -m fisheye.tracking.arena_assignment /path/to/output/detect_runs.zarr
 python -m fisheye.visualization.detection_visualizer /path/to/output/detect_runs.zarr
 ```
 

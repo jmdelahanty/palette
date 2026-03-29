@@ -3,7 +3,7 @@
 ## Summary
 
 The processing pipeline (detect → crop → keypoints → keypoint refinement →
-eye masks → eye mask refinement → ID assignment) has inconsistent registry
+eye masks → eye mask refinement → arena assignment) has inconsistent registry
 integration. Some stages update the registry as they execute; others are silent
 and require a separate rescan or batch script to make the registry aware of
 their completion. This report identifies the gaps across both the keypoints and
@@ -28,7 +28,7 @@ Related incident note for refined-keypoint coordinate-space mismatch:
 | Keypoints refinement | **Error path only** | Batch script only | `run_keypoints_batch_auto_review` |
 | Eye masks (YOLO/UNet) | **No** | No | — |
 | Eye masks refinement | **Yes** | **No** (neither perf nor quality) | `runtime_refine_eye_masks` |
-| ID assignment | **Yes** | No | `runtime_assign_ids` |
+| Arena assignment | **Yes** | No | `runtime_assign_ids` |
 
 ### What "inline" means
 

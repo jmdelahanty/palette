@@ -149,7 +149,11 @@ Canonical top-level shape:
   "geometry": {
     "triangle_area": {"stats": {}},
     "min_angle": {"stats": {}},
-    "heading": {"stats": {}}
+    "heading": {"stats": {}},
+    "derived_metrics": {
+      "schema_id": "traditional_v2_derived_metrics",
+      "metrics": []
+    }
   },
   "composition": {
     "rig_id": "omnifin0",
@@ -176,6 +180,24 @@ For `geometry.<metric>.stats` (`triangle_area`, `min_angle`, `heading`):
 - `p10`
 - `p50`
 - `p90`
+
+### Optional Derived Metric Profile Payload
+
+When a refined run exposes schema-driven derived metrics, `profile_summary` may
+also include:
+
+- `geometry.derived_metrics.schema_id`
+- `geometry.derived_metrics.schema_version`
+- `geometry.derived_metrics.labels`
+- `geometry.derived_metrics.normalization`
+- `geometry.derived_metrics.metrics[*].name`
+- `geometry.derived_metrics.metrics[*].valid_count`
+- `geometry.derived_metrics.metrics[*].valid_rate`
+- `geometry.derived_metrics.metrics[*].stats`
+- `geometry.derived_metrics.metrics[*].stats_norm` (when normalized values exist)
+
+These fields are profile-payload only in `v1`; they are not projected into
+registry SQL columns yet.
 
 ## Registry Projection Schema (Query Layer)
 
@@ -215,6 +237,12 @@ Geometry summary:
 - `min_angle_p10`, `min_angle_p50`, `min_angle_p90`
 - `heading_p10`, `heading_p50`, `heading_p90`
 
+Deferred in `v1`:
+
+- no SQL columns for skeleton-specific derived metrics
+- no latest-view query fields for `total_length`, `tail_length`, `head_length`,
+  `eye_span`, or future skeleton-specific metric names
+
 Composition/lineage:
 
 - `rig_id`, `camera_id`, `arena_id`
@@ -247,6 +275,9 @@ Shared profile filters:
 - `--profile-zarr-use`
 - `--profile-detection-type` (maps to `keypoint_method` in keypoint profile modes)
 - `--profile-coverage-min` (maps to `usable_rate` in keypoint profile modes)
+
+Derived-metric filtering/query is intentionally deferred until we define a
+cross-skeleton policy for metric availability and comparability.
 
 ## Freshness and Fail-Closed Semantics
 

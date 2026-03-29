@@ -5,7 +5,7 @@ Keypoint/Pose YOLO Trainer from Zarr files with Enhanced Metadata Logging
 
 Features:
 - Trains pose estimation models on ROI images with keypoint annotations
-- Requires tracking_runs with keypoint data (bladder, eye_l, eye_r)
+- Consumes ROI images with keypoint annotations from exported training datasets
 - Tracks crop source (detect/filtered/interpolated)
 - Complete provenance tracking
 - Enhanced training reports with tracking success rates

@@ -23,6 +23,12 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
   datasets (intended behavior).
 - Several runtime surfaces are still hard-coded to 3 keypoints (`(N,3,2)`),
   which blocks first-class support for richer skeletons.
+- `traditional_v2` seed runs can now be created from `traditional_v1` refined
+  runs and completed manually.
+- schema-driven derived metrics can now be stored on refined runs and surfaced
+  in keypoint profile payloads.
+- registry/query projection of those derived metrics is intentionally deferred
+  pending a cross-skeleton query policy.
 
 ## Non-Goals
 
@@ -54,13 +60,13 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
 
 ## Phase 2: Migration Utility (Starter -> Extended Skeleton)
 
-- [ ] Add utility to create a new keypoint run from a source run:
+- [x] Add utility to create a new keypoint run from a source run:
   - copies lineage arrays (`frame_indices`, `detection_indices`, `frame_counts`)
   - copies existing points into mapped indices
   - initializes new points as `NaN` + failure labels
   - writes updated `keypoint_labels`, `kpt_shape`, `pose_schema`, `skeleton_id`
-- [ ] Add optional mode to create corresponding refined run seed.
-- [ ] Emit JSON report with counts:
+- [x] Add optional mode to create corresponding refined run seed.
+- [x] Emit JSON report with counts:
   - rows copied
   - rows requiring manual completion
   - mapping used (`old_idx -> new_idx`)
@@ -82,6 +88,8 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
   - `--skeleton-id` filters for query/report tooling
   - clearer display of selected skeleton signature in prepare/export summaries
 - [ ] Add review/check outputs that print per-run skeleton identity.
+- [x] Update manual keypoint review to support dynamic keypoint selection beyond
+      the starter 3-point layout.
 
 ## Phase 5: Validation and Tests
 
@@ -90,6 +98,8 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
   - mixed skeleton training-set failures remain enforced
   - single-skeleton selected subsets pass
   - label-based landmark resolution behavior
+- [x] Focused tests for migration utility, dynamic manual-review selection, and
+      derived-metric backfill/profile aggregation.
 - [ ] Add/refresh fixtures with at least two skeleton identities in one
       recording.
 - [ ] Add a local operator validation recipe for large real zarrs.
@@ -109,10 +119,30 @@ one skeleton identity (`skeleton_id` + `kpt_shape`).
 - Hidden fixed-index assumptions outside keypoint modules.
 - Incomplete skeleton metadata on legacy runs causing ambiguous selection.
 - Manual-review tooling may need updates for larger `K`.
+- Registry/query surfacing of derived metrics may become inconsistent if we do
+  not define how skeleton-specific metric sets should be compared or filtered.
+
+## Deferred Query-Surface Work
+
+Derived metrics such as `total_length`, `tail_length`, `head_length`, and
+`eye_span` now exist in:
+
+- `refined_keypoints_runs/<run>/derived_metric_*`
+- `analysis/keypoint_profile_runs/<run>.attrs["profile_summary"]["geometry"]["derived_metrics"]`
+
+We are intentionally deferring:
+
+- registry SQL projection for those metrics
+- query CLI surfaces that filter or sort on those metrics
+
+Reason: not every skeleton will define the same named metrics, so the query
+surface needs a careful skeleton-aware policy before we denormalize them.
 
 ## Related Docs
 
 - `docs/keypoint_training_data_card_contract.md`
+- `docs/traditional_v2_keypoint_migration_design.md`
+- `docs/keypoint_derived_metric_schema_contract.md`
 - `docs/keypoint_data_profile_schema_contract.md`
 - `docs/training_quality_gate_contract.md`
 - `src/fisheye/docs/zarr_structure.md`
