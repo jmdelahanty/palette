@@ -93,6 +93,7 @@ def _resolution_payload(
             "mask_threshold": args.mask_threshold,
             "roi_cache_policy": args.roi_cache_policy,
             "roi_cache_dir": str(args.roi_cache_dir) if args.roi_cache_dir else None,
+            "profile_timings": bool(args.profile_timings),
         },
         inputs={
             "recording_dir": str(recording_dir),
@@ -174,6 +175,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=None,
         help="Optional scratch directory for temporary ROI caches.",
     )
+    parser.add_argument(
+        "--profile-timings",
+        action="store_true",
+        help="Collect per-stage timing diagnostics and store them in the output keypoint run attrs.",
+    )
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference.")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output.")
     parser.add_argument("--json", action="store_true", help="Print resolved payload JSON.")
@@ -236,6 +242,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         mask_threshold=args.mask_threshold,
         roi_cache_policy=args.roi_cache_policy,
         roi_cache_dir=args.roi_cache_dir,
+        profile_timings=bool(args.profile_timings),
         registry=registry_path,
     )
     if not run_name:

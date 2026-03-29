@@ -18,6 +18,8 @@ from typing import Iterable, List, Optional
 import h5py
 import zarr
 
+from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
+
 
 @dataclass
 class ReviewPlan:
@@ -42,14 +44,6 @@ def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
         else:
             yield from path.glob("*/zarr/*.zarr")
             yield from path.glob("*.zarr")
-
-
-def _normalize_attr(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "ignore")
-    return str(value)
 
 
 def _derive_camera_id(ipc_source_name: object) -> Optional[str]:

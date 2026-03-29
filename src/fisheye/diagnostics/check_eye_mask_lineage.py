@@ -12,43 +12,26 @@ match exactly against `crop_runs/<source_crop_run>`.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional
 
 import numpy as np
 import zarr
 
+from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
+from fisheye.shared.batch_logging import make_run_id
+from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.type_conversions import normalize_attr
+
 
 LINEAGE_ARRAYS = ("frame_indices", "detection_indices", "frame_counts")
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _run_id() -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{stamp}_{os.getpid()}"
-
-
-class JsonLogger:
-    def __init__(self, path: Path, run_id: str):
-        self.path = path
-        self.run_id = run_id
-        self._fh = self.path.open("w", encoding="utf-8")
-
-    def log(self, event: str, **fields: object) -> None:
-        payload = {"event": event, "ts_utc": _utc_now(), "run_id": self.run_id}
-        payload.update(fields)
-        self._fh.write(json.dumps(payload, sort_keys=True) + "\n")
-        self._fh.flush()
-
-    def close(self) -> None:
-        self._fh.close()
+_utc_now = utc_now
+_run_id = make_run_id
+JsonLogger = SharedJsonLogger
 
 
 @dataclass
@@ -214,18 +197,11 @@ def _print_report(report: RunLineageReport) -> None:
     print(f"  status: {'PASS' if not report.has_issues else 'FAIL'}")
 
 
-def _normalize_attr(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", "ignore")
-    text = str(value).strip().lower()
-    return text or None
-
-
 def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
     for key in ("zarr_use", "zarr_purpose"):
-        value = _normalize_attr(root.attrs.get(key))
+        value = normalize_attr(root.attrs.get(key))
+        if value is not None:
+            value = value.lower()
         if value in {"analysis", "training"}:
             return value
     name = zarr_path.name.lower()

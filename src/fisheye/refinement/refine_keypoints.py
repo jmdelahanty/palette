@@ -38,6 +38,12 @@ except ImportError:
 
 from .keypoint_quality import KeypointGeometryMetrics, compute_geometry_metrics
 from ..registry.db import Registry, RegistryPaths
+from ..pose.metric_schema import (
+    DerivedMetricStorage,
+    ensure_derived_metric_storage,
+    resolve_metric_schema_for_group,
+    update_derived_metric_rows,
+)
 from ..shared.detect_reason_codec import write_reason_columns
 from ..shared.registry_stage_complete import (
     DatasetMetadata,
@@ -968,6 +974,13 @@ def create_refined_keypoint_run(
     edge_count = int(edge_pairs.shape[0])
     edge_labels = [f"{keypoint_labels[int(src)]}-{keypoint_labels[int(dst)]}" for src, dst in edge_pairs.tolist()]
     console.print(f"Edge-distance pairs: {edge_count} ({edge_source})")
+    derived_metric_schema = resolve_metric_schema_for_group(kp_source, required=False)
+    if derived_metric_schema is not None:
+        console.print(
+            "Derived metric schema: "
+            f"[cyan]{derived_metric_schema.schema_name}[/cyan] "
+            f"({len(derived_metric_schema.metrics)} metrics)"
+        )
 
     # Prepare destination group
     kp_refined_root = _ensure_group(root, REFINED_KEYPOINT_GROUP)
@@ -1194,6 +1207,14 @@ def create_refined_keypoint_run(
     )
     reason_chunk = int(heading_chunks[0]) if heading_chunks else max(1, min(1024, total_rois))
     reason_values = np.full(int(total_rois), "", dtype=object)
+    kp_refined.create_array(
+        "edit_applied",
+        shape=(total_rois,),
+        chunks=heading_chunks,
+        dtype="bool",
+        fill_value=False,
+        overwrite=True,
+    )
     source_success = kp_source["detection_success"][:]
     kp_refined.create_array(
         "source_success",
@@ -1229,6 +1250,7 @@ def create_refined_keypoint_run(
     edge_distances_dst = None
     edge_distances_norm_dst = None
     edge_distance_valid_dst = None
+    derived_metric_storage: DerivedMetricStorage | None = None
     roi_diagonal = _resolve_roi_diagonal(root, source_crop_run=normalize_attr(source_crop_run))
     if edge_count > 0:
         edge_chunks = (heading_chunks[0] if heading_chunks else max(1, min(1024, total_rois)), edge_count)
@@ -1260,6 +1282,15 @@ def create_refined_keypoint_run(
             "mode": "roi_diagonal",
             "roi_diagonal": roi_diagonal,
         }
+    if derived_metric_schema is not None:
+        derived_metric_storage = ensure_derived_metric_storage(
+            kp_refined,
+            schema=derived_metric_schema,
+            row_count=total_rois,
+            chunk_len=int(heading_chunks[0]) if heading_chunks else max(1, min(1024, total_rois)),
+            roi_diagonal=roi_diagonal,
+            overwrite=True,
+        )
 
     stats = {
         "total": int(total_rois),
@@ -1376,6 +1407,16 @@ def create_refined_keypoint_run(
             edge_distances_dst[idx] = distances.astype(np.float32, copy=False)
             edge_distances_norm_dst[idx] = distances_norm.astype(np.float32, copy=False)
             edge_distance_valid_dst[idx] = valid
+        if derived_metric_storage is not None:
+            metric_points = np.asarray(result["roi"], dtype=np.float64)
+            metric_points[~np.asarray(result["refined_success"], dtype=bool)] = np.nan
+            update_derived_metric_rows(
+                derived_metric_storage,
+                row_indexer=idx,
+                keypoints_roi=metric_points,
+                keypoint_labels=keypoint_labels,
+                roi_diagonal=roi_diagonal,
+            )
 
         stats["refined_success"] += result["stats"]["refined_success"]
         stats["flips_corrected"] += result["stats"]["flips_corrected"]
@@ -1409,6 +1450,8 @@ def create_refined_keypoint_run(
         "edge_distance_source": edge_source,
         "edge_distance_normalization": "roi_diagonal",
         "edge_distance_roi_diagonal": roi_diagonal,
+        "derived_metric_schema_id": derived_metric_schema.schema_name if derived_metric_schema is not None else None,
+        "derived_metric_count": len(derived_metric_schema.metrics) if derived_metric_schema is not None else 0,
         "pass_rate_percent": pass_rate,
         "duration_seconds": duration,
     }
