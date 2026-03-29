@@ -441,6 +441,28 @@ REFINED_KEYPOINTS_SPEC = StageSpec(
             required=False,
             description="Optional validity mask for per-ROI edge distances.",
         ),
+        ArraySpec(
+            "derived_metric_values",
+            "float32",
+            ("n_rois", "n_metrics"),
+            required=False,
+            description="Optional schema-driven named derived keypoint metrics in ROI pixels.",
+        ),
+        ArraySpec(
+            "derived_metric_values_norm",
+            "float32",
+            ("n_rois", "n_metrics"),
+            required=False,
+            description="Optional derived metrics normalized by the configured metric schema normalization.",
+        ),
+        ArraySpec(
+            "derived_metric_valid",
+            "bool",
+            ("n_rois", "n_metrics"),
+            required=False,
+            description="Optional validity mask for schema-driven derived keypoint metrics.",
+        ),
+        ArraySpec("edit_applied", "bool", ("n_rois",)),
         ArraySpec("reason_bytes", "uint8", ("n_rois", "width")),
         ArraySpec("reason", "string", ("n_rois",)),
         ArraySpec("failure_indices", "int32", ("n_failures",)),
@@ -452,7 +474,7 @@ EYE_MASKS_SPEC = StageSpec(
     zarr_group="eye_masks_runs/<run>/",
     specs=(
         ArraySpec("masks_roi", "uint8", ("n_rois", 2, "H", "W")),
-        ArraySpec("mask_probs_roi", "float16/float32", ("n_rois", 2, "H", "W"), required=False),
+        ArraySpec("mask_probs_roi", "float16/float32/uint8", ("n_rois", 2, "H", "W"), required=False),
         ArraySpec("mask_scores", "float32", ("n_rois",), required=False),
         ArraySpec("ellipse_params", "float32", ("n_rois", 2, 5)),
         ArraySpec("ellipse_success", "bool", ("n_rois", 2)),
@@ -491,6 +513,7 @@ REFINED_EYE_MASKS_SPEC = StageSpec(
     zarr_group="refined_eye_masks_runs/<run>/",
     specs=(
         ArraySpec("masks_roi", "uint8", ("n_rois", 2, "H", "W")),
+        ArraySpec("edit_applied", "bool", ("n_rois", 2)),
         ArraySpec("ellipse_params", "float32", ("n_rois", 2, 5)),
         ArraySpec("ellipse_success", "bool", ("n_rois", 2)),
         ArraySpec("eye_separation", "float32", ("n_rois",)),
@@ -504,6 +527,53 @@ REFINED_EYE_MASKS_SPEC = StageSpec(
         ArraySpec("contours_right", "float32", ("n_points", 2)),
     ),
     subgroups={"metrics": _REFINED_EYE_MASK_METRICS},
+)
+
+_SUBJECT_MASK_METRICS: Tuple[ArraySpec, ...] = (
+    ArraySpec("prob_max", "float32", ("n_rois", "n_channels")),
+    ArraySpec("mask_present", "bool", ("n_rois", "n_channels")),
+    ArraySpec("area_px", "float32", ("n_rois", "n_channels"), required=False),
+    ArraySpec("centroid_xy", "float32", ("n_rois", "n_channels", 2), required=False),
+    ArraySpec("centroid_valid", "bool", ("n_rois", "n_channels"), required=False),
+    ArraySpec("bbox_xyxy", "float32", ("n_rois", "n_channels", 4), required=False),
+    ArraySpec("bbox_valid", "bool", ("n_rois", "n_channels"), required=False),
+)
+
+SUBJECT_MASKS_SPEC = StageSpec(
+    stage_name="subject_masks",
+    zarr_group="subject_mask_runs/<run>/",
+    specs=(
+        ArraySpec("frame_indices", "int32", ("n_rois",), required=False),
+        ArraySpec("frame_counts", "int32", ("n_frames",), required=False),
+        ArraySpec("detection_indices", "int32", ("n_rois",), required=False),
+        ArraySpec("detection_source", "int8", ("n_rois",)),
+        ArraySpec("masks_roi", "uint8", ("n_rois", "n_channels", "H", "W")),
+        ArraySpec("mask_probs_roi", "float16/float32/uint8", ("n_rois", "n_channels", "H", "W")),
+        ArraySpec("available_channels", "bool", ("n_channels",)),
+    ),
+    subgroups={"metrics": _SUBJECT_MASK_METRICS},
+)
+
+_REFINED_SUBJECT_MASK_METRICS: Tuple[ArraySpec, ...] = (
+    ArraySpec("mask_present", "bool", ("n_rois", "n_channels")),
+    ArraySpec("area_px", "float32", ("n_rois", "n_channels")),
+)
+
+REFINED_SUBJECT_MASKS_SPEC = StageSpec(
+    stage_name="refined_subject_masks",
+    zarr_group="refined_subject_masks_runs/<run>/",
+    specs=(
+        ArraySpec("frame_indices", "int32", ("n_rois",), required=False),
+        ArraySpec("frame_counts", "int32", ("n_frames",), required=False),
+        ArraySpec("detection_indices", "int32", ("n_rois",), required=False),
+        ArraySpec("detection_source", "int8", ("n_rois",)),
+        ArraySpec("masks_roi", "uint8", ("n_rois", "n_channels", "H", "W")),
+        ArraySpec("available_channels", "bool", ("n_channels",)),
+        ArraySpec("edit_applied", "bool", ("n_rois", "n_channels")),
+        ArraySpec("reason_bytes", "uint8", ("n_rois", "width"), required=False),
+        ArraySpec("reason", "string", ("n_rois",), required=False),
+    ),
+    subgroups={"metrics": _REFINED_SUBJECT_MASK_METRICS},
 )
 
 ARENA_ASSIGNMENT_SPEC = StageSpec(
@@ -539,6 +609,8 @@ STAGES: Dict[str, StageSpec] = {
     REFINED_KEYPOINTS_SPEC.stage_name: REFINED_KEYPOINTS_SPEC,
     EYE_MASKS_SPEC.stage_name: EYE_MASKS_SPEC,
     REFINED_EYE_MASKS_SPEC.stage_name: REFINED_EYE_MASKS_SPEC,
+    SUBJECT_MASKS_SPEC.stage_name: SUBJECT_MASKS_SPEC,
+    REFINED_SUBJECT_MASKS_SPEC.stage_name: REFINED_SUBJECT_MASKS_SPEC,
     ARENA_ASSIGNMENT_SPEC.stage_name: ARENA_ASSIGNMENT_SPEC,
     TRACKING_SPEC.stage_name: TRACKING_SPEC,
 }
@@ -557,6 +629,8 @@ __all__ = [
     "REFINED_KEYPOINTS_SPEC",
     "EYE_MASKS_SPEC",
     "REFINED_EYE_MASKS_SPEC",
+    "SUBJECT_MASKS_SPEC",
+    "REFINED_SUBJECT_MASKS_SPEC",
     "ARENA_ASSIGNMENT_SPEC",
     "TRACKING_SPEC",
     "STAGES",

@@ -120,9 +120,11 @@ ZARR_SCHEMA = {
         },
         "eye_masks_runs": {"description": "Eye mask segmentation runs (latest attr)"},
         "refined_eye_masks_runs": {"description": "Refined eye mask runs (latest attr)"},
+        "subject_mask_runs": {"description": "Generalized subject-mask runs (latest attr)"},
+        "refined_subject_masks_runs": {"description": "Refined subject-mask runs (latest attr)"},
         "refined_online_runs": {"description": "Online refined detection runs (latest attr)"},
-        "tracking_runs": {"description": "Tracking runs (legacy/optional, latest attr)"},
-        "id_assignment_runs": {"description": "ID assignment runs (latest attr)"},
+        "tracking_runs": {"description": "Tracking runs (latest attr)"},
+        "arena_assignment_runs": {"description": "Arena assignment runs (latest attr)"},
         "analysis": {"description": "Analysis outputs"},
         "analysis_metadata": {"description": "Calibration/tuning metadata"},
         "calibration": {"description": "Calibration data"},
@@ -298,9 +300,11 @@ def create_palette_zarr(
         'refined_keypoints_runs',
         'eye_masks_runs',
         'refined_eye_masks_runs',
+        'subject_mask_runs',
+        'refined_subject_masks_runs',
         'refined_online_runs',
         'tracking_runs',
-        'id_assignment_runs',
+        'arena_assignment_runs',
     )
     for group_name in run_groups:
         group = root.require_group(group_name)
@@ -694,7 +698,7 @@ def validate_zarr_structure(zarr_path: str) -> Dict[str, Any]:
         'eye_masks_runs',
         'refined_eye_masks_runs',
         'tracking_runs',
-        'id_assignment_runs',
+        'arena_assignment_runs',
         'analysis_metadata',
     ]
     for group_name in recommended_groups:
@@ -741,7 +745,7 @@ def validate_zarr_structure(zarr_path: str) -> Dict[str, Any]:
         'eye_masks_runs',
         'refined_eye_masks_runs',
         'tracking_runs',
-        'id_assignment_runs',
+        'arena_assignment_runs',
     ]
     for run_group in run_groups:
         if run_group in root:

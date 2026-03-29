@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnose provenance consistency across detect → crop → keypoint → ID stages."""
+"""Diagnose provenance consistency across detect → crop → keypoint → arena assignment stages."""
 
 from __future__ import annotations
 
@@ -21,12 +21,12 @@ class ProvenanceRecord:
     crop_source_path: Optional[str]
     crop_source_rows: Optional[int]
     keypoint_run: Optional[str]
-    id_run: Optional[str]
+    arena_assignment_run: Optional[str]
     detect_rows: Optional[int]
     refined_rows: Optional[int]
     crop_rois: Optional[int]
     keypoint_rows: Optional[int]
-    id_rows: Optional[int]
+    arena_assignment_rows: Optional[int]
     issues: list[str]
 
 
@@ -178,29 +178,29 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
                 f"Keypoint run '{keypoint_latest}' references crop '{kp_source_crop}', but latest crop is '{crop_latest}'."
             )
 
-    id_parent = root.get("id_assignment_runs")
-    id_latest = _latest(id_parent)
-    id_group = _first_matching_run(id_parent, id_latest)
-    id_rows = _safe_len(_safe_get(id_group, "detection_ids")) if id_group else None
-    id_source_rows = None
-    if id_group is not None:
-        id_source_detect = id_group.attrs.get("source_detect_run")
-        if detect_latest and id_source_detect and detect_latest != id_source_detect:
+    arena_parent = root.get("arena_assignment_runs")
+    arena_latest = _latest(arena_parent)
+    arena_group = _first_matching_run(arena_parent, arena_latest)
+    arena_rows = _safe_len(_safe_get(arena_group, "arena_ids")) if arena_group else None
+    arena_source_rows = None
+    if arena_group is not None:
+        arena_source_detect = arena_group.attrs.get("source_detect_run")
+        if detect_latest and arena_source_detect and detect_latest != arena_source_detect:
             issues.append(
-                f"ID run '{id_latest}' references detect '{id_source_detect}' but latest detect is '{detect_latest}'."
+                f"Arena assignment run '{arena_latest}' references detect '{arena_source_detect}' but latest detect is '{detect_latest}'."
             )
-        id_source_refined = id_group.attrs.get("source_refined_run")
-        if refined_latest and id_source_refined and refined_latest != id_source_refined:
+        arena_source_refined = arena_group.attrs.get("source_refined_run")
+        if refined_latest and arena_source_refined and refined_latest != arena_source_refined:
             issues.append(
-                f"ID run '{id_latest}' references refined detect '{id_source_refined}' but latest refined detect is '{refined_latest}'."
+                f"Arena assignment run '{arena_latest}' references refined detect '{arena_source_refined}' but latest refined detect is '{refined_latest}'."
             )
-        if id_source_refined:
-            id_source_rows = _count_detections(
-                _group_for_path(root, f"refined_detect_runs/{id_source_refined}/interpolated")
-                or _group_for_path(root, f"refined_runs/{id_source_refined}/interpolated")
+        if arena_source_refined:
+            arena_source_rows = _count_detections(
+                _group_for_path(root, f"refined_detect_runs/{arena_source_refined}/interpolated")
+                or _group_for_path(root, f"refined_runs/{arena_source_refined}/interpolated")
             )
-        if id_source_rows is None and id_source_detect:
-            id_source_rows = _count_detections(_group_for_path(root, f"detect_runs/{id_source_detect}"))
+        if arena_source_rows is None and arena_source_detect:
+            arena_source_rows = _count_detections(_group_for_path(root, f"detect_runs/{arena_source_detect}"))
 
     if crop_rois is not None and crop_source_rows is not None and crop_rois != crop_source_rows:
         issues.append(
@@ -211,9 +211,9 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
         issues.append(
             f"Crop ROI count ({crop_rois}) != keypoint heading count ({keypoint_rows})."
         )
-    if id_rows is not None and id_source_rows is not None and id_rows != id_source_rows:
+    if arena_rows is not None and arena_source_rows is not None and arena_rows != arena_source_rows:
         issues.append(
-            f"ID assignments ({id_rows}) != detection source count ({id_source_rows})."
+            f"Arena assignments ({arena_rows}) != detection source count ({arena_source_rows})."
         )
 
     return ProvenanceRecord(
@@ -223,12 +223,12 @@ def _collect_provenance(root: zarr.Group) -> ProvenanceRecord:
         crop_source_path=crop_source_path,
         crop_source_rows=crop_source_rows,
         keypoint_run=keypoint_latest,
-        id_run=id_latest,
+        arena_assignment_run=arena_latest,
         detect_rows=detect_rows,
         refined_rows=refined_rows,
         crop_rois=crop_rois,
         keypoint_rows=keypoint_rows,
-        id_rows=id_rows,
+        arena_assignment_rows=arena_rows,
         issues=issues,
     )
 
@@ -253,7 +253,7 @@ def show_provenance(zarr_path: Path) -> None:
     table.add_row("Refined Detect", record.refined_run or "—", str(record.refined_rows or "—"))
     table.add_row("Crop", record.crop_run or "—", str(record.crop_rois or "—"))
     table.add_row("Keypoints", record.keypoint_run or "—", str(record.keypoint_rows or "—"))
-    table.add_row("ID Assignment", record.id_run or "—", str(record.id_rows or "—"))
+    table.add_row("Arena Assignment", record.arena_assignment_run or "—", str(record.arena_assignment_rows or "—"))
 
     console.print(table)
     source_label = record.crop_source_path or "—"

@@ -1,11 +1,11 @@
 # Provenance-Safe Refinement Workflow
 
-This note captures the sequencing we used to align refined detections, crops, keypoints, and ID assignment so downstream analysis (movement, metrics, plots) stays consistent.
+This note captures the sequencing we used to align refined detections, crops, keypoints, arena assignment, and tracking so downstream analysis (track kinematics, metrics, plots) stays consistent.
 
 ## Stage Overview
 
 ```
-detect_runs → refined_detect_runs → crop_runs → keypoints_runs → refined_keypoints_runs → eye_masks_runs → refined_eye_masks_runs → id_assignment_runs → movement_runs
+detect_runs → refined_detect_runs → crop_runs → keypoints_runs → refined_keypoints_runs → eye_masks_runs → refined_eye_masks_runs → arena_assignment_runs → tracking_runs → track_kinematics_runs
 ```
 
 Relevant provenance attributes:
@@ -20,7 +20,8 @@ Relevant provenance attributes:
 | `refined_keypoints_runs/<run>` | `heading`, `usable_keypoints`, `reason_bytes`, `reason` | `source_keypoints_run`, `source_crop_run`, `keypoint_signature`, `keypoint_review_status`, `reason_fallback_order` |
 | `eye_masks_runs/<run>` | `masks_roi` | `source_crop_run`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
 | `refined_eye_masks_runs/<run>` | `masks_roi`, `ellipse_params` | `source_eye_masks_run`, `source_keypoint_group`, `source_keypoints_run` *(legacy alias: `source_keypoint_run`)* |
-| `id_assignment_runs/<run>` | `detection_ids` | `source_detect_run`, `source_refined_run` |
+| `arena_assignment_runs/<run>` | `arena_ids` | `source_detect_run`, `source_refined_run` |
+| `tracking_runs/<run>` | `track_ids`, `track_arena_ids` | `source_detect_run`, `source_refined_run`, `source_arena_assignment_run`, `tracking_qc_state` |
 
 Keypoint-lineage attribute contract for eye-mask stages:
 
@@ -48,7 +49,7 @@ When refined detections introduce interpolated boxes, we need matching ROI image
 
 1. **Regenerate crops** (GPU decode will be used when available):
    ```bash
-   python -m fisheye.refinement.regenerate_interpolated_crops \
+   scripts/py -m fisheye.refinement.regenerate_interpolated_crops \
      <archive>.zarr \
      --video-path /path/to/video.mp4 \
      --source-crop-run <existing_crop_run> \
@@ -58,7 +59,7 @@ When refined detections introduce interpolated boxes, we need matching ROI image
 
 2. Inspect linkage:
    ```bash
-   python -m fisheye.diagnostics.check_refined_roi_links <archive>.zarr
+   scripts/py -m fisheye.diagnostics.check_refined_roi_links <archive>.zarr
    ```
    Confirms `interpolated_roi_path`, counts, decoder, and crop metadata stay in sync.
 
@@ -68,8 +69,8 @@ After new ROIs exist, rerun stages that depend on them:
 
 1. YOLO keypoints:
    ```bash
-   python -m fisheye.detection.detect_keypoints_yolo <archive>.zarr --model <weights>.pt
-   python -m fisheye.refinement.refine_keypoints <archive>.zarr
+   scripts/py -m fisheye.detection.detect_keypoints_yolo <archive>.zarr --model <weights>.pt
+   scripts/py -m fisheye.refinement.refine_keypoints <archive>.zarr
    ```
    The keypoint script now auto-applies refined ROI overrides when available.
    The refinement step also runs a coordinate-space audit by default and writes:
@@ -77,7 +78,7 @@ After new ROIs exist, rerun stages that depend on them:
 
    Optional overlap analysis and output-dir override:
    ```bash
-   python -m fisheye.refinement.refine_keypoints <archive>.zarr \
+   scripts/py -m fisheye.refinement.refine_keypoints <archive>.zarr \
      --post-overlap \
      --post-audit-output-dir /tmp
    ```
@@ -90,44 +91,48 @@ After new ROIs exist, rerun stages that depend on them:
 
 2. Eye masks (defaults to refined keypoints when present):
    ```bash
-   python -m fisheye.segmentation.eye_segmentation <archive>.zarr
-   python -m fisheye.refinement.refine_eye_masks <archive>.zarr
+   scripts/py -m fisheye.segmentation.eye_segmentation <archive>.zarr
+   scripts/py -m fisheye.refinement.refine_eye_masks <archive>.zarr
    ```
    `refine_eye_masks` source keypoint resolution is strict by default:
    `--keypoint-run` override -> source lineage attrs (`source_keypoint_group` + canonical/legacy keypoint run attr) -> error.
    Use `--allow-latest-keypoint-fallback` only for temporary legacy recovery.
    Optional review/audit:
    ```bash
-   python -m fisheye.tune.eye_mask_review <archive>.zarr --retune
-   python -m fisheye.tune.eye_mask_review <archive>.zarr --manual
-   python -m fisheye.tune.eye_mask_review <archive>.zarr --audit
+   scripts/py -m fisheye.tune.eye_mask_review <archive>.zarr --retune
+   scripts/py -m fisheye.tune.eye_mask_review <archive>.zarr --manual
+   scripts/py -m fisheye.tune.eye_mask_review <archive>.zarr --audit
    ```
    Full tuning/review checklist: `src/fisheye/docs/eye_mask_tuning_workflow.md`.
 
-3. ID assignment (if IDs align with refined detections):
+3. Arena assignment (if arenas align with refined detections):
    ```bash
-   python -m fisheye.tracking.assign_ids <archive>.zarr
+   scripts/py -m fisheye.tracking.arena_assignment <archive>.zarr
    ```
+   This current workflow also writes a matching `tracking_runs/<run>` entry for
+   `single_subject_per_arena`, including `source_arena_assignment_run` and
+   `tracking_qc_state`.
 
-4. Movement analysis / downstream pipelines can now run without length mismatches.
+4. Track kinematics / downstream pipelines can now run without length mismatches.
 
 ## Provenance Validation
 
 Two diagnostics help verify alignment:
 
-* `python -m fisheye.diagnostics.check_provenance_consistency <archive>.zarr`
-  * Compares row counts across detect, refined detect, crop, keypoint, and ID runs.
-* `python -m fisheye.diagnostics.check_refined_roi_links <archive>.zarr`
+* `scripts/py -m fisheye.diagnostics.check_provenance_consistency <archive>.zarr`
+  * Compares row counts across detect, refined detect, crop, keypoint, arena-assignment, and tracking runs.
+* `scripts/py -m fisheye.diagnostics.check_refined_roi_links <archive>.zarr`
   * Audits refined detection runs and ensures regenerated ROIs are discoverable from the crop side.
 
-Expected healthy output shows consistent row counts (e.g., refined detections = crop ROIs = keypoint headings = ID rows) and no reported issues.
+Expected healthy output shows consistent row counts (e.g., refined detections = crop ROIs = keypoint headings = arena-assignment rows = tracking rows) and no reported issues.
 
 ## Summary Checklist
 
 1. `regenerate_interpolated_crops` with correct crop run.
 2. Rerun YOLO keypoints and keypoint refinement.
-3. Rerun ID assignment (and analysis).
-4. Confirm with diagnostics.
+3. Rerun arena assignment / tracking.
+4. Rerun track kinematics or other downstream analysis.
+5. Confirm with diagnostics.
 
 ## Detection Training Preflight
 
@@ -136,7 +141,7 @@ crop provenance, bbox integrity, and downsample inputs while generating a
 training config + manifest:
 
 ```bash
-python -m fisheye.diagnostics.prepare_detect_training \
+scripts/py -m fisheye.diagnostics.prepare_detect_training \
   <archive>.zarr \
   --source-type filtered \
   --input-format gray \

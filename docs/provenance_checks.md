@@ -46,7 +46,7 @@ Stage names:
 - `refined_keypoints`
 - `eye_masks`
 - `refined_eye_masks`
-- `id_assignment`
+- `arena_assignment`
 
 Strict mode:
 

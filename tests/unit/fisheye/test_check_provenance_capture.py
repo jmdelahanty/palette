@@ -41,8 +41,10 @@ def _minimal_provenance(stage_name: str) -> dict[str, Any]:
     }
 
 
-def test_stages_include_refined_eye_masks() -> None:
+def test_stages_include_subject_and_refined_mask_stages() -> None:
     labels = {stage["label"] for stage in mod.STAGES}
+    assert "subject_masks" in labels
+    assert "refined_subject_masks" in labels
     assert "refined_eye_masks" in labels
 
 
@@ -56,7 +58,9 @@ def test_stages_include_refined_eye_masks() -> None:
         ("refined_keypoints_runs", "refined_keypoints", "refined_keypoints_001", "refine_keypoints"),
         ("eye_masks_runs", "eye_masks", "eye_masks_001", "eye_masks"),
         ("refined_eye_masks_runs", "refined_eye_masks", "refined_eye_masks_001", "refine_eye_masks"),
-        ("id_assignment_runs", "id_assignment", "id_assignment_001", "id_assignment"),
+        ("subject_mask_runs", "subject_masks", "subject_masks_001", "subject_masks"),
+        ("refined_subject_masks_runs", "refined_subject_masks", "refined_subject_masks_001", "refine_subject_masks"),
+        ("arena_assignment_runs", "arena_assignment", "arena_assignment_001", "arena_assignment"),
     ],
 )
 def test_check_zarr_strict_contract_requires_contract_for_migrated_offline_stages(
@@ -327,6 +331,52 @@ def test_check_zarr_accepts_canonical_contract_payload_for_eye_masks_stage(monke
     )
 
     check = checks["eye_masks"][0]
+    assert check.status == "ok"
+    assert check.has_provenance is True
+
+
+@pytest.mark.parametrize(
+    ("stage_group", "stage_label", "run_name", "stage_name"),
+    [
+        ("subject_mask_runs", "subject_masks", "subject_masks_001", "subject_masks"),
+        ("refined_subject_masks_runs", "refined_subject_masks", "refined_subject_masks_001", "refine_subject_masks"),
+    ],
+)
+def test_check_zarr_accepts_canonical_contract_payload_for_subject_mask_stages(
+    monkeypatch,
+    stage_group: str,
+    stage_label: str,
+    run_name: str,
+    stage_name: str,
+) -> None:
+    payload = build_stage_provenance(
+        stage=stage_name,
+        created_at_utc="2026-02-20T00:00:00+00:00",
+        parameters={"method": "subject_masks_test"},
+        inputs={"source_crop_run": "crop_001"},
+        git={"commit": "d" * 40, "branch": "main"},
+        environment={},
+    )
+    root = _build_root_for_stage(
+        stage_group,
+        run_name,
+        {
+            "method": "subject_masks_test",
+            "provenance": payload,
+        },
+    )
+    monkeypatch.setattr(mod.zarr, "open", lambda *_args, **_kwargs: root)
+
+    checks, _, _ = mod._check_zarr(
+        Path("/fake/recording.zarr"),
+        all_runs=False,
+        require_provenance=True,
+        check_consistency=False,
+        check_subject_metadata=False,
+        strict_contract=True,
+    )
+
+    check = checks[stage_label][0]
     assert check.status == "ok"
     assert check.has_provenance is True
 

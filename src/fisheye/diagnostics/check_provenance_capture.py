@@ -36,7 +36,9 @@ STAGES = [
     {"label": "refined_keypoints", "groups": ["refined_keypoints_runs", "keypoints_refined_runs"]},
     {"label": "eye_masks", "groups": ["eye_masks_runs"]},
     {"label": "refined_eye_masks", "groups": ["refined_eye_masks_runs"]},
-    {"label": "id_assignment", "groups": ["id_assignment_runs"]},
+    {"label": "subject_masks", "groups": ["subject_mask_runs"]},
+    {"label": "refined_subject_masks", "groups": ["refined_subject_masks_runs"]},
+    {"label": "arena_assignment", "groups": ["arena_assignment_runs"]},
 ]
 
 # Strict contract gating is stage-string aware so legacy/non-migrated payloads
@@ -49,7 +51,9 @@ STRICT_CONTRACT_STAGE_ALIASES: Dict[str, set[str]] = {
     "refined_keypoints": {"refined_keypoints", "refine_keypoints"},
     "eye_masks": {"eye_masks"},
     "refined_eye_masks": {"refined_eye_masks", "refine_eye_masks"},
-    "id_assignment": {"id_assignment"},
+    "subject_masks": {"subject_masks"},
+    "refined_subject_masks": {"refined_subject_masks", "refine_subject_masks"},
+    "arena_assignment": {"arena_assignment"},
 }
 
 

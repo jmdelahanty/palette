@@ -32,7 +32,7 @@ OFFLINE_RUN_GROUPS = (
     "keypoints_refined_runs",
     "eye_masks_runs",
     "refined_eye_masks_runs",
-    "id_assignment_runs",
+    "arena_assignment_runs",
 )
 MISSING_STRING_VALUES = {"", "unknown", "n/a", "na", "none", "null"}
 CROP_PARAMETER_ATTR_KEYS = (

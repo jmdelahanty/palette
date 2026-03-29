@@ -95,13 +95,13 @@ def test_collect_provenance_handles_missing_optional_stage_arrays() -> None:
     keypoints.attrs["source_crop_run"] = "crop_001"
     keypoints_runs.attrs["latest"] = "keypoints_001"
 
-    id_runs = root.create_group("id_assignment_runs")
-    id_run = id_runs.create_group("id_001")
-    id_run.attrs["source_detect_run"] = "detect_001"
-    id_runs.attrs["latest"] = "id_001"
+    arena_runs = root.create_group("arena_assignment_runs")
+    arena_run = arena_runs.create_group("arena_001")
+    arena_run.attrs["source_detect_run"] = "detect_001"
+    arena_runs.attrs["latest"] = "arena_001"
 
     record = mod.collect_provenance(root)  # type: ignore[arg-type]
 
     assert record.crop_rois is None
     assert record.keypoint_rows is None
-    assert record.id_rows is None
+    assert record.arena_assignment_rows is None

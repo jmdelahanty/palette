@@ -10,7 +10,7 @@
   - [x] `keypoints_runs`
   - [x] `detect_runs`
   - [x] `crop_runs`
-  - [x] `id_assignment_runs`
+  - [x] `arena_assignment_runs`
 - Add a generic provenance backfill tool for legacy offline runs:
   - [x] inject `provenance.contract` when missing
   - [x] normalize git payload into canonical `provenance.git.commit` shape
@@ -47,6 +47,11 @@
   - Scan recordings and report missing provenance fields per run type
 - [ ] Store explicit run lineage per step:
   - `source_*_run` (detect → refine → crop → keypoints) on each run
+- [ ] Add merged-training row provenance for label origin and supervision mode:
+  - distinguish `auto`, `manual_review`, `manual_training`,
+    `interpolated/synthetic`, and task-specific supervision semantics where
+    available
+  - see [training_label_origin_provenance_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/training_label_origin_provenance_todo.md)
 
 ## Open decisions
 
@@ -72,3 +77,4 @@
 - `docs/provenance_contract_draft.md`
 - `docs/pipeline_metadata_boundaries.md`
 - `docs/provenance_multi_agent_handoff.md`
+- `docs/training_label_origin_provenance_todo.md`
