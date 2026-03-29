@@ -2,21 +2,25 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import h5py
 import zarr
+
+from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 
 
 DEFAULT_KEYS = [
     "dish_mask",
     "detection_tuning",
     "keypoint_tuning",
+    "subject_mask_tuning",
     "eye_mask_tuning",
     "subdish_mask_tuning",
 ]
@@ -29,15 +33,6 @@ class TargetPlan:
     zarr_use: Optional[str]
     status: str
     reason: Optional[str] = None
-
-
-def _normalize_attr(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", "ignore")
-    text = str(value).strip()
-    return text or None
 
 
 def _derive_camera_id(ipc_source_name: object) -> Optional[str]:
@@ -201,6 +196,24 @@ def _load_source_tuning(source_zarr: Path, keys: Sequence[str]) -> Dict[str, obj
     return {key: attrs[key] for key in keys if key in attrs}
 
 
+def _merge_mapping_values(base: Mapping[str, Any], update: Mapping[str, Any]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {str(key): deepcopy(value) for key, value in base.items()}
+    for key, value in update.items():
+        key_text = str(key)
+        existing = merged.get(key_text)
+        if isinstance(existing, Mapping) and isinstance(value, Mapping):
+            merged[key_text] = _merge_mapping_values(existing, value)
+        else:
+            merged[key_text] = deepcopy(value)
+    return merged
+
+
+def _compute_tuning_value(existing: object, source: object, *, merge_dicts: bool) -> object:
+    if merge_dicts and isinstance(existing, Mapping) and isinstance(source, Mapping):
+        return _merge_mapping_values(existing, source)
+    return deepcopy(source)
+
+
 def _resolve_target_use(mode: str, source_use: Optional[str]) -> Optional[str]:
     normalized = mode.strip().lower()
     if normalized == "all":
@@ -328,6 +341,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Overwrite existing tuning keys in target zarrs.",
     )
     parser.add_argument(
+        "--merge-dicts",
+        action="store_true",
+        help=(
+            "When both source and target tuning values are dict-like, recursively merge them "
+            "with source paths overriding matching target paths while preserving unrelated target entries."
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Emit JSON lines for each plan/apply event.",
@@ -417,10 +438,22 @@ def main(argv: Optional[List[str]] = None) -> int:
             updated: List[str] = []
             skipped_keys: List[str] = []
             for key, value in tuning.items():
+                if key in attrs and args.merge_dicts and isinstance(attrs[key], Mapping) and isinstance(value, Mapping):
+                    merged_value = _compute_tuning_value(attrs[key], value, merge_dicts=True)
+                    if merged_value == attrs[key]:
+                        skipped_keys.append(key)
+                        continue
+                    attrs[key] = merged_value
+                    updated.append(key)
+                    continue
                 if not args.overwrite and key in attrs:
                     skipped_keys.append(key)
                     continue
-                attrs[key] = value
+                new_value = _compute_tuning_value(attrs.get(key), value, merge_dicts=bool(args.merge_dicts))
+                if key in attrs and new_value == attrs[key]:
+                    skipped_keys.append(key)
+                    continue
+                attrs[key] = new_value
                 updated.append(key)
             status = "applied" if updated else "unchanged"
             if updated:

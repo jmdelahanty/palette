@@ -127,3 +127,73 @@ def test_main_apply_can_target_analysis_use(tmp_path: Path) -> None:
     assert _read_tuning(target_analysis, "keypoint_tuning") == {"threshold": 0.12}
     assert _read_tuning(target_training, "keypoint_tuning") is None
 
+
+def test_main_apply_merge_dicts_preserves_unrelated_subject_mask_components(tmp_path: Path) -> None:
+    source = tmp_path / "rec_src" / "zarr" / "rec_src_training.zarr"
+    target = tmp_path / "rec_target" / "zarr" / "rec_target_training.zarr"
+    source.parent.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+
+    _make_zarr(
+        source,
+        camera_id="2010093",
+        zarr_use="training",
+        tuning={
+            "subject_mask_tuning": {
+                "version": "2.0",
+                "components": {
+                    "subject_body": {
+                        "method": "traditional_subject_mask_seed",
+                        "tuned_parameters": {"diff_threshold": 44},
+                    }
+                },
+            }
+        },
+    )
+    _make_zarr(
+        target,
+        camera_id="2010093",
+        zarr_use="training",
+        tuning={
+            "subject_mask_tuning": {
+                "version": "2.0",
+                "components": {
+                    "eyes_union": {
+                        "method": "global_threshold_otsu",
+                        "tuned_parameters": {"roi_padding": 12},
+                    },
+                    "subject_body": {
+                        "method": "traditional_subject_mask_seed",
+                        "tuned_parameters": {"diff_threshold": 20, "min_area": 5},
+                    },
+                },
+            }
+        },
+    )
+
+    rc = mod.main(
+        [
+            str(tmp_path),
+            "--source",
+            str(source),
+            "--recursive",
+            "--apply",
+            "--keys",
+            "subject_mask_tuning",
+            "--merge-dicts",
+        ]
+    )
+    assert rc == 0
+    assert _read_tuning(target, "subject_mask_tuning") == {
+        "version": "2.0",
+        "components": {
+            "eyes_union": {
+                "method": "global_threshold_otsu",
+                "tuned_parameters": {"roi_padding": 12},
+            },
+            "subject_body": {
+                "method": "traditional_subject_mask_seed",
+                "tuned_parameters": {"diff_threshold": 44, "min_area": 5},
+            },
+        },
+    }
