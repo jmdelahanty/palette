@@ -779,6 +779,8 @@ def test_run_unet_forwards_roi_cache_args(
             "eye_masks": {
                 "checkpoint": "/tmp/unet.pt",
                 "batch_size": 32,
+                "mask_probs_chunk_rois": 96,
+                "mask_probs_dtype": "uint8",
                 "roi_cache_policy": "always",
                 "roi_cache_dir": "/tmp/unet-roi-cache",
             }
@@ -789,8 +791,12 @@ def test_run_unet_forwards_roi_cache_args(
     argv = captured.get("argv")
     assert isinstance(argv, list)
     assert "--checkpoint" in argv
+    assert "--mask-probs-chunk-rois" in argv
+    assert "--mask-probs-dtype" in argv
     assert "--roi-cache-policy" in argv
     assert "--roi-cache-dir" in argv
+    assert "96" in argv
+    assert "uint8" in argv
     assert "always" in argv
     assert "/tmp/unet-roi-cache" in argv
 

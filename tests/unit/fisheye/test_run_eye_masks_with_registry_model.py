@@ -282,6 +282,8 @@ def test_run_unet_forwards_registry_and_status_details(monkeypatch: pytest.Monke
         device="cpu",
         label_mode="union",
         write_binary_masks=True,
+        mask_probs_chunk_rois=96,
+        mask_probs_dtype="uint8",
         roi_cache_policy="always",
         roi_cache_dir=tmp_path / "roi-cache",
         no_use_crop=False,
@@ -303,7 +305,11 @@ def test_run_unet_forwards_registry_and_status_details(monkeypatch: pytest.Monke
     argv = captured.get("argv")
     assert isinstance(argv, list)
     assert "--write-binary-masks" in argv
+    assert "--mask-probs-chunk-rois" in argv
+    assert "--mask-probs-dtype" in argv
     assert "--roi-cache-policy" in argv
     assert "--roi-cache-dir" in argv
+    assert "96" in argv
+    assert "uint8" in argv
     assert "always" in argv
     assert str(tmp_path / "roi-cache") in argv
