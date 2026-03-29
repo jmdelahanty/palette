@@ -14,6 +14,7 @@ from typing import Any, List, Mapping, Optional, Sequence
 import numpy as np
 from fisheye.diagnostics import prepare_detect_training as pdt
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.shared.type_conversions import normalize_attr as _shared_decode_attr
 
 
 def _add_arg(argv: List[str], flag: str, value: Optional[object]) -> None:
@@ -259,14 +260,7 @@ def _reject_legacy_orchestration_flags(args: argparse.Namespace) -> None:
         )
 
 
-def _decode_attr(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, (bytes, bytearray)):
-        text = value.decode("utf-8", "ignore").strip()
-    else:
-        text = str(value).strip()
-    return text or None
+_decode_attr = _shared_decode_attr
 
 
 def _coerce_mapping(value: Any) -> Optional[Mapping[str, Any]]:

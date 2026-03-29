@@ -10,6 +10,7 @@ from typing import Any, Mapping, Optional
 import numpy as np
 import zarr
 
+from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
 from fisheye.utils.detection_profile import infer_zarr_use
 
@@ -74,8 +75,7 @@ class EyeMaskProfileWriteResult:
     profile_summary: dict[str, Any]
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_utc_now = utc_now
 
 
 def _default_profile_run_name(created_at_utc: str) -> str:

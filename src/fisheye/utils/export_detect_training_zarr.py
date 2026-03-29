@@ -26,6 +26,7 @@ from zarr.core.dtype import VariableLengthUTF8
 
 from fisheye.diagnostics.prepare_detect_training import DatasetManifest, TrainingManifest
 from fisheye.registry.db import Registry
+from fisheye.shared.batch_logging import utc_now
 from fisheye.utils.system import build_invocation_record
 from fisheye.utils.zarr_metadata import get_downsample_array_name, get_downsample_array_path
 
@@ -92,8 +93,7 @@ class MergeResult:
     training_input_format: str
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_utc_now = utc_now
 
 
 def _sha256(path: Path) -> str:

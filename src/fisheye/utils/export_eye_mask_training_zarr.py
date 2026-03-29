@@ -15,7 +15,7 @@ import math
 import shutil
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -24,11 +24,13 @@ import zarr
 from zarr.core.dtype import VariableLengthUTF8
 
 from fisheye.registry.db import Registry, resolve_dataset_id
+from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.detect_reason_codec import (
     REASON_BYTES_ENCODING,
     read_reason_labels,
     write_reason_columns,
 )
+from fisheye.shared.type_conversions import normalize_attr as _as_text
 
 try:
     from rich.console import Console
@@ -52,19 +54,7 @@ except Exception:  # pragma: no cover - rich is optional
 EYE_ROW_GATE_POLICIES = ("all_rows", "usable_only", "usable_plus_explicit_negatives")
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _as_text(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        text = value.decode("utf-8", errors="ignore")
-    else:
-        text = str(value)
-    text = text.strip()
-    return text or None
+_utc_now = utc_now
 
 
 def _normalize_input_format(value: Optional[str]) -> Optional[str]:

@@ -19,18 +19,12 @@ import zarr
 import yaml
 
 from fisheye.registry.db import Registry, RegistryPaths
+from fisheye.shared.type_conversions import normalize_attr as _shared_as_text
 from fisheye.utils import export_eye_mask_training_zarr as export_eye
 from fisheye.utils.system import build_invocation_record
 
 
-def _as_text(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, (bytes, bytearray)):
-        text = value.decode("utf-8", "ignore").strip()
-    else:
-        text = str(value).strip()
-    return text or None
+_as_text = _shared_as_text
 
 
 def _as_float(value: Any) -> Optional[float]:

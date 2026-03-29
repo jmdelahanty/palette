@@ -10,6 +10,7 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.refined_detect_review import DEFAULT_DETECT_GROUP_PREFERENCE, resolve_refined_detect_group
 
 
@@ -72,8 +73,7 @@ class DetectionProfileWriteResult:
     profile_summary: dict[str, Any]
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_utc_now = utc_now
 
 
 def _default_profile_run_name(created_at_utc: str) -> str:
