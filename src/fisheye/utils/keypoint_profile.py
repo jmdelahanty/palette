@@ -9,6 +9,7 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.batch_logging import utc_now
 from fisheye.utils.detection_profile import infer_zarr_use
 
 
@@ -62,8 +63,7 @@ class KeypointProfileWriteResult:
     profile_summary: dict[str, Any]
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_utc_now = utc_now
 
 
 def _default_profile_run_name(created_at_utc: str) -> str:
@@ -466,6 +466,62 @@ def _build_edge_distance_payload(
     }
 
 
+def _build_derived_metric_payload(
+    source_group: zarr.Group,
+    *,
+    rows_total: Optional[int],
+) -> Optional[dict[str, Any]]:
+    required_arrays = ("derived_metric_values", "derived_metric_valid")
+    if not all(name in source_group for name in required_arrays):
+        return None
+
+    values = np.asarray(source_group["derived_metric_values"][:], dtype=np.float64)
+    if values.ndim != 2:
+        return None
+    metric_count = int(values.shape[1])
+    if metric_count <= 0:
+        return None
+
+    valid = np.asarray(source_group["derived_metric_valid"][:], dtype=bool)
+    if valid.shape != values.shape:
+        return None
+
+    values_norm = None
+    if "derived_metric_values_norm" in source_group:
+        candidate = np.asarray(source_group["derived_metric_values_norm"][:], dtype=np.float64)
+        if candidate.shape == values.shape:
+            values_norm = candidate
+
+    labels_raw = source_group.attrs.get("derived_metric_labels")
+    labels: list[str] = []
+    if isinstance(labels_raw, (list, tuple)):
+        labels = [str(item).strip() for item in labels_raw if str(item).strip()]
+    if len(labels) != metric_count:
+        labels = [f"metric_{idx}" for idx in range(metric_count)]
+
+    total_rows = int(values.shape[0]) if rows_total is None else int(rows_total)
+    payload: dict[str, Any] = {
+        "schema_id": _normalize_text(source_group.attrs.get("derived_metric_schema_id")),
+        "schema_version": _normalize_text(source_group.attrs.get("derived_metric_schema_version")),
+        "labels": labels,
+        "normalization": _coerce_mapping(source_group.attrs.get("derived_metric_normalization")) or {},
+        "metrics": [],
+    }
+    for metric_idx, label in enumerate(labels):
+        metric_valid = np.asarray(valid[:, metric_idx], dtype=bool)
+        valid_count = int(np.count_nonzero(metric_valid))
+        metric_info: dict[str, Any] = {
+            "name": label,
+            "valid_count": valid_count,
+            "valid_rate": _safe_ratio(float(valid_count), float(total_rows)),
+            "stats": _metric_stats(values[metric_valid, metric_idx]),
+        }
+        if values_norm is not None:
+            metric_info["stats_norm"] = _metric_stats(values_norm[metric_valid, metric_idx])
+        payload["metrics"].append(metric_info)
+    return payload
+
+
 def _load_source_group(root: zarr.Group, source: ResolvedKeypointSource) -> zarr.Group:
     try:
         group = root[source.keypoint_path]
@@ -553,6 +609,12 @@ def build_keypoint_profile_summary(
     )
     if edge_distance_payload is not None:
         geometry_payload["edge_distance"] = edge_distance_payload
+    derived_metric_payload = _build_derived_metric_payload(
+        source_group,
+        rows_total=rows_total,
+    )
+    if derived_metric_payload is not None:
+        geometry_payload["derived_metrics"] = derived_metric_payload
 
     dataset_id = _normalize_text(dataset_id) or _normalize_text(root.attrs.get("dataset_id"))
     recording_id = (

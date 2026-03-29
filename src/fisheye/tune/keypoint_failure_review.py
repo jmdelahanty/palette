@@ -18,9 +18,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 
+from ..pose.metric_schema import (
+    DerivedMetricStorage,
+    compute_derived_metric_results,
+    ensure_derived_metric_storage,
+    resolve_metric_schema_for_group,
+)
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
 from ..shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
+from ..shared.type_conversions import normalize_attr as _normalize_attr
 from ..refinement.keypoint_quality import compute_geometry_metrics
 from ..refinement.refine_keypoints import _compute_heading_from_points
 from ..registry.db import Registry, RegistryPaths
@@ -32,6 +39,38 @@ _NO_REVIEWABLE_FAILURES_POLICY_ID = "keypoint_no_reviewable_failures_v1"
 _NO_REVIEWABLE_FAILURES_POLICY_VERSION = 1
 _NO_REVIEWABLE_FAILURES_ALLOWED_TAGS = ("fish_present_no_keypoints",)
 _NO_REVIEWABLE_FAILURES_BLOCKED_TAGS = ("detection_issue",)
+
+
+def _display_colors(label_count: int) -> list[str]:
+    if label_count <= len(_DEFAULT_COLORS):
+        return list(_DEFAULT_COLORS[:label_count])
+    colors = list(_DEFAULT_COLORS)
+    cmap = mpl.colormaps["tab10"]
+    extra_needed = int(label_count - len(colors))
+    for idx in range(extra_needed):
+        colors.append(mpl.colors.to_hex(cmap((idx + len(_DEFAULT_COLORS)) % cmap.N)))
+    return colors
+
+
+def _advance_active_index(current_idx: int, *, label_count: int, step: int) -> int:
+    if label_count <= 0:
+        return 0
+    return int((current_idx + step) % label_count)
+
+
+def _active_index_from_key(key: str | None, *, label_count: int, current_idx: int) -> int | None:
+    if not key or label_count <= 0:
+        return None
+    if key.isdigit():
+        idx = int(key) - 1
+        if 0 <= idx < label_count:
+            return idx
+        return None
+    if key == "]":
+        return _advance_active_index(current_idx, label_count=label_count, step=1)
+    if key == "[":
+        return _advance_active_index(current_idx, label_count=label_count, step=-1)
+    return None
 
 
 def _get_latest_run(root: zarr.Group, group_name: str) -> str:
@@ -288,6 +327,15 @@ def _set_roi_value_if_changed(arr: Optional[zarr.Array], roi_idx: int, value: ob
     return True
 
 
+def _mark_edit_applied(edit_applied_arr: Optional[zarr.Array], roi_idx: int) -> bool:
+    if edit_applied_arr is None:
+        return False
+    if bool(np.asarray(edit_applied_arr[roi_idx], dtype=bool)):
+        return False
+    edit_applied_arr[roi_idx] = True
+    return True
+
+
 def _build_manual_reason(existing: str, *, geom_ok: bool) -> str:
     existing_tags = [tag for tag in existing.split("|") if tag]
     drop_tags = {
@@ -349,6 +397,74 @@ def _write_reason_labels(refined: zarr.Group, labels: np.ndarray) -> None:
         include_reason_text=True,
         overwrite=True,
     )
+
+
+def _roi_diagonal_from_roi_images(roi_images: np.ndarray) -> Optional[float]:
+    shape = np.shape(roi_images)
+    if len(shape) < 3:
+        return None
+    try:
+        roi_h = float(shape[1])
+        roi_w = float(shape[2])
+    except (TypeError, ValueError):
+        return None
+    diagonal = float(np.hypot(roi_w, roi_h))
+    return diagonal if np.isfinite(diagonal) and diagonal > 0 else None
+
+
+def _ensure_review_derived_metric_storage(
+    refined: zarr.Group,
+    *,
+    row_count: int,
+    chunk_len: int,
+    roi_diagonal: Optional[float],
+) -> DerivedMetricStorage | None:
+    schema = resolve_metric_schema_for_group(refined, required=False)
+    if schema is None:
+        return None
+    return ensure_derived_metric_storage(
+        refined,
+        schema=schema,
+        row_count=row_count,
+        chunk_len=chunk_len,
+        roi_diagonal=roi_diagonal,
+        overwrite=False,
+    )
+
+
+def _set_review_derived_metric_row(
+    storage: Optional[DerivedMetricStorage],
+    *,
+    roi_idx: int,
+    keypoints_roi: Optional[np.ndarray],
+    keypoint_labels: Sequence[str],
+    roi_diagonal: Optional[float],
+) -> bool:
+    if storage is None:
+        return False
+
+    metric_count = int(len(storage.schema.metrics))
+    if metric_count <= 0:
+        return False
+
+    if keypoints_roi is None:
+        values = np.full(metric_count, np.nan, dtype=np.float32)
+        valid = np.zeros(metric_count, dtype=bool)
+        changed = _set_roi_value_if_changed(storage.values, roi_idx, values)
+        changed |= _set_roi_value_if_changed(storage.values_norm, roi_idx, values)
+        changed |= _set_roi_value_if_changed(storage.valid, roi_idx, valid)
+        return changed
+
+    result = compute_derived_metric_results(
+        np.asarray(keypoints_roi, dtype=np.float64),
+        keypoint_labels=keypoint_labels,
+        schema=storage.schema,
+        roi_diagonal=roi_diagonal,
+    )
+    changed = _set_roi_value_if_changed(storage.values, roi_idx, result.values)
+    changed |= _set_roi_value_if_changed(storage.values_norm, roi_idx, result.values_norm)
+    changed |= _set_roi_value_if_changed(storage.valid, roi_idx, result.valid)
+    return changed
 
 
 def _load_frame_flags(path: Path) -> Dict[str, list[Dict[str, Optional[int]]]]:
@@ -488,13 +604,6 @@ def _build_keypoint_signature(attrs: Dict[str, Any]) -> Dict[str, object]:
         "parameter_source": parameter_source,
         "parameters_hash": _hash_parameters(params),
     }
-
-
-def _normalize_attr(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
 
 
 def _jsonable_scalar(value: object) -> object:
@@ -975,6 +1084,7 @@ def launch_review(
     confidence_valid_arr = refined.get("confidence_valid")
     geometry_valid_arr = refined.get("geometry_valid")
     usable_arr = refined.get("usable_keypoints")
+    edit_applied_arr = refined.get("edit_applied")
     reason_arr = refined.get("reason")
     heading_finite_arr = refined.get("heading_finite")
     heading_usable_arr = refined.get("heading_usable")
@@ -988,7 +1098,26 @@ def launch_review(
         _sanitize_reason_array(reason_arr)
 
     labels = list(refined.attrs.get("keypoint_labels", _DEFAULT_LABELS))
-    colors = _DEFAULT_COLORS[: len(labels)]
+    colors = _display_colors(len(labels))
+    roi_diagonal = _roi_diagonal_from_roi_images(roi_images)
+    derived_metric_storage: Optional[DerivedMetricStorage] = None
+
+    def _get_derived_metric_storage() -> Optional[DerivedMetricStorage]:
+        nonlocal derived_metric_storage
+        if derived_metric_storage is not None:
+            return derived_metric_storage
+        chunk_len = (
+            int(heading_arr.chunks[0])
+            if heading_arr is not None and heading_arr.chunks
+            else max(1, min(1024, int(kp_roi_arr.shape[0])))
+        )
+        derived_metric_storage = _ensure_review_derived_metric_storage(
+            refined,
+            row_count=int(kp_roi_arr.shape[0]),
+            chunk_len=chunk_len,
+            roi_diagonal=roi_diagonal,
+        )
+        return derived_metric_storage
 
     idx_pos = 0
     active_idx = 0
@@ -1061,7 +1190,9 @@ def launch_review(
         roi_idx = int(failures[idx_pos])
         frame_idx = int(frame_indices[roi_idx])
         if not np.isfinite(points).all():
-            print("Set all three keypoints before saving.")
+            missing_labels = [str(label) for label, xy in zip(labels, points) if not np.isfinite(xy).all()]
+            detail = f" Missing: {', '.join(missing_labels)}." if missing_labels else ""
+            print(f"Set all keypoints before saving.{detail}")
             return
 
         changed = False
@@ -1073,7 +1204,7 @@ def launch_review(
         heading_val = _compute_heading_from_points(points[0], points[1], points[2])
         changed |= _set_roi_value_if_changed(heading_arr, roi_idx, heading_val)
 
-        metrics = compute_geometry_metrics(points)
+        metrics = compute_geometry_metrics(points[:3])
         max_ok = max_triangle_area is None or metrics.area <= max_triangle_area
         geom_ok = bool(
             np.isfinite(metrics.min_angle)
@@ -1086,6 +1217,13 @@ def launch_review(
         changed |= _set_roi_value_if_changed(triangle_area_arr, roi_idx, metrics.area)
         changed |= _set_roi_value_if_changed(min_angle_arr, roi_idx, metrics.min_angle)
         changed |= _set_roi_value_if_changed(triangle_angles_arr, roi_idx, metrics.angles)
+        changed |= _set_review_derived_metric_row(
+            _get_derived_metric_storage(),
+            roi_idx=roi_idx,
+            keypoints_roi=points,
+            keypoint_labels=labels,
+            roi_diagonal=roi_diagonal,
+        )
 
         conf_ok = True
         if conf_arr is not None:
@@ -1119,6 +1257,7 @@ def launch_review(
                 changed = True
 
         if changed:
+            _mark_edit_applied(edit_applied_arr, roi_idx)
             stale_touched = mark_downstream_eye_mask_runs_stale(
                 root,
                 source_keypoint_group="refined_keypoints_runs",
@@ -1163,6 +1302,13 @@ def launch_review(
                 roi_idx,
                 np.full_like(np.asarray(triangle_angles_arr[roi_idx]), np.nan),
             )
+        changed |= _set_review_derived_metric_row(
+            _get_derived_metric_storage(),
+            roi_idx=roi_idx,
+            keypoints_roi=None,
+            keypoint_labels=labels,
+            roi_diagonal=roi_diagonal,
+        )
         changed |= _set_roi_value_if_changed(refined_success_arr, roi_idx, False)
         changed |= _set_roi_value_if_changed(flip_corrected_arr, roi_idx, False)
         changed |= _set_roi_value_if_changed(quality_labels_arr, roi_idx, 0)
@@ -1179,6 +1325,7 @@ def launch_review(
                 changed = True
 
         if changed:
+            _mark_edit_applied(edit_applied_arr, roi_idx)
             stale_touched = mark_downstream_eye_mask_runs_stale(
                 root,
                 source_keypoint_group="refined_keypoints_runs",
@@ -1237,6 +1384,13 @@ def launch_review(
                 roi_idx,
                 np.full_like(np.asarray(triangle_angles_arr[roi_idx]), np.nan),
             )
+        changed |= _set_review_derived_metric_row(
+            _get_derived_metric_storage(),
+            roi_idx=roi_idx,
+            keypoints_roi=None,
+            keypoint_labels=labels,
+            roi_diagonal=roi_diagonal,
+        )
         changed |= _set_roi_value_if_changed(refined_success_arr, roi_idx, False)
         changed |= _set_roi_value_if_changed(flip_corrected_arr, roi_idx, False)
         changed |= _set_roi_value_if_changed(quality_labels_arr, roi_idx, 0)
@@ -1253,6 +1407,7 @@ def launch_review(
                 changed = True
 
         if changed:
+            _mark_edit_applied(edit_applied_arr, roi_idx)
             stale_touched = mark_downstream_eye_mask_runs_stale(
                 root,
                 source_keypoint_group="refined_keypoints_runs",
@@ -1322,8 +1477,9 @@ def launch_review(
                     suffix = f" ({detail})" if detail else ""
                     print(f"Warning: registry sync skipped: {reason}{suffix}")
 
-        if event.key in {"1", "2", "3"}:
-            active_idx = int(event.key) - 1
+        selected_idx = _active_index_from_key(event.key, label_count=len(labels), current_idx=active_idx)
+        if selected_idx is not None:
+            active_idx = int(selected_idx)
             update_display()
         elif event.key == "n":
             next_failure()
@@ -1376,7 +1532,12 @@ def launch_review(
         print(f"  Failures to review: {len(failures)}")
     print("\nControls:")
     print("  Click: set active keypoint")
-    print("  1/2/3: select bladder/left/right")
+    if len(labels) <= 9:
+        label_help = ", ".join(f"{idx + 1}={label}" for idx, label in enumerate(labels))
+        print(f"  1-{len(labels)}: select keypoint ({label_help})")
+    else:
+        print("  1-9: select corresponding keypoint when available")
+    print("  [/]: cycle active keypoint backward/forward")
     print("  s: save correction")
     print("  t: toggle text overlays")
     print("  b: flag frame for follow-up (writes --frame-flag-file)")

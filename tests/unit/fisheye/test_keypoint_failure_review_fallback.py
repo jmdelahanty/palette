@@ -1,22 +1,63 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 
 import numpy as np
+import pytest
 import zarr
+import zarr.api.synchronous as zarr_sync_api
+import zarr.core.sync as zarr_sync
+from zarr.storage import MemoryStore
 
+from fisheye.pose.metric_schema import DerivedMetricStorage, metric_schema_from_package
 from fisheye.shared.detect_reason_codec import write_reason_columns
 from fisheye.tune import keypoint_failure_review as mod
 from fisheye.tune.keypoint_failure_review import (
     _build_manual_reason,
     _build_no_reviewable_failures_auto_review,
+    _active_index_from_key,
     _apply_review_status,
+    _display_colors,
     _empty_review_auto_state,
     _load_raw_failure_indices,
+    _mark_edit_applied,
+    _roi_diagonal_from_roi_images,
+    _set_review_derived_metric_row,
     launch_review,
     _resolve_full_frame_dimensions,
     _resolve_review_intended_use,
 )
+
+
+@pytest.fixture(autouse=True)
+def _patch_zarr_sync(monkeypatch):
+    def _sync_via_asyncio_run(coro, loop=None, timeout=None):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+
+        result = {}
+        error = {}
+
+        def _runner():
+            try:
+                result["value"] = asyncio.run(coro)
+            except Exception as exc:  # pragma: no cover - defensive
+                error["exc"] = exc
+
+        thread = threading.Thread(target=_runner, daemon=True)
+        thread.start()
+        thread.join()
+
+        if "exc" in error:
+            raise error["exc"]
+        return result.get("value")
+
+    monkeypatch.setattr(zarr_sync, "sync", _sync_via_asyncio_run)
+    monkeypatch.setattr(zarr_sync_api, "sync", _sync_via_asyncio_run)
 
 
 def test_resolve_full_frame_dimensions_from_root_attrs_when_images_full_missing(tmp_path: Path) -> None:
@@ -47,6 +88,79 @@ def test_build_manual_reason_is_canonical_and_idempotent() -> None:
     second = _build_manual_reason(first, geom_ok=False)
     assert first == "manual_correction|geometry_issue"
     assert second == first
+
+
+def test_display_colors_extends_beyond_default_triplet() -> None:
+    colors = _display_colors(5)
+    assert len(colors) == 5
+    assert colors[:3] == ["#22c55e", "#1a66f3", "#f85151"]
+
+
+def test_active_index_from_key_supports_dynamic_digits_and_cycle_keys() -> None:
+    assert _active_index_from_key("1", label_count=5, current_idx=0) == 0
+    assert _active_index_from_key("5", label_count=5, current_idx=0) == 4
+    assert _active_index_from_key("6", label_count=5, current_idx=0) is None
+    assert _active_index_from_key("]", label_count=5, current_idx=4) == 0
+    assert _active_index_from_key("[", label_count=5, current_idx=0) == 4
+
+
+def test_roi_diagonal_from_roi_images_uses_crop_shape() -> None:
+    roi_images = np.zeros((7, 3, 4), dtype=np.uint8)
+    assert _roi_diagonal_from_roi_images(roi_images) == 5.0
+
+
+def test_review_helpers_update_and_clear_derived_metric_rows(tmp_path: Path) -> None:
+    schema = metric_schema_from_package("traditional_v2")
+    storage = DerivedMetricStorage(
+        schema=schema,
+        values=np.full((2, len(schema.metrics)), np.nan, dtype=np.float32),
+        values_norm=np.full((2, len(schema.metrics)), np.nan, dtype=np.float32),
+        valid=np.zeros((2, len(schema.metrics)), dtype=bool),
+    )
+
+    labels = ["swim_bladder", "eye_left", "eye_right", "snout_tip", "tail_tip"]
+    points = np.array(
+        [
+            [1.0, 1.0],
+            [2.0, 0.0],
+            [2.0, 2.0],
+            [3.0, 1.0],
+            [0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    changed = _set_review_derived_metric_row(
+        storage,
+        roi_idx=0,
+        keypoints_roi=points,
+        keypoint_labels=labels,
+        roi_diagonal=5.0,
+    )
+    assert changed is True
+    np.testing.assert_allclose(np.asarray(storage.values[0], dtype=np.float32), np.array([3.0, 1.0, 2.0, 2.0], dtype=np.float32))
+    np.testing.assert_array_equal(np.asarray(storage.valid[0], dtype=bool), np.array([True, True, True, True], dtype=bool))
+
+    changed = _set_review_derived_metric_row(
+        storage,
+        roi_idx=0,
+        keypoints_roi=None,
+        keypoint_labels=labels,
+        roi_diagonal=5.0,
+    )
+    assert changed is True
+    np.testing.assert_array_equal(np.asarray(storage.valid[0], dtype=bool), np.array([False, False, False, False], dtype=bool))
+    assert np.isnan(np.asarray(storage.values[0], dtype=np.float32)).all()
+
+
+def test_mark_edit_applied_sets_flag_once(tmp_path: Path) -> None:
+    root = zarr.open_group(store=tmp_path / "edit_applied.zarr", mode="w")
+    refined = root.create_group("refined_keypoints_runs").create_group("refined_1")
+    edit_applied = refined.create_array("edit_applied", data=np.array([False, True], dtype=bool))
+
+    assert _mark_edit_applied(edit_applied, 0) is True
+    assert _mark_edit_applied(edit_applied, 0) is False
+    assert _mark_edit_applied(edit_applied, 1) is False
+    np.testing.assert_array_equal(np.asarray(edit_applied[:], dtype=bool), np.asarray([True, True], dtype=bool))
 
 
 def test_resolve_review_intended_use_prefers_existing_status(tmp_path: Path) -> None:

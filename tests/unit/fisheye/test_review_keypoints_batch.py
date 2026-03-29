@@ -2,8 +2,30 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from fisheye.utils import review_keypoints_batch as mod
+
+
+class _FakeGroup:
+    def __init__(self, *, attrs: dict[str, Any] | None = None, children: dict[str, "_FakeGroup"] | None = None) -> None:
+        self.attrs = attrs or {}
+        self._children = children or {}
+
+    def get(self, key: str):
+        return self._children.get(key)
+
+    def keys(self):
+        return self._children.keys()
+
+    def group_keys(self):
+        return self._children.keys()
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._children
+
+    def __getitem__(self, key: str):
+        return self._children[key]
 
 
 def _write_registry_for_latest(path: Path, recordings_root: Path) -> None:
@@ -203,6 +225,64 @@ def test_build_plans_from_registry_excludes_runs_with_no_review_failures(tmp_pat
     )
 
     assert plans == []
+
+
+def test_build_plans_selects_latest_run_matching_pose_schema(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "sample_training.zarr"
+    refined_parent = _FakeGroup(
+        attrs={"latest": "refined_old"},
+        children={
+            "refined_old": _FakeGroup(attrs={"pose_schema": {"name": "traditional_v1"}}),
+            "refined_old_traditional_v2_seed": _FakeGroup(
+                attrs={
+                    "pose_schema": {"name": "traditional_v2"},
+                    "keypoint_review_status": {"state": "pending"},
+                }
+            ),
+        },
+    )
+    root = _FakeGroup(attrs={"zarr_use": "training"}, children={"refined_keypoints_runs": refined_parent})
+
+    monkeypatch.setattr(mod, "_iter_zarr", lambda _paths, _recursive: [zarr_path])
+    monkeypatch.setattr(mod.zarr, "open", lambda _path, mode="r": root)
+
+    plans = mod._build_plans(
+        roots=[tmp_path],
+        recursive=False,
+        refined_run=None,
+        pose_schema="traditional_v2",
+        zarr_use="training",
+    )
+
+    ok = [plan for plan in plans if plan.status == "ok"]
+    assert len(ok) == 1
+    assert ok[0].zarr_path == zarr_path
+    assert ok[0].refined_run == "refined_old_traditional_v2_seed"
+    assert ok[0].review_state == "pending"
+
+
+def test_main_filesystem_mode_passes_pose_schema(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_build_plans(*_args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(mod, "_build_plans", _fake_build_plans)
+    monkeypatch.setattr(mod, "_build_plans_from_registry", lambda *_args, **_kwargs: [])
+
+    rc = mod.main(
+        [
+            str(tmp_path / "recordings"),
+            "--manual",
+            "--pose-schema",
+            "traditional_v2",
+            "--list",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["pose_schema"] == "traditional_v2"
 
 
 def test_main_registry_only_requires_registry(tmp_path: Path) -> None:

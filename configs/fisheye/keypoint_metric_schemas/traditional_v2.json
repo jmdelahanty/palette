@@ -1,0 +1,44 @@
+{
+  "schema_name": "traditional_v2_derived_metrics",
+  "schema_version": "v1",
+  "skeleton_id": "pose_skel_traditional_v2",
+  "source_pose_schema": "traditional_v2",
+  "metrics": [
+    {
+      "name": "total_length",
+      "type": "distance",
+      "from_label": "snout_tip",
+      "to_label": "tail_tip",
+      "units": "px",
+      "normalization": "roi_diagonal",
+      "description": "Full body axis distance from snout tip to tail tip."
+    },
+    {
+      "name": "tail_length",
+      "type": "distance",
+      "from_label": "swim_bladder",
+      "to_label": "tail_tip",
+      "units": "px",
+      "normalization": "roi_diagonal",
+      "description": "Posterior body distance from swim bladder to tail tip."
+    },
+    {
+      "name": "head_length",
+      "type": "distance",
+      "from_label": "snout_tip",
+      "to_label": "swim_bladder",
+      "units": "px",
+      "normalization": "roi_diagonal",
+      "description": "Anterior body distance from snout tip to swim bladder."
+    },
+    {
+      "name": "eye_span",
+      "type": "distance",
+      "from_label": "eye_left",
+      "to_label": "eye_right",
+      "units": "px",
+      "normalization": "roi_diagonal",
+      "description": "Distance between left and right eye centers."
+    }
+  ]
+}

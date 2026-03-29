@@ -1,0 +1,27 @@
+{
+  "name": "traditional_v2",
+  "description": "5-point fish pose (swim bladder + left/right eye + snout tip + tail tip).",
+  "nodes": [
+    {"id": 0, "name": "swim_bladder"},
+    {"id": 1, "name": "eye_left"},
+    {"id": 2, "name": "eye_right"},
+    {"id": 3, "name": "snout_tip"},
+    {"id": 4, "name": "tail_tip"}
+  ],
+  "edges": [
+    [0, 1],
+    [0, 2],
+    [1, 2],
+    [3, 1],
+    [3, 2],
+    [0, 4]
+  ],
+  "metadata": {
+    "units": "pixels",
+    "coordinate_system": "roi",
+    "version": 2,
+    "skeleton_id": "pose_skel_traditional_v2",
+    "migration_from": "traditional_v1",
+    "notes": "Ordered as swim_bladder, eye_left, eye_right, snout_tip, tail_tip so traditional_v1 indices are preserved and new points append cleanly."
+  }
+}

@@ -281,6 +281,79 @@ def test_build_keypoint_profile_summary_includes_edge_distance_metrics() -> None
     assert third_edge["distance_norm"]["count"] == 4
 
 
+def test_build_keypoint_profile_summary_includes_derived_metrics() -> None:
+    root = _make_keypoint_root()
+    keypoints_run = root["keypoints_runs/keypoints_001"]
+    keypoints_run.attrs["derived_metric_schema_id"] = "traditional_v2_derived_metrics"
+    keypoints_run.attrs["derived_metric_schema_version"] = "1.0"
+    keypoints_run.attrs["derived_metric_labels"] = [
+        "total_length",
+        "tail_length",
+        "head_length",
+        "eye_span",
+    ]
+    keypoints_run.attrs["derived_metric_normalization"] = {
+        "mode": "roi_diagonal",
+        "roi_diagonal": 90.5,
+    }
+    keypoints_run.create_array(
+        "derived_metric_values",
+        data=np.asarray(
+            [
+                [40.0, 25.0, 15.0, 8.0],
+                [42.0, 26.0, 16.0, 8.5],
+                [np.nan, np.nan, np.nan, np.nan],
+                [44.0, 27.0, 17.0, 9.0],
+                [46.0, 28.0, 18.0, 9.5],
+            ],
+            dtype=np.float32,
+        ),
+    )
+    keypoints_run.create_array(
+        "derived_metric_values_norm",
+        data=np.asarray(
+            [
+                [0.40, 0.25, 0.15, 0.08],
+                [0.42, 0.26, 0.16, 0.085],
+                [np.nan, np.nan, np.nan, np.nan],
+                [0.44, 0.27, 0.17, 0.09],
+                [0.46, 0.28, 0.18, 0.095],
+            ],
+            dtype=np.float32,
+        ),
+    )
+    keypoints_run.create_array(
+        "derived_metric_valid",
+        data=np.asarray(
+            [
+                [True, True, True, True],
+                [True, True, True, True],
+                [False, False, False, False],
+                [True, True, True, True],
+                [True, True, True, True],
+            ],
+            dtype=np.bool_,
+        ),
+    )
+
+    summary = build_keypoint_profile_summary(
+        root,
+        zarr_path=Path("/tmp/rec_001_analysis.zarr"),
+    )
+    derived = summary["geometry"]["derived_metrics"]
+
+    assert derived["schema_id"] == "traditional_v2_derived_metrics"
+    assert derived["labels"] == ["total_length", "tail_length", "head_length", "eye_span"]
+    assert derived["normalization"]["mode"] == "roi_diagonal"
+
+    total_length = derived["metrics"][0]
+    assert total_length["name"] == "total_length"
+    assert total_length["valid_count"] == 4
+    assert total_length["valid_rate"] == pytest.approx(4.0 / 5.0)
+    assert total_length["stats"]["p50"] == pytest.approx(43.0)
+    assert total_length["stats_norm"]["p50"] == pytest.approx(0.43)
+
+
 def test_write_keypoint_profile_writes_run_attrs_and_latest_pointer() -> None:
     root = _make_keypoint_root()
     result = write_keypoint_profile(
