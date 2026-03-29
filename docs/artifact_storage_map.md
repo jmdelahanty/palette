@@ -31,13 +31,50 @@ This doc clarifies where PNG/JSON artifacts are persisted today.
 
 ## Notes
 
+- A **profile summary** and a **profile PNG artifact** are different things.
+  A run can have `attrs["profile_summary"]` and still have no `visualizations/*_png`
+  artifacts at all.
 - Detect/keypoint **profile runs** (`analysis/*_profile_runs`) primarily store metric summary attrs.
   Their images shown in the source-profile HTML may come from linked refined-run visualizations.
+- Eye-mask profile runs are different: their finalized overview PNG is written directly into
+  `analysis/eye_mask_profile_runs/<run>/visualizations/eye_mask_profile_overview_png`.
+- The source-profile HTML indexer (`fisheye.utils.index_source_recording_profiles --include-artifacts`)
+  first checks the profile run itself, then for detect/keypoint profiles also follows
+  `profile_summary.source.refined_run` and related source paths to look for PNG arrays in the
+  linked refined run's `visualizations/` group.
+- Finalized PNG artifacts are not written automatically just because a profile/refined run exists.
+  The finalize helpers are gated and dry-run by default:
+  - `fisheye.utils.finalize_refinement_artifacts`
+  - `fisheye.utils.finalize_keypoint_refinement_artifacts`
+  - `fisheye.utils.finalize_eye_mask_profile_artifacts`
+- For detect/keypoint finalize flows, the run generally must satisfy the expected review state
+  (default `approved`) and the command must be run with `--apply` before the PNG artifacts are
+  persisted into zarr.
+- For eye-mask profile finalize flow, the same `--apply` rule applies, and review-state /
+  intended-use filters may also exclude a run from artifact generation.
 - Export/view helpers for zarr-stored artifacts:
   - detect: `fisheye.utils.export_detect_quality_overview`
   - keypoint: `fisheye.utils.export_keypoint_quality_overview`
   - eye-mask profile: `fisheye.utils.export_eye_mask_quality_overview`
 - Training card plots can be disabled via `--no-plots` (`--data-card-no-plots` in pipeline wrappers).
+
+## Why A Profile May Have No Visible PNG Artifacts
+
+Common cases:
+
+- The profile run exists, but only the summary attrs were written; no finalize step has been run.
+- A finalize command was run without `--apply`, so it stayed in dry-run mode.
+- The run failed review-state gating, so the finalize command skipped it.
+- For detect/keypoint profiles, the profile run exists but the linked refined run has no
+  `visualizations/*_png` arrays to extract.
+- The HTML index was generated with `--include-artifacts`, but there were no underlying PNG arrays
+  in any resolved target run.
+
+Practical implication:
+
+- Eye-mask profiles can legitimately have profile-local PNGs.
+- Detect/keypoint profiles often show thumbnails only when the corresponding refined run has already
+  had its PNG artifacts finalized.
 
 ## Quick Checks
 
@@ -52,4 +89,3 @@ Check whether zarr visual artifacts exist:
 ```bash
 find /nvme1/recordings -type d -path '*/visualizations/*_png' | head
 ```
-
