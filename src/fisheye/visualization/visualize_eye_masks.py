@@ -358,27 +358,40 @@ class EyeMaskViewer:
         success_flags: np.ndarray,
         keypoints: np.ndarray,
         keypoint_labels: Sequence[str],
+        roi_indices: Optional[Sequence[int]] = None,
     ) -> None:
         if not variants:
             raise ValueError("No mask variants available to visualize.")
         self.root = root
         self.variants = list(variants)
         self.crop_source = crop_source
-        self.total = int(self.crop_source.total_rois)
+        self.full_total = int(self.crop_source.total_rois)
+        if roi_indices is None:
+            roi_indices_arr = np.arange(self.full_total, dtype=np.int64)
+        else:
+            roi_indices_arr = np.asarray(list(roi_indices), dtype=np.int64)
+            if roi_indices_arr.ndim != 1:
+                raise ValueError("roi_indices must be a 1D sequence of ROI indices.")
+            if roi_indices_arr.size == 0:
+                raise ValueError("roi_indices must contain at least one ROI index.")
+            if np.any(roi_indices_arr < 0) or np.any(roi_indices_arr >= self.full_total):
+                raise ValueError("roi_indices contains values outside the ROI range.")
+        self.roi_indices = roi_indices_arr
+        self.total = int(self.roi_indices.shape[0])
         self.success_flags = success_flags
         self.keypoints = np.asarray(keypoints)
-        if self.keypoints.shape[0] != self.total:
+        if self.keypoints.shape[0] != self.full_total:
             raise ValueError(
-                f"Keypoint count ({self.keypoints.shape[0]}) does not match ROI count ({self.total})."
+                f"Keypoint count ({self.keypoints.shape[0]}) does not match ROI count ({self.full_total})."
             )
         if self.keypoints.ndim != 3 or self.keypoints.shape[2] != 2:
             raise ValueError("Keypoints array must have shape (num_roi, num_keypoints, 2).")
         self.keypoint_labels = list(keypoint_labels)
         self.keypoint_count = int(self.keypoints.shape[1]) if self.keypoints.ndim >= 2 else 0
         for variant in self.variants:
-            if variant.masks.shape[0] != self.total:
+            if variant.masks.shape[0] != self.full_total:
                 raise ValueError(
-                    f"Variant '{variant.name}' mask count ({variant.masks.shape[0]}) does not match ROI count ({self.total})."
+                    f"Variant '{variant.name}' mask count ({variant.masks.shape[0]}) does not match ROI count ({self.full_total})."
                 )
         self.variant_index = 0
         self.max_channels = max(variant.channel_count for variant in self.variants)
@@ -504,18 +517,25 @@ class EyeMaskViewer:
         np.ndarray,
     ]:
         variant = self.variants[variant_idx]
-        roi = np.asarray(self.crop_source.read_slice(idx, idx + 1)[0])
+        global_idx = int(self.roi_indices[idx])
+        roi = np.asarray(self.crop_source.read_slice(global_idx, global_idx + 1)[0])
         base = normalize_roi(roi)
         overlay = np.dstack([base, base, base])
 
-        success_flag = bool(self.success_flags[idx])
+        success_flag = bool(self.success_flags[global_idx])
         summary_lines = [
-            f"ROI {idx + 1}/{self.total} | keypoints: {'ok' if success_flag else 'fail'}",
+            "ROI {display_idx}/{display_total} (global {global_idx}/{global_total}) | keypoints: {status}".format(
+                display_idx=idx + 1,
+                display_total=self.total,
+                global_idx=global_idx + 1,
+                global_total=self.full_total,
+                status="ok" if success_flag else "fail",
+            ),
             f"Variant: {variant.name}",
         ]
         summary_lines.extend(variant.summary_lines)
 
-        kp_array = np.asarray(self.keypoints[idx], dtype=np.float32)
+        kp_array = np.asarray(self.keypoints[global_idx], dtype=np.float32)
         kp_valid = np.all(np.isfinite(kp_array), axis=1)
         kp_summaries = []
         for kp_idx in range(self.keypoint_count):
@@ -532,13 +552,8 @@ class EyeMaskViewer:
         mask_list: List[np.ndarray] = []
         axes_data: List[dict[str, tuple[tuple[float, float], tuple[float, float]]]] = []
         ellipse_curves: List[np.ndarray] = []
-        if variant.ellipse_params is not None:
-            ellipse_info = np.asarray(variant.ellipse_params[idx])
-        else:
-            ellipse_info = np.full((variant.channel_count, 5), np.nan, dtype=np.float32)
-
         for ch_idx in range(variant.channel_count):
-            mask = np.asarray(variant.masks[idx, ch_idx])
+            mask = np.asarray(variant.masks[global_idx, ch_idx])
             mask_list.append(mask)
             mask_bool = mask > 0
             color = variant.channel_colors[ch_idx]
@@ -548,15 +563,15 @@ class EyeMaskViewer:
 
             if (
                 variant.ellipse_success is not None
-                and variant.ellipse_success.shape[0] > idx
+                and variant.ellipse_success.shape[0] > global_idx
                 and variant.ellipse_success.shape[1] > ch_idx
             ):
-                success = bool(np.asarray(variant.ellipse_success[idx, ch_idx]))
+                success = bool(np.asarray(variant.ellipse_success[global_idx, ch_idx]))
             else:
                 success = False
             ellipse_row = (
-                np.asarray(ellipse_info[ch_idx])
-                if ch_idx < ellipse_info.shape[0]
+                np.asarray(variant.ellipse_params[global_idx, ch_idx])
+                if variant.ellipse_params is not None and ch_idx < variant.ellipse_params.shape[1]
                 else np.full(5, np.nan, dtype=np.float32)
             )
             cx, cy, major_len_raw, minor_len_raw, theta = (
@@ -591,7 +606,7 @@ class EyeMaskViewer:
         prob_maps: Optional[List[np.ndarray]] = None
         if variant.mask_probs is not None:
             prob_maps = [
-                np.asarray(variant.mask_probs[idx, ch_idx], dtype=np.float32)
+                np.asarray(variant.mask_probs[global_idx, ch_idx], dtype=np.float32)
                 for ch_idx in range(variant.channel_count)
             ]
         return (
@@ -615,6 +630,7 @@ def create_viewer(
     keypoint_run: Optional[str],
     refined_runs: Optional[List[str]] = None,
     frame_flag_file: Optional[str] = None,
+    roi_indices: Optional[Sequence[int]] = None,
 ) -> None:
     root = open_zarr(zarr_path)
     eye_run = get_latest_run(root, "eye_masks", eye_run)
@@ -668,7 +684,15 @@ def create_viewer(
         group_path = f"refined_eye_masks_runs/{name}"
         variants.append(build_mask_variant(root, group_path, f"Refined: {name}"))
 
-    viewer = EyeMaskViewer(root, variants, crop_source, success_flags, keypoints, keypoint_labels)
+    viewer = EyeMaskViewer(
+        root,
+        variants,
+        crop_source,
+        success_flags,
+        keypoints,
+        keypoint_labels,
+        roi_indices=roi_indices,
+    )
 
     fig = plt.figure(figsize=(12, 6))
     gs = fig.add_gridspec(3, 3, height_ratios=[1, 0.35, 0.12], width_ratios=[1, 1, 1])
@@ -1030,8 +1054,9 @@ def create_viewer(
             if flag_path is None:
                 print("No frame flag file configured. Pass --frame-flag-file to enable cleanup flagging.")
                 return
-            roi_idx = int(round(slider.val))
-            roi_idx = max(0, min(viewer.total - 1, roi_idx))
+            roi_idx_local = int(round(slider.val))
+            roi_idx_local = max(0, min(viewer.total - 1, roi_idx_local))
+            roi_idx = int(viewer.roi_indices[roi_idx_local])
             variant_local = viewer.variants[viewer.variant_index]
             if not _is_refined_variant(variant_local.group_path):
                 print("Frame flagging is for refined variants only. Press 'v' to switch variants.")

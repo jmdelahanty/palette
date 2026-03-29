@@ -30,6 +30,7 @@ import cv2
 import numpy as np
 import zarr
 
+from ..shared.crop_image_source import CropImageSource
 from ..shared.detect_reason_codec import decode_reason_bytes, write_reason_columns
 from ..shared.mask_source import load_mask_bundle
 from ..shared.provenance_attrs import resolve_source_keypoints_run
@@ -1056,7 +1057,7 @@ def _build_eye_row_with_editor(
     row = _stack_h(panels, gap=6)
 
     widths = [panel.shape[1] for panel in panels]
-    edit_panel_index = panels.index(panel_edit)
+    edit_panel_index = len(panels) - 2
     edit_x = sum(widths[:edit_panel_index]) + (6 * edit_panel_index)
     edit_meta = {
         "eye_idx": int(eye_idx),
@@ -1107,6 +1108,7 @@ def _save_roi_mask_edits(
     roi_idx: int,
     masks_row: np.ndarray,
     masks_arr: zarr.Array,
+    edit_applied_arr: Optional[zarr.Array],
     ellipse_params_arr: zarr.Array,
     ellipse_success_arr: zarr.Array,
     eye_separation_arr: Optional[zarr.Array],
@@ -1114,6 +1116,7 @@ def _save_roi_mask_edits(
     reason_bytes_arr: Optional[zarr.Array],
     reason_group: Optional[zarr.Group] = None,
 ) -> Dict[str, object]:
+    existing_masks = np.asarray(masks_arr[roi_idx], dtype=np.uint8)
     channel_count = int(masks_row.shape[0])
     new_params = np.full((channel_count, 5), np.nan, dtype=np.float32)
     new_success = np.zeros((channel_count,), dtype=bool)
@@ -1163,7 +1166,12 @@ def _save_roi_mask_edits(
                 elif max_sep is not None and separation > max_sep:
                     reject_reason = "too_far"
 
-    masks_arr[roi_idx] = np.asarray(masks_row, dtype=np.uint8)
+    next_masks = np.asarray(masks_row, dtype=np.uint8)
+    changed_channels = np.any(existing_masks != next_masks, axis=(1, 2))
+    masks_arr[roi_idx] = next_masks
+    if edit_applied_arr is not None and np.any(changed_channels):
+        prior = np.asarray(edit_applied_arr[roi_idx], dtype=bool)
+        edit_applied_arr[roi_idx] = np.logical_or(prior, changed_channels)
     ellipse_params_arr[roi_idx] = new_params
     ellipse_success_arr[roi_idx] = new_success
     if eye_separation_arr is not None and channel_count >= 2:
@@ -1275,10 +1283,10 @@ def create_viewer(
     if not isinstance(crop_parent, zarr.Group) or resolved_crop not in crop_parent:
         raise RuntimeError(f"Crop run '{resolved_crop}' not found.")
     crop_group = crop_parent[resolved_crop]
-
-    roi_images = crop_group["roi_images"]
+    crop_source = CropImageSource.open(root, crop_run=resolved_crop, zarr_path=zarr_path)
     frame_indices_arr = crop_group.get("frame_indices")
     masks_roi = refined["masks_roi"]
+    edit_applied = refined.get("edit_applied")
     ellipse_params = refined["ellipse_params"]
     ellipse_success = refined["ellipse_success"]
     eye_separation = refined.get("eye_separation")
@@ -1291,11 +1299,11 @@ def create_viewer(
         reason_arr = refined.get("reason")
         reason_bytes_arr = refined.get("reason_bytes")
 
-    total_rois = int(roi_images.shape[0])
+    total_rois = int(crop_source.total_rois)
     if total_rois <= 0:
         raise RuntimeError("No ROIs found in crop run.")
     if int(masks_roi.shape[0]) != total_rois:
-        raise RuntimeError("masks_roi rows do not match crop roi_images rows.")
+        raise RuntimeError("masks_roi rows do not match crop ROI rows.")
     if tuple(ellipse_params.shape[:2]) != tuple(masks_roi.shape[:2]):
         raise RuntimeError("ellipse_params shape does not align with masks_roi.")
     if tuple(ellipse_success.shape[:2]) != tuple(masks_roi.shape[:2]):
@@ -1414,7 +1422,7 @@ def create_viewer(
 
     def _load_roi(roi_idx: int) -> None:
         state["loaded_roi_idx"] = int(roi_idx)
-        state["roi_img"] = np.asarray(roi_images[roi_idx], dtype=np.uint8)
+        state["roi_img"] = np.asarray(crop_source.read_slice(int(roi_idx), int(roi_idx) + 1)[0], dtype=np.uint8)
         state["edit_masks_row"] = np.asarray(masks_roi[roi_idx], dtype=np.uint8).copy()
         if probability_data is not None:
             state["probability_row"] = _to_numpy_roi_slice(probability_data, int(roi_idx))
@@ -1563,302 +1571,236 @@ def create_viewer(
             f"(recommended_threshold={recommended_threshold:.2f})"
         )
 
-    while True:
-        roi_idx = cv2.getTrackbarPos("ROI", window_name)
-        pad = max(1, cv2.getTrackbarPos("Padding", window_name))
-        scale = max(25, cv2.getTrackbarPos("Scale %", window_name))
-        zoom = max(1, cv2.getTrackbarPos("Edit Zoom", window_name))
-        brush = max(BRUSH_MIN, cv2.getTrackbarPos("Brush", window_name))
-        probability_threshold = (
-            float(cv2.getTrackbarPos(PROBABILITY_TRACKBAR_NAME, window_name)) / float(PROBABILITY_TRACKBAR_MAX)
-            if probability_data is not None
-            else float(state.get("recommended_probability_threshold", DEFAULT_RECOMMENDED_PROBABILITY_THRESHOLD))
-        )
-        state["display_scale"] = float(scale) / 100.0
-        show_ellipse_overlay = bool(state.get("show_ellipse_overlay", True))
-        show_keypoint_overlay = bool(state.get("show_keypoint_overlay", False))
-        probability_preview_enabled = bool(state.get("probability_preview_enabled", False)) and probability_data is not None
-
-        loaded_roi_idx = int(state.get("loaded_roi_idx", -1))
-        if loaded_roi_idx != roi_idx:
-            if bool(state.get("dirty")) and loaded_roi_idx >= 0:
-                print(f"Discarded unsaved edits for ROI {loaded_roi_idx}.")
-            _load_roi(roi_idx)
-
-        roi_img = np.asarray(state["roi_img"], dtype=np.uint8)
-        masks_row = np.asarray(state["edit_masks_row"], dtype=np.uint8)
-        probability_row = state.get("probability_row")
-        ellipse_row = np.asarray(ellipse_params[roi_idx], dtype=np.float32)
-        ellipse_ok_row = np.asarray(ellipse_success[roi_idx], dtype=bool)
-        kp_row = np.asarray(keypoints_roi[roi_idx], dtype=np.float32) if keypoints_roi is not None else None
-
-        channel_count = int(masks_row.shape[0])
-        active_eye = int(state.get("active_eye", 0))
-        if active_eye >= channel_count:
-            active_eye = max(0, channel_count - 1)
-            state["active_eye"] = active_eye
-
-        eye_rows: List[np.ndarray] = []
-        eye_metas: List[Dict[str, int]] = []
-        eye_center_sources: List[str] = []
-        for eye_idx in range(channel_count):
-            label = _friendly_eye_label(eye_labels[eye_idx] if eye_idx < len(eye_labels) else None, eye_idx)
-            center_xy, center_source = _resolve_eye_center_with_source(
-                eye_idx,
-                kp_row,
-                ellipse_row[eye_idx] if eye_idx < ellipse_row.shape[0] else np.full(5, np.nan, dtype=np.float32),
-                bool(eye_idx < ellipse_ok_row.shape[0] and ellipse_ok_row[eye_idx]),
-                masks_row[eye_idx],
-                roi_img.shape,
+    try:
+        while True:
+            roi_idx = cv2.getTrackbarPos("ROI", window_name)
+            pad = max(1, cv2.getTrackbarPos("Padding", window_name))
+            scale = max(25, cv2.getTrackbarPos("Scale %", window_name))
+            zoom = max(1, cv2.getTrackbarPos("Edit Zoom", window_name))
+            brush = max(BRUSH_MIN, cv2.getTrackbarPos("Brush", window_name))
+            probability_threshold = (
+                float(cv2.getTrackbarPos(PROBABILITY_TRACKBAR_NAME, window_name)) / float(PROBABILITY_TRACKBAR_MAX)
+                if probability_data is not None
+                else float(state.get("recommended_probability_threshold", DEFAULT_RECOMMENDED_PROBABILITY_THRESHOLD))
             )
-            center_source_label = CENTER_SOURCE_LABELS.get(center_source, center_source.upper())
-            eye_label = f"{label} [{center_source_label}]"
-            eye_center_sources.append(center_source)
-            keypoint_xy = _extract_eye_keypoint_xy(kp_row, eye_idx)
-            probability_eye = None
-            probability_label = None
-            if probability_preview_enabled and probability_row is not None:
-                probability_eye, probability_label = _select_probability_preview_channel(
-                    np.asarray(probability_row),
+            state["display_scale"] = float(scale) / 100.0
+            show_ellipse_overlay = bool(state.get("show_ellipse_overlay", True))
+            show_keypoint_overlay = bool(state.get("show_keypoint_overlay", False))
+            probability_preview_enabled = bool(state.get("probability_preview_enabled", False)) and probability_data is not None
+
+            loaded_roi_idx = int(state.get("loaded_roi_idx", -1))
+            if loaded_roi_idx != roi_idx:
+                if bool(state.get("dirty")) and loaded_roi_idx >= 0:
+                    print(f"Discarded unsaved edits for ROI {loaded_roi_idx}.")
+                _load_roi(roi_idx)
+
+            roi_img = np.asarray(state["roi_img"], dtype=np.uint8)
+            masks_row = np.asarray(state["edit_masks_row"], dtype=np.uint8)
+            probability_row = state.get("probability_row")
+            ellipse_row = np.asarray(ellipse_params[roi_idx], dtype=np.float32)
+            ellipse_ok_row = np.asarray(ellipse_success[roi_idx], dtype=bool)
+            kp_row = np.asarray(keypoints_roi[roi_idx], dtype=np.float32) if keypoints_roi is not None else None
+
+            channel_count = int(masks_row.shape[0])
+            active_eye = int(state.get("active_eye", 0))
+            if active_eye >= channel_count:
+                active_eye = max(0, channel_count - 1)
+                state["active_eye"] = active_eye
+
+            eye_rows: List[np.ndarray] = []
+            eye_metas: List[Dict[str, int]] = []
+            eye_center_sources: List[str] = []
+            for eye_idx in range(channel_count):
+                label = _friendly_eye_label(eye_labels[eye_idx] if eye_idx < len(eye_labels) else None, eye_idx)
+                center_xy, center_source = _resolve_eye_center_with_source(
+                    eye_idx,
+                    kp_row,
+                    ellipse_row[eye_idx] if eye_idx < ellipse_row.shape[0] else np.full(5, np.nan, dtype=np.float32),
+                    bool(eye_idx < ellipse_ok_row.shape[0] and ellipse_ok_row[eye_idx]),
+                    masks_row[eye_idx],
+                    roi_img.shape,
+                )
+                center_source_label = CENTER_SOURCE_LABELS.get(center_source, center_source.upper())
+                eye_label = f"{label} [{center_source_label}]"
+                eye_center_sources.append(center_source)
+                keypoint_xy = _extract_eye_keypoint_xy(kp_row, eye_idx)
+                probability_eye = None
+                probability_label = None
+                if probability_preview_enabled and probability_row is not None:
+                    probability_eye, probability_label = _select_probability_preview_channel(
+                        np.asarray(probability_row),
+                        eye_idx=eye_idx,
+                    )
+                cursor_eye = state.get("cursor_eye")
+                cursor_xy = state.get("cursor_patch_xy")
+                row, edit_meta = _build_eye_row_with_editor(
+                    roi_img,
+                    masks_row[eye_idx],
+                    ellipse_row[eye_idx] if eye_idx < ellipse_row.shape[0] else np.full(5, np.nan, dtype=np.float32),
+                    bool(eye_idx < ellipse_ok_row.shape[0] and ellipse_ok_row[eye_idx]),
+                    center_xy,
+                    padding=pad,
+                    eye_label=eye_label,
                     eye_idx=eye_idx,
+                    edit_zoom=zoom,
+                    active_eye=bool(eye_idx == active_eye),
+                    brush_radius=brush,
+                    cursor_patch_xy=cursor_xy if cursor_eye == eye_idx else None,
+                    show_ellipse_overlay=show_ellipse_overlay,
+                    keypoint_xy=keypoint_xy,
+                    show_keypoint_overlay=show_keypoint_overlay,
+                    probability_eye=probability_eye,
+                    probability_label=probability_label,
+                    probability_threshold=probability_threshold,
                 )
-            cursor_eye = state.get("cursor_eye")
-            cursor_xy = state.get("cursor_patch_xy")
-            row, edit_meta = _build_eye_row_with_editor(
-                roi_img,
-                masks_row[eye_idx],
-                ellipse_row[eye_idx] if eye_idx < ellipse_row.shape[0] else np.full(5, np.nan, dtype=np.float32),
-                bool(eye_idx < ellipse_ok_row.shape[0] and ellipse_ok_row[eye_idx]),
-                center_xy,
-                padding=pad,
-                eye_label=eye_label,
-                eye_idx=eye_idx,
-                edit_zoom=zoom,
-                active_eye=bool(eye_idx == active_eye),
-                brush_radius=brush,
-                cursor_patch_xy=cursor_xy if cursor_eye == eye_idx else None,
-                show_ellipse_overlay=show_ellipse_overlay,
-                keypoint_xy=keypoint_xy,
-                show_keypoint_overlay=show_keypoint_overlay,
-                probability_eye=probability_eye,
-                probability_label=probability_label,
-                probability_threshold=probability_threshold,
+                eye_rows.append(row)
+                eye_metas.append(edit_meta)
+
+            content, panel_regions = _compose_rows_with_edit_meta(eye_rows, eye_metas, gap=8)
+            header_h = int(state.get("header_h", 36))
+            for region in panel_regions:
+                region["y"] = int(region["y"] + header_h)
+            state["panel_regions"] = panel_regions
+
+            header = np.zeros((header_h, content.shape[1], 3), dtype=np.uint8)
+            dirty_suffix = " *unsaved*" if bool(state.get("dirty")) else ""
+            brush_mode = "erase" if bool(state.get("erase_mode")) else "paint"
+            ellipse_overlay = "on" if show_ellipse_overlay else "off"
+            keypoint_overlay = "on" if show_keypoint_overlay else "off"
+            source_reject = str(state.get("source_reject_reason") or "none")
+            source_reason_compact = str(state.get("source_reason_compact") or "none")
+            fallback_labels = [CENTER_SOURCE_LABELS.get(src, src.upper()) for src in eye_center_sources if src != "keypoint"]
+            if fallback_labels:
+                uniq = sorted(set(fallback_labels))
+                fallback_summary = f"{len(fallback_labels)}/{len(eye_center_sources)} ({','.join(uniq)})"
+            else:
+                fallback_summary = "0"
+            cv2.putText(
+                header,
+                (
+                    f"ROI {roi_idx + 1}/{total_rois}  pad={pad}  brush={brush}px  "
+                    f"mode={brush_mode}  ellipse={ellipse_overlay}  keypoints={keypoint_overlay}  edit_zoom={zoom}x  "
+                    f"active_eye={active_eye + 1}  fallback={fallback_summary}  review={review_label}{dirty_suffix}"
+                ),
+                (8, 19),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.50,
+                (200, 255, 200),
+                1,
+                cv2.LINE_AA,
             )
-            eye_rows.append(row)
-            eye_metas.append(edit_meta)
+            cv2.putText(
+                header,
+                (
+                    f"Source reject={source_reject}  source reason tags={source_reason_compact}"
+                    + (
+                        f"  prob_preview={'on' if probability_preview_enabled else 'off'} "
+                        f"thr={probability_threshold:.2f} "
+                        f"saved={float(state.get('recommended_probability_threshold', recommended_threshold)):.2f}"
+                        if probability_data is not None
+                        else ""
+                    )
+                ),
+                (8, 43),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                (180, 220, 255),
+                1,
+                cv2.LINE_AA,
+            )
+            frame = np.vstack([header, content])
 
-        content, panel_regions = _compose_rows_with_edit_meta(eye_rows, eye_metas, gap=8)
-        header_h = int(state.get("header_h", 36))
-        for region in panel_regions:
-            region["y"] = int(region["y"] + header_h)
-        state["panel_regions"] = panel_regions
-
-        header = np.zeros((header_h, content.shape[1], 3), dtype=np.uint8)
-        dirty_suffix = " *unsaved*" if bool(state.get("dirty")) else ""
-        brush_mode = "erase" if bool(state.get("erase_mode")) else "paint"
-        ellipse_overlay = "on" if show_ellipse_overlay else "off"
-        keypoint_overlay = "on" if show_keypoint_overlay else "off"
-        source_reject = str(state.get("source_reject_reason") or "none")
-        source_reason_compact = str(state.get("source_reason_compact") or "none")
-        fallback_labels = [CENTER_SOURCE_LABELS.get(src, src.upper()) for src in eye_center_sources if src != "keypoint"]
-        if fallback_labels:
-            uniq = sorted(set(fallback_labels))
-            fallback_summary = f"{len(fallback_labels)}/{len(eye_center_sources)} ({','.join(uniq)})"
-        else:
-            fallback_summary = "0"
-        cv2.putText(
-            header,
-            (
-                f"ROI {roi_idx + 1}/{total_rois}  pad={pad}  brush={brush}px  "
-                f"mode={brush_mode}  ellipse={ellipse_overlay}  keypoints={keypoint_overlay}  edit_zoom={zoom}x  "
-                f"active_eye={active_eye + 1}  fallback={fallback_summary}  review={review_label}{dirty_suffix}"
-            ),
-            (8, 19),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.50,
-            (200, 255, 200),
-            1,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            header,
-            (
-                f"Source reject={source_reject}  source reason tags={source_reason_compact}"
-                + (
-                    f"  prob_preview={'on' if probability_preview_enabled else 'off'} "
-                    f"thr={probability_threshold:.2f} "
-                    f"saved={float(state.get('recommended_probability_threshold', recommended_threshold)):.2f}"
-                    if probability_data is not None
-                    else ""
+            if scale != 100:
+                frame = cv2.resize(
+                    frame,
+                    None,
+                    fx=float(scale) / 100.0,
+                    fy=float(scale) / 100.0,
+                    interpolation=cv2.INTER_NEAREST,
                 )
-            ),
-            (8, 43),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
-            (180, 220, 255),
-            1,
-            cv2.LINE_AA,
-        )
-        frame = np.vstack([header, content])
 
-        if scale != 100:
-            frame = cv2.resize(
-                frame,
-                None,
-                fx=float(scale) / 100.0,
-                fy=float(scale) / 100.0,
-                interpolation=cv2.INTER_NEAREST,
-            )
-
-        cv2.imshow(window_name, frame)
-        key = cv2.waitKey(30) & 0xFF
-        if key in (27, ord("q")):
-            break
-        if key in (ord("n"), 83):  # 'n' or right-arrow
-            cv2.setTrackbarPos("ROI", window_name, min(total_rois - 1, roi_idx + 1))
-        elif key in (ord("p"), 81):  # 'p' or left-arrow
-            cv2.setTrackbarPos("ROI", window_name, max(0, roi_idx - 1))
-        elif key in (ord("1"), ord("2")):
-            eye_idx = int(chr(key)) - 1
-            if 0 <= eye_idx < channel_count:
-                state["active_eye"] = eye_idx
-        elif key in (ord("x"),):
-            new_mode = not bool(state.get("erase_mode"))
-            state["erase_mode"] = new_mode
-            print(f"Brush mode: {'erase' if new_mode else 'paint'}")
-        elif key in (ord("e"),):
-            new_overlay = not bool(state.get("show_ellipse_overlay", True))
-            state["show_ellipse_overlay"] = new_overlay
-            print(f"Ellipse overlay: {'on' if new_overlay else 'off'}")
-        elif key in (ord("h"),):
-            new_overlay = not bool(state.get("show_keypoint_overlay", False))
-            state["show_keypoint_overlay"] = new_overlay
-            print(f"Keypoint overlay: {'on' if new_overlay else 'off'}")
-        elif key in (ord("t"),):
-            if probability_data is None:
-                print("No probability masks available for preview.")
-                continue
-            new_preview = not bool(state.get("probability_preview_enabled", False))
-            state["probability_preview_enabled"] = new_preview
-            print(f"Probability preview: {'on' if new_preview else 'off'}")
-        elif key in (ord("]"), ord("="), ord("+")):
-            brush_value = _adjust_brush_size(BRUSH_STEP)
-            print(f"Brush size: {brush_value}px")
-        elif key in (ord("["), ord("-"), ord("_")):
-            brush_value = _adjust_brush_size(-BRUSH_STEP)
-            print(f"Brush size: {brush_value}px")
-        elif key in (ord("."), ord(">")):
-            pad_value = _adjust_padding_size(PADDING_STEP)
-            print(f"Patch size (half-width): {pad_value}px")
-        elif key in (ord(","), ord("<")):
-            pad_value = _adjust_padding_size(-PADDING_STEP)
-            print(f"Patch size (half-width): {pad_value}px")
-        elif key in (ord("c"),):
-            edit_masks_row = state.get("edit_masks_row")
-            if edit_masks_row is None:
-                print("No ROI masks loaded to clear.")
-                continue
-            edit_masks_arr = np.asarray(edit_masks_row, dtype=np.uint8)
-            edit_masks_arr[...] = 0
-            state["edit_masks_row"] = edit_masks_arr
-            state["dirty"] = True
-            print(f"Cleared all eye masks for ROI {roi_idx}. Press 's' to save.")
-        elif key in (ord("r"),):
-            _load_roi(roi_idx)
-            print(f"Reset edits for ROI {roi_idx}.")
-        elif key in (ord("s"),):
-            result = _save_roi_mask_edits(
-                root=root,
-                refined=refined,
-                roi_idx=roi_idx,
-                masks_row=np.asarray(state["edit_masks_row"], dtype=np.uint8),
-                masks_arr=masks_roi,
-                ellipse_params_arr=ellipse_params,
-                ellipse_success_arr=ellipse_success,
-                eye_separation_arr=eye_separation if isinstance(eye_separation, zarr.Array) else None,
-                reason_arr=reason_arr if isinstance(reason_arr, zarr.Array) else None,
-                reason_bytes_arr=reason_bytes_arr if isinstance(reason_bytes_arr, zarr.Array) else None,
-                reason_group=reason_group if isinstance(reason_group, zarr.Group) else None,
-            )
-            if isinstance(reason_group, zarr.Group):
-                next_reason_arr = reason_group.get("reason")
-                next_reason_bytes_arr = reason_group.get("reason_bytes")
-                reason_arr = next_reason_arr if isinstance(next_reason_arr, zarr.Array) else None
-                reason_bytes_arr = next_reason_bytes_arr if isinstance(next_reason_bytes_arr, zarr.Array) else None
-            _refresh_source_reason_state(int(roi_idx))
-            _refresh_refined_eye_mask_metrics(root, refined)
-            state["dirty"] = False
-            print(
-                f"Saved ROI {roi_idx}: {result['successful_eyes']}/{result['channel_count']} eyes fit "
-                f"(reject_reason={result['reject_reason'] or 'none'})."
-            )
-            if registry_path is not None:
-                ok, detail = _sync_registry_for_zarr(
-                    registry_path=registry_path,
-                    zarr_path=zarr_path,
+            cv2.imshow(window_name, frame)
+            key = cv2.waitKey(30) & 0xFF
+            if key in (27, ord("q")):
+                break
+            if key in (ord("n"), 83):  # 'n' or right-arrow
+                cv2.setTrackbarPos("ROI", window_name, min(total_rois - 1, roi_idx + 1))
+            elif key in (ord("p"), 81):  # 'p' or left-arrow
+                cv2.setTrackbarPos("ROI", window_name, max(0, roi_idx - 1))
+            elif key in (ord("1"), ord("2")):
+                eye_idx = int(chr(key)) - 1
+                if 0 <= eye_idx < channel_count:
+                    state["active_eye"] = eye_idx
+            elif key in (ord("x"),):
+                new_mode = not bool(state.get("erase_mode"))
+                state["erase_mode"] = new_mode
+                print(f"Brush mode: {'erase' if new_mode else 'paint'}")
+            elif key in (ord("e"),):
+                new_overlay = not bool(state.get("show_ellipse_overlay", True))
+                state["show_ellipse_overlay"] = new_overlay
+                print(f"Ellipse overlay: {'on' if new_overlay else 'off'}")
+            elif key in (ord("h"),):
+                new_overlay = not bool(state.get("show_keypoint_overlay", False))
+                state["show_keypoint_overlay"] = new_overlay
+                print(f"Keypoint overlay: {'on' if new_overlay else 'off'}")
+            elif key in (ord("t"),):
+                if probability_data is None:
+                    print("No probability masks available for preview.")
+                    continue
+                new_preview = not bool(state.get("probability_preview_enabled", False))
+                state["probability_preview_enabled"] = new_preview
+                print(f"Probability preview: {'on' if new_preview else 'off'}")
+            elif key in (ord("]"), ord("="), ord("+")):
+                brush_value = _adjust_brush_size(BRUSH_STEP)
+                print(f"Brush size: {brush_value}px")
+            elif key in (ord("["), ord("-"), ord("_")):
+                brush_value = _adjust_brush_size(-BRUSH_STEP)
+                print(f"Brush size: {brush_value}px")
+            elif key in (ord("."), ord(">")):
+                pad_value = _adjust_padding_size(PADDING_STEP)
+                print(f"Patch size (half-width): {pad_value}px")
+            elif key in (ord(","), ord("<")):
+                pad_value = _adjust_padding_size(-PADDING_STEP)
+                print(f"Patch size (half-width): {pad_value}px")
+            elif key in (ord("c"),):
+                edit_masks_row = state.get("edit_masks_row")
+                if edit_masks_row is None:
+                    print("No ROI masks loaded to clear.")
+                    continue
+                edit_masks_arr = np.asarray(edit_masks_row, dtype=np.uint8)
+                edit_masks_arr[...] = 0
+                state["edit_masks_row"] = edit_masks_arr
+                state["dirty"] = True
+                print(f"Cleared all eye masks for ROI {roi_idx}. Press 's' to save.")
+            elif key in (ord("r"),):
+                _load_roi(roi_idx)
+                print(f"Reset edits for ROI {roi_idx}.")
+            elif key in (ord("s"),):
+                result = _save_roi_mask_edits(
+                    root=root,
+                    refined=refined,
+                    roi_idx=roi_idx,
+                    masks_row=np.asarray(state["edit_masks_row"], dtype=np.uint8),
+                    masks_arr=masks_roi,
+                    edit_applied_arr=edit_applied if isinstance(edit_applied, zarr.Array) else None,
+                    ellipse_params_arr=ellipse_params,
+                    ellipse_success_arr=ellipse_success,
+                    eye_separation_arr=eye_separation if isinstance(eye_separation, zarr.Array) else None,
+                    reason_arr=reason_arr if isinstance(reason_arr, zarr.Array) else None,
+                    reason_bytes_arr=reason_bytes_arr if isinstance(reason_bytes_arr, zarr.Array) else None,
+                    reason_group=reason_group if isinstance(reason_group, zarr.Group) else None,
                 )
-                prefix = "Registry sync OK" if ok else "Registry sync FAILED"
-                print(f"{prefix}: {detail}")
-        elif key in (ord("b"),):
-            if flag_path is None:
-                print("No frame flag file configured. Pass --frame-flag-file to enable cleanup flagging.")
-                continue
-            if frame_indices is None:
-                print(f"crop_runs/{resolved_crop} missing frame_indices; cannot flag cleanup frames.")
-                continue
-            frame_idx = int(frame_indices[roi_idx])
-            try:
-                _append_flagged_frame(flag_path, str(zarr_path), frame_idx, roi_idx)
-                print(f"Flagged cleanup frame {frame_idx} (roi {roi_idx})")
-                print(f"Frame flag file: {flag_path.expanduser().resolve(strict=False)}")
-            except Exception as exc:
-                print(f"Failed to flag cleanup frame: {exc}")
-        elif key in (ord("k"),):
-            if nudge_flag_path is None:
+                if isinstance(reason_group, zarr.Group):
+                    next_reason_arr = reason_group.get("reason")
+                    next_reason_bytes_arr = reason_group.get("reason_bytes")
+                    reason_arr = next_reason_arr if isinstance(next_reason_arr, zarr.Array) else None
+                    reason_bytes_arr = next_reason_bytes_arr if isinstance(next_reason_bytes_arr, zarr.Array) else None
+                _refresh_source_reason_state(int(roi_idx))
+                _refresh_refined_eye_mask_metrics(root, refined)
+                state["dirty"] = False
                 print(
-                    "No keypoint nudge flag file configured. "
-                    "Pass --keypoint-nudge-flag-file to enable keypoint nudge flagging."
-                )
-                continue
-            if frame_indices is None:
-                print(f"crop_runs/{resolved_crop} missing frame_indices; cannot flag keypoint nudges.")
-                continue
-            frame_idx = int(frame_indices[roi_idx])
-            try:
-                _append_flagged_frame(
-                    nudge_flag_path,
-                    str(zarr_path),
-                    frame_idx,
-                    roi_idx,
-                    extra_fields={
-                        "action": "keypoint_nudge",
-                        "preserve_eye_masks": True,
-                    },
-                )
-                print(f"Flagged keypoint nudge frame {frame_idx} (roi {roi_idx})")
-                print(f"Keypoint nudge flag file: {nudge_flag_path.expanduser().resolve(strict=False)}")
-            except Exception as exc:
-                print(f"Failed to flag keypoint nudge frame: {exc}")
-        elif key in (ord("a"),):
-            try:
-                try:
-                    _refresh_refined_eye_mask_metrics(root, refined)
-                except Exception as exc:
-                    print(f"Warning: failed to refresh refined metrics before review status write: {exc}")
-                payload = _apply_eye_mask_review_status(
-                    refined_parent,
-                    refined_run,
-                    refined,
-                    state=review_state,
-                    method=review_method,
-                    intended_use=review_intended_use,
-                    reviewer=reviewer or os.environ.get("USER") or os.environ.get("USERNAME"),
-                    notes=review_notes,
-                )
-                review_label = _format_review_status(payload)
-                print(
-                    f"Set eye_mask_review_status: {payload.get('state')} "
-                    f"({payload.get('method')}/{payload.get('intended_use')})"
+                    f"Saved ROI {roi_idx}: {result['successful_eyes']}/{result['channel_count']} eyes fit "
+                    f"(reject_reason={result['reject_reason'] or 'none'})."
                 )
                 if registry_path is not None:
                     ok, detail = _sync_registry_for_zarr(
@@ -1867,31 +1809,100 @@ def create_viewer(
                     )
                     prefix = "Registry sync OK" if ok else "Registry sync FAILED"
                     print(f"{prefix}: {detail}")
-            except Exception as exc:
-                print(f"Failed to set eye_mask_review_status: {exc}")
-        elif key in (ord("w"),):
-            if probability_data is None or source_eye_run is None or not isinstance(source_eye_run_name, str):
-                print("No source probability run available for threshold metadata.")
-                continue
-            try:
-                reviewer_name = reviewer or os.environ.get("USER") or os.environ.get("USERNAME")
-                payload = _apply_recommended_probability_threshold(
-                    source_eye_run,
-                    threshold=probability_threshold,
-                    reviewer=reviewer_name,
-                    notes=review_notes,
-                    source_refined_run=refined_run,
-                )
-                state["recommended_probability_threshold"] = float(probability_threshold)
-                print(
-                    "Saved recommended probability threshold "
-                    f"{float(probability_threshold):.2f} to eye_masks_runs/{source_eye_run_name}"
-                )
-                print(f"Threshold metadata: {payload}")
-            except Exception as exc:
-                print(f"Failed to save recommended probability threshold: {exc}")
-
-    cv2.destroyWindow(window_name)
+            elif key in (ord("b"),):
+                if flag_path is None:
+                    print("No frame flag file configured. Pass --frame-flag-file to enable cleanup flagging.")
+                    continue
+                if frame_indices is None:
+                    print(f"crop_runs/{resolved_crop} missing frame_indices; cannot flag cleanup frames.")
+                    continue
+                frame_idx = int(frame_indices[roi_idx])
+                try:
+                    _append_flagged_frame(flag_path, str(zarr_path), frame_idx, roi_idx)
+                    print(f"Flagged cleanup frame {frame_idx} (roi {roi_idx})")
+                    print(f"Frame flag file: {flag_path.expanduser().resolve(strict=False)}")
+                except Exception as exc:
+                    print(f"Failed to flag cleanup frame: {exc}")
+            elif key in (ord("k"),):
+                if nudge_flag_path is None:
+                    print(
+                        "No keypoint nudge flag file configured. "
+                        "Pass --keypoint-nudge-flag-file to enable keypoint nudge flagging."
+                    )
+                    continue
+                if frame_indices is None:
+                    print(f"crop_runs/{resolved_crop} missing frame_indices; cannot flag keypoint nudges.")
+                    continue
+                frame_idx = int(frame_indices[roi_idx])
+                try:
+                    _append_flagged_frame(
+                        nudge_flag_path,
+                        str(zarr_path),
+                        frame_idx,
+                        roi_idx,
+                        extra_fields={
+                            "action": "keypoint_nudge",
+                            "preserve_eye_masks": True,
+                        },
+                    )
+                    print(f"Flagged keypoint nudge frame {frame_idx} (roi {roi_idx})")
+                    print(f"Keypoint nudge flag file: {nudge_flag_path.expanduser().resolve(strict=False)}")
+                except Exception as exc:
+                    print(f"Failed to flag keypoint nudge frame: {exc}")
+            elif key in (ord("a"),):
+                try:
+                    try:
+                        _refresh_refined_eye_mask_metrics(root, refined)
+                    except Exception as exc:
+                        print(f"Warning: failed to refresh refined metrics before review status write: {exc}")
+                    payload = _apply_eye_mask_review_status(
+                        refined_parent,
+                        refined_run,
+                        refined,
+                        state=review_state,
+                        method=review_method,
+                        intended_use=review_intended_use,
+                        reviewer=reviewer or os.environ.get("USER") or os.environ.get("USERNAME"),
+                        notes=review_notes,
+                    )
+                    review_label = _format_review_status(payload)
+                    print(
+                        f"Set eye_mask_review_status: {payload.get('state')} "
+                        f"({payload.get('method')}/{payload.get('intended_use')})"
+                    )
+                    if registry_path is not None:
+                        ok, detail = _sync_registry_for_zarr(
+                            registry_path=registry_path,
+                            zarr_path=zarr_path,
+                        )
+                        prefix = "Registry sync OK" if ok else "Registry sync FAILED"
+                        print(f"{prefix}: {detail}")
+                except Exception as exc:
+                    print(f"Failed to set eye_mask_review_status: {exc}")
+            elif key in (ord("w"),):
+                if probability_data is None or source_eye_run is None or not isinstance(source_eye_run_name, str):
+                    print("No source probability run available for threshold metadata.")
+                    continue
+                try:
+                    reviewer_name = reviewer or os.environ.get("USER") or os.environ.get("USERNAME")
+                    payload = _apply_recommended_probability_threshold(
+                        source_eye_run,
+                        threshold=probability_threshold,
+                        reviewer=reviewer_name,
+                        notes=review_notes,
+                        source_refined_run=refined_run,
+                    )
+                    state["recommended_probability_threshold"] = float(probability_threshold)
+                    print(
+                        "Saved recommended probability threshold "
+                        f"{float(probability_threshold):.2f} to eye_masks_runs/{source_eye_run_name}"
+                    )
+                    print(f"Threshold metadata: {payload}")
+                except Exception as exc:
+                    print(f"Failed to save recommended probability threshold: {exc}")
+    finally:
+        crop_source.close()
+        cv2.destroyWindow(window_name)
 
 
 def build_parser() -> argparse.ArgumentParser:

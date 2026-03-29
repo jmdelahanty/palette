@@ -2163,6 +2163,13 @@ def refine_eye_masks(
         dtype=np.dtype(np.float32),
         fill_value=np.float32(np.nan),
     )
+    _prepare_dataset(
+        "edit_applied",
+        shape=(total_rois, 2),
+        chunks=(chunk_rois, 2),
+        dtype=np.dtype(bool),
+        fill_value=False,
+    )
 
     if "metrics" in run_group:
         del run_group["metrics"]

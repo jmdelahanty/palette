@@ -476,6 +476,7 @@ def launch_review(
 
     roi_images = crop_group["roi_images"]
     masks_arr = refined["masks_roi"]
+    edit_applied_arr = refined.get("edit_applied")
     ellipse_params_arr = refined["ellipse_params"]
     ellipse_success_arr = refined["ellipse_success"]
     eye_separation_arr = refined["eye_separation"]
@@ -670,6 +671,7 @@ def launch_review(
             cv2.imshow(window_name, combined)
 
     def save_current() -> None:
+        existing_masks = np.asarray(masks_arr[roi_idx], dtype=np.uint8)
         left_params, left_success, left_contour, left_centroid = _fit_ellipse(edit_masks[0])
         right_params, right_success, right_contour, right_centroid = _fit_ellipse(edit_masks[1])
 
@@ -700,8 +702,12 @@ def launch_review(
                 elif max_sep is not None and separation > max_sep:
                     reject_reason = "too_far"
 
-        masks_arr[roi_idx, 0] = edit_masks[0]
-        masks_arr[roi_idx, 1] = edit_masks[1]
+        next_masks = np.asarray(edit_masks, dtype=np.uint8)
+        changed_channels = np.any(existing_masks != next_masks, axis=(1, 2))
+        masks_arr[roi_idx] = next_masks
+        if isinstance(edit_applied_arr, zarr.Array) and np.any(changed_channels):
+            prior = np.asarray(edit_applied_arr[roi_idx], dtype=bool)
+            edit_applied_arr[roi_idx] = np.logical_or(prior, changed_channels)
         ellipse_params_arr[roi_idx, 0] = left_params
         ellipse_params_arr[roi_idx, 1] = right_params
         ellipse_success_arr[roi_idx, 0] = left_success

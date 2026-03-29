@@ -26,6 +26,7 @@ from fisheye.visualization.visualize_eye_mask_patches import (
     _resolve_erase_mode,
     _save_roi_mask_edits,
     _step_clamped,
+    create_viewer,
     parse_args,
     _resolve_eye_center,
     _resolve_eye_center_with_source,
@@ -363,6 +364,7 @@ def test_save_roi_mask_edits_updates_arrays(tmp_path: Path) -> None:
     refined_parent = root.create_group("refined_eye_masks_runs")
     refined = refined_parent.create_group("refined_eye_masks_001")
     masks_arr = refined.create_array("masks_roi", shape=(1, 2, 32, 32), dtype="u1")
+    edit_applied = refined.create_array("edit_applied", shape=(1, 2), dtype=bool)
     ellipse_params = refined.create_array("ellipse_params", shape=(1, 2, 5), dtype="f4")
     ellipse_success = refined.create_array("ellipse_success", shape=(1, 2), dtype=bool)
     eye_sep = refined.create_array("eye_separation", shape=(1,), dtype="f4")
@@ -378,6 +380,7 @@ def test_save_roi_mask_edits_updates_arrays(tmp_path: Path) -> None:
         roi_idx=0,
         masks_row=edited,
         masks_arr=masks_arr,
+        edit_applied_arr=edit_applied,
         ellipse_params_arr=ellipse_params,
         ellipse_success_arr=ellipse_success,
         eye_separation_arr=eye_sep,
@@ -389,6 +392,7 @@ def test_save_roi_mask_edits_updates_arrays(tmp_path: Path) -> None:
     assert result["channel_count"] == 2
     assert result["successful_eyes"] == 2
     assert np.asarray(masks_arr[0]).sum() > 0
+    np.testing.assert_array_equal(np.asarray(edit_applied[0], dtype=bool), np.asarray([True, True], dtype=bool))
     assert bool(np.asarray(ellipse_success[0])[0])
     assert bool(np.asarray(ellipse_success[0])[1])
     assert float(np.asarray(eye_sep[0])) > 0.0
@@ -401,6 +405,7 @@ def test_save_roi_mask_edits_syncs_reason_bytes(tmp_path: Path) -> None:
     refined = refined_parent.create_group("refined_eye_masks_001")
     metrics = refined.create_group("metrics")
     masks_arr = refined.create_array("masks_roi", shape=(1, 2, 32, 32), dtype="u1")
+    edit_applied = refined.create_array("edit_applied", shape=(1, 2), dtype=bool)
     ellipse_params = refined.create_array("ellipse_params", shape=(1, 2, 5), dtype="f4")
     ellipse_success = refined.create_array("ellipse_success", shape=(1, 2), dtype=bool)
     eye_sep = refined.create_array("eye_separation", shape=(1,), dtype="f4")
@@ -424,6 +429,7 @@ def test_save_roi_mask_edits_syncs_reason_bytes(tmp_path: Path) -> None:
         roi_idx=0,
         masks_row=edited,
         masks_arr=masks_arr,
+        edit_applied_arr=edit_applied,
         ellipse_params_arr=ellipse_params,
         ellipse_success_arr=ellipse_success,
         eye_separation_arr=eye_sep,
@@ -433,6 +439,7 @@ def test_save_roi_mask_edits_syncs_reason_bytes(tmp_path: Path) -> None:
     )
 
     expected = "legacy_tag|patch_viewer_edit|manual_correction"
+    np.testing.assert_array_equal(np.asarray(edit_applied[0], dtype=bool), np.asarray([True, True], dtype=bool))
     assert str(metrics["reason"][0]) == expected
     decoded = decode_reason_bytes(np.asarray(metrics["reason_bytes"][:], dtype=np.uint8)).tolist()
     assert decoded == [expected]
@@ -464,6 +471,7 @@ def test_save_roi_mask_edits_uses_fitted_ellipse_centers_for_separation(monkeypa
         roi_idx=0,
         masks_row=np.zeros((2, 8, 8), dtype=np.uint8),
         masks_arr=masks_arr,
+        edit_applied_arr=None,
         ellipse_params_arr=ellipse_params,
         ellipse_success_arr=ellipse_success,
         eye_separation_arr=eye_sep,
@@ -474,3 +482,76 @@ def test_save_roi_mask_edits_uses_fitted_ellipse_centers_for_separation(monkeypa
 
     assert float(result["eye_separation"]) == pytest.approx(24.186773, abs=1e-5)
     assert float(np.asarray(eye_sep[0])) == pytest.approx(24.186773, abs=1e-5)
+
+
+def test_create_viewer_supports_geometry_only_crop_runs(monkeypatch, tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs["latest"] = "crop_geom"
+    crop_run = crop_parent.create_group("crop_geom")
+    crop_run.attrs["crop_storage_mode"] = "geometry_only"
+    crop_run.attrs["roi_size"] = [8, 8]
+    crop_run.create_array("roi_coordinates_full", data=np.array([[0, 0]], dtype=np.int32))
+    crop_run.create_array("frame_indices", data=np.array([0], dtype=np.int32))
+
+    raw_video = root.create_group("raw_video")
+    raw_video.create_array("images_full", data=np.arange(64, dtype=np.uint8).reshape(1, 8, 8))
+
+    eye_parent = root.create_group("eye_masks_runs")
+    eye_run = eye_parent.create_group("eye_001")
+    eye_run.create_array("mask_probs_roi", data=np.ones((1, 1, 8, 8), dtype=np.float32))
+
+    kp_parent = root.create_group("keypoints_runs")
+    kp_parent.attrs["latest"] = "kp_001"
+    kp_run = kp_parent.create_group("kp_001")
+    kp_run.create_array("keypoints_roi", data=np.zeros((1, 3, 2), dtype=np.float32))
+    kp_run.create_array("detection_success", data=np.ones((1,), dtype=bool))
+
+    refined_parent = root.create_group("refined_eye_masks_runs")
+    refined_parent.attrs["latest"] = "refined_001"
+    refined = refined_parent.create_group("refined_001")
+    refined.attrs["source_eye_masks_run"] = "eye_001"
+    refined.attrs["source_crop_run"] = "crop_geom"
+    refined.attrs["source_keypoint_run"] = "kp_001"
+    refined.attrs["source_keypoint_group"] = "keypoints_runs"
+    refined.create_array("masks_roi", data=np.ones((1, 2, 8, 8), dtype=np.uint8))
+    refined.create_array("ellipse_params", data=np.zeros((1, 2, 5), dtype=np.float32))
+    refined.create_array("ellipse_success", data=np.zeros((1, 2), dtype=bool))
+
+    trackbars: dict[str, int] = {}
+
+    monkeypatch.setattr(patches_mod.cv2, "namedWindow", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        patches_mod.cv2,
+        "createTrackbar",
+        lambda name, _window, value, _maximum, _cb: trackbars.__setitem__(name, int(value)),
+    )
+    monkeypatch.setattr(patches_mod.cv2, "setMouseCallback", lambda *args, **kwargs: None)
+    monkeypatch.setattr(patches_mod.cv2, "getTrackbarPos", lambda name, _window: int(trackbars.get(name, 0)))
+    monkeypatch.setattr(patches_mod.cv2, "setTrackbarPos", lambda name, _window, value: trackbars.__setitem__(name, int(value)))
+    monkeypatch.setattr(patches_mod.cv2, "imshow", lambda *args, **kwargs: None)
+    monkeypatch.setattr(patches_mod.cv2, "waitKey", lambda _delay: ord("q"))
+    monkeypatch.setattr(patches_mod.cv2, "destroyWindow", lambda *args, **kwargs: None)
+    monkeypatch.setattr(patches_mod, "_refresh_refined_eye_mask_metrics", lambda *args, **kwargs: {"ok": True})
+
+    create_viewer(
+        zarr_path,
+        registry_path=None,
+        refined_run="refined_001",
+        crop_run="crop_geom",
+        keypoint_run="kp_001",
+        keypoint_group="keypoints_runs",
+        start_roi=0,
+        padding=24,
+        scale_percent=100,
+        edit_zoom=6,
+        frame_flag_file=None,
+        keypoint_nudge_flag_file=None,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        reviewer=None,
+        review_notes=None,
+    )
