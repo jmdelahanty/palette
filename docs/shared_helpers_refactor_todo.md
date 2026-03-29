@@ -1,7 +1,7 @@
 # Shared Helpers & Deduplication TODO
 
 Initial audit: 2026-02-24
-Updated: 2026-03-05 (status refresh + C1/C2 alignment cleanup + C3 batch-2)
+Updated: 2026-03-06 (C4 completion + Item 1 batch-1 + status refresh)
 
 Scan covered ~150+ files across `src/fisheye/` and `src/` standalone scripts
 (vendored `decord/` excluded).
@@ -16,7 +16,7 @@ Scan covered ~150+ files across `src/fisheye/` and `src/` standalone scripts
 
 ---
 
-## 2026-03-04 Snapshot (Code-Verified Refresh)
+## 2026-03-06 Snapshot (Code-Verified Refresh)
 
 Current state after direct code-audit verification of CRITICAL/HIGH/MEDIUM/LOW sections.
 
@@ -24,9 +24,9 @@ Current state after direct code-audit verification of CRITICAL/HIGH/MEDIUM/LOW s
 |---|---|---|
 | C1. Registry step status helper | [x] Done | Shared `emit_stage_completion()` covers all current `_emit_*_status` wrappers and the direct inference/batch/manual sync status paths touched in this slice. |
 | C2. Dataset metadata extraction helper | [x] Done | `extract_dataset_metadata(...)` is centralized in `registry/db.py`, reused via shared stage helpers, and direct resolve+attrs extraction callsites in active paths (including `registry/db.py` registration) are migrated. |
-| C3. Normalization helper consolidation | [~] Partial | Shared `type_conversions.normalize_attr()` exists, but many private `_normalize_attr/_status_text/_decode_attr` variants remain. |
-| C4. Batch logging/timestamp consolidation | [~] Partial | Added shared `batch_logging.py`; migrated 4 core batch runners to shared logger/run-id helpers. |
-| 1. Zarr run resolution helper | [ ] Not started | Diagnostic/read paths still duplicate run resolution logic. |
+| C3. Normalization helper consolidation | [x] Done | Shared `type_conversions.normalize_attr()` and `status_text()` now cover all current local `_normalize_attr/_status_text/_as_text/_decode_attr` wrappers under `src/fisheye`. |
+| C4. Batch logging/timestamp consolidation | [x] Done | Shared `batch_logging.py` now covers all identical local `JsonLogger` / `_utc_now` / `_run_id` copies in the active refactor scope. Remaining holdouts are an intentional custom subclass in `run_detections_batch.py` and an unrelated `status_page/query.py` `_utc_now`. |
+| 1. Zarr run resolution helper | [~] Partial | Added shared `resolve_zarr_run(...)` in `shared/zarr_helpers.py` and migrated the first stimulus/offline diagnostic batch. Remaining movement prefix selectors and other specialized readers still duplicate resolution logic. |
 | 2. Promote `open_zarr_root()` | [~] Partial | Helper exists, but adoption is limited and most call sites still use raw `zarr.open(...)`. |
 | 3. Data-card aggregation dedup | [ ] Not started | Detection/keypoint aggregate scripts still largely parallel implementations. |
 | 4. Model loading/device helper | [ ] Not started | YOLO model load/device placement remains copy-pasted across many files. |
@@ -47,7 +47,7 @@ Current state after direct code-audit verification of CRITICAL/HIGH/MEDIUM/LOW s
 | 19. Data-card plot unification | [ ] Not started | Duplicate plotting logic spans detection, keypoint, and eye-mask data-card scripts. |
 | 20. Color scheme constants | [ ] Not started | No shared color constants module; repeated hardcoded palettes remain. |
 
-### Phase A Progress (2026-03-04)
+### Phase A Progress (2026-03-06)
 
 - Added `src/fisheye/shared/type_conversions.py` with shared normalization/numeric coercion helpers.
 - Added `src/fisheye/shared/registry_stage_complete.py` with `emit_stage_completion(...)` and shared registry-completion flow.
@@ -62,7 +62,7 @@ Current state after direct code-audit verification of CRITICAL/HIGH/MEDIUM/LOW s
   - `refinement/refine_keypoints.py`
   - `refinement/detect_quality.py`
   - `tracking/crop.py`
-  - `tracking/assign_ids.py`
+  - `tracking/arena_assignment.py`
   - `inference/predict_pose.py`
   - `utils/keypoint_retry.py`
   - `utils/run_detect_with_registry_model.py`
@@ -83,7 +83,7 @@ Current state after direct code-audit verification of CRITICAL/HIGH/MEDIUM/LOW s
   - `detection/detect_keypoints_traditional.py`
   - `segmentation/eye_segmentation_yolo.py`
   - `segmentation/infer_unet_eye_masks.py`
-  - `tracking/assign_ids.py`
+  - `tracking/arena_assignment.py`
   - `refinement/refine_eye_masks.py`
   - `refinement/refine_detect.py`
   - `refinement/detect_quality.py`
@@ -93,8 +93,35 @@ Current state after direct code-audit verification of CRITICAL/HIGH/MEDIUM/LOW s
   - `refinement/refine_keypoints.py`
   - `utils/run_detect_with_registry_model.py`
   - `utils/run_eye_masks_with_registry_model.py`
+- C3 cleanup batch-3/4 completed the remaining local
+  `_normalize_attr/_status_text/_as_text/_decode_attr` migrations via shared
+  `type_conversions.py` in:
+  - `diagnostics/check_eye_mask_keypoint_coverage.py`
+  - `diagnostics/check_eye_mask_lineage.py`
+  - `registry/db.py`
+  - `shared/experiment_setup.py`
+  - `shared/refined_detect_review.py`
+  - `tune/keypoint_failure_review.py`
+  - `utils/apply_tuning_by_camera.py`
+  - `utils/backfill_keypoint_edge_distances.py`
+  - `utils/check_recording_steps.py`
+  - `utils/check_training_registry.py`
+  - `utils/compute_backgrounds_batch.py`
+  - `utils/export_eye_mask_training_zarr.py`
+  - `utils/export_keypoint_training_zarr.py`
+  - `utils/import_recordings_analysis.py`
+  - `utils/import_recordings_training.py`
+  - `utils/keypoint_retry.py`
+  - `utils/organize_recordings.py`
+  - `utils/prepare_detect_training_from_registry.py`
+  - `utils/prepare_eye_mask_training_from_registry.py`
+  - `utils/prepare_keypoint_training_from_registry.py`
+  - `utils/review_dish_masks.py`
+  - `utils/run_eye_masks_batch.py`
+  - `utils/run_keypoints_batch.py`
+  - `utils/zarr_inspector.py`
 
-### Phase B Progress (2026-03-03)
+### Phase B Progress (2026-03-06)
 
 - Added `src/fisheye/shared/batch_logging.py` with shared `JsonLogger`,
   `utc_now()`, and `make_run_id()`.
@@ -109,19 +136,83 @@ Current state after direct code-audit verification of CRITICAL/HIGH/MEDIUM/LOW s
   - `utils/crop_batch.py`
   - `utils/run_keypoints_batch.py`
   - `utils/run_eye_masks_batch.py`
+- C4 cleanup batch-1 migrated additional batch logging/timestamp helpers in:
+  - `analysis/create_analysis_zarr.py`
+  - `utils/detect_quality_batch.py`
+  - `utils/prune_zarr_runs.py`
+  - `utils/refine_detect_batch.py`
+  - `utils/refine_keypoints_batch.py`
+- C4 cleanup batch-2 migrated additional batch logging/timestamp helpers in:
+  - `diagnostics/check_eye_mask_keypoint_coverage.py`
+  - `diagnostics/check_eye_mask_lineage.py`
+  - `utils/import_recordings_analysis.py`
+  - `utils/organize_recordings.py`
+- C4 cleanup batch-3 removed pass-through logging/timestamp wrappers in:
+  - `utils/run_detections_batch.py`
+  - `utils/run_keypoints_batch.py`
+  - `utils/run_eye_masks_batch.py`
+- C4 cleanup batch-4 migrated remaining batch utility logger/run-id helpers in:
+  - `utils/apply_dish_mask_by_chamber.py`
+  - `utils/compute_backgrounds_batch.py`
+  - `utils/crop_batch.py`
+  - `utils/import_recordings_training.py`
+  - `utils/import_video_metadata_batch.py`
+  - `utils/retune_detect_batch.py`
+- C4 cleanup batch-5 migrated remaining shared timestamp/run-id copies in:
+  - `registry/db.py`
+  - `registry/status_ledger.py`
+  - `utils/aggregate_detection_training_data_card.py`
+  - `utils/aggregate_eye_mask_training_data_card.py`
+  - `utils/aggregate_keypoint_training_data_card.py`
+  - `utils/backfill_hevc_keyframe_flags.py`
+  - `utils/detection_profile.py`
+  - `utils/eye_mask_profile.py`
+  - `utils/export_detect_training_zarr.py`
+  - `utils/export_eye_mask_training_zarr.py`
+  - `utils/export_keypoint_training_zarr.py`
+  - `utils/finalize_eye_mask_profile_artifacts.py`
+  - `utils/finalize_keypoint_refinement_artifacts.py`
+  - `utils/finalize_refinement_artifacts.py`
+  - `utils/keypoint_profile.py`
+  - `utils/model_resolution_provenance.py`
+- C4 completion note:
+  - remaining local `JsonLogger` under `src/fisheye` is the intentional custom
+    subclass in `utils/run_detections_batch.py`
+  - remaining local `_utc_now` under `src/fisheye` is the unrelated dirty
+    worktree file `status_page/query.py`
+  - no local `_run_id` defs remain under `src/fisheye`
+- Item 1 batch-1 added `src/fisheye/shared/zarr_helpers.py` with shared
+  `resolve_zarr_run(...)`.
+- Migrated the first read-side run-resolution batch to shared helper in:
+  - `diagnostics/check_smoothed_distance_nan.py`
+  - `diagnostics/check_chaser_alignment.py`
+  - `diagnostics/check_chaser_periodicity.py`
+  - `diagnostics/diagnose_camera_chaser_mapping.py`
+  - `diagnostics/inspect_chaser_states.py`
+  - `diagnostics/inspect_frame_alignment.py`
+  - `diagnostics/inspect_frame_relationship.py`
+  - `diagnostics/inspect_stimulus_events.py`
+  - `diagnostics/inspect_stimulus_mapping.py`
+  - `diagnostics/plot_chaser_alignment.py`
+  - `diagnostics/validate_centroids.py`
+- Added fake-group unit coverage for the shared resolver in:
+  - `tests/unit/fisheye/test_zarr_helpers.py`
 
-### Audit Metrics (2026-03-05)
+### Audit Metrics (2026-03-06)
 
 - `zarr.open(...)`: 254 call sites across 160 files.
 - `open_zarr_root(...)` usage outside helper definition: 3 call sites.
+- `resolve_zarr_run(...)` usage outside helper definition: 11 call sites.
 - `emit_stage_completion(...)`: 21 call sites across 20 files.
 - direct `upsert_recording_step_status(...)` outside helper/ledger/cascade definitions: 1 call site (callback wrapper in `run_eye_masks_batch.py` for test hook compatibility).
-- local `_normalize_attr/_status_text/_as_text/_decode_attr` helper defs: 26
-  (down from 38 before C3 batches).
+- local `_normalize_attr/_status_text/_as_text/_decode_attr` helper defs: 0
+  (down from 38 before C3 cleanup started).
 - `PALETTE_RECORDINGS_ROOT` references: 66 occurrences across 43 files.
-- `JsonLogger` references in 19 files.
-- `_utc_now` helper copies in 32 files.
-- `_run_id` helper copies in 17 files.
+- local `JsonLogger` defs under `src/fisheye` (excluding shared helper): 1
+  (custom subclass in `utils/run_detections_batch.py`).
+- local `_utc_now` defs under `src/fisheye` (excluding shared helper): 1
+  (unrelated `status_page/query.py`, left out of this refactor slice).
+- local `_run_id` defs under `src/fisheye`: 0.
 - `if ... not in root` + `root.create_group(...)`: 12 files under `src/fisheye`, 18 across `src`.
 - Local `_progress()` wrappers: 9 files.
 - `Progress(...)` constructions: 37 call sites across 30 files.
@@ -141,6 +232,10 @@ Current state after direct code-audit verification of CRITICAL/HIGH/MEDIUM/LOW s
 2. Dataset metadata extraction is centralized in `registry/db.py` and now
    flows through canonical dataset-id resolution paths (including
    hash-suffixed IDs for source recordings).
+3. `batch_logging.py` now covers the shared/private-copy `JsonLogger`,
+   `utc_now()`, and `make_run_id()` patterns across the active C4 scope.
+4. `resolve_zarr_run(...)` now covers the first shared read-side run-resolution
+   batch for stimulus/offline diagnostics.
 
 **Still open:**
 1. For reporting and success metrics, should counts target `src/fisheye` only
@@ -154,13 +249,14 @@ Current state after direct code-audit verification of CRITICAL/HIGH/MEDIUM/LOW s
 
 ### Recommended Next Implementation Plan (from current baseline)
 
-#### Phase A (In Progress: Finish Remaining Critical Work)
+#### Phase A (Current Critical Work)
 
-1. C3: replace remaining local `_normalize_attr/_status_text/_as_text/_decode_attr`
-   helpers with shared conversions.
-2. C4: continue batch logging/timestamp migration beyond the 4 core runners.
-3. Add focused regression tests where helper migration touches monkeypatchable
-   status-write hooks.
+1. Item 1: continue migrating remaining movement-prefix and specialized
+   diagnostic selectors onto `resolve_zarr_run(...)`.
+2. Add focused regression tests where helper migration touches monkeypatchable
+   status-write hooks or zarr-read fallbacks.
+3. Item 2: promote `open_zarr_root()` across remaining raw `zarr.open(...)`
+   call sites in read/diagnostic paths.
 
 #### Phase B (High Priority Consolidation)
 
@@ -257,7 +353,7 @@ def emit_stage_completion(
 - `detection/detect_keypoints_traditional.py` — `_emit_keypoint_step_status()` (~50 lines)
 - `segmentation/eye_segmentation_yolo.py` — `_emit_eye_masks_status()` (~50 lines)
 - `segmentation/infer_unet_eye_masks.py` — `_emit_eye_masks_status()` (~60 lines)
-- `tracking/assign_ids.py` — `_emit_tracking_step_statuses()` (~50 lines)
+- `tracking/arena_assignment.py` — `_emit_tracking_step_statuses()` (~50 lines)
 - `inference/predict_pose.py` — `_emit_keypoint_status()` (~50 lines)
 - `utils/run_detect_with_registry_model.py` — `_emit_detect_step_status()` (~77 lines)
 - `utils/run_eye_masks_with_registry_model.py` — `_emit_eye_masks_failure_status()` (~30 lines)
@@ -303,7 +399,7 @@ zarr_purpose = _normalize_attr(root.attrs.get("zarr_purpose"))
 
 - [x] Promote `_decode_attr()` from `registry/db.py` to
       `fisheye/shared/type_conversions.py` as `normalize_attr()`
-- [ ] Replace remaining private copies of `_normalize_attr`, `_status_text`,
+- [x] Replace remaining private copies of `_normalize_attr`, `_status_text`,
       `_as_text`, `_decode_attr` across the codebase
 
 **Pattern (repeated with minor name variations in 33+ files):**
@@ -379,7 +475,7 @@ def _run_id() -> str:
 
 **Pattern (repeated ~20+ times):**
 ```python
-parent = root["analysis"]["movement_runs"]["offline"]
+parent = root["analysis"]["track_kinematics_runs"]["offline"]
 run_name = run_name or parent.attrs.get("latest")
 if not run_name:
     raise SystemExit("No 'latest' attribute")
@@ -624,7 +720,7 @@ lineage. Other source attrs are written ad-hoc:
 
 | Attr | Files writing it |
 |---|---|
-| `source_detect_run` | crop.py, assign_ids.py, refine_keypoints.py, keypoint_yolo.py |
+| `source_detect_run` | crop.py, arena_assignment.py, refine_keypoints.py, keypoint_yolo.py |
 | `source_refined_run` | crop.py (3x), keypoint_yolo.py, refine_keypoints.py |
 | `source_crop_run` | refine_keypoints.py (multiple), visualization files |
 | `source_quality_run` | refine_detect.py, detect_quality.py |

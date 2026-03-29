@@ -31,6 +31,18 @@ def as_int(value: Any) -> Optional[int]:
         return None
 
 
+def status_text(
+    value: Optional[bool],
+    *,
+    ok: str = "OK",
+    missing: str = "MISS",
+    unavailable: str = "N/A",
+) -> str:
+    if value is None:
+        return unavailable
+    return ok if value else missing
+
+
 def coerce_positive_float(value: Any) -> Optional[float]:
     numeric = as_float(value)
     if numeric is None or numeric <= 0:

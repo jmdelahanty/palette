@@ -15,11 +15,15 @@ import re
 import sys
 import shutil
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import h5py
+
+from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
+from fisheye.shared.batch_logging import make_run_id
+from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 
 try:
     from fisheye.utils.hevc_keyframe_flags import check_hevc_keyframe_flags
@@ -30,24 +34,8 @@ except ModuleNotFoundError:
     from hevc_keyframe_flags import check_hevc_keyframe_flags
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-class JsonLogger:
-    def __init__(self, path: Path, run_id: str):
-        self.path = path
-        self.run_id = run_id
-        self._fh = self.path.open("w", encoding="utf-8")
-
-    def log(self, event: str, **fields: object) -> None:
-        payload = {"event": event, "ts_utc": _utc_now(), "run_id": self.run_id}
-        payload.update(fields)
-        self._fh.write(json.dumps(payload, sort_keys=True) + "\n")
-        self._fh.flush()
-
-    def close(self) -> None:
-        self._fh.close()
+_utc_now = utc_now
+JsonLogger = SharedJsonLogger
 
 
 @dataclass(frozen=True)
@@ -68,14 +56,6 @@ class RecordingPlan:
     meta: Dict[str, str] = field(default_factory=dict)
     missing: List[str] = field(default_factory=list)
     keyframe_checks: Dict[str, Dict[str, object]] = field(default_factory=dict)
-
-
-def _normalize_attr(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "ignore")
-    return str(value)
 
 
 def _derive_camera_id(ipc_source_name: object) -> Optional[str]:
@@ -516,17 +496,31 @@ def _write_manifest(
     }
     snapshot_path = plan.dest_dir / "derived" / "recording_snapshot.json"
     payload = {
-        "recording_name": plan.name,
+        "recording_name": plan.meta.get("recording_name") or plan.name,
         "organized_utc": organized_utc,
         "organize_run_id": run_id,
         "organize_log": str(log_path) if log_path else None,
         "session_uuid": plan.meta.get("session_uuid"),
+        "recording_id": plan.meta.get("recording_id"),
         "session_start_iso8601_utc": plan.meta.get("session_start_iso8601_utc"),
+        "recording_type": plan.meta.get("recording_type"),
+        "recording_subtype": plan.meta.get("recording_subtype"),
+        "behavior_mode": plan.meta.get("behavior_mode"),
+        "artifact_schema_id": plan.meta.get("artifact_schema_id"),
         "rig_id": plan.meta.get("rig_id"),
         "arena_id": plan.meta.get("arena_id"),
         "camera_id": plan.camera_id,
         "canvas_name": plan.meta.get("canvas_name"),
-        "protocol_name_from_definition": plan.meta.get("protocol_name_from_definition"),
+        "protocol_name_from_definition": (
+            plan.meta.get("protocol_name_from_definition")
+            or plan.meta.get("protocol_name")
+        ),
+        "protocol_name": plan.meta.get("protocol_name"),
+        "dish_design": plan.meta.get("dish_design"),
+        "genotype": plan.meta.get("genotype"),
+        "dpf_at_acquisition": plan.meta.get("dpf_at_acquisition"),
+        "num_dishes": plan.meta.get("num_dishes"),
+        "fish_per_dish": plan.meta.get("fish_per_dish"),
         "loaded_protocol_filepath": plan.meta.get("loaded_protocol_filepath"),
         "ipc_source_name": plan.meta.get("ipc_source_name"),
         "active_ipc_source": plan.meta.get("active_ipc_source"),
@@ -982,8 +976,7 @@ def main() -> int:
     else:
         sources = [source]
 
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_id = f"{run_id}_{os.getpid()}"
+    run_id = make_run_id()
     log_dir: Optional[Path]
     if args.log_dir is not None:
         log_dir = args.log_dir
@@ -1010,6 +1003,8 @@ def main() -> int:
             rename_cams=args.rename_cams,
             write_manifest=args.write_manifest,
             snapshot_mode=args.snapshot_mode,
+            video_only=args.video_only,
+            metadata_csv=str(args.metadata_csv) if args.metadata_csv else None,
         )
     except Exception as exc:
         print(f"Warning: could not create log file: {exc}", file=sys.stderr)
