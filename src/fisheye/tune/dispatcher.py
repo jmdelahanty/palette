@@ -83,6 +83,56 @@ def run_tuner(
             )
             return 0
             
+        elif tuner_name in {
+            'subject-mask',
+            'subject_mask',
+            'subject-mask-seed',
+            'subject_masks',
+            'subject-body-mask',
+            'eye-union-mask',
+            'eye-left-mask',
+            'left-eye-mask',
+            'eye-right-mask',
+            'right-eye-mask',
+            'swimbladder-mask',
+            'swim-bladder-mask',
+        }:
+            from .subject_mask_tuner import main as subject_mask_main
+            console.print("[bold cyan] Starting Subject Mask Tuner[/bold cyan]")
+            console.print(f"Zarr: {zarr_path}")
+            if config_path:
+                console.print(f"Config: {config_path}")
+            print()
+            component = None
+            if tuner_name == 'subject-body-mask':
+                component = 'subject_body'
+            elif tuner_name == 'eye-union-mask':
+                component = 'eyes_union'
+            elif tuner_name in {'eye-left-mask', 'left-eye-mask'}:
+                component = 'eye_left'
+            elif tuner_name in {'eye-right-mask', 'right-eye-mask'}:
+                component = 'eye_right'
+            elif tuner_name in {'swimbladder-mask', 'swim-bladder-mask'}:
+                component = 'swim_bladder'
+
+            subject_mask_main(
+                zarr_path=zarr_path,
+                config_path=config_path,
+                component=component,
+                roi_index=frame_idx if frame_idx is not None else 0,
+            )
+            return 0
+        elif tuner_name in {'swimbladder-patch-mask', 'swim-bladder-patch-mask'}:
+            from .swim_bladder_mask_tuner import main as swim_bladder_main
+            console.print("[bold cyan] Starting Swim Bladder Mask Tuner[/bold cyan]")
+            console.print(f"Zarr: {zarr_path}")
+            print()
+            argv = [zarr_path]
+            if frame_idx is not None:
+                argv.extend(["--roi-index", str(frame_idx)])
+            swim_bladder_main(argv)
+            return 0
+
         elif tuner_name == 'keypoint' or tuner_name == 'keypoints':
             from .keypoint_tuner import main as keypoint_main
             console.print("[bold cyan] Starting Keypoint Detection Tuner[/bold cyan]")
@@ -113,6 +163,16 @@ def run_tuner(
                 "Run: `python -m fisheye.tune.eye_mask_review <zarr> --retune|--manual|--audit`"
             )
             return 0
+        elif tuner_name in {'subject-mask-review', 'subject_mask_review', 'refined-subject-mask-review'}:
+            from .refined_subject_mask_review import main as refined_subject_mask_main
+            console.print("[bold cyan] Starting Refined Subject Mask Review[/bold cyan]")
+            console.print(f"Zarr: {zarr_path}")
+            print()
+            argv = [zarr_path]
+            if frame_idx is not None:
+                argv.extend(["--roi-index", str(frame_idx)])
+            refined_subject_mask_main(argv)
+            return 0
         elif tuner_name in {'detect-review', 'detect_review', 'detection-review'}:
             console.print(
                 "[yellow]Detection manual review uses a separate entrypoint.[/yellow]"
@@ -126,12 +186,20 @@ def run_tuner(
             console.print(f"[red]Error: Unknown tuner '{tuner_name}'[/red]")
             console.print("\n[yellow]Available tuners:[/yellow]")
             console.print("  • mask      - Tune dish mask detection (Hough circles)")
-            console.print("  • subdish   - Define sub-dish masks for spatial ID assignment")
+            console.print("  • subdish   - Define sub-dish masks for spatial arena assignment")
             console.print("  • detect    - Tune fish detection thresholds")
             console.print("  • threshold - Alias for 'detect'")
+            console.print("  • subject-mask - Tune ROI-local raw subject-mask components")
+            console.print("  • subject-body-mask - Alias for subject-mask targeting subject_body")
+            console.print("  • eye-union-mask - Alias for subject-mask targeting eyes_union")
+            console.print("  • eye-left-mask - Alias for subject-mask targeting eye_left")
+            console.print("  • eye-right-mask - Alias for subject-mask targeting eye_right")
+            console.print("  • swimbladder-mask - Alias for subject-mask targeting swim_bladder")
+            console.print("  • swimbladder-patch-mask - Tune a local swim-bladder patch proposal")
             console.print("  • keypoint  - Tune anatomical keypoint detection (swim bladder & eyes)")
             console.print("  • keypoints - Alias for 'keypoint'")
             console.print("  • eye-mask-review - Retune/manual review for refined eye masks")
+            console.print("  • subject-mask-review - Manual paint/review for refined subject masks")
             return 1
             
     except ImportError as e:
@@ -154,9 +222,16 @@ def list_tuners(console: Optional[Console] = None):
     
     tuners = [
         ("mask", "Tune dish mask detection using Hough circle detection"),
-        ("subdish", "Define sub-dish masks for spatial ID assignment"),
+        ("subdish", "Define sub-dish masks for spatial arena assignment"),
         ("detect", "Tune fish detection thresholds and morphological parameters"),
         ("threshold", "Alias for 'detect' tuner"),
+        ("subject-mask", "Tune ROI-local raw subject-mask components"),
+        ("subject-body-mask", "Alias targeting whole-subject/body component"),
+        ("eye-union-mask", "Alias targeting eye-union component"),
+        ("eye-left-mask", "Alias targeting left-eye component"),
+        ("eye-right-mask", "Alias targeting right-eye component"),
+        ("swimbladder-mask", "Alias targeting swim-bladder component"),
+        ("swimbladder-patch-mask", "Tune a local keypoint-centered swim-bladder proposal"),
         ("keypoints", "Tune anatomical keypoint detection (swim bladder and eyes)"),
         ("keypoint-review", "Review refined keypoints (retune/manual/audit)"),
         ("eye-mask-review", "Review refined eye masks (retune/manual/audit)"),
@@ -170,6 +245,7 @@ def list_tuners(console: Optional[Console] = None):
     console.print("\n[bold]Examples:[/bold]")
     console.print("  python -m fisheye data.zarr --tune mask")
     console.print("  python -m fisheye data.zarr --tune detect --frame 100")
+    console.print("  python -m fisheye data.zarr --tune subject-mask --frame 250")
     console.print("  python -m fisheye data.zarr --tune keypoints --frame 50")
     console.print("  python -m fisheye data.zarr --tune subdish")
     console.print()
