@@ -1,4 +1,5 @@
 import argparse
+from decimal import Decimal, ROUND_HALF_UP
 import json
 import os
 from dataclasses import dataclass
@@ -15,6 +16,9 @@ from fisheye.shared.refined_detect_review import (
     DEFAULT_DETECT_GROUP_PREFERENCE,
     resolve_refined_detect_group,
 )
+from fisheye.tracking.single_subject_per_arena import build_tracking_qc_fields
+from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
+from fisheye.shared.type_conversions import status_text as _status_text
 from fisheye.utils.crop_quality_freshness import is_crop_quality_row_fresh
 try:
     from rich.console import Console
@@ -28,6 +32,7 @@ DEFAULT_TUNING_KEYS = [
     "dish_mask",
     "detection_tuning",
     "keypoint_tuning",
+    "subject_mask_tuning",
     "eye_mask_tuning",
     "subdish_mask_tuning",
 ]
@@ -45,8 +50,7 @@ _STEP_NAME_ALIASES = {
     "refined_keypoints": "refined_keypoints",
     "eye_masks": "eye_masks",
     "refined_eye_masks": "refined_eye_masks",
-    "id_assignment": "id_assignment",
-    "assign_ids": "id_assignment",
+    "arena_assignment": "arena_assignment",
     "tracks": "tracks",
     "track": "tracks",
     "stimulus": "stimulus",
@@ -54,6 +58,7 @@ _STEP_NAME_ALIASES = {
     "dish_mask": "dish_mask",
     "detection_tuning": "detection_tuning",
     "keypoint_tuning": "keypoint_tuning",
+    "subject_mask_tuning": "subject_mask_tuning",
     "eye_mask_tuning": "eye_mask_tuning",
     "subdish_mask_tuning": "subdish_mask_tuning",
 }
@@ -67,13 +72,14 @@ _OVERVIEW_STEP_PREFIX = {
     "refined_keypoints": "refined_keypoints",
     "eye_masks": "eye_masks",
     "refined_eye_masks": "refined_eye_masks",
-    "id_assignment": "id_assignment",
+    "arena_assignment": "arena_assignment",
     "tracks": "tracks",
     "stimulus": "stimulus",
     "calibration": "calibration",
     "dish_mask": "dish_mask",
     "detection_tuning": "detection_tuning",
     "keypoint_tuning": "keypoint_tuning",
+    "subject_mask_tuning": "subject_mask_tuning",
     "eye_mask_tuning": "eye_mask_tuning",
     "subdish_mask_tuning": "subdish_mask_tuning",
 }
@@ -123,22 +129,17 @@ class RecordingStatus:
     eye_masks_present: bool
     refined_eye_masks_present: bool
     eye_mask_review_status: Optional[Dict[str, object]]
-    assign_ids_present: bool
+    arena_assignment_present: bool
     track_present: bool
+    track_qc_state: Optional[str]
+    track_unassigned_rows: Optional[int]
+    track_unassigned_rate_percent: Optional[float]
     stimulus_runs: int
     calibration_present: bool
     tuning_present: int
     tuning_total: int
     tuning_missing: List[str]
     tuning_status: Dict[str, str]
-
-
-def _normalize_attr(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "ignore")
-    return str(value)
 
 
 def _coerce_float(value: object) -> Optional[float]:
@@ -314,8 +315,11 @@ def _base_status_payload(*, tuning_keys: List[str], zarr_exists: bool) -> Dict[s
         "eye_masks_present": False,
         "refined_eye_masks_present": False,
         "eye_mask_review_status": None,
-        "assign_ids_present": False,
+        "arena_assignment_present": False,
         "track_present": False,
+        "track_qc_state": None,
+        "track_unassigned_rows": None,
+        "track_unassigned_rate_percent": None,
         "stimulus_runs": 0,
         "calibration_present": False,
         "tuning_present": 0,
@@ -344,6 +348,62 @@ def _parse_step_json(value: object) -> Optional[Dict[str, object]]:
     if mapping:
         return mapping
     return None
+
+
+def _normalize_tracking_qc_state(value: object) -> Optional[str]:
+    normalized = _normalize_attr(value)
+    if normalized is None:
+        return None
+    lowered = normalized.strip().lower()
+    if lowered == "block":
+        return "warn"
+    if lowered in {"ok", "warn"}:
+        return lowered
+    return None
+
+
+def _extract_tracking_qc_details(details: Optional[Dict[str, object]]) -> Dict[str, object]:
+    if not details:
+        return {
+            "track_qc_state": None,
+            "track_unassigned_rows": None,
+            "track_unassigned_rate_percent": None,
+        }
+
+    summary = _coerce_mapping(details.get("summary_statistics")) or {}
+
+    n_unassigned_rows = _coerce_int(details.get("n_unassigned_rows"))
+    if n_unassigned_rows is None:
+        n_unassigned_rows = _coerce_int(summary.get("n_unassigned_rows"))
+
+    unassigned_row_rate_percent = _coerce_float(details.get("unassigned_row_rate_percent"))
+    if unassigned_row_rate_percent is None:
+        unassigned_row_rate_percent = _coerce_float(summary.get("unassigned_row_rate_percent"))
+
+    if unassigned_row_rate_percent is None:
+        n_rows = _coerce_int(details.get("n_rows"))
+        if n_rows is None:
+            n_rows = _coerce_int(summary.get("n_rows"))
+        if n_unassigned_rows is not None and n_rows is not None and n_rows > 0:
+            unassigned_row_rate_percent = float(n_unassigned_rows) / float(n_rows) * 100.0
+
+    track_qc_state = _normalize_tracking_qc_state(details.get("tracking_qc_state"))
+    if track_qc_state is None:
+        track_qc_state = _normalize_tracking_qc_state(summary.get("tracking_qc_state"))
+
+    if n_unassigned_rows is not None:
+        computed_qc = build_tracking_qc_fields(
+            n_unassigned_rows=int(n_unassigned_rows),
+            unassigned_row_rate_percent=unassigned_row_rate_percent,
+        )
+        if track_qc_state is None:
+            track_qc_state = str(computed_qc["tracking_qc_state"])
+
+    return {
+        "track_qc_state": track_qc_state,
+        "track_unassigned_rows": n_unassigned_rows,
+        "track_unassigned_rate_percent": unassigned_row_rate_percent,
+    }
 
 
 def _select_step_row(rows: List[Dict[str, object]]) -> Optional[Dict[str, object]]:
@@ -629,8 +689,14 @@ def _registry_status_payload(
         eye_masks_row.get("review_status_json") if eye_masks_row else None
     )
 
-    payload["assign_ids_present"] = _step_row_status_ok(selected_rows.get("id_assignment"))
-    payload["track_present"] = _step_row_status_ok(selected_rows.get("tracks"))
+    payload["arena_assignment_present"] = _step_row_status_ok(selected_rows.get("arena_assignment"))
+    tracks_row = selected_rows.get("tracks")
+    payload["track_present"] = _step_row_status_ok(tracks_row)
+    track_details = _parse_step_json(tracks_row.get("details_json") if tracks_row else None) or {}
+    tracking_qc_details = _extract_tracking_qc_details(track_details)
+    payload["track_qc_state"] = tracking_qc_details["track_qc_state"]
+    payload["track_unassigned_rows"] = tracking_qc_details["track_unassigned_rows"]
+    payload["track_unassigned_rate_percent"] = tracking_qc_details["track_unassigned_rate_percent"]
     stimulus_row = selected_rows.get("stimulus")
     stimulus_details = _parse_step_json(stimulus_row.get("details_json") if stimulus_row else None) or {}
     stimulus_runs = _coerce_int(stimulus_details.get("stimulus_runs"))
@@ -716,8 +782,11 @@ def _build_recording_status(
         eye_masks_present=bool(zarr_info["eye_masks_present"]),
         refined_eye_masks_present=bool(zarr_info["refined_eye_masks_present"]),
         eye_mask_review_status=zarr_info["eye_mask_review_status"],  # type: ignore[arg-type]
-        assign_ids_present=bool(zarr_info["assign_ids_present"]),
+        arena_assignment_present=bool(zarr_info["arena_assignment_present"]),
         track_present=bool(zarr_info["track_present"]),
+        track_qc_state=zarr_info["track_qc_state"],  # type: ignore[arg-type]
+        track_unassigned_rows=zarr_info["track_unassigned_rows"],  # type: ignore[arg-type]
+        track_unassigned_rate_percent=zarr_info["track_unassigned_rate_percent"],  # type: ignore[arg-type]
         stimulus_runs=int(zarr_info["stimulus_runs"]),
         calibration_present=bool(zarr_info["calibration_present"]),
         tuning_present=int(zarr_info["tuning_present"]),
@@ -748,8 +817,13 @@ def _plan_compare_snapshot(plan: RecordingStatus, tuning_keys: List[str]) -> Dic
         "refined_keypoints": _status_text(plan.refined_keypoints_present),
         "eye_masks": _status_text(plan.eye_masks_present),
         "refined_eye_masks": _status_text(plan.refined_eye_masks_present),
-        "assign_ids": _status_text(plan.assign_ids_present),
-        "track": _status_text(plan.track_present),
+        "arena_assignment": _status_text(plan.arena_assignment_present),
+        "track": _track_status_text(
+            plan.track_present,
+            plan.track_qc_state,
+            plan.track_unassigned_rows,
+            plan.track_unassigned_rate_percent,
+        ),
         "stimulus": _status_text(plan.stimulus_runs > 0),
         "calibration": _status_text(plan.calibration_present),
         "tuning": "N/A" if is_production else f"{plan.tuning_present}/{plan.tuning_total}",
@@ -1546,24 +1620,43 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
             else:
                 refined_eye_masks_present = len(list(refined_eye_masks_parent.keys())) > 0
 
-    assign_ids_present = False
-    assign_ids_parent = root.get("id_assignment_runs")
-    if assign_ids_parent is not None:
-        latest_assign = assign_ids_parent.attrs.get("latest")
-        if latest_assign and latest_assign in assign_ids_parent:
-            assign_ids_present = True
+    arena_assignment_present = False
+    arena_assignment_parent = root.get("arena_assignment_runs")
+    if arena_assignment_parent is not None:
+        latest_assign = arena_assignment_parent.attrs.get("latest")
+        if latest_assign and latest_assign in arena_assignment_parent:
+            arena_assignment_present = True
         else:
-            if hasattr(assign_ids_parent, "group_keys"):
-                assign_ids_present = len(list(assign_ids_parent.group_keys())) > 0
+            if hasattr(arena_assignment_parent, "group_keys"):
+                arena_assignment_present = len(list(arena_assignment_parent.group_keys())) > 0
             else:
-                assign_ids_present = len(list(assign_ids_parent.keys())) > 0
+                arena_assignment_present = len(list(arena_assignment_parent.keys())) > 0
 
     track_present = False
+    track_qc_state: Optional[str] = None
+    track_unassigned_rows: Optional[int] = None
+    track_unassigned_rate_percent: Optional[float] = None
     track_parent = root.get("tracking_runs")
     if track_parent is not None:
-        latest_track = track_parent.attrs.get("latest")
+        latest_track = _normalize_attr(track_parent.attrs.get("latest"))
+        candidate_run = None
         if latest_track and latest_track in track_parent:
+            candidate_run = latest_track
+        else:
+            if hasattr(track_parent, "group_keys"):
+                names = list(track_parent.group_keys())
+            else:
+                names = list(track_parent.keys())
+            if names:
+                candidate_run = sorted(names)[-1]
+        if candidate_run:
             track_present = True
+            track_group = track_parent[candidate_run]
+            track_attrs = _coerce_mapping(track_group.attrs) or {}
+            tracking_qc_details = _extract_tracking_qc_details(track_attrs)
+            track_qc_state = tracking_qc_details["track_qc_state"]  # type: ignore[assignment]
+            track_unassigned_rows = tracking_qc_details["track_unassigned_rows"]  # type: ignore[assignment]
+            track_unassigned_rate_percent = tracking_qc_details["track_unassigned_rate_percent"]  # type: ignore[assignment]
         else:
             if hasattr(track_parent, "group_keys"):
                 track_present = len(list(track_parent.group_keys())) > 0
@@ -1640,8 +1733,11 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
         "eye_masks_present": eye_masks_present,
         "refined_eye_masks_present": refined_eye_masks_present,
         "eye_mask_review_status": eye_mask_review_status,
-        "assign_ids_present": assign_ids_present,
+        "arena_assignment_present": arena_assignment_present,
         "track_present": track_present,
+        "track_qc_state": track_qc_state,
+        "track_unassigned_rows": track_unassigned_rows,
+        "track_unassigned_rate_percent": track_unassigned_rate_percent,
         "stimulus_runs": stim_runs,
         "calibration_present": calibration_present,
         "tuning_present": tuning_present,
@@ -1649,12 +1745,6 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
         "tuning_missing": tuning_missing,
         "tuning_status": tuning_status,
     }
-
-
-def _status_text(value: Optional[bool]) -> str:
-    if value is None:
-        return "N/A"
-    return "OK" if value else "MISS"
 
 
 def _tuning_status_text(value: str) -> str:
@@ -1676,6 +1766,60 @@ def _crop_status_text(present: bool, status: Optional[str]) -> str:
         return "MISS"
     normalized = str(status or "").strip().lower()
     return normalized or "OK"
+
+
+def _format_one_decimal(value: float) -> str:
+    return str(Decimal(str(value)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+
+
+def _track_status_text(
+    present: bool,
+    track_qc_state: Optional[str],
+    n_unassigned_rows: Optional[int],
+    unassigned_row_rate_percent: Optional[float],
+) -> str:
+    if not present:
+        return "MISS"
+    normalized_state = _normalize_tracking_qc_state(track_qc_state)
+    if normalized_state == "warn":
+        if n_unassigned_rows is not None and unassigned_row_rate_percent is not None:
+            return f"WARN ({n_unassigned_rows} unassigned, {_format_one_decimal(unassigned_row_rate_percent)}%)"
+        if n_unassigned_rows is not None:
+            return f"WARN ({n_unassigned_rows} unassigned)"
+        return "WARN"
+    if n_unassigned_rows is None or n_unassigned_rows <= 0:
+        return "OK"
+    if unassigned_row_rate_percent is not None:
+        return f"WARN ({n_unassigned_rows} unassigned, {_format_one_decimal(unassigned_row_rate_percent)}%)"
+    return f"WARN ({n_unassigned_rows} unassigned)"
+
+
+def _track_status_rich(
+    present: bool,
+    track_qc_state: Optional[str],
+    n_unassigned_rows: Optional[int],
+    unassigned_row_rate_percent: Optional[float],
+) -> str:
+    if not present:
+        return "[red]MISS[/red]"
+    normalized_state = _normalize_tracking_qc_state(track_qc_state)
+    if normalized_state == "warn":
+        if n_unassigned_rows is not None and unassigned_row_rate_percent is not None:
+            return (
+                f"[yellow]WARN[/yellow] ({n_unassigned_rows} unassigned, "
+                f"{_format_one_decimal(unassigned_row_rate_percent)}%)"
+            )
+        if n_unassigned_rows is not None:
+            return f"[yellow]WARN[/yellow] ({n_unassigned_rows} unassigned)"
+        return "[yellow]WARN[/yellow]"
+    if n_unassigned_rows is None or n_unassigned_rows <= 0:
+        return "[chartreuse1]OK[/chartreuse1]"
+    if unassigned_row_rate_percent is not None:
+        return (
+            f"[yellow]WARN[/yellow] ({n_unassigned_rows} unassigned, "
+            f"{_format_one_decimal(unassigned_row_rate_percent)}%)"
+        )
+    return f"[yellow]WARN[/yellow] ({n_unassigned_rows} unassigned)"
 
 
 def _crop_status_rich(present: bool, status: Optional[str]) -> str:
@@ -2130,7 +2274,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         table.add_column("Eye Masks")
         table.add_column("Refined Eye Masks")
         table.add_column("Eye Mask Review")
-        table.add_column("Assign IDs")
+        table.add_column("Arena Assignment")
         table.add_column("Track")
         table.add_column("Stimulus")
         table.add_column("Calib")
@@ -2182,8 +2326,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 _status_rich(plan.eye_masks_present),
                 _status_rich(plan.refined_eye_masks_present),
                 _review_status_rich(plan.eye_mask_review_status),
-                _status_rich(plan.assign_ids_present),
-                _status_rich(plan.track_present),
+                _status_rich(plan.arena_assignment_present),
+                _track_status_rich(
+                    plan.track_present,
+                    plan.track_qc_state,
+                    plan.track_unassigned_rows,
+                    plan.track_unassigned_rate_percent,
+                ),
                 stimulus_text,
                 _status_rich(plan.calibration_present),
                 "N/A" if is_production else tuning_text,
@@ -2240,8 +2389,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"  eye_masks: {_status_text(plan.eye_masks_present)}")
             print(f"  refined_eye_masks: {_status_text(plan.refined_eye_masks_present)}")
             print(f"  eye_mask_review_status: {_review_status_text(plan.eye_mask_review_status)}")
-            print(f"  assign_ids: {_status_text(plan.assign_ids_present)}")
-            print(f"  track: {_status_text(plan.track_present)}")
+            print(f"  arena_assignment: {_status_text(plan.arena_assignment_present)}")
+            print(
+                "  track: "
+                f"{_track_status_text(plan.track_present, plan.track_qc_state, plan.track_unassigned_rows, plan.track_unassigned_rate_percent)}"
+            )
             print(f"  stimulus_runs: {plan.stimulus_runs} ({_status_text(stimulus_ok)})")
             print(f"  calibration: {_status_text(plan.calibration_present)}")
             if is_production:

@@ -38,10 +38,10 @@ STEP_DEPENDENTS: Dict[str, FrozenSet[str]] = {
     "detect_quality": frozenset(),
     "crop": frozenset({"keypoints"}),
     "keypoints": frozenset({"refined_keypoints"}),
-    "refined_keypoints": frozenset({"eye_masks", "id_assignment"}),
+    "refined_keypoints": frozenset({"eye_masks", "arena_assignment"}),
     "eye_masks": frozenset({"refined_eye_masks"}),
     "refined_eye_masks": frozenset(),
-    "id_assignment": frozenset({"tracks"}),
+    "arena_assignment": frozenset({"tracks"}),
     "tracks": frozenset(),
 }
 

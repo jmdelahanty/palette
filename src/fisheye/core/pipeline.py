@@ -1390,6 +1390,7 @@ Examples:
   # Tune parameters before running pipeline
   python -m fisheye data.zarr --tune mask
   python -m fisheye data.zarr --tune detect --frame 100
+  python -m fisheye data.zarr --tune subject-mask --frame 250
   python -m fisheye data.zarr --tune keypoint --frame 50
   
   # List available tuners
@@ -1403,7 +1404,7 @@ Examples:
         "--tune",
         type=str,
         metavar="TUNER",
-        help="Run interactive parameter tuner (mask, detect, threshold, keypoint)"
+        help="Run interactive parameter tuner (mask, detect, threshold, subject-mask, keypoint)"
     )
     tuner_group.add_argument(
         "--list-tuners",
@@ -1413,7 +1414,7 @@ Examples:
     tuner_group.add_argument(
         "--frame",
         type=int,
-        help="Specific frame index to use in tuner"
+        help="Specific frame/ROI index to use in tuner"
     )
     tuner_group.add_argument(
         "--full",

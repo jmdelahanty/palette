@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from fisheye.shared.batch_logging import utc_now
 from .db import Registry
 
 RECORDING_STEP_STATUSES = ("ok", "missing", "absent", "na", "error")
 _RECORDING_STEP_STATUS_SET = frozenset(RECORDING_STEP_STATUSES)
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_utc_now = utc_now
 
 
 def _clean_text(value: Any) -> Optional[str]:

@@ -148,7 +148,7 @@ this phase integrates that capability into the registry TUI.
 - [ ] Run keypoint refinement (`python -m fisheye <zarr> --stages keypoints_refine`).
 - [ ] Run eye mask inference (`python -m fisheye <zarr> --stages eye_masks`).
 - [ ] Run eye mask refinement (`python -m fisheye <zarr> --stages refined_eye_masks`).
-- [ ] Run ID assignment + tracking (`python -m fisheye <zarr> --stages assign_ids track`).
+- [ ] Run arena assignment + tracking (`python -m fisheye <zarr> --stages assign_ids track`).
 - [ ] Run full pipeline (all stages in dependency order).
 - [ ] Run "fix stale" — automatically determine which stages need re-running from
       `recording_step_status` and execute only those.

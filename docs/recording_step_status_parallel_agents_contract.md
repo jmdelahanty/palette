@@ -53,7 +53,7 @@ Standardized step names:
 - `refined_keypoints`
 - `eye_masks`
 - `refined_eye_masks`
-- `id_assignment`
+- `arena_assignment`
 - `tracks`
 
 Write behavior requirements:
@@ -120,11 +120,11 @@ Must emit:
 ### Agent E (RS4-tracking)
 
 Owns:
-- `src/fisheye/tracking/assign_ids.py`
+- `src/fisheye/tracking/arena_assignment.py`
 - tracking/id-assignment unit tests
 
 Must emit:
-- `step_name=id_assignment`
+- `step_name=arena_assignment`
 - `step_name=tracks` where track materialization state is known
 
 ### Agent F (Validation/Harness)

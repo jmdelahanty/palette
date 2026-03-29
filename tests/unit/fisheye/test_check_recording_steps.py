@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import h5py
@@ -159,6 +160,37 @@ def test_crop_status_format_helpers() -> None:
     assert mod._crop_status_rich(True, "completed") == "[chartreuse1]completed[/chartreuse1]"  # noqa: SLF001
     assert mod._crop_status_rich(True, "running") == "[yellow]running[/yellow]"  # noqa: SLF001
     assert mod._crop_status_rich(True, "failed") == "[red]failed[/red]"  # noqa: SLF001
+
+
+def test_track_status_format_helpers() -> None:
+    assert mod._track_status_text(False, None, None, None) == "MISS"  # noqa: SLF001
+    assert mod._track_status_text(True, None, None, None) == "OK"  # noqa: SLF001
+    assert mod._track_status_text(True, None, 0, 0.0) == "OK"  # noqa: SLF001
+    assert mod._track_status_text(True, "warn", 1, 0.25) == "WARN (1 unassigned, 0.3%)"  # noqa: SLF001
+    assert mod._track_status_text(True, "block", 1, 25.0) == "WARN (1 unassigned, 25.0%)"  # noqa: SLF001
+    assert mod._track_status_rich(True, "block", 1, 25.0) == "[yellow]WARN[/yellow] (1 unassigned, 25.0%)"  # noqa: SLF001
+
+
+def test_check_zarr_reads_track_unassigned_warning_from_latest_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "track_warning_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    tracks_parent = root.create_group("tracking_runs")
+    tracks_parent.attrs["latest"] = "tracks_001"
+    track_run = tracks_parent.create_group("tracks_001")
+    track_run.attrs["summary_statistics"] = {
+        "n_rows": 4,
+        "n_tracks": 3,
+        "n_assigned_rows": 3,
+        "n_unassigned_rows": 1,
+        "unassigned_row_rate_percent": 25.0,
+    }
+
+    info = mod._check_zarr(zarr_path, tuning_keys=[])  # noqa: SLF001
+
+    assert info["track_present"] is True
+    assert info["track_qc_state"] == "warn"
+    assert info["track_unassigned_rows"] == 1
+    assert info["track_unassigned_rate_percent"] == pytest.approx(25.0)
 
 
 def test_registry_crop_review_status_for_zarr_returns_latest_review_fields(tmp_path: Path) -> None:
@@ -557,3 +589,59 @@ def test_registry_status_payload_filters_rows_to_matching_recording_id(tmp_path:
     assert payload["eye_masks_present"] is True
     assert payload["refined_eye_masks_present"] is True
     assert payload["tuning_status"]["eye_mask_tuning"] == "ok"  # type: ignore[index]
+
+
+def test_registry_status_payload_reads_track_unassigned_warning(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "track_warning_analysis.zarr"
+    zarr.open_group(str(zarr_path), mode="w")
+
+    registry = Registry(tmp_path / "registry.sqlite")
+    registry.upsert_dataset(
+        "dataset_track_warning",
+        session_uuid="session_track_warning",
+        zarr_path=zarr_path,
+        recording_id="recording_track_warning",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.conn.execute(
+        """
+        INSERT INTO recording_step_status (
+            dataset_id, recording_id, step_name, status, run_name, details_json, source, updated_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            "dataset_track_warning",
+            "recording_track_warning",
+            "tracks",
+            "ok",
+            "tracks_001",
+            json.dumps(
+                {
+                    "n_assigned_rows": 399,
+                    "n_unassigned_rows": 1,
+                    "unassigned_row_rate_percent": 0.25,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ),
+            "unit_test",
+            "2026-02-23T03:00:00+00:00",
+        ),
+    )
+    registry.conn.commit()
+
+    payload = mod._registry_status_payload(  # noqa: SLF001
+        registry=registry,
+        zarr_path=zarr_path,
+        recording_id="recording_track_warning",
+        tuning_keys=[],
+    )
+    registry.close()
+
+    assert payload["track_present"] is True
+    assert payload["track_qc_state"] == "warn"
+    assert payload["track_unassigned_rows"] == 1
+    assert payload["track_unassigned_rate_percent"] == pytest.approx(0.25)

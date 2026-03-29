@@ -99,9 +99,10 @@ STAGE_ORDER = [
 
 TUNER_INFO = {
     'mask': 'Tune dish mask detection (Hough circles)',
-    'subdish': 'Define sub-dish masks for spatial ID assignment (multi-dish only)',
+    'subdish': 'Define sub-dish masks for spatial arena assignment (multi-dish only)',
     'detect': 'Tune fish detection thresholds',
     'threshold': 'Alias for detect tuner',
+    'subject-mask': 'Tune ROI-local whole-subject mask seed generation',
     'keypoints': 'Tune anatomical keypoint detection (swim bladder & eyes)',
 }
 
@@ -429,10 +430,10 @@ class PipelineLauncherApp(App):
                 # Join all lines
                 status['refine'] = '\n'.join(status_lines)
             
-            # Check assign_ids
-            if 'id_assignment_runs' in root and len(list(root['id_assignment_runs'].group_keys())) > 0:
-                latest = root['id_assignment_runs'].attrs.get('latest')
-                assign_group = root[f'id_assignment_runs/{latest}'] if latest else None
+            # Check arena assignment
+            if 'arena_assignment_runs' in root and len(list(root['arena_assignment_runs'].group_keys())) > 0:
+                latest = root['arena_assignment_runs'].attrs.get('latest')
+                assign_group = root[f'arena_assignment_runs/{latest}'] if latest else None
                 
                 if assign_group and 'summary_statistics' in assign_group.attrs:
                     stats = assign_group.attrs['summary_statistics']
@@ -446,12 +447,12 @@ class PipelineLauncherApp(App):
                         assigned = stats.get('assigned_detections', 0)
                         total = stats.get('total_detections', 1)
                         percent = stats.get('assignment_rate_percent', 0)
-                        status['assign_ids'] = f'✓ Complete (single_dish, {percent:.0f}% assigned)'
+                        status['assign_ids'] = f'✓ Complete (single_dish, {percent:.0f}% arena-assigned)'
                     else:
                         # For multi-dish, show number of ROIs
-                        num_masks = stats.get('num_masks', 0)
+                        num_masks = stats.get('num_arenas', 0)
                         percent = stats.get('assignment_rate_percent', 0)
-                        status['assign_ids'] = f'✓ Complete ({num_masks} ROIs, {percent:.0f}% assigned)'
+                        status['assign_ids'] = f'✓ Complete ({num_masks} arenas, {percent:.0f}% arena-assigned)'
                 else:
                     status['assign_ids'] = '✓ Complete'
         
@@ -514,13 +515,13 @@ class PipelineLauncherApp(App):
                 f"[dim]Source: {source}[/dim]"
             )
             
-            # Add validation status if assign_ids has run
-            if 'id_assignment_runs' in root and root['id_assignment_runs'].attrs.get('latest'):
-                latest = root['id_assignment_runs'].attrs['latest']
-                assign_group = root[f'id_assignment_runs/{latest}']
+            # Add validation status if arena assignment has run
+            if 'arena_assignment_runs' in root and root['arena_assignment_runs'].attrs.get('latest'):
+                latest = root['arena_assignment_runs'].attrs['latest']
+                assign_group = root[f'arena_assignment_runs/{latest}']
                 if 'summary_statistics' in assign_group.attrs:
                     stats = assign_group.attrs['summary_statistics']
-                    num_rois = stats.get('num_masks', 0)
+                    num_rois = stats.get('num_arenas', 0)
                     
                     if num_rois == num_dishes:
                         info_text += f"\n[green]✓ {num_rois} ROIs tracked[/green]"
