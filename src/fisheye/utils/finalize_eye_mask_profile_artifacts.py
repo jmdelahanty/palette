@@ -11,13 +11,13 @@ import hashlib
 import json
 import os
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 import zarr
 
+from fisheye.shared.batch_logging import utc_now
 from fisheye.utils.export_eye_mask_quality_overview import (
     ARTIFACT_NAME,
     ARTIFACT_PATH,
@@ -53,8 +53,7 @@ class FinalizeRow:
     action: str
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_utc_now = utc_now
 
 
 def _decode_text(value: object) -> Optional[str]:

@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+from fisheye.shared.batch_logging import utc_now
 from fisheye.utils.system import build_invocation_record
 
 MODEL_RESOLUTION_CONTRACT_NAME = "palette_model_resolution_provenance"
 MODEL_RESOLUTION_CONTRACT_VERSION = 1
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_utc_now = utc_now
 
 
 def _to_jsonable(value: Any) -> Any:
@@ -102,4 +101,3 @@ def build_model_resolution_payload(
     if method is not None:
         payload["method"] = _to_jsonable(method)
     return payload
-

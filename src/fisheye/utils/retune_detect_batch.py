@@ -4,12 +4,15 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-import zarr
 import numpy as np
+import zarr
+
+from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
+from fisheye.shared.batch_logging import make_run_id
+from fisheye.shared.batch_logging import utc_now
 
 try:
     from rich.console import Console
@@ -35,24 +38,8 @@ class RetunePlan:
     target_frames: Optional[List[int]] = None
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-class JsonLogger:
-    def __init__(self, path: Path, run_id: str):
-        self.path = path
-        self.run_id = run_id
-        self._fh = self.path.open("w", encoding="utf-8")
-
-    def log(self, event: str, **fields: object) -> None:
-        payload = {"event": event, "ts_utc": _utc_now(), "run_id": self.run_id}
-        payload.update(fields)
-        self._fh.write(json.dumps(payload, sort_keys=True) + "\n")
-        self._fh.flush()
-
-    def close(self) -> None:
-        self._fh.close()
+_utc_now = utc_now
+JsonLogger = SharedJsonLogger
 
 
 def _resolve_root(paths: Optional[List[Path]]) -> List[Path]:
@@ -126,9 +113,7 @@ def _resolve_log_dir(arg_log_dir: Optional[Path], roots: List[Path]) -> Path:
     return Path.cwd() / "logs" / "retune_detect_batch"
 
 
-def _run_id() -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{stamp}_{os.getpid()}"
+_run_id = make_run_id
 
 
 def _progress(console: Optional[Console], total: int):

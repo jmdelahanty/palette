@@ -17,12 +17,16 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import h5py
 import zarr
+
+from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
+from fisheye.shared.batch_logging import make_run_id
+from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 
 try:
     from rich.console import Console
@@ -37,24 +41,8 @@ from fisheye.registry.db import Registry, RegistryPaths
 DEFAULT_RECORDINGS_ROOT = Path("/nvme1/recordings")
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-class JsonLogger:
-    def __init__(self, path: Path, run_id: str):
-        self.path = path
-        self.run_id = run_id
-        self._fh = self.path.open("w", encoding="utf-8")
-
-    def log(self, event: str, **fields: object) -> None:
-        payload = {"event": event, "ts_utc": _utc_now(), "run_id": self.run_id}
-        payload.update(fields)
-        self._fh.write(json.dumps(payload, sort_keys=True) + "\n")
-        self._fh.flush()
-
-    def close(self) -> None:
-        self._fh.close()
+_utc_now = utc_now
+JsonLogger = SharedJsonLogger
 
 
 @dataclass
@@ -69,14 +57,6 @@ class ImportPlan:
     stimulus_present: Optional[bool] = None
     existing_frame_step: Optional[int] = None
     frame_step_mismatch: Optional[bool] = None
-
-
-def _normalize_attr(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "ignore")
-    return str(value)
 
 
 def _derive_camera_id(ipc_source_name: object) -> Optional[str]:
@@ -375,9 +355,7 @@ def _resolve_log_dir(arg_log_dir: Optional[Path], recordings_root: Path) -> Path
     return recordings_root / "logs" / "import_recordings_training"
 
 
-def _run_id() -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{stamp}_{os.getpid()}"
+_run_id = make_run_id
 
 
 def _gpu_preflight(logger: Optional[JsonLogger]) -> None:

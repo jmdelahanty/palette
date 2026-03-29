@@ -9,6 +9,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
+from fisheye.shared.type_conversions import normalize_attr as _as_text
 
 
 @dataclass
@@ -70,16 +71,6 @@ def _select_run_names(refined_parent: zarr.Group, all_runs: bool) -> list[str]:
     if not names:
         return []
     return [names[-1]]
-
-
-def _as_text(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        text = value.decode("utf-8", "ignore").strip()
-    else:
-        text = str(value).strip()
-    return text or None
 
 
 def _normalize_keypoint_labels(

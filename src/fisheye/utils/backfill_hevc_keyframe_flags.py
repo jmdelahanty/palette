@@ -9,9 +9,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+from fisheye.shared.batch_logging import utc_now
 
 try:
     from fisheye.utils.hevc_keyframe_flags import check_hevc_keyframe_flags
@@ -24,8 +25,7 @@ except ModuleNotFoundError:
     from hevc_keyframe_flags import check_hevc_keyframe_flags
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_utc_now = utc_now
 
 
 def _iter_manifests(

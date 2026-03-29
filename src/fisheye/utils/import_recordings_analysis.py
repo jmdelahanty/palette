@@ -15,16 +15,18 @@ Default mode is dry-run. Use --apply to execute.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import h5py
 
+from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
+from fisheye.shared.batch_logging import make_run_id
+from fisheye.shared.batch_logging import utc_now
+from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.utils.import_recording_analysis import (
     RecordingImportOptions,
@@ -40,24 +42,8 @@ from fisheye.utils.run_recording_analysis_pipeline import (
 DEFAULT_RECORDINGS_ROOT = Path("/nvme1/recordings")
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-class JsonLogger:
-    def __init__(self, path: Path, run_id: str):
-        self.path = path
-        self.run_id = run_id
-        self._fh = self.path.open("w", encoding="utf-8")
-
-    def log(self, event: str, **fields: object) -> None:
-        payload = {"event": event, "ts_utc": _utc_now(), "run_id": self.run_id}
-        payload.update(fields)
-        self._fh.write(json.dumps(payload, sort_keys=True) + "\n")
-        self._fh.flush()
-
-    def close(self) -> None:
-        self._fh.close()
+_utc_now = utc_now
+JsonLogger = SharedJsonLogger
 
 
 @dataclass
@@ -70,15 +56,6 @@ class AnalysisPlan:
     status: str
     reason: Optional[str] = None
     stimulus_present: Optional[bool] = None
-
-
-def _normalize_attr(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "ignore")
-    text = str(value).strip()
-    return text or None
 
 
 def _derive_camera_id(ipc_source_name: object) -> Optional[str]:
@@ -262,9 +239,7 @@ def _resolve_log_dir(arg_log_dir: Optional[Path], root: Path) -> Path:
     return root / "logs" / "import_recordings_analysis"
 
 
-def _run_id() -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{stamp}_{os.getpid()}"
+_run_id = make_run_id
 
 
 def main(argv: Optional[List[str]] = None) -> int:

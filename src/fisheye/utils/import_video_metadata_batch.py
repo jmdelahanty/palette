@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
 import zarr
 
+from fisheye.shared.batch_logging import JsonLogger as SharedJsonLogger
+from fisheye.shared.batch_logging import make_run_id
+from fisheye.shared.batch_logging import utc_now
 from .import_video_metadata import _probe_video, _write_metadata
 
 
@@ -34,25 +36,8 @@ class MetadataPlan:
     new_encoder_summary: Optional[str] = None
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-class JsonLogger:
-    def __init__(self, path: Path, run_id: str):
-        self.path = path
-        self.run_id = run_id
-        self._fh = self.path.open("w", encoding="utf-8")
-
-    def log(self, event: str, **fields: object) -> None:
-        payload = {"event": event, "ts_utc": _utc_now(), "run_id": self.run_id}
-        payload.update(fields)
-        import json
-        self._fh.write(json.dumps(payload, sort_keys=True) + "\n")
-        self._fh.flush()
-
-    def close(self) -> None:
-        self._fh.close()
+_utc_now = utc_now
+JsonLogger = SharedJsonLogger
 
 
 def _resolve_roots(paths: Optional[List[Path]]) -> List[Path]:
@@ -75,9 +60,7 @@ def _resolve_log_dir(arg_log_dir: Optional[Path], roots: List[Path]) -> Path:
     return Path.cwd() / "logs" / "organize_recordings" / "import_video_metadata_batch"
 
 
-def _run_id() -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{stamp}_{os.getpid()}"
+_run_id = make_run_id
 
 
 def _iter_zarr(roots: List[Path], recursive: bool) -> Iterable[Path]:
