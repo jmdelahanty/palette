@@ -3,8 +3,8 @@
 Plot pre/training/post spatial heatmaps using data stored inside a Palette Zarr archive.
 
 This script assumes stimulus metadata has been imported via
-``fisheye.analysis.import_stimulus_to_zarr`` and that a movement run exists under
-``analysis/movement_runs``. It mirrors the functionality of
+``fisheye.analysis.import_stimulus_to_zarr`` and that a track kinematics run exists under
+``analysis/track_kinematics_runs``. It mirrors the functionality of
 ``chaser_analysis/training_heatmap_analyzer.py`` but reads exclusively from the
 Zarr store (no separate analysis H5 required).
 """
@@ -257,7 +257,7 @@ def _collect_positions(movement_run: zarr.Group) -> Tuple[np.ndarray, np.ndarray
         frames_list.append(frames.astype(np.int64, copy=False))
         positions_list.append(positions.astype(np.float64, copy=False))
     if not frames_list:
-        raise ValueError("Movement run contains no track data.")
+        raise ValueError("Track kinematics run contains no track data.")
     frames = np.concatenate(frames_list)
     positions = np.concatenate(positions_list)
     order = np.argsort(frames)
@@ -453,8 +453,8 @@ def _create_heatmap(
 
 
 def _resolve_latest(parent: zarr.Group, run_name: Optional[str], label: str, console: Console) -> Tuple[zarr.Group, str]:
-    if label == "movement_run":
-        return _resolve_movement_run(parent, run_name, console)
+    if label == "track_kinematics_run":
+        return _resolve_track_kinematics_run(parent, run_name, console)
 
     if run_name:
         if run_name not in parent:
@@ -471,7 +471,9 @@ def _resolve_latest(parent: zarr.Group, run_name: Optional[str], label: str, con
     return parent[latest], latest
 
 
-def _resolve_movement_run(parent: zarr.Group, run_name: Optional[str], console: Console) -> Tuple[zarr.Group, str]:
+def _resolve_track_kinematics_run(
+    parent: zarr.Group, run_name: Optional[str], console: Console
+) -> Tuple[zarr.Group, str]:
     online_parent = parent.get("online")
     offline_parent = parent.get("offline")
 
@@ -503,9 +505,9 @@ def _resolve_movement_run(parent: zarr.Group, run_name: Optional[str], console: 
     if run_name:
         resolved = resolve_name(run_name)
         if resolved is None:
-            raise ValueError(f"movement_run '{run_name}' not found.")
+            raise ValueError(f"track_kinematics_run '{run_name}' not found.")
         group, label = resolved
-        console.log(f"[cyan]Using movement_run:[/cyan] {label}")
+        console.log(f"[cyan]Using track_kinematics_run:[/cyan] {label}")
         return group, label
 
     candidates: list[Tuple[zarr.Group, str]] = []
@@ -531,7 +533,7 @@ def _resolve_movement_run(parent: zarr.Group, run_name: Optional[str], console: 
             candidates.append(resolved)
 
     if not candidates:
-        console.log("[yellow]No movement runs referenced by 'latest'; scanning available runs.[/yellow]")
+        console.log("[yellow]No track kinematics runs referenced by 'latest'; scanning available runs.[/yellow]")
         for subgroup, prefix in ((online_parent, "online"), (offline_parent, "offline")):
             if subgroup is None:
                 continue
@@ -539,10 +541,10 @@ def _resolve_movement_run(parent: zarr.Group, run_name: Optional[str], console: 
                 candidates.append((subgroup[name], f"{prefix}/{name}"))
 
     if not candidates:
-        raise ValueError("No movement runs found under analysis/movement_runs.")
+        raise ValueError("No track kinematics runs found under analysis/track_kinematics_runs.")
 
     group, label = candidates[0]
-    console.log(f"[cyan]Using movement_run:[/cyan] {label}")
+    console.log(f"[cyan]Using track_kinematics_run:[/cyan] {label}")
     return group, label
 
 
@@ -555,7 +557,7 @@ def _format_duration(start_ns: Optional[int], end_ns: Optional[int]) -> str:
 
 def plot_training_heatmaps(
     zarr_path: Path,
-    movement_run_name: Optional[str],
+    track_kinematics_run_name: Optional[str],
     stimulus_run_name: Optional[str],
     bin_size: int,
     smooth_sigma: float,
@@ -572,11 +574,14 @@ def plot_training_heatmaps(
     if analysis is None:
         raise ValueError("Archive missing 'analysis' group.")
 
-    movement_parent = analysis.get("movement_runs")
+    movement_parent = analysis.get("track_kinematics_runs")
     if movement_parent is None or not movement_parent:
-        raise ValueError("No movement runs found under analysis/movement_runs.")
-    movement_run_group, movement_run_name = _resolve_latest(
-        movement_parent, movement_run_name, "movement_run", console
+        raise ValueError("No track kinematics runs found under analysis/track_kinematics_runs.")
+    movement_run_group, track_kinematics_run_name = _resolve_latest(
+        movement_parent,
+        track_kinematics_run_name,
+        "track_kinematics_run",
+        console,
     )
 
     stimulus_parent = analysis.get("stimulus_runs")
@@ -595,7 +600,7 @@ def plot_training_heatmaps(
         raise ValueError("Stimulus metadata missing 'triggering_camera_frame_id'.")
     camera_frames_all = camera_frames_all.astype(np.int64, copy=False)
 
-    console.log("[bold]Loading movement run positions...[/bold]")
+    console.log("[bold]Loading track kinematics run positions...[/bold]")
     frames, positions = _collect_positions(movement_run_group)
 
     periods = _determine_periods(events, stim_to_camera, camera_frames_all, console)
@@ -634,7 +639,7 @@ def plot_training_heatmaps(
         width=width,
         height=height,
         title=(
-            f"Training Heatmaps – movement run {movement_run_name}, stimulus run {stimulus_run_name}\n"
+            f"Training Heatmaps – track kinematics run {track_kinematics_run_name}, stimulus run {stimulus_run_name}\n"
             f"bin size {bin_size}px, smoothing σ={smooth_sigma}"
         ),
     )
@@ -694,7 +699,11 @@ def plot_training_heatmaps(
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot training heatmaps from a Palette Zarr archive.")
     parser.add_argument("zarr_path", type=Path, help="Path to the Palette Zarr archive.")
-    parser.add_argument("--movement-run", help="Specific movement run name (defaults to latest).")
+    parser.add_argument(
+        "--track-kinematics-run",
+        dest="track_kinematics_run",
+        help="Specific track kinematics run name (defaults to latest).",
+    )
     parser.add_argument("--stimulus-run", help="Specific stimulus run name under analysis/stimulus_runs.")
     parser.add_argument("--bin-size", type=int, default=80, help="Heatmap bin size in pixels (default: 80).")
     parser.add_argument(
@@ -723,7 +732,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
     plot_training_heatmaps(
         zarr_path=args.zarr_path,
-        movement_run_name=args.movement_run,
+        track_kinematics_run_name=args.track_kinematics_run,
         stimulus_run_name=args.stimulus_run,
         bin_size=args.bin_size,
         smooth_sigma=args.smooth_sigma,
