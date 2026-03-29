@@ -32,9 +32,10 @@ SUBJECT_MASK_LABEL_SCHEMA = "subject_v1_union"
 SUBJECT_MASK_LABELS: tuple[str, ...] = ("subject_body", "eyes_union", "swim_bladder")
 SUBJECT_MASK_AVAILABLE_CHANNELS = (True, False, False)
 DEFAULT_INFER_BATCH_SIZE = 8
-BOX_PROMPT_SOURCE_CHOICES = ("detect", "roi_inset")
+BOX_PROMPT_SOURCE_CHOICES = ("detect", "roi_inset", "pose_roi")
 DEFAULT_BOX_PROMPT_SOURCE = "detect"
 DEFAULT_ROI_INSET_FRACTION = 0.05
+DEFAULT_POSE_BOX_EXPAND_FRACTION = 0.10
 NEGATIVE_POINT_POLICY_CHOICES = ("none", "corners", "border8")
 DEFAULT_NEGATIVE_POINT_POLICY = "none"
 DEFAULT_NEGATIVE_POINT_MARGIN_FRACTION = 0.05
@@ -78,6 +79,7 @@ class ResolvedSamInputs:
     frame_height: int
     frame_width: int
     warnings: tuple[str, ...]
+    pose_bbox_xyxy_roi: np.ndarray | None = None
 
     @property
     def row_count(self) -> int:
@@ -368,6 +370,8 @@ def _sam_prompt_policy(
     if use_box_prompt:
         if box_prompt_source == "roi_inset":
             parts.append("plus_roi_inset_box")
+        elif box_prompt_source == "pose_roi":
+            parts.append("plus_pose_roi_box")
         else:
             parts.append("plus_detect_box")
     if negative_point_policy == "corners":
@@ -389,6 +393,8 @@ def _sam_method_name(
             return "sam3_interactive_keypoints_body_v1"
         if box_prompt_source == "roi_inset":
             return "sam3_interactive_keypoints_roi_inset_box_body_v1"
+        if box_prompt_source == "pose_roi":
+            return "sam3_interactive_keypoints_pose_roi_box_body_v1"
         return "sam3_interactive_keypoints_detect_box_body_v1"
 
     if negative_point_policy == "corners":
@@ -402,6 +408,8 @@ def _sam_method_name(
         return f"sam3_interactive_keypoints_{suffix}_body_v1"
     if box_prompt_source == "roi_inset":
         return f"sam3_interactive_keypoints_roi_inset_box_{suffix}_body_v1"
+    if box_prompt_source == "pose_roi":
+        return f"sam3_interactive_keypoints_pose_roi_box_{suffix}_body_v1"
     return f"sam3_interactive_keypoints_detect_box_{suffix}_body_v1"
 
 
@@ -526,6 +534,20 @@ def resolve_sam_subject_inputs(
             f"Row mismatch between crop_runs/{resolved_crop_run}/roi_images ({row_count}) and "
             f"{keypoints.group_name}/{keypoints.run_name}/keypoints_roi ({keypoints_roi.shape[0]})."
         )
+    pose_bbox_xyxy_roi = None
+    pose_bbox_arr = keypoints.group.get("pose_bbox_xyxy_roi")
+    if pose_bbox_arr is not None:
+        pose_bbox_xyxy_roi = np.asarray(pose_bbox_arr[:], dtype=np.float32)
+        if pose_bbox_xyxy_roi.ndim != 2 or int(pose_bbox_xyxy_roi.shape[1]) != 4:
+            raise ValueError(
+                f"{keypoints.group_name}/{keypoints.run_name}/pose_bbox_xyxy_roi expected shape (n_rois, 4), "
+                f"got {tuple(int(v) for v in pose_bbox_xyxy_roi.shape)}."
+            )
+        if int(pose_bbox_xyxy_roi.shape[0]) != row_count:
+            raise ValueError(
+                f"Row mismatch between crop_runs/{resolved_crop_run}/roi_images ({row_count}) and "
+                f"{keypoints.group_name}/{keypoints.run_name}/pose_bbox_xyxy_roi ({pose_bbox_xyxy_roi.shape[0]})."
+            )
 
     _raise_alignment_error(
         "frame_indices",
@@ -587,6 +609,7 @@ def resolve_sam_subject_inputs(
         frame_height=int(frame_height),
         frame_width=int(frame_width),
         warnings=tuple(warnings),
+        pose_bbox_xyxy_roi=None if pose_bbox_xyxy_roi is None else pose_bbox_xyxy_roi.astype(np.float32, copy=False),
     )
 
 
@@ -748,6 +771,49 @@ def build_roi_inset_box_xyxy(
     return np.asarray([x0, y0, x1, y1], dtype=np.float32)
 
 
+def expand_roi_box_xyxy(
+    box_xyxy: np.ndarray,
+    *,
+    roi_height: int,
+    roi_width: int,
+    expand_fraction: float = DEFAULT_POSE_BOX_EXPAND_FRACTION,
+) -> np.ndarray:
+    if roi_height <= 0 or roi_width <= 0:
+        raise ValueError("roi_height and roi_width must be positive.")
+    if not np.isfinite(expand_fraction):
+        raise ValueError("expand_fraction must be finite.")
+    if expand_fraction < 0.0:
+        raise ValueError("expand_fraction must be non-negative.")
+
+    box = np.asarray(box_xyxy, dtype=np.float32).reshape(4)
+    if not np.isfinite(box).all():
+        raise ValueError(f"box_xyxy must be finite, got {box.tolist()}.")
+
+    max_x = float(roi_width - 1)
+    max_y = float(roi_height - 1)
+    cx = (float(box[0]) + float(box[2])) / 2.0
+    cy = (float(box[1]) + float(box[3])) / 2.0
+    width = max(float(box[2]) - float(box[0]), 1.0)
+    height = max(float(box[3]) - float(box[1]), 1.0)
+    width *= 1.0 + float(expand_fraction)
+    height *= 1.0 + float(expand_fraction)
+    x0 = float(np.clip(cx - (width / 2.0), 0.0, max_x))
+    y0 = float(np.clip(cy - (height / 2.0), 0.0, max_y))
+    x1 = float(np.clip(cx + (width / 2.0), 0.0, max_x))
+    y1 = float(np.clip(cy + (height / 2.0), 0.0, max_y))
+
+    if roi_width > 1 and x1 <= x0:
+        x1 = min(max_x, x0 + 1.0)
+    if roi_height > 1 and y1 <= y0:
+        y1 = min(max_y, y0 + 1.0)
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(
+            "Expanded ROI-local box collapsed after clipping: "
+            f"box_xyxy={box.tolist()} roi_shape=({roi_height},{roi_width}) expand_fraction={expand_fraction}."
+        )
+    return np.asarray([x0, y0, x1, y1], dtype=np.float32)
+
+
 def build_negative_prompt_points(
     *,
     roi_height: int,
@@ -877,6 +943,30 @@ def _build_detect_box_batch(
     return boxes
 
 
+def _build_pose_roi_box_batch(
+    inputs: ResolvedSamInputs,
+    row_indices: np.ndarray,
+    *,
+    expand_fraction: float = DEFAULT_POSE_BOX_EXPAND_FRACTION,
+) -> list[np.ndarray]:
+    if inputs.pose_bbox_xyxy_roi is None:
+        raise ValueError(
+            f"{inputs.keypoint_group}/{inputs.keypoint_run} does not contain pose_bbox_xyxy_roi, "
+            "so box_prompt_source='pose_roi' is unavailable."
+        )
+    rows = np.asarray(row_indices, dtype=np.int32).reshape(-1)
+    boxes: list[np.ndarray] = []
+    for idx in rows.tolist():
+        box_xyxy = expand_roi_box_xyxy(
+            inputs.pose_bbox_xyxy_roi[int(idx)],
+            roi_height=int(inputs.roi_height),
+            roi_width=int(inputs.roi_width),
+            expand_fraction=float(expand_fraction),
+        )
+        boxes.append(box_xyxy.reshape(1, 4))
+    return boxes
+
+
 def _build_roi_inset_box_batch(
     inputs: ResolvedSamInputs,
     row_indices: np.ndarray,
@@ -901,6 +991,7 @@ def build_sam_preview_batch(
     use_box_prompt: bool = True,
     box_prompt_source: str = DEFAULT_BOX_PROMPT_SOURCE,
     roi_inset_fraction: float = DEFAULT_ROI_INSET_FRACTION,
+    pose_box_expand_fraction: float = DEFAULT_POSE_BOX_EXPAND_FRACTION,
     negative_point_policy: str = DEFAULT_NEGATIVE_POINT_POLICY,
     negative_point_margin_fraction: float = DEFAULT_NEGATIVE_POINT_MARGIN_FRACTION,
 ) -> PreparedSamBatch:
@@ -947,6 +1038,12 @@ def build_sam_preview_batch(
             eligible_indices,
             inset_fraction=roi_inset_fraction,
         )
+    elif use_box_prompt and box_prompt_source == "pose_roi":
+        box_batch = _build_pose_roi_box_batch(
+            inputs,
+            eligible_indices,
+            expand_fraction=pose_box_expand_fraction,
+        )
     elif use_box_prompt:
         box_batch = _build_detect_box_batch(inputs, eligible_indices)
     else:
@@ -969,6 +1066,7 @@ def build_sam_batch_for_rows(
     use_box_prompt: bool = True,
     box_prompt_source: str = DEFAULT_BOX_PROMPT_SOURCE,
     roi_inset_fraction: float = DEFAULT_ROI_INSET_FRACTION,
+    pose_box_expand_fraction: float = DEFAULT_POSE_BOX_EXPAND_FRACTION,
     negative_point_policy: str = DEFAULT_NEGATIVE_POINT_POLICY,
     negative_point_margin_fraction: float = DEFAULT_NEGATIVE_POINT_MARGIN_FRACTION,
 ) -> PreparedSamBatch:
@@ -1006,6 +1104,8 @@ def build_sam_batch_for_rows(
         box_batch=(
             _build_roi_inset_box_batch(inputs, rows, inset_fraction=roi_inset_fraction)
             if use_box_prompt and box_prompt_source == "roi_inset"
+            else _build_pose_roi_box_batch(inputs, rows, expand_fraction=pose_box_expand_fraction)
+            if use_box_prompt and box_prompt_source == "pose_roi"
             else _build_detect_box_batch(inputs, rows)
             if use_box_prompt
             else None
@@ -1178,6 +1278,7 @@ def _build_subject_mask_summary(
     use_box_prompt: bool,
     box_prompt_source: str,
     roi_inset_fraction: float | None,
+    pose_box_expand_fraction: float | None,
     negative_point_policy: str,
     negative_point_margin_fraction: float | None,
     device: str,
@@ -1221,6 +1322,9 @@ def _build_subject_mask_summary(
         "box_prompt_enabled": bool(use_box_prompt),
         "box_prompt_source": box_prompt_source if use_box_prompt else None,
         "roi_inset_fraction": float(roi_inset_fraction) if use_box_prompt and box_prompt_source == "roi_inset" else None,
+        "pose_box_expand_fraction": float(pose_box_expand_fraction)
+        if use_box_prompt and box_prompt_source == "pose_roi"
+        else None,
         "negative_point_policy": negative_point_policy,
         "negative_point_margin_fraction": float(negative_point_margin_fraction)
         if negative_point_policy != "none"
@@ -1333,6 +1437,7 @@ def write_sam_subject_mask_run(
     use_box_prompt: bool,
     box_prompt_source: str,
     roi_inset_fraction: float,
+    pose_box_expand_fraction: float,
     negative_point_policy: str,
     negative_point_margin_fraction: float,
     device: str,
@@ -1373,6 +1478,9 @@ def write_sam_subject_mask_run(
             "sam_box_prompt_enabled": bool(use_box_prompt),
             "sam_box_prompt_source": box_prompt_source if use_box_prompt else None,
             "sam_roi_inset_fraction": float(roi_inset_fraction) if use_box_prompt and box_prompt_source == "roi_inset" else None,
+            "sam_pose_box_expand_fraction": float(pose_box_expand_fraction)
+            if use_box_prompt and box_prompt_source == "pose_roi"
+            else None,
             "sam_negative_point_policy": negative_point_policy,
             "sam_negative_point_margin_fraction": float(negative_point_margin_fraction)
             if negative_point_policy != "none"
@@ -1456,6 +1564,7 @@ def write_sam_subject_mask_run(
         use_box_prompt=use_box_prompt,
         box_prompt_source=box_prompt_source,
         roi_inset_fraction=roi_inset_fraction,
+        pose_box_expand_fraction=pose_box_expand_fraction,
         negative_point_policy=negative_point_policy,
         negative_point_margin_fraction=negative_point_margin_fraction,
         device=device,
@@ -1541,6 +1650,7 @@ def run_sam_subject_mask_inference(
     use_box_prompt: bool = True,
     box_prompt_source: str = DEFAULT_BOX_PROMPT_SOURCE,
     roi_inset_fraction: float = DEFAULT_ROI_INSET_FRACTION,
+    pose_box_expand_fraction: float = DEFAULT_POSE_BOX_EXPAND_FRACTION,
     negative_point_policy: str = DEFAULT_NEGATIVE_POINT_POLICY,
     negative_point_margin_fraction: float = DEFAULT_NEGATIVE_POINT_MARGIN_FRACTION,
     overwrite: bool = False,
@@ -1563,6 +1673,13 @@ def run_sam_subject_mask_inference(
             roi_height=2,
             roi_width=2,
             inset_fraction=float(roi_inset_fraction),
+        )
+    if use_box_prompt and box_prompt_source == "pose_roi":
+        expand_roi_box_xyxy(
+            np.asarray([0.0, 0.0, 1.0, 1.0], dtype=np.float32),
+            roi_height=2,
+            roi_width=2,
+            expand_fraction=float(pose_box_expand_fraction),
         )
     if negative_point_policy != "none":
         build_negative_prompt_points(
@@ -1629,6 +1746,7 @@ def run_sam_subject_mask_inference(
                     use_box_prompt=use_box_prompt,
                     box_prompt_source=box_prompt_source,
                     roi_inset_fraction=roi_inset_fraction,
+                    pose_box_expand_fraction=pose_box_expand_fraction,
                     negative_point_policy=negative_point_policy,
                     negative_point_margin_fraction=negative_point_margin_fraction,
                 )
@@ -1681,6 +1799,7 @@ def run_sam_subject_mask_inference(
             use_box_prompt=use_box_prompt,
             box_prompt_source=box_prompt_source,
             roi_inset_fraction=roi_inset_fraction,
+            pose_box_expand_fraction=pose_box_expand_fraction,
             negative_point_policy=negative_point_policy,
             negative_point_margin_fraction=negative_point_margin_fraction,
             device=resolved_device,
@@ -1722,6 +1841,7 @@ def inspect_sam_subject_archive(
     use_box_prompt: bool = True,
     box_prompt_source: str = DEFAULT_BOX_PROMPT_SOURCE,
     roi_inset_fraction: float = DEFAULT_ROI_INSET_FRACTION,
+    pose_box_expand_fraction: float = DEFAULT_POSE_BOX_EXPAND_FRACTION,
     negative_point_policy: str = DEFAULT_NEGATIVE_POINT_POLICY,
     negative_point_margin_fraction: float = DEFAULT_NEGATIVE_POINT_MARGIN_FRACTION,
     positive_keypoint_labels: Sequence[str] | None = None,
@@ -1749,6 +1869,7 @@ def inspect_sam_subject_archive(
         use_box_prompt=use_box_prompt,
         box_prompt_source=box_prompt_source,
         roi_inset_fraction=roi_inset_fraction,
+        pose_box_expand_fraction=pose_box_expand_fraction,
         negative_point_policy=negative_point_policy,
         negative_point_margin_fraction=negative_point_margin_fraction,
     )
@@ -1798,6 +1919,9 @@ def inspect_sam_subject_archive(
             "sam_prompt_policy": _sam_prompt_policy(use_box_prompt, box_prompt_source, negative_point_policy),
             "sam_box_prompt_source": box_prompt_source if use_box_prompt else None,
             "sam_roi_inset_fraction": float(roi_inset_fraction) if use_box_prompt and box_prompt_source == "roi_inset" else None,
+            "sam_pose_box_expand_fraction": float(pose_box_expand_fraction)
+            if use_box_prompt and box_prompt_source == "pose_roi"
+            else None,
             "sam_negative_point_policy": negative_point_policy,
             "sam_negative_point_margin_fraction": float(negative_point_margin_fraction)
             if negative_point_policy != "none"
@@ -1824,6 +1948,7 @@ def inspect_sam_subject_archive_path(
     use_box_prompt: bool = True,
     box_prompt_source: str = DEFAULT_BOX_PROMPT_SOURCE,
     roi_inset_fraction: float = DEFAULT_ROI_INSET_FRACTION,
+    pose_box_expand_fraction: float = DEFAULT_POSE_BOX_EXPAND_FRACTION,
     negative_point_policy: str = DEFAULT_NEGATIVE_POINT_POLICY,
     negative_point_margin_fraction: float = DEFAULT_NEGATIVE_POINT_MARGIN_FRACTION,
     positive_keypoint_labels: Sequence[str] | None = None,
@@ -1842,6 +1967,7 @@ def inspect_sam_subject_archive_path(
         use_box_prompt=use_box_prompt,
         box_prompt_source=box_prompt_source,
         roi_inset_fraction=roi_inset_fraction,
+        pose_box_expand_fraction=pose_box_expand_fraction,
         negative_point_policy=negative_point_policy,
         negative_point_margin_fraction=negative_point_margin_fraction,
         positive_keypoint_labels=positive_keypoint_labels,
@@ -1989,6 +2115,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--pose-box-expand-fraction",
+        type=float,
+        default=DEFAULT_POSE_BOX_EXPAND_FRACTION,
+        help=(
+            "Expansion fraction for --box-prompt-source pose_roi, applied to the persisted ROI-local pose box "
+            f"(default: {DEFAULT_POSE_BOX_EXPAND_FRACTION})."
+        ),
+    )
+    parser.add_argument(
         "--negative-point-policy",
         choices=list(NEGATIVE_POINT_POLICY_CHOICES),
         default=DEFAULT_NEGATIVE_POINT_POLICY,
@@ -2054,6 +2189,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             use_box_prompt=not args.no_box_prompt,
             box_prompt_source=args.box_prompt_source,
             roi_inset_fraction=float(args.roi_inset_fraction),
+            pose_box_expand_fraction=float(args.pose_box_expand_fraction),
             negative_point_policy=args.negative_point_policy,
             negative_point_margin_fraction=float(args.negative_point_margin_fraction),
             overwrite=bool(args.overwrite),
@@ -2075,6 +2211,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             use_box_prompt=not args.no_box_prompt,
             box_prompt_source=args.box_prompt_source,
             roi_inset_fraction=float(args.roi_inset_fraction),
+            pose_box_expand_fraction=float(args.pose_box_expand_fraction),
             negative_point_policy=args.negative_point_policy,
             negative_point_margin_fraction=float(args.negative_point_margin_fraction),
             positive_keypoint_labels=args.positive_keypoint_labels,

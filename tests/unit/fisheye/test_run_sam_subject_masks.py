@@ -90,6 +90,7 @@ def _fake_keypoint_group(
     detection_indices: np.ndarray | None = None,
     detection_source: np.ndarray | None = None,
     keypoints_roi: np.ndarray | None = None,
+    pose_bbox_xyxy_roi: np.ndarray | None = None,
     refined_success: np.ndarray | None = None,
     geometry_valid: np.ndarray | None = None,
     usable_keypoints: np.ndarray | None = None,
@@ -114,6 +115,8 @@ def _fake_keypoint_group(
     group["detection_indices"] = FakeArray(detection_indices)
     group["detection_source"] = FakeArray(detection_source)
     group["keypoints_roi"] = FakeArray(keypoints_roi)
+    if pose_bbox_xyxy_roi is not None:
+        group["pose_bbox_xyxy_roi"] = FakeArray(np.asarray(pose_bbox_xyxy_roi, dtype=np.float32))
     group.attrs["keypoint_labels"] = ["swim_bladder", "eye_left", "eye_right"]
     if refined_success is not None:
         group["refined_success"] = FakeArray(np.asarray(refined_success, dtype=bool))
@@ -273,6 +276,40 @@ def test_resolve_sam_subject_inputs_raises_on_alignment_mismatch(monkeypatch) ->
     assert "frame_indices mismatch at row 1" in message
 
 
+def test_resolve_sam_subject_inputs_loads_pose_bbox_xyxy_roi(monkeypatch) -> None:
+    root = _fake_root()
+    crop_group = _fake_crop_group()
+    pose_boxes = np.asarray(
+        [
+            [1.0, 1.0, 4.0, 3.0],
+            [2.0, 1.0, 5.0, 4.0],
+            [0.5, 0.5, 6.5, 5.0],
+        ],
+        dtype=np.float32,
+    )
+    keypoint_group_obj = _fake_keypoint_group(pose_bbox_xyxy_roi=pose_boxes)
+
+    monkeypatch.setattr(
+        mod,
+        "resolve_materialized_crop_run",
+        lambda root, *, crop_run=None: (FakeGroup(), crop_group, "crop_001"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_resolve_keypoint_run",
+        lambda root, *, keypoint_run=None, keypoint_group="auto": mod.ResolvedKeypointRun(
+            group_name="refined_keypoints_runs",
+            run_name="refined_001",
+            group=keypoint_group_obj,
+        ),
+    )
+
+    resolved = mod.resolve_sam_subject_inputs(root)
+
+    assert resolved.pose_bbox_xyxy_roi is not None
+    np.testing.assert_allclose(resolved.pose_bbox_xyxy_roi, pose_boxes)
+
+
 def test_convert_roi_batch_to_rgb_repeats_single_channel_and_scales_float01() -> None:
     grayscale = np.asarray(
         [
@@ -407,6 +444,68 @@ def test_build_sam_batch_for_rows_supports_roi_inset_box_prompt() -> None:
     np.testing.assert_allclose(
         batch.box_batch[1],
         np.asarray([[3.0, 2.0, 26.0, 17.0]], dtype=np.float32),
+        atol=1e-5,
+    )
+
+
+def test_build_sam_batch_for_rows_supports_pose_roi_box_prompt() -> None:
+    inputs = mod.ResolvedSamInputs(
+        crop_run="crop_001",
+        keypoint_group="refined_keypoints_runs",
+        keypoint_run="refined_001",
+        roi_images=FakeArray(np.arange(2 * 20 * 30, dtype=np.uint8).reshape(2, 20, 30)),
+        roi_coordinates_full=np.asarray([[10, 20], [30, 40]], dtype=np.int32),
+        bbox_norm_coords=np.asarray(
+            [
+                _xyxy_to_norm_xywh(11, 21, 14, 24),
+                _xyxy_to_norm_xywh(31, 40, 34, 43),
+            ],
+            dtype=np.float32,
+        ),
+        frame_indices=np.asarray([0, 1], dtype=np.int32),
+        detection_indices=np.asarray([10, 11], dtype=np.int32),
+        detection_source=np.asarray([0, 0], dtype=np.int8),
+        keypoints_roi=np.asarray(
+            [
+                [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]],
+                [[4.0, 1.0], [2.0, 2.0], [3.0, 3.0]],
+            ],
+            dtype=np.float32,
+        ),
+        keypoint_labels=("swim_bladder", "eye_left", "eye_right"),
+        success_flags=None,
+        geometry_valid=None,
+        usable_keypoints=None,
+        frame_height=80,
+        frame_width=100,
+        warnings=(),
+        pose_bbox_xyxy_roi=np.asarray(
+            [
+                [5.0, 4.0, 15.0, 10.0],
+                [10.0, 3.0, 18.0, 11.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
+
+    batch = mod.build_sam_batch_for_rows(
+        inputs,
+        np.asarray([1, 0], dtype=np.int32),
+        prompt_selection=mod.resolve_prompt_keypoint_selection(inputs),
+        box_prompt_source="pose_roi",
+        pose_box_expand_fraction=0.25,
+    )
+
+    assert batch.row_indices.tolist() == [1, 0]
+    assert batch.box_batch is not None
+    np.testing.assert_allclose(
+        batch.box_batch[0],
+        np.asarray([[9.0, 2.0, 19.0, 12.0]], dtype=np.float32),
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        batch.box_batch[1],
+        np.asarray([[3.75, 3.25, 16.25, 10.75]], dtype=np.float32),
         atol=1e-5,
     )
 
@@ -710,6 +809,7 @@ def test_write_sam_subject_mask_run_records_richer_stage_provenance(monkeypatch)
         use_box_prompt=True,
         box_prompt_source="detect",
         roi_inset_fraction=0.05,
+        pose_box_expand_fraction=0.10,
         negative_point_policy="none",
         negative_point_margin_fraction=0.05,
         device="cpu",
