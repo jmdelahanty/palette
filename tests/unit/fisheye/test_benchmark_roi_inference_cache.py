@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import zarr
@@ -96,6 +97,7 @@ def test_build_keypoint_and_eye_commands_include_cache_settings(tmp_path: Path) 
         batch_size=128,
         device="cuda:0",
         imgsz=512,
+        profile_timings=True,
     )
     eye_cmd = mod._build_eye_mask_command(
         zarr_path=zarr_path,
@@ -108,18 +110,26 @@ def test_build_keypoint_and_eye_commands_include_cache_settings(tmp_path: Path) 
         batch_size=64,
         device="cuda:0",
         write_binary_masks=True,
+        mask_probs_chunk_rois=96,
+        mask_probs_dtype="uint8",
+        profile_timings=True,
     )
 
     assert "--roi-cache-policy" in key_cmd
     assert "--roi-cache-dir" in key_cmd
     assert "--device" in key_cmd
     assert "--imgsz" in key_cmd
+    assert "--profile-timings" in key_cmd
     assert "kp_run" in key_cmd
 
     assert "--roi-cache-policy" in eye_cmd
     assert "--roi-cache-dir" in eye_cmd
     assert "--device" in eye_cmd
     assert "--write-binary-masks" in eye_cmd
+    assert "--mask-probs-chunk-rois" in eye_cmd
+    assert "--mask-probs-dtype" in eye_cmd
+    assert "--profile-timings" in eye_cmd
+    assert "uint8" in eye_cmd
     assert "kp_run" in eye_cmd
 
 
@@ -138,6 +148,7 @@ def test_stage_metrics_reports_cache_usage_fields() -> None:
             "source_roi_cache_path": "/tmp/cache.zarr",
             "source_roi_cache_key": "abc123",
             "roi_cache_policy": "always",
+            "timing_profile": {"enabled": True, "stages": {"roi_read": {"total_seconds": 1.0}}},
         },
         wall_seconds=5.0,
     )
@@ -148,3 +159,51 @@ def test_stage_metrics_reports_cache_usage_fields() -> None:
     assert metrics["throughput_per_second"] == 25.0
     assert metrics["source_roi_read_mode"] == "temporary_cache"
     assert metrics["source_roi_cache_used"] is True
+    assert metrics["timing_profile"]["enabled"] is True
+
+
+def test_prepare_scenario_cache_prewarms_reuse_cache(monkeypatch, tmp_path: Path) -> None:
+    seen: dict[str, object] = {}
+
+    class _FakeSource:
+        roi_cache_created = False
+        roi_cache_used = True
+        roi_cache_path = str(tmp_path / "cache-root" / "cache.zarr")
+        roi_cache_key = "cache-key"
+
+        def close(self) -> None:
+            seen["closed"] = True
+
+    def _fake_open_group(path: str, mode: str = "r"):
+        seen["open_group"] = (path, mode)
+        return object()
+
+    def _fake_open(root, *, crop_run=None, zarr_path=None, roi_cache_policy="never", roi_cache_dir=None, console=None):
+        seen["open"] = {
+            "root": root,
+            "crop_run": crop_run,
+            "zarr_path": Path(zarr_path) if zarr_path is not None else None,
+            "roi_cache_policy": roi_cache_policy,
+            "roi_cache_dir": Path(roi_cache_dir) if roi_cache_dir is not None else None,
+            "console": console,
+        }
+        return _FakeSource()
+
+    monkeypatch.setattr(mod.zarr, "open_group", _fake_open_group)
+    monkeypatch.setattr(mod, "CropImageSource", SimpleNamespace(open=_fake_open))
+
+    scenario = mod.ScenarioSpec(
+        name=mod.SCENARIO_GEOMETRY_CACHE_REUSE,
+        crop_run="crop_geometry",
+        roi_cache_policy="always",
+        roi_cache_dir=tmp_path / "cache-root",
+        description="reuse",
+    )
+
+    result = mod._prepare_scenario_cache(scenario=scenario, zarr_path=tmp_path / "archive.zarr")
+
+    assert result["prepared"] is True
+    assert result["cache_used"] is True
+    assert seen["open"]["crop_run"] == "crop_geometry"
+    assert seen["open"]["roi_cache_policy"] == "always"
+    assert seen["closed"] is True

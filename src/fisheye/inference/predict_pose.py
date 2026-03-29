@@ -287,6 +287,11 @@ Examples:
         default=None,
         help="Optional scratch directory for temporary ROI caches.",
     )
+    parser.add_argument(
+        "--profile-timings",
+        action="store_true",
+        help="Collect per-stage timing diagnostics and store them in the output run attrs.",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output")
     return parser
 
@@ -313,6 +318,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             max_det=args.max_det,
             roi_cache_policy=args.roi_cache_policy,
             roi_cache_dir=args.roi_cache_dir,
+            profile_timings=args.profile_timings,
             verbose=args.verbose,
             registry=(status_context.registry_path if status_context is not None else None),
             console=console,

@@ -1268,8 +1268,8 @@ def detect_yolo(
   # Refine detections
   python -m fisheye.refinement.refine_detect {output_zarr}
   
-  # Assign IDs
-  python -m fisheye.tracking.assign_ids {output_zarr}
+  # Run arena assignment
+  python -m fisheye.tracking.arena_assignment {output_zarr}
   
   # Visualize
   python -m fisheye.visualization.detection_visualizer {output_zarr}
@@ -1310,7 +1310,7 @@ Examples:
   
   # Then run downstream analysis
   python -m fisheye.refinement.refine_detect output.zarr
-  python -m fisheye.tracking.assign_ids output.zarr
+  python -m fisheye.tracking.arena_assignment output.zarr
         """
     )
     

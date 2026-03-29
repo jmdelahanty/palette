@@ -27,6 +27,7 @@ from ultralytics import YOLO, __version__ as ultralytics_version
 
 from ..registry.db import RegistryPaths
 from ..shared.crop_image_source import CropImageSource
+from ..shared.inference_timing import InferenceTimingProfiler
 from ..shared.registry_stage_complete import emit_stage_completion
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.type_conversions import normalize_attr
@@ -156,6 +157,14 @@ def _create_output_arrays(group: zarr.Group, total_rois: int, chunk_hint: int) -
             chunks=scalar_chunk,
             dtype="bool",
             fill_value=False,
+            overwrite=True,
+        ),
+        "pose_bbox_xyxy_roi": group.create_array(
+            "pose_bbox_xyxy_roi",
+            shape=(total_rois, 4),
+            chunks=(chunk_len, 4),
+            dtype="f4",
+            fill_value=np.nan,
             overwrite=True,
         ),
         "heading_finite": group.create_array(
@@ -309,6 +318,42 @@ def _extract_keypoint_confidences(keypoints, det_idx: int, *, n_keypoints: int =
     return out
 
 
+def _extract_pose_bbox_xyxy_roi(
+    boxes,
+    det_idx: int,
+    *,
+    roi_height: int,
+    roi_width: int,
+) -> np.ndarray:
+    out = np.full(4, np.nan, dtype=np.float32)
+    xyxy = getattr(boxes, "xyxy", None)
+    if xyxy is None:
+        return out
+    try:
+        bbox = xyxy[det_idx].detach().cpu().numpy()
+    except Exception:
+        return out
+
+    bbox = np.asarray(bbox, dtype=np.float32).reshape(-1)
+    if bbox.size < 4:
+        return out
+
+    max_x = float(max(roi_width - 1, 0))
+    max_y = float(max(roi_height - 1, 0))
+    x0 = float(np.clip(bbox[0], 0.0, max_x))
+    y0 = float(np.clip(bbox[1], 0.0, max_y))
+    x1 = float(np.clip(bbox[2], 0.0, max_x))
+    y1 = float(np.clip(bbox[3], 0.0, max_y))
+    if roi_width > 1 and x1 <= x0:
+        x1 = min(max_x, x0 + 1.0)
+    if roi_height > 1 and y1 <= y0:
+        y1 = min(max_y, y0 + 1.0)
+    if x1 <= x0 or y1 <= y0:
+        return out
+    out[:] = (x0, y0, x1, y1)
+    return out
+
+
 def detect_keypoints_yolo(
     zarr_path: str,
     model_path: str,
@@ -325,6 +370,7 @@ def detect_keypoints_yolo(
     mask_threshold: float = 0.5,
     roi_cache_policy: str = "auto",
     roi_cache_dir: Optional[Path] = None,
+    profile_timings: bool = False,
     registry: Optional[Path] = None,
     console: Optional[Console] = None,
 ) -> str:
@@ -503,6 +549,7 @@ def detect_keypoints_yolo(
 
     success_total = 0
     confidence_accum: List[float] = []
+    timing_profiler = InferenceTimingProfiler(enabled=profile_timings)
 
     progress = Progress(
         SpinnerColumn(),
@@ -519,24 +566,29 @@ def detect_keypoints_yolo(
         for start in range(0, total_rois, batch_size):
             end = min(start + batch_size, total_rois)
             batch_coords = roi_coords[start:end]
-            batch_roi_np = crop_source.read_slice(start, end)
+            batch_count = end - start
+            with timing_profiler.time("roi_read", items=batch_count):
+                batch_roi_np = crop_source.read_slice(start, end)
             if override_map is not None and override_rois is not None:
-                local_map = override_map[start:end]
-                valid = local_map >= 0
-                if np.any(valid):
-                    batch_roi_np[valid] = override_rois[local_map[valid]]
+                with timing_profiler.time("roi_override_apply", items=batch_count):
+                    local_map = override_map[start:end]
+                    valid = local_map >= 0
+                    if np.any(valid):
+                        batch_roi_np[valid] = override_rois[local_map[valid]]
 
-            rgb_inputs = _repeat_to_rgb(batch_roi_np)
-            results = model.predict(
-                rgb_inputs,
-                imgsz=imgsz,
-                conf=conf,
-                iou=iou,
-                max_det=max_det,
-                device=device,
-                verbose=verbose,
-                stream=False,
-            )
+            with timing_profiler.time("input_prepare", items=batch_count):
+                rgb_inputs = _repeat_to_rgb(batch_roi_np)
+            with timing_profiler.time("model_predict", items=batch_count):
+                results = model.predict(
+                    rgb_inputs,
+                    imgsz=imgsz,
+                    conf=conf,
+                    iou=iou,
+                    max_det=max_det,
+                    device=device,
+                    verbose=verbose,
+                    stream=False,
+                )
 
             batch_keypoints_roi = np.full((len(rgb_inputs), 3, 2), np.nan, dtype=np.float64)
             batch_keypoints_img = np.full_like(batch_keypoints_roi, np.nan)
@@ -545,66 +597,77 @@ def detect_keypoints_yolo(
             batch_conf = np.full(len(rgb_inputs), np.nan, dtype=np.float64)
             batch_keypoint_conf = np.full((len(rgb_inputs), 3), np.nan, dtype=np.float64)
             batch_success = np.zeros(len(rgb_inputs), dtype=bool)
+            batch_pose_bbox_roi = np.full((len(rgb_inputs), 4), np.nan, dtype=np.float32)
 
-            for i, (res, top_left) in enumerate(zip(results, batch_coords)):
-                det_idx = _select_detection(res)
-                if det_idx is None:
-                    continue
-                keypoints = getattr(res, "keypoints", None)
-                if keypoints is None or keypoints.xy is None:
-                    continue
-                kp_xy = keypoints.xy
-                if kp_xy is None or kp_xy.ndim != 3 or kp_xy.shape[0] == 0:
-                    continue
+            with timing_profiler.time("result_decode", items=batch_count):
+                for i, (res, top_left) in enumerate(zip(results, batch_coords)):
+                    det_idx = _select_detection(res)
+                    if det_idx is None:
+                        continue
+                    keypoints = getattr(res, "keypoints", None)
+                    if keypoints is None or keypoints.xy is None:
+                        continue
+                    kp_xy = keypoints.xy
+                    if kp_xy is None or kp_xy.ndim != 3 or kp_xy.shape[0] == 0:
+                        continue
 
-                kp = kp_xy[det_idx].detach().cpu().numpy()
-                if kp.shape[0] < 3:
-                    continue
+                    kp = kp_xy[det_idx].detach().cpu().numpy()
+                    if kp.shape[0] < 3:
+                        continue
 
-                kp[:, 0] = np.clip(kp[:, 0], 0.0, roi_w - 1)
-                kp[:, 1] = np.clip(kp[:, 1], 0.0, roi_h - 1)
+                    kp[:, 0] = np.clip(kp[:, 0], 0.0, roi_w - 1)
+                    kp[:, 1] = np.clip(kp[:, 1], 0.0, roi_h - 1)
 
-                batch_keypoints_roi[i] = kp
-                top_left = np.asarray(top_left, dtype=np.float64)
-                kp_img = kp + np.array([top_left[0], top_left[1]])
-                batch_keypoints_img[i] = kp_img
-                batch_keypoints_norm[i] = kp_img / norm_factor
-                batch_heading[i] = _compute_heading(kp[0], kp[1], kp[2])
-                batch_keypoint_conf[i] = _extract_keypoint_confidences(keypoints, det_idx, n_keypoints=3)
+                    batch_keypoints_roi[i] = kp
+                    top_left = np.asarray(top_left, dtype=np.float64)
+                    kp_img = kp + np.array([top_left[0], top_left[1]])
+                    batch_keypoints_img[i] = kp_img
+                    batch_keypoints_norm[i] = kp_img / norm_factor
+                    batch_heading[i] = _compute_heading(kp[0], kp[1], kp[2])
+                    batch_keypoint_conf[i] = _extract_keypoint_confidences(keypoints, det_idx, n_keypoints=3)
 
-                boxes = getattr(res, "boxes", None)
-                if boxes is not None and boxes.conf is not None and boxes.conf.numel() > 0:
-                    det_conf = float(boxes.conf[det_idx].detach().cpu())
+                    boxes = getattr(res, "boxes", None)
+                    if boxes is not None and boxes.conf is not None and boxes.conf.numel() > 0:
+                        det_conf = float(boxes.conf[det_idx].detach().cpu())
+                    else:
+                        kp_conf = getattr(keypoints, "conf", None)
+                        det_conf = float(kp_conf[det_idx].detach().cpu().mean()) if kp_conf is not None else 0.0
+                    if boxes is not None:
+                        batch_pose_bbox_roi[i] = _extract_pose_bbox_xyxy_roi(
+                            boxes,
+                            det_idx,
+                            roi_height=roi_h,
+                            roi_width=roi_w,
+                        )
+
+                    batch_conf[i] = det_conf
+                    batch_success[i] = True
+                    success_total += 1
+                    confidence_accum.append(det_conf)
+
+            with timing_profiler.time("output_write", items=batch_count):
+                arrays["keypoints_roi"][start:end] = batch_keypoints_roi
+                arrays["keypoints_img"][start:end] = batch_keypoints_img
+                arrays["keypoints_norm"][start:end] = batch_keypoints_norm
+                arrays["heading"][start:end] = batch_heading
+                arrays["confidence"][start:end] = batch_conf
+                arrays["keypoint_confidences"][start:end] = batch_keypoint_conf
+                arrays["detection_success"][start:end] = batch_success
+                arrays["pose_bbox_xyxy_roi"][start:end] = batch_pose_bbox_roi
+                arrays["effective_threshold"][start:end] = np.nan
+                arrays["effective_se2_radius"][start:end] = np.nan
+
+                if crop_detection_source is not None:
+                    source_chunk = crop_detection_source[start:end].astype("i1", copy=False)
                 else:
-                    kp_conf = getattr(keypoints, "conf", None)
-                    det_conf = float(kp_conf[det_idx].detach().cpu().mean()) if kp_conf is not None else 0.0
-
-                batch_conf[i] = det_conf
-                batch_success[i] = True
-                success_total += 1
-                confidence_accum.append(det_conf)
-
-            arrays["keypoints_roi"][start:end] = batch_keypoints_roi
-            arrays["keypoints_img"][start:end] = batch_keypoints_img
-            arrays["keypoints_norm"][start:end] = batch_keypoints_norm
-            arrays["heading"][start:end] = batch_heading
-            arrays["confidence"][start:end] = batch_conf
-            arrays["keypoint_confidences"][start:end] = batch_keypoint_conf
-            arrays["detection_success"][start:end] = batch_success
-            arrays["effective_threshold"][start:end] = np.nan
-            arrays["effective_se2_radius"][start:end] = np.nan
-
-            if crop_detection_source is not None:
-                source_chunk = crop_detection_source[start:end].astype("i1", copy=False)
-            else:
-                source_chunk = np.zeros(end - start, dtype="i1")
-            detection_source_dst[start:end] = source_chunk
-            heading_finite_chunk = np.isfinite(batch_heading)
-            arrays["heading_finite"][start:end] = heading_finite_chunk
-            arrays["heading_usable"][start:end] = np.logical_and(
-                np.logical_and(batch_success, source_chunk == 0),
-                heading_finite_chunk,
-            )
+                    source_chunk = np.zeros(end - start, dtype="i1")
+                detection_source_dst[start:end] = source_chunk
+                heading_finite_chunk = np.isfinite(batch_heading)
+                arrays["heading_finite"][start:end] = heading_finite_chunk
+                arrays["heading_usable"][start:end] = np.logical_and(
+                    np.logical_and(batch_success, source_chunk == 0),
+                    heading_finite_chunk,
+                )
 
             progress.update(task, advance=end - start)
 
@@ -666,6 +729,7 @@ def detect_keypoints_yolo(
             "imgsz": imgsz,
             "batch_size": batch_size,
             "device": model_device,
+            "profile_timings": bool(profile_timings),
             # Maintained for API compatibility with pipeline/batch configs.
             "mask_threshold": float(mask_threshold),
         },
@@ -682,7 +746,18 @@ def detect_keypoints_yolo(
         "hostname": env_info["platform"].get("hostname", "unknown"),
         "inference_duration_seconds": float(total_time),
         "inference_poses_per_second": float(inference_rate),
+        "profile_timings_enabled": bool(profile_timings),
     })
+    if timing_profiler.enabled:
+        run_group.attrs["timing_profile"] = timing_profiler.summary(
+            total_items=int(total_rois),
+            wall_seconds=float(total_time),
+            notes=[
+                "roi_read measures ROI slice fetch from the active crop image source.",
+                "model_predict wraps Ultralytics predict(), including model-side preprocessing and postprocessing.",
+                "output_write measures Zarr writes for keypoint outputs and lineage flags.",
+            ],
+        )
     if crop_source.roi_cache_key:
         run_group.attrs["source_roi_cache_key"] = crop_source.roi_cache_key
     if crop_source.roi_cache_path:
@@ -786,6 +861,10 @@ def detect_keypoints_yolo(
         f"[bold]Model:[/bold] {model_path_resolved}",
         f"[bold]Duration:[/bold] {total_time:.1f}s ({inference_rate:.1f} poses/s)",
     ]
+    if timing_profiler.enabled:
+        summary_lines.append("[bold]Timing Profile:[/bold]")
+        for line in timing_profiler.render_lines(total_items=total_rois, wall_seconds=total_time, limit=5):
+            summary_lines.append(f"[dim]{line}[/dim]")
     if override_data is not None:
         summary_lines.append(
             f"[dim]Refined ROI overrides: {override_data['count']} from {override_data['path']}[/dim]"
@@ -832,6 +911,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional scratch directory for temporary ROI caches.",
     )
+    parser.add_argument(
+        "--profile-timings",
+        action="store_true",
+        help="Collect per-stage timing diagnostics and store them in the output run attrs.",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose Ultralytics output")
     return parser
 
@@ -855,6 +939,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         mask_threshold=args.mask_threshold,
         roi_cache_policy=args.roi_cache_policy,
         roi_cache_dir=args.roi_cache_dir,
+        profile_timings=args.profile_timings,
         registry=args.registry,
     )
 

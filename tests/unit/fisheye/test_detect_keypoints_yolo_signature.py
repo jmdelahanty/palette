@@ -9,3 +9,4 @@ def test_detect_keypoints_yolo_accepts_mask_threshold() -> None:
     assert "registry" in params
     assert "roi_cache_policy" in params
     assert "roi_cache_dir" in params
+    assert "profile_timings" in params
