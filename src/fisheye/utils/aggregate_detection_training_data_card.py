@@ -7,12 +7,12 @@ import argparse
 import json
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 
+from fisheye.shared.batch_logging import utc_now
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.utils import plot_detection_training_data_card as plot_data_card
 
@@ -38,8 +38,7 @@ class SubjectLineageCoverage:
     coverage_unavailable_reason: Optional[str]
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_utc_now = utc_now
 
 
 def _normalize_text(value: Any) -> Optional[str]:
@@ -212,6 +211,77 @@ def _select_profile_rows(
             continue
         profile_by_dataset[dataset_id] = payload
     return profile_by_dataset
+
+
+def _load_legacy_profile_row(
+    registry: Registry,
+    *,
+    dataset_id: str,
+    profile_run: str,
+) -> Optional[dict[str, Any]]:
+    row = registry.conn.execute(
+        """
+        SELECT
+            recording_id,
+            zarr_use,
+            rig_id,
+            camera_id,
+            arena_id,
+            dish_design,
+            canvas_name,
+            protocol_name,
+            genotype,
+            dpf_at_acquisition
+        FROM detection_data_profile
+        WHERE dataset_id = ? AND profile_run = ?
+        LIMIT 1;
+        """,
+        (dataset_id, profile_run),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _coalesce_text_value(*values: Any) -> Optional[str]:
+    for value in values:
+        text = _normalize_text(value)
+        if text is not None:
+            return text
+    return None
+
+
+def _coalesce_int_value(*values: Any) -> Optional[int]:
+    for value in values:
+        number = _as_int(value)
+        if number is not None:
+            return number
+    return None
+
+
+def _apply_profile_context_fallbacks(
+    row: dict[str, Any],
+    *,
+    profile_summary: Mapping[str, Any],
+    legacy_row: Optional[Mapping[str, Any]],
+) -> None:
+    composition = profile_summary.get("composition")
+    composition_map = composition if isinstance(composition, Mapping) else {}
+    legacy = legacy_row or {}
+
+    row["recording_id"] = _coalesce_text_value(row.get("recording_id"), legacy.get("recording_id"))
+    row["zarr_use"] = _coalesce_text_value(row.get("zarr_use"), legacy.get("zarr_use"))
+
+    for field in COMPOSITION_FIELDS:
+        row[field] = _coalesce_text_value(
+            row.get(field),
+            composition_map.get(field),
+            legacy.get(field),
+        )
+
+    row["genotype"] = _coalesce_text_value(row.get("genotype"), legacy.get("genotype"))
+    row["dpf_at_acquisition"] = _coalesce_int_value(
+        row.get("dpf_at_acquisition"),
+        legacy.get("dpf_at_acquisition"),
+    )
 
 
 def _query_subject_lineage_dataset_ids(
@@ -622,6 +692,21 @@ def _build_detection_training_data_card(
             raise ValueError(
                 f"Invalid profile_json for dataset_id '{item.dataset_id}' run '{row.get('profile_run')}'."
             )
+        profile_run = _normalize_text(row.get("profile_run"))
+        legacy_row = (
+            _load_legacy_profile_row(
+                registry,
+                dataset_id=item.dataset_id,
+                profile_run=profile_run,
+            )
+            if profile_run is not None
+            else None
+        )
+        _apply_profile_context_fallbacks(
+            row,
+            profile_summary=summary,
+            legacy_row=legacy_row,
+        )
         profile_rows.append(row)
         profile_summaries.append(summary)
 
