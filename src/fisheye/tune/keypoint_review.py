@@ -20,6 +20,7 @@ import numpy as np
 import zarr
 
 from ..shared.detect_reason_codec import read_reason_labels
+from ..utils.zarr_io import open_zarr_root
 
 
 def _get_latest_refined_run(root: zarr.Group) -> str:
@@ -242,7 +243,7 @@ def run_manual_review(
 ) -> Dict[str, object]:
     if not reviewer:
         reviewer = os.environ.get("USER")
-    root = zarr.open_group(str(zarr_path), mode="a")
+    root = open_zarr_root(zarr_path, mode="a")
     refined_run = refined_run or _get_latest_refined_run(root)
     refined = root[f"refined_keypoints_runs/{refined_run}"]
 
@@ -265,7 +266,7 @@ def run_manual_review(
         detect_frame_flag_file=detect_frame_flag_file,
     )
     # Re-open to pick up review_status written by the UI before updating summary.
-    root = zarr.open_group(str(zarr_path), mode="a")
+    root = open_zarr_root(zarr_path, mode="a")
     refined = root[f"refined_keypoints_runs/{refined_run}"]
     return _update_postprocess_summary(refined, print_summary=True)
 
@@ -353,7 +354,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
     args = parser.parse_args(argv)
 
-    root = zarr.open_group(str(args.zarr_path), mode="a")
+    root = open_zarr_root(args.zarr_path, mode="a")
     refined_run = args.refined_run or _get_latest_refined_run(root)
     refined = root[f"refined_keypoints_runs/{refined_run}"]
     target_frames, target_roi_indices = _parse_targets_arg(args.frames, str(args.zarr_path))

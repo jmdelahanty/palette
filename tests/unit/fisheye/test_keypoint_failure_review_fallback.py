@@ -353,3 +353,93 @@ def test_launch_review_auto_applies_algorithmic_status_for_no_reviewable_failure
     auto_review = seen["auto_review"]
     assert isinstance(auto_review, dict)
     assert auto_review.get("policy_id") == "keypoint_no_reviewable_failures_v1"
+
+
+def test_launch_review_uses_direct_refined_run_lookup_when_parent_membership_is_stale(
+    monkeypatch,
+) -> None:
+    class _FakeAttrs(dict):
+        pass
+
+    class _FakeRefined:
+        attrs = {"keypoint_review_status": {"intended_use": "training"}}
+
+    class _FakeParent:
+        def __init__(self) -> None:
+            self.attrs = _FakeAttrs(latest="refined_keypoints_traditional_v2_seed_001")
+
+        def __contains__(self, key: object) -> bool:
+            return False
+
+    class _FakeCropGroup(dict):
+        pass
+
+    class _FakeRoot:
+        def __init__(self) -> None:
+            self.attrs = {"zarr_use": "training", "width": 8, "height": 8}
+            self._refined = _FakeRefined()
+            self._parent = _FakeParent()
+            crop = _FakeCropGroup()
+            crop["roi_images"] = np.zeros((1, 8, 8), dtype=np.uint8)
+            crop["roi_coordinates_full"] = np.zeros((1, 2), dtype=np.float64)
+            crop["frame_indices"] = np.array([0], dtype=np.int64)
+            self._crop = crop
+
+        def get(self, key: str):
+            if key == "refined_keypoints_runs":
+                return self._parent
+            return None
+
+        def __getitem__(self, key: str):
+            if key == "refined_keypoints_runs/refined_keypoints_traditional_v2_seed_001":
+                return self._refined
+            if key == "crop_runs/crop_1":
+                return self._crop
+            raise KeyError(key)
+
+    fake_root = _FakeRoot()
+
+    monkeypatch.setattr(mod, "open_zarr_root", lambda *args, **kwargs: fake_root)
+    monkeypatch.setattr(mod, "_get_latest_run", lambda *_args, **_kwargs: "crop_1")
+    monkeypatch.setattr(mod, "_resolve_full_frame_dimensions", lambda root: (8, 8))
+    monkeypatch.setattr(mod, "_load_failure_indices", lambda refined, include_all=False: np.array([], dtype="i4"))
+    monkeypatch.setattr(mod, "_load_raw_failure_indices", lambda refined: np.array([], dtype="i4"))
+    monkeypatch.setattr(mod, "_empty_review_auto_state", lambda refined, raw_failures: (True, None))
+    monkeypatch.setattr(
+        mod,
+        "_build_no_reviewable_failures_auto_review",
+        lambda **kwargs: {"policy_id": "keypoint_no_reviewable_failures_v1"},
+    )
+
+    seen: dict[str, object] = {}
+
+    def _fake_apply(
+        refined_parent_arg,
+        refined_run_arg,
+        refined_arg,
+        *,
+        zarr_path: str,
+        state: str,
+        method: str,
+        intended_use: str,
+        reviewer: str | None,
+        notes: str | None,
+        registry_path=None,
+        auto_review=None,
+    ):
+        seen["refined_parent"] = refined_parent_arg
+        seen["refined_run"] = refined_run_arg
+        seen["refined"] = refined_arg
+        seen["auto_review"] = auto_review
+        return (
+            {"state": state, "method": method, "intended_use": intended_use},
+            {"synced": True},
+        )
+
+    monkeypatch.setattr(mod, "_apply_review_status", _fake_apply)
+
+    launch_review("/tmp/fake_training.zarr", review_state="approved")
+
+    assert seen["refined_parent"] is fake_root.get("refined_keypoints_runs")
+    assert seen["refined_run"] == "refined_keypoints_traditional_v2_seed_001"
+    assert seen["refined"] is fake_root["refined_keypoints_runs/refined_keypoints_traditional_v2_seed_001"]

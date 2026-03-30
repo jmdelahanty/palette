@@ -10,6 +10,8 @@ from typing import Optional, Dict, Any
 
 import zarr
 
+from .zarr_io import open_zarr_root
+
 
 def _pick_refined_parent(root: zarr.Group) -> Optional[zarr.Group]:
     if "refined_keypoints_runs" in root:
@@ -103,7 +105,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    root = zarr.open_group(str(args.zarr_path), mode="a")
+    root = open_zarr_root(args.zarr_path, mode="a")
     refined_parent = _pick_refined_parent(root)
     if refined_parent is None:
         raise RuntimeError("No refined_keypoints_runs found in archive.")

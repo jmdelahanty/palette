@@ -28,6 +28,7 @@ from ..shared.detect_reason_codec import read_reason_labels, write_reason_column
 from ..shared.keypoint_stale import mark_downstream_eye_mask_runs_stale
 from ..shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
 from ..shared.type_conversions import normalize_attr as _normalize_attr
+from ..utils.zarr_io import open_zarr_root
 from ..refinement.keypoint_quality import compute_geometry_metrics
 from ..refinement.refine_keypoints import _compute_heading_from_points
 from ..registry.db import Registry, RegistryPaths
@@ -943,7 +944,7 @@ def launch_review(
     detect_flag_file: Optional[str] = None,
     detect_frame_flag_file: Optional[str] = None,
 ) -> None:
-    root = zarr.open_group(zarr_path, mode="a")
+    root = open_zarr_root(zarr_path, mode="a")
 
     refined_parent = root.get("refined_keypoints_runs")
     if refined_parent is None:
@@ -952,9 +953,12 @@ def launch_review(
     using_latest = refined_run is None
     if refined_run is None:
         refined_run = refined_parent.attrs.get("latest")
-    if not refined_run or refined_run not in refined_parent:
+    if not refined_run:
         raise RuntimeError("Refined keypoint run not found.")
-    refined = refined_parent[refined_run]
+    try:
+        refined = root[f"refined_keypoints_runs/{refined_run}"]
+    except KeyError as exc:
+        raise RuntimeError("Refined keypoint run not found.") from exc
     resolved_review_intended_use = _resolve_review_intended_use(
         requested=review_intended_use,
         refined=refined,
