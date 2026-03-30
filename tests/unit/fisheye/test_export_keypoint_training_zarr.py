@@ -16,6 +16,8 @@ from fisheye.utils.export_keypoint_training_zarr import (
     _discover_merge_sources,
     _format_skeleton_signature,
     _normalize_kpt_shape,
+    _export_merged,
+    validate_merged_keypoint_training_zarr,
 )
 from fisheye.shared.detect_reason_codec import write_reason_columns
 
@@ -286,6 +288,56 @@ def test_discover_merge_sources_prefers_refined_annotation_skeleton_identity(tmp
     assert spec.kpt_shape == (5, 3)
     assert layout["skeleton_id"] == "pose_skel_traditional_v2"
     assert tuple(layout["kpt_shape"]) == (5, 3)
+
+
+def test_export_merged_uses_refined_keypoint_shape_for_written_arrays(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "source_refined_v2.zarr"
+    _write_source_pose_zarr(
+        zarr_path,
+        skeleton_id="pose_skel_traditional_v1",
+        kpt_shape=(3, 3),
+        keypoint_count=3,
+        refined_run_name="refined_kp_pose_v2_001",
+        refined_skeleton_id="pose_skel_traditional_v2",
+        refined_runtime_kpt_shape=(5, 2),
+        refined_keypoint_count=5,
+        refined_pose_schema_name="traditional_v2",
+    )
+    manifest = _manifest_for_single_source(zarr_path)
+    manifest["set_id"] = "pose_set_v2"
+    manifest["pose_schema"] = {
+        "skeleton_id": "pose_skel_traditional_v2",
+        "kpt_shape": [5, 3],
+    }
+    manifest["datasets"][0]["refined_keypoint_run"] = "refined_kp_pose_v2_001"
+
+    manifest_path = tmp_path / "pose_set_v2.manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    out_zarr = tmp_path / "pose_set_v2_merged.zarr"
+
+    result = _export_merged(
+        manifest_payload=manifest,
+        manifest_path=manifest_path,
+        out_zarr=out_zarr,
+        merged_dataset_id=None,
+        overwrite=True,
+        train_ratio=0.8,
+        val_ratio=0.2,
+        test_ratio=0.0,
+        seed=42,
+        copy_batch_size=128,
+        row_gate_policy="auto",
+        invocation={},
+    )
+
+    assert result.kpt_shape == (5, 3)
+
+    root = zarr.open_group(str(out_zarr), mode="r")
+    keypoints = np.asarray(root["keypoints_runs"][result.run_name]["keypoints_roi"][:], dtype=np.float32)
+    assert keypoints.shape == (3, 5, 2)
+
+    summary = validate_merged_keypoint_training_zarr(out_zarr)
+    assert summary["kpt_shape"] == [5, 3]
 
 
 def _write_min_manifest(path: Path, *, set_id: str = "pose_set_v001") -> None:

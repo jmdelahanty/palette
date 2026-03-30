@@ -734,19 +734,6 @@ def _discover_merge_sources(
             if dataset_roi_dtype != roi_dtype:
                 raise ValueError(f"{source_zarr}: roi dtype mismatch {dataset_roi_dtype} != {roi_dtype}.")
 
-        if keypoint_shape is None:
-            keypoint_shape = dataset_keypoint_shape
-            keypoint_dtype = dataset_keypoint_dtype
-        else:
-            if dataset_keypoint_shape != keypoint_shape:
-                raise ValueError(
-                    f"{source_zarr}: keypoint shape mismatch {dataset_keypoint_shape} != {keypoint_shape}."
-                )
-            if dataset_keypoint_dtype != keypoint_dtype:
-                raise ValueError(
-                    f"{source_zarr}: keypoint dtype mismatch {dataset_keypoint_dtype} != {keypoint_dtype}."
-                )
-
         annotation_group = kp_group
         annotation_run = keypoint_run
         annotation_parent_name = "keypoints_runs"
@@ -812,6 +799,19 @@ def _discover_merge_sources(
                         f"({refined_success_arr.shape[0]} != {source_sample_count})."
                     )
                 success_path = f"{refined_parent_name}/{refined_run_name}/refined_success"
+
+        if keypoint_shape is None:
+            keypoint_shape = dataset_keypoint_shape
+            keypoint_dtype = dataset_keypoint_dtype
+        else:
+            if dataset_keypoint_shape != keypoint_shape:
+                raise ValueError(
+                    f"{source_zarr}: keypoint shape mismatch {dataset_keypoint_shape} != {keypoint_shape}."
+                )
+            if dataset_keypoint_dtype != keypoint_dtype:
+                raise ValueError(
+                    f"{source_zarr}: keypoint dtype mismatch {dataset_keypoint_dtype} != {keypoint_dtype}."
+                )
 
         dataset_skeleton_id, dataset_kpt_shape, dataset_signature = _resolve_dataset_skeleton_identity(
             dataset_payload=dataset,
