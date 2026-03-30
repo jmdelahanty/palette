@@ -823,10 +823,16 @@ def test_write_sam_subject_mask_run_records_richer_stage_provenance(monkeypatch)
     assert run.attrs["source_keypoint_run"] == "refined_001"
     assert run.attrs["git_commit"] == "a" * 40
     assert run.attrs["git_branch"] == "main"
+    assert run.attrs["probability_semantics"] == "sigmoid_selected_mask_logits"
+    assert run.attrs["sam_quality_score_semantics"] == "predicted_mask_quality"
     assert tuple(run["masks_roi"].chunks) == (2, 1, 6, 8)
     assert run["masks_roi"].fill_value == 0
     assert tuple(run["mask_probs_roi"].chunks) == (2, 1, 6, 8)
     assert run["mask_probs_roi"].fill_value == np.float16(0.0)
+    np.testing.assert_allclose(
+        np.asarray(run["metrics"]["sam_quality_score"][:], dtype=np.float32),
+        np.asarray([[0.9, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32),
+    )
 
     provenance = run.attrs["provenance"]
     assert provenance["stage"] == "subject_masks"

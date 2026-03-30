@@ -152,6 +152,13 @@ Recommended `metrics/` subgroup arrays:
 - `bbox_valid`
   - shape: `(N, C)`
 
+Method-specific recommended `metrics/` arrays:
+
+- `sam_quality_score`
+  - shape: `(N, C)`
+  - for SAM/SAM2/SAM3-style runs, the selected candidate's predicted mask
+    quality score for each row/channel
+
 ## Required attrs
 
 - `source_crop_run`
@@ -217,6 +224,33 @@ keypoint-centered swim-bladder segmenter, the run should also record:
 Recommended `run_semantics` for this path:
 
 - `traditional_swim_bladder_inference`
+
+### SAM subject-mask inference attrs
+
+When a `subject_mask_runs/<run>` entry is produced by a promptable
+SAM/SAM2/SAM3-style segmentation path, the run should also record:
+
+- `probability_semantics = "sigmoid_selected_mask_logits"`
+- `sam_quality_score_semantics = "predicted_mask_quality"`
+- `sam_multimask_output`
+- prompt-policy attrs describing the point/box prompting strategy
+- checkpoint/runtime attrs such as `sam_checkpoint_path`
+- structured `model_info` when available
+
+Recommended `run_semantics` for the current body-only path:
+
+- `sam_body_mask_inference`
+
+Interpretation:
+
+- SAM returns candidate mask logits and separate per-candidate quality scores
+- Palette currently chooses the candidate with the highest predicted quality
+  score
+- `masks_roi` stores the selected candidate thresholded at logit `> 0`
+- `mask_probs_roi` stores `sigmoid(selected_candidate_logits)`, not a directly
+  emitted calibrated semantic probability map from SAM
+- `metrics/sam_quality_score` stores the selected candidate's separate quality
+  score and should be interpreted separately from `mask_probs_roi`
 
 Interpretation:
 

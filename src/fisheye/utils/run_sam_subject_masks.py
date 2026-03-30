@@ -1488,6 +1488,8 @@ def write_sam_subject_mask_run(
             "sam_checkpoint_path": checkpoint_path,
             "sam3_root": sam3_root,
             "input_format": "gray" if inputs.roi_channels == 1 else "rgb",
+            "probability_semantics": "sigmoid_selected_mask_logits",
+            "sam_quality_score_semantics": "predicted_mask_quality",
             "probabilities_dtype": "float16",
             "probabilities_encoding": "unit_float",
             "created_at_utc": created_at,
@@ -1527,6 +1529,7 @@ def write_sam_subject_mask_run(
 
     metrics_group = run_group.require_group("metrics")
     prob_max = np.zeros((n_rows, n_channels), dtype=np.float32)
+    sam_quality_score = np.zeros((n_rows, n_channels), dtype=np.float32)
     mask_present = np.zeros((n_rows, n_channels), dtype=bool)
     area_px = np.zeros((n_rows, n_channels), dtype=np.float32)
     centroid_xy = np.zeros((n_rows, n_channels, 2), dtype=np.float32)
@@ -1537,6 +1540,7 @@ def write_sam_subject_mask_run(
     if selected.row_indices.size:
         channel_metrics = _compute_channel_metrics(selected.binary, selected.probs)
         prob_max[selected.row_indices, 0] = channel_metrics["prob_max"]
+        sam_quality_score[selected.row_indices, 0] = selected.scores
         mask_present[selected.row_indices, 0] = channel_metrics["mask_present"]
         area_px[selected.row_indices, 0] = channel_metrics["area_px"]
         centroid_xy[selected.row_indices, 0, :] = channel_metrics["centroid_xy"]
@@ -1545,6 +1549,7 @@ def write_sam_subject_mask_run(
         bbox_valid[selected.row_indices, 0] = channel_metrics["bbox_valid"]
 
     metrics_group.create_array("prob_max", data=prob_max, overwrite=True)
+    metrics_group.create_array("sam_quality_score", data=sam_quality_score, overwrite=True)
     metrics_group.create_array("mask_present", data=mask_present, overwrite=True)
     metrics_group.create_array("area_px", data=area_px, overwrite=True)
     metrics_group.create_array("centroid_xy", data=centroid_xy, overwrite=True)

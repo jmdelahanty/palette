@@ -526,6 +526,17 @@ is:
 4. downstream analysis joins mask-derived features to `track_id`, not to
    `arena_id` alone
 
+Recommended conclusion for the current subject-mask contracts:
+
+- keep `subject_mask_runs` and `refined_subject_masks_runs` single-instance per
+  row
+- do not try to encode multiple subjects by adding more component channels
+- if one ROI contains multiple subjects, treat that as an ambiguous or
+  upstream-instance-resolution problem first
+- if multi-instance-in-one-ROI support becomes a real recurring requirement,
+  introduce a separate instance-segmentation artifact rather than overloading
+  the current subject-mask schema
+
 ## Short Recommendation for Citrus/Orange
 
 If Citrus wants multi-camera arenas and multi-zone camera views, the safest path

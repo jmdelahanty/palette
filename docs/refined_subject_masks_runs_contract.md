@@ -103,6 +103,10 @@ refined_subject_masks_runs/
     metrics/
       mask_present                          (N, C) bool
       area_px                               (N, C) float32
+      centroid_xy                           (N, C, 2) float32   # recommended
+      centroid_valid                        (N, C) bool         # recommended
+      bbox_xyxy                             (N, C, 4) float32   # recommended
+      bbox_valid                            (N, C) bool         # recommended
     components/
       <component_name>/
         reason_bytes                        (N, width) uint8     # recommended
@@ -111,6 +115,8 @@ refined_subject_masks_runs/
         area_px                             (N,) float32         # recommended
         geometry_valid                      (N,) bool            # optional
         edit_applied                        (N,) bool            # recommended
+        metrics/                            # optional component-local QC summary arrays
+          ...
         geometry/                           # optional extension point
           ...
 ```
@@ -139,6 +145,17 @@ Required `metrics/` arrays:
 - `mask_present`
   - shape: `(N, C)`
 - `area_px`
+  - shape: `(N, C)`
+
+Recommended common geometry `metrics/` arrays:
+
+- `centroid_xy`
+  - shape: `(N, C, 2)`
+- `centroid_valid`
+  - shape: `(N, C)`
+- `bbox_xyxy`
+  - shape: `(N, C, 4)`
+- `bbox_valid`
   - shape: `(N, C)`
 
 Recommended lineage arrays:
@@ -279,6 +296,38 @@ Optional arrays:
   - shape: `(N,)`
 - component-specific quality flags
 - component-specific review artifacts
+
+Optional subgroups:
+
+- `metrics/`
+  - component-local fixed-shape QC summary arrays
+
+Optional component attrs:
+
+- `component_schema_id`
+- `anatomical_scope`
+- component-local policy attrs such as `pectoral_fin_policy`
+
+Recommended current `subject_body` defaults:
+
+- `component_schema_id = "subject_body_v1"`
+- `anatomical_scope = "body_core"`
+- `pectoral_fin_policy = "excluded_or_unresolved"`
+
+Recommended examples for `components/<component>/metrics/`:
+
+- `component_count`
+- `largest_component_fraction`
+- `hole_count`
+- `hole_area_fraction`
+- `sigma_noise`
+- `curvature_var`
+- `ipr`
+- `solidity`
+
+Common cross-component geometry such as centroid and bbox should stay at
+run-level `metrics/`, while component-specific QC should live under
+`components/<component>/metrics/`.
 
 Why per-component subgroups:
 

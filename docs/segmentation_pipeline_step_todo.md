@@ -277,7 +277,160 @@ Needed work:
 - consistent source model/checkpoint recording where applicable
 - registry/status integration for the new step name and component availability
 
-### 9. Decide What Happens To Legacy Eye-Specific Metadata
+### 9. SAM3 Provenance And Output Parity Checklist
+
+The current SAM3 body-segmentation path in
+`src/fisheye/utils/run_sam_subject_masks.py` is a useful baseline because it
+already writes a valid `subject_mask_runs/<run>` artifact. But it is not yet
+full provenance/model-tracking parity with the more mature detect/keypoint
+paths or with the future generalized segmentation abstraction.
+
+#### What SAM3 currently writes well
+
+Current SAM3 subject-mask runs already persist:
+
+- canonical raw output stage:
+  - `subject_mask_runs/<run>`
+- canonical runtime arrays:
+  - `masks_roi`
+  - `mask_probs_roi`
+  - `available_channels`
+  - lineage arrays copied from the crop run when present
+- canonical component metrics for the populated channel:
+  - `metrics/prob_max`
+  - `metrics/sam_quality_score`
+  - `metrics/mask_present`
+  - `metrics/area_px`
+  - `metrics/centroid_xy`
+  - `metrics/centroid_valid`
+  - `metrics/bbox_xyxy`
+  - `metrics/bbox_valid`
+- useful run attrs:
+  - `method`
+  - `run_semantics`
+  - prompt-policy attrs
+  - `sam_checkpoint_path`
+  - `sam3_root`
+  - source crop/keypoint lineage
+- stage provenance:
+  - git / environment / platform
+  - `provenance.parameters`
+  - `provenance.inputs`
+- run summary attrs:
+  - eligibility counts
+  - prompt failure counts
+  - mask area summary
+  - selected-mask score summary
+
+#### What SAM3 currently computes but does not fully preserve
+
+The current writer computes or observes additional SAM runtime information but
+does not yet preserve all of it in first-class arrays/registry surfaces:
+
+- candidate mask bank per ROI from multimask output
+- per-row candidate IoU/score vectors
+- prompt-point counts and prompt validity per row
+- exact box prompt geometry per row
+- richer row-level failure reasons for prompt/eligibility failures
+
+Today, most of that information is collapsed into `summary_statistics` rather
+than persisted as row-level arrays, although the selected SAM quality score can
+now be stored per row in `metrics/sam_quality_score`.
+
+#### What is missing for parity with other mature methods
+
+The main gaps to close before SAM3 cleanly fits a generalized segmentation
+pipeline are:
+
+1. Structured model identity
+   - Current SAM3 runs store `sam_checkpoint_path` and `sam3_root`.
+   - They do not yet populate a stable `model_info` payload with enough detail
+     to match the intent of a general model-tracked segmentation method.
+   - Needed fields likely include:
+     - model family / runtime family
+     - checkpoint path
+     - checkpoint digest
+     - source repo / commit / package version
+     - Hugging Face model id or config identifier when applicable
+
+2. Explicit probability semantics
+   - Traditional subject-body runs already record
+     `probability_semantics = "normalized_background_diff"`.
+   - SAM3 runs currently omit an equivalent statement.
+   - Official SAM-style predictors expose candidate masks, a separate mask
+     quality / predicted-IoU signal, and optional unthresholded mask logits.
+   - The current Palette SAM3 path requests logits, chooses the candidate with
+     the highest predicted quality score, then writes:
+     - `masks_roi = (selected_logits > 0)`
+     - `mask_probs_roi = sigmoid(selected_logits)`
+   - The contract should therefore define:
+     - `probability_semantics = "sigmoid_selected_mask_logits"`
+   - Selected SAM quality scores should be treated as a separate provenance/QC
+     signal, not as the semantics of `mask_probs_roi`.
+
+3. Row-level prompt and confidence provenance
+   - Current SAM3 runs now persist the selected SAM quality score per row, but
+     other prompt/diagnostic information is still mostly summary-level.
+   - For parity with future debugging and QC needs, likely additions are:
+     - per-row candidate IoU/score vectors when multimask output is enabled
+     - per-row prompt-point count
+     - per-row prompt validity / eligibility reason
+     - per-row box-prompt source or explicit box geometry if multiple prompt
+       sources remain supported
+
+4. Component-scoped provenance for mixed-method runs
+   - The current SAM writer assumes a body-only run.
+   - The future segmentation step needs one coherent run where different
+     components may come from different methods.
+   - That means one run-level provenance payload is not enough on its own;
+     we also need per-component provenance/model metadata.
+
+5. Immediate status-ledger integration
+   - The current SAM writer produces a valid run and later registry refresh can
+     project it into subject-mask registry tables.
+   - It does not yet eagerly upsert coarse `recording_step_status` the way some
+     other stage writers do.
+   - We should decide whether the new segmentation orchestrator will:
+     - write the step ledger immediately, or
+     - continue relying on registry refresh/backfill
+
+6. Registry model surfaces
+   - Current subject-mask registry work is intentionally about run/component
+     quality and review, not model registries.
+   - That is fine for now, but parity with detect/keypoint model provenance
+     likely requires future subject-segmentation model registry surfaces or a
+     shared segmentation-model registry story.
+
+#### Recommended future shape for a generalized segmentation step
+
+For the broader `segmentation` abstraction, the provenance target should be:
+
+- one canonical `subject_mask_runs/<run>` snapshot
+- run-level stage provenance for the orchestration invocation
+- per-component provenance/model payloads for:
+  - `subject_body`
+  - `eyes_union` or `eye_left`/`eye_right`
+  - `swim_bladder`
+- consistent `probability_semantics`
+- optional row-level quality arrays when the source method exposes meaningful
+  scores or prompt diagnostics
+
+In other words, future parity should mean:
+
+- traditional methods, SAM3, YOLO, and U-Net all write into one canonical raw
+  stage family
+- but each component/method retains enough model and runtime metadata to make
+  the artifact auditable
+
+Needed deliverables:
+
+- extend the segmentation contract with component-scoped provenance/model info
+- define `probability_semantics` for SAM3 body masks
+- decide which SAM row-level diagnostics deserve persisted arrays
+- decide whether the unified segmentation step writes ledger/registry status
+  eagerly
+
+### 10. Decide What Happens To Legacy Eye-Specific Metadata
 
 `subject_mask_runs` intentionally does not yet replace the full eye-specific
 metadata surface.
@@ -296,7 +449,7 @@ Recommended near-term answer:
 - do not block the raw subject-mask unification on immediate migration of these
   eye-specific details
 
-### 10. Testing And Validation
+### 11. Testing And Validation
 
 This abstraction needs more than unit coverage of one helper.
 

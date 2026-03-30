@@ -19,6 +19,7 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "2")
 import cv2
 import numpy as np
 import zarr
+from scipy.ndimage import gaussian_filter1d
 
 from ..shared.detect_reason_codec import encode_reason_bytes, read_reason_labels, write_reason_columns
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
@@ -67,6 +68,12 @@ DEFAULT_BRUSH_RADIUS = 6
 DEFAULT_REVIEW_METHOD = "manual"
 DEFAULT_REVIEW_INTENDED_USE = "training"
 DEFAULT_RUN_METHOD = "refined_subject_mask_manual_review_v1"
+DEFAULT_SUBJECT_BODY_COMPONENT_SCHEMA_ID = "subject_body_v1"
+DEFAULT_SUBJECT_BODY_ANATOMICAL_SCOPE = "body_core"
+DEFAULT_SUBJECT_BODY_PECTORAL_FIN_POLICY = "excluded_or_unresolved"
+SIGMA_NOISE_SMOOTHING_SIGMA = 3.0
+CURVATURE_VAR_SMOOTHING_SIGMA = 3.0
+CURVATURE_VAR_STEP = 5
 
 
 @dataclass(frozen=True)
@@ -195,6 +202,251 @@ def _compute_mask_metrics(masks_roi: np.ndarray) -> tuple[np.ndarray, np.ndarray
     return present.astype(bool), np.asarray(area, dtype=np.float32)
 
 
+def _compute_single_mask_geometry_metrics(mask: np.ndarray) -> tuple[np.ndarray, bool, np.ndarray, bool]:
+    binary = np.asarray(mask, dtype=np.uint8) > 0
+    centroid_xy = np.zeros((2,), dtype=np.float32)
+    bbox_xyxy = np.zeros((4,), dtype=np.float32)
+    if int(np.count_nonzero(binary)) <= 0:
+        return centroid_xy, False, bbox_xyxy, False
+
+    ys, xs = np.nonzero(binary)
+    centroid_xy[:] = np.asarray([xs.mean(), ys.mean()], dtype=np.float32)
+    bbox_xyxy[:] = np.asarray(
+        [float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())],
+        dtype=np.float32,
+    )
+    return centroid_xy, True, bbox_xyxy, True
+
+
+def _compute_geometry_metrics(masks_roi: np.ndarray) -> dict[str, np.ndarray]:
+    binary = np.asarray(masks_roi, dtype=np.uint8)
+    if binary.ndim != 4:
+        raise ValueError(f"Expected masks with shape (N,C,H,W), got {tuple(binary.shape)}")
+    total_rois = int(binary.shape[0])
+    channel_count = int(binary.shape[1])
+    centroid_xy = np.zeros((total_rois, channel_count, 2), dtype=np.float32)
+    centroid_valid = np.zeros((total_rois, channel_count), dtype=bool)
+    bbox_xyxy = np.zeros((total_rois, channel_count, 4), dtype=np.float32)
+    bbox_valid = np.zeros((total_rois, channel_count), dtype=bool)
+
+    for roi_idx in range(total_rois):
+        for comp_idx in range(channel_count):
+            centroid, centroid_is_valid, bbox, bbox_is_valid = _compute_single_mask_geometry_metrics(
+                binary[roi_idx, comp_idx]
+            )
+            centroid_xy[roi_idx, comp_idx] = centroid
+            centroid_valid[roi_idx, comp_idx] = centroid_is_valid
+            bbox_xyxy[roi_idx, comp_idx] = bbox
+            bbox_valid[roi_idx, comp_idx] = bbox_is_valid
+
+    return {
+        "centroid_xy": centroid_xy,
+        "centroid_valid": centroid_valid,
+        "bbox_xyxy": bbox_xyxy,
+        "bbox_valid": bbox_valid,
+    }
+
+
+def _compute_single_mask_topology_metrics(mask: np.ndarray) -> tuple[int, float, int, float]:
+    binary = np.asarray(mask, dtype=np.uint8) > 0
+    area = int(np.count_nonzero(binary))
+    if area <= 0:
+        return 0, 0.0, 0, 0.0
+
+    component_input = binary.astype(np.uint8, copy=False)
+    num_labels, labels = cv2.connectedComponents(component_input, connectivity=8)
+    if num_labels <= 1:
+        component_count = 0
+        largest_component_fraction = 0.0
+    else:
+        counts = np.bincount(labels.reshape(-1), minlength=num_labels)
+        component_sizes = counts[1:]
+        component_count = int(component_sizes.size)
+        largest_component_fraction = float(component_sizes.max() / float(area)) if component_sizes.size else 0.0
+
+    background_input = (~binary).astype(np.uint8, copy=False)
+    num_bg_labels, bg_labels = cv2.connectedComponents(background_input, connectivity=8)
+    if num_bg_labels <= 1:
+        hole_count = 0
+        hole_area_fraction = 0.0
+    else:
+        border_labels = set()
+        border_labels.update(int(value) for value in bg_labels[0, :].tolist())
+        border_labels.update(int(value) for value in bg_labels[-1, :].tolist())
+        border_labels.update(int(value) for value in bg_labels[:, 0].tolist())
+        border_labels.update(int(value) for value in bg_labels[:, -1].tolist())
+        hole_labels = [label for label in range(1, num_bg_labels) if label not in border_labels]
+        if hole_labels:
+            bg_counts = np.bincount(bg_labels.reshape(-1), minlength=num_bg_labels)
+            hole_area = int(sum(int(bg_counts[label]) for label in hole_labels))
+            hole_count = int(len(hole_labels))
+            hole_area_fraction = float(hole_area / float(area))
+        else:
+            hole_count = 0
+            hole_area_fraction = 0.0
+
+    return component_count, largest_component_fraction, hole_count, hole_area_fraction
+
+
+def _compute_component_topology_metrics(masks_roi: np.ndarray) -> dict[str, np.ndarray]:
+    binary = np.asarray(masks_roi, dtype=np.uint8)
+    if binary.ndim != 3:
+        raise ValueError(f"Expected component masks with shape (N,H,W), got {tuple(binary.shape)}")
+    total = int(binary.shape[0])
+    component_count = np.zeros((total,), dtype=np.int32)
+    largest_component_fraction = np.zeros((total,), dtype=np.float32)
+    hole_count = np.zeros((total,), dtype=np.int32)
+    hole_area_fraction = np.zeros((total,), dtype=np.float32)
+    for row_idx in range(total):
+        comp_count, largest_frac, holes, hole_frac = _compute_single_mask_topology_metrics(binary[row_idx])
+        component_count[row_idx] = comp_count
+        largest_component_fraction[row_idx] = largest_frac
+        hole_count[row_idx] = holes
+        hole_area_fraction[row_idx] = hole_frac
+    return {
+        "component_count": component_count,
+        "largest_component_fraction": largest_component_fraction,
+        "hole_count": hole_count,
+        "hole_area_fraction": hole_area_fraction,
+    }
+
+
+def _extract_largest_external_contour(mask: np.ndarray) -> np.ndarray | None:
+    binary = (np.asarray(mask, dtype=np.uint8) > 0).astype(np.uint8, copy=False)
+    if int(np.count_nonzero(binary)) <= 0:
+        return None
+
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return None
+    contour = np.asarray(max(contours, key=cv2.contourArea), dtype=np.float32).reshape(-1, 1, 2)
+    if contour.shape[0] < 3:
+        return None
+    return contour
+
+
+def _extract_largest_external_contour_xy(mask: np.ndarray) -> np.ndarray | None:
+    contour = _extract_largest_external_contour(mask)
+    if contour is None:
+        return None
+    return np.asarray(contour, dtype=np.float32).reshape(-1, 2)
+
+
+def _smooth_closed_contour(contour_xy: np.ndarray, *, smoothing_sigma: float) -> np.ndarray:
+    sigma = max(float(smoothing_sigma), 0.0)
+    if sigma == 0.0:
+        return np.asarray(contour_xy, dtype=np.float32)
+    xs = np.asarray(contour_xy[:, 0], dtype=np.float32)
+    ys = np.asarray(contour_xy[:, 1], dtype=np.float32)
+    xs_smooth = gaussian_filter1d(xs, sigma=sigma, mode="wrap")
+    ys_smooth = gaussian_filter1d(ys, sigma=sigma, mode="wrap")
+    return np.stack((xs_smooth, ys_smooth), axis=1).astype(np.float32, copy=False)
+
+
+def _compute_single_mask_sigma_noise(mask: np.ndarray, *, smoothing_sigma: float = SIGMA_NOISE_SMOOTHING_SIGMA) -> float:
+    contour_xy = _extract_largest_external_contour_xy(mask)
+    if contour_xy is None:
+        return 0.0
+
+    contour_smooth = _smooth_closed_contour(contour_xy, smoothing_sigma=smoothing_sigma)
+    diffs = np.asarray(contour_xy, dtype=np.float32) - np.asarray(contour_smooth, dtype=np.float32)
+    distances_sq = np.sum(np.square(diffs, dtype=np.float32), axis=1, dtype=np.float32)
+    return float(np.sqrt(np.mean(distances_sq, dtype=np.float32), dtype=np.float32))
+
+
+def _compute_component_sigma_noise_metrics(masks_roi: np.ndarray) -> dict[str, np.ndarray]:
+    binary = np.asarray(masks_roi, dtype=np.uint8)
+    if binary.ndim != 3:
+        raise ValueError(f"Expected component masks with shape (N,H,W), got {tuple(binary.shape)}")
+    total = int(binary.shape[0])
+    sigma_noise = np.zeros((total,), dtype=np.float32)
+    for row_idx in range(total):
+        sigma_noise[row_idx] = _compute_single_mask_sigma_noise(binary[row_idx])
+    return {"sigma_noise": sigma_noise}
+
+
+def _compute_single_mask_curvature_var(
+    mask: np.ndarray,
+    *,
+    smoothing_sigma: float = CURVATURE_VAR_SMOOTHING_SIGMA,
+    step: int = CURVATURE_VAR_STEP,
+) -> float:
+    contour_xy = _extract_largest_external_contour_xy(mask)
+    if contour_xy is None:
+        return 0.0
+    contour_smooth = _smooth_closed_contour(contour_xy, smoothing_sigma=smoothing_sigma)
+    total = int(contour_smooth.shape[0])
+    k = max(int(step), 1)
+    if total < (2 * k + 1):
+        return 0.0
+
+    curvature = np.zeros((total,), dtype=np.float32)
+    for idx in range(total):
+        p_prev = contour_smooth[(idx - k) % total]
+        p_curr = contour_smooth[idx]
+        p_next = contour_smooth[(idx + k) % total]
+
+        v1 = p_curr - p_prev
+        v2 = p_next - p_curr
+        v3 = p_prev - p_next
+        denom = float(np.linalg.norm(v1) * np.linalg.norm(v2) * np.linalg.norm(v3))
+        if denom <= 0.0:
+            curvature[idx] = 0.0
+            continue
+        cross = float(v1[0] * v2[1] - v1[1] * v2[0])
+        curvature[idx] = np.float32((2.0 * abs(cross)) / denom)
+    return float(np.var(curvature, dtype=np.float32))
+
+
+def _compute_component_curvature_var_metrics(masks_roi: np.ndarray) -> dict[str, np.ndarray]:
+    binary = np.asarray(masks_roi, dtype=np.uint8)
+    if binary.ndim != 3:
+        raise ValueError(f"Expected component masks with shape (N,H,W), got {tuple(binary.shape)}")
+    total = int(binary.shape[0])
+    curvature_var = np.zeros((total,), dtype=np.float32)
+    for row_idx in range(total):
+        curvature_var[row_idx] = _compute_single_mask_curvature_var(binary[row_idx])
+    return {"curvature_var": curvature_var}
+
+
+def _compute_single_mask_ipr(mask: np.ndarray) -> float:
+    contour = _extract_largest_external_contour(mask)
+    if contour is None:
+        return 0.0
+    area = float(cv2.contourArea(contour))
+    if area <= 0.0:
+        return 0.0
+    perimeter = float(cv2.arcLength(contour, True))
+    return float((perimeter * perimeter) / (4.0 * float(np.pi) * area))
+
+
+def _compute_single_mask_solidity(mask: np.ndarray) -> float:
+    contour = _extract_largest_external_contour(mask)
+    if contour is None:
+        return 0.0
+    area = float(cv2.contourArea(contour))
+    if area <= 0.0:
+        return 0.0
+    hull = cv2.convexHull(contour)
+    hull_area = float(cv2.contourArea(hull))
+    if hull_area <= 0.0:
+        return 0.0
+    return float(area / hull_area)
+
+
+def _compute_component_shape_qc_metrics(masks_roi: np.ndarray) -> dict[str, np.ndarray]:
+    binary = np.asarray(masks_roi, dtype=np.uint8)
+    if binary.ndim != 3:
+        raise ValueError(f"Expected component masks with shape (N,H,W), got {tuple(binary.shape)}")
+    total = int(binary.shape[0])
+    ipr = np.zeros((total,), dtype=np.float32)
+    solidity = np.zeros((total,), dtype=np.float32)
+    for row_idx in range(total):
+        ipr[row_idx] = _compute_single_mask_ipr(binary[row_idx])
+        solidity[row_idx] = _compute_single_mask_solidity(binary[row_idx])
+    return {"ipr": ipr, "solidity": solidity}
+
+
 def _source_mask_for_component(
     source: SourceSubjectMaskRun,
     component_name: str,
@@ -269,6 +521,7 @@ def _ensure_component_group(
     mask_present: np.ndarray,
     area_px: np.ndarray,
     edit_applied: np.ndarray,
+    component_metrics: Optional[Mapping[str, np.ndarray]] = None,
 ) -> zarr.Group:
     components_parent = refined.require_group("components")
     component_group = components_parent.require_group(component_name)
@@ -278,6 +531,28 @@ def _ensure_component_group(
         component_group.create_array("area_px", data=np.asarray(area_px, dtype=np.float32), overwrite=True)
     if "edit_applied" not in component_group:
         component_group.create_array("edit_applied", data=np.asarray(edit_applied, dtype=bool), overwrite=True)
+    if component_name == "subject_body":
+        component_group.attrs.setdefault("component_schema_id", DEFAULT_SUBJECT_BODY_COMPONENT_SCHEMA_ID)
+        component_group.attrs.setdefault("anatomical_scope", DEFAULT_SUBJECT_BODY_ANATOMICAL_SCOPE)
+        component_group.attrs.setdefault("pectoral_fin_policy", DEFAULT_SUBJECT_BODY_PECTORAL_FIN_POLICY)
+    if component_metrics is not None:
+        metrics_group = component_group.require_group("metrics")
+        metric_specs = (
+            ("component_count", np.asarray(component_metrics["component_count"], dtype=np.int32)),
+            (
+                "largest_component_fraction",
+                np.asarray(component_metrics["largest_component_fraction"], dtype=np.float32),
+            ),
+            ("hole_count", np.asarray(component_metrics["hole_count"], dtype=np.int32)),
+            ("hole_area_fraction", np.asarray(component_metrics["hole_area_fraction"], dtype=np.float32)),
+            ("sigma_noise", np.asarray(component_metrics["sigma_noise"], dtype=np.float32)),
+            ("curvature_var", np.asarray(component_metrics["curvature_var"], dtype=np.float32)),
+            ("ipr", np.asarray(component_metrics["ipr"], dtype=np.float32)),
+            ("solidity", np.asarray(component_metrics["solidity"], dtype=np.float32)),
+        )
+        for metric_name, metric_values in metric_specs:
+            if metric_name not in metrics_group:
+                metrics_group.create_array(metric_name, data=metric_values, overwrite=True)
     _load_or_init_reason_labels(component_group, total_rois)
     return component_group
 
@@ -351,12 +626,29 @@ def _open_or_create_refined_subject_run(
             raise RuntimeError(f"refined_subject_masks_runs/{target_run} missing masks_roi.")
         total_rois = int(masks_arr.shape[0])
         metrics = run_group.require_group("metrics")
+        masks_np = np.asarray(masks_arr[:], dtype=np.uint8)
+        geometry_metrics = None
         if "mask_present" not in metrics or "area_px" not in metrics:
-            mask_present, area_px = _compute_mask_metrics(np.asarray(masks_arr[:], dtype=np.uint8))
+            mask_present, area_px = _compute_mask_metrics(masks_np)
             if "mask_present" not in metrics:
                 metrics.create_array("mask_present", data=mask_present, overwrite=True)
             if "area_px" not in metrics:
                 metrics.create_array("area_px", data=area_px, overwrite=True)
+        if (
+            "centroid_xy" not in metrics
+            or "centroid_valid" not in metrics
+            or "bbox_xyxy" not in metrics
+            or "bbox_valid" not in metrics
+        ):
+            geometry_metrics = _compute_geometry_metrics(masks_np)
+            if "centroid_xy" not in metrics:
+                metrics.create_array("centroid_xy", data=geometry_metrics["centroid_xy"], overwrite=True)
+            if "centroid_valid" not in metrics:
+                metrics.create_array("centroid_valid", data=geometry_metrics["centroid_valid"], overwrite=True)
+            if "bbox_xyxy" not in metrics:
+                metrics.create_array("bbox_xyxy", data=geometry_metrics["bbox_xyxy"], overwrite=True)
+            if "bbox_valid" not in metrics:
+                metrics.create_array("bbox_valid", data=geometry_metrics["bbox_valid"], overwrite=True)
         if "edit_applied" not in run_group:
             run_group.create_array(
                 "edit_applied",
@@ -367,6 +659,11 @@ def _open_or_create_refined_subject_run(
         area_px_arr = np.asarray(metrics["area_px"][:], dtype=np.float32)
         edit_applied_arr = np.asarray(run_group["edit_applied"][:], dtype=bool)
         for comp_idx, component_name in enumerate(component_names):
+            component_masks = np.asarray(masks_np[:, comp_idx], dtype=np.uint8)
+            component_metrics = _compute_component_topology_metrics(component_masks)
+            component_metrics.update(_compute_component_sigma_noise_metrics(component_masks))
+            component_metrics.update(_compute_component_curvature_var_metrics(component_masks))
+            component_metrics.update(_compute_component_shape_qc_metrics(component_masks))
             _ensure_component_group(
                 run_group,
                 component_name,
@@ -374,6 +671,7 @@ def _open_or_create_refined_subject_run(
                 mask_present_arr[:, comp_idx],
                 area_px_arr[:, comp_idx],
                 edit_applied_arr[:, comp_idx],
+                component_metrics=component_metrics,
             )
         return RefinedSubjectMaskRun(
             run_name=target_run,
@@ -413,8 +711,17 @@ def _open_or_create_refined_subject_run(
     metrics = run_group.require_group("metrics")
     metrics.create_array("mask_present", data=mask_present, overwrite=True)
     metrics.create_array("area_px", data=area_px, overwrite=True)
+    geometry_metrics = _compute_geometry_metrics(masks)
+    metrics.create_array("centroid_xy", data=geometry_metrics["centroid_xy"], overwrite=True)
+    metrics.create_array("centroid_valid", data=geometry_metrics["centroid_valid"], overwrite=True)
+    metrics.create_array("bbox_xyxy", data=geometry_metrics["bbox_xyxy"], overwrite=True)
+    metrics.create_array("bbox_valid", data=geometry_metrics["bbox_valid"], overwrite=True)
 
     for comp_idx, component_name in enumerate(component_names):
+        component_metrics = _compute_component_topology_metrics(masks[:, comp_idx])
+        component_metrics.update(_compute_component_sigma_noise_metrics(masks[:, comp_idx]))
+        component_metrics.update(_compute_component_curvature_var_metrics(masks[:, comp_idx]))
+        component_metrics.update(_compute_component_shape_qc_metrics(masks[:, comp_idx]))
         component_group = _ensure_component_group(
             run_group,
             component_name,
@@ -422,6 +729,7 @@ def _open_or_create_refined_subject_run(
             mask_present[:, comp_idx],
             area_px[:, comp_idx],
             edit_applied[:, comp_idx],
+            component_metrics=component_metrics,
         )
         reason_labels = _load_or_init_reason_labels(component_group, total_rois)
         for row_idx in range(total_rois):
@@ -605,6 +913,10 @@ def save_refined_subject_roi(
     edit_arr = run_group["edit_applied"]
     metrics_mask_present = metrics["mask_present"]
     metrics_area_px = metrics["area_px"]
+    metrics_centroid_xy = metrics["centroid_xy"]
+    metrics_centroid_valid = metrics["centroid_valid"]
+    metrics_bbox_xyxy = metrics["bbox_xyxy"]
+    metrics_bbox_valid = metrics["bbox_valid"]
     components_parent = run_group.require_group("components")
 
     edited_masks = np.asarray(edited_masks, dtype=np.uint8)
@@ -620,15 +932,30 @@ def save_refined_subject_roi(
         area = float(np.count_nonzero(current_mask))
         present = bool(area > 0)
         edited = not np.array_equal(current_mask, source_mask)
+        centroid_xy, centroid_valid, bbox_xyxy, bbox_valid = _compute_single_mask_geometry_metrics(current_mask)
 
         edit_arr[int(roi_idx), comp_idx] = edited
         metrics_mask_present[int(roi_idx), comp_idx] = present
         metrics_area_px[int(roi_idx), comp_idx] = area
+        metrics_centroid_xy[int(roi_idx), comp_idx] = centroid_xy
+        metrics_centroid_valid[int(roi_idx), comp_idx] = centroid_valid
+        metrics_bbox_xyxy[int(roi_idx), comp_idx] = bbox_xyxy
+        metrics_bbox_valid[int(roi_idx), comp_idx] = bbox_valid
 
         component_group = components_parent.require_group(component_name)
         component_group["mask_present"][int(roi_idx)] = present
         component_group["area_px"][int(roi_idx)] = area
         component_group["edit_applied"][int(roi_idx)] = edited
+        component_metrics = component_group.require_group("metrics")
+        comp_count, largest_frac, holes, hole_frac = _compute_single_mask_topology_metrics(current_mask)
+        component_metrics["component_count"][int(roi_idx)] = np.int32(comp_count)
+        component_metrics["largest_component_fraction"][int(roi_idx)] = np.float32(largest_frac)
+        component_metrics["hole_count"][int(roi_idx)] = np.int32(holes)
+        component_metrics["hole_area_fraction"][int(roi_idx)] = np.float32(hole_frac)
+        component_metrics["sigma_noise"][int(roi_idx)] = np.float32(_compute_single_mask_sigma_noise(current_mask))
+        component_metrics["curvature_var"][int(roi_idx)] = np.float32(_compute_single_mask_curvature_var(current_mask))
+        component_metrics["ipr"][int(roi_idx)] = np.float32(_compute_single_mask_ipr(current_mask))
+        component_metrics["solidity"][int(roi_idx)] = np.float32(_compute_single_mask_solidity(current_mask))
         reason_labels = _load_or_init_reason_labels(component_group, int(masks_arr.shape[0]))
         reason_labels[int(roi_idx)] = _default_reason_label(source_mask, current_mask, edited)
         _write_reason_label_row(component_group, reason_labels, int(roi_idx))
@@ -663,12 +990,103 @@ def _component_sync_state(
     roi_idx: int,
 ) -> tuple[bool, float, bool, str]:
     reason_labels = _load_or_init_reason_labels(component_group, int(run_group["masks_roi"].shape[0]))
+    component_metrics = component_group.require_group("metrics")
     return (
         bool(np.asarray(run_group["metrics/mask_present"][int(roi_idx), comp_idx], dtype=bool)),
         float(np.asarray(run_group["metrics/area_px"][int(roi_idx), comp_idx], dtype=np.float32)),
+        tuple(
+            float(value)
+            for value in np.asarray(run_group["metrics/centroid_xy"][int(roi_idx), comp_idx], dtype=np.float32).tolist()
+        ),
+        bool(np.asarray(run_group["metrics/centroid_valid"][int(roi_idx), comp_idx], dtype=bool)),
+        tuple(
+            float(value)
+            for value in np.asarray(run_group["metrics/bbox_xyxy"][int(roi_idx), comp_idx], dtype=np.float32).tolist()
+        ),
+        bool(np.asarray(run_group["metrics/bbox_valid"][int(roi_idx), comp_idx], dtype=bool)),
         bool(np.asarray(run_group["edit_applied"][int(roi_idx), comp_idx], dtype=bool)),
+        int(np.asarray(component_metrics["component_count"][int(roi_idx)], dtype=np.int32)),
+        float(np.asarray(component_metrics["largest_component_fraction"][int(roi_idx)], dtype=np.float32)),
+        int(np.asarray(component_metrics["hole_count"][int(roi_idx)], dtype=np.int32)),
+        float(np.asarray(component_metrics["hole_area_fraction"][int(roi_idx)], dtype=np.float32)),
+        float(np.asarray(component_metrics["sigma_noise"][int(roi_idx)], dtype=np.float32)),
+        float(np.asarray(component_metrics["curvature_var"][int(roi_idx)], dtype=np.float32)),
+        float(np.asarray(component_metrics["ipr"][int(roi_idx)], dtype=np.float32)),
+        float(np.asarray(component_metrics["solidity"][int(roi_idx)], dtype=np.float32)),
         str(reason_labels[int(roi_idx)]),
     )
+
+
+def _format_component_summary_lines(
+    run_group: zarr.Group,
+    component_group: zarr.Group,
+    *,
+    comp_idx: int,
+    roi_idx: int,
+) -> list[str]:
+    metrics = run_group["metrics"]
+    component_metrics = component_group.require_group("metrics")
+    reason_labels = _load_or_init_reason_labels(component_group, int(run_group["masks_roi"].shape[0]))
+    present = bool(np.asarray(metrics["mask_present"][int(roi_idx), comp_idx], dtype=bool))
+    area = float(np.asarray(metrics["area_px"][int(roi_idx), comp_idx], dtype=np.float32))
+    centroid_xy = np.asarray(metrics["centroid_xy"][int(roi_idx), comp_idx], dtype=np.float32)
+    centroid_valid = bool(np.asarray(metrics["centroid_valid"][int(roi_idx), comp_idx], dtype=bool))
+    bbox_xyxy = np.asarray(metrics["bbox_xyxy"][int(roi_idx), comp_idx], dtype=np.float32)
+    bbox_valid = bool(np.asarray(metrics["bbox_valid"][int(roi_idx), comp_idx], dtype=bool))
+    component_count = int(np.asarray(component_metrics["component_count"][int(roi_idx)], dtype=np.int32))
+    largest_fraction = float(
+        np.asarray(component_metrics["largest_component_fraction"][int(roi_idx)], dtype=np.float32)
+    )
+    hole_count = int(np.asarray(component_metrics["hole_count"][int(roi_idx)], dtype=np.int32))
+    hole_area_fraction = float(
+        np.asarray(component_metrics["hole_area_fraction"][int(roi_idx)], dtype=np.float32)
+    )
+    sigma_noise = float(np.asarray(component_metrics["sigma_noise"][int(roi_idx)], dtype=np.float32))
+    curvature_var = float(np.asarray(component_metrics["curvature_var"][int(roi_idx)], dtype=np.float32))
+    ipr = float(np.asarray(component_metrics["ipr"][int(roi_idx)], dtype=np.float32))
+    solidity = float(np.asarray(component_metrics["solidity"][int(roi_idx)], dtype=np.float32))
+    centroid_text = (
+        f"centroid=({float(centroid_xy[0]):.1f}, {float(centroid_xy[1]):.1f})"
+        if centroid_valid
+        else "centroid=--"
+    )
+    bbox_text = (
+        "bbox=["
+        f"{float(bbox_xyxy[0]):.1f},{float(bbox_xyxy[1]):.1f},"
+        f"{float(bbox_xyxy[2]):.1f},{float(bbox_xyxy[3]):.1f}]"
+        if bbox_valid
+        else "bbox=--"
+    )
+    return [
+        f"present={int(present)} area_px={area:.1f}",
+        f"{centroid_text}  {bbox_text}",
+        f"components={component_count} largest_frac={largest_fraction:.3f}",
+        f"holes={hole_count} hole_area_frac={hole_area_fraction:.3f}",
+        f"sigma_noise={sigma_noise:.3f} curvature_var={curvature_var:.6f}",
+        f"ipr={ipr:.3f} solidity={solidity:.3f}",
+        f"reason={str(reason_labels[int(roi_idx)])}",
+    ]
+
+
+def _draw_summary_lines(
+    panel: np.ndarray,
+    lines: Sequence[str],
+    *,
+    start_y: int = 46,
+    line_height: int = 18,
+) -> np.ndarray:
+    output = np.asarray(panel, dtype=np.uint8).copy()
+    for idx, line in enumerate(lines):
+        cv2.putText(
+            output,
+            str(line),
+            (10, start_y + idx * line_height),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (255, 255, 255),
+            1,
+        )
+    return output
 
 
 def sync_refined_subject_mask_metadata(
@@ -862,6 +1280,14 @@ def launch_review(
             f"Editor {component_names[active_idx]}",
             _overlay_components(roi_img, (component_names[active_idx],), (active_mask,)),
         )
+        active_component_group = refined.group.require_group("components").require_group(component_names[active_idx])
+        summary_lines = _format_component_summary_lines(
+            refined.group,
+            active_component_group,
+            comp_idx=active_idx,
+            roi_idx=current_pos,
+        )
+        active_panel = _draw_summary_lines(active_panel, summary_lines)
 
         header = refined_panel.copy()
         state_payload = dict(refined.group.attrs.get("component_review_statuses") or {}).get(component_names[active_idx], {})

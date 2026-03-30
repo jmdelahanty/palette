@@ -102,6 +102,22 @@ def test_sync_refined_subject_mask_metadata_updates_touched_component(tmp_path: 
         np.asarray(run["metrics/area_px"][0], dtype=np.float32),
         np.asarray([0.0, 0.0], dtype=np.float32),
     )
+    np.testing.assert_allclose(
+        np.asarray(run["metrics/centroid_xy"][0], dtype=np.float32),
+        np.asarray([[0.0, 0.0], [0.0, 0.0]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(run["metrics/centroid_valid"][0], dtype=bool),
+        np.asarray([False, False], dtype=bool),
+    )
+    np.testing.assert_allclose(
+        np.asarray(run["metrics/bbox_xyxy"][0], dtype=np.float32),
+        np.asarray([[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(run["metrics/bbox_valid"][0], dtype=bool),
+        np.asarray([False, False], dtype=bool),
+    )
     np.testing.assert_array_equal(
         np.asarray(run["edit_applied"][0], dtype=bool),
         np.asarray([True, False], dtype=bool),
@@ -117,6 +133,14 @@ def test_sync_refined_subject_mask_metadata_updates_touched_component(tmp_path: 
     assert swim_reasons is not None
     assert body_reasons[0] == "manual_correction"
     assert swim_reasons[0] == "clean"
+    assert int(np.asarray(body_group["metrics/component_count"][0], dtype=np.int32)) == 0
+    assert float(np.asarray(body_group["metrics/largest_component_fraction"][0], dtype=np.float32)) == 0.0
+    assert int(np.asarray(body_group["metrics/hole_count"][0], dtype=np.int32)) == 0
+    assert float(np.asarray(body_group["metrics/hole_area_fraction"][0], dtype=np.float32)) == 0.0
+    assert float(np.asarray(body_group["metrics/sigma_noise"][0], dtype=np.float32)) == 0.0
+    assert float(np.asarray(body_group["metrics/curvature_var"][0], dtype=np.float32)) == 0.0
+    assert float(np.asarray(body_group["metrics/ipr"][0], dtype=np.float32)) == 0.0
+    assert float(np.asarray(body_group["metrics/solidity"][0], dtype=np.float32)) == 0.0
 
 
 def test_sync_refined_subject_mask_metadata_cli_emits_json_summary(tmp_path: Path, capsys) -> None:

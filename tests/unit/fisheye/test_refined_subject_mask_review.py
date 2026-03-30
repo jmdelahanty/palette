@@ -62,6 +62,75 @@ def _build_subject_review_root():
     return root
 
 
+def test_compute_single_mask_topology_metrics_handles_components_and_holes() -> None:
+    mask = np.zeros((10, 10), dtype=np.uint8)
+    mask[2:8, 2:8] = 1
+    mask[4:6, 4:6] = 0
+    mask[0, 0] = 1
+
+    component_count, largest_component_fraction, hole_count, hole_area_fraction = mod._compute_single_mask_topology_metrics(mask)
+
+    assert component_count == 2
+    np.testing.assert_allclose(largest_component_fraction, np.float32(32.0 / 33.0))
+    assert hole_count == 1
+    np.testing.assert_allclose(hole_area_fraction, np.float32(4.0 / 33.0))
+
+
+def test_compute_single_mask_sigma_noise_is_higher_for_jagged_mask() -> None:
+    clean = np.zeros((32, 32), dtype=np.uint8)
+    clean[8:24, 8:24] = 1
+
+    jagged = np.zeros((32, 32), dtype=np.uint8)
+    for row in range(8, 24):
+        left = 8 + (row % 2)
+        right = 24 + (row % 2)
+        jagged[row, left:right] = 1
+
+    clean_sigma = mod._compute_single_mask_sigma_noise(clean)
+    jagged_sigma = mod._compute_single_mask_sigma_noise(jagged)
+
+    assert clean_sigma >= 0.0
+    assert jagged_sigma > clean_sigma
+
+
+def test_compute_single_mask_curvature_var_is_higher_for_jagged_mask() -> None:
+    clean = np.zeros((32, 32), dtype=np.uint8)
+    clean[8:24, 8:24] = 1
+
+    jagged = np.zeros((32, 32), dtype=np.uint8)
+    for row in range(8, 24):
+        left = 8 + (row % 2)
+        right = 24 + (row % 2)
+        jagged[row, left:right] = 1
+
+    clean_curvature = mod._compute_single_mask_curvature_var(clean)
+    jagged_curvature = mod._compute_single_mask_curvature_var(jagged)
+
+    assert clean_curvature >= 0.0
+    assert jagged_curvature > clean_curvature
+
+
+def test_compute_single_mask_ipr_and_solidity_capture_shape_roughness() -> None:
+    clean = np.zeros((32, 32), dtype=np.uint8)
+    clean[8:24, 8:24] = 1
+
+    jagged = np.zeros((32, 32), dtype=np.uint8)
+    for row in range(8, 24):
+        left = 8 + (row % 2)
+        right = 24 + (row % 2)
+        jagged[row, left:right] = 1
+
+    clean_ipr = mod._compute_single_mask_ipr(clean)
+    jagged_ipr = mod._compute_single_mask_ipr(jagged)
+    clean_solidity = mod._compute_single_mask_solidity(clean)
+    jagged_solidity = mod._compute_single_mask_solidity(jagged)
+
+    assert clean_ipr > 1.0
+    assert jagged_ipr > clean_ipr
+    np.testing.assert_allclose(clean_solidity, np.float32(1.0))
+    assert jagged_solidity < clean_solidity
+
+
 def test_prepare_refined_subject_run_creates_body_swim_editor_run(monkeypatch) -> None:
     root = _build_subject_review_root()
     monkeypatch.setattr(
@@ -128,10 +197,26 @@ def test_prepare_refined_subject_run_creates_body_swim_editor_run(monkeypatch) -
     metrics = run["metrics"]
     mask_present = np.asarray(metrics["mask_present"][:], dtype=bool)
     area_px = np.asarray(metrics["area_px"][:], dtype=np.float32)
+    centroid_xy = np.asarray(metrics["centroid_xy"][:], dtype=np.float32)
+    centroid_valid = np.asarray(metrics["centroid_valid"][:], dtype=bool)
+    bbox_xyxy = np.asarray(metrics["bbox_xyxy"][:], dtype=np.float32)
+    bbox_valid = np.asarray(metrics["bbox_valid"][:], dtype=bool)
     np.testing.assert_array_equal(mask_present[:, 0], np.asarray([True, True], dtype=bool))
     np.testing.assert_array_equal(mask_present[:, 1], np.asarray([False, False], dtype=bool))
     np.testing.assert_allclose(area_px[:, 0], np.asarray([36.0, 16.0], dtype=np.float32))
     np.testing.assert_allclose(area_px[:, 1], np.asarray([0.0, 0.0], dtype=np.float32))
+    np.testing.assert_allclose(
+        centroid_xy[:, 0, :],
+        np.asarray([[3.5, 3.5], [3.5, 3.5]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(centroid_valid[:, 0], np.asarray([True, True], dtype=bool))
+    np.testing.assert_array_equal(centroid_valid[:, 1], np.asarray([False, False], dtype=bool))
+    np.testing.assert_allclose(
+        bbox_xyxy[:, 0, :],
+        np.asarray([[1.0, 1.0, 6.0, 6.0], [2.0, 2.0, 5.0, 5.0]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(bbox_valid[:, 0], np.asarray([True, True], dtype=bool))
+    np.testing.assert_array_equal(bbox_valid[:, 1], np.asarray([False, False], dtype=bool))
 
     body_reasons = read_reason_labels(run["components/subject_body"])
     swim_reasons = read_reason_labels(run["components/swim_bladder"])
@@ -139,6 +224,57 @@ def test_prepare_refined_subject_run_creates_body_swim_editor_run(monkeypatch) -
     assert swim_reasons is not None
     assert body_reasons.tolist() == ["copied_from_source", "copied_from_source"]
     assert swim_reasons.tolist() == ["clean", "clean"]
+
+    body_group = run["components/subject_body"]
+    assert body_group.attrs["component_schema_id"] == "subject_body_v1"
+    assert body_group.attrs["anatomical_scope"] == "body_core"
+    assert body_group.attrs["pectoral_fin_policy"] == "excluded_or_unresolved"
+
+    body_metrics = run["components/subject_body/metrics"]
+    swim_metrics = run["components/swim_bladder/metrics"]
+    np.testing.assert_array_equal(
+        np.asarray(body_metrics["component_count"][:], dtype=np.int32),
+        np.asarray([1, 1], dtype=np.int32),
+    )
+    np.testing.assert_allclose(
+        np.asarray(body_metrics["largest_component_fraction"][:], dtype=np.float32),
+        np.asarray([1.0, 1.0], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(body_metrics["hole_count"][:], dtype=np.int32),
+        np.asarray([0, 0], dtype=np.int32),
+    )
+    np.testing.assert_allclose(
+        np.asarray(body_metrics["hole_area_fraction"][:], dtype=np.float32),
+        np.asarray([0.0, 0.0], dtype=np.float32),
+    )
+    assert np.all(np.asarray(body_metrics["sigma_noise"][:], dtype=np.float32) > 0.0)
+    assert np.all(np.asarray(body_metrics["curvature_var"][:], dtype=np.float32) > 0.0)
+    assert np.all(np.asarray(body_metrics["ipr"][:], dtype=np.float32) > 1.0)
+    np.testing.assert_allclose(
+        np.asarray(body_metrics["solidity"][:], dtype=np.float32),
+        np.asarray([1.0, 1.0], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(swim_metrics["component_count"][:], dtype=np.int32),
+        np.asarray([0, 0], dtype=np.int32),
+    )
+    np.testing.assert_allclose(
+        np.asarray(swim_metrics["sigma_noise"][:], dtype=np.float32),
+        np.asarray([0.0, 0.0], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        np.asarray(swim_metrics["curvature_var"][:], dtype=np.float32),
+        np.asarray([0.0, 0.0], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        np.asarray(swim_metrics["ipr"][:], dtype=np.float32),
+        np.asarray([0.0, 0.0], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        np.asarray(swim_metrics["solidity"][:], dtype=np.float32),
+        np.asarray([0.0, 0.0], dtype=np.float32),
+    )
 
     provenance = run.attrs["provenance"]
     assert provenance["stage"] == "refine_subject_masks"
@@ -178,8 +314,22 @@ def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> 
 
     mask_present = np.asarray(run["metrics/mask_present"][0], dtype=bool)
     area_px = np.asarray(run["metrics/area_px"][0], dtype=np.float32)
+    centroid_xy = np.asarray(run["metrics/centroid_xy"][0], dtype=np.float32)
+    centroid_valid = np.asarray(run["metrics/centroid_valid"][0], dtype=bool)
+    bbox_xyxy = np.asarray(run["metrics/bbox_xyxy"][0], dtype=np.float32)
+    bbox_valid = np.asarray(run["metrics/bbox_valid"][0], dtype=bool)
     np.testing.assert_array_equal(mask_present, np.asarray([False, True], dtype=bool))
     np.testing.assert_allclose(area_px, np.asarray([0.0, 4.0], dtype=np.float32))
+    np.testing.assert_allclose(
+        centroid_xy,
+        np.asarray([[0.0, 0.0], [4.5, 4.5]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(centroid_valid, np.asarray([False, True], dtype=bool))
+    np.testing.assert_allclose(
+        bbox_xyxy,
+        np.asarray([[0.0, 0.0, 0.0, 0.0], [4.0, 4.0, 5.0, 5.0]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(bbox_valid, np.asarray([False, True], dtype=bool))
 
     body_group = run["components/subject_body"]
     swim_group = run["components/swim_bladder"]
@@ -191,6 +341,73 @@ def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> 
     assert swim_reasons is not None
     assert body_reasons[0] == "manual_correction"
     assert swim_reasons[0] == "manual_correction"
+    np.testing.assert_allclose(
+        np.asarray(body_group["metrics/largest_component_fraction"][0], dtype=np.float32),
+        np.float32(0.0),
+    )
+    np.testing.assert_allclose(
+        np.asarray(body_group["metrics/sigma_noise"][0], dtype=np.float32),
+        np.float32(0.0),
+    )
+    np.testing.assert_allclose(
+        np.asarray(body_group["metrics/curvature_var"][0], dtype=np.float32),
+        np.float32(0.0),
+    )
+    np.testing.assert_allclose(
+        np.asarray(body_group["metrics/ipr"][0], dtype=np.float32),
+        np.float32(0.0),
+    )
+    np.testing.assert_allclose(
+        np.asarray(body_group["metrics/solidity"][0], dtype=np.float32),
+        np.float32(0.0),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(body_group["metrics/component_count"][0], dtype=np.int32),
+        np.int32(0),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(swim_group["metrics/component_count"][0], dtype=np.int32),
+        np.int32(1),
+    )
+    np.testing.assert_allclose(
+        np.asarray(swim_group["metrics/largest_component_fraction"][0], dtype=np.float32),
+        np.float32(1.0),
+    )
+    assert float(np.asarray(swim_group["metrics/sigma_noise"][0], dtype=np.float32)) > 0.0
+    assert float(np.asarray(swim_group["metrics/curvature_var"][0], dtype=np.float32)) == 0.0
+    assert float(np.asarray(swim_group["metrics/ipr"][0], dtype=np.float32)) > 1.0
+    np.testing.assert_allclose(
+        np.asarray(swim_group["metrics/solidity"][0], dtype=np.float32),
+        np.float32(1.0),
+    )
+
+
+def test_format_component_summary_lines_exposes_common_geometry_and_qc() -> None:
+    root = _build_subject_review_root()
+    _source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    body_group = refined.group["components/subject_body"]
+    lines = mod._format_component_summary_lines(
+        refined.group,
+        body_group,
+        comp_idx=0,
+        roi_idx=0,
+    )
+
+    assert any("area_px=36.0" in line for line in lines)
+    assert any("centroid=(3.5, 3.5)" in line for line in lines)
+    assert any("bbox=[1.0,1.0,6.0,6.0]" in line for line in lines)
+    assert any("components=1" in line for line in lines)
+    assert any("sigma_noise=" in line for line in lines)
+    assert any("curvature_var=" in line for line in lines)
+    assert any("ipr=" in line for line in lines)
+    assert any("solidity=" in line for line in lines)
+    assert any("reason=copied_from_source" in line for line in lines)
 
 
 def test_apply_component_review_status_aggregates_run_review_state() -> None:

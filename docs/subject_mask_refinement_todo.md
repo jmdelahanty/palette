@@ -220,6 +220,222 @@ Optional later:
 - `eye_left`
 - `eye_right`
 
+## Recommended Refinement Model
+
+The preferred refinement model is:
+
+- mask-first
+- component-local
+- idempotent
+
+Meaning:
+
+- the canonical editable truth is the refined binary mask for each component
+- save operations should only update the touched component(s)
+- save operations should recompute only the derived metadata for the touched
+  component(s)
+- repeated saves of unchanged pixels should be a no-op
+- unrelated components should remain untouched
+
+This should hold whether refinement is driven from Palette-native review tools,
+Paintera, or a future Crimson editing path.
+
+## Settled Near-Term Design Decisions
+
+These decisions are settled for the first implementation slice unless a later
+contract review deliberately changes them.
+
+### 1. Metrics location split
+
+Use:
+
+- run-level `metrics/` for common cross-component arrays
+- `components/<component>/metrics/` for component-specific QC
+
+Near-term run-level metrics remain:
+
+- `mask_present`
+- `area_px`
+- `centroid_xy`
+- `centroid_valid`
+- `bbox_xyxy`
+- `bbox_valid`
+
+Component-aware QC should live under the component subtree so body, swim
+bladder, and future eye metrics can evolve independently.
+
+The intent is:
+
+- common fixed-shape geometry like centroid and bbox stays at run-level
+  `metrics/`
+- component-specific QC and anatomy-dependent quality signals stay under
+  `components/<component>/metrics/`
+
+### 2. Body-mask scope metadata
+
+`subject_body` should use component-local scope metadata with:
+
+- a versioned component schema id
+- explicit policy attrs
+
+Recommended shape:
+
+- `component_schema_id = "subject_body_vX"`
+- `anatomical_scope = ...`
+- `pectoral_fin_policy = ...`
+
+This should live under the `subject_body` component subtree rather than as a
+run-global convention.
+
+### 3. First-wave refined body QC metrics
+
+The first refined body implementation should recompute only the stable topology
+metrics that do not depend on unresolved fin/skeleton policy:
+
+- `mask_present`
+- `area_px`
+- `component_count`
+- `largest_component_fraction`
+- `hole_count`
+- `hole_area_fraction`
+
+Boundary-roughness and skeleton-branching metrics are intentionally deferred to
+the next phase after the first saveback path is proven.
+
+## Metrics vs Geometry Structure
+
+Recommended structure split:
+
+- keep small fixed-shape QC and summary arrays in `metrics/`
+- keep richer component-specific structured outputs in `geometry/`
+
+Use `metrics/` for things like:
+
+- `mask_present`
+- `area_px`
+- `component_count`
+- `largest_component_fraction`
+- other fixed-shape values that are useful for filtering, QA, and registry
+  projection
+
+Use `geometry/` for things like:
+
+- contours
+- centroids if we want a richer geometry namespace
+- bbox / axis summaries if they grow beyond simple scalar fields
+- splines / centerlines
+- ellipse parameters
+
+Recommended rule of thumb:
+
+- if the value is a small fixed-shape QC summary, prefer `metrics/`
+- if the value is a richer derived shape/structure payload, prefer
+  `components/<component>/geometry/`
+
+This keeps the refined subject-mask stage consistent with the broader design:
+
+- `metrics/` is embedded within the run as the stable QC-summary surface
+- `geometry/` is the extension point for evolving component-specific structure
+
+## Recommended QC Metrics For Refined Masks
+
+For the current single-subject, low-occlusion recordings, body-mask QC should
+prioritize topology and refinement fitness over generic shape heuristics.
+
+Recommended priority order:
+
+### 1. Topology / validity checks first
+
+These are the most interpretable first-pass checks for current body masks:
+
+- `component_count`
+- `largest_component_fraction`
+- `hole_count`
+- `hole_area_fraction`
+- `n_branch_points`
+- `n_endpoints`
+
+Current expected body-mask topology:
+
+- one connected component
+- no holes
+- no skeleton branches
+- two skeleton endpoints
+
+If these fail, that is usually a segmentation/refinement quality problem, not a
+normal biological outcome for the current recordings.
+
+### 2. Boundary roughness next
+
+Once topology is acceptable, the next useful QC class is boundary noise:
+
+- `sigma_noise`
+  - contour-to-smoothed-contour deviation
+- `curvature_var`
+  - curvature variance on a suitably smoothed/resampled contour
+- `ipr`
+  - isoperimetric ratio, as a coarse malformed-mask screen
+- `solidity`
+  - convexity/concavity screen
+
+Recommended policy:
+
+- treat `sigma_noise` as the primary boundary-roughness metric
+- treat `curvature_var`, `ipr`, and `solidity` as supporting signals rather
+  than the first gate
+
+### 3. Temporal consistency later
+
+Temporal consistency metrics are useful, but they belong to a later
+track-aware/sequence-aware QC layer rather than the first core refined-mask
+contract.
+
+Examples:
+
+- `temporal_iou`
+- `centroid_displacement`
+
+These should likely live in a later analysis/QC stage rather than in the
+canonical per-mask refined stage.
+
+## Recommended QC Storage Split
+
+Run-level `metrics/` should hold common fixed-shape arrays that make sense
+across components, such as:
+
+- `mask_present`
+- `area_px`
+- `bbox`
+- `centroid`
+
+Component-aware QC should prefer `components/<component>/metrics/`, for
+example:
+
+- `component_count`
+- `largest_component_fraction`
+- `hole_count`
+- `hole_area_fraction`
+- `sigma_noise`
+- `curvature_var`
+- `ipr`
+- `solidity`
+- `n_branch_points`
+- `n_endpoints`
+
+Richer structured derived outputs should live under
+`components/<component>/geometry/`, for example:
+
+- contours
+- skeleton graphs
+- ellipse parameters
+- splines / centerlines
+
+Recommended policy for flags:
+
+- store raw QC metrics as the canonical truth
+- optionally store derived flags/reasons with a versioned QC policy
+- do not make a single `flagged` boolean the only persisted truth
+
 ## Component-Specific Expectations
 
 ### Subject Body
@@ -239,6 +455,111 @@ This component is expected to feed later:
 - tail segmentation / centerline workflows
 - body-axis calculations
 
+Body-mask scope note:
+
+- some datasets may intentionally include visible pectoral fins inside
+  `subject_body`
+- other datasets may not have enough resolution to capture those fins
+- this should be treated as a resolution/annotation-scope choice, not
+  necessarily a mask defect
+
+Implication:
+
+- raw body-mask topology and raw skeleton branching cannot be treated with one
+  universal rule across all datasets
+- if fins are intentionally included, a raw skeleton may legitimately contain
+  side branches
+- downstream body-axis/centerline derivation should therefore distinguish:
+  - raw shape/skeleton structure
+  - pruned main-path body axis
+
+Recommended metadata direction:
+
+- add a versioned descriptor for `subject_body` rather than relying on implicit
+  conventions
+- do not treat fin inclusion as a new top-level component label by itself
+- keep this descriptor component-local so downstream QC/geometry code can decide
+  what body-mask topology is expected
+
+Likely shape:
+
+- a versioned body/component schema id, for example:
+  - `component_schema_id = "subject_body_v1_core"`
+  - `component_schema_id = "subject_body_v2_with_pectoral_fins"`
+- plus explicit policy attrs when needed, for example:
+  - `anatomical_scope = "core_body"` or `"body_with_pectoral_fins"`
+  - `pectoral_fin_policy = "excluded" | "included_when_visible" | "required_when_visible"`
+
+Reason:
+
+- the same `subject_body` channel should not silently mean different anatomical
+  scope in different datasets
+- body-mask QC thresholds and centerline/skeleton expectations may depend on
+  whether pectoral fins are intended to be part of the mask
+- this metadata should become part of the future body-refinement/body-geometry
+  contract before those workflows get more complex
+
+Recommended default before fin-aware curation is formalized:
+
+- `component_schema_id = "subject_body_v1"`
+- `anatomical_scope = "body_core"`
+- `pectoral_fin_policy = "excluded_or_unresolved"`
+
+Why this default:
+
+- current datasets do not yet have one stable, explicit fin-inclusion rule
+- some masks may visually include fin structure while others may not, depending
+  on resolution and segmentation behavior
+- the default should therefore avoid overclaiming that pectoral fins were
+  intentionally included or intentionally excluded with strong consistency
+
+Recommended later upgrade when fin-aware curation becomes explicit:
+
+- `component_schema_id = "subject_body_v2"`
+- `anatomical_scope = "body_with_pectoral_fins"`
+- `pectoral_fin_policy = "included_when_visible"`
+
+Recommended near-term refinement behavior:
+
+- treat the refined body mask as the canonical editable artifact
+- recompute simple body-local derived outputs on save:
+  - `mask_present`
+  - `area_px`
+  - contour
+  - centroid
+  - bbox
+- defer centerline/spline-specific schema work until real curated masks exist
+
+The first viable body-refinement workflow should not depend on downstream shape
+contracts being complete.
+
+Suggested body-specific QC metrics:
+
+- topology:
+  - `component_count`
+  - `largest_component_fraction`
+  - `hole_count`
+  - `hole_area_fraction`
+- boundary roughness:
+  - `sigma_noise`
+  - `curvature_var`
+  - `ipr`
+  - `solidity`
+- skeleton quality:
+  - `n_branch_points_raw`
+  - `n_endpoints_raw`
+  - `n_branch_points_pruned`
+  - `n_endpoints_pruned`
+
+Recommended interpretation:
+
+- for low-resolution datasets where fins are not expected, raw branching should
+  usually remain near zero
+- for higher-resolution datasets where fins are intentionally included, raw
+  branching may be anatomically expected
+- the stronger long-term QC target is that the pruned main body-axis skeleton is
+  simple and usable, even when the raw body silhouette has side branches
+
 ### Swim Bladder
 
 Likely refined/derived outputs:
@@ -254,9 +575,88 @@ This component may later support:
 - body-axis anchoring
 - more stable anatomy-aware normalization
 
+Recommended near-term refinement behavior:
+
+- keep swim-bladder refinement lightweight and blob-oriented
+- recompute simple component-local outputs on save:
+  - `mask_present`
+  - `area_px`
+  - centroid
+  - bbox
+  - contour
+- defer richer geometry unless a clear downstream need appears
+
+The swim bladder should not be forced into the same derived-geometry shape as
+body or eyes just for schema symmetry.
+
+Suggested swim-bladder-specific QC metrics:
+
+- `component_count`
+- `largest_component_fraction`
+- `hole_count`
+- `sigma_noise`
+- `ipr`
+- `solidity`
+
+Skeleton-branching metrics are likely less central here than for body masks.
+
 ### Eyes
 
 Keep current specialized refined path for now.
+
+Recommended near-term policy:
+
+- continue to treat `refined_eye_masks_runs` as the authoritative refined eye
+  stage
+- do not force eye editing into `refined_subject_masks_runs` until body/swim
+  workflows are stable
+- keep eye-specific derived outputs specialized for now:
+  - left/right assignment
+  - contours
+  - ellipse parameters
+  - ellipse success
+  - eye separation
+
+Longer-term target:
+
+- eye masks may eventually live under
+  `refined_subject_masks_runs/components/eye_left|eye_right`
+- but only once the unified component model can preserve the current eye
+  geometry/review affordances without regression
+
+Current-state note:
+
+- `refined_eye_masks_runs` does not yet follow the exact refined-subject layout
+  proposed here
+- it is an older specialized stage that mixes top-level eye geometry arrays with
+  a `metrics/` subgroup
+- it should be treated as a strong precedent for the kinds of derived outputs we
+  want, but not as the final structural template for generic component
+  refinement
+
+Eye-specific QC should remain specialized for now; body-mask topology or
+skeleton metrics should not be copied over mechanically.
+
+## Review And Saveback Model
+
+Recommended review model:
+
+- one run-level review payload
+- one component-level review payload per component
+- component-scoped `reason_bytes` / `reason`
+
+Recommended saveback behavior:
+
+- editing `subject_body` updates only body mask pixels and body-derived metadata
+- editing `swim_bladder` updates only swim-bladder pixels and metadata
+- future eye editing should update only the touched eye component plus
+  eye-specific derived fields
+
+This keeps refinement aligned with the broader subject-mask design:
+
+- one canonical refined stage for generic component masks
+- component-specific geometry where needed
+- no assumption that every component shares the same derived formulas
 
 Future unification should make eyes a subject-mask component conceptually, but
 the current refined eye artifact is richer than a plain component mask.
