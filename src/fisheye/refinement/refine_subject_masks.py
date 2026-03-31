@@ -517,11 +517,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--num-workers", type=int, help="Optional Dask worker count.")
     parser.add_argument(
-        "--show-run-info",
-        action="store_true",
-        help="Resolve source/target runs, available components, and ROI counts without mutating the archive.",
-    )
-    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Plan the apply, print the resolved target and selections, and exit without mutating the archive.",
@@ -546,7 +541,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         scheduler=args.scheduler,
         num_workers=args.num_workers,
         console=console,
-        dry_run=bool(args.dry_run or args.show_run_info),
+        dry_run=bool(args.dry_run),
     )
     if args.json:
         print(json.dumps(summary, sort_keys=True))

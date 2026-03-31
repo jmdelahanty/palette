@@ -157,6 +157,65 @@ Current inspector behavior:
 This is intended as a Palette-native read-mostly inspection surface. It is not
 a replacement for Paintera's heavier pixel-editing interaction model.
 
+### 6. Recompute refined metadata in batch mode
+
+When a refined run already has edited `masks_roi` data and the goal is to
+refresh derived metadata rather than paint interactively, use the non-UI batch
+apply path.
+
+Dry run:
+
+```bash
+scripts/py -m fisheye.refinement.refine_subject_masks \
+  <archive>.zarr \
+  --source-run traditional_subject_masks_canary_001 \
+  --run-name refined_subject_masks_001 \
+  --component subject_body \
+  --dry-run
+```
+
+Apply:
+
+```bash
+scripts/py -m fisheye.refinement.refine_subject_masks \
+  <archive>.zarr \
+  --source-run traditional_subject_masks_canary_001 \
+  --run-name refined_subject_masks_001 \
+  --component subject_body \
+  --scheduler processes
+```
+
+Current batch behavior:
+
+- `--dry-run` prints the resolved source run, target refined run, selected
+  components, ROI count, chunk count, and scheduler without mutating the
+  archive.
+- `--run-name` always targets one explicit
+  `refined_subject_masks_runs/<run>` entry. If that run already exists, the
+  tool updates its derived metadata in place for the selected components/ROI
+  rows.
+- the batch apply path recomputes metrics, QC, reasons, `updated_at_utc`, and
+  `dask_*` attrs from the current `masks_roi` contents
+- the inspector remains the recommended read-mostly verification surface after
+  batch apply
+
+Canary validation on 2026-03-31:
+
+- archive:
+  - `/nvme1/recordings/2026-01-28T22-15-03Z_arena_1_DefaultScreen/zarr/2026-01-28T22-15-03Z_arena_1_DefaultScreen_training.zarr`
+- source run:
+  - `subject_masks_canary_sam_points_body_eyes_001`
+- refined run:
+  - `refined_subject_masks_canary_sam_points_body_001`
+- component:
+  - `subject_body`
+- full apply result:
+  - `changed_roi_count = 0`
+  - `noop_roi_count = 227`
+
+That result means the stored `subject_body` metadata in the canary refined run
+was already internally consistent with its current `masks_roi` state.
+
 ## Eye-Union Note
 
 `subject_mask_tuner --component eyes_union` is a separate path.

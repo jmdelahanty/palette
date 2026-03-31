@@ -6,6 +6,35 @@ interactive editor into a Dask-bound UI loop.
 
 Date anchored: 2026-03-30.
 
+## Rollout Status
+
+- Phase 1 is in place:
+  - the ROI-local save path now shares one canonical apply kernel for single-ROI
+    and multi-ROI updates
+- Phase 2 is in place:
+  - `src/fisheye/refinement/refine_subject_masks.py` now provides a
+    scheduler-aware non-UI apply entrypoint
+  - the entrypoint supports explicit `--run-name`, component/ROI scoping,
+    scheduler options, and `--dry-run` plan output
+  - the pipeline now exposes this as the `refined_subject_masks` stage
+
+Canary validation on 2026-03-31:
+
+- archive:
+  - `/nvme1/recordings/2026-01-28T22-15-03Z_arena_1_DefaultScreen/zarr/2026-01-28T22-15-03Z_arena_1_DefaultScreen_training.zarr`
+- source run:
+  - `subject_masks_canary_sam_points_body_eyes_001`
+- refined run:
+  - `refined_subject_masks_canary_sam_points_body_001`
+- component:
+  - `subject_body`
+- full batch apply result:
+  - `changed_roi_count = 0`
+  - `noop_roi_count = 227`
+
+So the current batch engine appears safe on the canary refined run, and the
+existing body-only refined metadata was already consistent with the stored masks.
+
 ## Current State
 
 Today the refined subject-mask path is effectively serial:

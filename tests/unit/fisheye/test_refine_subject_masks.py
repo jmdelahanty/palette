@@ -212,7 +212,7 @@ def test_refine_subject_masks_cli_dry_run_supports_aliases_and_ranges(tmp_path: 
     assert "refined_subject_masks_runs" not in root
 
 
-def test_refine_subject_masks_cli_show_run_info_reports_existing_target(tmp_path: Path, capsys) -> None:
+def test_refine_subject_masks_cli_dry_run_reports_existing_target(tmp_path: Path, capsys) -> None:
     zarr_path = tmp_path / "subject_review.zarr"
     _build_subject_review_archive(zarr_path)
 
@@ -230,7 +230,7 @@ def test_refine_subject_masks_cli_show_run_info_reports_existing_target(tmp_path
             str(zarr_path),
             "--run-name",
             "refined_subject_masks_001",
-            "--show-run-info",
+            "--dry-run",
             "--json",
         ]
     )
