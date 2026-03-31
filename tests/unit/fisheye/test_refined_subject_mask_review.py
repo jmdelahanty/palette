@@ -382,6 +382,67 @@ def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> 
     )
 
 
+def test_apply_refined_subject_roi_rows_updates_only_requested_component() -> None:
+    root = _build_subject_review_root()
+    source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    edited_batch = np.stack(
+        [
+            np.asarray(refined.group["masks_roi"][0], dtype=np.uint8),
+            np.asarray(refined.group["masks_roi"][1], dtype=np.uint8),
+        ],
+        axis=0,
+    )
+    edited_batch[0, 0, 1:7, 1:7] = 0
+    edited_batch[0, 1, 4:6, 4:6] = 1
+    edited_batch[1, 1, 3:5, 3:5] = 1
+
+    normalized_rows = mod._apply_refined_subject_roi_rows(
+        source=source,
+        refined=refined,
+        roi_indices=[0, 1],
+        edited_masks_batch=edited_batch,
+        component_names=("subject_body",),
+    )
+
+    assert normalized_rows == (0, 1)
+
+    run = refined.group
+    saved = np.asarray(run["masks_roi"][:], dtype=np.uint8)
+    np.testing.assert_array_equal(saved[0, 0], np.zeros((8, 8), dtype=np.uint8))
+    np.testing.assert_array_equal(saved[1, 0], np.asarray(source.masks_roi[1, 0], dtype=np.uint8))
+    np.testing.assert_array_equal(saved[:, 1], np.zeros((2, 8, 8), dtype=np.uint8))
+
+    np.testing.assert_array_equal(
+        np.asarray(run["edit_applied"][:], dtype=bool),
+        np.asarray(
+            [
+                [True, False],
+                [False, False],
+            ],
+            dtype=bool,
+        ),
+    )
+
+    body_group = run["components/subject_body"]
+    swim_group = run["components/swim_bladder"]
+    body_reasons = read_reason_labels(body_group)
+    swim_reasons = read_reason_labels(swim_group)
+    assert body_reasons is not None
+    assert swim_reasons is not None
+    assert body_reasons.tolist() == ["manual_correction", "copied_from_source"]
+    assert swim_reasons.tolist() == ["clean", "clean"]
+    np.testing.assert_allclose(
+        np.asarray(swim_group["area_px"][:], dtype=np.float32),
+        np.asarray([0.0, 0.0], dtype=np.float32),
+    )
+
+
 def test_format_component_summary_lines_exposes_common_geometry_and_qc() -> None:
     root = _build_subject_review_root()
     _source, refined = mod.prepare_refined_subject_run(

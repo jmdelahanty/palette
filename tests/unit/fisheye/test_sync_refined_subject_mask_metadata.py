@@ -143,6 +143,45 @@ def test_sync_refined_subject_mask_metadata_updates_touched_component(tmp_path: 
     assert float(np.asarray(body_group["metrics/solidity"][0], dtype=np.float32)) == 0.0
 
 
+def test_sync_refined_subject_mask_metadata_batches_rows_and_tracks_noops(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "subject_review.zarr"
+    _build_subject_review_archive(zarr_path)
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    _source, refined = review_mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+
+    edited0 = np.asarray(refined.group["masks_roi"][0], dtype=np.uint8)
+    edited0[0, 1:7, 1:7] = 0
+    refined.group["masks_roi"][0] = edited0
+
+    edited1 = np.asarray(refined.group["masks_roi"][1], dtype=np.uint8)
+    refined.group["masks_roi"][1] = edited1
+
+    summary = review_mod.sync_refined_subject_mask_metadata(
+        zarr_path,
+        refined_run="refined_subject_masks_001",
+        component_name="subject_body",
+        roi_indices=[0, 1],
+    )
+
+    assert summary["status"] == "updated"
+    assert summary["roi_indices"] == [0, 1]
+    assert summary["roi_count"] == 2
+    assert summary["changed_roi_count"] == 1
+    assert summary["noop_roi_count"] == 1
+
+    run = root["refined_subject_masks_runs"]["refined_subject_masks_001"]
+    body_group = run["components/subject_body"]
+    body_reasons = read_reason_labels(body_group)
+    assert body_reasons is not None
+    assert body_reasons.tolist() == ["manual_correction", "copied_from_source"]
+
+
 def test_sync_refined_subject_mask_metadata_cli_emits_json_summary(tmp_path: Path, capsys) -> None:
     zarr_path = tmp_path / "subject_review.zarr"
     _build_subject_review_archive(zarr_path)

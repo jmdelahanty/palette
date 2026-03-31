@@ -850,6 +850,30 @@ def prepare_refined_subject_run(
     return source, refined
 
 
+def _open_existing_refined_subject_run(
+    root: zarr.Group,
+    refined_run: str,
+) -> RefinedSubjectMaskRun:
+    refined_parent = root.get("refined_subject_masks_runs")
+    if refined_parent is None or str(refined_run) not in refined_parent:
+        raise RuntimeError(f"refined_subject_masks_runs/{refined_run} not found.")
+
+    run_group = refined_parent[str(refined_run)]
+    labels_raw = run_group.attrs.get("mask_labels")
+    if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
+        raise RuntimeError(f"refined_subject_masks_runs/{refined_run} missing usable mask_labels attr.")
+    if "masks_roi" not in run_group:
+        raise RuntimeError(f"refined_subject_masks_runs/{refined_run} missing masks_roi.")
+    component_names = tuple(str(item) for item in labels_raw)
+    return RefinedSubjectMaskRun(
+        run_name=str(refined_run),
+        parent=refined_parent,
+        group=run_group,
+        component_names=component_names,
+        component_to_index={name: idx for idx, name in enumerate(component_names)},
+    )
+
+
 def _aggregate_run_state(component_reviews: Mapping[str, Mapping[str, object]]) -> str:
     states = [str(payload.get("state") or "pending") for payload in component_reviews.values()]
     if not states:
@@ -900,14 +924,138 @@ def apply_component_review_status(
     return component_reviews[str(component_name)], run_payload
 
 
-def save_refined_subject_roi(
+def _normalize_refined_component_names(
+    refined: RefinedSubjectMaskRun,
+    component_names: Optional[Sequence[str]],
+) -> tuple[str, ...]:
+    if component_names is None:
+        return tuple(refined.component_names)
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_name in component_names:
+        component_name = _normalize_component_name(raw_name)
+        if component_name is None:
+            continue
+        if component_name not in refined.component_to_index:
+            raise ValueError(
+                f"Component '{component_name}' not available in refined_subject_masks_runs/{refined.run_name}."
+            )
+        if component_name in seen:
+            continue
+        seen.add(component_name)
+        normalized.append(component_name)
+
+    if not normalized:
+        raise ValueError("At least one refined subject-mask component is required.")
+    return tuple(normalized)
+
+
+def _normalize_refined_edited_masks_batch(
+    refined: RefinedSubjectMaskRun,
+    roi_indices: Sequence[int],
+    edited_masks_batch: np.ndarray,
+) -> np.ndarray:
+    expected_row_shape = tuple(int(dim) for dim in refined.group["masks_roi"].shape[1:])
+    edited = np.asarray(edited_masks_batch, dtype=np.uint8)
+    if edited.shape == expected_row_shape:
+        if len(roi_indices) != 1:
+            raise ValueError(
+                "edited_masks_batch must include one mask stack per ROI row when multiple roi_indices are provided."
+            )
+        edited = edited[np.newaxis, ...]
+
+    expected_batch_shape = (len(roi_indices),) + expected_row_shape
+    if edited.shape != expected_batch_shape:
+        raise ValueError(
+            f"edited_masks_batch shape mismatch: expected {expected_batch_shape}, got {tuple(edited.shape)}"
+        )
+    return edited
+
+
+def _compute_refined_subject_component_apply_rows(
     *,
     source: SourceSubjectMaskRun,
     refined: RefinedSubjectMaskRun,
-    roi_idx: int,
-    edited_masks: np.ndarray,
+    component_name: str,
+    roi_indices: Sequence[int],
+    edited_masks_batch: np.ndarray,
+) -> dict[str, np.ndarray]:
+    comp_idx = int(refined.component_to_index[component_name])
+    row_count = int(len(roi_indices))
+    mask_present = np.zeros((row_count,), dtype=bool)
+    area_px = np.zeros((row_count,), dtype=np.float32)
+    edit_applied = np.zeros((row_count,), dtype=bool)
+    centroid_xy = np.zeros((row_count, 2), dtype=np.float32)
+    centroid_valid = np.zeros((row_count,), dtype=bool)
+    bbox_xyxy = np.zeros((row_count, 4), dtype=np.float32)
+    bbox_valid = np.zeros((row_count,), dtype=bool)
+    component_count = np.zeros((row_count,), dtype=np.int32)
+    largest_component_fraction = np.zeros((row_count,), dtype=np.float32)
+    hole_count = np.zeros((row_count,), dtype=np.int32)
+    hole_area_fraction = np.zeros((row_count,), dtype=np.float32)
+    sigma_noise = np.zeros((row_count,), dtype=np.float32)
+    curvature_var = np.zeros((row_count,), dtype=np.float32)
+    ipr = np.zeros((row_count,), dtype=np.float32)
+    solidity = np.zeros((row_count,), dtype=np.float32)
+    reason_labels = np.empty((row_count,), dtype=object)
+
+    for row_offset, roi_idx in enumerate(roi_indices):
+        current_mask = np.asarray(edited_masks_batch[row_offset, comp_idx], dtype=np.uint8)
+        source_mask = _source_mask_for_component(source, component_name, int(roi_idx))
+        area = float(np.count_nonzero(current_mask))
+        present = bool(area > 0.0)
+        edited = not np.array_equal(current_mask, source_mask)
+        centroid, centroid_is_valid, bbox, bbox_is_valid = _compute_single_mask_geometry_metrics(current_mask)
+        comp_count, largest_frac, holes, hole_frac = _compute_single_mask_topology_metrics(current_mask)
+
+        mask_present[row_offset] = present
+        area_px[row_offset] = np.float32(area)
+        edit_applied[row_offset] = edited
+        centroid_xy[row_offset] = centroid
+        centroid_valid[row_offset] = centroid_is_valid
+        bbox_xyxy[row_offset] = bbox
+        bbox_valid[row_offset] = bbox_is_valid
+        component_count[row_offset] = np.int32(comp_count)
+        largest_component_fraction[row_offset] = np.float32(largest_frac)
+        hole_count[row_offset] = np.int32(holes)
+        hole_area_fraction[row_offset] = np.float32(hole_frac)
+        sigma_noise[row_offset] = np.float32(_compute_single_mask_sigma_noise(current_mask))
+        curvature_var[row_offset] = np.float32(_compute_single_mask_curvature_var(current_mask))
+        ipr[row_offset] = np.float32(_compute_single_mask_ipr(current_mask))
+        solidity[row_offset] = np.float32(_compute_single_mask_solidity(current_mask))
+        reason_labels[row_offset] = _default_reason_label(source_mask, current_mask, edited)
+
+    return {
+        "mask_present": mask_present,
+        "area_px": area_px,
+        "edit_applied": edit_applied,
+        "centroid_xy": centroid_xy,
+        "centroid_valid": centroid_valid,
+        "bbox_xyxy": bbox_xyxy,
+        "bbox_valid": bbox_valid,
+        "component_count": component_count,
+        "largest_component_fraction": largest_component_fraction,
+        "hole_count": hole_count,
+        "hole_area_fraction": hole_area_fraction,
+        "sigma_noise": sigma_noise,
+        "curvature_var": curvature_var,
+        "ipr": ipr,
+        "solidity": solidity,
+        "reason_labels": reason_labels,
+    }
+
+
+def _write_refined_subject_component_apply_rows(
+    *,
+    refined: RefinedSubjectMaskRun,
+    component_name: str,
+    roi_indices: Sequence[int],
+    edited_masks_batch: np.ndarray,
+    component_updates: Mapping[str, np.ndarray],
 ) -> None:
     run_group = refined.group
+    comp_idx = int(refined.component_to_index[component_name])
     masks_arr = run_group["masks_roi"]
     metrics = run_group["metrics"]
     edit_arr = run_group["edit_applied"]
@@ -917,51 +1065,97 @@ def save_refined_subject_roi(
     metrics_centroid_valid = metrics["centroid_valid"]
     metrics_bbox_xyxy = metrics["bbox_xyxy"]
     metrics_bbox_valid = metrics["bbox_valid"]
-    components_parent = run_group.require_group("components")
+    component_group = run_group.require_group("components").require_group(component_name)
+    component_metrics = component_group.require_group("metrics")
+    reason_labels = _load_or_init_reason_labels(component_group, int(run_group["masks_roi"].shape[0]))
 
-    edited_masks = np.asarray(edited_masks, dtype=np.uint8)
-    if edited_masks.shape != tuple(masks_arr.shape[1:]):
-        raise ValueError(
-            f"edited_masks shape mismatch: expected {tuple(masks_arr.shape[1:])}, got {tuple(edited_masks.shape)}"
+    for row_offset, roi_idx in enumerate(roi_indices):
+        masks_arr[int(roi_idx), comp_idx] = np.asarray(edited_masks_batch[row_offset, comp_idx], dtype=np.uint8)
+        edit_arr[int(roi_idx), comp_idx] = bool(component_updates["edit_applied"][row_offset])
+        metrics_mask_present[int(roi_idx), comp_idx] = bool(component_updates["mask_present"][row_offset])
+        metrics_area_px[int(roi_idx), comp_idx] = np.float32(component_updates["area_px"][row_offset])
+        metrics_centroid_xy[int(roi_idx), comp_idx] = np.asarray(
+            component_updates["centroid_xy"][row_offset],
+            dtype=np.float32,
         )
+        metrics_centroid_valid[int(roi_idx), comp_idx] = bool(component_updates["centroid_valid"][row_offset])
+        metrics_bbox_xyxy[int(roi_idx), comp_idx] = np.asarray(
+            component_updates["bbox_xyxy"][row_offset],
+            dtype=np.float32,
+        )
+        metrics_bbox_valid[int(roi_idx), comp_idx] = bool(component_updates["bbox_valid"][row_offset])
 
-    masks_arr[int(roi_idx)] = edited_masks
-    for comp_idx, component_name in enumerate(refined.component_names):
-        current_mask = np.asarray(edited_masks[comp_idx], dtype=np.uint8)
-        source_mask = _source_mask_for_component(source, component_name, roi_idx)
-        area = float(np.count_nonzero(current_mask))
-        present = bool(area > 0)
-        edited = not np.array_equal(current_mask, source_mask)
-        centroid_xy, centroid_valid, bbox_xyxy, bbox_valid = _compute_single_mask_geometry_metrics(current_mask)
-
-        edit_arr[int(roi_idx), comp_idx] = edited
-        metrics_mask_present[int(roi_idx), comp_idx] = present
-        metrics_area_px[int(roi_idx), comp_idx] = area
-        metrics_centroid_xy[int(roi_idx), comp_idx] = centroid_xy
-        metrics_centroid_valid[int(roi_idx), comp_idx] = centroid_valid
-        metrics_bbox_xyxy[int(roi_idx), comp_idx] = bbox_xyxy
-        metrics_bbox_valid[int(roi_idx), comp_idx] = bbox_valid
-
-        component_group = components_parent.require_group(component_name)
-        component_group["mask_present"][int(roi_idx)] = present
-        component_group["area_px"][int(roi_idx)] = area
-        component_group["edit_applied"][int(roi_idx)] = edited
-        component_metrics = component_group.require_group("metrics")
-        comp_count, largest_frac, holes, hole_frac = _compute_single_mask_topology_metrics(current_mask)
-        component_metrics["component_count"][int(roi_idx)] = np.int32(comp_count)
-        component_metrics["largest_component_fraction"][int(roi_idx)] = np.float32(largest_frac)
-        component_metrics["hole_count"][int(roi_idx)] = np.int32(holes)
-        component_metrics["hole_area_fraction"][int(roi_idx)] = np.float32(hole_frac)
-        component_metrics["sigma_noise"][int(roi_idx)] = np.float32(_compute_single_mask_sigma_noise(current_mask))
-        component_metrics["curvature_var"][int(roi_idx)] = np.float32(_compute_single_mask_curvature_var(current_mask))
-        component_metrics["ipr"][int(roi_idx)] = np.float32(_compute_single_mask_ipr(current_mask))
-        component_metrics["solidity"][int(roi_idx)] = np.float32(_compute_single_mask_solidity(current_mask))
-        reason_labels = _load_or_init_reason_labels(component_group, int(masks_arr.shape[0]))
-        reason_labels[int(roi_idx)] = _default_reason_label(source_mask, current_mask, edited)
+        component_group["mask_present"][int(roi_idx)] = bool(component_updates["mask_present"][row_offset])
+        component_group["area_px"][int(roi_idx)] = np.float32(component_updates["area_px"][row_offset])
+        component_group["edit_applied"][int(roi_idx)] = bool(component_updates["edit_applied"][row_offset])
+        component_metrics["component_count"][int(roi_idx)] = np.int32(component_updates["component_count"][row_offset])
+        component_metrics["largest_component_fraction"][int(roi_idx)] = np.float32(
+            component_updates["largest_component_fraction"][row_offset]
+        )
+        component_metrics["hole_count"][int(roi_idx)] = np.int32(component_updates["hole_count"][row_offset])
+        component_metrics["hole_area_fraction"][int(roi_idx)] = np.float32(
+            component_updates["hole_area_fraction"][row_offset]
+        )
+        component_metrics["sigma_noise"][int(roi_idx)] = np.float32(component_updates["sigma_noise"][row_offset])
+        component_metrics["curvature_var"][int(roi_idx)] = np.float32(component_updates["curvature_var"][row_offset])
+        component_metrics["ipr"][int(roi_idx)] = np.float32(component_updates["ipr"][row_offset])
+        component_metrics["solidity"][int(roi_idx)] = np.float32(component_updates["solidity"][row_offset])
+        reason_labels[int(roi_idx)] = str(component_updates["reason_labels"][row_offset])
         _write_reason_label_row(component_group, reason_labels, int(roi_idx))
 
-    run_group.attrs["updated_at_utc"] = _utc_now()
+
+def _finalize_refined_subject_apply(refined: RefinedSubjectMaskRun) -> None:
+    refined.group.attrs["updated_at_utc"] = _utc_now()
     refined.parent.attrs["latest"] = refined.run_name
+
+
+def _apply_refined_subject_roi_rows(
+    *,
+    source: SourceSubjectMaskRun,
+    refined: RefinedSubjectMaskRun,
+    roi_indices: Sequence[int],
+    edited_masks_batch: np.ndarray,
+    component_names: Optional[Sequence[str]] = None,
+) -> tuple[int, ...]:
+    run_group = refined.group
+    total_rois = int(run_group["masks_roi"].shape[0])
+    normalized_rows = tuple(_normalize_roi_indices(roi_indices, total_rois))
+    normalized_components = _normalize_refined_component_names(refined, component_names)
+    edited_batch = _normalize_refined_edited_masks_batch(refined, normalized_rows, edited_masks_batch)
+
+    for component_name in normalized_components:
+        component_updates = _compute_refined_subject_component_apply_rows(
+            source=source,
+            refined=refined,
+            component_name=component_name,
+            roi_indices=normalized_rows,
+            edited_masks_batch=edited_batch,
+        )
+        _write_refined_subject_component_apply_rows(
+            refined=refined,
+            component_name=component_name,
+            roi_indices=normalized_rows,
+            edited_masks_batch=edited_batch,
+            component_updates=component_updates,
+        )
+
+    _finalize_refined_subject_apply(refined)
+    return normalized_rows
+
+
+def save_refined_subject_roi(
+    *,
+    source: SourceSubjectMaskRun,
+    refined: RefinedSubjectMaskRun,
+    roi_idx: int,
+    edited_masks: np.ndarray,
+) -> None:
+    _apply_refined_subject_roi_rows(
+        source=source,
+        refined=refined,
+        roi_indices=[int(roi_idx)],
+        edited_masks_batch=edited_masks,
+    )
 
 
 def _normalize_roi_indices(roi_indices: Sequence[int], total_rois: int) -> list[int]:
@@ -1140,18 +1334,27 @@ def sync_refined_subject_mask_metadata(
     comp_idx = int(refined.component_to_index[normalized_component])
     component_group = run_group.require_group("components").require_group(normalized_component)
 
+    before_states = {
+        int(roi_idx): _component_sync_state(run_group, component_group, comp_idx=comp_idx, roi_idx=int(roi_idx))
+        for roi_idx in normalized_rows
+    }
+    edited_masks_batch = np.stack(
+        [np.asarray(run_group["masks_roi"][int(roi_idx)], dtype=np.uint8) for roi_idx in normalized_rows],
+        axis=0,
+    )
+    _apply_refined_subject_roi_rows(
+        source=source,
+        refined=refined,
+        roi_indices=normalized_rows,
+        edited_masks_batch=edited_masks_batch,
+        component_names=(normalized_component,),
+    )
+
     changed_count = 0
     noop_count = 0
     for roi_idx in normalized_rows:
-        before = _component_sync_state(run_group, component_group, comp_idx=comp_idx, roi_idx=roi_idx)
-        edited_masks = np.asarray(run_group["masks_roi"][int(roi_idx)], dtype=np.uint8)
-        save_refined_subject_roi(
-            source=source,
-            refined=refined,
-            roi_idx=int(roi_idx),
-            edited_masks=edited_masks,
-        )
-        after = _component_sync_state(run_group, component_group, comp_idx=comp_idx, roi_idx=roi_idx)
+        before = before_states[int(roi_idx)]
+        after = _component_sync_state(run_group, component_group, comp_idx=comp_idx, roi_idx=int(roi_idx))
         if before == after:
             noop_count += 1
         else:
