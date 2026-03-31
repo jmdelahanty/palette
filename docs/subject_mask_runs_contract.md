@@ -103,6 +103,10 @@ subject_mask_runs/
     metrics/
       prob_max                 (N, C) float32
       mask_present             (N, C) bool
+    components/
+      <component_name>/
+        provenance/            # attrs-only subgroup describing component origin
+        metrics/               # optional component-local extension point
 ```
 
 ## `subject_mask_runs/<latest>`
@@ -290,6 +294,67 @@ Operational note:
 - or intentionally component-scoped runs in the future
 
 In both cases, readers must treat them as unavailable rather than absent.
+
+## Component-Scoped Provenance
+
+Run-level `source_*_run` attrs remain useful coarse lineage pointers, but they
+are not sufficient once one `subject_mask_runs/<run>` entry may contain
+components materialized from different upstream stages or channels.
+
+Canonical home:
+
+- `components/<component_name>/provenance/`
+
+The provenance subgroup should be attrs-only in v1 unless a later contract
+needs per-row component lineage.
+
+Writers should persist component-scoped provenance for every semantically
+available component. This becomes effectively required for:
+
+- mixed-source runs
+- projection/backfill runs
+- future unified runs that combine components from different model families
+
+Required provenance attrs for an available component:
+
+- `source_stage`
+  - source stage family such as `subject_mask_runs`, `eye_masks_runs`,
+    `refined_eye_masks_runs`
+- `source_run`
+  - source run id within that stage family
+- `source_method`
+  - upstream run `method` used to generate the component payload
+- `source_channels`
+  - list of source channel names used to generate this component
+
+Recommended provenance attrs:
+
+- `source_label_schema_id`
+  - the source run's `label_schema_id`
+- `projection_mode`
+  - required when this component is projected or collapsed from another schema
+- `source_created_at_utc`
+  - source run creation timestamp when available
+
+Semantics:
+
+- `source_channels` is a list because some projections consume multiple source
+  channels
+- for single-channel lineage, writers should still use a one-element list
+- for placeholder components where `available_channels[c] == false`, the
+  provenance subgroup may be omitted
+
+Examples:
+
+- A SAM3 body channel should typically record:
+  - `source_stage = "subject_mask_runs"`
+  - `source_run = "sam_subject_masks_..."`
+  - `source_method = "sam_body_mask_inference"`
+  - `source_channels = ["subject_body"]`
+- An `eyes_union` compatibility projection from left/right eyes should record:
+  - `source_stage = "refined_eye_masks_runs"`
+  - `source_channels = ["eye_left", "eye_right"]`
+  - `projection_mode = "eyes_union_from_lr"`
 
 ## Legacy projection/backfill policy
 

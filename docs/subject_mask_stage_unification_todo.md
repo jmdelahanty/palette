@@ -370,17 +370,17 @@ Exact naming can change, but the structure should be component-scoped.
 
 ### 1. Update the contracts/design docs
 
-- [ ] Update `subject_mask_runs_contract.md` to describe component subgroups as
+- [x] Update `subject_mask_runs_contract.md` to describe component subgroups as
       the preferred long-term metadata home.
-- [ ] Update `refined_subject_masks_runs_contract.md` to describe eye geometry
+- [x] Update `refined_subject_masks_runs_contract.md` to describe eye geometry
       and review metadata under `components/eye_left|eye_right`.
 - [ ] Update docs that still describe `refined_eye_masks_runs` as the canonical
       future refined eye stage for new runs.
 
 ### 2. Define component-scoped provenance attrs
 
-- [ ] Define the canonical component provenance payload for raw runs.
-- [ ] Define the canonical component provenance payload for refined runs.
+- [x] Define the canonical component provenance payload for raw runs.
+- [x] Define the canonical component provenance payload for refined runs.
 - [ ] Decide how inherited-but-unchanged components are recorded when a new
       snapshot changes only one component.
 

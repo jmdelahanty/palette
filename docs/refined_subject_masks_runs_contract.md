@@ -109,6 +109,7 @@ refined_subject_masks_runs/
       bbox_valid                            (N, C) bool         # recommended
     components/
       <component_name>/
+        provenance/                        # attrs-only subgroup for component lineage/update provenance
         reason_bytes                        (N, width) uint8     # recommended
         reason                              (N,) string          # optional mirror
         mask_present                        (N,) bool            # recommended
@@ -270,6 +271,63 @@ Example:
 }
 ```
 
+## Component-Scoped Provenance
+
+Run-level `source_subject_mask_run` remains required as the coarse lineage
+pointer for the refined run as a whole, but it is not sufficient once one
+refined run may contain components seeded from different upstream artifacts.
+
+Canonical home:
+
+- `components/<component_name>/provenance/`
+
+The provenance subgroup should be attrs-only in v1 unless a later contract
+needs per-row lineage.
+
+Required provenance attrs for an available component:
+
+- `source_stage`
+  - stage family that seeded the component, for example `subject_mask_runs`,
+    `refined_subject_masks_runs`, or `refined_eye_masks_runs`
+- `source_run`
+  - source run id within that stage family
+- `source_method`
+  - upstream run `method` used to seed or replace this component
+- `source_channels`
+  - list of source channel names used to seed this component
+
+Recommended provenance attrs:
+
+- `source_label_schema_id`
+  - the source run's `label_schema_id`
+- `last_update_stage`
+  - stage/tool that most recently changed this component in the current refined
+    run
+- `last_update_mode`
+  - recommended values include `create`, `interactive`, `batch`, `projection`
+- `last_update_method`
+  - method/tool label for the last change
+- `updated_at_utc`
+  - component-local last update timestamp
+
+Semantics:
+
+- `source_*` identifies the upstream artifact that seeded or replaced the
+  component in this refined run
+- `source_label_schema_id` is the source artifact's `label_schema_id`
+- `source_*` does not imply the current component is byte-identical to that
+  source after later edits
+- `last_update_*` records the most recent operation that changed this component
+  inside the current refined run
+- if a component is copied through during refined-run creation and never edited,
+  writers may record `last_update_mode = "create"`
+
+This distinction is required for future mixed-source refined runs such as:
+
+- `subject_body` seeded from a SAM subject-mask run
+- `eye_left` and `eye_right` seeded from a UNet/refined-eye workflow
+- `swim_bladder` later added from a different raw or refined source
+
 ## Component Subgroups
 
 `components/<component_name>/` is the standard extension point for
@@ -299,6 +357,8 @@ Optional arrays:
 
 Optional subgroups:
 
+- `provenance/`
+  - component-scoped lineage and last-update attrs
 - `metrics/`
   - component-local fixed-shape QC summary arrays
 
@@ -360,6 +420,18 @@ Expected future examples:
 - centroid
 - ellipse/blob summaries
 
+### `eye_left` / `eye_right`
+
+- review metadata remains component-local under
+  `components/eye_left|eye_right/`
+- eye-specific geometry should live under
+  `components/eye_left|eye_right/geometry/`
+- likely migrated examples:
+  - `ellipse_params`
+  - `ellipse_success`
+  - `eye_separation_peer`
+  - contour tables
+
 Geometry policy:
 
 - refined component masks remain the canonical source artifact
@@ -419,6 +491,10 @@ without inventing separate stage families.
 If eye channels appear later inside `refined_subject_masks_runs`, that should
 be treated as an aligned component view, not an immediate replacement for
 `refined_eye_masks_runs`.
+
+If such eye channels are seeded from `refined_eye_masks_runs`, component
+provenance should point to that true source stage/run rather than collapsing
+everything to the run-level `source_subject_mask_run`.
 
 ## Registry Implications
 
