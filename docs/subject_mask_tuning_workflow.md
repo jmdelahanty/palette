@@ -135,6 +135,28 @@ scripts/py -m fisheye.tune.refined_subject_mask_review \
 This creates or reopens a `refined_subject_masks_runs/<run>` entry and lets the
 operator paint or erase masks per ROI.
 
+### 5. Inspect raw vs refined subject masks
+
+```bash
+scripts/py -m fisheye.visualization.subject_mask_inspector \
+  <archive>.zarr \
+  --subject-run traditional_subject_masks_canary_001 \
+  --refined-run refined_subject_masks_001 \
+  --component subject_body
+```
+
+Current inspector behavior:
+
+- opens the crop ROI alongside raw and refined subject-mask overlays
+- shows run/method/review metadata for the active component
+- shows common geometry and refined component QC summaries
+- supports ROI/component navigation without entering edit mode
+- supports jumping to the next flagged ROI for the active component based on
+  current refined QC thresholds
+
+This is intended as a Palette-native read-mostly inspection surface. It is not
+a replacement for Paintera's heavier pixel-editing interaction model.
+
 ## Eye-Union Note
 
 `subject_mask_tuner --component eyes_union` is a separate path.

@@ -685,6 +685,50 @@ Recommended distinction:
 - refined eye-mask review:
   remains specialized because of left/right and ellipse geometry
 
+### Palette Inspector vs Paintera
+
+We should not make Paintera the primary conceptual UI for subject-mask
+inspection just because it can edit pixels.
+
+Recommended role split:
+
+- Palette-native subject-mask inspector:
+  - browse subject-mask and refined subject-mask runs
+  - overlay masks on ROI crops
+  - show lineage, method, component availability, and review state
+  - show component QC and provenance summaries
+  - filter or jump to suspicious ROIs
+  - compare raw masks, refined masks, and prompt/context overlays
+- Palette-native lightweight review/editor:
+  - keep the current focused OpenCV-style paint/erase workflow for refined
+    subject masks
+  - remain optimized for small ROI-local cleanup rather than generic dense
+    labeling
+- Paintera:
+  - remain the heavy-duty pixel editor when that interaction model is useful
+  - not be treated as the canonical inspection surface for subject-mask
+    provenance or QC
+
+Rationale:
+
+- Paintera is useful for pixel editing, but it is not naturally pipeline-aware.
+- Palette is the layer that understands:
+  - lineage such as `source_subject_mask_run`, `source_keypoints_run`, and
+    crop provenance
+  - component availability and review state
+  - component-local QC metrics such as topology and roughness summaries
+  - method/model-specific provenance such as SAM prompt settings
+- A thin Palette-native inspector is consistent with the repo's current
+  collection of stage-specific review and visualization tools.
+- What we should avoid is trying to recreate a full connectomics-style generic
+  labeling workstation inside Palette.
+
+Design direction:
+
+- build a separate read-mostly subject-mask inspector first
+- keep Paintera as an optional editing backend/tool of opportunity
+- let the existing refined-subject review tool stay narrow and editing-focused
+
 ## Registry Implications
 
 We should not reduce this to one boolean on recordings.
@@ -752,6 +796,12 @@ This means the registry should eventually answer questions like:
 - [ ] Keep eye review tooling unchanged during this phase.
 - [ ] Validate the new tool on real non-eye masks rather than only empty/copy
       initialized channels.
+- [x] Add a separate Palette-native subject-mask inspector for read-mostly
+      browsing, QC triage, and provenance-aware mask inspection.
+- [ ] Keep that inspector distinct from Paintera's role as an optional heavier
+      pixel-editing surface.
+- [ ] Route refinement execution through a scheduler-aware engine rather than a
+      permanently serial editor-only save path.
 
 ## Phase 3: Registry Integration
 
@@ -818,6 +868,7 @@ This means the registry should eventually answer questions like:
 - [swim_bladder_patch_review_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/swim_bladder_patch_review_design.md)
 - [subject_mask_registry_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_registry_contract.md)
 - [subject_mask_training_artifact_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_training_artifact_contract.md)
+- [refined_subject_mask_scheduler_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/refined_subject_mask_scheduler_todo.md)
 - [subject_mask_tuning_workflow.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_tuning_workflow.md)
 - [pose_kinematics_run_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/pose_kinematics_run_design.md)
 - [review_status_schema_unification_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/review_status_schema_unification_contract.md)
