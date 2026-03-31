@@ -26,8 +26,10 @@ except ImportError:  # pragma: no cover - depends on optional dependency
 from ..tune.refined_subject_mask_review import (
     _component_sync_state,
     _compute_refined_subject_component_apply_rows,
+    _default_refined_run_name,
     _finalize_refined_subject_apply,
     _load_source_subject_mask_run,
+    _normalize_component_list,
     _normalize_refined_component_names,
     _normalize_roi_indices,
     _open_existing_refined_subject_run,
@@ -37,14 +39,49 @@ from ..tune.refined_subject_mask_review import (
 from ..utils.zarr_io import open_zarr_root
 
 
-def _parse_roi_indices(text: str) -> list[int]:
+def _parse_roi_index_spec(text: str) -> list[int]:
     raw = str(text or "").replace(" ", "")
     if not raw:
         raise argparse.ArgumentTypeError("ROI indices must not be empty.")
-    try:
-        return [int(token) for token in raw.split(",") if token]
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"Invalid ROI indices '{text}'. Expected comma-separated integers.") from exc
+    values: list[int] = []
+    for token in raw.split(","):
+        if not token:
+            continue
+        if "-" in token:
+            start_text, end_text = token.split("-", 1)
+            try:
+                start = int(start_text)
+                end = int(end_text)
+            except ValueError as exc:
+                raise argparse.ArgumentTypeError(
+                    f"Invalid ROI range '{token}'. Expected syntax like '10-20'."
+                ) from exc
+            if end < start:
+                raise argparse.ArgumentTypeError(
+                    f"Invalid ROI range '{token}'. Range end must be greater than or equal to start."
+                )
+            values.extend(range(start, end + 1))
+            continue
+        try:
+            values.append(int(token))
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"Invalid ROI index '{token}'. Expected integers or ranges like '10-20'."
+            ) from exc
+    if not values:
+        raise argparse.ArgumentTypeError("ROI indices must not be empty.")
+    return values
+
+
+def _parse_scheduler_arg(text: str) -> str:
+    scheduler_key = _normalize_scheduler(text)
+    normalized_raw = str(text or "").strip().lower()
+    if scheduler_key == "processes" and normalized_raw not in {"", "processes"}:
+        raise argparse.ArgumentTypeError(
+            "Invalid scheduler. Expected one of: threads, processes, distributed, "
+            "single-threaded, single-thread, single_thread."
+        )
+    return scheduler_key
 
 
 def _normalize_scheduler(scheduler: str) -> str:
@@ -62,6 +99,159 @@ def _chunk_roi_indices(roi_indices: Sequence[int], chunk_size: int) -> list[tupl
         tuple(row_list[start : start + chunk_size])
         for start in range(0, len(row_list), max(1, int(chunk_size)))
     ]
+
+
+def _resolve_refined_run_name(
+    root,
+    *,
+    source_run: str,
+    refined_run: Optional[str],
+) -> tuple[str, str, bool]:
+    refined_parent = root.get("refined_subject_masks_runs")
+    if refined_run is not None:
+        target_run = str(refined_run)
+        return target_run, "explicit", refined_parent is not None and target_run in refined_parent
+
+    if refined_parent is not None:
+        latest = refined_parent.attrs.get("latest")
+        if latest and str(latest) in refined_parent:
+            candidate = refined_parent[str(latest)]
+            if str(candidate.attrs.get("source_subject_mask_run") or "") == source_run:
+                return str(latest), "inferred_latest", True
+
+    return _default_refined_run_name(), "inferred_new", False
+
+
+def _collect_component_args(
+    component_groups: Optional[Sequence[Sequence[str]]],
+    component_values: Optional[Sequence[str]],
+) -> Optional[list[str]]:
+    merged: list[str] = []
+    for group in component_groups or ():
+        merged.extend(str(value) for value in group)
+    for value in component_values or ():
+        merged.append(str(value))
+    return merged or None
+
+
+def _collect_roi_index_args(
+    roi_specs: Optional[Sequence[Sequence[int]]],
+    roi_indices: Optional[Sequence[int]],
+) -> Optional[list[int]]:
+    merged: list[int] = []
+    for spec in roi_specs or ():
+        merged.extend(int(value) for value in spec)
+    for value in roi_indices or ():
+        merged.append(int(value))
+    return sorted(merged) if merged else None
+
+
+def _build_refined_subject_apply_plan(
+    zarr_path: str | Path,
+    *,
+    subject_run: Optional[str] = None,
+    refined_run: Optional[str] = None,
+    components: Optional[Sequence[str]] = None,
+    roi_indices: Optional[Sequence[int]] = None,
+    chunk_size: int = 512,
+    scheduler: str = "processes",
+    num_workers: Optional[int] = None,
+) -> dict[str, object]:
+    zarr_path = str(Path(zarr_path))
+    chunk_size = max(1, int(chunk_size))
+    scheduler_key = _normalize_scheduler(scheduler)
+
+    root = open_zarr_root(zarr_path, mode="r")
+    source = _load_source_subject_mask_run(root, subject_run)
+    target_run, selection_mode, target_exists = _resolve_refined_run_name(
+        root,
+        source_run=source.run_name,
+        refined_run=refined_run,
+    )
+
+    if target_exists:
+        refined = _open_existing_refined_subject_run(root, target_run)
+        selected_components = _normalize_refined_component_names(refined, components)
+        available_components = list(refined.component_names)
+        total_rois = int(refined.group["masks_roi"].shape[0])
+    else:
+        selected_components = _normalize_component_list(components)
+        available_components = [str(label) for label in source.mask_labels]
+        total_rois = int(source.masks_roi.shape[0])
+
+    selected_rows = (
+        tuple(_normalize_roi_indices(roi_indices, total_rois))
+        if roi_indices is not None
+        else tuple(range(total_rois))
+    )
+    row_chunks = _chunk_roi_indices(selected_rows, chunk_size)
+
+    return {
+        "status": "planned",
+        "zarr_path": zarr_path,
+        "source_subject_mask_run": source.run_name,
+        "refined_run": target_run,
+        "refined_run_selection": selection_mode,
+        "refined_run_exists": bool(target_exists),
+        "would_create_refined_run": not bool(target_exists),
+        "mutates_archive": False,
+        "component_names": list(selected_components),
+        "available_component_names": available_components,
+        "roi_indices": [int(roi_idx) for roi_idx in selected_rows],
+        "roi_count": int(len(selected_rows)),
+        "total_roi_count": int(total_rois),
+        "chunk_count": int(len(row_chunks)),
+        "chunk_size": int(chunk_size),
+        "scheduler": scheduler_key,
+        "num_workers": int(num_workers) if num_workers is not None else None,
+    }
+
+
+def _print_refined_subject_apply_plan(
+    console: Console,
+    plan: dict[str, object],
+    *,
+    dry_run: bool,
+) -> None:
+    target_run = str(plan["refined_run"])
+    selection_mode = str(plan["refined_run_selection"])
+    if selection_mode == "explicit":
+        target_label = "explicit"
+    elif selection_mode == "inferred_latest":
+        target_label = "inferred latest"
+    else:
+        target_label = "inferred new"
+
+    if bool(plan["would_create_refined_run"]):
+        mutation_line = (
+            f"  Mutation: create [cyan]refined_subject_masks_runs/{target_run}[/cyan] "
+            "and populate selected rows/components"
+        )
+    else:
+        mutation_line = (
+            f"  Mutation: update [cyan]refined_subject_masks_runs/{target_run}[/cyan] "
+            "in place for selected rows/components"
+        )
+
+    console.print(
+        f"Resolved refined subject-mask apply target: [cyan]{target_run}[/cyan] ({target_label})"
+    )
+    console.print(f"  Source run: [cyan]{plan['source_subject_mask_run']}[/cyan]")
+    console.print(mutation_line)
+    console.print(
+        f"  Components: [cyan]{list(plan['component_names'])}[/cyan] "
+        f"| ROI rows: [cyan]{plan['roi_count']}[/cyan]/[cyan]{plan['total_roi_count']}[/cyan]"
+    )
+    console.print(
+        f"  Scheduler: [cyan]{plan['scheduler']}[/cyan] | Chunk size: [cyan]{plan['chunk_size']}[/cyan]"
+        + (
+            f" | Workers: [cyan]{int(plan['num_workers'])}[/cyan]"
+            if plan.get("num_workers") is not None and str(plan["scheduler"]) != "single-threaded"
+            else ""
+        )
+    )
+    if dry_run:
+        console.print("[yellow]Dry run only. No archive data will be modified.[/yellow]")
 
 
 def _compute_refined_subject_apply_chunk(
@@ -128,44 +318,43 @@ def refine_subject_masks(
     scheduler: str = "processes",
     num_workers: Optional[int] = None,
     console: Optional[Console] = None,
+    dry_run: bool = False,
 ) -> dict[str, object]:
     """Recompute refined subject-mask metadata in chunked non-UI mode."""
 
     stage_start = time.perf_counter()
-    zarr_path = str(Path(zarr_path))
-    chunk_size = max(1, int(chunk_size))
-    scheduler_key = _normalize_scheduler(scheduler)
-
-    root = open_zarr_root(zarr_path, mode="a")
-    source, refined = prepare_refined_subject_run(
-        root,
+    plan = _build_refined_subject_apply_plan(
+        zarr_path,
         subject_run=subject_run,
         refined_run=refined_run,
         components=components,
+        roi_indices=roi_indices,
+        chunk_size=chunk_size,
+        scheduler=scheduler,
+        num_workers=num_workers,
     )
-    selected_components = _normalize_refined_component_names(refined, components)
-    total_rois = int(refined.group["masks_roi"].shape[0])
-    if total_rois <= 0:
-        raise RuntimeError("refined_subject_masks run has no ROI rows.")
-    selected_rows = (
-        tuple(_normalize_roi_indices(roi_indices, total_rois))
-        if roi_indices is not None
-        else tuple(range(total_rois))
-    )
-
     if console is not None:
-        console.print(
-            f"Applying refined subject masks for [cyan]{refined.run_name}[/cyan] "
-            f"(components={list(selected_components)}, rois={len(selected_rows)})"
-        )
-        console.print(
-            f"  Scheduler: [cyan]{scheduler_key}[/cyan] | Chunk size: [cyan]{chunk_size}[/cyan]"
-            + (
-                f" | Workers: [cyan]{int(num_workers)}[/cyan]"
-                if num_workers is not None and scheduler_key != "single-threaded"
-                else ""
-            )
-        )
+        _print_refined_subject_apply_plan(console, plan, dry_run=dry_run)
+    if dry_run:
+        return plan
+
+    zarr_path = str(plan["zarr_path"])
+    selected_components = tuple(str(name) for name in plan["component_names"])
+    selected_rows = tuple(int(roi_idx) for roi_idx in plan["roi_indices"])
+    chunk_size = int(plan["chunk_size"])
+    scheduler_key = str(plan["scheduler"])
+    resolved_refined_run = str(plan["refined_run"])
+
+    root = open_zarr_root(zarr_path, mode="a")
+    source = _load_source_subject_mask_run(root, subject_run)
+    refined = _open_existing_refined_subject_run(root, resolved_refined_run) if bool(
+        plan["refined_run_exists"]
+    ) else prepare_refined_subject_run(
+        root,
+        subject_run=source.run_name,
+        refined_run=resolved_refined_run,
+        components=selected_components,
+    )[1]
 
     before_states = {
         int(roi_idx): _row_component_state(refined, selected_components, int(roi_idx))
@@ -252,9 +441,15 @@ def refine_subject_masks(
         "zarr_path": zarr_path,
         "refined_run": refined.run_name,
         "source_subject_mask_run": source.run_name,
+        "refined_run_selection": str(plan["refined_run_selection"]),
+        "refined_run_exists": bool(plan["refined_run_exists"]),
+        "would_create_refined_run": bool(plan["would_create_refined_run"]),
+        "mutates_archive": True,
         "component_names": list(selected_components),
+        "available_component_names": list(plan["available_component_names"]),
         "roi_indices": [int(roi_idx) for roi_idx in selected_rows],
         "roi_count": int(len(selected_rows)),
+        "total_roi_count": int(plan["total_roi_count"]),
         "chunk_count": int(len(row_chunks)),
         "chunk_size": int(chunk_size),
         "scheduler": scheduler_key,
@@ -270,22 +465,67 @@ def refine_subject_masks(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zarr_path", help="Path to the Palette zarr archive.")
-    parser.add_argument("--subject-run", help="Source subject_mask_runs/<run> override (default: refined run lineage).")
-    parser.add_argument("--refined-run", help="Target refined_subject_masks_runs/<run> to open or create.")
-    parser.add_argument("--components", nargs="+", help="Optional refined components to recompute (default: all).")
+    parser.add_argument(
+        "--subject-run",
+        "--source-run",
+        dest="subject_run",
+        help="Source subject_mask_runs/<run> override (default: refined run lineage or latest source run).",
+    )
+    parser.add_argument(
+        "--refined-run",
+        "--run-name",
+        dest="refined_run",
+        help=(
+            "Target refined_subject_masks_runs/<run> to update in place or create. "
+            "If omitted, the latest matching refined run is reused when possible."
+        ),
+    )
+    parser.add_argument(
+        "--components",
+        nargs="+",
+        action="append",
+        help="Optional refined components to recompute (space-separated, repeatable).",
+    )
+    parser.add_argument(
+        "--component",
+        action="append",
+        dest="component_values",
+        help="Optional single refined component selector. Repeat to add more components.",
+    )
     parser.add_argument(
         "--roi-indices",
-        type=_parse_roi_indices,
-        help="Optional comma-separated ROI rows to recompute (default: all rows).",
+        type=_parse_roi_index_spec,
+        action="append",
+        help="Optional ROI row selector spec. Accepts comma-separated values and ranges like '0,2,5-8'.",
+    )
+    parser.add_argument(
+        "--roi-index",
+        type=int,
+        action="append",
+        dest="roi_index_values",
+        help="Optional single ROI row selector. Repeat to add more rows.",
     )
     parser.add_argument("--chunk-size", type=int, default=512, help="Number of ROI rows per compute chunk.")
     parser.add_argument(
         "--scheduler",
+        type=_parse_scheduler_arg,
         default="processes",
-        choices=["threads", "processes", "distributed", "single-threaded"],
-        help="Dask scheduler to use for chunked recompute.",
+        help=(
+            "Dask scheduler to use for chunked recompute. Accepted values: threads, processes, "
+            "distributed, single-threaded, single-thread, single_thread."
+        ),
     )
     parser.add_argument("--num-workers", type=int, help="Optional Dask worker count.")
+    parser.add_argument(
+        "--show-run-info",
+        action="store_true",
+        help="Resolve source/target runs, available components, and ROI counts without mutating the archive.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Plan the apply, print the resolved target and selections, and exit without mutating the archive.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit the apply summary as JSON.")
     return parser
 
@@ -294,16 +534,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     console = None if args.json else Console()
+    components = _collect_component_args(args.components, args.component_values)
+    roi_indices = _collect_roi_index_args(args.roi_indices, args.roi_index_values)
     summary = refine_subject_masks(
         args.zarr_path,
         subject_run=args.subject_run,
         refined_run=args.refined_run,
-        components=args.components,
-        roi_indices=args.roi_indices,
+        components=components,
+        roi_indices=roi_indices,
         chunk_size=args.chunk_size,
         scheduler=args.scheduler,
         num_workers=args.num_workers,
         console=console,
+        dry_run=bool(args.dry_run or args.show_run_info),
     )
     if args.json:
         print(json.dumps(summary, sort_keys=True))

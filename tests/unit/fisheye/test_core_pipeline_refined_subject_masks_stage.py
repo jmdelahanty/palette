@@ -54,6 +54,33 @@ def test_run_refined_subject_masks_respects_enabled_flag(monkeypatch, tmp_path: 
     pipeline._run_refined_subject_masks()
 
 
+def test_run_refined_subject_masks_explicit_stage_overrides_enabled_flag(monkeypatch, tmp_path: Path) -> None:
+    pipeline = _make_pipeline(tmp_path)
+    pipeline.zarr_root = object()
+    pipeline._explicitly_requested_stages = {"refined_subject_masks"}
+    pipeline.pipeline_params["refine_subject_masks"] = {
+        "enabled": False,
+        "run_name": "refined_subject_masks_001",
+    }
+
+    captured: dict[str, object] = {}
+
+    def _fake_refine_subject_masks(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "updated",
+            "refined_run": "refined_subject_masks_001",
+            "changed_roi_count": 0,
+            "noop_roi_count": 0,
+        }
+
+    monkeypatch.setattr(refine_subject_masks_mod, "refine_subject_masks", _fake_refine_subject_masks)
+
+    pipeline._run_refined_subject_masks()
+
+    assert captured["refined_run"] == "refined_subject_masks_001"
+
+
 def test_run_refined_subject_masks_passes_config_and_preserves_supported_scheduler(
     monkeypatch,
     tmp_path: Path,
@@ -98,6 +125,34 @@ def test_run_refined_subject_masks_passes_config_and_preserves_supported_schedul
     assert pipeline.stage_results["refined_subject_masks"]["refined_run"] == "refined_subject_masks_001"
 
 
+def test_run_refined_subject_masks_accepts_config_aliases(monkeypatch, tmp_path: Path) -> None:
+    pipeline = _make_pipeline(tmp_path)
+    pipeline.zarr_root = object()
+    pipeline.pipeline_params["refine_subject_masks"] = {
+        "enabled": True,
+        "source_run": "subject_masks_alias_001",
+        "run_name": "refined_subject_masks_alias_001",
+    }
+
+    captured: dict[str, object] = {}
+
+    def _fake_refine_subject_masks(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "updated",
+            "refined_run": "refined_subject_masks_alias_001",
+            "changed_roi_count": 0,
+            "noop_roi_count": 0,
+        }
+
+    monkeypatch.setattr(refine_subject_masks_mod, "refine_subject_masks", _fake_refine_subject_masks)
+
+    pipeline._run_refined_subject_masks()
+
+    assert captured["subject_run"] == "subject_masks_alias_001"
+    assert captured["refined_run"] == "refined_subject_masks_alias_001"
+
+
 def test_run_refined_subject_masks_normalizes_invalid_scheduler(monkeypatch, tmp_path: Path) -> None:
     pipeline = _make_pipeline(tmp_path)
     pipeline.zarr_root = object()
@@ -122,3 +177,18 @@ def test_run_refined_subject_masks_normalizes_invalid_scheduler(monkeypatch, tmp
     pipeline._run_refined_subject_masks()
 
     assert captured["scheduler"] == "processes"
+
+
+def test_run_refined_subject_masks_rejects_conflicting_aliases(monkeypatch, tmp_path: Path) -> None:
+    pipeline = _make_pipeline(tmp_path)
+    pipeline.zarr_root = object()
+    pipeline.pipeline_params["refine_subject_masks"] = {
+        "enabled": True,
+        "subject_run": "subject_masks_primary_001",
+        "source_run": "subject_masks_alias_001",
+    }
+
+    monkeypatch.setattr(refine_subject_masks_mod, "refine_subject_masks", lambda **_kwargs: None)
+
+    with pytest.raises(ValueError, match="disagree"):
+        pipeline._run_refined_subject_masks()

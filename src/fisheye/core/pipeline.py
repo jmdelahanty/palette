@@ -197,6 +197,7 @@ class Pipeline:
         self.zarr_root = None
         self.stage_timings = {}
         self.stage_results = {}
+        self._explicitly_requested_stages: set[str] = set()
         
     def _load_pipeline_params(self) -> Dict[str, Any]:
         """Load pipeline parameters from YAML config file."""
@@ -300,7 +301,9 @@ class Pipeline:
             'refine_subject_masks': {
                 'enabled': False,
                 'subject_run': None,
+                'source_run': None,
                 'refined_run': None,
+                'run_name': None,
                 'components': None,
                 'roi_indices': None,
                 'chunk_size': 512,
@@ -325,6 +328,7 @@ class Pipeline:
             Root zarr group
         """
         stages = stages or self.config.stages
+        self._explicitly_requested_stages = {str(stage) for stage in stages if str(stage) != 'all'}
         
         # Handle 'all' keyword
         if 'all' in stages:
@@ -830,14 +834,35 @@ class Pipeline:
             self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
 
         params = self.pipeline_params.get('refine_subject_masks', {}) or {}
-        if not bool(params.get('enabled', False)):
+        explicitly_requested = self._is_stage_explicitly_requested('refined_subject_masks')
+        if not bool(params.get('enabled', False)) and not explicitly_requested:
             self.console.print(
                 "[yellow]Refined subject-mask batch apply disabled via "
                 "refine_subject_masks.enabled=false; skipping.[/yellow]"
             )
             return
+        if not bool(params.get('enabled', False)) and explicitly_requested:
+            self.console.print(
+                "[cyan]Running refined subject-mask batch apply because "
+                "'refined_subject_masks' was explicitly requested.[/cyan]"
+            )
 
-        scheduler = str(params.get('scheduler') or self.config.scheduler or 'processes').lower()
+        def _resolve_alias(primary: str, alias: str):
+            primary_value = params.get(primary)
+            alias_value = params.get(alias)
+            if primary_value is not None and alias_value is not None and primary_value != alias_value:
+                raise ValueError(
+                    f"refine_subject_masks.{primary} and refine_subject_masks.{alias} disagree: "
+                    f"{primary_value!r} != {alias_value!r}"
+                )
+            return primary_value if primary_value is not None else alias_value
+
+        source_run = _resolve_alias('subject_run', 'source_run')
+        refined_run = _resolve_alias('refined_run', 'run_name')
+
+        scheduler_param = params.get('scheduler')
+        scheduler_source = 'refine_subject_masks.scheduler' if scheduler_param is not None else 'pipeline --scheduler'
+        scheduler = str(scheduler_param or self.config.scheduler or 'processes').lower()
         if scheduler in {'single-thread', 'single_thread'}:
             scheduler = 'single-threaded'
         if scheduler not in {'threads', 'processes', 'distributed', 'single-threaded'}:
@@ -848,18 +873,29 @@ class Pipeline:
         chunk_size = params.get('chunk_size', 512)
         if chunk_size is None:
             chunk_size = 512
+        num_workers = params.get('num_workers', self.config.num_workers)
+        num_workers_source = (
+            'refine_subject_masks.num_workers'
+            if params.get('num_workers') is not None
+            else 'pipeline --num-workers'
+        )
 
         from ..refinement.refine_subject_masks import refine_subject_masks
 
+        self.console.print(
+            f"[cyan]Refined subject-mask execution config:[/cyan] scheduler={scheduler} "
+            f"({scheduler_source}), num_workers={num_workers} ({num_workers_source})"
+        )
+
         apply_summary = refine_subject_masks(
             zarr_path=self.config.zarr_path,
-            subject_run=params.get('subject_run'),
-            refined_run=params.get('refined_run'),
+            subject_run=source_run,
+            refined_run=refined_run,
             components=params.get('components'),
             roi_indices=params.get('roi_indices'),
             chunk_size=chunk_size,
             scheduler=scheduler,
-            num_workers=params.get('num_workers', self.config.num_workers),
+            num_workers=num_workers,
             console=self.console,
         )
 
@@ -1007,6 +1043,9 @@ class Pipeline:
             if self.zarr_root:
                 stats = get_import_stats(self.config.zarr_path)
                 self.console.print(f"✓ Imported {stats['total_frames']} frames")
+
+    def _is_stage_explicitly_requested(self, stage: str) -> bool:
+        return stage in self._explicitly_requested_stages
     
     def _display_pipeline_plan(self, stages: List[str]) -> None:
         """Display the pipeline execution plan"""

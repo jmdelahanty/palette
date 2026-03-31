@@ -99,11 +99,13 @@ refine_eye_masks:
   force_refine_traditional: false
   allow_latest_keypoint_fallback: false
 refine_subject_masks:
-  enabled: false
+  enabled: false              # Explicit --stages refined_subject_masks overrides this gate
   subject_run: null
+  source_run: null            # Alias for subject_run
   refined_run: null
+  run_name: null              # Alias for refined_run
   components: null
   roi_indices: null
   chunk_size: 512
-  scheduler: processes
-  num_workers: null
+  scheduler: processes        # Set null to inherit pipeline --scheduler; supports single-threaded
+  num_workers: null           # Null inherits pipeline --num-workers

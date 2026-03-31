@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
 
 import numpy as np
+import pytest
 import zarr
 
 from fisheye.refinement import refine_subject_masks as mod
@@ -164,3 +166,90 @@ def test_refine_subject_masks_cli_emits_json_summary(tmp_path: Path, capsys) -> 
     assert payload["roi_indices"] == [0, 1]
     assert payload["changed_roi_count"] == 1
     assert payload["noop_roi_count"] == 1
+
+
+def test_refine_subject_masks_cli_dry_run_supports_aliases_and_ranges(tmp_path: Path, capsys) -> None:
+    zarr_path = tmp_path / "subject_review.zarr"
+    _build_subject_review_archive(zarr_path)
+
+    rc = mod.main(
+        [
+            str(zarr_path),
+            "--source-run",
+            "subject_masks_001",
+            "--run-name",
+            "refined_subject_masks_preview",
+            "--component",
+            "subject_body",
+            "--roi-index",
+            "0",
+            "--roi-indices",
+            "1-1",
+            "--scheduler",
+            "single_thread",
+            "--dry-run",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["status"] == "planned"
+    assert payload["source_subject_mask_run"] == "subject_masks_001"
+    assert payload["refined_run"] == "refined_subject_masks_preview"
+    assert payload["refined_run_selection"] == "explicit"
+    assert payload["refined_run_exists"] is False
+    assert payload["would_create_refined_run"] is True
+    assert payload["mutates_archive"] is False
+    assert payload["component_names"] == ["subject_body"]
+    assert payload["available_component_names"] == ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    assert payload["roi_indices"] == [0, 1]
+    assert payload["roi_count"] == 2
+    assert payload["total_roi_count"] == 2
+    assert payload["scheduler"] == "single-threaded"
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    assert "refined_subject_masks_runs" not in root
+
+
+def test_refine_subject_masks_cli_show_run_info_reports_existing_target(tmp_path: Path, capsys) -> None:
+    zarr_path = tmp_path / "subject_review.zarr"
+    _build_subject_review_archive(zarr_path)
+
+    root = zarr.open_group(str(zarr_path), mode="a")
+    review_mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("subject_body", "swim_bladder"),
+    )
+    updated_before = str(root["refined_subject_masks_runs"]["refined_subject_masks_001"].attrs.get("updated_at_utc") or "")
+
+    rc = mod.main(
+        [
+            str(zarr_path),
+            "--run-name",
+            "refined_subject_masks_001",
+            "--show-run-info",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["status"] == "planned"
+    assert payload["refined_run"] == "refined_subject_masks_001"
+    assert payload["refined_run_selection"] == "explicit"
+    assert payload["refined_run_exists"] is True
+    assert payload["would_create_refined_run"] is False
+    assert payload["available_component_names"] == ["subject_body", "swim_bladder"]
+    assert payload["roi_indices"] == [0, 1]
+
+    root_after = zarr.open_group(str(zarr_path), mode="r")
+    updated_after = str(root_after["refined_subject_masks_runs"]["refined_subject_masks_001"].attrs.get("updated_at_utc") or "")
+    assert updated_after == updated_before
+
+
+def test_parse_scheduler_arg_rejects_invalid_value() -> None:
+    with pytest.raises(argparse.ArgumentTypeError, match="Invalid scheduler"):
+        mod._parse_scheduler_arg("bogus")
