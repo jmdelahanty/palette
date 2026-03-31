@@ -140,6 +140,7 @@ class Pipeline:
         'keypoints',
         'eye_masks',
         'refined_eye_masks',
+        'refined_subject_masks',
         'keypoints_refine',
         'assign_ids',
         'track',
@@ -157,11 +158,21 @@ class Pipeline:
         'keypoints_refine': ['keypoints'],
         'eye_masks': ['keypoints'],
         'refined_eye_masks': ['eye_masks'],
+        'refined_subject_masks': [],
         'assign_ids': ['detect'],
         'track': ['keypoints'],
     }
 
-    ANALYSIS_STAGES = {'background', 'detect', 'detect_quality', 'track', 'refine', 'keypoints_refine', 'refined_eye_masks'}
+    ANALYSIS_STAGES = {
+        'background',
+        'detect',
+        'detect_quality',
+        'track',
+        'refine',
+        'keypoints_refine',
+        'refined_eye_masks',
+        'refined_subject_masks',
+    }
     DATA_STAGES = {'import', 'downsample'}
     
     def __init__(
@@ -285,6 +296,16 @@ class Pipeline:
                 'data_card_no_plots': False,
                 'data_card_plot_dir': None,
                 'data_card_plot_prefix': None,
+            },
+            'refine_subject_masks': {
+                'enabled': False,
+                'subject_run': None,
+                'refined_run': None,
+                'components': None,
+                'roi_indices': None,
+                'chunk_size': 512,
+                'scheduler': 'processes',
+                'num_workers': None,
             }
         }
         
@@ -395,6 +416,7 @@ class Pipeline:
             'keypoints',
             'eye_masks',
             'refined_eye_masks',
+            'refined_subject_masks',
             'keypoints_refine',
             'assign_ids'] and self._is_stage_complete(stage):
             self.console.print(f"[green]✓ Stage '{stage}' already complete, skipping[/green]")
@@ -419,6 +441,8 @@ class Pipeline:
                 self._run_eye_masks()
             elif stage == 'refined_eye_masks':
                 self._run_refined_eye_masks()
+            elif stage == 'refined_subject_masks':
+                self._run_refined_subject_masks()
             elif stage == 'keypoints_refine':
                 self._run_keypoints_refine()
             elif stage == 'track':
@@ -799,6 +823,52 @@ class Pipeline:
             self.console.print(
                 f"[green]✓[/green] Eye-mask merged export saved as [cyan]{merged_out_zarr}[/cyan]"
             )
+
+    def _run_refined_subject_masks(self) -> None:
+        """Run refined subject-mask batch apply stage."""
+        if self.zarr_root is None:
+            self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
+
+        params = self.pipeline_params.get('refine_subject_masks', {}) or {}
+        if not bool(params.get('enabled', False)):
+            self.console.print(
+                "[yellow]Refined subject-mask batch apply disabled via "
+                "refine_subject_masks.enabled=false; skipping.[/yellow]"
+            )
+            return
+
+        scheduler = str(params.get('scheduler') or self.config.scheduler or 'processes').lower()
+        if scheduler in {'single-thread', 'single_thread'}:
+            scheduler = 'single-threaded'
+        if scheduler not in {'threads', 'processes', 'distributed', 'single-threaded'}:
+            self.console.print(
+                f"[yellow]Unsupported refine_subject_masks scheduler '{scheduler}', using 'processes'[/yellow]"
+            )
+            scheduler = 'processes'
+        chunk_size = params.get('chunk_size', 512)
+        if chunk_size is None:
+            chunk_size = 512
+
+        from ..refinement.refine_subject_masks import refine_subject_masks
+
+        apply_summary = refine_subject_masks(
+            zarr_path=self.config.zarr_path,
+            subject_run=params.get('subject_run'),
+            refined_run=params.get('refined_run'),
+            components=params.get('components'),
+            roi_indices=params.get('roi_indices'),
+            chunk_size=chunk_size,
+            scheduler=scheduler,
+            num_workers=params.get('num_workers', self.config.num_workers),
+            console=self.console,
+        )
+
+        self.stage_results['refined_subject_masks'] = apply_summary
+        self.console.print(
+            "[green]✓[/green] Refined subject-mask batch apply updated "
+            f"[cyan]{apply_summary['refined_run']}[/cyan] "
+            f"(changed={apply_summary['changed_roi_count']}, noop={apply_summary['noop_roi_count']})"
+        )
     
     def _run_refine(self) -> None:
         """Run detection refinement stage (filter & interpolate detections)."""
@@ -1268,7 +1338,7 @@ class Pipeline:
             return False
 
         # Refinement stages are designed to be repeatable; always allow rerun.
-        if stage in {'refine', 'keypoints_refine', 'eye_masks', 'refined_eye_masks'}:
+        if stage in {'refine', 'keypoints_refine', 'eye_masks', 'refined_eye_masks', 'refined_subject_masks'}:
             return False
         
         try:
@@ -1324,6 +1394,12 @@ class Pipeline:
                 if 'refined_eye_masks_runs' not in root:
                     return False
                 latest = root['refined_eye_masks_runs'].attrs.get('latest')
+                return latest is not None
+
+            elif stage == 'refined_subject_masks':
+                if 'refined_subject_masks_runs' not in root:
+                    return False
+                latest = root['refined_subject_masks_runs'].attrs.get('latest')
                 return latest is not None
 
             elif stage == 'keypoints_refine':
@@ -1568,6 +1644,7 @@ Examples:
             'keypoints',
             'eye_masks',
             'refined_eye_masks',
+            'refined_subject_masks',
             'keypoints_refine',
             'track',
             'refine',

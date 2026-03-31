@@ -98,3 +98,12 @@ refine_eye_masks:
   area_filter_mode: either
   force_refine_traditional: false
   allow_latest_keypoint_fallback: false
+refine_subject_masks:
+  enabled: false
+  subject_run: null
+  refined_run: null
+  components: null
+  roi_indices: null
+  chunk_size: 512
+  scheduler: processes
+  num_workers: null
