@@ -374,15 +374,16 @@ Exact naming can change, but the structure should be component-scoped.
       the preferred long-term metadata home.
 - [x] Update `refined_subject_masks_runs_contract.md` to describe eye geometry
       and review metadata under `components/eye_left|eye_right`.
-- [ ] Update docs that still describe `refined_eye_masks_runs` as the canonical
+- [x] Update docs that still describe `refined_eye_masks_runs` as the canonical
       future refined eye stage for new runs.
 
 ### 2. Define component-scoped provenance attrs
 
 - [x] Define the canonical component provenance payload for raw runs.
 - [x] Define the canonical component provenance payload for refined runs.
-- [ ] Decide how inherited-but-unchanged components are recorded when a new
-      snapshot changes only one component.
+- [x] Specify that component-local refined edits update the existing refined run
+      in place by default, leaving unchanged components untouched unless they
+      participate in dependent summaries.
 
 ### 3. Define the eye migration target
 
@@ -395,16 +396,18 @@ Exact naming can change, but the structure should be component-scoped.
 
 ### 4. Define component-only edit semantics
 
-- [ ] Specify how a new snapshot is created when editing only one component.
-- [ ] Specify which arrays/attrs are copied unchanged from the previous
-      snapshot.
-- [ ] Specify which run-level summaries must be recomputed.
+- [x] Specify that component-only refined edits update the current working run
+      in place by default rather than cloning a new refined snapshot.
+- [x] Specify that unrelated component arrays/attrs remain unchanged unless they
+      depend on the edited component state.
+- [x] Specify that run-level and component-level summaries are recomputed only
+      when they depend on the edited component state.
 
 ### 5. Keep legacy compatibility explicit
 
-- [ ] Keep backfill/projection utilities for historical eye-mask runs.
-- [ ] Do not require historical archives to be rewritten.
-- [ ] Make it explicit that legacy eye-mask stages are compatibility inputs, not
+- [x] Keep backfill/projection utilities for historical eye-mask runs.
+- [x] Do not require historical archives to be rewritten.
+- [x] Make it explicit that legacy eye-mask stages are compatibility inputs, not
       the preferred new authoring path.
 
 ## Open Questions
@@ -425,7 +428,7 @@ Exact naming can change, but the structure should be component-scoped.
 
 ## Recommended Near-Term Policy
 
-Until the contracts are updated:
+Current near-term policy:
 
 - use `subject_mask_runs` as the preferred canonical destination for new
   component-mask work

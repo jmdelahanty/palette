@@ -38,20 +38,39 @@ breaking the current eye tools before the unified model is ready.
   multi-component runs.
 - `subject_mask_training_artifact_contract.md` exists and the merged
   `subject_masks` exporter has been started.
-- `refined_eye_masks_runs` remains the canonical edited/refined eye artifact.
+- `refined_eye_masks_runs` remains the current eye-specific edited/refined
+  artifact during the transition to subject-mask unification.
 - `refined_subject_masks_runs` now exists as a stage contract and runtime stage
   spec.
 - A first review/editor entrypoint exists at
   [src/fisheye/tune/refined_subject_mask_review.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/tune/refined_subject_mask_review.py).
+- A scheduler-aware non-UI apply entrypoint now exists at
+  [src/fisheye/refinement/refine_subject_masks.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/refinement/refine_subject_masks.py),
+  and the pipeline now exposes it as the `refined_subject_masks` stage.
 - Subject-mask registry tables/views now exist for:
   - run-level quality/performance
   - component-level availability/review state
+- Component-scoped provenance is now defined and written for:
+  - raw `subject_mask_runs`
+  - refined `refined_subject_masks_runs`
+  - merge/projection utilities
+  - legacy backfill paths
 - The current operator workflow for tuning, batch propagation, materialization,
   and refinement is now documented in
   [subject_mask_tuning_workflow.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_tuning_workflow.md).
 - Traditional `subject_body` materialization now exists for canary-scale use,
   but execution scaling is still deferred to
   [traditional_subject_segmentation_scaling_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/traditional_subject_segmentation_scaling_todo.md).
+- A body-only canary refined run has now been validated on 2026-03-31:
+  - archive:
+    - `/nvme1/recordings/2026-01-28T22-15-03Z_arena_1_DefaultScreen/zarr/2026-01-28T22-15-03Z_arena_1_DefaultScreen_training.zarr`
+  - source run:
+    - `subject_masks_canary_sam_points_body_eyes_001`
+  - refined run:
+    - `refined_subject_masks_canary_sam_points_body_001`
+  - batch apply result:
+    - `changed_roi_count = 0`
+    - `noop_roi_count = 227`
 - The main short-term blocker is no longer storage or registry design.
   The blocker is that we still do not have real body-mask and swim-bladder-mask
   data to curate, review, and export at scale.
@@ -62,19 +81,19 @@ This is the near-term rollout order that should happen before more schema work.
 
 ### 1. Get real body/swim-bladder mask data into a canary archive
 
-- [ ] Decide the first source of body/swim-bladder masks:
-  - manual painting in `refined_subject_masks_runs`
-  - projected traditional masks
-  - model-native `subject_mask_runs`
-- [ ] Pick one canary training zarr and create the first non-eye refined masks.
-- [ ] Confirm the component set for that canary:
-  - `subject_body` only, or
-  - `subject_body + swim_bladder`
+- [x] Decide the first source of body/swim-bladder masks:
+  - first validated refined-body canary uses model-native raw
+    `subject_mask_runs` input from the SAM canary source run
+- [x] Pick one canary training zarr and create the first non-eye refined masks.
+- [x] Confirm the component set for that canary:
+  - first canary is `subject_body` only
+  - `subject_body + swim_bladder` remains the next acceptance target once
+    swim-bladder data cleanup is ready
 
 ### 2. Treat the first refined masks as the acceptance test
 
-- [ ] Verify that the new review/editor is usable enough for body-mask work.
-- [ ] Verify that saved refined masks write:
+- [x] Verify that the new review/editor is usable enough for body-mask work.
+- [x] Verify that saved refined masks write:
   - `masks_roi`
   - `edit_applied`
   - component `reason_bytes`
@@ -98,7 +117,7 @@ This is the near-term rollout order that should happen before more schema work.
 
 The missing pieces are now mostly workflow/data problems, not schema problems:
 
-- real `subject_body` masks
+- broader curated `subject_body` coverage beyond the first canary
 - real `swim_bladder` masks
 - review-time conventions for those components
 - enough curated examples to validate export and future training paths
@@ -120,7 +139,7 @@ The canonical raw dense-prediction stage should remain:
 
 ### 2. Add a refined subject-mask stage
 
-We will likely want a future stage such as:
+The refined editable stage for this work is now:
 
 - `refined_subject_masks_runs`
 
@@ -162,6 +181,7 @@ Near-term:
 ```text
 crop_runs/<run>
   -> subject_mask_runs/<run>
+  -> refined_subject_masks_runs/<run>  # body-only canary path now exists
   -> refined_eye_masks_runs/<run>      # eye-specialized path remains
 ```
 
@@ -793,14 +813,14 @@ This means the registry should eventually answer questions like:
   - body mask
   - swim-bladder mask
 - [x] Add per-component review actions and status writing.
-- [ ] Keep eye review tooling unchanged during this phase.
-- [ ] Validate the new tool on real non-eye masks rather than only empty/copy
+- [x] Keep eye review tooling unchanged during this phase.
+- [x] Validate the new tool on real non-eye masks rather than only empty/copy
       initialized channels.
 - [x] Add a separate Palette-native subject-mask inspector for read-mostly
       browsing, QC triage, and provenance-aware mask inspection.
-- [ ] Keep that inspector distinct from Paintera's role as an optional heavier
+- [x] Keep that inspector distinct from Paintera's role as an optional heavier
       pixel-editing surface.
-- [ ] Route refinement execution through a scheduler-aware engine rather than a
+- [x] Route refinement execution through a scheduler-aware engine rather than a
       permanently serial editor-only save path.
 
 ## Phase 3: Registry Integration
@@ -842,11 +862,11 @@ This means the registry should eventually answer questions like:
 
 ## Acceptance Criteria
 
-- [ ] Whole-subject and swim-bladder masks have a clear future refined/editable
+- [x] Whole-subject and swim-bladder masks have a clear future refined/editable
       stage.
 - [x] Registry can represent raw presence vs refined presence vs review state by
       component.
-- [ ] `refined_eye_masks_runs` remains supported during transition.
+- [x] `refined_eye_masks_runs` remains supported during transition.
 - [ ] The future unification path for eyes is explicit enough to avoid another
       schema reset later.
 - [ ] Downstream body-shape work is clearly anchored to refined body masks.

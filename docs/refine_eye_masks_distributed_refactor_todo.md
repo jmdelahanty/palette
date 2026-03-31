@@ -25,7 +25,8 @@ Date anchored: 2026-03-09.
 
 ## Constraints We Must Keep
 
-- `refined_eye_masks_runs/<run>` remains the canonical refined artifact.
+- `refined_eye_masks_runs/<run>` remains the canonical eye-specific refined
+  artifact for the current transition period.
 - Refined outputs must keep:
   - `masks_roi`
   - `ellipse_params`

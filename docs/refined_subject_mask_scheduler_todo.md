@@ -37,18 +37,28 @@ existing body-only refined metadata was already consistent with the stored masks
 
 ## Current State
 
-Today the refined subject-mask path is effectively serial:
+Today the refined subject-mask path has two execution modes that share one
+semantic apply contract:
 
-- `src/fisheye/tune/refined_subject_mask_review.py`
+- local interactive apply in `src/fisheye/tune/refined_subject_mask_review.py`
   - `prepare_refined_subject_run(...)` creates or backfills the refined run
     synchronously
-  - `save_refined_subject_roi(...)` updates one ROI row at a time
-  - `sync_refined_subject_mask_metadata(...)` loops over touched ROI rows
-    serially and calls the same save path
-  - the OpenCV review UI is a single-user local loop
+  - `save_refined_subject_roi(...)` updates one ROI row at a time through the
+    shared apply kernel
+  - `sync_refined_subject_mask_metadata(...)` updates touched ROI rows through
+    that same shared apply kernel
+  - the OpenCV review UI remains a single-user local loop
+- scheduler-aware non-UI apply in
+  `src/fisheye/refinement/refine_subject_masks.py`
+  - supports chunked batch recompute with `scheduler`, `num_workers`, and
+    `chunk_size`
+  - writes through the driver after chunk computation
+  - is exposed in the pipeline as the `refined_subject_masks` stage
 
-This is acceptable for a canary workflow, but it does not match the scheduler
-surface used by other Palette stages.
+So the remaining work here is no longer "make refinement scheduler-aware at
+all." The remaining work is to broaden usage beyond the current body-only
+canary and decide how far to push scheduler-backed recompute for future
+multi-component refinement.
 
 ## Desired Direction
 
