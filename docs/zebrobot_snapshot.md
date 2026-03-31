@@ -163,3 +163,16 @@ H5 as the source of truth.
 - species and sex are only available from GET /dishes/{dish_id}.
 - dish_id is provided by the acquisition UI dropdown (populated from active
   dishes).
+
+## Migration note (2026-03-31): /crosses endpoint now backed by PyRAT
+
+The local `crosses` table has been removed from MetaZebrobot. The
+`GET /crosses/{cross_id}` endpoint now fetches crossing data live from the
+PyRAT API and returns the same JSON shape.
+
+Key difference: **parent sex is always "unknown"**. PyRAT stores fish as
+`number_of_unknown` rather than `number_of_male`/`number_of_female`. The old
+local crosses table had manually-entered sex assignments that are no longer
+available. Parent identifiers (rack:position + tank ID) remain correct.
+
+Consumers should treat `sex: "unknown"` as a valid value and not fail on it.
