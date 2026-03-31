@@ -387,12 +387,17 @@ Exact naming can change, but the structure should be component-scoped.
 
 ### 3. Define the eye migration target
 
-- [ ] Decide which eye-specific arrays move into
+- [x] Decide which eye-specific arrays move into
       `refined_subject_masks_runs/components/eye_left|eye_right`.
-- [ ] Decide whether contour storage remains per-eye component-local or also has
+      See [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_subject_mask_unification_design.md).
+- [x] Decide whether contour storage remains per-eye component-local or also has
       a shared run-level index.
-- [ ] Decide how `eye_separation` is stored once it conceptually spans two eye
+      Decision: keep contours per-eye component-local under
+      `components/eye_left|eye_right/contours/`.
+- [x] Decide how `eye_separation` is stored once it conceptually spans two eye
       components.
+      Decision: store it under `relations/eye_pair/metrics/`, not duplicated
+      into both eye components.
 
 ### 4. Define component-only edit semantics
 
@@ -422,9 +427,9 @@ Exact naming can change, but the structure should be component-scoped.
    level once component-level review becomes routine?
 4. Should refined runs support an explicit freeze/snapshot operation in
    addition to in-place editing, and if so what should trigger it?
-5. Should compatibility `refined_eye_masks_runs` continue to be materialized for
-   a transitional period, or should new eye refinement immediately write only to
-   `refined_subject_masks_runs` with adapter readers?
+5. At what point should compatibility `refined_eye_masks_runs` materialization
+   become opt-in rather than routine once `refined_subject_masks_runs` is the
+   canonical eye-capable refined artifact?
 
 ## Recommended Near-Term Policy
 

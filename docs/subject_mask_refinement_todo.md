@@ -848,17 +848,23 @@ This means the registry should eventually answer questions like:
 
 ## Phase 5: Eye Unification Path
 
-- [ ] Define what “unify eye refinement under subject-mask component model”
+- [x] Define what “unify eye refinement under subject-mask component model”
       actually means:
   - shared component identity vocabulary
   - shared review payload schema
   - shared registry component rows
   - optional shared refined-mask storage
-- [ ] Decide whether `refined_eye_masks_runs` becomes:
+  See [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_subject_mask_unification_design.md).
+- [x] Decide whether `refined_eye_masks_runs` becomes:
   - a specialized derivative of `refined_subject_masks_runs`, or
   - a long-lived sibling artifact with aligned component semantics
-- [ ] Add a non-destructive migration/backfill plan when the target becomes
+  Decision: target steady-state is a compatibility/adapter artifact derived
+  from canonical refined-subject state, while the current transition keeps it
+  supported for eye-specific workflows.
+- [x] Add a non-destructive migration/backfill plan when the target becomes
       clear.
+  See the migration phases in
+  [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_subject_mask_unification_design.md).
 
 ## Acceptance Criteria
 
@@ -867,7 +873,7 @@ This means the registry should eventually answer questions like:
 - [x] Registry can represent raw presence vs refined presence vs review state by
       component.
 - [x] `refined_eye_masks_runs` remains supported during transition.
-- [ ] The future unification path for eyes is explicit enough to avoid another
+- [x] The future unification path for eyes is explicit enough to avoid another
       schema reset later.
 - [ ] Downstream body-shape work is clearly anchored to refined body masks.
 
