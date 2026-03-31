@@ -31,3 +31,19 @@ Focus areas remaining after schema correctness tests.
   - Lazy-import `decord` inside `capture/import_video.py` call sites instead of at module import time.
   - Reduce top-level imports in `fisheye.core.pipeline` so non-import-stage tests do not pull in the video decode stack during collection.
   - Add a stable test seam or monkeypatch strategy for pipeline tests that should not depend on live decode libraries.
+
+## Codex Sandbox AppArmor Restriction
+
+- On Ubuntu 24.04 workstations, Codex sandbox startup may fail before the requested command runs if `bubblewrap` cannot create the expected user namespace.
+- Observed 2026-03-31 symptom outside the repo:
+  - `bwrap: setting up uid map: Permission denied`
+  - `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`
+- The confirmed machine-level cause on `delahantyj-ws1` was `kernel.apparmor_restrict_unprivileged_userns=1`.
+- A temporary diagnostic override:
+  - `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`
+  restored `unshare -Ur ...`, `bwrap ...`, and normal Codex sandbox command execution.
+- This is not a Palette code regression. It is a host AppArmor/user-namespace policy issue that can surface as unexplained Codex sandbox failures during otherwise ordinary repo work.
+- Preferred workstation fix:
+  - keep the global AppArmor restriction enabled when possible,
+  - add a targeted AppArmor allowance for the specific Codex/bubblewrap launcher that needs `userns`,
+  - use the global sysctl override only as a temporary diagnostic or personal-workstation fallback.
