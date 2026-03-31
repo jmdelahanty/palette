@@ -25,6 +25,8 @@ except ImportError:  # pragma: no cover - depends on optional dependency
 
 from ..tune.refined_subject_mask_review import (
     _component_sync_state,
+    _capture_component_sync_states,
+    _component_sync_states_changed,
     _compute_refined_subject_component_apply_rows,
     _default_refined_run_name,
     _finalize_refined_subject_apply,
@@ -33,6 +35,7 @@ from ..tune.refined_subject_mask_review import (
     _normalize_refined_component_names,
     _normalize_roi_indices,
     _open_existing_refined_subject_run,
+    _write_refined_component_last_update,
     _write_refined_subject_component_apply_rows,
     prepare_refined_subject_run,
 )
@@ -360,6 +363,15 @@ def refine_subject_masks(
         int(roi_idx): _row_component_state(refined, selected_components, int(roi_idx))
         for roi_idx in selected_rows
     }
+    before_component_states = {
+        str(component_name): _capture_component_sync_states(
+            refined.group,
+            str(component_name),
+            selected_rows,
+            comp_idx=int(refined.component_to_index[str(component_name)]),
+        )
+        for component_name in selected_components
+    }
 
     row_chunks = _chunk_roi_indices(selected_rows, chunk_size)
     tasks = [
@@ -420,11 +432,27 @@ def refine_subject_masks(
                 component_updates=component_updates[str(component_name)],
             )
 
-    _finalize_refined_subject_apply(refined)
+    updated_at_utc = _finalize_refined_subject_apply(refined)
     refined.group.attrs["dask_scheduler"] = scheduler_key
     refined.group.attrs["dask_num_workers"] = int(num_workers) if num_workers is not None else None
     refined.group.attrs["dask_chunk_size"] = int(chunk_size)
     refined.group.attrs["dask_version"] = getattr(dask, "__version__", "unknown")
+    for component_name in selected_components:
+        comp_idx = int(refined.component_to_index[str(component_name)])
+        if _component_sync_states_changed(
+            refined.group,
+            str(component_name),
+            selected_rows,
+            comp_idx=comp_idx,
+            before_states=before_component_states[str(component_name)],
+        ):
+            _write_refined_component_last_update(
+                refined.group,
+                component_name=str(component_name),
+                updated_at_utc=updated_at_utc,
+                update_mode="batch",
+                update_method="fisheye.refinement.refine_subject_masks",
+            )
 
     changed_count = 0
     noop_count = 0
@@ -456,7 +484,7 @@ def refine_subject_masks(
         "num_workers": int(num_workers) if num_workers is not None else None,
         "changed_roi_count": int(changed_count),
         "noop_roi_count": int(noop_count),
-        "updated_at_utc": str(refined.group.attrs.get("updated_at_utc") or ""),
+        "updated_at_utc": str(updated_at_utc),
         "duration_seconds": float(time.perf_counter() - stage_start),
     }
     return summary

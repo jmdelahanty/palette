@@ -125,6 +125,8 @@ def test_sync_refined_subject_mask_metadata_updates_touched_component(tmp_path: 
 
     body_group = run["components/subject_body"]
     swim_group = run["components/swim_bladder"]
+    body_provenance = body_group["provenance"]
+    swim_provenance = swim_group["provenance"]
     assert bool(np.asarray(body_group["edit_applied"][0], dtype=bool)) is True
     assert bool(np.asarray(swim_group["edit_applied"][0], dtype=bool)) is False
     body_reasons = read_reason_labels(body_group)
@@ -141,6 +143,11 @@ def test_sync_refined_subject_mask_metadata_updates_touched_component(tmp_path: 
     assert float(np.asarray(body_group["metrics/curvature_var"][0], dtype=np.float32)) == 0.0
     assert float(np.asarray(body_group["metrics/ipr"][0], dtype=np.float32)) == 0.0
     assert float(np.asarray(body_group["metrics/solidity"][0], dtype=np.float32)) == 0.0
+    assert body_provenance.attrs["last_update_stage"] == review_mod.REFINED_SUBJECT_STAGE_NAME
+    assert body_provenance.attrs["last_update_mode"] == "interactive"
+    assert body_provenance.attrs["last_update_method"] == review_mod.REFINED_SUBJECT_SYNC_METHOD
+    assert body_provenance.attrs["updated_at_utc"] == run.attrs["updated_at_utc"]
+    assert swim_provenance.attrs["last_update_mode"] == "create"
 
 
 def test_sync_refined_subject_mask_metadata_batches_rows_and_tracks_noops(tmp_path: Path) -> None:

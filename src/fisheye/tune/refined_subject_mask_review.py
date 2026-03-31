@@ -68,6 +68,8 @@ DEFAULT_BRUSH_RADIUS = 6
 DEFAULT_REVIEW_METHOD = "manual"
 DEFAULT_REVIEW_INTENDED_USE = "training"
 DEFAULT_RUN_METHOD = "refined_subject_mask_manual_review_v1"
+REFINED_SUBJECT_STAGE_NAME = "refine_subject_masks"
+REFINED_SUBJECT_SYNC_METHOD = "sync_refined_subject_mask_metadata"
 DEFAULT_SUBJECT_BODY_COMPONENT_SCHEMA_ID = "subject_body_v1"
 DEFAULT_SUBJECT_BODY_ANATOMICAL_SCOPE = "body_core"
 DEFAULT_SUBJECT_BODY_PECTORAL_FIN_POLICY = "excluded_or_unresolved"
@@ -193,6 +195,164 @@ def _copy_optional_array(dest: zarr.Group, source: zarr.Group, name: str) -> Non
     if name not in source or name in dest:
         return
     dest.create_array(name, data=np.asarray(source[name][:]), overwrite=True)
+
+
+def _normalize_provenance_channels(value: object, *, default_component: str) -> list[str]:
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        channels = [str(item) for item in value if str(item).strip()]
+        return channels or [str(default_component)]
+    if value is None:
+        return [str(default_component)]
+    text = str(value).strip()
+    return [text] if text else [str(default_component)]
+
+
+def _get_component_group(parent: zarr.Group, component_name: str) -> zarr.Group | None:
+    components_parent = parent.get("components")
+    if components_parent is None:
+        return None
+    component_group = components_parent.get(str(component_name))
+    if component_group is None or not hasattr(component_group, "attrs"):
+        return None
+    return component_group
+
+
+def _get_component_provenance_group(parent: zarr.Group, component_name: str) -> zarr.Group | None:
+    component_group = _get_component_group(parent, component_name)
+    if component_group is None:
+        return None
+    provenance_group = component_group.get("provenance")
+    if provenance_group is None or not hasattr(provenance_group, "attrs"):
+        return None
+    return provenance_group
+
+
+def _source_component_provenance_payload(
+    source: SourceSubjectMaskRun,
+    component_name: str,
+) -> dict[str, object]:
+    legacy_component_payload = (
+        dict(source.group.attrs.get("component_provenance") or {}).get("components", {}).get(str(component_name), {})
+    )
+    provenance_group = _get_component_provenance_group(source.group, component_name)
+    provenance_attrs = dict(provenance_group.attrs) if provenance_group is not None else {}
+    label_schema_id = source.group.attrs.get("label_schema_id")
+    created_at_utc = source.group.attrs.get("created_at_utc")
+    projection_mode = source.group.attrs.get("projection_mode")
+
+    source_channels = provenance_attrs.get("source_channels")
+    if source_channels is None:
+        source_channels = legacy_component_payload.get("source_channels", legacy_component_payload.get("source_channel"))
+
+    payload: dict[str, object] = {
+        "source_stage": str(
+            provenance_attrs.get("source_stage")
+            or legacy_component_payload.get("source_stage")
+            or "subject_mask_runs"
+        ),
+        "source_run": str(
+            provenance_attrs.get("source_run")
+            or legacy_component_payload.get("source_run")
+            or source.run_name
+        ),
+        "source_method": str(
+            provenance_attrs.get("source_method")
+            or legacy_component_payload.get("source_method")
+            or source.source_method
+            or source.group.attrs.get("method")
+            or "unknown"
+        ),
+        "source_channels": _normalize_provenance_channels(source_channels, default_component=component_name),
+    }
+    source_label_schema_id = provenance_attrs.get("source_label_schema_id")
+    if source_label_schema_id is None:
+        source_label_schema_id = legacy_component_payload.get("source_label_schema_id", label_schema_id)
+    if source_label_schema_id is not None:
+        payload["source_label_schema_id"] = str(source_label_schema_id)
+    source_created_at = provenance_attrs.get("source_created_at_utc")
+    if source_created_at is None:
+        source_created_at = legacy_component_payload.get("source_created_at_utc", created_at_utc)
+    if source_created_at is not None:
+        payload["source_created_at_utc"] = str(source_created_at)
+    projection_mode_value = provenance_attrs.get("projection_mode")
+    if projection_mode_value is None:
+        projection_mode_value = legacy_component_payload.get("projection_mode", projection_mode)
+    if projection_mode_value is not None:
+        payload["projection_mode"] = str(projection_mode_value)
+    return payload
+
+
+def _ensure_refined_component_provenance(
+    refined_group: zarr.Group,
+    *,
+    source: SourceSubjectMaskRun,
+    component_name: str,
+    created_at_utc: str,
+) -> zarr.Group:
+    component_group = refined_group.require_group("components").require_group(component_name)
+    provenance_group = component_group.require_group("provenance")
+    source_payload = _source_component_provenance_payload(source, component_name)
+    for key, value in source_payload.items():
+        provenance_group.attrs[key] = value
+    provenance_group.attrs.setdefault("last_update_stage", REFINED_SUBJECT_STAGE_NAME)
+    provenance_group.attrs.setdefault("last_update_mode", "create")
+    provenance_group.attrs.setdefault("last_update_method", str(refined_group.attrs.get("method") or DEFAULT_RUN_METHOD))
+    provenance_group.attrs.setdefault(
+        "updated_at_utc",
+        str(refined_group.attrs.get("updated_at_utc") or refined_group.attrs.get("created_at_utc") or created_at_utc),
+    )
+    return provenance_group
+
+
+def _capture_component_sync_states(
+    run_group: zarr.Group,
+    component_name: str,
+    roi_indices: Sequence[int],
+    *,
+    comp_idx: int,
+) -> dict[int, tuple[object, ...]]:
+    component_group = run_group.require_group("components").require_group(component_name)
+    return {
+        int(roi_idx): _component_sync_state(run_group, component_group, comp_idx=comp_idx, roi_idx=int(roi_idx))
+        for roi_idx in roi_indices
+    }
+
+
+def _component_sync_states_changed(
+    run_group: zarr.Group,
+    component_name: str,
+    roi_indices: Sequence[int],
+    *,
+    comp_idx: int,
+    before_states: Mapping[int, tuple[object, ...]],
+) -> bool:
+    component_group = run_group.require_group("components").require_group(component_name)
+    for roi_idx in roi_indices:
+        if before_states[int(roi_idx)] != _component_sync_state(
+            run_group,
+            component_group,
+            comp_idx=comp_idx,
+            roi_idx=int(roi_idx),
+        ):
+            return True
+    return False
+
+
+def _write_refined_component_last_update(
+    refined_group: zarr.Group,
+    *,
+    component_name: str,
+    updated_at_utc: str,
+    update_mode: str,
+    update_method: str,
+) -> None:
+    provenance_group = refined_group.require_group("components").require_group(component_name).require_group("provenance")
+    provenance_group.attrs["last_update_stage"] = REFINED_SUBJECT_STAGE_NAME
+    provenance_group.attrs["last_update_mode"] = str(update_mode)
+    provenance_group.attrs["last_update_method"] = str(update_method)
+    provenance_group.attrs["updated_at_utc"] = str(updated_at_utc)
 
 
 def _compute_mask_metrics(masks_roi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -673,6 +833,12 @@ def _open_or_create_refined_subject_run(
                 edit_applied_arr[:, comp_idx],
                 component_metrics=component_metrics,
             )
+            _ensure_refined_component_provenance(
+                run_group,
+                source=source,
+                component_name=component_name,
+                created_at_utc=str(run_group.attrs.get("created_at_utc") or _utc_now()),
+            )
         return RefinedSubjectMaskRun(
             run_name=target_run,
             parent=refined_parent,
@@ -716,6 +882,7 @@ def _open_or_create_refined_subject_run(
     metrics.create_array("centroid_valid", data=geometry_metrics["centroid_valid"], overwrite=True)
     metrics.create_array("bbox_xyxy", data=geometry_metrics["bbox_xyxy"], overwrite=True)
     metrics.create_array("bbox_valid", data=geometry_metrics["bbox_valid"], overwrite=True)
+    created = _utc_now()
 
     for comp_idx, component_name in enumerate(component_names):
         component_metrics = _compute_component_topology_metrics(masks[:, comp_idx])
@@ -746,6 +913,12 @@ def _open_or_create_refined_subject_run(
             include_reason_text=True,
             overwrite=True,
         )
+        _ensure_refined_component_provenance(
+            run_group,
+            source=source,
+            component_name=component_name,
+            created_at_utc=created,
+        )
 
     run_group.attrs["source_subject_mask_run"] = source.run_name
     if source.source_method:
@@ -760,7 +933,6 @@ def _open_or_create_refined_subject_run(
     run_group.attrs["output_semantics"] = "multilabel"
     run_group.attrs["refinement_semantics"] = "canonical_component_masks"
     run_group.attrs["method"] = DEFAULT_RUN_METHOD
-    created = _utc_now()
     run_group.attrs["created_at_utc"] = created
     run_group.attrs["created_utc"] = created
     run_group.attrs["duration_seconds"] = 0.0
@@ -787,7 +959,7 @@ def _open_or_create_refined_subject_run(
     )
     platform_info = env_info.get("platform", {})
     provenance = build_stage_provenance(
-        stage="refine_subject_masks",
+        stage=REFINED_SUBJECT_STAGE_NAME,
         command=" ".join(sys.argv) if sys.argv else "unknown",
         created_at_utc=created,
         version=git_info.get("short_hash") or git_info.get("commit_hash"),
@@ -1104,9 +1276,11 @@ def _write_refined_subject_component_apply_rows(
         _write_reason_label_row(component_group, reason_labels, int(roi_idx))
 
 
-def _finalize_refined_subject_apply(refined: RefinedSubjectMaskRun) -> None:
-    refined.group.attrs["updated_at_utc"] = _utc_now()
+def _finalize_refined_subject_apply(refined: RefinedSubjectMaskRun) -> str:
+    updated_at_utc = _utc_now()
+    refined.group.attrs["updated_at_utc"] = updated_at_utc
     refined.parent.attrs["latest"] = refined.run_name
+    return updated_at_utc
 
 
 def _apply_refined_subject_roi_rows(
@@ -1116,12 +1290,23 @@ def _apply_refined_subject_roi_rows(
     roi_indices: Sequence[int],
     edited_masks_batch: np.ndarray,
     component_names: Optional[Sequence[str]] = None,
+    update_mode: str = "interactive",
+    update_method: Optional[str] = None,
 ) -> tuple[int, ...]:
     run_group = refined.group
     total_rois = int(run_group["masks_roi"].shape[0])
     normalized_rows = tuple(_normalize_roi_indices(roi_indices, total_rois))
     normalized_components = _normalize_refined_component_names(refined, component_names)
     edited_batch = _normalize_refined_edited_masks_batch(refined, normalized_rows, edited_masks_batch)
+    before_states = {
+        component_name: _capture_component_sync_states(
+            run_group,
+            component_name,
+            normalized_rows,
+            comp_idx=int(refined.component_to_index[component_name]),
+        )
+        for component_name in normalized_components
+    }
 
     for component_name in normalized_components:
         component_updates = _compute_refined_subject_component_apply_rows(
@@ -1139,7 +1324,24 @@ def _apply_refined_subject_roi_rows(
             component_updates=component_updates,
         )
 
-    _finalize_refined_subject_apply(refined)
+    updated_at_utc = _finalize_refined_subject_apply(refined)
+    resolved_method = str(update_method or DEFAULT_RUN_METHOD)
+    for component_name in normalized_components:
+        comp_idx = int(refined.component_to_index[component_name])
+        if _component_sync_states_changed(
+            run_group,
+            component_name,
+            normalized_rows,
+            comp_idx=comp_idx,
+            before_states=before_states[component_name],
+        ):
+            _write_refined_component_last_update(
+                run_group,
+                component_name=component_name,
+                updated_at_utc=updated_at_utc,
+                update_mode=update_mode,
+                update_method=resolved_method,
+            )
     return normalized_rows
 
 
@@ -1155,6 +1357,8 @@ def save_refined_subject_roi(
         refined=refined,
         roi_indices=[int(roi_idx)],
         edited_masks_batch=edited_masks,
+        update_mode="interactive",
+        update_method=DEFAULT_RUN_METHOD,
     )
 
 
@@ -1348,6 +1552,8 @@ def sync_refined_subject_mask_metadata(
         roi_indices=normalized_rows,
         edited_masks_batch=edited_masks_batch,
         component_names=(normalized_component,),
+        update_mode="interactive",
+        update_method=REFINED_SUBJECT_SYNC_METHOD,
     )
 
     changed_count = 0

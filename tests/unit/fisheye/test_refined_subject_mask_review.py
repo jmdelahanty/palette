@@ -226,9 +226,27 @@ def test_prepare_refined_subject_run_creates_body_swim_editor_run(monkeypatch) -
     assert swim_reasons.tolist() == ["clean", "clean"]
 
     body_group = run["components/subject_body"]
+    body_provenance = body_group["provenance"]
     assert body_group.attrs["component_schema_id"] == "subject_body_v1"
     assert body_group.attrs["anatomical_scope"] == "body_core"
     assert body_group.attrs["pectoral_fin_policy"] == "excluded_or_unresolved"
+    assert body_provenance.attrs["source_stage"] == "subject_mask_runs"
+    assert body_provenance.attrs["source_run"] == "subject_masks_001"
+    assert body_provenance.attrs["source_method"] == "subject_mask_threshold_lr_v1"
+    assert body_provenance.attrs["source_channels"] == ["subject_body"]
+    assert body_provenance.attrs["source_label_schema_id"] == "subject_v1_lr"
+    assert body_provenance.attrs["last_update_stage"] == mod.REFINED_SUBJECT_STAGE_NAME
+    assert body_provenance.attrs["last_update_mode"] == "create"
+    assert body_provenance.attrs["last_update_method"] == mod.DEFAULT_RUN_METHOD
+    assert body_provenance.attrs["updated_at_utc"] == run.attrs["created_at_utc"]
+
+    swim_provenance = run["components/swim_bladder/provenance"]
+    assert swim_provenance.attrs["source_stage"] == "subject_mask_runs"
+    assert swim_provenance.attrs["source_run"] == "subject_masks_001"
+    assert swim_provenance.attrs["source_method"] == "subject_mask_threshold_lr_v1"
+    assert swim_provenance.attrs["source_channels"] == ["swim_bladder"]
+    assert swim_provenance.attrs["source_label_schema_id"] == "subject_v1_lr"
+    assert swim_provenance.attrs["last_update_mode"] == "create"
 
     body_metrics = run["components/subject_body/metrics"]
     swim_metrics = run["components/swim_bladder/metrics"]
@@ -333,6 +351,8 @@ def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> 
 
     body_group = run["components/subject_body"]
     swim_group = run["components/swim_bladder"]
+    body_provenance = body_group["provenance"]
+    swim_provenance = swim_group["provenance"]
     assert bool(np.asarray(body_group["edit_applied"][0], dtype=bool)) is True
     assert bool(np.asarray(swim_group["edit_applied"][0], dtype=bool)) is True
     body_reasons = read_reason_labels(body_group)
@@ -380,6 +400,13 @@ def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> 
         np.asarray(swim_group["metrics/solidity"][0], dtype=np.float32),
         np.float32(1.0),
     )
+    assert body_provenance.attrs["last_update_stage"] == mod.REFINED_SUBJECT_STAGE_NAME
+    assert body_provenance.attrs["last_update_mode"] == "interactive"
+    assert body_provenance.attrs["last_update_method"] == mod.DEFAULT_RUN_METHOD
+    assert body_provenance.attrs["updated_at_utc"] == run.attrs["updated_at_utc"]
+    assert swim_provenance.attrs["last_update_mode"] == "interactive"
+    assert swim_provenance.attrs["last_update_method"] == mod.DEFAULT_RUN_METHOD
+    assert swim_provenance.attrs["updated_at_utc"] == run.attrs["updated_at_utc"]
 
 
 def test_apply_refined_subject_roi_rows_updates_only_requested_component() -> None:
@@ -431,6 +458,8 @@ def test_apply_refined_subject_roi_rows_updates_only_requested_component() -> No
 
     body_group = run["components/subject_body"]
     swim_group = run["components/swim_bladder"]
+    body_provenance = body_group["provenance"]
+    swim_provenance = swim_group["provenance"]
     body_reasons = read_reason_labels(body_group)
     swim_reasons = read_reason_labels(swim_group)
     assert body_reasons is not None
@@ -441,6 +470,10 @@ def test_apply_refined_subject_roi_rows_updates_only_requested_component() -> No
         np.asarray(swim_group["area_px"][:], dtype=np.float32),
         np.asarray([0.0, 0.0], dtype=np.float32),
     )
+    assert body_provenance.attrs["last_update_mode"] == "interactive"
+    assert body_provenance.attrs["last_update_method"] == mod.DEFAULT_RUN_METHOD
+    assert body_provenance.attrs["updated_at_utc"] == run.attrs["updated_at_utc"]
+    assert swim_provenance.attrs["last_update_mode"] == "create"
 
 
 def test_format_component_summary_lines_exposes_common_geometry_and_qc() -> None:

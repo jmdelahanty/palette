@@ -108,6 +108,8 @@ def test_refine_subject_masks_batches_driver_writeback_and_records_scheduler_att
 
     body_group = run["components/subject_body"]
     swim_group = run["components/swim_bladder"]
+    body_provenance = body_group["provenance"]
+    swim_provenance = swim_group["provenance"]
     body_reasons = read_reason_labels(body_group)
     swim_reasons = read_reason_labels(swim_group)
     assert body_reasons is not None
@@ -124,6 +126,11 @@ def test_refine_subject_masks_batches_driver_writeback_and_records_scheduler_att
             dtype=bool,
         ),
     )
+    assert body_provenance.attrs["last_update_stage"] == review_mod.REFINED_SUBJECT_STAGE_NAME
+    assert body_provenance.attrs["last_update_mode"] == "batch"
+    assert body_provenance.attrs["last_update_method"] == "fisheye.refinement.refine_subject_masks"
+    assert body_provenance.attrs["updated_at_utc"] == run.attrs["updated_at_utc"]
+    assert swim_provenance.attrs["last_update_mode"] == "create"
 
 
 def test_refine_subject_masks_cli_emits_json_summary(tmp_path: Path, capsys) -> None:
