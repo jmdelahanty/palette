@@ -207,6 +207,12 @@ def test_segment_subject_masks_from_root_writes_body_only_run_using_saved_tuning
     assert metrics["prob_max"][:].shape == (2, 3)
     assert metrics["mask_present"][:].tolist() == [[True, False, False], [True, False, False]]
     assert run.attrs["summary_statistics"]["rows_with_nonempty_masks"] == 2
+    body_provenance = run["components"]["subject_body"]["provenance"].attrs
+    assert body_provenance["source_stage"] == "subject_mask_runs"
+    assert body_provenance["source_run"] == "subject_masks_canary_001"
+    assert body_provenance["source_method"] == "traditional_subject_mask_seed"
+    assert body_provenance["source_channels"] == ["subject_body"]
+    assert body_provenance["source_label_schema_id"] == "subject_v1_union"
     assert "provenance" in run.attrs
     assert run.attrs["provenance"]["parameters"]["method"] == "traditional_subject_mask_seed"
     assert run.attrs["provenance"]["parameters"]["run_semantics"] == "traditional_subject_body_inference"

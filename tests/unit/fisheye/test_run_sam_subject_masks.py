@@ -829,6 +829,12 @@ def test_write_sam_subject_mask_run_records_richer_stage_provenance(monkeypatch)
     assert run["masks_roi"].fill_value == 0
     assert tuple(run["mask_probs_roi"].chunks) == (2, 1, 6, 8)
     assert run["mask_probs_roi"].fill_value == np.float16(0.0)
+    body_provenance = run["components"]["subject_body"]["provenance"].attrs
+    assert body_provenance["source_stage"] == "subject_mask_runs"
+    assert body_provenance["source_run"] == "sam_subject_masks_test_001"
+    assert body_provenance["source_method"] == run.attrs["method"]
+    assert body_provenance["source_channels"] == ["subject_body"]
+    assert body_provenance["source_label_schema_id"] == "subject_v1_union"
     np.testing.assert_allclose(
         np.asarray(run["metrics"]["sam_quality_score"][:], dtype=np.float32),
         np.asarray([[0.9, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32),

@@ -21,6 +21,7 @@ from fisheye.pose.schema import schema_from_metadata
 from fisheye.shared.crop_image_source import resolve_materialized_crop_run
 from fisheye.shared.provenance_attrs import build_source_keypoints_attrs
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
@@ -1525,6 +1526,16 @@ def write_sam_subject_mask_run(
         "available_channels",
         data=np.asarray(SUBJECT_MASK_AVAILABLE_CHANNELS, dtype=bool),
         overwrite=True,
+    )
+    write_subject_mask_component_provenance(
+        run_group,
+        component_name="subject_body",
+        source_stage="subject_mask_runs",
+        source_run=output_run,
+        source_method=str(run_group.attrs["method"]),
+        source_channels=["subject_body"],
+        source_label_schema_id=SUBJECT_MASK_LABEL_SCHEMA,
+        source_created_at_utc=created_at,
     )
 
     metrics_group = run_group.require_group("metrics")

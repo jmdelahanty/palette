@@ -23,6 +23,7 @@ from ..diagnostics.preview_eye_mask_background_subtraction import (
 )
 from ..shared.crop_image_source import resolve_materialized_crop_run
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from ..tune import subject_mask_tuner as tuning
 from ..utils.system import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
@@ -490,6 +491,16 @@ def segment_subject_masks_from_root(
         "available_channels",
         data=np.asarray(SUBJECT_MASK_AVAILABLE_CHANNELS, dtype=bool),
         overwrite=True,
+    )
+    write_subject_mask_component_provenance(
+        run_group,
+        component_name="subject_body",
+        source_stage="subject_mask_runs",
+        source_run=run_name,
+        source_method=str(run_group.attrs["method"]),
+        source_channels=["subject_body"],
+        source_label_schema_id=SUBJECT_MASK_LABEL_SCHEMA,
+        source_created_at_utc=created_at,
     )
 
     channel_metrics = _compute_channel_metrics(body_masks, body_probs)

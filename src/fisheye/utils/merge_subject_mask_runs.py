@@ -14,6 +14,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
+from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.utils.zarr_io import open_zarr_root
 
@@ -320,6 +321,36 @@ def merge_subject_mask_runs(
             "source_body_subject_mask_run": body_source.run_name,
             "source_eye_subject_mask_run": eye_source.run_name,
         }
+    )
+    write_subject_mask_component_provenance(
+        run_group,
+        component_name="subject_body",
+        source_stage="subject_mask_runs",
+        source_run=body_source.run_name,
+        source_method=str(body_source.run_group.attrs.get("method") or "unknown"),
+        source_channels=["subject_body"],
+        source_label_schema_id=normalize_attr(body_source.run_group.attrs.get("label_schema_id")),
+        source_created_at_utc=normalize_attr(body_source.run_group.attrs.get("created_at_utc")),
+    )
+    write_subject_mask_component_provenance(
+        run_group,
+        component_name="eye_left",
+        source_stage="subject_mask_runs",
+        source_run=eye_source.run_name,
+        source_method=str(eye_source.run_group.attrs.get("method") or "unknown"),
+        source_channels=["eye_left"],
+        source_label_schema_id=normalize_attr(eye_source.run_group.attrs.get("label_schema_id")),
+        source_created_at_utc=normalize_attr(eye_source.run_group.attrs.get("created_at_utc")),
+    )
+    write_subject_mask_component_provenance(
+        run_group,
+        component_name="eye_right",
+        source_stage="subject_mask_runs",
+        source_run=eye_source.run_name,
+        source_method=str(eye_source.run_group.attrs.get("method") or "unknown"),
+        source_channels=["eye_right"],
+        source_label_schema_id=normalize_attr(eye_source.run_group.attrs.get("label_schema_id")),
+        source_created_at_utc=normalize_attr(eye_source.run_group.attrs.get("created_at_utc")),
     )
 
     if body_source.source_keypoints_run and body_source.source_keypoints_run == eye_source.source_keypoints_run:

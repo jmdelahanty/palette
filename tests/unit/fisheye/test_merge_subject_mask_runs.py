@@ -259,6 +259,18 @@ def test_merge_subject_mask_runs_combines_body_and_eye_components(tmp_path: Path
     assert component_provenance["components"]["subject_body"]["source_run"] == "sam_subject_masks_canary_001"
     assert component_provenance["components"]["eye_left"]["source_run"] == "subject_masks_from_refined_eye_masks_001"
     assert component_provenance["components"]["eye_right"]["source_run"] == "subject_masks_from_refined_eye_masks_001"
+    body_provenance = run["components"]["subject_body"]["provenance"].attrs
+    left_provenance = run["components"]["eye_left"]["provenance"].attrs
+    right_provenance = run["components"]["eye_right"]["provenance"].attrs
+    assert body_provenance["source_run"] == "sam_subject_masks_canary_001"
+    assert body_provenance["source_channels"] == ["subject_body"]
+    assert body_provenance["source_label_schema_id"] == "subject_v1_union"
+    assert left_provenance["source_run"] == "subject_masks_from_refined_eye_masks_001"
+    assert left_provenance["source_channels"] == ["eye_left"]
+    assert left_provenance["source_label_schema_id"] == "subject_v1_lr"
+    assert right_provenance["source_run"] == "subject_masks_from_refined_eye_masks_001"
+    assert right_provenance["source_channels"] == ["eye_right"]
+    assert right_provenance["source_label_schema_id"] == "subject_v1_lr"
 
     validation = validate_run(run, SUBJECT_MASKS_SPEC)
     assert validation.valid, validation.errors

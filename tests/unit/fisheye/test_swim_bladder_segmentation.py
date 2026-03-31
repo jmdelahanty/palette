@@ -199,6 +199,12 @@ def test_segment_swim_bladder_masks_from_root_writes_swim_channel_only(
     assert run.attrs["summary_statistics"]["rows_with_nonempty_masks"] == 1
     assert run.attrs["summary_statistics"]["rows_skipped_missing_keypoint"] == 1
     assert run.attrs["summary_statistics"]["rows_skipped_unsuccessful_keypoint"] == 0
+    swim_provenance = run["components"]["swim_bladder"]["provenance"].attrs
+    assert swim_provenance["source_stage"] == "subject_mask_runs"
+    assert swim_provenance["source_run"] == "swim_bladder_masks_canary_001"
+    assert swim_provenance["source_method"] == "global_threshold_otsu"
+    assert swim_provenance["source_channels"] == ["swim_bladder"]
+    assert swim_provenance["source_label_schema_id"] == "subject_v1_lr"
     assert run.attrs["provenance"]["parameters"]["run_semantics"] == "traditional_swim_bladder_inference"
     assert run.attrs["provenance"]["parameters"]["tuning_timestamp"] == "2026-03-12T10:00:00+00:00"
 

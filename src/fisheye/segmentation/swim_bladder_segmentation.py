@@ -16,6 +16,7 @@ import zarr
 
 from ..shared.crop_image_source import resolve_materialized_crop_run
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from ..tune import subject_mask_tuner as subject_tuning
 from ..tune import swim_bladder_mask_tuner as swim_tuning
 from ..utils.system import get_environment_info, get_git_info
@@ -277,6 +278,16 @@ def segment_swim_bladder_masks_from_root(
         "available_channels",
         data=np.asarray(SUBJECT_MASK_AVAILABLE_CHANNELS, dtype=bool),
         overwrite=True,
+    )
+    write_subject_mask_component_provenance(
+        run_group,
+        component_name="swim_bladder",
+        source_stage="subject_mask_runs",
+        source_run=run_name,
+        source_method=str(run_group.attrs["method"]),
+        source_channels=["swim_bladder"],
+        source_label_schema_id=SUBJECT_MASK_LABEL_SCHEMA,
+        source_created_at_utc=created_at,
     )
 
     channel_metrics = _compute_channel_metrics(swim_masks, swim_probs)
