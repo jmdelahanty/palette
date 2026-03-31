@@ -21,6 +21,7 @@ from fisheye.shared.provenance_attrs import (
     build_source_keypoints_attrs,
     resolve_source_keypoints_run,
 )
+from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.zarr_io import open_zarr_root
@@ -199,6 +200,25 @@ def _projection_mode_for_schema(label_schema: str, source_layout: EyeLayout) -> 
     if source_layout.kind == "lr":
         return "eyes_union_from_lr"
     return "eyes_union_from_pair"
+
+
+def _component_source_channels_for_projection(
+    *,
+    label_schema: str,
+    source_layout: EyeLayout,
+) -> dict[str, list[str]]:
+    if label_schema == "subject_v1_lr":
+        if source_layout.kind != "lr":
+            raise ValueError("subject_v1_lr projection requires anatomical left/right eye labels.")
+        return {
+            "eye_left": ["eye_left"],
+            "eye_right": ["eye_right"],
+        }
+    if source_layout.kind == "union":
+        return {"eyes_union": ["eyes_union"]}
+    if source_layout.kind == "lr":
+        return {"eyes_union": ["eye_left", "eye_right"]}
+    return {"eyes_union": ["channel_0", "channel_1"]}
 
 
 def _probability_source_usable_for_schema(
@@ -486,6 +506,25 @@ def backfill_subject_mask_run(
         run_group.attrs.update(build_source_keypoints_attrs(source_keypoints_run))
     if source_keypoint_group:
         run_group.attrs[SOURCE_KEYPOINT_GROUP_ATTR] = source_keypoint_group
+    source_method = str(source.run_group.attrs.get("method") or "unknown")
+    source_label_schema_id = normalize_attr(source.run_group.attrs.get("label_schema_id"))
+    source_created_at_utc = normalize_attr(source.run_group.attrs.get("created_at_utc"))
+    component_source_channels = _component_source_channels_for_projection(
+        label_schema=target_label_schema,
+        source_layout=source_layout,
+    )
+    for component_name, source_channels in component_source_channels.items():
+        write_subject_mask_component_provenance(
+            run_group,
+            component_name=component_name,
+            source_stage=source.stage_group,
+            source_run=source.run_name,
+            source_method=source_method,
+            source_channels=source_channels,
+            source_label_schema_id=source_label_schema_id,
+            projection_mode=projection_mode,
+            source_created_at_utc=source_created_at_utc,
+        )
 
     masks_chunks = _target_mask_chunks(
         getattr(source_masks, "chunks", None) if source_masks is not None else None,

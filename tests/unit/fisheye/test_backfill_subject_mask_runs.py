@@ -183,6 +183,12 @@ def test_backfill_subject_mask_run_projects_raw_eye_masks(tmp_path: Path) -> Non
     assert run.attrs["source_eye_masks_run"] == "eye_masks_001"
     assert run.attrs["source_probability_path"] == "eye_masks_runs/eye_masks_001/mask_probs_roi"
     assert run.attrs["probabilities_encoding"] == "linear_uint8_0_255"
+    eyes_union_provenance = run["components"]["eyes_union"]["provenance"].attrs
+    assert eyes_union_provenance["source_stage"] == "eye_masks_runs"
+    assert eyes_union_provenance["source_run"] == "eye_masks_001"
+    assert eyes_union_provenance["source_method"] == "unknown"
+    assert eyes_union_provenance["source_channels"] == ["channel_0", "channel_1"]
+    assert eyes_union_provenance["projection_mode"] == "eyes_union_from_pair"
 
     validation = validate_run(run, SUBJECT_MASKS_SPEC)
     assert validation.valid, validation.errors
@@ -252,6 +258,16 @@ def test_backfill_subject_mask_run_projects_refined_eye_masks_to_lr_schema(tmp_p
     assert run.attrs["projection_mode"] == "eye_lr_from_lr"
     assert run.attrs["source_probability_path"] == "refined_eye_masks_runs/refined_eye_masks_001/masks_roi"
     assert run.attrs["probabilities_encoding"] == "unit_float"
+    left_provenance = run["components"]["eye_left"]["provenance"].attrs
+    right_provenance = run["components"]["eye_right"]["provenance"].attrs
+    assert left_provenance["source_stage"] == "refined_eye_masks_runs"
+    assert left_provenance["source_run"] == "refined_eye_masks_001"
+    assert left_provenance["source_channels"] == ["eye_left"]
+    assert left_provenance["projection_mode"] == "eye_lr_from_lr"
+    assert right_provenance["source_stage"] == "refined_eye_masks_runs"
+    assert right_provenance["source_run"] == "refined_eye_masks_001"
+    assert right_provenance["source_channels"] == ["eye_right"]
+    assert right_provenance["projection_mode"] == "eye_lr_from_lr"
     validation = validate_run(run, SUBJECT_MASKS_SPEC)
     assert validation.valid, validation.errors
 
@@ -310,6 +326,16 @@ def test_backfill_subject_mask_run_can_preserve_raw_lr_when_eye_labels_are_anato
     )
     assert run.attrs["label_schema_id"] == "subject_v1_lr"
     assert run.attrs["source_probability_path"] == "eye_masks_runs/eye_masks_001/mask_probs_roi"
+    left_provenance = run["components"]["eye_left"]["provenance"].attrs
+    right_provenance = run["components"]["eye_right"]["provenance"].attrs
+    assert left_provenance["source_stage"] == "eye_masks_runs"
+    assert left_provenance["source_run"] == "eye_masks_001"
+    assert left_provenance["source_channels"] == ["eye_left"]
+    assert left_provenance["projection_mode"] == "eye_lr_from_lr"
+    assert right_provenance["source_stage"] == "eye_masks_runs"
+    assert right_provenance["source_run"] == "eye_masks_001"
+    assert right_provenance["source_channels"] == ["eye_right"]
+    assert right_provenance["projection_mode"] == "eye_lr_from_lr"
 
 
 def test_backfill_subject_mask_run_rejects_lr_projection_from_unlabeled_pair_source(tmp_path: Path) -> None:

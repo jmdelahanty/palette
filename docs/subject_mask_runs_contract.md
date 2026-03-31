@@ -341,6 +341,11 @@ Semantics:
 - `source_channels` is a list because some projections consume multiple source
   channels
 - for single-channel lineage, writers should still use a one-element list
+- use anatomical names such as `eye_left` / `eye_right` only when the source
+  artifact explicitly carries anatomical left/right identity
+- if the source artifact is only an unlabeled positional pair, writers should
+  use positional channel identifiers such as `channel_0` / `channel_1` instead
+  of anatomical names
 - for placeholder components where `available_channels[c] == false`, the
   provenance subgroup may be omitted
 
@@ -385,9 +390,11 @@ target schema is `subject_v1_union`:
   `["eye_0", "eye_1"]`):
   - `masks_roi[:, eyes_union] = union(channel_0, channel_1)`
   - `mask_probs_roi[:, eyes_union] = max(prob_0, prob_1)`
+  - `components/eyes_union/provenance/source_channels = ["channel_0", "channel_1"]`
   - `projection_mode = "eyes_union_from_pair"`
 - if source already provides an eye union channel:
   - copy that channel directly
+  - `components/eyes_union/provenance/source_channels = ["eyes_union"]`
   - `projection_mode = "eyes_union_from_union"`
 
 In both cases:
@@ -405,6 +412,8 @@ target schema is `subject_v1_lr`:
 - source channels must carry anatomical left/right identity
 - `masks_roi[:, eye_left] = source_left`
 - `masks_roi[:, eye_right] = source_right`
+- `components/eye_left/provenance/source_channels = ["eye_left"]`
+- `components/eye_right/provenance/source_channels = ["eye_right"]`
 - if probability masks also preserve left/right identity:
   - copy them channel-for-channel
 - otherwise:
