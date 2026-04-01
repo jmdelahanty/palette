@@ -145,4 +145,27 @@ def test_component_names_union_available_components() -> None:
 
     component_names = mod._component_names(subject, refined)
 
-    assert component_names == ("subject_body", "swim_bladder")
+    assert component_names == ("subject_body", "eye_left", "eye_right", "swim_bladder")
+
+
+def test_draw_component_shape_overlay_draws_contour_and_hull() -> None:
+    image = np.zeros((16, 16, 3), dtype=np.uint8)
+    mask = np.zeros((16, 16), dtype=np.uint8)
+    mask[3:13, 4:11] = 1
+    mask[7:13, 9:13] = 1
+
+    drawn = mod._draw_component_shape_overlay(
+        image,
+        component_name="swim_bladder",
+        mask=mask,
+    )
+
+    assert int(np.count_nonzero(drawn)) > 0
+    assert np.any(np.all(drawn == np.asarray(mod.HULL_COLOR, dtype=np.uint8), axis=2))
+    assert np.any(np.all(drawn == np.asarray(mod.COMPONENT_COLORS["swim_bladder"], dtype=np.uint8), axis=2))
+
+
+def test_cycle_component_index_wraps() -> None:
+    assert mod._cycle_component_index(0, 4, -1) == 3
+    assert mod._cycle_component_index(3, 4, 1) == 0
+    assert mod._cycle_component_index(1, 4, 1) == 2

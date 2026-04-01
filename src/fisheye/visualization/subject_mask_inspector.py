@@ -51,6 +51,10 @@ BBOX_THICKNESS = 1
 CENTROID_RADIUS = 3
 SUMMARY_LINE_HEIGHT = 18
 SUMMARY_START_Y = 26
+CONTOUR_THICKNESS = 1
+HULL_THICKNESS = 1
+HULL_COLOR = (80, 180, 255)
+CONTOUR_COLOR = (255, 255, 255)
 
 
 @dataclass(frozen=True)
@@ -268,6 +272,39 @@ def _mask_for_component(run: LoadedMaskRun | None, component_name: str, roi_idx:
     if comp_idx is None:
         return None
     return np.asarray(run.masks_roi[int(roi_idx), comp_idx], dtype=np.uint8)
+
+
+def _extract_largest_external_contour(mask: np.ndarray | None) -> np.ndarray | None:
+    if mask is None:
+        return None
+    binary = (np.asarray(mask, dtype=np.uint8) > 0).astype(np.uint8, copy=False)
+    if int(np.count_nonzero(binary)) <= 0:
+        return None
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return None
+    contour = max(contours, key=cv2.contourArea)
+    contour = np.asarray(contour, dtype=np.int32).reshape(-1, 1, 2)
+    if int(contour.shape[0]) < 3:
+        return None
+    return contour
+
+
+def _draw_component_shape_overlay(
+    image: np.ndarray,
+    *,
+    component_name: str,
+    mask: np.ndarray | None,
+) -> np.ndarray:
+    canvas = np.asarray(image, dtype=np.uint8).copy()
+    contour = _extract_largest_external_contour(mask)
+    if contour is None:
+        return canvas
+    hull = cv2.convexHull(contour)
+    if hull is not None and int(hull.shape[0]) >= 3:
+        cv2.polylines(canvas, [np.asarray(hull, dtype=np.int32)], True, HULL_COLOR, HULL_THICKNESS, cv2.LINE_8)
+    cv2.polylines(canvas, [np.asarray(contour, dtype=np.int32)], True, CONTOUR_COLOR, CONTOUR_THICKNESS, cv2.LINE_8)
+    return canvas
 
 
 def _component_geometry(
@@ -489,17 +526,30 @@ def _component_names(subject: LoadedMaskRun | None, refined: LoadedMaskRun | Non
     seen: set[str] = set()
     result: list[str] = []
     for component_name in COMPONENT_ORDER:
-        available = False
+        declared = False
         for run in (subject, refined):
             if run is None:
                 continue
-            if _component_index(run, component_name) is not None:
-                available = True
+            if component_name in run.mask_labels:
+                declared = True
                 break
-        if available and component_name not in seen:
+        if declared and component_name not in seen:
             seen.add(component_name)
             result.append(component_name)
+    for run in (subject, refined):
+        if run is None:
+            continue
+        for component_name in run.mask_labels:
+            if component_name not in seen:
+                seen.add(component_name)
+                result.append(component_name)
     return tuple(result)
+
+
+def _cycle_component_index(active_idx: int, component_count: int, step: int) -> int:
+    if component_count <= 0:
+        return 0
+    return int((int(active_idx) + int(step)) % int(component_count))
 
 
 def launch_inspector(
@@ -555,6 +605,7 @@ def launch_inspector(
     print(f"  Components: {', '.join(component_names)}")
     print("Controls:")
     print("  1..9: select active component")
+    print("  [/]: previous/next active component")
     print("  n/p: next/previous ROI")
     print("  j/k: jump +10 / -10 ROIs")
     print("  o: toggle overlay mode (all vs active component)")
@@ -567,16 +618,24 @@ def launch_inspector(
             overlay_components = (component_names[active_idx],)
         else:
             overlay_components = component_names
-
+        active_component_name = component_names[active_idx]
+        raw_masks_lookup = {
+            component_name: _mask_for_component(subject, component_name, current_pos)
+            for component_name in overlay_components
+        }
+        refined_masks_lookup = {
+            component_name: _mask_for_component(refined, component_name, current_pos)
+            for component_name in overlay_components
+        }
         raw_masks = [
-            _mask_for_component(subject, component_name, current_pos)
-            if _mask_for_component(subject, component_name, current_pos) is not None
+            raw_masks_lookup[component_name]
+            if raw_masks_lookup[component_name] is not None
             else np.zeros((int(roi_img.shape[0]), int(roi_img.shape[1])), dtype=np.uint8)
             for component_name in overlay_components
         ]
         refined_masks = [
-            _mask_for_component(refined, component_name, current_pos)
-            if _mask_for_component(refined, component_name, current_pos) is not None
+            refined_masks_lookup[component_name]
+            if refined_masks_lookup[component_name] is not None
             else np.zeros((int(roi_img.shape[0]), int(roi_img.shape[1])), dtype=np.uint8)
             for component_name in overlay_components
         ]
@@ -586,17 +645,21 @@ def launch_inspector(
             _to_bgr(roi_img),
             footer_lines=(
                 f"overlay_mode={overlay_mode}",
-                f"active_component={component_names[active_idx]}",
+                f"active_component={active_component_name} ({active_idx + 1}/{len(component_names)})",
             ),
         )
         raw_panel = (
             _panel(
                 f"Raw Overlay: {subject.run_name}",
-                _draw_component_geometry(
-                    _overlay_components(roi_img, overlay_components, raw_masks),
-                    run=subject,
-                    component_name=component_names[active_idx],
-                    roi_idx=current_pos,
+                _draw_component_shape_overlay(
+                    _draw_component_geometry(
+                        _overlay_components(roi_img, overlay_components, raw_masks),
+                        run=subject,
+                        component_name=active_component_name,
+                        roi_idx=current_pos,
+                    ),
+                    component_name=active_component_name,
+                    mask=raw_masks_lookup.get(active_component_name),
                 ),
                 footer_lines=(f"method={subject.method or 'unknown'}",),
             )
@@ -606,23 +669,28 @@ def launch_inspector(
         refined_panel = (
             _panel(
                 f"Refined Overlay: {refined.run_name}",
-                _draw_component_geometry(
-                    _overlay_components(roi_img, overlay_components, refined_masks),
-                    run=refined,
-                    component_name=component_names[active_idx],
-                    roi_idx=current_pos,
+                _draw_component_shape_overlay(
+                    _draw_component_geometry(
+                        _overlay_components(roi_img, overlay_components, refined_masks),
+                        run=refined,
+                        component_name=active_component_name,
+                        roi_idx=current_pos,
+                    ),
+                    component_name=active_component_name,
+                    mask=refined_masks_lookup.get(active_component_name),
                 ),
                 footer_lines=(
-                    f"review={str(dict(refined.component_reviews.get(component_names[active_idx]) or {}).get('state') or 'pending')}",
+                    f"review={str(dict(refined.component_reviews.get(active_component_name) or {}).get('state') or 'pending')}",
+                    "active_outline=contour+hull",
                 ),
             )
             if refined is not None
             else _blank_panel_like(roi_img, "Refined Overlay", "No matching refined subject-mask run")
         )
-        flags = _component_flag_reasons(refined, component_names[active_idx], current_pos, thresholds=thresholds)
+        flags = _component_flag_reasons(refined, active_component_name, current_pos, thresholds=thresholds)
         summary_panel = _summary_panel(
             roi_img,
-            component_name=component_names[active_idx],
+            component_name=active_component_name,
             roi_idx=current_pos,
             total_rois=total_rois,
             subject=subject,
@@ -650,6 +718,12 @@ def launch_inspector(
             if choice < len(component_names):
                 active_idx = choice
                 update_display()
+        elif key == ord("["):
+            active_idx = _cycle_component_index(active_idx, len(component_names), -1)
+            update_display()
+        elif key == ord("]"):
+            active_idx = _cycle_component_index(active_idx, len(component_names), 1)
+            update_display()
         elif key == ord("n"):
             if current_pos < total_rois - 1:
                 current_pos += 1
