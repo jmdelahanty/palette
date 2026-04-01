@@ -157,6 +157,12 @@ Key point:
 - `masks_roi` and `mask_probs_roi` remain the canonical unified tensor surface
 - `components/<name>/...` holds component-scoped metadata, provenance, and any
   component-specific details
+- sparse multi-source workflows should assemble directly into
+  `refined_subject_masks_runs/<run>` rather than requiring an assembled raw
+  `subject_mask_runs/<run>` intermediate
+- the assembled unified run is only valid after subject-mask
+  refinement/finalization has materialized canonical QA, reasons, and review
+  metadata
 
 ## Recommended Canonical Refined Shape
 
@@ -205,6 +211,14 @@ refined_subject_masks_runs/
 The eye geometry that currently lives in `refined_eye_masks_runs` should
 ultimately move here as component-scoped refined metadata rather than remaining
 in a separate canonical stage for new runs.
+
+Assembly note:
+
+- seeding this run from multiple sources is only the first half of the write
+  path
+- the subject-mask refinement/finalization step must always run after assembly
+  so `refined_subject_masks_runs` keeps the same "materialized refined stage"
+  semantics as other Palette refined artifacts
 
 Editing note:
 

@@ -2,7 +2,7 @@
 
 <!-- design-meta
 status: active
-last_verified: 2026-03-31
+last_verified: 2026-04-01
 -->
 
 Purpose: define the target runtime/refined model for moving eye refinement under
@@ -48,7 +48,12 @@ steady-state model for new multi-component work.
    relation subtree, not duplicated into both eye components.
 5. `refined_eye_masks_runs` should become a compatibility/adapter artifact in
    the long-term design, not a parallel canonical authoring surface.
-6. Historical eye-mask runs remain readable and backfillable; no destructive
+6. Direct multi-source assembly should target `refined_subject_masks_runs`
+   rather than introducing a required assembled raw subject-mask intermediate.
+7. An assembled unified run is only valid after the subject-mask
+   refinement/finalization step materializes the canonical QA, metrics,
+   reasons, and review scaffolding.
+8. Historical eye-mask runs remain readable and backfillable; no destructive
    archive rewrite is required.
 
 ## Canonical Write Targets
@@ -90,6 +95,37 @@ Reason:
   it is too lossy as the refined canonical authoring surface
 - refined workflows can legitimately promote a union/raw source into LR
   semantics using keypoints or other eye-specific refinement logic
+
+## Assembly And Finalization Policy
+
+Unified subject-mask assembly should not stop at "collect component masks into a
+shared tensor."
+
+Required policy:
+
+- do not require an assembled raw `subject_mask_runs/<run>` intermediate for
+  sparse multi-source workflows
+- assemble directly into `refined_subject_masks_runs/<run>`
+- always run the assembled result through the subject-mask
+  refinement/finalization layer before treating it as a valid refined run
+
+Why:
+
+- other Palette refined artifacts are materialized QA/validation stages, not
+  just storage containers
+- the subject-mask refined stage is where component-local and run-level
+  metrics, reasons, provenance, and review scaffolding become canonical
+- skipping finalization would make `refined_subject_masks_runs` the only
+  "refined" family that does not actually guarantee a refinement-time QA
+  surface
+
+Initial source policy for unified assembly:
+
+- normal sources should be raw component producers such as `subject_mask_runs`
+- one transitional already-refined source is explicitly allowed:
+  `refined_eye_masks_runs`
+- importing components from an existing `refined_subject_masks_runs` run is
+  deferred; it is not part of the initial unification plan
 
 ## Canonical Refined Storage Shape
 
@@ -262,6 +298,9 @@ Required behavior:
 - if eye components are seeded from raw `subject_mask_runs`, provenance must
   preserve the true source channels such as `["eyes_union"]`,
   `["eye_left"]`, `["eye_right"]`, or positional channel names
+- subject-mask finalization must then record the assembled unified run's own
+  `last_update_*` state without erasing the original component `source_*`
+  lineage
 - later edits update `last_update_*` without erasing the original `source_*`
   origin
 
@@ -269,7 +308,7 @@ This is necessary for mixed-source refined runs such as:
 
 - `subject_body` from a SAM subject-mask run
 - `eye_left` and `eye_right` from refined eye masks
-- `swim_bladder` from a separate raw or refined source
+- `swim_bladder` from a separate raw subject-mask source
 
 ## Role Of `refined_eye_masks_runs`
 
@@ -321,11 +360,15 @@ canonical and the other must be derived.
   `refined_subject_masks_runs`
 - support seeding those eye components from `refined_eye_masks_runs`
 - add the `relations/eye_pair/` subtree for cross-eye derived values
+- require subject-mask finalization after the seed/assembly step so the unified
+  run has canonical refined QA and review metadata
 
 ### Phase C: canonical unification
 
 - new eye-capable refined authoring writes canonical state to
   `refined_subject_masks_runs`
+- direct assembly into `refined_subject_masks_runs` remains the preferred path;
+  a merged raw subject-mask intermediate is not required
 - `refined_eye_masks_runs` becomes an optional derived compatibility artifact
   for consumers that still require the legacy eye-specific layout
 
@@ -364,6 +407,8 @@ This design does not yet decide:
   default or only on request during the later transition phases
 - the exact implementation seam for converting union/raw eye sources into
   canonical refined LR eye components
+- the exact CLI/API that seeds a new assembled unified run before
+  finalization
 - whether training/export defaults should stay `subject_v1_union` even after
   runtime/refined authoring becomes canonically `subject_v1_lr`
 

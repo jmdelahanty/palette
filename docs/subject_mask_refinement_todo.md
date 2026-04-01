@@ -149,6 +149,16 @@ This stage should hold edited/refined component masks for:
 - `swim_bladder`
 - possibly eye channels later
 
+Policy note:
+
+- sparse multi-source workflows should not require an assembled raw
+  `subject_mask_runs/<run>` intermediate
+- instead, component sources should seed `refined_subject_masks_runs/<run>`
+  directly and then pass through the subject-mask refinement/finalization step
+- this keeps `refined_subject_masks_runs` aligned with other Palette refined
+  artifacts, where the refined run is a QA/metrics materialization stage rather
+  than just an assembled container
+
 ### 3. Defer eye migration
 
 Do not migrate away from `refined_eye_masks_runs` yet.
@@ -159,6 +169,8 @@ For now:
 - eye review/edit continues to operate there
 - subject-mask unification should be designed so eye refinement can move under
   the subject-mask component model later without another schema reset
+- during unified assembly, the one planned already-refined upstream exception
+  is eye components seeded from `refined_eye_masks_runs`
 
 ### 4. Keep eye geometry specialized for now
 
@@ -190,7 +202,7 @@ Target medium-term:
 ```text
 crop_runs/<run>
   -> subject_mask_runs/<run>
-  -> refined_subject_masks_runs/<run>  # body/swim bladder editable masks
+  -> refined_subject_masks_runs/<run>  # assembled then finalized body/swim bladder editable masks
   -> refined_eye_masks_runs/<run>      # still specialized, may read from subject masks
   -> subject_shape_runs/<run>          # geometry derived from refined subject/body
 ```
@@ -198,8 +210,8 @@ crop_runs/<run>
 Possible longer-term convergence:
 
 ```text
-subject_mask_runs
-  -> refined_subject_masks_runs
+component/raw sources
+  -> refined_subject_masks_runs        # direct assembly + subject-mask finalization
      -> refined_eye_masks_runs         # specialized derivative or sibling view
 ```
 

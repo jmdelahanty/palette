@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-03-31
+last_verified: 2026-04-01
 -->
 
 Purpose: define the runtime/storage contract for editable, refined
@@ -61,6 +61,8 @@ Policy:
   `refined_subject_masks_runs`
 - future unification should align eye refinement under the subject-mask
   component model without forcing a destructive migration now
+- sparse multi-source workflows should not require an assembled raw
+  `subject_mask_runs/<run>` intermediate before refinement
 
 ## Canonical Label Scope
 
@@ -104,6 +106,34 @@ This contract is intended to support:
 
 V1 directly supports case 1 and is shaped to permit cases 2 and 3 later
 without changing the stage family name.
+
+## Assembly And Finalization Semantics
+
+`refined_subject_masks_runs/<run>` is not merely a bag of assembled component
+masks. It is the canonical refined/editable working artifact, and it should be
+treated as valid only after subject-mask refinement/finalization has
+materialized the canonical QA surface.
+
+Required behavior:
+
+- sparse multi-source assembly may seed a new
+  `refined_subject_masks_runs/<run>` directly
+- the seed/assembly step must be followed by subject-mask finalization before
+  the run is treated as a valid refined artifact
+- finalization is responsible for canonical run/component metrics, reasons,
+  review scaffolding, provenance updates, and any refinement-time geometry
+  derived by this stage family
+
+Initial allowed seed sources for unified assembly:
+
+- raw `subject_mask_runs`
+- transitional `refined_eye_masks_runs` for eye components
+
+Deferred source pattern:
+
+- importing components from another `refined_subject_masks_runs/<run>` is not
+  part of the initial unification plan and should be treated as a later
+  extension if needed
 
 ## Output Layout
 
@@ -313,7 +343,7 @@ Required provenance attrs for an available component:
 
 - `source_stage`
   - stage family that seeded the component, for example `subject_mask_runs`,
-    `refined_subject_masks_runs`, or `refined_eye_masks_runs`
+    or transitional `refined_eye_masks_runs`
 - `source_run`
   - source run id within that stage family
 - `source_method`
@@ -342,6 +372,8 @@ Semantics:
 - `source_label_schema_id` is the source artifact's `label_schema_id`
 - `source_*` does not imply the current component is byte-identical to that
   source after later edits
+- subject-mask finalization is expected to run after seeding and may update
+  `last_update_*` while preserving the original `source_*` origin
 - `last_update_*` records the most recent operation that changed this component
   inside the current refined run
 - if a component is copied through during refined-run creation and never edited,
@@ -351,7 +383,7 @@ This distinction is required for future mixed-source refined runs such as:
 
 - `subject_body` seeded from a SAM subject-mask run
 - `eye_left` and `eye_right` seeded from a UNet/refined-eye workflow
-- `swim_bladder` later added from a different raw or refined source
+- `swim_bladder` seeded from a different raw subject-mask source
 
 ## Component Subgroups
 
