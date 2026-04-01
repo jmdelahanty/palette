@@ -180,6 +180,7 @@ def test_segment_swim_bladder_masks_from_root_writes_swim_channel_only(
     assert run.attrs["source_keypoints_run"] == "refined_keypoints_canary_001"
     assert run.attrs["source_keypoint_group"] == "refined_keypoints_runs"
     assert run.attrs["tuning_source"] == "analysis_metadata.subject_mask_tuning.components.swim_bladder"
+    assert run.attrs["tuning_override_keys"] == []
     assert run.attrs["tuning_entry_snapshot"]["method"] == "global_threshold_otsu"
     assert run.attrs["tuning_entry_snapshot"]["subject_method_family"] == "swim_bladder_patch_threshold_v1"
     assert run.attrs["tuning_entry_snapshot"]["tuned_timestamp"] == "2026-03-12T10:00:00+00:00"
@@ -211,6 +212,7 @@ def test_segment_swim_bladder_masks_from_root_writes_swim_channel_only(
     assert swim_provenance["source_label_schema_id"] == "subject_v1_union"
     assert run.attrs["provenance"]["parameters"]["run_semantics"] == "traditional_swim_bladder_inference"
     assert run.attrs["provenance"]["parameters"]["tuning_timestamp"] == "2026-03-12T10:00:00+00:00"
+    assert run.attrs["provenance"]["parameters"]["tuning_override_keys"] == []
     assert run.attrs["provenance"]["parameters"]["tuning_entry_snapshot"]["subject_method_family"] == (
         "swim_bladder_patch_threshold_v1"
     )
@@ -272,3 +274,102 @@ def test_segment_swim_bladder_masks_uses_open_zarr_root_wrapper(monkeypatch: pyt
 
     assert run_name == "swim_bladder_masks_cli_001"
     assert "swim_bladder_masks_cli_001" in root["subject_mask_runs"]
+
+
+def test_segment_swim_bladder_masks_dispatches_polar_boundary_family(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _make_root()
+    root["analysis_metadata"].attrs[mod.subject_tuning.TUNING_KEY]["components"]["swim_bladder"] = {
+        "method": "polar_boundary_center_seed",
+        "subject_method_family": "swim_bladder_polar_boundary_v1",
+        "version": "1.0",
+        "tuned_timestamp": "2026-04-01T12:00:00+00:00",
+        "tuned_parameters": {
+            "roi_padding": 1,
+            "angle_step_degrees": 30,
+            "min_radius_px": 1,
+            "max_radius_px": 2,
+            "smoothing_sigma": 0.0,
+            "response_threshold": 0.0,
+            "max_missing_gap_degrees": 360,
+            "min_valid_ray_fraction": 0.0,
+            "gradient_mode": "sobel_magnitude",
+            "prefilter_sigma": 0.0,
+        },
+        "context": {"storage_component_name": "swim_bladder"},
+    }
+    keypoint_source = mod.subject_tuning.EyeKeypointSource(
+        group_name="refined_keypoints_runs",
+        run_name="refined_keypoints_canary_001",
+        group=_FakeGroup(attrs={"keypoint_labels": ["swim_bladder", "eye_left", "eye_right"]}),
+        keypoints_roi=_FakeArray(
+            np.asarray(
+                [
+                    [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                    [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                ],
+                dtype=np.float32,
+            )
+        ),
+        success_flags=np.asarray([True, True], dtype=bool),
+        heading_values=None,
+    )
+    monkeypatch.setattr(mod.subject_tuning, "_resolve_eye_keypoint_source", lambda *_args, **_kwargs: keypoint_source)
+
+    run_name = mod.segment_swim_bladder_masks_from_root(
+        root,
+        zarr_path="/tmp/fake_training.zarr",
+        output_run="swim_bladder_masks_polar_001",
+    )
+
+    run = root["subject_mask_runs"][run_name]
+    assert run.attrs["method"] == "polar_boundary_center_seed"
+    assert run.attrs["probability_semantics"] == "normalized_boundary_response"
+    assert run.attrs["config"]["subject_method_family"] == "swim_bladder_polar_boundary_v1"
+    assert run.attrs["tuning_entry_snapshot"]["subject_method_family"] == "swim_bladder_polar_boundary_v1"
+    assert (
+        run.attrs["provenance"]["parameters"]["tuning_entry_snapshot"]["subject_method_family"]
+        == "swim_bladder_polar_boundary_v1"
+    )
+    assert run.attrs["tuning_override_keys"] == []
+    assert run["metrics"]["mask_present"][:].tolist() == [[False, False, True], [False, False, True]]
+
+
+def test_segment_swim_bladder_masks_override_method_family_updates_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _make_root()
+    keypoint_source = mod.subject_tuning.EyeKeypointSource(
+        group_name="refined_keypoints_runs",
+        run_name="refined_keypoints_canary_001",
+        group=_FakeGroup(attrs={"keypoint_labels": ["swim_bladder", "eye_left", "eye_right"]}),
+        keypoints_roi=_FakeArray(
+            np.asarray(
+                [
+                    [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                    [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                ],
+                dtype=np.float32,
+            )
+        ),
+        success_flags=np.asarray([True, True], dtype=bool),
+        heading_values=None,
+    )
+    monkeypatch.setattr(mod.subject_tuning, "_resolve_eye_keypoint_source", lambda *_args, **_kwargs: keypoint_source)
+
+    run_name = mod.segment_swim_bladder_masks_from_root(
+        root,
+        zarr_path="/tmp/fake_training.zarr",
+        config_dict={"subject_method_family": "polar_boundary"},
+        output_run="swim_bladder_masks_override_001",
+    )
+
+    run = root["subject_mask_runs"][run_name]
+    assert run.attrs["method"] == "polar_boundary_center_seed"
+    assert run.attrs["tuning_source"] == "analysis_metadata.subject_mask_tuning.components.swim_bladder"
+    assert run.attrs["tuning_override_keys"] == ["subject_method_family"]
+    assert run.attrs["tuning_entry_snapshot"]["method"] == "global_threshold_otsu"
+    assert run.attrs["tuning_entry_snapshot"]["subject_method_family"] == "swim_bladder_patch_threshold_v1"
+    assert run["components"]["swim_bladder"]["provenance"].attrs["source_method"] == "polar_boundary_center_seed"
+    assert run.attrs["provenance"]["parameters"]["tuning_override_keys"] == ["subject_method_family"]

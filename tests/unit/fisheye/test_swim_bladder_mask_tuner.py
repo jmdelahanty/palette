@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
@@ -76,6 +77,47 @@ def test_compute_swim_bladder_patch_preview_selects_region_nearest_center() -> N
     assert int(preview["proposal_mask"].sum()) == 16
     assert preview["stats"]["selected_area"] == 16
     assert preview["stats"]["bbox_xyxy"] == [3, 3, 7, 7]
+
+
+def test_compute_swim_bladder_patch_preview_polar_boundary_fills_synthetic_ring() -> None:
+    patch = np.full((21, 21), 180, dtype=np.uint8)
+    cv2.circle(patch, (10, 10), 5, 60, 1)
+
+    params = mod._build_swim_bladder_params(
+        {
+            "roi_padding": 10,
+            "angle_step_degrees": 15,
+            "min_radius_px": 2,
+            "max_radius_px": 8,
+            "smoothing_sigma": 0.5,
+            "response_threshold": 0.05,
+            "max_missing_gap_degrees": 180,
+            "min_valid_ray_fraction": 0.25,
+            "prefilter_sigma": 0.0,
+        },
+        method_family=mod.POLAR_BOUNDARY_METHOD_FAMILY,
+    )
+
+    preview = mod._compute_swim_bladder_patch_preview(
+        patch,
+        center_xy=(10.0, 10.0),
+        params=params,
+        method_family=mod.POLAR_BOUNDARY_METHOD_FAMILY,
+    )
+
+    assert preview["method_family"] == mod.POLAR_BOUNDARY_METHOD_FAMILY
+    assert preview["proposal_mask"].shape == patch.shape
+    assert int(np.sum(preview["proposal_mask"])) > 0
+    assert int(preview["proposal_mask"][10, 10]) == 1
+    assert float(preview["stats"]["valid_ray_fraction"]) > 0.25
+    assert preview["filtered_patch_title"] == "Boundary Response"
+    assert preview["seed_mask_title"] == "Ray Hits"
+
+
+def test_sync_polar_radius_constraints_clamps_pad_and_radii() -> None:
+    assert mod._sync_polar_radius_constraints(13, 5, 12) == (13, 5, 12)
+    assert mod._sync_polar_radius_constraints(8, 5, 12) == (8, 5, 8)
+    assert mod._sync_polar_radius_constraints(1, 9, 1) == (2, 1, 2)
 
 
 def test_save_subject_mask_params_supports_pre_normalized_swim_bladder_payload(

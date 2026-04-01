@@ -42,10 +42,31 @@ except Exception:  # pragma: no cover - rich is optional at runtime
 
 
 SUBJECT_MASK_AVAILABLE_CHANNELS = (False, False, True)
+TUNING_OVERRIDE_KEYS = (
+    "subject_method_family",
+    "roi_padding",
+    "pre_threshold",
+    "sobel_strength",
+    "min_area",
+    "max_area",
+    "min_circularity",
+    "closing_radius",
+    "opening_radius",
+    "angle_step_degrees",
+    "min_radius_px",
+    "max_radius_px",
+    "smoothing_sigma",
+    "response_threshold",
+    "max_missing_gap_degrees",
+    "min_valid_ray_fraction",
+    "gradient_mode",
+    "prefilter_sigma",
+)
 
 
 @dataclass
 class SwimBladderSegmentationConfig:
+    subject_method_family: str = swim_tuning.DEFAULT_METHOD_FAMILY
     roi_padding: int = swim_tuning.DEFAULT_ROI_PADDING
     pre_threshold: Optional[int] = swim_tuning.DEFAULT_PRE_THRESHOLD
     sobel_strength: float = swim_tuning.DEFAULT_SOBEL_STRENGTH
@@ -54,6 +75,15 @@ class SwimBladderSegmentationConfig:
     min_circularity: Optional[float] = swim_tuning.DEFAULT_MIN_CIRCULARITY
     closing_radius: int = swim_tuning.DEFAULT_CLOSING_RADIUS
     opening_radius: int = swim_tuning.DEFAULT_OPENING_RADIUS
+    angle_step_degrees: int = 8
+    min_radius_px: int = 3
+    max_radius_px: int = swim_tuning.DEFAULT_ROI_PADDING
+    smoothing_sigma: float = 1.5
+    response_threshold: float = 0.12
+    max_missing_gap_degrees: int = 40
+    min_valid_ray_fraction: float = 0.55
+    gradient_mode: str = "sobel_magnitude"
+    prefilter_sigma: float = 1.0
     crop_run: Optional[str] = None
     keypoint_run: Optional[str] = None
 
@@ -63,6 +93,19 @@ def _print(console: Optional[Console], message: str) -> None:
         console.print(message)
     else:  # pragma: no cover
         print(message)
+
+
+def _resolve_effective_method_name(method_family: str) -> str:
+    normalized_family = swim_tuning._normalize_method_family(method_family)
+    if normalized_family == swim_tuning.POLAR_BOUNDARY_METHOD_FAMILY:
+        return "polar_boundary_center_seed"
+    return "global_threshold_otsu"
+
+
+def _collect_tuning_override_keys(overrides: Optional[Mapping[str, Any]]) -> list[str]:
+    if not overrides:
+        return []
+    return sorted(str(key) for key in TUNING_OVERRIDE_KEYS if key in overrides)
 
 
 def _apply_tuned_parameters(
@@ -75,21 +118,38 @@ def _apply_tuned_parameters(
     if not isinstance(tuned, Mapping):
         return cfg, None
 
-    normalized = swim_tuning._normalize_swim_bladder_params(tuned)
+    cfg.subject_method_family = swim_tuning._normalize_method_family(
+        entry.get("subject_method_family") if isinstance(entry, dict) else None
+    )
+    normalized = swim_tuning._normalize_swim_bladder_params(
+        tuned,
+        method_family=cfg.subject_method_family,
+    )
     cfg.roi_padding = int(normalized["roi_padding"])
-    cfg.pre_threshold = (
-        int(normalized["pre_threshold"]) if normalized.get("pre_threshold") is not None else None
-    )
-    cfg.sobel_strength = float(normalized["sobel_strength"])
-    cfg.min_area = int(normalized["min_area"])
-    cfg.max_area = int(normalized["max_area"]) if normalized.get("max_area") is not None else None
-    cfg.min_circularity = (
-        float(normalized["min_circularity"])
-        if normalized.get("min_circularity") is not None
-        else None
-    )
-    cfg.closing_radius = int(normalized["closing_radius"])
-    cfg.opening_radius = int(normalized["opening_radius"])
+    if cfg.subject_method_family == swim_tuning.POLAR_BOUNDARY_METHOD_FAMILY:
+        cfg.angle_step_degrees = int(normalized["angle_step_degrees"])
+        cfg.min_radius_px = int(normalized["min_radius_px"])
+        cfg.max_radius_px = int(normalized["max_radius_px"])
+        cfg.smoothing_sigma = float(normalized["smoothing_sigma"])
+        cfg.response_threshold = float(normalized["response_threshold"])
+        cfg.max_missing_gap_degrees = int(normalized["max_missing_gap_degrees"])
+        cfg.min_valid_ray_fraction = float(normalized["min_valid_ray_fraction"])
+        cfg.gradient_mode = str(normalized["gradient_mode"])
+        cfg.prefilter_sigma = float(normalized["prefilter_sigma"])
+    else:
+        cfg.pre_threshold = (
+            int(normalized["pre_threshold"]) if normalized.get("pre_threshold") is not None else None
+        )
+        cfg.sobel_strength = float(normalized["sobel_strength"])
+        cfg.min_area = int(normalized["min_area"])
+        cfg.max_area = int(normalized["max_area"]) if normalized.get("max_area") is not None else None
+        cfg.min_circularity = (
+            float(normalized["min_circularity"])
+            if normalized.get("min_circularity") is not None
+            else None
+        )
+        cfg.closing_radius = int(normalized["closing_radius"])
+        cfg.opening_radius = int(normalized["opening_radius"])
 
     if console is not None:
         timestamp = entry.get("tuned_timestamp") if isinstance(entry, dict) else None
@@ -104,19 +164,15 @@ def _apply_overrides(
 ) -> SwimBladderSegmentationConfig:
     if not overrides:
         return cfg
-    param_keys = {
-        "roi_padding",
-        "pre_threshold",
-        "sobel_strength",
-        "min_area",
-        "max_area",
-        "min_circularity",
-        "closing_radius",
-        "opening_radius",
-    }
+    if "subject_method_family" in overrides:
+        cfg.subject_method_family = swim_tuning._normalize_method_family(overrides["subject_method_family"])
+    param_keys = set(TUNING_OVERRIDE_KEYS) - {"subject_method_family"}
     param_overrides = {key: overrides[key] for key in param_keys if key in overrides}
     if param_overrides:
-        normalized = swim_tuning._normalize_swim_bladder_params(param_overrides)
+        normalized = swim_tuning._normalize_swim_bladder_params(
+            param_overrides,
+            method_family=cfg.subject_method_family,
+        )
         for key in param_keys:
             if key in param_overrides:
                 setattr(cfg, key, normalized[key])
@@ -153,7 +209,9 @@ def segment_swim_bladder_masks_from_root(
     stage_start = time.perf_counter()
     cfg = SwimBladderSegmentationConfig()
     cfg, tuning_entry = _apply_tuned_parameters(root, cfg, console)
+    tuning_override_keys = _collect_tuning_override_keys(config_dict)
     cfg = _apply_overrides(cfg, config_dict)
+    effective_method = _resolve_effective_method_name(cfg.subject_method_family)
 
     _, crop_group, crop_run = resolve_materialized_crop_run(root, crop_run=cfg.crop_run, zarr_path=zarr_path)
     roi_images = crop_group.get("roi_images")
@@ -184,17 +242,33 @@ def segment_swim_bladder_masks_from_root(
     rows_skipped_missing_keypoint = 0
     rows_skipped_unsuccessful_keypoint = 0
     otsu_thresholds = np.full((roi_count,), np.nan, dtype=np.float32)
+    valid_ray_fraction_values = np.full((roi_count,), np.nan, dtype=np.float32)
+    max_missing_gap_values = np.full((roi_count,), np.nan, dtype=np.float32)
 
-    params = {
-        "roi_padding": int(cfg.roi_padding),
-        "pre_threshold": cfg.pre_threshold,
-        "sobel_strength": float(cfg.sobel_strength),
-        "min_area": int(cfg.min_area),
-        "max_area": cfg.max_area,
-        "min_circularity": cfg.min_circularity,
-        "closing_radius": int(cfg.closing_radius),
-        "opening_radius": int(cfg.opening_radius),
-    }
+    if cfg.subject_method_family == swim_tuning.POLAR_BOUNDARY_METHOD_FAMILY:
+        params = {
+            "roi_padding": int(cfg.roi_padding),
+            "angle_step_degrees": int(cfg.angle_step_degrees),
+            "min_radius_px": int(cfg.min_radius_px),
+            "max_radius_px": int(cfg.max_radius_px),
+            "smoothing_sigma": float(cfg.smoothing_sigma),
+            "response_threshold": float(cfg.response_threshold),
+            "max_missing_gap_degrees": int(cfg.max_missing_gap_degrees),
+            "min_valid_ray_fraction": float(cfg.min_valid_ray_fraction),
+            "gradient_mode": str(cfg.gradient_mode),
+            "prefilter_sigma": float(cfg.prefilter_sigma),
+        }
+    else:
+        params = {
+            "roi_padding": int(cfg.roi_padding),
+            "pre_threshold": cfg.pre_threshold,
+            "sobel_strength": float(cfg.sobel_strength),
+            "min_area": int(cfg.min_area),
+            "max_area": cfg.max_area,
+            "min_circularity": cfg.min_circularity,
+            "closing_radius": int(cfg.closing_radius),
+            "opening_radius": int(cfg.opening_radius),
+        }
 
     for row_idx in range(roi_count):
         if row_idx < success_flags.shape[0] and not bool(success_flags[row_idx]):
@@ -215,13 +289,24 @@ def segment_swim_bladder_masks_from_root(
             patch,
             center_xy=patch_center_xy,
             params=params,
+            method_family=cfg.subject_method_family,
         )
 
         proposal_patch = np.asarray(preview["proposal_mask"], dtype=np.uint8)
         swim_masks[row_idx, y0:y1, x0:x1] = proposal_patch
-        darkness_patch = 1.0 - (np.asarray(preview["filtered_patch"], dtype=np.float32) / 255.0)
-        swim_probs[row_idx, y0:y1, x0:x1] = np.clip(darkness_patch, 0.0, 1.0)
-        otsu_thresholds[row_idx] = float(preview["stats"]["threshold_value"])
+        probability_patch = np.asarray(preview.get("probability_patch"), dtype=np.float32)
+        if probability_patch.shape != patch.shape:
+            probability_patch = np.zeros_like(patch, dtype=np.float32)
+        swim_probs[row_idx, y0:y1, x0:x1] = np.clip(probability_patch, 0.0, 1.0)
+        threshold_value = preview["stats"].get("threshold_value")
+        if threshold_value is not None:
+            otsu_thresholds[row_idx] = float(threshold_value)
+        valid_fraction = preview["stats"].get("valid_ray_fraction")
+        if valid_fraction is not None:
+            valid_ray_fraction_values[row_idx] = float(valid_fraction)
+        max_gap = preview["stats"].get("max_missing_gap_degrees")
+        if max_gap is not None:
+            max_missing_gap_values[row_idx] = float(max_gap)
 
     run_group, run_name = _prepare_run_group(root, output_run=output_run, overwrite=overwrite)
     created_at = datetime.now(timezone.utc).isoformat()
@@ -240,11 +325,7 @@ def segment_swim_bladder_masks_from_root(
 
     run_group.attrs.update(
         {
-            "method": str(
-                tuning_entry.get("method")
-                if isinstance(tuning_entry, dict) and tuning_entry.get("method")
-                else "global_threshold_otsu"
-            ),
+            "method": effective_method,
             "config": asdict(cfg),
             "source_crop_run": str(crop_run),
             "source_keypoints_run": str(keypoint_source.run_name),
@@ -258,13 +339,18 @@ def segment_swim_bladder_masks_from_root(
             "input_format": "gray",
             "probabilities_dtype": "float16",
             "probabilities_encoding": "unit_float",
-            "probability_semantics": "normalized_patch_darkness",
+            "probability_semantics": (
+                "normalized_boundary_response"
+                if cfg.subject_method_family == swim_tuning.POLAR_BOUNDARY_METHOD_FAMILY
+                else "normalized_patch_darkness"
+            ),
             "tuning_source": (
                 "analysis_metadata.subject_mask_tuning.components.swim_bladder"
                 if tuning_entry is not None
                 else "defaults_or_overrides"
             ),
             "tuning_timestamp": tuning_entry.get("tuned_timestamp") if isinstance(tuning_entry, dict) else None,
+            "tuning_override_keys": list(tuning_override_keys),
             "created_at_utc": created_at,
         }
     )
@@ -337,6 +423,12 @@ def segment_swim_bladder_masks_from_root(
         "otsu_threshold_min": float(np.nanmin(otsu_thresholds)) if np.any(np.isfinite(otsu_thresholds)) else None,
         "otsu_threshold_mean": float(np.nanmean(otsu_thresholds)) if np.any(np.isfinite(otsu_thresholds)) else None,
         "otsu_threshold_max": float(np.nanmax(otsu_thresholds)) if np.any(np.isfinite(otsu_thresholds)) else None,
+        "valid_ray_fraction_mean": (
+            float(np.nanmean(valid_ray_fraction_values)) if np.any(np.isfinite(valid_ray_fraction_values)) else None
+        ),
+        "max_missing_gap_degrees_mean": (
+            float(np.nanmean(max_missing_gap_values)) if np.any(np.isfinite(max_missing_gap_values)) else None
+        ),
         "output_run": run_name,
         "crop_run": str(crop_run),
         "keypoint_group": str(keypoint_source.group_name),
@@ -379,9 +471,10 @@ def segment_swim_bladder_masks_from_root(
             **asdict(cfg),
             "method": run_group.attrs.get("method"),
             "run_semantics": run_group.attrs.get("run_semantics"),
-            "probability_semantics": "normalized_patch_darkness",
+            "probability_semantics": run_group.attrs.get("probability_semantics"),
             "tuning_source": run_group.attrs.get("tuning_source"),
             "tuning_timestamp": run_group.attrs.get("tuning_timestamp"),
+            "tuning_override_keys": list(tuning_override_keys),
             "tuning_entry_snapshot": tuning_entry_snapshot,
         },
         inputs={
@@ -421,18 +514,7 @@ def segment_swim_bladder_masks(
 
 def _build_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
     overrides: Dict[str, Any] = {}
-    for key in (
-        "crop_run",
-        "keypoint_run",
-        "roi_padding",
-        "pre_threshold",
-        "sobel_strength",
-        "min_area",
-        "max_area",
-        "min_circularity",
-        "closing_radius",
-        "opening_radius",
-    ):
+    for key in ("crop_run", "keypoint_run", *TUNING_OVERRIDE_KEYS):
         value = getattr(args, key)
         if value is not None:
             overrides[key] = value
@@ -446,6 +528,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("zarr_path", type=Path, help="Path to the Palette Zarr archive.")
     parser.add_argument("--crop-run", type=str, help="Optional crop_runs/<run> to segment.")
     parser.add_argument("--keypoint-run", type=str, help="Optional keypoint run providing swim-bladder anchors.")
+    parser.add_argument(
+        "--subject-method-family",
+        type=str,
+        help="Optional swim-bladder method family override (e.g. threshold_blob or polar_boundary).",
+    )
     parser.add_argument("--run-name", type=str, help="Optional subject_mask_runs/<run> output name.")
     parser.add_argument(
         "--overwrite",
@@ -460,6 +547,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--min-circularity", type=float, help="Override minimum circularity.")
     parser.add_argument("--closing-radius", type=int, help="Override morphological closing radius.")
     parser.add_argument("--opening-radius", type=int, help="Override morphological opening radius.")
+    parser.add_argument("--angle-step-degrees", type=int, help="Override polar boundary angle step.")
+    parser.add_argument("--min-radius-px", type=int, help="Override polar boundary minimum radius.")
+    parser.add_argument("--max-radius-px", type=int, help="Override polar boundary maximum radius.")
+    parser.add_argument("--smoothing-sigma", type=float, help="Override polar boundary smoothing sigma.")
+    parser.add_argument("--response-threshold", type=float, help="Override polar boundary response threshold.")
+    parser.add_argument(
+        "--gradient-mode",
+        type=str,
+        help="Override polar boundary gradient response (e.g. sobel_magnitude, scharr_magnitude, laplacian_abs).",
+    )
+    parser.add_argument(
+        "--max-missing-gap-degrees",
+        type=int,
+        help="Override maximum allowed missing-angle gap before rejecting a polar proposal.",
+    )
+    parser.add_argument(
+        "--min-valid-ray-fraction",
+        type=float,
+        help="Override minimum valid-ray fraction required for a polar proposal.",
+    )
+    parser.add_argument("--prefilter-sigma", type=float, help="Override polar boundary prefilter sigma.")
 
     args = parser.parse_args(argv)
     console = Console() if Console is not None else None
