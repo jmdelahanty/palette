@@ -121,8 +121,12 @@ Current status:
   [swim_bladder_mask_tuner.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/tune/swim_bladder_mask_tuner.py)
 - stores patch-local threshold/Sobel/morphology parameters under
   `subject_mask_tuning.components["swim_bladder"]`
-- does not yet have a batch materializer that converts the saved tuning into
-  raw `subject_mask_runs`
+- now has a traditional materializer in
+  [swim_bladder_segmentation.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/segmentation/swim_bladder_segmentation.py)
+  that converts the saved tuning into raw `subject_mask_runs`
+- current method family is still threshold/blob-oriented
+- a boundary-oriented successor is proposed in
+  [swim_bladder_polar_boundary_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/swim_bladder_polar_boundary_design.md)
 
 ## Patch Reviewer UI Contract
 
@@ -211,6 +215,13 @@ when introduced.
 
 The traditional local swim-bladder tuner is patch-local and keypoint-centered,
 not ROI-wide.
+
+Current note:
+
+- the implemented saved metadata shape below describes the current
+  `swim_bladder_patch_threshold_v1` family
+- a new `swim_bladder_polar_boundary_v1` family is now proposed separately in
+  [swim_bladder_polar_boundary_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/swim_bladder_polar_boundary_design.md)
 
 Recommended saved metadata shape:
 

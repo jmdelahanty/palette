@@ -99,6 +99,11 @@ This is the near-term rollout order that should happen before more schema work.
   - component `reason_bytes`
   - component review payloads
 - [ ] Decide what “good enough to save” means for a first swim-bladder mask.
+- [ ] Decide whether the current threshold/blob swim-bladder tuner is good
+      enough for canary use, or whether we should switch to the proposed
+      boundary-based method family in
+      [swim_bladder_polar_boundary_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/swim_bladder_polar_boundary_design.md)
+      before scaling up curation.
 
 ### 3. Delay downstream geometry until labels exist
 
