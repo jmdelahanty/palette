@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-03-10
+last_verified: 2026-03-31
 -->
 
 Purpose: define the merged training artifact for a generalized ROI-local
@@ -20,8 +20,11 @@ discarding existing eye-mask training data.
 
 - Allow one target schema such as `["subject_body", "eyes_union",
   "swim_bladder"]`.
+- Allow one target schema such as `["subject_body", "eye_left", "eye_right",
+  "swim_bladder"]` when the export explicitly targets LR semantics.
 - Allow mixed source stages:
   - `subject_mask_runs/<run>`
+  - `refined_subject_masks_runs/<run>`
   - `eye_masks_runs/<run>`
   - `refined_eye_masks_runs/<run>`
 - Avoid fabricating negatives for channels that were never labeled.
@@ -88,14 +91,35 @@ Recommended transition plan:
    provenance and compatibility.
 2. Allow explicit backfill/projection of legacy eye-mask runs into
    `subject_mask_runs`.
-3. Treat `refined_eye_masks_runs` as an eye-specific derived stage that may
-   eventually read from `subject_mask_runs` plus keypoints.
-4. Deprecate authoring of new raw `eye_masks_runs` only after the
+3. Treat `refined_eye_masks_runs` as an eye-specific compatibility/derived
+   stage during the transition to unified subject-mask refinement.
+4. Prefer `refined_subject_masks_runs` as the canonical refined source for new
+   eye-capable exports once unified LR eye components are available there.
+5. Deprecate authoring of new raw `eye_masks_runs` only after the
    `subject_mask_runs` path is stable.
 
 This contract only governs the merged training artifact, but exporters should
 support that runtime migration path rather than requiring a destructive rewrite
 of historical eye-mask data.
+
+## Relationship To Canonical Runtime/Refined Schemas
+
+The canonical runtime/refined eye-capable authoring target is moving toward:
+
+- `subject_mask_runs` for raw snapshots
+- `refined_subject_masks_runs` for refined/editable snapshots
+- `label_schema_id = "subject_v1_lr"` for canonical refined eye-capable work
+
+This training contract remains more permissive than the runtime/refined
+contracts because exporters need to support:
+
+- legacy eye-only sources
+- union-eye supervision
+- partial-supervision datasets
+- compatibility projections into `subject_v1_union`
+
+So the training export default may remain `subject_v1_union` even while
+canonical runtime/refined authoring trends toward `subject_v1_lr`.
 
 ## Canonical Target Schema
 
@@ -104,10 +128,17 @@ Recommended default target schema for v1:
 - `label_schema_id = "subject_v1_union"`
 - `mask_labels = ["subject_body", "eyes_union", "swim_bladder"]`
 
-Future schemas may extend this contract, for example:
+Exporters should also support explicit LR targets, for example:
 
 - `subject_v1_lr`
 - `mask_labels = ["subject_body", "eye_left", "eye_right", "swim_bladder"]`
+
+Policy:
+
+- `subject_v1_union` remains the recommended default training export schema for
+  v1 compatibility
+- `subject_v1_lr` is the canonical refined eye-capable runtime/refined authoring
+  target, but not yet required as the default export schema
 
 Writers must always persist:
 
@@ -192,8 +223,8 @@ Required root attrs:
   - `label_schema_id`
   - `mask_labels`
   - `allow_partial_supervision` (`true`)
-  - `source_stage` (`subject_mask_runs`, `eye_masks_runs`,
-    `refined_eye_masks_runs`, or `mixed`)
+  - `source_stage` (`subject_mask_runs`, `refined_subject_masks_runs`,
+    `eye_masks_runs`, `refined_eye_masks_runs`, or `mixed`)
   - `source_count`
   - `source_zarr_paths`
   - `split_seed`
@@ -346,9 +377,10 @@ All split arrays must:
 
 ## Source Projection Rules
 
-### 1. Identity projection from `subject_mask_runs`
+### 1. Identity projection from subject-mask stage families
 
-If the source run already matches the requested target schema:
+If the source run comes from `subject_mask_runs` or
+`refined_subject_masks_runs` and already matches the requested target schema:
 
 - masks are copied channel-for-channel
 - `target_valid_channels` is derived from the source-run channel availability
@@ -364,7 +396,7 @@ Required rule:
 
 ### 1b. Projection from `subject_v1_lr` into `subject_v1_union`
 
-If the source run is `subject_mask_runs` with:
+If the source run is `subject_mask_runs` or `refined_subject_masks_runs` with:
 
 - `label_schema_id = "subject_v1_lr"`
 - channels `["subject_body", "eye_left", "eye_right", "swim_bladder"]`
@@ -383,6 +415,9 @@ Required rule:
   union
 - exporters must not mark `subject_body` or `swim_bladder` valid unless those
   channels were explicitly supervised in the source rows
+- if a refined-subject source is available for a unified LR refined run,
+  exporters should prefer that canonical refined source over a compatibility
+  `refined_eye_masks_runs` artifact for the same semantic labels
 
 ### 2. Eye-mask projection into `subject_v1_union`
 
@@ -511,6 +546,8 @@ Proposed:
 ## Related Contracts
 
 - [eye_mask_training_artifact_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_mask_training_artifact_contract.md)
+- [refined_subject_masks_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/refined_subject_masks_runs_contract.md)
+- [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_subject_mask_unification_design.md)
 - [subject_mask_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_runs_contract.md)
 - [training_label_origin_provenance_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/training_label_origin_provenance_todo.md)
 - [training_quality_gate_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/training_quality_gate_contract.md)

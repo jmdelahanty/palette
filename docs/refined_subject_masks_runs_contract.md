@@ -2,13 +2,13 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-03-10
+last_verified: 2026-03-31
 -->
 
 Purpose: define the runtime/storage contract for editable, refined
 subject-mask artifacts that can hold canonical component masks for body and swim
-bladder now, while leaving a clean future path to unify eye refinement under
-the same component model later.
+bladder now, while also defining the target canonical home for future
+left/right eye refinement under the same component model.
 
 ## Scope
 
@@ -18,6 +18,12 @@ the same component model later.
 - Support component-scoped review and reasons.
 - Reserve space for component-specific derived geometry such as contours,
   centroids, and centerline/spline-related outputs.
+- Define the target eye-capable refined layout for:
+  - `eye_left`
+  - `eye_right`
+  - per-eye ellipses
+  - per-eye contours
+  - cross-eye relation metrics such as `eye_separation`
 
 ## Non-goals
 
@@ -49,23 +55,36 @@ Policy:
 
 - `refined_subject_masks_runs` is the refined stage for generic subject-mask
   components.
-- `refined_eye_masks_runs` remains the specialized refined stage for eye
-  geometry until the unification path is ready.
-- Future unification should align eye refinement under the subject-mask
-  component model without forcing a destructive migration now.
+- `refined_eye_masks_runs` remains supported during the transition as the
+  current eye-specific refined stage.
+- the target steady-state for new eye-capable refined authoring is still
+  `refined_subject_masks_runs`
+- future unification should align eye refinement under the subject-mask
+  component model without forcing a destructive migration now
 
 ## Canonical Label Scope
 
-Recommended minimum v1 component scope:
+Recommended minimum currently implemented component scope:
 
 - `subject_body`
 - `swim_bladder`
 
-Optional later:
+Optional/compatibility labels:
 
 - `eyes_union`
 - `eye_left`
 - `eye_right`
+
+Canonical target for eye-capable refined authoring:
+
+- `label_schema_id = "subject_v1_lr"`
+- `mask_labels = ["subject_body", "eye_left", "eye_right", "swim_bladder"]`
+
+Compatibility/raw model-output schema:
+
+- `subject_v1_union` remains valid for raw compatibility and export use
+- `subject_v1_union` is not the preferred long-term refined eye authoring
+  schema because it loses anatomical eye identity
 
 Writers must always persist:
 
@@ -119,6 +138,12 @@ refined_subject_masks_runs/
         metrics/                            # optional component-local QC summary arrays
           ...
         geometry/                           # optional extension point
+          ...
+        contours/                           # optional component-local contour storage
+          ...
+    relations/                              # optional cross-component derived values
+      <relation_name>/
+        metrics/
           ...
 ```
 
@@ -361,6 +386,11 @@ Optional subgroups:
   - component-scoped lineage and last-update attrs
 - `metrics/`
   - component-local fixed-shape QC summary arrays
+- `geometry/`
+  - component-local derived geometry arrays
+- `contours/`
+  - component-local contour stores when contour ownership belongs to one
+    component
 
 Optional component attrs:
 
@@ -395,14 +425,31 @@ Why per-component subgroups:
 - eye refinement is even more specialized
 - this avoids freezing the whole stage around one component’s geometry layout
 
+## Cross-Component Relation Subgroups
+
+`relations/<relation_name>/` is the standard extension point for derived values
+that conceptually span multiple components and are not owned by one component.
+
+Canonical example for future eye-capable refined runs:
+
+- `relations/eye_pair/metrics/`
+  - `separation_px`
+  - `separation_valid`
+
+Why this belongs under `relations/` rather than under one eye component:
+
+- `eye_separation` is a pairwise derived value
+- duplicating it under both eye components creates synchronization risk
+- it should not require inventing a fake mask component such as `eye_pair`
+
 ## Geometry Extension Policy
 
 Component-specific geometry should live under:
 
 - `components/<component>/geometry/`
 
-This contract intentionally leaves the exact geometry array names open for
-follow-on contracts.
+This contract keeps body/swim-bladder geometry intentionally open, but the
+target eye-capable refined layout is now explicit.
 
 Expected future examples:
 
@@ -422,15 +469,19 @@ Expected future examples:
 
 ### `eye_left` / `eye_right`
 
-- review metadata remains component-local under
+- eye-specific review, reasons, QC, and provenance remain component-local under
   `components/eye_left|eye_right/`
-- eye-specific geometry should live under
-  `components/eye_left|eye_right/geometry/`
-- likely migrated examples:
-  - `ellipse_params`
-  - `ellipse_success`
-  - `eye_separation_peer`
-  - contour tables
+- eye-specific geometry should live under:
+  - `components/eye_left/geometry/ellipse_params`
+  - `components/eye_left/geometry/ellipse_success`
+  - `components/eye_right/geometry/ellipse_params`
+  - `components/eye_right/geometry/ellipse_success`
+- eye-specific contour stores should live under:
+  - `components/eye_left/contours/{ptr, len, points_xy}`
+  - `components/eye_right/contours/{ptr, len, points_xy}`
+- cross-eye relation metrics should live under:
+  - `relations/eye_pair/metrics/separation_px`
+  - `relations/eye_pair/metrics/separation_valid`
 
 Geometry policy:
 
@@ -479,22 +530,26 @@ without inventing separate stage families.
 
 ## Relationship To `refined_eye_masks_runs`
 
-`refined_eye_masks_runs` remains authoritative for refined eye geometry in v1.
+During transition:
 
-`refined_subject_masks_runs` should therefore not be required to duplicate:
+- `refined_eye_masks_runs` remains supported for historical archives and
+  existing eye-specific tooling
+- it may remain the live eye-specific refinement surface until unified
+  eye-capable refined-subject writes reach parity
 
-- eye ellipses
-- eye separation
-- left/right assignment
-- current eye-specific QA rollups
+Target steady-state:
 
-If eye channels appear later inside `refined_subject_masks_runs`, that should
-be treated as an aligned component view, not an immediate replacement for
-`refined_eye_masks_runs`.
+- `refined_subject_masks_runs` is the canonical refined authoring surface for
+  new eye-capable subject-mask work
+- `refined_eye_masks_runs` becomes a compatibility or adapter artifact rather
+  than a second independent canonical authoring surface
 
-If such eye channels are seeded from `refined_eye_masks_runs`, component
-provenance should point to that true source stage/run rather than collapsing
-everything to the run-level `source_subject_mask_run`.
+Required provenance rule:
+
+- if eye components in `refined_subject_masks_runs` are seeded from
+  `refined_eye_masks_runs`, component provenance must point to that true source
+  stage/run rather than collapsing everything to the run-level
+  `source_subject_mask_run`
 
 ## Registry Implications
 
@@ -511,7 +566,8 @@ The registry must be able to distinguish:
 
 - raw subject-mask availability
 - refined body/swim-bladder availability
-- specialized refined eye availability
+- refined eye availability projected from unified refined-subject component rows
+- specialized refined eye availability during the transition period
 
 ## Migration Policy
 
@@ -519,9 +575,12 @@ Recommended transition:
 
 1. keep `refined_eye_masks_runs` unchanged
 2. introduce `refined_subject_masks_runs` for body/swim bladder
-3. align registry and review payloads across refined stages
-4. only then evaluate how eye refinement should unify with the subject-mask
-   component model
+3. extend `refined_subject_masks_runs` contracts to cover unified eye-local
+   geometry and cross-eye relations
+4. align registry and review payloads across refined stages
+5. move new eye-capable refined authoring to `refined_subject_masks_runs`
+6. treat `refined_eye_masks_runs` as a compatibility artifact once adapter
+   readers/materializers exist
 
 This contract is intentionally non-destructive.
 
@@ -539,13 +598,15 @@ This contract is intentionally non-destructive.
   from `metrics/`, or should one be derived-only?
 - Should body contour/spline geometry live directly here, or only in a later
   `subject_shape_runs` stage with this stage remaining mask-centric?
-- If eye channels are added later, do they store only refined masks here, or
-  also mirrored eye-specific geometry references?
+- At what point should compatibility materialization of `refined_eye_masks_runs`
+  become opt-in rather than routine once unified refined-subject eye writes are
+  available?
 
 ## Related Docs
 
 - [subject_mask_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_runs_contract.md)
 - [subject_mask_registry_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_registry_contract.md)
+- [eye_subject_mask_unification_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/eye_subject_mask_unification_design.md)
 - [subject_mask_refinement_todo.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_refinement_todo.md)
 - [review_status_schema_unification_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/review_status_schema_unification_contract.md)
 - [pose_kinematics_run_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/pose_kinematics_run_design.md)
