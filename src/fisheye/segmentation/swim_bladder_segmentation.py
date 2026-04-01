@@ -31,6 +31,7 @@ from .subject_segmentation import (
     _coerce_roi_to_gray,
     _compute_channel_metrics,
     _copy_lineage_array,
+    _snapshot_tuning_entry,
     _prepare_run_group,
 )
 
@@ -267,6 +268,9 @@ def segment_swim_bladder_masks_from_root(
             "created_at_utc": created_at,
         }
     )
+    tuning_entry_snapshot = _snapshot_tuning_entry(tuning_entry)
+    if tuning_entry_snapshot is not None:
+        run_group.attrs["tuning_entry_snapshot"] = tuning_entry_snapshot
 
     _copy_lineage_array(run_group, crop_group, "frame_indices")
     _copy_lineage_array(run_group, crop_group, "frame_counts")
@@ -378,6 +382,7 @@ def segment_swim_bladder_masks_from_root(
             "probability_semantics": "normalized_patch_darkness",
             "tuning_source": run_group.attrs.get("tuning_source"),
             "tuning_timestamp": run_group.attrs.get("tuning_timestamp"),
+            "tuning_entry_snapshot": tuning_entry_snapshot,
         },
         inputs={
             "source_crop_run": str(crop_run),

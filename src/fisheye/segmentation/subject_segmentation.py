@@ -93,6 +93,26 @@ def _apply_tuned_parameters(
     return cfg, dict(entry) if isinstance(entry, dict) else None
 
 
+def _freeze_attr_payload(value: Any) -> Any:
+    """Convert nested payloads into plain Python attr-safe values."""
+    if isinstance(value, Mapping):
+        return {str(key): _freeze_attr_payload(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_freeze_attr_payload(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return _freeze_attr_payload(value.tolist())
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _snapshot_tuning_entry(tuning_entry: Optional[Mapping[str, Any]]) -> Optional[dict[str, Any]]:
+    if not isinstance(tuning_entry, Mapping):
+        return None
+    frozen = _freeze_attr_payload(dict(tuning_entry))
+    return frozen if isinstance(frozen, dict) else None
+
+
 def _apply_overrides(
     cfg: SubjectSegmentationConfig,
     overrides: Optional[Mapping[str, Any]],
@@ -480,6 +500,9 @@ def segment_subject_masks_from_root(
             "created_at_utc": created_at,
         }
     )
+    tuning_entry_snapshot = _snapshot_tuning_entry(tuning_entry)
+    if tuning_entry_snapshot is not None:
+        run_group.attrs["tuning_entry_snapshot"] = tuning_entry_snapshot
 
     _copy_lineage_array(run_group, crop_group, "frame_indices")
     _copy_lineage_array(run_group, crop_group, "frame_counts")
@@ -594,6 +617,7 @@ def segment_subject_masks_from_root(
             "probability_semantics": "normalized_background_diff",
             "tuning_source": run_group.attrs.get("tuning_source"),
             "tuning_timestamp": run_group.attrs.get("tuning_timestamp"),
+            "tuning_entry_snapshot": tuning_entry_snapshot,
         },
         inputs={
             "source_crop_run": str(crop_run),

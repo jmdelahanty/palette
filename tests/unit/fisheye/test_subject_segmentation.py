@@ -190,6 +190,10 @@ def test_segment_subject_masks_from_root_writes_body_only_run_using_saved_tuning
     assert run.attrs["probability_semantics"] == "normalized_background_diff"
     assert run.attrs["tuning_source"] == "analysis_metadata.subject_mask_tuning.components.subject_body"
     assert run.attrs["config"]["gaussian_blur_kernel"] == 5
+    assert run.attrs["tuning_entry_snapshot"]["method"] == "traditional_subject_mask_seed"
+    assert run.attrs["tuning_entry_snapshot"]["tuned_timestamp"] == "2026-03-11T01:23:45+00:00"
+    assert run.attrs["tuning_entry_snapshot"]["tuned_parameters"]["gaussian_blur_kernel"] == 4
+    assert run.attrs["tuning_entry_snapshot"]["context"]["storage_component_name"] == "subject_body"
 
     np.testing.assert_array_equal(
         run["available_channels"][:],
@@ -221,6 +225,10 @@ def test_segment_subject_masks_from_root_writes_body_only_run_using_saved_tuning
         == "analysis_metadata.subject_mask_tuning.components.subject_body"
     )
     assert run.attrs["provenance"]["parameters"]["tuning_timestamp"] == "2026-03-11T01:23:45+00:00"
+    assert (
+        run.attrs["provenance"]["parameters"]["tuning_entry_snapshot"]["tuned_parameters"]["gaussian_blur_kernel"]
+        == 4
+    )
 
 
 def test_segment_subject_masks_from_root_supports_background_ds_and_overwrite() -> None:

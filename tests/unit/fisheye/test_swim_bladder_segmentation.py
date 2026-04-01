@@ -180,6 +180,10 @@ def test_segment_swim_bladder_masks_from_root_writes_swim_channel_only(
     assert run.attrs["source_keypoints_run"] == "refined_keypoints_canary_001"
     assert run.attrs["source_keypoint_group"] == "refined_keypoints_runs"
     assert run.attrs["tuning_source"] == "analysis_metadata.subject_mask_tuning.components.swim_bladder"
+    assert run.attrs["tuning_entry_snapshot"]["method"] == "global_threshold_otsu"
+    assert run.attrs["tuning_entry_snapshot"]["subject_method_family"] == "swim_bladder_patch_threshold_v1"
+    assert run.attrs["tuning_entry_snapshot"]["tuned_timestamp"] == "2026-03-12T10:00:00+00:00"
+    assert run.attrs["tuning_entry_snapshot"]["tuned_parameters"]["roi_padding"] == 1
 
     np.testing.assert_array_equal(
         run["available_channels"][:],
@@ -204,9 +208,12 @@ def test_segment_swim_bladder_masks_from_root_writes_swim_channel_only(
     assert swim_provenance["source_run"] == "swim_bladder_masks_canary_001"
     assert swim_provenance["source_method"] == "global_threshold_otsu"
     assert swim_provenance["source_channels"] == ["swim_bladder"]
-    assert swim_provenance["source_label_schema_id"] == "subject_v1_lr"
+    assert swim_provenance["source_label_schema_id"] == "subject_v1_union"
     assert run.attrs["provenance"]["parameters"]["run_semantics"] == "traditional_swim_bladder_inference"
     assert run.attrs["provenance"]["parameters"]["tuning_timestamp"] == "2026-03-12T10:00:00+00:00"
+    assert run.attrs["provenance"]["parameters"]["tuning_entry_snapshot"]["subject_method_family"] == (
+        "swim_bladder_patch_threshold_v1"
+    )
 
 
 def test_segment_swim_bladder_masks_skips_unsuccessful_keypoints(
