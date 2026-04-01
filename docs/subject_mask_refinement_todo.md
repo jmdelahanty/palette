@@ -99,11 +99,16 @@ This is the near-term rollout order that should happen before more schema work.
   - component `reason_bytes`
   - component review payloads
 - [ ] Decide what “good enough to save” means for a first swim-bladder mask.
-- [ ] Decide whether the current threshold/blob swim-bladder tuner is good
-      enough for canary use, or whether we should switch to the proposed
-      boundary-based method family in
+- [x] Decide whether the current threshold/blob swim-bladder tuner is good
+      enough for canary use, or whether we should switch to the boundary-based
+      method family in
       [swim_bladder_polar_boundary_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/swim_bladder_polar_boundary_design.md)
       before scaling up curation.
+  - boundary-based `swim_bladder_polar_boundary_v1` is now implemented in the
+    tuner and materializer
+  - first raw canary source run
+    `subject_mask_runs/traditional_swim_bladder_masks_canary_001` was
+    materialized successfully on 2026-04-01
 
 ### 3. Delay downstream geometry until labels exist
 
@@ -123,7 +128,7 @@ This is the near-term rollout order that should happen before more schema work.
 The missing pieces are now mostly workflow/data problems, not schema problems:
 
 - broader curated `subject_body` coverage beyond the first canary
-- real `swim_bladder` masks
+- curated/refined `swim_bladder` masks and review conventions
 - review-time conventions for those components
 - enough curated examples to validate export and future training paths
 

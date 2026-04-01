@@ -1,12 +1,13 @@
 # Swim-Bladder Polar Boundary Design
 
 <!-- design-meta
-status: active
+status: implemented
 last_verified: 2026-04-01
 -->
 
-Purpose: define a new traditional swim-bladder proposal family for cases where
-the current patch-local threshold/blob method is the wrong shape prior.
+Purpose: document the implemented traditional swim-bladder proposal family for
+cases where the older patch-local threshold/blob method is the wrong shape
+prior.
 
 ## Problem Statement
 
@@ -184,33 +185,41 @@ Notes:
 
 ## Tuner UX Changes
 
-The current dedicated swim-bladder tuner remains the correct UI surface.
+The dedicated swim-bladder tuner remains the correct UI surface, and the
+boundary-oriented path is now implemented there.
 
-Recommended UI additions:
+Current UI behavior:
 
-- show a `Boundary Response` panel in addition to the raw patch
-- show a `Radial Hits` or `Polar Profile` debug visualization
-- show the final closed contour over the patch
-- preserve the current keypoint-centered ROI context panel
+- shows a `Boundary Response` panel in addition to the raw patch
+- shows a `Ray Hits` debug visualization
+- shows the final proposal overlay over the patch
+- preserves the keypoint-centered ROI context panel
+- supports `--method-family polar_boundary`
+- switches to boundary-specific sliders when this method family is active
 
-Recommended controls:
+Current controls for the boundary family:
 
-- keep ROI navigation and save behavior unchanged
-- replace threshold/blob-specific sliders with boundary-specific sliders when
-  this method family is active
-- optionally allow switching between:
-  - `threshold_blob`
-  - `polar_boundary`
+- `Patch Pad`
+- `Angle Step`
+- `Min Radius`
+- `Max Radius`
+- `Smooth %`
+- `Resp %`
+- `Max Gap`
+- `Min Valid %`
+- `Prefilter %`
 
-That would let the same tuner compare method families on the same ROI.
+The tuner now keeps `Patch Pad`, `Min Radius`, and `Max Radius` in a visibly
+valid state so the UI reflects the real geometric constraints instead of
+silently clamping them only at compute time.
 
 ## Materializer Integration
 
-The materializer should remain:
+The materializer remains:
 
 - [swim_bladder_segmentation.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/segmentation/swim_bladder_segmentation.py)
 
-Required behavior:
+Implemented behavior:
 
 - inspect `subject_mask_tuning.components["swim_bladder"]`
 - dispatch by `subject_method_family`
@@ -244,8 +253,13 @@ The method family difference should be reflected by:
 
 - `method`
 - `config`
+- `probability_semantics`
+- `tuning_override_keys`
 - `tuning_entry_snapshot.subject_method_family`
 - stage provenance parameters
+
+Polar runs now also emit boundary-oriented summary statistics such as
+`valid_ray_fraction_mean` and `max_missing_gap_degrees_mean`.
 
 ## Acceptance Criteria For A Canary Prototype
 
@@ -265,29 +279,26 @@ Recommended first comparison:
 - decide whether the new method should replace the threshold family for this
   recording class or remain opt-in
 
-## Rollout Plan
+## Implementation Status
 
-### Phase 1
+Implemented on 2026-04-01:
 
-- keep the current threshold/blob path as-is
-- add this design doc
-- validate the image prior on a few canary ROIs manually
+- tuner preview path for `swim_bladder_polar_boundary_v1`
+- saved tuning with `subject_method_family = "swim_bladder_polar_boundary_v1"`
+- materializer dispatch by saved method family
+- focused tuner/materializer unit coverage
 
-### Phase 2
+Canary evidence recorded on 2026-04-01:
 
-- add a second preview path to `swim_bladder_mask_tuner.py`
-- save tuning with `subject_method_family = "swim_bladder_polar_boundary_v1"`
-- do not remove the threshold family
+- saved polar swim-bladder tuning on
+  `2026-01-28T22-15-03Z_arena_1_DefaultScreen_training.zarr`
+- materialized
+  `subject_mask_runs/traditional_swim_bladder_masks_canary_001`
 
-### Phase 3
+Next decision:
 
-- extend `swim_bladder_segmentation.py` to dispatch by saved method family
-- materialize canary raw source runs with both methods for comparison
-
-### Phase 4
-
-- if the new method is consistently better, make it the recommended default for
-  swim-bladder tuning on new canary archives
+- determine whether the polar family should become the recommended default for
+  new swim-bladder canaries, or remain an explicit opt-in family
 
 ## Open Questions
 

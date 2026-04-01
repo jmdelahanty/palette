@@ -220,8 +220,10 @@ Current note:
 
 - the implemented saved metadata shape below describes the current
   `swim_bladder_patch_threshold_v1` family
-- a new `swim_bladder_polar_boundary_v1` family is now proposed separately in
+- the `swim_bladder_polar_boundary_v1` family is now implemented separately in
   [swim_bladder_polar_boundary_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/swim_bladder_polar_boundary_design.md)
+- this patch-review surface is family-agnostic once a raw swim-bladder source
+  run has been materialized
 
 Recommended saved metadata shape:
 

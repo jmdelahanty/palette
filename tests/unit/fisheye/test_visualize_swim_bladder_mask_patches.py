@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from fisheye.visualization.visualize_swim_bladder_mask_patches import (
     _build_view,
     _extract_patch_bounds,
+    _mouse_modifier_state,
+    _resolve_erase_mode,
     _resolve_swim_bladder_center_with_source,
     parse_args,
 )
@@ -64,6 +67,22 @@ def test_parse_args_sets_defaults() -> None:
     assert args.review_state == "approved"
     assert args.review_method == "manual"
     assert args.review_intended_use == "training"
+
+
+def test_mouse_modifier_state_decodes_ctrl_shift_lmb() -> None:
+    cv2 = pytest.importorskip("cv2")
+    flags = int(cv2.EVENT_FLAG_CTRLKEY | cv2.EVENT_FLAG_SHIFTKEY | cv2.EVENT_FLAG_LBUTTON)
+    ctrl, shift, lmb = _mouse_modifier_state(flags)
+    assert ctrl is True
+    assert shift is True
+    assert lmb is True
+
+
+def test_resolve_erase_mode_allows_shift_temporary_inverse() -> None:
+    assert _resolve_erase_mode(False, False) is False
+    assert _resolve_erase_mode(True, False) is True
+    assert _resolve_erase_mode(False, True) is True
+    assert _resolve_erase_mode(True, True) is False
 
 
 def test_build_view_returns_edit_meta() -> None:

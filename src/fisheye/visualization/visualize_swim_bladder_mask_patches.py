@@ -59,6 +59,18 @@ def _require_gui_display() -> None:
     )
 
 
+def _mouse_modifier_state(flags: int) -> Tuple[bool, bool, bool]:
+    ctrl_down = bool(flags & cv2.EVENT_FLAG_CTRLKEY)
+    shift_down = bool(flags & cv2.EVENT_FLAG_SHIFTKEY)
+    left_down = bool(flags & cv2.EVENT_FLAG_LBUTTON)
+    return ctrl_down, shift_down, left_down
+
+
+def _resolve_erase_mode(base_erase_mode: bool, shift_down: bool) -> bool:
+    # Shift acts as a temporary inverse while drawing.
+    return (not base_erase_mode) if shift_down else base_erase_mode
+
+
 def _extract_patch_bounds(
     roi_shape: Tuple[int, int],
     center_xy: Tuple[float, float],
@@ -458,12 +470,13 @@ def create_viewer(
         )
         review_payload = dict(refined.group.attrs.get("component_review_statuses") or {}).get("swim_bladder", {})
         review_state_text = str(review_payload.get("state") or "pending")
+        brush_mode_text = "erase" if bool(state.get("erase_mode")) else "paint"
         cv2.putText(
             canvas,
             (
                 f"ROI {int(state['loaded_roi_idx']) + 1}/{total_rois}  "
                 f"Center={state['center_source']}  "
-                f"Brush={brush_val}  Review={review_state_text}"
+                f"Brush={brush_val} ({brush_mode_text})  Review={review_state_text}"
             ),
             (12, max(16, canvas.shape[0] - 12)),
             cv2.FONT_HERSHEY_SIMPLEX,
@@ -516,6 +529,7 @@ def create_viewer(
         edit_meta = state.get("edit_meta")
         if not isinstance(edit_meta, dict):
             return
+        ctrl_down, shift_down, left_down = _mouse_modifier_state(int(_flags))
         scale = float(state.get("display_scale") or 1.0)
         if scale != 1.0:
             x = int(x / scale)
@@ -528,34 +542,30 @@ def create_viewer(
             if state.get("cursor_patch_xy") is not None:
                 state["cursor_patch_xy"] = None
                 _update_display()
-            if event in (cv2.EVENT_LBUTTONUP, cv2.EVENT_RBUTTONUP):
+            if event == cv2.EVENT_LBUTTONUP or not left_down:
                 state["drawing"] = False
             return
 
         local_x = x - int(edit_meta["x"])
         local_y = y - int(edit_meta["y"])
         if event == cv2.EVENT_LBUTTONDOWN:
-            state["drawing"] = True
-            state["erase_mode"] = False
-            _apply_patch_at(local_x, local_y, False)
-            return
-        if event == cv2.EVENT_RBUTTONDOWN:
-            state["drawing"] = True
-            state["erase_mode"] = True
-            _apply_patch_at(local_x, local_y, True)
-            return
-        if event in (cv2.EVENT_LBUTTONUP, cv2.EVENT_RBUTTONUP):
+            # Brush edits are gated behind Ctrl to avoid accidental draws while navigating.
+            state["drawing"] = bool(ctrl_down)
+        elif event == cv2.EVENT_MOUSEMOVE and bool(state.get("drawing")):
+            if not (ctrl_down and left_down):
+                state["drawing"] = False
+        elif event == cv2.EVENT_LBUTTONUP:
             state["drawing"] = False
-            return
-        if event == cv2.EVENT_MOUSEMOVE:
-            if bool(state.get("drawing")):
-                _apply_patch_at(local_x, local_y, bool(state.get("erase_mode")))
-            else:
-                patch_x = int(local_x / max(1, int(edit_meta["zoom"])))
-                patch_y = int((local_y - int(edit_meta["label_h"])) / max(1, int(edit_meta["zoom"])))
-                if 0 <= patch_x < int(edit_meta["patch_w"]) and 0 <= patch_y < int(edit_meta["patch_h"]):
-                    state["cursor_patch_xy"] = (patch_x, patch_y)
-                    _update_display()
+
+        patch_x = int(local_x / max(1, int(edit_meta["zoom"])))
+        patch_y = int((local_y - int(edit_meta["label_h"])) / max(1, int(edit_meta["zoom"])))
+        if bool(state.get("drawing")) and 0 <= patch_x < int(edit_meta["patch_w"]) and 0 <= patch_y < int(edit_meta["patch_h"]):
+            erase_mode = _resolve_erase_mode(bool(state.get("erase_mode")), shift_down)
+            _apply_patch_at(local_x, local_y, erase_mode)
+        elif event == cv2.EVENT_MOUSEMOVE:
+            if 0 <= patch_x < int(edit_meta["patch_w"]) and 0 <= patch_y < int(edit_meta["patch_h"]):
+                state["cursor_patch_xy"] = (patch_x, patch_y)
+                _update_display()
 
     cv2.setMouseCallback(WINDOW_NAME, _on_mouse)
     _load_roi(current_pos)
@@ -566,8 +576,10 @@ def create_viewer(
     print(f"  Refined run: refined_subject_masks_runs/{refined.run_name}")
     print(f"  Crop run: {crop_run_name}")
     print("Controls:")
-    print("  Mouse: paint (LMB) / erase (RMB) in Edit Patch")
+    print("  Mouse on Edit Patch: hold Ctrl+LMB to paint")
+    print("  Mouse while drawing: hold Shift to temporarily invert brush mode")
     print("  [ / ]: brush size")
+    print("  x: toggle brush mode (paint/erase)")
     print("  n/p: next/previous ROI")
     print("  s: save current ROI edits")
     print("  r: reset current ROI to stored refined mask")
@@ -589,6 +601,11 @@ def create_viewer(
             _update_display()
         elif key == ord("r"):
             state["edit_masks_row"] = np.asarray(state["stored_masks_row"], dtype=np.uint8).copy()
+            _update_display()
+        elif key == ord("x"):
+            new_mode = not bool(state.get("erase_mode"))
+            state["erase_mode"] = new_mode
+            print(f"Brush mode: {'erase' if new_mode else 'paint'}")
             _update_display()
         elif key == ord("s"):
             _save_current()

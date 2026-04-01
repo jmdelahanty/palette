@@ -241,19 +241,22 @@ scripts/py -m fisheye.tune.swim_bladder_mask_tuner <archive>.zarr
 Current behavior:
 
 - centers a local patch on the `swim_bladder` keypoint
-- tunes a traditional threshold/Sobel/morphology proposal on that patch
+- supports both:
+  - `swim_bladder_patch_threshold_v1`
+  - `swim_bladder_polar_boundary_v1`
 - stores parameters under
   `subject_mask_tuning.components["swim_bladder"]`
 
-Current limitation:
+For ring-like canaries, use the boundary-oriented family explicitly:
 
-- this method assumes the swim bladder can be recovered as a thresholded blob
-  or blob-like dark region
-- on canaries where the visible cue is a contrast ring rather than a filled
-  dark interior, this method family is likely the wrong prior
-- see
-  [swim_bladder_polar_boundary_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/swim_bladder_polar_boundary_design.md)
-  for the proposed boundary-oriented successor
+```bash
+scripts/py -m fisheye.tune.swim_bladder_mask_tuner <archive>.zarr \
+  --method-family polar_boundary
+```
+
+The polar family is the better fit when the useful cue is a contrast ring or
+boundary rather than a uniformly dark filled interior. See
+[swim_bladder_polar_boundary_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/swim_bladder_polar_boundary_design.md).
 
 This is intentionally separate from the ROI-wide `subject_mask_tuner` because
 the operator task is patch-local and keypoint-centered rather than whole-ROI.
@@ -270,17 +273,12 @@ scripts/py -m fisheye.segmentation.swim_bladder_segmentation \
 Current materializer behavior:
 
 - reads `subject_mask_tuning.components["swim_bladder"]`
+- dispatches by saved `subject_method_family`
 - centers each proposal on the chosen swim-bladder keypoint run
 - writes a raw `subject_mask_runs/<run>` entry with only the
   `swim_bladder` channel available
 - records `run_semantics = "traditional_swim_bladder_inference"`
-
-Near-term note:
-
-- the current materializer implements the threshold/blob method family only
-- if the polar-boundary design lands, this same materializer should dispatch by
-  `subject_method_family` rather than introducing a second swim-bladder source
-  stage
+- snapshots the exact tuning entry it used on the produced run for auditability
 
 ## Current Batch Propagation Recommendation
 
