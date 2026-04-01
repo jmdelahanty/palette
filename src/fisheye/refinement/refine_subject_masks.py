@@ -30,6 +30,7 @@ from ..tune.refined_subject_mask_review import (
     _compute_refined_subject_component_apply_rows,
     _default_refined_run_name,
     _finalize_refined_subject_apply,
+    _load_refined_component_source_runs,
     _load_source_subject_mask_run,
     _normalize_component_list,
     _normalize_refined_component_names,
@@ -165,22 +166,36 @@ def _build_refined_subject_apply_plan(
     scheduler_key = _normalize_scheduler(scheduler)
 
     root = open_zarr_root(zarr_path, mode="r")
-    source = _load_source_subject_mask_run(root, subject_run)
-    target_run, selection_mode, target_exists = _resolve_refined_run_name(
-        root,
-        source_run=source.run_name,
-        refined_run=refined_run,
-    )
+    explicit_source = _load_source_subject_mask_run(root, subject_run) if subject_run is not None else None
+    source_run_name = explicit_source.run_name if explicit_source is not None else ""
+
+    if refined_run is not None:
+        refined_parent = root.get("refined_subject_masks_runs")
+        target_run = str(refined_run)
+        selection_mode = "explicit"
+        target_exists = refined_parent is not None and target_run in refined_parent
+    else:
+        inferred_source = explicit_source or _load_source_subject_mask_run(root, None)
+        target_run, selection_mode, target_exists = _resolve_refined_run_name(
+            root,
+            source_run=inferred_source.run_name,
+            refined_run=None,
+        )
+        source_run_name = inferred_source.run_name
 
     if target_exists:
         refined = _open_existing_refined_subject_run(root, target_run)
         selected_components = _normalize_refined_component_names(refined, components)
         available_components = list(refined.component_names)
         total_rois = int(refined.group["masks_roi"].shape[0])
+        if not source_run_name:
+            source_run_name = str(refined.group.attrs.get("source_subject_mask_run") or "")
     else:
+        source = explicit_source or _load_source_subject_mask_run(root, subject_run)
         selected_components = _normalize_component_list(components)
         available_components = [str(label) for label in source.mask_labels]
         total_rois = int(source.masks_roi.shape[0])
+        source_run_name = source.run_name
 
     selected_rows = (
         tuple(_normalize_roi_indices(roi_indices, total_rois))
@@ -192,7 +207,7 @@ def _build_refined_subject_apply_plan(
     return {
         "status": "planned",
         "zarr_path": zarr_path,
-        "source_subject_mask_run": source.run_name,
+        "source_subject_mask_run": str(source_run_name),
         "refined_run": target_run,
         "refined_run_selection": selection_mode,
         "refined_run_exists": bool(target_exists),
@@ -260,21 +275,20 @@ def _print_refined_subject_apply_plan(
 def _compute_refined_subject_apply_chunk(
     zarr_path: str,
     *,
-    source_subject_mask_run: str,
     refined_run: str,
     component_names: Sequence[str],
     roi_indices: Sequence[int],
 ) -> dict[str, object]:
     root = open_zarr_root(zarr_path, mode="r")
-    source = _load_source_subject_mask_run(root, source_subject_mask_run)
     refined = _open_existing_refined_subject_run(root, refined_run)
+    _primary_source, component_sources = _load_refined_component_source_runs(root, refined)
     edited_masks_batch = np.stack(
         [np.asarray(refined.group["masks_roi"][int(roi_idx)], dtype=np.uint8) for roi_idx in roi_indices],
         axis=0,
     )
     component_updates = {
         str(component_name): _compute_refined_subject_component_apply_rows(
-            source=source,
+            component_sources=component_sources,
             refined=refined,
             component_name=str(component_name),
             roi_indices=tuple(int(roi_idx) for roi_idx in roi_indices),
@@ -349,15 +363,27 @@ def refine_subject_masks(
     resolved_refined_run = str(plan["refined_run"])
 
     root = open_zarr_root(zarr_path, mode="a")
-    source = _load_source_subject_mask_run(root, subject_run)
-    refined = _open_existing_refined_subject_run(root, resolved_refined_run) if bool(
-        plan["refined_run_exists"]
-    ) else prepare_refined_subject_run(
-        root,
-        subject_run=source.run_name,
-        refined_run=resolved_refined_run,
-        components=selected_components,
-    )[1]
+    default_source = _load_source_subject_mask_run(root, subject_run) if subject_run is not None else None
+    if bool(plan["refined_run_exists"]):
+        refined = _open_existing_refined_subject_run(root, resolved_refined_run)
+        primary_source, component_sources = _load_refined_component_source_runs(
+            root,
+            refined,
+            default_source=default_source,
+        )
+    else:
+        source = default_source or _load_source_subject_mask_run(root, subject_run)
+        refined = prepare_refined_subject_run(
+            root,
+            subject_run=source.run_name,
+            refined_run=resolved_refined_run,
+            components=selected_components,
+        )[1]
+        primary_source, component_sources = _load_refined_component_source_runs(
+            root,
+            refined,
+            default_source=source,
+        )
 
     before_states = {
         int(roi_idx): _row_component_state(refined, selected_components, int(roi_idx))
@@ -377,7 +403,6 @@ def refine_subject_masks(
     tasks = [
         delayed(_compute_refined_subject_apply_chunk)(
             zarr_path,
-            source_subject_mask_run=source.run_name,
             refined_run=refined.run_name,
             component_names=selected_components,
             roi_indices=chunk_rows,
@@ -468,7 +493,7 @@ def refine_subject_masks(
         "status": "updated",
         "zarr_path": zarr_path,
         "refined_run": refined.run_name,
-        "source_subject_mask_run": source.run_name,
+        "source_subject_mask_run": primary_source.run_name,
         "refined_run_selection": str(plan["refined_run_selection"]),
         "refined_run_exists": bool(plan["refined_run_exists"]),
         "would_create_refined_run": bool(plan["would_create_refined_run"]),

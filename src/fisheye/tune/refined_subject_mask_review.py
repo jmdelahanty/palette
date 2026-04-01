@@ -104,6 +104,13 @@ class RefinedSubjectMaskRun:
     component_to_index: dict[str, int]
 
 
+@dataclass(frozen=True)
+class RefinedSubjectComponentSeed:
+    component_name: str
+    masks: np.ndarray
+    source_payload: Mapping[str, object]
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -161,6 +168,8 @@ def _default_refined_run_name() -> str:
 
 def _infer_refined_label_schema_id(component_names: Sequence[str]) -> str:
     labels = tuple(component_names)
+    if labels == ("subject_body", "eye_left", "eye_right", "swim_bladder"):
+        return "subject_v1_lr"
     if labels == ("subject_body",):
         return "refined_subject_v1_body"
     if labels == ("swim_bladder",):
@@ -229,6 +238,12 @@ def _get_component_provenance_group(parent: zarr.Group, component_name: str) -> 
     return provenance_group
 
 
+def _set_attr_if_missing(attrs: Any, key: str, value: object) -> None:
+    existing = attrs.get(key)
+    if existing is None or (isinstance(existing, str) and not existing.strip()):
+        attrs[key] = value
+
+
 def _source_component_provenance_payload(
     source: SourceSubjectMaskRun,
     component_name: str,
@@ -284,18 +299,17 @@ def _source_component_provenance_payload(
     return payload
 
 
-def _ensure_refined_component_provenance(
+def _ensure_refined_component_provenance_payload(
     refined_group: zarr.Group,
     *,
-    source: SourceSubjectMaskRun,
     component_name: str,
+    source_payload: Mapping[str, object],
     created_at_utc: str,
 ) -> zarr.Group:
     component_group = refined_group.require_group("components").require_group(component_name)
     provenance_group = component_group.require_group("provenance")
-    source_payload = _source_component_provenance_payload(source, component_name)
     for key, value in source_payload.items():
-        provenance_group.attrs[key] = value
+        _set_attr_if_missing(provenance_group.attrs, str(key), value)
     provenance_group.attrs.setdefault("last_update_stage", REFINED_SUBJECT_STAGE_NAME)
     provenance_group.attrs.setdefault("last_update_mode", "create")
     provenance_group.attrs.setdefault("last_update_method", str(refined_group.attrs.get("method") or DEFAULT_RUN_METHOD))
@@ -304,6 +318,49 @@ def _ensure_refined_component_provenance(
         str(refined_group.attrs.get("updated_at_utc") or refined_group.attrs.get("created_at_utc") or created_at_utc),
     )
     return provenance_group
+
+
+def _ensure_refined_component_provenance(
+    refined_group: zarr.Group,
+    *,
+    source: SourceSubjectMaskRun,
+    component_name: str,
+    created_at_utc: str,
+) -> zarr.Group:
+    source_payload = _source_component_provenance_payload(source, component_name)
+    return _ensure_refined_component_provenance_payload(
+        refined_group,
+        component_name=component_name,
+        source_payload=source_payload,
+        created_at_utc=created_at_utc,
+    )
+
+
+def _component_masks_from_source(source: SourceSubjectMaskRun, component_name: str) -> np.ndarray:
+    total_rois = int(source.masks_roi.shape[0])
+    height = int(source.masks_roi.shape[2])
+    width = int(source.masks_roi.shape[3])
+    masks = np.zeros((total_rois, height, width), dtype=np.uint8)
+    if component_name not in source.mask_labels:
+        return masks
+    source_idx = source.mask_labels.index(component_name)
+    if source_idx >= int(source.available_channels.shape[0]) or not bool(source.available_channels[source_idx]):
+        return masks
+    return np.asarray(source.masks_roi[:, source_idx], dtype=np.uint8)
+
+
+def _build_single_source_component_seeds(
+    source: SourceSubjectMaskRun,
+    component_names: Sequence[str],
+) -> dict[str, RefinedSubjectComponentSeed]:
+    return {
+        str(component_name): RefinedSubjectComponentSeed(
+            component_name=str(component_name),
+            masks=_component_masks_from_source(source, str(component_name)),
+            source_payload=_source_component_provenance_payload(source, str(component_name)),
+        )
+        for component_name in component_names
+    }
 
 
 def _capture_component_sync_states(
@@ -624,6 +681,16 @@ def _source_mask_for_component(
     return np.asarray(source.masks_roi[roi_idx, channel_idx], dtype=np.uint8)
 
 
+def _source_mask_for_resolved_component(
+    component_sources: Mapping[str, SourceSubjectMaskRun],
+    component_name: str,
+    roi_idx: int,
+) -> np.ndarray:
+    if component_name not in component_sources:
+        raise RuntimeError(f"No resolved source available for component {component_name!r}.")
+    return _source_mask_for_component(component_sources[component_name], component_name, roi_idx)
+
+
 def _default_reason_label(source_mask: np.ndarray, current_mask: np.ndarray, edit_applied: bool) -> str:
     if edit_applied:
         return "manual_correction"
@@ -756,6 +823,258 @@ def _load_source_subject_mask_run(root: zarr.Group, subject_run: Optional[str]) 
     )
 
 
+def _resolve_primary_source_subject_mask_run_name(refined_group: zarr.Group) -> Optional[str]:
+    direct = refined_group.attrs.get("source_subject_mask_run")
+    if direct is not None and str(direct).strip():
+        return str(direct)
+    labels_raw = refined_group.attrs.get("mask_labels")
+    if not isinstance(labels_raw, (list, tuple)):
+        return None
+    for component_name in (str(item) for item in labels_raw):
+        provenance_group = _get_component_provenance_group(refined_group, component_name)
+        if provenance_group is None:
+            continue
+        source_stage = str(provenance_group.attrs.get("source_stage") or "")
+        source_run = str(provenance_group.attrs.get("source_run") or "")
+        if source_stage == "subject_mask_runs" and source_run:
+            return source_run
+    return None
+
+
+def _load_refined_component_source_runs(
+    root: zarr.Group,
+    refined: RefinedSubjectMaskRun,
+    *,
+    default_source: Optional[SourceSubjectMaskRun] = None,
+) -> tuple[SourceSubjectMaskRun, dict[str, SourceSubjectMaskRun]]:
+    cache: dict[str, SourceSubjectMaskRun] = {}
+    if default_source is not None:
+        cache[default_source.run_name] = default_source
+
+    primary_source = default_source
+    primary_run = _resolve_primary_source_subject_mask_run_name(refined.group)
+    if primary_source is None and primary_run:
+        primary_source = cache.setdefault(primary_run, _load_source_subject_mask_run(root, primary_run))
+
+    component_sources: dict[str, SourceSubjectMaskRun] = {}
+    for component_name in refined.component_names:
+        provenance_group = _get_component_provenance_group(refined.group, component_name)
+        source_stage = str(provenance_group.attrs.get("source_stage") or "") if provenance_group is not None else ""
+        source_run = str(provenance_group.attrs.get("source_run") or "") if provenance_group is not None else ""
+        if source_run and source_stage and source_stage != "subject_mask_runs":
+            raise RuntimeError(
+                "Component source resolution currently supports only subject_mask_runs-backed refined components; "
+                f"{component_name!r} is sourced from {source_stage}/{source_run}."
+            )
+        resolved_source: SourceSubjectMaskRun | None = None
+        if source_run:
+            resolved_source = cache.setdefault(source_run, _load_source_subject_mask_run(root, source_run))
+        elif default_source is not None:
+            resolved_source = default_source
+        elif primary_source is not None:
+            resolved_source = primary_source
+        if resolved_source is None:
+            raise RuntimeError(
+                f"Unable to resolve source subject-mask lineage for component {component_name!r} "
+                f"in refined_subject_masks_runs/{refined.run_name}."
+            )
+        component_sources[component_name] = resolved_source
+        if primary_source is None:
+            primary_source = resolved_source
+
+    if primary_source is None:
+        raise RuntimeError(f"Unable to resolve any source subject-mask run for refined_subject_masks_runs/{refined.run_name}.")
+    return primary_source, component_sources
+
+
+def _create_refined_subject_run_from_component_seeds(
+    *,
+    refined_parent: zarr.Group,
+    target_run: str,
+    reference_source: SourceSubjectMaskRun,
+    component_names: Sequence[str],
+    component_seeds: Mapping[str, RefinedSubjectComponentSeed],
+    coarse_source_subject_mask_run: Optional[str],
+    coarse_source_subject_mask_method: Optional[str],
+    source_keypoints_run: Optional[str],
+    source_keypoint_group: Optional[str],
+    run_method: str = DEFAULT_RUN_METHOD,
+    stage_command: Optional[str] = None,
+    extra_attrs: Optional[Mapping[str, object]] = None,
+    provenance_inputs: Optional[Mapping[str, object]] = None,
+) -> RefinedSubjectMaskRun:
+    total_rois = int(reference_source.masks_roi.shape[0])
+    height = int(reference_source.masks_roi.shape[2])
+    width = int(reference_source.masks_roi.shape[3])
+    component_names = tuple(str(name) for name in component_names)
+    masks = np.zeros((total_rois, len(component_names), height, width), dtype=np.uint8)
+    for comp_idx, component_name in enumerate(component_names):
+        if component_name not in component_seeds:
+            raise RuntimeError(f"Missing component seed for {component_name!r}.")
+        seed_masks = np.asarray(component_seeds[component_name].masks, dtype=np.uint8)
+        expected_shape = (total_rois, height, width)
+        if seed_masks.shape != expected_shape:
+            raise ValueError(
+                f"Component seed shape mismatch for {component_name!r}: expected {expected_shape}, got {tuple(seed_masks.shape)}"
+            )
+        masks[:, comp_idx] = seed_masks
+
+    mask_present, area_px = _compute_mask_metrics(masks)
+    edit_applied = np.zeros((total_rois, len(component_names)), dtype=bool)
+
+    run_group = refined_parent.create_group(target_run)
+    run_group.create_array(
+        "detection_source",
+        data=np.asarray(reference_source.detection_source[:], dtype=np.int8),
+        overwrite=True,
+    )
+    run_group.create_array("masks_roi", data=masks, overwrite=True)
+    run_group.create_array(
+        "available_channels",
+        data=np.ones((len(component_names),), dtype=bool),
+        overwrite=True,
+    )
+    run_group.create_array("edit_applied", data=edit_applied, overwrite=True)
+    _copy_optional_array(run_group, reference_source.group, "frame_indices")
+    _copy_optional_array(run_group, reference_source.group, "frame_counts")
+    _copy_optional_array(run_group, reference_source.group, "detection_indices")
+
+    metrics = run_group.require_group("metrics")
+    metrics.create_array("mask_present", data=mask_present, overwrite=True)
+    metrics.create_array("area_px", data=area_px, overwrite=True)
+    geometry_metrics = _compute_geometry_metrics(masks)
+    metrics.create_array("centroid_xy", data=geometry_metrics["centroid_xy"], overwrite=True)
+    metrics.create_array("centroid_valid", data=geometry_metrics["centroid_valid"], overwrite=True)
+    metrics.create_array("bbox_xyxy", data=geometry_metrics["bbox_xyxy"], overwrite=True)
+    metrics.create_array("bbox_valid", data=geometry_metrics["bbox_valid"], overwrite=True)
+    created = _utc_now()
+
+    for comp_idx, component_name in enumerate(component_names):
+        seed = component_seeds[component_name]
+        component_masks = np.asarray(seed.masks, dtype=np.uint8)
+        component_metrics = _compute_component_topology_metrics(component_masks)
+        component_metrics.update(_compute_component_sigma_noise_metrics(component_masks))
+        component_metrics.update(_compute_component_curvature_var_metrics(component_masks))
+        component_metrics.update(_compute_component_shape_qc_metrics(component_masks))
+        component_group = _ensure_component_group(
+            run_group,
+            component_name,
+            total_rois,
+            mask_present[:, comp_idx],
+            area_px[:, comp_idx],
+            edit_applied[:, comp_idx],
+            component_metrics=component_metrics,
+        )
+        reason_labels = _load_or_init_reason_labels(component_group, total_rois)
+        for row_idx in range(total_rois):
+            source_mask = np.asarray(component_masks[row_idx], dtype=np.uint8)
+            reason_labels[row_idx] = _default_reason_label(source_mask, masks[row_idx, comp_idx], edit_applied=False)
+        write_reason_columns(
+            component_group,
+            reason_labels,
+            chunk_size=max(1, min(256, total_rois)),
+            include_reason_text=True,
+            overwrite=True,
+        )
+        _ensure_refined_component_provenance_payload(
+            run_group,
+            component_name=component_name,
+            source_payload=seed.source_payload,
+            created_at_utc=created,
+        )
+
+    if coarse_source_subject_mask_run:
+        run_group.attrs["source_subject_mask_run"] = coarse_source_subject_mask_run
+    if coarse_source_subject_mask_method:
+        run_group.attrs["source_subject_mask_method"] = coarse_source_subject_mask_method
+    if source_keypoints_run:
+        run_group.attrs.update(build_source_keypoints_attrs(source_keypoints_run, include_legacy_alias=True))
+    if source_keypoint_group:
+        run_group.attrs["source_keypoint_group"] = source_keypoint_group
+    run_group.attrs["source_crop_run"] = reference_source.crop_run
+    run_group.attrs["mask_labels"] = list(component_names)
+    run_group.attrs["label_schema_id"] = _infer_refined_label_schema_id(component_names)
+    run_group.attrs["output_semantics"] = "multilabel"
+    run_group.attrs["refinement_semantics"] = "canonical_component_masks"
+    run_group.attrs["method"] = str(run_method)
+    run_group.attrs["created_at_utc"] = created
+    run_group.attrs["created_utc"] = created
+    run_group.attrs["duration_seconds"] = 0.0
+    if extra_attrs:
+        for key, value in extra_attrs.items():
+            run_group.attrs[str(key)] = value
+
+    component_reviews = {
+        component_name: _review_payload(
+            state="pending",
+            method=DEFAULT_REVIEW_METHOD,
+            intended_use=DEFAULT_REVIEW_INTENDED_USE,
+        )
+        for component_name in component_names
+    }
+    run_group.attrs["component_review_statuses"] = component_reviews
+    run_group.attrs["refined_subject_mask_review_status"] = _review_payload(
+        state="pending",
+        method=DEFAULT_REVIEW_METHOD,
+        intended_use=DEFAULT_REVIEW_INTENDED_USE,
+        notes="auto_initialized_from_components",
+    )
+    git_info = get_git_info(repo_path=Path(__file__).resolve().parents[3])
+    env_info = get_environment_info(
+        include_all_packages=False,
+        collect_ip=False,
+        capture_env_vars=False,
+    )
+    platform_info = env_info.get("platform", {})
+    stage_inputs_payload = {
+        "source_subject_mask_run": coarse_source_subject_mask_run,
+        "source_subject_mask_method": coarse_source_subject_mask_method,
+        "source_crop_run": reference_source.crop_run,
+        "source_keypoints_run": source_keypoints_run,
+        "source_keypoint_group": source_keypoint_group,
+    }
+    if provenance_inputs:
+        stage_inputs_payload.update({str(key): value for key, value in provenance_inputs.items()})
+    provenance = build_stage_provenance(
+        stage=REFINED_SUBJECT_STAGE_NAME,
+        command=stage_command or (" ".join(sys.argv) if sys.argv else "unknown"),
+        created_at_utc=created,
+        version=git_info.get("short_hash") or git_info.get("commit_hash"),
+        git={
+            "commit": git_info.get("commit_hash"),
+            "short": git_info.get("short_hash"),
+            "branch": git_info.get("branch"),
+            "is_dirty": git_info.get("is_dirty"),
+            "remote": git_info.get("remote_url"),
+        },
+        environment=env_info.get("environment"),
+        platform={
+            "hostname": platform_info.get("hostname"),
+            "system": platform_info.get("system"),
+            "release": platform_info.get("release"),
+            "python_version": platform_info.get("python_version"),
+            "machine": platform_info.get("machine"),
+        },
+        parameters={
+            "method": str(run_method),
+            "refinement_semantics": "canonical_component_masks",
+            "components": list(component_names),
+            "component_count": int(len(component_names)),
+        },
+        inputs=stage_inputs_payload,
+    )
+    write_stage_provenance(run_group, provenance)
+    refined_parent.attrs["latest"] = target_run
+    refined_parent.attrs["refined_subject_mask_review_status_latest"] = target_run
+    return RefinedSubjectMaskRun(
+        run_name=target_run,
+        parent=refined_parent,
+        group=run_group,
+        component_names=component_names,
+        component_to_index={name: idx for idx, name in enumerate(component_names)},
+    )
+
+
 def _open_or_create_refined_subject_run(
     root: zarr.Group,
     *,
@@ -847,160 +1166,18 @@ def _open_or_create_refined_subject_run(
             component_to_index=component_to_index,
         )
 
-    total_rois = int(source.masks_roi.shape[0])
-    height = int(source.masks_roi.shape[2])
-    width = int(source.masks_roi.shape[3])
     component_names = tuple(components)
-    masks = np.zeros((total_rois, len(component_names), height, width), dtype=np.uint8)
-    for comp_idx, component_name in enumerate(component_names):
-        if component_name in source.mask_labels:
-            source_idx = source.mask_labels.index(component_name)
-            if source_idx < int(source.available_channels.shape[0]) and bool(source.available_channels[source_idx]):
-                masks[:, comp_idx] = np.asarray(source.masks_roi[:, source_idx], dtype=np.uint8)
-
-    mask_present, area_px = _compute_mask_metrics(masks)
-    edit_applied = np.zeros((total_rois, len(component_names)), dtype=bool)
-
-    run_group = refined_parent.create_group(target_run)
-    run_group.create_array("detection_source", data=np.asarray(source.detection_source[:], dtype=np.int8), overwrite=True)
-    run_group.create_array("masks_roi", data=masks, overwrite=True)
-    run_group.create_array(
-        "available_channels",
-        data=np.ones((len(component_names),), dtype=bool),
-        overwrite=True,
-    )
-    run_group.create_array("edit_applied", data=edit_applied, overwrite=True)
-    _copy_optional_array(run_group, source.group, "frame_indices")
-    _copy_optional_array(run_group, source.group, "frame_counts")
-    _copy_optional_array(run_group, source.group, "detection_indices")
-
-    metrics = run_group.require_group("metrics")
-    metrics.create_array("mask_present", data=mask_present, overwrite=True)
-    metrics.create_array("area_px", data=area_px, overwrite=True)
-    geometry_metrics = _compute_geometry_metrics(masks)
-    metrics.create_array("centroid_xy", data=geometry_metrics["centroid_xy"], overwrite=True)
-    metrics.create_array("centroid_valid", data=geometry_metrics["centroid_valid"], overwrite=True)
-    metrics.create_array("bbox_xyxy", data=geometry_metrics["bbox_xyxy"], overwrite=True)
-    metrics.create_array("bbox_valid", data=geometry_metrics["bbox_valid"], overwrite=True)
-    created = _utc_now()
-
-    for comp_idx, component_name in enumerate(component_names):
-        component_metrics = _compute_component_topology_metrics(masks[:, comp_idx])
-        component_metrics.update(_compute_component_sigma_noise_metrics(masks[:, comp_idx]))
-        component_metrics.update(_compute_component_curvature_var_metrics(masks[:, comp_idx]))
-        component_metrics.update(_compute_component_shape_qc_metrics(masks[:, comp_idx]))
-        component_group = _ensure_component_group(
-            run_group,
-            component_name,
-            total_rois,
-            mask_present[:, comp_idx],
-            area_px[:, comp_idx],
-            edit_applied[:, comp_idx],
-            component_metrics=component_metrics,
-        )
-        reason_labels = _load_or_init_reason_labels(component_group, total_rois)
-        for row_idx in range(total_rois):
-            source_mask = _source_mask_for_component(source, component_name, row_idx)
-            reason_labels[row_idx] = _default_reason_label(
-                source_mask,
-                masks[row_idx, comp_idx],
-                edit_applied=False,
-        )
-        write_reason_columns(
-            component_group,
-            reason_labels,
-            chunk_size=max(1, min(256, total_rois)),
-            include_reason_text=True,
-            overwrite=True,
-        )
-        _ensure_refined_component_provenance(
-            run_group,
-            source=source,
-            component_name=component_name,
-            created_at_utc=created,
-        )
-
-    run_group.attrs["source_subject_mask_run"] = source.run_name
-    if source.source_method:
-        run_group.attrs["source_subject_mask_method"] = source.source_method
-    if source.source_keypoints_run:
-        run_group.attrs.update(build_source_keypoints_attrs(source.source_keypoints_run, include_legacy_alias=True))
-    if source.source_keypoint_group:
-        run_group.attrs["source_keypoint_group"] = source.source_keypoint_group
-    run_group.attrs["source_crop_run"] = source.crop_run
-    run_group.attrs["mask_labels"] = list(component_names)
-    run_group.attrs["label_schema_id"] = _infer_refined_label_schema_id(component_names)
-    run_group.attrs["output_semantics"] = "multilabel"
-    run_group.attrs["refinement_semantics"] = "canonical_component_masks"
-    run_group.attrs["method"] = DEFAULT_RUN_METHOD
-    run_group.attrs["created_at_utc"] = created
-    run_group.attrs["created_utc"] = created
-    run_group.attrs["duration_seconds"] = 0.0
-    component_reviews = {
-        component_name: _review_payload(
-            state="pending",
-            method=DEFAULT_REVIEW_METHOD,
-            intended_use=DEFAULT_REVIEW_INTENDED_USE,
-        )
-        for component_name in component_names
-    }
-    run_group.attrs["component_review_statuses"] = component_reviews
-    run_group.attrs["refined_subject_mask_review_status"] = _review_payload(
-        state="pending",
-        method=DEFAULT_REVIEW_METHOD,
-        intended_use=DEFAULT_REVIEW_INTENDED_USE,
-        notes="auto_initialized_from_components",
-    )
-    git_info = get_git_info(repo_path=Path(__file__).resolve().parents[3])
-    env_info = get_environment_info(
-        include_all_packages=False,
-        collect_ip=False,
-        capture_env_vars=False,
-    )
-    platform_info = env_info.get("platform", {})
-    provenance = build_stage_provenance(
-        stage=REFINED_SUBJECT_STAGE_NAME,
-        command=" ".join(sys.argv) if sys.argv else "unknown",
-        created_at_utc=created,
-        version=git_info.get("short_hash") or git_info.get("commit_hash"),
-        git={
-            "commit": git_info.get("commit_hash"),
-            "short": git_info.get("short_hash"),
-            "branch": git_info.get("branch"),
-            "is_dirty": git_info.get("is_dirty"),
-            "remote": git_info.get("remote_url"),
-        },
-        environment=env_info.get("environment"),
-        platform={
-            "hostname": platform_info.get("hostname"),
-            "system": platform_info.get("system"),
-            "release": platform_info.get("release"),
-            "python_version": platform_info.get("python_version"),
-            "machine": platform_info.get("machine"),
-        },
-        parameters={
-            "method": DEFAULT_RUN_METHOD,
-            "refinement_semantics": "canonical_component_masks",
-            "components": list(component_names),
-            "component_count": int(len(component_names)),
-        },
-        inputs={
-            "source_subject_mask_run": source.run_name,
-            "source_subject_mask_method": source.source_method,
-            "source_crop_run": source.crop_run,
-            "source_keypoints_run": source.source_keypoints_run,
-            "source_keypoint_group": source.source_keypoint_group,
-        },
-    )
-    write_stage_provenance(run_group, provenance)
-    refined_parent.attrs["latest"] = target_run
-    refined_parent.attrs["refined_subject_mask_review_status_latest"] = target_run
-    return RefinedSubjectMaskRun(
-        run_name=target_run,
-        parent=refined_parent,
-        group=run_group,
+    component_seeds = _build_single_source_component_seeds(source, component_names)
+    return _create_refined_subject_run_from_component_seeds(
+        refined_parent=refined_parent,
+        target_run=target_run,
+        reference_source=source,
         component_names=component_names,
-        component_to_index={name: idx for idx, name in enumerate(component_names)},
+        component_seeds=component_seeds,
+        coarse_source_subject_mask_run=source.run_name,
+        coarse_source_subject_mask_method=source.source_method,
+        source_keypoints_run=source.source_keypoints_run,
+        source_keypoint_group=source.source_keypoint_group,
     )
 
 
@@ -1011,7 +1188,12 @@ def prepare_refined_subject_run(
     refined_run: Optional[str] = None,
     components: Optional[Sequence[str]] = None,
 ) -> tuple[SourceSubjectMaskRun, RefinedSubjectMaskRun]:
-    source = _load_source_subject_mask_run(root, subject_run)
+    resolved_subject_run = subject_run
+    if resolved_subject_run is None and refined_run is not None:
+        refined_parent = root.get("refined_subject_masks_runs")
+        if refined_parent is not None and str(refined_run) in refined_parent:
+            resolved_subject_run = _resolve_primary_source_subject_mask_run_name(refined_parent[str(refined_run)])
+    source = _load_source_subject_mask_run(root, resolved_subject_run)
     normalized_components = _normalize_component_list(components)
     refined = _open_or_create_refined_subject_run(
         root,
@@ -1147,12 +1329,17 @@ def _normalize_refined_edited_masks_batch(
 
 def _compute_refined_subject_component_apply_rows(
     *,
-    source: SourceSubjectMaskRun,
+    component_sources: Optional[Mapping[str, SourceSubjectMaskRun]] = None,
+    source: Optional[SourceSubjectMaskRun] = None,
     refined: RefinedSubjectMaskRun,
     component_name: str,
     roi_indices: Sequence[int],
     edited_masks_batch: np.ndarray,
 ) -> dict[str, np.ndarray]:
+    if component_sources is None:
+        if source is None:
+            raise RuntimeError("component_sources or source is required.")
+        component_sources = {name: source for name in refined.component_names}
     comp_idx = int(refined.component_to_index[component_name])
     row_count = int(len(roi_indices))
     mask_present = np.zeros((row_count,), dtype=bool)
@@ -1174,7 +1361,7 @@ def _compute_refined_subject_component_apply_rows(
 
     for row_offset, roi_idx in enumerate(roi_indices):
         current_mask = np.asarray(edited_masks_batch[row_offset, comp_idx], dtype=np.uint8)
-        source_mask = _source_mask_for_component(source, component_name, int(roi_idx))
+        source_mask = _source_mask_for_resolved_component(component_sources, component_name, int(roi_idx))
         area = float(np.count_nonzero(current_mask))
         present = bool(area > 0.0)
         edited = not np.array_equal(current_mask, source_mask)
@@ -1285,7 +1472,8 @@ def _finalize_refined_subject_apply(refined: RefinedSubjectMaskRun) -> str:
 
 def _apply_refined_subject_roi_rows(
     *,
-    source: SourceSubjectMaskRun,
+    component_sources: Optional[Mapping[str, SourceSubjectMaskRun]] = None,
+    source: Optional[SourceSubjectMaskRun] = None,
     refined: RefinedSubjectMaskRun,
     roi_indices: Sequence[int],
     edited_masks_batch: np.ndarray,
@@ -1293,6 +1481,10 @@ def _apply_refined_subject_roi_rows(
     update_mode: str = "interactive",
     update_method: Optional[str] = None,
 ) -> tuple[int, ...]:
+    if component_sources is None:
+        if source is None:
+            raise RuntimeError("component_sources or source is required.")
+        component_sources = {name: source for name in refined.component_names}
     run_group = refined.group
     total_rois = int(run_group["masks_roi"].shape[0])
     normalized_rows = tuple(_normalize_roi_indices(roi_indices, total_rois))
@@ -1310,6 +1502,7 @@ def _apply_refined_subject_roi_rows(
 
     for component_name in normalized_components:
         component_updates = _compute_refined_subject_component_apply_rows(
+            component_sources=component_sources,
             source=source,
             refined=refined,
             component_name=component_name,
@@ -1351,9 +1544,14 @@ def save_refined_subject_roi(
     refined: RefinedSubjectMaskRun,
     roi_idx: int,
     edited_masks: np.ndarray,
+    component_sources: Optional[Mapping[str, SourceSubjectMaskRun]] = None,
 ) -> None:
     _apply_refined_subject_roi_rows(
-        source=source,
+        component_sources=(
+            dict(component_sources)
+            if component_sources is not None
+            else {component_name: source for component_name in refined.component_names}
+        ),
         refined=refined,
         roi_indices=[int(roi_idx)],
         edited_masks_batch=edited_masks,
@@ -1531,6 +1729,7 @@ def sync_refined_subject_mask_metadata(
         raise RuntimeError(
             f"Resolved source subject-mask run mismatch: expected {resolved_source_run}, got {source.run_name}."
         )
+    _primary_source, component_sources = _load_refined_component_source_runs(root, refined, default_source=source)
 
     run_group = refined.group
     total_rois = int(run_group["masks_roi"].shape[0])
@@ -1547,7 +1746,7 @@ def sync_refined_subject_mask_metadata(
         axis=0,
     )
     _apply_refined_subject_roi_rows(
-        source=source,
+        component_sources=component_sources,
         refined=refined,
         roi_indices=normalized_rows,
         edited_masks_batch=edited_masks_batch,
@@ -1658,6 +1857,7 @@ def launch_review(
     cv2.resizeWindow(WINDOW_NAME, 1900, 1100)
 
     refined_masks_arr = refined.group["masks_roi"]
+    _primary_source, component_sources = _load_refined_component_source_runs(root, refined, default_source=source)
     display_layout = {"all": (0, 0, 0, 0), "edit": (0, 0, 0, 0)}
     roi_img: np.ndarray | None = None
     original_masks: list[np.ndarray] = []
@@ -1673,7 +1873,7 @@ def launch_review(
     def update_display() -> None:
         if roi_img is None:
             return
-        source_active_mask = _source_mask_for_component(source, component_names[active_idx], current_pos)
+        source_active_mask = _source_mask_for_resolved_component(component_sources, component_names[active_idx], current_pos)
         source_panel = (
             _panel(
                 f"Source {component_names[active_idx]}",
@@ -1734,7 +1934,13 @@ def launch_review(
 
     def save_current() -> None:
         stacked = np.stack(edit_masks, axis=0)
-        save_refined_subject_roi(source=source, refined=refined, roi_idx=current_pos, edited_masks=stacked)
+        save_refined_subject_roi(
+            source=source,
+            refined=refined,
+            roi_idx=current_pos,
+            edited_masks=stacked,
+            component_sources=component_sources,
+        )
         print(f"Saved refined subject masks for ROI {current_pos}.")
 
     def on_mouse(event: int, x: int, y: int, _flags: int, _param: object) -> None:

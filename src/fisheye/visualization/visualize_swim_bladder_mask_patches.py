@@ -22,6 +22,7 @@ from ..shared.provenance_attrs import resolve_source_keypoints_run
 from ..tune.refined_subject_mask_review import (
     DEFAULT_REVIEW_INTENDED_USE,
     DEFAULT_REVIEW_METHOD,
+    _load_refined_component_source_runs,
     apply_component_review_status,
     prepare_refined_subject_run,
     save_refined_subject_roi,
@@ -354,12 +355,14 @@ def create_viewer(
         refined_run=refined_run,
         components=("swim_bladder",),
     )
+    _primary_source, component_sources = _load_refined_component_source_runs(root, refined, default_source=source)
+    swim_source = component_sources["swim_bladder"]
     if "swim_bladder" not in refined.component_to_index:
         raise RuntimeError(
             f"refined_subject_masks_runs/{refined.run_name} does not contain swim_bladder."
         )
     component_idx = int(refined.component_to_index["swim_bladder"])
-    crop_run_name = str(crop_run or source.crop_run)
+    crop_run_name = str(crop_run or swim_source.crop_run)
     crop_source = CropImageSource.open(root, crop_run=crop_run_name, zarr_path=zarr_path)
     total_rois = int(crop_source.total_rois)
     if total_rois <= 0:
@@ -367,7 +370,7 @@ def create_viewer(
 
     kp_group, _kp_group_name, _kp_run_name = _resolve_keypoint_group(
         root,
-        subject_group=source.group,
+        subject_group=swim_source.group,
         refined_group=refined.group,
         explicit_run=keypoint_run,
         explicit_group=keypoint_group,
@@ -446,8 +449,9 @@ def create_viewer(
         roi_arr = np.asarray(roi_img, dtype=np.uint8)
         masks_row = np.asarray(edit_masks_row, dtype=np.uint8)
         source_mask = np.asarray(
-            source.group["masks_roi"][int(state["loaded_roi_idx"]), source.mask_labels.index("swim_bladder")]
-            if "swim_bladder" in source.mask_labels and bool(source.available_channels[source.mask_labels.index("swim_bladder")])
+            swim_source.group["masks_roi"][int(state["loaded_roi_idx"]), swim_source.mask_labels.index("swim_bladder")]
+            if "swim_bladder" in swim_source.mask_labels
+            and bool(swim_source.available_channels[swim_source.mask_labels.index("swim_bladder")])
             else np.zeros_like(masks_row[component_idx]),
             dtype=np.uint8,
         )
@@ -502,6 +506,7 @@ def create_viewer(
             refined=refined,
             roi_idx=int(state["loaded_roi_idx"]),
             edited_masks=np.asarray(state["edit_masks_row"], dtype=np.uint8),
+            component_sources=component_sources,
         )
         state["stored_masks_row"] = np.asarray(state["edit_masks_row"], dtype=np.uint8).copy()
         print(f"Saved swim bladder patch edits for ROI {int(state['loaded_roi_idx'])}.")
