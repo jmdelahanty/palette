@@ -47,6 +47,11 @@ breaking the current eye tools before the unified model is ready.
 - A scheduler-aware non-UI apply entrypoint now exists at
   [src/fisheye/refinement/refine_subject_masks.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/refinement/refine_subject_masks.py),
   and the pipeline now exposes it as the `refined_subject_masks` stage.
+- A direct multi-source assembler/finalizer now exists at
+  [src/fisheye/refinement/assemble_refined_subject_masks.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/refinement/assemble_refined_subject_masks.py)
+  for sparse body/eye/swim workflows that should seed
+  `refined_subject_masks_runs/<run>` directly rather than creating an
+  assembled raw intermediate first.
 - Subject-mask registry tables/views now exist for:
   - run-level quality/performance
   - component-level availability/review state
@@ -71,6 +76,21 @@ breaking the current eye tools before the unified model is ready.
   - batch apply result:
     - `changed_roi_count = 0`
     - `noop_roi_count = 227`
+- A first assembled multi-source refined canary has now been created on
+  2026-04-01:
+  - archive:
+    - `/nvme1/recordings/2026-01-28T22-15-03Z_arena_1_DefaultScreen/zarr/2026-01-28T22-15-03Z_arena_1_DefaultScreen_training.zarr`
+  - body source run:
+    - `subject_masks_canary_sam_points_body_eyes_001`
+  - eye source run:
+    - `subject_masks_from_refined_eye_masks_2026-02-12_19-51-24`
+  - swim source run:
+    - `traditional_swim_bladder_masks_canary_001`
+  - refined run:
+    - `refined_subject_masks_canary_body_eyes_swim_001`
+  - canonical schema:
+    - `label_schema_id = "subject_v1_lr"`
+    - `mask_labels = ["subject_body", "eye_left", "eye_right", "swim_bladder"]`
 - The main short-term blocker is no longer storage or registry design.
   The blocker is that we still do not have real body-mask and swim-bladder-mask
   data to curate, review, and export at scale.
@@ -86,9 +106,15 @@ This is the near-term rollout order that should happen before more schema work.
     `subject_mask_runs` input from the SAM canary source run
 - [x] Pick one canary training zarr and create the first non-eye refined masks.
 - [x] Confirm the component set for that canary:
-  - first canary is `subject_body` only
-  - `subject_body + swim_bladder` remains the next acceptance target once
-    swim-bladder data cleanup is ready
+  - first validated non-eye canary was `subject_body` only
+  - first assembled multi-source refined canary now includes:
+    - `subject_body`
+    - `eye_left`
+    - `eye_right`
+    - `swim_bladder`
+  - next acceptance target is no longer storage assembly
+  - next acceptance target is component-local swim-bladder review/approval
+    conventions on real data
 
 ### 2. Treat the first refined masks as the acceptance test
 
@@ -181,6 +207,8 @@ For now:
   the subject-mask component model later without another schema reset
 - during unified assembly, the one planned already-refined upstream exception
   is eye components seeded from `refined_eye_masks_runs`
+- the first assembled refined canary already uses that transitional rule via
+  `subject_masks_from_refined_eye_masks_2026-02-12_19-51-24` as the eye source
 
 ### 4. Keep eye geometry specialized for now
 
@@ -202,27 +230,18 @@ Near-term:
 
 ```text
 crop_runs/<run>
-  -> subject_mask_runs/<run>
-  -> refined_subject_masks_runs/<run>  # body-only canary path now exists
+  -> subject_mask_runs/<run>            # dense/raw or component source snapshots
+  -> refined_subject_masks_runs/<run>   # body-only refined path now exists
   -> refined_eye_masks_runs/<run>      # eye-specialized path remains
 ```
 
-Target medium-term:
-
-```text
-crop_runs/<run>
-  -> subject_mask_runs/<run>
-  -> refined_subject_masks_runs/<run>  # assembled then finalized body/swim bladder editable masks
-  -> refined_eye_masks_runs/<run>      # still specialized, may read from subject masks
-  -> subject_shape_runs/<run>          # geometry derived from refined subject/body
-```
-
-Possible longer-term convergence:
+Current sparse-source assembly path:
 
 ```text
 component/raw sources
-  -> refined_subject_masks_runs        # direct assembly + subject-mask finalization
-     -> refined_eye_masks_runs         # specialized derivative or sibling view
+  -> refined_subject_masks_runs/<run>  # direct assembly + subject-mask finalization
+  -> refined_eye_masks_runs/<run>      # still specialized during transition
+  -> subject_shape_runs/<run>          # future geometry derived from refined subject/body
 ```
 
 ## Scope
@@ -805,13 +824,15 @@ This means the registry should eventually answer questions like:
 
 ## Phase 0: Contract Decisions
 
-- [ ] Decide whether `refined_subject_masks_runs` is the canonical name.
-- [ ] Define whether eye channels belong in the refined subject-mask contract in
+- [x] Decide whether `refined_subject_masks_runs` is the canonical name.
+- [x] Define whether eye channels belong in the refined subject-mask contract in
       v1, or only body/swim bladder do.
-- [ ] Define canonical source lineage attrs:
+- [x] Define canonical source lineage attrs:
   - `source_subject_mask_run`
   - `source_crop_run`
   - optional `source_keypoints_run`
+  - component-scoped `source_subject_mask_runs` supplements the coarse
+    run-level lineage when the refined run is assembled from multiple sources
 
 ## Phase 1: Refined Subject-Mask Contract
 

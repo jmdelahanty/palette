@@ -41,7 +41,9 @@ Instead, the canonical answer for new data should simply be:
 
 Recommended direction:
 
-- new authoring should target `subject_mask_runs`
+- new raw producers should target `subject_mask_runs`
+- sparse multi-source assembly/finalization should target
+  `refined_subject_masks_runs`
 - new refinement/review should target `refined_subject_masks_runs`
 - raw runs should be treated as immutable provenance snapshots
 - refined runs should be treated as idempotently editable working artifacts
@@ -226,6 +228,14 @@ Editing note:
 - tools such as Crimson or Paintera should not write bare pixel blocks only;
   they should eventually route through a Palette-native save helper that keeps
   sibling metadata synchronized
+
+Implementation note:
+
+- the direct assembler/finalizer now exists at
+  [src/fisheye/refinement/assemble_refined_subject_masks.py](/home/delahantyj@hhmi.org/gitrepos/palette/src/fisheye/refinement/assemble_refined_subject_masks.py)
+- the first four-component canary assembled refined run was created on
+  2026-04-01 as
+  `refined_subject_masks_runs/refined_subject_masks_canary_body_eyes_swim_001`
 
 Deferred geometry note:
 
@@ -429,6 +439,19 @@ Exact naming can change, but the structure should be component-scoped.
 - [x] Make it explicit that legacy eye-mask stages are compatibility inputs, not
       the preferred new authoring path.
 
+### 6. Land the direct assembled-refined canary path
+
+- [x] Add a direct multi-source assembler that seeds
+      `refined_subject_masks_runs/<run>` from component source runs and runs
+      subject-mask finalization in the same command.
+- [x] Validate a first four-component canary assembled refined run:
+  - `subject_body` from `subject_masks_canary_sam_points_body_eyes_001`
+  - `eye_left` / `eye_right` from
+    `subject_masks_from_refined_eye_masks_2026-02-12_19-51-24`
+  - `swim_bladder` from `traditional_swim_bladder_masks_canary_001`
+  - output:
+    `refined_subject_masks_canary_body_eyes_swim_001`
+
 ## Open Questions
 
 1. Should `subject_v1_lr` become the explicit default schema for new raw and
@@ -450,10 +473,12 @@ Exact naming can change, but the structure should be component-scoped.
 Current near-term policy:
 
 - use `subject_mask_runs` as the preferred canonical destination for new
-  component-mask work
+  raw component-mask work
 - use `refined_subject_masks_runs` as the preferred canonical refined/editable
-  destination for body/swim-bladder work
+  destination for body/swim-bladder work and sparse multi-source assembly
 - treat eye-mask backfills as migration aids, not the final desired steady
   state
+- do not require a merged raw canary run before creating a canonical refined
+  multi-component working artifact
 - avoid building new tooling that depends on separate per-component run
   registries

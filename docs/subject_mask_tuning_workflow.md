@@ -8,6 +8,7 @@ and canary body-mask generation.
 - Traditional `subject_body` tuning and materialization.
 - Batch propagation of `subject_mask_tuning` by `camera_id`.
 - First-pass refinement/review of `subject_body` masks.
+- Direct multi-source assembly into `refined_subject_masks_runs`.
 
 This is the current practical workflow for canary training zarrs. It is not a
 contract doc.
@@ -150,7 +151,12 @@ Current inspector behavior:
 - opens the crop ROI alongside raw and refined subject-mask overlays
 - shows run/method/review metadata for the active component
 - shows common geometry and refined component QC summaries
+- draws the active component's external contour and convex hull on the raw and
+  refined panels, which is especially useful when explaining solidity-driven
+  flags
 - supports ROI/component navigation without entering edit mode
+- supports cycling the active component with `[` / `]` in addition to direct
+  `1..9` selection
 - supports jumping to the next flagged ROI for the active component based on
   current refined QC thresholds
 
@@ -279,6 +285,62 @@ Current materializer behavior:
   `swim_bladder` channel available
 - records `run_semantics = "traditional_swim_bladder_inference"`
 - snapshots the exact tuning entry it used on the produced run for auditability
+
+## Direct Multi-Source Assembly Into `refined_subject_masks_runs`
+
+When body, eye, and swim-bladder source runs already exist, the preferred
+sparse multi-source canary path is now to assemble directly into
+`refined_subject_masks_runs/<run>` and finalize that run immediately.
+
+Dry run:
+
+```bash
+scripts/py -m fisheye.refinement.assemble_refined_subject_masks \
+  <archive>.zarr \
+  --body-run <body_subject_run> \
+  --eye-run <eye_subject_run> \
+  --swim-run <swim_subject_run> \
+  --run-name refined_subject_masks_<purpose>_001 \
+  --dry-run
+```
+
+Apply:
+
+```bash
+scripts/py -m fisheye.refinement.assemble_refined_subject_masks \
+  <archive>.zarr \
+  --body-run <body_subject_run> \
+  --eye-run <eye_subject_run> \
+  --swim-run <swim_subject_run> \
+  --run-name refined_subject_masks_<purpose>_001
+```
+
+Current assembler behavior:
+
+- validates that the source runs are row-aligned and crop-compatible
+- seeds each component from its own source run
+- writes component-scoped provenance for the assembled refined run
+- runs the normal subject-mask finalization step in the same command, so the
+  output run already has canonical refined metrics, QC, reasons, and review
+  scaffolding
+- avoids requiring a merged raw `subject_mask_runs/<run>` intermediate for
+  sparse workflows
+
+Canary validation on 2026-04-01:
+
+- archive:
+  - `/nvme1/recordings/2026-01-28T22-15-03Z_arena_1_DefaultScreen/zarr/2026-01-28T22-15-03Z_arena_1_DefaultScreen_training.zarr`
+- body source:
+  - `subject_masks_canary_sam_points_body_eyes_001`
+- eye source:
+  - `subject_masks_from_refined_eye_masks_2026-02-12_19-51-24`
+- swim source:
+  - `traditional_swim_bladder_masks_canary_001`
+- refined output:
+  - `refined_subject_masks_canary_body_eyes_swim_001`
+- output schema:
+  - `label_schema_id = "subject_v1_lr"`
+  - `mask_labels = ["subject_body", "eye_left", "eye_right", "swim_bladder"]`
 
 ## Current Batch Propagation Recommendation
 
