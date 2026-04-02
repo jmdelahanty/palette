@@ -292,6 +292,153 @@ def _update_postprocess_summary(
     return post_stats
 
 
+def _default_unified_refined_run_name(subject_run: str) -> str:
+    if subject_run.startswith("subject_masks"):
+        return f"refined_{subject_run}"
+    return f"refined_subject_masks_from_{subject_run}"
+
+
+def _available_eye_components(subject_group: zarr.Group) -> tuple[str, ...]:
+    labels_raw = subject_group.attrs.get("mask_labels")
+    if not isinstance(labels_raw, (list, tuple)) or not labels_raw:
+        raise RuntimeError("Projected subject-mask run is missing usable mask_labels.")
+    available_arr = subject_group.get("available_channels")
+    if available_arr is None:
+        raise RuntimeError("Projected subject-mask run is missing available_channels.")
+    available = np.asarray(available_arr[:], dtype=bool)
+    eye_components: list[str] = []
+    for idx, raw_name in enumerate(labels_raw):
+        if idx >= int(available.shape[0]) or not bool(available[idx]):
+            continue
+        component_name = str(raw_name)
+        if component_name in {"eyes_union", "eye_left", "eye_right"}:
+            eye_components.append(component_name)
+    if not eye_components:
+        raise RuntimeError("Projected subject-mask run does not expose any available eye components.")
+    return tuple(eye_components)
+
+
+def _resolve_manual_review_start_roi(
+    *,
+    root: zarr.Group,
+    refined: zarr.Group,
+    zarr_path: str,
+    crop_run: Optional[str],
+    frame_flag_file: Optional[str],
+) -> int:
+    min_sep, max_sep = _get_sep_limits(root, refined)
+    ellipse_success = np.asarray(refined["ellipse_success"][:], dtype=bool)
+    eye_separation = _load_eye_separation(refined)
+    area_refined = _load_area_refined(refined)
+    min_eye_area_px = _resolve_success_min_eye_area_px(refined)
+    success_mask = _compute_success_mask(
+        ellipse_success,
+        eye_separation,
+        min_sep,
+        max_sep,
+        area_refined,
+        min_eye_area_px,
+    )
+    failure_indices = np.where(~success_mask)[0].astype(np.int32, copy=False)
+    if failure_indices.size > 0:
+        return int(failure_indices[0])
+
+    if not frame_flag_file:
+        return 0
+
+    from .eye_mask_failure_review import _collect_flagged_roi_indices
+
+    crop_parent = root.get("crop_runs")
+    resolved_crop_run = crop_run or refined.attrs.get("source_crop_run") or (
+        crop_parent.attrs.get("latest") if crop_parent is not None else None
+    )
+    if crop_parent is None or not resolved_crop_run or resolved_crop_run not in crop_parent:
+        return 0
+    crop_group = crop_parent[resolved_crop_run]
+    roi_images = crop_group.get("roi_images")
+    if roi_images is None:
+        return 0
+    frame_indices = (
+        np.asarray(crop_group["frame_indices"][:], dtype=np.int64)
+        if "frame_indices" in crop_group
+        else None
+    )
+    try:
+        flagged_indices = _collect_flagged_roi_indices(
+            flag_path=Path(frame_flag_file).expanduser(),
+            zarr_path=str(zarr_path),
+            total_rois=int(roi_images.shape[0]),
+            frame_indices=frame_indices,
+        )
+    except RuntimeError:
+        return 0
+    if flagged_indices.size > 0:
+        return int(flagged_indices[0])
+    return 0
+
+
+def _launch_unified_subject_review(
+    zarr_path: str,
+    *,
+    refined_run: str,
+    crop_run: Optional[str],
+    frame_flag_file: Optional[str],
+    review_state: str,
+    review_method: str,
+    review_intended_use: str,
+    reviewer: Optional[str],
+    review_notes: Optional[str],
+) -> dict[str, str]:
+    from .refined_subject_mask_review import launch_review as launch_subject_review
+    from ..utils.backfill_subject_mask_runs import backfill_subject_mask_run
+
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    refined = root[f"refined_eye_masks_runs/{refined_run}"]
+    source_method_raw = refined.attrs.get("method")
+    source_method = str(source_method_raw).strip() if source_method_raw is not None else ""
+    projection = backfill_subject_mask_run(
+        zarr_path,
+        source_stage="refined_eye_masks_runs",
+        source_run=refined_run,
+        label_schema="auto",
+        overwrite=True,
+        apply=True,
+        method=source_method or None,
+    )
+    subject_run = str(projection.get("target_run") or "")
+    if not subject_run:
+        raise RuntimeError("Failed to resolve a projected subject-mask run for unified eye review.")
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    subject_group = root[f"subject_mask_runs/{subject_run}"]
+    components = _available_eye_components(subject_group)
+    unified_refined_run = _default_unified_refined_run_name(subject_run)
+    start_roi = _resolve_manual_review_start_roi(
+        root=root,
+        refined=refined,
+        zarr_path=zarr_path,
+        crop_run=crop_run,
+        frame_flag_file=frame_flag_file,
+    )
+    launch_subject_review(
+        str(zarr_path),
+        subject_run=subject_run,
+        refined_run=unified_refined_run,
+        crop_run=crop_run,
+        components=components,
+        component=components[0],
+        roi_index=start_roi,
+        approve_state=review_state,
+        review_method=review_method,
+        review_intended_use=review_intended_use,
+        reviewer=reviewer,
+        review_notes=review_notes,
+    )
+    return {
+        "subject_run": subject_run,
+        "refined_subject_run": unified_refined_run,
+    }
+
+
 def run_manual_review(
     zarr_path: str,
     refined_run: Optional[str] = None,
@@ -302,6 +449,7 @@ def run_manual_review(
     review_intended_use: str = "training",
     reviewer: Optional[str] = None,
     review_notes: Optional[str] = None,
+    legacy: bool = False,
 ) -> Dict[str, object]:
     if not reviewer:
         reviewer = os.environ.get("USER")
@@ -309,9 +457,23 @@ def run_manual_review(
     refined_run = refined_run or _get_latest_refined_run(root)
     refined = root[f"refined_eye_masks_runs/{refined_run}"]
 
-    from .eye_mask_failure_review import launch_review
+    if legacy:
+        from .eye_mask_failure_review import launch_review
 
-    launch_review(
+        launch_review(
+            str(zarr_path),
+            refined_run=refined_run,
+            crop_run=crop_run,
+            frame_flag_file=frame_flag_file,
+            review_state=review_state,
+            review_method=review_method,
+            review_intended_use=review_intended_use,
+            reviewer=reviewer,
+            review_notes=review_notes,
+        )
+        return _update_postprocess_summary(root, refined, print_summary=True)
+
+    delegated = _launch_unified_subject_review(
         str(zarr_path),
         refined_run=refined_run,
         crop_run=crop_run,
@@ -322,12 +484,21 @@ def run_manual_review(
         reviewer=reviewer,
         review_notes=review_notes,
     )
-    return _update_postprocess_summary(root, refined, print_summary=True)
+    summary = _update_postprocess_summary(root, refined, print_summary=True)
+    summary.update(
+        {
+            "review_surface": "refined_subject_masks_runs",
+            "legacy_compat_source": refined_run,
+            "subject_run": delegated["subject_run"],
+            "refined_subject_run": delegated["refined_subject_run"],
+        }
+    )
+    return summary
 
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Eye mask review: retune failures, manual corrections, or audit summary."
+        description="Eye mask review: retune failures, unified manual review, or audit summary."
     )
     parser.add_argument("zarr_path", type=Path, help="Path to Palette Zarr directory.")
     parser.add_argument(
@@ -337,17 +508,26 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
 
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--retune", action="store_true", help="Run failure retune UI.")
-    mode.add_argument("--manual", action="store_true", help="Run manual correction UI.")
+    mode.add_argument(
+        "--manual",
+        action="store_true",
+        help="Run canonical manual review in refined_subject_masks_runs (default eye review surface).",
+    )
+    mode.add_argument(
+        "--legacy-manual",
+        action="store_true",
+        help="Run the legacy refined-eye failure review UI.",
+    )
     mode.add_argument("--audit", action="store_true", help="Recompute postprocess summary only.")
 
     parser.add_argument(
         "--crop-run",
-        help="Crop run to source ROI images from (manual mode only).",
+        help="Crop run to source ROI images from (manual modes only).",
     )
     parser.add_argument(
         "--frame-flag-file",
         default="eye_mask_frame_flags.json",
-        help="JSON file with flagged eye-mask frames/ROIs to include in manual review.",
+        help="JSON file with flagged eye-mask frames/ROIs; legacy manual filters to them, unified manual starts there.",
     )
     parser.add_argument(
         "--apply-batch-size",
@@ -399,7 +579,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             apply_workers=args.apply_workers,
         )
         _update_postprocess_summary(root, refined, print_summary=True)
-    elif args.manual:
+    elif args.manual or args.legacy_manual:
         run_manual_review(
             str(args.zarr_path),
             refined_run=refined_run,
@@ -410,6 +590,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             review_intended_use=args.review_intended_use,
             reviewer=args.reviewer,
             review_notes=args.review_notes,
+            legacy=bool(args.legacy_manual),
         )
     else:
         _update_postprocess_summary(root, refined, print_summary=True)

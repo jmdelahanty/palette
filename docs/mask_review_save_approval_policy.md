@@ -121,9 +121,13 @@ Operational implication:
 
 - eye-mask save behavior is well-established
 - eye-mask approval behavior exists and is functional
-- eye-stage review is still important for current editing, but new operator
-  summaries should prefer the unified subject-mask component view when asking
-  whether eye components are available/reviewed
+- `scripts/py -m fisheye.tune.eye_mask_review --manual` now treats
+  `refined_subject_masks_runs` as the canonical manual review surface for eye
+  components, seeded through a compatibility `subject_mask_runs` projection
+- `scripts/py -m fisheye.tune.eye_mask_review --legacy-manual` remains
+  available for the older refined-eye failure/ellipse workflow
+- new operator summaries should prefer the unified subject-mask component view
+  when asking whether eye components are available/reviewed
 - but the policy is documented mostly procedurally in the workflow doc rather
   than in a dedicated contract/policy note
 
@@ -167,6 +171,8 @@ Operational implication:
   - body approved
   - swim bladder still pending
   - eyes seeded but not yet reviewed
+- for new manual eye review, this subject-mask component surface is now the
+  default authority rather than the legacy refined-eye run-level payload
 - unified subject-mask component surfaces are also the preferred operator/query
   answer for eye availability during transition, with legacy eye-stage rows
   projected in only when needed

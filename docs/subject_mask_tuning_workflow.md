@@ -38,6 +38,9 @@ Operator policy:
   asking whether a recording has usable body/eye/swim masks
 - treat legacy eye-specific stages as compatibility inputs or diagnostics, not
   as the preferred canonical surface for new work
+- for manual eye review/edit, prefer the unified refined-subject review surface
+  reached through `scripts/py -m fisheye.tune.eye_mask_review --manual`
+  or directly through `scripts/py -m fisheye.tune.refined_subject_mask_review`
 
 For the raw stage contract, see
 [subject_mask_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_runs_contract.md).
@@ -201,6 +204,34 @@ Current inspector behavior:
 
 This is intended as a Palette-native read-mostly inspection surface. It is not
 a replacement for Paintera's heavier pixel-editing interaction model.
+
+## Unified Eye Review During Transition
+
+For eye components, the current canonical manual review path now goes through
+the unified subject-mask editor, not directly through `refined_eye_masks_runs`.
+
+Recommended command:
+
+```bash
+scripts/py -m fisheye.tune.eye_mask_review <archive>.zarr --manual
+```
+
+Current behavior:
+
+- projects the selected `refined_eye_masks_runs/<run>` into a compatibility
+  `subject_mask_runs/<run>`
+- opens or reopens a matching `refined_subject_masks_runs/<run>` eye-component
+  review surface
+- uses the same per-component review payloads as body/swim refinement
+
+Legacy fallback:
+
+```bash
+scripts/py -m fisheye.tune.eye_mask_review <archive>.zarr --legacy-manual
+```
+
+Use the legacy mode only when the older failure-local eye UI is specifically
+needed.
 
 ### 6. Recompute refined metadata in batch mode
 

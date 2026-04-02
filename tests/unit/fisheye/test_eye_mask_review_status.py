@@ -61,6 +61,58 @@ def test_run_manual_review_forwards_review_status_args(
 
     seen: Dict[str, Any] = {}
 
+    def _fake_launch_review(_zarr_path: str, **kwargs: Any) -> Dict[str, str]:
+        seen.update(kwargs)
+        return {
+            "subject_run": "subject_masks_from_refined_eye_masks_001",
+            "refined_subject_run": "refined_subject_masks_from_refined_eye_masks_001",
+        }
+
+    monkeypatch.setattr(review_mod, "_launch_unified_subject_review", _fake_launch_review)
+    monkeypatch.setattr(
+        review_mod,
+        "_update_postprocess_summary",
+        lambda _root, _refined, print_summary=True: {"status": "ok"},
+    )
+
+    result = review_mod.run_manual_review(
+        str(zarr_path),
+        refined_run="refined_eye_masks_001",
+        crop_run="crop_001",
+        frame_flag_file="eye_mask_frame_flags.json",
+        review_state="pending",
+        review_method="spotcheck",
+        review_intended_use="full_recording",
+        reviewer="reviewer_a",
+        review_notes="needs another pass",
+    )
+
+    assert result["status"] == "ok"
+    assert result["review_surface"] == "refined_subject_masks_runs"
+    assert result["subject_run"] == "subject_masks_from_refined_eye_masks_001"
+    assert result["refined_subject_run"] == "refined_subject_masks_from_refined_eye_masks_001"
+    assert seen["refined_run"] == "refined_eye_masks_001"
+    assert seen["crop_run"] == "crop_001"
+    assert seen["frame_flag_file"] == "eye_mask_frame_flags.json"
+    assert seen["review_state"] == "pending"
+    assert seen["review_method"] == "spotcheck"
+    assert seen["review_intended_use"] == "full_recording"
+    assert seen["reviewer"] == "reviewer_a"
+    assert seen["review_notes"] == "needs another pass"
+
+
+def test_run_manual_review_legacy_mode_forwards_to_eye_failure_review(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "recording.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    refined_parent = root.create_group("refined_eye_masks_runs")
+    refined_parent.create_group("refined_eye_masks_001")
+    refined_parent.attrs["latest"] = "refined_eye_masks_001"
+
+    seen: Dict[str, Any] = {}
+
     def _fake_launch_review(_zarr_path: str, **kwargs: Any) -> None:
         seen.update(kwargs)
 
@@ -81,6 +133,7 @@ def test_run_manual_review_forwards_review_status_args(
         review_intended_use="full_recording",
         reviewer="reviewer_a",
         review_notes="needs another pass",
+        legacy=True,
     )
 
     assert result["status"] == "ok"

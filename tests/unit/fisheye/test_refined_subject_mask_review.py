@@ -62,6 +62,39 @@ def _build_subject_review_root():
     return root
 
 
+def _patch_review_provenance(monkeypatch) -> None:
+    monkeypatch.setattr(
+        mod,
+        "get_git_info",
+        lambda repo_path=None: {  # noqa: ARG005
+            "commit_hash": "b" * 40,
+            "short_hash": "bbbbbbbb",
+            "branch": "main",
+            "is_dirty": False,
+            "remote_url": "git@example.com:palette.git",
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_environment_info",
+        lambda **kwargs: {  # noqa: ARG005
+            "environment": {"python": "3.12"},
+            "platform": {
+                "hostname": "review-host",
+                "system": "Linux",
+                "release": "6.8",
+                "python_version": "3.12.0",
+                "machine": "x86_64",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        mod.sys,
+        "argv",
+        ["scripts/py", "-m", "fisheye.tune.refined_subject_mask_review"],
+    )
+
+
 def test_compute_single_mask_topology_metrics_handles_components_and_holes() -> None:
     mask = np.zeros((10, 10), dtype=np.uint8)
     mask[2:8, 2:8] = 1
@@ -133,36 +166,7 @@ def test_compute_single_mask_ipr_and_solidity_capture_shape_roughness() -> None:
 
 def test_prepare_refined_subject_run_creates_body_swim_editor_run(monkeypatch) -> None:
     root = _build_subject_review_root()
-    monkeypatch.setattr(
-        mod,
-        "get_git_info",
-        lambda repo_path=None: {  # noqa: ARG005
-            "commit_hash": "b" * 40,
-            "short_hash": "bbbbbbbb",
-            "branch": "main",
-            "is_dirty": False,
-            "remote_url": "git@example.com:palette.git",
-        },
-    )
-    monkeypatch.setattr(
-        mod,
-        "get_environment_info",
-        lambda **kwargs: {  # noqa: ARG005
-            "environment": {"python": "3.12"},
-            "platform": {
-                "hostname": "review-host",
-                "system": "Linux",
-                "release": "6.8",
-                "python_version": "3.12.0",
-                "machine": "x86_64",
-            },
-        },
-    )
-    monkeypatch.setattr(
-        mod.sys,
-        "argv",
-        ["scripts/py", "-m", "fisheye.tune.refined_subject_mask_review"],
-    )
+    _patch_review_provenance(monkeypatch)
 
     source, refined = mod.prepare_refined_subject_run(
         root,
@@ -301,6 +305,58 @@ def test_prepare_refined_subject_run_creates_body_swim_editor_run(monkeypatch) -
     assert provenance["inputs"]["source_subject_mask_run"] == "subject_masks_001"
     assert provenance["inputs"]["source_keypoints_run"] == "refined_kp_001"
     assert provenance["inputs"]["source_keypoint_group"] == "refined_keypoints_runs"
+
+
+def test_prepare_refined_subject_run_defaults_to_available_source_components(monkeypatch) -> None:
+    root = _build_subject_review_root()
+    _patch_review_provenance(monkeypatch)
+
+    _source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+    )
+
+    assert refined.component_names == ("subject_body", "eye_left", "eye_right")
+
+
+def test_load_refined_component_source_runs_falls_back_to_coarse_subject_source_for_legacy_lineage(monkeypatch) -> None:
+    root = _build_subject_review_root()
+    _patch_review_provenance(monkeypatch)
+    subject = root["subject_mask_runs"]["subject_masks_001"]
+    subject.attrs["component_provenance"] = {
+        "components": {
+            "eye_left": {
+                "source_stage": "refined_eye_masks_runs",
+                "source_run": "refined_eye_masks_001",
+                "source_channels": ["eye_left"],
+            },
+            "eye_right": {
+                "source_stage": "refined_eye_masks_runs",
+                "source_run": "refined_eye_masks_001",
+                "source_channels": ["eye_right"],
+            },
+        }
+    }
+
+    source, refined = mod.prepare_refined_subject_run(
+        root,
+        subject_run="subject_masks_001",
+        refined_run="refined_subject_masks_001",
+        components=("eye_left", "eye_right"),
+    )
+
+    primary_source, component_sources = mod._load_refined_component_source_runs(  # noqa: SLF001
+        root,
+        refined,
+        default_source=source,
+    )
+
+    assert primary_source.run_name == "subject_masks_001"
+    assert component_sources["eye_left"].run_name == "subject_masks_001"
+    assert component_sources["eye_right"].run_name == "subject_masks_001"
+    assert refined.group["components/eye_left/provenance"].attrs["source_stage"] == "refined_eye_masks_runs"
+    assert refined.group["components/eye_right/provenance"].attrs["source_stage"] == "refined_eye_masks_runs"
 
 
 def test_save_refined_subject_roi_updates_edit_applied_metrics_and_reasons() -> None:

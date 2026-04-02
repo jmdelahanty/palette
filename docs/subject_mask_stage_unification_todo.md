@@ -458,6 +458,9 @@ Exact naming can change, but the structure should be component-scoped.
 - [x] Do not require historical archives to be rewritten.
 - [x] Make it explicit that legacy eye-mask stages are compatibility inputs, not
       the preferred new authoring path.
+- [x] Make it explicit that legacy refined-eye manual review is a compatibility
+      fallback, while canonical manual eye review now lands in
+      `refined_subject_masks_runs`.
 
 ### 6. Land the direct assembled-refined canary path
 

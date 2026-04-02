@@ -887,7 +887,9 @@ This means the registry should eventually answer questions like:
   - body mask
   - swim-bladder mask
 - [x] Add per-component review actions and status writing.
-- [x] Keep eye review tooling unchanged during this phase.
+- [x] Move canonical manual eye review authority onto
+      `refined_subject_masks_runs`, while preserving the legacy refined-eye
+      failure UI as an explicit compatibility fallback.
 - [x] Validate the new tool on real non-eye masks rather than only empty/copy
       initialized channels.
 - [x] Add a separate Palette-native subject-mask inspector for read-mostly

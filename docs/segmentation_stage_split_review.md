@@ -61,12 +61,16 @@ without breaking the eye-specific refinement and training stack.
 | Surface | Entrypoint | Current write target | Notes |
 | --- | --- | --- | --- |
 | Eye refinement | `src/fisheye/refinement/refine_eye_masks.py` -> `refine_eye_masks(...)` | `refined_eye_masks_runs/<run>` | Still the authoritative refined eye stage for geometry, ellipses, contours, and eye QA in v1. |
-| Subject-mask review/editor | `src/fisheye/tune/refined_subject_mask_review.py` -> `prepare_refined_subject_run(...)` | `refined_subject_masks_runs/<run>` | Current default focus is body and swim bladder. New run creation currently seeds from `subject_mask_runs` sources, not directly from `refined_eye_masks_runs`. |
+| Subject-mask review/editor | `src/fisheye/tune/refined_subject_mask_review.py` -> `prepare_refined_subject_run(...)` | `refined_subject_masks_runs/<run>` | Default new-run component selection now follows the available components in the source `subject_mask_runs` input, including eyes when present. New run creation still seeds from `subject_mask_runs` sources, not directly from `refined_eye_masks_runs`. |
 
 Implementation note as of 2026-04-02:
 
 - direct `refined_eye_masks_runs` -> `refined_subject_masks_runs` seeding is
   not yet shipped
+- `scripts/py -m fisheye.tune.eye_mask_review --manual` now routes canonical
+  eye review/edit into `refined_subject_masks_runs` through a compatibility
+  `subject_mask_runs` projection, while `--legacy-manual` retains the old
+  refined-eye failure-review UI
 - new raw eye orchestration now dual-writes a compatibility
   `subject_mask_runs/<run>` companion immediately after successful raw
   `eye_masks_runs/<run>` completion in:

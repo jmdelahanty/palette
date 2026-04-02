@@ -321,7 +321,10 @@ feature parity.
 That means:
 
 - historical archives keep using it unchanged
-- current eye review/edit tooling can keep targeting it
+- the legacy failure-local eye review/edit tooling can keep targeting it when
+  explicitly requested
+- canonical manual eye review authority should move to
+  `refined_subject_masks_runs`
 - migration/backfill into subject-mask stages remains non-destructive
 
 ### Steady-state target
@@ -350,8 +353,11 @@ canonical and the other must be derived.
 
 ### Phase A: current transition
 
-- keep `refined_eye_masks_runs` as the current eye-specific editing surface
+- keep `refined_eye_masks_runs` available for specialized failure/ellipse
+  editing, but stop treating it as the default manual review authority
 - keep `refined_subject_masks_runs` authoritative for body/swim refinement
+- move canonical manual eye review onto `refined_subject_masks_runs` via a
+  compatibility `subject_mask_runs` projection when needed
 - prefer unified subject-mask component registry/query/operator surfaces for
   eye visibility, projecting legacy eye-stage rows when needed
 - preserve provenance across projection and backfill

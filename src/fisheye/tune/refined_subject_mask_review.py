@@ -35,6 +35,7 @@ cv2.setNumThreads(cv2_threads)
 
 WINDOW_NAME = "Refined Subject Mask Review"
 DEFAULT_COMPONENTS = ("subject_body", "swim_bladder")
+REVIEW_STATE_CHOICES = ("approved", "pending", "rejected", "needs_review")
 COMPONENT_ALIASES = {
     "body": "subject_body",
     "subject": "subject_body",
@@ -124,8 +125,41 @@ def _normalize_component_name(name: object) -> Optional[str]:
     return COMPONENT_ALIASES.get(text, text)
 
 
-def _normalize_component_list(values: Optional[Sequence[str]]) -> tuple[str, ...]:
+def _default_components_for_source(source: SourceSubjectMaskRun) -> tuple[str, ...]:
+    available: list[str] = []
+    seen: set[str] = set()
+    for idx, raw_name in enumerate(source.mask_labels):
+        if idx >= int(source.available_channels.shape[0]) or not bool(source.available_channels[idx]):
+            continue
+        component_name = _normalize_component_name(raw_name)
+        if component_name is None or component_name in seen:
+            continue
+        seen.add(component_name)
+        available.append(component_name)
+    if available:
+        return tuple(available)
+
+    fallback_labels: list[str] = []
+    for raw_name in source.mask_labels:
+        component_name = _normalize_component_name(raw_name)
+        if component_name is None or component_name in seen:
+            continue
+        seen.add(component_name)
+        fallback_labels.append(component_name)
+    if fallback_labels:
+        return tuple(fallback_labels)
+
+    return tuple(DEFAULT_COMPONENTS)
+
+
+def _normalize_component_list(
+    values: Optional[Sequence[str]],
+    *,
+    default_source: Optional[SourceSubjectMaskRun] = None,
+) -> tuple[str, ...]:
     if not values:
+        if default_source is not None:
+            return _default_components_for_source(default_source)
         return tuple(DEFAULT_COMPONENTS)
     result: list[str] = []
     seen: set[str] = set()
@@ -136,6 +170,8 @@ def _normalize_component_list(values: Optional[Sequence[str]]) -> tuple[str, ...
         seen.add(normalized)
         result.append(normalized)
     if not result:
+        if default_source is not None:
+            return _default_components_for_source(default_source)
         return tuple(DEFAULT_COMPONENTS)
     return tuple(result)
 
@@ -861,14 +897,19 @@ def _load_refined_component_source_runs(
         provenance_group = _get_component_provenance_group(refined.group, component_name)
         source_stage = str(provenance_group.attrs.get("source_stage") or "") if provenance_group is not None else ""
         source_run = str(provenance_group.attrs.get("source_run") or "") if provenance_group is not None else ""
-        if source_run and source_stage and source_stage != "subject_mask_runs":
-            raise RuntimeError(
-                "Component source resolution currently supports only subject_mask_runs-backed refined components; "
-                f"{component_name!r} is sourced from {source_stage}/{source_run}."
-            )
         resolved_source: SourceSubjectMaskRun | None = None
-        if source_run:
+        if source_run and source_stage == "subject_mask_runs":
             resolved_source = cache.setdefault(source_run, _load_source_subject_mask_run(root, source_run))
+        elif source_run and source_stage and source_stage != "subject_mask_runs":
+            # Editing still operates against a coarse subject_mask_runs source even
+            # when the component's original lineage points at a legacy stage such
+            # as refined_eye_masks_runs. Preserve the true provenance on the
+            # component itself, but use the coarse source subject run for editor
+            # overlay/save comparisons.
+            if default_source is not None:
+                resolved_source = default_source
+            elif primary_source is not None:
+                resolved_source = primary_source
         elif default_source is not None:
             resolved_source = default_source
         elif primary_source is not None:
@@ -1194,7 +1235,7 @@ def prepare_refined_subject_run(
         if refined_parent is not None and str(refined_run) in refined_parent:
             resolved_subject_run = _resolve_primary_source_subject_mask_run_name(refined_parent[str(refined_run)])
     source = _load_source_subject_mask_run(root, resolved_subject_run)
-    normalized_components = _normalize_component_list(components)
+    normalized_components = _normalize_component_list(components, default_source=source)
     refined = _open_or_create_refined_subject_run(
         root,
         source=source,
@@ -1814,6 +1855,7 @@ def launch_review(
     components: Optional[Sequence[str]] = None,
     component: Optional[str] = None,
     roi_index: int = 0,
+    approve_state: str = "approved",
     review_method: str = DEFAULT_REVIEW_METHOD,
     review_intended_use: str = DEFAULT_REVIEW_INTENDED_USE,
     reviewer: Optional[str] = None,
@@ -1838,6 +1880,11 @@ def launch_review(
     component_names = refined.component_names
     if not component_names:
         raise RuntimeError("No components available in refined subject-mask run.")
+    approve_state = str(approve_state).strip().lower() or "approved"
+    if approve_state not in REVIEW_STATE_CHOICES:
+        raise RuntimeError(
+            f"Unsupported approve_state={approve_state!r}; expected one of {', '.join(REVIEW_STATE_CHOICES)}."
+        )
     active_component = _normalize_component_name(component) or component_names[0]
     if active_component not in refined.component_to_index:
         raise RuntimeError(
@@ -2007,7 +2054,7 @@ def launch_review(
     print("  s: save current ROI edits")
     print("  r: reset current ROI to stored refined masks")
     print("  n/p: next/previous ROI")
-    print("  a: approve active component")
+    print(f"  a: set active component review to {approve_state}")
     print("  N: mark active component needs_review")
     print("  R: mark active component rejected")
     print("  P: mark active component pending")
@@ -2046,7 +2093,7 @@ def launch_review(
                 update_display()
         elif key in (ord("a"), ord("N"), ord("R"), ord("P")):
             state = {
-                ord("a"): "approved",
+                ord("a"): approve_state,
                 ord("N"): "needs_review",
                 ord("R"): "rejected",
                 ord("P"): "pending",
@@ -2086,6 +2133,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--component", help="Initial active component.")
     parser.add_argument("--roi-index", type=int, default=0, help="Initial ROI index.")
+    parser.add_argument(
+        "--approve-state",
+        default="approved",
+        choices=list(REVIEW_STATE_CHOICES),
+        help="Review state applied by the 'a' hotkey (default: approved).",
+    )
     parser.add_argument("--review-method", default=DEFAULT_REVIEW_METHOD)
     parser.add_argument("--review-intended-use", default=DEFAULT_REVIEW_INTENDED_USE)
     parser.add_argument("--reviewer", help="Reviewer name to record in review payloads.")
@@ -2104,6 +2157,7 @@ def main(argv: Optional[Sequence[str]] = None) -> str:
         components=args.components,
         component=args.component,
         roi_index=args.roi_index,
+        approve_state=args.approve_state,
         review_method=args.review_method,
         review_intended_use=args.review_intended_use,
         reviewer=args.reviewer,

@@ -879,7 +879,7 @@ def launch_review(
 def main(argv: Optional[Sequence[str]] = None) -> None:
     raise SystemExit(
         "The eye_mask_failure_review entrypoint has been removed. "
-        "Use `python -m fisheye.tune.eye_mask_review --manual`."
+        "Use `scripts/py -m fisheye.tune.eye_mask_review --legacy-manual`."
     )
 
 
