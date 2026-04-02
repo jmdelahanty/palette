@@ -369,6 +369,39 @@ def test_backfill_subject_mask_run_dry_run_does_not_write(tmp_path: Path) -> Non
     assert "subject_mask_runs" not in root
 
 
+def test_backfill_subject_mask_run_prefer_refined_uses_refined_first(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    _create_crop_run(root)
+    _create_eye_run(root)
+    _create_refined_eye_run(root)
+
+    summary = mod.backfill_subject_mask_run(zarr_path, source_stage="prefer_refined", apply=False)
+
+    assert summary["status"] == "would_update"
+    assert summary["source_stage"] == "refined_eye_masks_runs"
+    assert summary["source_run"] == "refined_eye_masks_001"
+    assert summary["target_run"] == "subject_masks_from_refined_eye_masks_001"
+    assert summary["label_schema_id"] == "subject_v1_lr"
+    assert "subject_mask_runs" not in root
+
+
+def test_backfill_subject_mask_run_prefer_refined_falls_back_to_raw(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    _create_crop_run(root)
+    _create_eye_run(root)
+
+    summary = mod.backfill_subject_mask_run(zarr_path, source_stage="prefer_refined", apply=False)
+
+    assert summary["status"] == "would_update"
+    assert summary["source_stage"] == "eye_masks_runs"
+    assert summary["source_run"] == "eye_masks_001"
+    assert summary["target_run"] == "subject_masks_from_eye_masks_001"
+    assert summary["label_schema_id"] == "subject_v1_union"
+    assert "subject_mask_runs" not in root
+
+
 def test_project_eye_mask_run_to_subject_mask_run_uses_runtime_defaults(tmp_path: Path) -> None:
     zarr_path = tmp_path / "recording_analysis.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")

@@ -38,7 +38,7 @@ AVAILABLE_EYE_ONLY_BY_SCHEMA: dict[str, np.ndarray] = {
     "subject_v1_union": np.asarray([False, True, False], dtype=bool),
     "subject_v1_lr": np.asarray([False, True, True, False], dtype=bool),
 }
-SOURCE_STAGE_CHOICES = ("auto", "eye_masks_runs", "refined_eye_masks_runs")
+SOURCE_STAGE_CHOICES = ("auto", "prefer_refined", "eye_masks_runs", "refined_eye_masks_runs")
 LABEL_SCHEMA_CHOICES = ("auto", "subject_v1_union", "subject_v1_lr")
 SOURCE_KEYPOINT_GROUP_ATTR = "source_keypoint_group"
 
@@ -112,7 +112,12 @@ def _resolve_source(
     source_run: Optional[str],
 ) -> ResolvedSource:
     errors: list[str] = []
-    candidates = ("eye_masks_runs", "refined_eye_masks_runs") if source_stage == "auto" else (source_stage,)
+    if source_stage == "auto":
+        candidates = ("eye_masks_runs", "refined_eye_masks_runs")
+    elif source_stage == "prefer_refined":
+        candidates = ("refined_eye_masks_runs", "eye_masks_runs")
+    else:
+        candidates = (source_stage,)
     for stage_group in candidates:
         try:
             run_group, run_name = resolve_zarr_run(
@@ -714,7 +719,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--source-stage",
         choices=list(SOURCE_STAGE_CHOICES),
         default="auto",
-        help="Legacy source stage to project (default: auto prefers eye_masks_runs).",
+        help=(
+            "Legacy source stage to project "
+            "(default: auto prefers eye_masks_runs; prefer_refined prefers "
+            "refined_eye_masks_runs and falls back to eye_masks_runs)."
+        ),
     )
     parser.add_argument("--source-run", type=str, default=None, help="Explicit source run name (default: latest).")
     parser.add_argument(

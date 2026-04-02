@@ -379,6 +379,9 @@ Current implementation note:
 
 - the explicit migration utility/backfill path records
   `run_semantics = "legacy_eye_mask_projection"`
+- `scripts/py -m fisheye.utils.backfill_subject_mask_runs --source-stage prefer_refined`
+  now provides a one-pass migration mode that prefers `refined_eye_masks_runs`
+  and falls back to `eye_masks_runs`
 - raw eye orchestration may also materialize an immediate compatibility
   `subject_mask_runs/<run>` companion after successful `eye_masks_runs/<run>`
   completion
