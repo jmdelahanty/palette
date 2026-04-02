@@ -270,10 +270,25 @@ def test_run_plan_dispatch_and_payload(
             "source_runs": {"source_keypoints_run": "keypoints_001"},
         }
 
+    def _project(_zarr_path: Path, eye_run: str) -> dict:
+        return {
+            "group": "subject_mask_runs",
+            "run_name": f"subject_masks_from_{eye_run}",
+            "method": "mock",
+            "label_schema_id": "subject_v1_union",
+            "projection_mode": "eyes_union_from_pair",
+            "run_semantics": "eye_mask_runtime_projection",
+            "source_runs": {
+                "source_eye_masks_run": eye_run,
+                "source_mask_stage": "eye_masks_runs",
+            },
+        }
+
     monkeypatch.setattr(mod, "_run_traditional", _traditional)
     monkeypatch.setattr(mod, "_run_yolo", _yolo)
     monkeypatch.setattr(mod, "_run_unet", _unet)
     monkeypatch.setattr(mod, "_collect_stage_payload", _collect)
+    monkeypatch.setattr(mod, "_project_subject_masks_after_eye_run", _project)
     monkeypatch.setattr(
         mod,
         "_sync_eye_mask_registry_rows_after_run",
@@ -304,6 +319,8 @@ def test_run_plan_dispatch_and_payload(
     assert "duration_seconds" in result
     assert result["eye_masks"]["run_name"].startswith("eye_masks_")
     assert result["eye_masks"]["source_runs"]["source_keypoints_run"] == "keypoints_001"
+    assert result["subject_masks"]["group"] == "subject_mask_runs"
+    assert result["subject_masks"]["source_runs"]["source_eye_masks_run"] == result["eye_masks"]["run_name"]
     assert result["registry_sync"]["synced"] is True
     assert "refined_eye_masks" not in result
 
@@ -331,6 +348,11 @@ def test_run_plan_refine_only_uses_latest_eye_mask_run(
 
     monkeypatch.setattr(mod, "_run_refine", _run_refine)
     monkeypatch.setattr(mod, "_collect_stage_payload", _collect)
+    monkeypatch.setattr(
+        mod,
+        "_project_subject_masks_after_eye_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("raw projection should not run in refine-only mode")),
+    )
     monkeypatch.setattr(
         mod,
         "_sync_eye_mask_registry_rows_after_run",
@@ -411,6 +433,12 @@ def test_sync_eye_mask_registry_rows_after_run_writes_status_and_refreshes(
         def refresh_eye_mask_quality_for_dataset(self, *_args, **_kwargs) -> int:
             return 2
 
+        def refresh_subject_mask_performance_for_dataset(self, *_args, **_kwargs) -> int:
+            return 3
+
+        def refresh_subject_mask_component_quality_for_dataset(self, *_args, **_kwargs) -> int:
+            return 5
+
         def close(self) -> None:
             return None
 
@@ -438,6 +466,17 @@ def test_sync_eye_mask_registry_rows_after_run_writes_status_and_refreshes(
                 "source_runs": {"source_eye_masks_run": "eye_masks_001"},
                 "successful_roi_pair_rate": 80.0,
             },
+            "subject_masks": {
+                "run_name": "subject_masks_001",
+                "method": "yolo_eye_segmentation",
+                "label_schema_id": "subject_v1_union",
+                "projection_mode": "eyes_union_from_pair",
+                "run_semantics": "eye_mask_runtime_projection",
+                "source_runs": {
+                    "source_eye_masks_run": "eye_masks_001",
+                    "source_mask_stage": "eye_masks_runs",
+                },
+            },
         },
     )
 
@@ -446,11 +485,15 @@ def test_sync_eye_mask_registry_rows_after_run_writes_status_and_refreshes(
     assert result["recording_id"] == "recording_db"
     assert result["eye_mask_performance_rows"] == 4
     assert result["eye_mask_quality_rows"] == 2
-    assert result["step_status_written"] == ["eye_masks", "refined_eye_masks"]
+    assert result["subject_mask_performance_rows"] == 3
+    assert result["subject_mask_component_quality_rows"] == 5
+    assert result["step_status_written"] == ["eye_masks", "refined_eye_masks", "subject_masks"]
     assert result["step_status_errors"] == {}
-    assert [call["step_name"] for call in step_calls] == ["eye_masks", "refined_eye_masks"]
+    assert [call["step_name"] for call in step_calls] == ["eye_masks", "refined_eye_masks", "subject_masks"]
     assert step_calls[0]["coverage_pct"] == pytest.approx(75.0)
     assert step_calls[1]["coverage_pct"] == pytest.approx(80.0)
+    assert step_calls[2]["coverage_pct"] is None
+    assert step_calls[2]["details_json"]["projection_mode"] == "eyes_union_from_pair"
 
 
 def test_sync_eye_mask_registry_rows_after_run_refresh_failure_is_non_fatal(
@@ -486,6 +529,12 @@ def test_sync_eye_mask_registry_rows_after_run_refresh_failure_is_non_fatal(
             raise RuntimeError("refresh boom")
 
         def refresh_eye_mask_quality_for_dataset(self, *_args, **_kwargs) -> int:
+            return 0
+
+        def refresh_subject_mask_performance_for_dataset(self, *_args, **_kwargs) -> int:
+            return 0
+
+        def refresh_subject_mask_component_quality_for_dataset(self, *_args, **_kwargs) -> int:
             return 0
 
         def close(self) -> None:

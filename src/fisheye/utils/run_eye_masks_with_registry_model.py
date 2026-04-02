@@ -13,7 +13,8 @@ import zarr
 
 from fisheye.registry.db import Registry, RegistryPaths
 from fisheye.shared.registry_stage_complete import emit_stage_completion
-from fisheye.shared.type_conversions import clean_mapping
+from fisheye.shared.type_conversions import clean_mapping, normalize_attr
+from fisheye.utils.backfill_subject_mask_runs import project_eye_mask_run_to_subject_mask_run
 from fisheye.utils.model_resolution_provenance import build_model_resolution_payload
 from fisheye.utils.resolve_detect_model import Candidate, TargetProfile
 from fisheye.utils.resolve_detect_model import _load_candidates, _load_target_profile, _resolve_recording_id
@@ -221,7 +222,10 @@ def _write_model_resolution_provenance(
 
 
 def _latest_eye_masks_run(zarr_path: Path) -> Optional[str]:
-    root = zarr.open_group(str(zarr_path), mode="r")
+    try:
+        root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    except TypeError:
+        root = zarr.open_group(str(zarr_path), mode="r")
     parent = root.get("eye_masks_runs")
     if parent is None:
         return None
@@ -232,6 +236,88 @@ def _latest_eye_masks_run(zarr_path: Path) -> Optional[str]:
     if latest_name not in parent:
         return None
     return latest_name
+
+
+def _project_subject_masks_after_eye_run(
+    zarr_path: Path,
+    eye_run: str,
+    *,
+    registry: Optional[Registry] = None,
+) -> str:
+    projection = project_eye_mask_run_to_subject_mask_run(zarr_path, source_run=eye_run)
+    subject_run = normalize_attr(projection.get("target_run"))
+    if not subject_run:
+        raise RuntimeError("Runtime eye-to-subject projection did not return a target run.")
+
+    if registry is None:
+        return subject_run
+
+    try:
+        try:
+            root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+        except TypeError:
+            root = zarr.open_group(str(zarr_path), mode="r")
+        subject_parent = root.get("subject_mask_runs")
+        if subject_parent is None or subject_run not in subject_parent:
+            raise RuntimeError(f"Projected subject-mask run not found: subject_mask_runs/{subject_run}")
+        subject_group = subject_parent[subject_run]
+        attrs = dict(subject_group.attrs)
+        subject_method = normalize_attr(attrs.get("method")) or "eye_mask_runtime_projection"
+        emit_stage_completion(
+            root,
+            zarr_path,
+            step_name="subject_masks",
+            status="ok",
+            source=_EYE_MASKS_STATUS_SOURCE,
+            run_name=subject_run,
+            method=subject_method,
+            coverage_pct=None,
+            details_json=clean_mapping(
+                {
+                    "reason": "present",
+                    "latest_selector": "run_eye_masks_with_registry_model",
+                    "source_mask_stage": normalize_attr(attrs.get("source_mask_stage")),
+                    "source_eye_masks_run": normalize_attr(attrs.get("source_eye_masks_run")),
+                    "label_schema_id": normalize_attr(attrs.get("label_schema_id")),
+                    "projection_mode": normalize_attr(attrs.get("projection_mode")),
+                    "run_semantics": normalize_attr(attrs.get("run_semantics")),
+                }
+            ),
+            console=None,
+            warning_label="subject_masks",
+            registry=registry,
+            auto_registry_from_env=False,
+            invalidate_on_ok=False,
+        )
+
+        dataset_row = registry.conn.execute(
+            """
+            SELECT dataset_id, recording_id, zarr_use
+            FROM datasets
+            WHERE zarr_path = ?
+            ORDER BY COALESCE(last_seen_utc, '') DESC, dataset_id
+            LIMIT 1;
+            """,
+            (str(zarr_path.resolve()),),
+        ).fetchone()
+        if dataset_row is not None:
+            dataset_id = normalize_attr(dataset_row["dataset_id"])
+            if dataset_id:
+                registry.refresh_subject_mask_performance_for_dataset(
+                    dataset_id,
+                    zarr_path=zarr_path,
+                    recording_id=normalize_attr(dataset_row["recording_id"]),
+                    zarr_use=normalize_attr(dataset_row["zarr_use"]),
+                )
+                registry.refresh_subject_mask_component_quality_for_dataset(
+                    dataset_id,
+                    zarr_path=zarr_path,
+                    recording_id=normalize_attr(dataset_row["recording_id"]),
+                    zarr_use=normalize_attr(dataset_row["zarr_use"]),
+                )
+    except Exception:
+        pass
+    return subject_run
 
 
 def _segment_eye_masks_yolo(**kwargs: Any) -> str:
@@ -495,12 +581,18 @@ def main(argv: Optional[list[str]] = None) -> int:
             run_name=run_name,
             payload=payload,
         )
+        subject_run = _project_subject_masks_after_eye_run(
+            output_path,
+            run_name,
+            registry=registry,
+        )
     finally:
         registry.close()
 
     print("Model resolution provenance written")
     print(f"  output_zarr: {output_path}")
     print(f"  eye_masks_run: {run_name}")
+    print(f"  subject_masks_run: {subject_run}")
     print(f"  selected_model: {best.model_path}")
     return 0
 

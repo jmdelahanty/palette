@@ -346,6 +346,10 @@ For historical archives:
 For new archives:
 
 - stop introducing new canonical dependencies on eye-specific stages
+- raw eye orchestration may still emit `eye_masks_runs/<run>` for compatibility,
+  but it should also materialize a same-session `subject_mask_runs/<run>`
+  companion immediately so unified registry/query/operator surfaces can treat
+  `subject_mask_runs` as the canonical raw subject snapshot
 - if eye-specific compatibility outputs are still needed for some downstream
   consumer, treat them as derived/adapter artifacts rather than the source of
   truth

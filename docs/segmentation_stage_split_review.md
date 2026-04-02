@@ -45,7 +45,7 @@ without breaking the eye-specific refinement and training stack.
 | --- | --- | --- |
 | Registry-resolved eye inference | `src/fisheye/utils/run_eye_masks_with_registry_model.py` | Resolves a model from the registry, dispatches YOLO or U-Net, then annotates the resulting `eye_masks_runs/<run>`. |
 | Batch eye runner | `src/fisheye/utils/run_eye_masks_batch.py` | Dispatches `traditional`, `yolo`, or `unet`, then optionally runs refinement into `refined_eye_masks_runs/<run>`. |
-| Core pipeline | `src/fisheye/core/pipeline.py` | Still wires traditional/YOLO eye segmentation and refined eye masks separately from the newer subject-mask stage family. |
+| Core pipeline | `src/fisheye/core/pipeline.py` | Raw `eye_masks` stage now delegates to the shared eye orchestration path, which also materializes a unified eye-only `subject_mask_runs/<run>` companion. Refined eye masks still run as a separate stage. |
 
 ### Raw Subject-Mask Writers
 
@@ -67,6 +67,12 @@ Implementation note as of 2026-04-02:
 
 - direct `refined_eye_masks_runs` -> `refined_subject_masks_runs` seeding is
   not yet shipped
+- new raw eye orchestration now dual-writes a compatibility
+  `subject_mask_runs/<run>` companion immediately after successful raw
+  `eye_masks_runs/<run>` completion in:
+  - `src/fisheye/utils/run_eye_masks_batch.py`
+  - `src/fisheye/utils/run_eye_masks_with_registry_model.py`
+  - `src/fisheye/core/pipeline.py` `eye_masks` stage
 - the implemented unified path for legacy eye data is:
   `eye_masks_runs` or `refined_eye_masks_runs`
   -> `subject_mask_runs/<compat_run>` via backfill/projection
@@ -75,10 +81,12 @@ Implementation note as of 2026-04-02:
 
 ## Current Mismatches
 
-### 1. Raw Runtime Storage Is Split Across Two Stage Families
+### 1. Raw Runtime Storage Still Has Two Physical Stage Families
 
-New eye inference still lands in `eye_masks_runs`, while new body/swim-bladder
-and SAM3 inference land in `subject_mask_runs`.
+New eye inference still lands first in `eye_masks_runs`, while new
+body/swim-bladder and SAM3 inference land in `subject_mask_runs`.
+However, the shipped eye orchestration now also materializes an immediate
+eye-only `subject_mask_runs/<run>` companion using `subject_v1_union`.
 
 This means downstream tooling has to know whether a component came from:
 
@@ -142,6 +150,14 @@ The narrowest safe change is:
 5. set `available_channels` so only the eye component is marked present
 6. preserve source eye-run lineage on the projected subject-mask run
 
+Status:
+
+- shipped
+- the runtime projection currently records
+  `run_semantics = "eye_mask_runtime_projection"`
+- explicit historical utility/backfill still records
+  `run_semantics = "legacy_eye_mask_projection"`
+
 This gives new eye inference a canonical subject-mask surface immediately while
 avoiding a forced rewrite of:
 
@@ -195,13 +211,9 @@ So the recommended near-term model is additive, not destructive:
 
 ## Open Follow-Up Questions
 
-1. Should the new steady-state eye-to-subject writer keep
-   `run_semantics = "legacy_eye_mask_projection"` or adopt a new canonical
-   semantic value for non-backfill runtime writes?
-2. Should direct eye CLIs dual-write to both stage families, or should only the
-   orchestration surfaces perform the subject-mask projection at first?
-3. When eye-only subject-mask runs become standard, should the core pipeline be
-   rewired to use the same orchestration path as `run_eye_masks_batch.py`?
+1. When eye-only subject-mask runs become standard, should runtime naming move
+   fully to native `subject_masks_*` identities without preserving any
+   eye-stage ancestry hints?
 
 ## Related Docs
 

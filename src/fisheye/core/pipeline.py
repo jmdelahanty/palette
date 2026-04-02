@@ -31,6 +31,7 @@ from ..refinement.detect_quality import analyze_detect_quality, save_quality_rep
 from ..refinement.refine_keypoints import create_refined_keypoint_run
 from ..shared.experiment_setup import infer_experiment_setup
 from ..shared.zarr.schema import validate_zarr_structure
+from ..utils import run_eye_masks_batch as eye_mask_batch
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
 LEGACY_REFINED_DETECT_GROUP = "refined_runs"
@@ -626,81 +627,48 @@ class Pipeline:
             raise ValueError(f"Unknown keypoint method '{method}'. Expected 'traditional' or 'yolo'.")
 
     def _run_eye_masks(self) -> None:
-        """Run traditional eye segmentation to produce masks and contours."""
+        """Run raw eye-mask inference through the shared eye orchestration path."""
         if self.zarr_root is None:
             self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
 
-        params = self.pipeline_params.get('eye_masks', {})
-        method = str(params.get('method', 'traditional')).lower()
+        params = self.pipeline_params.get('eye_masks', {}) or {}
+        method = eye_mask_batch._canonical_method(str(params.get('method', 'traditional')).lower())
+        eye_mask_batch._validate_method_requirements(self.pipeline_params, method, refine_only=False)
 
-        if method in {'yolo', 'yolo_segmentation', 'yolo-eye', 'yolo_eye_segmentation'}:
-            model_path = params.get('model_path') or params.get('model')
-            if not model_path:
-                raise ValueError(
-                    "YOLO eye segmentation requires 'model_path' (or 'model') under pipeline eye_masks params."
-                )
+        zarr_path = Path(self.config.zarr_path).expanduser().resolve()
+        plan = eye_mask_batch.EyeMaskPlan(
+            recording_dir=eye_mask_batch._infer_recording_dir(zarr_path),
+            h5_path=None,
+            zarr_path=zarr_path,
+            camera_id=None,
+            status='ok',
+        )
+        registry_path = Path(str(self.config.registry_path)).expanduser().resolve() if self.config.registry_path else None
+        result = eye_mask_batch._run_plan(
+            plan,
+            config=self.pipeline_params,
+            method=method,
+            scheduler=self.config.scheduler,
+            num_workers=self.config.num_workers,
+            quiet=not bool(self.config.verbose),
+            refine=False,
+            refine_only=False,
+            registry_path_for_sync=registry_path,
+        )
+        self.stage_results['eye_masks'] = result
+        self.zarr_root = zarr.open_group(self.config.zarr_path, mode='a')
 
-            from ..segmentation.eye_segmentation_yolo import segment_eye_masks_yolo
+        eye_payload = result.get('eye_masks') if isinstance(result, dict) else None
+        eye_run = eye_payload.get('run_name') if isinstance(eye_payload, dict) else None
+        if eye_run:
+            self.console.print(f"[green]✓[/green] Eye masks saved as [cyan]eye_masks_runs/{eye_run}[/cyan]")
 
-            segment_eye_masks_yolo(
-                zarr_path=self.config.zarr_path,
-                model_path=model_path,
-                run_name=params.get('run_name'),
-                crop_run=params.get('crop_run'),
-                batch_size=params.get('batch_size', 128),
-                device=params.get('device'),
-                imgsz=params.get('imgsz'),
-                conf=params.get('conf', 0.05),
-                iou=params.get('iou', 0.5),
-                max_det=params.get('max_det', 2),
-                mask_threshold=params.get('mask_threshold', 0.05),
-                adaptive_scale=params.get('adaptive_scale', 0.6),
-                adaptive_cap=params.get('adaptive_cap', 0.6),
-                use_retina_masks=params.get('use_retina_masks', True),
-                proto_upsample_factor=params.get('proto_upsample_factor', 2),
-                legacy_masks=params.get('legacy_masks', False),
-                roi_cache_policy=params.get('roi_cache_policy', 'auto'),
-                roi_cache_dir=params.get('roi_cache_dir'),
-                verbose=params.get('verbose', False),
-                console=self.console,
-            )
-        else:
-            from ..segmentation.eye_segmentation import segment_eye_masks
-
-            traditional_params = {
-                k: v
-                for k, v in params.items()
-                if k
-                not in {
-                    'method',
-                    'model_path',
-                    'model',
-                    'run_name',
-                    'crop_run',
-                    'batch_size',
-                    'device',
-                    'imgsz',
-                    'conf',
-                    'iou',
-                    'max_det',
-                    'mask_threshold',
-                    'adaptive_scale',
-                    'adaptive_cap',
-                    'use_retina_masks',
-                    'proto_upsample_factor',
-                    'legacy_masks',
-                    'roi_cache_policy',
-                    'roi_cache_dir',
-                    'verbose',
-                }
-            }
-
-            segment_eye_masks(
-                zarr_path=self.config.zarr_path,
-                config_dict=traditional_params,
-                console=self.console,
-                scheduler=self.config.scheduler,
-                num_workers=self.config.num_workers,
+        subject_payload = result.get('subject_masks') if isinstance(result, dict) else None
+        subject_run = subject_payload.get('run_name') if isinstance(subject_payload, dict) else None
+        if subject_run:
+            self.console.print(
+                "[green]✓[/green] Unified subject-mask eye companion saved as "
+                f"[cyan]subject_mask_runs/{subject_run}[/cyan]"
             )
 
     def _run_keypoints_refine(self) -> None:

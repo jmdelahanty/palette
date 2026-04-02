@@ -31,6 +31,9 @@ TARGET_SCHEMAS: dict[str, tuple[str, ...]] = {
     "subject_v1_union": ("subject_body", "eyes_union", "swim_bladder"),
     "subject_v1_lr": ("subject_body", "eye_left", "eye_right", "swim_bladder"),
 }
+BACKFILL_SUBJECT_MASK_METHOD = "fisheye.utils.backfill_subject_mask_runs"
+LEGACY_EYE_MASK_PROJECTION_SEMANTICS = "legacy_eye_mask_projection"
+RUNTIME_EYE_MASK_PROJECTION_SEMANTICS = "eye_mask_runtime_projection"
 AVAILABLE_EYE_ONLY_BY_SCHEMA: dict[str, np.ndarray] = {
     "subject_v1_union": np.asarray([False, True, False], dtype=bool),
     "subject_v1_lr": np.asarray([False, True, True, False], dtype=bool),
@@ -128,6 +131,12 @@ def _resolve_source(
 
 def _default_run_name(source: ResolvedSource) -> str:
     return f"subject_masks_from_{source.run_name}"
+
+
+def _default_runtime_run_name(source_run: str) -> str:
+    if source_run.startswith("eye_masks_"):
+        return f"subject_masks_{source_run[len('eye_masks_'):]}"
+    return f"subject_masks_from_{source_run}"
 
 
 def _normalize_eye_label(value: Any) -> Optional[str]:
@@ -387,6 +396,8 @@ def backfill_subject_mask_run(
     batch_size: int = 256,
     overwrite: bool = False,
     apply: bool = False,
+    method: Optional[str] = None,
+    run_semantics: str = LEGACY_EYE_MASK_PROJECTION_SEMANTICS,
 ) -> dict[str, Any]:
     if source_stage not in SOURCE_STAGE_CHOICES:
         raise ValueError(f"Unsupported source_stage={source_stage!r}.")
@@ -394,6 +405,10 @@ def backfill_subject_mask_run(
         raise ValueError(f"Unsupported label_schema={label_schema!r}.")
     if batch_size <= 0:
         raise ValueError("batch_size must be positive.")
+    resolved_method = normalize_attr(method) or BACKFILL_SUBJECT_MASK_METHOD
+    resolved_run_semantics = normalize_attr(run_semantics)
+    if not resolved_run_semantics:
+        raise ValueError("run_semantics must be a non-empty string.")
 
     zarr_path = Path(zarr_path)
     root = open_zarr_root(zarr_path, mode="r+" if apply else "r")
@@ -467,6 +482,8 @@ def backfill_subject_mask_run(
         "label_schema_id": target_label_schema,
         "projection_mode": projection_mode,
         "probability_source": prob_source_path,
+        "method": resolved_method,
+        "run_semantics": resolved_run_semantics,
     }
     if not apply:
         return summary
@@ -485,8 +502,8 @@ def backfill_subject_mask_run(
             "mask_labels": list(target_labels),
             "output_semantics": "multilabel",
             "overlap_policy": "independent_sigmoid",
-            "method": "fisheye.utils.backfill_subject_mask_runs",
-            "run_semantics": "legacy_eye_mask_projection",
+            "method": resolved_method,
+            "run_semantics": resolved_run_semantics,
             "source_mask_stage": source.stage_group,
             "projection_mode": projection_mode,
             "source_probability_path": prob_source_path,
@@ -649,6 +666,38 @@ def backfill_subject_mask_run(
     run_group.attrs["summary_statistics"] = summary_statistics
     summary["duration_seconds"] = duration
     return summary
+
+
+def project_eye_mask_run_to_subject_mask_run(
+    zarr_path: Path | str,
+    *,
+    source_run: str,
+    run_name: Optional[str] = None,
+    label_schema: str = "subject_v1_union",
+    batch_size: int = 256,
+    overwrite: bool = True,
+) -> dict[str, Any]:
+    if not source_run:
+        raise ValueError("source_run is required.")
+    if label_schema != "subject_v1_union":
+        raise ValueError("Runtime eye-to-subject projection currently requires label_schema='subject_v1_union'.")
+
+    source_root = open_zarr_root(Path(zarr_path), mode="r")
+    source = _resolve_source(source_root, source_stage="eye_masks_runs", source_run=source_run)
+    source_method = normalize_attr(source.run_group.attrs.get("method")) or BACKFILL_SUBJECT_MASK_METHOD
+    target_run_name = run_name or _default_runtime_run_name(source.run_name)
+    return backfill_subject_mask_run(
+        zarr_path,
+        source_stage="eye_masks_runs",
+        source_run=source.run_name,
+        label_schema=label_schema,
+        run_name=target_run_name,
+        batch_size=batch_size,
+        overwrite=overwrite,
+        apply=True,
+        method=source_method,
+        run_semantics=RUNTIME_EYE_MASK_PROJECTION_SEMANTICS,
+    )
 
 
 def main(argv: Optional[list[str]] = None) -> int:

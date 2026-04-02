@@ -172,6 +172,11 @@ def test_main_runs_eye_mask_resolution_and_writes_provenance(
         calls["write_payload"] = payload
 
     monkeypatch.setattr(mod, "_write_model_resolution_provenance", _fake_write_model_resolution_provenance)
+    def _fake_project_subject_masks_after_eye_run(zarr_path: Path, eye_run: str, registry=None) -> str:  # noqa: ANN001
+        calls["subject_projection"] = (zarr_path, eye_run, registry)
+        return "subject_masks_001"
+
+    monkeypatch.setattr(mod, "_project_subject_masks_after_eye_run", _fake_project_subject_masks_after_eye_run)
 
     rc = mod.main(
         [
@@ -203,6 +208,11 @@ def test_main_runs_eye_mask_resolution_and_writes_provenance(
 
     assert calls.get("write_zarr_path") == output_path.resolve()
     assert calls.get("write_run_name") == "eye_masks_001"
+    subject_projection = calls.get("subject_projection")
+    assert isinstance(subject_projection, tuple)
+    assert subject_projection[0] == output_path.resolve()
+    assert subject_projection[1] == "eye_masks_001"
+    assert subject_projection[2] is not None
     payload = calls.get("write_payload")
     assert isinstance(payload, dict)
     assert payload.get("task") == "eye_masks"
@@ -256,6 +266,91 @@ def test_run_yolo_forwards_registry_and_status_details(monkeypatch: pytest.Monke
     assert captured.get("status_details") == details
     assert captured.get("roi_cache_policy") == "always"
     assert captured.get("roi_cache_dir") == tmp_path / "roi-cache"
+
+
+def test_project_subject_masks_after_eye_run_emits_subject_status_and_refreshes_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "out.zarr"
+    calls: dict[str, object] = {}
+
+    class _SubjectRun(dict):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attrs = {
+                "method": "yolo_eye_segmentation",
+                "source_mask_stage": "eye_masks_runs",
+                "source_eye_masks_run": "eye_masks_001",
+                "label_schema_id": "subject_v1_union",
+                "projection_mode": "eyes_union_from_pair",
+                "run_semantics": "eye_mask_runtime_projection",
+            }
+
+    class _Parent(dict):
+        def get(self, key: str, default: object = None) -> object:  # noqa: A003
+            return super().get(key, default)
+
+    class _Root(dict):
+        def get(self, key: str, default: object = None) -> object:  # noqa: A003
+            return super().get(key, default)
+
+    root = _Root()
+    subject_parent = _Parent()
+    subject_parent["subject_masks_001"] = _SubjectRun()
+    root["subject_mask_runs"] = subject_parent
+
+    monkeypatch.setattr(
+        mod,
+        "project_eye_mask_run_to_subject_mask_run",
+        lambda *_args, **_kwargs: {"target_run": "subject_masks_001"},
+    )
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *_args, **_kwargs: root)
+
+    class _Cursor:
+        def fetchone(self) -> dict[str, object]:
+            return {
+                "dataset_id": "dataset_001",
+                "recording_id": "recording_001",
+                "zarr_use": "analysis",
+            }
+
+    class _Registry:
+        def __init__(self) -> None:
+            self.conn = self
+
+        def execute(self, _sql: str, _params: tuple[str]) -> _Cursor:
+            calls["query"] = True
+            return _Cursor()
+
+        def refresh_subject_mask_performance_for_dataset(self, *args, **kwargs) -> int:  # noqa: ANN002, ANN003
+            calls["refresh_perf"] = (args, kwargs)
+            return 4
+
+        def refresh_subject_mask_component_quality_for_dataset(self, *args, **kwargs) -> int:  # noqa: ANN002, ANN003
+            calls["refresh_quality"] = (args, kwargs)
+            return 5
+
+    monkeypatch.setattr(
+        mod,
+        "emit_stage_completion",
+        lambda *args, **kwargs: calls.setdefault("emit", kwargs) or True,  # noqa: ANN002, ANN003
+    )
+
+    subject_run = mod._project_subject_masks_after_eye_run(  # noqa: SLF001
+        zarr_path,
+        "eye_masks_001",
+        registry=_Registry(),  # type: ignore[arg-type]
+    )
+
+    assert subject_run == "subject_masks_001"
+    assert isinstance(calls.get("emit"), dict)
+    assert calls["emit"]["step_name"] == "subject_masks"
+    assert calls["emit"]["run_name"] == "subject_masks_001"
+    assert calls["emit"]["method"] == "yolo_eye_segmentation"
+    assert calls["emit"]["details_json"]["projection_mode"] == "eyes_union_from_pair"
+    assert "refresh_perf" in calls
+    assert "refresh_quality" in calls
 
 
 def test_run_unet_forwards_registry_and_status_details(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -209,6 +209,9 @@ Current implementation note:
 
 - the shipped subject-mask review/assembly helpers still load source inputs
   from `subject_mask_runs`
+- new raw eye orchestration now writes a companion eye-only
+  `subject_mask_runs/<run>` immediately after successful `eye_masks_runs/<run>`
+  completion, using `subject_v1_union`
 - when eye content starts in legacy eye stages, the implemented bridge is to
   project/backfill a compatibility `subject_mask_runs/<run>` first and then
   assemble or refine from that subject-mask source

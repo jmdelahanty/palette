@@ -24,6 +24,7 @@ def _create_eye_run(
     *,
     run_name: str = "eye_masks_001",
     eye_labels: tuple[str, ...] | None = None,
+    method: str | None = None,
 ) -> zarr.Group:
     eye_parent = root.require_group("eye_masks_runs")
     eye_parent.attrs["latest"] = run_name
@@ -32,6 +33,8 @@ def _create_eye_run(
     eye.attrs["source_keypoints_run"] = "refined_keypoints_001"
     eye.attrs["source_keypoint_group"] = "refined_keypoints_runs"
     eye.attrs["probabilities_encoding"] = "linear_uint8_0_255"
+    if method is not None:
+        eye.attrs["method"] = method
     if eye_labels is not None:
         eye.attrs["eye_labels"] = list(eye_labels)
     masks = np.asarray(
@@ -364,3 +367,23 @@ def test_backfill_subject_mask_run_dry_run_does_not_write(tmp_path: Path) -> Non
     assert summary["status"] == "would_update"
     assert summary["source_stage"] == "eye_masks_runs"
     assert "subject_mask_runs" not in root
+
+
+def test_project_eye_mask_run_to_subject_mask_run_uses_runtime_defaults(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    _create_crop_run(root)
+    _create_eye_run(root, method="yolo_eye_segmentation")
+
+    summary = mod.project_eye_mask_run_to_subject_mask_run(zarr_path, source_run="eye_masks_001")
+
+    assert summary["status"] == "updated"
+    assert summary["target_run"] == "subject_masks_001"
+    assert summary["run_semantics"] == "eye_mask_runtime_projection"
+    assert summary["method"] == "yolo_eye_segmentation"
+
+    run = root["subject_mask_runs/subject_masks_001"]
+    assert run.attrs["run_semantics"] == "eye_mask_runtime_projection"
+    assert run.attrs["method"] == "yolo_eye_segmentation"
+    assert run.attrs["label_schema_id"] == "subject_v1_union"
+    assert run.attrs["source_eye_masks_run"] == "eye_masks_001"

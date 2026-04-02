@@ -33,6 +33,7 @@ from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
 from fisheye.shared.registry_stage_complete import DatasetMetadata, emit_stage_completion
 from fisheye.shared.type_conversions import normalize_attr as _normalize_attr
 from fisheye.shared.zarr_discovery import discover_registry_zarrs as discover_shared_registry_zarrs
+from fisheye.utils.backfill_subject_mask_runs import project_eye_mask_run_to_subject_mask_run
 from fisheye.utils.batch_registry_model_resolution import ResolvedModel
 from fisheye.utils.batch_registry_model_resolution import (
     resolve_registry_models_for_plans as resolve_shared_registry_models_for_plans,
@@ -592,9 +593,12 @@ def _decode_source_runs(attrs: Dict[str, Any]) -> Dict[str, Any]:
         "source_crop_run",
         "source_detect_run",
         "source_background_run",
+        "source_mask_stage",
         "source_eye_masks_run",
         "source_eye_masks_method",
+        "source_refined_eye_masks_run",
         "source_keypoint_group",
+        "source_subject_mask_run",
     ):
         if key in attrs:
             source_runs[key] = attrs.get(key)
@@ -716,13 +720,19 @@ def _step_status_details_from_stage_payload(
             "source_background_run",
             "source_eye_masks_run",
             "source_eye_masks_method",
+            "source_mask_stage",
+            "source_refined_eye_masks_run",
             "source_keypoint_group",
             "source_keypoints_run",
+            "source_subject_mask_run",
         ):
             if source_runs.get(key) is not None:
                 details[key] = source_runs.get(key)
 
     for key in ("total_rois", "successful_roi_pairs", "successful_roi_pair_rate"):
+        if stage_payload.get(key) is not None:
+            details[key] = stage_payload.get(key)
+    for key in ("label_schema_id", "projection_mode", "run_semantics"):
         if stage_payload.get(key) is not None:
             details[key] = stage_payload.get(key)
 
@@ -814,6 +824,8 @@ def _sync_eye_mask_registry_rows_after_run(
 
         perf_rows: Optional[int] = None
         quality_rows: Optional[int] = None
+        subject_perf_rows: Optional[int] = None
+        subject_quality_rows: Optional[int] = None
         refresh_error: Optional[str] = None
         try:
             perf_rows = int(
@@ -832,6 +844,23 @@ def _sync_eye_mask_registry_rows_after_run(
                     zarr_use=zarr_use,
                 )
             )
+            if "subject_masks" in stage_payloads or "refined_subject_masks" in stage_payloads:
+                subject_perf_rows = int(
+                    registry.refresh_subject_mask_performance_for_dataset(
+                        dataset_id,
+                        zarr_path=zarr_path,
+                        recording_id=recording_id,
+                        zarr_use=zarr_use,
+                    )
+                )
+                subject_quality_rows = int(
+                    registry.refresh_subject_mask_component_quality_for_dataset(
+                        dataset_id,
+                        zarr_path=zarr_path,
+                        recording_id=recording_id,
+                        zarr_use=zarr_use,
+                    )
+                )
         except Exception as exc:
             refresh_error = str(exc)
 
@@ -843,6 +872,8 @@ def _sync_eye_mask_registry_rows_after_run(
             "step_status_errors": step_status_errors,
             "eye_mask_performance_rows": perf_rows,
             "eye_mask_quality_rows": quality_rows,
+            "subject_mask_performance_rows": subject_perf_rows,
+            "subject_mask_component_quality_rows": subject_quality_rows,
         }
         if refresh_error is not None:
             result["reason"] = "refresh_failed"
@@ -865,18 +896,38 @@ def _collect_stage_payload(zarr_path: Path, group_name: str, run_name: str) -> D
     attrs = dict(run_group.attrs)
     summary = attrs.get("summary_statistics")
     summary_statistics = summary if isinstance(summary, dict) else {}
+    if group_name == "refined_subject_masks_runs":
+        review_status = attrs.get("refined_subject_mask_review_status")
+    elif group_name == "subject_mask_runs":
+        review_status = attrs.get("subject_mask_review_status")
+    else:
+        review_status = attrs.get("eye_mask_review_status")
     return {
         "group": group_name,
         "run_name": run_name,
         "method": _normalize_attr(attrs.get("method")),
+        "label_schema_id": _normalize_attr(attrs.get("label_schema_id")),
+        "projection_mode": _normalize_attr(attrs.get("projection_mode")),
+        "run_semantics": _normalize_attr(attrs.get("run_semantics")),
         "duration_seconds": attrs.get("duration_seconds"),
         "total_rois": attrs.get("total_rois"),
         "successful_roi_pairs": attrs.get("successful_roi_pairs"),
         "successful_roi_pair_rate": attrs.get("successful_roi_pair_rate"),
-        "review_status": attrs.get("eye_mask_review_status"),
+        "review_status": review_status,
         "summary_statistics": summary_statistics,
         "source_runs": _decode_source_runs(attrs),
     }
+
+
+def _project_subject_masks_after_eye_run(zarr_path: Path, eye_run: str) -> Dict[str, Any]:
+    projection = project_eye_mask_run_to_subject_mask_run(
+        zarr_path,
+        source_run=eye_run,
+    )
+    target_run = _normalize_attr(projection.get("target_run"))
+    if not target_run:
+        raise RuntimeError("Runtime eye-to-subject projection did not return a target run.")
+    return _collect_stage_payload(zarr_path, "subject_mask_runs", target_run)
 
 
 def _run_traditional(
@@ -1246,6 +1297,8 @@ def _run_plan(
             )
         payload["eye_masks"] = _collect_stage_payload(plan.zarr_path, "eye_masks_runs", eye_run)
         stage_payloads["eye_masks"] = payload["eye_masks"]
+        payload["subject_masks"] = _project_subject_masks_after_eye_run(plan.zarr_path, eye_run)
+        stage_payloads["subject_masks"] = payload["subject_masks"]
         if refine:
             refined_run = _run_refine(plan.zarr_path, config, source_run=eye_run, quiet=quiet)
             payload["refined_eye_masks"] = _collect_stage_payload(plan.zarr_path, "refined_eye_masks_runs", refined_run)
@@ -1400,6 +1453,8 @@ def _run_plan_with_registry_model(
     stage_payloads: Dict[str, Dict[str, Any]] = {}
     payload["eye_masks"] = _collect_stage_payload(plan.zarr_path, "eye_masks_runs", eye_run)
     stage_payloads["eye_masks"] = payload["eye_masks"]
+    payload["subject_masks"] = _project_subject_masks_after_eye_run(plan.zarr_path, eye_run)
+    stage_payloads["subject_masks"] = payload["subject_masks"]
     if resolved_model is not None:
         selected = (
             resolved_model.payload.get("selected", {})

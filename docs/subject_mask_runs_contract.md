@@ -375,6 +375,19 @@ Recommended migration model:
    when that path is stable.
 5. Only then deprecate creation of new raw `eye_masks_runs`.
 
+Current implementation note:
+
+- the explicit migration utility/backfill path records
+  `run_semantics = "legacy_eye_mask_projection"`
+- raw eye orchestration may also materialize an immediate compatibility
+  `subject_mask_runs/<run>` companion after successful `eye_masks_runs/<run>`
+  completion
+- that fresh runtime companion records
+  `run_semantics = "eye_mask_runtime_projection"`
+- current runtime eye projection defaults to `subject_v1_union`, even when the
+  eye producer may carry richer left/right semantics, so the canonical raw
+  bridge remains safe across traditional, YOLO, and U-Net eye producers
+
 ## Projection rules from legacy eye-mask stages
 
 ### Projection into `subject_v1_union`
