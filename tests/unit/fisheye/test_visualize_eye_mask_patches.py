@@ -268,7 +268,8 @@ def test_apply_eye_mask_review_status_writes_contract_attrs(tmp_path: Path) -> N
     assert status["source_eye_masks_run"] == "eye_masks_001"
     assert status["source_keypoints_run"] == "refined_keypoints_001"
     assert status["source_keypoint_group"] == "refined_keypoints_runs"
-    assert "timestamp" in status
+    assert "timestamp_utc" in status
+    assert status["timestamp"] == status["timestamp_utc"]
     assert payload["state"] == "approved"
     assert refined_parent.attrs["eye_mask_review_status_latest"] == "refined_eye_masks_001"
 
@@ -294,7 +295,8 @@ def test_apply_recommended_probability_threshold_writes_source_run_metadata(tmp_
     assert review_payload["notes"] == "previewed in patch viewer"
     assert review_payload["source_refined_eye_masks_run"] == "refined_eye_masks_001"
     assert review_payload["source"] == "visualize_eye_mask_patches"
-    assert "timestamp" in review_payload
+    assert "timestamp_utc" in review_payload
+    assert review_payload["timestamp"] == review_payload["timestamp_utc"]
     assert payload["threshold"] == pytest.approx(0.62)
 
 

@@ -108,9 +108,9 @@ Current review payload:
 
 Important current limitation:
 
-- eye-mask review payloads still write `timestamp`, not canonical
-  `timestamp_utc`
-- eye-mask review is not yet covered by the shared detect/keypoint review
+- eye-mask review payloads now write canonical `timestamp_utc` and mirror
+  legacy `timestamp` for compatibility
+- eye-mask review is still not yet covered by the shared detect/keypoint review
   status contract
 
 Operational implication:
@@ -192,9 +192,6 @@ For mask workflows, the near-term policy should be:
 
 ## Follow-Up Gaps
 
-- [ ] Decide whether eye-mask review payloads should be normalized to the same
-      canonical timestamp key (`timestamp_utc`) used by detect, keypoints, and
-      subject masks.
 - [ ] Decide whether eye masks should eventually adopt a dedicated review
       policy/contract note rather than living only in the workflow doc.
 - [ ] Define swim-bladder-specific approval heuristics for the first curated

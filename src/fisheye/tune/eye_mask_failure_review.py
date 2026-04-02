@@ -303,11 +303,13 @@ def _apply_review_status(
     reviewer: Optional[str],
     notes: Optional[str],
 ) -> Dict[str, object]:
+    timestamp_utc = datetime.now(timezone.utc).isoformat()
     payload: Dict[str, object] = {
         "state": state,
         "method": method,
         "intended_use": intended_use,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp_utc": timestamp_utc,
+        "timestamp": timestamp_utc,
     }
     if reviewer:
         payload["reviewer"] = reviewer

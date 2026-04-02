@@ -42,7 +42,8 @@ def test_apply_review_status_writes_eye_mask_review_attrs(tmp_path: Path) -> Non
     assert status["source_eye_masks_run"] == "eye_masks_001"
     assert status["source_keypoints_run"] == "refined_keypoints_001"
     assert status["source_keypoint_group"] == "refined_keypoints_runs"
-    assert "timestamp" in status
+    assert "timestamp_utc" in status
+    assert status["timestamp"] == status["timestamp_utc"]
 
     assert payload["state"] == "approved"
     assert refined_parent.attrs["eye_mask_review_status_latest"] == "refined_eye_masks_001"
