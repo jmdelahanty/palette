@@ -467,7 +467,11 @@ def _viewer_cmd(args: argparse.Namespace, plan: ReviewPlan) -> List[str]:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Batch review eye-mask patches by launching visualize_eye_mask_patches per recording."
+        description=(
+            "Batch review refined-eye patch views with the legacy eye viewer. "
+            "Derived compat runs open read-only and redirect canonical edits to "
+            "`scripts/py -m fisheye.tune.eye_mask_review --manual`."
+        )
     )
     parser.add_argument("paths", nargs="*", type=Path, help="Recording roots or zarr paths to scan.")
     parser.add_argument(
@@ -495,9 +499,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--status",
         choices=["missing", "approved", "pending", "rejected", "needs_review", "any"],
         default="missing",
-        help="Select runs by eye_mask_review_status state (default: missing).",
+        help="Select refined-eye runs by eye_mask_review_status state (default: missing).",
     )
-    parser.add_argument("--refined-run", type=str, help="Specific refined eye-mask run (default: latest per zarr).")
+    parser.add_argument(
+        "--refined-run",
+        type=str,
+        help="Specific refined eye-mask run or compat run (default: latest per zarr).",
+    )
     parser.add_argument("--crop-run", type=str, help="Crop run override for viewer.")
     parser.add_argument("--keypoint-run", type=str, help="Keypoint run override for viewer.")
     parser.add_argument("--keypoint-group", type=str, help="Keypoint group override for viewer.")

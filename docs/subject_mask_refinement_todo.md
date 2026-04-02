@@ -39,10 +39,10 @@ breaking the current eye tools before the unified model is ready.
   multi-component runs.
 - `subject_mask_training_artifact_contract.md` exists and the merged
   `subject_masks` exporter has been started.
-- `refined_eye_masks_runs` remains the current eye-specific editing surface
-  during the transition to subject-mask unification, but registry/query and
-  operator-facing component views should treat it as a compatibility source for
-  unified subject-mask eye components rather than a parallel canonical stage.
+- `refined_eye_masks_runs` remains a specialized and compatibility stage during
+  the transition to subject-mask unification, but canonical manual eye review
+  has now moved to `refined_subject_masks_runs` and derived compat refined-eye
+  runs are read-only in legacy viewers.
 - `refined_subject_masks_runs` now exists as a stage contract and runtime stage
   spec.
 - A first review/editor entrypoint exists at
@@ -149,15 +149,17 @@ This is the near-term rollout order that should happen before more schema work.
 - [ ] Do not design body/spline contour arrays beyond the current contract until
       we see what the first curated masks actually look like.
 
-### 4. Keep eye migration deferred
+### 4. Keep eye-specific geometry compatibility clean while review authority is unified
 
-- [ ] Continue using `refined_eye_masks_runs` for left/right eye editing as the
-      current specialized editor surface.
-- [ ] Do not move eye editing into `refined_subject_masks_runs` until body/swim
-      workflows are proven.
+- [x] Move canonical manual eye review into `refined_subject_masks_runs`.
+- [x] Guard derived `refined_eye_masks_runs` compatibility artifacts against
+      drift by treating them as read-only in legacy eye viewers.
+- [ ] Keep specialized eye geometry/export consumers readable from
+      `refined_eye_masks_runs` while canonical authoring authority remains
+      unified under `refined_subject_masks_runs`.
 - [ ] Prefer unified subject-mask component registry/query/operator surfaces for
-      eye availability and review visibility, even while eye-specific editing
-      remains transitional.
+      eye availability and review visibility, using legacy eye stages only as
+      compatibility inputs or diagnostics.
 
 ## What Is Actually Missing Now
 
@@ -218,18 +220,22 @@ Current implementation note:
 - direct `refined_eye_masks_runs` -> `refined_subject_masks_runs` seeding is a
   future extension, not the current code path
 
-### 3. Defer eye migration
+### 3. Keep eye geometry migration deferred even though review authority is unified
 
-Do not migrate away from `refined_eye_masks_runs` yet, but also do not treat it
-as a second canonical refined family for new operator-facing status.
+Do not remove `refined_eye_masks_runs` yet, but also do not treat it as a
+second canonical refined family for new operator-facing review status.
 
 For now:
 
-- `refined_eye_masks_runs` stays supported as the current specialized
-  eye-editing surface
-- eye review/edit continues to operate there for now
-- subject-mask unification should be designed so eye refinement can move under
-  the subject-mask component model later without another schema reset
+- canonical manual eye review/edit now operates through
+  `refined_subject_masks_runs`
+- `refined_eye_masks_runs` stays supported as the specialized legacy/compat
+  eye layout for historical runs and eye-specific consumers
+- derived compatibility `refined_eye_masks_runs/<run>` artifacts refreshed
+  from canonical refined-subject eye state should be treated as read-only in
+  legacy viewers
+- subject-mask unification should keep eye-specific geometry/export consumers
+  working without another schema reset
 - registry/query/operator surfaces should prefer unified subject-mask component
   rows for eye visibility, projecting legacy eye-stage data when necessary
 - contract target: unified assembly may later allow eye components to seed

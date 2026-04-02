@@ -162,6 +162,9 @@ def run_tuner(
             console.print(
                 "Run: `scripts/py -m fisheye.tune.eye_mask_review <zarr> --retune|--manual|--legacy-manual|--audit`"
             )
+            console.print(
+                "Canonical manual review is `--manual`; `--legacy-manual` is only for standalone historical refined-eye runs."
+            )
             return 0
         elif tuner_name in {'subject-mask-review', 'subject_mask_review', 'refined-subject-mask-review'}:
             from .refined_subject_mask_review import main as refined_subject_mask_main
@@ -198,7 +201,7 @@ def run_tuner(
             console.print("  • swimbladder-patch-mask - Tune a local swim-bladder patch proposal")
             console.print("  • keypoint  - Tune anatomical keypoint detection (swim bladder & eyes)")
             console.print("  • keypoints - Alias for 'keypoint'")
-            console.print("  • eye-mask-review - Retune/audit for refined eye masks; manual defaults to unified subject-mask review")
+            console.print("  • eye-mask-review - Retune/audit refined-eye runs; canonical manual review is unified subject-mask review")
             console.print("  • subject-mask-review - Manual paint/review for refined subject masks")
             return 1
             
@@ -234,7 +237,7 @@ def list_tuners(console: Optional[Console] = None):
         ("swimbladder-patch-mask", "Tune a local keypoint-centered swim-bladder proposal"),
         ("keypoints", "Tune anatomical keypoint detection (swim bladder and eyes)"),
         ("keypoint-review", "Review refined keypoints (retune/manual/audit)"),
-        ("eye-mask-review", "Review eye masks; manual defaults to unified subject-mask review"),
+        ("eye-mask-review", "Review eye masks; canonical manual review is unified subject-mask review"),
         ("detect-review", "Manual review for refined detections (draw boxes on missing frames)"),
     ]
     

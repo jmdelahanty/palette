@@ -2,7 +2,7 @@
 
 <!-- design-meta
 status: active
-last_verified: 2026-04-01
+last_verified: 2026-04-02
 -->
 
 Purpose: define the target runtime/refined model for moving eye refinement under
@@ -322,12 +322,14 @@ That means:
 
 - historical archives keep using it unchanged
 - the legacy failure-local eye review/edit tooling can keep targeting it when
-  explicitly requested
+  explicitly requested for standalone historical refined-eye runs
 - canonical manual eye review authority should move to
   `refined_subject_masks_runs`
 - once canonical eye edits or eye review-state changes land in
   `refined_subject_masks_runs`, the corresponding `refined_eye_masks_runs/<run>`
   should be refreshed as a derived compatibility artifact for legacy readers
+- those derived compatibility runs should be read-only in legacy viewers so
+  they cannot drift away from canonical refined-subject eye state
 - migration/backfill into subject-mask stages remains non-destructive
 
 ### Steady-state target
@@ -356,13 +358,15 @@ canonical and the other must be derived.
 
 ### Phase A: current transition
 
-- keep `refined_eye_masks_runs` available for specialized failure/ellipse
-  editing, but stop treating it as the default manual review authority
+- keep `refined_eye_masks_runs` available for specialized historical
+  failure/ellipse workflows, but stop treating it as the default manual review
+  authority
 - keep `refined_subject_masks_runs` authoritative for body/swim refinement
 - move canonical manual eye review onto `refined_subject_masks_runs` via a
   compatibility `subject_mask_runs` projection when needed
 - prefer unified subject-mask component registry/query/operator surfaces for
   eye visibility, projecting legacy eye-stage rows when needed
+- treat derived compatibility refined-eye runs as read-only in legacy viewers
 - preserve provenance across projection and backfill
 
 ### Phase B: aligned storage

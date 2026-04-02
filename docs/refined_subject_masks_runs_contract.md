@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-04-01
+last_verified: 2026-04-02
 -->
 
 Purpose: define the runtime/storage contract for editable, refined
@@ -56,7 +56,7 @@ Policy:
 - `refined_subject_masks_runs` is the refined stage for generic subject-mask
   components.
 - `refined_eye_masks_runs` remains supported during the transition as the
-  current eye-specific refined stage.
+  eye-specific refined compatibility and historical stage.
 - registry/query/operator surfaces should prefer unified subject-mask component
   rows for eye availability, with legacy eye stages projected in only as
   compatibility inputs when native eye-capable subject-mask rows are absent.
@@ -580,10 +580,14 @@ During transition:
 
 - `refined_eye_masks_runs` remains supported for historical archives and
   existing eye-specific tooling
-- legacy eye-specific retune/failure tooling may still target it explicitly
+- legacy eye-specific retune/failure tooling may still target standalone
+  historical refined-eye runs explicitly
 - canonical eye saves and eye review-state changes in
   `refined_subject_masks_runs` may now refresh the matching
   `refined_eye_masks_runs/<run>` as a derived compatibility artifact
+- derived compatibility refined-eye runs should be treated as read-only in
+  legacy viewers so canonical eye authority does not drift back out of
+  `refined_subject_masks_runs`
 
 Target steady-state:
 

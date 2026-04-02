@@ -39,7 +39,7 @@ That means:
 | --- | --- | --- | --- | --- | --- |
 | Detect | Manual subgroup under `refined_detect_runs/<run>/` | subgroup-level corrections | whole refined detect run | `detect_review_status` | `detect_review_status_latest` |
 | Keypoints | `refined_keypoints_runs/<run>` | run-local row edits | whole refined keypoint run | `keypoint_review_status` | `keypoint_review_status_latest` |
-| Eye masks (legacy compat) | `refined_eye_masks_runs/<run>` | per-ROI manual correction | whole refined eye-mask run | `eye_mask_review_status` | `eye_mask_review_status_latest` |
+| Eye masks (legacy compat) | `refined_eye_masks_runs/<run>` for standalone historical runs; derived compat runs are read-only | per-ROI manual correction on standalone historical runs | whole refined eye-mask run | `eye_mask_review_status` | `eye_mask_review_status_latest` |
 | Subject masks (canonical unified surface) | `refined_subject_masks_runs/<run>` | per-ROI component-aware save | per-component, with run aggregation | `component_review_statuses` + `refined_subject_mask_review_status` | `refined_subject_mask_review_status_latest` |
 
 ## Detect
@@ -89,13 +89,17 @@ References:
 
 Current policy:
 
-- `refined_eye_masks_runs/<run>` is the current eye-specific editable artifact
-  during transition
-- manual review saves per-ROI mask/ellipse/contour corrections in place on that
-  refined run
-- approval is still whole-run, not per-eye
-- review-state writes happen from review UIs rather than a dedicated
-  mask-specific policy doc
+- canonical manual eye review authority now lives in
+  `refined_subject_masks_runs/<run>`, reached via
+  `scripts/py -m fisheye.tune.eye_mask_review --manual`
+- `refined_eye_masks_runs/<run>` remains supported for historical archives and
+  eye-specific consumers, but it is no longer the default manual review surface
+- derived compatibility `refined_eye_masks_runs/<run>` artifacts refreshed from
+  canonical refined-subject eye edits/review-state changes should be treated as
+  read-only in legacy refined-eye viewers
+- standalone historical refined-eye runs may still receive per-ROI manual
+  correction in the legacy UI
+- approval on the legacy refined-eye stage remains whole-run, not per-eye
 - unified subject-mask component registry/query/operator surfaces should treat
   this stage as a compatibility source for eye components rather than as the
   long-term canonical refined mask surface
@@ -119,13 +123,14 @@ Important current limitation:
 
 Operational implication:
 
-- eye-mask save behavior is well-established
-- eye-mask approval behavior exists and is functional
 - `scripts/py -m fisheye.tune.eye_mask_review --manual` now treats
   `refined_subject_masks_runs` as the canonical manual review surface for eye
   components, seeded through a compatibility `subject_mask_runs` projection
 - `scripts/py -m fisheye.tune.eye_mask_review --legacy-manual` remains
-  available for the older refined-eye failure/ellipse workflow
+  available only for standalone historical refined-eye runs and diagnostics
+- if the selected refined-eye run is a derived compatibility artifact, legacy
+  viewers now redirect operators back to the canonical unified manual review
+  surface rather than allowing the compat artifact to drift
 - new operator summaries should prefer the unified subject-mask component view
   when asking whether eye components are available/reviewed
 - but the policy is documented mostly procedurally in the workflow doc rather

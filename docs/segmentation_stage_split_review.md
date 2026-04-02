@@ -17,7 +17,9 @@ Yes, `palette` currently has multiple runtime mask-creation paths.
 - raw eye segmentation still writes to `eye_masks_runs/<run>`
 - raw body, swim bladder, and SAM3 subject segmentation write to
   `subject_mask_runs/<run>`
-- eye refinement still writes to `refined_eye_masks_runs/<run>`
+- eye refinement still writes to `refined_eye_masks_runs/<run>` for historical
+  or specialized eye-specific consumers, while canonical manual eye review now
+  lands in `refined_subject_masks_runs/<run>`
 - subject-mask review/editing writes to `refined_subject_masks_runs/<run>`
 
 The main bridge already exists:
@@ -70,11 +72,14 @@ Implementation note as of 2026-04-02:
 - `scripts/py -m fisheye.tune.eye_mask_review --manual` now routes canonical
   eye review/edit into `refined_subject_masks_runs` through a compatibility
   `subject_mask_runs` projection, while `--legacy-manual` retains the old
-  refined-eye failure-review UI
+  refined-eye failure-review UI only for standalone historical refined-eye runs
 - canonical refined-subject eye saves, batch apply, and eye component review
   status updates now refresh `refined_eye_masks_runs/<run>` as a derived
   compatibility artifact rather than leaving the two refined stage families to
   drift
+- derived compatibility `refined_eye_masks_runs/<run>` artifacts are now
+  read-only in legacy refined-eye viewers and redirect write attempts back to
+  canonical unified manual review
 - new raw eye orchestration now dual-writes a compatibility
   `subject_mask_runs/<run>` companion immediately after successful raw
   `eye_masks_runs/<run>` completion in:
@@ -204,14 +209,15 @@ Recommended interpretation:
 These should remain valid and first-class during the transition:
 
 - `eye_masks_runs/<run>` as the raw eye-specific inference artifact
-- `refined_eye_masks_runs/<run>` as the refined eye-specific artifact
+- `refined_eye_masks_runs/<run>` as the refined eye-specific compatibility or
+  standalone historical artifact
 
 Reason:
 
 - the refined eye workflow still reads from `eye_masks_runs`
 - eye-specific geometry and QA still live there
-- current training and review tooling still depend on those eye-specific
-  surfaces
+- current training/export and some visualization tooling still depend on those
+  eye-specific surfaces
 
 So the recommended near-term model is additive, not destructive:
 

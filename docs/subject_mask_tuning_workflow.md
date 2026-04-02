@@ -41,6 +41,9 @@ Operator policy:
 - for manual eye review/edit, prefer the unified refined-subject review surface
   reached through `scripts/py -m fisheye.tune.eye_mask_review --manual`
   or directly through `scripts/py -m fisheye.tune.refined_subject_mask_review`
+- treat derived compatibility `refined_eye_masks_runs/<run>` artifacts as
+  read-only diagnostics in legacy eye viewers rather than as mutable canonical
+  review targets
 
 For the raw stage contract, see
 [subject_mask_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_runs_contract.md).
@@ -226,6 +229,9 @@ Current behavior:
 - when canonical eye masks or eye component review states are saved there, the
   matching `refined_eye_masks_runs/<run>` compatibility artifact is refreshed
   for legacy eye-specific consumers
+- if a derived compatibility `refined_eye_masks_runs/<run>` is later opened in
+  a legacy eye viewer, that viewer now runs in read-only compat mode and
+  redirects write attempts back to the canonical unified manual review surface
 
 Legacy fallback:
 
@@ -234,7 +240,9 @@ scripts/py -m fisheye.tune.eye_mask_review <archive>.zarr --legacy-manual
 ```
 
 Use the legacy mode only when the older failure-local eye UI is specifically
-needed.
+needed for a standalone historical refined-eye run or geometry diagnostic.
+Derived compatibility `refined_eye_masks_runs/<run>` artifacts are now
+read-only there and redirect canonical editing back to `--manual`.
 
 ### 6. Recompute refined metadata in batch mode
 

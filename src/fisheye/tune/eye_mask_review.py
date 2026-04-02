@@ -1,7 +1,8 @@
 """
 Eye mask review entrypoint for retune, manual correction, and audit.
 
-Workflow mirrors keypoint_review but operates on refined_eye_masks_runs.
+Canonical manual eye review now routes through refined_subject_masks_runs,
+while refined_eye_masks_runs remains the retune/audit and legacy-compat stage.
 """
 
 from __future__ import annotations
@@ -498,12 +499,15 @@ def run_manual_review(
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Eye mask review: retune failures, unified manual review, or audit summary."
+        description=(
+            "Eye mask review: retune refined-eye failures, run canonical unified manual review, "
+            "or audit refined-eye summaries."
+        )
     )
     parser.add_argument("zarr_path", type=Path, help="Path to Palette Zarr directory.")
     parser.add_argument(
         "--refined-run",
-        help="Refined eye mask run to review (defaults to latest).",
+        help="Refined eye-mask source or compat run to review (defaults to latest).",
     )
 
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -511,12 +515,15 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     mode.add_argument(
         "--manual",
         action="store_true",
-        help="Run canonical manual review in refined_subject_masks_runs (default eye review surface).",
+        help="Run canonical manual eye review in refined_subject_masks_runs via subject-mask projection.",
     )
     mode.add_argument(
         "--legacy-manual",
         action="store_true",
-        help="Run the legacy refined-eye failure review UI.",
+        help=(
+            "Run the legacy refined-eye failure review UI for standalone historical refined-eye runs. "
+            "Derived compat runs redirect to --manual."
+        ),
     )
     mode.add_argument("--audit", action="store_true", help="Recompute postprocess summary only.")
 
@@ -527,7 +534,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser.add_argument(
         "--frame-flag-file",
         default="eye_mask_frame_flags.json",
-        help="JSON file with flagged eye-mask frames/ROIs; legacy manual filters to them, unified manual starts there.",
+        help=(
+            "JSON file with flagged eye-mask frames/ROIs; legacy-manual filters to them, "
+            "and unified manual uses them to choose the start ROI."
+        ),
     )
     parser.add_argument(
         "--apply-batch-size",
