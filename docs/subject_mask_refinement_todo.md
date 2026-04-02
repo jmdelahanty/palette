@@ -10,7 +10,8 @@ that covers:
 - eye masks
 
 while preserving the current specialized eye-refinement workflow until the
-unified subject-mask path is ready.
+unified subject-mask path is ready, and treating legacy eye-specific stages as
+transition compatibility inputs rather than a second canonical mask family.
 
 ## Why This Is Needed
 
@@ -38,8 +39,10 @@ breaking the current eye tools before the unified model is ready.
   multi-component runs.
 - `subject_mask_training_artifact_contract.md` exists and the merged
   `subject_masks` exporter has been started.
-- `refined_eye_masks_runs` remains the current eye-specific edited/refined
-  artifact during the transition to subject-mask unification.
+- `refined_eye_masks_runs` remains the current eye-specific editing surface
+  during the transition to subject-mask unification, but registry/query and
+  operator-facing component views should treat it as a compatibility source for
+  unified subject-mask eye components rather than a parallel canonical stage.
 - `refined_subject_masks_runs` now exists as a stage contract and runtime stage
   spec.
 - A first review/editor entrypoint exists at
@@ -124,7 +127,10 @@ This is the near-term rollout order that should happen before more schema work.
   - `edit_applied`
   - component `reason_bytes`
   - component review payloads
-- [ ] Decide what “good enough to save” means for a first swim-bladder mask.
+- [x] Decide what “good enough to save” and “good enough to approve” mean for
+      the first swim-bladder masks.
+  See
+  [swim_bladder_review_policy.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/swim_bladder_review_policy.md).
 - [x] Decide whether the current threshold/blob swim-bladder tuner is good
       enough for canary use, or whether we should switch to the boundary-based
       method family in
@@ -145,9 +151,13 @@ This is the near-term rollout order that should happen before more schema work.
 
 ### 4. Keep eye migration deferred
 
-- [ ] Continue using `refined_eye_masks_runs` for left/right eye editing.
+- [ ] Continue using `refined_eye_masks_runs` for left/right eye editing as the
+      current specialized editor surface.
 - [ ] Do not move eye editing into `refined_subject_masks_runs` until body/swim
       workflows are proven.
+- [ ] Prefer unified subject-mask component registry/query/operator surfaces for
+      eye availability and review visibility, even while eye-specific editing
+      remains transitional.
 
 ## What Is Actually Missing Now
 
@@ -195,20 +205,35 @@ Policy note:
   artifacts, where the refined run is a QA/metrics materialization stage rather
   than just an assembled container
 
+Current implementation note:
+
+- the shipped subject-mask review/assembly helpers still load source inputs
+  from `subject_mask_runs`
+- when eye content starts in legacy eye stages, the implemented bridge is to
+  project/backfill a compatibility `subject_mask_runs/<run>` first and then
+  assemble or refine from that subject-mask source
+- direct `refined_eye_masks_runs` -> `refined_subject_masks_runs` seeding is a
+  future extension, not the current code path
+
 ### 3. Defer eye migration
 
-Do not migrate away from `refined_eye_masks_runs` yet.
+Do not migrate away from `refined_eye_masks_runs` yet, but also do not treat it
+as a second canonical refined family for new operator-facing status.
 
 For now:
 
-- `refined_eye_masks_runs` stays first-class
-- eye review/edit continues to operate there
+- `refined_eye_masks_runs` stays supported as the current specialized
+  eye-editing surface
+- eye review/edit continues to operate there for now
 - subject-mask unification should be designed so eye refinement can move under
   the subject-mask component model later without another schema reset
-- during unified assembly, the one planned already-refined upstream exception
-  is eye components seeded from `refined_eye_masks_runs`
-- the first assembled refined canary already uses that transitional rule via
-  `subject_masks_from_refined_eye_masks_2026-02-12_19-51-24` as the eye source
+- registry/query/operator surfaces should prefer unified subject-mask component
+  rows for eye visibility, projecting legacy eye-stage data when necessary
+- contract target: unified assembly may later allow eye components to seed
+  directly from `refined_eye_masks_runs`
+- current implementation: the first assembled refined canary still goes
+  through a projected compatibility `subject_mask_runs` eye source:
+  `subject_masks_from_refined_eye_masks_2026-02-12_19-51-24`
 
 ### 4. Keep eye geometry specialized for now
 
@@ -667,10 +692,12 @@ Keep current specialized refined path for now.
 
 Recommended near-term policy:
 
-- continue to treat `refined_eye_masks_runs` as the authoritative refined eye
-  stage
+- continue to use `refined_eye_masks_runs` as the current specialized
+  eye-editing surface
 - do not force eye editing into `refined_subject_masks_runs` until body/swim
   workflows are stable
+- prefer unified subject-mask component rows in registry/query/operator
+  surfaces when asking whether a dataset has reviewed eye components
 - keep eye-specific derived outputs specialized for now:
   - left/right assignment
   - contours
@@ -798,8 +825,8 @@ The registry should represent:
 
 1. coarse stage presence
    - `subject_masks`
-   - `refined_eye_masks`
-   - future `refined_subject_masks`
+   - legacy `refined_eye_masks` compatibility signals during transition
+   - `refined_subject_masks`
    - future `subject_shape`
 
 2. component availability
@@ -819,7 +846,8 @@ This means the registry should eventually answer questions like:
 - does this recording have any subject-mask run?
 - does it have refined body masks?
 - does it have refined swim-bladder masks?
-- does it have refined eye geometry?
+- does it have refined eye components, whether native subject-mask rows or
+  projected legacy eye-stage compatibility rows?
 - which components are reviewed for training use?
 
 ## Phase 0: Contract Decisions
@@ -934,6 +962,7 @@ This means the registry should eventually answer questions like:
 
 - [subject_mask_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_runs_contract.md)
 - [refined_subject_masks_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/refined_subject_masks_runs_contract.md)
+- [swim_bladder_review_policy.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/swim_bladder_review_policy.md)
 - [swim_bladder_patch_review_design.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/swim_bladder_patch_review_design.md)
 - [subject_mask_registry_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_registry_contract.md)
 - [subject_mask_training_artifact_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_training_artifact_contract.md)

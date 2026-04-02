@@ -439,6 +439,55 @@ def _query_eye_mask_quality_map(
     return out
 
 
+def _query_subject_mask_component_map(
+    registry: Registry,
+    *,
+    dataset_ids: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    if not dataset_ids:
+        return {}
+    placeholders = ",".join("?" for _ in dataset_ids)
+    rows = registry.conn.execute(
+        f"""
+        SELECT
+            dataset_id,
+            zarr_use,
+            stage_group,
+            run_name,
+            run_created_utc,
+            recording_id,
+            component_name,
+            component_family,
+            subject_mask_method,
+            label_schema_id,
+            eye_component_mode,
+            source_subject_mask_run,
+            available,
+            review_state,
+            review_method,
+            review_intended_use,
+            review_reviewer,
+            review_timestamp_utc,
+            total_rois,
+            rows_with_component_mask,
+            rows_with_component_mask_rate,
+            lifecycle_state,
+            lifecycle_reason,
+            quality_updated_utc
+        FROM subject_mask_component_quality_latest
+        WHERE dataset_id IN ({placeholders});
+        """,
+        dataset_ids,
+    ).fetchall()
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        dataset_id = row["dataset_id"]
+        if dataset_id is None:
+            continue
+        out.setdefault(str(dataset_id), []).append(dict(row))
+    return out
+
+
 def _query_recording_step_status_map(
     registry: Registry,
     *,
@@ -532,6 +581,28 @@ def _pick_eye_mask_candidate(
         ranked,
         key=lambda row: (
             str(row.get("run_created_utc") or ""),
+            str(row.get("run_name") or ""),
+        ),
+    )
+    return ranked[-1]
+
+
+def _pick_subject_mask_component_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    if not candidates:
+        raise ValueError("Expected at least one subject-mask component candidate.")
+    ranked = sorted(
+        candidates,
+        key=lambda row: (
+            int(_as_int(row.get("available")) or 0),
+            float(_as_float(row.get("rows_with_component_mask_rate")) or -1.0),
+            str(
+                row.get("review_timestamp_utc")
+                or row.get("run_created_utc")
+                or row.get("quality_updated_utc")
+                or ""
+            ),
+            str(row.get("component_name") or ""),
+            str(row.get("stage_group") or ""),
             str(row.get("run_name") or ""),
         ),
     )
@@ -1344,6 +1415,66 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Maximum eye-mask duration_seconds from eye-mask performance view.",
     )
     parser.add_argument(
+        "--subject-mask-component",
+        type=str,
+        help=(
+            "Subject-mask component filter from the unified "
+            "subject_mask_component_quality_latest view (for example eye_left or "
+            "swim_bladder)."
+        ),
+    )
+    parser.add_argument(
+        "--subject-mask-stage",
+        choices=["subject_mask_runs", "refined_subject_masks_runs", "eye_masks_runs", "refined_eye_masks_runs", "any"],
+        default="any",
+        help=(
+            "Filter unified subject-mask component rows by source stage group "
+            "(default: any). eye_masks_runs and refined_eye_masks_runs are "
+            "legacy compatibility source stages in this view."
+        ),
+    )
+    parser.add_argument(
+        "--subject-mask-method",
+        type=str,
+        help="Subject-mask component method filter from subject-mask latest component view (or 'missing').",
+    )
+    parser.add_argument(
+        "--subject-mask-review-state",
+        type=str,
+        help="Subject-mask component review state filter (or 'missing').",
+    )
+    parser.add_argument(
+        "--subject-mask-review-intended-use",
+        type=str,
+        help="Subject-mask component review intended-use filter (or 'missing').",
+    )
+    parser.add_argument(
+        "--subject-mask-reviewer",
+        type=str,
+        help="Subject-mask component reviewer filter (or 'missing').",
+    )
+    parser.add_argument(
+        "--subject-mask-lifecycle-state",
+        type=str,
+        help="Subject-mask component lifecycle state filter (approved/rejected/in_progress/stale/na or 'missing').",
+    )
+    parser.add_argument(
+        "--subject-mask-source-subject-mask-run",
+        type=str,
+        help="Subject-mask component source_subject_mask_run filter (or 'missing').",
+    )
+    parser.add_argument(
+        "--subject-mask-available",
+        choices=["0", "1", "any"],
+        default="any",
+        help="Filter subject-mask components by available flag (default: any).",
+    )
+    parser.add_argument(
+        "--subject-mask-coverage-min",
+        type=float,
+        help="Minimum subject-mask component rows_with_component_mask_rate from subject-mask latest component view.",
+    )
+    parser.add_argument(
         "--detect-model-only",
         action="store_true",
         help="Restrict detect performance matching to model-backed detect runs.",
@@ -1724,6 +1855,19 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.eye_mask_duration_max,
         )
     ) or str(args.eye_mask_stage) != "any"
+    use_subject_mask_component_filters = any(
+        value is not None
+        for value in (
+            args.subject_mask_component,
+            args.subject_mask_method,
+            args.subject_mask_review_state,
+            args.subject_mask_review_intended_use,
+            args.subject_mask_reviewer,
+            args.subject_mask_lifecycle_state,
+            args.subject_mask_source_subject_mask_run,
+            args.subject_mask_coverage_min,
+        )
+    ) or str(args.subject_mask_stage) != "any" or str(args.subject_mask_available) != "any"
     use_keypoint_filters = any(
         value is not None
         for value in (
@@ -1786,6 +1930,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     or use_detect_filters
                     or use_crop_filters
                     or use_eye_mask_filters
+                    or use_subject_mask_component_filters
                     or use_keypoint_filters
                 )
                 else args.limit
@@ -1986,6 +2131,100 @@ def main(argv: Optional[list[str]] = None) -> int:
                 row["crop_review_reviewer"] = crop.get("review_reviewer")
                 row["crop_review_timestamp_utc"] = crop.get("review_timestamp_utc")
                 row["crop_review_notes"] = crop.get("review_notes")
+                filtered.append(row)
+            result_rows = filtered
+
+        if use_subject_mask_component_filters:
+            dataset_ids = [str(row["dataset_id"]) for row in result_rows if row.get("dataset_id") is not None]
+            subject_mask_component_map = _query_subject_mask_component_map(registry, dataset_ids=dataset_ids)
+            filtered = []
+            component_filter = str(args.subject_mask_component).strip().lower() if args.subject_mask_component else None
+            stage_filter = None if str(args.subject_mask_stage) == "any" else str(args.subject_mask_stage)
+            method_filter = str(args.subject_mask_method).strip().lower() if args.subject_mask_method else None
+            available_filter = None if str(args.subject_mask_available) == "any" else int(args.subject_mask_available)
+            for row in result_rows:
+                dataset_id = str(row.get("dataset_id") or "")
+                candidates = subject_mask_component_map.get(dataset_id, [])
+                if component_filter is not None:
+                    candidates = [
+                        candidate
+                        for candidate in candidates
+                        if str(candidate.get("component_name") or "").strip().lower() == component_filter
+                    ]
+                if stage_filter is not None:
+                    candidates = [
+                        candidate
+                        for candidate in candidates
+                        if str(candidate.get("stage_group") or "") == stage_filter
+                    ]
+
+                matching_candidates: list[dict[str, Any]] = []
+                for candidate in candidates:
+                    candidate_method = str(candidate.get("subject_mask_method") or "").strip().lower()
+                    if method_filter is not None:
+                        if method_filter == "missing":
+                            if candidate_method:
+                                continue
+                        elif candidate_method != method_filter:
+                            continue
+                    if not _matches_optional_text_filter(
+                        candidate.get("review_state"),
+                        args.subject_mask_review_state,
+                    ):
+                        continue
+                    if not _matches_optional_text_filter(
+                        candidate.get("review_intended_use"),
+                        args.subject_mask_review_intended_use,
+                    ):
+                        continue
+                    if not _matches_optional_text_filter(
+                        candidate.get("review_reviewer"),
+                        args.subject_mask_reviewer,
+                    ):
+                        continue
+                    if not _matches_optional_text_filter(
+                        candidate.get("lifecycle_state"),
+                        args.subject_mask_lifecycle_state,
+                    ):
+                        continue
+                    if not _matches_optional_text_filter(
+                        candidate.get("source_subject_mask_run"),
+                        args.subject_mask_source_subject_mask_run,
+                    ):
+                        continue
+                    if available_filter is not None and _as_int(candidate.get("available")) != available_filter:
+                        continue
+                    coverage_rate = _as_float(candidate.get("rows_with_component_mask_rate"))
+                    if args.subject_mask_coverage_min is not None and (
+                        coverage_rate is None or coverage_rate < float(args.subject_mask_coverage_min)
+                    ):
+                        continue
+                    matching_candidates.append(candidate)
+
+                if not matching_candidates:
+                    continue
+
+                selected = _pick_subject_mask_component_candidate(matching_candidates)
+                row["subject_mask_component_name"] = selected.get("component_name")
+                row["subject_mask_component_stage_group"] = selected.get("stage_group")
+                row["subject_mask_component_run"] = selected.get("run_name")
+                row["subject_mask_component_created_utc"] = selected.get("run_created_utc")
+                row["subject_mask_component_recording_id"] = selected.get("recording_id")
+                row["subject_mask_component_family"] = selected.get("component_family")
+                row["subject_mask_component_method"] = selected.get("subject_mask_method")
+                row["subject_mask_component_label_schema_id"] = selected.get("label_schema_id")
+                row["subject_mask_component_eye_component_mode"] = selected.get("eye_component_mode")
+                row["subject_mask_component_source_subject_mask_run"] = selected.get("source_subject_mask_run")
+                row["subject_mask_component_available"] = selected.get("available")
+                row["subject_mask_component_total_rois"] = selected.get("total_rois")
+                row["subject_mask_component_rows_with_component_mask"] = selected.get("rows_with_component_mask")
+                row["subject_mask_component_rows_with_component_mask_rate"] = selected.get(
+                    "rows_with_component_mask_rate"
+                )
+                row["subject_mask_component_lifecycle_state"] = selected.get("lifecycle_state")
+                row["subject_mask_component_lifecycle_reason"] = selected.get("lifecycle_reason")
+                row["subject_mask_component_match_count"] = len(matching_candidates)
+                _apply_shared_review_fields(row, selected, prefix="subject_mask_component")
                 filtered.append(row)
             result_rows = filtered
 

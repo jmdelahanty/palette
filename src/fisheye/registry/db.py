@@ -2441,6 +2441,16 @@ class Registry:
                 "recording_step_status_latest_dataset_context_current",
                 self._migration_035_recording_step_status_latest_dataset_context_current,
             ),
+            (
+                36,
+                "subject_mask_component_latest_views",
+                self._migration_036_subject_mask_component_latest_views,
+            ),
+            (
+                37,
+                "subject_mask_component_eye_compat_latest_views",
+                self._migration_037_subject_mask_component_eye_compat_latest_views,
+            ),
         ]
 
     def _ensure_schema_version_table(self) -> None:
@@ -8374,6 +8384,469 @@ class Registry:
                 rss.updated_utc
             FROM recording_step_status rss
             LEFT JOIN dataset_context_current dcc ON dcc.dataset_id = rss.dataset_id;
+            """
+        )
+
+    def _migration_036_subject_mask_component_latest_views(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DROP VIEW IF EXISTS subject_mask_component_quality_latest;")
+        cur.execute(
+            """
+            CREATE VIEW subject_mask_component_quality_latest AS
+            WITH latest_raw AS (
+                SELECT
+                    dataset_id,
+                    run_name AS latest_subject_mask_run
+                FROM subject_mask_performance_latest
+                WHERE stage_group = 'subject_mask_runs'
+            ),
+            ranked AS (
+                SELECT
+                    smcqo.*,
+                    CASE
+                        WHEN smcqo.stage_group = 'refined_subject_masks_runs'
+                         AND COALESCE(smcqo.source_subject_mask_run, '') <> ''
+                         AND COALESCE(smcqo.source_subject_mask_run, '') = COALESCE(lr.latest_subject_mask_run, '')
+                        THEN 3
+                        WHEN smcqo.stage_group = 'subject_mask_runs'
+                         AND smcqo.run_name = COALESCE(lr.latest_subject_mask_run, '')
+                        THEN 2
+                        ELSE 1
+                    END AS freshness_rank,
+                    CASE
+                        WHEN smcqo.stage_group = 'refined_subject_masks_runs' THEN 1
+                        ELSE 0
+                    END AS stage_rank,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY smcqo.dataset_id, smcqo.component_name
+                        ORDER BY
+                            CASE
+                                WHEN smcqo.stage_group = 'refined_subject_masks_runs'
+                                 AND COALESCE(smcqo.source_subject_mask_run, '') <> ''
+                                 AND COALESCE(smcqo.source_subject_mask_run, '') = COALESCE(lr.latest_subject_mask_run, '')
+                                THEN 3
+                                WHEN smcqo.stage_group = 'subject_mask_runs'
+                                 AND smcqo.run_name = COALESCE(lr.latest_subject_mask_run, '')
+                                THEN 2
+                                ELSE 1
+                            END DESC,
+                            COALESCE(smcqo.review_timestamp_utc, smcqo.run_created_utc, smcqo.quality_updated_utc) DESC,
+                            CASE
+                                WHEN smcqo.stage_group = 'refined_subject_masks_runs' THEN 1
+                                ELSE 0
+                            END DESC,
+                            COALESCE(smcqo.run_created_utc, '') DESC,
+                            smcqo.run_name DESC
+                    ) AS _rn
+                FROM subject_mask_component_quality_overview smcqo
+                LEFT JOIN latest_raw lr ON lr.dataset_id = smcqo.dataset_id
+            )
+            SELECT
+                dataset_id,
+                zarr_path,
+                zarr_origin,
+                zarr_use,
+                zarr_purpose,
+                artifact_kind,
+                dataset_status,
+                stage_group,
+                run_name,
+                component_name,
+                component_family,
+                run_created_utc,
+                recording_id,
+                subject_mask_method,
+                label_schema_id,
+                eye_component_mode,
+                source_subject_mask_run,
+                available,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                total_rois,
+                rows_with_component_mask,
+                rows_with_component_mask_rate,
+                lifecycle_state,
+                lifecycle_reason,
+                quality_updated_utc,
+                zarr_mtime_ns,
+                quality_stale
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+    def _migration_037_subject_mask_component_eye_compat_latest_views(self) -> None:
+        self._migration_036_subject_mask_component_latest_views()
+        cur = self.conn.cursor()
+
+        cur.execute("DROP VIEW IF EXISTS subject_mask_component_quality_latest;")
+        cur.execute(
+            """
+            CREATE VIEW subject_mask_component_quality_latest AS
+            WITH latest_raw AS (
+                SELECT
+                    dataset_id,
+                    run_name AS latest_subject_mask_run
+                FROM subject_mask_performance_latest
+                WHERE stage_group = 'subject_mask_runs'
+            ),
+            eye_components AS (
+                SELECT 'eye_left' AS component_name
+                UNION ALL
+                SELECT 'eye_right' AS component_name
+            ),
+            candidate_rows AS (
+                SELECT
+                    dataset_id,
+                    zarr_path,
+                    zarr_origin,
+                    zarr_use,
+                    zarr_purpose,
+                    artifact_kind,
+                    dataset_status,
+                    stage_group,
+                    run_name,
+                    component_name,
+                    component_family,
+                    run_created_utc,
+                    recording_id,
+                    subject_mask_method,
+                    label_schema_id,
+                    eye_component_mode,
+                    source_subject_mask_run,
+                    available,
+                    review_state,
+                    review_method,
+                    review_intended_use,
+                    review_reviewer,
+                    review_timestamp_utc,
+                    total_rois,
+                    rows_with_component_mask,
+                    rows_with_component_mask_rate,
+                    lifecycle_state,
+                    lifecycle_reason,
+                    quality_updated_utc,
+                    zarr_mtime_ns,
+                    quality_stale
+                FROM subject_mask_component_quality_overview
+                UNION ALL
+                SELECT
+                    empl.dataset_id AS dataset_id,
+                    d.zarr_path AS zarr_path,
+                    d.zarr_origin AS zarr_origin,
+                    d.zarr_use AS zarr_use,
+                    d.zarr_use AS zarr_purpose,
+                    d.artifact_kind AS artifact_kind,
+                    d.status AS dataset_status,
+                    empl.stage_group AS stage_group,
+                    empl.run_name AS run_name,
+                    ec.component_name AS component_name,
+                    'eyes' AS component_family,
+                    empl.run_created_utc AS run_created_utc,
+                    empl.recording_id AS recording_id,
+                    empl.method AS subject_mask_method,
+                    'subject_v1_lr' AS label_schema_id,
+                    'lr' AS eye_component_mode,
+                    NULL AS source_subject_mask_run,
+                    1 AS available,
+                    empl.review_state AS review_state,
+                    empl.review_method AS review_method,
+                    empl.review_intended_use AS review_intended_use,
+                    empl.review_reviewer AS review_reviewer,
+                    empl.review_timestamp_utc AS review_timestamp_utc,
+                    empl.total_rois AS total_rois,
+                    empl.successful_roi_pairs AS rows_with_component_mask,
+                    empl.successful_roi_pair_rate AS rows_with_component_mask_rate,
+                    empl.lifecycle_state AS lifecycle_state,
+                    empl.lifecycle_reason AS lifecycle_reason,
+                    empl.updated_utc AS quality_updated_utc,
+                    empl.zarr_mtime_ns AS zarr_mtime_ns,
+                    CASE
+                        WHEN empl.zarr_mtime_ns IS NULL THEN 1
+                        ELSE 0
+                    END AS quality_stale
+                FROM eye_mask_performance_latest empl
+                CROSS JOIN eye_components ec
+                LEFT JOIN datasets d ON d.dataset_id = empl.dataset_id
+            ),
+            scored AS (
+                SELECT
+                    cr.*,
+                    CASE
+                        WHEN cr.stage_group = 'refined_subject_masks_runs'
+                         AND COALESCE(cr.source_subject_mask_run, '') <> ''
+                         AND COALESCE(cr.source_subject_mask_run, '') = COALESCE(lr.latest_subject_mask_run, '')
+                        THEN 3
+                        WHEN cr.stage_group = 'subject_mask_runs'
+                         AND cr.run_name = COALESCE(lr.latest_subject_mask_run, '')
+                        THEN 2
+                        ELSE 1
+                    END AS subject_mask_freshness_rank,
+                    CASE
+                        WHEN cr.component_name IN ('eye_left', 'eye_right')
+                         AND cr.stage_group = 'refined_subject_masks_runs'
+                         AND COALESCE(cr.source_subject_mask_run, '') <> ''
+                         AND COALESCE(cr.source_subject_mask_run, '') = COALESCE(lr.latest_subject_mask_run, '')
+                        THEN 5
+                        WHEN cr.component_name IN ('eye_left', 'eye_right')
+                         AND cr.stage_group = 'refined_eye_masks_runs'
+                        THEN 4
+                        WHEN cr.component_name IN ('eye_left', 'eye_right')
+                         AND cr.stage_group = 'subject_mask_runs'
+                         AND cr.run_name = COALESCE(lr.latest_subject_mask_run, '')
+                        THEN 3
+                        WHEN cr.component_name IN ('eye_left', 'eye_right')
+                         AND cr.stage_group = 'eye_masks_runs'
+                        THEN 2
+                        ELSE 1
+                    END AS eye_component_rank,
+                    CASE
+                        WHEN cr.stage_group IN ('refined_subject_masks_runs', 'refined_eye_masks_runs') THEN 1
+                        ELSE 0
+                    END AS refined_stage_rank
+                FROM candidate_rows cr
+                LEFT JOIN latest_raw lr ON lr.dataset_id = cr.dataset_id
+            ),
+            ranked AS (
+                SELECT
+                    s.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY s.dataset_id, s.component_name
+                        ORDER BY
+                            CASE
+                                WHEN s.component_name IN ('eye_left', 'eye_right')
+                                THEN s.eye_component_rank
+                                ELSE s.subject_mask_freshness_rank
+                            END DESC,
+                            COALESCE(s.review_timestamp_utc, s.run_created_utc, s.quality_updated_utc) DESC,
+                            s.refined_stage_rank DESC,
+                            COALESCE(s.run_created_utc, '') DESC,
+                            s.run_name DESC
+                    ) AS _rn
+                FROM scored s
+            )
+            SELECT
+                dataset_id,
+                zarr_path,
+                zarr_origin,
+                zarr_use,
+                zarr_purpose,
+                artifact_kind,
+                dataset_status,
+                stage_group,
+                run_name,
+                component_name,
+                component_family,
+                run_created_utc,
+                recording_id,
+                subject_mask_method,
+                label_schema_id,
+                eye_component_mode,
+                source_subject_mask_run,
+                available,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                total_rois,
+                rows_with_component_mask,
+                rows_with_component_mask_rate,
+                lifecycle_state,
+                lifecycle_reason,
+                quality_updated_utc,
+                zarr_mtime_ns,
+                quality_stale
+            FROM ranked
+            WHERE _rn = 1;
+            """
+        )
+
+        cur.execute("DROP VIEW IF EXISTS subject_mask_component_quality_latest_by_recording;")
+        cur.execute(
+            """
+            CREATE VIEW subject_mask_component_quality_latest_by_recording AS
+            WITH latest_raw AS (
+                SELECT
+                    recording_id,
+                    run_name AS latest_subject_mask_run
+                FROM recording_subject_mask_performance_latest
+                WHERE stage_group = 'subject_mask_runs'
+            ),
+            eye_components AS (
+                SELECT 'eye_left' AS component_name
+                UNION ALL
+                SELECT 'eye_right' AS component_name
+            ),
+            candidate_rows AS (
+                SELECT
+                    dataset_id,
+                    zarr_path,
+                    zarr_origin,
+                    zarr_use,
+                    zarr_purpose,
+                    artifact_kind,
+                    dataset_status,
+                    stage_group,
+                    run_name,
+                    component_name,
+                    component_family,
+                    run_created_utc,
+                    recording_id,
+                    subject_mask_method,
+                    label_schema_id,
+                    eye_component_mode,
+                    source_subject_mask_run,
+                    available,
+                    review_state,
+                    review_method,
+                    review_intended_use,
+                    review_reviewer,
+                    review_timestamp_utc,
+                    total_rois,
+                    rows_with_component_mask,
+                    rows_with_component_mask_rate,
+                    lifecycle_state,
+                    lifecycle_reason,
+                    quality_updated_utc,
+                    zarr_mtime_ns,
+                    quality_stale
+                FROM subject_mask_component_quality_overview
+                UNION ALL
+                SELECT
+                    empl.dataset_id AS dataset_id,
+                    d.zarr_path AS zarr_path,
+                    d.zarr_origin AS zarr_origin,
+                    d.zarr_use AS zarr_use,
+                    d.zarr_use AS zarr_purpose,
+                    d.artifact_kind AS artifact_kind,
+                    d.status AS dataset_status,
+                    empl.stage_group AS stage_group,
+                    empl.run_name AS run_name,
+                    ec.component_name AS component_name,
+                    'eyes' AS component_family,
+                    empl.run_created_utc AS run_created_utc,
+                    empl.recording_id AS recording_id,
+                    empl.method AS subject_mask_method,
+                    'subject_v1_lr' AS label_schema_id,
+                    'lr' AS eye_component_mode,
+                    NULL AS source_subject_mask_run,
+                    1 AS available,
+                    empl.review_state AS review_state,
+                    empl.review_method AS review_method,
+                    empl.review_intended_use AS review_intended_use,
+                    empl.review_reviewer AS review_reviewer,
+                    empl.review_timestamp_utc AS review_timestamp_utc,
+                    empl.total_rois AS total_rois,
+                    empl.successful_roi_pairs AS rows_with_component_mask,
+                    empl.successful_roi_pair_rate AS rows_with_component_mask_rate,
+                    empl.lifecycle_state AS lifecycle_state,
+                    empl.lifecycle_reason AS lifecycle_reason,
+                    empl.updated_utc AS quality_updated_utc,
+                    empl.zarr_mtime_ns AS zarr_mtime_ns,
+                    CASE
+                        WHEN empl.zarr_mtime_ns IS NULL THEN 1
+                        ELSE 0
+                    END AS quality_stale
+                FROM eye_mask_performance_latest empl
+                CROSS JOIN eye_components ec
+                LEFT JOIN datasets d ON d.dataset_id = empl.dataset_id
+            ),
+            scored AS (
+                SELECT
+                    cr.*,
+                    CASE
+                        WHEN cr.stage_group = 'refined_subject_masks_runs'
+                         AND COALESCE(cr.source_subject_mask_run, '') <> ''
+                         AND COALESCE(cr.source_subject_mask_run, '') = COALESCE(lr.latest_subject_mask_run, '')
+                        THEN 3
+                        WHEN cr.stage_group = 'subject_mask_runs'
+                         AND cr.run_name = COALESCE(lr.latest_subject_mask_run, '')
+                        THEN 2
+                        ELSE 1
+                    END AS subject_mask_freshness_rank,
+                    CASE
+                        WHEN cr.component_name IN ('eye_left', 'eye_right')
+                         AND cr.stage_group = 'refined_subject_masks_runs'
+                         AND COALESCE(cr.source_subject_mask_run, '') <> ''
+                         AND COALESCE(cr.source_subject_mask_run, '') = COALESCE(lr.latest_subject_mask_run, '')
+                        THEN 5
+                        WHEN cr.component_name IN ('eye_left', 'eye_right')
+                         AND cr.stage_group = 'refined_eye_masks_runs'
+                        THEN 4
+                        WHEN cr.component_name IN ('eye_left', 'eye_right')
+                         AND cr.stage_group = 'subject_mask_runs'
+                         AND cr.run_name = COALESCE(lr.latest_subject_mask_run, '')
+                        THEN 3
+                        WHEN cr.component_name IN ('eye_left', 'eye_right')
+                         AND cr.stage_group = 'eye_masks_runs'
+                        THEN 2
+                        ELSE 1
+                    END AS eye_component_rank,
+                    CASE
+                        WHEN cr.stage_group IN ('refined_subject_masks_runs', 'refined_eye_masks_runs') THEN 1
+                        ELSE 0
+                    END AS refined_stage_rank
+                FROM candidate_rows cr
+                LEFT JOIN latest_raw lr ON lr.recording_id = cr.recording_id
+                WHERE cr.recording_id IS NOT NULL
+            ),
+            ranked AS (
+                SELECT
+                    s.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY s.recording_id, s.component_name
+                        ORDER BY
+                            CASE
+                                WHEN s.component_name IN ('eye_left', 'eye_right')
+                                THEN s.eye_component_rank
+                                ELSE s.subject_mask_freshness_rank
+                            END DESC,
+                            COALESCE(s.review_timestamp_utc, s.run_created_utc, s.quality_updated_utc) DESC,
+                            s.refined_stage_rank DESC,
+                            COALESCE(s.run_created_utc, '') DESC,
+                            s.run_name DESC,
+                            s.dataset_id DESC
+                    ) AS _rn
+                FROM scored s
+            )
+            SELECT
+                recording_id,
+                dataset_id,
+                zarr_path,
+                zarr_origin,
+                zarr_use,
+                zarr_purpose,
+                artifact_kind,
+                dataset_status,
+                stage_group,
+                run_name,
+                component_name,
+                component_family,
+                run_created_utc,
+                subject_mask_method,
+                label_schema_id,
+                eye_component_mode,
+                source_subject_mask_run,
+                available,
+                review_state,
+                review_method,
+                review_intended_use,
+                review_reviewer,
+                review_timestamp_utc,
+                total_rois,
+                rows_with_component_mask,
+                rows_with_component_mask_rate,
+                lifecycle_state,
+                lifecycle_reason,
+                quality_updated_utc,
+                zarr_mtime_ns,
+                quality_stale
+            FROM ranked
+            WHERE _rn = 1;
             """
         )
 

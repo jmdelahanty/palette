@@ -166,6 +166,17 @@ Key point:
   refinement/finalization has materialized canonical QA, reasons, and review
   metadata
 
+Current implementation note:
+
+- the shipped assembly/review path currently expects source inputs that are
+  readable through `subject_mask_runs`
+- for legacy eye-stage inputs, the implemented bridge is:
+  `eye_masks_runs` or `refined_eye_masks_runs`
+  -> projected/backfilled `subject_mask_runs/<run>`
+  -> assembled/finalized `refined_subject_masks_runs/<run>`
+- direct `refined_eye_masks_runs` -> `refined_subject_masks_runs` seeding
+  remains future work
+
 ## Recommended Canonical Refined Shape
 
 Recommended direction for `refined_subject_masks_runs/<run>`:
@@ -221,6 +232,9 @@ Assembly note:
 - the subject-mask refinement/finalization step must always run after assembly
   so `refined_subject_masks_runs` keeps the same "materialized refined stage"
   semantics as other Palette refined artifacts
+- current implementation detail: those assembly sources are still
+  `subject_mask_runs`-backed today, even when the eye content originally came
+  from legacy eye stages
 
 Editing note:
 
@@ -335,6 +349,8 @@ For new archives:
 - if eye-specific compatibility outputs are still needed for some downstream
   consumer, treat them as derived/adapter artifacts rather than the source of
   truth
+- prefer unified subject-mask component registry/query/operator surfaces for
+  eye visibility, and keep legacy eye-stage visibility as diagnostic context
 
 ## Naming Policy
 
@@ -476,6 +492,8 @@ Current near-term policy:
   raw component-mask work
 - use `refined_subject_masks_runs` as the preferred canonical refined/editable
   destination for body/swim-bladder work and sparse multi-source assembly
+- use unified subject-mask component views as the preferred operator/query
+  surface for eye/body/swim availability during transition
 - treat eye-mask backfills as migration aids, not the final desired steady
   state
 - do not require a merged raw canary run before creating a canonical refined

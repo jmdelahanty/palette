@@ -350,8 +350,10 @@ canonical and the other must be derived.
 
 ### Phase A: current transition
 
-- keep `refined_eye_masks_runs` authoritative for current eye-specific editing
+- keep `refined_eye_masks_runs` as the current eye-specific editing surface
 - keep `refined_subject_masks_runs` authoritative for body/swim refinement
+- prefer unified subject-mask component registry/query/operator surfaces for
+  eye visibility, projecting legacy eye-stage rows when needed
 - preserve provenance across projection and backfill
 
 ### Phase B: aligned storage

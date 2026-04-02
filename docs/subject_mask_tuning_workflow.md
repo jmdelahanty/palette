@@ -1,14 +1,17 @@
 # Subject Mask Tuning Workflow
 
 This document describes the current operator workflow for subject-mask tuning
-and canary body-mask generation.
+and canary body/swim-mask generation.
 
 ## Scope
 
 - Traditional `subject_body` tuning and materialization.
 - Batch propagation of `subject_mask_tuning` by `camera_id`.
-- First-pass refinement/review of `subject_body` masks.
+- First-pass refinement/review of `subject_body` and `swim_bladder` masks.
 - Direct multi-source assembly into `refined_subject_masks_runs`.
+- Transitional eye-component sourcing from legacy eye stages when needed, while
+  treating unified subject-mask component views as the preferred operator
+  surface for eye/body/swim status.
 
 This is the current practical workflow for canary training zarrs. It is not a
 contract doc.
@@ -25,6 +28,16 @@ masks, and subject masks, see
   - `subject_mask_runs/<run>`
 - Refined editable subject masks live in:
   - `refined_subject_masks_runs/<run>`
+- Legacy eye-specific stages may still be present during transition:
+  - `eye_masks_runs/<run>`
+  - `refined_eye_masks_runs/<run>`
+
+Operator policy:
+
+- prefer `subject_masks` / `refined_subject_masks` component summaries when
+  asking whether a recording has usable body/eye/swim masks
+- treat legacy eye-specific stages as compatibility inputs or diagnostics, not
+  as the preferred canonical surface for new work
 
 For the raw stage contract, see
 [subject_mask_runs_contract.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/subject_mask_runs_contract.md).
@@ -102,6 +115,28 @@ Important behavior:
 - Without `--merge-dicts`, a top-level overwrite would replace the entire
   `subject_mask_tuning` object.
 - By default, the tool only targets the same `zarr_use` as the source.
+
+Component-scoped propagation:
+
+- `--subject-mask-components <name>` limits propagation to selected
+  `subject_mask_tuning.components[...]` entries.
+- unrelated target components are preserved.
+- matching target components are skipped unless `--overwrite` is given.
+- with `--overwrite --merge-dicts`, the selected component subtree is merged so
+  matching source fields win while unrelated target fields inside that
+  component remain intact.
+
+Example: propagate only swim-bladder tuning by camera:
+
+```bash
+scripts/py -m fisheye.utils.apply_tuning_by_camera \
+  /nvme1/recordings \
+  --source <source_training>.zarr \
+  --recursive \
+  --keys subject_mask_tuning \
+  --subject-mask-components swim_bladder \
+  --merge-dicts
+```
 
 ### 3. Materialize a raw subject-mask run
 
@@ -290,6 +325,27 @@ Current materializer behavior:
 - records `run_semantics = "traditional_swim_bladder_inference"`
 - snapshots the exact tuning entry it used on the produced run for auditability
 
+## Swim-Bladder Save / Approval Policy
+
+For the current canary phase, use the same editor surface as body masks, but
+apply a stricter review interpretation:
+
+- `s` saves ROI-local improvements and does not imply approval
+- `a` on `swim_bladder` should mean the whole component on that refined run is
+  training-usable, not merely that the current ROI looks acceptable
+- keep empty swim-bladder masks conservative; ambiguity is not an automatic
+  negative label
+
+Detailed heuristics now live in:
+
+- [swim_bladder_review_policy.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/swim_bladder_review_policy.md)
+
+Short practical rule:
+
+- save whenever a local edit is materially better than the stored mask
+- approve only after the component backlog for that run has been reviewed
+  end-to-end and no systematic swim-bladder failure mode remains
+
 ## Direct Multi-Source Assembly Into `refined_subject_masks_runs`
 
 When body, eye, and swim-bladder source runs already exist, the preferred
@@ -323,12 +379,22 @@ Current assembler behavior:
 
 - validates that the source runs are row-aligned and crop-compatible
 - seeds each component from its own source run
+- writes the assembled result into the unified refined subject-mask stage
 - writes component-scoped provenance for the assembled refined run
 - runs the normal subject-mask finalization step in the same command, so the
   output run already has canonical refined metrics, QC, reasons, and review
   scaffolding
 - avoids requiring a merged raw `subject_mask_runs/<run>` intermediate for
   sparse workflows
+
+Current implementation note:
+
+- `--body-run`, `--eye-run`, and `--swim-run` currently name
+  `subject_mask_runs/<run>` sources
+- if eye content starts in `eye_masks_runs` or `refined_eye_masks_runs`, first
+  project/backfill it into a compatibility `subject_mask_runs/<run>`
+- direct `refined_eye_masks_runs` -> `refined_subject_masks_runs` assembly is a
+  future extension, not the current CLI behavior
 
 Canary validation on 2026-04-01:
 

@@ -50,6 +50,8 @@ _STEP_NAME_ALIASES = {
     "refined_keypoints": "refined_keypoints",
     "eye_masks": "eye_masks",
     "refined_eye_masks": "refined_eye_masks",
+    "subject_masks": "subject_masks",
+    "refined_subject_masks": "refined_subject_masks",
     "arena_assignment": "arena_assignment",
     "tracks": "tracks",
     "track": "tracks",
@@ -72,6 +74,8 @@ _OVERVIEW_STEP_PREFIX = {
     "refined_keypoints": "refined_keypoints",
     "eye_masks": "eye_masks",
     "refined_eye_masks": "refined_eye_masks",
+    "subject_masks": "subject_masks",
+    "refined_subject_masks": "refined_subject_masks",
     "arena_assignment": "arena_assignment",
     "tracks": "tracks",
     "stimulus": "stimulus",
@@ -82,6 +86,14 @@ _OVERVIEW_STEP_PREFIX = {
     "subject_mask_tuning": "subject_mask_tuning",
     "eye_mask_tuning": "eye_mask_tuning",
     "subdish_mask_tuning": "subdish_mask_tuning",
+}
+
+_DISPLAY_FIELD_LABELS = {
+    "eye_masks": "eye_masks (legacy compat)",
+    "refined_eye_masks": "refined_eye_masks (legacy compat)",
+    "eye_mask_review_status": "eye_mask_review_status (legacy compat)",
+    "subject_mask_components": "subject_mask_components (unified)",
+    "refined_subject_mask_components": "refined_subject_mask_components (unified)",
 }
 
 
@@ -129,6 +141,18 @@ class RecordingStatus:
     eye_masks_present: bool
     refined_eye_masks_present: bool
     eye_mask_review_status: Optional[Dict[str, object]]
+    subject_masks_present: bool
+    subject_masks_coverage: Optional[float]
+    subject_mask_review_status: Optional[Dict[str, object]]
+    subject_mask_available_components: List[str]
+    subject_mask_unavailable_components: List[str]
+    subject_mask_component_review_states: Dict[str, str]
+    refined_subject_masks_present: bool
+    refined_subject_masks_coverage: Optional[float]
+    refined_subject_mask_review_status: Optional[Dict[str, object]]
+    refined_subject_mask_available_components: List[str]
+    refined_subject_mask_unavailable_components: List[str]
+    refined_subject_mask_component_review_states: Dict[str, str]
     arena_assignment_present: bool
     track_present: bool
     track_qc_state: Optional[str]
@@ -277,6 +301,153 @@ def _coerce_mapping(value: object) -> Optional[Dict[str, object]]:
     return None
 
 
+def _coerce_text_list(value: object) -> List[str]:
+    if value is None:
+        return []
+    if hasattr(value, "tolist"):
+        try:
+            value = value.tolist()
+        except Exception:
+            pass
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", "ignore").strip()
+        return [text] if text else []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, (list, tuple)):
+        out: List[str] = []
+        for item in value:
+            text = _normalize_attr(item)
+            if text:
+                out.append(text)
+        return out
+    return []
+
+
+def _extract_subject_mask_component_fields(
+    *,
+    mask_labels: List[str],
+    available_flags: Optional[List[bool]] = None,
+    component_review_statuses: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    if not mask_labels:
+        return {
+            "available_components": [],
+            "unavailable_components": [],
+            "component_review_states": {},
+        }
+
+    flags = list(available_flags or [])
+    if not flags:
+        flags = [True] * len(mask_labels)
+    if len(flags) < len(mask_labels):
+        flags.extend([False] * (len(mask_labels) - len(flags)))
+    flags = flags[: len(mask_labels)]
+
+    available_components = [label for label, flag in zip(mask_labels, flags) if flag]
+    unavailable_components = [label for label, flag in zip(mask_labels, flags) if not flag]
+
+    review_states: Dict[str, str] = {}
+    for label in mask_labels:
+        payload = _coerce_mapping((component_review_statuses or {}).get(label))
+        if not payload:
+            continue
+        state = _normalize_attr(payload.get("state") or payload.get("review_state"))
+        if state:
+            review_states[label] = state
+
+    return {
+        "available_components": available_components,
+        "unavailable_components": unavailable_components,
+        "component_review_states": review_states,
+    }
+
+
+def _subject_mask_component_fields_from_details(details: Optional[Dict[str, object]]) -> Dict[str, object]:
+    details = details or {}
+    review_states_raw = _coerce_mapping(details.get("component_review_states")) or {}
+    review_states: Dict[str, str] = {}
+    for component_name, raw_state in review_states_raw.items():
+        component = _normalize_attr(component_name)
+        state = _normalize_attr(raw_state)
+        if component and state:
+            review_states[component] = state
+    return {
+        "available_components": _coerce_text_list(details.get("available_components")),
+        "unavailable_components": _coerce_text_list(details.get("unavailable_components")),
+        "component_review_states": review_states,
+    }
+
+
+def _extract_subject_mask_coverage(group: Optional[zarr.Group]) -> Optional[float]:
+    if group is None:
+        return None
+    for key in ("frame_counts", "n_detections"):
+        counts_arr = group.get(key)
+        if counts_arr is None:
+            continue
+        try:
+            values = np.asarray(counts_arr[:])
+        except Exception:
+            continue
+        if values.size == 0:
+            continue
+        return float(np.sum(values > 0)) / float(values.shape[0]) * 100.0
+
+    metrics = group.get("metrics")
+    if metrics is None:
+        return None
+    mask_present = metrics.get("mask_present")
+    if mask_present is None:
+        return None
+    try:
+        values = np.asarray(mask_present[:], dtype=bool)
+    except Exception:
+        return None
+    if values.size == 0 or values.shape[0] == 0:
+        return None
+    return float(np.sum(np.any(values, axis=1))) / float(values.shape[0]) * 100.0
+
+
+def _extract_subject_mask_run_summary(
+    *,
+    zarr_path: Path,
+    group_path: str,
+    group: zarr.Group,
+    review_attr_names: List[str],
+) -> Dict[str, object]:
+    attrs = dict(group.attrs)
+    disk_attrs = _load_group_attrs(zarr_path, group_path)
+    for key, value in disk_attrs.items():
+        attrs.setdefault(key, value)
+
+    review_status = None
+    for attr_name in review_attr_names:
+        review_status = _coerce_mapping(attrs.get(attr_name))
+        if review_status:
+            break
+
+    available_flags: List[bool] = []
+    available_channels = group.get("available_channels")
+    if available_channels is not None:
+        try:
+            available_flags = [bool(value) for value in np.asarray(available_channels[:]).tolist()]
+        except Exception:
+            available_flags = []
+
+    component_fields = _extract_subject_mask_component_fields(
+        mask_labels=_coerce_text_list(attrs.get("mask_labels")),
+        available_flags=available_flags,
+        component_review_statuses=_coerce_mapping(attrs.get("component_review_statuses")) or {},
+    )
+    return {
+        "coverage": _extract_subject_mask_coverage(group),
+        "review_status": review_status,
+        **component_fields,
+    }
+
+
 def _base_status_payload(*, tuning_keys: List[str], zarr_exists: bool) -> Dict[str, object]:
     return {
         "zarr_exists": zarr_exists,
@@ -315,6 +486,18 @@ def _base_status_payload(*, tuning_keys: List[str], zarr_exists: bool) -> Dict[s
         "eye_masks_present": False,
         "refined_eye_masks_present": False,
         "eye_mask_review_status": None,
+        "subject_masks_present": False,
+        "subject_masks_coverage": None,
+        "subject_mask_review_status": None,
+        "subject_mask_available_components": [],
+        "subject_mask_unavailable_components": [],
+        "subject_mask_component_review_states": {},
+        "refined_subject_masks_present": False,
+        "refined_subject_masks_coverage": None,
+        "refined_subject_mask_review_status": None,
+        "refined_subject_mask_available_components": [],
+        "refined_subject_mask_unavailable_components": [],
+        "refined_subject_mask_component_review_states": {},
         "arena_assignment_present": False,
         "track_present": False,
         "track_qc_state": None,
@@ -689,6 +872,44 @@ def _registry_status_payload(
         eye_masks_row.get("review_status_json") if eye_masks_row else None
     )
 
+    subject_masks_row = selected_rows.get("subject_masks")
+    payload["subject_masks_present"] = _step_row_status_ok(subject_masks_row)
+    subject_masks_coverage = _coerce_float(
+        subject_masks_row.get("coverage_pct") if subject_masks_row else None
+    )
+    if payload["subject_masks_present"] and subject_masks_coverage is None:
+        subject_masks_coverage = 100.0
+    payload["subject_masks_coverage"] = subject_masks_coverage
+    payload["subject_mask_review_status"] = _parse_step_json(
+        subject_masks_row.get("review_status_json") if subject_masks_row else None
+    )
+    subject_details = _parse_step_json(
+        subject_masks_row.get("details_json") if subject_masks_row else None
+    ) or {}
+    subject_component_fields = _subject_mask_component_fields_from_details(subject_details)
+    payload["subject_mask_available_components"] = subject_component_fields["available_components"]
+    payload["subject_mask_unavailable_components"] = subject_component_fields["unavailable_components"]
+    payload["subject_mask_component_review_states"] = subject_component_fields["component_review_states"]
+
+    refined_subject_masks_row = selected_rows.get("refined_subject_masks")
+    payload["refined_subject_masks_present"] = _step_row_status_ok(refined_subject_masks_row)
+    refined_subject_masks_coverage = _coerce_float(
+        refined_subject_masks_row.get("coverage_pct") if refined_subject_masks_row else None
+    )
+    if payload["refined_subject_masks_present"] and refined_subject_masks_coverage is None:
+        refined_subject_masks_coverage = 100.0
+    payload["refined_subject_masks_coverage"] = refined_subject_masks_coverage
+    payload["refined_subject_mask_review_status"] = _parse_step_json(
+        refined_subject_masks_row.get("review_status_json") if refined_subject_masks_row else None
+    )
+    refined_subject_details = _parse_step_json(
+        refined_subject_masks_row.get("details_json") if refined_subject_masks_row else None
+    ) or {}
+    refined_subject_component_fields = _subject_mask_component_fields_from_details(refined_subject_details)
+    payload["refined_subject_mask_available_components"] = refined_subject_component_fields["available_components"]
+    payload["refined_subject_mask_unavailable_components"] = refined_subject_component_fields["unavailable_components"]
+    payload["refined_subject_mask_component_review_states"] = refined_subject_component_fields["component_review_states"]
+
     payload["arena_assignment_present"] = _step_row_status_ok(selected_rows.get("arena_assignment"))
     tracks_row = selected_rows.get("tracks")
     payload["track_present"] = _step_row_status_ok(tracks_row)
@@ -782,6 +1003,18 @@ def _build_recording_status(
         eye_masks_present=bool(zarr_info["eye_masks_present"]),
         refined_eye_masks_present=bool(zarr_info["refined_eye_masks_present"]),
         eye_mask_review_status=zarr_info["eye_mask_review_status"],  # type: ignore[arg-type]
+        subject_masks_present=bool(zarr_info["subject_masks_present"]),
+        subject_masks_coverage=zarr_info["subject_masks_coverage"],  # type: ignore[arg-type]
+        subject_mask_review_status=zarr_info["subject_mask_review_status"],  # type: ignore[arg-type]
+        subject_mask_available_components=list(zarr_info["subject_mask_available_components"]),  # type: ignore[arg-type]
+        subject_mask_unavailable_components=list(zarr_info["subject_mask_unavailable_components"]),  # type: ignore[arg-type]
+        subject_mask_component_review_states=dict(zarr_info["subject_mask_component_review_states"]),  # type: ignore[arg-type]
+        refined_subject_masks_present=bool(zarr_info["refined_subject_masks_present"]),
+        refined_subject_masks_coverage=zarr_info["refined_subject_masks_coverage"],  # type: ignore[arg-type]
+        refined_subject_mask_review_status=zarr_info["refined_subject_mask_review_status"],  # type: ignore[arg-type]
+        refined_subject_mask_available_components=list(zarr_info["refined_subject_mask_available_components"]),  # type: ignore[arg-type]
+        refined_subject_mask_unavailable_components=list(zarr_info["refined_subject_mask_unavailable_components"]),  # type: ignore[arg-type]
+        refined_subject_mask_component_review_states=dict(zarr_info["refined_subject_mask_component_review_states"]),  # type: ignore[arg-type]
         arena_assignment_present=bool(zarr_info["arena_assignment_present"]),
         track_present=bool(zarr_info["track_present"]),
         track_qc_state=zarr_info["track_qc_state"],  # type: ignore[arg-type]
@@ -817,6 +1050,19 @@ def _plan_compare_snapshot(plan: RecordingStatus, tuning_keys: List[str]) -> Dic
         "refined_keypoints": _status_text(plan.refined_keypoints_present),
         "eye_masks": _status_text(plan.eye_masks_present),
         "refined_eye_masks": _status_text(plan.refined_eye_masks_present),
+        "subject_masks": _subject_mask_stage_text(plan.subject_masks_present, plan.subject_masks_coverage),
+        "subject_mask_components": _subject_mask_component_summary_text(
+            plan.subject_mask_available_components,
+            plan.subject_mask_component_review_states,
+        ),
+        "refined_subject_masks": _subject_mask_stage_text(
+            plan.refined_subject_masks_present,
+            plan.refined_subject_masks_coverage,
+        ),
+        "refined_subject_mask_components": _subject_mask_component_summary_text(
+            plan.refined_subject_mask_available_components,
+            plan.refined_subject_mask_component_review_states,
+        ),
         "arena_assignment": _status_text(plan.arena_assignment_present),
         "track": _track_status_text(
             plan.track_present,
@@ -1620,6 +1866,84 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
             else:
                 refined_eye_masks_present = len(list(refined_eye_masks_parent.keys())) > 0
 
+    subject_masks_present = False
+    subject_masks_coverage: Optional[float] = None
+    subject_mask_review_status: Optional[Dict[str, object]] = None
+    subject_mask_available_components: List[str] = []
+    subject_mask_unavailable_components: List[str] = []
+    subject_mask_component_review_states: Dict[str, str] = {}
+    subject_masks_parent = root.get("subject_mask_runs")
+    if subject_masks_parent is not None:
+        latest_subject_masks = _normalize_attr(subject_masks_parent.attrs.get("latest"))
+        candidate_run = None
+        if latest_subject_masks and latest_subject_masks in subject_masks_parent:
+            candidate_run = latest_subject_masks
+        else:
+            if hasattr(subject_masks_parent, "group_keys"):
+                names = list(subject_masks_parent.group_keys())
+            else:
+                names = list(subject_masks_parent.keys())
+            if names:
+                candidate_run = sorted(names)[-1]
+        if candidate_run:
+            subject_masks_present = True
+            subject_masks_group = subject_masks_parent[candidate_run]
+            subject_summary = _extract_subject_mask_run_summary(
+                zarr_path=zarr_path,
+                group_path=f"subject_mask_runs/{candidate_run}",
+                group=subject_masks_group,
+                review_attr_names=["subject_mask_review_status"],
+            )
+            subject_masks_coverage = subject_summary["coverage"]  # type: ignore[assignment]
+            subject_mask_review_status = subject_summary["review_status"]  # type: ignore[assignment]
+            subject_mask_available_components = list(subject_summary["available_components"])  # type: ignore[arg-type]
+            subject_mask_unavailable_components = list(subject_summary["unavailable_components"])  # type: ignore[arg-type]
+            subject_mask_component_review_states = dict(subject_summary["component_review_states"])  # type: ignore[arg-type]
+        else:
+            if hasattr(subject_masks_parent, "group_keys"):
+                subject_masks_present = len(list(subject_masks_parent.group_keys())) > 0
+            else:
+                subject_masks_present = len(list(subject_masks_parent.keys())) > 0
+
+    refined_subject_masks_present = False
+    refined_subject_masks_coverage: Optional[float] = None
+    refined_subject_mask_review_status: Optional[Dict[str, object]] = None
+    refined_subject_mask_available_components: List[str] = []
+    refined_subject_mask_unavailable_components: List[str] = []
+    refined_subject_mask_component_review_states: Dict[str, str] = {}
+    refined_subject_masks_parent = root.get("refined_subject_masks_runs")
+    if refined_subject_masks_parent is not None:
+        latest_refined_subject_masks = _normalize_attr(refined_subject_masks_parent.attrs.get("latest"))
+        candidate_run = None
+        if latest_refined_subject_masks and latest_refined_subject_masks in refined_subject_masks_parent:
+            candidate_run = latest_refined_subject_masks
+        else:
+            if hasattr(refined_subject_masks_parent, "group_keys"):
+                names = list(refined_subject_masks_parent.group_keys())
+            else:
+                names = list(refined_subject_masks_parent.keys())
+            if names:
+                candidate_run = sorted(names)[-1]
+        if candidate_run:
+            refined_subject_masks_present = True
+            refined_subject_masks_group = refined_subject_masks_parent[candidate_run]
+            refined_subject_summary = _extract_subject_mask_run_summary(
+                zarr_path=zarr_path,
+                group_path=f"refined_subject_masks_runs/{candidate_run}",
+                group=refined_subject_masks_group,
+                review_attr_names=["refined_subject_mask_review_status", "subject_mask_review_status"],
+            )
+            refined_subject_masks_coverage = refined_subject_summary["coverage"]  # type: ignore[assignment]
+            refined_subject_mask_review_status = refined_subject_summary["review_status"]  # type: ignore[assignment]
+            refined_subject_mask_available_components = list(refined_subject_summary["available_components"])  # type: ignore[arg-type]
+            refined_subject_mask_unavailable_components = list(refined_subject_summary["unavailable_components"])  # type: ignore[arg-type]
+            refined_subject_mask_component_review_states = dict(refined_subject_summary["component_review_states"])  # type: ignore[arg-type]
+        else:
+            if hasattr(refined_subject_masks_parent, "group_keys"):
+                refined_subject_masks_present = len(list(refined_subject_masks_parent.group_keys())) > 0
+            else:
+                refined_subject_masks_present = len(list(refined_subject_masks_parent.keys())) > 0
+
     arena_assignment_present = False
     arena_assignment_parent = root.get("arena_assignment_runs")
     if arena_assignment_parent is not None:
@@ -1733,6 +2057,18 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
         "eye_masks_present": eye_masks_present,
         "refined_eye_masks_present": refined_eye_masks_present,
         "eye_mask_review_status": eye_mask_review_status,
+        "subject_masks_present": subject_masks_present,
+        "subject_masks_coverage": subject_masks_coverage,
+        "subject_mask_review_status": subject_mask_review_status,
+        "subject_mask_available_components": subject_mask_available_components,
+        "subject_mask_unavailable_components": subject_mask_unavailable_components,
+        "subject_mask_component_review_states": subject_mask_component_review_states,
+        "refined_subject_masks_present": refined_subject_masks_present,
+        "refined_subject_masks_coverage": refined_subject_masks_coverage,
+        "refined_subject_mask_review_status": refined_subject_mask_review_status,
+        "refined_subject_mask_available_components": refined_subject_mask_available_components,
+        "refined_subject_mask_unavailable_components": refined_subject_mask_unavailable_components,
+        "refined_subject_mask_component_review_states": refined_subject_mask_component_review_states,
         "arena_assignment_present": arena_assignment_present,
         "track_present": track_present,
         "track_qc_state": track_qc_state,
@@ -1994,6 +2330,65 @@ def _keypoint_status_rich(success: Optional[float], usable: Optional[float]) -> 
     return f"{success_text} (train {usable_text})"
 
 
+def _subject_mask_stage_text(present: bool, coverage: Optional[float]) -> str:
+    if not present:
+        return "MISS"
+    percent = _percent_text(coverage)
+    if percent is None:
+        return "OK"
+    return f"OK ({percent})"
+
+
+def _subject_mask_stage_rich(present: bool, coverage: Optional[float]) -> str:
+    if not present:
+        return "[red]MISS[/red]"
+    percent = _percent_rich(coverage)
+    if percent is None:
+        return "[chartreuse1]OK[/chartreuse1]"
+    return f"[chartreuse1]OK[/chartreuse1] ({percent})"
+
+
+_SUBJECT_COMPONENT_LABELS = {
+    "subject_body": "body",
+    "eye_left": "eye_l",
+    "eye_right": "eye_r",
+    "eyes_union": "eyes",
+    "swim_bladder": "swim",
+}
+_SUBJECT_REVIEW_LABELS = {
+    "approved": "appr",
+    "needs_review": "review",
+    "pending": "pend",
+    "rejected": "rej",
+}
+
+
+def _subject_mask_component_summary_text(
+    available_components: List[str],
+    review_states: Dict[str, str],
+) -> str:
+    if not available_components:
+        return "—"
+    parts: List[str] = []
+    for component_name in available_components:
+        label = _SUBJECT_COMPONENT_LABELS.get(component_name, component_name)
+        state = _normalize_attr(review_states.get(component_name))
+        if state:
+            label = f"{label}={_SUBJECT_REVIEW_LABELS.get(state, state)}"
+        parts.append(label)
+    return ", ".join(parts)
+
+
+def _subject_mask_component_summary_rich(
+    available_components: List[str],
+    review_states: Dict[str, str],
+) -> str:
+    text = _subject_mask_component_summary_text(available_components, review_states)
+    if text == "—":
+        return "[dim]—[/dim]"
+    return text
+
+
 def _review_status_text(status: Optional[Dict[str, object]]) -> str:
     if not status:
         return "—"
@@ -2040,9 +2435,17 @@ def _resolved_group_rich(group: Optional[str]) -> str:
     return group
 
 
+def _display_field_label(field: str) -> str:
+    return _DISPLAY_FIELD_LABELS.get(field, field)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Check which processing steps have been completed for recordings.",
+        description=(
+            "Check which processing steps have been completed for recordings. "
+            "Legacy eye stages are reported separately for transition diagnostics; "
+            "unified eye/body/swim availability lives in the subject-mask component summaries."
+        ),
     )
     parser.add_argument(
         "paths",
@@ -2227,7 +2630,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     str(row["recording"]),
                     str(row["camera_id"]),
                     str(row["zarr_use"]),
-                    str(row["field"]),
+                    _display_field_label(str(row["field"])),
                     str(row["filesystem"]),
                     str(row["registry"]),
                     str(row["zarr_path"]),
@@ -2239,7 +2642,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(str(row["recording"]))
                 print(f"  camera_id: {row['camera_id']}")
                 print(f"  use: {row['zarr_use']}")
-                print(f"  field: {row['field']}")
+                print(f"  field: {_display_field_label(str(row['field']))}")
                 print(f"  filesystem: {row['filesystem']}")
                 print(f"  registry: {row['registry']}")
                 print(f"  zarr_path: {row['zarr_path']}")
@@ -2271,9 +2674,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         table.add_column("Keypoints")
         table.add_column("Refined Keypoints (analysis/train)")
         table.add_column("Keypoint Review")
-        table.add_column("Eye Masks")
-        table.add_column("Refined Eye Masks")
-        table.add_column("Eye Mask Review")
+        table.add_column("Eye Masks (legacy)")
+        table.add_column("Refined Eye Masks (legacy)")
+        table.add_column("Eye Review (legacy)")
+        table.add_column("Subject Masks")
+        table.add_column("Subject Components (unified)")
+        table.add_column("Refined Subject Masks")
+        table.add_column("Refined Subject Components (unified)")
         table.add_column("Arena Assignment")
         table.add_column("Track")
         table.add_column("Stimulus")
@@ -2326,6 +2733,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                 _status_rich(plan.eye_masks_present),
                 _status_rich(plan.refined_eye_masks_present),
                 _review_status_rich(plan.eye_mask_review_status),
+                _subject_mask_stage_rich(plan.subject_masks_present, plan.subject_masks_coverage),
+                _subject_mask_component_summary_rich(
+                    plan.subject_mask_available_components,
+                    plan.subject_mask_component_review_states,
+                ),
+                _subject_mask_stage_rich(
+                    plan.refined_subject_masks_present,
+                    plan.refined_subject_masks_coverage,
+                ),
+                _subject_mask_component_summary_rich(
+                    plan.refined_subject_mask_available_components,
+                    plan.refined_subject_mask_component_review_states,
+                ),
                 _status_rich(plan.arena_assignment_present),
                 _track_status_rich(
                     plan.track_present,
@@ -2386,9 +2806,30 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"{_keypoint_status_text(plan.refined_keypoints_success, plan.refined_keypoints_coverage)}"
             )
             print(f"  keypoint_review_status: {_review_status_text(plan.keypoint_review_status)}")
-            print(f"  eye_masks: {_status_text(plan.eye_masks_present)}")
-            print(f"  refined_eye_masks: {_status_text(plan.refined_eye_masks_present)}")
-            print(f"  eye_mask_review_status: {_review_status_text(plan.eye_mask_review_status)}")
+            print(f"  eye_masks (legacy compat): {_status_text(plan.eye_masks_present)}")
+            print(f"  refined_eye_masks (legacy compat): {_status_text(plan.refined_eye_masks_present)}")
+            print(
+                "  eye_mask_review_status (legacy compat): "
+                f"{_review_status_text(plan.eye_mask_review_status)}"
+            )
+            print(f"  subject_masks: {_subject_mask_stage_text(plan.subject_masks_present, plan.subject_masks_coverage)}")
+            print(
+                "  subject_mask_components (unified): "
+                f"{_subject_mask_component_summary_text(plan.subject_mask_available_components, plan.subject_mask_component_review_states)}"
+            )
+            print(f"  subject_mask_review_status: {_review_status_text(plan.subject_mask_review_status)}")
+            print(
+                "  refined_subject_masks: "
+                f"{_subject_mask_stage_text(plan.refined_subject_masks_present, plan.refined_subject_masks_coverage)}"
+            )
+            print(
+                "  refined_subject_mask_components (unified): "
+                f"{_subject_mask_component_summary_text(plan.refined_subject_mask_available_components, plan.refined_subject_mask_component_review_states)}"
+            )
+            print(
+                "  refined_subject_mask_review_status: "
+                f"{_review_status_text(plan.refined_subject_mask_review_status)}"
+            )
             print(f"  arena_assignment: {_status_text(plan.arena_assignment_present)}")
             print(
                 "  track: "

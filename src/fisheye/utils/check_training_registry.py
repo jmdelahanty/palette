@@ -150,6 +150,19 @@ class EyeMaskPerformanceSummary:
 
 
 @dataclass
+class SubjectMaskComponentSummary:
+    total_rows: int
+    passing_rows: int
+    excluded_rows: int
+    stale_rows: int
+    unavailable_rows: int
+    exclusion_reasons: Dict[str, int]
+    review_rollups: Dict[str, int]
+    component_rollups: Dict[str, int]
+    stage_rollups: Dict[str, int]
+
+
+@dataclass
 class DetectPerformanceSummary:
     total_rows: int
     coverage_avg: Optional[float]
@@ -302,6 +315,8 @@ DETECT_GATE_MAX_INTERPOLATED_RATE = 0.25
 KEYPOINT_PROFILE_METHOD_KEYS = ("keypoint_method", "method")
 EYE_MASK_GATE_REVIEW_STATE = "approved"
 EYE_MASK_GATE_REVIEW_INTENDED_USE = "training"
+SUBJECT_MASK_COMPONENT_GATE_REVIEW_STATE = "approved"
+SUBJECT_MASK_COMPONENT_GATE_REVIEW_INTENDED_USE = "training"
 EYE_MASK_PROFILE_METHOD_KEYS = ("eye_mask_method", "method", "source_eye_masks_method")
 EYE_MASK_PROFILE_STALE_STATE_KEYS = (
     "source_keypoint_stale_state",
@@ -1527,6 +1542,65 @@ def _load_eye_mask_performance_rows(
     return [dict(row) for row in rows]
 
 
+def _load_subject_mask_component_rows(
+    registry: Registry,
+    *,
+    set_filter: Optional[str],
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    params: List[Any] = []
+    dataset_ids = _dataset_ids_for_set(registry, set_filter)
+    if dataset_ids is not None and not dataset_ids:
+        return []
+    if not _view_exists(registry, "subject_mask_component_quality_latest"):
+        return []
+    sql = [
+        "SELECT",
+        "  smcql.dataset_id AS dataset_id,",
+        "  smcql.zarr_path AS zarr_path,",
+        "  smcql.zarr_use AS zarr_use,",
+        "  smcql.stage_group AS stage_group,",
+        "  smcql.run_name AS run_name,",
+        "  smcql.run_created_utc AS run_created_utc,",
+        "  smcql.recording_id AS recording_id,",
+        "  smcql.component_name AS component_name,",
+        "  smcql.component_family AS component_family,",
+        "  smcql.subject_mask_method AS subject_mask_method,",
+        "  smcql.label_schema_id AS label_schema_id,",
+        "  smcql.eye_component_mode AS eye_component_mode,",
+        "  smcql.source_subject_mask_run AS source_subject_mask_run,",
+        "  smcql.available AS available,",
+        "  smcql.review_state AS review_state,",
+        "  smcql.review_method AS review_method,",
+        "  smcql.review_intended_use AS review_intended_use,",
+        "  smcql.review_reviewer AS review_reviewer,",
+        "  smcql.review_timestamp_utc AS review_timestamp_utc,",
+        "  smcql.total_rois AS total_rois,",
+        "  smcql.rows_with_component_mask AS rows_with_component_mask,",
+        "  smcql.rows_with_component_mask_rate AS rows_with_component_mask_rate,",
+        "  smcql.lifecycle_state AS lifecycle_state,",
+        "  smcql.lifecycle_reason AS lifecycle_reason,",
+        "  smcql.quality_updated_utc AS quality_updated_utc,",
+        "  smcql.zarr_mtime_ns AS zarr_mtime_ns,",
+        "  smcql.quality_stale AS quality_stale",
+        "FROM subject_mask_component_quality_latest smcql",
+        "WHERE 1=1",
+    ]
+    if dataset_ids is not None:
+        placeholders = ", ".join("?" for _ in dataset_ids)
+        sql.append(f"AND smcql.dataset_id IN ({placeholders})")
+        params.extend(dataset_ids)
+    sql.append(
+        "ORDER BY smcql.dataset_id, COALESCE(smcql.component_name, ''),"
+        " COALESCE(smcql.run_created_utc, ''), COALESCE(smcql.stage_group, '')"
+    )
+    if limit and limit > 0:
+        sql.append("LIMIT ?")
+        params.append(int(limit))
+    rows = registry.conn.execute(" ".join(sql), params).fetchall()
+    return [dict(row) for row in rows]
+
+
 def _load_eye_mask_profile_rows(
     registry: Registry,
     *,
@@ -2267,6 +2341,18 @@ def _review_rollups(
     return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
 
+def _value_rollups(
+    rows: List[Dict[str, Any]],
+    *,
+    key: str,
+) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for row in rows:
+        value = str(row.get(key) or "").strip() or "—"
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
 def _eye_mask_profile_method_info(row: Dict[str, Any]) -> Tuple[Optional[str], bool]:
     for key in EYE_MASK_PROFILE_METHOD_KEYS:
         if key not in row:
@@ -2594,6 +2680,99 @@ def _eye_mask_profile_remediation_lines(
     return lines
 
 
+def _subject_mask_component_stale_reason(
+    row: Dict[str, Any],
+    *,
+    mtime_cache: Dict[str, Optional[int]],
+) -> Optional[str]:
+    lifecycle_state = str(row.get("lifecycle_state") or "").strip().lower()
+    if lifecycle_state == "stale":
+        return "stale lifecycle"
+
+    expected_mtime = _coerce_int(row.get("zarr_mtime_ns"))
+    zarr_path = str(row.get("zarr_path") or "").strip()
+    if expected_mtime is None:
+        return "stale row: missing zarr_mtime_ns"
+    if not zarr_path:
+        return "stale row: missing zarr_path"
+    actual_mtime = _zarr_mtime_ns(zarr_path, mtime_cache=mtime_cache)
+    if actual_mtime is None:
+        return "stale row: zarr missing on disk"
+    if int(actual_mtime) != int(expected_mtime):
+        return "stale row: mtime mismatch"
+    return None
+
+
+def _subject_mask_component_row_passes_default_gate(
+    row: Dict[str, Any],
+    *,
+    mtime_cache: Dict[str, Optional[int]],
+) -> bool:
+    if _subject_mask_component_stale_reason(row, mtime_cache=mtime_cache) is not None:
+        return False
+    if _coerce_int(row.get("available")) != 1:
+        return False
+    return (
+        row.get("review_state") == SUBJECT_MASK_COMPONENT_GATE_REVIEW_STATE
+        and row.get("review_intended_use") == SUBJECT_MASK_COMPONENT_GATE_REVIEW_INTENDED_USE
+    )
+
+
+def _subject_mask_component_exclusion_reason(
+    row: Dict[str, Any],
+    *,
+    mtime_cache: Dict[str, Optional[int]],
+) -> Optional[str]:
+    if _subject_mask_component_row_passes_default_gate(row, mtime_cache=mtime_cache):
+        return None
+    if _coerce_int(row.get("available")) != 1:
+        return "component unavailable"
+    stale_reason = _subject_mask_component_stale_reason(row, mtime_cache=mtime_cache)
+    if stale_reason is not None:
+        return stale_reason
+    state = row.get("review_state")
+    intended_use = row.get("review_intended_use")
+    if not state or not intended_use:
+        return "missing review"
+    if (
+        state != SUBJECT_MASK_COMPONENT_GATE_REVIEW_STATE
+        or intended_use != SUBJECT_MASK_COMPONENT_GATE_REVIEW_INTENDED_USE
+    ):
+        return "wrong state/use"
+    return "other"
+
+
+def _summarize_subject_mask_component_rows(rows: List[Dict[str, Any]]) -> SubjectMaskComponentSummary:
+    passing = 0
+    stale_rows = 0
+    unavailable_rows = 0
+    reasons: Dict[str, int] = {}
+    mtime_cache: Dict[str, Optional[int]] = {}
+    for row in rows:
+        if _coerce_int(row.get("available")) != 1:
+            unavailable_rows += 1
+        if _subject_mask_component_stale_reason(row, mtime_cache=mtime_cache) is not None:
+            stale_rows += 1
+        reason = _subject_mask_component_exclusion_reason(row, mtime_cache=mtime_cache)
+        if reason is None:
+            passing += 1
+            continue
+        reasons[reason] = reasons.get(reason, 0) + 1
+    total = len(rows)
+    ordered = dict(sorted(reasons.items(), key=lambda item: (-item[1], item[0])))
+    return SubjectMaskComponentSummary(
+        total_rows=total,
+        passing_rows=passing,
+        excluded_rows=total - passing,
+        stale_rows=stale_rows,
+        unavailable_rows=unavailable_rows,
+        exclusion_reasons=ordered,
+        review_rollups=_review_rollups(rows),
+        component_rollups=_value_rollups(rows, key="component_name"),
+        stage_rollups=_value_rollups(rows, key="stage_group"),
+    )
+
+
 def _detect_quality_stale_reason(
     row: Dict[str, Any],
     *,
@@ -2697,6 +2876,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "eye-mask-quality",
             "eye-mask-performance",
             "eye-mask-profile",
+            "subject-mask-components",
             "lineage",
         ],
         default="sets",
@@ -2704,8 +2884,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             "Select output view: sets, datasets, recordings, recording-overview, "
             "recording-steps, recording-steps-wide, models, onnx, tensorrt, "
             "detect-quality, detect-performance, keypoint-quality, keypoint-profile, "
-            "eye-mask-quality, eye-mask-performance, "
-            "eye-mask-profile, or lineage (default: sets)."
+            "eye-mask-quality, eye-mask-performance, eye-mask-profile, "
+            "subject-mask-components, or lineage (default: sets). "
+            "The subject-mask component view is the unified eye/body/swim latest surface."
         ),
     )
     parser.add_argument(
@@ -2714,7 +2895,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         help=(
             "Show all registry views (sets, datasets, recordings, recording-overview, "
             "models, onnx, tensorrt, lineage, detect quality, keypoint quality, "
-            "keypoint profile, eye-mask quality/performance, and eye-mask profile)."
+            "keypoint profile, eye-mask quality/performance, eye-mask profile, "
+            "and subject-mask components)."
         ),
     )
     parser.add_argument("--limit", type=int, default=200)
@@ -2747,6 +2929,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--show-eye-mask-profile",
         action="store_true",
         help="Print detailed eye-mask profile rows (summary is always shown).",
+    )
+    parser.add_argument(
+        "--show-subject-mask-components",
+        action="store_true",
+        help=(
+            "Print detailed subject-mask component rows from the unified latest view "
+            "(including projected legacy eye-stage compatibility rows)."
+        ),
     )
     parser.add_argument(
         "--recording-summary",
@@ -2804,6 +2994,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     show_eye_mask_profile_view = args.view == "eye-mask-profile"
     show_eye_mask_profile_details = args.show_eye_mask_profile or show_eye_mask_profile_view
+    show_subject_mask_component_view = args.all or args.view == "subject-mask-components"
+    show_subject_mask_component_details = (
+        args.show_subject_mask_components
+        or args.view == "subject-mask-components"
+    )
     if summary_only_mode:
         show_sets = False
         show_datasets = False
@@ -2827,6 +3022,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         show_eye_mask_performance_details = False
         show_eye_mask_profile_view = False
         show_eye_mask_profile_details = False
+        show_subject_mask_component_view = False
+        show_subject_mask_component_details = False
 
     set_rows = _load_set_rows(registry, args.set_id, args.limit) if show_sets else []
     dataset_rows = _load_dataset_rows(
@@ -2952,6 +3149,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         eye_mask_profile_summary,
         registry_path=registry_path,
     )
+    subject_mask_component_limit = (
+        args.limit if (show_subject_mask_component_view or show_subject_mask_component_details) else None
+    )
+    subject_mask_component_rows = (
+        _load_subject_mask_component_rows(
+            registry,
+            set_filter=args.set_id,
+            limit=subject_mask_component_limit,
+        )
+        if (show_subject_mask_component_view or show_subject_mask_component_details)
+        else []
+    )
+    subject_mask_component_summary = _summarize_subject_mask_component_rows(subject_mask_component_rows)
     dataset_lineage_summary = _summarize_dataset_lineage(
         registry,
         set_filter=args.set_id,
@@ -3009,6 +3219,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("No eye-mask profile rows found.")
         for line in eye_mask_profile_remediation:
             print(f"  {line}")
+        return 1
+    if not args.all and args.view == "subject-mask-components" and not subject_mask_component_rows:
+        print("No subject-mask component rows found.")
         return 1
 
     show_inference_col = any(row.inference_dataset_count > 0 for row in recording_overview_rows)
@@ -3698,6 +3911,107 @@ def main(argv: Optional[List[str]] = None) -> int:
                     )
                 console.print(ep_table)
 
+            if show_subject_mask_component_view or show_subject_mask_component_details:
+                subject_mask_lines = [
+                    f"total rows: {subject_mask_component_summary.total_rows}",
+                    (
+                        "passing rows "
+                        f"({SUBJECT_MASK_COMPONENT_GATE_REVIEW_STATE}/"
+                        f"{SUBJECT_MASK_COMPONENT_GATE_REVIEW_INTENDED_USE}, available, non-stale): "
+                        f"{subject_mask_component_summary.passing_rows}"
+                    ),
+                    f"excluded rows: {subject_mask_component_summary.excluded_rows}",
+                    f"stale rows: {subject_mask_component_summary.stale_rows}",
+                    f"unavailable rows: {subject_mask_component_summary.unavailable_rows}",
+                ]
+                if subject_mask_component_summary.exclusion_reasons:
+                    subject_mask_reason_text = ", ".join(
+                        f"{name}={count}"
+                        for name, count in subject_mask_component_summary.exclusion_reasons.items()
+                    )
+                else:
+                    subject_mask_reason_text = "none"
+                subject_mask_lines.append(f"top exclusion reasons: {subject_mask_reason_text}")
+                if subject_mask_component_summary.review_rollups:
+                    review_rollup_text = ", ".join(
+                        f"{name}={count}"
+                        for name, count in subject_mask_component_summary.review_rollups.items()
+                    )
+                else:
+                    review_rollup_text = "none"
+                subject_mask_lines.append(f"review rollups: {review_rollup_text}")
+                if subject_mask_component_summary.component_rollups:
+                    component_rollup_text = ", ".join(
+                        f"{name}={count}"
+                        for name, count in subject_mask_component_summary.component_rollups.items()
+                    )
+                else:
+                    component_rollup_text = "none"
+                subject_mask_lines.append(f"component rollups: {component_rollup_text}")
+                if subject_mask_component_summary.stage_rollups:
+                    stage_rollup_text = ", ".join(
+                        f"{name}={count}"
+                        for name, count in subject_mask_component_summary.stage_rollups.items()
+                    )
+                else:
+                    stage_rollup_text = "none"
+                subject_mask_lines.append(f"stage rollups: {stage_rollup_text}")
+                console.print("[bold]Subject-Mask Components (Unified Latest View)[/bold]")
+                console.print(
+                    "- legacy eye-stage rows are projected here only when a fresher "
+                    "subject-mask-native eye component is not available"
+                )
+                for line in subject_mask_lines:
+                    console.print(f"- {line}")
+                if show_subject_mask_component_details and subject_mask_component_rows:
+                    smc_table = Table(
+                        title="Subject-Mask Component Details (Unified Latest View)",
+                        show_lines=False,
+                    )
+                    smc_table.add_column("Dataset", style="cyan")
+                    smc_table.add_column("Use")
+                    smc_table.add_column("Component")
+                    smc_table.add_column("Stage")
+                    smc_table.add_column("Method")
+                    smc_table.add_column("Review")
+                    smc_table.add_column("Avail")
+                    smc_table.add_column("Stale")
+                    smc_table.add_column("Lifecycle")
+                    smc_table.add_column("Rate")
+                    smc_table.add_column("Gate")
+                    smc_table.add_column("Reason")
+                    subject_mask_mtime_cache: Dict[str, Optional[int]] = {}
+                    for row in subject_mask_component_rows:
+                        reason = _subject_mask_component_exclusion_reason(
+                            row,
+                            mtime_cache=subject_mask_mtime_cache,
+                        ) or "—"
+                        stale_reason = _subject_mask_component_stale_reason(
+                            row,
+                            mtime_cache=subject_mask_mtime_cache,
+                        )
+                        passes = _subject_mask_component_row_passes_default_gate(
+                            row,
+                            mtime_cache=subject_mask_mtime_cache,
+                        )
+                        review = f"{row.get('review_state') or '—'}/{row.get('review_intended_use') or '—'}"
+                        rate = _coerce_float(row.get("rows_with_component_mask_rate"))
+                        smc_table.add_row(
+                            str(row.get("dataset_id") or "—"),
+                            str(row.get("zarr_use") or "—"),
+                            str(row.get("component_name") or "—"),
+                            str(row.get("stage_group") or "—"),
+                            str(row.get("subject_mask_method") or "—"),
+                            review,
+                            "1" if _coerce_int(row.get("available")) == 1 else "0",
+                            "1" if stale_reason is not None else "0",
+                            str(row.get("lifecycle_state") or "—"),
+                            f"{float(rate):.3f}" if rate is not None else "—",
+                            "[chartreuse1]PASS[/chartreuse1]" if passes else "[red]EXCLUDE[/red]",
+                            reason,
+                        )
+                    console.print(smc_table)
+
             eye_mask_profile_lines = [
                 f"total rows: {eye_mask_profile_summary.total_rows}",
                 f"stale rows (mtime mismatch/missing): {eye_mask_profile_summary.stale_rows}",
@@ -4295,6 +4609,91 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print(f"      success_rate: {float(rate):.3f}" if rate is not None else "      success_rate: —")
                     print(f"      gate: {'PASS' if passes else 'EXCLUDE'}")
                     print(f"      reason: {reason or '—'}")
+
+            if show_subject_mask_component_view or show_subject_mask_component_details:
+                print("Subject-Mask Components (Unified Latest View)")
+                print(
+                    "  note: legacy eye-stage rows are projected here only when a fresher "
+                    "subject-mask-native eye component is not available"
+                )
+                print(f"  total rows: {subject_mask_component_summary.total_rows}")
+                print(
+                    "  passing rows "
+                    f"({SUBJECT_MASK_COMPONENT_GATE_REVIEW_STATE}/"
+                    f"{SUBJECT_MASK_COMPONENT_GATE_REVIEW_INTENDED_USE}, available, non-stale): "
+                    f"{subject_mask_component_summary.passing_rows}"
+                )
+                print(f"  excluded rows: {subject_mask_component_summary.excluded_rows}")
+                print(f"  stale rows: {subject_mask_component_summary.stale_rows}")
+                print(f"  unavailable rows: {subject_mask_component_summary.unavailable_rows}")
+                if subject_mask_component_summary.exclusion_reasons:
+                    subject_mask_reason_text = ", ".join(
+                        f"{name}={count}"
+                        for name, count in subject_mask_component_summary.exclusion_reasons.items()
+                    )
+                else:
+                    subject_mask_reason_text = "none"
+                print(f"  top exclusion reasons: {subject_mask_reason_text}")
+                if subject_mask_component_summary.review_rollups:
+                    subject_mask_review_rollup_text = ", ".join(
+                        f"{name}={count}"
+                        for name, count in subject_mask_component_summary.review_rollups.items()
+                    )
+                else:
+                    subject_mask_review_rollup_text = "none"
+                print(f"  review rollups: {subject_mask_review_rollup_text}")
+                if subject_mask_component_summary.component_rollups:
+                    subject_mask_component_rollup_text = ", ".join(
+                        f"{name}={count}"
+                        for name, count in subject_mask_component_summary.component_rollups.items()
+                    )
+                else:
+                    subject_mask_component_rollup_text = "none"
+                print(f"  component rollups: {subject_mask_component_rollup_text}")
+                if subject_mask_component_summary.stage_rollups:
+                    subject_mask_stage_rollup_text = ", ".join(
+                        f"{name}={count}"
+                        for name, count in subject_mask_component_summary.stage_rollups.items()
+                    )
+                else:
+                    subject_mask_stage_rollup_text = "none"
+                print(f"  stage rollups: {subject_mask_stage_rollup_text}")
+                if show_subject_mask_component_details and subject_mask_component_rows:
+                    print("  details:")
+                    subject_mask_mtime_cache: Dict[str, Optional[int]] = {}
+                    for row in subject_mask_component_rows:
+                        reason = _subject_mask_component_exclusion_reason(
+                            row,
+                            mtime_cache=subject_mask_mtime_cache,
+                        )
+                        stale_reason = _subject_mask_component_stale_reason(
+                            row,
+                            mtime_cache=subject_mask_mtime_cache,
+                        )
+                        passes = _subject_mask_component_row_passes_default_gate(
+                            row,
+                            mtime_cache=subject_mask_mtime_cache,
+                        )
+                        rate = _coerce_float(row.get("rows_with_component_mask_rate"))
+                        print(f"    {row.get('dataset_id')}")
+                        print(f"      use: {row.get('zarr_use') or '—'}")
+                        print(f"      component: {row.get('component_name') or '—'}")
+                        print(f"      stage: {row.get('stage_group') or '—'}")
+                        print(f"      method: {row.get('subject_mask_method') or '—'}")
+                        print(
+                            "      review: "
+                            f"{row.get('review_state') or '—'}/{row.get('review_intended_use') or '—'}"
+                        )
+                        print(f"      available: {1 if _coerce_int(row.get('available')) == 1 else 0}")
+                        print(f"      stale: {1 if stale_reason is not None else 0}")
+                        print(f"      lifecycle: {row.get('lifecycle_state') or '—'}")
+                        print(
+                            f"      coverage: {float(rate):.3f}"
+                            if rate is not None
+                            else "      coverage: —"
+                        )
+                        print(f"      gate: {'PASS' if passes else 'EXCLUDE'}")
+                        print(f"      reason: {reason or '—'}")
 
             print("Eye-Mask Profile")
             print(f"  total rows: {eye_mask_profile_summary.total_rows}")

@@ -24,6 +24,15 @@ DEFAULT_KEYS = [
     "eye_mask_tuning",
     "subdish_mask_tuning",
 ]
+SUBJECT_MASK_TUNING_KEY = "subject_mask_tuning"
+SUBJECT_TUNING_VERSION = "2.0"
+SUPPORTED_SUBJECT_MASK_COMPONENTS = {
+    "subject_body",
+    "eyes_union",
+    "eye_left",
+    "eye_right",
+    "swim_bladder",
+}
 
 
 @dataclass
@@ -109,6 +118,170 @@ def _parse_keys(keys: Optional[str]) -> List[str]:
     return [key.strip() for key in keys.split(",") if key.strip()]
 
 
+def _normalize_subject_mask_component_name(value: object) -> Optional[str]:
+    text = _normalize_attr(value)
+    if text is None:
+        return None
+    normalized = text.strip().lower().replace(" ", "_")
+    if not normalized:
+        return None
+    aliases = {
+        "subject": "subject_body",
+        "body": "subject_body",
+        "subject-body": "subject_body",
+        "eyes": "eyes_union",
+        "eye_union": "eyes_union",
+        "eye-union": "eyes_union",
+        "left_eye": "eye_left",
+        "left-eye": "eye_left",
+        "right_eye": "eye_right",
+        "right-eye": "eye_right",
+        "swimbladder": "swim_bladder",
+        "swim-bladder": "swim_bladder",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in SUPPORTED_SUBJECT_MASK_COMPONENTS:
+        return None
+    return normalized
+
+
+def _parse_subject_mask_components(values: Optional[Sequence[str]]) -> List[str]:
+    components: List[str] = []
+    seen: set[str] = set()
+    for raw_value in values or ():
+        for token in str(raw_value).split(","):
+            token = token.strip()
+            if not token:
+                continue
+            normalized = _normalize_subject_mask_component_name(token)
+            if normalized is None:
+                supported = ", ".join(sorted(SUPPORTED_SUBJECT_MASK_COMPONENTS))
+                raise RuntimeError(
+                    f"Unsupported --subject-mask-components value {token!r}. "
+                    f"Expected one of: {supported}."
+                )
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            components.append(normalized)
+    return components
+
+
+def _normalize_subject_mask_tuning_payload(raw: object) -> Dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        return {"version": SUBJECT_TUNING_VERSION, "components": {}}
+
+    components_raw = raw.get("components")
+    if isinstance(components_raw, Mapping):
+        components: Dict[str, Dict[str, Any]] = {}
+        for key, value in components_raw.items():
+            normalized = _normalize_subject_mask_component_name(key)
+            if normalized is None or not isinstance(value, Mapping):
+                continue
+            components[normalized] = {str(entry_key): deepcopy(entry_value) for entry_key, entry_value in value.items()}
+        payload = {str(key): deepcopy(value) for key, value in raw.items()}
+        payload["version"] = str(payload.get("version") or SUBJECT_TUNING_VERSION)
+        payload["components"] = components
+        return payload
+
+    tuned = raw.get("tuned_parameters")
+    if not isinstance(tuned, Mapping):
+        return {"version": SUBJECT_TUNING_VERSION, "components": {}}
+    return {
+        "version": SUBJECT_TUNING_VERSION,
+        "components": {
+            "subject_body": {
+                "method": str(raw.get("method") or "traditional_subject_mask_seed"),
+                "version": str(raw.get("version") or "1.0"),
+                "tuned_timestamp": raw.get("tuned_timestamp"),
+                "tuned_parameters": {str(key): deepcopy(value) for key, value in tuned.items()},
+                "context": (
+                    {str(key): deepcopy(value) for key, value in raw.get("context", {}).items()}
+                    if isinstance(raw.get("context"), Mapping)
+                    else {}
+                ),
+            }
+        },
+        "migrated_from_flat": True,
+    }
+
+
+def _filter_subject_mask_tuning_payload(
+    raw: object,
+    components: Sequence[str],
+) -> tuple[Dict[str, Any], List[str]]:
+    payload = _normalize_subject_mask_tuning_payload(raw)
+    source_components = payload.get("components", {})
+    filtered_components: Dict[str, Any] = {}
+    missing: List[str] = []
+    for component_name in components:
+        if component_name not in source_components:
+            missing.append(component_name)
+            continue
+        filtered_components[component_name] = deepcopy(source_components[component_name])
+    return {
+        "version": str(payload.get("version") or SUBJECT_TUNING_VERSION),
+        "components": filtered_components,
+    }, missing
+
+
+def _format_tuning_targets(
+    tuning: Mapping[str, object],
+    *,
+    subject_mask_components: Optional[Sequence[str]] = None,
+) -> List[str]:
+    targets: List[str] = []
+    for key in tuning.keys():
+        if key == SUBJECT_MASK_TUNING_KEY and subject_mask_components:
+            targets.extend(f"{key}.components.{component_name}" for component_name in subject_mask_components)
+        else:
+            targets.append(str(key))
+    return targets
+
+
+def _apply_subject_mask_component_updates(
+    attrs: Any,
+    value: object,
+    *,
+    overwrite: bool,
+    merge_dicts: bool,
+) -> tuple[List[str], List[str]]:
+    target_raw = attrs.get(SUBJECT_MASK_TUNING_KEY)
+    target_payload = _normalize_subject_mask_tuning_payload(target_raw)
+    target_components = dict(target_payload.get("components", {}))
+    source_payload = _normalize_subject_mask_tuning_payload(value)
+    source_components = dict(source_payload.get("components", {}))
+
+    updated_paths: List[str] = []
+    skipped_paths: List[str] = []
+    for component_name, component_value in source_components.items():
+        path = f"{SUBJECT_MASK_TUNING_KEY}.components.{component_name}"
+        if component_name in target_components and not overwrite:
+            skipped_paths.append(path)
+            continue
+        if component_name in target_components:
+            new_value = _compute_tuning_value(
+                target_components[component_name],
+                component_value,
+                merge_dicts=merge_dicts,
+            )
+            if new_value == target_components[component_name]:
+                skipped_paths.append(path)
+                continue
+            target_components[component_name] = new_value
+        else:
+            target_components[component_name] = deepcopy(component_value)
+        updated_paths.append(path)
+
+    if not updated_paths:
+        return updated_paths, skipped_paths
+
+    target_payload["version"] = str(target_payload.get("version") or source_payload.get("version") or SUBJECT_TUNING_VERSION)
+    target_payload["components"] = target_components
+    attrs[SUBJECT_MASK_TUNING_KEY] = target_payload
+    return updated_paths, skipped_paths
+
+
 def _read_camera_id_from_zarr(root: zarr.Group) -> Optional[str]:
     camera_id = _normalize_attr(root.attrs.get("camera_id"))
     if camera_id:
@@ -187,13 +360,35 @@ def _camera_id_for_zarr(zarr_path: Path, root: zarr.Group) -> Optional[str]:
         return None
 
 
-def _load_source_tuning(source_zarr: Path, keys: Sequence[str]) -> Dict[str, object]:
+def _load_source_tuning(
+    source_zarr: Path,
+    keys: Sequence[str],
+    *,
+    subject_mask_components: Optional[Sequence[str]] = None,
+) -> Dict[str, object]:
     root = _open_group(source_zarr, mode="r")
     analysis = root.get("analysis_metadata")
     if analysis is None:
         return {}
     attrs = dict(analysis.attrs)
-    return {key: attrs[key] for key in keys if key in attrs}
+    if subject_mask_components and SUBJECT_MASK_TUNING_KEY in keys and SUBJECT_MASK_TUNING_KEY not in attrs:
+        raise RuntimeError("Source Zarr is missing subject_mask_tuning.")
+    tuning: Dict[str, object] = {}
+    for key in keys:
+        if key not in attrs:
+            continue
+        value = attrs[key]
+        if key == SUBJECT_MASK_TUNING_KEY and subject_mask_components:
+            filtered_value, missing_components = _filter_subject_mask_tuning_payload(value, subject_mask_components)
+            if missing_components:
+                missing_text = ", ".join(missing_components)
+                raise RuntimeError(
+                    f"Source Zarr is missing requested subject_mask_tuning components: {missing_text}."
+                )
+            tuning[key] = filtered_value
+            continue
+        tuning[key] = value
+    return tuning
 
 
 def _merge_mapping_values(base: Mapping[str, Any], update: Mapping[str, Any]) -> Dict[str, Any]:
@@ -326,6 +521,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         help=f"Comma-separated tuning keys to copy (default: {', '.join(DEFAULT_KEYS)}; use 'all').",
     )
     parser.add_argument(
+        "--subject-mask-components",
+        action="append",
+        help=(
+            "Optional comma-separated subject_mask_tuning component names to copy "
+            "(for example swim_bladder). Preserves unrelated target components and "
+            "skips matching target components unless --overwrite is given."
+        ),
+    )
+    parser.add_argument(
         "--recursive",
         action="store_true",
         help="Recursively scan for zarr archives under each root.",
@@ -380,10 +584,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     keys = _parse_keys(args.keys)
-    tuning = _load_source_tuning(source, keys)
+    try:
+        subject_mask_components = _parse_subject_mask_components(args.subject_mask_components)
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    if subject_mask_components and SUBJECT_MASK_TUNING_KEY not in keys:
+        print("--subject-mask-components requires subject_mask_tuning to be included in --keys.")
+        return 1
+    try:
+        tuning = _load_source_tuning(
+            source,
+            keys,
+            subject_mask_components=subject_mask_components,
+        )
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
     if not tuning:
         print("No matching tuning keys found in source analysis_metadata.")
         return 1
+    tuning_targets = _format_tuning_targets(
+        tuning,
+        subject_mask_components=subject_mask_components,
+    )
 
     plans = _build_plans(roots, bool(args.recursive), camera_id, target_use, source)
     if not plans:
@@ -420,13 +644,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "zarr": str(plan.zarr_path),
                 "camera_id": plan.camera_id,
                 "zarr_use": plan.zarr_use,
-                "keys": list(tuning.keys()),
+                "keys": tuning_targets,
             }
             if args.json:
                 print(json.dumps(payload, sort_keys=True))
             else:
                 print(
-                    f"Would apply {list(tuning.keys())} to {plan.zarr_path} "
+                    f"Would apply {tuning_targets} to {plan.zarr_path} "
                     f"(camera_id={plan.camera_id}, zarr_use={plan.zarr_use or 'unknown'})"
                 )
             continue
@@ -438,6 +662,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             updated: List[str] = []
             skipped_keys: List[str] = []
             for key, value in tuning.items():
+                if key == SUBJECT_MASK_TUNING_KEY and subject_mask_components:
+                    component_updates, component_skips = _apply_subject_mask_component_updates(
+                        attrs,
+                        value,
+                        overwrite=bool(args.overwrite),
+                        merge_dicts=bool(args.merge_dicts),
+                    )
+                    updated.extend(component_updates)
+                    skipped_keys.extend(component_skips)
+                    continue
                 if key in attrs and args.merge_dicts and isinstance(attrs[key], Mapping) and isinstance(value, Mapping):
                     merged_value = _compute_tuning_value(attrs[key], value, merge_dicts=True)
                     if merged_value == attrs[key]:
@@ -500,7 +734,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  source: {source}")
     print(f"  camera_id: {camera_id}")
     print(f"  zarr_use: {target_use or 'all'}")
-    print(f"  keys: {list(tuning.keys())}")
+    print(f"  keys: {tuning_targets}")
     print(f"  planned_ok: {len(ok_plans)}")
     print(f"  pre_skipped: {len(pre_skipped)}")
     print(f"  pre_errors: {len(pre_errors)}")

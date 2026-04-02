@@ -1374,6 +1374,8 @@ def test_schema_has_subject_mask_component_quality_table_views_and_indexes(tmp_p
         FROM sqlite_master
         WHERE type = 'view' AND name IN (
             'subject_mask_component_quality_current',
+            'subject_mask_component_quality_latest',
+            'subject_mask_component_quality_latest_by_recording',
             'subject_mask_component_quality_overview',
             'recording_subject_mask_component_quality_overview'
         );
@@ -1382,6 +1384,8 @@ def test_schema_has_subject_mask_component_quality_table_views_and_indexes(tmp_p
     view_names = {str(row["name"]) for row in views}
     assert view_names == {
         "subject_mask_component_quality_current",
+        "subject_mask_component_quality_latest",
+        "subject_mask_component_quality_latest_by_recording",
         "subject_mask_component_quality_overview",
         "recording_subject_mask_component_quality_overview",
     }
@@ -7700,6 +7704,46 @@ def test_backfill_subject_mask_component_quality_dry_run_and_apply(tmp_path: Pat
     assert str(refined_swim["review_state"]) == "needs_review"
     assert float(refined_swim["rows_with_component_mask_rate"]) == pytest.approx(0.5)
     assert str(refined_swim["lifecycle_state"]) == "in_progress"
+
+    latest_rows = registry.conn.execute(
+        """
+        SELECT
+            component_name,
+            stage_group,
+            run_name,
+            available,
+            review_state
+        FROM subject_mask_component_quality_latest
+        WHERE dataset_id = ?
+        ORDER BY component_name;
+        """,
+        (dataset_id,),
+    ).fetchall()
+    latest_by_component = {str(row["component_name"]): row for row in latest_rows}
+    assert len(latest_by_component) == 4
+    assert str(latest_by_component["subject_body"]["stage_group"]) == "refined_subject_masks_runs"
+    assert str(latest_by_component["subject_body"]["run_name"]) == "refined_subject_masks_001"
+    assert int(latest_by_component["subject_body"]["available"]) == 1
+    assert str(latest_by_component["subject_body"]["review_state"]) == "approved"
+    assert str(latest_by_component["swim_bladder"]["stage_group"]) == "refined_subject_masks_runs"
+    assert int(latest_by_component["swim_bladder"]["available"]) == 1
+
+    recording_latest_rows = registry.conn.execute(
+        """
+        SELECT
+            component_name,
+            stage_group,
+            run_name
+        FROM subject_mask_component_quality_latest_by_recording
+        WHERE recording_id = ?
+        ORDER BY component_name;
+        """,
+        ("subject_mask_registry_session",),
+    ).fetchall()
+    recording_latest = {str(row["component_name"]): row for row in recording_latest_rows}
+    assert len(recording_latest) == 4
+    assert str(recording_latest["eye_left"]["stage_group"]) == "refined_subject_masks_runs"
+    assert str(recording_latest["eye_left"]["run_name"]) == "refined_subject_masks_001"
     registry.close()
 
 
@@ -7770,6 +7814,343 @@ def test_backfill_subject_mask_registry_marks_refined_rows_stale_when_latest_raw
     ).fetchone()
     assert refined_component is not None
     assert str(refined_component["lifecycle_state"]) == "stale"
+
+    latest_rows = registry.conn.execute(
+        """
+        SELECT
+            component_name,
+            stage_group,
+            run_name
+        FROM subject_mask_component_quality_latest
+        WHERE dataset_id = ?
+        ORDER BY component_name;
+        """,
+        (dataset_id,),
+    ).fetchall()
+    latest_by_component = {str(row["component_name"]): row for row in latest_rows}
+    assert str(latest_by_component["subject_body"]["stage_group"]) == "subject_mask_runs"
+    assert str(latest_by_component["subject_body"]["run_name"]) == "subject_masks_002"
+    assert str(latest_by_component["swim_bladder"]["stage_group"]) == "subject_mask_runs"
+    assert str(latest_by_component["swim_bladder"]["run_name"]) == "subject_masks_002"
+    registry.close()
+
+
+def test_subject_mask_component_latest_views_project_eye_stage_compat_and_preserve_native_priority(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+
+    registry.upsert_dataset(
+        "dataset_eye_only",
+        session_uuid="session_eye_only",
+        zarr_path=tmp_path / "eye_only.zarr",
+        recording_id="recording_eye_only",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_dataset(
+        "dataset_native",
+        session_uuid="session_native",
+        zarr_path=tmp_path / "native_subject.zarr",
+        recording_id="recording_native",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_eye_only",
+        stage_group="eye_masks_runs",
+        run_name="eye_masks_eye_only",
+        run_created_utc="2026-03-01T00:00:00+00:00",
+        recording_id="recording_eye_only",
+        zarr_use="analysis",
+        method="traditional_eye_segmentation",
+        source_crop_run="crop_eye_only",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="kp_eye_only",
+        source_eye_masks_run=None,
+        source_eye_masks_method=None,
+        total_rois=100,
+        successful_eyes=180,
+        successful_roi_pairs=90,
+        successful_roi_pair_rate=0.9,
+        duration_seconds=20.0,
+        rois_per_second=5.0,
+        inference_duration_seconds=None,
+        inference_average_fps=5.0,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        zarr_mtime_ns=111,
+    )
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_eye_only",
+        stage_group="refined_eye_masks_runs",
+        run_name="refined_eye_masks_eye_only",
+        run_created_utc="2026-03-01T00:10:00+00:00",
+        recording_id="recording_eye_only",
+        zarr_use="analysis",
+        method="refine_eye_masks",
+        source_crop_run="crop_eye_only",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="kp_eye_only",
+        source_eye_masks_run="eye_masks_eye_only",
+        source_eye_masks_method="traditional_eye_segmentation",
+        total_rois=100,
+        successful_eyes=196,
+        successful_roi_pairs=98,
+        successful_roi_pair_rate=0.98,
+        duration_seconds=10.0,
+        rois_per_second=10.0,
+        inference_duration_seconds=None,
+        inference_average_fps=10.0,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="pytest",
+        review_timestamp_utc="2026-03-01T00:11:00+00:00",
+        lifecycle_state="approved",
+        lifecycle_reason="approved",
+        zarr_mtime_ns=111,
+    )
+
+    registry.upsert_subject_mask_performance(
+        dataset_id="dataset_native",
+        stage_group="subject_mask_runs",
+        run_name="subject_masks_native",
+        run_created_utc="2026-03-01T01:00:00+00:00",
+        recording_id="recording_native",
+        zarr_use="analysis",
+        subject_mask_method="subject_mask_threshold_lr_v1",
+        label_schema_id="subject_v1_lr",
+        source_crop_run="crop_native",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="kp_native",
+        source_subject_mask_run=None,
+        source_subject_mask_method=None,
+        run_semantics="traditional_subject_body_inference",
+        probability_semantics="normalized_background_diff",
+        source_background_run=None,
+        source_background_array=None,
+        source_dish_mask_array=None,
+        tuning_source=None,
+        tuning_timestamp=None,
+        total_rois=100,
+        rows_with_any_mask=100,
+        coverage_percent=100.0,
+        duration_seconds=20.0,
+        rois_per_second=5.0,
+        available_component_count=4,
+        available_components_json=json.dumps(["subject_body", "eye_left", "eye_right", "swim_bladder"]),
+        unavailable_components_json=json.dumps([]),
+        component_review_states_json=json.dumps(
+            {
+                "eye_left": {"state": "approved", "intended_use": "training"},
+                "eye_right": {"state": "approved", "intended_use": "training"},
+            }
+        ),
+        eye_component_mode="lr",
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="pytest",
+        review_timestamp_utc="2026-03-01T01:01:00+00:00",
+        lifecycle_state="approved",
+        lifecycle_reason="approved",
+        zarr_mtime_ns=222,
+    )
+    for component_name in ("eye_left", "eye_right"):
+        registry.upsert_subject_mask_component_quality(
+            dataset_id="dataset_native",
+            stage_group="subject_mask_runs",
+            run_name="subject_masks_native",
+            component_name=component_name,
+            component_family="eyes",
+            run_created_utc="2026-03-01T01:00:00+00:00",
+            recording_id="recording_native",
+            zarr_use="analysis",
+            subject_mask_method="subject_mask_threshold_lr_v1",
+            label_schema_id="subject_v1_lr",
+            eye_component_mode="lr",
+            source_subject_mask_run=None,
+            available=1,
+            review_state="approved",
+            review_method="manual",
+            review_intended_use="training",
+            review_reviewer="pytest",
+            review_timestamp_utc="2026-03-01T01:01:00+00:00",
+            total_rois=100,
+            rows_with_component_mask=95,
+            rows_with_component_mask_rate=0.95,
+            lifecycle_state="approved",
+            lifecycle_reason="approved",
+            quality_updated_utc="2026-03-01T01:01:00+00:00",
+            zarr_mtime_ns=222,
+        )
+
+    registry.upsert_subject_mask_performance(
+        dataset_id="dataset_native",
+        stage_group="refined_subject_masks_runs",
+        run_name="refined_subject_masks_native",
+        run_created_utc="2026-03-01T01:05:00+00:00",
+        recording_id="recording_native",
+        zarr_use="analysis",
+        subject_mask_method="refine_subject_masks",
+        label_schema_id="subject_v1_lr",
+        source_crop_run="crop_native",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="kp_native",
+        source_subject_mask_run="subject_masks_native",
+        source_subject_mask_method="subject_mask_threshold_lr_v1",
+        run_semantics=None,
+        probability_semantics=None,
+        source_background_run=None,
+        source_background_array=None,
+        source_dish_mask_array=None,
+        tuning_source=None,
+        tuning_timestamp=None,
+        total_rois=100,
+        rows_with_any_mask=100,
+        coverage_percent=100.0,
+        duration_seconds=10.0,
+        rois_per_second=10.0,
+        available_component_count=4,
+        available_components_json=json.dumps(["subject_body", "eye_left", "eye_right", "swim_bladder"]),
+        unavailable_components_json=json.dumps([]),
+        component_review_states_json=json.dumps(
+            {
+                "eye_left": {"state": "approved", "intended_use": "training"},
+                "eye_right": {"state": "approved", "intended_use": "training"},
+            }
+        ),
+        eye_component_mode="lr",
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="pytest",
+        review_timestamp_utc="2026-03-01T01:06:00+00:00",
+        lifecycle_state="approved",
+        lifecycle_reason="approved",
+        zarr_mtime_ns=222,
+    )
+    for component_name in ("eye_left", "eye_right"):
+        registry.upsert_subject_mask_component_quality(
+            dataset_id="dataset_native",
+            stage_group="refined_subject_masks_runs",
+            run_name="refined_subject_masks_native",
+            component_name=component_name,
+            component_family="eyes",
+            run_created_utc="2026-03-01T01:05:00+00:00",
+            recording_id="recording_native",
+            zarr_use="analysis",
+            subject_mask_method="refine_subject_masks",
+            label_schema_id="subject_v1_lr",
+            eye_component_mode="lr",
+            source_subject_mask_run="subject_masks_native",
+            available=1,
+            review_state="approved",
+            review_method="manual",
+            review_intended_use="training",
+            review_reviewer="pytest",
+            review_timestamp_utc="2026-03-01T01:06:00+00:00",
+            total_rois=100,
+            rows_with_component_mask=97,
+            rows_with_component_mask_rate=0.97,
+            lifecycle_state="approved",
+            lifecycle_reason="approved",
+            quality_updated_utc="2026-03-01T01:06:00+00:00",
+            zarr_mtime_ns=222,
+        )
+
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_native",
+        stage_group="refined_eye_masks_runs",
+        run_name="refined_eye_masks_native",
+        run_created_utc="2026-03-01T01:20:00+00:00",
+        recording_id="recording_native",
+        zarr_use="analysis",
+        method="refine_eye_masks",
+        source_crop_run="crop_native",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="kp_native",
+        source_eye_masks_run="eye_masks_native",
+        source_eye_masks_method="traditional_eye_segmentation",
+        total_rois=100,
+        successful_eyes=198,
+        successful_roi_pairs=99,
+        successful_roi_pair_rate=0.99,
+        duration_seconds=8.0,
+        rois_per_second=12.5,
+        inference_duration_seconds=None,
+        inference_average_fps=12.5,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="pytest",
+        review_timestamp_utc="2026-03-01T01:21:00+00:00",
+        lifecycle_state="approved",
+        lifecycle_reason="approved",
+        zarr_mtime_ns=222,
+    )
+
+    rows = registry.conn.execute(
+        """
+        SELECT
+            dataset_id,
+            component_name,
+            stage_group,
+            run_name,
+            subject_mask_method,
+            label_schema_id,
+            eye_component_mode,
+            rows_with_component_mask,
+            rows_with_component_mask_rate
+        FROM subject_mask_component_quality_latest
+        WHERE component_name IN ('eye_left', 'eye_right')
+        ORDER BY dataset_id, component_name;
+        """
+    ).fetchall()
+    by_key = {(str(row["dataset_id"]), str(row["component_name"])): row for row in rows}
+
+    eye_only_left = by_key[("dataset_eye_only", "eye_left")]
+    assert str(eye_only_left["stage_group"]) == "refined_eye_masks_runs"
+    assert str(eye_only_left["run_name"]) == "refined_eye_masks_eye_only"
+    assert str(eye_only_left["subject_mask_method"]) == "refine_eye_masks"
+    assert str(eye_only_left["label_schema_id"]) == "subject_v1_lr"
+    assert str(eye_only_left["eye_component_mode"]) == "lr"
+    assert int(eye_only_left["rows_with_component_mask"]) == 98
+    assert float(eye_only_left["rows_with_component_mask_rate"]) == pytest.approx(0.98)
+
+    native_left = by_key[("dataset_native", "eye_left")]
+    assert str(native_left["stage_group"]) == "refined_subject_masks_runs"
+    assert str(native_left["run_name"]) == "refined_subject_masks_native"
+    assert str(native_left["subject_mask_method"]) == "refine_subject_masks"
+    assert int(native_left["rows_with_component_mask"]) == 97
+    assert float(native_left["rows_with_component_mask_rate"]) == pytest.approx(0.97)
+
+    recording_rows = registry.conn.execute(
+        """
+        SELECT
+            recording_id,
+            component_name,
+            stage_group,
+            run_name
+        FROM subject_mask_component_quality_latest_by_recording
+        WHERE recording_id IN ('recording_eye_only', 'recording_native')
+        ORDER BY recording_id, component_name;
+        """
+    ).fetchall()
+    recording_by_key = {(str(row["recording_id"]), str(row["component_name"])): row for row in recording_rows}
+    assert str(recording_by_key[("recording_eye_only", "eye_right")]["stage_group"]) == "refined_eye_masks_runs"
+    assert str(recording_by_key[("recording_native", "eye_right")]["stage_group"]) == "refined_subject_masks_runs"
+
     registry.close()
 
 

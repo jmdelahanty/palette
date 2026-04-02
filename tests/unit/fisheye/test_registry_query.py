@@ -598,6 +598,226 @@ def _seed_eye_mask_performance_rows(registry_path: Path) -> None:
     registry.close()
 
 
+def _seed_subject_mask_component_rows(registry_path: Path) -> None:
+    registry = Registry(registry_path)
+
+    registry.upsert_subject_mask_performance(
+        dataset_id="dataset_a",
+        stage_group="subject_mask_runs",
+        run_name="subject_masks_a",
+        run_created_utc="2026-02-12T00:00:00+00:00",
+        recording_id="recording_a",
+        zarr_use="analysis",
+        subject_mask_method="subject_mask_threshold_lr_v1",
+        label_schema_id="subject_v1_lr",
+        source_crop_run="crop_a",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="refined_kp_a",
+        source_subject_mask_run=None,
+        source_subject_mask_method=None,
+        run_semantics="traditional_subject_body_inference",
+        probability_semantics="normalized_background_diff",
+        source_background_run=None,
+        source_background_array=None,
+        source_dish_mask_array=None,
+        tuning_source=None,
+        tuning_timestamp=None,
+        total_rois=200,
+        rows_with_any_mask=200,
+        coverage_percent=100.0,
+        duration_seconds=30.0,
+        rois_per_second=6.7,
+        available_component_count=4,
+        available_components_json=json.dumps(["subject_body", "eye_left", "eye_right", "swim_bladder"]),
+        unavailable_components_json=json.dumps([]),
+        component_review_states_json=json.dumps(
+            {
+                "eye_left": {"state": "approved", "intended_use": "training"},
+                "eye_right": {"state": "approved", "intended_use": "training"},
+            }
+        ),
+        eye_component_mode="lr",
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="alice",
+        review_timestamp_utc="2026-02-12T00:01:00+00:00",
+        lifecycle_state="approved",
+        lifecycle_reason="approved",
+        zarr_mtime_ns=123456789,
+    )
+    registry.upsert_subject_mask_component_quality(
+        dataset_id="dataset_a",
+        stage_group="refined_subject_masks_runs",
+        run_name="refined_subject_masks_a",
+        component_name="eye_left",
+        component_family="eyes",
+        run_created_utc="2026-02-12T00:05:00+00:00",
+        recording_id="recording_a",
+        zarr_use="analysis",
+        subject_mask_method="refine_subject_masks",
+        label_schema_id="subject_v1_lr",
+        eye_component_mode="lr",
+        source_subject_mask_run="subject_masks_a",
+        available=1,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="alice",
+        review_timestamp_utc="2026-02-12T00:06:00+00:00",
+        total_rois=200,
+        rows_with_component_mask=194,
+        rows_with_component_mask_rate=0.97,
+        lifecycle_state="approved",
+        lifecycle_reason="approved",
+        quality_updated_utc="2026-02-12T00:06:00+00:00",
+        zarr_mtime_ns=123456789,
+    )
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_a",
+        stage_group="refined_eye_masks_runs",
+        run_name="refined_eye_masks_a",
+        run_created_utc="2026-02-12T00:10:00+00:00",
+        recording_id="recording_a",
+        zarr_use="analysis",
+        method="refine_eye_masks",
+        source_crop_run="crop_a",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="refined_kp_a",
+        source_eye_masks_run="eye_masks_a",
+        source_eye_masks_method="traditional_eye_segmentation",
+        total_rois=200,
+        successful_eyes=198,
+        successful_roi_pairs=99,
+        successful_roi_pair_rate=0.99,
+        duration_seconds=40.0,
+        rois_per_second=5.0,
+        inference_duration_seconds=None,
+        inference_average_fps=5.0,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="alice",
+        review_timestamp_utc="2026-02-12T00:11:00+00:00",
+        lifecycle_state="approved",
+        lifecycle_reason="approved",
+        zarr_mtime_ns=123456789,
+    )
+
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_b",
+        stage_group="refined_eye_masks_runs",
+        run_name="refined_eye_masks_b",
+        run_created_utc="2026-02-12T01:00:00+00:00",
+        recording_id="recording_b",
+        zarr_use="analysis",
+        method="refine_eye_masks",
+        source_crop_run="crop_b",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="refined_kp_b",
+        source_eye_masks_run="eye_masks_b",
+        source_eye_masks_method="traditional_eye_segmentation",
+        total_rois=180,
+        successful_eyes=176,
+        successful_roi_pairs=88,
+        successful_roi_pair_rate=0.9777,
+        duration_seconds=30.0,
+        rois_per_second=6.0,
+        inference_duration_seconds=None,
+        inference_average_fps=6.0,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="bob",
+        review_timestamp_utc="2026-02-12T01:01:00+00:00",
+        lifecycle_state="approved",
+        lifecycle_reason="approved",
+        zarr_mtime_ns=123456789,
+    )
+
+    registry.upsert_subject_mask_performance(
+        dataset_id="dataset_c",
+        stage_group="subject_mask_runs",
+        run_name="subject_masks_c",
+        run_created_utc="2026-02-12T02:00:00+00:00",
+        recording_id="recording_c",
+        zarr_use="analysis",
+        subject_mask_method="subject_mask_threshold_lr_v1",
+        label_schema_id="subject_v1_lr",
+        source_crop_run="crop_c",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="refined_kp_c",
+        source_subject_mask_run=None,
+        source_subject_mask_method=None,
+        run_semantics="traditional_subject_body_inference",
+        probability_semantics="normalized_background_diff",
+        source_background_run=None,
+        source_background_array=None,
+        source_dish_mask_array=None,
+        tuning_source=None,
+        tuning_timestamp=None,
+        total_rois=220,
+        rows_with_any_mask=220,
+        coverage_percent=100.0,
+        duration_seconds=35.0,
+        rois_per_second=6.3,
+        available_component_count=2,
+        available_components_json=json.dumps(["subject_body", "swim_bladder"]),
+        unavailable_components_json=json.dumps(["eye_left", "eye_right"]),
+        component_review_states_json=json.dumps(
+            {
+                "swim_bladder": {"state": "needs_review", "intended_use": "training"},
+            }
+        ),
+        eye_component_mode="lr",
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="needs_review",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="carol",
+        review_timestamp_utc="2026-02-12T02:01:00+00:00",
+        lifecycle_state="in_progress",
+        lifecycle_reason="needs_review",
+        zarr_mtime_ns=123456789,
+    )
+    registry.upsert_subject_mask_component_quality(
+        dataset_id="dataset_c",
+        stage_group="subject_mask_runs",
+        run_name="subject_masks_c",
+        component_name="swim_bladder",
+        component_family="swim_bladder",
+        run_created_utc="2026-02-12T02:00:00+00:00",
+        recording_id="recording_c",
+        zarr_use="analysis",
+        subject_mask_method="subject_mask_threshold_lr_v1",
+        label_schema_id="subject_v1_lr",
+        eye_component_mode="lr",
+        source_subject_mask_run=None,
+        available=1,
+        review_state="needs_review",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="carol",
+        review_timestamp_utc="2026-02-12T02:01:00+00:00",
+        total_rois=220,
+        rows_with_component_mask=110,
+        rows_with_component_mask_rate=0.5,
+        lifecycle_state="in_progress",
+        lifecycle_reason="needs_review",
+        quality_updated_utc="2026-02-12T02:01:00+00:00",
+        zarr_mtime_ns=123456789,
+    )
+
+    registry.close()
+
+
 def _seed_keypoint_quality_and_performance_rows(registry_path: Path) -> None:
     registry = Registry(registry_path)
 
@@ -2385,6 +2605,98 @@ def test_registry_query_filters_by_eye_mask_stage_and_success_rate(tmp_path: Pat
     assert {row["dataset_id"] for row in payload} == {"dataset_c"}
     assert payload[0]["eye_mask_stage_group"] == "eye_masks_runs"
     assert payload[0]["eye_mask_successful_roi_pair_rate"] == pytest.approx(0.9545)
+
+
+def test_registry_query_filters_by_subject_mask_component_eye_compat_stage(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_subject_mask_component_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--subject-mask-component",
+            "eye_left",
+            "--subject-mask-stage",
+            "refined_eye_masks_runs",
+            "--subject-mask-review-state",
+            "approved",
+            "--subject-mask-review-intended-use",
+            "training",
+            "--subject-mask-coverage-min",
+            "0.97",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in payload} == {"dataset_b"}
+    assert payload[0]["subject_mask_component_name"] == "eye_left"
+    assert payload[0]["subject_mask_component_stage_group"] == "refined_eye_masks_runs"
+    assert payload[0]["subject_mask_component_method"] == "refine_eye_masks"
+    assert payload[0]["subject_mask_component_rows_with_component_mask_rate"] == pytest.approx(0.9777)
+
+
+def test_registry_query_subject_mask_component_prefers_native_refined_subject_rows(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_subject_mask_component_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--subject-mask-component",
+            "eye_left",
+            "--subject-mask-review-state",
+            "approved",
+            "--subject-mask-review-intended-use",
+            "training",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    by_dataset = {row["dataset_id"]: row for row in payload}
+    assert set(by_dataset) == {"dataset_a", "dataset_b"}
+    assert by_dataset["dataset_a"]["subject_mask_component_stage_group"] == "refined_subject_masks_runs"
+    assert by_dataset["dataset_a"]["subject_mask_component_run"] == "refined_subject_masks_a"
+    assert by_dataset["dataset_a"]["subject_mask_component_method"] == "refine_subject_masks"
+    assert by_dataset["dataset_b"]["subject_mask_component_stage_group"] == "refined_eye_masks_runs"
+
+
+def test_registry_query_filters_by_subject_mask_component_raw_swim_state(tmp_path: Path, capsys) -> None:
+    registry_path = tmp_path / "registry.sqlite"
+    _seed_registry_for_detect_filters(registry_path)
+    _seed_subject_mask_component_rows(registry_path)
+
+    rc = registry_query_main(
+        [
+            "--registry",
+            str(registry_path),
+            "--subject-mask-component",
+            "swim_bladder",
+            "--subject-mask-stage",
+            "subject_mask_runs",
+            "--subject-mask-lifecycle-state",
+            "in_progress",
+            "--subject-mask-review-state",
+            "needs_review",
+            "--subject-mask-available",
+            "1",
+            "--subject-mask-coverage-min",
+            "0.5",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {row["dataset_id"] for row in payload} == {"dataset_c"}
+    assert payload[0]["subject_mask_component_name"] == "swim_bladder"
+    assert payload[0]["subject_mask_component_stage_group"] == "subject_mask_runs"
+    assert payload[0]["subject_mask_component_lifecycle_state"] == "in_progress"
+    assert payload[0]["subject_mask_component_review_state"] == "needs_review"
 
 
 def test_registry_query_filters_by_keypoint_review_and_usable_rate(tmp_path: Path, capsys) -> None:

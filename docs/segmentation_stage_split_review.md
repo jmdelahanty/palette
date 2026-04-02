@@ -61,7 +61,17 @@ without breaking the eye-specific refinement and training stack.
 | Surface | Entrypoint | Current write target | Notes |
 | --- | --- | --- | --- |
 | Eye refinement | `src/fisheye/refinement/refine_eye_masks.py` -> `refine_eye_masks(...)` | `refined_eye_masks_runs/<run>` | Still the authoritative refined eye stage for geometry, ellipses, contours, and eye QA in v1. |
-| Subject-mask review/editor | `src/fisheye/tune/refined_subject_mask_review.py` -> `prepare_refined_subject_run(...)` | `refined_subject_masks_runs/<run>` | Current default focus is body and swim bladder, though the stage family can carry other subject-mask components. |
+| Subject-mask review/editor | `src/fisheye/tune/refined_subject_mask_review.py` -> `prepare_refined_subject_run(...)` | `refined_subject_masks_runs/<run>` | Current default focus is body and swim bladder. New run creation currently seeds from `subject_mask_runs` sources, not directly from `refined_eye_masks_runs`. |
+
+Implementation note as of 2026-04-02:
+
+- direct `refined_eye_masks_runs` -> `refined_subject_masks_runs` seeding is
+  not yet shipped
+- the implemented unified path for legacy eye data is:
+  `eye_masks_runs` or `refined_eye_masks_runs`
+  -> `subject_mask_runs/<compat_run>` via backfill/projection
+  -> `refined_subject_masks_runs/<run>` via review preparation or multi-source
+  assembly
 
 ## Current Mismatches
 

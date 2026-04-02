@@ -9,6 +9,7 @@ import pytest
 import zarr
 
 from fisheye.registry.db import Registry
+from fisheye.registry.status_ledger import upsert_recording_step_status
 from fisheye.utils import check_recording_steps as mod
 
 
@@ -171,6 +172,15 @@ def test_track_status_format_helpers() -> None:
     assert mod._track_status_rich(True, "block", 1, 25.0) == "[yellow]WARN[/yellow] (1 unassigned, 25.0%)"  # noqa: SLF001
 
 
+def test_display_field_label_marks_legacy_eye_and_unified_subject_fields() -> None:
+    assert mod._display_field_label("eye_masks") == "eye_masks (legacy compat)"  # noqa: SLF001
+    assert mod._display_field_label("refined_eye_masks") == "refined_eye_masks (legacy compat)"  # noqa: SLF001
+    assert mod._display_field_label("eye_mask_review_status") == "eye_mask_review_status (legacy compat)"  # noqa: SLF001
+    assert mod._display_field_label("subject_mask_components") == "subject_mask_components (unified)"  # noqa: SLF001
+    assert mod._display_field_label("refined_subject_mask_components") == "refined_subject_mask_components (unified)"  # noqa: SLF001
+    assert mod._display_field_label("detect") == "detect"  # noqa: SLF001
+
+
 def test_check_zarr_reads_track_unassigned_warning_from_latest_run(tmp_path: Path) -> None:
     zarr_path = tmp_path / "track_warning_analysis.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
@@ -191,6 +201,103 @@ def test_check_zarr_reads_track_unassigned_warning_from_latest_run(tmp_path: Pat
     assert info["track_qc_state"] == "warn"
     assert info["track_unassigned_rows"] == 1
     assert info["track_unassigned_rate_percent"] == pytest.approx(25.0)
+
+
+def test_check_zarr_reads_subject_mask_status_and_components(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "subject_mask_status_analysis.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+
+    subject_parent = root.create_group("subject_mask_runs")
+    subject_parent.attrs["latest"] = "subject_masks_001"
+    subject_run = subject_parent.create_group("subject_masks_001")
+    subject_run.attrs["mask_labels"] = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    subject_run.attrs["subject_mask_review_status"] = {
+        "state": "approved",
+        "method": "manual",
+        "intended_use": "training",
+    }
+    subject_run.attrs["component_review_statuses"] = {
+        "eye_left": {"state": "approved"},
+        "eye_right": {"state": "approved"},
+    }
+    subject_run.create_array(
+        "available_channels",
+        data=np.array([False, True, True, False], dtype=np.bool_),
+    )
+    subject_metrics = subject_run.create_group("metrics")
+    subject_metrics.create_array(
+        "mask_present",
+        data=np.array(
+            [
+                [False, True, True, False],
+                [False, True, True, False],
+                [False, True, True, False],
+                [False, True, True, False],
+            ],
+            dtype=np.bool_,
+        ),
+    )
+
+    refined_parent = root.create_group("refined_subject_masks_runs")
+    refined_parent.attrs["latest"] = "refined_subject_masks_001"
+    refined_run = refined_parent.create_group("refined_subject_masks_001")
+    refined_run.attrs["mask_labels"] = ["subject_body", "eye_left", "eye_right", "swim_bladder"]
+    refined_run.attrs["refined_subject_mask_review_status"] = {
+        "state": "pending",
+        "method": "manual",
+        "intended_use": "training",
+    }
+    refined_run.attrs["component_review_statuses"] = {
+        "subject_body": {"state": "approved"},
+        "eye_left": {"state": "approved"},
+        "eye_right": {"state": "approved"},
+        "swim_bladder": {"state": "needs_review"},
+    }
+    refined_run.create_array(
+        "available_channels",
+        data=np.array([True, True, True, True], dtype=np.bool_),
+    )
+    refined_metrics = refined_run.create_group("metrics")
+    refined_metrics.create_array(
+        "mask_present",
+        data=np.array(
+            [
+                [True, True, True, True],
+                [True, True, True, True],
+                [True, True, True, False],
+                [True, True, True, False],
+            ],
+            dtype=np.bool_,
+        ),
+    )
+
+    info = mod._check_zarr(zarr_path, tuning_keys=[])  # noqa: SLF001
+
+    assert info["subject_masks_present"] is True
+    assert info["subject_masks_coverage"] == pytest.approx(100.0)
+    assert info["subject_mask_available_components"] == ["eye_left", "eye_right"]
+    assert info["subject_mask_unavailable_components"] == ["subject_body", "swim_bladder"]
+    assert info["subject_mask_component_review_states"] == {
+        "eye_left": "approved",
+        "eye_right": "approved",
+    }
+    assert info["refined_subject_masks_present"] is True
+    assert info["refined_subject_masks_coverage"] == pytest.approx(100.0)
+    assert info["refined_subject_mask_available_components"] == [
+        "subject_body",
+        "eye_left",
+        "eye_right",
+        "swim_bladder",
+    ]
+    assert info["refined_subject_mask_component_review_states"] == {
+        "subject_body": "approved",
+        "eye_left": "approved",
+        "eye_right": "approved",
+        "swim_bladder": "needs_review",
+    }
+    review_status = info["refined_subject_mask_review_status"]
+    assert isinstance(review_status, dict)
+    assert review_status["state"] == "pending"
 
 
 def test_registry_crop_review_status_for_zarr_returns_latest_review_fields(tmp_path: Path) -> None:
@@ -262,6 +369,103 @@ def test_registry_crop_review_status_for_zarr_returns_latest_review_fields(tmp_p
     assert status["intended_use"] == "training"
     assert status["reviewer"] == "alice"
     assert status["timestamp_utc"] == "2026-02-10T10:30:00+00:00"
+
+
+def test_registry_status_payload_reads_subject_mask_status_and_components(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "subject_mask_registry_analysis.zarr"
+    zarr.open_group(str(zarr_path), mode="w")
+
+    registry_path = tmp_path / "registry.sqlite"
+    registry = Registry(registry_path)
+    registry.upsert_dataset(
+        "dataset_subject",
+        session_uuid="session_subject",
+        zarr_path=zarr_path,
+        recording_id="recording_subject",
+        artifact_kind="source_recording",
+        zarr_use="analysis",
+    )
+    registry.upsert_provenance(
+        "dataset_subject",
+        provenance={},
+        context={},
+        protocol_name=None,
+        protocol_hash=None,
+        acquisition={},
+        zarr_purpose="analysis",
+    )
+    upsert_recording_step_status(
+        registry,
+        dataset_id="dataset_subject",
+        recording_id="recording_subject",
+        step_name="subject_masks",
+        status="ok",
+        run_name="subject_masks_001",
+        method="subject_mask_threshold_lr_v1",
+        coverage_pct=100.0,
+        review_status_json={"state": "approved", "method": "manual"},
+        details_json={
+            "available_components": ["eye_left", "eye_right"],
+            "unavailable_components": ["subject_body", "swim_bladder"],
+            "component_review_states": {
+                "eye_left": "approved",
+                "eye_right": "approved",
+            },
+        },
+        source="unit_test",
+    )
+    upsert_recording_step_status(
+        registry,
+        dataset_id="dataset_subject",
+        recording_id="recording_subject",
+        step_name="refined_subject_masks",
+        status="ok",
+        run_name="refined_subject_masks_001",
+        method="refine_subject_masks",
+        coverage_pct=100.0,
+        review_status_json={"state": "pending", "method": "manual"},
+        details_json={
+            "available_components": ["subject_body", "eye_left", "eye_right", "swim_bladder"],
+            "unavailable_components": [],
+            "component_review_states": {
+                "subject_body": "approved",
+                "eye_left": "approved",
+                "eye_right": "approved",
+                "swim_bladder": "needs_review",
+            },
+        },
+        source="unit_test",
+    )
+
+    payload = mod._registry_status_payload(  # noqa: SLF001
+        registry=registry,
+        zarr_path=zarr_path,
+        recording_id="recording_subject",
+        tuning_keys=[],
+    )
+    registry.close()
+
+    assert payload["subject_masks_present"] is True
+    assert payload["subject_masks_coverage"] == pytest.approx(100.0)
+    assert payload["subject_mask_available_components"] == ["eye_left", "eye_right"]
+    assert payload["subject_mask_component_review_states"] == {
+        "eye_left": "approved",
+        "eye_right": "approved",
+    }
+    assert payload["refined_subject_masks_present"] is True
+    assert payload["refined_subject_masks_coverage"] == pytest.approx(100.0)
+    assert payload["refined_subject_mask_available_components"] == [
+        "subject_body",
+        "eye_left",
+        "eye_right",
+        "swim_bladder",
+    ]
+    assert payload["refined_subject_mask_component_review_states"] == {
+        "subject_body": "approved",
+        "eye_left": "approved",
+        "eye_right": "approved",
+        "swim_bladder": "needs_review",
+    }
 
 
 def test_registry_crop_review_status_for_zarr_returns_none_when_row_is_stale(tmp_path: Path) -> None:

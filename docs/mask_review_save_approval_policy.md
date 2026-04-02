@@ -39,8 +39,8 @@ That means:
 | --- | --- | --- | --- | --- | --- |
 | Detect | Manual subgroup under `refined_detect_runs/<run>/` | subgroup-level corrections | whole refined detect run | `detect_review_status` | `detect_review_status_latest` |
 | Keypoints | `refined_keypoints_runs/<run>` | run-local row edits | whole refined keypoint run | `keypoint_review_status` | `keypoint_review_status_latest` |
-| Eye masks | `refined_eye_masks_runs/<run>` | per-ROI manual correction | whole refined eye-mask run | `eye_mask_review_status` | `eye_mask_review_status_latest` |
-| Subject masks | `refined_subject_masks_runs/<run>` | per-ROI component-aware save | per-component, with run aggregation | `component_review_statuses` + `refined_subject_mask_review_status` | `refined_subject_mask_review_status_latest` |
+| Eye masks (legacy compat) | `refined_eye_masks_runs/<run>` | per-ROI manual correction | whole refined eye-mask run | `eye_mask_review_status` | `eye_mask_review_status_latest` |
+| Subject masks (canonical unified surface) | `refined_subject_masks_runs/<run>` | per-ROI component-aware save | per-component, with run aggregation | `component_review_statuses` + `refined_subject_mask_review_status` | `refined_subject_mask_review_status_latest` |
 
 ## Detect
 
@@ -89,12 +89,16 @@ References:
 
 Current policy:
 
-- `refined_eye_masks_runs/<run>` is the editable refined artifact
+- `refined_eye_masks_runs/<run>` is the current eye-specific editable artifact
+  during transition
 - manual review saves per-ROI mask/ellipse/contour corrections in place on that
   refined run
 - approval is still whole-run, not per-eye
 - review-state writes happen from review UIs rather than a dedicated
   mask-specific policy doc
+- unified subject-mask component registry/query/operator surfaces should treat
+  this stage as a compatibility source for eye components rather than as the
+  long-term canonical refined mask surface
 
 Current review payload:
 
@@ -117,6 +121,9 @@ Operational implication:
 
 - eye-mask save behavior is well-established
 - eye-mask approval behavior exists and is functional
+- eye-stage review is still important for current editing, but new operator
+  summaries should prefer the unified subject-mask component view when asking
+  whether eye components are available/reviewed
 - but the policy is documented mostly procedurally in the workflow doc rather
   than in a dedicated contract/policy note
 
@@ -160,14 +167,20 @@ Operational implication:
   - body approved
   - swim bladder still pending
   - eyes seeded but not yet reviewed
+- unified subject-mask component surfaces are also the preferred operator/query
+  answer for eye availability during transition, with legacy eye-stage rows
+  projected in only when needed
 - downstream gating should therefore prefer component review state when the
   consumer is component-specific
 
-Current unresolved policy question:
+Current swim-bladder policy note:
 
-- what should count as "good enough to save" or "good enough to approve" for
-  early swim-bladder masks is still open and remains a workflow/data-quality
-  decision rather than a storage problem
+- the early canary heuristics for what is "good enough to save" versus "good
+  enough to approve" now live in
+  [swim_bladder_review_policy.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/swim_bladder_review_policy.md)
+- that policy keeps save ROI-local, keeps approval component-level, and treats
+  explicit-negative swim-bladder labels conservatively so we do not fabricate
+  training negatives from ambiguous ROIs
 
 References:
 
@@ -194,5 +207,7 @@ For mask workflows, the near-term policy should be:
 
 - [ ] Decide whether eye masks should eventually adopt a dedicated review
       policy/contract note rather than living only in the workflow doc.
-- [ ] Define swim-bladder-specific approval heuristics for the first curated
+- [x] Define swim-bladder-specific approval heuristics for the first curated
       subject-mask datasets.
+  See
+  [swim_bladder_review_policy.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/swim_bladder_review_policy.md).

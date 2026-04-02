@@ -43,7 +43,7 @@ crop_runs/<run>
   -> subject_shape_runs/<run>          # future
 ```
 
-Eye-specialized path remains:
+Legacy eye-specialized compatibility path during transition:
 
 ```text
 crop_runs/<run>
@@ -57,6 +57,9 @@ Policy:
   components.
 - `refined_eye_masks_runs` remains supported during the transition as the
   current eye-specific refined stage.
+- registry/query/operator surfaces should prefer unified subject-mask component
+  rows for eye availability, with legacy eye stages projected in only as
+  compatibility inputs when native eye-capable subject-mask rows are absent.
 - the target steady-state for new eye-capable refined authoring is still
   `refined_subject_masks_runs`
 - future unification should align eye refinement under the subject-mask
@@ -128,6 +131,17 @@ Initial allowed seed sources for unified assembly:
 
 - raw `subject_mask_runs`
 - transitional `refined_eye_masks_runs` for eye components
+
+Current implementation note as of 2026-04-02:
+
+- the shipped assembler/review helpers currently resolve seed inputs through
+  `subject_mask_runs`-backed sources
+- for legacy eye-stage data, the implemented path is:
+  `refined_eye_masks_runs` or `eye_masks_runs`
+  -> projected/backfilled `subject_mask_runs/<run>`
+  -> assembled/finalized `refined_subject_masks_runs/<run>`
+- direct `refined_eye_masks_runs` -> `refined_subject_masks_runs` seeding
+  remains a contract target and future extension, not current shipped behavior
 
 Deferred source pattern:
 

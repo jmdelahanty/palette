@@ -197,3 +197,353 @@ def test_main_apply_merge_dicts_preserves_unrelated_subject_mask_components(tmp_
             },
         },
     }
+
+
+def test_parse_subject_mask_components_normalizes_aliases() -> None:
+    assert mod._parse_subject_mask_components(["swim-bladder,body", "left-eye"]) == [  # noqa: SLF001
+        "swim_bladder",
+        "subject_body",
+        "eye_left",
+    ]
+
+
+def test_filter_subject_mask_tuning_payload_selects_requested_components() -> None:
+    payload, missing = mod._filter_subject_mask_tuning_payload(  # noqa: SLF001
+        {
+            "version": "2.0",
+            "latest_component": "swim_bladder",
+            "components": {
+                "subject_body": {"method": "traditional_subject_mask_seed"},
+                "swim_bladder": {"method": "polar_boundary_center_seed"},
+            },
+        },
+        ["swim_bladder", "eye_left"],
+    )
+
+    assert payload == {
+        "version": "2.0",
+        "components": {
+            "swim_bladder": {"method": "polar_boundary_center_seed"},
+        },
+    }
+    assert missing == ["eye_left"]
+
+
+def test_apply_subject_mask_component_updates_preserves_unrelated_components() -> None:
+    attrs = {
+        "subject_mask_tuning": {
+            "version": "2.0",
+            "components": {
+                "subject_body": {
+                    "method": "traditional_subject_mask_seed",
+                    "tuned_parameters": {"diff_threshold": 20},
+                }
+            },
+        }
+    }
+
+    updated, skipped = mod._apply_subject_mask_component_updates(  # noqa: SLF001
+        attrs,
+        {
+            "version": "2.0",
+            "components": {
+                "swim_bladder": {
+                    "method": "polar_boundary_center_seed",
+                    "tuned_parameters": {"ray_count": 96},
+                }
+            },
+        },
+        overwrite=False,
+        merge_dicts=False,
+    )
+
+    assert updated == ["subject_mask_tuning.components.swim_bladder"]
+    assert skipped == []
+    assert attrs["subject_mask_tuning"] == {
+        "version": "2.0",
+        "components": {
+            "subject_body": {
+                "method": "traditional_subject_mask_seed",
+                "tuned_parameters": {"diff_threshold": 20},
+            },
+            "swim_bladder": {
+                "method": "polar_boundary_center_seed",
+                "tuned_parameters": {"ray_count": 96},
+            },
+        },
+    }
+
+
+def test_apply_subject_mask_component_updates_skips_then_overwrite_merges_selected_component() -> None:
+    attrs = {
+        "subject_mask_tuning": {
+            "version": "2.0",
+            "components": {
+                "subject_body": {
+                    "method": "traditional_subject_mask_seed",
+                    "tuned_parameters": {"diff_threshold": 20},
+                },
+                "swim_bladder": {
+                    "method": "swim_bladder_patch_threshold_v1",
+                    "tuned_parameters": {"diff_threshold": 7, "min_area": 5},
+                },
+            },
+        }
+    }
+    value = {
+        "version": "2.0",
+        "components": {
+            "swim_bladder": {
+                "method": "polar_boundary_center_seed",
+                "tuned_parameters": {"ray_count": 96},
+            }
+        },
+    }
+
+    updated, skipped = mod._apply_subject_mask_component_updates(  # noqa: SLF001
+        attrs,
+        value,
+        overwrite=False,
+        merge_dicts=True,
+    )
+    assert updated == []
+    assert skipped == ["subject_mask_tuning.components.swim_bladder"]
+
+    updated, skipped = mod._apply_subject_mask_component_updates(  # noqa: SLF001
+        attrs,
+        value,
+        overwrite=True,
+        merge_dicts=True,
+    )
+    assert updated == ["subject_mask_tuning.components.swim_bladder"]
+    assert skipped == []
+    assert attrs["subject_mask_tuning"]["components"]["subject_body"] == {
+        "method": "traditional_subject_mask_seed",
+        "tuned_parameters": {"diff_threshold": 20},
+    }
+    assert attrs["subject_mask_tuning"]["components"]["swim_bladder"] == {
+        "method": "polar_boundary_center_seed",
+        "tuned_parameters": {"diff_threshold": 7, "min_area": 5, "ray_count": 96},
+    }
+
+
+def test_main_apply_subject_mask_components_adds_only_requested_component(tmp_path: Path) -> None:
+    source = tmp_path / "rec_src" / "zarr" / "rec_src_training.zarr"
+    target = tmp_path / "rec_target" / "zarr" / "rec_target_training.zarr"
+    source.parent.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+
+    _make_zarr(
+        source,
+        camera_id="2010093",
+        zarr_use="training",
+        tuning={
+            "subject_mask_tuning": {
+                "version": "2.0",
+                "latest_component": "swim_bladder",
+                "components": {
+                    "subject_body": {
+                        "method": "traditional_subject_mask_seed",
+                        "tuned_parameters": {"diff_threshold": 44},
+                    },
+                    "swim_bladder": {
+                        "method": "polar_boundary_center_seed",
+                        "tuned_parameters": {"ray_count": 96},
+                    },
+                },
+            }
+        },
+    )
+    _make_zarr(
+        target,
+        camera_id="2010093",
+        zarr_use="training",
+        tuning={
+            "subject_mask_tuning": {
+                "version": "2.0",
+                "components": {
+                    "subject_body": {
+                        "method": "traditional_subject_mask_seed",
+                        "tuned_parameters": {"diff_threshold": 20, "min_area": 5},
+                    }
+                },
+            }
+        },
+    )
+
+    rc = mod.main(
+        [
+            str(tmp_path),
+            "--source",
+            str(source),
+            "--recursive",
+            "--apply",
+            "--keys",
+            "subject_mask_tuning",
+            "--subject-mask-components",
+            "swim_bladder",
+        ]
+    )
+
+    assert rc == 0
+    assert _read_tuning(target, "subject_mask_tuning") == {
+        "version": "2.0",
+        "components": {
+            "subject_body": {
+                "method": "traditional_subject_mask_seed",
+                "tuned_parameters": {"diff_threshold": 20, "min_area": 5},
+            },
+            "swim_bladder": {
+                "method": "polar_boundary_center_seed",
+                "tuned_parameters": {"ray_count": 96},
+            },
+        },
+    }
+
+
+def test_main_apply_subject_mask_components_skips_existing_component_without_overwrite(tmp_path: Path) -> None:
+    source = tmp_path / "rec_src" / "zarr" / "rec_src_training.zarr"
+    target = tmp_path / "rec_target" / "zarr" / "rec_target_training.zarr"
+    source.parent.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+
+    _make_zarr(
+        source,
+        camera_id="2010093",
+        zarr_use="training",
+        tuning={
+            "subject_mask_tuning": {
+                "version": "2.0",
+                "components": {
+                    "swim_bladder": {
+                        "method": "polar_boundary_center_seed",
+                        "tuned_parameters": {"ray_count": 96},
+                    }
+                },
+            }
+        },
+    )
+    _make_zarr(
+        target,
+        camera_id="2010093",
+        zarr_use="training",
+        tuning={
+            "subject_mask_tuning": {
+                "version": "2.0",
+                "components": {
+                    "subject_body": {
+                        "method": "traditional_subject_mask_seed",
+                        "tuned_parameters": {"diff_threshold": 20},
+                    },
+                    "swim_bladder": {
+                        "method": "swim_bladder_patch_threshold_v1",
+                        "tuned_parameters": {"diff_threshold": 7},
+                    },
+                },
+            }
+        },
+    )
+
+    rc = mod.main(
+        [
+            str(tmp_path),
+            "--source",
+            str(source),
+            "--recursive",
+            "--apply",
+            "--keys",
+            "subject_mask_tuning",
+            "--subject-mask-components",
+            "swim_bladder",
+        ]
+    )
+
+    assert rc == 0
+    assert _read_tuning(target, "subject_mask_tuning") == {
+        "version": "2.0",
+        "components": {
+            "subject_body": {
+                "method": "traditional_subject_mask_seed",
+                "tuned_parameters": {"diff_threshold": 20},
+            },
+            "swim_bladder": {
+                "method": "swim_bladder_patch_threshold_v1",
+                "tuned_parameters": {"diff_threshold": 7},
+            },
+        },
+    }
+
+
+def test_main_apply_subject_mask_components_overwrite_merges_selected_component(tmp_path: Path) -> None:
+    source = tmp_path / "rec_src" / "zarr" / "rec_src_training.zarr"
+    target = tmp_path / "rec_target" / "zarr" / "rec_target_training.zarr"
+    source.parent.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+
+    _make_zarr(
+        source,
+        camera_id="2010093",
+        zarr_use="training",
+        tuning={
+            "subject_mask_tuning": {
+                "version": "2.0",
+                "components": {
+                    "swim_bladder": {
+                        "method": "polar_boundary_center_seed",
+                        "tuned_parameters": {"ray_count": 96},
+                    }
+                },
+            }
+        },
+    )
+    _make_zarr(
+        target,
+        camera_id="2010093",
+        zarr_use="training",
+        tuning={
+            "subject_mask_tuning": {
+                "version": "2.0",
+                "components": {
+                    "subject_body": {
+                        "method": "traditional_subject_mask_seed",
+                        "tuned_parameters": {"diff_threshold": 20},
+                    },
+                    "swim_bladder": {
+                        "method": "swim_bladder_patch_threshold_v1",
+                        "tuned_parameters": {"diff_threshold": 7, "min_area": 5},
+                    },
+                },
+            }
+        },
+    )
+
+    rc = mod.main(
+        [
+            str(tmp_path),
+            "--source",
+            str(source),
+            "--recursive",
+            "--apply",
+            "--keys",
+            "subject_mask_tuning",
+            "--subject-mask-components",
+            "swim_bladder",
+            "--overwrite",
+            "--merge-dicts",
+        ]
+    )
+
+    assert rc == 0
+    assert _read_tuning(target, "subject_mask_tuning") == {
+        "version": "2.0",
+        "components": {
+            "subject_body": {
+                "method": "traditional_subject_mask_seed",
+                "tuned_parameters": {"diff_threshold": 20},
+            },
+            "swim_bladder": {
+                "method": "polar_boundary_center_seed",
+                "tuned_parameters": {"diff_threshold": 7, "min_area": 5, "ray_count": 96},
+            },
+        },
+    }

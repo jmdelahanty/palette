@@ -1014,6 +1014,220 @@ def test_eye_mask_performance_view_outputs_summary_and_details(tmp_path: Path, c
     assert "reason: stale source keypoint" in out
 
 
+def test_subject_mask_component_view_projects_eye_compat_rows(tmp_path: Path, capsys) -> None:
+    registry = Registry(tmp_path / "registry.sqlite")
+    eye_path = tmp_path / "eye_only.zarr"
+    native_path = tmp_path / "native_subject.zarr"
+    eye_path.mkdir(parents=True, exist_ok=True)
+    native_path.mkdir(parents=True, exist_ok=True)
+    eye_mtime = int(eye_path.stat().st_mtime_ns)
+    native_mtime = int(native_path.stat().st_mtime_ns)
+
+    registry.upsert_dataset(
+        "dataset_eye_only",
+        session_uuid="session_eye_only",
+        zarr_path=eye_path,
+        recording_id="recording_eye_only",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+    registry.upsert_dataset(
+        "dataset_native",
+        session_uuid="session_native",
+        zarr_path=native_path,
+        recording_id="recording_native",
+        artifact_kind="source_recording",
+        zarr_use="training",
+    )
+
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_eye_only",
+        stage_group="eye_masks_runs",
+        run_name="eye_masks_eye_only",
+        run_created_utc="2026-03-02T00:00:00+00:00",
+        recording_id="recording_eye_only",
+        zarr_use="training",
+        method="traditional_eye_segmentation",
+        source_crop_run="crop_eye_only",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="kp_eye_only",
+        source_eye_masks_run=None,
+        source_eye_masks_method=None,
+        total_rois=100,
+        successful_eyes=180,
+        successful_roi_pairs=90,
+        successful_roi_pair_rate=0.9,
+        duration_seconds=20.0,
+        rois_per_second=5.0,
+        inference_duration_seconds=None,
+        inference_average_fps=5.0,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        zarr_mtime_ns=eye_mtime,
+    )
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_eye_only",
+        stage_group="refined_eye_masks_runs",
+        run_name="refined_eye_masks_eye_only",
+        run_created_utc="2026-03-02T00:10:00+00:00",
+        recording_id="recording_eye_only",
+        zarr_use="training",
+        method="refine_eye_masks",
+        source_crop_run="crop_eye_only",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="kp_eye_only",
+        source_eye_masks_run="eye_masks_eye_only",
+        source_eye_masks_method="traditional_eye_segmentation",
+        total_rois=100,
+        successful_eyes=196,
+        successful_roi_pairs=98,
+        successful_roi_pair_rate=0.98,
+        duration_seconds=10.0,
+        rois_per_second=10.0,
+        inference_duration_seconds=None,
+        inference_average_fps=10.0,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="alice",
+        review_timestamp_utc="2026-03-02T00:11:00+00:00",
+        lifecycle_state="approved",
+        lifecycle_reason="approved",
+        zarr_mtime_ns=eye_mtime,
+    )
+
+    registry.upsert_subject_mask_performance(
+        dataset_id="dataset_native",
+        stage_group="subject_mask_runs",
+        run_name="subject_masks_native",
+        run_created_utc="2026-03-02T01:00:00+00:00",
+        recording_id="recording_native",
+        zarr_use="training",
+        subject_mask_method="subject_mask_threshold_lr_v1",
+        label_schema_id="subject_v1_lr",
+        source_crop_run="crop_native",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="kp_native",
+        source_subject_mask_run=None,
+        source_subject_mask_method=None,
+        run_semantics="traditional_subject_body_inference",
+        probability_semantics="normalized_background_diff",
+        source_background_run=None,
+        source_background_array=None,
+        source_dish_mask_array=None,
+        tuning_source=None,
+        tuning_timestamp=None,
+        total_rois=100,
+        rows_with_any_mask=100,
+        coverage_percent=100.0,
+        duration_seconds=20.0,
+        rois_per_second=5.0,
+        available_component_count=4,
+        available_components_json='["subject_body","eye_left","eye_right","swim_bladder"]',
+        unavailable_components_json="[]",
+        component_review_states_json='{"eye_left":{"state":"approved","intended_use":"training"},"eye_right":{"state":"approved","intended_use":"training"}}',
+        eye_component_mode="lr",
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="alice",
+        review_timestamp_utc="2026-03-02T01:01:00+00:00",
+        lifecycle_state="approved",
+        lifecycle_reason="approved",
+        zarr_mtime_ns=native_mtime,
+    )
+    for component_name in ("eye_left", "eye_right"):
+        registry.upsert_subject_mask_component_quality(
+            dataset_id="dataset_native",
+            stage_group="refined_subject_masks_runs",
+            run_name="refined_subject_masks_native",
+            component_name=component_name,
+            component_family="eyes",
+            run_created_utc="2026-03-02T01:05:00+00:00",
+            recording_id="recording_native",
+            zarr_use="training",
+            subject_mask_method="refine_subject_masks",
+            label_schema_id="subject_v1_lr",
+            eye_component_mode="lr",
+            source_subject_mask_run="subject_masks_native",
+            available=1,
+            review_state="approved",
+            review_method="manual",
+            review_intended_use="training",
+            review_reviewer="alice",
+            review_timestamp_utc="2026-03-02T01:06:00+00:00",
+            total_rois=100,
+            rows_with_component_mask=97,
+            rows_with_component_mask_rate=0.97,
+            lifecycle_state="approved",
+            lifecycle_reason="approved",
+            quality_updated_utc="2026-03-02T01:06:00+00:00",
+            zarr_mtime_ns=native_mtime,
+        )
+    registry.upsert_eye_mask_performance(
+        dataset_id="dataset_native",
+        stage_group="refined_eye_masks_runs",
+        run_name="refined_eye_masks_native",
+        run_created_utc="2026-03-02T01:20:00+00:00",
+        recording_id="recording_native",
+        zarr_use="training",
+        method="refine_eye_masks",
+        source_crop_run="crop_native",
+        source_keypoint_group="refined_keypoints_runs",
+        source_keypoints_run="kp_native",
+        source_eye_masks_run="eye_masks_native",
+        source_eye_masks_method="traditional_eye_segmentation",
+        total_rois=100,
+        successful_eyes=198,
+        successful_roi_pairs=99,
+        successful_roi_pair_rate=0.99,
+        duration_seconds=8.0,
+        rois_per_second=12.5,
+        inference_duration_seconds=None,
+        inference_average_fps=12.5,
+        reason_counts_json=None,
+        summary_statistics_json=None,
+        review_state="approved",
+        review_method="manual",
+        review_intended_use="training",
+        review_reviewer="alice",
+        review_timestamp_utc="2026-03-02T01:21:00+00:00",
+        lifecycle_state="approved",
+        lifecycle_reason="approved",
+        zarr_mtime_ns=native_mtime,
+    )
+    registry.close()
+
+    rc = check_training_registry_main(
+        [
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--view",
+            "subject-mask-components",
+            "--show-subject-mask-components",
+            "--no-rich",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Subject-Mask Components (Unified Latest View)" in out
+    assert (
+        "legacy eye-stage rows are projected here only when a fresher "
+        "subject-mask-native eye component is not available"
+    ) in out
+    assert "passing rows (approved/training, available, non-stale): 4" in out
+    assert "component rollups: eye_left=2, eye_right=2" in out
+    assert "stage rollups: refined_eye_masks_runs=2, refined_subject_masks_runs=2" in out
+    assert "dataset_eye_only" in out
+    assert "stage: refined_eye_masks_runs" in out
+    assert "dataset_native" in out
+    assert "stage: refined_subject_masks_runs" in out
+
+
 def test_eye_mask_profile_view_outputs_summary_and_remediation(tmp_path: Path, capsys) -> None:
     registry = Registry(tmp_path / "registry.sqlite")
     zarr_path = tmp_path / "dataset_eye_profile.zarr"
