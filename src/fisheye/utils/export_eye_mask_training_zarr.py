@@ -31,6 +31,7 @@ from fisheye.shared.detect_reason_codec import (
     write_reason_columns,
 )
 from fisheye.shared.type_conversions import normalize_attr as _as_text
+from fisheye.utils.refined_eye_masks_compat import refined_eye_masks_compat_context
 
 try:
     from rich.console import Console
@@ -574,7 +575,13 @@ def _make_split_indices(
 class EyeExportSelection:
     crop_run: str
     eye_stage: str
+    eye_stage_role: str
+    eye_stage_label: str
+    authority_stage_group: str
+    compatibility_role: Optional[str]
     eye_run: str
+    source_refined_subject_masks_run: Optional[str]
+    source_subject_mask_run: Optional[str]
     total_samples: int
     channels: int
     mask_probs_name: Optional[str]
@@ -592,6 +599,7 @@ def _select_source_runs(
         eye_stage=eye_stage,
         eye_run=eye_run,
     )
+    compat_context = refined_eye_masks_compat_context(eye_group, base_stage=stage_name)
 
     selected_crop = _as_text(crop_run)
     if selected_crop is None:
@@ -626,7 +634,13 @@ def _select_source_runs(
     selection = EyeExportSelection(
         crop_run=str(selected_crop),
         eye_stage=stage_name,
+        eye_stage_role=str(compat_context.get("stage_role") or "canonical"),
+        eye_stage_label=str(compat_context.get("stage_label") or stage_name),
+        authority_stage_group=str(compat_context.get("authority_stage_group") or stage_name),
+        compatibility_role=_as_text(compat_context.get("compatibility_role")),
         eye_run=run_name,
+        source_refined_subject_masks_run=_as_text(compat_context.get("source_refined_subject_masks_run")),
+        source_subject_mask_run=_as_text(compat_context.get("source_subject_mask_run")),
         total_samples=int(masks_roi.shape[0]),
         channels=int(masks_roi.shape[1]) if masks_roi.ndim >= 2 else 0,
         mask_probs_name=_resolve_mask_probs_name(eye_group),
@@ -1376,7 +1390,16 @@ def export_merged_eye_mask_training_zarr_from_sources(
     row_gate_applied = bool(applied_row_gate_policy != "all_rows" or row_gate_selected_rows != row_gate_total_rows)
 
     source_stage = _collapse_source_attr([source.selection.eye_stage for source in resolved_sources])
+    source_stage_role = _collapse_source_attr([source.selection.eye_stage_role for source in resolved_sources])
+    source_stage_label = _collapse_source_attr([source.selection.eye_stage_label for source in resolved_sources])
+    source_authority_stage = _collapse_source_attr([source.selection.authority_stage_group for source in resolved_sources])
     source_eye_run = _collapse_source_attr([source.selection.eye_run for source in resolved_sources])
+    source_refined_subject_run = _collapse_source_attr(
+        [source.selection.source_refined_subject_masks_run or "" for source in resolved_sources]
+    )
+    source_subject_run = _collapse_source_attr(
+        [source.selection.source_subject_mask_run or "" for source in resolved_sources]
+    )
     source_crop_run = _collapse_source_attr([source.selection.crop_run for source in resolved_sources])
     source_zarr_paths = [str(source.source_path) for source in resolved_sources]
 
@@ -1387,7 +1410,12 @@ def export_merged_eye_mask_training_zarr_from_sources(
         "input_format": normalized_input_format,
         "label_mode": normalized_label_mode,
         "source_stage": source_stage,
+        "source_stage_role": source_stage_role,
+        "source_stage_label": source_stage_label,
+        "source_authority_stage": source_authority_stage,
         "source_eye_run": source_eye_run,
+        "source_refined_subject_masks_run": source_refined_subject_run,
+        "source_subject_mask_run": source_subject_run,
         "source_crop_run": source_crop_run,
         "source_count": int(len(resolved_sources)),
         "source_zarr_paths": source_zarr_paths,
@@ -1672,7 +1700,12 @@ def export_merged_eye_mask_training_zarr_from_sources(
     dst_eye.attrs.update(
         {
             "source_eye_stage": source_stage,
+            "source_eye_stage_role": source_stage_role,
+            "source_eye_stage_label": source_stage_label,
+            "source_eye_authority_stage": source_authority_stage,
             "source_eye_run": source_eye_run,
+            "source_refined_subject_masks_run": source_refined_subject_run,
+            "source_subject_mask_run": source_subject_run,
             "source_crop_run": source_crop_run,
             "source_zarr_paths": source_zarr_paths,
             "label_mode": normalized_label_mode,
@@ -1815,7 +1848,14 @@ def export_merged_eye_mask_training_zarr_from_sources(
             "source_zarrs": source_zarr_paths,
             "source_dataset_ids": source_dataset_ids,
             "source_eye_stages": [source.selection.eye_stage for source in resolved_sources],
+            "source_eye_stage_roles": [source.selection.eye_stage_role for source in resolved_sources],
+            "source_eye_stage_labels": [source.selection.eye_stage_label for source in resolved_sources],
+            "source_eye_authority_stages": [source.selection.authority_stage_group for source in resolved_sources],
             "source_eye_runs": [source.selection.eye_run for source in resolved_sources],
+            "source_refined_subject_masks_runs": [
+                source.selection.source_refined_subject_masks_run for source in resolved_sources
+            ],
+            "source_subject_mask_runs": [source.selection.source_subject_mask_run for source in resolved_sources],
             "source_crop_runs": [source.selection.crop_run for source in resolved_sources],
             "source_count": int(len(resolved_sources)),
             "row_gate": {
@@ -1853,7 +1893,14 @@ def export_merged_eye_mask_training_zarr_from_sources(
     if len(resolved_sources) == 1:
         summary["source_zarr"] = source_zarr_paths[0]
         summary["source_eye_stage"] = resolved_sources[0].selection.eye_stage
+        summary["source_eye_stage_role"] = resolved_sources[0].selection.eye_stage_role
+        summary["source_eye_stage_label"] = resolved_sources[0].selection.eye_stage_label
+        summary["source_eye_authority_stage"] = resolved_sources[0].selection.authority_stage_group
         summary["source_eye_run"] = resolved_sources[0].selection.eye_run
+        summary["source_refined_subject_masks_run"] = (
+            resolved_sources[0].selection.source_refined_subject_masks_run
+        )
+        summary["source_subject_mask_run"] = resolved_sources[0].selection.source_subject_mask_run
         summary["source_crop_run"] = resolved_sources[0].selection.crop_run
     return summary
 

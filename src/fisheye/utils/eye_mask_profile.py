@@ -13,6 +13,7 @@ import zarr
 from fisheye.shared.batch_logging import utc_now
 from fisheye.shared.provenance_attrs import resolve_source_keypoints_run
 from fisheye.utils.detection_profile import infer_zarr_use
+from fisheye.utils.refined_eye_masks_compat import refined_eye_masks_compat_context
 
 
 SCHEMA_NAME = "eye_mask_dataset_profile"
@@ -51,9 +52,15 @@ class EyeMaskSourceError(EyeMaskProfileError):
 class ResolvedEyeMaskSource:
     eye_mask_path: str
     stage_group: str
+    stage_role: str
+    stage_label: str
+    authority_stage_group: str
+    compatibility_role: Optional[str]
     eye_mask_run: str
     eye_mask_method: Optional[str]
     source_eye_masks_run: Optional[str]
+    source_refined_subject_masks_run: Optional[str]
+    source_subject_mask_run: Optional[str]
     source_keypoint_group: Optional[str]
     source_keypoint_run: Optional[str]
     source_keypoint_path: Optional[str]
@@ -380,6 +387,7 @@ def resolve_eye_mask_source(
         if run_group is None:
             raise EyeMaskSourceError(f"eye-mask run not found: {stage_group}/{run_name}")
         attrs = dict(run_group.attrs)
+        compat_context = refined_eye_masks_compat_context(attrs, base_stage=stage_group)
 
         source_keypoint_run = _normalize_text(resolve_source_keypoints_run(attrs))
         source_keypoint_group = _normalize_text(attrs.get("source_keypoint_group"))
@@ -396,9 +404,15 @@ def resolve_eye_mask_source(
         return ResolvedEyeMaskSource(
             eye_mask_path=f"{stage_group}/{run_name}",
             stage_group=stage_group,
+            stage_role=str(compat_context.get("stage_role") or "canonical"),
+            stage_label=str(compat_context.get("stage_label") or stage_group),
+            authority_stage_group=str(compat_context.get("authority_stage_group") or stage_group),
+            compatibility_role=_normalize_text(compat_context.get("compatibility_role")),
             eye_mask_run=run_name,
             eye_mask_method=_normalize_text(attrs.get("method")),
             source_eye_masks_run=_normalize_text(attrs.get("source_eye_masks_run")),
+            source_refined_subject_masks_run=_normalize_text(compat_context.get("source_refined_subject_masks_run")),
+            source_subject_mask_run=_normalize_text(compat_context.get("source_subject_mask_run")),
             source_keypoint_group=source_keypoint_group,
             source_keypoint_run=source_keypoint_run,
             source_keypoint_path=source_keypoint_path,
@@ -777,6 +791,11 @@ def build_eye_mask_profile_summary(
         "stage_group": source.stage_group,
         "eye_stage_group": source.stage_group,
         "source_eye_stage": source.stage_group,
+        "eye_stage_role": source.stage_role,
+        "eye_stage_label": source.stage_label,
+        "stage_label": source.stage_label,
+        "authority_stage_group": source.authority_stage_group,
+        "compatibility_role": source.compatibility_role,
         "eye_mask_path": source.eye_mask_path,
         "source_eye_mask_path": source.eye_mask_path,
         "eye_mask_run": source.eye_mask_run,
@@ -785,6 +804,9 @@ def build_eye_mask_profile_summary(
         "method": source.eye_mask_method,
         "eye_masks_run": source.source_eye_masks_run or (source.eye_mask_run if source.stage_group == "eye_masks_runs" else None),
         "refined_eye_masks_run": source.eye_mask_run if source.stage_group == "refined_eye_masks_runs" else None,
+        "source_refined_subject_masks_run": source.source_refined_subject_masks_run,
+        "canonical_refined_subject_masks_run": source.source_refined_subject_masks_run,
+        "source_subject_mask_run": source.source_subject_mask_run,
         "source_keypoint_group": source.source_keypoint_group,
         "source_keypoint_path": source.source_keypoint_path,
         "keypoint_path": source.source_keypoint_path,
@@ -1001,6 +1023,10 @@ def write_eye_mask_profile(
             "source_recording_id": dataset.get("recording_id"),
             "source_zarr_use": dataset.get("zarr_use"),
             "source_stage_group": source.get("stage_group"),
+            "source_stage_role": source.get("eye_stage_role"),
+            "source_stage_label": source.get("eye_stage_label"),
+            "source_authority_stage_group": source.get("authority_stage_group"),
+            "source_compatibility_role": source.get("compatibility_role"),
             "source_eye_mask_path": source.get("eye_mask_path"),
             "source_eye_mask_run": source.get("eye_mask_run"),
             "source_eye_mask_method": source.get("eye_mask_method"),
@@ -1010,6 +1036,8 @@ def write_eye_mask_profile(
             "source_crop_run": source.get("source_crop_run"),
             "source_eye_masks_run": source.get("eye_masks_run"),
             "source_refined_eye_masks_run": source.get("refined_eye_masks_run"),
+            "source_refined_subject_masks_run": source.get("source_refined_subject_masks_run"),
+            "source_subject_mask_run": source.get("source_subject_mask_run"),
             "source_row_count": _as_int(quality.get("rows_total")),
             "profile_summary": summary,
         }

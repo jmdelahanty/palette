@@ -129,6 +129,7 @@ def _write_source_eye_zarr(
     frame_start: int = 100,
     ellipse_success: np.ndarray | None = None,
     reason_labels: list[str] | None = None,
+    derived_compat: bool = False,
 ) -> None:
     root = zarr.open_group(str(path), mode="w")
     if dataset_id is not None:
@@ -172,6 +173,10 @@ def _write_source_eye_zarr(
     refined.attrs["eye_labels"] = ["eye_left", "eye_right"]
     refined.attrs["source_keypoints_run"] = "refined_keypoints_001"
     refined.attrs["source_keypoint_group"] = "refined_keypoints_runs"
+    if derived_compat:
+        refined.attrs["compatibility_role"] = "derived_from_refined_subject_masks"
+        refined.attrs["source_refined_subject_masks_run"] = "refined_subject_masks_001"
+        refined.attrs["source_subject_mask_run"] = "subject_masks_001"
     refined.create_array(
         "masks_roi",
         data=np.zeros((4, 2, 16, 16), dtype=np.uint8),
@@ -277,6 +282,43 @@ def test_export_merged_eye_mask_training_zarr_then_validate(tmp_path: Path) -> N
     assert decoded == ["clean", "clean", "incomplete", "incomplete"]
     assert eye.attrs["reason_encoding"] == "utf8-null-terminated"
     assert eye.attrs["reason_fallback_order"] == ["reason_bytes", "reason", "detection_source"]
+
+
+def test_export_records_derived_compat_source_metadata(tmp_path: Path) -> None:
+    source_path = tmp_path / "source_compat_training.zarr"
+    out_path = tmp_path / "merged_eye_export_compat.zarr"
+    _write_source_eye_zarr(source_path, derived_compat=True)
+
+    summary = export_merged_eye_mask_training_zarr(
+        source_path,
+        out_path,
+        eye_stage="refined_eye_masks_runs",
+        eye_run="refined_eye_masks_001",
+        overwrite=True,
+    )
+
+    assert summary["source_eye_stage"] == "refined_eye_masks_runs"
+    assert summary["source_eye_stage_role"] == "derived_compat"
+    assert summary["source_eye_stage_label"] == "refined_eye_masks_runs (derived compat)"
+    assert summary["source_eye_authority_stage"] == "refined_subject_masks_runs"
+    assert summary["source_refined_subject_masks_run"] == "refined_subject_masks_001"
+    assert summary["source_subject_mask_run"] == "subject_masks_001"
+
+    out_root = zarr.open_group(str(out_path), mode="r")
+    training_export = dict(out_root.attrs["training_export"])
+    assert training_export["source_stage"] == "refined_eye_masks_runs"
+    assert training_export["source_stage_role"] == "derived_compat"
+    assert training_export["source_stage_label"] == "refined_eye_masks_runs (derived compat)"
+    assert training_export["source_authority_stage"] == "refined_subject_masks_runs"
+    assert training_export["source_refined_subject_masks_run"] == "refined_subject_masks_001"
+
+    eye_latest = str(out_root["eye_masks_runs"].attrs["latest"])
+    eye = out_root[f"eye_masks_runs/{eye_latest}"]
+    assert eye.attrs["source_eye_stage"] == "refined_eye_masks_runs"
+    assert eye.attrs["source_eye_stage_role"] == "derived_compat"
+    assert eye.attrs["source_eye_stage_label"] == "refined_eye_masks_runs (derived compat)"
+    assert eye.attrs["source_eye_authority_stage"] == "refined_subject_masks_runs"
+    assert eye.attrs["source_refined_subject_masks_run"] == "refined_subject_masks_001"
 
 
 def test_export_merged_eye_mask_training_zarr_from_multiple_sources_tracks_source_index(tmp_path: Path) -> None:

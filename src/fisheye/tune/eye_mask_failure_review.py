@@ -28,6 +28,11 @@ import zarr
 from skimage import measure
 from skimage.measure import EllipseModel
 
+from ..utils.refined_eye_masks_compat import (
+    refined_eye_masks_compat_context,
+    refined_eye_masks_redirect_hint,
+)
+
 
 _DEFAULT_SUCCESS_MIN_EYE_AREA_PX = 50.0
 
@@ -303,6 +308,13 @@ def _apply_review_status(
     reviewer: Optional[str],
     notes: Optional[str],
 ) -> Dict[str, object]:
+    if bool(refined_eye_masks_compat_context(refined).get("is_derived_compat")):
+        raise RuntimeError(
+            refined_eye_masks_redirect_hint(
+                refined_run=refined_run,
+                source=refined,
+            )
+        )
     timestamp_utc = datetime.now(timezone.utc).isoformat()
     payload: Dict[str, object] = {
         "state": state,
@@ -470,6 +482,15 @@ def launch_review(
     if refined_run not in refined_parent:
         raise RuntimeError(f"Refined run '{refined_run}' not found.")
     refined = refined_parent[refined_run]
+    compat_context = refined_eye_masks_compat_context(refined)
+    if bool(compat_context.get("is_derived_compat")):
+        raise RuntimeError(
+            refined_eye_masks_redirect_hint(
+                refined_run=refined_run,
+                source=refined,
+                zarr_path=zarr_path,
+            )
+        )
 
     crop_run = crop_run or refined.attrs.get("source_crop_run") or root["crop_runs"].attrs.get("latest")
     if not crop_run or "crop_runs" not in root or crop_run not in root["crop_runs"]:

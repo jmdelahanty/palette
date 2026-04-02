@@ -17,6 +17,8 @@ from typing import Iterable, List, Optional
 
 import zarr
 
+from .refined_eye_masks_compat import refined_eye_masks_compat_context, refined_eye_masks_redirect_hint
+
 
 REVIEW_STATES = {"approved", "pending", "rejected", "needs_review"}
 
@@ -28,6 +30,51 @@ class ReviewPlan:
     review_state: Optional[str]
     status: str
     reason: Optional[str] = None
+    compatibility_role: Optional[str] = None
+    source_refined_subject_masks_run: Optional[str] = None
+    stage_label: str = "refined_eye_masks_runs"
+
+    @property
+    def is_derived_compat(self) -> bool:
+        return self.stage_label.endswith("(derived compat)")
+
+
+def _compat_plan_fields(run_group: object) -> dict[str, Optional[str] | str]:
+    context = refined_eye_masks_compat_context(run_group)
+    return {
+        "compatibility_role": context.get("compatibility_role"),
+        "source_refined_subject_masks_run": context.get("source_refined_subject_masks_run"),
+        "stage_label": str(context.get("stage_label") or "refined_eye_masks_runs"),
+    }
+
+
+def _resolve_compat_plan_fields(zarr_path: Path, refined_run: str) -> dict[str, Optional[str] | str]:
+    try:
+        root = zarr.open_group(str(zarr_path), mode="r", use_consolidated=False)
+    except TypeError:
+        try:
+            root = zarr.open_group(str(zarr_path), mode="r")
+        except Exception:
+            return {
+                "compatibility_role": None,
+                "source_refined_subject_masks_run": None,
+                "stage_label": "refined_eye_masks_runs",
+            }
+    except Exception:
+        return {
+            "compatibility_role": None,
+            "source_refined_subject_masks_run": None,
+            "stage_label": "refined_eye_masks_runs",
+        }
+
+    refined_parent = root.get("refined_eye_masks_runs")
+    if not isinstance(refined_parent, zarr.Group) or refined_run not in refined_parent:
+        return {
+            "compatibility_role": None,
+            "source_refined_subject_masks_run": None,
+            "stage_label": "refined_eye_masks_runs",
+        }
+    return _compat_plan_fields(refined_parent[refined_run])
 
 
 def _iter_zarr(paths: List[Path], recursive: bool) -> Iterable[Path]:
@@ -250,12 +297,16 @@ def _build_plans_from_registry(
             )
             continue
 
+        compat_fields = _resolve_compat_plan_fields(zarr_path, str(raw_run_name))
         plans.append(
             ReviewPlan(
                 zarr_path=zarr_path,
                 refined_run=str(raw_run_name),
                 review_state=review_state,
                 status="ok",
+                compatibility_role=compat_fields["compatibility_role"],
+                source_refined_subject_masks_run=compat_fields["source_refined_subject_masks_run"],
+                stage_label=str(compat_fields["stage_label"]),
             )
         )
 
@@ -349,12 +400,16 @@ def _build_plans(
             )
             continue
 
+        compat_fields = _compat_plan_fields(run_group)
         plans.append(
             ReviewPlan(
                 zarr_path=zarr_path,
                 refined_run=run_name,
                 review_state=review_state,
                 status="ok",
+                compatibility_role=compat_fields["compatibility_role"],
+                source_refined_subject_masks_run=compat_fields["source_refined_subject_masks_run"],
+                stage_label=str(compat_fields["stage_label"]),
             )
         )
     return sorted(plans, key=lambda p: str(p.zarr_path))
@@ -524,8 +579,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(
                 f"{plan.zarr_path}\n"
                 f"  refined_run={plan.refined_run}\n"
+                f"  stage={plan.stage_label}\n"
                 f"  review_state={plan.review_state or 'missing'}"
             )
+            if plan.source_refined_subject_masks_run:
+                print(f"  canonical_subject_run={plan.source_refined_subject_masks_run}")
         if not selected:
             print("No matching review candidates.")
         return 0
@@ -537,6 +595,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     failures = 0
     for idx, plan in enumerate(selected, start=1):
         print(f"\n[{idx}/{len(selected)}] Reviewing: {plan.zarr_path}")
+        if plan.is_derived_compat:
+            print(
+                refined_eye_masks_redirect_hint(
+                    refined_run=plan.refined_run,
+                    source={
+                        "compatibility_role": plan.compatibility_role,
+                        "source_refined_subject_masks_run": plan.source_refined_subject_masks_run,
+                    },
+                    zarr_path=plan.zarr_path,
+                )
+            )
+            print("Legacy patch viewer will open in read-only compat mode.")
         cmd = _viewer_cmd(args, plan)
         rc = subprocess.call(cmd)
         if rc != 0:

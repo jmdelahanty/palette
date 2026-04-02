@@ -49,6 +49,38 @@ def test_apply_review_status_writes_eye_mask_review_attrs(tmp_path: Path) -> Non
     assert refined_parent.attrs["eye_mask_review_status_latest"] == "refined_eye_masks_001"
 
 
+def test_apply_review_status_rejects_derived_compat_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_compat.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    refined_parent = root.create_group("refined_eye_masks_runs")
+    refined = refined_parent.create_group("refined_eye_masks_compat_001")
+    refined.attrs.update(
+        {
+            "compatibility_role": "derived_from_refined_subject_masks",
+            "source_refined_subject_masks_run": "refined_subject_masks_001",
+        }
+    )
+
+    try:
+        failure_review._apply_review_status(
+            refined_parent,
+            "refined_eye_masks_compat_001",
+            refined,
+            state="approved",
+            method="manual",
+            intended_use="training",
+            reviewer="tester",
+            notes=None,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected RuntimeError for derived compat run")
+
+    assert "refined_subject_masks_runs/refined_subject_masks_001" in message
+    assert "--manual --refined-run refined_eye_masks_compat_001" in message
+
+
 def test_run_manual_review_forwards_review_status_args(
     monkeypatch,
     tmp_path: Path,

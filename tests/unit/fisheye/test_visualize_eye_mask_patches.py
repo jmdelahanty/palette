@@ -274,6 +274,31 @@ def test_apply_eye_mask_review_status_writes_contract_attrs(tmp_path: Path) -> N
     assert refined_parent.attrs["eye_mask_review_status_latest"] == "refined_eye_masks_001"
 
 
+def test_apply_eye_mask_review_status_rejects_derived_compat_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_compat.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    refined_parent = root.create_group("refined_eye_masks_runs")
+    refined = refined_parent.create_group("refined_eye_masks_compat_001")
+    refined.attrs.update(
+        {
+            "compatibility_role": "derived_from_refined_subject_masks",
+            "source_refined_subject_masks_run": "refined_subject_masks_001",
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="derived from refined_subject_masks_runs/refined_subject_masks_001"):
+        _apply_eye_mask_review_status(
+            refined_parent,
+            "refined_eye_masks_compat_001",
+            refined,
+            state="approved",
+            method="manual",
+            intended_use="training",
+            reviewer="reviewer_a",
+            notes=None,
+        )
+
+
 def test_apply_recommended_probability_threshold_writes_source_run_metadata(tmp_path: Path) -> None:
     zarr_path = tmp_path / "recording.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
@@ -398,6 +423,38 @@ def test_save_roi_mask_edits_updates_arrays(tmp_path: Path) -> None:
     assert bool(np.asarray(ellipse_success[0])[0])
     assert bool(np.asarray(ellipse_success[0])[1])
     assert float(np.asarray(eye_sep[0])) > 0.0
+
+
+def test_save_roi_mask_edits_rejects_derived_compat_run(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "recording_compat_save.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    refined_parent = root.create_group("refined_eye_masks_runs")
+    refined = refined_parent.create_group("refined_eye_masks_compat_001")
+    refined.attrs.update(
+        {
+            "compatibility_role": "derived_from_refined_subject_masks",
+            "source_refined_subject_masks_run": "refined_subject_masks_001",
+        }
+    )
+    masks_arr = refined.create_array("masks_roi", shape=(1, 2, 8, 8), dtype="u1")
+    ellipse_params = refined.create_array("ellipse_params", shape=(1, 2, 5), dtype="f4")
+    ellipse_success = refined.create_array("ellipse_success", shape=(1, 2), dtype=bool)
+
+    with pytest.raises(RuntimeError, match="--manual --refined-run refined_eye_masks_compat_001"):
+        _save_roi_mask_edits(
+            root=root,
+            refined=refined,
+            roi_idx=0,
+            masks_row=np.zeros((2, 8, 8), dtype=np.uint8),
+            masks_arr=masks_arr,
+            edit_applied_arr=None,
+            ellipse_params_arr=ellipse_params,
+            ellipse_success_arr=ellipse_success,
+            eye_separation_arr=None,
+            reason_arr=None,
+            reason_bytes_arr=None,
+            reason_group=None,
+        )
 
 
 def test_save_roi_mask_edits_syncs_reason_bytes(tmp_path: Path) -> None:

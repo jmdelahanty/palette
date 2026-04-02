@@ -34,6 +34,10 @@ from ..shared.crop_image_source import CropImageSource
 from ..shared.detect_reason_codec import decode_reason_bytes, write_reason_columns
 from ..shared.mask_source import load_mask_bundle
 from ..shared.provenance_attrs import resolve_source_keypoints_run
+from ..utils.refined_eye_masks_compat import (
+    refined_eye_masks_compat_context,
+    refined_eye_masks_redirect_hint,
+)
 
 cv2.setNumThreads(8)
 
@@ -156,6 +160,31 @@ def _append_flagged_frame(
     flag_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def _derived_compat_write_guard(
+    refined: zarr.Group,
+    *,
+    refined_run: Optional[str] = None,
+    zarr_path: Optional[Path] = None,
+) -> None:
+    context = refined_eye_masks_compat_context(refined)
+    if not bool(context.get("is_derived_compat")):
+        return
+
+    resolved_run = refined_run
+    if not resolved_run:
+        group_path = str(getattr(refined, "path", "") or "")
+        if group_path:
+            resolved_run = group_path.split("/")[-1]
+
+    raise RuntimeError(
+        refined_eye_masks_redirect_hint(
+            refined_run=resolved_run,
+            source=refined,
+            zarr_path=zarr_path,
+        )
+    )
+
+
 def _apply_eye_mask_review_status(
     refined_parent: zarr.Group,
     refined_run: str,
@@ -167,6 +196,7 @@ def _apply_eye_mask_review_status(
     reviewer: Optional[str],
     notes: Optional[str],
 ) -> Dict[str, object]:
+    _derived_compat_write_guard(refined, refined_run=refined_run)
     timestamp_utc = datetime.now(timezone.utc).isoformat()
     payload: Dict[str, object] = {
         "state": state,
@@ -1120,6 +1150,7 @@ def _save_roi_mask_edits(
     reason_bytes_arr: Optional[zarr.Array],
     reason_group: Optional[zarr.Group] = None,
 ) -> Dict[str, object]:
+    _derived_compat_write_guard(refined)
     existing_masks = np.asarray(masks_arr[roi_idx], dtype=np.uint8)
     channel_count = int(masks_row.shape[0])
     new_params = np.full((channel_count, 5), np.nan, dtype=np.float32)
@@ -1250,6 +1281,17 @@ def create_viewer(
     if not isinstance(refined_parent, zarr.Group) or refined_run not in refined_parent:
         raise RuntimeError(f"Refined run '{refined_run}' not found.")
     refined = refined_parent[refined_run]
+    compat_context = refined_eye_masks_compat_context(refined)
+    derived_compat_read_only = bool(compat_context.get("is_derived_compat"))
+    compat_redirect_hint = (
+        refined_eye_masks_redirect_hint(
+            refined_run=refined_run,
+            source=refined,
+            zarr_path=zarr_path,
+        )
+        if derived_compat_read_only
+        else None
+    )
 
     source_eye_run_name = refined.attrs.get("source_eye_masks_run")
     source_eye_parent = root.get("eye_masks_runs")
@@ -1488,6 +1530,10 @@ def create_viewer(
             state["cursor_eye"] = None
             state["cursor_patch_xy"] = None
 
+        if derived_compat_read_only:
+            state["drawing"] = False
+            return
+
         if event == cv2.EVENT_LBUTTONDOWN:
             # Brush edits are gated behind Ctrl to avoid accidental draws while navigating.
             if ctrl_down:
@@ -1532,15 +1578,24 @@ def create_viewer(
     cv2.setMouseCallback(window_name, on_mouse)
 
     print("\n=== Eye Mask Patch Viewer ===")
-    print(f"Refined run: refined_eye_masks_runs/{refined_run}")
+    print(f"Refined run: {compat_context['stage_label']}/{refined_run}")
     print(f"Crop run: crop_runs/{resolved_crop}")
+    if derived_compat_read_only:
+        canonical_run = compat_context.get("source_refined_subject_masks_run")
+        if canonical_run:
+            print(f"Canonical subject run: refined_subject_masks_runs/{canonical_run}")
+        print("Mode: read-only legacy compat view; zarr writes are disabled.")
+        print(compat_redirect_hint)
     if kp_group_name and kp_run_name:
         print(f"Keypoints: {kp_group_name}/{kp_run_name}")
     else:
         print("Keypoints: none (using ellipse/mask centers)")
     print("Controls:")
     print("  left/right or p/n: prev/next ROI")
-    print("  Mouse on Eye Edit panel: hold Ctrl+LMB to paint")
+    if derived_compat_read_only:
+        print("  Mouse on Eye Edit panel: inspection only in read-only compat mode")
+    else:
+        print("  Mouse on Eye Edit panel: hold Ctrl+LMB to paint")
     print("  ]/[ or +/-: increase/decrease brush size")
     print("  . / ,: increase/decrease patch size")
     print("  x: toggle brush mode (paint/erase)")
@@ -1549,14 +1604,22 @@ def create_viewer(
     if probability_data is not None:
         print("  t: toggle probability preview panels")
         print("  w: save recommended probability threshold metadata for refinement")
-    print("  Mouse while drawing: hold Shift to temporarily invert brush mode")
+    if not derived_compat_read_only:
+        print("  Mouse while drawing: hold Shift to temporarily invert brush mode")
     print("  1/2: choose active eye")
-    print("  c: clear all eye masks for current ROI (unsaved until 's')")
-    print("  s: save edits to refined run")
+    if derived_compat_read_only:
+        print("  c: disabled in read-only compat mode")
+        print("  s: disabled in read-only compat mode")
+    else:
+        print("  c: clear all eye masks for current ROI (unsaved until 's')")
+        print("  s: save edits to refined run")
     print("  r: reset edits for current ROI")
     print("  b: flag current frame/ROI for cleanup")
     print("  k: flag current frame/ROI for keypoint nudge (keep masks unchanged)")
-    print("  a: approve refinement (write eye_mask_review_status)")
+    if derived_compat_read_only:
+        print("  a: disabled in read-only compat mode")
+    else:
+        print("  a: approve refinement (write eye_mask_review_status)")
     print("  q/ESC: quit")
     if flag_path is not None:
         print(f"Frame flag file: {flag_path.expanduser().resolve(strict=False)}")
@@ -1684,7 +1747,9 @@ def create_viewer(
                 (
                     f"ROI {roi_idx + 1}/{total_rois}  pad={pad}  brush={brush}px  "
                     f"mode={brush_mode}  ellipse={ellipse_overlay}  keypoints={keypoint_overlay}  edit_zoom={zoom}x  "
-                    f"active_eye={active_eye + 1}  fallback={fallback_summary}  review={review_label}{dirty_suffix}"
+                    f"active_eye={active_eye + 1}  fallback={fallback_summary}  "
+                    f"review={review_label}{dirty_suffix}"
+                    + ("  compat=read-only" if derived_compat_read_only else "")
                 ),
                 (8, 19),
                 cv2.FONT_HERSHEY_SIMPLEX,
@@ -1767,6 +1832,9 @@ def create_viewer(
                 pad_value = _adjust_padding_size(-PADDING_STEP)
                 print(f"Patch size (half-width): {pad_value}px")
             elif key in (ord("c"),):
+                if derived_compat_read_only:
+                    print(compat_redirect_hint)
+                    continue
                 edit_masks_row = state.get("edit_masks_row")
                 if edit_masks_row is None:
                     print("No ROI masks loaded to clear.")
@@ -1780,6 +1848,9 @@ def create_viewer(
                 _load_roi(roi_idx)
                 print(f"Reset edits for ROI {roi_idx}.")
             elif key in (ord("s"),):
+                if derived_compat_read_only:
+                    print(compat_redirect_hint)
+                    continue
                 result = _save_roi_mask_edits(
                     root=root,
                     refined=refined,
@@ -1854,6 +1925,9 @@ def create_viewer(
                 except Exception as exc:
                     print(f"Failed to flag keypoint nudge frame: {exc}")
             elif key in (ord("a"),):
+                if derived_compat_read_only:
+                    print(compat_redirect_hint)
+                    continue
                 try:
                     try:
                         _refresh_refined_eye_mask_metrics(root, refined)
@@ -1884,6 +1958,9 @@ def create_viewer(
                 except Exception as exc:
                     print(f"Failed to set eye_mask_review_status: {exc}")
             elif key in (ord("w"),):
+                if derived_compat_read_only:
+                    print(compat_redirect_hint)
+                    continue
                 if probability_data is None or source_eye_run is None or not isinstance(source_eye_run_name, str):
                     print("No source probability run available for threshold metadata.")
                     continue

@@ -18,12 +18,16 @@ from ..refinement.refine_eye_masks import _compute_roi_metrics, _measure_mask, _
 from ..shared.detect_reason_codec import read_reason_labels, write_reason_columns
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..utils.refined_eye_masks_compat import (
+    DERIVED_REFINED_EYE_MASKS_COMPAT_ROLE as DERIVED_COMPAT_ROLE,
+)
 from ..utils.system import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
 
 
 MATERIALIZE_REFINED_EYE_MASKS_COMPAT_METHOD = "materialize_refined_eye_masks_compat"
 MATERIALIZE_REFINED_EYE_MASKS_STAGE = "materialize_refined_eye_masks_compat"
+DERIVED_REFINED_EYE_MASKS_COMPAT_ROLE = DERIVED_COMPAT_ROLE
 EYE_COMPONENTS = ("eye_left", "eye_right")
 _TRIVIAL_REASON_TAGS = {"clean", "copied_from_source"}
 _CARRYOVER_ATTR_KEYS = (

@@ -381,6 +381,30 @@ def test_build_eye_mask_profile_summary_invariants() -> None:
     assert composition["dpf_at_acquisition"] == 7
 
 
+def test_build_eye_mask_profile_summary_labels_derived_compat_sources() -> None:
+    root = _make_eye_mask_root()
+    refined = root["refined_eye_masks_runs/refined_eye_masks_001"]
+    refined.attrs["compatibility_role"] = "derived_from_refined_subject_masks"
+    refined.attrs["source_refined_subject_masks_run"] = "refined_subject_masks_001"
+    refined.attrs["source_subject_mask_run"] = "subject_masks_001"
+
+    summary = build_eye_mask_profile_summary(
+        root,
+        zarr_path=Path("/tmp/rec_001_analysis.zarr"),
+        created_at_utc="2026-02-25T10:02:00+00:00",
+    )
+
+    source = summary["source"]
+    assert source["stage_group"] == "refined_eye_masks_runs"
+    assert source["eye_stage_role"] == "derived_compat"
+    assert source["eye_stage_label"] == "refined_eye_masks_runs (derived compat)"
+    assert source["authority_stage_group"] == "refined_subject_masks_runs"
+    assert source["compatibility_role"] == "derived_from_refined_subject_masks"
+    assert source["source_refined_subject_masks_run"] == "refined_subject_masks_001"
+    assert source["canonical_refined_subject_masks_run"] == "refined_subject_masks_001"
+    assert source["source_subject_mask_run"] == "subject_masks_001"
+
+
 def test_resolve_eye_mask_source_does_not_require_contains_lookup(monkeypatch) -> None:
     root = _make_eye_mask_root()
     monkeypatch.setattr(_FakeGroup, "__contains__", lambda _self, _key: False)

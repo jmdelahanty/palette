@@ -15,11 +15,15 @@ def _mk_refined_run(
     run_name: str,
     *,
     review_state: str | None,
+    derived_compat: bool = False,
 ) -> None:
     run = parent.create_group(run_name)
     run.create_array("masks_roi", data=np.zeros((1, 2, 4, 4), dtype=np.uint8))
     if review_state is not None:
         run.attrs["eye_mask_review_status"] = {"state": review_state}
+    if derived_compat:
+        run.attrs["compatibility_role"] = "derived_from_refined_subject_masks"
+        run.attrs["source_refined_subject_masks_run"] = "refined_subject_masks_001"
 
 
 def test_build_plans_filters_missing_review_status(tmp_path: Path) -> None:
@@ -66,6 +70,28 @@ def test_build_plans_filters_specific_review_state(tmp_path: Path) -> None:
     ok = [plan for plan in plans if plan.status == "ok"]
     assert len(ok) == 1
     assert ok[0].review_state == "pending"
+
+
+def test_build_plans_labels_derived_compat_runs(tmp_path: Path) -> None:
+    zarr_path = tmp_path / "compat_training.zarr"
+    root = zarr.open_group(str(zarr_path), mode="w")
+    parent = root.create_group("refined_eye_masks_runs")
+    _mk_refined_run(parent, "refined_compat", review_state=None, derived_compat=True)
+    parent.attrs["latest"] = "refined_compat"
+
+    plans = mod._build_plans(
+        [zarr_path],
+        recursive=False,
+        refined_run=None,
+        status_filter="missing",
+        zarr_use="training",
+    )
+
+    ok = [plan for plan in plans if plan.status == "ok"]
+    assert len(ok) == 1
+    assert ok[0].stage_label == "refined_eye_masks_runs (derived compat)"
+    assert ok[0].source_refined_subject_masks_run == "refined_subject_masks_001"
+    assert ok[0].is_derived_compat is True
 
 
 def test_build_plans_marks_missing_when_no_refined_runs(tmp_path: Path) -> None:
