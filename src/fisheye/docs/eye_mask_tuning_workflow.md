@@ -8,6 +8,9 @@ This document describes the current operator procedure for tuning and reviewing 
 - Refined eye mask failure correction (`fisheye.tune.eye_mask_review --retune/--manual/--audit`).
 - Works for both `_analysis.zarr` and curated `_training.zarr` archives when eye-mask runs are present.
 
+For explicit save-versus-approval semantics across detect, keypoints, eye masks, and subject masks, see
+[mask_review_save_approval_policy.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/mask_review_save_approval_policy.md).
+
 ## Preconditions
 
 1. Archive contains `crop_runs/<run>/roi_images`.

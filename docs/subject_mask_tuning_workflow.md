@@ -13,6 +13,10 @@ and canary body-mask generation.
 This is the current practical workflow for canary training zarrs. It is not a
 contract doc.
 
+For explicit save-versus-approval semantics across detect, keypoints, eye
+masks, and subject masks, see
+[mask_review_save_approval_policy.md](/home/delahantyj@hhmi.org/gitrepos/palette/docs/mask_review_save_approval_policy.md).
+
 ## Current Stage Split
 
 - Tuning metadata lives in:
