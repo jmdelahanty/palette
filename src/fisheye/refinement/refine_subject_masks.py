@@ -457,7 +457,7 @@ def refine_subject_masks(
                 component_updates=component_updates[str(component_name)],
             )
 
-    updated_at_utc = _finalize_refined_subject_apply(refined)
+    updated_at_utc = _finalize_refined_subject_apply(refined, updated_components=selected_components)
     refined.group.attrs["dask_scheduler"] = scheduler_key
     refined.group.attrs["dask_num_workers"] = int(num_workers) if num_workers is not None else None
     refined.group.attrs["dask_chunk_size"] = int(chunk_size)

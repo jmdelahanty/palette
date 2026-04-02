@@ -60,8 +60,8 @@ without breaking the eye-specific refinement and training stack.
 
 | Surface | Entrypoint | Current write target | Notes |
 | --- | --- | --- | --- |
-| Eye refinement | `src/fisheye/refinement/refine_eye_masks.py` -> `refine_eye_masks(...)` | `refined_eye_masks_runs/<run>` | Still the authoritative refined eye stage for geometry, ellipses, contours, and eye QA in v1. |
-| Subject-mask review/editor | `src/fisheye/tune/refined_subject_mask_review.py` -> `prepare_refined_subject_run(...)` | `refined_subject_masks_runs/<run>` | Default new-run component selection now follows the available components in the source `subject_mask_runs` input, including eyes when present. New run creation still seeds from `subject_mask_runs` sources, not directly from `refined_eye_masks_runs`. |
+| Eye refinement | `src/fisheye/refinement/refine_eye_masks.py` -> `refine_eye_masks(...)` | `refined_eye_masks_runs/<run>` | Still emitted for historical archives and legacy eye-specific consumers. Once canonical eye edits or eye review-state changes land in `refined_subject_masks_runs`, the matching `refined_eye_masks_runs/<run>` artifact is now refreshed as a derived compatibility run. |
+| Subject-mask review/editor | `src/fisheye/tune/refined_subject_mask_review.py` -> `prepare_refined_subject_run(...)` | `refined_subject_masks_runs/<run>` | Default new-run component selection now follows the available components in the source `subject_mask_runs` input, including eyes when present. New run creation still seeds from `subject_mask_runs` sources, not directly from `refined_eye_masks_runs`. Canonical eye save/apply/review-state updates now materialize the legacy refined-eye layout as a compatibility artifact. |
 
 Implementation note as of 2026-04-02:
 
@@ -71,6 +71,10 @@ Implementation note as of 2026-04-02:
   eye review/edit into `refined_subject_masks_runs` through a compatibility
   `subject_mask_runs` projection, while `--legacy-manual` retains the old
   refined-eye failure-review UI
+- canonical refined-subject eye saves, batch apply, and eye component review
+  status updates now refresh `refined_eye_masks_runs/<run>` as a derived
+  compatibility artifact rather than leaving the two refined stage families to
+  drift
 - new raw eye orchestration now dual-writes a compatibility
   `subject_mask_runs/<run>` companion immediately after successful raw
   `eye_masks_runs/<run>` completion in:
@@ -126,11 +130,13 @@ the producer can guarantee anatomical left/right identity.
 
 1. historical `eye_masks_runs` and `refined_eye_masks_runs` stay supported
 2. eye content can be projected into `subject_mask_runs`
-3. `refined_eye_masks_runs` remains the eye-specific refined stage in v1
+3. `refined_eye_masks_runs` remains readable by eye-specific legacy tooling in
+   v1, but canonical eye authority is moving to `refined_subject_masks_runs`
 4. only later should new raw `eye_masks_runs` creation be deprecated
 
-`docs/refined_subject_masks_runs_contract.md` also explicitly keeps
-`refined_eye_masks_runs` authoritative for refined eye geometry and QA in v1.
+`docs/refined_subject_masks_runs_contract.md` now treats
+`refined_eye_masks_runs` as a compatibility artifact once canonical
+refined-subject eye writes are available.
 
 ### 4. Some Downstream Consumers Already Prefer `subject_mask_runs`
 

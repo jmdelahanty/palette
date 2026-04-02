@@ -580,8 +580,10 @@ During transition:
 
 - `refined_eye_masks_runs` remains supported for historical archives and
   existing eye-specific tooling
-- it may remain the live eye-specific refinement surface until unified
-  eye-capable refined-subject writes reach parity
+- legacy eye-specific retune/failure tooling may still target it explicitly
+- canonical eye saves and eye review-state changes in
+  `refined_subject_masks_runs` may now refresh the matching
+  `refined_eye_masks_runs/<run>` as a derived compatibility artifact
 
 Target steady-state:
 
@@ -627,6 +629,16 @@ Recommended transition:
 5. move new eye-capable refined authoring to `refined_subject_masks_runs`
 6. treat `refined_eye_masks_runs` as a compatibility artifact once adapter
    readers/materializers exist
+
+Implementation note as of 2026-04-02:
+
+- canonical eye edits and eye component review-state updates now materialize a
+  compatibility `refined_eye_masks_runs/<run>` view from the canonical
+  `refined_subject_masks_runs/<run>` eye components when anatomical
+  `eye_left`/`eye_right` components are available
+- the compatibility run now serves legacy readers such as eye-specific profile,
+  export, and visualization tools, while canonical authoring authority remains
+  in `refined_subject_masks_runs`
 
 This contract is intentionally non-destructive.
 

@@ -223,6 +223,9 @@ Current behavior:
 - opens or reopens a matching `refined_subject_masks_runs/<run>` eye-component
   review surface
 - uses the same per-component review payloads as body/swim refinement
+- when canonical eye masks or eye component review states are saved there, the
+  matching `refined_eye_masks_runs/<run>` compatibility artifact is refreshed
+  for legacy eye-specific consumers
 
 Legacy fallback:
 

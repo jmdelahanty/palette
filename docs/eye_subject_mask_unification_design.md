@@ -325,6 +325,9 @@ That means:
   explicitly requested
 - canonical manual eye review authority should move to
   `refined_subject_masks_runs`
+- once canonical eye edits or eye review-state changes land in
+  `refined_subject_masks_runs`, the corresponding `refined_eye_masks_runs/<run>`
+  should be refreshed as a derived compatibility artifact for legacy readers
 - migration/backfill into subject-mask stages remains non-destructive
 
 ### Steady-state target
@@ -377,8 +380,11 @@ canonical and the other must be derived.
   `refined_subject_masks_runs`
 - direct assembly into `refined_subject_masks_runs` remains the preferred path;
   a merged raw subject-mask intermediate is not required
-- `refined_eye_masks_runs` becomes an optional derived compatibility artifact
-  for consumers that still require the legacy eye-specific layout
+- `refined_eye_masks_runs` becomes a derived compatibility artifact for
+  consumers that still require the legacy eye-specific layout
+- compatibility refresh should happen when canonical refined-subject eye masks
+  or eye review-state payloads change, so the two refined stage families do not
+  drift silently
 
 ### Phase D: eventual simplification
 

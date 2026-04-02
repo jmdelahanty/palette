@@ -1316,6 +1316,19 @@ def apply_component_review_status(
     )
     refined.attrs["refined_subject_mask_review_status"] = run_payload
     refined_parent.attrs["refined_subject_mask_review_status_latest"] = refined_run
+    if str(component_name) in {"eye_left", "eye_right"}:
+        labels_raw = refined.attrs.get("mask_labels")
+        component_names = tuple(str(item) for item in labels_raw) if isinstance(labels_raw, (list, tuple)) else ()
+        _materialize_refined_eye_compat_if_needed(
+            RefinedSubjectMaskRun(
+                run_name=refined_run,
+                parent=refined_parent,
+                group=refined,
+                component_names=component_names,
+                component_to_index={name: idx for idx, name in enumerate(component_names)},
+            ),
+            updated_components=(str(component_name),),
+        )
     return component_reviews[str(component_name)], run_payload
 
 
@@ -1504,10 +1517,35 @@ def _write_refined_subject_component_apply_rows(
         _write_reason_label_row(component_group, reason_labels, int(roi_idx))
 
 
-def _finalize_refined_subject_apply(refined: RefinedSubjectMaskRun) -> str:
+def _materialize_refined_eye_compat_if_needed(
+    refined: RefinedSubjectMaskRun,
+    *,
+    updated_components: Optional[Sequence[str]] = None,
+) -> None:
+    eye_components = {"eye_left", "eye_right"}
+    if not eye_components.issubset(set(refined.component_names)):
+        return
+    if updated_components is not None and not eye_components.intersection(str(name) for name in updated_components):
+        return
+
+    from ..utils.materialize_refined_eye_masks_compat import materialize_refined_eye_masks_compat
+
+    materialize_refined_eye_masks_compat(
+        refined.group,
+        refined_subject_run=refined.run_name,
+        overwrite=True,
+    )
+
+
+def _finalize_refined_subject_apply(
+    refined: RefinedSubjectMaskRun,
+    *,
+    updated_components: Optional[Sequence[str]] = None,
+) -> str:
     updated_at_utc = _utc_now()
     refined.group.attrs["updated_at_utc"] = updated_at_utc
     refined.parent.attrs["latest"] = refined.run_name
+    _materialize_refined_eye_compat_if_needed(refined, updated_components=updated_components)
     return updated_at_utc
 
 
@@ -1558,7 +1596,7 @@ def _apply_refined_subject_roi_rows(
             component_updates=component_updates,
         )
 
-    updated_at_utc = _finalize_refined_subject_apply(refined)
+    updated_at_utc = _finalize_refined_subject_apply(refined, updated_components=normalized_components)
     resolved_method = str(update_method or DEFAULT_RUN_METHOD)
     for component_name in normalized_components:
         comp_idx = int(refined.component_to_index[component_name])
