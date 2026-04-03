@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import importlib
 import json
 import os
@@ -1427,6 +1428,28 @@ def _resolve_runtime_device(build_model_fn, explicit_device: str | None) -> str:
     return "cpu"
 
 
+def _release_runtime_memory(build_model_fn, *, device: str | None) -> None:
+    gc.collect()
+    if device != "cuda":
+        return
+    torch_module = build_model_fn.__globals__.get("torch")
+    if torch_module is None or not hasattr(torch_module, "cuda"):
+        return
+    cuda_mod = torch_module.cuda
+    try:
+        empty_cache = getattr(cuda_mod, "empty_cache", None)
+        if callable(empty_cache):
+            empty_cache()
+    except Exception:
+        pass
+    try:
+        ipc_collect = getattr(cuda_mod, "ipc_collect", None)
+        if callable(ipc_collect):
+            ipc_collect()
+    except Exception:
+        pass
+
+
 def _subject_mask_storage_chunks(n_rows: int, height: int, width: int) -> tuple[int, int, int, int]:
     return (
         max(1, min(64, n_rows)),
@@ -1781,6 +1804,8 @@ def run_sam_subject_mask_inference(
     resolved_device = _resolve_runtime_device(build_model_fn, device)
     checkpoint_text = str(Path(checkpoint_path).expanduser().resolve()) if checkpoint_path else None
 
+    model = None
+    processor = None
     try:
         start = time.perf_counter()
         collected_binary: list[np.ndarray] = []
@@ -1831,6 +1856,12 @@ def run_sam_subject_mask_inference(
                 collected_binary.append(selected.binary)
                 collected_probs.append(selected.probs)
                 collected_scores.append(selected.scores)
+                del preview
+                del pil_images
+                del inference_state
+                del masks_list
+                del ious_list
+                del selected
 
         duration = float(time.perf_counter() - start)
         if collected_rows:
@@ -1871,6 +1902,9 @@ def run_sam_subject_mask_inference(
             duration_seconds=duration,
         )
     finally:
+        del processor
+        del model
+        _release_runtime_memory(build_model_fn, device=resolved_device)
         if added_path and sam3_root_text in sys.path:
             sys.path.remove(sam3_root_text)
 

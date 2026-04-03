@@ -1024,3 +1024,30 @@ def test_resolve_prompt_keypoint_selection_supports_aliases_and_default_all() ->
     np.testing.assert_array_equal(default_selection.indices, np.asarray([0, 1, 2], dtype=np.int32))
     assert alias_selection.labels == ("swim_bladder", "eye_left")
     np.testing.assert_array_equal(alias_selection.indices, np.asarray([0, 1], dtype=np.int32))
+
+
+def test_run_sam_subject_mask_inference_releases_cuda_memory(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class _FakeCuda:
+        @staticmethod
+        def empty_cache() -> None:
+            calls.append("empty_cache")
+
+        @staticmethod
+        def ipc_collect() -> None:
+            calls.append("ipc_collect")
+
+    class _FakeTorch:
+        cuda = _FakeCuda()
+
+    def _fake_build_model_fn(**_kwargs):
+        return object()
+
+    _fake_build_model_fn.__globals__["torch"] = _FakeTorch()
+
+    monkeypatch.setattr(mod.gc, "collect", lambda: calls.append("gc_collect"))
+
+    mod._release_runtime_memory(_fake_build_model_fn, device="cuda")
+
+    assert calls == ["gc_collect", "empty_cache", "ipc_collect"]
