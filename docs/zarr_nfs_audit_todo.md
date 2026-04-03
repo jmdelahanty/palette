@@ -67,14 +67,12 @@ Implication:
 5. Decide on a default sharding policy for NFS (target shard size in MB).
 6. Evaluate consolidated metadata support and add optional finalize step.
 7. Route all open calls through `open_zarr_root` for future store changes.
-8. Implement a first transfer-artifact prototype (`tar.zst` first, before a
-   rewritten sharded export).
-9. Benchmark movement to external storage:
+8. Benchmark movement to external storage:
    - raw `.zarr` directory copy
    - packed transfer artifact copy
    - unpack time on destination
-10. Record whether transfer artifacts should include all groups or omit
-    regenerable compatibility artifacts by default.
+9. Record whether transfer artifacts should include all groups or omit
+   regenerable compatibility artifacts by default.
 
 ## TODO: design changes (if needed)
 
@@ -103,6 +101,8 @@ Implication:
 - [ ] Verify whether GDS path can shard (or fails) and document outcome.
 - [ ] Pick shard targets for raw_video and crops based on measurements.
 - [ ] Decide how sharding is enabled (config flag vs auto policy).
-- [ ] Build a transfer-artifact prototype and benchmark raw-dir copy vs packed copy.
+- [x] Build a transfer-artifact prototype.
+  - Utility: `scripts/py -m fisheye.utils.pack_zarr_transfer_artifact ...`
+- [ ] Benchmark raw-dir copy vs packed copy.
 - [ ] Decide which compatibility/regenerable groups belong in transfer artifacts.
 - [ ] Document the final policy and update schema docs.

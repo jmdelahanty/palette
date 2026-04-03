@@ -224,6 +224,8 @@ revisited after a transfer-artifact benchmark exists.
 ## Recommended Near-Term Implementation Order
 
 1. Add a transfer-artifact tool (`tar.zst` first).
+   - Prototype utility:
+     `scripts/py -m fisheye.utils.pack_zarr_transfer_artifact <archive>.zarr --apply`
 2. Benchmark directory copy vs packed-artifact copy to external storage.
 3. Define keep-vs-regenerate rules for compatibility artifacts.
 4. Audit chunk layouts for the largest dense derived arrays.
