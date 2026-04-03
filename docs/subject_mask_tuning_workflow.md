@@ -87,6 +87,16 @@ Notes:
 If the same camera setup is shared across recordings, you can copy the
 subject-mask tuning to other zarrs with the same `camera_id`.
 
+If you do not remember which archive you tuned, scan for candidate source zarrs
+first:
+
+```bash
+scripts/py -m fisheye.utils.find_subject_mask_tuning_sources \
+  /nvme1/recordings \
+  --recursive \
+  --subject-mask-components swim_bladder
+```
+
 Dry run:
 
 ```bash
@@ -168,6 +178,50 @@ Current behavior:
 - applies dish-mask gating when dish-mask tuning exists
 - writes a body-only `subject_mask_runs/<run>`
 - records `run_semantics = "traditional_subject_body_inference"`
+
+Batch materialization for tuned swim-bladder-only runs:
+
+```bash
+scripts/py -m fisheye.utils.run_swim_bladder_segmentation_batch \
+  /nvme1/recordings \
+  --recursive \
+  --run-name traditional_swim_bladder_masks_camera2010093_2026-04-02
+```
+
+Apply after the dry run looks correct:
+
+```bash
+scripts/py -m fisheye.utils.run_swim_bladder_segmentation_batch \
+  /nvme1/recordings \
+  --recursive \
+  --run-name traditional_swim_bladder_masks_camera2010093_2026-04-02 \
+  --apply
+```
+
+Current batch behavior:
+
+- defaults to `--zarr-use training`
+- requires `subject_mask_tuning.components["swim_bladder"]` unless
+  `--allow-missing-tuning` is passed
+- skips an existing target `subject_mask_runs/<run>` unless `--overwrite` is
+  given
+
+Operator note:
+
+- `scripts/py -m fisheye.utils.check_recording_steps` currently counts tuning at
+  the top-level attr layer, so the summary line still reflects coarse keys such
+  as `subject_mask_tuning` and `eye_mask_tuning`.
+- the command now also prints explicit nested component lines such as
+  `subject_mask_tuning.subject_body` and
+  `subject_mask_tuning.swim_bladder` so operators can see which unified
+  subject-mask tuning components are actually present.
+- future operator cleanup should promote those nested subject-mask tuning
+  components into the summary/counting layer too, so the top summary reflects
+  all required tuning inputs directly instead of mixing a coarse
+  `subject_mask_tuning: OK` line with component-specific detail lines below it.
+- if registry status views eventually become the default operator surface, the
+  same component-aware tuning summary should be mirrored there rather than
+  staying filesystem-only.
 
 ### 4. Refine / review the body masks
 

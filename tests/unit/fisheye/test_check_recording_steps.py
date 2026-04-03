@@ -200,6 +200,43 @@ def test_subject_mask_component_summary_text_marks_available_and_missing_compone
     )
 
 
+def test_subject_mask_tuning_component_statuses_detect_body_and_swim_entries() -> None:
+    assert mod._subject_mask_tuning_component_statuses(  # noqa: SLF001
+        {
+            "version": "2.0",
+            "components": {
+                "subject_body": {"method": "traditional_subject_mask_seed"},
+                "swim_bladder": {"subject_method_family": "swim_bladder_polar_boundary_v1"},
+            },
+        }
+    ) == {
+        "subject_body": "ok",
+        "swim_bladder": "ok",
+    }
+    assert mod._subject_mask_tuning_component_statuses(None) == {  # noqa: SLF001
+        "subject_body": "miss",
+        "swim_bladder": "miss",
+    }
+
+
+def test_subject_mask_tuning_component_lines_render_nested_labels() -> None:
+    assert mod._subject_mask_tuning_component_lines(  # noqa: SLF001
+        {"subject_body": "miss", "swim_bladder": "ok"}
+    ) == [
+        ("subject_mask_tuning.subject_body", "MISS"),
+        ("subject_mask_tuning.swim_bladder", "OK"),
+    ]
+
+
+class _FakeTuningGroup(dict):
+    def __init__(self, *args: object, attrs: dict[str, object] | None = None, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.attrs = attrs or {}
+
+    def get(self, key: str, default: object = None) -> object:
+        return super().get(key, default)
+
+
 def test_check_zarr_reads_track_unassigned_warning_from_latest_run(tmp_path: Path) -> None:
     zarr_path = tmp_path / "track_warning_analysis.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
@@ -317,6 +354,37 @@ def test_check_zarr_reads_subject_mask_status_and_components(tmp_path: Path) -> 
     review_status = info["refined_subject_mask_review_status"]
     assert isinstance(review_status, dict)
     assert review_status["state"] == "pending"
+
+
+def test_check_zarr_reads_subject_mask_tuning_component_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    zarr_path = tmp_path / "subject_mask_tuning_training.zarr"
+    zarr_path.mkdir()
+    root = _FakeTuningGroup(
+        attrs={"zarr_use": "training"},
+    )
+    root["analysis_metadata"] = _FakeTuningGroup(
+        attrs={
+            "subject_mask_tuning": {
+                "version": "2.0",
+                "components": {
+                    "subject_body": {"method": "traditional_subject_mask_seed"},
+                    "swim_bladder": {"subject_method_family": "swim_bladder_polar_boundary_v1"},
+                },
+            }
+        }
+    )
+    monkeypatch.setattr(mod.zarr, "open_group", lambda *args, **kwargs: root)
+
+    info = mod._check_zarr(zarr_path, tuning_keys=["subject_mask_tuning"])  # noqa: SLF001
+
+    assert info["tuning_status"]["subject_mask_tuning"] == "ok"
+    assert info["subject_mask_tuning_component_status"] == {
+        "subject_body": "ok",
+        "swim_bladder": "ok",
+    }
 
 
 def test_registry_crop_review_status_for_zarr_returns_latest_review_fields(tmp_path: Path) -> None:

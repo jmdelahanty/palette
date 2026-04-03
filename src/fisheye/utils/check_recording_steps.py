@@ -10,6 +10,7 @@ import h5py
 import numpy as np
 import zarr
 
+from fisheye.utils.apply_tuning_by_camera import _normalize_subject_mask_tuning_payload
 from fisheye.registry.db import Registry
 from fisheye.shared.experiment_setup import subdish_required
 from fisheye.shared.refined_detect_review import (
@@ -95,6 +96,10 @@ _DISPLAY_FIELD_LABELS = {
     "subject_mask_components": "subject_mask_components (unified)",
     "refined_subject_mask_components": "refined_subject_mask_components (unified)",
 }
+_SUBJECT_MASK_TUNING_COMPONENT_LABELS = {
+    "subject_body": "subject_mask_tuning.subject_body",
+    "swim_bladder": "subject_mask_tuning.swim_bladder",
+}
 
 
 @dataclass
@@ -164,6 +169,7 @@ class RecordingStatus:
     tuning_total: int
     tuning_missing: List[str]
     tuning_status: Dict[str, str]
+    subject_mask_tuning_component_status: Dict[str, str]
 
 
 def _coerce_float(value: object) -> Optional[float]:
@@ -378,6 +384,41 @@ def _subject_mask_component_fields_from_details(details: Optional[Dict[str, obje
         "unavailable_components": _coerce_text_list(details.get("unavailable_components")),
         "component_review_states": review_states,
     }
+
+
+def _subject_mask_tuning_component_statuses(raw: object) -> Dict[str, str]:
+    payload = _normalize_subject_mask_tuning_payload(raw)
+    components = payload.get("components", {})
+    if not isinstance(components, dict):
+        components = {}
+    statuses: Dict[str, str] = {}
+    for component_name in _SUBJECT_MASK_TUNING_COMPONENT_LABELS:
+        statuses[component_name] = "ok" if component_name in components else "miss"
+    return statuses
+
+
+def _subject_mask_tuning_component_statuses_from_details(details: Optional[Dict[str, object]]) -> Dict[str, str]:
+    details = details or {}
+    component_names = _coerce_text_list(
+        details.get("subject_mask_tuning_components") or details.get("component_names")
+    )
+    if not component_names:
+        return {}
+    names = set(component_names)
+    statuses: Dict[str, str] = {}
+    for component_name in _SUBJECT_MASK_TUNING_COMPONENT_LABELS:
+        statuses[component_name] = "ok" if component_name in names else "miss"
+    return statuses
+
+
+def _subject_mask_tuning_component_lines(statuses: Dict[str, str]) -> List[tuple[str, str]]:
+    lines: List[tuple[str, str]] = []
+    for component_name, label in _SUBJECT_MASK_TUNING_COMPONENT_LABELS.items():
+        status = statuses.get(component_name)
+        if status is None:
+            continue
+        lines.append((label, _tuning_status_text(status)))
+    return lines
 
 
 def _extract_subject_mask_coverage(group: Optional[zarr.Group]) -> Optional[float]:
@@ -930,6 +971,13 @@ def _registry_status_payload(
     tuning_total = 0
     tuning_missing: List[str] = []
     tuning_status: Dict[str, str] = {}
+    subject_mask_tuning_row = selected_rows.get("subject_mask_tuning")
+    subject_mask_tuning_details = _parse_step_json(
+        subject_mask_tuning_row.get("details_json") if subject_mask_tuning_row else None
+    ) or {}
+    subject_mask_tuning_component_status = _subject_mask_tuning_component_statuses_from_details(
+        subject_mask_tuning_details
+    )
     for key in tuning_keys:
         status = _normalize_step_status(selected_rows.get(key, {}).get("status"))
         if status == "ok":
@@ -946,6 +994,7 @@ def _registry_status_payload(
     payload["tuning_total"] = tuning_total
     payload["tuning_missing"] = tuning_missing
     payload["tuning_status"] = tuning_status
+    payload["subject_mask_tuning_component_status"] = subject_mask_tuning_component_status
 
     return payload
 
@@ -1026,6 +1075,7 @@ def _build_recording_status(
         tuning_total=int(zarr_info["tuning_total"]),
         tuning_missing=list(zarr_info["tuning_missing"]),  # type: ignore[arg-type]
         tuning_status=dict(zarr_info["tuning_status"]),  # type: ignore[arg-type]
+        subject_mask_tuning_component_status=dict(zarr_info["subject_mask_tuning_component_status"]),  # type: ignore[arg-type]
     )
 
 
@@ -2008,6 +2058,9 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
     tuning_status: Dict[str, str] = {}
     analysis_meta = root.get("analysis_metadata")
     attrs = analysis_meta.attrs if analysis_meta is not None else {}
+    subject_mask_tuning_component_status = _subject_mask_tuning_component_statuses(
+        attrs.get("subject_mask_tuning")
+    )
     for key in tuning_keys:
         if key in attrs:
             tuning_present += 1
@@ -2082,6 +2135,7 @@ def _check_zarr(zarr_path: Path, tuning_keys: List[str]) -> Dict[str, object]:
         "tuning_total": tuning_total,
         "tuning_missing": tuning_missing,
         "tuning_status": tuning_status,
+        "subject_mask_tuning_component_status": subject_mask_tuning_component_status,
     }
 
 
@@ -2861,6 +2915,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             for key in tuning_keys:
                 status = "na" if is_production else plan.tuning_status.get(key, "miss")
                 print(f"    {key}: {_tuning_status_text(status)}")
+            if not is_production and "subject_mask_tuning" in tuning_keys:
+                for label, status_text in _subject_mask_tuning_component_lines(
+                    plan.subject_mask_tuning_component_status
+                ):
+                    print(f"    {label}: {status_text}")
 
     return 0
 
