@@ -181,6 +181,21 @@ scripts/py -m fisheye.tune.refined_subject_mask_review \
 This creates or reopens a `refined_subject_masks_runs/<run>` entry and lets the
 operator paint or erase masks per ROI.
 
+Current review/editor purpose:
+
+- canonical manual edit/save/approval surface for unified refined subject masks
+- use this surface when the operator wants to change pixels, save ROI-local
+  improvements, or update component/run review state
+- shows source, refined, and active-component edit overlays for editing context
+- does not currently draw the contour + convex hull overlays used by the
+  inspector
+
+Practical rule:
+
+- if you want to edit or approve, use `refined_subject_mask_review`
+- if you want to inspect shape/geometry without editing, use
+  `subject_mask_inspector`
+
 ### 5. Inspect raw vs refined subject masks
 
 ```bash
@@ -205,8 +220,15 @@ Current inspector behavior:
 - supports jumping to the next flagged ROI for the active component based on
   current refined QC thresholds
 
-This is intended as a Palette-native read-mostly inspection surface. It is not
-a replacement for Paintera's heavier pixel-editing interaction model.
+Current inspector purpose:
+
+- Palette-native read-mostly comparison and QC surface
+- best surface for checking raw vs refined component geometry
+- the place to see the active component contour and convex hull overlays
+- not the canonical pixel-edit/save/approval surface
+
+This is not a replacement for the unified manual editor or for Paintera's
+heavier pixel-editing interaction model.
 
 ## Unified Eye Review During Transition
 

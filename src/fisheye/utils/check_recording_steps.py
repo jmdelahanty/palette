@@ -1053,6 +1053,7 @@ def _plan_compare_snapshot(plan: RecordingStatus, tuning_keys: List[str]) -> Dic
         "subject_masks": _subject_mask_stage_text(plan.subject_masks_present, plan.subject_masks_coverage),
         "subject_mask_components": _subject_mask_component_summary_text(
             plan.subject_mask_available_components,
+            plan.subject_mask_unavailable_components,
             plan.subject_mask_component_review_states,
         ),
         "refined_subject_masks": _subject_mask_stage_text(
@@ -1061,6 +1062,7 @@ def _plan_compare_snapshot(plan: RecordingStatus, tuning_keys: List[str]) -> Dic
         ),
         "refined_subject_mask_components": _subject_mask_component_summary_text(
             plan.refined_subject_mask_available_components,
+            plan.refined_subject_mask_unavailable_components,
             plan.refined_subject_mask_component_review_states,
         ),
         "arena_assignment": _status_text(plan.arena_assignment_present),
@@ -2365,25 +2367,35 @@ _SUBJECT_REVIEW_LABELS = {
 
 def _subject_mask_component_summary_text(
     available_components: List[str],
+    unavailable_components: List[str],
     review_states: Dict[str, str],
 ) -> str:
-    if not available_components:
+    if not available_components and not unavailable_components:
         return "—"
-    parts: List[str] = []
+    available_parts: List[str] = []
     for component_name in available_components:
         label = _SUBJECT_COMPONENT_LABELS.get(component_name, component_name)
         state = _normalize_attr(review_states.get(component_name))
         if state:
             label = f"{label}={_SUBJECT_REVIEW_LABELS.get(state, state)}"
-        parts.append(label)
-    return ", ".join(parts)
+        available_parts.append(label)
+    missing_parts = [
+        _SUBJECT_COMPONENT_LABELS.get(component_name, component_name) for component_name in unavailable_components
+    ]
+    parts: List[str] = []
+    if available_parts:
+        parts.append(f"avail: {', '.join(available_parts)}")
+    if missing_parts:
+        parts.append(f"miss: {', '.join(missing_parts)}")
+    return "; ".join(parts) if parts else "—"
 
 
 def _subject_mask_component_summary_rich(
     available_components: List[str],
+    unavailable_components: List[str],
     review_states: Dict[str, str],
 ) -> str:
-    text = _subject_mask_component_summary_text(available_components, review_states)
+    text = _subject_mask_component_summary_text(available_components, unavailable_components, review_states)
     if text == "—":
         return "[dim]—[/dim]"
     return text
@@ -2736,6 +2748,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 _subject_mask_stage_rich(plan.subject_masks_present, plan.subject_masks_coverage),
                 _subject_mask_component_summary_rich(
                     plan.subject_mask_available_components,
+                    plan.subject_mask_unavailable_components,
                     plan.subject_mask_component_review_states,
                 ),
                 _subject_mask_stage_rich(
@@ -2744,6 +2757,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 ),
                 _subject_mask_component_summary_rich(
                     plan.refined_subject_mask_available_components,
+                    plan.refined_subject_mask_unavailable_components,
                     plan.refined_subject_mask_component_review_states,
                 ),
                 _status_rich(plan.arena_assignment_present),
@@ -2815,7 +2829,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"  subject_masks: {_subject_mask_stage_text(plan.subject_masks_present, plan.subject_masks_coverage)}")
             print(
                 "  subject_mask_components (unified): "
-                f"{_subject_mask_component_summary_text(plan.subject_mask_available_components, plan.subject_mask_component_review_states)}"
+                f"{_subject_mask_component_summary_text(plan.subject_mask_available_components, plan.subject_mask_unavailable_components, plan.subject_mask_component_review_states)}"
             )
             print(f"  subject_mask_review_status: {_review_status_text(plan.subject_mask_review_status)}")
             print(
@@ -2824,7 +2838,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             print(
                 "  refined_subject_mask_components (unified): "
-                f"{_subject_mask_component_summary_text(plan.refined_subject_mask_available_components, plan.refined_subject_mask_component_review_states)}"
+                f"{_subject_mask_component_summary_text(plan.refined_subject_mask_available_components, plan.refined_subject_mask_unavailable_components, plan.refined_subject_mask_component_review_states)}"
             )
             print(
                 "  refined_subject_mask_review_status: "

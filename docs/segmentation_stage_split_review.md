@@ -63,7 +63,13 @@ without breaking the eye-specific refinement and training stack.
 | Surface | Entrypoint | Current write target | Notes |
 | --- | --- | --- | --- |
 | Eye refinement | `src/fisheye/refinement/refine_eye_masks.py` -> `refine_eye_masks(...)` | `refined_eye_masks_runs/<run>` | Still emitted for historical archives and legacy eye-specific consumers. Once canonical eye edits or eye review-state changes land in `refined_subject_masks_runs`, the matching `refined_eye_masks_runs/<run>` artifact is now refreshed as a derived compatibility run. |
-| Subject-mask review/editor | `src/fisheye/tune/refined_subject_mask_review.py` -> `prepare_refined_subject_run(...)` | `refined_subject_masks_runs/<run>` | Default new-run component selection now follows the available components in the source `subject_mask_runs` input, including eyes when present. New run creation still seeds from `subject_mask_runs` sources, not directly from `refined_eye_masks_runs`. Canonical eye save/apply/review-state updates now materialize the legacy refined-eye layout as a compatibility artifact. |
+| Subject-mask review/editor | `src/fisheye/tune/refined_subject_mask_review.py` -> `prepare_refined_subject_run(...)` | `refined_subject_masks_runs/<run>` | Canonical unified edit/save/approval surface. Default new-run component selection now follows the available components in the source `subject_mask_runs` input, including eyes when present. New run creation still seeds from `subject_mask_runs` sources, not directly from `refined_eye_masks_runs`. Canonical eye save/apply/review-state updates now materialize the legacy refined-eye layout as a compatibility artifact. |
+
+### Read-Only Inspection Surface
+
+| Surface | Entrypoint | Current read target | Notes |
+| --- | --- | --- | --- |
+| Subject-mask inspector | `src/fisheye/visualization/subject_mask_inspector.py` | `subject_mask_runs/<run>` + `refined_subject_masks_runs/<run>` | Read-mostly comparison/QC surface. Shows raw/refined overlays, active-component metadata, and the contour + convex-hull overlays that are not currently drawn in `refined_subject_mask_review.py`. |
 
 Implementation note as of 2026-04-02:
 

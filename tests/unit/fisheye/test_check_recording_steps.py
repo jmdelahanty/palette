@@ -181,6 +181,25 @@ def test_display_field_label_marks_legacy_eye_and_unified_subject_fields() -> No
     assert mod._display_field_label("detect") == "detect"  # noqa: SLF001
 
 
+def test_subject_mask_component_summary_text_marks_available_and_missing_components() -> None:
+    assert (
+        mod._subject_mask_component_summary_text(  # noqa: SLF001
+            ["eye_left", "eye_right"],
+            ["subject_body", "swim_bladder"],
+            {"eye_left": "approved", "eye_right": "pending"},
+        )
+        == "avail: eye_l=appr, eye_r=pend; miss: body, swim"
+    )
+    assert (
+        mod._subject_mask_component_summary_text(  # noqa: SLF001
+            ["subject_body", "eye_left", "eye_right", "swim_bladder"],
+            [],
+            {},
+        )
+        == "avail: body, eye_l, eye_r, swim"
+    )
+
+
 def test_check_zarr_reads_track_unassigned_warning_from_latest_run(tmp_path: Path) -> None:
     zarr_path = tmp_path / "track_warning_analysis.zarr"
     root = zarr.open_group(str(zarr_path), mode="w")
