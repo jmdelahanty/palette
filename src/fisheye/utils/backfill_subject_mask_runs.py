@@ -21,6 +21,7 @@ from fisheye.shared.provenance_attrs import (
     build_source_keypoints_attrs,
     resolve_source_keypoints_run,
 )
+from fisheye.shared.subject_mask_chunks import subject_mask_storage_chunks
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.shared.zarr_helpers import resolve_zarr_run
@@ -372,23 +373,8 @@ def _target_prob_dtype(prob_source: ProbabilitySource) -> np.dtype:
     return np.dtype(prob_source.array.dtype)
 
 
-def _target_mask_chunks(
-    source_chunks: Optional[tuple[int, ...]],
-    *,
-    batch_size: int,
-    total_rows: int,
-    channel_count: int,
-    height: int,
-    width: int,
-) -> tuple[int, int, int, int]:
-    if source_chunks is None or len(source_chunks) != 4:
-        return (min(batch_size, total_rows), 1, height, width)
-    return (
-        max(1, min(int(source_chunks[0]), total_rows)),
-        1,
-        int(source_chunks[2]),
-        int(source_chunks[3]),
-    )
+def _target_mask_chunks(*, total_rows: int, height: int, width: int) -> tuple[int, int, int, int]:
+    return subject_mask_storage_chunks(total_rows, height, width)
 
 
 def backfill_subject_mask_run(
@@ -548,22 +534,8 @@ def backfill_subject_mask_run(
             source_created_at_utc=source_created_at_utc,
         )
 
-    masks_chunks = _target_mask_chunks(
-        getattr(source_masks, "chunks", None) if source_masks is not None else None,
-        batch_size=batch_size,
-        total_rows=total_rows,
-        channel_count=len(target_labels),
-        height=height,
-        width=width,
-    )
-    probs_chunks = _target_mask_chunks(
-        getattr(prob_source.array, "chunks", None) if use_probability_source and prob_source.array is not None else None,
-        batch_size=batch_size,
-        total_rows=total_rows,
-        channel_count=len(target_labels),
-        height=height,
-        width=width,
-    )
+    masks_chunks = _target_mask_chunks(total_rows=total_rows, height=height, width=width)
+    probs_chunks = _target_mask_chunks(total_rows=total_rows, height=height, width=width)
 
     masks_out = run_group.create_array(
         "masks_roi",

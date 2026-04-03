@@ -1,0 +1,15 @@
+from __future__ import annotations
+
+from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
+
+
+def test_subject_mask_storage_chunks_use_full_roi_spatial_extent() -> None:
+    assert subject_mask_storage_chunks(227, 512, 512) == (16, 1, 512, 512)
+
+
+def test_subject_mask_storage_chunks_clamp_to_small_arrays() -> None:
+    assert subject_mask_storage_chunks(2, 6, 8) == (2, 1, 6, 8)
+
+
+def test_subject_mask_metric_row_chunk_uses_large_row_groups() -> None:
+    assert subject_mask_metric_row_chunk(227) == 227

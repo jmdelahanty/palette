@@ -22,6 +22,7 @@ from fisheye.pose.schema import schema_from_metadata
 from fisheye.shared.crop_image_source import resolve_materialized_crop_run
 from fisheye.shared.provenance_attrs import build_source_keypoints_attrs
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.system import get_environment_info, get_git_info
@@ -1450,15 +1451,6 @@ def _release_runtime_memory(build_model_fn, *, device: str | None) -> None:
         pass
 
 
-def _subject_mask_storage_chunks(n_rows: int, height: int, width: int) -> tuple[int, int, int, int]:
-    return (
-        max(1, min(64, n_rows)),
-        1,
-        max(1, min(128, height)),
-        max(1, min(128, width)),
-    )
-
-
 def _write_sparse_mask_channel(
     dest: zarr.Array,
     row_indices: np.ndarray,
@@ -1573,7 +1565,8 @@ def write_sam_subject_mask_run(
     _copy_lineage_array(run_group, crop_group, "detection_indices")
     _copy_lineage_array(run_group, crop_group, "detection_source")
 
-    storage_chunks = _subject_mask_storage_chunks(n_rows, height, width)
+    storage_chunks = subject_mask_storage_chunks(n_rows, height, width)
+    metric_row_chunk = subject_mask_metric_row_chunk(n_rows)
     masks_arr = run_group.create_array(
         "masks_roi",
         shape=(n_rows, n_channels, height, width),
@@ -1630,14 +1623,14 @@ def write_sam_subject_mask_run(
         bbox_xyxy[selected.row_indices, 0, :] = channel_metrics["bbox_xyxy"]
         bbox_valid[selected.row_indices, 0] = channel_metrics["bbox_valid"]
 
-    metrics_group.create_array("prob_max", data=prob_max, overwrite=True)
-    metrics_group.create_array("sam_quality_score", data=sam_quality_score, overwrite=True)
-    metrics_group.create_array("mask_present", data=mask_present, overwrite=True)
-    metrics_group.create_array("area_px", data=area_px, overwrite=True)
-    metrics_group.create_array("centroid_xy", data=centroid_xy, overwrite=True)
-    metrics_group.create_array("centroid_valid", data=centroid_valid, overwrite=True)
-    metrics_group.create_array("bbox_xyxy", data=bbox_xyxy, overwrite=True)
-    metrics_group.create_array("bbox_valid", data=bbox_valid, overwrite=True)
+    metrics_group.create_array("prob_max", data=prob_max, chunks=(metric_row_chunk, 1), overwrite=True)
+    metrics_group.create_array("sam_quality_score", data=sam_quality_score, chunks=(metric_row_chunk, 1), overwrite=True)
+    metrics_group.create_array("mask_present", data=mask_present, chunks=(metric_row_chunk, 1), overwrite=True)
+    metrics_group.create_array("area_px", data=area_px, chunks=(metric_row_chunk, 1), overwrite=True)
+    metrics_group.create_array("centroid_xy", data=centroid_xy, chunks=(metric_row_chunk, 1, 2), overwrite=True)
+    metrics_group.create_array("centroid_valid", data=centroid_valid, chunks=(metric_row_chunk, 1), overwrite=True)
+    metrics_group.create_array("bbox_xyxy", data=bbox_xyxy, chunks=(metric_row_chunk, 1, 4), overwrite=True)
+    metrics_group.create_array("bbox_valid", data=bbox_valid, chunks=(metric_row_chunk, 1), overwrite=True)
 
     summary_statistics = _build_subject_mask_summary(
         inputs,

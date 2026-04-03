@@ -146,7 +146,7 @@ def test_inspect_sam_subject_archive_prepares_expected_preview(monkeypatch) -> N
     monkeypatch.setattr(
         mod,
         "_resolve_keypoint_run",
-        lambda root, *, keypoint_run=None, keypoint_group="auto": mod.ResolvedKeypointRun(
+        lambda root, *, keypoint_run=None, keypoint_group="auto", zarr_path=None: mod.ResolvedKeypointRun(
             group_name="refined_keypoints_runs",
             run_name="refined_001",
             group=keypoint_group_obj,
@@ -192,7 +192,7 @@ def test_inspect_sam_subject_archive_supports_explicit_positive_keypoint_labels(
     monkeypatch.setattr(
         mod,
         "_resolve_keypoint_run",
-        lambda root, *, keypoint_run=None, keypoint_group="auto": mod.ResolvedKeypointRun(
+        lambda root, *, keypoint_run=None, keypoint_group="auto", zarr_path=None: mod.ResolvedKeypointRun(
             group_name="refined_keypoints_runs",
             run_name="refined_001",
             group=keypoint_group_obj,
@@ -300,7 +300,7 @@ def test_resolve_sam_subject_inputs_raises_on_alignment_mismatch(monkeypatch) ->
     monkeypatch.setattr(
         mod,
         "_resolve_keypoint_run",
-        lambda root, *, keypoint_run=None, keypoint_group="auto": mod.ResolvedKeypointRun(
+        lambda root, *, keypoint_run=None, keypoint_group="auto", zarr_path=None: mod.ResolvedKeypointRun(
             group_name="refined_keypoints_runs",
             run_name="refined_001",
             group=keypoint_group_obj,
@@ -338,7 +338,7 @@ def test_resolve_sam_subject_inputs_loads_pose_bbox_xyxy_roi(monkeypatch) -> Non
     monkeypatch.setattr(
         mod,
         "_resolve_keypoint_run",
-        lambda root, *, keypoint_run=None, keypoint_group="auto": mod.ResolvedKeypointRun(
+        lambda root, *, keypoint_run=None, keypoint_group="auto", zarr_path=None: mod.ResolvedKeypointRun(
             group_name="refined_keypoints_runs",
             run_name="refined_001",
             group=keypoint_group_obj,

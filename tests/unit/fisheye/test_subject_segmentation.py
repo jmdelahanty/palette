@@ -10,11 +10,19 @@ from fisheye.segmentation import subject_segmentation as mod
 
 
 class _FakeArray:
-    def __init__(self, data: np.ndarray) -> None:
+    def __init__(
+        self,
+        data: np.ndarray,
+        *,
+        chunks: tuple[int, ...] | None = None,
+        fill_value: object | None = None,
+    ) -> None:
         self._data = np.asarray(data)
         self.shape = self._data.shape
         self.dtype = self._data.dtype
         self.ndim = self._data.ndim
+        self.chunks = tuple(int(v) for v in chunks) if chunks is not None else None
+        self.fill_value = fill_value
 
     def __getitem__(self, key):
         return self._data[key]
@@ -44,8 +52,12 @@ class _FakeGroup(dict):
         self[name] = value
         return value
 
-    def create_array(self, name: str, data, **_kwargs):
-        array = _FakeArray(np.asarray(data))
+    def create_array(self, name: str, data, **kwargs):
+        array = _FakeArray(
+            np.asarray(data),
+            chunks=kwargs.get("chunks"),
+            fill_value=kwargs.get("fill_value"),
+        )
         self[name] = array
         return array
 
@@ -203,6 +215,8 @@ def test_segment_subject_masks_from_root_writes_body_only_run_using_saved_tuning
     probs = run["mask_probs_roi"][:]
     assert masks.shape == (2, 3, 4, 4)
     assert probs.shape == (2, 3, 4, 4)
+    assert run["masks_roi"].chunks == (2, 1, 4, 4)
+    assert run["mask_probs_roi"].chunks == (2, 1, 4, 4)
     assert np.any(masks[:, 0] > 0)
     assert not np.any(masks[:, 1] > 0)
     assert not np.any(masks[:, 2] > 0)

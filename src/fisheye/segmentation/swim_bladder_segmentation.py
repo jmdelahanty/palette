@@ -16,6 +16,7 @@ import zarr
 
 from ..shared.crop_image_source import resolve_materialized_crop_run
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from ..tune import subject_mask_tuner as subject_tuning
 from ..tune import swim_bladder_mask_tuner as swim_tuning
@@ -361,9 +362,11 @@ def segment_swim_bladder_masks_from_root(
     _copy_lineage_array(run_group, crop_group, "frame_indices")
     _copy_lineage_array(run_group, crop_group, "frame_counts")
     _copy_lineage_array(run_group, crop_group, "detection_indices")
+    storage_chunks = subject_mask_storage_chunks(roi_count, roi_h, roi_w)
+    metric_row_chunk = subject_mask_metric_row_chunk(roi_count)
     run_group.create_array("detection_source", data=detection_source, overwrite=True)
-    run_group.create_array("masks_roi", data=masks_full, overwrite=True)
-    run_group.create_array("mask_probs_roi", data=probs_full, overwrite=True)
+    run_group.create_array("masks_roi", data=masks_full, chunks=storage_chunks, overwrite=True)
+    run_group.create_array("mask_probs_roi", data=probs_full, chunks=storage_chunks, overwrite=True)
     run_group.create_array(
         "available_channels",
         data=np.asarray(SUBJECT_MASK_AVAILABLE_CHANNELS, dtype=bool),
@@ -398,13 +401,13 @@ def segment_swim_bladder_masks_from_root(
     bbox_xyxy[:, 2, :] = channel_metrics["bbox_xyxy"]
     bbox_valid[:, 2] = channel_metrics["bbox_valid"]
 
-    metrics_group.create_array("prob_max", data=prob_max, overwrite=True)
-    metrics_group.create_array("mask_present", data=mask_present, overwrite=True)
-    metrics_group.create_array("area_px", data=area_px, overwrite=True)
-    metrics_group.create_array("centroid_xy", data=centroid_xy, overwrite=True)
-    metrics_group.create_array("centroid_valid", data=centroid_valid, overwrite=True)
-    metrics_group.create_array("bbox_xyxy", data=bbox_xyxy, overwrite=True)
-    metrics_group.create_array("bbox_valid", data=bbox_valid, overwrite=True)
+    metrics_group.create_array("prob_max", data=prob_max, chunks=(metric_row_chunk, 1), overwrite=True)
+    metrics_group.create_array("mask_present", data=mask_present, chunks=(metric_row_chunk, 1), overwrite=True)
+    metrics_group.create_array("area_px", data=area_px, chunks=(metric_row_chunk, 1), overwrite=True)
+    metrics_group.create_array("centroid_xy", data=centroid_xy, chunks=(metric_row_chunk, 1, 2), overwrite=True)
+    metrics_group.create_array("centroid_valid", data=centroid_valid, chunks=(metric_row_chunk, 1), overwrite=True)
+    metrics_group.create_array("bbox_xyxy", data=bbox_xyxy, chunks=(metric_row_chunk, 1, 4), overwrite=True)
+    metrics_group.create_array("bbox_valid", data=bbox_valid, chunks=(metric_row_chunk, 1), overwrite=True)
 
     duration_seconds = float(time.perf_counter() - stage_start)
     nonempty_rows = np.any(swim_masks > 0, axis=(1, 2))

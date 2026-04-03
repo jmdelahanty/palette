@@ -14,6 +14,7 @@ import numpy as np
 import zarr
 
 from fisheye.shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
+from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from fisheye.shared.subject_mask_component_provenance import write_subject_mask_component_provenance
 from fisheye.shared.type_conversions import normalize_attr
 from fisheye.utils.zarr_io import open_zarr_root
@@ -59,17 +60,12 @@ def _default_encoding_for_dtype(dtype: np.dtype) -> str:
     return "unit_float"
 
 
-def _target_mask_chunks(total_rows: int, height: int, width: int, batch_size: int) -> tuple[int, int, int, int]:
-    return (
-        max(1, min(batch_size, total_rows)),
-        1,
-        max(1, min(128, height)),
-        max(1, min(128, width)),
-    )
+def _target_mask_chunks(total_rows: int, height: int, width: int) -> tuple[int, int, int, int]:
+    return subject_mask_storage_chunks(total_rows, height, width)
 
 
-def _target_metric_chunks(total_rows: int, batch_size: int) -> tuple[int, int]:
-    return (max(1, min(batch_size, total_rows)), 1)
+def _target_metric_chunks(total_rows: int) -> tuple[int, int]:
+    return (subject_mask_metric_row_chunk(total_rows), 1)
 
 
 def _decode_probabilities(batch: np.ndarray, *, encoding: str) -> np.ndarray:
@@ -367,7 +363,7 @@ def merge_subject_mask_runs(
             run_group.create_array(name, data=np.asarray(source_array[:]), overwrite=True)
     run_group.create_array("detection_source", data=np.asarray(body_source.detection_source[:], dtype=np.int8), overwrite=True)
 
-    storage_chunks = _target_mask_chunks(total_rows, height, width, batch_size)
+    storage_chunks = _target_mask_chunks(total_rows, height, width)
     masks_out = run_group.create_array(
         "masks_roi",
         shape=(total_rows, len(TARGET_LABELS), height, width),
@@ -386,7 +382,7 @@ def merge_subject_mask_runs(
     )
     run_group.create_array("available_channels", data=TARGET_AVAILABLE_CHANNELS, overwrite=True)
 
-    metric_chunks = _target_metric_chunks(total_rows, batch_size)
+    metric_chunks = _target_metric_chunks(total_rows)
     metrics_group = run_group.require_group("metrics")
     metric_arrays = {
         "prob_max": metrics_group.create_array(

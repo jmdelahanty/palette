@@ -189,17 +189,26 @@ that one archive should permanently hold:
 
 That will scale poorly even if some arrays are sharded.
 
-Current example:
+Historical example:
 
-- `subject_mask_runs/*/masks_roi` is currently chunked like
+- some `subject_mask_runs/*/masks_roi` arrays were chunked like
   `[64, 1, 128, 128]` over `[T, 3, 512, 512]`
 - at `T = 100,000`, that is about `75,024` chunks for `masks_roi` alone
+
+Current raw subject-mask write policy:
+
+- dense `subject_mask_runs/*/masks_roi` and `mask_probs_roi` should use
+  full-ROI spatial chunks with modest row depth:
+  `[min(16, T), 1, H, W]`
+- for a `512x512` ROI archive at `T = 100,000`, that is about `18,750`
+  chunks for one dense mask array
 
 Implications:
 
 - file budget needs to be treated as a first-class design constraint
 - historical runs should not accumulate forever in the canonical online store
-- dense outputs may need different canonical chunk shapes than today
+- dense outputs need canonical chunk shapes chosen for ROI-level access,
+  not tile-level portability
 - small scalar metrics should eventually be audited for packing/aggregation
 
 ## Provisional File-Count Budgets
