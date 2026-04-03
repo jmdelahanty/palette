@@ -75,17 +75,28 @@ def open_zarr_root(
             raise last_error
         raise RuntimeError(f"Unable to open Zarr group at {zarr_path}")
 
+    def _annotate_group(group: zarr.Group) -> zarr.Group:
+        try:
+            setattr(group, "_palette_fs_path", str(zarr_path.expanduser().resolve()))
+        except Exception:
+            pass
+        try:
+            setattr(group, "_palette_open_mode", str(mode))
+        except Exception:
+            pass
+        return group
+
     # First try the Zarr v3 LocalStore (used by Palette schema >= 3).
     if LocalStore is not None:
         try:
             store = LocalStore(str(zarr_path))
-            return _open_with_fallbacks(store)
+            return _annotate_group(_open_with_fallbacks(store))
         except Exception as exc:  # pragma: no cover - requires zarr v3 datasets
             last_error = exc
 
     # Fallback to the default directory-based loader for legacy archives.
     try:
-        return _open_with_fallbacks(str(zarr_path))
+        return _annotate_group(_open_with_fallbacks(str(zarr_path)))
     except Exception as exc:
         if last_error is not None:
             raise exc from last_error

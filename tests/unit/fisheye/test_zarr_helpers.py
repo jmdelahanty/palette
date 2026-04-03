@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
+import zarr
 
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 
@@ -155,3 +157,68 @@ def test_resolve_zarr_run_reports_missing_parent() -> None:
             None,
             run_label="Stimulus run",
         )
+
+
+def test_resolve_zarr_run_uses_direct_filesystem_group_for_explicit_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _FakeGroup()
+    root.require_group("analysis/stimulus_runs")
+    root._palette_fs_path = str(tmp_path / "archive.zarr")  # type: ignore[attr-defined]
+    root._palette_open_mode = "r"  # type: ignore[attr-defined]
+    direct_group_path = tmp_path / "archive.zarr" / "analysis" / "stimulus_runs" / "stimulus_777"
+    direct_group_path.mkdir(parents=True)
+    (direct_group_path / "zarr.json").write_text('{"zarr_format": 3, "node_type": "group", "attributes": {}}')
+    sentinel = _FakeGroup(path="analysis/stimulus_runs/stimulus_777")
+
+    def _fake_open_group(path: str, *, mode: str, use_consolidated: bool) -> _FakeGroup:
+        assert Path(path) == direct_group_path
+        assert mode == "r"
+        assert use_consolidated is False
+        return sentinel
+
+    monkeypatch.setattr(zarr, "open_group", _fake_open_group)
+
+    run_group, run_name = resolve_zarr_run(
+        root,
+        "analysis/stimulus_runs",
+        "stimulus_777",
+        run_label="Stimulus run",
+    )
+
+    assert run_name == "stimulus_777"
+    assert run_group is sentinel
+
+
+def test_resolve_zarr_run_uses_direct_filesystem_group_for_latest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _FakeGroup()
+    parent = root.require_group("analysis/stimulus_runs")
+    parent.attrs["latest"] = "stimulus_888"
+    root._palette_fs_path = str(tmp_path / "archive.zarr")  # type: ignore[attr-defined]
+    root._palette_open_mode = "r"  # type: ignore[attr-defined]
+    direct_group_path = tmp_path / "archive.zarr" / "analysis" / "stimulus_runs" / "stimulus_888"
+    direct_group_path.mkdir(parents=True)
+    (direct_group_path / "zarr.json").write_text('{"zarr_format": 3, "node_type": "group", "attributes": {}}')
+    sentinel = _FakeGroup(path="analysis/stimulus_runs/stimulus_888")
+
+    def _fake_open_group(path: str, *, mode: str, use_consolidated: bool) -> _FakeGroup:
+        assert Path(path) == direct_group_path
+        assert mode == "r"
+        assert use_consolidated is False
+        return sentinel
+
+    monkeypatch.setattr(zarr, "open_group", _fake_open_group)
+
+    run_group, run_name = resolve_zarr_run(
+        root,
+        "analysis/stimulus_runs",
+        None,
+        run_label="Stimulus run",
+    )
+
+    assert run_name == "stimulus_888"
+    assert run_group is sentinel

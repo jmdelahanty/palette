@@ -419,7 +419,33 @@ def _resolve_keypoint_run(
     *,
     keypoint_run: str | None,
     keypoint_group: str,
+    zarr_path: str | Path | None = None,
 ) -> ResolvedKeypointRun:
+    archive_path = Path(zarr_path).expanduser() if zarr_path is not None else None
+
+    def _direct_run_names(group_name: str) -> list[str]:
+        if archive_path is None:
+            return []
+        parent_path = archive_path / group_name
+        if not parent_path.is_dir():
+            return []
+        names: list[str] = []
+        for candidate in sorted(parent_path.iterdir()):
+            if not candidate.is_dir():
+                continue
+            if (candidate / "zarr.json").is_file() or (candidate / ".zgroup").is_file():
+                names.append(candidate.name)
+        return names
+
+    def _direct_open(group_name: str, run_name: str) -> zarr.Group:
+        if archive_path is None:
+            raise ValueError("archive_path is required for direct keypoint run fallback")
+        run_path = archive_path / group_name / run_name
+        try:
+            return zarr.open_group(str(run_path), mode="r", use_consolidated=False)
+        except TypeError:
+            return zarr.open_group(str(run_path), mode="r", consolidated=False)
+
     group_candidates: Sequence[str]
     if keypoint_group == "auto":
         group_candidates = ("refined_keypoints_runs", "keypoints_runs")
@@ -438,6 +464,22 @@ def _resolve_keypoint_run(
             )
             return ResolvedKeypointRun(group_name=group_name, run_name=run_name, group=run_group)
         except Exception as exc:
+            direct_names = _direct_run_names(group_name)
+            requested = str(keypoint_run).strip() if keypoint_run is not None and str(keypoint_run).strip() else None
+            latest_name = None
+            try:
+                parent_group = root.get(group_name)
+            except Exception:
+                parent_group = None
+            if parent_group is not None:
+                latest_name = str(parent_group.attrs.get("latest")).strip() if parent_group.attrs.get("latest") else None
+            fallback_name = requested or latest_name
+            if fallback_name and fallback_name in direct_names:
+                return ResolvedKeypointRun(
+                    group_name=group_name,
+                    run_name=fallback_name,
+                    group=_direct_open(group_name, fallback_name),
+                )
             errors.append(f"{group_name}: {exc}")
     raise ValueError("; ".join(errors) if errors else "Could not resolve keypoint run.")
 
@@ -469,9 +511,15 @@ def resolve_sam_subject_inputs(
     crop_run: str | None = None,
     keypoint_run: str | None = None,
     keypoint_group: str = "auto",
+    zarr_path: str | Path | None = None,
 ) -> ResolvedSamInputs:
     _, crop_group, resolved_crop_run = resolve_materialized_crop_run(root, crop_run=crop_run)
-    keypoints = _resolve_keypoint_run(root, keypoint_run=keypoint_run, keypoint_group=keypoint_group)
+    keypoints = _resolve_keypoint_run(
+        root,
+        keypoint_run=keypoint_run,
+        keypoint_group=keypoint_group,
+        zarr_path=zarr_path,
+    )
 
     roi_images = _require_array(crop_group, "roi_images", context=f"crop_runs/{resolved_crop_run}")
     roi_coordinates_full = _load_2d(
@@ -1712,6 +1760,7 @@ def run_sam_subject_mask_inference(
         crop_run=resolved_crop_run,
         keypoint_run=keypoint_run,
         keypoint_group=keypoint_group,
+        zarr_path=zarr_path,
     )
     prompt_selection = resolve_prompt_keypoint_selection(
         inputs,
@@ -1849,6 +1898,7 @@ def inspect_sam_subject_archive(
     crop_run: str | None = None,
     keypoint_run: str | None = None,
     keypoint_group: str = "auto",
+    zarr_path: str | Path | None = None,
     skip_interpolated: bool = True,
     prepare_count: int = DEFAULT_PREPARE_COUNT,
     output_run: str | None = None,
@@ -1867,6 +1917,7 @@ def inspect_sam_subject_archive(
         crop_run=crop_run,
         keypoint_run=keypoint_run,
         keypoint_group=keypoint_group,
+        zarr_path=zarr_path,
     )
     prompt_selection = resolve_prompt_keypoint_selection(
         inputs,
@@ -1987,6 +2038,7 @@ def inspect_sam_subject_archive_path(
         negative_point_policy=negative_point_policy,
         negative_point_margin_fraction=negative_point_margin_fraction,
         positive_keypoint_labels=positive_keypoint_labels,
+        zarr_path=zarr_path,
     )
     summary["zarr_path"] = str(Path(zarr_path).expanduser().resolve())
     return summary

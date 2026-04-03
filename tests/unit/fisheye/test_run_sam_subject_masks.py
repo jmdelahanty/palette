@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import zarr
 
@@ -244,6 +246,45 @@ def test_resolve_keypoint_run_falls_back_to_raw_keypoints(monkeypatch) -> None:
     assert resolved.group_name == "keypoints_runs"
     assert resolved.run_name == "raw_001"
     assert calls == ["refined_keypoints_runs", "keypoints_runs"]
+
+
+def test_resolve_keypoint_run_uses_direct_latest_when_parent_membership_is_stale(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root = FakeGroup()
+    refined_parent = FakeGroup()
+    refined_parent.attrs["latest"] = "refined_v2_001"
+    root["refined_keypoints_runs"] = refined_parent
+    direct_run_path = tmp_path / "archive.zarr" / "refined_keypoints_runs" / "refined_v2_001"
+    direct_run_path.mkdir(parents=True)
+    (direct_run_path / "zarr.json").write_text('{"zarr_format": 3, "node_type": "group", "attributes": {}}')
+    sentinel = FakeGroup()
+
+    def _fake_resolve(root, parent_path, run_name, **kwargs):
+        if str(parent_path) == "refined_keypoints_runs":
+            raise ValueError("latest missing from visible refined members")
+        raise AssertionError("raw fallback should not be consulted when direct refined latest exists")
+
+    def _fake_open_group(path: str, *, mode: str, use_consolidated: bool):
+        assert Path(path) == direct_run_path
+        assert mode == "r"
+        assert use_consolidated is False
+        return sentinel
+
+    monkeypatch.setattr(mod, "resolve_zarr_run", _fake_resolve)
+    monkeypatch.setattr(zarr, "open_group", _fake_open_group)
+
+    resolved = mod._resolve_keypoint_run(
+        root,
+        keypoint_run=None,
+        keypoint_group="auto",
+        zarr_path=tmp_path / "archive.zarr",
+    )
+
+    assert resolved.group_name == "refined_keypoints_runs"
+    assert resolved.run_name == "refined_v2_001"
+    assert resolved.group is sentinel
 
 
 def test_resolve_sam_subject_inputs_raises_on_alignment_mismatch(monkeypatch) -> None:

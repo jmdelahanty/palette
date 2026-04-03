@@ -26,11 +26,13 @@ the answer is:
 The key Palette entrypoints are:
 
 - `src/fisheye/utils/run_sam_subject_masks.py`
+- `src/fisheye/utils/run_sam_subject_masks_batch.py`
 - `src/fisheye/visualization/visualize_sam_subject_prompts.py`
 
 These are the files that:
 
 - read Palette training Zarr data,
+- batch-discover training Zarr archives when needed,
 - resolve crop runs and keypoint runs,
 - construct SAM3 prompts,
 - import the local SAM3 image runtime,
@@ -186,6 +188,40 @@ scripts/py -m fisheye.utils.run_sam_subject_masks \
   --sam3-root /path/to/sam3 \
   --no-box-prompt \
   --apply
+```
+
+### Batch dry run across training archives
+
+```bash
+scripts/py -m fisheye.utils.run_sam_subject_masks_batch \
+  /nvme1/recordings \
+  --recursive \
+  --zarr-use training \
+  --sam3-root /path/to/sam3
+```
+
+Use the batch dry run first to verify:
+
+- which archives are eligible
+- which crop/keypoint runs will be used
+- which output run names are planned
+- which archives are skipped because the target output already exists
+
+### Batch apply across training archives
+
+```bash
+scripts/py -m fisheye.utils.run_sam_subject_masks_batch \
+  /nvme1/recordings \
+  --recursive \
+  --zarr-use training \
+  --sam3-root /path/to/sam3 \
+  --apply
+```
+
+If a collaborator wants a fixed output run name across the batch, add:
+
+```bash
+  --output-run <planned_subject_mask_run>
 ```
 
 ## Output Contract
