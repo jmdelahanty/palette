@@ -110,6 +110,13 @@ but still too slow for bulk ROI-model inference. In practice, full-frame decode
 from `4512x4512` source video may run around `90 FPS`, while keypoint/eye-mask
 inference over materialized ROI tensors can run closer to `300 FPS`.
 
+On the representative non-smoke analysis benchmark run on `2026-04-04`:
+
+- materialized keypoints finished in about `77.2s`
+- `geometry_live_gpu` keypoints took about `513.0s`
+- `roi_read` alone consumed `423.44s` (`83.4%` of wall time)
+- `geometry_live_gpu` eye masks hit Decord GPU `CUDA out of memory`
+
 That means a geometry-only archive design still needs a fast path for repeated
 ROI inference. The right answer is a temporary ROI cache, not a second
 permanent canonical crop-image datastream.

@@ -23,7 +23,6 @@ import zarr
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
-from ultralytics import YOLO, __version__ as ultralytics_version
 
 from ..registry.db import RegistryPaths
 from ..shared.crop_image_source import CropImageSource
@@ -34,6 +33,7 @@ from ..shared.type_conversions import normalize_attr
 from ..shared.zarr.schema import get_run_group
 from ..utils.system import get_environment_info, get_git_info
 from ..pose.schema import schema_from_package
+from ultralytics import YOLO, __version__ as ultralytics_version
 
 # Load the traditional 3-point pose schema (swim_bladder + left/right eyes)
 TRADITIONAL_POSE_SCHEMA = schema_from_package("traditional_v1")

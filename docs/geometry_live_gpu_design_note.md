@@ -16,6 +16,20 @@ This is specifically about the case where:
 - downstream ROI stages want to read ROIs directly without first building a
   temporary ROI cache.
 
+## Status
+
+`Phase 1` has now been prototyped:
+
+- external-video `geometry_live` reads can request
+  `roi_live_acceleration = auto | cpu | gpu`
+- the GPU path reuses the existing GPU decode/crop kernels from
+  `src/fisheye/tracking/crop.py`
+- the public ROI reader contract is still CPU/NumPy (`read_slice() -> np.ndarray`)
+
+The implementation is useful as a fallback/debugging path, but the benchmark
+results below show that it does not replace the temporary ROI cache as the
+preferred analysis path for large full-frame source video.
+
 ## Current State
 
 For geometry-only crop runs, `CropImageSource` currently does one of two things:
@@ -50,6 +64,41 @@ Interpretation:
 - the current live path is decode/crop-bound, not model-bound
 - for large full-frame external videos, pure `geometry_live` is not an
   acceptable hot path in its current CPU form
+
+## Benchmark Outcome After `Phase 1`
+
+Representative archive benchmarked on `2026-04-04`:
+
+- archive: `2026-01-28T22-15-03Z_arena_1_DefaultScreen_analysis.zarr`
+- ROI count: `22,876`
+- ROI size: `512x512`
+- source video size: `4512x4512`
+- GPU: `RTX A6000`
+- operator decode note: Decord GPU decode on this source size appears capped at
+  roughly `90 FPS`
+
+Measured keypoint results:
+
+- materialized baseline: about `77.2s` wall
+- `geometry_live_gpu`: about `513.0s` wall
+- `geometry_live_gpu` ROI read time: `423.44s` (`83.4%` of wall time)
+- `geometry_live_gpu` throughput: about `45 poses/s`
+
+Measured eye-mask result:
+
+- `geometry_live_gpu` failed during `video_reader.get_batch(...)`
+- failure mode: Decord GPU `CUDA out of memory`
+
+Interpretation:
+
+- for `4512x4512` external video, even GPU live ROI reads remain strongly
+  decode-limited
+- repeated full-frame decode dominates the stage before model inference becomes
+  the bottleneck
+- temporary local ROI caches are still the preferred analysis path when more
+  than one stage will consume the same ROIs
+- `geometry_live_gpu` is best treated as a one-off fallback/debugging path, not
+  the steady-state high-throughput analysis workflow
 
 ## Reusable Existing Pieces
 
@@ -177,16 +226,15 @@ But the temporary ROI cache should still remain the preferred path when:
 
 ## Recommended Next Step
 
-Implement Phase 1 only:
+Keep the current `Phase 1` implementation, but treat it as a bounded
+compatibility feature. The next steps should be:
 
-- external-video `geometry_live_gpu`
-- reuse `_process_chunk_gpu_from_top_left(...)`
-- keep `CropImageSource.read_slice(...)` returning NumPy
-- add a focused benchmark comparing:
-  - `geometry_live_cpu`
-  - `geometry_live_gpu`
-  - `geometry_cache_build`
-  - `geometry_cache_reuse`
-
-This should happen before any attempt to make the downstream inference wrappers
-GPU-native end-to-end.
+- prefer `geometry_cache_build` / `geometry_cache_reuse` for analysis workflows
+  on large full-frame sources
+- add robustness work for the live GPU path only if it materially improves
+  fallback usability
+  - tighter `roi_live_gpu_chunk_frames`
+  - clearer runtime error reporting
+  - optional OOM fallback to CPU live reads when policy allows it
+- do not invest in end-to-end GPU-native live ROI consumers until the cache
+  path ceases to be the preferred operational workflow
