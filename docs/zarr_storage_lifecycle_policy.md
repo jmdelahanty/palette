@@ -53,6 +53,23 @@ Conclusion:
 - movement pain is already more about metadata/file-open overhead than bulk
   bandwidth
 
+Representative off-machine benchmark conclusion on `/groups/...`:
+
+- raw directory copy: `136.74 s`
+- prebuilt `.tar.zst` copy: `5.99 s`
+- unpacked tar reads are close to raw for representative open/frame/ROI/mask
+  reads
+- sharded browseable exports help only modestly for transfer on the
+  representative archive
+- archival rechunk improves unified subject-mask reads, but not enough to
+  outweigh export cost for general movement
+
+Policy implication:
+
+- use `tar.zst` as the default off-machine transfer format
+- treat sharded browseable exports as a niche read-mostly option, not the
+  default transport path
+
 ## Storage Modes
 
 ### 1. Working Scratch Store

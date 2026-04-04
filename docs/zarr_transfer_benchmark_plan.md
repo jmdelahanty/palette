@@ -137,6 +137,19 @@ For every run, record:
 The benchmark should keep raw timing data in a machine-readable manifest rather
 than only terminal notes.
 
+### Destination Read Benchmark Utility
+
+Use:
+
+`scripts/py -m fisheye.utils.benchmark_zarr_destination_reads <archive>.zarr --variant <label> --json`
+
+This utility records:
+
+- open-root timing
+- one `raw_video/images_full` frame read
+- one `crop_runs/*/roi_images` row read
+- one `subject_mask_runs/*/masks_roi` row read
+
 ## Existing Commands
 
 ### Raw inspection
@@ -144,6 +157,12 @@ than only terminal notes.
 Use:
 
 `scripts/py -m fisheye.utils.report_zarr_storage <archive>.zarr`
+
+### Destination read benchmark
+
+Use:
+
+`scripts/py -m fisheye.utils.benchmark_zarr_destination_reads <archive>.zarr --variant <label> --json`
 
 ### Packed artifact build
 
@@ -255,6 +274,59 @@ The likely outcomes are:
 - raw working store remains best for active mutation
 
 That is the result this benchmark is intended to confirm or reject.
+
+## Representative Archive Results (2026-04-03)
+
+Representative archive:
+
+- `2026-01-28T22-15-03Z_arena_1_DefaultScreen_training.zarr`
+
+Measured movement timings:
+
+- raw `.zarr` directory copy to `/groups/...`: `136.74 s`
+- prebuilt `.tar.zst` copy to `/groups/...`: `5.99 s`
+- unpack on `/groups/...`: `117.75 s`
+- sharded clone copy (`dense_readmostly_v1`): `116.03 s`
+- sharded clone copy (`dense_readmostly_rechunk_v1`): `111.22 s`
+
+Measured build/export timings:
+
+- local transfer-artifact pack: `43.25 s`
+- sharded clone export (`dense_readmostly_v1`): `135.65 s`
+- sharded clone export (`dense_readmostly_rechunk_v1`): `466.03 s`
+
+Measured destination open/read timings:
+
+- raw
+  - open root: `0.0098 s`
+  - `raw_video/images_full` frame read: `1.1522 s`
+  - latest crop ROI row read: `0.0340 s`
+  - latest subject-mask row read: `0.0248 s`
+- tar unpacked
+  - open root: `0.0090 s`
+  - `raw_video/images_full` frame read: `1.1873 s`
+  - latest crop ROI row read: `0.0342 s`
+  - latest subject-mask row read: `0.0290 s`
+- sharded dense
+  - open root: `0.0087 s`
+  - `raw_video/images_full` frame read: `1.4438 s`
+  - latest crop ROI row read: `0.0380 s`
+  - latest subject-mask row read: `0.0333 s`
+- sharded rechunk
+  - open root: `0.0136 s`
+  - `raw_video/images_full` frame read: `1.4601 s`
+  - latest crop ROI row read: `0.0295 s`
+  - latest subject-mask row read: `0.0201 s`
+
+Interpretation:
+
+- prebuilt `.tar.zst` is the best default for off-machine movement
+- unpacked tar reads essentially like the raw directory on the destination
+- sharded browseable exports are not a general read win on this representative
+  archive
+- archival rechunking improves subject-mask row reads, but the rewrite cost is
+  high and the overall read profile still does not justify making sharded
+  exports the default transport path
 
 ## Recommended Next Step
 

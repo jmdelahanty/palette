@@ -131,13 +131,16 @@ Implication:
 - [ ] Decide how sharding is enabled (config flag vs auto policy).
 - [x] Build a transfer-artifact prototype.
   - Utility: `scripts/py -m fisheye.utils.pack_zarr_transfer_artifact ...`
-- [ ] Benchmark raw-dir copy vs packed copy.
-- [ ] Benchmark raw-dir vs packed vs sharded-clone copy.
-- [ ] Benchmark `dense_readmostly_v1` vs `dense_readmostly_rechunk_v1`.
+- [x] Benchmark raw-dir copy vs packed copy.
+- [x] Benchmark raw-dir vs packed vs sharded-clone copy.
+- [x] Benchmark `dense_readmostly_v1` vs `dense_readmostly_rechunk_v1`.
 - [x] Implement `export_sharded_zarr_clone` benchmark prototype.
-- [ ] Run the representative-archive three-way benchmark from
+- [x] Run the representative-archive three-way benchmark from
   `docs/zarr_transfer_benchmark_plan.md`.
-- [ ] Capture destination open/read timings for all three layouts.
+- [x] Capture destination open/read timings for all three layouts.
+- [x] Add a destination open/read benchmark utility.
+  - Utility:
+    `scripts/py -m fisheye.utils.benchmark_zarr_destination_reads ...`
 - [ ] Decide which compatibility/regenerable groups belong in transfer artifacts.
 - [ ] Run a workflow-wide chunk-policy audit across canonical stage families.
 - [ ] Decide the next stage family to standardize after unified subject masks.
