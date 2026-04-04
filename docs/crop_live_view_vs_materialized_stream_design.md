@@ -41,6 +41,9 @@ state.
 - `geometry_only` is an explicit opt-in writer/storage mode, not the default.
 - `crop_runs.latest` remains materialized-compatible during the migration; mixed
   mode adds explicit pointers such as `latest_materialized` and `latest_any`.
+- Materialized crop runs should use one canonical ROI layout regardless of
+  whether source frames came from `raw_video` or `source_video_path`; temporary
+  ROI caches remain a separate scratch/runtime policy question.
 
 ### Supported opt-in mixed mode
 

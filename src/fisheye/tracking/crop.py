@@ -20,7 +20,6 @@ import os
 import sys
 import subprocess
 from queue import Queue
-from zarr.codecs import BloscCodec
 import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +38,13 @@ from ..shared.refined_detect_review import (
 )
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.crop_signature import build_crop_signature
+from ..shared.crop_roi_layout import (
+    DEFAULT_CANONICAL_CROP_ROI_CHUNK_LEN,
+    build_canonical_crop_roi_layout,
+    build_crop_roi_create_kwargs,
+    crop_roi_layout_attrs,
+    normalize_crop_roi_storage,
+)
 from ..shared.type_conversions import normalize_attr
 
 REFINED_DETECT_GROUP = "refined_detect_runs"
@@ -1003,14 +1009,18 @@ def materialize_external_roi_cache(
         )
 
     backend_norm = str(write_backend or "standard").strip().lower()
-    storage_norm = str(roi_storage or "compressed").strip().lower()
+    storage_norm = normalize_crop_roi_storage(roi_storage, default="compressed")
     if backend_norm not in {"standard", "kvikio"}:
         backend_norm = "standard"
-    if storage_norm not in {"compressed", "uncompressed"}:
-        storage_norm = "compressed"
-    roi_chunk_len = max(1, min(int(roi_chunk_size), max(1, total_rois)))
-    shard_len = max(roi_chunk_len, int(roi_shard_size)) if roi_shard_size is not None else max(roi_chunk_len, roi_chunk_len * 8)
-    shard_len = min(shard_len, max(1, total_rois))
+    layout = build_canonical_crop_roi_layout(
+        total_rois=total_rois,
+        preferred_chunk_len=int(roi_chunk_size),
+        roi_storage=storage_norm,
+        use_sharding=bool(use_sharding),
+        roi_shard_len=roi_shard_size,
+    )
+    roi_chunk_len = layout.roi_chunk_len
+    shard_len = layout.roi_shard_len if layout.roi_shard_len is not None else roi_chunk_len
     gpu_chunk_frames = max(1, int(gpu_chunk_frames))
 
     use_gpu = False
@@ -1058,20 +1068,12 @@ def materialize_external_roi_cache(
             detail += f", fallback={fallback_reason}"
         console.print(f"[dim]Temporary ROI cache materialization: {detail}[/dim]")
 
-    roi_compressor = (
-        BloscCodec(typesize=1, cname='lz4', clevel=1, shuffle="bitshuffle")
-        if storage_norm == "compressed"
-        else None
+    roi_create_kwargs = build_crop_roi_create_kwargs(
+        total_rois=total_rois,
+        roi_sz=roi_sz,
+        layout=layout,
+        overwrite=True,
     )
-    roi_create_kwargs: Dict[str, Any] = {
-        "shape": (total_rois, *roi_sz),
-        "chunks": (roi_chunk_len, roi_sz[0], roi_sz[1]),
-        "dtype": "uint8",
-        "overwrite": True,
-        "compressors": roi_compressor,
-    }
-    if bool(use_sharding):
-        roi_create_kwargs["shards"] = (shard_len, roi_sz[0], roi_sz[1])
     roi_images = cache_root.create_array("roi_images", **roi_create_kwargs)
 
     decode_seconds = 0.0
@@ -1479,27 +1481,21 @@ def crop_from_external_video(
             )
         
         # Create output arrays
-        roi_chunk_len = max(1, min(int(external_roi_chunk_size), total_detections))
-        if external_roi_shard_size is None:
-            roi_shard_len = max(roi_chunk_len, roi_chunk_len * 8)
-        else:
-            roi_shard_len = max(roi_chunk_len, int(external_roi_shard_size))
-        roi_shard_len = min(roi_shard_len, total_detections)
-        roi_compressor = (
-            BloscCodec(typesize=1, cname='lz4', clevel=1, shuffle="bitshuffle")
-            if roi_storage_norm == "compressed"
-            else None
+        roi_layout = build_canonical_crop_roi_layout(
+            total_rois=total_detections,
+            preferred_chunk_len=int(external_roi_chunk_size),
+            roi_storage=roi_storage_norm,
+            use_sharding=bool(external_use_sharding),
+            roi_shard_len=external_roi_shard_size,
         )
-
-        roi_create_kwargs: Dict[str, Any] = {
-            "shape": (total_detections, *roi_sz),
-            "chunks": (roi_chunk_len, roi_sz[0], roi_sz[1]),
-            "dtype": "uint8",
-            "overwrite": True,
-            "compressors": roi_compressor,
-        }
-        if bool(external_use_sharding):
-            roi_create_kwargs["shards"] = (roi_shard_len, roi_sz[0], roi_sz[1])
+        roi_chunk_len = roi_layout.roi_chunk_len
+        roi_shard_len = roi_layout.roi_shard_len if roi_layout.roi_shard_len is not None else roi_chunk_len
+        roi_create_kwargs = build_crop_roi_create_kwargs(
+            total_rois=total_detections,
+            roi_sz=roi_sz,
+            layout=roi_layout,
+            overwrite=True,
+        )
         if crop_storage_mode == "materialized":
             crop_group.create_array(
                 'roi_images',
@@ -1608,11 +1604,9 @@ def crop_from_external_video(
             crop_group.attrs['write_backend_fallback_reason'] = fallback_reason
         else:
             crop_group.attrs.pop('write_backend_fallback_reason', None)
-        crop_group.attrs['roi_storage'] = roi_storage_norm
-        crop_group.attrs['roi_chunk_len'] = int(roi_chunk_len)
-        crop_group.attrs['roi_use_sharding'] = bool(external_use_sharding)
-        if bool(external_use_sharding):
-            crop_group.attrs['roi_shard_len'] = int(roi_shard_len)
+        crop_group.attrs.update(crop_roi_layout_attrs(roi_layout))
+        if not roi_layout.roi_use_sharding and 'roi_shard_len' in crop_group.attrs:
+            del crop_group.attrs['roi_shard_len']
 
         # Add detailed GPU info if using GPU
         if actual_use_gpu and env_info['gpu']['available'] and env_info['gpu'].get('devices'):
@@ -2676,16 +2670,24 @@ def crop_detections(
                 console.print(f"[yellow]Warning: GPU requested but unavailable ({gpu_reason})[/yellow]")
 
         cfg_backend = str(crop_params_cfg.get('external_write_backend', 'standard')).strip().lower()
-        cfg_storage = str(crop_params_cfg.get('external_roi_storage', 'compressed')).strip().lower()
+        cfg_storage = normalize_crop_roi_storage(
+            crop_params_cfg.get('external_roi_storage', 'compressed'),
+            default='compressed',
+        )
         cfg_use_sharding = bool(crop_params_cfg.get('external_use_sharding', False))
-        cfg_chunk = int(crop_params_cfg.get('external_roi_chunk_size', 1024))
+        cfg_chunk = int(
+            crop_params_cfg.get(
+                'external_roi_chunk_size',
+                config.get('import', {}).get('chunk_size', DEFAULT_CANONICAL_CROP_ROI_CHUNK_LEN),
+            )
+        )
         cfg_shard = crop_params_cfg.get('external_roi_shard_size')
         cfg_gpu_chunk_frames = int(crop_params_cfg.get('external_gpu_chunk_frames', 24))
         cfg_require_kvikio = bool(crop_params_cfg.get('external_require_kvikio', False))
         cfg_shard = int(cfg_shard) if cfg_shard is not None else None
 
         backend = (external_write_backend or cfg_backend).strip().lower()
-        storage = (external_roi_storage or cfg_storage).strip().lower()
+        storage = normalize_crop_roi_storage(external_roi_storage or cfg_storage, default="compressed")
         use_sharding_value = cfg_use_sharding if external_use_sharding is None else bool(external_use_sharding)
         chunk_len = cfg_chunk if external_roi_chunk_size is None else int(external_roi_chunk_size)
         shard_len = cfg_shard if external_roi_shard_size is None else int(external_roi_shard_size)
@@ -2693,8 +2695,6 @@ def crop_detections(
         require_kvikio = cfg_require_kvikio if external_require_kvikio is None else bool(external_require_kvikio)
         if backend not in {"standard", "kvikio"}:
             backend = "standard"
-        if storage not in {"compressed", "uncompressed"}:
-            storage = "compressed"
         chunk_len = max(1, chunk_len)
         gpu_chunk_frames = max(1, gpu_chunk_frames)
         if shard_len is not None:
@@ -2987,20 +2987,29 @@ def crop_detections(
     full_img_shape = root['raw_video/images_full'].shape[1:]
     scale_factor = ds_img_shape[0] / full_img_shape[0]
 
-    # Compressor
-    compressor = BloscCodec(typesize=1, cname='lz4', clevel=1, shuffle="bitshuffle")
+    roi_layout = build_canonical_crop_roi_layout(
+        total_rois=total_detections,
+        preferred_chunk_len=int(chunk_size),
+        roi_storage="compressed",
+        use_sharding=False,
+        roi_shard_len=None,
+    )
 
     # Create output arrays in crop group
     roi_images = None
     if crop_storage_mode_resolved == "materialized":
         roi_images = crop_group.create_array(
             'roi_images',
-            shape=(total_detections, *roi_sz),
-            chunks=(min(chunk_size, total_detections), roi_sz[0], roi_sz[1]),
-            dtype='uint8',
-            overwrite=True,
-            compressors=compressor
+            **build_crop_roi_create_kwargs(
+                total_rois=total_detections,
+                roi_sz=roi_sz,
+                layout=roi_layout,
+                overwrite=True,
+            )
         )
+    crop_group.attrs.update(crop_roi_layout_attrs(roi_layout))
+    if 'roi_shard_len' in crop_group.attrs and not roi_layout.roi_use_sharding:
+        del crop_group.attrs['roi_shard_len']
     
     roi_coordinates_full = crop_group.create_array(
         'roi_coordinates_full',
