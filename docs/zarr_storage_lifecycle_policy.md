@@ -164,6 +164,8 @@ Policy:
 - keep only when needed for active compatibility
 - exclude from finalized/export artifacts by default once regeneration is
   reliable and documented
+- do not treat them as the primary long-term chunk-policy target once canonical
+  unified subject-mask stores are in place
 
 ### Temporary Runtime Caches
 
@@ -238,6 +240,51 @@ revisited after a transfer-artifact benchmark exists.
 2. Benchmark directory copy vs packed-artifact copy to external storage.
 3. Define keep-vs-regenerate rules for compatibility artifacts.
 4. Audit chunk layouts for the largest dense derived arrays.
+
+## Next Chunk-Policy Audit
+
+The next chunk-policy pass should validate chunk choices empirically across the
+major workflow families instead of only fixing one storage hotspot at a time.
+
+Priority order:
+
+1. Canonical unified mask stores.
+   - `subject_mask_runs`
+   - `refined_subject_masks_runs`
+2. Dense image-like supporting stages.
+   - `crop_runs`
+3. Row-oriented structured stages.
+   - `detect` / `refined_detect`
+   - `keypoints_runs` / `refined_keypoints_runs`
+4. Transitional compatibility stores only as needed for migration safety.
+   - `eye_masks_runs`
+   - `refined_eye_masks_runs`
+
+Expected evaluation style by family:
+
+- `subject_mask_runs` / `refined_subject_masks_runs`
+  - validate ROI-level read/write/edit latency
+  - validate file-count growth on representative training and large analysis
+    archives
+  - validate transfer/export behavior for canonical runs
+- `crop_runs`
+  - validate ROI read patterns and file-count contribution
+  - decide whether scratch and finalized/export modes should diverge
+- `detect` / `refined_detect`
+  - audit array fanout and row-chunk depth
+  - do not assume chunking alone is the main lever if schema fanout dominates
+- `keypoints_runs` / `refined_keypoints_runs`
+  - audit row chunk depth, run fanout, and retention policy
+  - prefer simple row-oriented chunk contracts over mask-like tuning
+
+Guardrails:
+
+- do not blindly inherit upstream chunks into canonical refined outputs
+- prefer one explicit helper per stage family over scattered literal chunk
+  tuples
+- do not overinvest in long-term chunk optimization for eye-only compatibility
+  stores if canonical unified subject-mask data is the future
+- keep transfer-only optimizations separate from the mutable working-store path
 5. Use the transfer benchmark runbook in
    `docs/zarr_transfer_benchmark_plan.md` to compare raw vs packed vs sharded
    export layouts.

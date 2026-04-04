@@ -81,6 +81,18 @@ Implication:
       `scripts/py -m fisheye.utils.export_sharded_zarr_clone ...`
     - Include archival rechunk variant:
       `--policy dense_readmostly_rechunk_v1`
+11. Validate chunk-policy choices empirically across the major workflow
+    families instead of treating masks as the only storage concern.
+    - Canonical priority:
+      `subject_mask_runs`, `refined_subject_masks_runs`, `crop_runs`,
+      `detect` / `refined_detect`, `keypoints_runs` / `refined_keypoints_runs`
+    - Transitional compatibility priority only as needed:
+      `eye_masks_runs`, `refined_eye_masks_runs`
+    - Measure stage-specific behavior:
+      hot-write latency, review/edit latency, file-count growth, transfer cost,
+      and destination read/open behavior
+    - Add explicit stage-family chunk helpers where ad hoc literals still exist
+    - Avoid blindly inheriting upstream chunks into canonical refined outputs
 
 ## TODO: design changes (if needed)
 
@@ -96,6 +108,10 @@ Implication:
 - Document storage modes and NFS-recommended settings.
 - Define keep-vs-regenerate policy for compatibility artifacts in finalized and
   transfer modes.
+- Define canonical stage-family chunk contracts for crops, detections,
+  keypoints, and unified subject masks.
+- Add an audit/report path that flags arrays which violate the canonical chunk
+  contract for their stage family.
 - Define file-count warning thresholds for finalized online stores.
 
 ## Success criteria
@@ -123,4 +139,7 @@ Implication:
   `docs/zarr_transfer_benchmark_plan.md`.
 - [ ] Capture destination open/read timings for all three layouts.
 - [ ] Decide which compatibility/regenerable groups belong in transfer artifacts.
+- [ ] Run a workflow-wide chunk-policy audit across canonical stage families.
+- [ ] Decide the next stage family to standardize after unified subject masks.
+- [ ] Add stage-family compliance checks for canonical chunk layouts.
 - [ ] Document the final policy and update schema docs.
