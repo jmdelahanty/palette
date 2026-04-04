@@ -296,8 +296,8 @@ Examples:
     parser.add_argument(
         "--roi-live-gpu-chunk-frames",
         type=int,
-        default=96,
-        help="Frame batch size for GPU-accelerated live ROI reads (default: 96).",
+        default=32,
+        help="Frame batch size for GPU-accelerated live ROI reads (default: 32).",
     )
     parser.add_argument(
         "--profile-timings",

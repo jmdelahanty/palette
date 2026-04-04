@@ -116,6 +116,9 @@ On the representative non-smoke analysis benchmark run on `2026-04-04`:
 - `geometry_live_gpu` keypoints took about `513.0s`
 - `roi_read` alone consumed `423.44s` (`83.4%` of wall time)
 - `geometry_live_gpu` eye masks hit Decord GPU `CUDA out of memory`
+- a smaller live setting (`roi_live_gpu_chunk_frames=8`, `eye_batch_size=64`)
+  completed, but was still about `5.7x` slower than the materialized keypoint
+  baseline and about `5.2x` slower than the materialized eye-mask baseline
 
 That means a geometry-only archive design still needs a fast path for repeated
 ROI inference. The right answer is a temporary ROI cache, not a second

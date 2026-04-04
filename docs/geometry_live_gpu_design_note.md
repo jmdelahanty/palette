@@ -89,12 +89,25 @@ Measured eye-mask result:
 - `geometry_live_gpu` failed during `video_reader.get_batch(...)`
 - failure mode: Decord GPU `CUDA out of memory`
 
+Follow-up with smaller live GPU chunks:
+
+- with `roi_live_gpu_chunk_frames=8` and `eye_batch_size=64`,
+  `geometry_live_gpu` completed end-to-end
+- keypoints still took about `440.8s` wall, with `roi_read` consuming `360.28s`
+  (`82.8%` of wall time)
+- eye masks took about `895.1s` wall, with `roi_read` consuming `767.71s`
+  (`86.3%` of wall time)
+- compared with the earlier materialized baselines, that was still about `5.7x`
+  slower for keypoints and about `5.2x` slower for eye masks
+
 Interpretation:
 
 - for `4512x4512` external video, even GPU live ROI reads remain strongly
   decode-limited
 - repeated full-frame decode dominates the stage before model inference becomes
   the bottleneck
+- lowering the live GPU chunk size can make the path complete successfully, but
+  it does not change the operational recommendation
 - temporary local ROI caches are still the preferred analysis path when more
   than one stage will consume the same ROIs
 - `geometry_live_gpu` is best treated as a one-off fallback/debugging path, not

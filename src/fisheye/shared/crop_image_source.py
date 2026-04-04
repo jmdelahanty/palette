@@ -47,7 +47,7 @@ _ROI_CACHE_POLICIES = {"never", "auto", "always"}
 _ROI_CACHE_AUTO_MIN_SOURCE_PIXELS = 2048 * 2048
 _ROI_CACHE_BUILD_BATCH = 64
 _ROI_LIVE_ACCELERATION_CHOICES = {"auto", "cpu", "gpu"}
-_ROI_LIVE_GPU_CHUNK_FRAMES_DEFAULT = 96
+_ROI_LIVE_GPU_CHUNK_FRAMES_DEFAULT = 32
 
 
 def _normalize_run_name(value: object) -> str | None:

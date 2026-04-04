@@ -506,8 +506,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--roi-live-gpu-chunk-frames",
         type=int,
-        default=96,
-        help="Frame batch size for GPU-accelerated live ROI reads (default: 96).",
+        default=32,
+        help="Frame batch size for GPU-accelerated live ROI reads (default: 32).",
     )
     parser.add_argument("--write-binary-masks", action="store_true", help="Write binary eye masks during U-Net benchmark.")
     parser.add_argument(

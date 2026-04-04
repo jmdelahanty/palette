@@ -125,10 +125,13 @@ Date anchored: 2026-03-06.
   but remained strongly ROI-read-bound on `4512x4512` source video
   (`~513.0s` wall, `423.44s` in `roi_read`, about `45 poses/s`), while the
   corresponding materialized keypoint baseline was about `77.2s`. The U-Net
-  eye-mask pass hit Decord GPU `CUDA out of memory`. Conclusion: temporary
-  local ROI cache remains the preferred analysis path for large full-frame
-  sources; `geometry_live_gpu` is useful as a fallback/debugging path, not the
-  default high-throughput workflow.
+  eye-mask pass hit Decord GPU `CUDA out of memory`. Smaller live settings
+  (`roi_live_gpu_chunk_frames=8`, `eye_batch_size=64`) allowed the full
+  benchmark to complete, but the path still remained about `5x` slower than
+  the materialized/cached baselines for both keypoints and eye masks.
+  Conclusion: temporary local ROI cache remains the preferred analysis path for
+  large full-frame sources; `geometry_live_gpu` is useful as a fallback/debugging
+  path, not the default high-throughput workflow.
 
 ## Phase 3: Secondary ROI Consumers
 

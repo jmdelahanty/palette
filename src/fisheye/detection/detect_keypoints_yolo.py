@@ -371,7 +371,7 @@ def detect_keypoints_yolo(
     roi_cache_policy: str = "auto",
     roi_cache_dir: Optional[Path] = None,
     roi_live_acceleration: str = "auto",
-    roi_live_gpu_chunk_frames: int = 96,
+    roi_live_gpu_chunk_frames: int = 32,
     profile_timings: bool = False,
     registry: Optional[Path] = None,
     console: Optional[Console] = None,
