@@ -259,6 +259,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("--prefilter-sigma", type=float, help="Override polar boundary prefilter sigma.")
     parser.add_argument(
+        "--roi-cache-policy",
+        choices=("never", "auto", "always"),
+        default="auto",
+        help="Temporary ROI cache policy for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument("--roi-cache-dir", type=str, help="Optional scratch directory for temporary ROI caches.")
+    parser.add_argument(
+        "--roi-live-acceleration",
+        choices=("auto", "cpu", "gpu"),
+        default="auto",
+        help="Live ROI read acceleration for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument(
+        "--roi-live-gpu-chunk-frames",
+        type=int,
+        default=32,
+        help="Frame batch size for GPU-accelerated live ROI reads (default: 32).",
+    )
+    parser.add_argument(
         "--allow-missing-tuning",
         action="store_true",
         help="Allow segmentation even when subject_mask_tuning.components.swim_bladder is missing.",

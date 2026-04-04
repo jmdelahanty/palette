@@ -56,6 +56,10 @@ class BatchOptions:
     include_interpolated: bool
     positive_keypoint_labels: tuple[str, ...] | None
     allow_zero_eligible: bool
+    roi_cache_policy: str
+    roi_cache_dir: Optional[str]
+    roi_live_acceleration: str
+    roi_live_gpu_chunk_frames: int
 
 
 @dataclass(frozen=True)
@@ -177,6 +181,10 @@ def _process_zarr_path(zarr_path: Path, options: BatchOptions) -> BatchRow:
             negative_point_policy=options.negative_point_policy,
             negative_point_margin_fraction=float(options.negative_point_margin_fraction),
             positive_keypoint_labels=options.positive_keypoint_labels,
+            roi_cache_policy=options.roi_cache_policy,
+            roi_cache_dir=options.roi_cache_dir,
+            roi_live_acceleration=options.roi_live_acceleration,
+            roi_live_gpu_chunk_frames=int(options.roi_live_gpu_chunk_frames),
         )
     except Exception as exc:
         return BatchRow(
@@ -254,6 +262,10 @@ def _process_zarr_path(zarr_path: Path, options: BatchOptions) -> BatchRow:
             device=options.device,
             no_hf_download=options.no_hf_download,
             positive_keypoint_labels=options.positive_keypoint_labels,
+            roi_cache_policy=options.roi_cache_policy,
+            roi_cache_dir=options.roi_cache_dir,
+            roi_live_acceleration=options.roi_live_acceleration,
+            roi_live_gpu_chunk_frames=int(options.roi_live_gpu_chunk_frames),
         )
     except Exception as exc:
         return BatchRow(
@@ -386,6 +398,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help="Do not skip archives whose inspect summary reports zero eligible rows.",
     )
+    parser.add_argument(
+        "--roi-cache-policy",
+        choices=("never", "auto", "always"),
+        default="auto",
+        help="Temporary ROI cache policy for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument("--roi-cache-dir", type=str, help="Optional scratch directory for temporary ROI caches.")
+    parser.add_argument(
+        "--roi-live-acceleration",
+        choices=("auto", "cpu", "gpu"),
+        default="auto",
+        help="Live ROI read acceleration for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument(
+        "--roi-live-gpu-chunk-frames",
+        type=int,
+        default=32,
+        help="Frame batch size for GPU-accelerated live ROI reads (default: 32).",
+    )
     args = parser.parse_args(argv)
 
     options = BatchOptions(
@@ -414,6 +445,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.positive_keypoint_labels
         else None,
         allow_zero_eligible=bool(args.allow_zero_eligible),
+        roi_cache_policy=str(args.roi_cache_policy),
+        roi_cache_dir=str(args.roi_cache_dir) if args.roi_cache_dir else None,
+        roi_live_acceleration=str(args.roi_live_acceleration),
+        roi_live_gpu_chunk_frames=int(args.roi_live_gpu_chunk_frames),
     )
 
     roots = _resolve_roots(list(args.paths))

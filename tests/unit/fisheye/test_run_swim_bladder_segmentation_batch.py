@@ -147,6 +147,46 @@ def test_process_zarr_path_apply_runs_segmentation(monkeypatch, tmp_path: Path) 
     assert captured["overwrite"] is False
 
 
+def test_main_parses_roi_cache_args_into_config(monkeypatch, tmp_path: Path, capsys) -> None:
+    training_path = tmp_path / "recording_training.zarr"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(mod, "_iter_zarr", lambda _roots, recursive: [training_path])
+
+    def _fake_process(zarr_path, options):  # type: ignore[no-untyped-def]
+        captured["zarr_path"] = zarr_path
+        captured["options"] = options
+        return mod.BatchRow(zarr_path=zarr_path, status="planned", observed_use="training")
+
+    monkeypatch.setattr(mod, "_process_zarr_path", _fake_process)
+
+    rc = mod.main(
+        [
+            str(tmp_path),
+            "--recursive",
+            "--run-name",
+            "traditional_swim_bladder_masks_batch_001",
+            "--roi-cache-policy",
+            "always",
+            "--roi-cache-dir",
+            "/tmp/swim-cache",
+            "--roi-live-acceleration",
+            "gpu",
+            "--roi-live-gpu-chunk-frames",
+            "21",
+        ]
+    )
+    _ = capsys.readouterr()
+
+    assert rc == 0
+    assert captured["zarr_path"] == training_path
+    options = captured["options"]
+    assert options.config_dict["roi_cache_policy"] == "always"
+    assert options.config_dict["roi_cache_dir"] == "/tmp/swim-cache"
+    assert options.config_dict["roi_live_acceleration"] == "gpu"
+    assert options.config_dict["roi_live_gpu_chunk_frames"] == 21
+
+
 def test_main_scans_roots_and_reports_summary(monkeypatch, tmp_path: Path, capsys) -> None:
     training_path = tmp_path / "recording_training.zarr"
     analysis_path = tmp_path / "recording_analysis.zarr"

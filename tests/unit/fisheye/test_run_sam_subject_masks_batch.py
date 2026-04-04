@@ -55,6 +55,10 @@ def _default_options(**overrides) -> mod.BatchOptions:
         include_interpolated=False,
         positive_keypoint_labels=None,
         allow_zero_eligible=False,
+        roi_cache_policy="auto",
+        roi_cache_dir=None,
+        roi_live_acceleration="auto",
+        roi_live_gpu_chunk_frames=32,
     )
     values = dict(base.__dict__)
     values.update(overrides)
@@ -78,10 +82,23 @@ def _inspect_summary(*, output_run: str = "sam_subject_masks_from_refined_001", 
 def test_process_zarr_path_plans_training_archive(monkeypatch, tmp_path: Path) -> None:
     zarr_path = tmp_path / "recording_training.zarr"
     _install_fake_roots(monkeypatch, {zarr_path: _FakeRoot(zarr_use="training")})
+    captured: dict[str, object] = {}
 
-    monkeypatch.setattr(mod, "inspect_sam_subject_archive_path", lambda *_args, **_kwargs: _inspect_summary())
+    def _fake_inspect(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["kwargs"] = kwargs
+        return _inspect_summary()
 
-    row = mod._process_zarr_path(zarr_path, _default_options())  # noqa: SLF001
+    monkeypatch.setattr(mod, "inspect_sam_subject_archive_path", _fake_inspect)
+
+    row = mod._process_zarr_path(  # noqa: SLF001
+        zarr_path,
+        _default_options(
+            roi_cache_policy="always",
+            roi_cache_dir="/tmp/sam-cache",
+            roi_live_acceleration="gpu",
+            roi_live_gpu_chunk_frames=17,
+        ),
+    )
 
     assert row.status == "planned"
     assert row.observed_use == "training"
@@ -90,6 +107,11 @@ def test_process_zarr_path_plans_training_archive(monkeypatch, tmp_path: Path) -
     assert row.keypoint_run == "refined_001"
     assert row.output_run == "sam_subject_masks_from_refined_001"
     assert row.eligible_rows == 5
+    kwargs = captured["kwargs"]
+    assert kwargs["roi_cache_policy"] == "always"
+    assert kwargs["roi_cache_dir"] == "/tmp/sam-cache"
+    assert kwargs["roi_live_acceleration"] == "gpu"
+    assert kwargs["roi_live_gpu_chunk_frames"] == 17
 
 
 def test_process_zarr_path_skips_existing_output_without_overwrite(monkeypatch, tmp_path: Path) -> None:
@@ -163,6 +185,48 @@ def test_process_zarr_path_apply_runs_inference(monkeypatch, tmp_path: Path) -> 
     assert captured["args"] == (zarr_path,)
     assert captured["kwargs"]["batch_size"] == 16
     assert captured["kwargs"]["positive_keypoint_labels"] == ("swim_bladder",)
+    assert captured["kwargs"]["roi_cache_policy"] == "auto"
+    assert captured["kwargs"]["roi_cache_dir"] is None
+    assert captured["kwargs"]["roi_live_acceleration"] == "auto"
+    assert captured["kwargs"]["roi_live_gpu_chunk_frames"] == 32
+
+
+def test_main_parses_roi_cache_args(monkeypatch, tmp_path: Path, capsys) -> None:
+    training_path = tmp_path / "recording_training.zarr"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(mod, "_iter_zarr", lambda _roots, recursive: [training_path])
+
+    def _fake_process(zarr_path, options):  # type: ignore[no-untyped-def]
+        captured["zarr_path"] = zarr_path
+        captured["options"] = options
+        return mod.BatchRow(zarr_path=zarr_path, status="planned", observed_use="training")
+
+    monkeypatch.setattr(mod, "_process_zarr_path", _fake_process)
+
+    rc = mod.main(
+        [
+            str(tmp_path),
+            "--recursive",
+            "--roi-cache-policy",
+            "always",
+            "--roi-cache-dir",
+            "/tmp/sam-cache",
+            "--roi-live-acceleration",
+            "gpu",
+            "--roi-live-gpu-chunk-frames",
+            "19",
+        ]
+    )
+    _ = capsys.readouterr()
+
+    assert rc == 0
+    assert captured["zarr_path"] == training_path
+    options = captured["options"]
+    assert options.roi_cache_policy == "always"
+    assert options.roi_cache_dir == "/tmp/sam-cache"
+    assert options.roi_live_acceleration == "gpu"
+    assert options.roi_live_gpu_chunk_frames == 19
 
 
 def test_main_scans_roots_and_reports_summary(monkeypatch, tmp_path: Path, capsys) -> None:
