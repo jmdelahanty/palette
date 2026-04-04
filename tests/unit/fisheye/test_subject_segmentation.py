@@ -62,6 +62,48 @@ class _FakeGroup(dict):
         return array
 
 
+class _FakeCropSource:
+    def __init__(
+        self,
+        crop_group: _FakeGroup,
+        *,
+        storage_mode: str,
+        roi_read_mode: str,
+        roi_cache_policy: str = "never",
+        roi_cache_used: bool = False,
+        roi_cache_key: str | None = None,
+        roi_cache_path: str | None = None,
+        frame_source_kind: str = "roi_images",
+        frame_source_path: str | None = None,
+    ) -> None:
+        self.crop_group = crop_group
+        self.crop_run_name = "crop_001"
+        self.storage_mode = storage_mode
+        self.roi_read_mode = roi_read_mode
+        self.roi_cache_policy = roi_cache_policy
+        self.roi_cache_used = roi_cache_used
+        self.roi_cache_key = roi_cache_key
+        self.roi_cache_path = roi_cache_path
+        self.roi_live_acceleration_requested = None
+        self.roi_live_acceleration_effective = None
+        self.roi_live_acceleration_fallback_reason = None
+        self.roi_live_gpu_chunk_frames = 32
+        self.frame_source_kind = frame_source_kind
+        self.frame_source_path = frame_source_path
+        self.roi_coordinates_full = np.asarray(crop_group["roi_coordinates_full"][:], dtype=np.int32)
+        self._roi_images = np.asarray(crop_group["roi_images"][:], dtype=np.uint8)
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self._roi_images.shape
+
+    def __getitem__(self, key):
+        return self._roi_images[key]
+
+    def close(self) -> None:
+        return None
+
+
 def _make_root(
     *,
     use_background_ds: bool = False,
@@ -274,6 +316,41 @@ def test_segment_subject_masks_from_root_supports_background_ds_and_overwrite() 
     assert run.attrs["config"]["diff_threshold"] == 50
     assert run.attrs["config"]["keep_largest_component"] is False
     assert run.attrs["summary_statistics"]["background_array"] == "background_ds"
+
+
+def test_segment_subject_masks_from_root_supports_geometry_only_crop_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _make_root()
+    crop_group = root["crop_runs"]["crop_001"]
+    crop_group.attrs["crop_storage_mode"] = "geometry_only"
+    crop_source = _FakeCropSource(
+        crop_group,
+        storage_mode="geometry_only",
+        roi_read_mode="temporary_cache",
+        roi_cache_policy="auto",
+        roi_cache_used=True,
+        roi_cache_key="cache-key-001",
+        roi_cache_path="/tmp/subject-cache.zarr",
+        frame_source_kind="source_video_path",
+        frame_source_path="/tmp/source.mp4",
+    )
+    monkeypatch.setattr(mod.CropImageSource, "open", lambda *args, **kwargs: crop_source)
+
+    run_name = mod.segment_subject_masks_from_root(
+        root,
+        zarr_path="/tmp/fake_analysis.zarr",
+        output_run="subject_masks_geometry_001",
+    )
+
+    run = root["subject_mask_runs"][run_name]
+    assert run.attrs["source_crop_storage_mode"] == "geometry_only"
+    assert run.attrs["source_roi_read_mode"] == "temporary_cache"
+    assert run.attrs["source_roi_cache_used"] is True
+    assert run.attrs["source_roi_cache_key"] == "cache-key-001"
+    assert run.attrs["source_roi_cache_path"] == "/tmp/subject-cache.zarr"
+    assert run.attrs["provenance"]["inputs"]["frame_source"] == "source_video_path"
+    assert run.attrs["provenance"]["inputs"]["source_video_path"] == "/tmp/source.mp4"
     np.testing.assert_array_equal(run["frame_indices"][:], np.asarray([0, 1], dtype=np.int32))
 
 

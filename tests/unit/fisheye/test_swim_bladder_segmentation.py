@@ -65,6 +65,48 @@ class _FakeGroup(dict):
         return array
 
 
+class _FakeCropSource:
+    def __init__(
+        self,
+        crop_group: _FakeGroup,
+        *,
+        storage_mode: str,
+        roi_read_mode: str,
+        roi_cache_policy: str = "never",
+        roi_cache_used: bool = False,
+        roi_cache_key: str | None = None,
+        roi_cache_path: str | None = None,
+        frame_source_kind: str = "roi_images",
+        frame_source_path: str | None = None,
+    ) -> None:
+        self.crop_group = crop_group
+        self.crop_run_name = "crop_001"
+        self.storage_mode = storage_mode
+        self.roi_read_mode = roi_read_mode
+        self.roi_cache_policy = roi_cache_policy
+        self.roi_cache_used = roi_cache_used
+        self.roi_cache_key = roi_cache_key
+        self.roi_cache_path = roi_cache_path
+        self.roi_live_acceleration_requested = None
+        self.roi_live_acceleration_effective = None
+        self.roi_live_acceleration_fallback_reason = None
+        self.roi_live_gpu_chunk_frames = 32
+        self.frame_source_kind = frame_source_kind
+        self.frame_source_path = frame_source_path
+        self.roi_coordinates_full = np.asarray(crop_group["roi_coordinates_full"][:], dtype=np.int32)
+        self._roi_images = np.asarray(crop_group["roi_images"][:], dtype=np.uint8)
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self._roi_images.shape
+
+    def __getitem__(self, key):
+        return self._roi_images[key]
+
+    def close(self) -> None:
+        return None
+
+
 def _make_root() -> _FakeGroup:
     root = _FakeGroup(attrs={"width": 8, "height": 8})
     crop_parent = root.require_group("crop_runs")
@@ -387,3 +429,55 @@ def test_segment_swim_bladder_masks_override_method_family_updates_provenance(
     assert run.attrs["tuning_entry_snapshot"]["subject_method_family"] == "swim_bladder_patch_threshold_v1"
     assert run["components"]["swim_bladder"]["provenance"].attrs["source_method"] == "polar_boundary_center_seed"
     assert run.attrs["provenance"]["parameters"]["tuning_override_keys"] == ["subject_method_family"]
+
+
+def test_segment_swim_bladder_masks_supports_geometry_only_crop_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _make_root()
+    crop_group = root["crop_runs"]["crop_001"]
+    crop_group.attrs["crop_storage_mode"] = "geometry_only"
+    crop_source = _FakeCropSource(
+        crop_group,
+        storage_mode="geometry_only",
+        roi_read_mode="temporary_cache",
+        roi_cache_policy="auto",
+        roi_cache_used=True,
+        roi_cache_key="cache-key-002",
+        roi_cache_path="/tmp/swim-cache.zarr",
+        frame_source_kind="source_video_path",
+        frame_source_path="/tmp/source.mp4",
+    )
+    monkeypatch.setattr(mod.CropImageSource, "open", lambda *args, **kwargs: crop_source)
+    keypoint_source = mod.subject_tuning.EyeKeypointSource(
+        group_name="refined_keypoints_runs",
+        run_name="refined_keypoints_canary_001",
+        group=_FakeGroup(attrs={"keypoint_labels": ["swim_bladder", "eye_left", "eye_right"]}),
+        keypoints_roi=_FakeArray(
+            np.asarray(
+                [
+                    [[1.5, 1.5], [0.0, 0.0], [0.0, 0.0]],
+                    [[np.nan, np.nan], [0.0, 0.0], [0.0, 0.0]],
+                ],
+                dtype=np.float32,
+            )
+        ),
+        success_flags=np.asarray([True, True], dtype=bool),
+        heading_values=None,
+    )
+    monkeypatch.setattr(mod.subject_tuning, "_resolve_eye_keypoint_source", lambda *_args, **_kwargs: keypoint_source)
+
+    run_name = mod.segment_swim_bladder_masks_from_root(
+        root,
+        zarr_path="/tmp/fake_analysis.zarr",
+        output_run="swim_bladder_geometry_001",
+    )
+
+    run = root["subject_mask_runs"][run_name]
+    assert run.attrs["source_crop_storage_mode"] == "geometry_only"
+    assert run.attrs["source_roi_read_mode"] == "temporary_cache"
+    assert run.attrs["source_roi_cache_used"] is True
+    assert run.attrs["source_roi_cache_key"] == "cache-key-002"
+    assert run.attrs["source_roi_cache_path"] == "/tmp/swim-cache.zarr"
+    assert run.attrs["provenance"]["inputs"]["frame_source"] == "source_video_path"
+    assert run.attrs["provenance"]["inputs"]["source_video_path"] == "/tmp/source.mp4"

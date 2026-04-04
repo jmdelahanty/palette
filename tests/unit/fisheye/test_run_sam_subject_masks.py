@@ -9,14 +9,25 @@ from fisheye.utils import run_sam_subject_masks as mod
 
 
 class FakeArray:
-    def __init__(self, data: np.ndarray):
+    def __init__(
+        self,
+        data: np.ndarray,
+        *,
+        chunks: tuple[int, ...] | None = None,
+        fill_value: object | None = None,
+    ):
         self._data = np.asarray(data)
         self.shape = self._data.shape
         self.dtype = self._data.dtype
         self.ndim = self._data.ndim
+        self.chunks = tuple(int(v) for v in chunks) if chunks is not None else None
+        self.fill_value = fill_value
 
     def __getitem__(self, item):
         return self._data[item]
+
+    def __setitem__(self, item, value) -> None:
+        self._data[item] = value
 
 
 class FakeGroup(dict):
@@ -26,6 +37,90 @@ class FakeGroup(dict):
 
     def get(self, name: str, default=None):
         return super().get(name, default)
+
+    def create_group(self, name: str):
+        group = FakeGroup()
+        self[name] = group
+        return group
+
+    def require_group(self, name: str):
+        value = self.get(name)
+        if isinstance(value, FakeGroup):
+            return value
+        return self.create_group(name)
+
+    def create_array(self, name: str, data=None, **kwargs):
+        if data is None:
+            shape = kwargs["shape"]
+            dtype = kwargs.get("dtype", np.float32)
+            fill_value = kwargs.get("fill_value", 0)
+            data = np.full(shape, fill_value, dtype=dtype)
+        array = FakeArray(
+            np.asarray(data),
+            chunks=kwargs.get("chunks"),
+            fill_value=kwargs.get("fill_value"),
+        )
+        self[name] = array
+        return array
+
+
+class FakeCropSource:
+    def __init__(
+        self,
+        crop_group: FakeGroup,
+        *,
+        crop_run_name: str = "crop_001",
+        storage_mode: str = "materialized",
+        roi_read_mode: str = "materialized_crop_run",
+        roi_cache_policy: str = "never",
+        roi_cache_used: bool = False,
+        roi_cache_key: str | None = None,
+        roi_cache_path: str | None = None,
+        roi_live_acceleration_requested: str | None = None,
+        roi_live_acceleration_effective: str | None = None,
+        roi_live_acceleration_fallback_reason: str | None = None,
+        roi_live_gpu_chunk_frames: int = 32,
+        frame_source_kind: str = "roi_images",
+        frame_source_path: str | None = None,
+    ) -> None:
+        self.crop_group = crop_group
+        self.crop_run_name = crop_run_name
+        self.storage_mode = storage_mode
+        self.roi_read_mode = roi_read_mode
+        self.roi_cache_policy = roi_cache_policy
+        self.roi_cache_used = roi_cache_used
+        self.roi_cache_key = roi_cache_key
+        self.roi_cache_path = roi_cache_path
+        self.roi_live_acceleration_requested = roi_live_acceleration_requested
+        self.roi_live_acceleration_effective = roi_live_acceleration_effective
+        self.roi_live_acceleration_fallback_reason = roi_live_acceleration_fallback_reason
+        self.roi_live_gpu_chunk_frames = roi_live_gpu_chunk_frames
+        self.frame_source_kind = frame_source_kind
+        self.frame_source_path = frame_source_path
+        self._roi_images = np.asarray(crop_group["roi_images"][:], dtype=np.uint8)
+        self.roi_coordinates_full = np.asarray(crop_group["roi_coordinates_full"][:], dtype=np.int32)
+
+    @property
+    def total_rois(self) -> int:
+        return int(self._roi_images.shape[0])
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self._roi_images.shape
+
+    @property
+    def dtype(self):
+        return self._roi_images.dtype
+
+    @property
+    def ndim(self) -> int:
+        return self._roi_images.ndim
+
+    def __getitem__(self, item):
+        return self._roi_images[item]
+
+    def close(self) -> None:
+        return None
 
 
 def _fake_root(*, width: int = 100, height: int = 80) -> FakeGroup:
@@ -132,6 +227,7 @@ def _fake_keypoint_group(
 def test_inspect_sam_subject_archive_prepares_expected_preview(monkeypatch) -> None:
     root = _fake_root()
     crop_group = _fake_crop_group()
+    crop_source = FakeCropSource(crop_group)
     keypoint_group_obj = _fake_keypoint_group(
         refined_success=np.asarray([True, True, True], dtype=bool),
         geometry_valid=np.asarray([True, True, True], dtype=bool),
@@ -139,9 +235,9 @@ def test_inspect_sam_subject_archive_prepares_expected_preview(monkeypatch) -> N
     )
 
     monkeypatch.setattr(
-        mod,
-        "resolve_materialized_crop_run",
-        lambda root, *, crop_run=None: (FakeGroup(), crop_group, "crop_001"),
+        mod.CropImageSource,
+        "open",
+        lambda *args, **kwargs: crop_source,
     )
     monkeypatch.setattr(
         mod,
@@ -178,6 +274,7 @@ def test_inspect_sam_subject_archive_prepares_expected_preview(monkeypatch) -> N
 def test_inspect_sam_subject_archive_supports_explicit_positive_keypoint_labels(monkeypatch) -> None:
     root = _fake_root()
     crop_group = _fake_crop_group()
+    crop_source = FakeCropSource(crop_group)
     keypoint_group_obj = _fake_keypoint_group(
         refined_success=np.asarray([True, True, True], dtype=bool),
         geometry_valid=np.asarray([True, True, True], dtype=bool),
@@ -185,9 +282,9 @@ def test_inspect_sam_subject_archive_supports_explicit_positive_keypoint_labels(
     )
 
     monkeypatch.setattr(
-        mod,
-        "resolve_materialized_crop_run",
-        lambda root, *, crop_run=None: (FakeGroup(), crop_group, "crop_001"),
+        mod.CropImageSource,
+        "open",
+        lambda *args, **kwargs: crop_source,
     )
     monkeypatch.setattr(
         mod,
@@ -210,6 +307,48 @@ def test_inspect_sam_subject_archive_supports_explicit_positive_keypoint_labels(
     assert summary["eligibility"]["eligible_rows"] == 1
     assert summary["eligibility"]["off_image_prompt_rows"] == 1
     assert summary["prepared_batch"]["point_coords_shape"] == [1, 2]
+
+
+def test_inspect_sam_subject_archive_reports_geometry_only_cache_provenance(monkeypatch) -> None:
+    root = _fake_root()
+    crop_group = _fake_crop_group()
+    crop_group.attrs["crop_storage_mode"] = "geometry_only"
+    crop_source = FakeCropSource(
+        crop_group,
+        storage_mode="geometry_only",
+        roi_read_mode="temporary_cache",
+        roi_cache_policy="auto",
+        roi_cache_used=True,
+        roi_cache_key="cache-key-003",
+        roi_cache_path="/tmp/sam-cache.zarr",
+        frame_source_kind="source_video_path",
+        frame_source_path="/tmp/source.mp4",
+    )
+    keypoint_group_obj = _fake_keypoint_group(
+        refined_success=np.asarray([True, True, True], dtype=bool),
+        geometry_valid=np.asarray([True, True, True], dtype=bool),
+        usable_keypoints=np.asarray([True, True, True], dtype=bool),
+    )
+
+    monkeypatch.setattr(mod.CropImageSource, "open", lambda *args, **kwargs: crop_source)
+    monkeypatch.setattr(
+        mod,
+        "_resolve_keypoint_run",
+        lambda root, *, keypoint_run=None, keypoint_group="auto", zarr_path=None: mod.ResolvedKeypointRun(
+            group_name="refined_keypoints_runs",
+            run_name="refined_001",
+            group=keypoint_group_obj,
+        ),
+    )
+
+    summary = mod.inspect_sam_subject_archive(root, inspect_runtime=False, prepare_count=2)
+
+    assert summary["source_crop_storage_mode"] == "geometry_only"
+    assert summary["source_roi_read_mode"] == "temporary_cache"
+    assert summary["roi_cache_policy"] == "auto"
+    assert summary["source_roi_cache_used"] is True
+    assert summary["source_roi_cache_key"] == "cache-key-003"
+    assert summary["source_roi_cache_path"] == "/tmp/sam-cache.zarr"
 
 
 def test_resolve_keypoint_run_prefers_refined_keypoints(monkeypatch) -> None:
@@ -290,12 +429,13 @@ def test_resolve_keypoint_run_uses_direct_latest_when_parent_membership_is_stale
 def test_resolve_sam_subject_inputs_raises_on_alignment_mismatch(monkeypatch) -> None:
     root = _fake_root()
     crop_group = _fake_crop_group()
+    crop_source = FakeCropSource(crop_group)
     keypoint_group_obj = _fake_keypoint_group(frame_indices=np.asarray([0, 99, 2], dtype=np.int32))
 
     monkeypatch.setattr(
-        mod,
-        "resolve_materialized_crop_run",
-        lambda root, *, crop_run=None: (FakeGroup(), crop_group, "crop_001"),
+        mod.CropImageSource,
+        "open",
+        lambda *args, **kwargs: crop_source,
     )
     monkeypatch.setattr(
         mod,
@@ -320,6 +460,7 @@ def test_resolve_sam_subject_inputs_raises_on_alignment_mismatch(monkeypatch) ->
 def test_resolve_sam_subject_inputs_loads_pose_bbox_xyxy_roi(monkeypatch) -> None:
     root = _fake_root()
     crop_group = _fake_crop_group()
+    crop_source = FakeCropSource(crop_group)
     pose_boxes = np.asarray(
         [
             [1.0, 1.0, 4.0, 3.0],
@@ -331,9 +472,9 @@ def test_resolve_sam_subject_inputs_loads_pose_bbox_xyxy_roi(monkeypatch) -> Non
     keypoint_group_obj = _fake_keypoint_group(pose_bbox_xyxy_roi=pose_boxes)
 
     monkeypatch.setattr(
-        mod,
-        "resolve_materialized_crop_run",
-        lambda root, *, crop_run=None: (FakeGroup(), crop_group, "crop_001"),
+        mod.CropImageSource,
+        "open",
+        lambda *args, **kwargs: crop_source,
     )
     monkeypatch.setattr(
         mod,
@@ -744,7 +885,7 @@ def test_compute_channel_metrics_reports_area_centroid_and_bbox() -> None:
 
 
 def test_write_sam_subject_mask_run_records_richer_stage_provenance(monkeypatch) -> None:
-    root = zarr.group()
+    root = FakeGroup()
     crop_parent = root.create_group("crop_runs")
     crop_group = crop_parent.create_group("crop_001")
     crop_group.attrs["video_source_type"] = "video"
@@ -929,11 +1070,6 @@ def test_run_sam_subject_mask_inference_uses_pixel_prompt_normalization(monkeypa
     )
 
     monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: root)
-    monkeypatch.setattr(
-        mod,
-        "resolve_materialized_crop_run",
-        lambda *_args, **_kwargs: (mod.PreparedSamBatch, crop_group, "crop_001"),
-    )
     monkeypatch.setattr(mod, "resolve_sam_subject_inputs", lambda *_args, **_kwargs: inputs)
     monkeypatch.setattr(mod, "compute_row_eligibility", lambda *_args, **_kwargs: eligibility)
 

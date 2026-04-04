@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Traditional subject-body segmentation on materialized ROI crops."""
+"""Traditional subject-body segmentation on Palette crop runs."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from ..diagnostics.preview_eye_mask_background_subtraction import (
     _resolve_background_source,
     _resolve_run_name,
 )
-from ..shared.crop_image_source import resolve_materialized_crop_run
+from ..shared.crop_image_source import CropImageSource
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
@@ -50,6 +50,10 @@ class SubjectSegmentationConfig:
     keep_largest_component: bool = bool(tuning.DEFAULT_KEEP_LARGEST_COMPONENT)
     crop_run: Optional[str] = None
     background_run: Optional[str] = None
+    roi_cache_policy: str = "auto"
+    roi_cache_dir: Optional[str] = None
+    roi_live_acceleration: str = "auto"
+    roi_live_gpu_chunk_frames: int = 32
 
 
 def _print(console: Optional[Console], message: str) -> None:
@@ -377,268 +381,316 @@ def segment_subject_masks_from_root(
     cfg, tuning_entry = _apply_tuned_parameters(root, cfg, console)
     cfg = _apply_overrides(cfg, config_dict)
 
-    _, crop_group, crop_run = resolve_materialized_crop_run(root, crop_run=cfg.crop_run, zarr_path=zarr_path)
-    roi_images = crop_group.get("roi_images")
-    roi_coordinates_full = crop_group.get("roi_coordinates_full")
-    if roi_images is None or roi_coordinates_full is None:
-        raise ValueError(
-            f"crop_runs/{crop_run} must provide roi_images and roi_coordinates_full for traditional subject segmentation."
-        )
-
-    background_run = _resolve_run_name(root, "background_runs", cfg.background_run)
-    background_source = _resolve_background_source(root, background_run)
-    background_group = root["background_runs"][background_run]
-    background_frame = _normalize_background_frame(np.asarray(background_group[background_source.array_name][:]))
-    dish_mask_image, dish_mask_array_name, dish_mask_image_shape = _resolve_dish_mask_projection(root)
-    full_frame_shape = _resolve_full_frame_shape(root)
-
-    roi_count = int(roi_images.shape[0])
-    roi_h = int(roi_images.shape[1])
-    roi_w = int(roi_images.shape[2])
-    n_channels = len(SUBJECT_MASK_LABELS)
-
-    body_masks = np.zeros((roi_count, roi_h, roi_w), dtype=np.uint8)
-    body_probs = np.zeros((roi_count, roi_h, roi_w), dtype=np.float32)
-    otsu_thresholds = np.zeros((roi_count,), dtype=np.float32)
-    candidate_components = np.zeros((roi_count,), dtype=np.int32)
-    kept_components = np.zeros((roi_count,), dtype=np.int32)
-    largest_area = np.zeros((roi_count,), dtype=np.float32)
-    kept_area = np.zeros((roi_count,), dtype=np.float32)
-
-    params = {
-        "diff_threshold": int(cfg.diff_threshold),
-        "gaussian_blur_kernel": int(cfg.gaussian_blur_kernel),
-        "closing_radius": int(cfg.closing_radius),
-        "opening_radius": int(cfg.opening_radius),
-        "min_area": int(cfg.min_area),
-        "keep_largest_component": bool(cfg.keep_largest_component),
-    }
-
-    for row_idx in range(roi_count):
-        roi_image = _coerce_roi_to_gray(np.asarray(roi_images[row_idx]))
-        top_left_xy = np.asarray(roi_coordinates_full[row_idx], dtype=np.float32)
-        roi_shape = (roi_image.shape[0], roi_image.shape[1])
-        if background_source.array_name == "background_full":
-            background_roi = _extract_background_roi_full(background_frame, top_left_xy, roi_shape)
-        else:
-            assert background_source.full_shape is not None
-            background_roi = _extract_background_roi_ds(
-                background_frame,
-                top_left_xy,
-                roi_shape,
-                background_source.full_shape,
-            )
-        dish_mask_roi = None
-        if dish_mask_image is not None and dish_mask_array_name is not None and dish_mask_image_shape is not None:
-            dish_mask_roi = _extract_dish_mask_roi(
-                dish_mask_image,
-                tuned_on_array=dish_mask_array_name,
-                image_shape=dish_mask_image_shape,
-                top_left_xy_full=top_left_xy,
-                roi_shape=roi_shape,
-                full_shape=full_frame_shape,
-            )
-
-        seed = tuning._compute_subject_mask_seed(
-            roi_image,
-            background_roi,
-            params,
-            allowed_mask=dish_mask_roi,
-        )
-        body_masks[row_idx] = np.asarray(seed["processed_mask"], dtype=np.uint8)
-        body_probs[row_idx] = (
-            np.asarray(seed["diff_filtered"], dtype=np.float32) / 255.0
-        )
-        otsu_thresholds[row_idx] = float(seed["otsu_threshold"])
-        stats = seed["stats"]
-        candidate_components[row_idx] = int(stats["candidate_components"])
-        kept_components[row_idx] = int(stats["kept_components"])
-        largest_area[row_idx] = float(stats["largest_area"])
-        kept_area[row_idx] = float(stats["kept_area"])
-
-    run_group, run_name = _prepare_run_group(root, output_run=output_run, overwrite=overwrite)
-    created_at = datetime.now(timezone.utc).isoformat()
-
-    masks_full = np.zeros((roi_count, n_channels, roi_h, roi_w), dtype=np.uint8)
-    probs_full = np.zeros((roi_count, n_channels, roi_h, roi_w), dtype=np.float16)
-    masks_full[:, 0] = body_masks
-    probs_full[:, 0] = body_probs.astype(np.float16, copy=False)
-
-    detection_source_arr = crop_group.get("detection_source")
-    detection_source = (
-        np.asarray(detection_source_arr[:], dtype=np.int8)
-        if detection_source_arr is not None
-        else np.zeros((roi_count,), dtype=np.int8)
+    crop_source = CropImageSource.open(
+        root,
+        crop_run=cfg.crop_run,
+        zarr_path=zarr_path,
+        roi_cache_policy=cfg.roi_cache_policy,
+        roi_live_acceleration=cfg.roi_live_acceleration,
+        roi_live_gpu_chunk_frames=int(cfg.roi_live_gpu_chunk_frames),
+        roi_cache_dir=cfg.roi_cache_dir,
+        console=console,
     )
+    crop_group = crop_source.crop_group
+    crop_run = crop_source.crop_run_name
+    roi_images = crop_source
+    roi_coordinates_full = crop_source.roi_coordinates_full
 
-    run_group.attrs.update(
-        {
-            "method": str(
-                tuning_entry.get("method")
-                if isinstance(tuning_entry, dict) and tuning_entry.get("method")
-                else "traditional_subject_mask_seed"
-            ),
-            "config": asdict(cfg),
-            "source_crop_run": str(crop_run),
-            "source_background_run": str(background_run),
-            "source_background_array": str(background_source.array_name),
-            "source_dish_mask_array": dish_mask_array_name,
-            "label_schema_id": SUBJECT_MASK_LABEL_SCHEMA,
-            "mask_labels": list(SUBJECT_MASK_LABELS),
-            "output_semantics": "multilabel",
-            "overlap_policy": "independent_sigmoid",
-            "run_semantics": "traditional_subject_body_inference",
-            "input_format": "gray",
-            "probabilities_dtype": "float16",
-            "probabilities_encoding": "unit_float",
-            "probability_semantics": "normalized_background_diff",
-            "tuning_source": (
-                "analysis_metadata.subject_mask_tuning.components.subject_body"
-                if tuning_entry is not None
-                else "defaults_or_overrides"
-            ),
-            "tuning_timestamp": tuning_entry.get("tuned_timestamp") if isinstance(tuning_entry, dict) else None,
+    try:
+        background_run = _resolve_run_name(root, "background_runs", cfg.background_run)
+        background_source = _resolve_background_source(root, background_run)
+        background_group = root["background_runs"][background_run]
+        background_frame = _normalize_background_frame(np.asarray(background_group[background_source.array_name][:]))
+        dish_mask_image, dish_mask_array_name, dish_mask_image_shape = _resolve_dish_mask_projection(root)
+        full_frame_shape = _resolve_full_frame_shape(root)
+
+        roi_count = int(roi_images.shape[0])
+        roi_h = int(roi_images.shape[1])
+        roi_w = int(roi_images.shape[2])
+        n_channels = len(SUBJECT_MASK_LABELS)
+
+        body_masks = np.zeros((roi_count, roi_h, roi_w), dtype=np.uint8)
+        body_probs = np.zeros((roi_count, roi_h, roi_w), dtype=np.float32)
+        otsu_thresholds = np.zeros((roi_count,), dtype=np.float32)
+        candidate_components = np.zeros((roi_count,), dtype=np.int32)
+        kept_components = np.zeros((roi_count,), dtype=np.int32)
+        largest_area = np.zeros((roi_count,), dtype=np.float32)
+        kept_area = np.zeros((roi_count,), dtype=np.float32)
+
+        params = {
+            "diff_threshold": int(cfg.diff_threshold),
+            "gaussian_blur_kernel": int(cfg.gaussian_blur_kernel),
+            "closing_radius": int(cfg.closing_radius),
+            "opening_radius": int(cfg.opening_radius),
+            "min_area": int(cfg.min_area),
+            "keep_largest_component": bool(cfg.keep_largest_component),
+        }
+
+        for row_idx in range(roi_count):
+            roi_image = _coerce_roi_to_gray(np.asarray(roi_images[row_idx]))
+            top_left_xy = np.asarray(roi_coordinates_full[row_idx], dtype=np.float32)
+            roi_shape = (roi_image.shape[0], roi_image.shape[1])
+            if background_source.array_name == "background_full":
+                background_roi = _extract_background_roi_full(background_frame, top_left_xy, roi_shape)
+            else:
+                assert background_source.full_shape is not None
+                background_roi = _extract_background_roi_ds(
+                    background_frame,
+                    top_left_xy,
+                    roi_shape,
+                    background_source.full_shape,
+                )
+            dish_mask_roi = None
+            if dish_mask_image is not None and dish_mask_array_name is not None and dish_mask_image_shape is not None:
+                dish_mask_roi = _extract_dish_mask_roi(
+                    dish_mask_image,
+                    tuned_on_array=dish_mask_array_name,
+                    image_shape=dish_mask_image_shape,
+                    top_left_xy_full=top_left_xy,
+                    roi_shape=roi_shape,
+                    full_shape=full_frame_shape,
+                )
+
+            seed = tuning._compute_subject_mask_seed(
+                roi_image,
+                background_roi,
+                params,
+                allowed_mask=dish_mask_roi,
+            )
+            body_masks[row_idx] = np.asarray(seed["processed_mask"], dtype=np.uint8)
+            body_probs[row_idx] = (
+                np.asarray(seed["diff_filtered"], dtype=np.float32) / 255.0
+            )
+            otsu_thresholds[row_idx] = float(seed["otsu_threshold"])
+            stats = seed["stats"]
+            candidate_components[row_idx] = int(stats["candidate_components"])
+            kept_components[row_idx] = int(stats["kept_components"])
+            largest_area[row_idx] = float(stats["largest_area"])
+            kept_area[row_idx] = float(stats["kept_area"])
+        run_group, run_name = _prepare_run_group(root, output_run=output_run, overwrite=overwrite)
+        created_at = datetime.now(timezone.utc).isoformat()
+
+        masks_full = np.zeros((roi_count, n_channels, roi_h, roi_w), dtype=np.uint8)
+        probs_full = np.zeros((roi_count, n_channels, roi_h, roi_w), dtype=np.float16)
+        masks_full[:, 0] = body_masks
+        probs_full[:, 0] = body_probs.astype(np.float16, copy=False)
+
+        detection_source_arr = crop_group.get("detection_source")
+        detection_source = (
+            np.asarray(detection_source_arr[:], dtype=np.int8)
+            if detection_source_arr is not None
+            else np.zeros((roi_count,), dtype=np.int8)
+        )
+        tuning_entry_snapshot = _snapshot_tuning_entry(tuning_entry)
+
+        run_group.attrs.update(
+            {
+                "method": str(
+                    tuning_entry.get("method")
+                    if isinstance(tuning_entry, dict) and tuning_entry.get("method")
+                    else "traditional_subject_mask_seed"
+                ),
+                "config": asdict(cfg),
+                "source_crop_run": str(crop_run),
+                "source_crop_storage_mode": crop_source.storage_mode,
+                "source_crop_signature": crop_group.attrs.get("crop_signature"),
+                "source_crop_revision": crop_group.attrs.get("crop_revision"),
+                "source_roi_read_mode": crop_source.roi_read_mode,
+                "roi_cache_policy": crop_source.roi_cache_policy,
+                "source_roi_cache_used": bool(crop_source.roi_cache_used),
+                "source_roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
+                "source_roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
+                "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
+                "source_roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
+                "source_background_run": str(background_run),
+                "source_background_array": str(background_source.array_name),
+                "source_dish_mask_array": dish_mask_array_name,
+                "label_schema_id": SUBJECT_MASK_LABEL_SCHEMA,
+                "mask_labels": list(SUBJECT_MASK_LABELS),
+                "output_semantics": "multilabel",
+                "overlap_policy": "independent_sigmoid",
+                "run_semantics": "traditional_subject_body_inference",
+                "input_format": "gray",
+                "probabilities_dtype": "float16",
+                "probabilities_encoding": "unit_float",
+                "probability_semantics": "normalized_background_diff",
+                "tuning_source": (
+                    "analysis_metadata.subject_mask_tuning.components.subject_body"
+                    if tuning_entry is not None
+                    else "defaults_or_overrides"
+                ),
+                "tuning_timestamp": tuning_entry.get("tuned_timestamp") if isinstance(tuning_entry, dict) else None,
+                "created_at_utc": created_at,
+            }
+        )
+        if crop_source.roi_cache_key is not None:
+            run_group.attrs["source_roi_cache_key"] = crop_source.roi_cache_key
+        if crop_source.roi_cache_path is not None:
+            run_group.attrs["source_roi_cache_path"] = crop_source.roi_cache_path
+        if tuning_entry_snapshot is not None:
+            run_group.attrs["tuning_entry_snapshot"] = tuning_entry_snapshot
+
+        _copy_lineage_array(run_group, crop_group, "frame_indices")
+        _copy_lineage_array(run_group, crop_group, "frame_counts")
+        _copy_lineage_array(run_group, crop_group, "detection_indices")
+        storage_chunks = subject_mask_storage_chunks(roi_count, roi_h, roi_w)
+        metric_row_chunk = subject_mask_metric_row_chunk(roi_count)
+        run_group.create_array("detection_source", data=detection_source, overwrite=True)
+        run_group.create_array("masks_roi", data=masks_full, chunks=storage_chunks, overwrite=True)
+        run_group.create_array("mask_probs_roi", data=probs_full, chunks=storage_chunks, overwrite=True)
+        run_group.create_array(
+            "available_channels",
+            data=np.asarray(SUBJECT_MASK_AVAILABLE_CHANNELS, dtype=bool),
+            overwrite=True,
+        )
+        write_subject_mask_component_provenance(
+            run_group,
+            component_name="subject_body",
+            source_stage="subject_mask_runs",
+            source_run=run_name,
+            source_method=str(run_group.attrs["method"]),
+            source_channels=["subject_body"],
+            source_label_schema_id=SUBJECT_MASK_LABEL_SCHEMA,
+            source_created_at_utc=created_at,
+        )
+
+        channel_metrics = _compute_channel_metrics(body_masks, body_probs)
+        metrics_group = run_group.require_group("metrics")
+        prob_max = np.zeros((roi_count, n_channels), dtype=np.float32)
+        mask_present = np.zeros((roi_count, n_channels), dtype=bool)
+        area_px = np.zeros((roi_count, n_channels), dtype=np.float32)
+        centroid_xy = np.zeros((roi_count, n_channels, 2), dtype=np.float32)
+        centroid_valid = np.zeros((roi_count, n_channels), dtype=bool)
+        bbox_xyxy = np.zeros((roi_count, n_channels, 4), dtype=np.float32)
+        bbox_valid = np.zeros((roi_count, n_channels), dtype=bool)
+
+        prob_max[:, 0] = channel_metrics["prob_max"]
+        mask_present[:, 0] = channel_metrics["mask_present"]
+        area_px[:, 0] = channel_metrics["area_px"]
+        centroid_xy[:, 0, :] = channel_metrics["centroid_xy"]
+        centroid_valid[:, 0] = channel_metrics["centroid_valid"]
+        bbox_xyxy[:, 0, :] = channel_metrics["bbox_xyxy"]
+        bbox_valid[:, 0] = channel_metrics["bbox_valid"]
+
+        metrics_group.create_array("prob_max", data=prob_max, chunks=(metric_row_chunk, 1), overwrite=True)
+        metrics_group.create_array("mask_present", data=mask_present, chunks=(metric_row_chunk, 1), overwrite=True)
+        metrics_group.create_array("area_px", data=area_px, chunks=(metric_row_chunk, 1), overwrite=True)
+        metrics_group.create_array(
+            "centroid_xy",
+            data=centroid_xy,
+            chunks=(metric_row_chunk, 1, 2),
+            overwrite=True,
+        )
+        metrics_group.create_array(
+            "centroid_valid",
+            data=centroid_valid,
+            chunks=(metric_row_chunk, 1),
+            overwrite=True,
+        )
+        metrics_group.create_array("bbox_xyxy", data=bbox_xyxy, chunks=(metric_row_chunk, 1, 4), overwrite=True)
+        metrics_group.create_array("bbox_valid", data=bbox_valid, chunks=(metric_row_chunk, 1), overwrite=True)
+
+        duration_seconds = float(time.perf_counter() - stage_start)
+        nonempty_rows = np.any(body_masks > 0, axis=(1, 2))
+        nonempty_count = int(np.sum(nonempty_rows))
+        summary_statistics = {
+            "rows_total": int(roi_count),
+            "rows_with_nonempty_masks": nonempty_count,
+            "rows_empty_masks": int(roi_count - nonempty_count),
+            "area_px_min": float(area_px[:, 0].min()) if roi_count else None,
+            "area_px_mean": float(area_px[:, 0].mean()) if roi_count else None,
+            "area_px_max": float(area_px[:, 0].max()) if roi_count else None,
+            "prob_max_min": float(prob_max[:, 0].min()) if roi_count else None,
+            "prob_max_mean": float(prob_max[:, 0].mean()) if roi_count else None,
+            "prob_max_max": float(prob_max[:, 0].max()) if roi_count else None,
+            "otsu_threshold_min": float(otsu_thresholds.min()) if roi_count else None,
+            "otsu_threshold_mean": float(otsu_thresholds.mean()) if roi_count else None,
+            "otsu_threshold_max": float(otsu_thresholds.max()) if roi_count else None,
+            "candidate_components_mean": float(candidate_components.mean()) if roi_count else None,
+            "kept_components_mean": float(kept_components.mean()) if roi_count else None,
+            "largest_area_mean": float(largest_area.mean()) if roi_count else None,
+            "kept_area_mean": float(kept_area.mean()) if roi_count else None,
+            "output_run": run_name,
+            "crop_run": str(crop_run),
+            "background_run": str(background_run),
+            "background_array": str(background_source.array_name),
+            "dish_mask_array": dish_mask_array_name,
+            "duration_seconds": duration_seconds,
             "created_at_utc": created_at,
         }
-    )
-    tuning_entry_snapshot = _snapshot_tuning_entry(tuning_entry)
-    if tuning_entry_snapshot is not None:
-        run_group.attrs["tuning_entry_snapshot"] = tuning_entry_snapshot
+        run_group.attrs["duration_seconds"] = duration_seconds
+        run_group.attrs["summary_statistics"] = summary_statistics
 
-    _copy_lineage_array(run_group, crop_group, "frame_indices")
-    _copy_lineage_array(run_group, crop_group, "frame_counts")
-    _copy_lineage_array(run_group, crop_group, "detection_indices")
-    storage_chunks = subject_mask_storage_chunks(roi_count, roi_h, roi_w)
-    metric_row_chunk = subject_mask_metric_row_chunk(roi_count)
-    run_group.create_array("detection_source", data=detection_source, overwrite=True)
-    run_group.create_array("masks_roi", data=masks_full, chunks=storage_chunks, overwrite=True)
-    run_group.create_array("mask_probs_roi", data=probs_full, chunks=storage_chunks, overwrite=True)
-    run_group.create_array(
-        "available_channels",
-        data=np.asarray(SUBJECT_MASK_AVAILABLE_CHANNELS, dtype=bool),
-        overwrite=True,
-    )
-    write_subject_mask_component_provenance(
-        run_group,
-        component_name="subject_body",
-        source_stage="subject_mask_runs",
-        source_run=run_name,
-        source_method=str(run_group.attrs["method"]),
-        source_channels=["subject_body"],
-        source_label_schema_id=SUBJECT_MASK_LABEL_SCHEMA,
-        source_created_at_utc=created_at,
-    )
-
-    channel_metrics = _compute_channel_metrics(body_masks, body_probs)
-    metrics_group = run_group.require_group("metrics")
-    prob_max = np.zeros((roi_count, n_channels), dtype=np.float32)
-    mask_present = np.zeros((roi_count, n_channels), dtype=bool)
-    area_px = np.zeros((roi_count, n_channels), dtype=np.float32)
-    centroid_xy = np.zeros((roi_count, n_channels, 2), dtype=np.float32)
-    centroid_valid = np.zeros((roi_count, n_channels), dtype=bool)
-    bbox_xyxy = np.zeros((roi_count, n_channels, 4), dtype=np.float32)
-    bbox_valid = np.zeros((roi_count, n_channels), dtype=bool)
-
-    prob_max[:, 0] = channel_metrics["prob_max"]
-    mask_present[:, 0] = channel_metrics["mask_present"]
-    area_px[:, 0] = channel_metrics["area_px"]
-    centroid_xy[:, 0, :] = channel_metrics["centroid_xy"]
-    centroid_valid[:, 0] = channel_metrics["centroid_valid"]
-    bbox_xyxy[:, 0, :] = channel_metrics["bbox_xyxy"]
-    bbox_valid[:, 0] = channel_metrics["bbox_valid"]
-
-    metrics_group.create_array("prob_max", data=prob_max, chunks=(metric_row_chunk, 1), overwrite=True)
-    metrics_group.create_array("mask_present", data=mask_present, chunks=(metric_row_chunk, 1), overwrite=True)
-    metrics_group.create_array("area_px", data=area_px, chunks=(metric_row_chunk, 1), overwrite=True)
-    metrics_group.create_array("centroid_xy", data=centroid_xy, chunks=(metric_row_chunk, 1, 2), overwrite=True)
-    metrics_group.create_array("centroid_valid", data=centroid_valid, chunks=(metric_row_chunk, 1), overwrite=True)
-    metrics_group.create_array("bbox_xyxy", data=bbox_xyxy, chunks=(metric_row_chunk, 1, 4), overwrite=True)
-    metrics_group.create_array("bbox_valid", data=bbox_valid, chunks=(metric_row_chunk, 1), overwrite=True)
-
-    duration_seconds = float(time.perf_counter() - stage_start)
-    nonempty_rows = np.any(body_masks > 0, axis=(1, 2))
-    summary_statistics = {
-        "rows_total": int(roi_count),
-        "rows_with_nonempty_masks": int(np.sum(nonempty_rows)),
-        "rows_empty_masks": int(roi_count - np.sum(nonempty_rows)),
-        "area_px_min": float(area_px[:, 0].min()) if roi_count else None,
-        "area_px_mean": float(area_px[:, 0].mean()) if roi_count else None,
-        "area_px_max": float(area_px[:, 0].max()) if roi_count else None,
-        "prob_max_min": float(prob_max[:, 0].min()) if roi_count else None,
-        "prob_max_mean": float(prob_max[:, 0].mean()) if roi_count else None,
-        "prob_max_max": float(prob_max[:, 0].max()) if roi_count else None,
-        "otsu_threshold_min": float(otsu_thresholds.min()) if roi_count else None,
-        "otsu_threshold_mean": float(otsu_thresholds.mean()) if roi_count else None,
-        "otsu_threshold_max": float(otsu_thresholds.max()) if roi_count else None,
-        "candidate_components_mean": float(candidate_components.mean()) if roi_count else None,
-        "kept_components_mean": float(kept_components.mean()) if roi_count else None,
-        "largest_area_mean": float(largest_area.mean()) if roi_count else None,
-        "kept_area_mean": float(kept_area.mean()) if roi_count else None,
-        "output_run": run_name,
-        "crop_run": str(crop_run),
-        "background_run": str(background_run),
-        "background_array": str(background_source.array_name),
-        "dish_mask_array": dish_mask_array_name,
-        "duration_seconds": duration_seconds,
-        "created_at_utc": created_at,
-    }
-    run_group.attrs["duration_seconds"] = duration_seconds
-    run_group.attrs["summary_statistics"] = summary_statistics
-
-    git_info = get_git_info()
-    env_info = get_environment_info(
-        include_all_packages=False,
-        disk_path=str(zarr_path) if zarr_path is not None else None,
-        collect_ip=False,
-        capture_env_vars=False,
-    )
-    platform_info = env_info.get("platform", {})
-    provenance = build_stage_provenance(
-        stage="subject_masks",
-        command=" ".join(sys.argv),
-        created_at_utc=created_at,
-        version=git_info.get("short_hash") or git_info.get("commit_hash"),
-        git={
-            "commit": git_info.get("commit_hash"),
-            "short": git_info.get("short_hash"),
-            "branch": git_info.get("branch"),
-            "is_dirty": git_info.get("is_dirty"),
-            "remote": git_info.get("remote_url"),
-        },
-        environment=env_info.get("environment"),
-        platform={
-            "hostname": platform_info.get("hostname"),
-            "system": platform_info.get("system"),
-            "release": platform_info.get("release"),
-            "python_version": platform_info.get("python_version"),
-            "machine": platform_info.get("machine"),
-        },
-        parameters={
-            **asdict(cfg),
-            "method": run_group.attrs.get("method"),
-            "run_semantics": run_group.attrs.get("run_semantics"),
-            "probability_semantics": "normalized_background_diff",
-            "tuning_source": run_group.attrs.get("tuning_source"),
-            "tuning_timestamp": run_group.attrs.get("tuning_timestamp"),
-            "tuning_entry_snapshot": tuning_entry_snapshot,
-        },
-        inputs={
+        git_info = get_git_info()
+        env_info = get_environment_info(
+            include_all_packages=False,
+            disk_path=str(zarr_path) if zarr_path is not None else None,
+            collect_ip=False,
+            capture_env_vars=False,
+        )
+        platform_info = env_info.get("platform", {})
+        provenance_inputs = {
             "source_crop_run": str(crop_run),
+            "source_crop_storage_mode": crop_source.storage_mode,
+            "source_crop_signature": crop_group.attrs.get("crop_signature"),
+            "source_crop_revision": crop_group.attrs.get("crop_revision"),
+            "source_roi_read_mode": crop_source.roi_read_mode,
+            "roi_cache_policy": crop_source.roi_cache_policy,
+            "roi_cache_used": bool(crop_source.roi_cache_used),
+            "roi_cache_key": crop_source.roi_cache_key,
+            "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
+            "roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
+            "roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
+            "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
             "source_background_run": str(background_run),
             "source_background_array": str(background_source.array_name),
             "source_dish_mask_array": dish_mask_array_name,
-            "frame_source": crop_group.attrs.get("video_source_type", "zarr"),
-            "source_video_path": crop_group.attrs.get("video_source_path"),
-        },
-    )
-    write_stage_provenance(run_group, provenance)
+            "frame_source": crop_source.frame_source_kind,
+            "source_video_path": crop_source.frame_source_path or crop_group.attrs.get("video_source_path"),
+        }
+        if crop_source.roi_cache_path is not None:
+            provenance_inputs["roi_cache_path"] = crop_source.roi_cache_path
+        provenance = build_stage_provenance(
+            stage="subject_masks",
+            command=" ".join(sys.argv),
+            created_at_utc=created_at,
+            version=git_info.get("short_hash") or git_info.get("commit_hash"),
+            git={
+                "commit": git_info.get("commit_hash"),
+                "short": git_info.get("short_hash"),
+                "branch": git_info.get("branch"),
+                "is_dirty": git_info.get("is_dirty"),
+                "remote": git_info.get("remote_url"),
+            },
+            environment=env_info.get("environment"),
+            platform={
+                "hostname": platform_info.get("hostname"),
+                "system": platform_info.get("system"),
+                "release": platform_info.get("release"),
+                "python_version": platform_info.get("python_version"),
+                "machine": platform_info.get("machine"),
+            },
+            parameters={
+                **asdict(cfg),
+                "method": run_group.attrs.get("method"),
+                "run_semantics": run_group.attrs.get("run_semantics"),
+                "probability_semantics": "normalized_background_diff",
+                "tuning_source": run_group.attrs.get("tuning_source"),
+                "tuning_timestamp": run_group.attrs.get("tuning_timestamp"),
+                "tuning_entry_snapshot": tuning_entry_snapshot,
+            },
+            inputs=provenance_inputs,
+        )
+        write_stage_provenance(run_group, provenance)
 
-    _print(
-        console,
-        f"[green]✓[/green] Subject masks saved as [cyan]subject_mask_runs/{run_name}[/cyan] "
-        f"({int(np.sum(nonempty_rows))}/{roi_count} nonempty body masks) in {duration_seconds:.1f}s",
-    )
-    return run_name
+        _print(
+            console,
+            f"[green]✓[/green] Subject masks saved as [cyan]subject_mask_runs/{run_name}[/cyan] "
+            f"({nonempty_count}/{roi_count} nonempty body masks) in {duration_seconds:.1f}s",
+        )
+        return run_name
+    finally:
+        crop_source.close()
 
 
 def segment_subject_masks(
@@ -665,6 +717,10 @@ def _build_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
     for key in (
         "crop_run",
         "background_run",
+        "roi_cache_policy",
+        "roi_cache_dir",
+        "roi_live_acceleration",
+        "roi_live_gpu_chunk_frames",
         "diff_threshold",
         "gaussian_blur_kernel",
         "closing_radius",
@@ -681,11 +737,30 @@ def _build_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run traditional subject-body segmentation on ROI crops stored in a Palette Zarr archive.",
+        description="Run traditional subject-body segmentation on a Palette crop run.",
     )
     parser.add_argument("zarr_path", type=Path, help="Path to the Palette Zarr archive.")
     parser.add_argument("--crop-run", type=str, help="Optional crop_runs/<run> to segment.")
     parser.add_argument("--background-run", type=str, help="Optional background_runs/<run> to use.")
+    parser.add_argument(
+        "--roi-cache-policy",
+        choices=("never", "auto", "always"),
+        default="auto",
+        help="Temporary ROI cache policy for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument("--roi-cache-dir", type=str, help="Optional scratch directory for temporary ROI caches.")
+    parser.add_argument(
+        "--roi-live-acceleration",
+        choices=("auto", "cpu", "gpu"),
+        default="auto",
+        help="Live ROI read acceleration for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument(
+        "--roi-live-gpu-chunk-frames",
+        type=int,
+        default=32,
+        help="Frame batch size for GPU-accelerated live ROI reads (default: 32).",
+    )
     parser.add_argument("--run-name", type=str, help="Optional subject_mask_runs/<run> output name.")
     parser.add_argument(
         "--overwrite",

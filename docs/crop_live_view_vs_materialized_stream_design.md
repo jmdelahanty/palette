@@ -55,6 +55,10 @@ state.
   archives by default.
 - Temporary ROI caches should use an explicit scratch-optimized ROI layout
   profile rather than inheriting the canonical materialized crop layout.
+- Temporary ROI caches can be inspected or pruned with
+  `scripts/py -m fisheye.utils.inspect_roi_cache`, which resolves the same cache
+  root precedence as runtime (`--cache-root`, `PALETTE_ROI_CACHE_ROOT`, then
+  `/tmp/palette_roi_cache`).
 
 ### Future target policy
 

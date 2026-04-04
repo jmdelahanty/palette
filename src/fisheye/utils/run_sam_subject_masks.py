@@ -19,7 +19,7 @@ import numpy as np
 import zarr
 
 from fisheye.pose.schema import schema_from_metadata
-from fisheye.shared.crop_image_source import resolve_materialized_crop_run
+from fisheye.shared.crop_image_source import CropImageSource
 from fisheye.shared.provenance_attrs import build_source_keypoints_attrs
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
@@ -68,7 +68,7 @@ class ResolvedSamInputs:
     crop_run: str
     keypoint_group: str
     keypoint_run: str
-    roi_images: zarr.Array
+    roi_images: object
     roi_coordinates_full: np.ndarray
     bbox_norm_coords: np.ndarray
     frame_indices: np.ndarray
@@ -83,6 +83,8 @@ class ResolvedSamInputs:
     frame_width: int
     warnings: tuple[str, ...]
     pose_bbox_xyxy_roi: np.ndarray | None = None
+    crop_group: zarr.Group | None = None
+    crop_source: CropImageSource | None = None
 
     @property
     def row_count(self) -> int:
@@ -514,154 +516,170 @@ def resolve_sam_subject_inputs(
     keypoint_run: str | None = None,
     keypoint_group: str = "auto",
     zarr_path: str | Path | None = None,
+    roi_cache_policy: str = "auto",
+    roi_cache_dir: str | Path | None = None,
+    roi_live_acceleration: str = "auto",
+    roi_live_gpu_chunk_frames: int = 32,
 ) -> ResolvedSamInputs:
-    _, crop_group, resolved_crop_run = resolve_materialized_crop_run(root, crop_run=crop_run)
-    keypoints = _resolve_keypoint_run(
+    crop_source = CropImageSource.open(
         root,
-        keypoint_run=keypoint_run,
-        keypoint_group=keypoint_group,
+        crop_run=crop_run,
         zarr_path=zarr_path,
+        roi_cache_policy=roi_cache_policy,
+        roi_cache_dir=roi_cache_dir,
+        roi_live_acceleration=roi_live_acceleration,
+        roi_live_gpu_chunk_frames=int(roi_live_gpu_chunk_frames),
     )
-
-    roi_images = _require_array(crop_group, "roi_images", context=f"crop_runs/{resolved_crop_run}")
-    roi_coordinates_full = _load_2d(
-        crop_group,
-        "roi_coordinates_full",
-        context=f"crop_runs/{resolved_crop_run}",
-        width=2,
-        dtype=np.int32,
-    )
-    bbox_norm_coords = _load_2d(
-        crop_group,
-        "bbox_norm_coords",
-        context=f"crop_runs/{resolved_crop_run}",
-        width=4,
-        dtype=np.float32,
-    )
-    frame_indices = _load_1d_int(crop_group, "frame_indices", context=f"crop_runs/{resolved_crop_run}")
-    detection_indices = _load_1d_int(
-        crop_group, "detection_indices", context=f"crop_runs/{resolved_crop_run}"
-    )
-    detection_source = np.asarray(
-        _require_array(crop_group, "detection_source", context=f"crop_runs/{resolved_crop_run}")[:],
-        dtype=np.int8,
-    ).reshape(-1)
-
-    row_count = int(roi_images.shape[0])
-    for name, arr in (
-        ("roi_coordinates_full", roi_coordinates_full),
-        ("bbox_norm_coords", bbox_norm_coords),
-        ("frame_indices", frame_indices),
-        ("detection_indices", detection_indices),
-        ("detection_source", detection_source),
-    ):
-        if int(arr.shape[0]) != row_count:
-            raise ValueError(
-                f"crop_runs/{resolved_crop_run}/{name} length mismatch ({arr.shape[0]} != roi_images rows {row_count})."
-            )
-
-    keypoints_roi = np.asarray(
-        _require_array(
-            keypoints.group,
-            "keypoints_roi",
-            context=f"{keypoints.group_name}/{keypoints.run_name}",
-        )[:],
-        dtype=np.float32,
-    )
-    if keypoints_roi.ndim != 3 or int(keypoints_roi.shape[2]) != 2:
-        raise ValueError(
-            f"{keypoints.group_name}/{keypoints.run_name}/keypoints_roi expected shape (n_rois, K, 2), "
-            f"got {tuple(int(v) for v in keypoints_roi.shape)}."
+    try:
+        crop_group = crop_source.crop_group
+        resolved_crop_run = crop_source.crop_run_name
+        keypoints = _resolve_keypoint_run(
+            root,
+            keypoint_run=keypoint_run,
+            keypoint_group=keypoint_group,
+            zarr_path=zarr_path,
         )
 
-    kp_frame_indices = _load_1d_int(
-        keypoints.group, "frame_indices", context=f"{keypoints.group_name}/{keypoints.run_name}"
-    )
-    kp_detection_indices = _load_1d_int(
-        keypoints.group, "detection_indices", context=f"{keypoints.group_name}/{keypoints.run_name}"
-    )
-    if int(keypoints_roi.shape[0]) != row_count:
-        raise ValueError(
-            f"Row mismatch between crop_runs/{resolved_crop_run}/roi_images ({row_count}) and "
-            f"{keypoints.group_name}/{keypoints.run_name}/keypoints_roi ({keypoints_roi.shape[0]})."
+        roi_images = crop_source
+        roi_coordinates_full = np.asarray(crop_source.roi_coordinates_full, dtype=np.int32)
+        bbox_norm_coords = _load_2d(
+            crop_group,
+            "bbox_norm_coords",
+            context=f"crop_runs/{resolved_crop_run}",
+            width=4,
+            dtype=np.float32,
         )
-    pose_bbox_xyxy_roi = None
-    pose_bbox_arr = keypoints.group.get("pose_bbox_xyxy_roi")
-    if pose_bbox_arr is not None:
-        pose_bbox_xyxy_roi = np.asarray(pose_bbox_arr[:], dtype=np.float32)
-        if pose_bbox_xyxy_roi.ndim != 2 or int(pose_bbox_xyxy_roi.shape[1]) != 4:
+        frame_indices = _load_1d_int(crop_group, "frame_indices", context=f"crop_runs/{resolved_crop_run}")
+        detection_indices = _load_1d_int(
+            crop_group, "detection_indices", context=f"crop_runs/{resolved_crop_run}"
+        )
+        detection_source = np.asarray(
+            _require_array(crop_group, "detection_source", context=f"crop_runs/{resolved_crop_run}")[:],
+            dtype=np.int8,
+        ).reshape(-1)
+
+        row_count = int(crop_source.total_rois)
+        for name, arr in (
+            ("roi_coordinates_full", roi_coordinates_full),
+            ("bbox_norm_coords", bbox_norm_coords),
+            ("frame_indices", frame_indices),
+            ("detection_indices", detection_indices),
+            ("detection_source", detection_source),
+        ):
+            if int(arr.shape[0]) != row_count:
+                raise ValueError(
+                    f"crop_runs/{resolved_crop_run}/{name} length mismatch ({arr.shape[0]} != roi_images rows {row_count})."
+                )
+
+        keypoints_roi = np.asarray(
+            _require_array(
+                keypoints.group,
+                "keypoints_roi",
+                context=f"{keypoints.group_name}/{keypoints.run_name}",
+            )[:],
+            dtype=np.float32,
+        )
+        if keypoints_roi.ndim != 3 or int(keypoints_roi.shape[2]) != 2:
             raise ValueError(
-                f"{keypoints.group_name}/{keypoints.run_name}/pose_bbox_xyxy_roi expected shape (n_rois, 4), "
-                f"got {tuple(int(v) for v in pose_bbox_xyxy_roi.shape)}."
+                f"{keypoints.group_name}/{keypoints.run_name}/keypoints_roi expected shape (n_rois, K, 2), "
+                f"got {tuple(int(v) for v in keypoints_roi.shape)}."
             )
-        if int(pose_bbox_xyxy_roi.shape[0]) != row_count:
+
+        kp_frame_indices = _load_1d_int(
+            keypoints.group, "frame_indices", context=f"{keypoints.group_name}/{keypoints.run_name}"
+        )
+        kp_detection_indices = _load_1d_int(
+            keypoints.group, "detection_indices", context=f"{keypoints.group_name}/{keypoints.run_name}"
+        )
+        if int(keypoints_roi.shape[0]) != row_count:
             raise ValueError(
                 f"Row mismatch between crop_runs/{resolved_crop_run}/roi_images ({row_count}) and "
-                f"{keypoints.group_name}/{keypoints.run_name}/pose_bbox_xyxy_roi ({pose_bbox_xyxy_roi.shape[0]})."
+                f"{keypoints.group_name}/{keypoints.run_name}/keypoints_roi ({keypoints_roi.shape[0]})."
             )
+        pose_bbox_xyxy_roi = None
+        pose_bbox_arr = keypoints.group.get("pose_bbox_xyxy_roi")
+        if pose_bbox_arr is not None:
+            pose_bbox_xyxy_roi = np.asarray(pose_bbox_arr[:], dtype=np.float32)
+            if pose_bbox_xyxy_roi.ndim != 2 or int(pose_bbox_xyxy_roi.shape[1]) != 4:
+                raise ValueError(
+                    f"{keypoints.group_name}/{keypoints.run_name}/pose_bbox_xyxy_roi expected shape (n_rois, 4), "
+                    f"got {tuple(int(v) for v in pose_bbox_xyxy_roi.shape)}."
+                )
+            if int(pose_bbox_xyxy_roi.shape[0]) != row_count:
+                raise ValueError(
+                    f"Row mismatch between crop_runs/{resolved_crop_run}/roi_images ({row_count}) and "
+                    f"{keypoints.group_name}/{keypoints.run_name}/pose_bbox_xyxy_roi ({pose_bbox_xyxy_roi.shape[0]})."
+                )
 
-    _raise_alignment_error(
-        "frame_indices",
-        frame_indices,
-        kp_frame_indices,
-        left_path=f"crop_runs/{resolved_crop_run}/frame_indices",
-        right_path=f"{keypoints.group_name}/{keypoints.run_name}/frame_indices",
-    )
-    _raise_alignment_error(
-        "detection_indices",
-        detection_indices,
-        kp_detection_indices,
-        left_path=f"crop_runs/{resolved_crop_run}/detection_indices",
-        right_path=f"{keypoints.group_name}/{keypoints.run_name}/detection_indices",
-    )
+        _raise_alignment_error(
+            "frame_indices",
+            frame_indices,
+            kp_frame_indices,
+            left_path=f"crop_runs/{resolved_crop_run}/frame_indices",
+            right_path=f"{keypoints.group_name}/{keypoints.run_name}/frame_indices",
+        )
+        _raise_alignment_error(
+            "detection_indices",
+            detection_indices,
+            kp_detection_indices,
+            left_path=f"crop_runs/{resolved_crop_run}/detection_indices",
+            right_path=f"{keypoints.group_name}/{keypoints.run_name}/detection_indices",
+        )
 
-    warnings: list[str] = []
-    kp_detection_source_arr = keypoints.group.get("detection_source")
-    if kp_detection_source_arr is not None:
-        kp_detection_source = np.asarray(kp_detection_source_arr[:], dtype=np.int8).reshape(-1)
-        if int(kp_detection_source.shape[0]) != row_count:
-            raise ValueError(
-                f"{keypoints.group_name}/{keypoints.run_name}/detection_source length mismatch "
-                f"({kp_detection_source.shape[0]} != expected {row_count})."
-            )
-        mismatch = np.flatnonzero(kp_detection_source != detection_source)
-        if mismatch.size:
-            warnings.append(
-                f"detection_source differs between crop and keypoint runs in {int(mismatch.size)} rows; "
-                "using crop detection_source as the SAM eligibility source."
-            )
+        warnings: list[str] = []
+        kp_detection_source_arr = keypoints.group.get("detection_source")
+        if kp_detection_source_arr is not None:
+            kp_detection_source = np.asarray(kp_detection_source_arr[:], dtype=np.int8).reshape(-1)
+            if int(kp_detection_source.shape[0]) != row_count:
+                raise ValueError(
+                    f"{keypoints.group_name}/{keypoints.run_name}/detection_source length mismatch "
+                    f"({kp_detection_source.shape[0]} != expected {row_count})."
+                )
+            mismatch = np.flatnonzero(kp_detection_source != detection_source)
+            if mismatch.size:
+                warnings.append(
+                    f"detection_source differs between crop and keypoint runs in {int(mismatch.size)} rows; "
+                    "using crop detection_source as the SAM eligibility source."
+                )
 
-    success_flags = None
-    for success_name in ("refined_success", "detection_success", "source_success"):
-        success_flags = _load_optional_bool(keypoints.group, success_name, expected_len=row_count)
-        if success_flags is not None:
-            break
+        success_flags = None
+        for success_name in ("refined_success", "detection_success", "source_success"):
+            success_flags = _load_optional_bool(keypoints.group, success_name, expected_len=row_count)
+            if success_flags is not None:
+                break
 
-    geometry_valid = _load_optional_bool(keypoints.group, "geometry_valid", expected_len=row_count)
-    usable_keypoints = _load_optional_bool(keypoints.group, "usable_keypoints", expected_len=row_count)
-    frame_height, frame_width = _resolve_frame_shape(root, crop_group)
-    keypoint_labels = _resolve_keypoint_labels(keypoints.group, n_keypoints=int(keypoints_roi.shape[1]))
+        geometry_valid = _load_optional_bool(keypoints.group, "geometry_valid", expected_len=row_count)
+        usable_keypoints = _load_optional_bool(keypoints.group, "usable_keypoints", expected_len=row_count)
+        frame_height, frame_width = _resolve_frame_shape(root, crop_group)
+        keypoint_labels = _resolve_keypoint_labels(keypoints.group, n_keypoints=int(keypoints_roi.shape[1]))
 
-    return ResolvedSamInputs(
-        crop_run=resolved_crop_run,
-        keypoint_group=keypoints.group_name,
-        keypoint_run=keypoints.run_name,
-        roi_images=roi_images,
-        roi_coordinates_full=roi_coordinates_full.astype(np.int32, copy=False),
-        bbox_norm_coords=bbox_norm_coords.astype(np.float32, copy=False),
-        frame_indices=frame_indices.astype(np.int32, copy=False),
-        detection_indices=detection_indices.astype(np.int32, copy=False),
-        detection_source=detection_source.astype(np.int8, copy=False),
-        keypoints_roi=keypoints_roi.astype(np.float32, copy=False),
-        keypoint_labels=keypoint_labels,
-        success_flags=success_flags,
-        geometry_valid=geometry_valid,
-        usable_keypoints=usable_keypoints,
-        frame_height=int(frame_height),
-        frame_width=int(frame_width),
-        warnings=tuple(warnings),
-        pose_bbox_xyxy_roi=None if pose_bbox_xyxy_roi is None else pose_bbox_xyxy_roi.astype(np.float32, copy=False),
-    )
+        return ResolvedSamInputs(
+            crop_run=resolved_crop_run,
+            keypoint_group=keypoints.group_name,
+            keypoint_run=keypoints.run_name,
+            roi_images=roi_images,
+            roi_coordinates_full=roi_coordinates_full.astype(np.int32, copy=False),
+            bbox_norm_coords=bbox_norm_coords.astype(np.float32, copy=False),
+            frame_indices=frame_indices.astype(np.int32, copy=False),
+            detection_indices=detection_indices.astype(np.int32, copy=False),
+            detection_source=detection_source.astype(np.int8, copy=False),
+            keypoints_roi=keypoints_roi.astype(np.float32, copy=False),
+            keypoint_labels=keypoint_labels,
+            success_flags=success_flags,
+            geometry_valid=geometry_valid,
+            usable_keypoints=usable_keypoints,
+            frame_height=int(frame_height),
+            frame_width=int(frame_width),
+            warnings=tuple(warnings),
+            pose_bbox_xyxy_roi=(
+                None if pose_bbox_xyxy_roi is None else pose_bbox_xyxy_roi.astype(np.float32, copy=False)
+            ),
+            crop_group=crop_group,
+            crop_source=crop_source,
+        )
+    except Exception:
+        crop_source.close()
+        raise
 
 
 def compute_row_eligibility(
@@ -1523,10 +1541,54 @@ def write_sam_subject_mask_run(
 
     run_group = parent.create_group(output_run)
     parent.attrs["latest"] = output_run
+    source_crop_group = inputs.crop_group if inputs.crop_group is not None else crop_group
+    source_crop_source = inputs.crop_source
+    source_crop_storage_mode = (
+        source_crop_source.storage_mode
+        if source_crop_source is not None
+        else str(
+            source_crop_group.attrs.get("crop_storage_mode")
+            or ("materialized" if source_crop_group.get("roi_images") is not None else "geometry_only")
+        )
+    )
+    source_roi_read_mode = (
+        source_crop_source.roi_read_mode if source_crop_source is not None else "materialized_crop_run"
+    )
+    source_roi_cache_policy = source_crop_source.roi_cache_policy if source_crop_source is not None else "never"
+    source_roi_cache_used = bool(source_crop_source.roi_cache_used) if source_crop_source is not None else False
+    source_roi_cache_key = source_crop_source.roi_cache_key if source_crop_source is not None else None
+    source_roi_cache_path = source_crop_source.roi_cache_path if source_crop_source is not None else None
+    source_roi_live_acceleration_requested = (
+        source_crop_source.roi_live_acceleration_requested if source_crop_source is not None else None
+    )
+    source_roi_live_acceleration_effective = (
+        source_crop_source.roi_live_acceleration_effective if source_crop_source is not None else None
+    )
+    source_roi_live_acceleration_fallback_reason = (
+        source_crop_source.roi_live_acceleration_fallback_reason if source_crop_source is not None else None
+    )
+    source_roi_live_gpu_chunk_frames = (
+        int(source_crop_source.roi_live_gpu_chunk_frames) if source_crop_source is not None else 0
+    )
+    source_frame_kind = source_crop_source.frame_source_kind if source_crop_source is not None else None
+    source_video_path = (
+        (source_crop_source.frame_source_path if source_crop_source is not None else None)
+        or source_crop_group.attrs.get("video_source_path")
+    )
 
     run_group.attrs.update(
         {
             "source_crop_run": inputs.crop_run,
+            "source_crop_storage_mode": source_crop_storage_mode,
+            "source_crop_signature": source_crop_group.attrs.get("crop_signature"),
+            "source_crop_revision": source_crop_group.attrs.get("crop_revision"),
+            "source_roi_read_mode": source_roi_read_mode,
+            "roi_cache_policy": source_roi_cache_policy,
+            "source_roi_cache_used": source_roi_cache_used,
+            "source_roi_live_acceleration_requested": source_roi_live_acceleration_requested,
+            "source_roi_live_acceleration_effective": source_roi_live_acceleration_effective,
+            "source_roi_live_acceleration_fallback_reason": source_roi_live_acceleration_fallback_reason,
+            "source_roi_live_gpu_chunk_frames": source_roi_live_gpu_chunk_frames,
             **build_source_keypoints_attrs(inputs.keypoint_run, include_legacy_alias=True),
             "source_keypoint_group": inputs.keypoint_group,
             "label_schema_id": SUBJECT_MASK_LABEL_SCHEMA,
@@ -1559,6 +1621,10 @@ def write_sam_subject_mask_run(
             "created_at_utc": created_at,
         }
     )
+    if source_roi_cache_key is not None:
+        run_group.attrs["source_roi_cache_key"] = source_roi_cache_key
+    if source_roi_cache_path is not None:
+        run_group.attrs["source_roi_cache_path"] = source_roi_cache_path
 
     _copy_lineage_array(run_group, crop_group, "frame_indices")
     _copy_lineage_array(run_group, crop_group, "frame_counts")
@@ -1703,12 +1769,23 @@ def write_sam_subject_mask_run(
         },
         inputs={
             "source_crop_run": inputs.crop_run,
+            "source_crop_storage_mode": source_crop_storage_mode,
+            "source_crop_signature": source_crop_group.attrs.get("crop_signature"),
+            "source_crop_revision": source_crop_group.attrs.get("crop_revision"),
+            "source_roi_read_mode": source_roi_read_mode,
+            "roi_cache_policy": source_roi_cache_policy,
+            "roi_cache_used": source_roi_cache_used,
+            "roi_cache_key": source_roi_cache_key,
+            "roi_live_acceleration_requested": source_roi_live_acceleration_requested,
+            "roi_live_acceleration_effective": source_roi_live_acceleration_effective,
+            "roi_live_acceleration_fallback_reason": source_roi_live_acceleration_fallback_reason,
+            "roi_live_gpu_chunk_frames": source_roi_live_gpu_chunk_frames,
             "source_keypoints_run": inputs.keypoint_run,
             "source_keypoint_group": inputs.keypoint_group,
             "sam_checkpoint_path": checkpoint_path,
             "sam3_root": sam3_root,
-            "frame_source": crop_group.attrs.get("video_source_type", "zarr"),
-            "source_video_path": crop_group.attrs.get("video_source_path"),
+            "frame_source": source_frame_kind,
+            "source_video_path": source_video_path,
         },
     )
     write_stage_provenance(run_group, provenance)
@@ -1737,6 +1814,10 @@ def run_sam_subject_mask_inference(
     device: str | None = None,
     no_hf_download: bool = False,
     positive_keypoint_labels: Sequence[str] | None = None,
+    roi_cache_policy: str = "auto",
+    roi_cache_dir: str | Path | None = None,
+    roi_live_acceleration: str = "auto",
+    roi_live_gpu_chunk_frames: int = 32,
 ) -> dict[str, Any]:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive.")
@@ -1770,13 +1851,16 @@ def run_sam_subject_mask_inference(
         )
 
     root = open_zarr_root(zarr_path, mode="r+")
-    _, crop_group, resolved_crop_run = resolve_materialized_crop_run(root, crop_run=crop_run)
     inputs = resolve_sam_subject_inputs(
         root,
-        crop_run=resolved_crop_run,
+        crop_run=crop_run,
         keypoint_run=keypoint_run,
         keypoint_group=keypoint_group,
         zarr_path=zarr_path,
+        roi_cache_policy=roi_cache_policy,
+        roi_cache_dir=roi_cache_dir,
+        roi_live_acceleration=roi_live_acceleration,
+        roi_live_gpu_chunk_frames=int(roi_live_gpu_chunk_frames),
     )
     prompt_selection = resolve_prompt_keypoint_selection(
         inputs,
@@ -1878,7 +1962,7 @@ def run_sam_subject_mask_inference(
             inputs=inputs,
             eligibility=eligibility,
             selected=selected_batch,
-            crop_group=crop_group,
+            crop_group=inputs.crop_group,
             prompt_selection=prompt_selection,
             output_run=resolved_output_run,
             overwrite=overwrite,
@@ -1898,6 +1982,8 @@ def run_sam_subject_mask_inference(
         del processor
         del model
         _release_runtime_memory(build_model_fn, device=resolved_device)
+        if inputs.crop_source is not None:
+            inputs.crop_source.close()
         if added_path and sam3_root_text in sys.path:
             sys.path.remove(sam3_root_text)
 
@@ -1938,6 +2024,10 @@ def inspect_sam_subject_archive(
     negative_point_policy: str = DEFAULT_NEGATIVE_POINT_POLICY,
     negative_point_margin_fraction: float = DEFAULT_NEGATIVE_POINT_MARGIN_FRACTION,
     positive_keypoint_labels: Sequence[str] | None = None,
+    roi_cache_policy: str = "auto",
+    roi_cache_dir: str | Path | None = None,
+    roi_live_acceleration: str = "auto",
+    roi_live_gpu_chunk_frames: int = 32,
 ) -> dict[str, Any]:
     inputs = resolve_sam_subject_inputs(
         root,
@@ -1945,87 +2035,107 @@ def inspect_sam_subject_archive(
         keypoint_run=keypoint_run,
         keypoint_group=keypoint_group,
         zarr_path=zarr_path,
+        roi_cache_policy=roi_cache_policy,
+        roi_cache_dir=roi_cache_dir,
+        roi_live_acceleration=roi_live_acceleration,
+        roi_live_gpu_chunk_frames=int(roi_live_gpu_chunk_frames),
     )
-    prompt_selection = resolve_prompt_keypoint_selection(
-        inputs,
-        positive_keypoint_labels=positive_keypoint_labels,
-    )
-    eligibility = compute_row_eligibility(
-        inputs,
-        prompt_selection=prompt_selection,
-        skip_interpolated=skip_interpolated,
-    )
-    preview_batch = build_sam_preview_batch(
-        inputs,
-        eligibility,
-        prompt_selection=prompt_selection,
-        max_rows=prepare_count,
-        use_box_prompt=use_box_prompt,
-        box_prompt_source=box_prompt_source,
-        roi_inset_fraction=roi_inset_fraction,
-        pose_box_expand_fraction=pose_box_expand_fraction,
-        negative_point_policy=negative_point_policy,
-        negative_point_margin_fraction=negative_point_margin_fraction,
-    )
+    try:
+        prompt_selection = resolve_prompt_keypoint_selection(
+            inputs,
+            positive_keypoint_labels=positive_keypoint_labels,
+        )
+        eligibility = compute_row_eligibility(
+            inputs,
+            prompt_selection=prompt_selection,
+            skip_interpolated=skip_interpolated,
+        )
+        preview_batch = build_sam_preview_batch(
+            inputs,
+            eligibility,
+            prompt_selection=prompt_selection,
+            max_rows=prepare_count,
+            use_box_prompt=use_box_prompt,
+            box_prompt_source=box_prompt_source,
+            roi_inset_fraction=roi_inset_fraction,
+            pose_box_expand_fraction=pose_box_expand_fraction,
+            negative_point_policy=negative_point_policy,
+            negative_point_margin_fraction=negative_point_margin_fraction,
+        )
 
-    summary: dict[str, Any] = {
-        "crop_run": inputs.crop_run,
-        "keypoint_group": inputs.keypoint_group,
-        "keypoint_run": inputs.keypoint_run,
-        "keypoint_labels": list(inputs.keypoint_labels),
-        "positive_keypoint_labels": list(prompt_selection.labels),
-        "row_count": int(inputs.row_count),
-        "roi_shape": [int(inputs.roi_height), int(inputs.roi_width)],
-        "roi_channels": int(inputs.roi_channels),
-        "roi_dtype": str(inputs.roi_images.dtype),
-        "alignment": {
-            "status": "ok",
-            "warnings": list(inputs.warnings),
-        },
-        "detection_source_histogram": _histogram_int(inputs.detection_source),
-        "eligibility": {
-            "eligible_rows": int(np.sum(eligibility.eligible)),
-            "ineligible_rows": int(inputs.row_count - np.sum(eligibility.eligible)),
-            "rows_with_any_prompt_point": int(np.sum(eligibility.prompt_point_finite)),
-            "rows_with_any_in_bounds_prompt_point": int(np.sum(eligibility.prompt_point_in_bounds)),
-            "failed_prompt_rows": int(np.sum(~eligibility.prompt_point_finite)),
-            "off_image_prompt_rows": int(
-                np.sum(eligibility.prompt_point_finite & ~eligibility.prompt_point_in_bounds)
-            ),
-            "prompt_point_count_min": int(eligibility.prompt_point_count.min()) if eligibility.prompt_point_count.size else 0,
-            "prompt_point_count_mean": float(eligibility.prompt_point_count.mean()) if eligibility.prompt_point_count.size else 0.0,
-            "prompt_point_count_max": int(eligibility.prompt_point_count.max()) if eligibility.prompt_point_count.size else 0,
-            "success_flag_failed_rows": int(np.sum(~eligibility.success_ok)),
-            "geometry_invalid_rows": int(np.sum(~eligibility.geometry_ok)),
-            "usable_keypoints_failed_rows": int(np.sum(~eligibility.usable_ok)),
-            "skipped_interpolated_rows": int(np.sum(eligibility.skipped_interpolated)),
-            "eligible_row_indices_preview": [
-                int(idx) for idx in np.flatnonzero(eligibility.eligible)[: min(16, int(np.sum(eligibility.eligible)))].tolist()
-            ],
-        },
-        "prepared_batch": _preview_batch_summary(preview_batch),
-        "planned_output": {
-            "output_run": output_run or _default_output_run(inputs),
-            "label_schema_id": SUBJECT_MASK_LABEL_SCHEMA,
-            "mask_labels": list(SUBJECT_MASK_LABELS),
-            "available_channels": list(SUBJECT_MASK_AVAILABLE_CHANNELS),
-            "mode": "body_only",
-            "sam_prompt_policy": _sam_prompt_policy(use_box_prompt, box_prompt_source, negative_point_policy),
-            "sam_box_prompt_source": box_prompt_source if use_box_prompt else None,
-            "sam_roi_inset_fraction": float(roi_inset_fraction) if use_box_prompt and box_prompt_source == "roi_inset" else None,
-            "sam_pose_box_expand_fraction": float(pose_box_expand_fraction)
-            if use_box_prompt and box_prompt_source == "pose_roi"
-            else None,
-            "sam_negative_point_policy": negative_point_policy,
-            "sam_negative_point_margin_fraction": float(negative_point_margin_fraction)
-            if negative_point_policy != "none"
-            else None,
-            "sam_positive_keypoint_labels": list(prompt_selection.labels),
-        },
-    }
-    if inspect_runtime:
-        summary["sam3_runtime"] = _inspect_sam3_runtime(sam3_root)
-    return summary
+        summary: dict[str, Any] = {
+            "crop_run": inputs.crop_run,
+            "source_crop_storage_mode": inputs.crop_source.storage_mode,
+            "source_roi_read_mode": inputs.crop_source.roi_read_mode,
+            "roi_cache_policy": inputs.crop_source.roi_cache_policy,
+            "source_roi_cache_used": bool(inputs.crop_source.roi_cache_used),
+            "source_roi_live_acceleration_requested": inputs.crop_source.roi_live_acceleration_requested,
+            "source_roi_live_acceleration_effective": inputs.crop_source.roi_live_acceleration_effective,
+            "source_roi_live_acceleration_fallback_reason": inputs.crop_source.roi_live_acceleration_fallback_reason,
+            "source_roi_live_gpu_chunk_frames": int(inputs.crop_source.roi_live_gpu_chunk_frames),
+            "keypoint_group": inputs.keypoint_group,
+            "keypoint_run": inputs.keypoint_run,
+            "keypoint_labels": list(inputs.keypoint_labels),
+            "positive_keypoint_labels": list(prompt_selection.labels),
+            "row_count": int(inputs.row_count),
+            "roi_shape": [int(inputs.roi_height), int(inputs.roi_width)],
+            "roi_channels": int(inputs.roi_channels),
+            "roi_dtype": str(inputs.roi_images.dtype),
+            "alignment": {
+                "status": "ok",
+                "warnings": list(inputs.warnings),
+            },
+            "detection_source_histogram": _histogram_int(inputs.detection_source),
+            "eligibility": {
+                "eligible_rows": int(np.sum(eligibility.eligible)),
+                "ineligible_rows": int(inputs.row_count - np.sum(eligibility.eligible)),
+                "rows_with_any_prompt_point": int(np.sum(eligibility.prompt_point_finite)),
+                "rows_with_any_in_bounds_prompt_point": int(np.sum(eligibility.prompt_point_in_bounds)),
+                "failed_prompt_rows": int(np.sum(~eligibility.prompt_point_finite)),
+                "off_image_prompt_rows": int(
+                    np.sum(eligibility.prompt_point_finite & ~eligibility.prompt_point_in_bounds)
+                ),
+                "prompt_point_count_min": int(eligibility.prompt_point_count.min()) if eligibility.prompt_point_count.size else 0,
+                "prompt_point_count_mean": float(eligibility.prompt_point_count.mean()) if eligibility.prompt_point_count.size else 0.0,
+                "prompt_point_count_max": int(eligibility.prompt_point_count.max()) if eligibility.prompt_point_count.size else 0,
+                "success_flag_failed_rows": int(np.sum(~eligibility.success_ok)),
+                "geometry_invalid_rows": int(np.sum(~eligibility.geometry_ok)),
+                "usable_keypoints_failed_rows": int(np.sum(~eligibility.usable_ok)),
+                "skipped_interpolated_rows": int(np.sum(eligibility.skipped_interpolated)),
+                "eligible_row_indices_preview": [
+                    int(idx) for idx in np.flatnonzero(eligibility.eligible)[: min(16, int(np.sum(eligibility.eligible)))].tolist()
+                ],
+            },
+            "prepared_batch": _preview_batch_summary(preview_batch),
+            "planned_output": {
+                "output_run": output_run or _default_output_run(inputs),
+                "label_schema_id": SUBJECT_MASK_LABEL_SCHEMA,
+                "mask_labels": list(SUBJECT_MASK_LABELS),
+                "available_channels": list(SUBJECT_MASK_AVAILABLE_CHANNELS),
+                "mode": "body_only",
+                "sam_prompt_policy": _sam_prompt_policy(use_box_prompt, box_prompt_source, negative_point_policy),
+                "sam_box_prompt_source": box_prompt_source if use_box_prompt else None,
+                "sam_roi_inset_fraction": float(roi_inset_fraction) if use_box_prompt and box_prompt_source == "roi_inset" else None,
+                "sam_pose_box_expand_fraction": float(pose_box_expand_fraction)
+                if use_box_prompt and box_prompt_source == "pose_roi"
+                else None,
+                "sam_negative_point_policy": negative_point_policy,
+                "sam_negative_point_margin_fraction": float(negative_point_margin_fraction)
+                if negative_point_policy != "none"
+                else None,
+                "sam_positive_keypoint_labels": list(prompt_selection.labels),
+            },
+        }
+        if inputs.crop_source.roi_cache_key is not None:
+            summary["source_roi_cache_key"] = inputs.crop_source.roi_cache_key
+        if inputs.crop_source.roi_cache_path is not None:
+            summary["source_roi_cache_path"] = inputs.crop_source.roi_cache_path
+        if inspect_runtime:
+            summary["sam3_runtime"] = _inspect_sam3_runtime(sam3_root)
+        return summary
+    finally:
+        if inputs.crop_source is not None:
+            inputs.crop_source.close()
 
 
 def inspect_sam_subject_archive_path(
@@ -2046,6 +2156,10 @@ def inspect_sam_subject_archive_path(
     negative_point_policy: str = DEFAULT_NEGATIVE_POINT_POLICY,
     negative_point_margin_fraction: float = DEFAULT_NEGATIVE_POINT_MARGIN_FRACTION,
     positive_keypoint_labels: Sequence[str] | None = None,
+    roi_cache_policy: str = "auto",
+    roi_cache_dir: str | Path | None = None,
+    roi_live_acceleration: str = "auto",
+    roi_live_gpu_chunk_frames: int = 32,
 ) -> dict[str, Any]:
     root = open_zarr_root(zarr_path, mode="r")
     summary = inspect_sam_subject_archive(
@@ -2065,6 +2179,10 @@ def inspect_sam_subject_archive_path(
         negative_point_policy=negative_point_policy,
         negative_point_margin_fraction=negative_point_margin_fraction,
         positive_keypoint_labels=positive_keypoint_labels,
+        roi_cache_policy=roi_cache_policy,
+        roi_cache_dir=roi_cache_dir,
+        roi_live_acceleration=roi_live_acceleration,
+        roi_live_gpu_chunk_frames=int(roi_live_gpu_chunk_frames),
         zarr_path=zarr_path,
     )
     summary["zarr_path"] = str(Path(zarr_path).expanduser().resolve())
@@ -2145,7 +2263,30 @@ def _print_summary(summary: dict[str, Any]) -> None:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zarr_path", type=Path, help="Palette training or analysis zarr to inspect.")
-    parser.add_argument("--crop-run", type=str, help="Materialized crop_runs/<run> to read (default: latest materialized).")
+    parser.add_argument("--crop-run", type=str, help="crop_runs/<run> to read (default: latest_any/latest/latest_materialized).")
+    parser.add_argument(
+        "--roi-cache-policy",
+        choices=("never", "auto", "always"),
+        default="auto",
+        help="Temporary ROI cache policy for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument(
+        "--roi-cache-dir",
+        type=str,
+        help="Optional scratch directory for temporary ROI caches.",
+    )
+    parser.add_argument(
+        "--roi-live-acceleration",
+        choices=("auto", "cpu", "gpu"),
+        default="auto",
+        help="Live ROI read acceleration for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument(
+        "--roi-live-gpu-chunk-frames",
+        type=int,
+        default=32,
+        help="Frame batch size for GPU-accelerated live ROI reads (default: 32).",
+    )
     parser.add_argument(
         "--keypoint-run",
         type=str,
@@ -2273,6 +2414,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         summary = run_sam_subject_mask_inference(
             args.zarr_path,
             crop_run=args.crop_run,
+            roi_cache_policy=args.roi_cache_policy,
+            roi_cache_dir=args.roi_cache_dir,
+            roi_live_acceleration=args.roi_live_acceleration,
+            roi_live_gpu_chunk_frames=int(args.roi_live_gpu_chunk_frames),
             keypoint_run=args.keypoint_run,
             keypoint_group=args.keypoint_group,
             output_run=args.output_run,
@@ -2296,6 +2441,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         summary = inspect_sam_subject_archive_path(
             args.zarr_path,
             crop_run=args.crop_run,
+            roi_cache_policy=args.roi_cache_policy,
+            roi_cache_dir=args.roi_cache_dir,
+            roi_live_acceleration=args.roi_live_acceleration,
+            roi_live_gpu_chunk_frames=int(args.roi_live_gpu_chunk_frames),
             keypoint_run=args.keypoint_run,
             keypoint_group=args.keypoint_group,
             skip_interpolated=not args.include_interpolated,

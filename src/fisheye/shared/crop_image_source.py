@@ -663,9 +663,37 @@ class CropImageSource:
         return int(self.roi_coordinates_full.shape[0])
 
     @property
+    def shape(self) -> tuple[int, int, int]:
+        return (int(self.total_rois), int(self.roi_shape[0]), int(self.roi_shape[1]))
+
+    @property
+    def ndim(self) -> int:
+        return 3
+
+    @property
+    def dtype(self) -> np.dtype:
+        return np.dtype(np.uint8)
+
+    @property
     def roi_array(self) -> object | None:
         """Return the active ROI array backing this source when one exists."""
         return self._roi_images
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            start, stop, step = key.indices(self.total_rois)
+            if step != 1:
+                indices = np.arange(start, stop, step, dtype=np.int64)
+                return self.read_indices(indices)
+            return self.read_slice(start, stop)
+        if isinstance(key, (list, tuple, np.ndarray)):
+            return self.read_indices(key)
+        index = int(key)
+        if index < 0:
+            index += self.total_rois
+        if index < 0 or index >= self.total_rois:
+            raise IndexError(f"ROI index {index} out of range for total_rois={self.total_rois}")
+        return self.read_slice(index, index + 1)[0]
 
     def read_slice(self, start: int, end: int) -> np.ndarray:
         if start < 0 or end < start or end > self.total_rois:

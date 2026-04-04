@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Traditional swim-bladder segmentation on materialized ROI crops."""
+"""Traditional swim-bladder segmentation on Palette crop runs."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 import numpy as np
 import zarr
 
-from ..shared.crop_image_source import resolve_materialized_crop_run
+from ..shared.crop_image_source import CropImageSource
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
 from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
@@ -87,6 +87,10 @@ class SwimBladderSegmentationConfig:
     prefilter_sigma: float = 1.0
     crop_run: Optional[str] = None
     keypoint_run: Optional[str] = None
+    roi_cache_policy: str = "auto"
+    roi_cache_dir: Optional[str] = None
+    roi_live_acceleration: str = "auto"
+    roi_live_gpu_chunk_frames: int = 32
 
 
 def _print(console: Optional[Console], message: str) -> None:
@@ -214,286 +218,342 @@ def segment_swim_bladder_masks_from_root(
     cfg = _apply_overrides(cfg, config_dict)
     effective_method = _resolve_effective_method_name(cfg.subject_method_family)
 
-    _, crop_group, crop_run = resolve_materialized_crop_run(root, crop_run=cfg.crop_run, zarr_path=zarr_path)
-    roi_images = crop_group.get("roi_images")
-    if roi_images is None:
-        raise ValueError(f"crop_runs/{crop_run} must provide roi_images for traditional swim-bladder segmentation.")
-
-    keypoint_source = subject_tuning._resolve_eye_keypoint_source(root, cfg.keypoint_run)
-    keypoints_roi = np.asarray(keypoint_source.keypoints_roi[:], dtype=np.float32)
-    success_flags = np.asarray(keypoint_source.success_flags, dtype=bool)
-    if int(keypoints_roi.shape[0]) != int(roi_images.shape[0]):
-        raise ValueError(
-            f"Keypoint rows {int(keypoints_roi.shape[0])} do not match crop ROI rows {int(roi_images.shape[0])}."
-        )
-    keypoint_labels_raw = keypoint_source.group.attrs.get("keypoint_labels")
-    keypoint_labels = (
-        [str(item) for item in keypoint_labels_raw]
-        if isinstance(keypoint_labels_raw, (list, tuple))
-        else None
+    crop_source = CropImageSource.open(
+        root,
+        crop_run=cfg.crop_run,
+        zarr_path=zarr_path,
+        roi_cache_policy=cfg.roi_cache_policy,
+        roi_live_acceleration=cfg.roi_live_acceleration,
+        roi_live_gpu_chunk_frames=int(cfg.roi_live_gpu_chunk_frames),
+        roi_cache_dir=cfg.roi_cache_dir,
+        console=console,
     )
+    crop_group = crop_source.crop_group
+    crop_run = crop_source.crop_run_name
+    roi_images = crop_source
 
-    roi_count = int(roi_images.shape[0])
-    roi_h = int(roi_images.shape[1])
-    roi_w = int(roi_images.shape[2])
-    n_channels = len(SUBJECT_MASK_LABELS)
-
-    swim_masks = np.zeros((roi_count, roi_h, roi_w), dtype=np.uint8)
-    swim_probs = np.zeros((roi_count, roi_h, roi_w), dtype=np.float32)
-    rows_skipped_missing_keypoint = 0
-    rows_skipped_unsuccessful_keypoint = 0
-    otsu_thresholds = np.full((roi_count,), np.nan, dtype=np.float32)
-    valid_ray_fraction_values = np.full((roi_count,), np.nan, dtype=np.float32)
-    max_missing_gap_values = np.full((roi_count,), np.nan, dtype=np.float32)
-
-    if cfg.subject_method_family == swim_tuning.POLAR_BOUNDARY_METHOD_FAMILY:
-        params = {
-            "roi_padding": int(cfg.roi_padding),
-            "angle_step_degrees": int(cfg.angle_step_degrees),
-            "min_radius_px": int(cfg.min_radius_px),
-            "max_radius_px": int(cfg.max_radius_px),
-            "smoothing_sigma": float(cfg.smoothing_sigma),
-            "response_threshold": float(cfg.response_threshold),
-            "max_missing_gap_degrees": int(cfg.max_missing_gap_degrees),
-            "min_valid_ray_fraction": float(cfg.min_valid_ray_fraction),
-            "gradient_mode": str(cfg.gradient_mode),
-            "prefilter_sigma": float(cfg.prefilter_sigma),
-        }
-    else:
-        params = {
-            "roi_padding": int(cfg.roi_padding),
-            "pre_threshold": cfg.pre_threshold,
-            "sobel_strength": float(cfg.sobel_strength),
-            "min_area": int(cfg.min_area),
-            "max_area": cfg.max_area,
-            "min_circularity": cfg.min_circularity,
-            "closing_radius": int(cfg.closing_radius),
-            "opening_radius": int(cfg.opening_radius),
-        }
-
-    for row_idx in range(roi_count):
-        if row_idx < success_flags.shape[0] and not bool(success_flags[row_idx]):
-            rows_skipped_unsuccessful_keypoint += 1
-            continue
-
-        roi_image = _coerce_roi_to_gray(np.asarray(roi_images[row_idx]))
-        keypoints_row = np.asarray(keypoints_roi[row_idx], dtype=np.float32)
-        center_xy = _resolve_swim_bladder_point(keypoints_row, keypoint_labels, tuple(roi_image.shape))
-        if center_xy is None:
-            rows_skipped_missing_keypoint += 1
-            continue
-
-        x0, x1, y0, y1 = _extract_patch_bounds(tuple(roi_image.shape), center_xy, int(cfg.roi_padding))
-        patch = np.asarray(roi_image[y0:y1, x0:x1], dtype=np.uint8)
-        patch_center_xy = (float(center_xy[0]) - float(x0), float(center_xy[1]) - float(y0))
-        preview = swim_tuning._compute_swim_bladder_patch_preview(
-            patch,
-            center_xy=patch_center_xy,
-            params=params,
-            method_family=cfg.subject_method_family,
+    try:
+        keypoint_source = subject_tuning._resolve_eye_keypoint_source(root, cfg.keypoint_run)
+        keypoints_roi = np.asarray(keypoint_source.keypoints_roi[:], dtype=np.float32)
+        success_flags = np.asarray(keypoint_source.success_flags, dtype=bool)
+        if int(keypoints_roi.shape[0]) != int(roi_images.shape[0]):
+            raise ValueError(
+                f"Keypoint rows {int(keypoints_roi.shape[0])} do not match crop ROI rows {int(roi_images.shape[0])}."
+            )
+        keypoint_labels_raw = keypoint_source.group.attrs.get("keypoint_labels")
+        keypoint_labels = (
+            [str(item) for item in keypoint_labels_raw]
+            if isinstance(keypoint_labels_raw, (list, tuple))
+            else None
         )
 
-        proposal_patch = np.asarray(preview["proposal_mask"], dtype=np.uint8)
-        swim_masks[row_idx, y0:y1, x0:x1] = proposal_patch
-        probability_patch = np.asarray(preview.get("probability_patch"), dtype=np.float32)
-        if probability_patch.shape != patch.shape:
-            probability_patch = np.zeros_like(patch, dtype=np.float32)
-        swim_probs[row_idx, y0:y1, x0:x1] = np.clip(probability_patch, 0.0, 1.0)
-        threshold_value = preview["stats"].get("threshold_value")
-        if threshold_value is not None:
-            otsu_thresholds[row_idx] = float(threshold_value)
-        valid_fraction = preview["stats"].get("valid_ray_fraction")
-        if valid_fraction is not None:
-            valid_ray_fraction_values[row_idx] = float(valid_fraction)
-        max_gap = preview["stats"].get("max_missing_gap_degrees")
-        if max_gap is not None:
-            max_missing_gap_values[row_idx] = float(max_gap)
+        roi_count = int(roi_images.shape[0])
+        roi_h = int(roi_images.shape[1])
+        roi_w = int(roi_images.shape[2])
+        n_channels = len(SUBJECT_MASK_LABELS)
 
-    run_group, run_name = _prepare_run_group(root, output_run=output_run, overwrite=overwrite)
-    created_at = datetime.now(timezone.utc).isoformat()
+        swim_masks = np.zeros((roi_count, roi_h, roi_w), dtype=np.uint8)
+        swim_probs = np.zeros((roi_count, roi_h, roi_w), dtype=np.float32)
+        rows_skipped_missing_keypoint = 0
+        rows_skipped_unsuccessful_keypoint = 0
+        otsu_thresholds = np.full((roi_count,), np.nan, dtype=np.float32)
+        valid_ray_fraction_values = np.full((roi_count,), np.nan, dtype=np.float32)
+        max_missing_gap_values = np.full((roi_count,), np.nan, dtype=np.float32)
 
-    masks_full = np.zeros((roi_count, n_channels, roi_h, roi_w), dtype=np.uint8)
-    probs_full = np.zeros((roi_count, n_channels, roi_h, roi_w), dtype=np.float16)
-    masks_full[:, 2] = swim_masks
-    probs_full[:, 2] = swim_probs.astype(np.float16, copy=False)
+        if cfg.subject_method_family == swim_tuning.POLAR_BOUNDARY_METHOD_FAMILY:
+            params = {
+                "roi_padding": int(cfg.roi_padding),
+                "angle_step_degrees": int(cfg.angle_step_degrees),
+                "min_radius_px": int(cfg.min_radius_px),
+                "max_radius_px": int(cfg.max_radius_px),
+                "smoothing_sigma": float(cfg.smoothing_sigma),
+                "response_threshold": float(cfg.response_threshold),
+                "max_missing_gap_degrees": int(cfg.max_missing_gap_degrees),
+                "min_valid_ray_fraction": float(cfg.min_valid_ray_fraction),
+                "gradient_mode": str(cfg.gradient_mode),
+                "prefilter_sigma": float(cfg.prefilter_sigma),
+            }
+        else:
+            params = {
+                "roi_padding": int(cfg.roi_padding),
+                "pre_threshold": cfg.pre_threshold,
+                "sobel_strength": float(cfg.sobel_strength),
+                "min_area": int(cfg.min_area),
+                "max_area": cfg.max_area,
+                "min_circularity": cfg.min_circularity,
+                "closing_radius": int(cfg.closing_radius),
+                "opening_radius": int(cfg.opening_radius),
+            }
 
-    detection_source_arr = crop_group.get("detection_source")
-    detection_source = (
-        np.asarray(detection_source_arr[:], dtype=np.int8)
-        if detection_source_arr is not None
-        else np.zeros((roi_count,), dtype=np.int8)
-    )
+        for row_idx in range(roi_count):
+            if row_idx < success_flags.shape[0] and not bool(success_flags[row_idx]):
+                rows_skipped_unsuccessful_keypoint += 1
+                continue
 
-    run_group.attrs.update(
-        {
-            "method": effective_method,
-            "config": asdict(cfg),
-            "source_crop_run": str(crop_run),
-            "source_keypoints_run": str(keypoint_source.run_name),
-            "source_keypoint_run": str(keypoint_source.run_name),
-            "source_keypoint_group": str(keypoint_source.group_name),
-            "label_schema_id": SUBJECT_MASK_LABEL_SCHEMA,
-            "mask_labels": list(SUBJECT_MASK_LABELS),
-            "output_semantics": "multilabel",
-            "overlap_policy": "independent_sigmoid",
-            "run_semantics": "traditional_swim_bladder_inference",
-            "input_format": "gray",
-            "probabilities_dtype": "float16",
-            "probabilities_encoding": "unit_float",
-            "probability_semantics": (
-                "normalized_boundary_response"
-                if cfg.subject_method_family == swim_tuning.POLAR_BOUNDARY_METHOD_FAMILY
-                else "normalized_patch_darkness"
-            ),
-            "tuning_source": (
-                "analysis_metadata.subject_mask_tuning.components.swim_bladder"
-                if tuning_entry is not None
-                else "defaults_or_overrides"
-            ),
-            "tuning_timestamp": tuning_entry.get("tuned_timestamp") if isinstance(tuning_entry, dict) else None,
-            "tuning_override_keys": list(tuning_override_keys),
+            roi_image = _coerce_roi_to_gray(np.asarray(roi_images[row_idx]))
+            keypoints_row = np.asarray(keypoints_roi[row_idx], dtype=np.float32)
+            center_xy = _resolve_swim_bladder_point(keypoints_row, keypoint_labels, tuple(roi_image.shape))
+            if center_xy is None:
+                rows_skipped_missing_keypoint += 1
+                continue
+
+            x0, x1, y0, y1 = _extract_patch_bounds(tuple(roi_image.shape), center_xy, int(cfg.roi_padding))
+            patch = np.asarray(roi_image[y0:y1, x0:x1], dtype=np.uint8)
+            patch_center_xy = (float(center_xy[0]) - float(x0), float(center_xy[1]) - float(y0))
+            preview = swim_tuning._compute_swim_bladder_patch_preview(
+                patch,
+                center_xy=patch_center_xy,
+                params=params,
+                method_family=cfg.subject_method_family,
+            )
+
+            proposal_patch = np.asarray(preview["proposal_mask"], dtype=np.uint8)
+            swim_masks[row_idx, y0:y1, x0:x1] = proposal_patch
+            probability_patch = np.asarray(preview.get("probability_patch"), dtype=np.float32)
+            if probability_patch.shape != patch.shape:
+                probability_patch = np.zeros_like(patch, dtype=np.float32)
+            swim_probs[row_idx, y0:y1, x0:x1] = np.clip(probability_patch, 0.0, 1.0)
+            threshold_value = preview["stats"].get("threshold_value")
+            if threshold_value is not None:
+                otsu_thresholds[row_idx] = float(threshold_value)
+            valid_fraction = preview["stats"].get("valid_ray_fraction")
+            if valid_fraction is not None:
+                valid_ray_fraction_values[row_idx] = float(valid_fraction)
+            max_gap = preview["stats"].get("max_missing_gap_degrees")
+            if max_gap is not None:
+                max_missing_gap_values[row_idx] = float(max_gap)
+
+        run_group, run_name = _prepare_run_group(root, output_run=output_run, overwrite=overwrite)
+        created_at = datetime.now(timezone.utc).isoformat()
+
+        masks_full = np.zeros((roi_count, n_channels, roi_h, roi_w), dtype=np.uint8)
+        probs_full = np.zeros((roi_count, n_channels, roi_h, roi_w), dtype=np.float16)
+        masks_full[:, 2] = swim_masks
+        probs_full[:, 2] = swim_probs.astype(np.float16, copy=False)
+
+        detection_source_arr = crop_group.get("detection_source")
+        detection_source = (
+            np.asarray(detection_source_arr[:], dtype=np.int8)
+            if detection_source_arr is not None
+            else np.zeros((roi_count,), dtype=np.int8)
+        )
+        tuning_entry_snapshot = _snapshot_tuning_entry(tuning_entry)
+
+        run_group.attrs.update(
+            {
+                "method": effective_method,
+                "config": asdict(cfg),
+                "source_crop_run": str(crop_run),
+                "source_crop_storage_mode": crop_source.storage_mode,
+                "source_crop_signature": crop_group.attrs.get("crop_signature"),
+                "source_crop_revision": crop_group.attrs.get("crop_revision"),
+                "source_roi_read_mode": crop_source.roi_read_mode,
+                "roi_cache_policy": crop_source.roi_cache_policy,
+                "source_roi_cache_used": bool(crop_source.roi_cache_used),
+                "source_roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
+                "source_roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
+                "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
+                "source_roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
+                "source_keypoints_run": str(keypoint_source.run_name),
+                "source_keypoint_run": str(keypoint_source.run_name),
+                "source_keypoint_group": str(keypoint_source.group_name),
+                "label_schema_id": SUBJECT_MASK_LABEL_SCHEMA,
+                "mask_labels": list(SUBJECT_MASK_LABELS),
+                "output_semantics": "multilabel",
+                "overlap_policy": "independent_sigmoid",
+                "run_semantics": "traditional_swim_bladder_inference",
+                "input_format": "gray",
+                "probabilities_dtype": "float16",
+                "probabilities_encoding": "unit_float",
+                "probability_semantics": (
+                    "normalized_boundary_response"
+                    if cfg.subject_method_family == swim_tuning.POLAR_BOUNDARY_METHOD_FAMILY
+                    else "normalized_patch_darkness"
+                ),
+                "tuning_source": (
+                    "analysis_metadata.subject_mask_tuning.components.swim_bladder"
+                    if tuning_entry is not None
+                    else "defaults_or_overrides"
+                ),
+                "tuning_timestamp": tuning_entry.get("tuned_timestamp") if isinstance(tuning_entry, dict) else None,
+                "tuning_override_keys": list(tuning_override_keys),
+                "created_at_utc": created_at,
+            }
+        )
+        if crop_source.roi_cache_key is not None:
+            run_group.attrs["source_roi_cache_key"] = crop_source.roi_cache_key
+        if crop_source.roi_cache_path is not None:
+            run_group.attrs["source_roi_cache_path"] = crop_source.roi_cache_path
+        if tuning_entry_snapshot is not None:
+            run_group.attrs["tuning_entry_snapshot"] = tuning_entry_snapshot
+
+        _copy_lineage_array(run_group, crop_group, "frame_indices")
+        _copy_lineage_array(run_group, crop_group, "frame_counts")
+        _copy_lineage_array(run_group, crop_group, "detection_indices")
+        storage_chunks = subject_mask_storage_chunks(roi_count, roi_h, roi_w)
+        metric_row_chunk = subject_mask_metric_row_chunk(roi_count)
+        run_group.create_array("detection_source", data=detection_source, overwrite=True)
+        run_group.create_array("masks_roi", data=masks_full, chunks=storage_chunks, overwrite=True)
+        run_group.create_array("mask_probs_roi", data=probs_full, chunks=storage_chunks, overwrite=True)
+        run_group.create_array(
+            "available_channels",
+            data=np.asarray(SUBJECT_MASK_AVAILABLE_CHANNELS, dtype=bool),
+            overwrite=True,
+        )
+        write_subject_mask_component_provenance(
+            run_group,
+            component_name="swim_bladder",
+            source_stage="subject_mask_runs",
+            source_run=run_name,
+            source_method=str(run_group.attrs["method"]),
+            source_channels=["swim_bladder"],
+            source_label_schema_id=SUBJECT_MASK_LABEL_SCHEMA,
+            source_created_at_utc=created_at,
+        )
+
+        channel_metrics = _compute_channel_metrics(swim_masks, swim_probs)
+        metrics_group = run_group.require_group("metrics")
+        prob_max = np.zeros((roi_count, n_channels), dtype=np.float32)
+        mask_present = np.zeros((roi_count, n_channels), dtype=bool)
+        area_px = np.zeros((roi_count, n_channels), dtype=np.float32)
+        centroid_xy = np.zeros((roi_count, n_channels, 2), dtype=np.float32)
+        centroid_valid = np.zeros((roi_count, n_channels), dtype=bool)
+        bbox_xyxy = np.zeros((roi_count, n_channels, 4), dtype=np.float32)
+        bbox_valid = np.zeros((roi_count, n_channels), dtype=bool)
+
+        prob_max[:, 2] = channel_metrics["prob_max"]
+        mask_present[:, 2] = channel_metrics["mask_present"]
+        area_px[:, 2] = channel_metrics["area_px"]
+        centroid_xy[:, 2, :] = channel_metrics["centroid_xy"]
+        centroid_valid[:, 2] = channel_metrics["centroid_valid"]
+        bbox_xyxy[:, 2, :] = channel_metrics["bbox_xyxy"]
+        bbox_valid[:, 2] = channel_metrics["bbox_valid"]
+
+        metrics_group.create_array("prob_max", data=prob_max, chunks=(metric_row_chunk, 1), overwrite=True)
+        metrics_group.create_array("mask_present", data=mask_present, chunks=(metric_row_chunk, 1), overwrite=True)
+        metrics_group.create_array("area_px", data=area_px, chunks=(metric_row_chunk, 1), overwrite=True)
+        metrics_group.create_array(
+            "centroid_xy",
+            data=centroid_xy,
+            chunks=(metric_row_chunk, 1, 2),
+            overwrite=True,
+        )
+        metrics_group.create_array(
+            "centroid_valid",
+            data=centroid_valid,
+            chunks=(metric_row_chunk, 1),
+            overwrite=True,
+        )
+        metrics_group.create_array("bbox_xyxy", data=bbox_xyxy, chunks=(metric_row_chunk, 1, 4), overwrite=True)
+        metrics_group.create_array("bbox_valid", data=bbox_valid, chunks=(metric_row_chunk, 1), overwrite=True)
+
+        duration_seconds = float(time.perf_counter() - stage_start)
+        nonempty_rows = np.any(swim_masks > 0, axis=(1, 2))
+        nonempty_count = int(np.sum(nonempty_rows))
+        finite_otsu = np.isfinite(otsu_thresholds)
+        finite_valid_fraction = np.isfinite(valid_ray_fraction_values)
+        finite_max_gap = np.isfinite(max_missing_gap_values)
+        summary_statistics = {
+            "rows_total": int(roi_count),
+            "rows_with_nonempty_masks": nonempty_count,
+            "rows_empty_masks": int(roi_count - nonempty_count),
+            "rows_skipped_missing_keypoint": int(rows_skipped_missing_keypoint),
+            "rows_skipped_unsuccessful_keypoint": int(rows_skipped_unsuccessful_keypoint),
+            "area_px_min": float(area_px[:, 2].min()) if roi_count else None,
+            "area_px_mean": float(area_px[:, 2].mean()) if roi_count else None,
+            "area_px_max": float(area_px[:, 2].max()) if roi_count else None,
+            "prob_max_min": float(prob_max[:, 2].min()) if roi_count else None,
+            "prob_max_mean": float(prob_max[:, 2].mean()) if roi_count else None,
+            "prob_max_max": float(prob_max[:, 2].max()) if roi_count else None,
+            "otsu_threshold_min": float(np.nanmin(otsu_thresholds)) if np.any(finite_otsu) else None,
+            "otsu_threshold_mean": float(np.nanmean(otsu_thresholds)) if np.any(finite_otsu) else None,
+            "otsu_threshold_max": float(np.nanmax(otsu_thresholds)) if np.any(finite_otsu) else None,
+            "valid_ray_fraction_mean": float(np.nanmean(valid_ray_fraction_values))
+            if np.any(finite_valid_fraction)
+            else None,
+            "max_missing_gap_degrees_mean": float(np.nanmean(max_missing_gap_values))
+            if np.any(finite_max_gap)
+            else None,
+            "output_run": run_name,
+            "crop_run": str(crop_run),
+            "keypoint_group": str(keypoint_source.group_name),
+            "keypoint_run": str(keypoint_source.run_name),
+            "duration_seconds": duration_seconds,
             "created_at_utc": created_at,
         }
-    )
-    tuning_entry_snapshot = _snapshot_tuning_entry(tuning_entry)
-    if tuning_entry_snapshot is not None:
-        run_group.attrs["tuning_entry_snapshot"] = tuning_entry_snapshot
+        run_group.attrs["duration_seconds"] = duration_seconds
+        run_group.attrs["summary_statistics"] = summary_statistics
 
-    _copy_lineage_array(run_group, crop_group, "frame_indices")
-    _copy_lineage_array(run_group, crop_group, "frame_counts")
-    _copy_lineage_array(run_group, crop_group, "detection_indices")
-    storage_chunks = subject_mask_storage_chunks(roi_count, roi_h, roi_w)
-    metric_row_chunk = subject_mask_metric_row_chunk(roi_count)
-    run_group.create_array("detection_source", data=detection_source, overwrite=True)
-    run_group.create_array("masks_roi", data=masks_full, chunks=storage_chunks, overwrite=True)
-    run_group.create_array("mask_probs_roi", data=probs_full, chunks=storage_chunks, overwrite=True)
-    run_group.create_array(
-        "available_channels",
-        data=np.asarray(SUBJECT_MASK_AVAILABLE_CHANNELS, dtype=bool),
-        overwrite=True,
-    )
-    write_subject_mask_component_provenance(
-        run_group,
-        component_name="swim_bladder",
-        source_stage="subject_mask_runs",
-        source_run=run_name,
-        source_method=str(run_group.attrs["method"]),
-        source_channels=["swim_bladder"],
-        source_label_schema_id=SUBJECT_MASK_LABEL_SCHEMA,
-        source_created_at_utc=created_at,
-    )
-
-    channel_metrics = _compute_channel_metrics(swim_masks, swim_probs)
-    metrics_group = run_group.require_group("metrics")
-    prob_max = np.zeros((roi_count, n_channels), dtype=np.float32)
-    mask_present = np.zeros((roi_count, n_channels), dtype=bool)
-    area_px = np.zeros((roi_count, n_channels), dtype=np.float32)
-    centroid_xy = np.zeros((roi_count, n_channels, 2), dtype=np.float32)
-    centroid_valid = np.zeros((roi_count, n_channels), dtype=bool)
-    bbox_xyxy = np.zeros((roi_count, n_channels, 4), dtype=np.float32)
-    bbox_valid = np.zeros((roi_count, n_channels), dtype=bool)
-
-    prob_max[:, 2] = channel_metrics["prob_max"]
-    mask_present[:, 2] = channel_metrics["mask_present"]
-    area_px[:, 2] = channel_metrics["area_px"]
-    centroid_xy[:, 2, :] = channel_metrics["centroid_xy"]
-    centroid_valid[:, 2] = channel_metrics["centroid_valid"]
-    bbox_xyxy[:, 2, :] = channel_metrics["bbox_xyxy"]
-    bbox_valid[:, 2] = channel_metrics["bbox_valid"]
-
-    metrics_group.create_array("prob_max", data=prob_max, chunks=(metric_row_chunk, 1), overwrite=True)
-    metrics_group.create_array("mask_present", data=mask_present, chunks=(metric_row_chunk, 1), overwrite=True)
-    metrics_group.create_array("area_px", data=area_px, chunks=(metric_row_chunk, 1), overwrite=True)
-    metrics_group.create_array("centroid_xy", data=centroid_xy, chunks=(metric_row_chunk, 1, 2), overwrite=True)
-    metrics_group.create_array("centroid_valid", data=centroid_valid, chunks=(metric_row_chunk, 1), overwrite=True)
-    metrics_group.create_array("bbox_xyxy", data=bbox_xyxy, chunks=(metric_row_chunk, 1, 4), overwrite=True)
-    metrics_group.create_array("bbox_valid", data=bbox_valid, chunks=(metric_row_chunk, 1), overwrite=True)
-
-    duration_seconds = float(time.perf_counter() - stage_start)
-    nonempty_rows = np.any(swim_masks > 0, axis=(1, 2))
-    summary_statistics = {
-        "rows_total": int(roi_count),
-        "rows_with_nonempty_masks": int(np.sum(nonempty_rows)),
-        "rows_empty_masks": int(roi_count - np.sum(nonempty_rows)),
-        "rows_skipped_missing_keypoint": int(rows_skipped_missing_keypoint),
-        "rows_skipped_unsuccessful_keypoint": int(rows_skipped_unsuccessful_keypoint),
-        "area_px_min": float(area_px[:, 2].min()) if roi_count else None,
-        "area_px_mean": float(area_px[:, 2].mean()) if roi_count else None,
-        "area_px_max": float(area_px[:, 2].max()) if roi_count else None,
-        "prob_max_min": float(prob_max[:, 2].min()) if roi_count else None,
-        "prob_max_mean": float(prob_max[:, 2].mean()) if roi_count else None,
-        "prob_max_max": float(prob_max[:, 2].max()) if roi_count else None,
-        "otsu_threshold_min": float(np.nanmin(otsu_thresholds)) if np.any(np.isfinite(otsu_thresholds)) else None,
-        "otsu_threshold_mean": float(np.nanmean(otsu_thresholds)) if np.any(np.isfinite(otsu_thresholds)) else None,
-        "otsu_threshold_max": float(np.nanmax(otsu_thresholds)) if np.any(np.isfinite(otsu_thresholds)) else None,
-        "valid_ray_fraction_mean": (
-            float(np.nanmean(valid_ray_fraction_values)) if np.any(np.isfinite(valid_ray_fraction_values)) else None
-        ),
-        "max_missing_gap_degrees_mean": (
-            float(np.nanmean(max_missing_gap_values)) if np.any(np.isfinite(max_missing_gap_values)) else None
-        ),
-        "output_run": run_name,
-        "crop_run": str(crop_run),
-        "keypoint_group": str(keypoint_source.group_name),
-        "keypoint_run": str(keypoint_source.run_name),
-        "duration_seconds": duration_seconds,
-        "created_at_utc": created_at,
-    }
-    run_group.attrs["duration_seconds"] = duration_seconds
-    run_group.attrs["summary_statistics"] = summary_statistics
-
-    git_info = get_git_info()
-    env_info = get_environment_info(
-        include_all_packages=False,
-        disk_path=str(zarr_path) if zarr_path is not None else None,
-        collect_ip=False,
-        capture_env_vars=False,
-    )
-    platform_info = env_info.get("platform", {})
-    provenance = build_stage_provenance(
-        stage="subject_masks",
-        command=" ".join(sys.argv),
-        created_at_utc=created_at,
-        version=git_info.get("short_hash") or git_info.get("commit_hash"),
-        git={
-            "commit": git_info.get("commit_hash"),
-            "short": git_info.get("short_hash"),
-            "branch": git_info.get("branch"),
-            "is_dirty": git_info.get("is_dirty"),
-            "remote": git_info.get("remote_url"),
-        },
-        environment=env_info.get("environment"),
-        platform={
-            "hostname": platform_info.get("hostname"),
-            "system": platform_info.get("system"),
-            "release": platform_info.get("release"),
-            "python_version": platform_info.get("python_version"),
-            "machine": platform_info.get("machine"),
-        },
-        parameters={
-            **asdict(cfg),
-            "method": run_group.attrs.get("method"),
-            "run_semantics": run_group.attrs.get("run_semantics"),
-            "probability_semantics": run_group.attrs.get("probability_semantics"),
-            "tuning_source": run_group.attrs.get("tuning_source"),
-            "tuning_timestamp": run_group.attrs.get("tuning_timestamp"),
-            "tuning_override_keys": list(tuning_override_keys),
-            "tuning_entry_snapshot": tuning_entry_snapshot,
-        },
-        inputs={
+        git_info = get_git_info()
+        env_info = get_environment_info(
+            include_all_packages=False,
+            disk_path=str(zarr_path) if zarr_path is not None else None,
+            collect_ip=False,
+            capture_env_vars=False,
+        )
+        platform_info = env_info.get("platform", {})
+        provenance_inputs = {
             "source_crop_run": str(crop_run),
+            "source_crop_storage_mode": crop_source.storage_mode,
+            "source_crop_signature": crop_group.attrs.get("crop_signature"),
+            "source_crop_revision": crop_group.attrs.get("crop_revision"),
+            "source_roi_read_mode": crop_source.roi_read_mode,
+            "roi_cache_policy": crop_source.roi_cache_policy,
+            "roi_cache_used": bool(crop_source.roi_cache_used),
+            "roi_cache_key": crop_source.roi_cache_key,
+            "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
+            "roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
+            "roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
+            "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
             "source_keypoint_run": str(keypoint_source.run_name),
             "source_keypoint_group": str(keypoint_source.group_name),
-        },
-    )
-    write_stage_provenance(run_group, provenance)
+            "frame_source": crop_source.frame_source_kind,
+            "source_video_path": crop_source.frame_source_path or crop_group.attrs.get("video_source_path"),
+        }
+        if crop_source.roi_cache_path is not None:
+            provenance_inputs["roi_cache_path"] = crop_source.roi_cache_path
+        provenance = build_stage_provenance(
+            stage="subject_masks",
+            command=" ".join(sys.argv),
+            created_at_utc=created_at,
+            version=git_info.get("short_hash") or git_info.get("commit_hash"),
+            git={
+                "commit": git_info.get("commit_hash"),
+                "short": git_info.get("short_hash"),
+                "branch": git_info.get("branch"),
+                "is_dirty": git_info.get("is_dirty"),
+                "remote": git_info.get("remote_url"),
+            },
+            environment=env_info.get("environment"),
+            platform={
+                "hostname": platform_info.get("hostname"),
+                "system": platform_info.get("system"),
+                "release": platform_info.get("release"),
+                "python_version": platform_info.get("python_version"),
+                "machine": platform_info.get("machine"),
+            },
+            parameters={
+                **asdict(cfg),
+                "method": run_group.attrs.get("method"),
+                "run_semantics": run_group.attrs.get("run_semantics"),
+                "probability_semantics": run_group.attrs.get("probability_semantics"),
+                "tuning_source": run_group.attrs.get("tuning_source"),
+                "tuning_timestamp": run_group.attrs.get("tuning_timestamp"),
+                "tuning_override_keys": list(tuning_override_keys),
+                "tuning_entry_snapshot": tuning_entry_snapshot,
+            },
+            inputs=provenance_inputs,
+        )
+        write_stage_provenance(run_group, provenance)
 
-    _print(
-        console,
-        f"[green]✓[/green] Swim-bladder masks saved as [cyan]subject_mask_runs/{run_name}[/cyan] "
-        f"({int(np.sum(nonempty_rows))}/{roi_count} nonempty swim-bladder masks) in {duration_seconds:.1f}s",
-    )
-    return run_name
+        _print(
+            console,
+            f"[green]✓[/green] Swim-bladder masks saved as [cyan]subject_mask_runs/{run_name}[/cyan] "
+            f"({nonempty_count}/{roi_count} nonempty swim-bladder masks) in {duration_seconds:.1f}s",
+        )
+        return run_name
+    finally:
+        crop_source.close()
 
 
 def segment_swim_bladder_masks(
@@ -517,7 +577,15 @@ def segment_swim_bladder_masks(
 
 def _build_cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
     overrides: Dict[str, Any] = {}
-    for key in ("crop_run", "keypoint_run", *TUNING_OVERRIDE_KEYS):
+    for key in (
+        "crop_run",
+        "keypoint_run",
+        "roi_cache_policy",
+        "roi_cache_dir",
+        "roi_live_acceleration",
+        "roi_live_gpu_chunk_frames",
+        *TUNING_OVERRIDE_KEYS,
+    ):
         value = getattr(args, key)
         if value is not None:
             overrides[key] = value
@@ -531,6 +599,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("zarr_path", type=Path, help="Path to the Palette Zarr archive.")
     parser.add_argument("--crop-run", type=str, help="Optional crop_runs/<run> to segment.")
     parser.add_argument("--keypoint-run", type=str, help="Optional keypoint run providing swim-bladder anchors.")
+    parser.add_argument(
+        "--roi-cache-policy",
+        choices=("never", "auto", "always"),
+        default="auto",
+        help="Temporary ROI cache policy for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument("--roi-cache-dir", type=str, help="Optional scratch directory for temporary ROI caches.")
+    parser.add_argument(
+        "--roi-live-acceleration",
+        choices=("auto", "cpu", "gpu"),
+        default="auto",
+        help="Live ROI read acceleration for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument(
+        "--roi-live-gpu-chunk-frames",
+        type=int,
+        default=32,
+        help="Frame batch size for GPU-accelerated live ROI reads (default: 32).",
+    )
     parser.add_argument(
         "--subject-method-family",
         type=str,

@@ -102,6 +102,8 @@ Date anchored: 2026-03-06.
   `latest_materialized`, `latest_any`, or review status.
 - [x] Treat temporary ROI cache layout as a separate scratch/runtime policy
   rather than inheriting canonical crop-run layout semantics.
+- [x] Add a small ROI cache inspection/pruning utility so scratch caches are
+  easy to locate, size, and delete.
 - [x] Wire cache support into YOLO keypoint inference, YOLO eye-mask
   inference, and keypoint retry.
 - [x] Attempt a smoke-archive `geometry_live` benchmark.
