@@ -113,6 +113,20 @@ Interpretation:
 - `geometry_live_gpu` is best treated as a one-off fallback/debugging path, not
   the steady-state high-throughput analysis workflow
 
+Relevant follow-up on the recommended cache-backed path:
+
+- on the same representative archive, lowering the scratch-cache GPU chunk
+  default to `32` allowed `geometry_cache_build` and `geometry_cache_reuse` to
+  complete successfully
+- first-use `geometry_cache_build` remained expensive because it included cache
+  population (`342.4s` keypoints, `179.5s` eye masks)
+- warm `geometry_cache_reuse` was near parity with the earlier materialized
+  baselines (`83.4s` keypoints vs `77.2s` materialized, `170.3s` eye masks vs
+  `172.9s` materialized)
+- that reinforces the intended policy split:
+  `geometry_live_gpu` is fallback/debugging only, while geometry-only analysis
+  workflows should prefer a temporary local ROI cache
+
 ## Reusable Existing Pieces
 
 The repo already contains most of the hard GPU-side implementation in the

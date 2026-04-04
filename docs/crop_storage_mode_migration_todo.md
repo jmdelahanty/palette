@@ -113,9 +113,9 @@ Date anchored: 2026-03-06.
   Result on `2026-03-07`: after inheriting the crop run ROI layout into the
   temporary cache, warm-cache geometry-only runs were near parity with
   materialized runs for both keypoints and U-Net eye masks.
-- [ ] Prototype `geometry_live_gpu` for external-video crop sources by reusing
+- [x] Prototype `geometry_live_gpu` for external-video crop sources by reusing
   the GPU decode/crop kernels from the temporary ROI cache writer.
-- [ ] Benchmark `geometry_live_cpu` vs `geometry_live_gpu` vs
+- [x] Benchmark `geometry_live_cpu` vs `geometry_live_gpu` vs
   `geometry_cache_build` vs `geometry_cache_reuse` on a non-smoke archive.
   Latest signal on `2026-04-04`: a representative analysis archive without
   `raw_video/images_full` fell back to `source_video_path`, and the pure
@@ -129,6 +129,13 @@ Date anchored: 2026-03-06.
   (`roi_live_gpu_chunk_frames=8`, `eye_batch_size=64`) allowed the full
   benchmark to complete, but the path still remained about `5x` slower than
   the materialized/cached baselines for both keypoints and eye masks.
+  Follow-up result on `2026-04-04`: with the scratch-cache GPU chunk default
+  lowered to `32`, the recommended cache-backed path completed on the same
+  archive. `geometry_cache_build` wall time was about `342.4s` for keypoints
+  and `179.5s` for eye masks because it included first-time cache population,
+  while warm `geometry_cache_reuse` was near parity with the materialized
+  baselines (`83.4s` keypoints vs `77.2s` materialized, `170.3s` eye masks vs
+  `172.9s` materialized).
   Conclusion: temporary local ROI cache remains the preferred analysis path for
   large full-frame sources; `geometry_live_gpu` is useful as a fallback/debugging
   path, not the default high-throughput workflow.

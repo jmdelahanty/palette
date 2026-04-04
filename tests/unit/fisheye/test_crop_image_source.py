@@ -10,7 +10,11 @@ from rich.console import Console
 
 import fisheye.shared.crop_image_source as crop_mod
 from fisheye.shared.crop_image_source import CropImageSource, resolve_crop_run
-from fisheye.shared.crop_roi_layout import DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN, SCRATCH_ROI_CACHE_LAYOUT_PROFILE
+from fisheye.shared.crop_roi_layout import (
+    DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
+    DEFAULT_SCRATCH_ROI_CACHE_GPU_CHUNK_FRAMES,
+    SCRATCH_ROI_CACHE_LAYOUT_PROFILE,
+)
 
 
 class _FakeArray:
@@ -419,7 +423,7 @@ def test_crop_image_source_uses_accelerated_external_cache_builder(
             "roi_shard_len": 128,
             "roi_storage": "uncompressed",
             "roi_use_sharding": False,
-            "gpu_chunk_frames": 96,
+            "gpu_chunk_frames": DEFAULT_SCRATCH_ROI_CACHE_GPU_CHUNK_FRAMES,
         }
 
     monkeypatch.setattr(
@@ -444,6 +448,7 @@ def test_crop_image_source_uses_accelerated_external_cache_builder(
     assert calls[0]["crop_run_name"] == "crop_geometry"
     assert calls[0]["roi_storage"] == "uncompressed"
     assert calls[0]["roi_chunk_size"] == DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN
+    assert calls[0]["gpu_chunk_frames"] == DEFAULT_SCRATCH_ROI_CACHE_GPU_CHUNK_FRAMES
     assert calls[0]["use_sharding"] is False
     assert calls[0]["roi_shard_size"] is None
     source.close()
@@ -487,7 +492,7 @@ def test_crop_image_source_external_cache_does_not_inherit_canonical_crop_layout
             "roi_storage": "uncompressed",
             "roi_use_sharding": False,
             "roi_layout_profile": SCRATCH_ROI_CACHE_LAYOUT_PROFILE,
-            "gpu_chunk_frames": 96,
+            "gpu_chunk_frames": DEFAULT_SCRATCH_ROI_CACHE_GPU_CHUNK_FRAMES,
         }
 
     monkeypatch.setattr(
@@ -506,6 +511,7 @@ def test_crop_image_source_external_cache_does_not_inherit_canonical_crop_layout
     assert len(calls) == 1
     assert calls[0]["roi_storage"] == "uncompressed"
     assert calls[0]["roi_chunk_size"] == DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN
+    assert calls[0]["gpu_chunk_frames"] == DEFAULT_SCRATCH_ROI_CACHE_GPU_CHUNK_FRAMES
     assert calls[0]["use_sharding"] is False
     assert calls[0]["roi_shard_size"] is None
     source.close()

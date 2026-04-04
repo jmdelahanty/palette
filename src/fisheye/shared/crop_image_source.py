@@ -15,6 +15,7 @@ import zarr
 
 from fisheye.shared.crop_roi_layout import (
     DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
+    DEFAULT_SCRATCH_ROI_CACHE_GPU_CHUNK_FRAMES,
     SCRATCH_ROI_CACHE_LAYOUT_PROFILE,
     build_crop_roi_create_kwargs,
     build_scratch_roi_cache_layout,
@@ -820,7 +821,7 @@ class CropImageSource:
                     use_sharding=False,
                     roi_chunk_size=DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
                     roi_shard_size=None,
-                    gpu_chunk_frames=96,
+                    gpu_chunk_frames=DEFAULT_SCRATCH_ROI_CACHE_GPU_CHUNK_FRAMES,
                     require_kvikio=False,
                     prefer_gpu=True,
                 )

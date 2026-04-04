@@ -41,6 +41,7 @@ from ..shared.crop_signature import build_crop_signature
 from ..shared.crop_roi_layout import (
     DEFAULT_CANONICAL_CROP_ROI_CHUNK_LEN,
     DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
+    DEFAULT_SCRATCH_ROI_CACHE_GPU_CHUNK_FRAMES,
     SCRATCH_ROI_CACHE_LAYOUT_PROFILE,
     build_canonical_crop_roi_layout,
     build_crop_roi_create_kwargs,
@@ -991,7 +992,7 @@ def materialize_external_roi_cache(
     use_sharding: bool = False,
     roi_chunk_size: int = DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
     roi_shard_size: Optional[int] = None,
-    gpu_chunk_frames: int = 96,
+    gpu_chunk_frames: int = DEFAULT_SCRATCH_ROI_CACHE_GPU_CHUNK_FRAMES,
     require_kvikio: bool = False,
     prefer_gpu: bool = True,
     verbose: bool = False,
@@ -1282,7 +1283,7 @@ def materialize_external_roi_cache_for_crop_run(
     use_sharding: bool = False,
     roi_chunk_size: int = DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
     roi_shard_size: Optional[int] = None,
-    gpu_chunk_frames: int = 96,
+    gpu_chunk_frames: int = DEFAULT_SCRATCH_ROI_CACHE_GPU_CHUNK_FRAMES,
     require_kvikio: bool = False,
     prefer_gpu: bool = True,
     verbose: bool = False,
@@ -3359,7 +3360,11 @@ def _roi_cache_worker_main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--use-sharding", action="store_true")
     parser.add_argument("--roi-chunk-size", type=int, default=1024)
     parser.add_argument("--roi-shard-size", type=int, default=None)
-    parser.add_argument("--gpu-chunk-frames", type=int, default=96)
+    parser.add_argument(
+        "--gpu-chunk-frames",
+        type=int,
+        default=DEFAULT_SCRATCH_ROI_CACHE_GPU_CHUNK_FRAMES,
+    )
     parser.add_argument("--require-kvikio", action="store_true")
     parser.add_argument("--prefer-gpu", action="store_true")
     parser.add_argument("--no-prefer-gpu", action="store_true")

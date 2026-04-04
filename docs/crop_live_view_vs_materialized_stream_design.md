@@ -468,6 +468,18 @@ Latest follow-up signal on `2026-04-04`:
   resolved frames from `source_video_path`
 - that external-video live path currently decodes on CPU and crops on CPU
   before handing ROIs to the GPU inference stage
+- after adding the GPU live path, `geometry_live_gpu` still remained strongly
+  ROI-read-bound and was much slower than materialized/cached ROI reads on this
+  archive shape
+- after lowering the scratch-cache GPU chunk default to `32`, the
+  recommended cache-backed path completed successfully on the same archive:
+  - `geometry_cache_build` keypoints: `342.4s` wall
+  - `geometry_cache_build` eye masks: `179.5s` wall
+  - `geometry_cache_reuse` keypoints: `83.4s` wall
+  - `geometry_cache_reuse` eye masks: `170.3s` wall
+- that warm-cache reuse was close enough to the earlier materialized baselines
+  (`77.2s` keypoints, `172.9s` eye masks) to validate `geometry_only` plus
+  local scratch ROI cache as the intended non-smoke analysis workflow
 - operator observation: the keypoint `geometry_live` scenario showed low GPU
   utilization and was abandoned after roughly `20 minutes` with progress still
   far from completion
