@@ -12,6 +12,9 @@ Date anchored: 2026-03-06.
 ## Decision Snapshot (Current)
 
 - [x] Materialized crops remain the default for production/analysis archives.
+- [x] Crop writer defaults are not yet split by `zarr_use`; analysis archives
+  only become `geometry_only` when an explicit writer/storage-mode choice opts
+  into that behavior.
 - [x] Geometry-only runs must not become `crop_runs.latest` during the initial
   migration.
 - [x] `crop_runs.latest` remains backward-compatible and materialized-compatible;

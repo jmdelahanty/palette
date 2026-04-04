@@ -27,6 +27,39 @@ Current recommendation:
 - Treat live cropping as a compatibility project first, then revisit whether it
   should become the default.
 
+## Current vs Target Policy
+
+It is important to separate the current implementation from the future target
+state.
+
+### Current implementation
+
+- Crop writers still default to `crop_storage_mode=materialized` for both
+  training and analysis archives.
+- There is not yet a built-in "`training` gets materialized, `analysis` gets
+  geometry-only" writer split based on `zarr_use`.
+- `geometry_only` is an explicit opt-in writer/storage mode, not the default.
+- `crop_runs.latest` remains materialized-compatible during the migration; mixed
+  mode adds explicit pointers such as `latest_materialized` and `latest_any`.
+
+### Supported opt-in mixed mode
+
+- Some ROI-model readers now support mixed-mode reads through the shared crop
+  resolver.
+- Geometry-only runs may be consumed via live ROI reconstruction or a temporary
+  ROI cache.
+- Temporary ROI caches are runtime accelerators and remain outside canonical
+  archives by default.
+
+### Future target policy
+
+- Analysis archives may eventually become lean or mixed-mode, with
+  `roi_images` optional when `crop_storage_mode=geometry_only`.
+- Training/export artifacts should remain self-contained and materialized by
+  default even if analysis archives become mixed-mode.
+- This split is a migration target and rollout policy, not current default
+  behavior.
+
 ## Why This Is The Current Decision
 
 ### 1. Mixed-mode inference exists, but the broader reader set is not migrated

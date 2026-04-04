@@ -138,12 +138,12 @@ and upstream background information. Standard values:
 
 ## `crop_runs/`
 
-Each run stores the cropped ROI tensors and the bookkeeping needed to map
-ROIs back to frames.
+Each run stores crop-stage geometry/provenance and, in materialized mode, the
+cropped ROI tensors needed by downstream consumers.
 
 | Array | Shape | DType | Notes |
 | ----- | ----- | ----- | ----- |
-| `roi_images` | `(n_rois, h, w)` | `uint8` | Cropped grayscale patches |
+| `roi_images` *(conditional)* | `(n_rois, h, w)` | `uint8` | Cropped grayscale patches. Present for `crop_storage_mode=materialized`; may be omitted for `geometry_only` runs. |
 | `roi_coordinates_full` | `(n_rois, 2)` | `int32` | Top-left (x, y) in full-res pixels |
 | `roi_coordinates_ds` | `(n_rois, 2)` | `int32` | Same offsets in downsampled space |
 | `bbox_norm_coords` | `(n_rois, 4)` | `float32` | Normalized ROI bounding boxes (`[cx, cy, w, h]`) |
@@ -157,6 +157,8 @@ Attributes:
 - `source_detect_run`, `source_background_run`, `detection_source_type`,
   `detection_source_path`, `includes_interpolated`, `n_real_detections`,
   `n_interpolated_detections`, ROI size, scaling factors.
+- `crop_storage_mode` declares whether the run is `materialized` or
+  `geometry_only`.
 - `detect_review_status` (snapshot of refined review status when crop ran)
 - `detect_review_status_ref` (refined run path where review status lives)
 - `detection_preferred_policy` (policy label used for preferred/auto resolution)
@@ -165,6 +167,23 @@ Attributes:
 - `crop_review_signature` (signature snapshot stored when crop review was set)
 - `summary_statistics` (frames with crops, total ROIs, percentage coverage).
 - GPU/environment provenance.
+
+Parent-group pointer semantics during mixed-mode migration:
+
+- `crop_runs.attrs["latest"]` remains materialized-compatible for backward
+  compatibility.
+- `crop_runs.attrs["latest_materialized"]` tracks the latest materialized run.
+- `crop_runs.attrs["latest_any"]` tracks the latest run regardless of storage
+  mode.
+
+Current policy note:
+
+- Crop writers still default to materialized mode for both training and
+  analysis archives.
+- `geometry_only` runs are currently opt-in rather than the default.
+- Many traditional/training/export consumers still require materialized
+  `roi_images` even though mixed-mode readers now exist for some ROI-model
+  workflows.
 
 Cropping resolves the ROI source via `crop.source_type` (`detect`, `filtered`,
 `interpolated`, `manual`, `preferred`, `auto`) or an explicit `crop.source_path`
