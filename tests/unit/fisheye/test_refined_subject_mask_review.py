@@ -11,6 +11,10 @@ import numpy as np
 import zarr
 
 from fisheye.shared.detect_reason_codec import read_reason_labels
+from fisheye.shared.subject_mask_chunks import (
+    refined_subject_mask_metric_row_chunk,
+    refined_subject_mask_storage_chunks,
+)
 from fisheye.tune import refined_subject_mask_review as mod
 
 
@@ -192,13 +196,17 @@ def test_prepare_refined_subject_run_creates_body_swim_editor_run(monkeypatch) -
     masks = np.asarray(run["masks_roi"][:], dtype=np.uint8)
     np.testing.assert_array_equal(masks[:, 0], np.asarray(source.masks_roi[:, 0], dtype=np.uint8))
     assert np.count_nonzero(masks[:, 1]) == 0
+    assert tuple(int(v) for v in run["masks_roi"].chunks) == refined_subject_mask_storage_chunks(2, 8, 8)
 
     available = np.asarray(run["available_channels"][:], dtype=bool)
     np.testing.assert_array_equal(available, np.asarray([True, True], dtype=bool))
     edit_applied = np.asarray(run["edit_applied"][:], dtype=bool)
     assert not edit_applied.any()
+    assert tuple(int(v) for v in run["edit_applied"].chunks) == (refined_subject_mask_metric_row_chunk(2), 1)
 
     metrics = run["metrics"]
+    assert tuple(int(v) for v in metrics["mask_present"].chunks) == (refined_subject_mask_metric_row_chunk(2), 1)
+    assert tuple(int(v) for v in metrics["bbox_xyxy"].chunks) == (refined_subject_mask_metric_row_chunk(2), 1, 4)
     mask_present = np.asarray(metrics["mask_present"][:], dtype=bool)
     area_px = np.asarray(metrics["area_px"][:], dtype=np.float32)
     centroid_xy = np.asarray(metrics["centroid_xy"][:], dtype=np.float32)

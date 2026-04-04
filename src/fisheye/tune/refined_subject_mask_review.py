@@ -23,6 +23,10 @@ from scipy.ndimage import gaussian_filter1d
 
 from ..shared.detect_reason_codec import encode_reason_bytes, read_reason_labels, write_reason_columns
 from ..shared.provenance_attrs import build_source_keypoints_attrs, resolve_source_keypoints_run
+from ..shared.subject_mask_chunks import (
+    refined_subject_mask_metric_row_chunk,
+    refined_subject_mask_storage_chunks,
+)
 from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from ..utils.system import get_environment_info, get_git_info
 from ..utils.zarr_io import open_zarr_root
@@ -239,7 +243,24 @@ def _review_payload(
 def _copy_optional_array(dest: zarr.Group, source: zarr.Group, name: str) -> None:
     if name not in source or name in dest:
         return
-    dest.create_array(name, data=np.asarray(source[name][:]), overwrite=True)
+    source_arr = source[name]
+    kwargs: dict[str, object] = {"overwrite": True}
+    chunks = getattr(source_arr, "chunks", None)
+    if chunks is not None:
+        kwargs["chunks"] = tuple(int(v) for v in chunks)
+    dest.create_array(name, data=np.asarray(source_arr[:]), **kwargs)
+
+
+def _refined_metric_chunks(total_rows: int) -> tuple[int]:
+    return (refined_subject_mask_metric_row_chunk(total_rows),)
+
+
+def _refined_metric_chunks_2d(total_rows: int) -> tuple[int, int]:
+    return (refined_subject_mask_metric_row_chunk(total_rows), 1)
+
+
+def _refined_metric_chunks_lastdim(total_rows: int, width: int) -> tuple[int, int, int]:
+    return (refined_subject_mask_metric_row_chunk(total_rows), 1, int(width))
 
 
 def _normalize_provenance_channels(value: object, *, default_component: str) -> list[str]:
@@ -788,12 +809,28 @@ def _ensure_component_group(
 ) -> zarr.Group:
     components_parent = refined.require_group("components")
     component_group = components_parent.require_group(component_name)
+    component_chunks = _refined_metric_chunks(total_rois)
     if "mask_present" not in component_group:
-        component_group.create_array("mask_present", data=np.asarray(mask_present, dtype=bool), overwrite=True)
+        component_group.create_array(
+            "mask_present",
+            data=np.asarray(mask_present, dtype=bool),
+            chunks=component_chunks,
+            overwrite=True,
+        )
     if "area_px" not in component_group:
-        component_group.create_array("area_px", data=np.asarray(area_px, dtype=np.float32), overwrite=True)
+        component_group.create_array(
+            "area_px",
+            data=np.asarray(area_px, dtype=np.float32),
+            chunks=component_chunks,
+            overwrite=True,
+        )
     if "edit_applied" not in component_group:
-        component_group.create_array("edit_applied", data=np.asarray(edit_applied, dtype=bool), overwrite=True)
+        component_group.create_array(
+            "edit_applied",
+            data=np.asarray(edit_applied, dtype=bool),
+            chunks=component_chunks,
+            overwrite=True,
+        )
     if component_name == "subject_body":
         component_group.attrs.setdefault("component_schema_id", DEFAULT_SUBJECT_BODY_COMPONENT_SCHEMA_ID)
         component_group.attrs.setdefault("anatomical_scope", DEFAULT_SUBJECT_BODY_ANATOMICAL_SCOPE)
@@ -815,7 +852,7 @@ def _ensure_component_group(
         )
         for metric_name, metric_values in metric_specs:
             if metric_name not in metrics_group:
-                metrics_group.create_array(metric_name, data=metric_values, overwrite=True)
+                metrics_group.create_array(metric_name, data=metric_values, chunks=component_chunks, overwrite=True)
     _load_or_init_reason_labels(component_group, total_rois)
     return component_group
 
@@ -948,6 +985,10 @@ def _create_refined_subject_run_from_component_seeds(
     height = int(reference_source.masks_roi.shape[2])
     width = int(reference_source.masks_roi.shape[3])
     component_names = tuple(str(name) for name in component_names)
+    storage_chunks = refined_subject_mask_storage_chunks(total_rois, height, width)
+    metric_chunks = _refined_metric_chunks_2d(total_rois)
+    metric_chunks_2 = _refined_metric_chunks_lastdim(total_rois, 2)
+    metric_chunks_4 = _refined_metric_chunks_lastdim(total_rois, 4)
     masks = np.zeros((total_rois, len(component_names), height, width), dtype=np.uint8)
     for comp_idx, component_name in enumerate(component_names):
         if component_name not in component_seeds:
@@ -967,27 +1008,28 @@ def _create_refined_subject_run_from_component_seeds(
     run_group.create_array(
         "detection_source",
         data=np.asarray(reference_source.detection_source[:], dtype=np.int8),
+        chunks=_refined_metric_chunks(total_rois),
         overwrite=True,
     )
-    run_group.create_array("masks_roi", data=masks, overwrite=True)
+    run_group.create_array("masks_roi", data=masks, chunks=storage_chunks, overwrite=True)
     run_group.create_array(
         "available_channels",
         data=np.ones((len(component_names),), dtype=bool),
         overwrite=True,
     )
-    run_group.create_array("edit_applied", data=edit_applied, overwrite=True)
+    run_group.create_array("edit_applied", data=edit_applied, chunks=metric_chunks, overwrite=True)
     _copy_optional_array(run_group, reference_source.group, "frame_indices")
     _copy_optional_array(run_group, reference_source.group, "frame_counts")
     _copy_optional_array(run_group, reference_source.group, "detection_indices")
 
     metrics = run_group.require_group("metrics")
-    metrics.create_array("mask_present", data=mask_present, overwrite=True)
-    metrics.create_array("area_px", data=area_px, overwrite=True)
+    metrics.create_array("mask_present", data=mask_present, chunks=metric_chunks, overwrite=True)
+    metrics.create_array("area_px", data=area_px, chunks=metric_chunks, overwrite=True)
     geometry_metrics = _compute_geometry_metrics(masks)
-    metrics.create_array("centroid_xy", data=geometry_metrics["centroid_xy"], overwrite=True)
-    metrics.create_array("centroid_valid", data=geometry_metrics["centroid_valid"], overwrite=True)
-    metrics.create_array("bbox_xyxy", data=geometry_metrics["bbox_xyxy"], overwrite=True)
-    metrics.create_array("bbox_valid", data=geometry_metrics["bbox_valid"], overwrite=True)
+    metrics.create_array("centroid_xy", data=geometry_metrics["centroid_xy"], chunks=metric_chunks_2, overwrite=True)
+    metrics.create_array("centroid_valid", data=geometry_metrics["centroid_valid"], chunks=metric_chunks, overwrite=True)
+    metrics.create_array("bbox_xyxy", data=geometry_metrics["bbox_xyxy"], chunks=metric_chunks_4, overwrite=True)
+    metrics.create_array("bbox_valid", data=geometry_metrics["bbox_valid"], chunks=metric_chunks, overwrite=True)
     created = _utc_now()
 
     for comp_idx, component_name in enumerate(component_names):
@@ -1145,15 +1187,18 @@ def _open_or_create_refined_subject_run(
         if masks_arr is None:
             raise RuntimeError(f"refined_subject_masks_runs/{target_run} missing masks_roi.")
         total_rois = int(masks_arr.shape[0])
+        metric_chunks = _refined_metric_chunks_2d(total_rois)
+        metric_chunks_2 = _refined_metric_chunks_lastdim(total_rois, 2)
+        metric_chunks_4 = _refined_metric_chunks_lastdim(total_rois, 4)
         metrics = run_group.require_group("metrics")
         masks_np = np.asarray(masks_arr[:], dtype=np.uint8)
         geometry_metrics = None
         if "mask_present" not in metrics or "area_px" not in metrics:
             mask_present, area_px = _compute_mask_metrics(masks_np)
             if "mask_present" not in metrics:
-                metrics.create_array("mask_present", data=mask_present, overwrite=True)
+                metrics.create_array("mask_present", data=mask_present, chunks=metric_chunks, overwrite=True)
             if "area_px" not in metrics:
-                metrics.create_array("area_px", data=area_px, overwrite=True)
+                metrics.create_array("area_px", data=area_px, chunks=metric_chunks, overwrite=True)
         if (
             "centroid_xy" not in metrics
             or "centroid_valid" not in metrics
@@ -1162,17 +1207,38 @@ def _open_or_create_refined_subject_run(
         ):
             geometry_metrics = _compute_geometry_metrics(masks_np)
             if "centroid_xy" not in metrics:
-                metrics.create_array("centroid_xy", data=geometry_metrics["centroid_xy"], overwrite=True)
+                metrics.create_array(
+                    "centroid_xy",
+                    data=geometry_metrics["centroid_xy"],
+                    chunks=metric_chunks_2,
+                    overwrite=True,
+                )
             if "centroid_valid" not in metrics:
-                metrics.create_array("centroid_valid", data=geometry_metrics["centroid_valid"], overwrite=True)
+                metrics.create_array(
+                    "centroid_valid",
+                    data=geometry_metrics["centroid_valid"],
+                    chunks=metric_chunks,
+                    overwrite=True,
+                )
             if "bbox_xyxy" not in metrics:
-                metrics.create_array("bbox_xyxy", data=geometry_metrics["bbox_xyxy"], overwrite=True)
+                metrics.create_array(
+                    "bbox_xyxy",
+                    data=geometry_metrics["bbox_xyxy"],
+                    chunks=metric_chunks_4,
+                    overwrite=True,
+                )
             if "bbox_valid" not in metrics:
-                metrics.create_array("bbox_valid", data=geometry_metrics["bbox_valid"], overwrite=True)
+                metrics.create_array(
+                    "bbox_valid",
+                    data=geometry_metrics["bbox_valid"],
+                    chunks=metric_chunks,
+                    overwrite=True,
+                )
         if "edit_applied" not in run_group:
             run_group.create_array(
                 "edit_applied",
                 data=np.zeros((total_rois, len(component_names)), dtype=bool),
+                chunks=metric_chunks,
                 overwrite=True,
             )
         mask_present_arr = np.asarray(metrics["mask_present"][:], dtype=bool)

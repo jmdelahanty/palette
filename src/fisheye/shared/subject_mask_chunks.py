@@ -32,3 +32,18 @@ def subject_mask_storage_chunks(total_rows: int, height: int, width: int) -> tup
 def subject_mask_metric_row_chunk(total_rows: int) -> int:
     """Return canonical row chunk depth for subject-mask metric arrays."""
     return _clamp_positive_chunk(SUBJECT_MASK_METRIC_ROW_CHUNK, total_rows)
+
+
+def refined_subject_mask_storage_chunks(total_rows: int, height: int, width: int) -> tuple[int, int, int, int]:
+    """Return canonical chunks for dense refined-subject-mask ROI arrays.
+
+    Refined runs currently share the same full-ROI storage policy as raw
+    subject-mask runs, but keep a distinct helper so the refined contract can
+    evolve independently if review/edit access patterns diverge later.
+    """
+    return subject_mask_storage_chunks(total_rows, height, width)
+
+
+def refined_subject_mask_metric_row_chunk(total_rows: int) -> int:
+    """Return canonical row chunk depth for refined-subject-mask metric arrays."""
+    return subject_mask_metric_row_chunk(total_rows)

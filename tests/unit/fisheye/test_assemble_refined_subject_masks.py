@@ -7,6 +7,10 @@ import zarr
 from fisheye.refinement import assemble_refined_subject_masks as assemble_mod
 from fisheye.refinement import refine_subject_masks as batch_mod
 from fisheye.shared.detect_reason_codec import read_reason_labels
+from fisheye.shared.subject_mask_chunks import (
+    refined_subject_mask_metric_row_chunk,
+    refined_subject_mask_storage_chunks,
+)
 from fisheye.tune import refined_subject_mask_review as review_mod
 
 os.environ.setdefault("OMP_NUM_THREADS", "2")
@@ -163,6 +167,8 @@ def test_assemble_refined_subject_run_creates_finalized_mixed_source_run(monkeyp
         np.asarray(run["edit_applied"][:], dtype=bool),
         np.zeros((2, 4), dtype=bool),
     )
+    assert tuple(int(v) for v in run["masks_roi"].chunks) == refined_subject_mask_storage_chunks(2, 8, 8)
+    assert tuple(int(v) for v in run["edit_applied"].chunks) == (refined_subject_mask_metric_row_chunk(2), 1)
     np.testing.assert_array_equal(
         np.asarray(run["metrics/mask_present"][:], dtype=bool),
         np.asarray(
@@ -173,6 +179,7 @@ def test_assemble_refined_subject_run_creates_finalized_mixed_source_run(monkeyp
             dtype=bool,
         ),
     )
+    assert tuple(int(v) for v in run["metrics/mask_present"].chunks) == (refined_subject_mask_metric_row_chunk(2), 1)
 
     body_reasons = read_reason_labels(run["components/subject_body"])
     eye_left_reasons = read_reason_labels(run["components/eye_left"])

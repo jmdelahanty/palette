@@ -19,7 +19,10 @@ from typing import Any, Iterable, Optional, Sequence
 import numpy as np
 import zarr
 
-from fisheye.shared.subject_mask_chunks import subject_mask_storage_chunks
+from fisheye.shared.subject_mask_chunks import (
+    refined_subject_mask_storage_chunks,
+    subject_mask_storage_chunks,
+)
 
 POLICY_CHOICES = ("raw_only", "raw_and_crops", "dense_readmostly_v1", "dense_readmostly_rechunk_v1")
 RAW_VIDEO_IMAGE_PATHS = {"raw_video/images_full", "raw_video/images_ds", "raw_video/images_ds_color"}
@@ -132,6 +135,12 @@ def _dest_chunks_for_policy(path: str, arr: zarr.Array, policy: str) -> tuple[in
     if _is_subject_mask_dense(path):
         if int(arr.ndim) != 4:
             return source_chunks
+        if path.startswith("refined_subject_masks_runs/"):
+            return refined_subject_mask_storage_chunks(
+                total_rows=int(arr.shape[0]),
+                height=int(arr.shape[2]),
+                width=int(arr.shape[3]),
+            )
         return subject_mask_storage_chunks(
             total_rows=int(arr.shape[0]),
             height=int(arr.shape[2]),
