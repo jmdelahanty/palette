@@ -6,6 +6,8 @@ from typing import Any, Dict, Optional, Tuple
 from zarr.codecs import BloscCodec
 
 DEFAULT_CANONICAL_CROP_ROI_CHUNK_LEN = 32
+DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN = 128
+SCRATCH_ROI_CACHE_LAYOUT_PROFILE = "scratch_v1"
 _VALID_ROI_STORAGE = {"compressed", "uncompressed"}
 
 
@@ -48,6 +50,23 @@ def build_canonical_crop_roi_layout(
         roi_chunk_len=chunk_len,
         roi_use_sharding=bool(use_sharding),
         roi_shard_len=shard_len,
+    )
+
+
+def build_scratch_roi_cache_layout(
+    *,
+    total_rois: int,
+    preferred_chunk_len: int | None = None,
+) -> CropRoiLayout:
+    chunk_preference = (
+        DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN if preferred_chunk_len is None else int(preferred_chunk_len)
+    )
+    return build_canonical_crop_roi_layout(
+        total_rois=total_rois,
+        preferred_chunk_len=chunk_preference,
+        roi_storage="uncompressed",
+        use_sharding=False,
+        roi_shard_len=None,
     )
 
 

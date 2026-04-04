@@ -40,8 +40,11 @@ from ..shared.stage_provenance import build_stage_provenance, write_stage_proven
 from ..shared.crop_signature import build_crop_signature
 from ..shared.crop_roi_layout import (
     DEFAULT_CANONICAL_CROP_ROI_CHUNK_LEN,
+    DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
+    SCRATCH_ROI_CACHE_LAYOUT_PROFILE,
     build_canonical_crop_roi_layout,
     build_crop_roi_create_kwargs,
+    build_scratch_roi_cache_layout,
     crop_roi_layout_attrs,
     normalize_crop_roi_storage,
 )
@@ -986,7 +989,7 @@ def materialize_external_roi_cache(
     write_backend: str = "kvikio",
     roi_storage: str = "uncompressed",
     use_sharding: bool = False,
-    roi_chunk_size: int = 1024,
+    roi_chunk_size: int = DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
     roi_shard_size: Optional[int] = None,
     gpu_chunk_frames: int = 96,
     require_kvikio: bool = False,
@@ -1012,12 +1015,9 @@ def materialize_external_roi_cache(
     storage_norm = normalize_crop_roi_storage(roi_storage, default="compressed")
     if backend_norm not in {"standard", "kvikio"}:
         backend_norm = "standard"
-    layout = build_canonical_crop_roi_layout(
+    layout = build_scratch_roi_cache_layout(
         total_rois=total_rois,
         preferred_chunk_len=int(roi_chunk_size),
-        roi_storage=storage_norm,
-        use_sharding=bool(use_sharding),
-        roi_shard_len=roi_shard_size,
     )
     roi_chunk_len = layout.roi_chunk_len
     shard_len = layout.roi_shard_len if layout.roi_shard_len is not None else roi_chunk_len
@@ -1075,6 +1075,8 @@ def materialize_external_roi_cache(
         overwrite=True,
     )
     roi_images = cache_root.create_array("roi_images", **roi_create_kwargs)
+    cache_root.attrs.update(crop_roi_layout_attrs(layout))
+    cache_root.attrs["cache_layout_profile"] = SCRATCH_ROI_CACHE_LAYOUT_PROFILE
 
     decode_seconds = 0.0
     compute_seconds = 0.0
@@ -1204,8 +1206,9 @@ def materialize_external_roi_cache(
         "fallback_reason": fallback_reason,
         "roi_chunk_len": int(roi_chunk_len),
         "roi_shard_len": int(shard_len),
-        "roi_storage": storage_norm,
-        "roi_use_sharding": bool(use_sharding),
+        "roi_storage": layout.roi_storage,
+        "roi_use_sharding": bool(layout.roi_use_sharding),
+        "roi_layout_profile": SCRATCH_ROI_CACHE_LAYOUT_PROFILE,
         "gpu_chunk_frames": int(gpu_chunk_frames),
         "video_path": str(video_path),
         "cache_path": str(cache_path),
@@ -1277,7 +1280,7 @@ def materialize_external_roi_cache_for_crop_run(
     write_backend: str = "kvikio",
     roi_storage: str = "uncompressed",
     use_sharding: bool = False,
-    roi_chunk_size: int = 1024,
+    roi_chunk_size: int = DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
     roi_shard_size: Optional[int] = None,
     gpu_chunk_frames: int = 96,
     require_kvikio: bool = False,

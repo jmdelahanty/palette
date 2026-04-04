@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from fisheye.shared.crop_roi_layout import (
+    DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
     build_canonical_crop_roi_layout,
     build_crop_roi_create_kwargs,
+    build_scratch_roi_cache_layout,
     crop_roi_layout_attrs,
 )
 
@@ -60,3 +62,12 @@ def test_crop_roi_layout_attrs_omits_shard_len_when_unsharded() -> None:
         "roi_chunk_len": 16,
         "roi_use_sharding": False,
     }
+
+
+def test_build_scratch_roi_cache_layout_uses_explicit_scratch_defaults() -> None:
+    layout = build_scratch_roi_cache_layout(total_rois=500)
+
+    assert layout.roi_storage == "uncompressed"
+    assert layout.roi_chunk_len == DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN
+    assert layout.roi_use_sharding is False
+    assert layout.roi_shard_len is None

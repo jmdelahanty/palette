@@ -13,6 +13,13 @@ from typing import Any, Optional, Sequence
 import numpy as np
 import zarr
 
+from fisheye.shared.crop_roi_layout import (
+    DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
+    SCRATCH_ROI_CACHE_LAYOUT_PROFILE,
+    build_crop_roi_create_kwargs,
+    build_scratch_roi_cache_layout,
+    crop_roi_layout_attrs,
+)
 from fisheye.shared.type_conversions import normalize_attr
 
 os.environ.setdefault("DECORD_EOF_RETRY_MAX", "65536")
@@ -634,33 +641,16 @@ class CropImageSource:
             if self.frame_source_kind == "source_video_path" and self.frame_source_path:
                 from fisheye.tracking.crop import materialize_external_roi_cache_for_crop_run
 
-                cache_roi_storage = str(self.crop_group.attrs.get("roi_storage") or "uncompressed")
-                roi_chunk_attr = self.crop_group.attrs.get("roi_chunk_len")
-                try:
-                    cache_roi_chunk_size = max(1, int(roi_chunk_attr)) if roi_chunk_attr is not None else 128
-                except (TypeError, ValueError):
-                    cache_roi_chunk_size = 128
-                cache_use_sharding = bool(self.crop_group.attrs.get("roi_use_sharding", False))
-                roi_shard_attr = self.crop_group.attrs.get("roi_shard_len")
-                try:
-                    cache_roi_shard_size = (
-                        max(cache_roi_chunk_size, int(roi_shard_attr))
-                        if roi_shard_attr is not None
-                        else None
-                    )
-                except (TypeError, ValueError):
-                    cache_roi_shard_size = None
-
                 cache_result = materialize_external_roi_cache_for_crop_run(
                     cache_path=cache_path,
                     source_zarr_path=archive_path,
                     crop_run_name=self.crop_run_name,
                     console=console,
                     write_backend="kvikio",
-                    roi_storage=cache_roi_storage,
-                    use_sharding=cache_use_sharding,
-                    roi_chunk_size=cache_roi_chunk_size,
-                    roi_shard_size=cache_roi_shard_size,
+                    roi_storage="uncompressed",
+                    use_sharding=False,
+                    roi_chunk_size=DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
+                    roi_shard_size=None,
                     gpu_chunk_frames=96,
                     require_kvikio=False,
                     prefer_gpu=True,
@@ -681,17 +671,20 @@ class CropImageSource:
                         "cache_roi_shard_len": cache_result.get("roi_shard_len"),
                         "cache_roi_storage": cache_result.get("roi_storage"),
                         "cache_roi_use_sharding": cache_result.get("roi_use_sharding"),
+                        "cache_layout_profile": cache_result.get("roi_layout_profile", SCRATCH_ROI_CACHE_LAYOUT_PROFILE),
                         "cache_gpu_chunk_frames": cache_result.get("gpu_chunk_frames"),
                     }
                 )
             else:
-                chunk_len = min(max(1, _ROI_CACHE_BUILD_BATCH), self.total_rois) if self.total_rois > 0 else 1
+                cache_layout = build_scratch_roi_cache_layout(total_rois=self.total_rois)
                 cache_arr = cache_group.create_array(
                     "roi_images",
-                    shape=expected_shape,
-                    chunks=(chunk_len, expected_shape[1], expected_shape[2]),
-                    dtype="u1",
-                    overwrite=True,
+                    **build_crop_roi_create_kwargs(
+                        total_rois=self.total_rois,
+                        roi_sz=self.roi_shape,
+                        layout=cache_layout,
+                        overwrite=True,
+                    ),
                 )
                 if console is not None and hasattr(console, "print"):
                     console.print(
@@ -713,6 +706,14 @@ class CropImageSource:
                 cache_group.attrs["cache_write_backend_requested"] = "standard"
                 cache_group.attrs["cache_write_backend_effective"] = "standard_zarr"
                 cache_group.attrs["cache_acceleration"] = "cpu"
+                cache_group.attrs["cache_roi_chunk_len"] = int(cache_layout.roi_chunk_len)
+                cache_group.attrs["cache_roi_shard_len"] = (
+                    int(cache_layout.roi_shard_len) if cache_layout.roi_shard_len is not None else int(cache_layout.roi_chunk_len)
+                )
+                cache_group.attrs["cache_roi_storage"] = cache_layout.roi_storage
+                cache_group.attrs["cache_roi_use_sharding"] = bool(cache_layout.roi_use_sharding)
+                cache_group.attrs["cache_layout_profile"] = SCRATCH_ROI_CACHE_LAYOUT_PROFILE
+                cache_group.attrs.update(crop_roi_layout_attrs(cache_layout))
             cache_group.attrs["cache_complete"] = True
             if console is not None and hasattr(console, "print"):
                 console.print(

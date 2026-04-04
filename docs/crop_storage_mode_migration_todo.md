@@ -99,6 +99,8 @@ Date anchored: 2026-03-06.
 - [x] Keep temporary caches outside canonical archives by default.
 - [x] Ensure temporary caches do not alter `crop_runs.latest`,
   `latest_materialized`, `latest_any`, or review status.
+- [x] Treat temporary ROI cache layout as a separate scratch/runtime policy
+  rather than inheriting canonical crop-run layout semantics.
 - [x] Wire cache support into YOLO keypoint inference, YOLO eye-mask
   inference, and keypoint retry.
 - [x] Attempt a smoke-archive `geometry_live` benchmark.

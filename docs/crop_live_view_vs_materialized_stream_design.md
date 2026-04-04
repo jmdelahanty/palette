@@ -53,6 +53,8 @@ state.
   ROI cache.
 - Temporary ROI caches are runtime accelerators and remain outside canonical
   archives by default.
+- Temporary ROI caches should use an explicit scratch-optimized ROI layout
+  profile rather than inheriting the canonical materialized crop layout.
 
 ### Future target policy
 

@@ -9,6 +9,7 @@ from rich.console import Console
 
 import fisheye.shared.crop_image_source as crop_mod
 from fisheye.shared.crop_image_source import CropImageSource, resolve_crop_run
+from fisheye.shared.crop_roi_layout import DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN, SCRATCH_ROI_CACHE_LAYOUT_PROFILE
 
 
 class _FakeArray:
@@ -247,6 +248,14 @@ def test_crop_image_source_builds_and_reuses_temporary_roi_cache(tmp_path: Path)
     assert source.roi_cache_created is True
     assert source.roi_cache_path is not None
     assert Path(source.roi_cache_path).exists()
+    cache_root = zarr.open_group(str(source.roi_cache_path), mode="r")
+    assert cache_root.attrs["cache_layout_profile"] == SCRATCH_ROI_CACHE_LAYOUT_PROFILE
+    assert cache_root.attrs["cache_roi_storage"] == "uncompressed"
+    assert cache_root.attrs["cache_roi_chunk_len"] == min(
+        DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
+        int(cache_root["roi_images"].shape[0]),
+    )
+    assert cache_root.attrs["cache_roi_use_sharding"] is False
     source.close()
 
     root_rw = zarr.open_group(str(zarr_path), mode="a")
@@ -411,7 +420,69 @@ def test_crop_image_source_uses_accelerated_external_cache_builder(
     assert calls[0]["source_zarr_path"] == zarr_path.resolve()
     assert calls[0]["crop_run_name"] == "crop_geometry"
     assert calls[0]["roi_storage"] == "uncompressed"
-    assert calls[0]["roi_chunk_size"] == 128
+    assert calls[0]["roi_chunk_size"] == DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN
+    assert calls[0]["use_sharding"] is False
+    assert calls[0]["roi_shard_size"] is None
+    source.close()
+
+
+def test_crop_image_source_external_cache_does_not_inherit_canonical_crop_layout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    zarr_path = _make_external_geometry_only_archive(tmp_path)
+    root = zarr.open_group(str(zarr_path), mode="a")
+    crop = root["crop_runs"]["crop_geometry"]
+    crop.attrs["roi_storage"] = "compressed"
+    crop.attrs["roi_chunk_len"] = 17
+    crop.attrs["roi_use_sharding"] = True
+    crop.attrs["roi_shard_len"] = 68
+
+    calls: list[dict[str, object]] = []
+
+    import fisheye.tracking.crop as tracking_crop
+
+    def _fake_materialize_external_roi_cache_for_crop_run(**kwargs):
+        calls.append(kwargs)
+        cache_root = zarr.open_group(str(kwargs["cache_path"]), mode="a")
+        cache_root.create_array(
+            "roi_images",
+            data=np.arange(2 * 4 * 4, dtype=np.uint8).reshape(2, 4, 4),
+            overwrite=True,
+        )
+        return {
+            "write_backend_requested": "kvikio",
+            "write_backend_effective": "kvikio_gds",
+            "acceleration": "gpu",
+            "fallback_reason": None,
+            "decode_seconds": 1.0,
+            "compute_seconds": 2.0,
+            "write_seconds": 3.0,
+            "duration_seconds": 6.0,
+            "roi_chunk_len": DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
+            "roi_shard_len": DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN,
+            "roi_storage": "uncompressed",
+            "roi_use_sharding": False,
+            "roi_layout_profile": SCRATCH_ROI_CACHE_LAYOUT_PROFILE,
+            "gpu_chunk_frames": 96,
+        }
+
+    monkeypatch.setattr(
+        tracking_crop,
+        "materialize_external_roi_cache_for_crop_run",
+        _fake_materialize_external_roi_cache_for_crop_run,
+    )
+
+    source = CropImageSource.open(
+        zarr.open_group(str(zarr_path), mode="r"),
+        zarr_path=zarr_path,
+        roi_cache_policy="always",
+        roi_cache_dir=tmp_path / "roi-cache",
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["roi_storage"] == "uncompressed"
+    assert calls[0]["roi_chunk_size"] == DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN
     assert calls[0]["use_sharding"] is False
     assert calls[0]["roi_shard_size"] is None
     source.close()
