@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 import zarr
 from rich.console import Console
 
@@ -126,6 +127,28 @@ def _make_external_geometry_only_archive(tmp_path: Path) -> Path:
     )
     crop.create_array("frame_indices", data=np.array([0, 1], dtype=np.int32), overwrite=True)
     return zarr_path
+
+
+def _make_external_geometry_only_root(source_video_path: str) -> _FakeGroup:
+    root = _make_root()
+    root.attrs["width"] = 6
+    root.attrs["height"] = 6
+    root.attrs["source_video_path"] = source_video_path
+
+    crop_parent = root.create_group("crop_runs")
+    crop_parent.attrs["latest_any"] = "crop_geometry"
+
+    crop = crop_parent.create_group("crop_geometry")
+    crop.attrs["crop_storage_mode"] = "geometry_only"
+    crop.attrs["roi_size"] = [4, 4]
+    crop.attrs["crop_signature"] = "sig-external-001"
+    crop.attrs["source_video_path"] = source_video_path
+    crop.create_array(
+        "roi_coordinates_full",
+        data=np.array([[-1, 1], [3, 2]], dtype=np.int32),
+    )
+    crop.create_array("frame_indices", data=np.array([0, 1], dtype=np.int32))
+    return root
 
 
 def test_resolve_crop_run_prefers_latest_any_for_mixed_mode_reader() -> None:
@@ -485,4 +508,144 @@ def test_crop_image_source_external_cache_does_not_inherit_canonical_crop_layout
     assert calls[0]["roi_chunk_size"] == DEFAULT_SCRATCH_ROI_CACHE_CHUNK_LEN
     assert calls[0]["use_sharding"] is False
     assert calls[0]["roi_shard_size"] is None
+    source.close()
+
+
+def test_crop_image_source_external_geometry_live_gpu_uses_gpu_helper(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_video_path = str((tmp_path / "source.mp4").resolve())
+    root = _make_external_geometry_only_root(source_video_path)
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr(crop_mod, "_check_external_video_live_gpu_available", lambda: (True, "available"))
+
+    def _fake_gpu_batch_reader(
+        *,
+        video_path: Path,
+        frame_indices: np.ndarray,
+        roi_coordinates_full: np.ndarray,
+        roi_shape: tuple[int, int],
+        video_shape: tuple[int, int],
+        gpu_chunk_frames: int,
+    ) -> np.ndarray:
+        seen["video_path"] = video_path
+        seen["frame_indices"] = frame_indices.copy()
+        seen["roi_coordinates_full"] = roi_coordinates_full.copy()
+        seen["roi_shape"] = roi_shape
+        seen["video_shape"] = video_shape
+        seen["gpu_chunk_frames"] = gpu_chunk_frames
+        return np.full((frame_indices.shape[0], roi_shape[0], roi_shape[1]), 17, dtype=np.uint8)
+
+    monkeypatch.setattr(crop_mod, "_read_external_video_live_gpu_batch", _fake_gpu_batch_reader)
+
+    def _unexpected_cpu_read(self, roi_indices: np.ndarray) -> np.ndarray:  # noqa: ANN001
+        raise AssertionError(f"CPU live read should not be used: {roi_indices}")
+
+    monkeypatch.setattr(CropImageSource, "_read_live_indices_cpu", _unexpected_cpu_read)
+
+    source = CropImageSource.open(
+        root,
+        roi_cache_policy="never",
+        roi_live_acceleration="gpu",
+        roi_live_gpu_chunk_frames=17,
+    )
+    batch = source.read_slice(0, 2)
+
+    assert source.roi_live_acceleration_requested == "gpu"
+    assert source.roi_live_acceleration_effective == "gpu"
+    assert source.roi_live_acceleration_fallback_reason is None
+    np.testing.assert_array_equal(batch, np.full((2, 4, 4), 17, dtype=np.uint8))
+    assert seen["video_path"] == Path(source_video_path)
+    np.testing.assert_array_equal(seen["frame_indices"], np.array([0, 1], dtype=np.int64))
+    np.testing.assert_array_equal(
+        seen["roi_coordinates_full"],
+        np.array([[-1, 1], [3, 2]], dtype=np.int32),
+    )
+    assert seen["roi_shape"] == (4, 4)
+    assert seen["video_shape"] == (6, 6)
+    assert seen["gpu_chunk_frames"] == 17
+    source.close()
+
+
+def test_crop_image_source_external_geometry_live_gpu_auto_falls_back_to_cpu_when_unavailable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = _make_external_geometry_only_root(str((tmp_path / "source.mp4").resolve()))
+
+    monkeypatch.setattr(
+        crop_mod,
+        "_check_external_video_live_gpu_available",
+        lambda: (False, "cuda_unavailable"),
+    )
+
+    def _fake_cpu_read(self, roi_indices: np.ndarray) -> np.ndarray:  # noqa: ANN001
+        return np.full((roi_indices.shape[0], 4, 4), 23, dtype=np.uint8)
+
+    monkeypatch.setattr(CropImageSource, "_read_live_indices_cpu", _fake_cpu_read)
+
+    source = CropImageSource.open(
+        root,
+        roi_cache_policy="never",
+        roi_live_acceleration="auto",
+    )
+    batch = source.read_slice(0, 2)
+
+    assert source.roi_live_acceleration_requested == "auto"
+    assert source.roi_live_acceleration_effective == "cpu"
+    assert source.roi_live_acceleration_fallback_reason == "cuda_unavailable"
+    np.testing.assert_array_equal(batch, np.full((2, 4, 4), 23, dtype=np.uint8))
+    source.close()
+
+
+def test_crop_image_source_external_geometry_live_gpu_explicit_requires_available_gpu(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = _make_external_geometry_only_root(str((tmp_path / "source.mp4").resolve()))
+    monkeypatch.setattr(
+        crop_mod,
+        "_check_external_video_live_gpu_available",
+        lambda: (False, "cuda_unavailable"),
+    )
+
+    with pytest.raises(ValueError, match="roi_live_acceleration='gpu'"):
+        CropImageSource.open(
+            root,
+            roi_cache_policy="never",
+            roi_live_acceleration="gpu",
+        )
+
+
+def test_crop_image_source_external_geometry_live_gpu_auto_runtime_falls_back_to_cpu(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = _make_external_geometry_only_root(str((tmp_path / "source.mp4").resolve()))
+
+    monkeypatch.setattr(crop_mod, "_check_external_video_live_gpu_available", lambda: (True, "available"))
+
+    def _failing_gpu_batch_reader(**_kwargs) -> np.ndarray:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(crop_mod, "_read_external_video_live_gpu_batch", _failing_gpu_batch_reader)
+
+    def _fake_cpu_read(self, roi_indices: np.ndarray) -> np.ndarray:  # noqa: ANN001
+        return np.full((roi_indices.shape[0], 4, 4), 31, dtype=np.uint8)
+
+    monkeypatch.setattr(CropImageSource, "_read_live_indices_cpu", _fake_cpu_read)
+
+    source = CropImageSource.open(
+        root,
+        roi_cache_policy="never",
+        roi_live_acceleration="auto",
+    )
+    batch = source.read_slice(0, 2)
+
+    assert source.roi_live_acceleration_requested == "auto"
+    assert source.roi_live_acceleration_effective == "cpu"
+    assert source.roi_live_acceleration_fallback_reason == "runtime_gpu_fallback:RuntimeError: boom"
+    np.testing.assert_array_equal(batch, np.full((2, 4, 4), 31, dtype=np.uint8))
     source.close()

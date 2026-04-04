@@ -46,6 +46,8 @@ else:  # pragma: no cover - import itself is environment dependent
 _ROI_CACHE_POLICIES = {"never", "auto", "always"}
 _ROI_CACHE_AUTO_MIN_SOURCE_PIXELS = 2048 * 2048
 _ROI_CACHE_BUILD_BATCH = 64
+_ROI_LIVE_ACCELERATION_CHOICES = {"auto", "cpu", "gpu"}
+_ROI_LIVE_GPU_CHUNK_FRAMES_DEFAULT = 96
 
 
 def _normalize_run_name(value: object) -> str | None:
@@ -205,6 +207,14 @@ def _normalize_roi_cache_policy(value: object) -> str:
     return text
 
 
+def _normalize_roi_live_acceleration(value: object) -> str:
+    text = _normalize_run_name(value) or "auto"
+    if text not in _ROI_LIVE_ACCELERATION_CHOICES:
+        choices = ", ".join(sorted(_ROI_LIVE_ACCELERATION_CHOICES))
+        raise ValueError(f"Invalid roi_live_acceleration '{text}'. Expected one of: {choices}")
+    return text
+
+
 def _resolve_frame_shape(
     root: zarr.Group,
     crop_group: zarr.Group,
@@ -318,6 +328,87 @@ def _crop_from_top_left(
     return roi
 
 
+def _check_external_video_live_gpu_available() -> tuple[bool, str]:
+    try:
+        from fisheye.tracking.crop import check_gpu_crop_available
+    except Exception as exc:  # pragma: no cover - defensive import fallback
+        return False, f"gpu_crop_import_failed: {exc}"
+    return check_gpu_crop_available()
+
+
+def _read_external_video_live_gpu_batch(
+    *,
+    video_path: Path,
+    frame_indices: np.ndarray,
+    roi_coordinates_full: np.ndarray,
+    roi_shape: tuple[int, int],
+    video_shape: tuple[int, int],
+    gpu_chunk_frames: int,
+) -> np.ndarray:
+    frame_indices_np = np.asarray(frame_indices, dtype=np.int64).reshape(-1)
+    roi_coordinates_np = np.asarray(roi_coordinates_full, dtype=np.int32)
+    if roi_coordinates_np.shape[0] != frame_indices_np.shape[0]:
+        raise ValueError(
+            "frame_indices and roi_coordinates_full must have matching leading dimensions"
+        )
+
+    roi_h, roi_w = roi_shape
+    batch = np.zeros((frame_indices_np.shape[0], roi_h, roi_w), dtype=np.uint8)
+    if frame_indices_np.size == 0:
+        return batch
+
+    from fisheye.tracking import crop as tracking_crop
+
+    if tracking_crop.VideoReader is None or tracking_crop.gpu is None or tracking_crop.decord is None:
+        raise RuntimeError("GPU live ROI reads require Decord GPU video support.")
+    if not getattr(tracking_crop, "_TORCH_AVAILABLE", False):
+        raise RuntimeError("GPU live ROI reads require PyTorch.")
+
+    frame_to_roi: dict[int, list[int]] = {}
+    for local_roi_idx, frame_idx in enumerate(frame_indices_np.tolist()):
+        frame_to_roi.setdefault(int(frame_idx), []).append(int(local_roi_idx))
+
+    unique_frames = sorted(frame_to_roi.keys())
+    chunk_len = max(1, int(gpu_chunk_frames))
+    video_reader = None
+    try:
+        tracking_crop.decord.bridge.set_bridge("torch")
+        video_reader = tracking_crop.VideoReader(str(video_path), ctx=tracking_crop.gpu(0))
+        for chunk_idx, start in enumerate(range(0, len(unique_frames), chunk_len)):
+            chunk_frames = unique_frames[start : start + chunk_len]
+            if not chunk_frames:
+                continue
+            frames_gpu = video_reader.get_batch(chunk_frames)
+            _, roi_ids, crops_cpu, _coords_cpu, _chunk_time = tracking_crop._process_chunk_gpu_from_top_left(
+                chunk_idx,
+                chunk_frames,
+                frames_gpu,
+                frame_to_roi,
+                roi_coordinates_np,
+                roi_shape,
+                video_shape,
+                return_device=False,
+            )
+            if roi_ids.size > 0:
+                batch[roi_ids] = crops_cpu
+            del frames_gpu
+    finally:
+        try:
+            if tracking_crop.decord is not None:
+                tracking_crop.decord.bridge.set_bridge("native")
+        except Exception:
+            pass
+        video_reader = None
+        torch_mod = getattr(tracking_crop, "torch", None)
+        try:
+            if torch_mod is not None and torch_mod.cuda.is_available():
+                torch_mod.cuda.empty_cache()
+        except Exception:
+            pass
+
+    return batch
+
+
 class _ExternalFrameReader:
     def __init__(self, video_path: Path) -> None:
         self.video_path = video_path
@@ -413,6 +504,10 @@ class CropImageSource:
     roi_cache_created: bool = False
     roi_cache_key: str | None = None
     roi_cache_path: str | None = None
+    roi_live_acceleration_requested: str | None = None
+    roi_live_acceleration_effective: str | None = None
+    roi_live_acceleration_fallback_reason: str | None = None
+    roi_live_gpu_chunk_frames: int = _ROI_LIVE_GPU_CHUNK_FRAMES_DEFAULT
     _roi_images: object | None = None
     _images_full: object | None = None
     _external_reader: _ExternalFrameReader | None = None
@@ -425,10 +520,14 @@ class CropImageSource:
         crop_run: str | None = None,
         zarr_path: str | Path | None = None,
         roi_cache_policy: str = "never",
+        roi_live_acceleration: str = "auto",
+        roi_live_gpu_chunk_frames: int = _ROI_LIVE_GPU_CHUNK_FRAMES_DEFAULT,
         roi_cache_dir: str | Path | None = None,
         console: Any | None = None,
     ) -> "CropImageSource":
         normalized_cache_policy = _normalize_roi_cache_policy(roi_cache_policy)
+        normalized_live_acceleration = _normalize_roi_live_acceleration(roi_live_acceleration)
+        live_gpu_chunk_frames = max(1, int(roi_live_gpu_chunk_frames))
         _crop_parent, crop_group, crop_run_name = resolve_crop_run(
             root,
             crop_run=crop_run,
@@ -465,14 +564,22 @@ class CropImageSource:
             external_reader = None
             frame_shape = roi_shape
             roi_read_mode = "materialized_crop_run"
+            live_acceleration_effective = None
+            live_acceleration_fallback_reason = None
         else:
             raw_video = root.get("raw_video")
             images_full = raw_video.get("images_full") if raw_video is not None else None
             frame_shape = _resolve_frame_shape(root, crop_group, images_full)
             if images_full is not None:
+                if normalized_live_acceleration == "gpu":
+                    raise ValueError(
+                        "roi_live_acceleration='gpu' is only supported for geometry-only external-video reads."
+                    )
                 frame_source_kind = "raw_video/images_full"
                 frame_source_path = None
                 external_reader = None
+                live_acceleration_effective = "cpu"
+                live_acceleration_fallback_reason = None
             else:
                 source_video_path = (
                     crop_group.attrs.get("source_video_path")
@@ -486,6 +593,33 @@ class CropImageSource:
                 frame_source_kind = "source_video_path"
                 frame_source_path = str(source_video_path)
                 external_reader = _ExternalFrameReader(Path(frame_source_path))
+                if normalized_live_acceleration == "cpu":
+                    live_acceleration_effective = "cpu"
+                    live_acceleration_fallback_reason = None
+                else:
+                    gpu_available, gpu_reason = _check_external_video_live_gpu_available()
+                    if normalized_live_acceleration == "gpu":
+                        if not gpu_available:
+                            raise ValueError(
+                                "roi_live_acceleration='gpu' requested, but GPU live ROI reads are unavailable: "
+                                f"{gpu_reason}"
+                            )
+                        if frame_shape is None:
+                            raise ValueError(
+                                "roi_live_acceleration='gpu' requires known source frame dimensions "
+                                "(video_width/video_height metadata)."
+                            )
+                        live_acceleration_effective = "gpu"
+                        live_acceleration_fallback_reason = None
+                    elif gpu_available and frame_shape is not None:
+                        live_acceleration_effective = "gpu"
+                        live_acceleration_fallback_reason = None
+                    else:
+                        live_acceleration_effective = "cpu"
+                        if frame_shape is None:
+                            live_acceleration_fallback_reason = "unknown_frame_shape"
+                        else:
+                            live_acceleration_fallback_reason = gpu_reason
             roi_read_mode = "geometry_only_live"
 
         source = cls(
@@ -501,6 +635,16 @@ class CropImageSource:
             frame_shape=frame_shape,
             roi_read_mode=roi_read_mode,
             roi_cache_policy=normalized_cache_policy,
+            roi_live_acceleration_requested=(
+                normalized_live_acceleration if storage_mode == "geometry_only" else None
+            ),
+            roi_live_acceleration_effective=(
+                live_acceleration_effective if storage_mode == "geometry_only" else None
+            ),
+            roi_live_acceleration_fallback_reason=(
+                live_acceleration_fallback_reason if storage_mode == "geometry_only" else None
+            ),
+            roi_live_gpu_chunk_frames=live_gpu_chunk_frames,
             _roi_images=roi_images,
             _images_full=images_full if storage_mode == "geometry_only" else None,
             _external_reader=external_reader if storage_mode == "geometry_only" else None,
@@ -544,6 +688,31 @@ class CropImageSource:
         return self._read_live_indices(roi_indices)
 
     def _read_live_indices(self, roi_indices: np.ndarray) -> np.ndarray:
+        if (
+            self.frame_source_kind == "source_video_path"
+            and self.frame_source_path is not None
+            and self.roi_live_acceleration_effective == "gpu"
+            and self.frame_shape is not None
+        ):
+            try:
+                return _read_external_video_live_gpu_batch(
+                    video_path=Path(self.frame_source_path),
+                    frame_indices=self.frame_indices[roi_indices],
+                    roi_coordinates_full=self.roi_coordinates_full[roi_indices],
+                    roi_shape=self.roi_shape,
+                    video_shape=self.frame_shape,
+                    gpu_chunk_frames=self.roi_live_gpu_chunk_frames,
+                )
+            except Exception as exc:
+                if self.roi_live_acceleration_requested == "gpu":
+                    raise
+                self.roi_live_acceleration_effective = "cpu"
+                self.roi_live_acceleration_fallback_reason = (
+                    f"runtime_gpu_fallback:{exc.__class__.__name__}: {exc}"
+                )
+        return self._read_live_indices_cpu(roi_indices)
+
+    def _read_live_indices_cpu(self, roi_indices: np.ndarray) -> np.ndarray:
         roi_h, roi_w = self.roi_shape
         batch = np.zeros((roi_indices.size, roi_h, roi_w), dtype=np.uint8)
         coords = self.roi_coordinates_full[roi_indices]

@@ -94,6 +94,8 @@ def test_build_keypoint_and_eye_commands_include_cache_settings(tmp_path: Path) 
         run_name="kp_run",
         roi_cache_policy="always",
         roi_cache_dir=cache_dir,
+        roi_live_acceleration="gpu",
+        roi_live_gpu_chunk_frames=17,
         batch_size=128,
         device="cuda:0",
         imgsz=512,
@@ -107,6 +109,8 @@ def test_build_keypoint_and_eye_commands_include_cache_settings(tmp_path: Path) 
         run_name="eye_run",
         roi_cache_policy="always",
         roi_cache_dir=cache_dir,
+        roi_live_acceleration="gpu",
+        roi_live_gpu_chunk_frames=17,
         batch_size=64,
         device="cuda:0",
         write_binary_masks=True,
@@ -117,13 +121,19 @@ def test_build_keypoint_and_eye_commands_include_cache_settings(tmp_path: Path) 
 
     assert "--roi-cache-policy" in key_cmd
     assert "--roi-cache-dir" in key_cmd
+    assert "--roi-live-acceleration" in key_cmd
+    assert "--roi-live-gpu-chunk-frames" in key_cmd
     assert "--device" in key_cmd
     assert "--imgsz" in key_cmd
     assert "--profile-timings" in key_cmd
     assert "kp_run" in key_cmd
+    assert "gpu" in key_cmd
+    assert "17" in key_cmd
 
     assert "--roi-cache-policy" in eye_cmd
     assert "--roi-cache-dir" in eye_cmd
+    assert "--roi-live-acceleration" in eye_cmd
+    assert "--roi-live-gpu-chunk-frames" in eye_cmd
     assert "--device" in eye_cmd
     assert "--write-binary-masks" in eye_cmd
     assert "--mask-probs-chunk-rois" in eye_cmd
@@ -148,6 +158,10 @@ def test_stage_metrics_reports_cache_usage_fields() -> None:
             "source_roi_cache_path": "/tmp/cache.zarr",
             "source_roi_cache_key": "abc123",
             "roi_cache_policy": "always",
+            "source_roi_live_acceleration_requested": "auto",
+            "source_roi_live_acceleration_effective": "gpu",
+            "source_roi_live_acceleration_fallback_reason": None,
+            "source_roi_live_gpu_chunk_frames": 96,
             "timing_profile": {"enabled": True, "stages": {"roi_read": {"total_seconds": 1.0}}},
         },
         wall_seconds=5.0,
@@ -159,6 +173,9 @@ def test_stage_metrics_reports_cache_usage_fields() -> None:
     assert metrics["throughput_per_second"] == 25.0
     assert metrics["source_roi_read_mode"] == "temporary_cache"
     assert metrics["source_roi_cache_used"] is True
+    assert metrics["source_roi_live_acceleration_requested"] == "auto"
+    assert metrics["source_roi_live_acceleration_effective"] == "gpu"
+    assert metrics["source_roi_live_gpu_chunk_frames"] == 96
     assert metrics["timing_profile"]["enabled"] is True
 
 

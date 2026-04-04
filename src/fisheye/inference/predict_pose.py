@@ -288,6 +288,18 @@ Examples:
         help="Optional scratch directory for temporary ROI caches.",
     )
     parser.add_argument(
+        "--roi-live-acceleration",
+        choices=("auto", "cpu", "gpu"),
+        default="auto",
+        help="Live ROI read acceleration for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument(
+        "--roi-live-gpu-chunk-frames",
+        type=int,
+        default=96,
+        help="Frame batch size for GPU-accelerated live ROI reads (default: 96).",
+    )
+    parser.add_argument(
         "--profile-timings",
         action="store_true",
         help="Collect per-stage timing diagnostics and store them in the output run attrs.",
@@ -318,6 +330,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             max_det=args.max_det,
             roi_cache_policy=args.roi_cache_policy,
             roi_cache_dir=args.roi_cache_dir,
+            roi_live_acceleration=args.roi_live_acceleration,
+            roi_live_gpu_chunk_frames=args.roi_live_gpu_chunk_frames,
             profile_timings=args.profile_timings,
             verbose=args.verbose,
             registry=(status_context.registry_path if status_context is not None else None),

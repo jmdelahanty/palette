@@ -236,6 +236,8 @@ def _build_keypoint_command(
     run_name: str,
     roi_cache_policy: str,
     roi_cache_dir: Optional[Path],
+    roi_live_acceleration: str,
+    roi_live_gpu_chunk_frames: int,
     batch_size: int,
     device: Optional[str],
     imgsz: Optional[int],
@@ -257,6 +259,10 @@ def _build_keypoint_command(
         str(batch_size),
         "--roi-cache-policy",
         roi_cache_policy,
+        "--roi-live-acceleration",
+        roi_live_acceleration,
+        "--roi-live-gpu-chunk-frames",
+        str(roi_live_gpu_chunk_frames),
     ]
     if roi_cache_dir is not None:
         cmd.extend(["--roi-cache-dir", str(roi_cache_dir)])
@@ -278,6 +284,8 @@ def _build_eye_mask_command(
     run_name: str,
     roi_cache_policy: str,
     roi_cache_dir: Optional[Path],
+    roi_live_acceleration: str,
+    roi_live_gpu_chunk_frames: int,
     batch_size: int,
     device: Optional[str],
     write_binary_masks: bool,
@@ -302,6 +310,10 @@ def _build_eye_mask_command(
         str(batch_size),
         "--roi-cache-policy",
         roi_cache_policy,
+        "--roi-live-acceleration",
+        roi_live_acceleration,
+        "--roi-live-gpu-chunk-frames",
+        str(roi_live_gpu_chunk_frames),
     ]
     if roi_cache_dir is not None:
         cmd.extend(["--roi-cache-dir", str(roi_cache_dir)])
@@ -354,6 +366,20 @@ def _stage_metrics(
         "source_roi_cache_path": _normalize_text(attrs.get("source_roi_cache_path")),
         "source_roi_cache_key": _normalize_text(attrs.get("source_roi_cache_key")),
         "roi_cache_policy": _normalize_text(attrs.get("roi_cache_policy")),
+        "source_roi_live_acceleration_requested": _normalize_text(
+            attrs.get("source_roi_live_acceleration_requested")
+        ),
+        "source_roi_live_acceleration_effective": _normalize_text(
+            attrs.get("source_roi_live_acceleration_effective")
+        ),
+        "source_roi_live_acceleration_fallback_reason": _normalize_text(
+            attrs.get("source_roi_live_acceleration_fallback_reason")
+        ),
+        "source_roi_live_gpu_chunk_frames": (
+            int(attrs.get("source_roi_live_gpu_chunk_frames"))
+            if attrs.get("source_roi_live_gpu_chunk_frames") is not None
+            else None
+        ),
         "timing_profile": attrs.get("timing_profile"),
     }
 
@@ -471,6 +497,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--device", type=str, default=None, help="Optional shared device override.")
     parser.add_argument("--imgsz", type=int, default=None, help="Optional pose imgsz override.")
+    parser.add_argument(
+        "--roi-live-acceleration",
+        choices=("auto", "cpu", "gpu"),
+        default="auto",
+        help="Live ROI read acceleration for geometry-only crop scenarios (default: auto).",
+    )
+    parser.add_argument(
+        "--roi-live-gpu-chunk-frames",
+        type=int,
+        default=96,
+        help="Frame batch size for GPU-accelerated live ROI reads (default: 96).",
+    )
     parser.add_argument("--write-binary-masks", action="store_true", help="Write binary eye masks during U-Net benchmark.")
     parser.add_argument(
         "--profile-timings",
@@ -585,6 +623,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             run_name=key_run_name,
             roi_cache_policy=spec.roi_cache_policy,
             roi_cache_dir=spec.roi_cache_dir,
+            roi_live_acceleration=args.roi_live_acceleration,
+            roi_live_gpu_chunk_frames=int(args.roi_live_gpu_chunk_frames),
             batch_size=int(args.keypoint_batch_size),
             device=args.device,
             imgsz=args.imgsz,
@@ -605,6 +645,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 f"read_mode={scenario_result['keypoints']['metrics']['source_roi_read_mode']} "
                 f"cache_used={scenario_result['keypoints']['metrics']['source_roi_cache_used']}"
             )
+            live_accel = scenario_result["keypoints"]["metrics"].get("source_roi_live_acceleration_effective")
+            if live_accel:
+                print(f"    live_acceleration: {live_accel}")
             top_stage = _top_timing_stage(scenario_result["keypoints"]["metrics"])
             if top_stage:
                 print(f"    timing_top: {top_stage}")
@@ -626,6 +669,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             run_name=eye_run_name,
             roi_cache_policy=spec.roi_cache_policy,
             roi_cache_dir=spec.roi_cache_dir,
+            roi_live_acceleration=args.roi_live_acceleration,
+            roi_live_gpu_chunk_frames=int(args.roi_live_gpu_chunk_frames),
             batch_size=int(args.eye_batch_size),
             device=args.device,
             write_binary_masks=bool(args.write_binary_masks),
@@ -648,6 +693,9 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
                 f"read_mode={scenario_result['eye_masks']['metrics']['source_roi_read_mode']} "
                 f"cache_used={scenario_result['eye_masks']['metrics']['source_roi_cache_used']}"
             )
+            live_accel = scenario_result["eye_masks"]["metrics"].get("source_roi_live_acceleration_effective")
+            if live_accel:
+                print(f"    live_acceleration: {live_accel}")
             top_stage = _top_timing_stage(scenario_result["eye_masks"]["metrics"])
             if top_stage:
                 print(f"    timing_top: {top_stage}")
@@ -673,6 +721,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
             "eye_mask_chunk_rois": int(args.eye_mask_chunk_rois) if args.eye_mask_chunk_rois else None,
             "device": args.device,
             "imgsz": args.imgsz,
+            "roi_live_acceleration": str(args.roi_live_acceleration),
+            "roi_live_gpu_chunk_frames": int(args.roi_live_gpu_chunk_frames),
             "skip_eye_masks": bool(args.skip_eye_masks),
             "write_binary_masks": bool(args.write_binary_masks),
             "profile_timings": bool(args.profile_timings),

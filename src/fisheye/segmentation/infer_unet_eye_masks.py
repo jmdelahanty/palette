@@ -588,6 +588,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Optional scratch directory for temporary ROI caches.",
     )
     parser.add_argument(
+        "--roi-live-acceleration",
+        choices=("auto", "cpu", "gpu"),
+        default="auto",
+        help="Live ROI read acceleration for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument(
+        "--roi-live-gpu-chunk-frames",
+        type=int,
+        default=96,
+        help="Frame batch size for GPU-accelerated live ROI reads (default: 96).",
+    )
+    parser.add_argument(
         "--mask-probs-chunk-rois",
         type=int,
         default=32,
@@ -688,6 +700,8 @@ def main(
         crop_run=str(crop_run) if crop_run is not None else None,
         zarr_path=zarr_path,
         roi_cache_policy=args.roi_cache_policy,
+        roi_live_acceleration=args.roi_live_acceleration,
+        roi_live_gpu_chunk_frames=args.roi_live_gpu_chunk_frames,
         roi_cache_dir=args.roi_cache_dir,
         console=console,
     )
@@ -739,6 +753,8 @@ def main(
         "use_crop": bool(args.use_crop),
         "profile_timings": bool(args.profile_timings),
         "roi_cache_policy": str(args.roi_cache_policy),
+        "roi_live_acceleration": str(args.roi_live_acceleration),
+        "roi_live_gpu_chunk_frames": int(args.roi_live_gpu_chunk_frames),
         "roi_cache_dir": str(args.roi_cache_dir) if args.roi_cache_dir else None,
     }
     source_runs: Dict[str, str] = {}
@@ -906,6 +922,10 @@ def main(
             "source_roi_read_mode": crop_source.roi_read_mode,
             "roi_cache_policy": crop_source.roi_cache_policy,
             "source_roi_cache_used": bool(crop_source.roi_cache_used),
+            "source_roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
+            "source_roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
+            "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
+            "source_roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
             "source_checkpoint": str(checkpoint_path),
             "source_checkpoint_best_val_dice": float(checkpoint.get("best_val_dice", float("nan"))),
             "total_rois": int(total_rois),
@@ -976,6 +996,8 @@ def main(
             else None,
             "mask_probs_dtype": str(args.mask_probs_dtype),
             "roi_cache_policy": crop_source.roi_cache_policy,
+            "roi_live_acceleration": crop_source.roi_live_acceleration_requested,
+            "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
         },
         inputs={
             "source_eye_masks_run": source_run_name,
@@ -987,6 +1009,10 @@ def main(
             "source_crop_signature": normalize_attr(crop_group.attrs.get("crop_signature")),
             "source_crop_revision": crop_group.attrs.get("crop_revision"),
             "source_roi_read_mode": crop_source.roi_read_mode,
+            "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
+            "roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
+            "roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
+            "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
         },
         artifacts={
             "checkpoint_path": str(checkpoint_path),

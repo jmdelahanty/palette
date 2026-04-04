@@ -153,6 +153,10 @@ def test_infer_unet_eye_masks_supports_geometry_only_crop_runs_with_temporary_ca
             "always",
             "--roi-cache-dir",
             str(tmp_path / "roi-cache"),
+            "--roi-live-acceleration",
+            "cpu",
+            "--roi-live-gpu-chunk-frames",
+            "11",
             "--mask-probs-chunk-rois",
             "2",
             "--profile-timings",
@@ -179,6 +183,9 @@ def test_infer_unet_eye_masks_supports_geometry_only_crop_runs_with_temporary_ca
     assert run_group.attrs["roi_cache_policy"] == "always"
     assert run_group.attrs["source_roi_cache_used"] is True
     assert run_group.attrs["source_roi_cache_path"]
+    assert run_group.attrs["source_roi_live_acceleration_requested"] == "cpu"
+    assert run_group.attrs["source_roi_live_acceleration_effective"] == "cpu"
+    assert run_group.attrs["source_roi_live_gpu_chunk_frames"] == 11
     assert run_group.attrs["mask_probs_chunk_rois"] == 2
     assert run_group.attrs["profile_timings_enabled"] is True
     timing_profile = run_group.attrs["timing_profile"]
