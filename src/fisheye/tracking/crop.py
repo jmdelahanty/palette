@@ -1597,7 +1597,7 @@ def crop_from_external_video(
             crop_group.attrs['detect_review_status'] = review_status
         if preferred_policy:
             crop_group.attrs['detection_preferred_policy'] = preferred_policy
-        crop_group.attrs['crop_signature'] = _build_crop_signature(crop_group.attrs)
+        crop_group.attrs['crop_signature'] = build_crop_signature(crop_group.attrs)
         effective_backend = 'kvikio_gds' if use_kvikio_writes else 'standard_zarr'
         crop_group.attrs['write_backend'] = effective_backend
         crop_group.attrs['write_backend_requested'] = backend_norm
@@ -2972,7 +2972,7 @@ def crop_detections(
         },
     )
     write_stage_provenance(crop_group, provenance_record)
-    crop_group.attrs['crop_signature'] = _build_crop_signature(crop_group.attrs)
+    crop_group.attrs['crop_signature'] = build_crop_signature(crop_group.attrs)
 
     # Add GPU details if available (even though zarr workflow uses CPU)
     if env_info['gpu']['available'] and env_info['gpu'].get('devices'):

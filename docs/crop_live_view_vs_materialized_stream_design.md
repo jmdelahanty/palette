@@ -450,6 +450,26 @@ Interpretation:
   large-frame archives like this one rather than waiting for repeated live-read
   confirmation on every run.
 
+Latest follow-up signal on `2026-04-04`:
+
+- a representative copied analysis archive was benchmarked with a
+  `geometry_only` crop run derived from the latest materialized crop run
+- the archive did not contain `raw_video/images_full`, so `geometry_live`
+  resolved frames from `source_video_path`
+- that external-video live path currently decodes on CPU and crops on CPU
+  before handing ROIs to the GPU inference stage
+- operator observation: the keypoint `geometry_live` scenario showed low GPU
+  utilization and was abandoned after roughly `20 minutes` with progress still
+  far from completion
+
+Policy implication:
+
+- the temporary ROI cache remains the preferred runtime answer for large
+  external-video geometry-only archives
+- if pure `geometry_live` is to remain viable for one-off analysis runs, it
+  likely needs a GPU decode/crop implementation for the external-video path
+- see `docs/geometry_live_gpu_design_note.md`
+
 ## Latest Pointer Policy
 
 Recommended pointer semantics:

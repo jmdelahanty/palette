@@ -6,6 +6,7 @@ and keeping keypoint/eye-mask training artifacts materialized.
 
 Design reference:
 - `docs/crop_live_view_vs_materialized_stream_design.md`
+- `docs/geometry_live_gpu_design_note.md`
 
 Date anchored: 2026-03-06.
 
@@ -112,6 +113,14 @@ Date anchored: 2026-03-06.
   Result on `2026-03-07`: after inheriting the crop run ROI layout into the
   temporary cache, warm-cache geometry-only runs were near parity with
   materialized runs for both keypoints and U-Net eye masks.
+- [ ] Prototype `geometry_live_gpu` for external-video crop sources by reusing
+  the GPU decode/crop kernels from the temporary ROI cache writer.
+- [ ] Benchmark `geometry_live_cpu` vs `geometry_live_gpu` vs
+  `geometry_cache_build` vs `geometry_cache_reuse` on a non-smoke archive.
+  Latest signal on `2026-04-04`: a representative analysis archive without
+  `raw_video/images_full` fell back to `source_video_path`, and the pure
+  CPU-backed `geometry_live` benchmark was abandoned after roughly `20 minutes`
+  with low GPU utilization.
 
 ## Phase 3: Secondary ROI Consumers
 
