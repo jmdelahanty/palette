@@ -71,8 +71,16 @@ Implication:
    - raw `.zarr` directory copy
    - packed transfer artifact copy
    - unpack time on destination
+   - rewritten sharded clone copy
+   - destination open/read timing for each layout
 9. Record whether transfer artifacts should include all groups or omit
    regenerable compatibility artifacts by default.
+10. Implement and benchmark a narrow sharded export clone prototype.
+    - Runbook: `docs/zarr_transfer_benchmark_plan.md`
+    - Utility:
+      `scripts/py -m fisheye.utils.export_sharded_zarr_clone ...`
+    - Include archival rechunk variant:
+      `--policy dense_readmostly_rechunk_v1`
 
 ## TODO: design changes (if needed)
 
@@ -81,6 +89,10 @@ Implication:
 - Record chunk/shard sizes for all large arrays in run metadata.
 - Add an optional "pack/export" step for portability (`tar.zst` first; rewritten
   sharded export only if we prove it is worth the complexity).
+- Keep sharded export scoped to read-mostly benchmark policies first; do not
+  turn it into the default mutable working-store path.
+- Allow archival export to rechunk dense read-mostly arrays when that is the
+  only way to make sharding materially reduce file count.
 - Document storage modes and NFS-recommended settings.
 - Define keep-vs-regenerate policy for compatibility artifacts in finalized and
   transfer modes.
@@ -104,5 +116,11 @@ Implication:
 - [x] Build a transfer-artifact prototype.
   - Utility: `scripts/py -m fisheye.utils.pack_zarr_transfer_artifact ...`
 - [ ] Benchmark raw-dir copy vs packed copy.
+- [ ] Benchmark raw-dir vs packed vs sharded-clone copy.
+- [ ] Benchmark `dense_readmostly_v1` vs `dense_readmostly_rechunk_v1`.
+- [x] Implement `export_sharded_zarr_clone` benchmark prototype.
+- [ ] Run the representative-archive three-way benchmark from
+  `docs/zarr_transfer_benchmark_plan.md`.
+- [ ] Capture destination open/read timings for all three layouts.
 - [ ] Decide which compatibility/regenerable groups belong in transfer artifacts.
 - [ ] Document the final policy and update schema docs.

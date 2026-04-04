@@ -238,7 +238,14 @@ revisited after a transfer-artifact benchmark exists.
 2. Benchmark directory copy vs packed-artifact copy to external storage.
 3. Define keep-vs-regenerate rules for compatibility artifacts.
 4. Audit chunk layouts for the largest dense derived arrays.
-5. Revisit selective sharding only after those measurements.
+5. Use the transfer benchmark runbook in
+   `docs/zarr_transfer_benchmark_plan.md` to compare raw vs packed vs sharded
+   export layouts.
+   - Prototype utility:
+     `scripts/py -m fisheye.utils.export_sharded_zarr_clone <source>.zarr --dest <dest>.zarr --policy <policy> --apply`
+   - Include the archival rechunk benchmark path:
+     `--policy dense_readmostly_rechunk_v1`
+6. Revisit selective sharding only after those measurements.
 
 ## Non-Goals
 
