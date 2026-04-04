@@ -180,6 +180,8 @@ Current policy note:
 
 - Crop writers still default to materialized mode for both training and
   analysis archives.
+- Training archives should reject geometry-only crop writes; canonical training
+  crop runs are expected to persist `roi_images`.
 - `geometry_only` runs are currently opt-in rather than the default.
 - Many traditional/training/export consumers still require materialized
   `roi_images` even though mixed-mode readers now exist for some ROI-model

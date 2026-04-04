@@ -25,6 +25,8 @@ Date anchored: 2026-03-06.
 - [x] Keypoint and eye-mask training artifacts remain materialized by default.
 - [x] Training artifacts are intentionally duplicated, self-contained, stable
   dataset artifacts.
+- [x] Training zarrs must reject `crop_storage_mode=geometry_only` writes so
+  canonical crop ROIs remain persisted in the archive.
 - [x] No separate top-level crop-image datastream is introduced in the initial
   migration.
 - [x] The live-crop provenance contract should include `frame_counts` and

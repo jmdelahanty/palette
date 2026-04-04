@@ -8,7 +8,11 @@ import zarr
 if "decord" not in sys.modules:
     sys.modules["decord"] = MagicMock()
 
-from fisheye.tracking.crop import _finalize_crop_parent_pointers  # noqa: E402
+from fisheye.tracking.crop import (  # noqa: E402
+    _enforce_training_materialized_crop_contract,
+    _finalize_crop_parent_pointers,
+    _infer_archive_use,
+)
 
 
 def test_finalize_crop_parent_pointers_promotes_geometry_only_to_latest_any_only() -> None:
@@ -67,3 +71,26 @@ def test_finalize_crop_parent_pointers_promotes_materialized_to_all_latest_point
     assert parent.attrs["latest"] == "crop_current"
     assert parent.attrs["latest_materialized"] == "crop_current"
     assert parent.attrs["latest_any"] == "crop_current"
+
+
+def test_infer_archive_use_prefers_root_attrs() -> None:
+    root = zarr.group()
+    root.attrs["zarr_purpose"] = "training"
+
+    assert _infer_archive_use(root, "/tmp/example_analysis.zarr") == "training"
+
+
+def test_enforce_training_materialized_crop_contract_rejects_geometry_only() -> None:
+    root = zarr.group()
+    root.attrs["zarr_purpose"] = "training"
+
+    try:
+        _enforce_training_materialized_crop_contract(
+            root,
+            zarr_path="/tmp/example_training.zarr",
+            crop_storage_mode="geometry_only",
+        )
+    except ValueError as exc:
+        assert "Training zarrs require materialized crop runs" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("Expected training geometry-only crop enforcement to fail")

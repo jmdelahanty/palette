@@ -99,14 +99,38 @@ def _summarize_error_text(value: object, *, verbose: bool) -> str | None:
     return first_line
 
 
+def _infer_archive_use(root: zarr.Group, zarr_path: Path | None = None) -> str | None:
+    for attr_name in ("zarr_use", "zarr_purpose"):
+        value = root.attrs.get(attr_name)
+        if value is None:
+            continue
+        text = str(value).strip().lower()
+        if text in {"analysis", "training"}:
+            return text
+    if zarr_path is not None:
+        name = zarr_path.name.lower()
+        if name.endswith("_analysis.zarr"):
+            return "analysis"
+        if name.endswith("_training.zarr"):
+            return "training"
+    return None
+
+
 def _check_completed_run(
     group: zarr.Group,
     *,
     storage_mode: str,
+    zarr_use: str | None,
     verbose: bool,
 ) -> tuple[str, list[str]]:
     severity = 0
     details: List[str] = [f"crop_storage_mode: {storage_mode}"]
+    if zarr_use:
+        details.append(f"zarr_use: {zarr_use}")
+
+    if zarr_use == "training" and storage_mode != "materialized":
+        details.append("training contract: crop runs must be materialized")
+        return "[red]contract violation[/red]", details
 
     roi_count = group["roi_images"].shape[0] if "roi_images" in group else None
     source_path = group.attrs.get("detection_source_path")
@@ -211,6 +235,16 @@ def _infer_crop_storage_mode(group: zarr.Group) -> str:
 
 
 def _check_crop_runs(console: Console, parent: zarr.Group | None, *, verbose: bool = False) -> None:
+    _check_crop_runs_with_use(console, parent, zarr_use=None, verbose=verbose)
+
+
+def _check_crop_runs_with_use(
+    console: Console,
+    parent: zarr.Group | None,
+    *,
+    zarr_use: str | None,
+    verbose: bool = False,
+) -> None:
     if parent is None:
         console.print("[red]crop_runs group not found in Zarr archive.[/red]")
         return
@@ -245,7 +279,12 @@ def _check_crop_runs(console: Console, parent: zarr.Group | None, *, verbose: bo
                 verbose=verbose,
             )
         else:
-            status, details = _check_completed_run(group, storage_mode=storage_mode, verbose=verbose)
+            status, details = _check_completed_run(
+                group,
+                storage_mode=storage_mode,
+                zarr_use=zarr_use,
+                verbose=verbose,
+            )
 
         table.add_row(name, status, "\n".join(details))
 
@@ -263,7 +302,12 @@ def main() -> None:
     console.print(f"[bold]Inspecting[/bold] {zarr_path}")
 
     root = zarr.open(zarr_path, mode="r")
-    _check_crop_runs(console, root.get("crop_runs"), verbose=bool(args.verbose))
+    _check_crop_runs_with_use(
+        console,
+        root.get("crop_runs"),
+        zarr_use=_infer_archive_use(root, Path(args.zarr_path)),
+        verbose=bool(args.verbose),
+    )
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from ..shared.environment import resolve_log_dir
 from ..shared.environment import resolve_recording_roots
 from ..shared.zarr_discovery import discover_registry_zarrs
 from ..tracking.crop import (
+    _infer_archive_use,
     _normalize_crop_storage_mode,
     crop_detections,
     get_detection_source_info,
@@ -49,21 +50,6 @@ class CropPlan:
     latest_crop: Optional[str] = None
     latest_pointer: Optional[str] = None
     latest_signature: Optional[Dict[str, object]] = None
-
-
-def _infer_zarr_use(root: zarr.Group, zarr_path: Path) -> Optional[str]:
-    purpose = root.attrs.get("zarr_purpose")
-    if purpose is not None:
-        value = str(purpose).strip().lower()
-        if value in {"analysis", "training"}:
-            return value
-    name = zarr_path.name.lower()
-    if name.endswith("_analysis.zarr"):
-        return "analysis"
-    if name.endswith("_training.zarr"):
-        return "training"
-    return None
-
 
 _utc_now = utc_now
 JsonLogger = SharedJsonLogger
@@ -266,6 +252,18 @@ def _build_plan(
     desired_crop_storage_mode = _normalize_crop_storage_mode(
         crop_storage_mode if crop_storage_mode is not None else crop_params.get("crop_storage_mode", "materialized")
     )
+    archive_use = _infer_archive_use(root, zarr_path)
+    if archive_use == "training" and desired_crop_storage_mode != "materialized":
+        return CropPlan(
+            zarr_path=zarr_path,
+            status="invalid",
+            reason="training zarrs require materialized crop runs",
+            source_type=resolved_type,
+            source_path=resolved_path,
+            roi_size=roi_size,
+            crop_storage_mode=desired_crop_storage_mode,
+            preferred_policy=preferred_policy,
+        )
 
     desired = {
         "detection_source_path": resolved_path,
@@ -339,7 +337,7 @@ def _build_plans(
                     )
                 )
                 continue
-            observed_use = _infer_zarr_use(root, zarr_path)
+            observed_use = _infer_archive_use(root, zarr_path)
             if observed_use != zarr_use_filter:
                 plans.append(
                     CropPlan(
@@ -613,13 +611,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                             print(f"  latest_roi_size: {roi[0]}x{roi[1]}")
                     if latest_storage_mode:
                         print(f"  latest_crop_storage_mode: {latest_storage_mode}")
-        counts = {"ok": 0, "skipped": 0, "missing": 0}
+        counts = {"ok": 0, "skipped": 0, "missing": 0, "invalid": 0}
         for plan in plans:
             counts[plan.status] = counts.get(plan.status, 0) + 1
         print("\nSummary:")
         print(f"  ok: {counts.get('ok', 0)}")
         print(f"  skipped: {counts.get('skipped', 0)}")
         print(f"  missing: {counts.get('missing', 0)}")
+        print(f"  invalid: {counts.get('invalid', 0)}")
         print("\nUse --apply to run cropping.")
         return 0
 
@@ -645,7 +644,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     progress = _progress(console, len(plans))
     task_id = progress.add_task("crop_batch", total=len(plans)) if progress else None
 
-    ok = skipped = missing = failed = 0
+    ok = skipped = missing = invalid = failed = 0
     strict_abort = False
     for plan in plans:
         if plan.status == "missing":
@@ -653,6 +652,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.log("recording_missing", zarr=str(plan.zarr_path), reason=plan.reason)
             if args.strict:
                 failed += 1
+                strict_abort = True
+                logger.log("run_abort_strict", zarr=str(plan.zarr_path), reason=plan.reason, status=plan.status)
+        elif plan.status == "invalid":
+            invalid += 1
+            failed += 1
+            logger.log("recording_invalid", zarr=str(plan.zarr_path), reason=plan.reason)
+            if args.strict:
                 strict_abort = True
                 logger.log("run_abort_strict", zarr=str(plan.zarr_path), reason=plan.reason, status=plan.status)
         elif plan.status == "skipped":
@@ -721,13 +727,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if progress:
         progress.stop()
 
-    logger.log("run_end", ok=ok, skipped=skipped, missing=missing, failed=failed)
+    logger.log("run_end", ok=ok, skipped=skipped, missing=missing, invalid=invalid, failed=failed)
     logger.close()
 
     print("\nSummary:")
     print(f"  ok: {ok}")
     print(f"  skipped: {skipped}")
     print(f"  missing: {missing}")
+    print(f"  invalid: {invalid}")
     print(f"  failed: {failed}")
 
     return 0 if failed == 0 else 1

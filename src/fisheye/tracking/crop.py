@@ -123,6 +123,37 @@ def _normalize_crop_storage_mode(value: object) -> str:
     return text
 
 
+def _infer_archive_use(root: zarr.Group, zarr_path: str | Path | None = None) -> Optional[str]:
+    for attr_name in ("zarr_use", "zarr_purpose"):
+        value = root.attrs.get(attr_name)
+        if value is None:
+            continue
+        text = str(value).strip().lower()
+        if text in {"analysis", "training"}:
+            return text
+    if zarr_path is not None:
+        name = Path(zarr_path).name.lower()
+        if name.endswith("_analysis.zarr"):
+            return "analysis"
+        if name.endswith("_training.zarr"):
+            return "training"
+    return None
+
+
+def _enforce_training_materialized_crop_contract(
+    root: zarr.Group,
+    *,
+    zarr_path: str | Path | None,
+    crop_storage_mode: str,
+) -> None:
+    archive_use = _infer_archive_use(root, zarr_path)
+    if archive_use == "training" and crop_storage_mode != "materialized":
+        raise ValueError(
+            "Training zarrs require materialized crop runs; "
+            "crop_storage_mode=geometry_only is only supported for analysis archives."
+        )
+
+
 def _infer_crop_run_storage_mode(run_group: zarr.Group) -> str:
     explicit = run_group.attrs.get("crop_storage_mode")
     if explicit is not None:
@@ -2578,6 +2609,11 @@ def crop_detections(
     crop_params, param_source = get_crop_parameters(root, config, console)
     crop_storage_mode_resolved = _normalize_crop_storage_mode(
         crop_storage_mode if crop_storage_mode is not None else crop_params.get('crop_storage_mode', 'materialized')
+    )
+    _enforce_training_materialized_crop_contract(
+        root,
+        zarr_path=zarr_path,
+        crop_storage_mode=crop_storage_mode_resolved,
     )
     crop_params['crop_storage_mode'] = crop_storage_mode_resolved
     roi_sz = tuple(crop_params.get('roi_sz', [512, 512]))

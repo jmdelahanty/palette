@@ -57,6 +57,8 @@ state.
   `roi_images` optional when `crop_storage_mode=geometry_only`.
 - Training/export artifacts should remain self-contained and materialized by
   default even if analysis archives become mixed-mode.
+- Training archives should reject `crop_storage_mode=geometry_only` writes so
+  canonical crop ROIs remain persisted alongside keypoint/segmentation labels.
 - This split is a migration target and rollout policy, not current default
   behavior.
 

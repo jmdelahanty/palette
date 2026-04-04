@@ -297,6 +297,29 @@ def test_build_plan_materialized_compares_against_latest_materialized(tmp_path: 
     assert plan.crop_storage_mode == "materialized"
 
 
+def test_build_plan_rejects_geometry_only_for_training_archive(tmp_path: Path) -> None:
+    zarr_path = _make_archive(
+        tmp_path,
+        "rec_training",
+        "rec_training_training.zarr",
+        zarr_purpose="training",
+    )
+
+    plan = mod._build_plan(
+        zarr_path=zarr_path,
+        config={},
+        source_type="detect",
+        source_path=None,
+        preferred_policy=None,
+        force_new=False,
+        crop_storage_mode="geometry_only",
+    )
+
+    assert plan.status == "invalid"
+    assert plan.reason == "training zarrs require materialized crop runs"
+    assert plan.crop_storage_mode == "geometry_only"
+
+
 def test_main_forwards_crop_storage_mode(monkeypatch, tmp_path: Path) -> None:
     plans = [
         mod.CropPlan(
@@ -337,3 +360,25 @@ def test_main_forwards_crop_storage_mode(monkeypatch, tmp_path: Path) -> None:
 
     assert rc == 0
     assert seen_kwargs["crop_storage_mode"] == "geometry_only"
+
+
+def test_main_reports_invalid_plans_in_summary(monkeypatch, tmp_path: Path, capsys) -> None:
+    plans = [
+        mod.CropPlan(
+            zarr_path=Path("/tmp/a.zarr"),
+            status="invalid",
+            reason="training zarrs require materialized crop runs",
+            crop_storage_mode="geometry_only",
+        ),
+    ]
+
+    monkeypatch.setattr(mod, "_resolve_root", lambda _paths: [tmp_path])
+    monkeypatch.setattr(mod, "_resolve_targets", lambda _roots, _recursive: [Path("/tmp/a.zarr")])
+    monkeypatch.setattr(mod, "_load_config", lambda _path: {})
+    monkeypatch.setattr(mod, "_build_plans", lambda **_kwargs: plans)
+
+    rc = mod.main(["--log-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "invalid: 1" in out
