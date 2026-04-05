@@ -1,0 +1,637 @@
+"""Run a trained U-Net segmenter to produce unified subject-mask probabilities."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from datetime import datetime, timezone
+from contextlib import nullcontext
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import torch
+import zarr
+from rich.console import Console
+from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
+
+from ..shared.crop_image_source import CropImageSource
+from ..shared.inference_timing import InferenceTimingProfiler
+from ..shared.stage_provenance import build_stage_provenance, write_stage_provenance
+from ..shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
+from ..shared.subject_mask_component_provenance import write_subject_mask_component_provenance
+from ..utils.system import get_environment_info, get_git_info
+from .unet import UNetSmall
+
+SUBJECT_MASK_LABEL_SCHEMA = "subject_v1_union"
+SUBJECT_MASK_LABELS: tuple[str, ...] = ("subject_body", "eyes_union", "swim_bladder")
+
+
+def _compression_kwargs(array: zarr.Array) -> Dict[str, object]:
+    kwargs: Dict[str, object] = {}
+    sentinel = object()
+    compressors = getattr(array, "compressors", sentinel)
+    if compressors is not sentinel:
+        if compressors:
+            kwargs["compressors"] = compressors
+    else:
+        try:
+            compressor = array.compressor
+        except (TypeError, AttributeError):
+            compressor = None
+        if compressor is not None:
+            kwargs["compressor"] = compressor
+
+    chunk_codecs = getattr(array, "chunk_codecs", None)
+    if chunk_codecs:
+        kwargs.setdefault("chunk_codecs", chunk_codecs)
+    filters = getattr(array, "filters", None)
+    if filters:
+        kwargs.setdefault("filters", filters)
+    return kwargs
+
+
+def _resolve_device(device_str: Optional[str]) -> torch.device:
+    if device_str is None:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device_str = str(device_str)
+    if device_str.lower() == "cpu":
+        return torch.device("cpu")
+    if device_str.isdigit():
+        return torch.device(f"cuda:{device_str}")
+    return torch.device(device_str)
+
+
+def _normalise_roi_tensor(batch: torch.Tensor) -> torch.Tensor:
+    if batch.ndim == 3:
+        batch = batch.unsqueeze(1)
+    if batch.ndim != 4:
+        raise ValueError(f"Unexpected ROI batch shape {tuple(batch.shape)}")
+    if batch.shape[1] not in (1, 3):
+        raise ValueError(f"Unsupported ROI channel count: {int(batch.shape[1])}")
+
+    if not batch.is_floating_point():
+        max_value = float(torch.iinfo(batch.dtype).max)
+        batch = batch.to(dtype=torch.float32)
+        if max_value > 0:
+            batch = batch / max_value
+    else:
+        batch = batch.to(dtype=torch.float32)
+        if batch.numel():
+            max_val = torch.nan_to_num(batch, nan=0.0, posinf=float("inf"), neginf=float("-inf")).amax()
+            batch = batch / torch.maximum(max_val, torch.tensor(1.0, device=batch.device, dtype=torch.float32))
+
+    batch = torch.nan_to_num(batch, nan=0.0, posinf=1.0, neginf=0.0)
+    batch = torch.clamp(batch, 0.0, 1.0)
+    if batch.device.type == "cuda":
+        batch = batch.contiguous(memory_format=torch.channels_last)
+    return batch
+
+
+def _probabilities_from_logits(logits: torch.Tensor, *, mask_probs_dtype: str) -> np.ndarray:
+    probs = torch.sigmoid(logits)
+    probs = torch.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0)
+    probs = torch.clamp(probs, 0.0, 1.0)
+    if mask_probs_dtype == "uint8":
+        probs = torch.round(probs * 255.0).to(dtype=torch.uint8)
+    else:
+        probs = probs.to(dtype=torch.float16)
+    return probs.cpu().numpy()
+
+
+def _compute_channel_metrics(binary_masks: np.ndarray, probs: np.ndarray) -> dict[str, np.ndarray]:
+    binary = np.asarray(binary_masks, dtype=np.uint8)
+    prob_arr = np.asarray(probs, dtype=np.float32)
+    if binary.ndim != 3 or prob_arr.shape != binary.shape:
+        raise ValueError("binary_masks and probs must both have shape (N,H,W).")
+
+    row_count = int(binary.shape[0])
+    area_px = binary.sum(axis=(1, 2), dtype=np.int64).astype(np.float32)
+    mask_present = area_px > 0.0
+    prob_max = prob_arr.max(axis=(1, 2)).astype(np.float32, copy=False) if row_count else np.zeros((0,), dtype=np.float32)
+
+    centroid_xy = np.zeros((row_count, 2), dtype=np.float32)
+    centroid_valid = np.zeros((row_count,), dtype=bool)
+    bbox_xyxy = np.zeros((row_count, 4), dtype=np.float32)
+    bbox_valid = np.zeros((row_count,), dtype=bool)
+
+    for row_idx in range(row_count):
+        ys, xs = np.nonzero(binary[row_idx] > 0)
+        if ys.size == 0:
+            continue
+        centroid_xy[row_idx, 0] = float(xs.mean())
+        centroid_xy[row_idx, 1] = float(ys.mean())
+        centroid_valid[row_idx] = True
+        bbox_xyxy[row_idx] = np.asarray(
+            [float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())],
+            dtype=np.float32,
+        )
+        bbox_valid[row_idx] = True
+
+    return {
+        "prob_max": prob_max,
+        "mask_present": mask_present.astype(bool, copy=False),
+        "area_px": area_px,
+        "centroid_xy": centroid_xy,
+        "centroid_valid": centroid_valid,
+        "bbox_xyxy": bbox_xyxy,
+        "bbox_valid": bbox_valid,
+    }
+
+
+def _load_checkpoint(path: Path, device: torch.device) -> Tuple[UNetSmall, Dict[str, object]]:
+    checkpoint = torch.load(path, map_location=device)
+    model_cfg = checkpoint.get("model_config")
+    if not model_cfg:
+        raise ValueError("Checkpoint missing 'model_config'; retrain with updated trainer.")
+    model = UNetSmall(**model_cfg)
+    state_dict = checkpoint.get("model_state")
+    if state_dict is None:
+        raise ValueError("Checkpoint missing 'model_state'.")
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+    return model, checkpoint
+
+
+def _prepare_run_group(
+    root: zarr.Group,
+    *,
+    run_name: Optional[str],
+    overwrite: bool,
+) -> Tuple[zarr.Group, str]:
+    parent = root.require_group("subject_mask_runs")
+    resolved_name = run_name
+    if resolved_name is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+        base_name = f"subject_masks_{timestamp}"
+        resolved_name = base_name
+        suffix = 1
+        while resolved_name in parent:
+            resolved_name = f"{base_name}_{suffix:03d}"
+            suffix += 1
+    if resolved_name in parent:
+        if not overwrite:
+            raise ValueError(
+                f"subject_mask_runs/{resolved_name} already exists. Pass --overwrite to replace it."
+            )
+        del parent[resolved_name]
+    run_group = parent.create_group(resolved_name)
+    parent.attrs["latest"] = resolved_name
+    return run_group, str(resolved_name)
+
+
+def _copy_lineage_array(run_group: zarr.Group, crop_group: zarr.Group, array_name: str) -> None:
+    if array_name not in crop_group:
+        return
+    src = crop_group[array_name]
+    data = src[:]
+    chunks = getattr(src, "chunks", None)
+    if not chunks:
+        chunks = tuple(max(1, min(dim, 1024)) for dim in data.shape)
+    run_group.create_array(array_name, data=data, chunks=chunks, overwrite=True)
+
+
+def _write_subject_mask_outputs(
+    run_group: zarr.Group,
+    model: UNetSmall,
+    roi_source: CropImageSource,
+    *,
+    batch_size: int,
+    device: torch.device,
+    mask_labels: Sequence[str],
+    mask_probs_chunk_rois: Optional[int],
+    mask_probs_dtype: str,
+    console: Console,
+    timing_profiler: Optional[InferenceTimingProfiler],
+) -> float:
+    total_rois = int(roi_source.total_rois)
+    height, width = map(int, roi_source.roi_shape)
+    n_channels = int(len(mask_labels))
+    storage_chunks = subject_mask_storage_chunks(total_rois, height, width)
+    if mask_probs_chunk_rois is not None:
+        storage_chunks = (max(1, min(int(mask_probs_chunk_rois), max(1, total_rois))), storage_chunks[1], storage_chunks[2], storage_chunks[3])
+    metric_row_chunk = subject_mask_metric_row_chunk(total_rois)
+
+    roi_array = roi_source.roi_array
+    compression_kwargs = _compression_kwargs(roi_array) if roi_array is not None else {}
+    stored_prob_dtype = np.dtype(np.uint8 if mask_probs_dtype == "uint8" else np.float16)
+
+    masks_arr = run_group.create_array(
+        "masks_roi",
+        shape=(total_rois, n_channels, height, width),
+        dtype=np.uint8,
+        chunks=storage_chunks,
+        fill_value=0,
+        overwrite=True,
+        **compression_kwargs,
+    )
+    probs_arr = run_group.create_array(
+        "mask_probs_roi",
+        shape=(total_rois, n_channels, height, width),
+        dtype=stored_prob_dtype,
+        chunks=storage_chunks,
+        fill_value=np.uint8(0) if mask_probs_dtype == "uint8" else np.float16(0.0),
+        overwrite=True,
+        **compression_kwargs,
+    )
+    run_group.create_array(
+        "available_channels",
+        data=np.ones((n_channels,), dtype=bool),
+        overwrite=True,
+    )
+
+    metrics_group = run_group.require_group("metrics")
+    prob_max = np.zeros((total_rois, n_channels), dtype=np.float32)
+    mask_present = np.zeros((total_rois, n_channels), dtype=bool)
+    area_px = np.zeros((total_rois, n_channels), dtype=np.float32)
+    centroid_xy = np.zeros((total_rois, n_channels, 2), dtype=np.float32)
+    centroid_valid = np.zeros((total_rois, n_channels), dtype=bool)
+    bbox_xyxy = np.zeros((total_rois, n_channels, 4), dtype=np.float32)
+    bbox_valid = np.zeros((total_rois, n_channels), dtype=bool)
+
+    progress = Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    )
+    task = progress.add_task("[cyan]Running inference[/cyan]", total=total_rois)
+
+    def _sync_cuda(stage: str, *, items: int) -> None:
+        profiler = timing_profiler or InferenceTimingProfiler(enabled=False)
+        if profiler.enabled and device.type == "cuda":
+            with profiler.time(stage, items=items):
+                torch.cuda.synchronize(device)
+
+    stage_start = time.perf_counter()
+    profiler = timing_profiler or InferenceTimingProfiler(enabled=False)
+    with progress, torch.no_grad():
+        for start in range(0, total_rois, batch_size):
+            stop = min(start + batch_size, total_rois)
+            batch_count = stop - start
+
+            with profiler.time("roi_read", items=batch_count):
+                roi_np = roi_source.read_slice(start, stop)
+
+            _sync_cuda("sync_before_h2d", items=batch_count)
+            with profiler.time("h2d_copy", items=batch_count):
+                imgs = torch.from_numpy(roi_np).to(device, non_blocking=True)
+            _sync_cuda("sync_after_h2d", items=batch_count)
+            with profiler.time("input_normalize", items=batch_count):
+                imgs = _normalise_roi_tensor(imgs)
+            _sync_cuda("sync_after_normalize", items=batch_count)
+
+            amp_module = getattr(torch, "amp", None)
+            if device.type == "cuda" and amp_module is not None and hasattr(amp_module, "autocast"):
+                autocast_cm = amp_module.autocast("cuda")
+            elif device.type == "cuda" and hasattr(torch.cuda, "amp"):
+                autocast_cm = torch.cuda.amp.autocast()
+            else:
+                autocast_cm = nullcontext()
+
+            _sync_cuda("sync_before_forward", items=batch_count)
+            with profiler.time("model_forward", items=batch_count):
+                with autocast_cm:
+                    logits = model(imgs)
+            _sync_cuda("sync_after_forward", items=batch_count)
+
+            _sync_cuda("sync_before_d2h", items=batch_count)
+            with profiler.time("d2h_copy", items=batch_count):
+                probs = _probabilities_from_logits(logits, mask_probs_dtype=mask_probs_dtype)
+            _sync_cuda("sync_after_d2h", items=batch_count)
+
+            if probs.ndim == 3:
+                probs = probs[:, None, :, :]
+            if probs.shape[1] != n_channels:
+                raise ValueError(
+                    f"Checkpoint/model produced {probs.shape[1]} channels but expected {n_channels}."
+                )
+
+            with profiler.time("output_postprocess", items=batch_count):
+                if mask_probs_dtype == "uint8":
+                    probs_out = probs.astype(np.uint8, copy=False)
+                    probs_float = probs_out.astype(np.float32) / 255.0
+                    binary = (probs_out >= 128).astype(np.uint8, copy=False)
+                else:
+                    probs_float = np.nan_to_num(probs, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32, copy=False)
+                    probs_out = probs_float.astype(np.float16, copy=False)
+                    binary = (probs_float >= 0.5).astype(np.uint8, copy=False)
+
+            with profiler.time("output_write_probs", items=batch_count):
+                probs_arr[start:stop] = probs_out
+            with profiler.time("output_write_binary", items=batch_count):
+                masks_arr[start:stop] = binary
+
+            with profiler.time("metric_compute", items=batch_count):
+                for channel_idx in range(n_channels):
+                    channel_metrics = _compute_channel_metrics(binary[:, channel_idx], probs_float[:, channel_idx])
+                    prob_max[start:stop, channel_idx] = channel_metrics["prob_max"]
+                    mask_present[start:stop, channel_idx] = channel_metrics["mask_present"]
+                    area_px[start:stop, channel_idx] = channel_metrics["area_px"]
+                    centroid_xy[start:stop, channel_idx, :] = channel_metrics["centroid_xy"]
+                    centroid_valid[start:stop, channel_idx] = channel_metrics["centroid_valid"]
+                    bbox_xyxy[start:stop, channel_idx, :] = channel_metrics["bbox_xyxy"]
+                    bbox_valid[start:stop, channel_idx] = channel_metrics["bbox_valid"]
+
+            with profiler.time("progress_update", items=batch_count):
+                progress.advance(task, batch_count)
+
+    metrics_group.create_array("prob_max", data=prob_max, chunks=(metric_row_chunk, n_channels), overwrite=True)
+    metrics_group.create_array("mask_present", data=mask_present, chunks=(metric_row_chunk, n_channels), overwrite=True)
+    metrics_group.create_array("area_px", data=area_px, chunks=(metric_row_chunk, n_channels), overwrite=True)
+    metrics_group.create_array("centroid_xy", data=centroid_xy, chunks=(metric_row_chunk, n_channels, 2), overwrite=True)
+    metrics_group.create_array("centroid_valid", data=centroid_valid, chunks=(metric_row_chunk, n_channels), overwrite=True)
+    metrics_group.create_array("bbox_xyxy", data=bbox_xyxy, chunks=(metric_row_chunk, n_channels, 4), overwrite=True)
+    metrics_group.create_array("bbox_valid", data=bbox_valid, chunks=(metric_row_chunk, n_channels), overwrite=True)
+    return float(time.perf_counter() - stage_start)
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Infer unified subject-mask probabilities using a trained U-Net segmenter."
+    )
+    parser.add_argument("zarr_path", help="Path to Palette Zarr archive.")
+    parser.add_argument("checkpoint", nargs="?", help="Path to trained U-Net checkpoint (.pt).")
+    parser.add_argument("--checkpoint", dest="checkpoint_option", help="Path to trained U-Net checkpoint (.pt).")
+    parser.add_argument("--crop-run", help="Explicit crop run providing ROI images (default: latest/auto).")
+    parser.add_argument("--run-name", help="Optional name for the output run.")
+    parser.add_argument("--batch-size", type=int, default=256, help="Batch size used during inference (default: 256).")
+    parser.add_argument("--device", help="Torch device to use (e.g. 'cuda:0', 'cpu').")
+    parser.add_argument(
+        "--roi-cache-policy",
+        choices=("never", "auto", "always"),
+        default="auto",
+        help="Temporary ROI cache policy for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument("--roi-cache-dir", type=Path, default=None, help="Optional scratch directory for temporary ROI caches.")
+    parser.add_argument(
+        "--roi-live-acceleration",
+        choices=("auto", "cpu", "gpu"),
+        default="auto",
+        help="Live ROI read acceleration for geometry-only crop runs (default: auto).",
+    )
+    parser.add_argument(
+        "--roi-live-gpu-chunk-frames",
+        type=int,
+        default=32,
+        help="Frame batch size for GPU-accelerated live ROI reads (default: 32).",
+    )
+    parser.add_argument(
+        "--mask-probs-chunk-rois",
+        type=int,
+        default=32,
+        help="ROI chunk length override for mask_probs_roi and masks_roi outputs (default: 32).",
+    )
+    parser.add_argument(
+        "--mask-probs-dtype",
+        choices=("float16", "uint8"),
+        default="uint8",
+        help="Storage dtype for mask_probs_roi (default: uint8 for analysis runs).",
+    )
+    parser.add_argument("--profile-timings", action="store_true", help="Collect per-stage timing diagnostics.")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite the requested output run if it exists.")
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+
+    console = Console()
+    console.print("[bold cyan]Running U-Net subject-mask inference[/bold cyan]\n")
+
+    checkpoint_value = args.checkpoint_option or args.checkpoint
+    if not checkpoint_value:
+        raise ValueError("U-Net subject-mask inference requires a checkpoint path.")
+    checkpoint_path = Path(checkpoint_value).expanduser().resolve()
+    device = _resolve_device(args.device)
+    model, checkpoint = _load_checkpoint(checkpoint_path, device)
+
+    label_schema_id = str(checkpoint.get("label_schema_id") or "").strip() or SUBJECT_MASK_LABEL_SCHEMA
+    if label_schema_id != SUBJECT_MASK_LABEL_SCHEMA:
+        raise ValueError(
+            f"Only {SUBJECT_MASK_LABEL_SCHEMA!r} checkpoints are supported in this first implementation; "
+            f"got {label_schema_id!r}."
+        )
+    mask_labels_raw = checkpoint.get("mask_labels")
+    if isinstance(mask_labels_raw, (list, tuple)) and mask_labels_raw:
+        mask_labels = tuple(str(item) for item in mask_labels_raw)
+    else:
+        mask_labels = SUBJECT_MASK_LABELS
+    if mask_labels != SUBJECT_MASK_LABELS:
+        raise ValueError(
+            f"Checkpoint mask_labels {mask_labels!r} do not match the supported schema {SUBJECT_MASK_LABELS!r}."
+        )
+
+    zarr_path = Path(args.zarr_path).expanduser().resolve()
+    root = zarr.open(str(zarr_path), mode="a")
+
+    crop_source = CropImageSource.open(
+        root,
+        crop_run=args.crop_run,
+        zarr_path=zarr_path,
+        roi_cache_policy=args.roi_cache_policy,
+        roi_live_acceleration=args.roi_live_acceleration,
+        roi_live_gpu_chunk_frames=args.roi_live_gpu_chunk_frames,
+        roi_cache_dir=args.roi_cache_dir,
+        console=console,
+    )
+    crop_group = crop_source.crop_group
+    crop_run_name = crop_source.crop_run_name
+    total_rois = int(crop_source.total_rois)
+    if total_rois == 0:
+        crop_source.close()
+        raise ValueError("ROI image array is empty; nothing to segment.")
+
+    env_info = get_environment_info(
+        include_all_packages=False,
+        disk_path=str(zarr_path),
+        collect_ip=False,
+        capture_env_vars=False,
+    )
+    git_info = get_git_info()
+    run_group, resolved_run_name = _prepare_run_group(root, run_name=args.run_name, overwrite=bool(args.overwrite))
+    timing_profiler = InferenceTimingProfiler(enabled=bool(args.profile_timings))
+
+    try:
+        _copy_lineage_array(run_group, crop_group, "frame_indices")
+        _copy_lineage_array(run_group, crop_group, "frame_counts")
+        _copy_lineage_array(run_group, crop_group, "detection_indices")
+        _copy_lineage_array(run_group, crop_group, "detection_source")
+        if "detection_source" not in run_group:
+            run_group.create_array(
+                "detection_source",
+                data=np.zeros((total_rois,), dtype=np.int8),
+                overwrite=True,
+            )
+
+        duration = _write_subject_mask_outputs(
+            run_group,
+            model,
+            crop_source,
+            batch_size=int(args.batch_size),
+            device=device,
+            mask_labels=mask_labels,
+            mask_probs_chunk_rois=args.mask_probs_chunk_rois,
+            mask_probs_dtype=str(args.mask_probs_dtype),
+            console=console,
+            timing_profiler=timing_profiler,
+        )
+    finally:
+        crop_source.close()
+
+    created_at = datetime.now(timezone.utc).isoformat()
+    run_group.attrs.update(
+        {
+            "method": "unet_subject_mask_segmenter",
+            "run_semantics": "unet_subject_mask_inference",
+            "source_crop_run": crop_run_name,
+            "source_crop_storage_mode": crop_source.storage_mode,
+            "source_crop_signature": crop_group.attrs.get("crop_signature"),
+            "source_crop_revision": crop_group.attrs.get("crop_revision"),
+            "source_roi_read_mode": crop_source.roi_read_mode,
+            "roi_cache_policy": crop_source.roi_cache_policy,
+            "source_roi_cache_used": bool(crop_source.roi_cache_used),
+            "source_roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
+            "source_roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
+            "source_roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
+            "source_roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
+            "label_schema_id": label_schema_id,
+            "mask_labels": list(mask_labels),
+            "output_semantics": "multilabel",
+            "overlap_policy": "independent_sigmoid",
+            "probability_semantics": "sigmoid_multilabel_logits",
+            "probabilities_dtype": str(args.mask_probs_dtype),
+            "probabilities_encoding": "linear_uint8_0_255" if args.mask_probs_dtype == "uint8" else "unit_float",
+            "mask_probability_threshold": 0.5,
+            "input_format": "gray",
+            "source_checkpoint": str(checkpoint_path),
+            "source_checkpoint_best_val_dice": float(checkpoint.get("best_val_dice", float("nan"))),
+            "inference_device": str(device),
+            "inference_batch_size": int(args.batch_size),
+            "duration_seconds": float(duration),
+            "inference_duration_seconds": float(duration),
+            "profile_timings_enabled": bool(args.profile_timings),
+            "created_at_utc": created_at,
+        }
+    )
+    if crop_source.roi_cache_key is not None:
+        run_group.attrs["source_roi_cache_key"] = crop_source.roi_cache_key
+    if crop_source.roi_cache_path is not None:
+        run_group.attrs["source_roi_cache_path"] = crop_source.roi_cache_path
+    if args.mask_probs_chunk_rois is not None:
+        run_group.attrs["mask_probs_chunk_rois"] = int(args.mask_probs_chunk_rois)
+
+    masks_array = np.asarray(run_group["masks_roi"][:], dtype=np.uint8)
+    nonempty_rows = np.any(masks_array > 0, axis=(1, 2, 3))
+    run_group.attrs["summary_statistics"] = {
+        "rows_total": int(total_rois),
+        "rows_with_nonempty_masks": int(np.sum(nonempty_rows)),
+        "rows_empty_masks": int(total_rois - np.sum(nonempty_rows)),
+        "output_run": resolved_run_name,
+        "crop_run": str(crop_run_name),
+        "duration_seconds": float(duration),
+        "created_at_utc": created_at,
+    }
+
+    for label in mask_labels:
+        write_subject_mask_component_provenance(
+            run_group,
+            component_name=label,
+            source_stage="subject_mask_runs",
+            source_run=resolved_run_name,
+            source_method=str(run_group.attrs["method"]),
+            source_channels=[label],
+            source_label_schema_id=label_schema_id,
+            source_created_at_utc=created_at,
+        )
+
+    if timing_profiler.enabled:
+        run_group.attrs["timing_profile"] = timing_profiler.summary(
+            total_items=int(total_rois),
+            wall_seconds=float(duration),
+            notes=[
+                "roi_read measures ROI slice fetch from the active crop image source.",
+                "sync_before_* and sync_after_* measure explicit CUDA synchronize calls used to attribute queued GPU work deterministically.",
+                "input_normalize runs after the device transfer so dtype conversion, scaling, and clipping can execute on GPU.",
+                "h2d_copy and model_forward are measured separately for the U-Net loop.",
+                "d2h_copy includes sigmoid + clamp + dtype conversion + transfer back to CPU/NumPy.",
+                "output_write_probs and output_write_binary measure Zarr writes for dense subject-mask outputs.",
+                "metric_compute covers per-channel metric derivation before metric-array writes.",
+            ],
+        )
+
+    platform_info = env_info.get("platform", {})
+    provenance_inputs = {
+        "source_crop_run": str(crop_run_name),
+        "source_crop_storage_mode": crop_source.storage_mode,
+        "source_crop_signature": crop_group.attrs.get("crop_signature"),
+        "source_crop_revision": crop_group.attrs.get("crop_revision"),
+        "source_roi_read_mode": crop_source.roi_read_mode,
+        "roi_cache_policy": crop_source.roi_cache_policy,
+        "roi_cache_used": bool(crop_source.roi_cache_used),
+        "roi_cache_key": crop_source.roi_cache_key,
+        "roi_live_acceleration_requested": crop_source.roi_live_acceleration_requested,
+        "roi_live_acceleration_effective": crop_source.roi_live_acceleration_effective,
+        "roi_live_acceleration_fallback_reason": crop_source.roi_live_acceleration_fallback_reason,
+        "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
+        "frame_source": crop_source.frame_source_kind,
+        "source_video_path": crop_source.frame_source_path or crop_group.attrs.get("video_source_path"),
+    }
+    if crop_source.roi_cache_path is not None:
+        provenance_inputs["roi_cache_path"] = crop_source.roi_cache_path
+    provenance = build_stage_provenance(
+        stage="subject_masks",
+        command=" ".join(sys.argv),
+        created_at_utc=created_at,
+        version=git_info.get("short_hash") or git_info.get("commit_hash"),
+        git={
+            "commit": git_info.get("commit_hash"),
+            "short": git_info.get("short_hash"),
+            "branch": git_info.get("branch"),
+            "is_dirty": git_info.get("is_dirty"),
+            "remote": git_info.get("remote_url"),
+        },
+        environment=env_info.get("environment"),
+        platform={
+            "hostname": platform_info.get("hostname"),
+            "system": platform_info.get("system"),
+            "release": platform_info.get("release"),
+            "python_version": platform_info.get("python_version"),
+            "machine": platform_info.get("machine"),
+        },
+        parameters={
+            "batch_size": int(args.batch_size),
+            "device": str(device),
+            "label_schema_id": label_schema_id,
+            "mask_labels": list(mask_labels),
+            "mask_probs_chunk_rois": int(args.mask_probs_chunk_rois),
+            "mask_probs_dtype": str(args.mask_probs_dtype),
+            "roi_cache_policy": crop_source.roi_cache_policy,
+            "roi_live_acceleration": crop_source.roi_live_acceleration_requested,
+            "roi_live_gpu_chunk_frames": int(crop_source.roi_live_gpu_chunk_frames),
+        },
+        inputs=provenance_inputs,
+        artifacts={
+            "checkpoint_path": str(checkpoint_path),
+            "segmenter": "unet",
+            "label_schema_id": label_schema_id,
+        },
+    )
+    write_stage_provenance(run_group, provenance)
+
+    console.print(
+        f"\n[green]✓[/green] U-Net subject masks written to "
+        f"[cyan]subject_mask_runs/{resolved_run_name}/mask_probs_roi[/cyan] "
+        f"({total_rois:,} ROIs processed in {duration:.1f}s)."
+    )
+    if timing_profiler.enabled:
+        console.print("[bold]Timing Profile:[/bold]")
+        for line in timing_profiler.render_lines(total_items=total_rois, wall_seconds=duration, limit=8):
+            console.print(f"[dim]{line}[/dim]")
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    main()

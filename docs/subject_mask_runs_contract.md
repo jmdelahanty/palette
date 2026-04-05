@@ -2,7 +2,7 @@
 <!-- contract-meta
 version: 1
 status: draft
-last_verified: 2026-03-10
+last_verified: 2026-04-04
 -->
 
 Purpose: define the runtime/storage contract for a generalized ROI-local
@@ -266,6 +266,31 @@ Interpretation:
 This distinction matters because multiple methods may produce the same kind of
 raw subject-mask run, while downstream tools and registry views often need to
 query the artifact meaning rather than the exact algorithm label.
+
+### U-Net subject-mask inference attrs
+
+When a `subject_mask_runs/<run>` entry is produced by the unified U-Net
+subject-mask inference path, the run should also record:
+
+- `probability_semantics = "sigmoid_multilabel_logits"`
+- `unet_checkpoint_path`
+- structured `model_info` when available
+- the crop-read provenance attrs already used by other ROI-driven stages, such
+  as `source_crop_storage_mode` and `source_roi_read_mode`
+
+Recommended `run_semantics` for the shipped path:
+
+- `unet_subject_mask_inference`
+
+Current implementation note:
+
+- the shipped U-Net subject-mask path currently supports
+  `label_schema_id = "subject_v1_union"` only
+- it predicts `["subject_body", "eyes_union", "swim_bladder"]` together and
+  therefore typically writes `available_channels = [true, true, true]`
+- future U-Net variants may support other schemas such as `subject_v1_lr`, but
+  readers must continue relying on `label_schema_id` and `mask_labels`, not
+  channel position assumptions
 
 ## `available_channels` semantics
 

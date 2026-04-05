@@ -2,7 +2,7 @@
 
 <!-- todo-meta
 status: active
-last_updated: 2026-03-28
+last_updated: 2026-04-04
 -->
 
 ## Goal
@@ -56,6 +56,8 @@ This creates three practical problems:
 
 - traditional: `src/fisheye/segmentation/subject_segmentation.py`
 - sam3: `src/fisheye/utils/run_sam_subject_masks.py`
+- unified subject-mask U-Net:
+  `src/fisheye/segmentation/infer_unet_subject_masks.py`
 
 ### Swim Bladder Segmentation
 
@@ -167,11 +169,22 @@ Initial realistic method matrix:
 - `eyes`: `traditional`, `yolo`, `unet`
 - `swim_bladder`: `traditional`
 
+Important current exception:
+
+- `src/fisheye/segmentation/infer_unet_subject_masks.py` now provides an
+  initial unified subject-mask U-Net path that predicts
+  `["subject_body", "eyes_union", "swim_bladder"]` together into one
+  `subject_mask_runs/<run>` output using `label_schema_id = "subject_v1_union"`
+- that shipped path is not yet the same thing as a component-scoped pipeline
+  capability table entry like `subject_body: unet`
+- `src/fisheye/segmentation/train_unet_subject_masks.py` is the matching
+  trainer for merged subject-mask training artifacts using the same schema
+
 The pipeline must fail clearly on unsupported combinations such as:
 
 - `swim_bladder: sam3`
 - `eyes: sam3`
-- `subject_body: unet`
+- `subject_body: unet` as a component-only method selection
 
 Needed deliverable:
 

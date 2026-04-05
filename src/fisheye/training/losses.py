@@ -61,3 +61,62 @@ class BCEDiceCriterion(nn.Module):
             overlap_penalty = (probs[:, 0] * probs[:, 1]).mean()
 
         return self.bce_weight * bce + (1.0 - self.bce_weight) * dice + self.overlap_weight * overlap_penalty
+
+
+class MaskedBCEDiceCriterion(nn.Module):
+    """BCE-with-logits + soft Dice combo with per-channel supervision masking."""
+
+    def __init__(
+        self,
+        bce_weight: float = 0.5,
+        eps: float = 1e-6,
+        reduction: str = "mean",
+    ) -> None:
+        super().__init__()
+        self.bce_weight = float(bce_weight)
+        self.eps = float(eps)
+        if reduction not in {"mean"}:
+            raise ValueError("Only 'mean' reduction is supported.")
+        self.reduction = reduction
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        valid_channels: torch.Tensor,
+    ) -> torch.Tensor:
+        if targets.dtype != logits.dtype:
+            targets = targets.to(logits.dtype)
+        valid = valid_channels.to(device=logits.device)
+        if valid.dtype != logits.dtype:
+            valid = valid.to(logits.dtype)
+
+        if logits.ndim == 3:
+            logits = logits[:, None, ...]
+        if targets.ndim == 3:
+            targets = targets[:, None, ...]
+        if valid.ndim == 2:
+            valid = valid[:, :, None, None]
+        elif valid.ndim == 3:
+            valid = valid[:, :, :, None]
+        if valid.shape != logits.shape:
+            valid = valid.expand_as(logits)
+
+        valid_weight = valid.sum()
+        if torch.all(valid_weight <= 0):
+            return torch.zeros((), dtype=logits.dtype, device=logits.device)
+
+        bce_map = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        bce = (bce_map * valid).sum() / torch.clamp(valid_weight, min=1.0)
+
+        probs = logits.sigmoid()
+        intersection = (probs * targets * valid).sum(dim=(2, 3))
+        denom = ((probs + targets) * valid).sum(dim=(2, 3))
+        channel_valid = valid[..., 0, 0] > 0
+        dice_per_channel = 1.0 - (2.0 * intersection + self.eps) / (denom + self.eps)
+        if torch.any(channel_valid):
+            dice = dice_per_channel[channel_valid].mean()
+        else:
+            dice = torch.zeros((), dtype=logits.dtype, device=logits.device)
+
+        return self.bce_weight * bce + (1.0 - self.bce_weight) * dice

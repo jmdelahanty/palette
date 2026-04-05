@@ -178,6 +178,23 @@ class EyeMaskTrainingParams(TrainingParams):
     )
 
 
+class SubjectMaskTrainingParams(TrainingParams):
+    """Training parameters for unified subject-mask segmentation pipelines."""
+
+    batch: Optional[int] = Field(
+        default=None,
+        description="Legacy field; subject-mask trainers use training_params.batch_size.",
+    )
+    batch_size: int = Field(
+        ...,
+        gt=0,
+        description="Training batch size for subject-mask segmentation.",
+    )
+    label_schema_id: Literal["subject_v1_union"] = "subject_v1_union"
+    subject_masks_run: Optional[str] = None
+    crop_run: Optional[str] = None
+
+
 class DetectConfig(BaseModel):
     """Flat configuration for detection training"""
     # Dummy YOLO fields
@@ -318,6 +335,56 @@ class EyeMaskTrainingConfig(BaseModel):
 
     @classmethod
     def from_yaml(cls, path: Path) -> "EyeMaskTrainingConfig":
+        with open(path, 'r') as f:
+            config_dict = yaml.safe_load(f)
+        return cls(**config_dict)
+
+
+class SubjectMaskDatasetConfig(BaseModel):
+    """Configuration for a merged subject-mask training artifact."""
+
+    zarr_path: Path
+    crop_run: Optional[str] = None
+    subject_mask_run: Optional[str] = None
+
+    @field_validator('zarr_path')
+    @classmethod
+    def check_zarr_path(cls, v: Path) -> Path:
+        v = Path(v)
+        if not v.is_dir():
+            raise ValueError(f"Path '{v}' is not a valid directory")
+        if not (v / 'zarr.json').exists() and not (v / '.zgroup').exists():
+            raise ValueError(f"Path '{v}' is not a valid Zarr directory")
+        return v
+
+
+class SubjectMaskTrainingConfig(BaseModel):
+    """Configuration for training unified subject-mask segmentation models."""
+
+    datasets: Dict[str, SubjectMaskDatasetConfig]
+    names: List[str] = Field(default_factory=lambda: ["subject_body", "eyes_union", "swim_bladder"])
+    nc: int = Field(3, gt=0)
+    random_seed: int = 42
+    training_params: SubjectMaskTrainingParams
+    num_workers: int = Field(8, ge=0)
+
+    @field_validator('datasets')
+    @classmethod
+    def validate_datasets(cls, v: Dict[str, SubjectMaskDatasetConfig]) -> Dict[str, SubjectMaskDatasetConfig]:
+        if not v:
+            raise ValueError("'datasets' cannot be empty")
+        return v
+
+    @field_validator('names')
+    @classmethod
+    def validate_names(cls, v: List[str], info) -> List[str]:
+        nc = info.data.get('nc', 3)
+        if len(v) != nc:
+            raise ValueError(f"Length of 'names' ({len(v)}) must match 'nc' ({nc})")
+        return v
+
+    @classmethod
+    def from_yaml(cls, path: Path) -> "SubjectMaskTrainingConfig":
         with open(path, 'r') as f:
             config_dict = yaml.safe_load(f)
         return cls(**config_dict)
