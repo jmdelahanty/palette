@@ -150,6 +150,16 @@ Date anchored: 2026-03-06.
   stay materialized-only or gain mixed-mode/cache support.
   Decision: U-Net eye-mask inference supports mixed-mode/cache; traditional
   pipelines remain materialized-only.
+- [x] Migrate unified subject-mask inference stages to the shared ROI
+  resolver/cache path.
+  Result on `2026-04-05`: `run_sam_subject_masks.py` completed successfully on
+  a representative `geometry_only` analysis archive with a warm shared
+  temporary ROI cache. The timing profile showed the bottleneck was not ROI
+  loading (`roi_read` about `29.0s`, `1.0%` of wall time) but the SAM runtime
+  itself (`model_predict` about `2416.0s`, `85.2%`) plus output write-back
+  (`295.7s`, `10.4%`). This is acceptable because the current SAM path is
+  primarily a teacher/pseudo-label generator, not the intended fast production
+  segmenter.
 - [ ] Migrate Palette viewers, tuners, diagnostics, and failure-review tools to
   the shared ROI resolver or an explicit cache path.
 - [ ] Migrate Crimson crop preview / review surfaces to the same resolver/cache

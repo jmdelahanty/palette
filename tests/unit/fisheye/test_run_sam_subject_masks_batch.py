@@ -59,6 +59,7 @@ def _default_options(**overrides) -> mod.BatchOptions:
         roi_cache_dir=None,
         roi_live_acceleration="auto",
         roi_live_gpu_chunk_frames=32,
+        profile_timings=False,
     )
     values = dict(base.__dict__)
     values.update(overrides)
@@ -189,6 +190,7 @@ def test_process_zarr_path_apply_runs_inference(monkeypatch, tmp_path: Path) -> 
     assert captured["kwargs"]["roi_cache_dir"] is None
     assert captured["kwargs"]["roi_live_acceleration"] == "auto"
     assert captured["kwargs"]["roi_live_gpu_chunk_frames"] == 32
+    assert captured["kwargs"]["profile_timings"] is False
 
 
 def test_main_parses_roi_cache_args(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -216,6 +218,7 @@ def test_main_parses_roi_cache_args(monkeypatch, tmp_path: Path, capsys) -> None
             "gpu",
             "--roi-live-gpu-chunk-frames",
             "19",
+            "--profile-timings",
         ]
     )
     _ = capsys.readouterr()
@@ -227,6 +230,7 @@ def test_main_parses_roi_cache_args(monkeypatch, tmp_path: Path, capsys) -> None
     assert options.roi_cache_dir == "/tmp/sam-cache"
     assert options.roi_live_acceleration == "gpu"
     assert options.roi_live_gpu_chunk_frames == 19
+    assert options.profile_timings is True
 
 
 def test_main_scans_roots_and_reports_summary(monkeypatch, tmp_path: Path, capsys) -> None:

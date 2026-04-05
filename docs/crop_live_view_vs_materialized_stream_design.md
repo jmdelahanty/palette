@@ -496,6 +496,31 @@ Policy implication:
   likely needs a GPU decode/crop implementation for the external-video path
 - see `docs/geometry_live_gpu_design_note.md`
 
+Additional SAM follow-up on `2026-04-05`:
+
+- the same representative analysis archive was used to validate the
+  cache-backed geometry-only path for
+  `src/fisheye/utils/run_sam_subject_masks.py`
+- first-use geometry-only + cache build completed successfully, then a true
+  warm-cache rerun on the same `crop_run` completed in about `47:22` at
+  `--batch-size 64`
+- the persisted timing profile showed that the SAM runtime, not ROI loading,
+  dominated the wall time:
+  - `model_predict`: about `2416.0s` (`85.2%`)
+  - `output_write`: about `295.7s` (`10.4%`)
+  - `roi_read`: about `29.0s` (`1.0%`)
+  - `processor_set_image_batch`: about `29.0s` (`1.0%`)
+
+Interpretation:
+
+- the temporary ROI cache and shared crop reader are already good enough for
+  the current SAM use case
+- the remaining performance problem is inside the SAM runtime boundary plus
+  write-back, not in the Palette-side ROI dataloader
+- this is acceptable for now because the current SAM role is primarily
+  pseudo-label / teacher generation for smaller downstream models, not a
+  latency-sensitive production inference path
+
 ## Latest Pointer Policy
 
 Recommended pointer semantics:

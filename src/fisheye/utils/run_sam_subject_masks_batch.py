@@ -60,6 +60,7 @@ class BatchOptions:
     roi_cache_dir: Optional[str]
     roi_live_acceleration: str
     roi_live_gpu_chunk_frames: int
+    profile_timings: bool
 
 
 @dataclass(frozen=True)
@@ -266,6 +267,7 @@ def _process_zarr_path(zarr_path: Path, options: BatchOptions) -> BatchRow:
             roi_cache_dir=options.roi_cache_dir,
             roi_live_acceleration=options.roi_live_acceleration,
             roi_live_gpu_chunk_frames=int(options.roi_live_gpu_chunk_frames),
+            profile_timings=bool(options.profile_timings),
         )
     except Exception as exc:
         return BatchRow(
@@ -417,6 +419,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default=32,
         help="Frame batch size for GPU-accelerated live ROI reads (default: 32).",
     )
+    parser.add_argument(
+        "--profile-timings",
+        action="store_true",
+        help="Record and print per-stage timing diagnostics for SAM inference.",
+    )
     args = parser.parse_args(argv)
 
     options = BatchOptions(
@@ -449,6 +456,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         roi_cache_dir=str(args.roi_cache_dir) if args.roi_cache_dir else None,
         roi_live_acceleration=str(args.roi_live_acceleration),
         roi_live_gpu_chunk_frames=int(args.roi_live_gpu_chunk_frames),
+        profile_timings=bool(args.profile_timings),
     )
 
     roots = _resolve_roots(list(args.paths))

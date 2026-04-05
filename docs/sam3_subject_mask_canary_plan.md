@@ -51,6 +51,27 @@ Relevant SAM3 notes:
 - [`../sam3/docs/palette_zarr_subject_segmentation_workflow.md`](/home/delahantyj@hhmi.org/gitrepos/sam3/docs/palette_zarr_subject_segmentation_workflow.md)
 - [`../sam3/docs/palette_zarr_sam_integration_todo.md`](/home/delahantyj@hhmi.org/gitrepos/sam3/docs/palette_zarr_sam_integration_todo.md)
 
+Observed runtime follow-up as of `2026-04-05`:
+
+- the cache-backed `geometry_only` analysis path has now been validated for the
+  current Palette SAM wrapper
+- on the representative analysis archive, a warm-cache rerun at
+  `--batch-size 64` completed in about `47:22`
+- the persisted timing profile showed that ROI loading was not the bottleneck:
+  - `model_predict`: about `2416.0s` (`85.2%`)
+  - `output_write`: about `295.7s` (`10.4%`)
+  - `roi_read`: about `29.0s` (`1.0%`)
+
+Interpretation:
+
+- the shared crop reader and temporary ROI cache are already adequate for the
+  current SAM workflow
+- remaining slowness is mostly SAM runtime cost, not Palette-side dataloader
+  cost
+- this is acceptable for now because SAM is being treated primarily as a
+  pseudo-label / teacher path for smaller U-Net-style models, not as the
+  preferred fast runtime segmenter
+
 ## First-Phase Scope
 
 The canary should do only this:

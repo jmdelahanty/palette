@@ -20,6 +20,7 @@ import zarr
 
 from fisheye.pose.schema import schema_from_metadata
 from fisheye.shared.crop_image_source import CropImageSource
+from fisheye.shared.inference_timing import InferenceTimingProfiler
 from fisheye.shared.provenance_attrs import build_source_keypoints_attrs
 from fisheye.shared.stage_provenance import build_stage_provenance, write_stage_provenance
 from fisheye.shared.subject_mask_chunks import subject_mask_metric_row_chunk, subject_mask_storage_chunks
@@ -27,6 +28,18 @@ from fisheye.shared.subject_mask_component_provenance import write_subject_mask_
 from fisheye.shared.zarr_helpers import resolve_zarr_run
 from fisheye.utils.system import get_environment_info, get_git_info
 from fisheye.utils.zarr_io import open_zarr_root
+
+try:
+    from rich.console import Console
+    from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
+except Exception:  # pragma: no cover - rich is optional at runtime
+    Console = None  # type: ignore
+    Progress = None  # type: ignore
+    SpinnerColumn = None  # type: ignore
+    TextColumn = None  # type: ignore
+    BarColumn = None  # type: ignore
+    MofNCompleteColumn = None  # type: ignore
+    TimeRemainingColumn = None  # type: ignore
 
 KEYPOINT_GROUP_CHOICES = ("auto", "refined_keypoints_runs", "keypoints_runs")
 SAM3_ENV_VARS = ("PALETTE_SAM3_ROOT", "SAM3_ROOT")
@@ -138,6 +151,20 @@ class SelectedMaskBatch:
     binary: np.ndarray
     probs: np.ndarray
     scores: np.ndarray
+
+
+class _NullProgress:
+    def __enter__(self) -> "_NullProgress":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def add_task(self, *_args, **_kwargs) -> int:
+        return 0
+
+    def update(self, *_args, **_kwargs) -> None:
+        return None
 
 
 def _require_array(group: zarr.Group, name: str, *, context: str) -> zarr.Array:
@@ -1138,6 +1165,7 @@ def build_sam_batch_for_rows(
     pose_box_expand_fraction: float = DEFAULT_POSE_BOX_EXPAND_FRACTION,
     negative_point_policy: str = DEFAULT_NEGATIVE_POINT_POLICY,
     negative_point_margin_fraction: float = DEFAULT_NEGATIVE_POINT_MARGIN_FRACTION,
+    timing_profiler: InferenceTimingProfiler | None = None,
 ) -> PreparedSamBatch:
     rows = np.asarray(row_indices, dtype=np.int32).reshape(-1)
     if rows.size == 0:
@@ -1149,28 +1177,28 @@ def build_sam_batch_for_rows(
             box_batch=[] if use_box_prompt else None,
         )
 
-    roi_batch = np.asarray(inputs.roi_images[rows])
-    images_rgb = convert_roi_batch_to_rgb(roi_batch)
-    point_prompts = [
-        build_point_prompt_coords_labels(
-            _resolve_positive_prompt_points_for_row(
-                inputs,
-                int(idx),
-                prompt_selection=prompt_selection,
-            ),
-            roi_height=int(inputs.roi_height),
-            roi_width=int(inputs.roi_width),
-            negative_point_policy=negative_point_policy,
-            negative_point_margin_fraction=negative_point_margin_fraction,
-        )
-        for idx in rows.tolist()
-    ]
-    return PreparedSamBatch(
-        row_indices=rows.astype(np.int32, copy=False),
-        images_rgb=[np.asarray(image, dtype=np.uint8) for image in images_rgb],
-        point_coords_batch=[coords for coords, _ in point_prompts],
-        point_labels_batch=[labels for _, labels in point_prompts],
-        box_batch=(
+    profiler = timing_profiler or InferenceTimingProfiler(enabled=False)
+    with profiler.time("roi_read", items=int(rows.shape[0])):
+        roi_batch = np.asarray(inputs.roi_images[rows])
+    with profiler.time("rgb_convert", items=int(rows.shape[0])):
+        images_rgb = convert_roi_batch_to_rgb(roi_batch)
+        image_list = [np.asarray(image, dtype=np.uint8) for image in images_rgb]
+    with profiler.time("prompt_build", items=int(rows.shape[0])):
+        point_prompts = [
+            build_point_prompt_coords_labels(
+                _resolve_positive_prompt_points_for_row(
+                    inputs,
+                    int(idx),
+                    prompt_selection=prompt_selection,
+                ),
+                roi_height=int(inputs.roi_height),
+                roi_width=int(inputs.roi_width),
+                negative_point_policy=negative_point_policy,
+                negative_point_margin_fraction=negative_point_margin_fraction,
+            )
+            for idx in rows.tolist()
+        ]
+        box_batch = (
             _build_roi_inset_box_batch(inputs, rows, inset_fraction=roi_inset_fraction)
             if use_box_prompt and box_prompt_source == "roi_inset"
             else _build_pose_roi_box_batch(inputs, rows, expand_fraction=pose_box_expand_fraction)
@@ -1178,7 +1206,13 @@ def build_sam_batch_for_rows(
             else _build_detect_box_batch(inputs, rows)
             if use_box_prompt
             else None
-        ),
+        )
+    return PreparedSamBatch(
+        row_indices=rows.astype(np.int32, copy=False),
+        images_rgb=image_list,
+        point_coords_batch=[coords for coords, _ in point_prompts],
+        point_labels_batch=[labels for _, labels in point_prompts],
+        box_batch=box_batch,
     )
 
 
@@ -1276,6 +1310,27 @@ def _select_best_masks(
         binary=selected_binary,
         probs=selected_probs,
         scores=selected_scores,
+    )
+
+
+def _create_sam_progress(*, total_rows: int, batch_size: int):
+    if total_rows <= 0:
+        return _NullProgress()
+    if Progress is None or Console is None:
+        return _NullProgress()
+    try:
+        if not sys.stderr.isatty():
+            return _NullProgress()
+    except Exception:
+        return _NullProgress()
+    console = Console(stderr=True)
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeRemainingColumn(),
+        console=console,
     )
 
 
@@ -1524,6 +1579,8 @@ def write_sam_subject_mask_run(
     negative_point_margin_fraction: float,
     device: str,
     duration_seconds: float,
+    profile_timings: bool = False,
+    timing_profile_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     parent = root.require_group("subject_mask_runs")
     if output_run in parent and not overwrite:
@@ -1613,6 +1670,7 @@ def write_sam_subject_mask_run(
             else None,
             "sam_checkpoint_path": checkpoint_path,
             "sam3_root": sam3_root,
+            "profile_timings_enabled": bool(profile_timings),
             "input_format": "gray" if inputs.roi_channels == 1 else "rgb",
             "probability_semantics": "sigmoid_selected_mask_logits",
             "sam_quality_score_semantics": "predicted_mask_quality",
@@ -1718,6 +1776,8 @@ def write_sam_subject_mask_run(
     )
     run_group.attrs["duration_seconds"] = float(duration_seconds)
     run_group.attrs["summary_statistics"] = summary_statistics
+    if timing_profile_summary is not None:
+        run_group.attrs["timing_profile"] = timing_profile_summary
 
     zarr_path_text = str(Path(zarr_path).expanduser().resolve()) if zarr_path is not None else None
     git_info = get_git_info(repo_path=Path(__file__).resolve().parents[3])
@@ -1818,6 +1878,7 @@ def run_sam_subject_mask_inference(
     roi_cache_dir: str | Path | None = None,
     roi_live_acceleration: str = "auto",
     roi_live_gpu_chunk_frames: int = 32,
+    profile_timings: bool = False,
 ) -> dict[str, Any]:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive.")
@@ -1883,6 +1944,7 @@ def run_sam_subject_mask_inference(
 
     model = None
     processor = None
+    timing_profiler = InferenceTimingProfiler(enabled=bool(profile_timings))
     try:
         start = time.perf_counter()
         collected_binary: list[np.ndarray] = []
@@ -1904,43 +1966,57 @@ def run_sam_subject_mask_inference(
             if image_fromarray is None:
                 raise RuntimeError("PIL.Image does not expose fromarray.")
 
-            for batch_start in range(0, int(eligible_indices.shape[0]), int(batch_size)):
-                batch_rows = eligible_indices[batch_start : batch_start + int(batch_size)]
-                preview = build_sam_batch_for_rows(
-                    inputs,
-                    batch_rows,
-                    prompt_selection=prompt_selection,
-                    use_box_prompt=use_box_prompt,
-                    box_prompt_source=box_prompt_source,
-                    roi_inset_fraction=roi_inset_fraction,
-                    pose_box_expand_fraction=pose_box_expand_fraction,
-                    negative_point_policy=negative_point_policy,
-                    negative_point_margin_fraction=negative_point_margin_fraction,
+            with _create_sam_progress(
+                total_rows=int(eligible_indices.shape[0]),
+                batch_size=int(batch_size),
+            ) as progress:
+                task_id = progress.add_task(
+                    f"[cyan]Running SAM subject masks (batch={int(batch_size)})...",
+                    total=int(eligible_indices.shape[0]),
                 )
-                pil_images = [image_fromarray(image) for image in preview.images_rgb]
-                inference_state = processor.set_image_batch(pil_images)
-                masks_list, ious_list, _ = model.predict_inst_batch(
-                    inference_state,
-                    preview.point_coords_batch,
-                    preview.point_labels_batch,
-                    box_batch=preview.box_batch,
-                    multimask_output=bool(multimask_output),
-                    return_logits=True,
-                    normalize_coords=True,
-                )
-                selected = _select_best_masks(batch_rows, masks_list, ious_list)
-                collected_rows.append(selected.row_indices)
-                collected_binary.append(selected.binary)
-                collected_probs.append(selected.probs)
-                collected_scores.append(selected.scores)
-                del preview
-                del pil_images
-                del inference_state
-                del masks_list
-                del ious_list
-                del selected
+                for batch_start in range(0, int(eligible_indices.shape[0]), int(batch_size)):
+                    batch_rows = eligible_indices[batch_start : batch_start + int(batch_size)]
+                    preview = build_sam_batch_for_rows(
+                        inputs,
+                        batch_rows,
+                        prompt_selection=prompt_selection,
+                        use_box_prompt=use_box_prompt,
+                        box_prompt_source=box_prompt_source,
+                        roi_inset_fraction=roi_inset_fraction,
+                        pose_box_expand_fraction=pose_box_expand_fraction,
+                        negative_point_policy=negative_point_policy,
+                        negative_point_margin_fraction=negative_point_margin_fraction,
+                        timing_profiler=timing_profiler,
+                    )
+                    with timing_profiler.time("pil_convert", items=int(batch_rows.shape[0])):
+                        pil_images = [image_fromarray(image) for image in preview.images_rgb]
+                    with timing_profiler.time("processor_set_image_batch", items=int(batch_rows.shape[0])):
+                        inference_state = processor.set_image_batch(pil_images)
+                    with timing_profiler.time("model_predict", items=int(batch_rows.shape[0])):
+                        masks_list, ious_list, _ = model.predict_inst_batch(
+                            inference_state,
+                            preview.point_coords_batch,
+                            preview.point_labels_batch,
+                            box_batch=preview.box_batch,
+                            multimask_output=bool(multimask_output),
+                            return_logits=True,
+                            normalize_coords=True,
+                        )
+                    with timing_profiler.time("mask_select", items=int(batch_rows.shape[0])):
+                        selected = _select_best_masks(batch_rows, masks_list, ious_list)
+                    collected_rows.append(selected.row_indices)
+                    collected_binary.append(selected.binary)
+                    collected_probs.append(selected.probs)
+                    collected_scores.append(selected.scores)
+                    progress.update(task_id, advance=int(batch_rows.shape[0]))
+                    del preview
+                    del pil_images
+                    del inference_state
+                    del masks_list
+                    del ious_list
+                    del selected
 
-        duration = float(time.perf_counter() - start)
+        inference_duration = float(time.perf_counter() - start)
         if collected_rows:
             selected_batch = SelectedMaskBatch(
                 row_indices=np.concatenate(collected_rows, axis=0).astype(np.int32, copy=False),
@@ -1955,29 +2031,56 @@ def run_sam_subject_mask_inference(
                 probs=np.zeros((0, inputs.roi_height, inputs.roi_width), dtype=np.float32),
                 scores=np.zeros((0,), dtype=np.float32),
             )
-
-        summary_statistics = write_sam_subject_mask_run(
-            root,
-            zarr_path=zarr_path,
-            inputs=inputs,
-            eligibility=eligibility,
-            selected=selected_batch,
-            crop_group=inputs.crop_group,
-            prompt_selection=prompt_selection,
-            output_run=resolved_output_run,
-            overwrite=overwrite,
-            checkpoint_path=checkpoint_text,
-            sam3_root=sam3_root_text,
-            multimask_output=multimask_output,
-            use_box_prompt=use_box_prompt,
-            box_prompt_source=box_prompt_source,
-            roi_inset_fraction=roi_inset_fraction,
-            pose_box_expand_fraction=pose_box_expand_fraction,
-            negative_point_policy=negative_point_policy,
-            negative_point_margin_fraction=negative_point_margin_fraction,
-            device=resolved_device,
-            duration_seconds=duration,
-        )
+        timing_profile_summary = None
+        with timing_profiler.time("output_write", items=int(eligible_indices.shape[0])):
+            summary_statistics = write_sam_subject_mask_run(
+                root,
+                zarr_path=zarr_path,
+                inputs=inputs,
+                eligibility=eligibility,
+                selected=selected_batch,
+                crop_group=inputs.crop_group,
+                prompt_selection=prompt_selection,
+                output_run=resolved_output_run,
+                overwrite=overwrite,
+                checkpoint_path=checkpoint_text,
+                sam3_root=sam3_root_text,
+                multimask_output=multimask_output,
+                use_box_prompt=use_box_prompt,
+                box_prompt_source=box_prompt_source,
+                roi_inset_fraction=roi_inset_fraction,
+                pose_box_expand_fraction=pose_box_expand_fraction,
+                negative_point_policy=negative_point_policy,
+                negative_point_margin_fraction=negative_point_margin_fraction,
+                device=resolved_device,
+                duration_seconds=inference_duration,
+                profile_timings=bool(profile_timings),
+                timing_profile_summary=None,
+            )
+        total_duration = float(time.perf_counter() - start)
+        summary_statistics["duration_seconds"] = float(total_duration)
+        if timing_profiler.enabled:
+            timing_profile_summary = timing_profiler.summary(
+                total_items=int(eligible_indices.shape[0]),
+                wall_seconds=float(total_duration),
+                notes=[
+                    "roi_read measures ROI batch fetch from the active crop image source.",
+                    "rgb_convert measures grayscale-to-RGB expansion and batch materialization before SAM processor input.",
+                    "prompt_build measures per-row point/box prompt construction.",
+                    "pil_convert measures NumPy-to-PIL conversion before processor.set_image_batch().",
+                    "processor_set_image_batch measures SAM processor image-batch setup/embedding preparation.",
+                    "model_predict measures model.predict_inst_batch() for the prepared SAM prompts.",
+                    "mask_select measures per-row best-mask selection and sigmoid/binary conversion.",
+                    "output_write measures Zarr writes, metrics, provenance, and summary attrs for the output run.",
+                ],
+            )
+            parent = root.get("subject_mask_runs")
+            if parent is not None and resolved_output_run in parent:
+                parent[resolved_output_run].attrs["duration_seconds"] = float(total_duration)
+                parent[resolved_output_run].attrs["summary_statistics"] = summary_statistics
+                parent[resolved_output_run].attrs["timing_profile"] = timing_profile_summary
+                parent[resolved_output_run].attrs["profile_timings_enabled"] = True
+        duration = total_duration
     finally:
         del processor
         del model
@@ -1987,7 +2090,7 @@ def run_sam_subject_mask_inference(
         if added_path and sam3_root_text in sys.path:
             sys.path.remove(sam3_root_text)
 
-    return {
+    result = {
         "status": "updated",
         "zarr_path": str(Path(zarr_path).expanduser().resolve()),
         "crop_run": inputs.crop_run,
@@ -2003,6 +2106,9 @@ def run_sam_subject_mask_inference(
         "checkpoint_path": checkpoint_text,
         "sam3_root": sam3_root_text,
     }
+    if timing_profiler.enabled:
+        result["timing_profile"] = timing_profile_summary
+    return result
 
 
 def inspect_sam_subject_archive(
@@ -2260,6 +2366,36 @@ def _print_summary(summary: dict[str, Any]) -> None:
             print(f"    error={runtime['error']}")
 
 
+def _render_timing_profile_lines(
+    timing_profile: dict[str, Any],
+    *,
+    limit: int = 8,
+) -> list[str]:
+    if not isinstance(timing_profile, dict) or not timing_profile.get("enabled"):
+        return []
+    stages = timing_profile.get("stages")
+    if not isinstance(stages, dict):
+        return []
+    ordered: list[tuple[str, dict[str, Any]]] = []
+    for name, payload in stages.items():
+        if isinstance(payload, dict):
+            ordered.append((str(name), payload))
+    ordered.sort(key=lambda item: float(item[1].get("total_seconds", 0.0)), reverse=True)
+    if limit >= 0:
+        ordered = ordered[:limit]
+    lines: list[str] = []
+    for name, payload in ordered:
+        total_seconds = float(payload.get("total_seconds", 0.0))
+        share_pct = float(payload.get("share_of_wall_time_percent", 0.0))
+        avg_ms_per_call = float(payload.get("avg_ms_per_call", 0.0))
+        avg_ms_per_item = payload.get("avg_ms_per_item")
+        item_text = "n/a" if avg_ms_per_item is None else f"{float(avg_ms_per_item):.3f} ms/item"
+        lines.append(
+            f"{name}: {total_seconds:.2f}s ({share_pct:.1f}% wall, {avg_ms_per_call:.2f} ms/call, {item_text})"
+        )
+    return lines
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zarr_path", type=Path, help="Palette training or analysis zarr to inspect.")
@@ -2407,6 +2543,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Allow rows with detection_source != 0 to remain eligible.",
     )
+    parser.add_argument(
+        "--profile-timings",
+        action="store_true",
+        help="Record and print per-stage timing diagnostics for SAM inference.",
+    )
     parser.add_argument("--json", action="store_true", help="Print the inspection summary as JSON.")
     args = parser.parse_args(argv)
 
@@ -2436,6 +2577,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             device=args.device,
             no_hf_download=bool(args.no_hf_download),
             positive_keypoint_labels=args.positive_keypoint_labels,
+            profile_timings=bool(args.profile_timings),
         )
     else:
         summary = inspect_sam_subject_archive_path(
@@ -2480,6 +2622,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(f"  checkpoint={summary['checkpoint_path']}")
             if summary.get("sam3_root"):
                 print(f"  sam3_root={summary['sam3_root']}")
+            timing_profile = summary.get("timing_profile")
+            if bool(args.profile_timings) and isinstance(timing_profile, dict) and timing_profile.get("enabled"):
+                print("Timing Profile:")
+                for line in _render_timing_profile_lines(timing_profile, limit=8):
+                    print(f"  {line}")
         else:
             _print_summary(summary)
     return 0

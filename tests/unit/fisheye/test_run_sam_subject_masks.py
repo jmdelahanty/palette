@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import numpy as np
@@ -996,6 +997,22 @@ def test_write_sam_subject_mask_run_records_richer_stage_provenance(monkeypatch)
         negative_point_margin_fraction=0.05,
         device="cpu",
         duration_seconds=1.5,
+        profile_timings=True,
+        timing_profile_summary={
+            "enabled": True,
+            "total_items": 1,
+            "wall_seconds": 1.5,
+            "stages": {
+                "roi_read": {
+                    "total_seconds": 0.1,
+                    "calls": 1,
+                    "items": 1,
+                    "avg_ms_per_call": 100.0,
+                    "avg_ms_per_item": 100.0,
+                    "share_of_wall_time_percent": 6.7,
+                }
+            },
+        },
     )
 
     assert summary["checkpoint_path"] == "/tmp/sam3.pt"
@@ -1007,6 +1024,9 @@ def test_write_sam_subject_mask_run_records_richer_stage_provenance(monkeypatch)
     assert run.attrs["git_branch"] == "main"
     assert run.attrs["probability_semantics"] == "sigmoid_selected_mask_logits"
     assert run.attrs["sam_quality_score_semantics"] == "predicted_mask_quality"
+    assert run.attrs["profile_timings_enabled"] is True
+    assert run.attrs["timing_profile"]["enabled"] is True
+    assert "roi_read" in run.attrs["timing_profile"]["stages"]
     assert tuple(run["masks_roi"].chunks) == (2, 1, 6, 8)
     assert run["masks_roi"].fill_value == 0
     assert tuple(run["mask_probs_roi"].chunks) == (2, 1, 6, 8)
@@ -1127,6 +1147,238 @@ def test_run_sam_subject_mask_inference_uses_pixel_prompt_normalization(monkeypa
         captured["point_labels_batch"][0],
         np.asarray([1, 1, 1], dtype=np.int32),
     )
+
+
+def test_run_sam_subject_mask_inference_updates_progress(monkeypatch) -> None:
+    root = _fake_root()
+    crop_group = _fake_crop_group(detection_source=np.asarray([0, 0, 0], dtype=np.int8))
+    crop_source = FakeCropSource(crop_group)
+    inputs = mod.ResolvedSamInputs(
+        crop_run="crop_001",
+        keypoint_group="refined_keypoints_runs",
+        keypoint_run="refined_001",
+        roi_images=crop_source,
+        roi_coordinates_full=np.asarray([[10, 20], [11, 21], [12, 22]], dtype=np.int32),
+        bbox_norm_coords=np.asarray(
+            [
+                _xyxy_to_norm_xywh(12, 21, 16, 25),
+                _xyxy_to_norm_xywh(13, 22, 17, 26),
+                _xyxy_to_norm_xywh(14, 23, 18, 27),
+            ],
+            dtype=np.float32,
+        ),
+        frame_indices=np.asarray([0, 1, 2], dtype=np.int32),
+        detection_indices=np.asarray([10, 11, 12], dtype=np.int32),
+        detection_source=np.asarray([0, 0, 0], dtype=np.int8),
+        keypoints_roi=np.asarray(
+            [
+                [[2.0, 3.0], [3.0, 3.0], [1.0, 3.0]],
+                [[2.0, 3.0], [3.0, 3.0], [1.0, 3.0]],
+                [[2.0, 3.0], [3.0, 3.0], [1.0, 3.0]],
+            ],
+            dtype=np.float32,
+        ),
+        keypoint_labels=("swim_bladder", "eye_left", "eye_right"),
+        success_flags=np.asarray([True, True, True], dtype=bool),
+        geometry_valid=np.asarray([True, True, True], dtype=bool),
+        usable_keypoints=np.asarray([True, True, True], dtype=bool),
+        frame_height=80,
+        frame_width=100,
+        warnings=(),
+        crop_group=crop_group,
+        crop_source=crop_source,
+    )
+    eligibility = mod.RowEligibility(
+        eligible=np.asarray([True, True, True], dtype=bool),
+        prompt_point_finite=np.asarray([True, True, True], dtype=bool),
+        prompt_point_in_bounds=np.asarray([True, True, True], dtype=bool),
+        prompt_point_count=np.asarray([3, 3, 3], dtype=np.int32),
+        skipped_interpolated=np.asarray([False, False, False], dtype=bool),
+        success_ok=np.asarray([True, True, True], dtype=bool),
+        geometry_ok=np.asarray([True, True, True], dtype=bool),
+        usable_ok=np.asarray([True, True, True], dtype=bool),
+    )
+
+    monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: root)
+    monkeypatch.setattr(mod, "resolve_sam_subject_inputs", lambda *_args, **_kwargs: inputs)
+    monkeypatch.setattr(mod, "compute_row_eligibility", lambda *_args, **_kwargs: eligibility)
+
+    class _FakeModel:
+        def predict_inst_batch(self, inference_state, point_coords_batch, point_labels_batch, **kwargs):
+            count = len(point_coords_batch)
+            return (
+                [np.asarray([[[1.0, -1.0], [-1.0, -1.0]]], dtype=np.float32) for _ in range(count)],
+                [np.asarray([0.9], dtype=np.float32) for _ in range(count)],
+                [np.asarray([[[1.0, -1.0], [-1.0, -1.0]]], dtype=np.float32) for _ in range(count)],
+            )
+
+    class _FakeProcessor:
+        def __init__(self, model):
+            self.model = model
+
+        def set_image_batch(self, images):
+            return {"fake": True, "count": len(images)}
+
+    monkeypatch.setattr(
+        mod,
+        "_load_sam3_builder",
+        lambda _sam3_root: (
+            "/tmp/sam3",
+            lambda **_kwargs: _FakeModel(),
+            _FakeProcessor,
+            type("_FakePilImage", (), {"fromarray": staticmethod(lambda image: image)}),
+            False,
+        ),
+    )
+    monkeypatch.setattr(mod, "_resolve_runtime_device", lambda *_args, **_kwargs: "cpu")
+    monkeypatch.setattr(
+        mod,
+        "write_sam_subject_mask_run",
+        lambda *_args, **_kwargs: {"rows_segmented": 3, "rows_with_nonempty_masks": 3},
+    )
+
+    events: list[tuple[str, object, object]] = []
+
+    class _FakeProgress:
+        def __enter__(self):
+            events.append(("enter", None, None))
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            events.append(("exit", exc_type, None))
+            return None
+
+        def add_task(self, description, total):
+            events.append(("add_task", description, total))
+            return 7
+
+        def update(self, task_id, advance):
+            events.append(("update", task_id, advance))
+
+    monkeypatch.setattr(mod, "_create_sam_progress", lambda **_kwargs: _FakeProgress())
+
+    result = mod.run_sam_subject_mask_inference("/tmp/fake_training.zarr", batch_size=2)
+
+    assert result["rows_segmented"] == 3
+    assert ("add_task", "[cyan]Running SAM subject masks (batch=2)...", 3) in events
+    updates = [event for event in events if event[0] == "update"]
+    assert updates == [("update", 7, 2), ("update", 7, 1)]
+
+
+def test_run_sam_subject_mask_inference_records_timing_profile(monkeypatch) -> None:
+    root = _fake_root()
+    crop_group = _fake_crop_group(detection_source=np.asarray([0], dtype=np.int8))
+    crop_source = FakeCropSource(crop_group)
+    inputs = mod.ResolvedSamInputs(
+        crop_run="crop_001",
+        keypoint_group="refined_keypoints_runs",
+        keypoint_run="refined_001",
+        roi_images=crop_source,
+        roi_coordinates_full=np.asarray([[10, 20]], dtype=np.int32),
+        bbox_norm_coords=np.asarray([_xyxy_to_norm_xywh(12, 21, 16, 25)], dtype=np.float32),
+        frame_indices=np.asarray([0], dtype=np.int32),
+        detection_indices=np.asarray([10], dtype=np.int32),
+        detection_source=np.asarray([0], dtype=np.int8),
+        keypoints_roi=np.asarray([[[2.0, 3.0], [3.0, 3.0], [1.0, 3.0]]], dtype=np.float32),
+        keypoint_labels=("swim_bladder", "eye_left", "eye_right"),
+        success_flags=np.asarray([True], dtype=bool),
+        geometry_valid=np.asarray([True], dtype=bool),
+        usable_keypoints=np.asarray([True], dtype=bool),
+        frame_height=80,
+        frame_width=100,
+        warnings=(),
+        crop_group=crop_group,
+        crop_source=crop_source,
+    )
+    eligibility = mod.RowEligibility(
+        eligible=np.asarray([True], dtype=bool),
+        prompt_point_finite=np.asarray([True], dtype=bool),
+        prompt_point_in_bounds=np.asarray([True], dtype=bool),
+        prompt_point_count=np.asarray([3], dtype=np.int32),
+        skipped_interpolated=np.asarray([False], dtype=bool),
+        success_ok=np.asarray([True], dtype=bool),
+        geometry_ok=np.asarray([True], dtype=bool),
+        usable_ok=np.asarray([True], dtype=bool),
+    )
+
+    monkeypatch.setattr(mod, "open_zarr_root", lambda *_args, **_kwargs: root)
+    monkeypatch.setattr(mod, "resolve_sam_subject_inputs", lambda *_args, **_kwargs: inputs)
+    monkeypatch.setattr(mod, "compute_row_eligibility", lambda *_args, **_kwargs: eligibility)
+
+    class _FakeModel:
+        def predict_inst_batch(self, inference_state, point_coords_batch, point_labels_batch, **kwargs):
+            return (
+                [np.asarray([[[1.0, -1.0], [-1.0, -1.0]]], dtype=np.float32)],
+                [np.asarray([0.9], dtype=np.float32)],
+                [np.asarray([[[1.0, -1.0], [-1.0, -1.0]]], dtype=np.float32)],
+            )
+
+    class _FakeProcessor:
+        def __init__(self, model):
+            self.model = model
+
+        def set_image_batch(self, images):
+            return {"fake": True, "count": len(images)}
+
+    monkeypatch.setattr(
+        mod,
+        "_load_sam3_builder",
+        lambda _sam3_root: (
+            "/tmp/sam3",
+            lambda **_kwargs: _FakeModel(),
+            _FakeProcessor,
+            type("_FakePilImage", (), {"fromarray": staticmethod(lambda image: image)}),
+            False,
+        ),
+    )
+    monkeypatch.setattr(mod, "_resolve_runtime_device", lambda *_args, **_kwargs: "cpu")
+
+    captured: dict[str, object] = {}
+
+    def _fake_write(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["kwargs"] = kwargs
+        parent = root.require_group("subject_mask_runs")
+        run_group = parent.create_group(kwargs["output_run"])
+        run_group.attrs["duration_seconds"] = 0.0
+        run_group.attrs["summary_statistics"] = {"duration_seconds": 0.0}
+        time.sleep(0.01)
+        return {"rows_segmented": 1, "rows_with_nonempty_masks": 1}
+
+    monkeypatch.setattr(mod, "write_sam_subject_mask_run", _fake_write)
+
+    result = mod.run_sam_subject_mask_inference(
+        "/tmp/fake_training.zarr",
+        batch_size=1,
+        profile_timings=True,
+    )
+
+    assert captured["kwargs"]["profile_timings"] is True
+    timing_profile = result["timing_profile"]
+    assert timing_profile["enabled"] is True
+    assert timing_profile["total_items"] == 1
+    assert {
+        "roi_read",
+        "rgb_convert",
+        "prompt_build",
+        "pil_convert",
+        "processor_set_image_batch",
+        "model_predict",
+        "mask_select",
+        "output_write",
+    }.issubset(set(timing_profile["stages"]))
+    assert float(timing_profile["wall_seconds"]) >= float(
+        timing_profile["stages"]["output_write"]["total_seconds"]
+    )
+
+    run = root["subject_mask_runs"]["sam_subject_masks_from_refined_001"]
+    assert float(result["duration_seconds"]) >= float(
+        timing_profile["stages"]["output_write"]["total_seconds"]
+    )
+    assert run.attrs["profile_timings_enabled"] is True
+    assert run.attrs["timing_profile"]["enabled"] is True
+    assert "model_predict" in run.attrs["timing_profile"]["stages"]
+    assert float(run.attrs["duration_seconds"]) == float(result["duration_seconds"])
+    assert float(run.attrs["summary_statistics"]["duration_seconds"]) == float(result["duration_seconds"])
 
 
 def test_resolve_prompt_keypoint_selection_supports_aliases_and_default_all() -> None:
