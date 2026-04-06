@@ -56,7 +56,7 @@ without breaking the eye-specific refinement and training stack.
 | Traditional subject body segmentation | `src/fisheye/segmentation/subject_segmentation.py` -> `segment_subject_masks_from_root(...)` | `subject_mask_runs/<run>` | Body-only run. Uses `available_channels = (True, False, False)`. |
 | Traditional swim bladder segmentation | `src/fisheye/segmentation/swim_bladder_segmentation.py` -> `segment_swim_bladder_masks_from_root(...)` | `subject_mask_runs/<run>` | Swim-bladder-only run. Uses `available_channels = (False, False, True)`. |
 | SAM3 subject segmentation | `src/fisheye/utils/run_sam_subject_masks.py` -> `run_sam_subject_mask_inference(...)` | `subject_mask_runs/<run>` | Currently body-only in practice. |
-| U-Net subject-mask inference | `src/fisheye/segmentation/infer_unet_subject_masks.py` -> `main(...)` | `subject_mask_runs/<run>` | Initial unified subject-mask U-Net path. Currently supports `label_schema_id = "subject_v1_union"` with `mask_labels = ["subject_body", "eyes_union", "swim_bladder"]`. |
+| U-Net subject-mask inference | `src/fisheye/segmentation/infer_unet_subject_masks.py` -> `main(...)` | `subject_mask_runs/<run>` | Initial unified subject-mask U-Net path. Currently supports `label_schema_id = "subject_v1_union"` with `mask_labels = ["subject_body", "eyes_union", "swim_bladder"]`. Partially supervised checkpoints should still write the canonical schema, but channels without semantic support should be marked unavailable and emitted as zero placeholders. |
 | Eye-to-subject projection/backfill | `src/fisheye/utils/backfill_subject_mask_runs.py` -> `backfill_subject_mask_run(...)` | `subject_mask_runs/<run>` | Not fresh segmentation. Projects `eye_masks_runs` or `refined_eye_masks_runs` into the subject-mask schema. |
 
 ### Refined / Editable Writers
@@ -99,6 +99,9 @@ Implementation note as of 2026-04-02:
 - that U-Net path currently targets `subject_v1_union` only and is not yet
   wired into the higher-level segmentation orchestration surface described in
   `docs/segmentation_pipeline_step_todo.md`
+- for partially supervised checkpoints, the intended runtime contract is
+  fixed-schema output plus truthful `available_channels`, not treating
+  unsupported channels as meaningful all-zero predictions
 - the implemented unified path for legacy eye data is:
   `eye_masks_runs` or `refined_eye_masks_runs`
   -> `subject_mask_runs/<compat_run>` via backfill/projection

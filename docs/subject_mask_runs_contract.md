@@ -286,8 +286,15 @@ Current implementation note:
 
 - the shipped U-Net subject-mask path currently supports
   `label_schema_id = "subject_v1_union"` only
-- it predicts `["subject_body", "eyes_union", "swim_bladder"]` together and
-  therefore typically writes `available_channels = [true, true, true]`
+- it predicts `["subject_body", "eyes_union", "swim_bladder"]` together
+- fully supervised checkpoints may write
+  `available_channels = [true, true, true]`
+- partially supervised checkpoints must still preserve the canonical schema,
+  but any channel without semantic support in that checkpoint should be written
+  as an unavailable placeholder:
+  - `available_channels[c] = false`
+  - `masks_roi[:, c] = 0`
+  - decoded `mask_probs_roi[:, c] = 0`
 - future U-Net variants may support other schemas such as `subject_v1_lr`, but
   readers must continue relying on `label_schema_id` and `mask_labels`, not
   channel position assumptions
@@ -316,7 +323,9 @@ This is intentionally different from training
 Operational note:
 
 - unavailable channels may represent compatibility backfills today
-- or intentionally component-scoped runs in the future
+- intentionally component-scoped runs in the future
+- or partially supervised model outputs whose checkpoint does not provide
+  semantically trustworthy predictions for every schema channel
 
 In both cases, readers must treat them as unavailable rather than absent.
 

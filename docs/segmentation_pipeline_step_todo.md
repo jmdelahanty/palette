@@ -120,6 +120,9 @@ Interpretation:
   deterministic derived run per invocation
 - missing components are represented through `available_channels`, not by
   switching stage families
+- the same rule should apply to partially supervised unified models: preserve
+  the canonical schema, but mark unsupported channels unavailable rather than
+  treating them as semantically valid predictions
 
 ## Important Constraint
 
